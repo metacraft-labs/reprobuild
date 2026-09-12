@@ -1018,14 +1018,18 @@ proc countOccurrences(haystack, needle: string): int =
 proc isIdentChar(c: char): bool =
   c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
 
-proc blankRange(s: var string; a, b: int) =
-  for k in max(a, 0) ..< min(b, s.len):
-    if s[k] != '\n': s[k] = ' '
-
 proc strippedSource(src: string; blankStrings: bool): string =
   ## ``src`` with every comment — and, when ``blankStrings``, every string
   ## and character literal — replaced by spaces, preserving length and line
   ## structure.
+  ##
+  ## THE IMPLEMENTATION MOVED TO ``repro_test_support`` and this is a named
+  ## alias for it. It moved because four other structural audits in this
+  ## repository needed exactly it, each for the same reason: an audit a
+  ## comment can satisfy audits the prose. The non-vacuity fixture in "no
+  ## launch path exists outside the enumeration" below is therefore also the
+  ## gate on THEIR stripper — a stripper that silently returned its input
+  ## reddens here rather than leaving five audits green and empty.
   ##
   ## THE TWO MODES EXIST BECAUSE THE IMPORT GATE NEEDS THE OPPOSITE OF WHAT
   ## THE COUNTS NEED. The counts must not see prose or literals. The import
@@ -1044,70 +1048,7 @@ proc strippedSource(src: string; blankStrings: bool): string =
   ## cannot distinguish "a launch path was added" from "a comment was
   ## reworded" — and a count that reddens on comment edits is a count
   ## somebody eventually re-baselines without reading.
-  result = src
-  var i = 0
-  let n = src.len
-  while i < n:
-    let c = src[i]
-    if c == '#':
-      if i + 1 < n and src[i + 1] == '[':
-        var depth = 1
-        var j = i + 2
-        while j < n and depth > 0:
-          if j + 1 < n and src[j] == '#' and src[j + 1] == '[':
-            inc depth
-            j += 2
-          elif j + 1 < n and src[j] == ']' and src[j + 1] == '#':
-            dec depth
-            j += 2
-          else:
-            inc j
-        result.blankRange(i, j)
-        i = j
-      else:
-        var j = i
-        while j < n and src[j] != '\n': inc j
-        result.blankRange(i, j)
-        i = j
-    elif c == '"':
-      # A string literal is RAW when the quote is glued to an identifier
-      # (``r"…"``, ``fmt"…"``): backslash is then an ordinary character and
-      # a doubled quote is the escape.
-      let raw = i > 0 and isIdentChar(src[i - 1])
-      if i + 2 < n and src[i + 1] == '"' and src[i + 2] == '"':
-        var j = src.find("\"\"\"", i + 3)
-        j = if j < 0: n else: j + 3
-        if blankStrings: result.blankRange(i, j)
-        i = j
-      else:
-        var j = i + 1
-        while j < n:
-          if src[j] == '\n': break
-          elif (not raw) and src[j] == '\\': j += 2
-          elif raw and src[j] == '"' and j + 1 < n and src[j + 1] == '"': j += 2
-          elif src[j] == '"':
-            inc j
-            break
-          else: inc j
-        if blankStrings: result.blankRange(i, j)
-        i = j
-    elif c == '\'':
-      # A char literal — but NOT the apostrophe of ``1'u32`` or of a
-      # custom numeric literal, which is glued to what precedes it.
-      if i > 0 and isIdentChar(src[i - 1]):
-        inc i
-      else:
-        var j = i + 1
-        if j < n and src[j] == '\\':
-          j += 2
-          while j < n and src[j] != '\'' and src[j] != '\n': inc j
-        elif j < n:
-          inc j
-        if j < n and src[j] == '\'': inc j
-        if blankStrings: result.blankRange(i, j)
-        i = j
-    else:
-      inc i
+  nimSourceStripped(src, blankStrings)
 
 proc codeOnly(src: string): string =
   ## Comments AND literals blanked. What every count in this file is
@@ -1831,6 +1772,12 @@ suite "every_launch_path_is_monitored":
     ## site — or a second caller of either monitor seam — cannot land
     ## without this file being revisited.
     let src = readFile(getCurrentDir() / EngineSource)
+    # The pins below are `== N` equalities, and an equality is backstopped
+    # against prose in a way a `> 0` is not: a comment naming the needle moves
+    # the count UP and reddens. The one pin in this case that is an inequality
+    # — the spawn-site existence sweep — has no such backstop and is computed
+    # over `code` instead. See `strippedSource`.
+    let code = codeOnly(src)
 
     # SEAM 1 (argv): the monitor decision is taken in exactly one proc,
     # called from exactly one site. Since HM-4 that proc also decides WHO
@@ -1906,11 +1853,18 @@ suite "every_launch_path_is_monitored":
 
     # Every spawn site NAMED IN THE TABLE really exists in the engine —
     # so a row cannot describe a path that was deleted or renamed.
+    #
+    # OVER `code`, NOT `src`. These needles are BARE PROC NAMES, and this file
+    # says two paragraphs down that the bare names "also appear in prose
+    # comments" — which is exactly why the pins after this one use definition
+    # and call-site forms. A `> 0` over the raw text is therefore satisfied by
+    # a comment that merely mentions a spawn site that has been deleted, which
+    # is the one thing this sweep exists to catch.
     for lp in EnumeratedLaunchPaths:
-      if countOccurrences(src, lp.spawnSite) == 0:
+      if countOccurrences(code, lp.spawnSite) == 0:
         echo "enumerated launch path ", lp.name,
           " names a spawn site that is not in the engine: ", lp.spawnSite
-      check countOccurrences(src, lp.spawnSite) > 0
+      check countOccurrences(code, lp.spawnSite) > 0
 
     # Every enumerated spawn site is present, defined once and called
     # once. (The bare proc names also appear in prose comments, so the

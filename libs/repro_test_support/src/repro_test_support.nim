@@ -1118,3 +1118,129 @@ proc prepareMonitorTools*(repoRoot, tempRoot, cacheKey: string): MonitorTools =
   result.monitorCliArgs = ioMonitorCliArgs
   result.shim = requireBinary(monitorShimPath(repoRoot),
     "reprobuild.test_fixtures.monitor_shim")
+
+# ---------------------------------------------------------------------------
+# Source-scanning helpers for STRUCTURAL AUDITS.
+# ---------------------------------------------------------------------------
+#
+# A structural audit asserts something about a source file that no behavioural
+# test can reach — "this call site is conjoined with that guard", "the CLI
+# carries this flag", "the fixture really depends on PATH". Every one of them
+# is a substring search over source text, and every one of them has the same
+# failure mode:
+#
+#   AN AUDIT A COMMENT CAN SATISFY AUDITS THE PROSE.
+#
+# Measured twice, in two different files, by deleting the guarded thing and
+# leaving its explanatory comment in place: the audit stayed GREEN, because the
+# comment names the symbol the scan looks for. A structural audit whose subject
+# is code must therefore be computed over code.
+#
+# These live here rather than as a private helper per audit because five test
+# files need them — two under `libs/*/tests`, three under `tests/integration`
+# — and because the two MODES below are not interchangeable: an audit that
+# picks the wrong one is silently either over- or under-strict. One
+# implementation, named modes, and `t_every_launch_path_is_monitored` drives a
+# fixture through it, so a stripper that quietly returned its input is a red
+# test there rather than five audits that assert nothing everywhere.
+
+proc isNimIdentChar(c: char): bool =
+  c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+
+proc blankRange(s: var string; a, b: int) =
+  for k in max(a, 0) ..< min(b, s.len):
+    if s[k] != '\n': s[k] = ' '
+
+proc nimSourceStripped*(src: string; blankStrings: bool): string =
+  ## ``src`` with every comment — and, when ``blankStrings``, every string
+  ## and character literal — replaced by spaces, preserving length and line
+  ## structure.
+  ##
+  ## Length and line structure are preserved rather than the text removed so
+  ## that a caller may index the result by the ORIGINAL offsets, report a
+  ## line number from it, or splice it line-for-line beside the raw source.
+  ##
+  ## Handles ``#`` line comments, nestable ``#[ … ]#`` block comments,
+  ## ``"…"`` / ``"""…"""`` / raw ``r"…"`` string literals and ``'c'`` char
+  ## literals — including the apostrophe of ``1'u32``, which is not one.
+  result = src
+  var i = 0
+  let n = src.len
+  while i < n:
+    let c = src[i]
+    if c == '#':
+      if i + 1 < n and src[i + 1] == '[':
+        var depth = 1
+        var j = i + 2
+        while j < n and depth > 0:
+          if j + 1 < n and src[j] == '#' and src[j + 1] == '[':
+            inc depth
+            j += 2
+          elif j + 1 < n and src[j] == ']' and src[j + 1] == '#':
+            dec depth
+            j += 2
+          else:
+            inc j
+        result.blankRange(i, j)
+        i = j
+      else:
+        var j = i
+        while j < n and src[j] != '\n': inc j
+        result.blankRange(i, j)
+        i = j
+    elif c == '"':
+      # A string literal is RAW when the quote is glued to an identifier
+      # (``r"…"``, ``fmt"…"``): backslash is then an ordinary character and
+      # a doubled quote is the escape.
+      let raw = i > 0 and isNimIdentChar(src[i - 1])
+      if i + 2 < n and src[i + 1] == '"' and src[i + 2] == '"':
+        var j = src.find("\"\"\"", i + 3)
+        j = if j < 0: n else: j + 3
+        if blankStrings: result.blankRange(i, j)
+        i = j
+      else:
+        var j = i + 1
+        while j < n:
+          if src[j] == '\n': break
+          elif (not raw) and src[j] == '\\': j += 2
+          elif raw and src[j] == '"' and j + 1 < n and src[j + 1] == '"': j += 2
+          elif src[j] == '"':
+            inc j
+            break
+          else: inc j
+        if blankStrings: result.blankRange(i, j)
+        i = j
+    elif c == '\'':
+      # A char literal — but NOT the apostrophe of ``1'u32`` or of a
+      # custom numeric literal, which is glued to what precedes it.
+      if i > 0 and isNimIdentChar(src[i - 1]):
+        inc i
+      else:
+        var j = i + 1
+        if j < n and src[j] == '\\':
+          j += 2
+          while j < n and src[j] != '\'' and src[j] != '\n': inc j
+        elif j < n:
+          inc j
+        if j < n and src[j] == '\'': inc j
+        if blankStrings: result.blankRange(i, j)
+        i = j
+    else:
+      inc i
+
+proc nimSourceCodeOnly*(src: string): string =
+  ## Comments AND literals blanked. The mode for a needle that is a CODE
+  ## spelling — an identifier, a call, an operator — because such a needle
+  ## can appear inside a message string as easily as inside a comment.
+  ## Measured: ``check source.contains("findExe(")`` was satisfied by a
+  ## `checkpoint("findExe(\"git\") -> " & …)` in the file it audited, so
+  ## blanking comments alone would not have fixed that one.
+  nimSourceStripped(src, blankStrings = true)
+
+proc nimSourceCommentsBlanked*(src: string): string =
+  ## Comments blanked, literals KEPT. The mode for a needle that IS a string
+  ## literal — a CLI flag spelling, an environment variable name, a quoted
+  ## module path. Blanking literals here would delete the very thing the
+  ## audit is looking for, which fails in the SAFE direction for a positive
+  ## assertion and in the unsafe direction for a negative one.
+  nimSourceStripped(src, blankStrings = false)

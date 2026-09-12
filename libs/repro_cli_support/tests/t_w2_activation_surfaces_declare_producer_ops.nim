@@ -77,6 +77,15 @@
 
 import std/[os, strutils, unittest]
 
+# The stripper is SHARED rather than copied. Five structural audits in this
+# repository need exactly it, all for the same reason — an audit a comment can
+# satisfy audits the prose — and a per-file copy is how four of them come to
+# disagree about what "code" means. `t_every_launch_path_is_monitored` drives a
+# fixture through this implementation, so a stripper that silently returned its
+# input is a red test there rather than five audits reading green and asserting
+# nothing.
+from repro_test_support import nimSourceCodeOnly
+
 const
   RepoMarker = "repro.nim"
 
@@ -203,21 +212,14 @@ proc enclosingProcSpan(lines: openArray[string]; index: int):
     inc j
   result.last = lines.high
 
-proc spanReports(lines: openArray[string]; first, last: int): bool =
-  ## Does this routine call the resolve-and-report pass? COMMENT lines are
-  ## excluded on purpose: an opt-out marker that merely NAMES
-  ## ``devEnvProducerActivation`` must not be able to satisfy the requirement
-  ## to actually call it.
+proc spanReports(codeLines: openArray[string]; first, last: int): bool =
+  ## Does this routine call the resolve-and-report pass? Computed over CODE —
+  ## comments and string literals blanked — on purpose: an opt-out marker that
+  ## merely NAMES ``devEnvProducerActivation`` must not be able to satisfy the
+  ## requirement to actually call it.
   for i in first .. last:
-    let stripped = lines[i].strip()
-    if stripped.startsWith("#"):
-      continue
-    let code =
-      block:
-        let hash = lines[i].find('#')
-        if hash >= 0: lines[i][0 ..< hash] else: lines[i]
     for token in ReportTokens:
-      if code.contains(token):
+      if codeLines[i].contains(token):
         return true
   false
 
@@ -225,23 +227,50 @@ proc collectCallSites(repoRoot: string): seq[CallSite] =
   for relative in AuditedSources:
     let path = repoRoot / relative
     doAssert fileExists(path), "audited source is missing: " & relative
-    let lines = readFile(path).splitLines()
-    for index, raw in lines:
-      let stripped = raw.strip()
-      # A definition or forward declaration is not a call site.
-      if stripped.startsWith("proc ") or stripped.startsWith("#"):
+    let fileText = readFile(path)
+    let lines = fileText.splitLines()
+    # THE CALL SITE IS READ OUT OF CODE; THE MARKER IS READ OUT OF PROSE, AND
+    # THE TWO MUST NOT SHARE A HAYSTACK.
+    #
+    # `spanReports` above already had this treatment and this half did not,
+    # which is the more dangerous asymmetry of the two: the captured call
+    # `text` is the ONLY thing `threadsProducerOps` looks at, and it was the
+    # raw lines of a multi-line call — comments and all. So a call written
+    #
+    #     runActivatedCommand(spec, argv,
+    #       # extraOps deliberately omitted; see below
+    #       env)
+    #
+    # threaded nothing and answered YES, and the sentence that satisfied the
+    # audit is the very sentence explaining that the site opts out. The
+    # markers this audit reads live in comments one line ABOVE, so the two
+    # populations are adjacent by construction and a windowed slice will keep
+    # walking into them.
+    #
+    # `nimSourceCodeOnly` preserves length and line structure, so `codeLines`
+    # is index-aligned with `lines` and the marker walk below still reads the
+    # comments it must.
+    let codeLines = nimSourceCodeOnly(fileText).splitLines()
+    doAssert codeLines.len == lines.len,
+      "the code-only view of " & relative & " lost line alignment"
+    for index in 0 ..< lines.len:
+      let codeLine = codeLines[index]
+      # A definition or forward declaration is not a call site. A comment is
+      # not one either, and needs no test of its own: a comment line is all
+      # blanks in `codeLines`.
+      if codeLine.strip().startsWith("proc "):
         continue
       for entry in ActivationEntryPoints:
-        if not raw.contains(entry):
+        if not codeLine.contains(entry):
           continue
-        var text = raw
-        var depth = parenDelta(raw)
+        var text = codeLine
+        var depth = parenDelta(codeLine)
         var cursor = index
         while depth > 0 and cursor + 1 < lines.len:
           inc cursor
           text.add("\n")
-          text.add(lines[cursor])
-          depth += parenDelta(lines[cursor])
+          text.add(codeLines[cursor])
+          depth += parenDelta(codeLines[cursor])
         # The opt-out marker introduces the comment block immediately above the
         # call. Walk back over contiguous comment lines to find it, then take
         # the WHOLE block from the marker down as the stated reason — a
@@ -280,7 +309,7 @@ proc collectCallSites(repoRoot: string): seq[CallSite] =
           entryPoint: entry, text: text,
           optOut: markerKind, optOutReason: reason,
           enclosingProc: span.name,
-          enclosingReports: spanReports(lines, span.first, span.last)))
+          enclosingReports: spanReports(codeLines, span.first, span.last)))
         break
 
 proc threadsProducerOps(site: CallSite): bool =

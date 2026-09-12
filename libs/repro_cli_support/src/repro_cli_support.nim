@@ -277,7 +277,7 @@ proc renderUsage*(programName: string): string =
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
-      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota] [--monitor-hosting=never|where-supported|required] [--list-targets [--json] [--package=NAME]]\n       " &
+      " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
       " test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n       " &
           programName &
@@ -396,7 +396,43 @@ proc renderUsage*(programName: string): string =
       "build progress bars: default=overlay; use --progress-bars=split " &
       "or REPROBUILD_PROGRESS_BARS=split for separate check/exec bars\n" &
       "build color: auto by default; set NO_COLOR or REPROBUILD_COLOR=never " &
-      "to disable, REPROBUILD_COLOR=always to force"
+      "to disable, REPROBUILD_COLOR=always to force\n" &
+      # DA-1i. THE HAZARD, NOT ONLY THE BEHAVIOUR. An operator choosing this
+      # flag is accepting a specific, nameable risk, and a risk described only
+      # in a spec directory is not one they were given the chance to accept.
+      # The table is narrower than "probes are unsafe" and that is its value,
+      # so all three copies (here, docs/dependency-collection.md,
+      # reprobuild-specs/CLI/build.md) carry the same four rows AND the
+      # sentence that row 1 does not cover row 4.
+      "build evidence: default=full, which records every observation " &
+      "including lookups that found nothing. --evidence=reads-only records " &
+      "only lookups that SUCCEEDED (about a third of the records on a real " &
+      "nim c) and is NOT merely faster: it weakens \"is this build up to " &
+      "date?\" in one direction. Still detected: a recorded file is " &
+      "modified; a recorded file is deleted. NOT detected: a file is ADDED " &
+      "that shadows one earlier in a search path; a file that exists but " &
+      "could not be opened (a permission bit, a directory where a file was " &
+      "wanted) becomes openable. Those two are one rule — only successful " &
+      "lookups are recorded, so any later change that makes an " &
+      "unsuccessful lookup succeed is invisible — and \"a recorded file is " &
+      "modified\" does NOT cover the second, because the file is not " &
+      "recorded at all. This is ninja's own stale-build failure, which is " &
+      "why the mode exists: like-for-like comparison with depfile-driven " &
+      "tools, not speed. Artifacts built this way are correct and " &
+      "publishable; what degrades is the staleness check. Recover with " &
+      "--evidence=full or a clean build. A capture made under reads-only " &
+      "is refused by a build that requires full evidence, which recomputes " &
+      "locally instead; the scope is not part of the cache key, so a " &
+      "full-evidence result stays usable by everyone. NAME THE BLAST " &
+      "RADIUS: that refusal is SESSION-WIDE, not per-action. It is graded " &
+      "as an unknown-scope evidence loss, because a reads-only record " &
+      "cannot say which lookups it dropped, so there is no narrower set to " &
+      "invalidate -- and the first refused capture therefore turns every " &
+      "later cache lookup in that session into a miss. The build stays " &
+      "correct; it stops being incremental. You only reach it by reading a " &
+      "capture SOMEONE ELSE narrowed, never your own. Recover by opting " &
+      "into the reduced scope with --evidence=reads-only, or by " &
+      "re-capturing under --evidence=full."
   else:
     programName & " " & versionString() & "\nusage: " & programName & " --version"
 
@@ -8367,6 +8403,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         restoreCachedOutputs = false;
 
                         monitorHosting = mhmNever;
+                        evidenceScope = esFull;
                         benchmarkPath = "";
                         eventSink: BuildCommandEventSink = nil;
                         cancelCheck: BuildCancelCallback = nil;
@@ -8716,6 +8753,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # `REPROBUILD_MONITOR_HOSTING` said otherwise, so the shipped default
       # is unchanged and `test_umask_wrap_both_spawn_paths` still pins it.
       monitorHosting: monitorHosting,
+      # DA-1i — the operator's dependency-evidence scope, wired into BOTH
+      # user-facing build configs for the same reason `monitorHosting` above
+      # is: they are alternative entry points into the SAME build, and a flag
+      # wired to only one of them takes effect or not depending on whether the
+      # lowered-graph cache happened to hit. `esFull` unless `--evidence` said
+      # otherwise, which is the documented default and the enum's zero value.
+      evidenceScope: evidenceScope,
       dryRun: dryRun,
       forceRebuild: forceRebuild,
       # Edge-Determinism-And-Soft-Rebuild.md §4. Wired into EVERY
@@ -8904,8 +8948,31 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           cmakeRegenerationAction.weakFingerprint,
           cmakeRegenerationAction.actionCachePolicy)
         if hot.isSome:
+          # A THIRD SERVING PATH, and it needs the same refusal the other two
+          # carry. Like `tryFastNoopCacheHits`, this synthesises
+          # `asCacheHit` / `launched: false` WITHOUT entering the scheduler,
+          # so the per-edge refusal at the `lookupActionResult` seam never
+          # gets a turn. And `hotMetadataRecordInputsUnchanged` answers
+          # `true` VACUOUSLY for a record with no inputs — there is nothing
+          # to compare — so a record keyed on the weak fingerprint alone
+          # would be served here on every future build regardless of what
+          # changed.
+          #
+          # Today that is unreachable rather than safe: the regeneration
+          # edge's policy is `dgRecognizedFormat`, which is outside
+          # `MonitorPolicyKinds`, so `refusesRecordWithNoInputs` is false for
+          # it and this call is the identity. Asking the question anyway is
+          # what makes that a GUARD instead of an accident of one field's
+          # current value — a later change to the edge's policy would
+          # otherwise reopen the hole silently, at a call site with no
+          # mention of it. Same shape, and same fail-closed answer, as
+          # `tryFastNoopCacheHits`' `unservableCacheRecordReason` bail-out:
+          # fall through to the real build path, which re-consults the edge.
+          let servable =
+            cmakeRegenerationAction.unservableCacheRecordReason(
+              hot.get()).len == 0
           let selectedInputsUnchanged =
-            hotMetadataRecordInputsUnchanged(@[hot.get()])
+            servable and hotMetadataRecordInputsUnchanged(@[hot.get()])
           if selectedInputsUnchanged:
             cmakeFastHit = true
             cmakeRegenerationResult.results.add(ActionResult(
@@ -10145,6 +10212,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # wired to only one of them would work or not depending on whether
       # the lowered-graph cache happened to hit.
       monitorHosting: monitorHosting,
+      # DA-1i — the operator's dependency-evidence scope, wired into BOTH
+      # user-facing build configs for the same reason `monitorHosting` above
+      # is: they are alternative entry points into the SAME build, and a flag
+      # wired to only one of them takes effect or not depending on whether the
+      # lowered-graph cache happened to hit. `esFull` unless `--evidence` said
+      # otherwise, which is the documented default and the enum's zero value.
+      evidenceScope: evidenceScope,
       dryRun: dryRun,
       forceRebuild: forceRebuild,
       # Edge-Determinism-And-Soft-Rebuild.md §4. Wired into EVERY
@@ -11419,9 +11493,12 @@ proc publicDevEnvMonitor(publicCliPath: string):
   ## monitor binary.
   (selfSpawnIoMonitorPath(publicCliPath), internalIoMonitorArgs)
 
-proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
-                               extraPools: openArray[BuildPool] = []):
+proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
+                                extraPools: openArray[BuildPool] = []):
     owned(Process)
+  ## Exported on the FORWARD declaration, which is where Nim wants the marker
+  ## when a proc is declared before it is defined. See the definition for why
+  ## it is public at all.
 proc releaseAutoRunQuotaProcess*(process: var owned(Process))
 proc runQuotaBypassedByEnv(): bool
 
@@ -16383,9 +16460,61 @@ proc assembleRunquotadPoolArgs*(extraPools: openArray[BuildPool]): seq[string] =
     result.add("--pool")
     result.add(name & "=" & $seen[name])
 
-proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
-                               extraPools: openArray[BuildPool] = []):
+var machineDaemonTrustApplied = false
+
+proc applyMachineDeclaredDaemonTrust*(): seq[DaemonCheckReport]
+                                     {.discardable.} =
+  ## DA-4 — read this machine's daemon declarations, check each one, register
+  ## the peers whose check PASSED, and report every declaration either way.
+  ##
+  ## WHY IT IS CALLED FROM `startAutoRunQuotaIfNeeded` AND NOT FROM THE BUILD
+  ## COMMANDS. There are three `repro` entry points that start a build and each
+  ## calls `startAutoRunQuotaIfNeeded`; a call added beside those three is a
+  ## call the fourth one will not have. This function is what every build path
+  ## already funnels through, and the call sits ABOVE its first early return so
+  ## the topologies DA-2 cannot reach — the adopted host-wide daemon, the
+  ## inherited `RUNQUOTA_SOCKET`, the bypassed-RunQuota build — are exactly the
+  ## ones it runs on. `Dependency-Observation-Attribution.md` records the
+  ## general form of this mistake twice (a guard wired at the per-edge lookup
+  ## that `tryFastNoopCacheHits` never enters; a fold arm graded at one of two
+  ## sites); this is the same shape with launch paths in place of policy kinds.
+  ##
+  ## A MALFORMED DECLARATION IS LOUD AND NON-FATAL. Refusing to build because
+  ## `/etc/repro/daemons.conf` has a typo would take the whole host down for a
+  ## file whose only power is to GRANT trust; trusting nothing and saying so is
+  ## the fail-closed direction and leaves every build correct, merely slower.
+  if machineDaemonTrustApplied:
+    return @[]
+  machineDaemonTrustApplied = true
+  var declarations: seq[DeclaredDaemon] = @[]
+  try:
+    declarations = loadDeclaredDaemons()
+  except CatchableError as exc:
+    stderr.writeLine("repro: declared ipc peer trust disabled — " & exc.msg)
+    return @[]
+  if declarations.len == 0:
+    return @[]
+  result = applyDeclaredDaemonTrust(declarations)
+  for report in result:
+    stderr.writeLine("repro: " & renderDaemonCheckReport(report))
+
+proc forgetMachineDeclaredDaemonTrust*() =
+  ## Re-arm the once-guard above. For tests that drive the production wiring
+  ## more than once in a process; production calls it nowhere.
+  machineDaemonTrustApplied = false
+
+proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
+                                extraPools: openArray[BuildPool] = []):
     owned(Process) =
+  ## Exported for `tests/integration/t_derived_daemon_ipc_trust.nim` and
+  ## `tests/integration/t_declared_daemon_ipc_trust.nim`, which grade the
+  ## PRODUCTION WIRING of DA-2 and DA-4 rather than their mechanisms: this is
+  ## the one call site that registers a trusted daemon of either kind, and a
+  ## suite that registers by hand proves the mechanism and never the wire.
+  # DA-4 — first, and above every early return below, because the declared
+  # peers are the ones the spawn arm can never reach. See
+  # `applyMachineDeclaredDaemonTrust`.
+  applyMachineDeclaredDaemonTrust()
   if bypassRunQuota or not autoRunQuotaEnabled():
     return nil
   # If RUNQUOTA_SOCKET is set, the user (or a parent invocation) is
@@ -16573,6 +16702,75 @@ proc startAutoRunQuotaIfNeeded(bypassRunQuota: bool;
   result = startProcess(runquotad, args = args, options = {poUsePath})
   for _ in 0 ..< 300:
     if isRunQuotaDaemonReachable():
+      # DA-2 — DERIVED class-3 IPC trust. We spawned this daemon, so its pid is
+      # a fact this process holds rather than a claim anyone made, and
+      # `trustDaemonWeSpawned` takes the live `Process` precisely so that stays
+      # true (Dependency-Observation-Attribution.md §"Derived beats declared").
+      #
+      # WHICH BRANCH OF §Class 3, and it is branch (a): `runquotad` CONTRIBUTES
+      # NO CONTENT to any action. Its protocol is Hello / Acquire / Grant /
+      # Release plus the stats-extension rows — lease decisions and telemetry.
+      # It opens no file on a client's behalf and returns no bytes that can
+      # reach an action's output, so a monitored process talking to it has
+      # consumed nothing the monitor failed to see. It is NOT branch (b): it
+      # serves no content at all, keyed or otherwise.
+      #
+      # Registered only on the arm that SPAWNED it. The two early returns above
+      # — `RUNQUOTA_SOCKET` already serviced, and a daemon a previous build left
+      # running — reuse a daemon this process did not start, and DERIVED trust
+      # covers nothing it did not spawn.
+      #
+      # DA-4 NOW COVERS THOSE ARMS, AND DERIVED IS STILL THE PREFERRED ROUTE
+      # WHERE IT IS AVAILABLE. `applyMachineDeclaredDaemonTrust`, called at the
+      # top of this proc and therefore above every early return, trusts an
+      # ADOPTED daemon when the machine declares it and the declaration's check
+      # passes. That is strictly weaker than this line: holding the `Process`
+      # proves the spawn, while a check establishes an identity from what the
+      # kernel will vouch for and is bounded by what the kernel will vouch for
+      # (see `checkDeclaredDaemon`). So the spawn arm keeps registering
+      # derivedly even on a host that also declares this daemon; the two facts
+      # coexist in the registry and the diagnostic says which one forgave.
+      #
+      # WHAT THAT COSTS, STATED HERE BECAUSE HERE IS WHERE AN OPERATOR MEETS
+      # IT. Spawn-only is a real constraint and not a formality; DA-2's reach
+      # on a given host is exactly the set of builds that take THIS branch:
+      #
+      #   * LINUX, unprovisioned host: every top-level `repro build` spawns,
+      #     because the socket is per-PID (`reprobuild-runquota-<pid>`) and
+      #     `releaseAutoRunQuotaProcess` terminates and reaps the daemon at end
+      #     of build. DA-2 is live on every such build — and this is the ONLY
+      #     topology on which it is.
+      #   * macOS: INERT, spawn arm or not. Reaching this line is not the same
+      #     as registering: `trustDaemonWeSpawned` refuses a peer it cannot
+      #     re-validate, and `processStartIdentity` is `when defined(linux)`
+      #     with `""` on every other host. So the call below runs and stores
+      #     nothing. That is the conservative direction — an unre-validatable
+      #     pid must not exempt anything (see `TrustedDaemonPeer.identity`) —
+      #     but it means "POSIX" is the wrong granularity for DA-2's reach and
+      #     macOS gets today's behaviour until it grows an identity source.
+      #   * POSIX, provisioned host: `runquota_ipc.defaultEndpoint` resolves to
+      #     the FIXED host-wide socket (`/run/runquota/runquotad.sock` on
+      #     Linux, `/var/run/...` on macOS), so a host running the shipped unit
+      #     is reachable before we get here, the second early return fires, and
+      #     DA-2 is ENTIRELY INERT — on precisely the topology a shared lease
+      #     coordinator exists for. So is a nested `repro` that inherited
+      #     `RUNQUOTA_SOCKET` from its parent. **This row is DA-4's, and it is
+      #     covered when `/etc/repro/daemons.conf` declares that endpoint and
+      #     the declaration's check passes; it is still uncovered on a host
+      #     that declares nothing, which is the untrusting default.**
+      #   * Windows: INERT AFTER THE FIRST BUILD. The daemon binds the per-user
+      #     default pipe and `releaseAutoRunQuotaProcess` deliberately does not
+      #     terminate it (a concurrent invocation may have adopted it), so
+      #     build #2 onward finds it reachable and registers nothing.
+      #
+      # None of that is a defect in this branch; adopting a daemon this process
+      # did not spawn is declared attribution, and the check it needs is DA-4.
+      # It is written down so nobody reads "reprobuild trusts runquotad" as a
+      # claim about every build on every host.
+      #
+      # `t_derived_daemon_ipc_trust.nim` grades both halves of this: that the
+      # spawn arm registers, and that the warm arm provably does not.
+      trustDaemonWeSpawned(result, "runquotad", tdcNoContent)
       return
     if not result.running:
       break
@@ -19286,6 +19484,23 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # and ``required`` FAILS the action with ``monitorHostingRefusal``'s
   # sentence rather than running it unmonitored.
   var monitorHosting = configuredMonitorHostingMode()
+  # DA-1i — `repro build --evidence=full|reads-only`. `full` is the default and
+  # the only scope that records failed lookups; `reads-only` records only the
+  # lookups that SUCCEEDED, which reproduces the evidence model of a
+  # compiler-emitted depfile (`gcc -MD`) and, with it, ninja's precise
+  # one-directional staleness: a file ADDED that shadows one earlier in a
+  # search path does not invalidate, and neither does a file that existed but
+  # could not be opened becoming openable. Modified and deleted inputs are
+  # still caught. The hazard table is normative and appears in
+  # `renderUsage` (what an operator sees), `docs/dependency-collection.md` and
+  # `reprobuild-specs/CLI/build.md` §"Dependency Evidence Scope".
+  #
+  # DELIBERATELY NO ENVIRONMENT SPELLING. `--monitor-hosting` has one because
+  # it is a measurement knob whose value an operator wants to pin for a whole
+  # session; this flag trades a named correctness property for speed, and an
+  # exported variable is how that trade gets made once and then forgotten by
+  # everyone who inherits the shell. It must be typed per invocation.
+  var evidenceScope = esFull
   # Named-Targets M5: ``--list-targets`` enumerates every implicit /
   # explicit target name visible in the current project's target-export
   # table. ``--list-targets-json`` is the JSON view; ``--list-targets``
@@ -19450,6 +19665,15 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     elif arg == "--monitor-hosting" or arg.startsWith("--monitor-hosting="):
       monitorHosting = parseMonitorHostingMode(
         valueFromFlag(args, i, "--monitor-hosting"), "--monitor-hosting")
+    elif arg == "--evidence" or arg.startsWith("--evidence="):
+      # DA-1i. `parseEvidenceScope` lives beside the enum in
+      # `repro_build_engine` and decodes through io-mon's own token codec, so
+      # the value an operator types here and the `evidence=` stamp a later
+      # reader compares against come from ONE table. An unknown or empty value
+      # raises and the flag loop's handler turns it into a usage error rather
+      # than quietly selecting the default.
+      evidenceScope = parseEvidenceScope(
+        valueFromFlag(args, i, "--evidence"), "--evidence")
     elif arg == "--unicode":
       setUnicodeOverride(true)
     elif arg == "--no-unicode":
@@ -19808,6 +20032,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         restoreCachedOutputs = restoreCachedOutputs,
 
         monitorHosting = monitorHosting,
+        evidenceScope = evidenceScope,
         benchmarkPath = benchmarkPath,
         eventSink = eventSink,
         cancelCheck = cancelCheck,
@@ -27636,7 +27861,8 @@ proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
       forceRefresh = true
     elif arg in ["--daemon", "--progress", "--progress-bars",
         "--write-diagnostics", "--show", "--measure", "--write-report",
-        "--log", "--write-benchmark", "--write-stats", "--monitor-hosting"]:
+        "--log", "--write-benchmark", "--write-stats", "--monitor-hosting",
+        "--evidence"]:
       discard valueFromFlag(args, i, arg)
     elif arg == "--no-write-report":
       discard
@@ -27648,6 +27874,7 @@ proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
         arg.startsWith("--log=") or arg.startsWith("--write-benchmark=") or
         arg.startsWith("--write-stats=") or
         arg.startsWith("--monitor-hosting=") or
+        arg.startsWith("--evidence=") or
         arg.startsWith("--stats-groups="):
       discard
     elif arg == "--prepare-only":
@@ -56951,6 +57178,12 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
       # can drive the same experiment as `repro build`.
       result.buildFlags.add("--monitor-hosting=" &
         valueFromFlag(args, i, "--monitor-hosting"))
+    elif arg == "--evidence" or arg.startsWith("--evidence="):
+      # DA-1i: forwarded verbatim, like every other value-taking build flag
+      # here, so `repro test`/`bench`/`lint` capture under the scope the
+      # operator asked for instead of silently reverting to `full`.
+      result.buildFlags.add("--evidence=" &
+        valueFromFlag(args, i, "--evidence"))
     elif arg == "--package" or arg.startsWith("--package="):
       result.buildFlags.add("--package=" &
         valueFromFlag(args, i, "--package"))

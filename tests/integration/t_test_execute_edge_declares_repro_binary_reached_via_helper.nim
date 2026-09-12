@@ -155,7 +155,18 @@ suite "test execute edges follow helpers to the repro binary":
     # It does call the shared helper, and that helper really resolves the
     # CLI — established by CALLING the helper the anchor calls and
     # inspecting what it hands back, not by reading its source.
-    check "prepareMonitorTools" in anchorText
+    #
+    # OVER CODE, AND AS A CALL. The two negatives above are computed over the
+    # RAW text on purpose — a comment naming `build/bin/repro` reddens them,
+    # which is the conservative direction for a `notin`. This one is a
+    # positive, so the same raw text is the permissive direction: the anchor
+    # explaining in a comment that it reaches the CLI through
+    # `prepareMonitorTools` would satisfy the audit for a version that no
+    # longer calls it, and the whole point of the anchor is that it CALLS the
+    # helper. Blanking literals as well as comments matters here too, because
+    # the name is exactly the kind of thing a `checkpoint` string spells out.
+    let anchorCode = nimSourceCodeOnly(anchorText)
+    check "prepareMonitorTools(" in anchorCode
     let scratch = createTempDir("repro-helper-probe-", "")
     defer: removeDir(scratch)
     let tools = prepareMonitorTools(repoRoot, scratch, "gate")

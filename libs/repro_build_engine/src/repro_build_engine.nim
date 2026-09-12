@@ -1,5 +1,6 @@
 import std/[algorithm, json, locks, monotimes, options, os, osproc, net,
-    nativesockets, sets, streams, strtabs, strutils, tables, tempfiles, times]
+    nativesockets, parsecfg, sets, streams, strtabs, strutils, tables,
+    tempfiles, times]
 
 # The OS is reached through a named symbol list on both platforms, never
 # wholesale. ``std/posix`` exports ``fork`` / ``execvp`` / ``posix_spawn``
@@ -675,6 +676,29 @@ type
     # that only L1 (``--no-runquota``) can host, so the experiment is
     # ``--no-runquota --monitor-hosting=where-supported``.
     monitorHosting*: MonitorHostingMode
+    evidenceScope*: EvidenceScope
+      ## DA-1i — HOW MUCH OF WHAT THE MONITOR OBSERVES THIS BUILD WRITES DOWN,
+      ## and, symmetrically, the narrowest capture this build will TRUST.
+      ## ``repro build --evidence=full|reads-only`` sets it; the default is
+      ## ``esFull``, which is also the enum's zero value, so every caller that
+      ## predates this field keeps exactly its previous meaning with no special
+      ## case anywhere.
+      ##
+      ## It does NOT change what the monitor observes and it is NOT a
+      ## completeness input: a narrowed capture is the operator answering a
+      ## narrower question honestly, not the monitor failing, and
+      ## ``mcIncomplete`` means the latter. See io-mon's ``EvidenceScope``,
+      ## which owns the vocabulary, the record-side predicate and the trust
+      ## order; nothing about any of the three is restated here.
+      ##
+      ## IT IS DELIBERATELY NOT A CACHE-KEY COMPONENT. Trust here is a PARTIAL
+      ## ORDER, not a partition — full evidence is strictly stronger than
+      ## reads-only evidence, so a reads-only consumer must accept a full
+      ## capture while a strict consumer rejects a narrowed one. Keying on the
+      ## scope would make the two disjoint and block the useful direction: the
+      ## careful teammate publishes and the fast teammate cannot consume.
+      ## ``cacheInputPaths`` and the fingerprints therefore never read this
+      ## field, and ``t_da1i_evidence_scope`` pins that they do not.
     dryRun*: bool
     progressCallback*: BuildProgressCallback
     cancelCallback*: BuildCancelCallback
@@ -904,6 +928,33 @@ type
     cirEmptyEvidence = "empty-evidence"
     cirMonitorLoss = "monitor-loss"
     cirMonitorFlushFailed = "monitor-flush-failed"
+
+  MonitorEvidenceRequirement* = object
+    ## WHAT THIS BUILD NEEDS A CAPTURE TO HAVE OBSERVED BEFORE IT WILL TRUST IT
+    ## — the consumer side of DA-1i and DA-1j, in one object so a fold site
+    ## cannot satisfy one axis and forget the other.
+    ##
+    ## Two axes, both io-mon's, and they are composed rather than conflated
+    ## because they gate different things: ``interest`` is the KIND axis
+    ## (DA-1j — which categories of event the capture was asked for) and
+    ## ``evidenceScope`` is the RESULT axis (DA-1i — whether lookups that
+    ## found nothing were written down). A capture is trustworthy iff it
+    ## covers BOTH.
+    ##
+    ## NEITHER COMPARISON IS IMPLEMENTED HERE. ``observedInterestCovers`` and
+    ## ``observedEvidenceScopeCovers`` live in io-mon beside the enums they
+    ## order, and this module only supplies the required side and reports the
+    ## refusal — see ``monitorScopeRefusal``. Restating either order here is
+    ## how the two copies drift, and the direction that drift fails in is the
+    ## cardinal one: accepting a narrowed capture as though it were complete.
+    ##
+    ## DO NOT DEFAULT-CONSTRUCT THIS. The zero value has ``interest == {}``,
+    ## which ``observedInterestCovers`` accepts from ANY capture (a consumer
+    ## that needs no category cannot be missing one) — fail-open, and exactly
+    ## the wrong direction. Use ``FullMonitorEvidenceRequirement`` or build it
+    ## from the action and the config with ``monitorEvidenceRequirement``.
+    interest*: set[EventCategory]
+    evidenceScope*: EvidenceScope
 
   EvidenceCollection = object
     evidence: PathSetEvidence
@@ -1611,6 +1662,179 @@ proc textBytes(text: string): seq[byte] =
 proc weakFingerprintFromText*(text: string): ContentDigest =
   blake3DomainDigest(text.textBytes(), hdActionFingerprint)
 
+proc nixStoreRoot(normalized: string): string =
+  ## The `/nix/store/<hash>-<name>` root a forward-slashed path lies under.
+  ##
+  ## Matches the literal prefix and nothing else: `//nix/store`, `/nix/./store`
+  ## and symlink aliases are not recognised. That is the conservative
+  ## direction — an unrecognised root is elided by nobody and keyed as an
+  ## ordinary recorded input — and it is the same literal
+  ## `isImmutablePackageStoreRoot` matches.
+  const prefix = "/nix/store/"
+  if not normalized.startsWith(prefix):
+    return ""
+  let rest = normalized.substr(prefix.len)
+  let slash = rest.find('/')
+  if slash < 0:
+    normalized
+  else:
+    prefix & rest[0 ..< slash]
+
+proc isRealizationDirName(name: string): bool =
+  ## Does this directory name carry a realization digest?
+  ##
+  ## `repro_local_store/prefix_paths.realizationDirName` composes
+  ## `<version>-<first 16 hex of the BLAKE3 realization hash>`. Recognising
+  ## the SHAPE rather than trusting the location is what bounds the damage a
+  ## bogus `REPRO_STORE_ROOT` can do — see `reproStoreRootPath`.
+  if name.len < 17 or name[name.len - 17] != '-':
+    return false
+  for i in name.len - 16 ..< name.len:
+    if name[i] notin {'0' .. '9', 'a' .. 'f'}:
+      return false
+  true
+
+proc reproStoreRootPath(): string =
+  ## Reprobuild's OWN content-addressed store root, forward-slashed and with
+  ## any trailing slash stripped, or `""` when it cannot be resolved.
+  ##
+  ## DERIVED FROM CONFIGURATION, through the same `resolveStoreRoot`
+  ## precedence (`$REPRO_STORE_ROOT` > per-OS default) every other store
+  ## consumer uses, rather than from a literal — a per-user cache root has no
+  ## literal to hard-code.
+  ##
+  ## `isImmutablePackageStoreRoot` refuses to read the environment at all,
+  ## and its reason does not carry over here — the difference is worth stating
+  ## because the two look alike. There, the variable moved only the ELISION:
+  ## a transient value made a directory exempt, the record was written with
+  ## `mtimeNs = 0`, and clearing the variable did not recover because a 0 is
+  ## never re-listed. The value poisoned a record permanently. Here the same
+  ## value moves the elision AND the key, because `contentAddressedRoot` is
+  ## the single function both sides read: change it and every affected edge
+  ## fingerprints differently, so the old records are not found rather than
+  ## wrongly served. The failure direction is a rebuild.
+  ##
+  ## What the env var still could do is nominate a MUTABLE tree as
+  ## content-addressed within one consistent setting, and that is what
+  ## `isRealizationDirName` bounds: the only thing elided under this root is a
+  ## directory whose own name states a 16-hex realization digest.
+  ##
+  ## A ROOT OF `/` NAMES NOTHING AT ALL, which is stronger than the bound
+  ## above and worth stating because a reader will look here for it. The
+  ## trailing-slash strip maps `"/"` to `""`, and `""` is what
+  ## `reproStoreRealizationRoot`'s `root.len == 0` arm refuses — so a store
+  ## root of `/` does not exempt `/usr/…/prefixes/…/<version>-<digest>`
+  ## either, even though that path IS named like a realization. There used to
+  ## be an `if result == "/": result = ""` after the strip presented as the
+  ## thing that made this true. It was unreachable: the strip removes EVERY
+  ## trailing `/`, so `result` is already `""` by the time it is tested and no
+  ## input can make that comparison fire. Deleted rather than kept with a
+  ## corrected comment, because a branch no test can redden is one a later
+  ## reader takes for load-bearing all over again.
+  ##
+  ## The `try` is not decoration: `resolveStoreRoot` RAISES a `StoreError`
+  ## when it must fall back to the per-user default and neither
+  ## `$XDG_CACHE_HOME` nor `$HOME` is set (`$LOCALAPPDATA`/`$USERPROFILE` on
+  ## Windows). This function is on the path of every `argv[0]` and every
+  ## `PATH` entry of every action, so letting that escape would turn an
+  ## unset variable into a build failure. "Cannot resolve a store root" and
+  ## "this path is under no store root" are the same answer here.
+  try:
+    result = resolveStoreRoot().replace('\\', '/').strip(
+      leading = false, trailing = true, chars = {'/'})
+  except CatchableError:
+    return ""
+
+proc reproStoreRealizationRoot(normalized: string): string =
+  ## The `<store>/…/prefixes/<package>/<version>-<hash>` realization directory
+  ## a forward-slashed path lies under, or `""`.
+  ##
+  ## The realization directory is the granularity at which the repro store is
+  ## content-addressed: `prefixRelativePath` puts the digest in that segment's
+  ## name and nowhere above it. `<store>/prefixes` is NOT a content-addressed
+  ## root — packages come and go under it — so taking the immediate child of
+  ## the store root the way the Nix arm does would elide a mutable tree.
+  ##
+  ## The `prefixes` segment is searched for rather than required at depth 1
+  ## because the store nests one inside itself: tools live under
+  ## `<store>/tool-store/prefixes/<package>/<version>-<hash>`.
+  # Cheap rejection first. This runs once per `argv[0]` AND once per `PATH` /
+  # `NODE_PATH` entry of every action, and resolving the store root allocates;
+  # a path with no `prefixes` segment cannot match the layout below, so the
+  # overwhelming majority of calls stop here without touching configuration.
+  #
+  # IT IS A PERFORMANCE GUARD AND NOTHING ELSE — no part of the soundness
+  # argument rests on it, and deleting it cannot change an ANSWER. The loop
+  # below only ever succeeds with `parts[i] == "prefixes"` and two segments
+  # after it, and every such path contains the literal `/prefixes/` (the
+  # split is taken after `root & "/"`, so even `i == 0` has a slash in front
+  # of it). It is therefore the one conjunct in this chain that no mutation
+  # can redden, and it is said here so the next reader does not spend the
+  # effort discovering that twice. DA-11 grades every other arm below.
+  if not normalized.contains("/prefixes/"):
+    return ""
+  let root = reproStoreRootPath()
+  if root.len == 0 or not normalized.startsWith(root & "/"):
+    return ""
+  let parts = normalized.substr(root.len + 1).split('/')
+  for i in 0 ..< parts.len:
+    if parts[i] != "prefixes" or i + 2 >= parts.len:
+      continue
+    if not isRealizationDirName(parts[i + 2]):
+      continue
+    result = root
+    for j in 0 .. i + 2:
+      result.add('/')
+      result.add(parts[j])
+    return result
+
+proc contentAddressedRoot*(path: string): string =
+  ## The content-addressed root a path lies under, or `""`.
+  ##
+  ## THE ONE PLACE THE ENGINE DECIDES WHAT "CONTENT-ADDRESSED" MEANS, and the
+  ## reason it is defined here rather than beside its first consumer: two
+  ## opposite operations key off exactly this function and they are only sound
+  ## as a PAIR.
+  ##
+  ## * `toolInputRoots` SUBTRACTS observed reads under such a root from the
+  ##   action-cache input set (Dependency-Observation-Attribution.md §Class 1
+  ##   — "the path names its own content, the store is immutable, and the
+  ##   thing that put it in the key already covers every byte under it").
+  ## * `keyedOnContentAddressedToolRoot` below is what makes the second half
+  ##   of that sentence TRUE for the action's own image, instead of a claim
+  ##   about some caller's fingerprint that the engine never checks.
+  ##
+  ## Both must read the same root for the same path or the subtraction drops
+  ## something the key does not carry. Sharing the function is the structural
+  ## form of "same root", and it is why a newly recognised root is added HERE
+  ## rather than at either call site.
+  ##
+  ## ## Why the repro store had to join the Nix store, and why symmetry was
+  ## ## not enough on its own
+  ##
+  ## While this recognised the literal `/nix/store/` and nothing else, a tool
+  ## under reprobuild's own CAS store was elided by neither side and mixed by
+  ## neither side. The two stayed symmetric, so rule 7 held and the ELISION
+  ## hole stayed shut — but the tool then lived on as an ordinary recorded
+  ## input, and MEASURED (2026-09-09) that is not enough:
+  ##
+  ## | | value |
+  ## |---|---|
+  ## | `weak(A) == weak(B)` for two byte-different repro-store bashes | `true` |
+  ## | warm run after swapping `argv[0]` from A to B | **`cdHit`, `launched = false`** |
+  ##
+  ## Revalidation only re-checks the paths a record already NAMES. `<A>/bin/sh`
+  ## still existed and still hashed the same, and nothing looked at the fact
+  ## that `argv[0]` had moved to `<B>/bin/sh`. **A content-addressed store
+  ## expresses a tool change as a NEW PATH, so recording the old path cannot
+  ## catch it — only keying on it can.** Recognising the root is what puts it
+  ## in the key (`keyedOnContentAddressedToolRoot`), and because both sides
+  ## read this one function, the elision moved with it.
+  let normalized = path.replace('\\', '/')
+  result = nixStoreRoot(normalized)
+  if result.len == 0:
+    result = reproStoreRealizationRoot(normalized)
+
 proc keyedOnGoverningLock*(fingerprint: ContentDigest;
                            governingLockIdentity: LockIdentity): ContentDigest =
   ## Named-Lock-Files §7 — mix the governing lock identity into an action's
@@ -1809,6 +2033,175 @@ proc keyedOnActionEnvironment*(fingerprint: ContentDigest;
   framed.add($text.len & "\x1f" & text & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+proc monitorPayloadArgIndex(argv: openArray[string]): int
+
+proc executedImageArgvIndex*(argv: openArray[string]): int =
+  ## Index in `argv` of the image the ACTION ITSELF executes, or `-1` when
+  ## that cannot be told without guessing.
+  ##
+  ## ONE ANSWER FOR THREE QUESTIONS, and they used to have two. An action's
+  ## argv is not always the recipe's argv: on the wrapped monitor path
+  ## `monitoredAction` rewrites it to
+  ## `<repro> internal io monitor --depfile <f> -- <argv>`, so `argv[0]`
+  ## becomes the ENGINE'S OWN BINARY and the action's real tool moves to the
+  ## payload. On the in-process-hosted path it is left alone. Which one a
+  ## given action carries is decided by the launch site, not by the action.
+  ##
+  ## `executedToolImagePath` already knew this. `toolInputRoots` did not, and
+  ## MEASURED (2026-09-09) on a real monitored build the disagreement is
+  ## visible in both directions:
+  ##
+  ## * it subtracted nothing for the action's real store-resolved tool,
+  ##   because it was reading the wrapper's `argv[0]`; and
+  ## * where the engine's own binary is itself a store path — an installed
+  ##   reprobuild — it subtracted THAT root instead, which is an elision of
+  ##   reads under a root that is in no key at all, since the wrapper argv is
+  ##   composed long after the weak fingerprint was computed.
+  ##
+  ## Both disappear once the subtraction, the key mix and the launcher's
+  ## root-image fold ask this one function which argument is the tool.
+  ##
+  ## Returns `-1` for a monitor-shaped argv whose payload cannot be located,
+  ## rather than falling back to index 0. Index 0 there is the launcher, not
+  ## the action, and naming the wrong image is worse than naming none: it
+  ## would key an edge on the engine binary and elide the reads of whatever
+  ## else lives beside it.
+  if argv.len == 0:
+    return -1
+  let payloadIndex = monitorPayloadArgIndex(argv)
+  if payloadIndex >= 0:
+    return payloadIndex
+  if argv.len >= 4 and argv[1] == "internal" and argv[2] == "io" and
+      argv[3] == "monitor":
+    return -1
+  0
+
+proc keyedOnContentAddressedToolRoot*(fingerprint: ContentDigest;
+                                     argv: openArray[string]): ContentDigest =
+  ## Mix the CONTENT-ADDRESSED ROOT of the image this action executes into its
+  ## weak fingerprint — the derived half of the class-1 elision `cacheInputPaths`
+  ## performs, and the reason that elision is sound.
+  ##
+  ## ## The claim this exists to make true
+  ##
+  ## `toolInputRoots` drops every observed read under
+  ## `contentAddressedRoot(argv[0])`
+  ## from the action-cache input set. Dependency-Observation-Attribution.md
+  ## §Class 1 permits that ONLY on a two-part argument: the root is
+  ## content-addressed (the path names its content) AND "its identity is in
+  ## the key". The first half is a property of the store. **The second half was
+  ## an assumption about whatever fingerprint the caller happened to compute,
+  ## and nothing checked it.**
+  ##
+  ## MEASURED (2026-09-09), engine-default fingerprint
+  ## (`weakFingerprintFromText(id)`), monitored cacheable edge, `argv[0]` a
+  ## `/nix/store/…-bash-5.2p26/bin/sh`, one observed workspace read:
+  ##
+  ## | step | decision |
+  ## |---|---|
+  ## | run 1, tool A | published, `record.inputs = [observed.txt]` |
+  ## | warm, tool A | `cdHit` (control) |
+  ## | `argv[0]` -> `/nix/store/…-bash-5.3p9/bin/sh` | **`cdHit`, `launched=false`** |
+  ##
+  ## A DIFFERENT BINARY, and the record published against the first one was
+  ## served without running anything. `weak(A) == weak(B)` was `true`: the
+  ## engine's default fingerprint is the action id, the lock identity and the
+  ## environment declaration, and argv appears in none of them. The strong
+  ## fingerprint is `weak + inputs + envInputs` (`computeStrongFingerprint`),
+  ## and the tool was subtracted out of `inputs`. So for a store-resolved tool
+  ## the executed binary's identity was in NO key at all, and `947c50fc`'s
+  ## stated goal — "make the binary an action executes one of its cache
+  ## inputs" — was unmet for exactly the tools every NixOS build uses.
+  ##
+  ## The same measurement with argv mixed into the caller's fingerprint gives
+  ## `cdMiss, launched=true`. So the elision is sound precisely when the key
+  ## covers `argv[0]`, and the fix is to make that true by construction rather
+  ## than to hope each caller arranged it.
+  ##
+  ## ## The ROOT **and** the path within it, and why the path is not a digest
+  ##
+  ## The root, because the root is the granularity the subtraction works at:
+  ## `cacheInputPaths` drops everything under `contentAddressedRoot(argv[0])`,
+  ## so the key has to carry that whole root or the two sets do not line up
+  ## (Dependency-Observation-Attribution.md rule 7).
+  ##
+  ## The path as WELL, because rule 7 bounds the key from BELOW and nothing
+  ## bounds it from above. Keying on MORE than the elision drops is the safe
+  ## direction — every path the subtraction removed is still covered by the
+  ## root component — whereas keying on LESS is the unsound one. The first
+  ## version of this mixed the root ALONE and reasoned that splitting the two
+  ## programs of one derivation "would key on something the elision does not
+  ## bound", which has the argument backwards. MEASURED (2026-09-09), one
+  ## coreutils derivation, `argv[0]` swapped `…/bin/cat` -> `…/bin/head`:
+  ## **`cdHit`, `launched = false`**. One derivation, two programs, one cache
+  ## entry, and the second program served the first one's result.
+  ##
+  ## The path rather than a digest of the bytes, because for a
+  ## content-addressed root the path IS the digest — that is the entire
+  ## premise of class 1, and re-hashing the closure would cost a store walk to
+  ## re-derive what the name already states. Where the premise does not hold
+  ## the mix does not happen: `contentAddressedRoot` returns `""` for every
+  ## path outside a recognised store, `toolInputRoots` subtracts nothing
+  ## there, and the image stays a content-fingerprinted recorded input via
+  ## `collectEvidence`'s root-image fold — which is the case
+  ## `t_executed_binary_is_a_recorded_input` has always pinned.
+  ##
+  ## ## Applied in the CONSTRUCTOR, for `keyedOnGoverningLock`'s reason
+  ##
+  ## "By a structural check, not by care." Every `weakFingerprint =` argument
+  ## in the tree is a caller who computed a fingerprint over what its edge
+  ## does; some of them (`weakFingerprintForProfileBuildAction`, the typed-tool
+  ## DSL site's `profile.profileFingerprint`) already cover the tool and some
+  ## (`weakFingerprintFromText(id)`, the inline-exec site's id + payload) do
+  ## not. A subtraction whose soundness depends on which caller you came
+  ## through is a subtraction that is unsound somewhere, and the engine cannot
+  ## tell the two apart by inspecting an opaque digest.
+  ##
+  ## ## The empty case is the IDENTITY, and that is required
+  ##
+  ## An edge whose `argv[0]` is not under a content-addressed root must
+  ## fingerprint to exactly what it fingerprinted before this existed —
+  ## otherwise a correctness fix ships as a total cache wipe for every user
+  ## who does not build on NixOS. NLF-STAT-4's baseline corpus uses
+  ## `/usr/bin/cc`, so those recorded bytes do not move; the test pins it.
+  ##
+  ## ## Where the OTHER `toolInputRoots` roots come from, and why they need no
+  ## equivalent
+  ##
+  ## `toolInputRoots` also collects store roots out of `PATH` and `NODE_PATH`
+  ## — but it reads them from `action.env`, the edge's own DECLARED
+  ## environment, and `keyedOnActionEnvironment` already mixes every declared
+  ## name AND value into this same fingerprint. A passthrough `PATH`
+  ## contributes no value to the key, and `envValue` cannot see it either, so
+  ## it yields no root to subtract. Those two halves line up by construction
+  ## already. `argv[0]` was the one that did not.
+  ## ## `-1` is an ANSWER here, not an error
+  ##
+  ## `executedImageArgvIndex` returns `-1` for an argv whose executed image
+  ## cannot be told without guessing, and this is one of the three callers it
+  ## says that to. Indexing `argv` with it would raise inside the action
+  ## CONSTRUCTOR — every edge in the graph goes through here — so the guard is
+  ## the difference between "no image to mix" and a crash while building the
+  ## graph. There is no `image.len > 0` test between it and the `root.len`
+  ## test below: `contentAddressedRoot("")` is `""`, so that test decided
+  ## nothing the next one does not, and a conjunct no mutation can redden is
+  ## one a later reader mistakes for load-bearing.
+  let imageIndex = executedImageArgvIndex(argv)
+  let image =
+    if imageIndex >= 0: argv[imageIndex].replace('\\', '/') else: ""
+  let root = contentAddressedRoot(image)
+  if root.len == 0:
+    return fingerprint
+  # Length-framed mix, same shape and rationale as `keyedOnGoverningLock` and
+  # `keyedOnActionEnvironment`: no two distinct (fingerprint, root, image)
+  # triples may collide by concatenation ambiguity.
+  var framed = "action-tool-root\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  framed.add($root.len & "\x1f" & root & "\x1e")
+  framed.add($image.len & "\x1f" & image & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
 proc weakFingerprintFor*(id: string;
                          governingLockIdentity: LockIdentity): ContentDigest =
   ## The fingerprint `action()` / `builtinAction()` would compute for an edge
@@ -1888,8 +2281,18 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     # no environment is unaffected — `keyedOnActionEnvironment` is the
     # identity on the empty declaration — so this does not move any
     # fingerprint that existed before it.
+    #
+    # The tool-root mix sits between them, and it is the same kind of
+    # thing: an engine-derived component no call site knows to supply.
+    # It is the IDENTITY unless `argv[0]` lies under a content-addressed
+    # root, which is exactly the condition under which `cacheInputPaths`
+    # subtracts that root's contents out of the key — see
+    # `keyedOnContentAddressedToolRoot` for the measurement that showed
+    # the two halves had never been connected.
     weakFingerprint: keyedOnGoverningLock(
-      keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
+      keyedOnContentAddressedToolRoot(
+        keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
+        argv),
       governingLockIdentity),
     actionCachePolicy: actionCachePolicy,
     depfile: depfile,
@@ -2508,6 +2911,79 @@ proc entryDeterminismFor*(config: BuildEngineConfig;
   declaredDeterminism(action.determinismClass, action.effectiveRetention,
     nowUnix = config.nowUnix, buildEpoch = config.buildEpoch)
 
+proc refusesRecordWithNoInputs*(action: BuildAction): bool =
+  ## Is this an edge for which a cache record with NO inputs and NO observed
+  ## environment inputs is never legitimate?
+  ##
+  ## THE SCOPE, factored out because it is read from three places that would
+  ## otherwise each carry their own copy: the per-edge lookup
+  ## (`unservableCacheRecordReason`), the whole-graph metadata scan (through
+  ## `HotMetadataProbe.refuseRecordWithNoInputs`), and the whole-graph
+  ## record scan. A predicate whose scope is written down three times is a
+  ## predicate that will eventually mean three things.
+  ##
+  ## Each clause excludes a case where an empty record is CORRECT:
+  ##
+  ## * `cacheable` — a non-cacheable edge never publishes and always re-runs.
+  ## * `bakProcess` — a built-in (write-text, copy-file, stamp) legitimately
+  ##   has no file inputs; it is keyed on text its caller mixed into the weak
+  ##   fingerprint, and refusing it would make every such edge a permanent
+  ##   miss.
+  ## * `MonitorPolicyKinds` — this is the class where the ENGINE promised to
+  ##   discover the input set, so an empty one is the engine's failure. Where
+  ##   the author declares the set (a recognized report), an empty set is the
+  ##   author's statement and not ours to overrule.
+  action.cacheable and action.kind == bakProcess and
+    action.dependencyPolicy.kind in MonitorPolicyKinds
+
+proc unservableCacheRecordReason*(action: BuildAction;
+                                  record: ActionResultRecord): string =
+  ## Why this RECORD must not be served to this ACTION, or `""`.
+  ##
+  ## THE LOOKUP-SIDE TWIN OF `gradeKeyedInputSet`, and the reason there is one
+  ## at all. The publish-side guard is where the information lives — at publish
+  ## time the engine knows what the monitor observed — so it is the primary
+  ## defence and this is not a substitute for it. What this adds is POSITION:
+  ## it sits on the path every record must cross to be used, whichever
+  ## direction it arrived from. A record installed from a LAN peer, restored
+  ## from a binary cache, or written by some future launch path that publishes
+  ## without going through `collectEvidence` never passes the publish-side
+  ## guard at all. It passes here.
+  ##
+  ## THE PREDICATE IS RECORD-INTRINSIC AND HAS NO FALSE POSITIVES, and both
+  ## halves of that matter. A record with no input fingerprints and no observed
+  ## environment inputs is keyed on the weak fingerprint alone: the lookup
+  ## re-derives its strong fingerprint from its own (empty) input list, finds
+  ## nothing to compare against the filesystem, and returns a hit — forever,
+  ## for every future build, whatever changes. For a monitored, cacheable
+  ## PROCESS edge that state is never legitimate; `gradeKeyedInputSet` refuses
+  ## to publish it. The scope is what keeps it honest: a built-in action
+  ## (write-text, copy-file, stamp) legitimately has no file inputs and is
+  ## keyed on text its caller mixed into the weak fingerprint, and an edge
+  ## whose author declares its own input set owns that set.
+  ##
+  ## WHAT IT DELIBERATELY DOES NOT TRY TO DO. It does not attempt to recognise
+  ## the records published during the 2026-09-02..2026-09-08 window. Those
+  ## carry ONE input — the root image the engine reconstructed from `argv[0]`
+  ## — and are byte-indistinguishable from a record of an edge that genuinely
+  ## read that path. The fact that would separate them was destroyed when the
+  ## two were merged into one list (Dependency-Observation-Attribution.md rule
+  ## 6). Draining those needs a discriminator the record does carry, which is
+  ## its version; see `ActionRecordVersion` in `repro_local_store`. Guessing
+  ## here instead would refuse sound entries and still miss unsound ones.
+  if not action.refusesRecordWithNoInputs():
+    return ""
+  if record.inputs.len > 0 or record.envInputs.len > 0:
+    return ""
+  "action '" & action.id & "': refusing a cached record with no recorded " &
+    "inputs and no recorded environment inputs. Such a record is keyed on " &
+    "the weak fingerprint alone, so it has nothing to revalidate and would " &
+    "be served on every future build regardless of what changed. A monitored " &
+    "cacheable action never publishes one; this record predates the guard " &
+    "that refuses to, or arrived from a producer that lacks it. Re-running. " &
+    "Spec: Failure-Semantics.md:11-12, " &
+    "Reprobuild-Development.milestones.org M17."
+
 proc cachedResultReusableInPlace(action: BuildAction;
                                  declaredOutputsPresent: bool): bool =
   ## "If the action cache says nothing this action reads has changed, can the
@@ -2961,6 +3437,49 @@ proc zeroEvidenceDiagnostic*(actionId: string;
       "want, the fix is a library-load floor in the platform's shim, not " &
       "a weaker guard here.")
 
+proc emptyKeyedInputSetDiagnostic*(actionId: string;
+                                   observedCount, elidedCount: int): string =
+  ## The diagnostic for an action that observed something and keyed on
+  ## nothing — the S2 state.
+  ##
+  ## `zeroEvidenceDiagnostic` above grades what the MONITOR saw.  This one
+  ## grades what the RECORD is keyed on, and the two are different sets: the
+  ## engine's own tool-root and ignored-prefix subtractions are applied to the
+  ## observed channels on the way to `cacheInputPaths`, AFTER the monitor
+  ## question has been asked and answered.
+  ##
+  ## MEASURED (2026-09-09) — monitored cacheable edge, `argv[0]` a
+  ## `/nix/store/…-bash-5.2p26/bin/sh`, whose single observed read is a file
+  ## under that same store root, declaring nothing:
+  ##
+  ## | | value |
+  ## |---|---|
+  ## | `monitorReads` (the guard's set) | 2 entries -> passes, no diagnostic |
+  ## | `cacheInputPaths` (the key's set) | `[]` |
+  ## | published | **yes**, `record.inputs.len == 0` |
+  ## | warm | `cdHit`, `launched = false` |
+  ##
+  ## A cacheable edge published a record with an entirely empty input set —
+  ## precisely the state `zeroEvidenceDiagnostic`'s guard exists to refuse —
+  ## and reached it with no diagnostic at all, because the guard graded a
+  ## different set than the one that got keyed. That is
+  ## Dependency-Observation-Attribution.md rule 7: "the set a guard checks and
+  ## the set the key is built from are the same set — or the difference
+  ## between them is itself counted and reported". This message is the report,
+  ## and `elidedCount` is the count rule 3 asks for.
+  "action '" & actionId & "': the monitor observed " & $observedCount &
+    " path(s), but " & $elidedCount & " of them were elided by the " &
+    "action's own tool roots / ignored prefixes and the action-cache " &
+    "input set came out EMPTY. Such a record is keyed on the weak " &
+    "fingerprint alone and is indistinguishable from one published by an " &
+    "action that observed nothing, which is the state " &
+    "Reprobuild-Development.milestones.org M17 and " &
+    "Compiles-Are-Normal-Edges.md:269-273 refuse. Action-cache publish " &
+    "skipped; the edge re-runs. If the elided paths really are keyed by " &
+    "construction, the edge still has nothing of its own in the key and " &
+    "wants `cacheable = false`; if they are not, the elision is the bug. " &
+    "Spec: Dependency-Observation-Attribution.md rules 3 and 7."
+
 proc monitorEvidenceRequired(action: BuildAction): bool =
   ## Monitor evidence is required for monitored policies once an iomon
   ## (monitor depfile) has actually been wired up for the action. The only
@@ -3254,6 +3773,1331 @@ proc benignRawSyscallLoss*(detail: string): bool =
       return false
     return number in BenignRawSyscallNumbers
   false
+
+# ---------------------------------------------------------------------------
+# DA-2 — DERIVED IPC trust: the daemons THIS PROCESS spawned
+# (Dependency-Observation-Attribution.md §Class 3, §"Derived beats declared";
+#  Dependency-Attribution.milestones.org DA-2)
+# ---------------------------------------------------------------------------
+#
+# THE SYMPTOM. An action that opens an IPC channel to a process outside its own
+# monitored tree is graded `mcIncomplete`, so it never publishes a cache entry
+# and rebuilds forever. io-mon already has the mechanism —
+# `unmonitoredSubtreeLossDetails(records, trustedPeerPids)`, whose own comment
+# describes a trusted peer as "a daemon that accounted for its own"
+# contribution — and reprobuild passed an empty set, which is why the symptom
+# was total rather than occasional.
+#
+# WHAT MAY BE TRUSTED, AND ONLY THAT. §Class 3 admits exactly two branches, and
+# a daemon that satisfies NEITHER does not belong in the set however convenient:
+#
+#   (a) the peer contributes NO CONTENT to the action, or
+#   (b) the peer serves CLASS-1 content — content-addressed bytes whose
+#       identity is already in the action key by construction.
+#
+# WHY THE TRUST IS DERIVED AND NOT DECLARED. §"Derived beats declared": the
+# engine SPAWNED the daemon, so it knows the pid as a fact rather than as
+# someone's claim, and derived attribution cannot lie. That is why DA-2 lands
+# before DA-4's declared trust, and it is why THERE IS NO CONFIGURATION FIELD,
+# NO ALLOWLIST AND NO RECIPE SURFACE here: a `BuildEngineConfig` field naming a
+# pid would be a declaration, and a declaration needs a check (rule 5) that this
+# milestone deliberately does not build. The registry's only production writer
+# is `trustDaemonWeSpawned`, whose argument is an `osproc.Process` — a value a
+# caller can only hold by having spawned the process it names.
+#
+# SPAWN-ONLY IS A NARROW REACH, NOT A FORMALITY, and this file is the wrong
+# place to learn how narrow: the answer depends on how the host is provisioned,
+# so it is written at the ONE production registration site, in
+# `repro_cli_support.startAutoRunQuotaIfNeeded`. Read it there before treating
+# "reprobuild trusts runquotad" as a statement about any given build.
+#
+# AND THE PID IS RE-VALIDATED, so a RECYCLED pid cannot inherit trust. A bare
+# pid is not an identity: a daemon that dies frees its number for the next
+# process on the host, and on Linux the shim stamps NO `peerstart` token on
+# `mrIpcConnect` (only macOS does), so io-mon's own (pid, start-time) test
+# degrades to the bare pid for this record kind and cannot make the distinction
+# for us. `TrustedDaemonPeer.identity` therefore carries the kernel's own answer
+# — field 22 (`starttime`) of `/proc/<pid>/stat`, read AT REGISTRATION — and
+# `revalidatedTrustedDaemons` re-reads it at grading time, on the way into the
+# per-action attribution. A pid whose identity has changed, or whose process is
+# gone, is dropped before it can exempt anything.
+
+type
+  TrustedDaemonContribution* = enum
+    ## Which branch of §Class 3 a trusted daemon satisfies. Stated per daemon,
+    ## at the spawn site, so the justification travels with the pid instead of
+    ## living in a comment somewhere else.
+    tdcNoContent
+      ## Branch (a) — the peer contributes NO CONTENT to the action. Its side of
+      ## the conversation is a decision or a measurement, never bytes that reach
+      ## the action's output. `runquotad` is this case: it grants, queues and
+      ## releases leases and accepts telemetry rows, and it never serves file
+      ## content to a client (`runquota` protocol: Hello/Acquire/Grant/Release +
+      ## the stats extension rows).
+    tdcContentAlreadyKeyed
+      ## Branch (b) — the peer serves CLASS-1 content: content-addressed blobs
+      ## whose identity is already in the action key by construction, so
+      ## monitoring the transfer re-derives what the key structurally
+      ## guarantees. The repro store daemon is this case.
+
+  TrustedDaemonOrigin* = enum
+    ## How this process came to believe the fact. §"Derived beats declared"
+    ## makes the distinction load-bearing rather than decorative: one of these
+    ## cannot lie and the other can, so an exemption's diagnostic has to say
+    ## which it was.
+    tdoSpawned
+      ## DERIVED (DA-2). This process started the daemon, so the pid is a fact
+      ## it holds rather than a claim anyone made. The zero value, so every
+      ## `TrustedDaemonPeer` written before DA-4 keeps its meaning.
+    tdoDeclaredAndChecked
+      ## DECLARED (DA-4). Someone named the daemon and a check independently
+      ## established, from facts the kernel supplied, that the peer really is
+      ## what was named. See `checkDeclaredDaemon` for exactly what that
+      ## proves and — more importantly — what it does not.
+
+  DaemonAssertion* = enum
+    ## The assertions a declaration may make about a peer, each of which the
+    ## check VERIFIES against the kernel and `revalidatedTrustedDaemons`
+    ## RE-verifies at grading time. Modelled as a set so the zero value is
+    ## `{}` — "nothing was asserted, so nothing has to be re-checked" — which
+    ## is what keeps DA-2's derived peers (and every hand-built fixture value
+    ## predating DA-4) meaning exactly what they meant before.
+    daImage
+      ## `/proc/<pid>/exe` — the file the peer is EXECUTING, resolved by the
+      ## kernel. The strongest of the three, and the one a non-privileged
+      ## process cannot obtain for a root-owned daemon (see
+      ## `checkDeclaredDaemon`).
+    daProgram
+      ## `/proc/<pid>/stat` field 2 (`comm`). Kernel-recorded, world-readable,
+      ## and — this matters — process-SETTABLE via `prctl(PR_SET_NAME)`. It
+      ## narrows accidents, not attackers.
+    daUid
+      ## The peer's uid as `SO_PEERCRED` reports it. Un-forgeable: the kernel
+      ## stamps it at connect time and no userspace end contributes to it.
+
+  TrustedDaemonPeer* = object
+    ## One trust fact. Public fields so a test can drive
+    ## `revalidatedTrustedDaemons` with a hand-built value (which is how the
+    ## recycled-pid rejection is graded); the REGISTRY that production reads is
+    ## writable only through `trustDaemonWeSpawned` (derived) and
+    ## `trustDaemonWeChecked` (declared), and the second of those takes a value
+    ## only a completed check can produce.
+    pid*: int
+    identity*: string
+      ## `/proc/<pid>/stat` field 22 at registration time, or "" where the host
+      ## cannot supply one. An empty identity means "no re-validation is
+      ## possible", which is treated as NOT trustworthy — the conservative
+      ## direction, and the one that keeps a non-Linux host at today's
+      ## behaviour instead of silently widening trust there.
+    name*: string
+    contribution*: TrustedDaemonContribution
+    origin*: TrustedDaemonOrigin
+    declaredSocket*: string
+      ## DA-4 — the endpoint the declaration named, carried so the rule-3
+      ## diagnostic can say WHERE the claim came from. Empty for a derived
+      ## peer, which was not claimed anywhere.
+    checked*: set[DaemonAssertion]
+      ## DA-4 — which assertions the check VERIFIED. Every member is re-checked
+      ## in `revalidatedTrustedDaemons`; a declaration that asserted something
+      ## the check could not answer never reaches this type at all.
+    checkedImage*: string
+    checkedProgram*: string
+    checkedUid*: int
+
+proc processStartIdentity*(pid: int): string =
+  ## The kernel's identity for a live pid: field 22 (`starttime`) of
+  ## `/proc/<pid>/stat`, in clock ticks since boot. Empty when the process does
+  ## not exist or the host does not publish it.
+  ##
+  ## Field 22 is read by counting from the END of the line, not from the start:
+  ## field 2 is `comm` in parentheses and may itself contain spaces and
+  ## parentheses (`(sh -c "a b")`), so a left-to-right split miscounts for a
+  ## process whose name is adversarial. Everything after the closing `)` is
+  ## whitespace-separated and fixed-arity, and `starttime` is the 20th of those,
+  ## so the parse is anchored on `rfind(')')`.
+  if pid <= 0:
+    return ""
+  when defined(linux):
+    let statPath = "/proc/" & $pid & "/stat"
+    var raw = ""
+    try:
+      if not fileExists(statPath):
+        return ""
+      raw = readFile(statPath)
+    except CatchableError:
+      return ""
+    let close = raw.rfind(')')
+    if close < 0:
+      return ""
+    let fields = raw[close + 1 .. ^1].splitWhitespace()
+    # After `)` the fields are state(3) .. starttime(22): index 19 zero-based.
+    if fields.len <= 19:
+      return ""
+    fields[19]
+  else:
+    ""
+
+proc processImagePath*(pid: int): string =
+  ## The file `pid` is EXECUTING, as the kernel resolves it: `/proc/<pid>/exe`.
+  ## Empty when the host does not publish it, when the link cannot be read, or
+  ## when the image has been unlinked since exec.
+  ##
+  ## TWO REFUSALS THAT MATTER, both of which fail closed:
+  ##
+  ## * **Permission.** `readlink("/proc/<pid>/exe")` needs
+  ##   `PTRACE_MODE_READ_FSCREDS` — same uid, or `CAP_SYS_PTRACE`. So an
+  ##   unprivileged `repro` CANNOT read this for a root-owned daemon, which is
+  ##   exactly the shipped host-wide `runquotad` and the Nix daemon. That is a
+  ##   real limit on how strong a declared check can be on the topology DA-4
+  ##   exists for, and `checkDeclaredDaemon` refuses rather than degrades when
+  ##   a declaration asserts an image it cannot read.
+  ## * **A deleted image.** The kernel renders an unlinked executable as
+  ##   `<path> (deleted)`. The peer is then running bytes that the declared
+  ##   path no longer names, so the assertion "the peer executes THIS file" is
+  ##   false however the strings compare. Refused, not stripped.
+  if pid <= 0:
+    return ""
+  when defined(linux):
+    try:
+      let resolved = expandSymlink("/proc/" & $pid & "/exe")
+      if resolved.len == 0 or resolved.endsWith(" (deleted)"):
+        return ""
+      resolved
+    except CatchableError:
+      ""
+  else:
+    ""
+
+proc processCommName*(pid: int): string =
+  ## `/proc/<pid>/stat` field 2 — the kernel's short name for the process,
+  ## taken from the executable's basename at `execve` and truncated to 15
+  ## bytes. World-readable, unlike `/proc/<pid>/exe`.
+  ##
+  ## Parsed between the FIRST `(` and the LAST `)` for the same reason
+  ## `processStartIdentity` anchors on `rfind(')')`: `comm` may itself contain
+  ## spaces and parentheses, so any split-based reading of this line is wrong
+  ## for an adversarially named process.
+  ##
+  ## **NOT un-forgeable, and nothing here may pretend otherwise.**
+  ## `prctl(PR_SET_NAME)` lets a process choose its own `comm`, so this
+  ## assertion establishes that the peer CALLS ITSELF the declared name. It
+  ## narrows accidents — some unrelated program listening at the declared path
+  ## — and it does not bound an attacker who already runs code as the uid that
+  ## may bind that path.
+  if pid <= 0:
+    return ""
+  when defined(linux):
+    var raw = ""
+    try:
+      let statPath = "/proc/" & $pid & "/stat"
+      if not fileExists(statPath):
+        return ""
+      raw = readFile(statPath)
+    except CatchableError:
+      return ""
+    let open = raw.find('(')
+    let close = raw.rfind(')')
+    if open < 0 or close <= open:
+      return ""
+    raw[open + 1 ..< close]
+  else:
+    ""
+
+proc processEffectiveUid*(pid: int): int =
+  ## The peer's EFFECTIVE uid right now, from `/proc/<pid>/status`'s `Uid:`
+  ## line, or -1 where the host will not say.
+  ##
+  ## THE EFFECTIVE ONE AND NOT THE REAL ONE, because that is the field
+  ## `SO_PEERCRED` reports: the kernel fills `struct ucred` at connect time
+  ## from `current_euid()`. A re-check that read the REAL uid would compare a
+  ## different quantity against `checkedUid` and would fire spuriously on any
+  ## daemon that had ever changed one without the other. `/proc/<pid>/status`
+  ## renders `Uid:` as four fields — real, effective, saved-set, filesystem —
+  ## and the second is the one this returns.
+  ##
+  ## World-readable, unlike `/proc/<pid>/exe`: this is the same asymmetry
+  ## `checkDeclaredDaemon` relies on, so the re-check is available on exactly
+  ## the cross-uid topology where the image assertion is not.
+  if pid <= 0:
+    return -1
+  when defined(linux):
+    var raw = ""
+    try:
+      let statusPath = "/proc/" & $pid & "/status"
+      if not fileExists(statusPath):
+        return -1
+      raw = readFile(statusPath)
+    except CatchableError:
+      return -1
+    for line in raw.splitLines():
+      if line.startsWith("Uid:"):
+        let fields = line["Uid:".len .. ^1].splitWhitespace()
+        if fields.len >= 2:
+          try:
+            return parseInt(fields[1])
+          except ValueError:
+            return -1
+        return -1
+    -1
+  else:
+    -1
+
+var derivedTrustedDaemons: seq[TrustedDaemonPeer]
+  ## Every daemon this process trusts as a class-3 IPC peer, derived (DA-2) and
+  ## declared-and-checked (DA-4) alike, distinguished by `origin`. A
+  ## process-global rather than a `BuildEngineConfig` field on purpose: DA-2
+  ## had no declaration surface at all, and DA-4's surface is a MACHINE fact
+  ## (`daemons.conf`) rather than a per-invocation knob — see
+  ## `loadDeclaredDaemons` for why that layer and not another. It is written
+  ## before a build starts and read on the scheduler thread; the worker pool
+  ## never touches it.
+
+proc trustDaemonWeSpawned*(process: Process; name: string;
+                           contribution: TrustedDaemonContribution) =
+  ## Register a daemon THIS PROCESS SPAWNED as a class-3 trusted IPC peer.
+  ##
+  ## The parameter is the live `Process` and not a bare pid, because that is the
+  ## whole soundness argument in one type: a caller can only hold this value by
+  ## having started the process, so "trust a daemon of the right name that
+  ## someone else started" is not a call that can be written. Holding it also
+  ## means the child has not been reaped, so the kernel will not hand its pid to
+  ## anyone else while the registration is live — and `revalidatedTrustedDaemons`
+  ## re-checks the identity anyway for the case where it has been.
+  let pid = processID(process)
+  if pid <= 0:
+    return
+  let identity = processStartIdentity(pid)
+  if identity.len == 0:
+    # No re-validatable identity ⇒ no trust. See `TrustedDaemonPeer.identity`.
+    return
+  for existing in derivedTrustedDaemons:
+    if existing.pid == pid and existing.identity == identity:
+      return
+  derivedTrustedDaemons.add(TrustedDaemonPeer(pid: pid, identity: identity,
+    name: name, contribution: contribution, origin: tdoSpawned))
+
+proc forgetDerivedTrustedDaemons*() =
+  ## Drop every registration, derived and declared alike. For test isolation,
+  ## and for a caller that has torn its daemons down.
+  derivedTrustedDaemons.setLen(0)
+
+proc derivedTrustedDaemonRegistry*(): seq[TrustedDaemonPeer] =
+  ## The DERIVED registrations only — DA-2's set, unchanged, so a test that
+  ## grades spawn-only trust cannot be made to pass by a declaration.
+  result = @[]
+  for peer in derivedTrustedDaemons:
+    if peer.origin == tdoSpawned:
+      result.add(peer)
+
+proc declaredTrustedDaemonRegistry*(): seq[TrustedDaemonPeer] =
+  ## The DECLARED-AND-CHECKED registrations only — DA-4's set.
+  result = @[]
+  for peer in derivedTrustedDaemons:
+    if peer.origin == tdoDeclaredAndChecked:
+      result.add(peer)
+
+proc trustedDaemonRegistry*(): seq[TrustedDaemonPeer] =
+  ## Every trust fact this process holds, whatever its origin. THIS is what
+  ## `collectEvidence` grades an action against; the two accessors above exist
+  ## so a test can ask about one origin without the other answering for it.
+  derivedTrustedDaemons
+
+proc revalidatedTrustedDaemons*(peers: openArray[TrustedDaemonPeer]):
+    seq[TrustedDaemonPeer] =
+  ## The subset of `peers` the kernel still agrees with — asked RIGHT NOW,
+  ## not at registration. A registration whose process has exited, or whose pid
+  ## has been recycled onto a different process, contributes nothing.
+  ##
+  ## Returns the FACTS and not just the pids because rule 3 needs the `name`
+  ## and the `contribution` at the point an exemption is granted: a diagnostic
+  ## that cannot name the daemon it forgave, and cannot say which §Class 3
+  ## branch let it, has counted the exemption without naming it.
+  ##
+  ## DA-4 — EVERY ASSERTION A DECLARATION'S CHECK VERIFIED IS RE-VERIFIED HERE,
+  ## and the reason is that `(pid, start-time)` does not pin the PROGRAM. It
+  ## pins the incarnation: `execve` preserves both, so a process that was
+  ## `runquotad` when the check ran and has since exec'd into something else
+  ## has the same pid and the same `starttime`, and a start-time-only
+  ## re-validation would hand it the exemption. Re-reading `/proc/<pid>/exe`
+  ## and `/proc/<pid>/stat`'s `comm` is what closes that.
+  ##
+  ## `daUid` IS RE-CHECKED TOO, AND AN EARLIER VERSION OF THIS COMMENT ARGUED
+  ## IT NEED NOT BE. That argument ran: a surviving `(pid, start-time)` is the
+  ## same process `SO_PEERCRED` answered for, and a process "can drop privileges
+  ## but cannot acquire them", so the only drift is away from a privileged uid
+  ## and re-checking could only reject, never protect. **MEASURED FALSE**
+  ## (2026-09-11), sampling `/proc/<pid>` in a tight loop across an `execve`
+  ## into setuid-root `sudo`:
+  ##
+  ##   t=0.000 pid=1183970 comm=execprobe2 starttime=4661947 uid=1007 euid=1007
+  ##   t=0.158 pid=1183970 comm=sudo       starttime=4661947 uid=1007 euid=0
+  ##
+  ## Same pid, same field 22, euid raised in place. `execve` genuinely does
+  ## preserve `starttime` — that half was right, and it is precisely why the
+  ## preserved pair proves so much less than it looks like it proves. The
+  ## general form does not even need an exec: a daemon that started as root and
+  ## called `seteuid(user)` keeps root in its SAVED set-user-ID and may
+  ## `seteuid(0)` back at any moment, with no exec, no new image and an
+  ## unchanged `comm` — so it is the assertion the other two re-checks cannot
+  ## stand in for.
+  ##
+  ## So every assertion the check verified is re-verified here, `daUid`
+  ## included, against `/proc/<pid>/status`'s EFFECTIVE uid — the field
+  ## `SO_PEERCRED` reported in the first place.
+  ##
+  ## The set is empty for every derived peer and for every value written before
+  ## DA-4, so this loop is exactly DA-2's for them.
+  result = @[]
+  for peer in peers:
+    if peer.pid <= 0 or peer.identity.len == 0:
+      continue
+    if processStartIdentity(peer.pid) != peer.identity:
+      continue
+    if daImage in peer.checked and
+        (peer.checkedImage.len == 0 or
+         processImagePath(peer.pid) != peer.checkedImage):
+      continue
+    if daProgram in peer.checked and
+        (peer.checkedProgram.len == 0 or
+         processCommName(peer.pid) != peer.checkedProgram):
+      continue
+    if daUid in peer.checked and
+        (peer.checkedUid < 0 or
+         processEffectiveUid(peer.pid) != peer.checkedUid):
+      continue
+    result.add(peer)
+
+# ---------------------------------------------------------------------------
+# DA-4 — DECLARED IPC trust, and the CHECK that makes it a claim
+# (Dependency-Observation-Attribution.md §Class 3, §"Derived beats declared",
+#  §"Where each declaration lives", rules 3/4/5;
+#  Dependency-Attribution.milestones.org DA-4)
+# ---------------------------------------------------------------------------
+#
+# WHAT DA-2 LEFT OPEN, AND WHY IT IS THE CASE THAT MATTERS. DA-2 trusts only a
+# daemon THIS PROCESS SPAWNED. Measured, that is live only on an unprovisioned
+# Linux host: on a host running the shipped `runquotad` unit,
+# `startAutoRunQuotaIfNeeded` finds the host-wide socket already answered,
+# adopts the daemon and registers nothing — so DA-2 is entirely inert on
+# precisely the topology a shared lease coordinator exists for. Closing that
+# means trusting a daemon this process did not start, which by
+# §"Derived beats declared" is DECLARED attribution, and
+# **a declared attribution needs a check** (rule 5).
+#
+# THE CHECKED-CLAIM PATTERN, WHICH IS THE POINT OF THE MILESTONE. A declaration
+# NAMES a peer. A check must then establish, INDEPENDENTLY OF THE DECLARATION
+# AND FROM FACTS THE DECLARER DOES NOT SUPPLY, that the peer really is what was
+# named. The design constraint runs check-first: the declaration surface is
+# whatever the check can actually verify, and nothing wider. Concretely, this
+# is why there is no `contribution =` key below — see `class3Contribution`.
+#
+# WHAT THE KERNEL WILL VOUCH FOR, WHICH IS THE WHOLE BUDGET.
+#
+#   * `SO_PEERCRED` on a connected AF_UNIX socket yields the peer's
+#     (pid, uid, gid) as of connect. The kernel stamps it; neither end
+#     contributes to it; it cannot be forged from userspace. This is the
+#     foundation, and it is the same fact io-mon's shim reads at the ACTION's
+#     own connect — which is what binds the check to the observation, because
+#     the exemption is keyed on that pid and on nothing else.
+#   * `/proc/<pid>/stat` field 22 (`starttime`) distinguishes an incarnation
+#     from a recycled pid. DA-2 already reads it; DA-4 reuses it verbatim.
+#   * `/proc/<pid>/exe` names the file the peer executes — but only to a
+#     reader with `PTRACE_MODE_READ_FSCREDS` (same uid, or `CAP_SYS_PTRACE`).
+#   * `/proc/<pid>/stat` field 2 (`comm`) is world-readable and
+#     process-settable.
+#
+# WHAT A CHECK CANNOT ESTABLISH, STATED BEFORE THE CODE BECAUSE IT BOUNDS EVERY
+# CLAIM BELOW.
+#
+#   1. **That the declared program deserves trust.** Whether `runquotad`
+#      contributes content is a semantic property of the program, and no
+#      runtime probe answers it. That is why the class-3 branch is NOT
+#      declarable (`class3Contribution` is a closed, compiled-in table) — an
+#      operator who could assert a branch for an arbitrary binary would have an
+#      exemption from reproducibility, not a declaration.
+#   2. **That the socket path is trustworthy.** "Something is listening here"
+#      is arrangeable by accident and by an attacker alike, and it is exactly
+#      the check this code must not be. Every assertion below is about the
+#      PEER, never about the path.
+#   3. **That an unprivileged reader can identify a privileged daemon's
+#      image.** `/proc/<pid>/exe` is unreadable across a uid boundary, so on
+#      the shipped topology — root-owned `runquotad`, root-owned Nix daemon,
+#      unprivileged `repro` — the strongest assertion is UNAVAILABLE and the
+#      check rests on `daUid` (un-forgeable) plus `daProgram` (not). Declaring
+#      an image that cannot be read is REFUSED, not degraded, so an operator
+#      learns this from a report rather than from a silent weakening.
+#   4. **That the peer the ACTION talked to is the peer the check connected
+#      to** — except through the pid, which is precisely how it is established.
+#      A socket re-bound by a different process yields a different peer pid at
+#      the action's connect and is not in the trust set. A pid recycled onto a
+#      different process fails `revalidatedTrustedDaemons`. Neither inherits
+#      anything, and both are graded.
+#   5. **That the channel the ACTION used is the ENDPOINT that was declared.**
+#      THE RESIDUAL. READ THIS BEFORE WIDENING THE VOCABULARY.
+#
+#      A declaration names an endpoint; the exemption is keyed on a PID. io-mon
+#      grants it with `peer in trustedPeerPids` and looks at no path at all
+#      (io-mon `src/io_mon/writer.nim:1992-1994`), so what trust buys is
+#      "everything this process serves", not "the endpoint that was declared".
+#      Under DA-2 the two coincide because the engine spawned the daemon and
+#      knows it end to end; under DA-4 they can come apart, and MEASURED they
+#      do: on a socket-activated host pid 1 answers `/nix/var/nix/daemon-socket
+#      /socket` AND `/run/dbus/system_bus_socket`, so declaring the first
+#      registered a pid that forgave the second.
+#
+#      WHAT NARROWS IT, AND HOW FAR. Requiring a program-identifying assertion
+#      (`declarationIdentifiesAProgram`) refuses the activator outright — pid
+#      1's `comm` is `systemd`, not `nix-daemon` — and, more generally, turns
+#      the trust fact from "pid P" into "pid P, executing declared program X".
+#      That is the granularity the class-3 argument is actually stated at:
+#      `class3Contribution` is a table from PROGRAM to branch, and "runquotad
+#      serves lease decisions and no content" is a claim about the program,
+#      true of every channel it serves. So once the program is identified, the
+#      endpoint is a LOCATOR for finding the peer rather than a term in the
+#      soundness argument, and forgiving X's other channels is forgiving what
+#      the branch already licensed.
+#
+#      WHAT IS LEFT, STATED PLAINLY RATHER THAN IMPLIED. That reduction is
+#      exactly as good as the program identification and as the branch table:
+#
+#        * `daProgram` is `comm`, which the peer sets (`prctl(PR_SET_NAME)`).
+#          Against an attacker already running as the uid that may bind the
+#          declared path, `program` alone identifies nothing — which is why the
+#          documented shape for a privileged daemon is `program` + `uid`, and
+#          why a host that can read `/proc/<pid>/exe` should declare `image`.
+#        * A program admitted to the vocabulary whose branch is true of only
+#          SOME of its channels would be forgiven on all of them. None of the
+#          three admitted today is such a program: `runquotad` speaks one
+#          lease/telemetry protocol on every endpoint it binds; the Nix daemon
+#          and the repro store daemon serve content-addressed store paths on
+#          every endpoint they bind. **A fourth kind must be argued at the
+#          PROGRAM level, not at the endpoint level, or this residual becomes a
+#          hole.**
+#
+#      THE EXACT FIX, AND WHY IT IS NOT HERE. Keying the exemption on
+#      `(pid, endpoint)` would remove the residual outright. It cannot be done
+#      from this repository: on Linux `mrIpcConnect` carries no usable path —
+#      io-mon's `recordIpcConnect` never sets `record.path` there — so the
+#      dedup key io-mon builds for a peer-attributed loss is `pid:<peer>@<start>`
+#      with no path term, and the engine has nothing to match an endpoint
+#      against. It needs an io-mon change (carry the connect path on Linux),
+#      after which this file can compare it to `declaredSocket`, which is
+#      already recorded on every declared `TrustedDaemonPeer` for exactly that
+#      day. Until then the residual is REAL, BOUNDED BY THE PROGRAM, and
+#      graded: see `t_declared_daemon_ipc_trust`'s two-endpoint case, whose
+#      second arm asserts the forgiveness of an undeclared endpoint of a
+#      declared PROGRAM — so that narrowing this later shows up as a red case
+#      to update rather than as a silent change of meaning.
+#
+# AND CLASS 4 IS NOT REACHABLE FROM HERE (rule 4). A declaration's endpoint
+# must be an absolute filesystem path, and `SO_PEERCRED` on anything that is
+# not an AF_UNIX socket yields no pid — `checkDeclaredDaemon` refuses pid <= 0
+# outright. On the observation side io-mon's own exemption requires
+# `peer != 0` (io-mon `writer.nim:1992`) and an INET connect reports peer 0, so
+# a network peer stays unattributable whatever this registry contains.
+
+type
+  DeclarableDaemonKind* = enum
+    ## The CLOSED vocabulary of daemons that may be declared, and the reason it
+    ## is closed rather than a name plus a contribution field.
+    ##
+    ## §Class 3 admits a peer on one of two grounds — it contributes no
+    ## content, or it serves content already in the key — and BOTH are claims
+    ## about what a program DOES. Nothing the engine can probe at runtime
+    ## decides them. So the branch travels with the daemon KIND, compiled in
+    ## here beside the argument for it, exactly as `tdcNoContent` travels with
+    ## `runquotad` at DA-2's spawn site. What the machine layer supplies is
+    ## WHERE the daemon is, which is the part the machine actually knows.
+    ##
+    ## An unrecognised section name in `daemons.conf` is an ERROR, not an
+    ## ignored line: a typo that silently declared nothing would be a
+    ## declaration rotting into a no-op, which is the failure mode DA-4's third
+    ## test exists to prevent.
+    ddkRunQuota
+      ## `runquotad` reached over an endpoint this process did not create —
+      ## the host-wide `/run/runquota/runquotad.sock` the shipped unit owns,
+      ## or an endpoint inherited through `RUNQUOTA_SOCKET`. THE DA-2 GAP.
+    ddkNixDaemon
+      ## The Nix daemon at `/nix/var/nix/daemon-socket/socket`.
+    ddkReproStoreDaemon
+      ## reprobuild's own store daemon (`repro store daemon`,
+      ## `repro_store_daemon.defaultDevEndpoint`). DA-2 verified that it
+      ## satisfies branch (b) and declined it for want of a spawn to derive
+      ## from; under a declared-and-checked regime that objection is answered.
+
+  DaemonCheckOutcome* = enum
+    ## Why a declaration was or was not turned into a trust fact. Every value
+    ## other than `dcoTrusted` is REPORTED — rule 3's "counted and named",
+    ## applied to the declarations as well as to the exemptions.
+    ##
+    ## `dcoNotChecked` IS FIRST, AND THE ORDER IS THE POINT. Nim's zero value
+    ## for an enum is its first member, so whichever value sits here is what a
+    ## default-constructed `DaemonIdentityCheck` or `DaemonCheckReport` claims
+    ## about a peer nobody asked about. With `dcoTrusted` first — which is how
+    ## this enum shipped — an un-run check ANNOUNCED A PASS, and
+    ## `renderDaemonCheckReport` rendered a zero `DaemonCheckReport` as
+    ## "checked and trusted". The safe default has to be the absence of a
+    ## verdict, so it is.
+    ##
+    ## Reordering was verified safe rather than assumed: EVERY use of this
+    ## type is `==`, `!=`, `$` or a type annotation — no `ord`, no `succ`, no
+    ## indexing, no `<`, no iteration over the enum and no persistence of an
+    ## ordinal, so nothing reads the member positions. Keep it that way; the
+    ## moment one does, this member's position becomes a wire fact.
+    ##
+    ## WHERE THE USES ARE: this module and
+    ## `tests/integration/t_declared_daemon_ipc_trust.nim`, and nowhere else.
+    ## The CLI is NOT a third site — it holds a `DaemonCheckReport` and renders
+    ## it, and names neither this type nor any member of it — so a sweep that
+    ## goes looking for one there will not find it and should not conclude it
+    ## missed something.
+    ##
+    ## NO COUNT IS STATED, DELIBERATELY — AND NOT BECAUSE THE ONE THAT USED TO
+    ## STAND HERE HAD ROTTED. It had not. MEASURED (2026-09-11) across both
+    ## files with comments and string literals stripped, "all 56 uses" is still
+    ## exactly right — 29 here and 27 in the suite — as it was at `88e3b7e7`
+    ## where it was written. The number is dropped because it is a SECOND
+    ## claim, one that has to be re-established on every edit, standing beside
+    ## the claim that actually carries the argument and can be checked by
+    ## reading: that no use reads a member POSITION. Count it yourself when you
+    ## re-run the sweep. THE TRAP WHEN YOU DO —
+    ## `DependencyOutputKind`'s members share the `dco` prefix
+    ## (`dcoReproPathSet`, `dcoRecognizedFormat`) and ARE read ordinally, in
+    ## `repro_domain_types/codec.nim` and the CLI's copy of that decoder. Sweep
+    ## by TYPE, not by member prefix; a `grep "ord(dco"` hits the other enum
+    ## and reports a dependency this one does not have.
+    dcoNotChecked
+      ## No check has run. The zero value, and never an answer: nothing
+      ## produces it, `trustDaemonWeChecked` refuses it, and it renders as
+      ## "not checked".
+    dcoTrusted
+    dcoEndpointNotAbsolute
+      ## The endpoint is not an absolute path, so it does not name an AF_UNIX
+      ## socket this code can obtain a peer credential from. Rule 4's shape at
+      ## the declaration surface: an `host:port` endpoint is refused here
+      ## rather than connected to and found unattributable later.
+    dcoUnreachable
+      ## Nothing accepted a connection. A declaration for a daemon that is not
+      ## running is not an error, but it must not be silent either — a stale
+      ## declaration that nobody notices is a permanent exemption waiting for
+      ## a pid collision.
+    dcoNoPeerCredentials
+      ## Connected, but the kernel would not name a peer. Includes every
+      ## non-AF_UNIX transport that somehow got this far.
+    dcoNoKernelIdentity
+      ## No `/proc/<pid>/stat` start time, so the trust could never be
+      ## re-validated. Every non-Linux host is here today, deliberately.
+    dcoNothingAsserted
+      ## The declaration named an endpoint and asserted nothing about the peer.
+      ## Refused: "something is listening at this path" is not a check.
+    dcoNoProgramAssertion
+      ## The declaration asserted something about the peer, but nothing that
+      ## IDENTIFIES THE PROGRAM it is running — `uid` alone, in practice.
+      ## Refused before a connection is attempted. See
+      ## `declarationIdentifiesAProgram` for the whole argument.
+    dcoImageUnreadable
+      ## `image` was asserted and `/proc/<pid>/exe` could not be read — the
+      ## cross-uid case above. Refused rather than degraded.
+    dcoImageMismatch
+    dcoProgramMismatch
+    dcoUidMismatch
+
+  DeclaredDaemon* = object
+    ## One parsed `daemons.conf` section. A DECLARATION and nothing more: no
+    ## field of it is believed until `checkDeclaredDaemon` has answered.
+    kind*: DeclarableDaemonKind
+    endpoint*: string
+      ## Where the daemon listens. Absolute path to an AF_UNIX socket.
+    assertions*: set[DaemonAssertion]
+    image*: string
+    program*: string
+    uid*: int
+    source*: string
+      ## Which file said so, carried into the report so an operator chasing a
+      ## refused declaration is told where to edit.
+
+  DaemonIdentityCheck* = object
+    ## THE RESULT OF A CHECK, and the only thing `trustDaemonWeChecked` accepts.
+    ##
+    ## THE FIELDS ARE PRIVATE ON PURPOSE, and it is the same device DA-2 used
+    ## when it made `trustDaemonWeSpawned` take an `osproc.Process`: a caller
+    ## outside this module can write `DaemonIdentityCheck()` but cannot fill
+    ## it, and the zero value carries `outcome = dcoNotChecked` with `pid = 0`
+    ## and `verified = {}` — which `trustDaemonWeChecked` refuses on all three
+    ## counts. So "trust a peer whose check I did not run" is not a call that
+    ## can be written, and a declaration cannot reach the registry except
+    ## through the code below.
+    outcome: DaemonCheckOutcome
+    pid: int
+    uid: int
+    identity: string
+    image: string
+    program: string
+    verified: set[DaemonAssertion]
+    endpoint: string
+    detail: string
+
+  DaemonCheckReport* = object
+    ## What happened to one declaration, for the build log. Its zero value
+    ## carries `dcoNotChecked` and therefore renders as "not checked"; before
+    ## `dcoNotChecked` existed it rendered as "checked and trusted", which is a
+    ## default-constructed value asserting the strongest thing this type can
+    ## say.
+    kind*: DeclarableDaemonKind
+    endpoint*: string
+    outcome*: DaemonCheckOutcome
+    detail*: string
+    source*: string
+
+proc class3BranchText(contribution: TrustedDaemonContribution): string =
+  ## The §Class 3 branch a trusted daemon satisfies, in the words the operator
+  ## reading a build log needs — "why was this allowed to be forgiven".
+  ##
+  ## Defined here rather than beside its first DA-2 consumer because DA-4's
+  ## declaration report needs the same sentence, and two spellings of "which
+  ## branch let this through" is the shape a later reader has to reconcile.
+  case contribution
+  of tdcNoContent:
+    "branch (a), contributes no content to the action"
+  of tdcContentAlreadyKeyed:
+    "branch (b), serves class-1 content already in the action key"
+
+proc daemonKindName*(kind: DeclarableDaemonKind): string =
+  ## The name a `daemons.conf` section carries, and the name a diagnostic
+  ## prints. One function so the two cannot drift.
+  case kind
+  of ddkRunQuota: "runquotad"
+  of ddkNixDaemon: "nix-daemon"
+  of ddkReproStoreDaemon: "repro-store-daemon"
+
+proc parseDaemonKind*(name: string): Option[DeclarableDaemonKind] =
+  for kind in DeclarableDaemonKind:
+    if daemonKindName(kind) == name:
+      return some(kind)
+  none(DeclarableDaemonKind)
+
+proc class3Contribution*(kind: DeclarableDaemonKind):
+    TrustedDaemonContribution =
+  ## WHICH §Class 3 BRANCH EACH DECLARABLE DAEMON SATISFIES. Compiled in, one
+  ## arm per kind, because this is the half of the attribution that no check
+  ## can establish and no operator may assert (see the header above).
+  case kind
+  of ddkRunQuota:
+    ## BRANCH (a) — contributes NO CONTENT. Its protocol is
+    ## Hello / Acquire / Grant / Release plus the stats-extension rows: lease
+    ## decisions and telemetry. It opens no file on a client's behalf and
+    ## returns no bytes that can reach an action's output. Identical to the
+    ## argument DA-2 makes at its spawn site, and it does not depend on WHO
+    ## started the daemon — which is why the same branch holds for an adopted
+    ## one, and why the only thing DA-4 has to add is the identity check.
+    tdcNoContent
+  of ddkNixDaemon:
+    ## BRANCH (b) — serves CLASS-1 content. Every byte it hands back is a
+    ## `/nix/store/<hash>-<name>` path, and §Class 1 is exactly the statement
+    ## that such a path names its own content and its identity is already in
+    ## the action key by construction. `contentAddressedRoot` in this file
+    ## recognises that root, `toolInputRoots` elides under it and
+    ## `keyedOnContentAddressedToolRoot` keys on it — so the elision this
+    ## branch licenses is the SAME elision the store already gets, reached
+    ## through the daemon instead of through the filesystem. §Class 3 names
+    ## this daemon explicitly.
+    tdcContentAlreadyKeyed
+  of ddkReproStoreDaemon:
+    ## BRANCH (b), for the same reason and over reprobuild's own CAS store:
+    ## it realizes and serves prefixes under
+    ## `<storeRoot>/…/prefixes/<package>/<version>-<16 hex>`, the second root
+    ## `contentAddressedRoot` recognises. DA-2's text names it and DA-2
+    ## declined to register it because nothing spawns it — which is a statement
+    ## about DERIVATION, not about the branch, and is what a checked
+    ## declaration answers.
+    tdcContentAlreadyKeyed
+
+when defined(linux):
+  type
+    SocketPeerCredentials = object
+      ## The ABI of `struct ucred` on Linux: `pid_t`, `uid_t`, `gid_t`, all
+      ## 32-bit on every architecture Nim targets here.
+      ##
+      ## Declared rather than `importc`'d, and the reason is specific:
+      ## `struct ucred` is behind `__USE_GNU` in glibc's `<sys/socket.h>`, so
+      ## importing it would require this file to be compiled with
+      ## `-D_GNU_SOURCE` — a translation-unit-wide change to satisfy one
+      ## struct. The CONSTANT is not behind that guard, so `SO_PEERCRED` and
+      ## `SOL_SOCKET` are imported from the header and only the layout is
+      ## restated.
+      pid: int32
+      uid: uint32
+      gid: uint32
+
+  var
+    SoPeerCredOpt {.importc: "SO_PEERCRED", header: "<sys/socket.h>".}: cint
+    SolSocketLevel {.importc: "SOL_SOCKET", header: "<sys/socket.h>".}: cint
+
+  proc getsockoptRaw(sock: cint; level, optname: cint; optval: pointer;
+                     optlen: ptr cuint): cint
+                    {.importc: "getsockopt", header: "<sys/socket.h>".}
+
+proc peerCredentialsOfSocket(sock: Socket): tuple[pid, uid: int] =
+  ## The kernel's record of the peer's identity on a connected socket, or
+  ## `(0, 0)` when it will not supply one.
+  ##
+  ## THE ONE FACT THIS WHOLE MILESTONE STANDS ON. `SO_PEERCRED` is stamped by
+  ## the kernel at connect time from the peer's credentials — its pid and its
+  ## EFFECTIVE uid/gid; no byte of it crosses the wire and neither end can
+  ## influence it. It is also the SAME mechanism io-mon's shim reads at the
+  ## monitored action's own connect (`linux_preload.channelPeerPid`), which is
+  ## what lets a pid checked here be compared against a pid observed there at
+  ## all. `revalidatedTrustedDaemons` re-reads the effective uid from
+  ## `/proc/<pid>/status` for the same reason it is the effective one here.
+  ##
+  ## AN AF_INET SOCKET DOES NOT FAIL THIS CALL — it SUCCEEDS and answers with a
+  ## nobody. MEASURED (2026-09-11) on a connected loopback AF_INET socket:
+  ##
+  ##   getsockopt rc=0 errno=0 len=12 pid=0 uid=-1 gid=-1
+  ##
+  ## `rc` is 0 and `optlen` comes back the full `sizeof(struct ucred)`, so
+  ## NEITHER guard below is what refuses it — the refusal is `pid == 0` and the
+  ## `pid <= 0` arm in `checkDeclaredDaemon` that reads it. An earlier version
+  ## of this comment said the `getsockopt` fails. The behaviour is the same
+  ## either way, which is exactly why the sentence had to be corrected rather
+  ## than left: the next person changing this function will reason from it, and
+  ## "the call fails" licenses removing the `pid <= 0` test as redundant.
+  ## Rule 4 is held by the pid being zero, not by an error return.
+  result = (0, 0)
+  when defined(linux):
+    var cred = SocketPeerCredentials()
+    var size = cuint(sizeof(SocketPeerCredentials))
+    if getsockoptRaw(cint(sock.getFd()), SolSocketLevel, SoPeerCredOpt,
+        addr cred, addr size) != 0:
+      return
+    if size.int < sizeof(SocketPeerCredentials):
+      return
+    result = (int(cred.pid), int(cred.uid))
+
+const ProgramIdentifyingAssertions* = {daImage, daProgram}
+  ## The assertions that name WHAT THE PEER IS RUNNING, as opposed to what it
+  ## is running AS. `checkDeclaredDaemon` requires at least one; see
+  ## `declarationIdentifiesAProgram`.
+
+proc declarationIdentifiesAProgram*(decl: DeclaredDaemon): bool =
+  ## Does this declaration assert anything that identifies the peer's PROGRAM?
+  ##
+  ## WHY THIS IS REQUIRED, AND WHY `uid` ALONE IS NOT A CHECK OF THE THING
+  ## §Class 3 IS ABOUT. A class-3 exemption is licensed by a claim about a
+  ## PROGRAM: `runquotad` serves lease decisions and no content; the Nix daemon
+  ## serves `/nix/store/<hash>-<name>` paths whose identity is already in the
+  ## key. `class3Contribution` is a table from PROGRAM to branch. A check that
+  ## establishes only "the peer runs as uid 0" has established nothing about
+  ## the subject of that claim — every root daemon on the box satisfies it —
+  ## so it cannot make the claim true, and rule 5's "a declared attribution has
+  ## a check" is not discharged by a check of something else.
+  ##
+  ## MEASURED, AND THIS IS WHY IT IS A HARD REFUSAL RATHER THAN ADVICE. On a
+  ## socket-activated host the process on the far end of a daemon's socket is
+  ## the ACTIVATOR, not the daemon:
+  ##
+  ##   /nix/var/nix/daemon-socket/socket   peer pid=1 uid=0 comm=systemd
+  ##   /run/dbus/system_bus_socket         peer pid=1 uid=0 comm=systemd
+  ##
+  ## A `uid = 0` declaration of `nix-daemon` at the first path passes, and what
+  ## it registers is **pid 1** — after which an action that touches D-Bus, or
+  ## anything else pid 1 serves, is forgiven and publishes. That was measured
+  ## end to end on this host: the declaration passed, pid 1 was registered, and
+  ## an unrelated D-Bus edge published and warm-hit. Requiring a
+  ## program-identifying assertion is what refuses it, and it refuses it
+  ## precisely: `comm` on pid 1 is `systemd`, so `program = nix-daemon` fails
+  ## with `dcoProgramMismatch` and the endpoint simply cannot be declared on
+  ## that topology. That is the correct answer — the peer really is not the
+  ## daemon — and it is a report rather than a silent exemption.
+  ##
+  ## WHAT IT COSTS. `uid`-only was the only form that worked for a root-owned
+  ## daemon read from an unprivileged `repro`, because `image` is unreadable
+  ## across a uid boundary (`processImagePath`). What is left there is
+  ## `program`, which is kernel-recorded and world-readable but SETTABLE by the
+  ## peer via `prctl(PR_SET_NAME)` — it narrows accidents, not attackers. So
+  ## the shipped shape for a privileged daemon is `program` + `uid`: `program`
+  ## identifies the subject of the class-3 claim, `uid` is the un-forgeable
+  ## half, and neither is redundant. Declaring `uid` alone is refused; the
+  ## refusal is `dcoNoProgramAssertion` and it happens BEFORE any connection,
+  ## so a declaration that cannot discharge rule 5 never even touches the
+  ## daemon.
+  (decl.assertions * ProgramIdentifyingAssertions) != {}
+
+proc checkDeclaredDaemon*(decl: DeclaredDaemon): DaemonIdentityCheck =
+  ## THE CHECK. Connect to the declared endpoint, ask the KERNEL who is on the
+  ## other end, and verify every assertion the declaration made against what
+  ## the kernel said. Nothing the declaration supplied is used as evidence for
+  ## itself.
+  ##
+  ## Order matters and is deliberate: the endpoint shape and the ADEQUACY OF
+  ## THE ASSERTIONS are refused before a connection is attempted, the peer
+  ## credential is obtained before any `/proc` read (so a pid of 0 never
+  ## becomes a path), and every assertion is a conjunction — one mismatch
+  ## refuses the whole declaration rather than trusting the remainder.
+  ##
+  ## `dcoNothingAsserted` and `dcoNoProgramAssertion` are the two arms that
+  ## keep this from being theatre. A declaration carrying only an endpoint
+  ## would make "a socket exists at this path" the whole check, and a socket
+  ## path is arrangeable by anyone who can write the directory — the exact
+  ## shape §"Derived beats declared" calls a wish. A declaration carrying only
+  ## a `uid` would make "a root process is listening here" the whole check,
+  ## which identifies no program and therefore checks nothing about the claim
+  ## §Class 3 actually licenses; see `declarationIdentifiesAProgram`, which
+  ## carries the measurement that forced it.
+  ##
+  ## WHAT IT COSTS THE DAEMON: one accepted connection, closed immediately,
+  ## once per declared daemon per build. No protocol is spoken, because the
+  ## kernel supplies the peer credential the moment the connection is accepted
+  ## and nothing a daemon could SAY would add a fact — a self-reported name is
+  ## the declaration again, not a check of it. Every daemon in the closed
+  ## vocabulary is an accept-loop server and tolerates an immediate disconnect.
+  result.endpoint = decl.endpoint
+  if not decl.endpoint.isAbsolute:
+    result.outcome = dcoEndpointNotAbsolute
+    result.detail = "endpoint is not an absolute path to a unix socket"
+    return
+  if decl.assertions == {}:
+    result.outcome = dcoNothingAsserted
+    result.detail = "declaration asserts nothing about the peer; " &
+      "'something is listening at this path' is not a check"
+    return
+  if not decl.declarationIdentifiesAProgram():
+    result.outcome = dcoNoProgramAssertion
+    result.detail = "declaration asserts nothing that identifies the peer's " &
+      "program (declare 'image' or 'program'); the §Class 3 branch is a " &
+      "property of the PROGRAM, so a check that identifies no program has " &
+      "not established what the branch is about — on a socket-activated host " &
+      "the peer of a daemon socket is the activator, and a uid-only " &
+      "declaration would trust everything the activator serves"
+    return
+  var sock: Socket
+  try:
+    sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+      protocol = IPPROTO_IP)
+  except CatchableError:
+    result.outcome = dcoUnreachable
+    result.detail = "cannot create an AF_UNIX socket"
+    return
+  var connected = false
+  try:
+    sock.connectUnix(decl.endpoint)
+    connected = true
+  except CatchableError:
+    result.outcome = dcoUnreachable
+    result.detail = "nothing accepted a connection at " & decl.endpoint
+  if connected:
+    let cred = peerCredentialsOfSocket(sock)
+    result.pid = cred.pid
+    result.uid = cred.uid
+    if result.pid <= 0:
+      result.outcome = dcoNoPeerCredentials
+      result.detail =
+        "the kernel would not name a peer for " & decl.endpoint &
+        " (SO_PEERCRED yields no pid for anything but an AF_UNIX socket)"
+  try:
+    sock.close()
+  except CatchableError:
+    discard
+  if result.outcome != dcoNotChecked or not connected:
+    return
+  result.identity = processStartIdentity(result.pid)
+  if result.identity.len == 0:
+    result.outcome = dcoNoKernelIdentity
+    result.detail = "no kernel start-time identity for pid " & $result.pid &
+      "; the trust could not be re-validated at grading time"
+    return
+  # `/proc/<pid>/exe` and `comm` are read ONCE here and re-read in
+  # `revalidatedTrustedDaemons`. Reading them after the start-time identity is
+  # what makes the pair coherent: the identity says which incarnation the
+  # readings describe.
+  result.image = processImagePath(result.pid)
+  result.program = processCommName(result.pid)
+  if daImage in decl.assertions:
+    if result.image.len == 0:
+      result.outcome = dcoImageUnreadable
+      result.detail = "cannot read /proc/" & $result.pid & "/exe (a " &
+        "cross-uid read needs CAP_SYS_PTRACE, and an unlinked image is " &
+        "refused outright); declare 'program' (with 'uid') instead of " &
+        "'image' for a daemon running as another user"
+      return
+    # The DECLARED path is canonicalised before the comparison, because
+    # `/proc/<pid>/exe` is the kernel's fully-resolved answer and a provisioned
+    # host names its daemons through symlinks — `/run/current-system/sw/bin/…`
+    # on NixOS, `/usr/bin/…` into an alternatives tree elsewhere. Without this
+    # the strongest assertion would be unusable on exactly the topology DA-4
+    # exists for. It does not weaken the check: the comparison TARGET is still
+    # the kernel's reading, and canonicalising the claim only decides which
+    # file the claim is about.
+    var expected = decl.image
+    try:
+      expected = expandFilename(decl.image)
+    except CatchableError:
+      discard
+    if result.image != expected:
+      result.outcome = dcoImageMismatch
+      result.detail = "peer pid " & $result.pid & " executes " & result.image &
+        ", not the declared " & decl.image &
+        (if expected == decl.image: "" else: " (resolving to " & expected & ")")
+      return
+    result.verified.incl(daImage)
+  if daProgram in decl.assertions:
+    if result.program.len == 0 or result.program != decl.program:
+      result.outcome = dcoProgramMismatch
+      result.detail = "peer pid " & $result.pid & " reports comm '" &
+        result.program & "', not the declared '" & decl.program & "'"
+      return
+    result.verified.incl(daProgram)
+  if daUid in decl.assertions:
+    if result.uid != decl.uid:
+      result.outcome = dcoUidMismatch
+      result.detail = "peer pid " & $result.pid & " runs as uid " &
+        $result.uid & ", not the declared " & $decl.uid
+      return
+    result.verified.incl(daUid)
+  # THE PASS IS STATED, NEVER INHERITED. Every arm above leaves this proc with
+  # `dcoNotChecked` still in place unless it set a refusal, so reaching here —
+  # having verified every assertion the declaration made — is the only way
+  # `dcoTrusted` is ever written. A future arm that returns early without
+  # setting an outcome therefore reports "not checked" and is refused, rather
+  # than falling through to the enum's zero value and reporting a pass.
+  result.outcome = dcoTrusted
+  result.detail = "peer pid " & $result.pid & " verified: " &
+    ($result.verified).replace("{", "").replace("}", "")
+
+# Read-only accessors. The FIELDS stay private so nothing outside this module
+# can construct — or complete — a passing check; the READINGS are published
+# because the report and the tests both need them, and publishing a reading
+# grants no ability to produce one.
+proc checkedDaemonPid*(check: DaemonIdentityCheck): int = check.pid
+proc checkedDaemonOutcome*(check: DaemonIdentityCheck): DaemonCheckOutcome =
+  check.outcome
+proc checkedDaemonDetail*(check: DaemonIdentityCheck): string = check.detail
+proc checkedDaemonAssertions*(check: DaemonIdentityCheck):
+    set[DaemonAssertion] = check.verified
+proc checkedDaemonIdentity*(check: DaemonIdentityCheck): string =
+  ## Published so a test can establish that a REFUSED check still carries every
+  ## other field `trustDaemonWeChecked`'s guard reads — which is what makes the
+  ## `outcome` clause of that guard gradeable in isolation.
+  check.identity
+
+proc trustDaemonWeChecked*(kind: DeclarableDaemonKind;
+                           check: DaemonIdentityCheck): bool
+                          {.discardable.} =
+  ## Register a DECLARED daemon whose CHECK PASSED as a class-3 trusted peer.
+  ##
+  ## The parameter is the check's own result, and the type's fields are private
+  ## to this module, so a caller cannot hand in a pass it did not obtain. That
+  ## is the structural half of rule 5: the declaration cannot reach the registry
+  ## except through the check.
+  ##
+  ## The class-3 branch comes from `kind` and never from the caller, so the one
+  ## thing a check cannot establish is also the one thing nobody may assert.
+  ##
+  ## THE GUARD BELOW IS THE FLOOR UNDER THE CALLER'S GATE, AND IT IS GRADED AS
+  ## SUCH. `applyDeclaredDaemonTrust` also tests `outcome == dcoTrusted` before
+  ## calling, so on the production path this guard is a second opinion — but it
+  ## is the one that answers for any OTHER caller, including one that hands in
+  ## a default-constructed value.
+  ##
+  ## It was once not graded at all: a mutation deleting the `outcome`,
+  ## `identity` and `verified` clauses and keeping only `pid <= 0` left all 13
+  ## cases of `t_declared_daemon_ipc_trust` green, because every check the
+  ## suite could reach this call with was either a pass or had `pid == 0`. The
+  ## case *"a refused check is refused HERE, not only by its caller"* closes
+  ## that: it drives the REAL `checkDeclaredDaemon` to a refusal that carries
+  ## `pid > 0`, a non-empty `identity` and a non-empty `verified` — a correct
+  ## `image` with a wrong `program` produces exactly that — so the `outcome`
+  ## clause is the only thing left that can refuse it, and deleting the clauses
+  ## reddens.
+  ##
+  ## The type is the other reason the clauses stay. `DaemonIdentityCheck`'s
+  ## zero value is `dcoNotChecked` / `pid = 0` / `verified = {}`, so an un-run
+  ## check is refused three times over rather than once.
+  if check.outcome != dcoTrusted or check.pid <= 0 or
+      check.identity.len == 0 or check.verified == {}:
+    return false
+  for existing in derivedTrustedDaemons:
+    if existing.pid == check.pid and existing.identity == check.identity and
+        existing.origin == tdoDeclaredAndChecked:
+      return true
+  derivedTrustedDaemons.add(TrustedDaemonPeer(
+    pid: check.pid,
+    identity: check.identity,
+    name: daemonKindName(kind),
+    contribution: class3Contribution(kind),
+    origin: tdoDeclaredAndChecked,
+    declaredSocket: check.endpoint,
+    checked: check.verified,
+    checkedImage: check.image,
+    checkedProgram: check.program,
+    checkedUid: check.uid))
+  true
+
+# --- Where the declaration lives -------------------------------------------
+#
+# §"Where each declaration lives" gives three layers and says what each one
+# KNOWS: the workspace/machine layer knows which roots are content-addressed,
+# the tool package knows what a tool does, and the project recipe declares
+# NOTHING about monitoring. A host-wide daemon socket is a MACHINE fact — it is
+# a property of how this box was provisioned, not of any project built on it,
+# and the same recipe must build identically on a box that has no such daemon.
+# So the declaration is a machine/user config file and there is deliberately:
+#
+#   * no `repro.nim` surface — a recipe author must never learn that
+#     `runquotad` exists, for the same reason they must not learn that nim
+#     reads its stdlib through the store;
+#   * no `BuildEngineConfig` field and no command-line flag — those are
+#     per-invocation, and "which daemons this host runs" is not;
+#   * no environment variable that NOMINATES a daemon. `REPRO_DAEMONS_CONFIG`
+#     selects a FILE (which is how the tests reach it) and cannot by itself
+#     assert anything about a peer; the file still has to declare, and the
+#     declaration still has to pass the check. `isImmutablePackageStoreRoot`
+#     in `repro_local_store` records what an ambient variable that nominates
+#     an exemption actually cost — a transient value permanently poisoned a
+#     record — and that failure mode is why this one selects a file rather
+#     than naming a socket.
+#
+# The layering mirrors `caches_config.nim`, which is the same shape one
+# problem over: a system file, then a per-user file that extends and overrides
+# it by name, and a default of trusting NOTHING. A user file may declare
+# because the exemption it can buy is bounded twice over — by the check, and by
+# the fact that a user's declaration only ever affects that user's own builds.
+
+const
+  DaemonTrustSystemConfigPath* = "/etc/repro/daemons.conf"
+  DaemonTrustUserConfigRelPath* = "repro/daemons.conf"
+  DaemonTrustConfigEnvVar* = "REPRO_DAEMONS_CONFIG"
+
+type
+  DaemonDeclarationError* = object of CatchableError
+    ## A malformed declaration. Raised rather than skipped: an unreadable
+    ## declaration that silently declared nothing is the "stale declaration
+    ## rots into a permanent no-op" failure this milestone is asked to prevent,
+    ## pointed the other way.
+
+proc declarableDaemonNames*(): string =
+  ## The declarable vocabulary as a diagnostic renders it, DERIVED from the
+  ## enum and from `daemonKindName` rather than restated.
+  ##
+  ## It was restated once, and the failure mode is the reason this proc exists:
+  ## the "unknown daemon" error carried the literal string "runquotad,
+  ## nix-daemon, repro-store-daemon", so a fourth `DeclarableDaemonKind` would
+  ## have left the sentence telling an operator that their perfectly valid
+  ## section name is not declarable — with every case in the suite green,
+  ## because nothing compared the sentence to the vocabulary. `daemonKindName`
+  ## is the single source of truth everywhere else; now it is here too, and the
+  ## suite grades the derivation by requiring every member's name to appear.
+  var names: seq[string] = @[]
+  for kind in DeclarableDaemonKind:
+    names.add(daemonKindName(kind))
+  names.join(", ")
+
+proc parseDeclaredDaemonSections(text, source: string): seq[DeclaredDaemon] =
+  ## Parse one `daemons.conf`. Every key is known or the file is refused —
+  ## a typo must not become a default.
+  result = @[]
+  var stream = newStringStream(text)
+  var parser: CfgParser
+  open(parser, stream, source)
+  defer: parser.close()
+  var current = -1
+  while true:
+    let event = parser.next()
+    case event.kind
+    of cfgEof:
+      break
+    of cfgSectionStart:
+      var name = event.section.strip()
+      # `[daemon runquotad]` is accepted as sugar for `[runquotad]`, the same
+      # allowance `caches_config` makes, because `std/parsecfg` section headers
+      # cannot carry quotes.
+      if name.startsWith("daemon "):
+        name = name["daemon ".len .. ^1].strip()
+      let kind = parseDaemonKind(name)
+      if kind.isNone:
+        raise newException(DaemonDeclarationError,
+          source & ": unknown daemon '" & name & "'. Declarable daemons are " &
+          declarableDaemonNames() & " — the class-3 branch is " &
+          "compiled in per daemon and cannot be asserted by configuration.")
+      result.add(DeclaredDaemon(kind: kind.get(), source: source, uid: -1))
+      current = result.high
+    of cfgKeyValuePair, cfgOption:
+      if current < 0:
+        raise newException(DaemonDeclarationError,
+          source & ": key '" & event.key & "' appears before any [daemon] " &
+          "section")
+      let value = event.value.strip()
+      case event.key.strip().toLowerAscii()
+      of "socket", "endpoint":
+        result[current].endpoint = value
+      of "image":
+        result[current].image = value
+        result[current].assertions.incl(daImage)
+      of "program":
+        result[current].program = value
+        result[current].assertions.incl(daProgram)
+      of "uid":
+        var parsed = 0
+        try:
+          parsed = parseInt(value)
+        except ValueError:
+          raise newException(DaemonDeclarationError,
+            source & ": uid '" & value & "' is not a number")
+        result[current].uid = parsed
+        result[current].assertions.incl(daUid)
+      else:
+        raise newException(DaemonDeclarationError,
+          source & ": unknown key '" & event.key & "'. Known keys are " &
+          "socket, image, program, uid.")
+    of cfgError:
+      raise newException(DaemonDeclarationError, source & ": " & event.msg)
+
+proc loadDeclaredDaemons*(): seq[DeclaredDaemon] =
+  ## Read the machine's daemon declarations, system file then user file, the
+  ## user's entry for a given daemon REPLACING the system's rather than adding
+  ## to it. `REPRO_DAEMONS_CONFIG`, when set, replaces both.
+  ##
+  ## A missing file is not an error and yields no declarations, so a host that
+  ## declares nothing behaves exactly as it does today — DA-2's reach and no
+  ## more. This is the default, and it is the untrusting one.
+  result = @[]
+  var files: seq[string] = @[]
+  let overridePath = getEnv(DaemonTrustConfigEnvVar, "")
+  if overridePath.len > 0:
+    files.add(overridePath)
+  else:
+    when not defined(windows):
+      files.add(DaemonTrustSystemConfigPath)
+    files.add(getConfigDir() / DaemonTrustUserConfigRelPath)
+  for file in files:
+    if file.len == 0 or not fileExists(file):
+      continue
+    var text = ""
+    try:
+      text = readFile(file)
+    except CatchableError as exc:
+      raise newException(DaemonDeclarationError,
+        file & ": cannot be read: " & exc.msg)
+    for decl in parseDeclaredDaemonSections(text, file):
+      var replaced = false
+      for i in 0 .. result.high:
+        if result[i].kind == decl.kind:
+          result[i] = decl
+          replaced = true
+          break
+      if not replaced:
+        result.add(decl)
+
+proc applyDeclaredDaemonTrust*(declarations: openArray[DeclaredDaemon]):
+    seq[DaemonCheckReport] =
+  ## Check every declaration and register the ones that pass. Returns one
+  ## report per declaration, PASS AND FAIL ALIKE.
+  ##
+  ## Every declaration is reported because a declaration is the thing that can
+  ## rot. A daemon that has moved, been renamed, or stopped running leaves a
+  ## line in the config that asserts a peer nobody will ever meet; reporting it
+  ## every build is what stops that line from sitting there until some future
+  ## pid collision makes it mean something. This is rule 3 applied to the
+  ## declaration surface rather than only to the exemptions it buys.
+  result = @[]
+  for decl in declarations:
+    let check = checkDeclaredDaemon(decl)
+    var outcome = check.outcome
+    if outcome == dcoTrusted:
+      if not trustDaemonWeChecked(decl.kind, check):
+        # Unreachable while `checkDeclaredDaemon` and `trustDaemonWeChecked`
+        # agree on what a pass is; reported rather than asserted, because the
+        # direction of a disagreement between them must be a refusal.
+        outcome = dcoNoPeerCredentials
+    result.add(DaemonCheckReport(kind: decl.kind, endpoint: decl.endpoint,
+      outcome: outcome, detail: check.detail, source: decl.source))
+
+proc renderDaemonCheckReport*(report: DaemonCheckReport): string =
+  ## The build-log line for one declaration. Names the daemon, the endpoint,
+  ## the outcome, the §Class 3 branch a PASS bought, and the file that declared
+  ## it — so neither a granted exemption nor a rotted declaration is anonymous.
+  let name = daemonKindName(report.kind)
+  if report.outcome == dcoTrusted:
+    "declared ipc peer '" & name & "' at " & report.endpoint &
+      " checked and trusted — Dependency-Observation-Attribution.md §Class 3 " &
+      class3BranchText(class3Contribution(report.kind)) & " (DA-4); " &
+      report.detail & "; declared in " & report.source
+  else:
+    "declared ipc peer '" & name & "' at " & report.endpoint &
+      " NOT trusted (" & $report.outcome & "): " & report.detail &
+      "; declared in " & report.source
+
+const
+  UnmonitoredSubtreeLossDetailPrefix* =
+    "unmonitored subtree/peer (un-injectable spawn child, SETEXEC into a " &
+    "hardened image, or IPC connect to an out-of-tree breakaway daemon): "
+      ## The EXACT text io-mon's `mergeFragments` prepends to each entry
+      ## `unmonitoredSubtreeLossDetails` returned (io-mon writer.nim). Matched
+      ## exactly, not by a `find(": ")`: a shape this code has not reasoned
+      ## about must fall through to the unchanged Level-2 classification rather
+      ## than be parsed on a guess.
+  IpcPeerLossDetailPrefix* = "ipc peer outside monitored tree "
+      ## The (c) arm's own prefix, inside the wrapper above. The (a) spawn arm
+      ## and the (b) exec arm are NOT attributable by a peer pid and are never
+      ## considered here.
+
+type
+  MonitorPeerAttribution* = object
+    ## The per-action state DA-2's attribution needs, carried through the fold.
+    ##
+    ## WHY THE FOLD CANNOT ANSWER PER RECORD. io-mon's exemption is
+    ## `peer != 0 and not duplicatePeerStart and (childIsMonitored(…) or
+    ## peer in trustedPeerPids)` — quoted whole because the `childIsMonitored`
+    ## disjunct is what makes the recomputation below CONSERVATIVE rather than
+    ## merely different: it needs `mrProcessStart` records the buffer does not
+    ## carry, so the recomputation exempts strictly LESS than io-mon did, and
+    ## `duplicatePeerStart` — a shim identity token appearing twice, which io-mon
+    ## treats as attacker-controlled evidence that must fail CLOSED — is NOT
+    ## recoverable from the loss text: `trustedDetailToken` returns "" for a
+    ## duplicated token, which is also what a Linux record with no token at all
+    ## produces. So the decision is deferred to the end of the fold and taken by
+    ## re-running io-mon's OWN function over the `mrIpcConnect` records that
+    ## produced the losses — twice, with and without the trust set, because the
+    ## recomputation is not exact and only the DIFFERENCE between those two
+    ## answers is attributable to the trust. See `resolvePeerAttribution`, which
+    ## states both divergences. There is exactly one implementation of the
+    ## exemption rule and it is io-mon's.
+    trusted: HashSet[uint64]
+    peers: Table[uint64, TrustedDaemonPeer]
+      ## The same trust facts keyed by pid, so an exemption can be NAMED and
+      ## not merely counted (rule 3). io-mon's loss text identifies the peer by
+      ## a bare pid — on Linux `recordIpcConnect` never sets `record.path` for
+      ## an AF_UNIX connect, so the pid is the ONLY identifier in it — and a
+      ## build log saying "peer 21894 was forgiven" tells an operator neither
+      ## which daemon that was nor why it was allowed to be.
+    ipcRecords: seq[MonitorRecord]
+      ## The `mrIpcConnect` records, and nothing else. Buffering the whole
+      ## record stream would defeat `foldMonitorDepFileEvidence`'s streaming
+      ## read (a real `nim c` capture is 124k records); these are a handful per
+      ## action. The (a)/(b) arms need spawn/exec records this deliberately does
+      ## NOT collect, which is exactly why the comparison below is scoped to the
+      ## (c) arm — an entry from either other arm is not in the recomputation
+      ## and must never be treated as attributed.
+    pendingIpcLosses: seq[string]
+    attributed*: int
+      ## Rule 3 — every exemption is counted, so a daemon that turns out not to
+      ## deserve trust leaves a number behind rather than nothing.
+
+proc initMonitorPeerAttribution*(peers: openArray[TrustedDaemonPeer]):
+    MonitorPeerAttribution =
+  ## Build one action's attribution state from trust FACTS, re-validating each
+  ## against the kernel on the way in. Takes the facts rather than a bare pid
+  ## set because both consumers need them: io-mon's parameter wants the pids,
+  ## and the rule-3 diagnostic wants the name and the §Class 3 branch.
+  result.trusted = initHashSet[uint64]()
+  result.peers = initTable[uint64, TrustedDaemonPeer]()
+  for peer in revalidatedTrustedDaemons(peers):
+    result.trusted.incl(uint64(peer.pid))
+    result.peers[uint64(peer.pid)] = peer
+
+proc trustsAnyPeer(attribution: MonitorPeerAttribution): bool =
+  attribution.trusted.len > 0
+
 proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   ## M9.R.72.3 — spec-graded classification of io-mon eventLoss records.
   ##
@@ -3374,10 +5218,196 @@ const FailedExecDetailToken = "execstatus=failed"
   ## site; a rename there silently turns absent paths into cache inputs here,
   ## which `t_executed_binary_is_a_recorded_input.nim` pins.
 
+proc ipcPeerLossText(detail: string): string =
+  ## The io-mon (c)-arm loss text inside an injected `mrEventLoss` detail, or ""
+  ## when this record is not one. Exact prefixes only — see their declarations.
+  if not detail.startsWith(UnmonitoredSubtreeLossDetailPrefix):
+    return ""
+  let inner = detail[UnmonitoredSubtreeLossDetailPrefix.len .. ^1]
+  if not inner.startsWith(IpcPeerLossDetailPrefix):
+    return ""
+  inner
+
+type
+  IpcPeerLossIdentity = object
+    ## What a (c)-arm loss text identifies, parsed back out of it.
+    key: string
+      ## io-mon's OWN dedup key for the record that produced the text, or ""
+      ## when the text does not parse. See `ipcPeerLossIdentity`.
+    peer: uint64
+      ## The peer pid the text names, 0 for an unknown (INET) peer.
+
+proc ipcPeerLossIdentity(loss: string): IpcPeerLossIdentity =
+  ## Recover io-mon's dedup key, and the peer pid, from a (c)-arm loss text.
+  ##
+  ## WHY THE KEY AND NOT THE TEXT. `unmonitoredSubtreeLossDetails` keys each
+  ## (c) entry on `"pid:" & $peer & "@" & peerStart` when the peer pid is known
+  ## and on `"dest:" & r.path` when it is not, and emits the text of the FIRST
+  ## NON-EXEMPT record per key. Two records that share a key are therefore
+  ## INTERCHANGEABLE in the output: which one's text appears depends on which
+  ## of them was exempt, which differs between io-mon's run and the engine's
+  ## recomputation. The key is the part that is stable across both, so the key
+  ## is what may be compared. Everything else in the text — the CLIENT pid, the
+  ## socket path — belongs to whichever record happened to be first.
+  ##
+  ## io-mon emits `"ipc peer outside monitored tree pid=<osPid> peer=<peer> " &
+  ## "peerstart=<peerStart> path=<path>"`. `pid`, `peer` and `peerstart` are
+  ## whitespace-free decimal tokens, so the first occurrence of each separator
+  ## is the real one; `path` is last and may contain anything.
+  result = IpcPeerLossIdentity(key: "", peer: 0)
+  if not loss.startsWith(IpcPeerLossDetailPrefix):
+    return
+  let rest = loss[IpcPeerLossDetailPrefix.len .. ^1]
+  const
+    PeerSep = " peer="
+    PeerStartSep = " peerstart="
+    PathSep = " path="
+  let peerAt = rest.find(PeerSep)
+  let startAt = rest.find(PeerStartSep)
+  let pathAt = rest.find(PathSep)
+  if peerAt < 0 or startAt < 0 or pathAt < 0:
+    return
+  if not (peerAt < startAt and startAt < pathAt):
+    return
+  let peerText = rest[peerAt + PeerSep.len ..< startAt]
+  let peerStart = rest[startAt + PeerStartSep.len ..< pathAt]
+  let path = rest[pathAt + PathSep.len .. ^1]
+  if peerText.len == 0:
+    return
+  var peer: uint64 = 0
+  for ch in peerText:
+    if ch notin {'0' .. '9'}:
+      return
+    peer = peer * 10 + uint64(ord(ch) - ord('0'))
+  result.peer = peer
+  result.key =
+    if peer != 0: "pid:" & peerText & "@" & peerStart
+    else: "dest:" & path
+
+proc resolvePeerAttribution(attribution: var MonitorPeerAttribution;
+                            evidence: var PathSetEvidence;
+                            status: var MonitorEvidenceStatus) =
+  ## DA-2 — decide each deferred IPC-peer loss, by asking io-mon TWICE.
+  ##
+  ## THE RECOMPUTATION IS NOT EXACT, which is what this shape is built around.
+  ## It sees only the buffered `mrIpcConnect` records, so it differs from the
+  ## run that produced the losses in two MEASURED ways, both of them
+  ## fail-OPEN under a "was this text still returned?" test:
+  ##
+  ##   1. THE RECORDS MAY NOT BE THERE AT ALL. `unmonitoredSubtreeLossDetails`
+  ##      over an empty record set returns an empty seq, so an absent-text test
+  ##      forgives EVERYTHING. Unreachable while `monitorInterest` returns
+  ##      `FullInterest` unconditionally — but `DependencyGatheringPolicy`
+  ##      already carries a `captureIpc` switch, and narrowing it would silently
+  ##      turn this into a blanket exemption.
+  ##   2. THE DEDUP KEY CAN BE CLAIMED BY A DIFFERENT RECORD. io-mon emits the
+  ##      text of the first NON-EXEMPT record per key. Without `mrProcessStart`
+  ##      records nothing looks in-tree here, so a record io-mon exempted as
+  ##      in-tree is flagged by the recomputation and can claim the key FIRST,
+  ##      with its own (different) text — and the loss that io-mon actually
+  ##      emitted for that key then reads as "no longer returned". The earlier
+  ##      claim that "a trusted peer's key is `pid:<peer>@…` and the entries it
+  ##      could suppress are its own" does not cover this: the colliding record
+  ##      need not belong to a trusted peer, and the trust set need not be
+  ##      involved at all.
+  ##
+  ## SO THE QUESTION IS ASKED AS A DIFFERENCE, NOT AS AN ABSENCE. io-mon's own
+  ## function is run over the SAME buffered records twice — once with NO trust
+  ## and once with this action's trust set — and a deferred loss is forgiven
+  ## only when its dedup key is in the FIRST answer and not in the second. That
+  ## reads as: *these records account for this loss, and the trust set is what
+  ## removed it.* Both divergences fall closed under it. An absent record is in
+  ## neither answer, so the key is not in the difference and the loss
+  ## downgrades. A collided key is in BOTH answers — the colliding record is
+  ## still flagged in the second — so it is not in the difference either.
+  ## Comparing keys is also strictly more conservative than comparing texts:
+  ## a text present in the second answer implies its key is, so nothing that
+  ## the old test downgraded is forgiven by this one.
+  ##
+  ## The no-trust run is not a guess at what io-mon did: with no
+  ## `mrProcessStart` records and an empty trust set NOTHING is exempt, so it
+  ## enumerates exactly the dedup keys the buffered records can account for,
+  ## computed by io-mon's dedup rather than by a reimplementation of it here.
+  ##
+  ## AN EXEMPTION THAT CANNOT BE NAMED IS NOT GRANTED (rule 3). The diagnostic
+  ## carries the daemon's name and the §Class 3 branch it satisfies, and the
+  ## lookup that supplies them is on the FORGIVING path: a key whose peer pid is
+  ## not a registered daemon downgrades instead of being forgiven anonymously.
+  ## In practice the lookup cannot fail — the key was removed by the trust set,
+  ## so its peer is in that set — which is what makes failing closed there free.
+  ##
+  ## AND CLASS 4 IS NOT REACHABLE FROM HERE. `SO_PEERCRED` yields a pid for
+  ## AF_UNIX and 0 for INET (io-mon `recordIpcConnect`), and io-mon's exemption
+  ## requires `peer != 0`. A network peer is therefore unattributable and stays
+  ## unattributable no matter what this set contains — rule 4, held by io-mon's
+  ## code rather than restated here. Its `dest:<path>` key is in both answers.
+  ##
+  ## ONE CAPTURE PER CALL. `collectEvidence` reuses a single
+  ## `MonitorPeerAttribution` across the recognized-`.iomon`-report loop (one
+  ## fold per resolved report path) and the wrapped/hosted monitor fold, so the
+  ## buffers are cleared here. Each capture is a separate monitored run and must
+  ## be resolved against its OWN `mrIpcConnect` records; carrying them forward
+  ## would let one capture's peers forgive another's losses, and would re-grade
+  ## losses already decided. `attributed` deliberately does NOT reset — it is
+  ## the per-action count.
+  if attribution.pendingIpcLosses.len == 0:
+    attribution.ipcRecords.setLen(0)
+    return
+  var accountedKeys = initHashSet[string]()
+  for loss in unmonitoredSubtreeLossDetails(attribution.ipcRecords,
+      initHashSet[uint64]()):
+    let identity = ipcPeerLossIdentity(loss)
+    if identity.key.len > 0:
+      accountedKeys.incl(identity.key)
+  var remainingKeys = initHashSet[string]()
+  for loss in unmonitoredSubtreeLossDetails(attribution.ipcRecords,
+      attribution.trusted):
+    let identity = ipcPeerLossIdentity(loss)
+    if identity.key.len > 0:
+      remainingKeys.incl(identity.key)
+  for loss in attribution.pendingIpcLosses:
+    let identity = ipcPeerLossIdentity(loss)
+    let removedByTrust = identity.key.len > 0 and
+      identity.key in accountedKeys and identity.key notin remainingKeys
+    if not removedByTrust or identity.peer notin attribution.peers:
+      status = worseMonitorStatus(status, mesUnknownScopeLoss)
+    else:
+      let peer = attribution.peers[identity.peer]
+      inc attribution.attributed
+      # DA-4 — the diagnostic states the ORIGIN of the trust, not just the fact
+      # of it. §"Derived beats declared" makes the two different kinds of
+      # claim: one the engine derived and cannot have got wrong, one somebody
+      # declared and a check had to establish. An operator auditing an
+      # exemption needs to know which, and for a declared one needs the
+      # endpoint that was named and the assertions the check actually verified
+      # — "checked" with no statement of what was checked is the wish this
+      # milestone exists to replace.
+      let provenance =
+        case peer.origin
+        of tdoSpawned:
+          "spawned by this process"
+        of tdoDeclaredAndChecked:
+          "declared at " & peer.declaredSocket & " and checked (" &
+          ($peer.checked).replace("{", "").replace("}", "") &
+          "), re-validated against the kernel at grading time"
+      let milestone =
+        case peer.origin
+        of tdoSpawned: " (DA-2); forgave: "
+        of tdoDeclaredAndChecked: " (DA-4); forgave: "
+      evidence.diagnostics.add(
+        "ipc peer attributed to daemon '" & peer.name & "' (pid " &
+        $peer.pid & "), " & provenance & " — " &
+        "Dependency-Observation-Attribution.md §Class 3 " &
+        class3BranchText(peer.contribution) &
+        milestone & loss)
+  attribution.pendingIpcLosses.setLen(0)
+  attribution.ipcRecords.setLen(0)
+
 proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
                           evidence: var PathSetEvidence;
                           seen: var EvidenceSeenSets;
-                          status: var MonitorEvidenceStatus) =
+                          status: var MonitorEvidenceStatus;
+                          attribution: var MonitorPeerAttribution) =
   ## Fold ONE decoded iomon record into the engine's path-set evidence.
   ##
   ## THE ONE IMPLEMENTATION OF THE FOLDING RULES, deliberately. Since HM-5
@@ -3389,14 +5419,35 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   ## means, silently, in the dependency set. So the decode and the fold are
   ## separated here and the fold is shared.
 
+  # DA-2 — the `mrIpcConnect` records are what io-mon's (c)-arm loss text is
+  # DERIVED FROM, so they are what `resolvePeerAttribution` re-asks io-mon
+  # about. Collected only when this action has a trusted peer at all, so an
+  # ordinary build buffers nothing.
+  if record.kind == mrIpcConnect and attribution.trustsAnyPeer():
+    attribution.ipcRecords.add(record)
+
   if record.kind == mrEventLoss or record.observationKind == moEventLoss:
     # M9.R.72.3 — classify the loss instead of collapsing to a bool.
     # ``classifyEventLossDetail`` maps io-mon's detail strings to Level
     # 1 (known scope) or Level 2 (unknown scope); ``worseMonitorStatus``
     # keeps the worst observed level across the whole depfile so the
     # caller can decide session cache-skip vs hard-fail conservatively.
-    let recordStatus = classifyEventLossDetail(record.detail)
-    status = worseMonitorStatus(status, recordStatus)
+    #
+    # DA-2 — one shape is DEFERRED rather than classified here: an IPC-peer
+    # loss, when this action has a derived trusted peer. The decision needs the
+    # `mrIpcConnect` records, which are still arriving, so it is taken in
+    # `resolvePeerAttribution` at the end of the fold. Nothing is suppressed:
+    # the record stays in the `.iomon` on disk and its loss text is carried
+    # here, so a peer that turns out NOT to be trusted downgrades exactly as it
+    # does today (attribution, not suppression —
+    # Dependency-Observation-Attribution.md §"Attribution, not suppression").
+    let ipcLoss =
+      if attribution.trustsAnyPeer(): ipcPeerLossText(record.detail) else: ""
+    if ipcLoss.len > 0:
+      attribution.pendingIpcLosses.add(ipcLoss)
+    else:
+      let recordStatus = classifyEventLossDetail(record.detail)
+      status = worseMonitorStatus(status, recordStatus)
   elif record.kind == mrBackendProfile and
       not monitorProfileEvidenceComplete(record.detail):
     status = worseMonitorStatus(status, mesUnknownScopeLoss)
@@ -3595,10 +5646,124 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   else:
     discard
 
+# The strictest requirement there is, and therefore the right DEFAULT for
+# every fold site that has not been told otherwise: a capture is trusted only
+# if it observed every event category and wrote down every lookup, including
+# the ones that found nothing.
+#
+# Being the default is what makes the back-compat story hold in the safe
+# direction. A depfile written before DA-1i/DA-1j states neither stamp;
+# io-mon's ``effectiveObservedInterest`` / ``effectiveObservedEvidenceScope``
+# widen an ABSENT stamp to full on both axes, so such a file still passes this
+# requirement unchanged — while a file that STATES a narrowing does not.
+# "Silent" and "narrowed" are different facts and only the first one reads as
+# full.
+const FullMonitorEvidenceRequirement* = MonitorEvidenceRequirement(
+  interest: FullInterest, evidenceScope: esFull)
+
+proc monitorScopeRefusal*(dep: MonitorDepFile;
+                          required: MonitorEvidenceRequirement): string =
+  ## Is this capture's STATED scope enough for what this build requires? The
+  ## empty string means yes; anything else is the sentence explaining the
+  ## refusal, in the operator's terms.
+  ##
+  ## THE TWO PARTIAL ORDERS ARE DELEGATED, NOT REPRODUCED. This proc chooses
+  ## the required side and phrases the verdict; ``observedEvidenceScopeCovers``
+  ## and ``observedInterestCovers`` decide it, in io-mon, beside the enums they
+  ## order and beside the three-way not-stated / stated-and-named /
+  ## stated-and-unnamable reading that a bare field read gets wrong. A second
+  ## copy of "full is stronger than reads-only" here would be a copy that can
+  ## drift, and the way it drifts is not symmetric: the failure it produces is
+  ## accepting a narrowed capture as complete evidence, which is the cardinal
+  ## sin this stamp exists to make impossible.
+  ##
+  ## THE VERDICT IS NOT A COMPLETENESS VERDICT. A narrowed capture is an honest
+  ## answer to a narrower question; ``mcIncomplete`` means the monitor could not
+  ## observe something. The caller maps a refusal onto the Level-2 rung of
+  ## Failure-Semantics.md's ladder — the action still succeeds, nothing is
+  ## published from evidence this build cannot vouch for, and the next build
+  ## recomputes locally.
+  if not dep.observedEvidenceScopeCovers(required.evidenceScope):
+    let stated =
+      if dep.statesUnevaluableEvidenceScope:
+        "declares evidence scope `" & dep.observedEvidenceScopeToken &
+          "`, which this build cannot evaluate"
+      else:
+        "was captured with evidence scope `" &
+          evidenceScopeToken(effectiveObservedEvidenceScope(dep)) & "`"
+    return "monitor capture " & stated & ", which does not cover the `" &
+      evidenceScopeToken(required.evidenceScope) &
+      "` this build requires; its evidence is not trusted and the action-cache " &
+      "publish is skipped this session (DA-1i, CLI/build.md " &
+      "§Dependency Evidence Scope)"
+  if not dep.observedInterestCovers(required.interest):
+    let stated =
+      if dep.statesUnevaluableInterest:
+        "declares event interest `" & dep.observedInterestTokens &
+          "`, which this build cannot evaluate"
+      else:
+        "was captured with event interest `" &
+          interestToTokens(effectiveObservedInterest(dep)) & "`"
+    return "monitor capture " & stated & ", which does not cover the `" &
+      interestToTokens(required.interest) &
+      "` this build requires; its evidence is not trusted and the action-cache " &
+      "publish is skipped this session (DA-1j)"
+  ""
+
+proc gradeCaptureScope(profileRecords: openArray[MonitorRecord];
+                       evidence: var PathSetEvidence;
+                       required: MonitorEvidenceRequirement):
+                       MonitorEvidenceStatus =
+  ## Grade a capture's stamps, given the backend-profile records it carried.
+  ##
+  ## THE STAMPS ARE PARSED BY io-mon, not here. Both ride as `;`-separated keys
+  ## on the ``mrBackendProfile`` record's detail — which is why neither needed a
+  ## depfile envelope bump — and ``depFileFromRecords`` is the exported door
+  ## onto that decode. Handing it only the profile records reproduces io-mon's
+  ## own reading exactly (its readers scan for the FIRST profile record and
+  ## these arrive in stream order), while keeping the streaming fold's promise
+  ## that a 97k-record depfile is never materialized to grade it.
+  ##
+  ## NO PROFILE RECORD AT ALL grades as full scope on both axes, because
+  ## ``depFileFromRecords(@[])`` states neither stamp and io-mon widens an
+  ## absent stamp to full. That is the back-compat arm and it is reached by
+  ## every depfile written before this shipped.
+  let dep = depFileFromRecords(profileRecords)
+  let refusal = monitorScopeRefusal(dep, required)
+  if refusal.len == 0:
+    return mesComplete
+  evidence.diagnostics.add(refusal)
+  # Level 2 (unknown scope). This build cannot bound WHAT the narrowing left
+  # out — for `esReadsOnly` the dropped observations name paths that were never
+  # written down, so there is no path set to invalidate narrowly — and the
+  # action therefore succeeds and publishes nothing.
+  #
+  # DELIBERATELY NOT LEVEL 3. The capture is not corrupt and monitoring did not
+  # fail. Failing a successful command for a property of its evidence is the
+  # same mistake as grading a deliberate narrowing `mcIncomplete`, which DA-1i
+  # already discarded — one rung further up the ladder.
+  #
+  # DELIBERATELY NOT LEVEL 1 EITHER. Level 1 publishes the action's own record
+  # and only gates DOWNSTREAM lookups; here it is precisely this action's own
+  # input set that is narrower than this build trusts.
+  #
+  # AND THE COST IS NAMED RATHER THAN ELIDED: Level 2 additionally flips the
+  # scheduler's session-wide `sessionCachePublishDisabled`, so one refused
+  # capture turns every later lookup in the session into a miss. That is
+  # broader than the contract asks for — the untrusted evidence belongs to one
+  # action — and it is accepted here rather than papered over, because the
+  # alternative is a new rung on Failure-Semantics.md's ladder, which is a
+  # change to the shared monitor-loss vocabulary and not to this feature. It is
+  # also the rare path: a build reaches it only when it reads a capture SOMEONE
+  # ELSE narrowed, since its own captures are taken under exactly the scope it
+  # requires (`monitorEvidenceRequirement`).
+  mesUnknownScopeLoss
 
 proc foldMonitorDepFileEvidence*(path, cwd: string;
                                  evidence: var PathSetEvidence;
-                                 seen: var EvidenceSeenSets):
+                                 seen: var EvidenceSeenSets;
+                                 attribution: var MonitorPeerAttribution;
+                                 required = FullMonitorEvidenceRequirement):
                                  MonitorEvidenceStatus =
   ## Fold depfile records directly into build-engine evidence.
   ##
@@ -3625,15 +5790,61 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
   ## from Level 2 (unknown-scope, disable cache hits) from Level 0 (complete).
   ## Level 3 (monitor entirely unavailable) is asserted at ``collectEvidence``
   ## when the ``monitorDepfile`` path itself is empty.
+  ##
+  ## DA-2 — `attribution` carries the derived trusted-daemon pid set (empty for
+  ## every pre-existing caller, which is exactly today's behaviour) and comes
+  ## back carrying how many IPC-peer losses it attributed.
+  ##
+  ## A READ THAT RAISES MUST NOT LEAVE ITS BUFFERS FOR THE NEXT CAPTURE.
+  ## `collectEvidence` reuses ONE `MonitorPeerAttribution` across the
+  ## recognized-report loop and catches `MonitorDepFileReaderError` PER RESOLVED
+  ## PATH, so a truncated capture would otherwise hand its undecided losses to
+  ## the next capture's records — the exact carry-forward `resolvePeerAttribution`
+  ## says must not happen, reached by the one path that skips it. Dropping them
+  ## is the conservative direction and not a lost downgrade: the caller grades a
+  ## read failure as `mesMonitorUnavailable` and refuses the publish, which is
+  ## strictly worse than the `mesUnknownScopeLoss` the deferred losses carried.
+  ##
+  ## DA-1i/DA-1j — `required` is the narrowest capture this build will trust,
+  ## and it defaults to the STRICTEST answer so that a caller who has not
+  ## thought about it gets the safe one. The backend-profile records carry both
+  ## scope stamps, so they are collected as the stream goes past and graded
+  ## once at the end by `gradeCaptureScope`; a capture that does not cover the
+  ## requirement comes back `mesUnknownScopeLoss` with the reason in
+  ## `evidence.diagnostics`, so the action succeeds and publishes nothing.
   result = mesComplete
-  for record in streamMonitorDepFileRecords(path,
-      defaultMonitorDepFileReaderOptions()):
-    foldOneMonitorRecord(record, cwd, evidence, seen, result)
+  # Profile records only — a handful per capture, never the record body. The
+  # streaming read exists so a 97k-record depfile is not materialized, and
+  # grading its stamps must not undo that.
+  var profileRecords: seq[MonitorRecord] = @[]
+  try:
+    for record in streamMonitorDepFileRecords(path,
+        defaultMonitorDepFileReaderOptions()):
+      if record.kind == mrBackendProfile:
+        profileRecords.add(record)
+      foldOneMonitorRecord(record, cwd, evidence, seen, result, attribution)
+  except CatchableError:
+    attribution.pendingIpcLosses.setLen(0)
+    attribution.ipcRecords.setLen(0)
+    raise
+  resolvePeerAttribution(attribution, evidence, result)
+  result = worseMonitorStatus(result,
+    gradeCaptureScope(profileRecords, evidence, required))
+
+proc foldMonitorDepFileEvidence*(path, cwd: string;
+                                 evidence: var PathSetEvidence;
+                                 seen: var EvidenceSeenSets):
+                                 MonitorEvidenceStatus =
+  ## Trust nothing — the four-argument form every caller predating DA-2 uses.
+  var attribution = initMonitorPeerAttribution([])
+  foldMonitorDepFileEvidence(path, cwd, evidence, seen, attribution)
 
 proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
                                  cwd: string;
                                  evidence: var PathSetEvidence;
-                                 seen: var EvidenceSeenSets):
+                                 seen: var EvidenceSeenSets;
+                                 attribution: var MonitorPeerAttribution;
+                                 required = FullMonitorEvidenceRequirement):
                                  MonitorEvidenceStatus =
   ## In-Process-Monitor-Hosting HM-5 — the same fold, over records the engine
   ## ALREADY HAS instead of over a file it has to read back.
@@ -3661,9 +5872,30 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
   ## The records are borrowed, not retained: the caller drops them as soon as
   ## this returns, so the engine's "path sets + completeness, never a retained
   ## depfile" rule is unchanged.
+  ##
+  ## DA-1i/DA-1j — the scope stamps are graded here too, from the SAME records
+  ## and by the SAME proc the file path uses. The hosted and wrapped paths are
+  ## required to produce identical evidence for the same action
+  ## (IoMon-Decomposed-Host-API DH-4); a guard wired to one of them is a guard
+  ## half of production does not execute.
   result = mesComplete
+  var profileRecords: seq[MonitorRecord] = @[]
   for record in records:
-    foldOneMonitorRecord(record, cwd, evidence, seen, result)
+    if record.kind == mrBackendProfile:
+      profileRecords.add(record)
+    foldOneMonitorRecord(record, cwd, evidence, seen, result, attribution)
+  resolvePeerAttribution(attribution, evidence, result)
+  result = worseMonitorStatus(result,
+    gradeCaptureScope(profileRecords, evidence, required))
+
+proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
+                                 cwd: string;
+                                 evidence: var PathSetEvidence;
+                                 seen: var EvidenceSeenSets):
+                                 MonitorEvidenceStatus =
+  ## Trust nothing — the four-argument form every caller predating DA-2 uses.
+  var attribution = initMonitorPeerAttribution([])
+  foldMonitorRecordsEvidence(records, cwd, evidence, seen, attribution)
 
 proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
                 pathSet: DependencyPathSet; recognized: bool) =
@@ -3809,6 +6041,24 @@ proc monitorObservedNoReads(col: EvidenceCollection): bool {.inline.} =
   ## action's own root image (`executedToolImagePath`). O(1) by construction:
   ## that entry is the FIRST thing added to the set, so a set with one element
   ## is the only one it can be alone in.
+  ##
+  ## ITS ONE BLIND SPOT, MEASURED RATHER THAN REASONED ABOUT, so that the next
+  ## reader inherits the number instead of the argument. The set is a set: when
+  ## a monitor really DID observe the action's own root image and nothing else
+  ## — a nested exec of the same image on a platform with no library-load floor
+  ## — `addUnique` collapses the observation and the reconstruction into one
+  ## entry, this returns true, and the edge is refused a publish although it
+  ## observed something. Measured on this host with a capture carrying one
+  ## `mrFileRead` of `/bin/sh` against an `argv[0]` of `/bin/sh`: no record
+  ## published, and the diagnostic told the operator to "suspect the monitor
+  ## backend", which in that case is the wrong place to look.
+  ##
+  ## It is the FAIL-CLOSED direction — a lost cache hit and a re-run, never a
+  ## stale artifact — so it is a cost, not a soundness hole, and it is not
+  ## reachable on Linux or macOS, where the loader floor puts other paths in
+  ## the set. Recorded here because a one-slot attribution cannot express "this
+  ## path is both", and the fix if it ever matters is to make the attribution
+  ## per-entry rather than to widen this predicate.
   case col.evidence.monitorReads.len
   of 0: true
   of 1:
@@ -3906,6 +6156,15 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
     # unable to fire at all from the day that fold landed.
     # `engineSuppliedRootImage` is what distinguishes the two, and
     # `t_zero_evidence_edge_is_not_cacheable` is what holds them apart.
+    #
+    # THE SAME QUESTION HAS TO BE ASKED OF EVERY CHANNEL BELOW. Any
+    # future path by which the ENGINE contributes to one of these sets
+    # from its own bookkeeping answers this question on the monitor's
+    # behalf and silently retires the guard, exactly as the root-image
+    # fold did. Record such a contribution the way
+    # `engineSuppliedRootImage` records this one — attribution, not a
+    # subtraction and not an ordering, per
+    # `../reprobuild-specs/Dependency-Observation-Attribution.md`.
     if action.cacheable and
         col.monitorObservedNoReads() and
         col.evidence.monitorWrites.len == 0 and
@@ -3960,10 +6219,25 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
     if action.cacheable:
       col.publishable = false
 
-proc monitorPayloadArgIndex(argv: openArray[string]): int
 proc preparedRunQuotaCommand(action: BuildAction;
                              config: BuildEngineConfig;
                              shellUmaskWrap = true): ReproCommandSpec
+# Forward-declared so `collectEvidence` can grade THE SET THAT GETS KEYED
+# rather than the set the monitor filled in — see `gradeKeyedInputSet`. The
+# definitions stay beside the other key-construction helpers further down;
+# only the visibility ordering moves.
+proc cacheInputPaths*(action: BuildAction;
+                      evidence: PathSetEvidence): seq[string]
+proc evidenceInputPaths(action: BuildAction;
+                        evidence: PathSetEvidence): seq[string]
+# DA-1i/DA-1j — forward-declared for the same reason: `collectEvidence` has to
+# state what it requires of a capture before it trusts one, and the definition
+# belongs beside `monitorInterest`, which answers half of it. Two procs, one
+# for each direction of the same contract (what we ASK io-mon for, what we
+# DEMAND of what comes back), kept adjacent so they cannot drift apart.
+proc monitorEvidenceRequirement(action: BuildAction;
+                                config: ptr BuildEngineConfig):
+                                MonitorEvidenceRequirement
 
 proc isExecutableFile(path: string): bool =
   ## `execvp`'s candidate test, as close as a consumer can get to it: the
@@ -4024,18 +6298,15 @@ proc executedToolImagePath(action: BuildAction;
   ## shape, a bare name that no PATH entry supplies, or no config to ask.
   ## Returning nothing leaves the pre-existing gap exactly as it was; it never
   ## invents a path.
-  if action.argv.len == 0:
-    return ""
-  let payloadIndex = monitorPayloadArgIndex(action.argv)
-  if payloadIndex < 0 and action.argv.len >= 4 and
-      action.argv[1] == "internal" and action.argv[2] == "io" and
-      action.argv[3] == "monitor":
-    # Monitor-wrapped but not in the shape `monitorPayloadArgIndex` accepts.
-    # The root image would be the `repro` binary, which is the launcher, not
-    # the action. Say nothing rather than record the wrong thing.
-    return ""
-  let base = if payloadIndex >= 0: payloadIndex else: 0
-  if base >= action.argv.len:
+  # `executedImageArgvIndex` is the shared answer to "which argument is the
+  # action's own image", and it returns -1 for a monitor-wrapped argv whose
+  # payload cannot be located — there the root image would be the `repro`
+  # binary, which is the launcher and not the action, so say nothing rather
+  # than record the wrong thing. `toolInputRoots` and
+  # `keyedOnContentAddressedToolRoot` read the same function, which is what
+  # keeps the elision, the key and this fold talking about one image.
+  let base = executedImageArgvIndex(action.argv)
+  if base < 0 or base >= action.argv.len:
     return ""
   let name = action.argv[base]
   if name.len == 0:
@@ -4066,6 +6337,52 @@ proc executedToolImagePath(action: BuildAction;
     if isExecutableFile(candidate):
       return os.normalizedPath(candidate)
   ""
+
+proc gradeKeyedInputSet(action: BuildAction; col: var EvidenceCollection) =
+  ## The zero-evidence guard, applied to the set the RECORD IS KEYED ON.
+  ##
+  ## `applyMonitorEvidenceStatus` asks "did the monitor observe anything?" of
+  ## `evidence.monitorReads` and friends. That is the right question about the
+  ## MONITOR, and it stays where it is. It is not the question about the KEY,
+  ## because two engine-side subtractions run between those channels and
+  ## `cacheInputPaths`: `toolInputRoots` (the action's own store roots) and
+  ## `ignoredInputRoots` (author-declared prefixes, expanded against the
+  ## engine's environment when `action.env` is silent). An action can therefore
+  ## satisfy the first question and still publish a record keyed on nothing —
+  ## measured, and quantified in `emptyKeyedInputSetDiagnostic`.
+  ##
+  ## IT MUST RUN AFTER EVERY CONTRIBUTOR TO THE KEY, the root-image fold at
+  ## the head of `collectEvidence` included, or it grades a draft. That is not
+  ## in tension with the sibling guard's rule, which is that a predicate over
+  ## OBSERVED evidence must not read a channel the engine seeded: they are the
+  ## same instruction — *ask each question of the final state of the set that
+  ## question is about* — and the sets are different, which is exactly why the
+  ## guard needs two call sites and not one. The sibling guard resolves its
+  ## half by ATTRIBUTION rather than by ordering
+  ## (`EvidenceCollection.engineSuppliedRootImage`), so this one is free to sit
+  ## at the end without disarming it.
+  ##
+  ## SCOPED TO `monitorEvidenceRequired`, deliberately: that is the precondition
+  ## of the guard this mirrors, so the two cover the same class of edge and a
+  ## change to the scope moves both. An edge outside it is either declaring its
+  ## own input set (where an empty key is the author's statement, not the
+  ## engine's failure) or is not monitored at all.
+  ##
+  ## The `observed` denominator is what makes this a REPORT rather than a
+  ## duplicate: when the observed channels were empty too, the monitor guard
+  ## has already fired with its own, more specific message, and firing again
+  ## would tell an operator the same thing twice in different words.
+  if not action.cacheable or not action.monitorEvidenceRequired():
+    return
+  let observed = action.evidenceInputPaths(col.evidence).len
+  if observed == 0:
+    return
+  let keyed = action.cacheInputPaths(col.evidence)
+  if keyed.len > 0:
+    return
+  col.evidence.diagnostics.add(
+    emptyKeyedInputSetDiagnostic(action.id, observed, observed))
+  col.disableCacheHits = true
 
 proc collectEvidence(action: BuildAction; strict: bool;
                      hostedRecords: ptr seq[MonitorRecord] = nil;
@@ -4107,10 +6424,25 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # legacy linear ``find`` made the per-action wrap-up the dominant
   # term on the 14-app / ~1044-action collections from B1/B3/B5.
   var seen: EvidenceSeenSets
-  # The action's OWN root image, which no monitor record can supply — see
-  # `executedToolImagePath`. Folded as a content read, beside `mrLibraryLoad`
-  # and the `mrProcessExec` arm that covers this action's NESTED execs.
+  # DA-2/DA-4 — the class-3 trust this action's evidence is graded against:
+  # every daemon THIS PROCESS SPAWNED (derived, DA-2) plus every daemon a
+  # machine declaration named AND a check established the identity of
+  # (declared, DA-4). Both are re-validated against the kernel on the way in,
+  # so a dead pid, a recycled pid, or a peer that has exec'd into a different
+  # program since it was checked exempts nothing.
   #
+  # Shared by BOTH fold sites below — the recognized-`.iomon`-report arm and the
+  # wrapped/hosted monitor arm — because an edge that produces its own capture
+  # talks to the same daemons as one the engine monitors, and a guard wired at
+  # one of two sites is a guard half of production does not execute.
+  var attribution = initMonitorPeerAttribution(trustedDaemonRegistry())
+  # DA-1i/DA-1j — what this build demands of a capture before it trusts one.
+  # Shared by BOTH fold sites below for exactly the reason `attribution` is: an
+  # edge that PRODUCES its own `.iomon` is the likeliest source of a capture
+  # this build did not take — a teammate's, a CI runner's, an inner `ct test`'s
+  # — so the arm that consumes such a file is the last one that may go
+  # ungraded. See `monitorEvidenceRequirement`.
+  let scopeRequirement = monitorEvidenceRequirement(action, config)
   # SCOPED TO THE AUTOMATIC-MONITOR CLASS on purpose. That is the class where
   # the ENGINE promises to discover the input set, so a missing input is the
   # engine's defect. On an edge whose inputs are declared by its author, the
@@ -4162,7 +6494,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
         for resolved in resolvedPaths:
           try:
             let status = foldMonitorDepFileEvidence(resolved, action.cwd,
-              result.evidence, seen)
+              result.evidence, seen, attribution, scopeRequirement)
             applyMonitorEvidenceStatus(action, status, result)
           except MonitorDepFileReaderError as err:
             result.evidence.diagnostics.add(
@@ -4287,10 +6619,10 @@ proc collectEvidence(action: BuildAction; strict: bool;
       let status =
         if hostedRecords != nil:
           foldMonitorRecordsEvidence(hostedRecords[], action.cwd,
-            result.evidence, seen)
+            result.evidence, seen, attribution, scopeRequirement)
         else:
           foldMonitorDepFileEvidence(action.monitorDepfile,
-            action.cwd, result.evidence, seen)
+            action.cwd, result.evidence, seen, attribution, scopeRequirement)
       applyMonitorEvidenceStatus(action, status, result)
       applyEntropyBlessingPolicy(action, result)
     except MonitorDepFileReaderError as err:
@@ -4332,6 +6664,10 @@ proc collectEvidence(action: BuildAction; strict: bool;
         "rewrites are errors'.")
     if offenders.len > 0:
       result.publishable = false
+  # LAST OF ALL, after every contributor to the key — the root-image fold at
+  # the head of this proc included — grade the set the key is actually built
+  # from. Rule 7. See `gradeKeyedInputSet`.
+  gradeKeyedInputSet(action, result)
   if strict and not result.publishable:
     discard
 
@@ -4404,22 +6740,23 @@ proc evidenceInputPaths(action: BuildAction;
       continue
     result.addUnique(seen, probe)
 
-proc nixStoreRoot(path: string): string =
-  let normalized = path.replace('\\', '/')
-  const prefix = "/nix/store/"
-  if not normalized.startsWith(prefix):
-    return ""
-  let rest = normalized.substr(prefix.len)
-  let slash = rest.find('/')
-  if slash < 0:
-    normalized
-  else:
-    prefix & rest[0 ..< slash]
-
-proc addNixStoreRoot(roots: var seq[string]; path: string) =
-  let root = nixStoreRoot(path)
-  if root.len > 0:
-    roots.addUnique(root)
+proc addContentAddressedRoot(roots: var seq[string]; path: string) =
+  ## AN EMPTY ROOT MUST NEVER ENTER THIS SEQUENCE, and `addUnique` is what
+  ## stops it: its first statement is `if value.len == 0: return`.
+  ##
+  ## The consequence is worth stating because it is severe and silent. These
+  ## roots reach `isUnderAnyRoot`, which answers `startsWith(root & "/")` — so
+  ## a single `""` in here matches EVERY absolute path, `cacheInputPaths`
+  ## subtracts the entire observed set, and the record is keyed on nothing.
+  ## `contentAddressedRoot` returns `""` for the overwhelming majority of the
+  ## paths handed to it (every `PATH` entry of every non-store action), so
+  ## this is the common case, not an edge one.
+  ##
+  ## There used to be an `if root.len > 0:` here as well. It could not change
+  ## an answer — `addUnique` had already made `""` mean "add nothing" — and a
+  ## conjunct no mutation can redden is one a later reader takes for
+  ## load-bearing. The guarantee is named here instead of duplicated.
+  roots.addUnique(contentAddressedRoot(path))
 
 proc envValue(action: BuildAction; name: string): string =
   let prefix = name & "="
@@ -4428,12 +6765,43 @@ proc envValue(action: BuildAction; name: string): string =
       return item.substr(prefix.len)
 
 proc toolInputRoots(action: BuildAction): seq[string] =
-  if action.argv.len > 0:
-    result.addNixStoreRoot(action.argv[0])
+  ## The content-addressed roots whose contents `cacheInputPaths` may elide
+  ## from the action-cache key, and — read together with the note below —
+  ## the reason it may.
+  ##
+  ## EVERY ROOT THIS RETURNS IS IN THE WEAK FINGERPRINT BY CONSTRUCTION.
+  ## Dependency-Observation-Attribution.md §Class 1 allows the elision only
+  ## when the root is content-addressed AND its identity is in the key, and
+  ## for a long time this function supplied the first half and merely assumed
+  ## the second. The two halves are now connected, per source:
+  ##
+  ## * `argv[0]` — `keyedOnContentAddressedToolRoot`, applied in `action()`
+  ##   over exactly this `contentAddressedRoot` call, so the root subtracted
+  ##   here is the root mixed there. Before that existed, a monitored edge
+  ##   under the engine-default fingerprint took a `cdHit` after its
+  ##   `/nix/store` shell was swapped for a different store path — measured;
+  ##   see that proc. The key additionally carries the image's own path
+  ##   within the root, which is strictly more than this drops.
+  ## * `PATH` / `NODE_PATH` — `keyedOnActionEnvironment`, also applied in
+  ##   `action()`, which mixes every DECLARED name and value. `envValue` reads
+  ##   `action.env`, the same declaration, so a value that yields a root here
+  ##   is a value that is in the key there. A passthrough variable is in
+  ##   neither: the key carries only its name, and `envValue` returns "".
+  ##
+  ## An elision that stops being covered by one of those is a soundness
+  ## regression, not a tuning change. `gradeKeyedInputSet` is the backstop
+  ## that reports the case where the subtraction empties the key entirely.
+  ##
+  ## `executedImageArgvIndex` rather than a bare `argv[0]`, because by the time
+  ## this runs the argv may be the monitor wrapper's — see that proc for what
+  ## reading index 0 through the wrapper subtracted, and failed to subtract.
+  let imageIndex = executedImageArgvIndex(action.argv)
+  if imageIndex >= 0:
+    result.addContentAddressedRoot(action.argv[imageIndex])
   for value in action.envValue("PATH").split(PathSep):
-    result.addNixStoreRoot(value)
+    result.addContentAddressedRoot(value)
   for value in action.envValue("NODE_PATH").split(PathSep):
-    result.addNixStoreRoot(value)
+    result.addContentAddressedRoot(value)
 
 proc expandPolicyPath(action: BuildAction; path: string): string =
   result = path
@@ -5015,6 +7383,76 @@ proc monitorInterest(action: BuildAction): set[EventCategory] =
   ## own blast radius.
   FullInterest
 
+proc monitorEvidenceScope(config: BuildEngineConfig): EvidenceScope =
+  ## The evidence scope `config` asks io-mon for — ONE definition, read by BOTH
+  ## hosting forms, for exactly the reason `monitorInterest` above is one proc:
+  ## the two paths carrying different answers for the same action was a live
+  ## defect on the interest axis, and this axis has the identical two-channel
+  ## shape (an argv flag on the wrapped path, a request field on the hosted
+  ## one).
+  ##
+  ## Straight through from the operator, with no policy of its own. There is no
+  ## per-action narrowing and there must not be one invented here: DA-1i's
+  ## hazard is something the OPERATOR accepts for a whole build after reading
+  ## what it costs, not something an engine heuristic may decide on their
+  ## behalf for the edges it guesses are cheap.
+  config.evidenceScope
+
+proc monitorEvidenceFlag(scope: EvidenceScope): seq[string] =
+  ## The wrapped path's argv spelling of `scope`.
+  ##
+  ## `evidenceScopeToken` is io-mon's codec and the ONLY speller of these
+  ## tokens. THERE IS NO EMPTY-TOKEN CASE LEFT TO HANDLE, on either of the two
+  ## grounds the deleted guard rested on:
+  ##
+  ## * "a future `EvidenceScope` member added without a wire token" is now a
+  ##   COMPILE ERROR in io-mon rather than a possibility here.
+  ##   `evidenceScopeToken` is an exhaustive `case`, and a `static:` block
+  ##   beside it asserts over the whole enum that `esUnrecognized` is the only
+  ##   member whose token is empty (and that every other member's token
+  ##   survives the wire and decodes back to itself). Graded by io-mon's
+  ##   `tests/portable/test_io_mon_evidence_scope.nim`, which mutates a copy of
+  ##   `types.nim` and reads the real compiler's exit code.
+  ## * `esUnrecognized` itself cannot reach this proc: `parseEvidenceScope`
+  ##   refuses it, `monitorEvidenceScope` passes `config.evidenceScope` straight
+  ##   through with no policy of its own, and that field's zero value is
+  ##   `esFull`.
+  ##
+  ## The guard that stood here returned `@[]` on an empty token. Its own
+  ## docstring already conceded it was unreachable, and deleting it was MEASURED
+  ## to redden nothing. A branch no test can redden is one the next reader takes
+  ## for load-bearing again — the precedent set for the `run`-verb skip.
+  ##
+  ## And if a library caller outside the CLI ever did hand this an unspellable
+  ## scope, omitting the flag is the WEAKER answer, not the safer one: io-mon
+  ## would then capture full evidence silently. Passing the empty value instead
+  ## makes io-mon refuse it in the scope vocabulary and exit non-zero — measured
+  ## at the real binary. Loud beats silent here too.
+  @["--evidence", evidenceScopeToken(scope)]
+
+proc monitorEvidenceRequirement(action: BuildAction;
+                                config: ptr BuildEngineConfig):
+                                MonitorEvidenceRequirement =
+  ## The narrowest capture this build will TRUST for `action` — the consumer
+  ## side of the same two axes `monitorInterest` / `monitorEvidenceScope`
+  ## request, which is why it is spelled here and not at the fold sites.
+  ##
+  ## The two sides are deliberately the SAME VALUE and not merely compatible
+  ## ones. A build that asks io-mon for reads-only evidence and then demands
+  ## full evidence of what comes back would refuse its own captures; a build
+  ## that asks for full and accepts reads-only would silently consume a
+  ## teammate's narrowed record. Deriving both from one place makes the pair
+  ## consistent by construction.
+  ##
+  ## `config == nil` is every caller that does not have one (the direct-engine
+  ## API, most of the suite) and it requires FULL evidence. Fail-closed: the
+  ## cost of being wrong that way is a re-capture, and the cost of the other
+  ## way is publishing a narrowed capture as complete.
+  MonitorEvidenceRequirement(
+    interest: monitorInterest(action),
+    evidenceScope:
+      if config != nil: monitorEvidenceScope(config[]) else: esFull)
+
 proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
                      cacheRoot: string;
                      hostInProcess: bool): tuple[action: BuildAction;
@@ -5133,10 +7571,17 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
       # was therefore writing into a variable io-mon overwrites, which is what
       # made this path's request silently different from the hosted path's —
       # see ``monitorInterest``.
+      # DA-1i — `--evidence` travels on the ARGV for the same reason
+      # `--interest` does: `REPRO_MONITOR_EVIDENCE` is io-mon's OWN channel to
+      # the shim, written last by `childEnv`, so an engine that seeded it into
+      # the action's environment would be writing into a variable io-mon
+      # overwrites before any shim could read it. The flag is a channel io-mon
+      # does not own and therefore cannot overwrite.
       result.action.argv = @[monitorCli] & config.monitorCliArgs &
         @["--depfile", result.capturePath,
-          "--interest", interestToTokens(monitorInterest(action)),
-          "--"] & action.argv
+          "--interest", interestToTokens(monitorInterest(action))] &
+        monitorEvidenceFlag(monitorEvidenceScope(config)) &
+        @["--"] & action.argv
     # M9.R.13c.2: shim-library env seed is layered at LAUNCH time via
     # ``launchChildEnv`` (NOT here on ``result.action.env``). The seed
     # MUST NOT enter the action's fingerprint — the absolute path of
@@ -5995,12 +8440,45 @@ proc applyExplicitRuntimeLibraryEnvOverrides*(env: StringTableRef;
 proc monitorPayloadArgIndex(argv: openArray[string]): int =
   ## Return the first argument of an io-monitor payload, or -1 when argv is
   ## not the canonical ``repro internal io monitor ... -- <command>`` shape.
+  ##
+  ## THE SCAN IS BOUNDED TO THE WRAPPER'S OWN ARGUMENTS, and it has to be.
+  ## It used to scan the WHOLE argv backwards for the LAST ``--``, which is
+  ## the wrapper's separator only when the payload contains no ``--`` of its
+  ## own. ``cargo test -- <args>``, ``sh -c <script> -- <arg>`` and
+  ## ``git … -- <path>`` all do, and MEASURED (2026-09-09) on the production
+  ## key builder a payload of
+  ## ``/usr/bin/env runner -- /nix/store/…-data-1.0/input.txt`` answered index
+  ## 12 — the store path after the ACTION's ``--`` — where the unwrapped argv
+  ## answers index 0. ``toolInputRoots`` then elided everything under a root
+  ## the weak fingerprint carries nothing about, because the wrapper argv is
+  ## composed long after that fingerprint was computed
+  ## (Dependency-Observation-Attribution.md rule 9, in a new shape).
+  ##
+  ## Scanning FORWARD from the first wrapper argument and stopping at the
+  ## FIRST ``--`` is not merely the opposite convention: it is the grammar the
+  ## RECEIVING parser applies. io-mon's ``parseRun``
+  ## (io-mon/src/io_mon/fs_snoop.nim) walks its arguments in order and
+  ## ``break``s on the first ``--``, taking everything after it as the
+  ## command. So this now names the argument io-mon will actually execute,
+  ## rather than a second answer free to disagree with it.
+  ##
+  ## THE OPTIONAL LEADING ``run`` VERB NEEDS NO SPECIAL CASE, and there used
+  ## to be one here presented as required for agreement with
+  ## ``parseFsSnoopCommand``. It was dead: the loop below steps over every
+  ## token that is not ``--``, and ``run`` never is, so skipping it cannot
+  ## change the answer. MEASURED (2026-09-09) — deleting the skip left both
+  ## files that grade this function green, which is the definition of a branch
+  ## nothing can observe. It is removed rather than kept with a corrected
+  ## comment, because a branch no test can redden is one a later reader will
+  ## take for a load-bearing one all over again.
   if argv.len < 8 or argv[1] != "internal" or argv[2] != "io" or
       argv[3] != "monitor":
     return -1
-  for i in countdown(argv.len - 1, 4):
-    if argv[i] == "--" and i + 1 < argv.len:
-      return i + 1
+  var i = 4
+  while i < argv.len:
+    if argv[i] == "--":
+      return (if i + 1 < argv.len: i + 1 else: -1)
+    inc i
   -1
 
 when defined(macosx):
@@ -7531,6 +10009,38 @@ func parseMonitorHostingMode*(value, source: string): MonitorHostingMode =
       "unsupported " & source & "=" & value &
         " (expected never, where-supported, or required)")
 
+func parseEvidenceScope*(value, source: string): EvidenceScope =
+  ## DA-1i — the OPERATOR SURFACE for ``BuildEngineConfig.evidenceScope``:
+  ## ``repro build --evidence=full|reads-only``.
+  ##
+  ## THE VOCABULARY IS io-mon's AND IS NOT RESTATED. ``parseEvidenceScopeToken``
+  ## is the single codec for both channels the token travels on (the
+  ## ``--evidence`` flag this decodes, and the ``evidence=`` stamp a depfile
+  ## carries), so the value an operator types and the value a reader later
+  ## compares against cannot come from two tables that drift.
+  ##
+  ## TWO VALUES ARE REJECTED THAT ``parseEvidenceScopeToken`` ACCEPTS or
+  ## PRODUCES, and both rejections are the point of this wrapper:
+  ##
+  ## * the EMPTY string. On the env channel an absent ``REPRO_MONITOR_EVIDENCE``
+  ##   means "write everything down", so io-mon widens it to ``esFull``. On a
+  ##   command line ``--evidence=`` is a typo, and answering a typo with the
+  ##   default is how an operator who meant ``reads-only`` gets ``full``
+  ##   silently — or, far worse, believes they got the narrowing they asked for.
+  ## * anything io-mon cannot name, which parses to ``esUnrecognized``. That is
+  ##   a READING of a stamp from a newer io-mon, never a scope this build can
+  ##   ask for; it covers nothing, so accepting it here would build with a
+  ##   scope whose own captures this build then refuses to trust.
+  ##
+  ## ``source`` is the spelling to blame in the diagnostic, exactly as
+  ## ``parseMonitorHostingMode(value, source)`` uses it.
+  let scope = parseEvidenceScopeToken(value)
+  if value.strip().len == 0 or scope == esUnrecognized:
+    raise newException(ValueError,
+      "unsupported " & source & "=" & value &
+        " (expected full or reads-only)")
+  scope
+
 proc configuredMonitorHostingMode*(): MonitorHostingMode =
   ## The environment default for ``--monitor-hosting``. ``mhmNever`` when
   ## unset, which is the same value ``BuildEngineConfig``'s zero value gives,
@@ -7622,7 +10132,8 @@ proc allocMonitorHostSlot(pool: var MonitorHostPool): int =
 
 proc monitorHostRequest(action: BuildAction;
                         command: ReproCommandSpec;
-                        depFilePath: string): FsSnoopRequest =
+                        depFilePath: string;
+                        evidenceScope: EvidenceScope): FsSnoopRequest =
   ## Project the ONE argv+env contract every launch path shares onto io-mon's
   ## request. Both sides layer over the hosting process's own environment
   ## (``ReproCommandSpec.env`` through RunQuota's process backend,
@@ -7641,12 +10152,19 @@ proc monitorHostRequest(action: BuildAction;
   # (which forwards the same answer to `repro internal io monitor` as
   # `--interest`), so the two hosting forms cannot ask io-mon for different
   # categories for the same action — see ``monitorInterest``.
+  #
+  # DA-1i — the evidence scope arrives as an ARGUMENT rather than being read
+  # from a config here, because this proc has no config and the caller
+  # (``startMonitorHost``) does. It is ``monitorEvidenceScope``'s answer, the
+  # same one the wrapped path spells as ``--evidence``, so the two hosting
+  # forms cannot narrow differently for the same action.
   result = FsSnoopRequest(
     command: command.argv,
     depFilePath: depFilePath,
     cwd: command.cwd,
     streamMode: fsoNone,
     interest: monitorInterest(action),
+    evidenceScope: evidenceScope,
     passthroughChildStdout: true,
     passthroughChildStderr: true)
   for entry in command.env:
@@ -7849,7 +10367,7 @@ proc startMonitorHost(pool: var MonitorHostPool; action: BuildAction;
     pool.records[slot].depTempPath = depTemp
     pool.records[slot].depDestPath = depDest
     pool.handles[slot] = startMonitor(monitorHostRequest(action, command,
-      depTemp))
+      depTemp, monitorEvidenceScope(config)))
     pool.records[slot].handleLive = true
     pool.records[slot].rootPid = int(rootPid(pool.handles[slot]))
   except CatchableError:
@@ -9897,7 +12415,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         hotProbes.add(HotMetadataProbe(
           weakFingerprint: action.weakFingerprint,
           policy: action.actionCachePolicy,
-          outputRoot: action.cwd))
+          outputRoot: action.cwd,
+          # This arm never runs the scheduler, so the per-edge refusal at the
+          # `lookupActionResult` seam is not on this path at all. The probe
+          # carries the scope so the scan can apply it where it already has
+          # the record in hand. See `refusesRecordWithNoInputs`.
+          refuseRecordWithNoInputs: action.refusesRecordWithNoInputs()))
         hotEnvResolvers.add(action.actionEnvResolver())
       let lookupStart = statStart()
       let navigatorStart = statStart()
@@ -9954,6 +12477,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       # as "repro output revalidate"; a timer here would have measured this
       # call site only.
       if outputStateMismatch(hotRecord.get(), action.cwd).len > 0:
+        return none(BuildRunResult)
+      # The other whole-graph arm, and the same reason as the probe field
+      # above: reaching `hmssHit` here also means the scheduler never runs, so
+      # the per-edge refusal never gets a turn. Falling back to the full
+      # scheduler is enough — it re-consults this edge, refuses the record
+      # there, and states the reason once.
+      if action.unservableCacheRecordReason(hotRecord.get()).len > 0:
         return none(BuildRunResult)
       hotRecords.add(hotRecord.get())
       hotRecordEnvResolvers.add(action.actionEnvResolver())
@@ -10734,6 +13264,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               else:
                 runResult.trace(id, "peer-cache-install-failed",
                   install.reason)
+          # ONE seam for BOTH lookups above — the local one and the
+          # peer-installed retry — and deliberately placed after the retry so
+          # a record that arrived from a peer is graded exactly like one that
+          # was already on disk. See `unservableCacheRecordReason` for what it
+          # refuses and, just as importantly, what it does not try to.
+          if lookup.status in {aclHit, aclHybridCutoff}:
+            let refusal = action.unservableCacheRecordReason(lookup.record)
+            if refusal.len > 0:
+              runResult.trace(id, "cache-record-refused", refusal)
+              lookup = ActionCacheLookup(status: aclMissNoRecord,
+                message: refusal)
           case lookup.status
           of aclHit:
             if config.rebuildMissingOutputsOnCacheHit and reusableInPlace:
