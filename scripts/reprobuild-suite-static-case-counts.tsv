@@ -258,6 +258,7 @@ libs/repro_launch_plan/tests/t_codec_smoke.nim	nim	12
 libs/repro_local_store/tests/t_a4_p4_eviction.nim	nim	4
 libs/repro_local_store/tests/t_c3_sandbox_manifest.nim	nim	8
 libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	nim	6
+libs/repro_local_store/tests/t_input_revalidation_is_attributed.nim	nim	6
 libs/repro_local_store/tests/t_m8_multi_output_realize.nim	nim	6
 libs/repro_local_store/tests/t_newest_alias_and_interned_records.nim	nim	15
 libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim	nim	4
