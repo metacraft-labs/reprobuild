@@ -52,42 +52,35 @@
 ## stopped being empty, or a flake that stopped wrapping every binary,
 ## fails here instead of shipping.
 
-import std/[os, strutils, unittest]
+import std/[strutils, unittest]
 
 import repro_dsl_stdlib/packaging
 import ./packaging_test_support
 
-proc flakeWrapperVariables(): seq[string] =
-  ## Extract the ``--set-default NAME`` operands from ``flake.nix``'s
-  ## ``postFixup`` ``wrapProgram`` loop, in source order.
-  let path = repoRootFromTest() & "/flake.nix"
-  doAssert fileExists(path), "flake.nix not found at " & path
-  for line in readFile(path).splitLines():
-    let trimmed = line.strip()
-    if not trimmed.startsWith("--set-default "):
-      continue
-    let rest = trimmed["--set-default ".len .. ^1].strip()
-    var name = ""
-    for ch in rest:
-      if ch == ' ' or ch == '\t': break
-      name.add(ch)
-    if name.len > 0 and name notin result:
-      result.add(name)
+# ``packageNixText`` and ``packageNixWrapperVariables`` come from
+# ``packaging_test_support``. WHERE THE WRAPPER CONTRACT LIVES -- it used
+# to be inline in ``flake.nix``; Distribution-And-Packaging M4 made the
+# nixpkgs-format ``package.nix`` the single definition of the reprobuild
+# derivation and left ``flake.nix`` to ``callPackage`` it, so the
+# ``--set-default`` loop this suite reads moved with it -- is now stated
+# once, there, because this suite was never the only reader and the last
+# move repointed some readers and not others. The file name in this
+# suite's own name is historical; the guarantee is not.
 
-suite "packaging: the §5 wrapper-var list tracks flake.nix":
+suite "packaging: the §5 wrapper-var list tracks the reprobuild derivation":
 
-  test "flake.nix still has a recognisable wrapProgram contract":
+  test "package.nix still has a recognisable wrapProgram contract":
     # The extractor is a text scan, so its most likely failure is
     # matching nothing after an unrelated reformat — which would make
     # every case below pass vacuously.
-    let names = flakeWrapperVariables()
+    let names = packageNixWrapperVariables()
     check names.len >= 15
     check "REPROBUILD_SOURCE_ROOT" in names
     check "CLINGO_PREFIX" in names
 
   test "the layer's list is exactly the flake's list, in the same order":
-    check ReprobuildWrapperVariables.len == flakeWrapperVariables().len
-    check @ReprobuildWrapperVariables == flakeWrapperVariables()
+    check ReprobuildWrapperVariables.len == packageNixWrapperVariables().len
+    check @ReprobuildWrapperVariables == packageNixWrapperVariables()
 
   test "the dlopen-by-leaf-name set is the one §5 names":
     # §5: "blake3, xxHash, sqlite, openssl, zstd, clingo — the last two
@@ -173,14 +166,14 @@ proc flakeText(): string =
   readFile(repoRootFromTest() & "/flake.nix")
 
 proc flakeWrapsEveryInstalledBinary(): bool =
-  ## Whether ``flake.nix``'s ``postFixup`` wraps a GLOB of installed
+  ## Whether the derivation's ``postFixup`` wraps a GLOB of installed
   ## binaries rather than one named entry point.
   ##
   ## This is the fact that makes the Nix cache server carry the CLI's
   ## variables: ``reproBinaryCache`` overrides only ``pname`` and
   ## ``meta``, so it inherits this loop, and ``repro-binary-cache`` is
   ## one of the ``$out/bin`` entries the loop walks.
-  flakeText().contains("for b in \"$out\"/bin/*")
+  packageNixText().contains("for b in \"$out\"/bin/*")
 
 proc flakeCacheIsAnOverrideOfReprobuild(): bool =
   ## Whether the cache package is derived from the CLI package rather
@@ -204,16 +197,24 @@ proc flakeCacheOverridesPostFixup(): bool =
 suite "packaging: the drift guard has a PER-BINARY dimension":
 
   test "the flake wraps every installed binary, from ONE inherited postFixup":
-    # The three facts the divergence rests on, read out of the file
+    # The three facts the divergence rests on, read out of the files
     # rather than assumed. Each is separately capable of changing.
+    #
+    # Note the two files: the wrapping loop lives in the derivation
+    # (``package.nix``), while ``reproBinaryCache`` -- the override that
+    # INHERITS that loop -- is a flake-only package and lives in
+    # ``flake.nix``. Reading each fact out of the file that states it is
+    # what stops the pair from being checked against a single file that
+    # happens to mention both.
     check flakeWrapsEveryInstalledBinary()
     check flakeCacheIsAnOverrideOfReprobuild()
     check not flakeCacheOverridesPostFixup()
-    # Non-vacuity: the extractors must be looking at a file that has a
-    # postFixup and a wrapProgram in it at all, or all three could pass
-    # by matching nothing.
-    check flakeText().contains("postFixup")
-    check flakeText().contains("wrapProgram")
+    # Non-vacuity: the extractors must be looking at files that have a
+    # postFixup, a wrapProgram and an overrideAttrs in them at all, or
+    # all three could pass by matching nothing.
+    check packageNixText().contains("postFixup")
+    check packageNixText().contains("wrapProgram")
+    check flakeText().contains("overrideAttrs")
 
   test "each ROLE is compared to the flake, and the cache role DISAGREES":
     # The property N17 asked for. Stated per role, so that a change to
@@ -226,7 +227,7 @@ suite "packaging: the drift guard has a PER-BINARY dimension":
     # the two roles can be read side by side.
     var cliNames: seq[string] = @[]
     for (name, _) in reprobuildWrapperValues(cli): cliNames.add(name)
-    check cliNames == flakeWrapperVariables()
+    check cliNames == packageNixWrapperVariables()
 
     # THE CACHE ROLE: empty, DELIBERATELY, against a flake that gives
     # the same binary every one of these variables. The divergence is
@@ -236,7 +237,7 @@ suite "packaging: the drift guard has a PER-BINARY dimension":
     for (name, _) in reprobuildWrapperValues(cache): cacheNames.add(name)
     check cacheNames.len == 0
     check flakeWrapsEveryInstalledBinary()
-    check flakeWrapperVariables().len > 0
+    check packageNixWrapperVariables().len > 0
 
     # AND THE ESCAPE HATCH IS CLOSED. If the cache role ever becomes
     # non-empty, this case fails rather than silently leaving that list
@@ -245,7 +246,7 @@ suite "packaging: the drift guard has a PER-BINARY dimension":
     # nothing at all. Whoever makes it non-empty has to decide here
     # whether the flake must gain the same names.
     if cacheNames.len > 0:
-      doAssert cacheNames == flakeWrapperVariables(),
+      doAssert cacheNames == packageNixWrapperVariables(),
         "reprobuildCacheWrapperValues is no longer empty, so the cache " &
         "role now has names that can drift from flake.nix; either make " &
         "the flake wrap that binary with the same list or record here " &
@@ -270,7 +271,8 @@ suite "packaging: the drift guard has a PER-BINARY dimension":
     # is a separate assertion rather than a consequence of the
     # comparison above.
     check "CT_INTERPOSE_SRC" notin ReprobuildWrapperVariables
-    check "CT_INTERPOSE_SRC" notin flakeWrapperVariables()
+    check "CT_INTERPOSE_SRC" notin packageNixWrapperVariables()
+    check not packageNixText().contains("CT_INTERPOSE_SRC")
     # M1's N19 finished the job: the flake no longer SETS it either, in
     # the dev shell, in the lint hook or in the package environment.
     #

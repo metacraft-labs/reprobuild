@@ -330,7 +330,8 @@
     # nim-unwrapped-2.2.4. It carries a compiler effect-inference fix (so
     # `std/streams`/`std/json` compile under `--mm:orc -d:useNimRtl`, which stock
     # 2.2.x rejects) plus CodeTracer's column-aware tracer. Built koch-boot-free
-    # by nix/nim-fork.nix. The fork uses the ``git+https`` clone form (its
+    # by nix/pkgs/by-name/re/reprobuild/nim-fork.nix. The fork uses the
+    # ``git+https`` clone form (its
     # codeload tarball 404s, same as codetracer-native-recorder above); the
     # compiler itself imports the three vendored deps below (trace/stew/results).
     #
@@ -458,6 +459,61 @@
         "aarch64-darwin"
       ];
 
+      # ── Distribution-And-Packaging M4 (§9): module exports ──────────────────
+      #
+      # The NixOS / nix-darwin / home-manager modules that configure reprobuild
+      # are DEFINED here, in `nix/modules/`, and exported from this flake. They
+      # used to live only in `metacraft-labs/nixos-modules`
+      # (`modules/mcl-reprobuild`, `modules/mcl-repro-binary-cache`), which meant
+      # an external Nix user could get the PACKAGE from this flake but had to
+      # take a dependency on our org's module repo to get the SERVICES.
+      #
+      # nixos-modules now re-exports these; it holds no copy of the option
+      # schema, the caches.conf renderer, or the unit wiring. That direction —
+      # reprobuild owns, nixos-modules re-exports — is what keeps the two from
+      # drifting, and it is the direction the input graph already allows:
+      # nixos-modules pins `reprobuild`, so reprobuild must not need
+      # nixos-modules for its modules. (It keeps a `nixos-modules` input for
+      # `nixpkgs.follows` only, which is a lock-time pin and not an import.)
+      #
+      # `inputs.self.packages.<system>` is the module's default package. This is
+      # a self-reference through the flake's own outputs, which is lazy and fine
+      # so long as nothing inside `perSystem` forces `flake.*` — see the note in
+      # nix/modules/reprobuild.nix about the perSystem->flake->perSystem cycle.
+      flake =
+        let
+          reprobuildModules = import ./nix/modules/reprobuild.nix {
+            defaultPackageFor = system: inputs.self.packages.${system}.reprobuild;
+          };
+          reproBinaryCacheModule = import ./nix/modules/repro-binary-cache.nix {
+            defaultPackageFor = system: inputs.self.packages.${system}.repro-binary-cache;
+          };
+        in
+        {
+          nixosModules = {
+            reprobuild = reprobuildModules.nixos;
+            repro-binary-cache = reproBinaryCacheModule;
+            # Opt-in compatibility with the historical `programs.reprobuild`
+            # option path. External consumers never need it; the metacraft-labs
+            # fleet imports it alongside the canonical module so already-deployed
+            # `programs.reprobuild.* = …` configuration keeps evaluating.
+            reprobuild-legacy-option-names = reprobuildModules.legacyOptionNames;
+            default = reprobuildModules.nixos;
+          };
+
+          darwinModules = {
+            reprobuild = reprobuildModules.darwin;
+            reprobuild-legacy-option-names = reprobuildModules.legacyOptionNames;
+            default = reprobuildModules.darwin;
+          };
+
+          homeManagerModules = {
+            reprobuild = reprobuildModules.homeManager;
+            reprobuild-legacy-option-names = reprobuildModules.legacyOptionNames;
+            default = reprobuildModules.homeManager;
+          };
+        };
+
       perSystem =
         { pkgs, system, ... }:
         let
@@ -472,19 +528,24 @@
             builtins.elemAt (builtins.head versionMatches) 0;
           # libblake3 has split `out`/`dev` outputs (dev has include/blake3.h,
           # out has lib/libblake3.so). config.nims's prefix-lookup expects a
-          # single tree containing both, so join them with symlinkJoin.
-          blake3Prefix = pkgs.symlinkJoin {
-            name = "libblake3-prefix";
-            paths = [
-              pkgs.libblake3.dev
-              pkgs.libblake3.out
-            ];
-          };
+          # single tree containing both, so they are joined with symlinkJoin —
+          # ONCE, in the package derivation, and read back here through
+          # `passthru`. The dev shell, the pre-commit hooks and the packaged
+          # runtime-compile check all need the same prefix the package was built
+          # against, and a second symlinkJoin spelled out here is exactly how
+          # they would come to differ.
+          blake3Prefix = reprobuild.blake3Prefix;
           # The reprobuild Nim toolchain: the metacraft-labs/nim fork (Nim 2.3.1
-          # devel), built from source (nix/nim-fork.nix). Used everywhere the
-          # flake previously used `pkgs.nim2` (nixpkgs nim-unwrapped-2.2.4).
-          nimFork = import ./nix/nim-fork.nix {
-            inherit pkgs;
+          # devel), built from source. Used everywhere the flake previously used
+          # `pkgs.nim2` (nixpkgs nim-unwrapped-2.2.4).
+          #
+          # The derivation lives in the NIXPKGS-FORMAT package directory and is
+          # `callPackage`d from here with this flake's source inputs overriding
+          # its `fetchFromGitHub` defaults. One derivation serves both entry
+          # points: `nix build .#nim-fork` here, and the nixpkgs fork's
+          # `pkgs/by-name/re/reprobuild/nim-fork.nix` there. There is no second
+          # copy of the bootstrap to drift against.
+          nimFork = pkgs.callPackage ./nix/pkgs/by-name/re/reprobuild/nim-fork.nix {
             forkSrc = nim-fork-src;
             csourcesSrc = nim-csources-src;
             traceFormatSrc = ct-trace-format-src;
@@ -494,18 +555,14 @@
             nimonySrc = nim-nimony-src;
           };
           # CodeTracer's top-level ct entry point imports the span-stream
-          # writer. Fail during Nix evaluation if a future pin regression
-          # silently points at a pre-span trace-format tree; otherwise the
-          # first symptom is a slow, opaque native compile failure.
-          codeTracerTraceFormatNimSrc =
-            let
-              sourceRoot = "${ct-trace-format-src}/src";
-              requiredModule = "${sourceRoot}/codetracer_trace_writer/span_stream.nim";
-            in
-            if builtins.pathExists requiredModule then
-              sourceRoot
-            else
-              throw "ct-trace-format-src must contain ${requiredModule}";
+          # writer, and the derivation fails Nix EVALUATION if a future pin
+          # regression silently points at a pre-span trace-format tree
+          # (otherwise the first symptom is a slow, opaque native compile
+          # failure). The guard and the `/src` suffix are stated ONCE, in
+          # package.nix, and read back here through `passthru` so the dev shell
+          # and the packaged-runtime-compile table cannot end up pointing at a
+          # different tree than the package was built against.
+          codeTracerTraceFormatNimSrc = reprobuild.codeTracerTraceFormatNimSrc;
           # The RunQuota daemon (and CLI), built from the ``runquota-src``
           # input — the same source the reprobuild client compiles against
           # (``RUNQUOTA_SRC``). Putting this on the dev-shell PATH means the
@@ -756,240 +813,65 @@
             };
           };
           reprobuildSource = ./.;
-          runtimeLibraries = [
-            blake3Prefix
-            pkgs.xxHash
-            pkgs.sqlite.out
-            pkgs.openssl.out
-            pkgs.zstd.out
-            pkgs.clingo
-          ];
-          runtimeLibraryPath = pkgs.lib.makeLibraryPath runtimeLibraries;
-          reprobuild = pkgs.stdenv.mkDerivation {
-            pname = "reprobuild";
-            inherit version;
-            src = reprobuildSource;
-
-            strictDeps = true;
-            dontConfigure = true;
-
-            nativeBuildInputs = [
-              pkgs.just
-              pkgs.makeWrapper
-              nimFork
-              # Spec-Implementation M2a: clingo is the ASP solver
-              # reprobuild's repro_solver lib binds against. The CLI
-              # tool is used by smoke tests and the C library
-              # (libclingo.so + <clingo/clingo.h>) is what the Nim
-              # bindings dlopen at runtime. Adding it to
-              # nativeBuildInputs makes the headers visible during
-              # `just build`; the buildInputs entry below pulls the
-              # shared library into the runtime closure.
-              pkgs.clingo
-            ]
-            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-              # Rewrites Mach-O install IDs and internal dependency paths
-              # before postFixup adds the complete package LC_RPATH set. The
-              # signing hook is a postFixupHooks entry: stdenv runs the
-              # derivation's postFixup body first, so it signs only after our
-              # per-slice mutation and universal-image reassembly.
-              pkgs.fixDarwinDylibNames
-              pkgs.darwin.autoSignDarwinBinariesHook
-              pkgs.coreutils
-              pkgs.file
-            ];
-
-            buildInputs = [
-              pkgs.libblake3
-              pkgs.sqlite
-              pkgs.xxHash
-              pkgs.clingo
-              # repro-harvest-apt is compiled with --define:ssl (it walks
-              # snapshot.debian.org's HTTPS InRelease signature chain), so
-              # Nim's std/net openssl backend link step needs -lssl -lcrypto.
-              # macOS resolves these from the system SDK, but the Linux nix
-              # sandbox has no system openssl — pull it into the closure here.
-              pkgs.openssl
-            ];
-
-            BLAKE3_PREFIX = blake3Prefix;
-            NIMCRYPTO_SRC = nimcrypto-src;
-            BEARSSL_SRC = bearssl-src;
-            STACKABLE_HOOKS_SRC = "${nim-stackable-hooks-src}/src";
-            CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;
-            IO_MON_SRC = "${io-mon-src}/src";
-            SHM_GSET_SRC = "${nim-shm-gset-src}/src";
-            SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
-            # Tier 3 of ``config.nims``'s incremental-test-seam resolution, and
-            # the tier this build has always needed. It runs in a pure sandbox
-            # with no ``../codetracer`` in reach, so before this variable
-            # existed the packaged build was the one build that compiled the
-            # standalone copy in ``reprobuild-ct-test-runner`` instead of the
-            # file CodeTracer actually owns — silently, and only because of
-            # where the sandbox happens to sit.
-            #
-            # NOT ``CODETRACER_SRC``: that name belongs to the user override,
-            # and seeding it here would also mean seeding it in the dev shell
-            # for consistency, which is precisely what takes the sibling
-            # checkout out of play. See the note on the ``codetracer-src``
-            # input.
-            CODETRACER_PINNED_SRC = "${codetracer-src}/src";
-            REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
-            REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
-            REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
-            RUNQUOTA_SRC = runquota-src;
-            SQLITE_PREFIX = pkgs.sqlite.out;
-            XXHASH_PREFIX = pkgs.xxHash;
-
-            buildPhase = ''
-              runHook preBuild
-              just build
-              runHook postBuild
-            '';
-
-            installPhase = ''
-              runHook preInstall
-              mkdir -p "$out/bin" "$out/lib" \
-                "$out/share/reprobuild/nim-macro-sourcemaps/bin" \
-                "$out/share/reprobuild/nim-macro-sourcemaps/lib"
-              for bin in build/bin/*; do
-                case "$bin" in
-                  *.json)
-                    # Nim emits macro source maps next to compiled binaries.
-                    # Keep them as package data, outside the public entry-point
-                    # directory audited for executable runtime roles.
-                    install -m644 "$bin" \
-                      "$out/share/reprobuild/nim-macro-sourcemaps/bin/$(basename "$bin")"
-                    ;;
-                  *)
-                    install -m755 "$bin" "$out/bin/$(basename "$bin")"
-                    ;;
-                esac
-              done
-              for lib in build/lib/*; do
-                [ -e "$lib" ] || continue
-                case "$lib" in
-                  *.json)
-                    install -m644 "$lib" \
-                      "$out/share/reprobuild/nim-macro-sourcemaps/lib/$(basename "$lib")"
-                    ;;
-                  *)
-                    install -m755 "$lib" "$out/lib/$(basename "$lib")"
-                    ;;
-                esac
-              done
-
-              # `reprobuild-nix-daemon` is the helper that `tool-provisioning=nix`
-              # resolutions talk to. It used to be reachable only through
-              # $REPROBUILD_SOURCE_ROOT/tools, i.e. an unpatched source checkout,
-              # so its `#!/usr/bin/env python3` picked up whatever interpreter
-              # happened to be on PATH. Under launchd's default environment that
-              # is macOS's system python3 (3.9), which cannot parse the script's
-              # PEP 604 `X | None` annotations — the child died instantly and its
-              # stderr went to an unread pipe, surfacing only as the opaque
-              # "Failed to connect or spawn reprobuild-nix-daemon".
-              #
-              # Installing it here pins an absolute, known-good interpreter so
-              # the helper no longer depends on the ambient PATH. libexec (not
-              # bin) keeps it out of the wrapProgram loop below, which is for
-              # CLI entry points.
-              #
-              # The interpreter is substituted explicitly rather than via
-              # patchShebangs: bare patchShebangs resolves against HOST_PATH,
-              # whereas a nativeBuildInputs python3 lands on the build PATH, so
-              # it silently left `env python3` in place. --replace-fail also
-              # turns a future upstream shebang change into a build error
-              # instead of silently restoring the ambient-PATH behaviour.
-              mkdir -p "$out/libexec"
-              install -m755 tools/reprobuild-nix-daemon/reprobuild-nix-daemon \
-                "$out/libexec/reprobuild-nix-daemon"
-              substituteInPlace "$out/libexec/reprobuild-nix-daemon" \
-                --replace-fail '#!/usr/bin/env python3' \
-                  '#!${pkgs.python3}/bin/python3'
-              runHook postInstall
-            '';
-
-            # Installed entry points span ordinary linked libraries and bare
-            # leaf-name dlopen()s (notably zstd and clingo). Normal fixup only
-            # retains paths visible from link dependencies, so restore the full
-            # runtime family for every installed ELF/Mach-O role. Linux uses a
-            # transitive DT_RPATH; Darwin needs one LC_RPATH load command per
-            # directory and valid install IDs for every installed dylib.
-            postFixup = ''
-              ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-                for b in "$out"/bin/* "$out"/lib/*; do
-                  if orig=$(${pkgs.patchelf}/bin/patchelf --print-rpath "$b" 2>/dev/null); then
-                    ${pkgs.patchelf}/bin/patchelf --force-rpath \
-                      --set-rpath "$orig''${orig:+:}${runtimeLibraryPath}" "$b"
-                  fi
-                done
-              ''}
-
-              ${pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
-                # fixDarwinDylibNames is a fixupOutputHook and has already run.
-                # Copy thin images or extract universal slices, mutate each
-                # architecture independently, then reassemble universal images.
-                # autoSignDarwinBinariesHook is registered in
-                # postFixupHooks, which stdenv invokes after this implicit
-                # postFixup body, so arm64/arm64e signatures cover final bytes.
-                FILE=${pkgs.file}/bin/file \
-                STAT=${pkgs.coreutils}/bin/stat \
-                CP=${pkgs.coreutils}/bin/cp \
-                MV=${pkgs.coreutils}/bin/mv \
-                ${pkgs.bash}/bin/bash ${./scripts/fixup_macho_runtime.sh} "$out" \
-                  ${pkgs.lib.concatStringsSep " " (map (library: "${library}/lib") runtimeLibraries)}
-              ''}
-
-              # Provider/interface compilation happens after installation, in
-              # the caller's project. Keep the package's exact source inputs in
-              # its runtime closure and expose them as defaults to every entry
-              # point. `--set-default` preserves explicit development/source
-              # overrides while making an ordinary installed package
-              # independent of sibling checkouts and the build-time dev shell.
-              # REPROBUILD_RUNTIME_LIBRARY_PATH is compiler input, not a loader
-              # variable: generated interface/provider binaries bake these dirs
-              # into their own RPATH. In particular, do not inject LD_LIBRARY_PATH
-              # or DYLD_* into wrappers because arbitrary user build actions
-              # inherit the wrapper environment.
-              for b in "$out"/bin/*; do
-                test -x "$b" || continue
-                wrapProgram "$b" \
-                  --set-default REPROBUILD_RUNTIME_LIBRARY_PATH ${runtimeLibraryPath} \
-                  --set-default REPROBUILD_SOURCE_ROOT ${reprobuildSource} \
-                  --set-default BLAKE3_PREFIX ${blake3Prefix} \
-                  --set-default NIMCRYPTO_SRC ${nimcrypto-src} \
-                  --set-default BEARSSL_SRC ${bearssl-src} \
-                  --set-default STACKABLE_HOOKS_SRC ${nim-stackable-hooks-src}/src \
-                  --set-default CODETRACER_TRACE_FORMAT_NIM_SRC ${codeTracerTraceFormatNimSrc} \
-                  --set-default IO_MON_SRC ${io-mon-src}/src \
-                  --set-default SHM_GSET_SRC ${nim-shm-gset-src}/src \
-                  --set-default SHM_QUEUE_SRC ${nim-shm-queue-src}/src \
-                  --set-default CODETRACER_PINNED_SRC ${codetracer-src}/src \
-                  --set-default REPRO_CT_TEST_RUNNER_SRC ${reprobuild-ct-test-runner-src} \
-                  --set-default REPRO_TEST_ADAPTERS_SRC ${reprobuild-test-adapters-src}/src \
-                  --set-default REPROBUILD_USE_SYSTEM_HASH_LIBS 1 \
-                  --set-default REPROBUILD_NIX_DAEMON_BIN "$out/libexec/reprobuild-nix-daemon" \
-                  --set-default RUNQUOTA_SRC ${runquota-src} \
-                  --set-default SQLITE_PREFIX ${pkgs.sqlite.out} \
-                  --set-default XXHASH_PREFIX ${pkgs.xxHash} \
-                  --set-default CLINGO_PREFIX ${pkgs.clingo} \
-                  --set-default REPRO_NIM_COMPILER ${nimFork}/bin/nim
-              done
-            '';
-
-            meta = {
-              description = "Reprobuild build system";
-              homepage = "https://github.com/metacraft-labs/reprobuild";
-              license = pkgs.lib.licenses.mit;
-              mainProgram = "repro";
-              platforms = [
-                "x86_64-linux"
-                "aarch64-linux"
-                "x86_64-darwin"
-                "aarch64-darwin"
-              ];
-            };
-          };
+          # ── The reprobuild package ────────────────────────────────────────
+          #
+          # The derivation is DEFINED ONCE, in nixpkgs `pkgs/by-name/` form at
+          # nix/pkgs/by-name/re/reprobuild/package.nix, and `callPackage`d here
+          # with this flake's inputs overriding its `fetchFromGitHub` defaults.
+          # That is what makes `--override-input io-mon-src path:../io-mon` (and
+          # the `.envrc` sibling auto-overrides) still work while the very same
+          # file, copied verbatim into metacraft-labs/nixpkgs, builds with no
+          # flake plumbing at all.
+          #
+          # It replaced a hand-maintained second copy of this derivation that
+          # sat alongside the flake's. The copies HAD drifted: the nixpkgs one
+          # was still on version 0.1.0, used `nim2` instead of the fork, pinned
+          # `rev = "main"` (a retired branch — and a moving ref inside a
+          # fixed-output fetch), and named three of the thirteen source inputs
+          # the build actually needs. Two derivations for one package do not
+          # stay in step; one derivation with overridable source arguments does,
+          # by construction.
+          #
+          # `version` is parsed from reprobuild.nimble here and passed in.
+          # package.nix cannot parse it itself — reading `${src}/…` would be
+          # import-from-derivation, which nixpkgs forbids — so it carries a
+          # literal default, and `checks.nixpkgs-package-version-sync` fails if
+          # that literal and the manifest disagree.
+          #
+          # `xxhash` is passed explicitly because nixpkgs renamed the attribute:
+          # this flake's nixpkgs pin still spells it `xxHash`, while current
+          # nixpkgs (and the fork) spell it `xxhash`. package.nix names the
+          # current spelling, as an upstream submission must.
+          reprobuild =
+            (pkgs.callPackage ./nix/pkgs/by-name/re/reprobuild/package.nix {
+              inherit nimFork;
+              xxhash = pkgs.xxHash;
+              nimcryptoSrc = nimcrypto-src;
+              bearsslSrc = bearssl-src;
+              stackableHooksSrc = nim-stackable-hooks-src;
+              ctTraceFormatSrc = ct-trace-format-src;
+              ioMonSrc = io-mon-src;
+              shmGsetSrc = nim-shm-gset-src;
+              shmQueueSrc = nim-shm-queue-src;
+              codetracerSrc = codetracer-src;
+              ctTestRunnerSrc = reprobuild-ct-test-runner-src;
+              testAdaptersSrc = reprobuild-test-adapters-src;
+              runquotaSrc = runquota-src;
+            }).overrideAttrs
+              (_: {
+                # `src` and `version` go through overrideAttrs, not through
+                # callPackage arguments: callPackage fills an argument from the
+                # package set whenever the set has that name, and nixpkgs has a
+                # `src` attribute, so a `src ? …` argument is unusable. See the
+                # note at the top of package.nix.
+                inherit version;
+                src = reprobuildSource;
+              });
+          # Read back from the package so the dev shell, the pre-commit hooks
+          # and the packaged runtime-compile check all use the same library set
+          # the package itself was fixed up against.
+          runtimeLibraries = reprobuild.runtimeLibraries;
+          runtimeLibraryPath = reprobuild.runtimeLibraryPath;
           reprobuildClosure = pkgs.closureInfo {
             rootPaths = [ reprobuild ];
           };
@@ -1407,6 +1289,42 @@
           checks = {
             inherit pre-commit-check;
             package-build = reprobuild;
+            # The nixpkgs-format package cannot parse reprobuild.nimble for its
+            # own version -- reading `${src}/reprobuild.nimble` at eval time is
+            # import-from-derivation, which nixpkgs forbids -- so it carries a
+            # literal default and this check is what keeps the literal honest.
+            # Without it the fork would happily ship a `reprobuild-0.1.0`
+            # derivation built from 0.1.3 sources.
+            #
+            # The grep is COUNTED, not merely run: a `version ? "..."` line that
+            # stops matching (renamed argument, reformatted file) makes the
+            # count 0 and fails here, rather than passing vacuously on an empty
+            # match the way a bare `grep | sed` pipeline would.
+            nixpkgs-package-version-sync =
+              pkgs.runCommand "reprobuild-nixpkgs-package-version-sync"
+                {
+                  packageNix = ./nix/pkgs/by-name/re/reprobuild/package.nix;
+                  nimbleVersion = version;
+                }
+                ''
+                  set -eu
+                  matches=$(grep -c '^  version = "' "$packageNix" || true)
+                  if [ "$matches" != 1 ]; then
+                    echo "package.nix: expected exactly 1 version-default line, found $matches"
+                    exit 1
+                  fi
+                  literal=$(sed -n 's/^  version = "\(.*\)";$/\1/p' "$packageNix")
+                  if [ -z "$literal" ]; then
+                    echo "package.nix: could not extract the version literal"
+                    exit 1
+                  fi
+                  if [ "$literal" != "$nimbleVersion" ]; then
+                    echo "package.nix version literal ($literal) != reprobuild.nimble version ($nimbleVersion)"
+                    exit 1
+                  fi
+                  echo "package.nix and reprobuild.nimble agree on version $literal"
+                  mkdir -p "$out"
+                '';
             packaged-runtime-compile = packagedRuntimeCompileCheck;
             repo-requirements =
               pkgs.runCommand "reprobuild-repo-requirements" { nativeBuildInputs = [ pkgs.just ]; }
@@ -1438,8 +1356,9 @@
             # "could not load: libcrypto.so" in the bare dev shell without it.
             #
             # pcre is here for a DIFFERENT reason, and the distinction matters
-            # for anyone tempted to "fix" it in `nix/nim-fork.nix` instead. The
-            # Nim toolchain IS self-contained: `nix/nim-fork.nix` already lists
+            # for anyone tempted to "fix" it in the nim-fork derivation
+            # (`nix/pkgs/by-name/re/reprobuild/nim-fork.nix`) instead. The
+            # Nim toolchain IS self-contained: that derivation already lists
             # pcre in `buildInputs` and patchelfs the pcre lib dir into
             # `bin/nim`'s RUNPATH, and a bare `nim --version` loads
             # `libpcre.so.1` fine. What breaks is monitored execution. The

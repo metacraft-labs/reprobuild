@@ -11,7 +11,7 @@
 ## helper proc prints "Check failed" and the case still reports ``[OK]``
 ## — a silently passing test, which is worse than no test.
 
-import std/[strutils]
+import std/[os, strutils]
 
 import repro_project_dsl
 import repro_dsl_stdlib/packaging
@@ -141,3 +141,67 @@ proc repoRootFromTest*(): string =
       "cannot derive the repository root from " & currentSourcePath()
     dir = dir[0 ..< cut]
   dir
+
+# ---------------------------------------------------------------------------
+# The reprobuild derivation, read as text -- ONCE, for every suite.
+# ---------------------------------------------------------------------------
+#
+# The ``--set-default`` wrapper contract used to live inline in
+# ``flake.nix``, and three readers transcribed that path separately:
+# ``t_packaging_wrapper_vars_match_flake``, ``t_packaging_reprobuild_dist``
+# and ``scripts/check_repo_requirements.sh``. Distribution-And-Packaging
+# M4 moved the contract into the nixpkgs-format derivation and repointed
+# two of the three. The third went on reading ``flake.nix``, found two
+# comments where twenty operands used to be, and went red on a contract
+# that had not changed at all.
+#
+# The shell gate keeps its own copy because it is a different language.
+# The two Nim suites do not, and no longer do: the path is a constant
+# here and the extractor is a proc here, so the next move is one edit
+# rather than a scavenger hunt with a red test at the end of it.
+
+const PackageNixPath* = "/nix/pkgs/by-name/re/reprobuild/package.nix"
+  ## Where the reprobuild derivation lives, relative to the repository
+  ## root. If it moves again, it moves HERE, once.
+
+proc packageNixText*(): string =
+  ## The text of the reprobuild derivation.
+  let path = repoRootFromTest() & PackageNixPath
+  doAssert fileExists(path),
+    "the reprobuild derivation is not at " & path &
+    "; if it moved, change PackageNixPath in packaging_test_support " &
+    "rather than in each suite that reads it"
+  result = readFile(path)
+  doAssert result.len > 0,
+    "the reprobuild derivation at " & path & " is empty"
+
+proc packageNixWrapperVariables*(): seq[string] =
+  ## The ``--set-default NAME`` operands of the derivation's
+  ## ``postFixup`` ``wrapProgram`` loop, in source order, without
+  ## repeats.
+  ##
+  ## NON-VACUITY IS THE EXTRACTOR'S OWN POST-CONDITION, deliberately,
+  ## rather than something each caller remembers to guard. This is a text
+  ## scan, so the failure it is likeliest to have is matching NOTHING --
+  ## the loop moved again, or an unrelated reformat broke the shape --
+  ## and every caller either iterates the result or compares its length,
+  ## so every caller would pass over an empty seq exactly as quietly as
+  ## over a correct one. That is the false green the guard exists to make
+  ## impossible, and stating it here is what extends it to the reader
+  ## that has not been written yet.
+  for line in packageNixText().splitLines():
+    let trimmed = line.strip()
+    if not trimmed.startsWith("--set-default "):
+      continue
+    let rest = trimmed["--set-default ".len .. ^1].strip()
+    var name = ""
+    for ch in rest:
+      if ch == ' ' or ch == '\t': break
+      name.add(ch)
+    if name.len > 0 and name notin result:
+      result.add(name)
+  doAssert result.len > 0,
+    "no '--set-default NAME' operand was found in " &
+    repoRootFromTest() & PackageNixPath &
+    "; the wrapper contract has moved or been reformatted, and every " &
+    "suite that reads it would otherwise pass over an empty list"

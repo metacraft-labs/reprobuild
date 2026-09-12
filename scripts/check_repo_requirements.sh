@@ -70,6 +70,16 @@ require_file .github/workflows/ci.yml
 require_file .github/workflows/benchmark.yml
 
 require_contains .envrc "use flake"
+# Distribution-And-Packaging M4 moved the reprobuild DERIVATION out of
+# flake.nix and into nixpkgs `pkgs/by-name/` form; flake.nix now callPackages
+# it. Every requirement below that is about the derivation (its `env`, its
+# install phase, its wrapProgram loop) therefore names this file, while the
+# requirements about the dev shell, the inputs and the packaged-runtime-compile
+# table still name flake.nix. Keeping each requirement on the file that states
+# the fact is what stops it being satisfied by an unrelated mention elsewhere.
+package_nix=nix/pkgs/by-name/re/reprobuild/package.nix
+require_file "${package_nix}"
+
 require_contains flake.nix 'nixos-modules.url = "github:metacraft-labs/nixos-modules"'
 require_contains flake.nix 'nixpkgs.follows = "nixos-modules/nixpkgs-unstable"'
 require_contains flake.nix 'flake-parts.follows = "nixos-modules/flake-parts"'
@@ -109,10 +119,15 @@ require_contains flake.nix "github:metacraft-labs/codetracer-trace-format-nim/${
 # different trace-format rev the count would fall back to 2 and this line would
 # fail, which is the disagreement it exists to catch.
 require_count flake.lock "\"rev\": \"${trace_format_rev}\"" 4
-require_contains flake.nix 'requiredModule = "${sourceRoot}/codetracer_trace_writer/span_stream.nim";'
+require_contains "${package_nix}" 'requiredModule = "${sourceRoot}/codetracer_trace_writer/span_stream.nim";'
+# ONE definition of the guarded source root, in the derivation, read back by
+# the flake through passthru -- so the dev shell and the packaged-runtime
+# table cannot point at a different tree than the package was built against.
+require_count flake.nix 'codeTracerTraceFormatNimSrc = reprobuild.codeTracerTraceFormatNimSrc;' 1
 require_count flake.nix 'export CODETRACER_TRACE_FORMAT_NIM_SRC=${codeTracerTraceFormatNimSrc}' 1
-require_count flake.nix 'CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;' 2
-require_count flake.nix '--set-default CODETRACER_TRACE_FORMAT_NIM_SRC ${codeTracerTraceFormatNimSrc} \' 1
+require_count "${package_nix}" 'CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;' 1
+require_count flake.nix 'CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;' 1
+require_count "${package_nix}" '--set-default CODETRACER_TRACE_FORMAT_NIM_SRC ${codeTracerTraceFormatNimSrc} \' 1
 require_count flake.nix 'CODETRACER_TRACE_FORMAT_NIM_SRC|${codeTracerTraceFormatNimSrc}' 1
 require_count flake.nix '                                      ${ct-trace-format-src} \' 1
 require_contains tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim \
@@ -140,9 +155,19 @@ require_count flake.nix 'export CODETRACER_SRC=' 0
 require_count flake.nix 'CODETRACER_SRC = "' 0
 require_count flake.nix '--set-default CODETRACER_SRC ' 0
 require_count flake.nix 'CODETRACER_SRC|' 0
+# The same four negatives against the derivation, which is where the package
+# environment and the wrapper now live -- the file a leak would have to appear
+# in for it to reach an installed package at all.
+require_count "${package_nix}" 'export CODETRACER_SRC=' 0
+require_count "${package_nix}" 'CODETRACER_SRC = "' 0
+require_count "${package_nix}" '--set-default CODETRACER_SRC ' 0
+require_count "${package_nix}" 'CODETRACER_SRC|' 0
 require_count flake.nix 'export CODETRACER_PINNED_SRC=${codetracer-src}/src' 1
-require_count flake.nix 'CODETRACER_PINNED_SRC = "${codetracer-src}/src";' 2
-require_count flake.nix '--set-default CODETRACER_PINNED_SRC ${codetracer-src}/src \' 1
+require_count flake.nix 'CODETRACER_PINNED_SRC = "${codetracer-src}/src";' 1
+# In the derivation the flake input is an ARGUMENT (`codetracerSrc`), because a
+# nixpkgs consumer has no flake inputs; the spelling differs, the pin does not.
+require_count "${package_nix}" 'CODETRACER_PINNED_SRC = "${codetracerSrc}/src";' 1
+require_count "${package_nix}" '--set-default CODETRACER_PINNED_SRC ${codetracerSrc}/src \' 1
 require_count flake.nix 'CODETRACER_PINNED_SRC|${codetracer-src}/src' 1
 require_count flake.nix '                                      ${codetracer-src} \' 1
 require_contains config.nims 'getEnv("CODETRACER_SRC")'
@@ -151,9 +176,9 @@ require_contains config.nims 'getEnv("CODETRACER_PINNED_SRC")'
 # Compiler macro source maps are package data. If they regain executable mode
 # or enter the wrapper loop, the Darwin runtime audit sees a hidden non-Mach-O
 # "entry point" and the packaged-runtime gate cannot reach its compile checks.
-require_count flake.nix 'nim-macro-sourcemaps/' 4
-require_count flake.nix 'install -m644' 2
-require_count flake.nix 'test -x "$b" || continue' 1
+require_count "${package_nix}" 'nim-macro-sourcemaps/' 4
+require_count "${package_nix}" 'install -m644' 2
+require_count "${package_nix}" 'test -x "$b" || continue' 1
 require_contains flake.nix 'unexpected non-executable bin artifact: $wrapper'
 require_count flake.nix 'CODESIGN=/usr/bin/codesign \' 1
 require_count flake.nix "loaderStrings=\$(strings \"\$candidate\" | sed -e 's/^@//')" 1
