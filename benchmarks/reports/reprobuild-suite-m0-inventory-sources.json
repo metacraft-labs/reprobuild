@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1544,
+    "nimTestBinaries": 1545,
     "pureUnitConsolidationGroups": 46,
-    "pureUnitTests": 560,
+    "pureUnitTests": 561,
     "staticallyDetectedRuntimeCompilerFlowTests": 95,
-    "testEntries": 1552
+    "testEntries": 1553
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -23,6 +23,25 @@
       "targetOs": "soAny"
     },
     {
+      "count": 6,
+      "defines": [],
+      "dependencyShape": [
+        "repro_build_engine",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "sources": [
+        "libs/repro_build_engine/tests/t_child_cpu_stats_row.nim",
+        "libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim",
+        "libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim",
+        "libs/repro_build_engine/tests/test_dependency_rerun_cache_lookup.nim",
+        "libs/repro_build_engine/tests/test_m9r75_double_write_reject.nim",
+        "libs/repro_build_engine/tests/test_no_progress_diagnostic.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 4,
       "defines": [],
       "dependencyShape": [
@@ -34,24 +53,6 @@
         "libs/repro_build_engine/tests/t_fingerprint_audit_every_action_has_lock_identity.nim",
         "libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim",
         "libs/repro_build_engine/tests/test_m9r75_source_write_reject.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 5,
-      "defines": [],
-      "dependencyShape": [
-        "repro_build_engine",
-        "repro_hash",
-        "repro_local_store"
-      ],
-      "owner": "libs/repro_build_engine",
-      "sources": [
-        "libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim",
-        "libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim",
-        "libs/repro_build_engine/tests/test_dependency_rerun_cache_lookup.nim",
-        "libs/repro_build_engine/tests/test_m9r75_double_write_reject.nim",
-        "libs/repro_build_engine/tests/test_no_progress_diagnostic.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1044,7 +1045,7 @@
       "graph-fixture": 12,
       "integration": 705,
       "platform/destructive": 113,
-      "pure unit": 560,
+      "pure unit": 561,
       "unclassified": 162
     },
     "graphOwnedTestArtifacts": [
@@ -1169,9 +1170,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1544,
+    "nimTestBinaryCount": 1545,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1552
+    "testEntryCount": 1553
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -6149,6 +6150,25 @@
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/t_annotation_perturbs_no_fingerprint.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_child_cpu_stats_row",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_child_cpu_stats_row.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
