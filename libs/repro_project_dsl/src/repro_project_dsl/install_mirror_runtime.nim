@@ -99,6 +99,20 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   ## normalization never depends on the caller's ambient PATH.
   var script = ""
   script.add("if command -v patchelf >/dev/null 2>&1; then ")
+  # A completed source tool can come from the mirror being normalized.
+  # Patch a separate inode, then rename beside the resolved target so running
+  # executables (including patchelf itself) and loader symlinks remain valid.
+  script.add("m9r14f_patch_elf() ( ")
+  script.add("m9r14f_target=$(readlink -f -- \"$1\") || exit; shift; ")
+  script.add("m9r14f_temp=$(mktemp \"$m9r14f_target.repro-patch.XXXXXX\") || exit; ")
+  script.add("trap 'rm -f -- \"$m9r14f_temp\"' 0; ")
+  script.add("trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; ")
+  script.add("cp -p -- \"$m9r14f_target\" \"$m9r14f_temp\" && ")
+  script.add("chmod u+w -- \"$m9r14f_temp\" && ")
+  script.add("patchelf \"$@\" \"$m9r14f_temp\" && ")
+  script.add("chmod --reference=\"$m9r14f_target\" -- \"$m9r14f_temp\" && ")
+  script.add("mv -f -- \"$m9r14f_temp\" \"$m9r14f_target\"; ")
+  script.add("); ")
   # Build the RPATH string. Single-quote ``$ORIGIN`` so the shell does
   # not expand it — ``$ORIGIN`` must reach patchelf verbatim so the
   # dynamic linker interprets it at load time. Use a here-doc-free
@@ -358,7 +372,7 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("for loader in \"" & escapedDstUsr & "/lib\"/ld-*.so* \"")
   script.add(escapedDstUsr & "/lib64\"/ld-*.so*; do ")
   script.add("if [ -f \"$loader\" ]; then ")
-  script.add("patchelf --remove-rpath \"$loader\"; ")
+  script.add("m9r14f_patch_elf \"$loader\" --remove-rpath; ")
   script.add("fi; done; ")
   # Walk lib/ + lib64/ for .so* files (the SONAME-versioned chain).
   # Walk bin/ + sbin/ + libexec/ for executables.
@@ -371,17 +385,17 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   # Runtime loaders reject a DT_RUNPATH on their own ELF. This covers glibc
   # (ld-linux-*.so.*, ld-2.*.so) and musl (ld-musl-*.so.*) conventions.
   script.add("case \"$(basename \"$f\")\" in ld-*.so*) continue;; esac; ")
-  # ``patchelf --set-rpath`` is no-op for non-ELF files (it errors with
-  # ``not an ELF executable``); guard with file-magic check via ``head``
-  # before patching so non-ELF executables (shell scripts, etc.) don't
-  # pollute the log with errors. ``\\177ELF`` is the 4-byte magic.
+  # Skip non-ELF executables before patching. Errors on actual ELFs must fail
+  # the action rather than publishing a partially normalized runtime closure.
   script.add("magic=$(head -c 4 \"$f\" 2>/dev/null | od -An -c | head -1 | tr -d ' '); ")
   script.add("case \"$magic\" in 177ELF*) ")
+  script.add("m9r14f_old_interpreter=; ")
   script.add("if [ -n \"$m9r14f_runtime_loader\" ]; then ")
   script.add("m9r14f_old_interpreter=$(patchelf --print-interpreter \"$f\" 2>/dev/null || true); ")
+  script.add("fi; ")
   script.add("if [ -n \"$m9r14f_old_interpreter\" ]; then ")
-  script.add("patchelf --set-interpreter \"$m9r14f_runtime_loader\" \"$f\"; fi; fi; ")
-  script.add("patchelf --set-rpath \"$rpath\" \"$f\" 2>/dev/null || true; ")
+  script.add("m9r14f_patch_elf \"$f\" --set-interpreter \"$m9r14f_runtime_loader\" --set-rpath \"$rpath\"; ")
+  script.add("else m9r14f_patch_elf \"$f\" --set-rpath \"$rpath\"; fi; ")
   script.add(";; esac; ")
   script.add("done; ")
   script.add("fi; done; ")

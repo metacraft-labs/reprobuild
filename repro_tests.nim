@@ -9351,6 +9351,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_install_mirror_atomic_patching.nim",
+    binary: "build/test-bin/t_install_mirror_atomic_patching",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_installed_engine_read_only_source_tree.nim",
     binary: "build/test-bin/t_installed_engine_read_only_source_tree",
     defines: @[],

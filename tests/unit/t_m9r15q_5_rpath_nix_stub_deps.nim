@@ -101,7 +101,7 @@ suite "DSL-port M9.R.15q.5.1 — RPATH resolution for nix-stub deps":
     # patchelf-availability guard.
     let script = m9r14fEmitRpathPatchScript("/tmp/mirror/usr", @[])
     check script.contains("'$ORIGIN'")
-    check script.contains("patchelf --set-rpath")
+    check script.contains("m9r14f_patch_elf \"$f\" --set-rpath")
     check script.contains("command -v patchelf")
 
   when defined(linux):
