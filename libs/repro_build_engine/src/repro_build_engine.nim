@@ -4382,8 +4382,8 @@ type
       ## declaration that nobody notices is a permanent exemption waiting for
       ## a pid collision.
     dcoNoPeerCredentials
-      ## Connected, but the kernel would not name a peer. Includes every
-      ## non-AF_UNIX transport that somehow got this far.
+      ## Peer credentials are unavailable on this platform, or the connected
+      ## socket's kernel would not name a peer.
     dcoNoKernelIdentity
       ## No `/proc/<pid>/stat` start time, so the trust could never be
       ## re-validated. Every non-Linux host is here today, deliberately.
@@ -4670,35 +4670,42 @@ proc checkDeclaredDaemon*(decl: DeclaredDaemon): DaemonIdentityCheck =
       "the peer of a daemon socket is the activator, and a uid-only " &
       "declaration would trust everything the activator serves"
     return
-  var sock: Socket
-  try:
-    sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
-      protocol = IPPROTO_IP)
-  except CatchableError:
-    result.outcome = dcoUnreachable
-    result.detail = "cannot create an AF_UNIX socket"
-    return
-  var connected = false
-  try:
-    sock.connectUnix(decl.endpoint)
-    connected = true
-  except CatchableError:
-    result.outcome = dcoUnreachable
-    result.detail = "nothing accepted a connection at " & decl.endpoint
-  if connected:
-    let cred = peerCredentialsOfSocket(sock)
-    result.pid = cred.pid
-    result.uid = cred.uid
-    if result.pid <= 0:
-      result.outcome = dcoNoPeerCredentials
-      result.detail =
-        "the kernel would not name a peer for " & decl.endpoint &
-        " (SO_PEERCRED yields no pid for anything but an AF_UNIX socket)"
-  try:
-    sock.close()
-  except CatchableError:
-    discard
-  if result.outcome != dcoNotChecked or not connected:
+  when defined(posix):
+    var sock: Socket
+    try:
+      sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+        protocol = IPPROTO_IP)
+    except CatchableError:
+      result.outcome = dcoUnreachable
+      result.detail = "cannot create an AF_UNIX socket"
+      return
+    var connected = false
+    try:
+      sock.connectUnix(decl.endpoint)
+      connected = true
+    except CatchableError:
+      result.outcome = dcoUnreachable
+      result.detail = "nothing accepted a connection at " & decl.endpoint
+    if connected:
+      let cred = peerCredentialsOfSocket(sock)
+      result.pid = cred.pid
+      result.uid = cred.uid
+      if result.pid <= 0:
+        result.outcome = dcoNoPeerCredentials
+        result.detail =
+          "the kernel would not name a peer for " & decl.endpoint &
+          " (SO_PEERCRED yields no pid for anything but an AF_UNIX socket)"
+    try:
+      sock.close()
+    except CatchableError:
+      discard
+    if result.outcome != dcoNotChecked or not connected:
+      return
+  else:
+    # std/net has no connectUnix on Windows. Lack of a peer-identity
+    # mechanism must refuse the declaration, never create a trusted peer.
+    result.outcome = dcoNoPeerCredentials
+    result.detail = "unix socket peer credentials are unavailable on this platform"
     return
   result.identity = processStartIdentity(result.pid)
   if result.identity.len == 0:

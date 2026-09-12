@@ -387,6 +387,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_daemon_check_platform_refusal.nim",
+    binary: "build/test-bin/t_daemon_check_platform_refusal",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim",
     binary: "build/test-bin/t_declared_env_is_in_the_cache_key",
     defines: @[],
@@ -1703,6 +1712,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim",
     binary: "build/test-bin/t_shell_entropy_is_not_blessed",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_shell_extra_env.nim",
+    binary: "build/test-bin/t_shell_extra_env",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
