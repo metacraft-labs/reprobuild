@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1544,
+    "nimTestBinaries": 1545,
     "pureUnitConsolidationGroups": 46,
     "pureUnitTests": 562,
     "staticallyDetectedRuntimeCompilerFlowTests": 97,
-    "testEntries": 1552
+    "testEntries": 1553
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1044,7 +1044,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 700,
+      "integration": 701,
       "platform/destructive": 115,
       "pure unit": 562,
       "unclassified": 163
@@ -1171,9 +1171,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1544,
+    "nimTestBinaryCount": 1545,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1552
+    "testEntryCount": 1553
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5419,7 +5419,7 @@
             "rpath",
             "scratch"
           ],
-          "line": 167,
+          "line": 166,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "cc"
@@ -5441,7 +5441,7 @@
             "rpath",
             "scratch"
           ],
-          "line": 168,
+          "line": 167,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "gcc"
@@ -5463,7 +5463,7 @@
             "rpath",
             "scratch"
           ],
-          "line": 356,
+          "line": 355,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "cc"
@@ -5485,7 +5485,7 @@
             "rpath",
             "scratch"
           ],
-          "line": 357,
+          "line": 356,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "gcc"
@@ -5507,7 +5507,7 @@
             "rpath",
             "scratch"
           ],
-          "line": 374,
+          "line": 373,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "dynamic-c-compiler"
@@ -5529,7 +5529,7 @@
             "rpath",
             "scratch"
           ],
-          "line": 379,
+          "line": 378,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "dynamic-c-compiler"
@@ -24226,6 +24226,23 @@
       "source": "tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_install_mirror_atomic_patching",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_install_mirror_atomic_patching.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

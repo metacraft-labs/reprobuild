@@ -185,6 +185,12 @@ package readlink:
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
 
+package mktemp:
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/mktemp",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
 package `ln`:
   provisioning:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/ln",

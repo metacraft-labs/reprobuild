@@ -58,7 +58,7 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
 
   test "emitted_script_contains_patchelf_invocation":
     let script = m9r14fEmitRpathPatchScript("/tmp/mirror/usr", @[])
-    check script.contains("patchelf --set-rpath")
+    check script.contains("m9r14f_patch_elf \"$f\" --set-rpath")
 
   test "emitted_script_preserves_dollar_ORIGIN_token":
     # $ORIGIN must be passed to patchelf VERBATIM (single-quoted in
@@ -117,7 +117,7 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
     let script = m9r14fEmitRpathPatchScript("/tmp/mirror/usr", @[])
     check script.contains("'$ORIGIN'")
     check script.contains("'$ORIGIN/../lib'")
-    check script.contains("patchelf --set-rpath")
+    check script.contains("m9r14f_patch_elf \"$f\" --set-rpath")
 
   test "emitted_script_guards_on_patchelf_availability":
     # The script must short-circuit when patchelf isn't on PATH so
@@ -129,7 +129,7 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
   test "emitted_script_does_not_patch_runtime_loaders":
     let script = m9r14fEmitRpathPatchScript("/tmp/mirror/usr", @[])
     check script.contains("ld-*.so*) continue")
-    check script.contains("patchelf --remove-rpath")
+    check script.contains("m9r14f_patch_elf \"$loader\" --remove-rpath")
 
   test "emitted_script_keeps_dynamic_interpreter_and_libc_together":
     let script = m9r14fEmitRpathPatchScript("/tmp/mirror/usr", @[
@@ -138,9 +138,8 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
     check script.contains("ld-linux-*.so.*")
     check script.contains("ld-musl-*.so.*")
     check script.contains("patchelf --print-interpreter")
-    check script.contains("patchelf --set-interpreter")
-    check script.find("patchelf --set-interpreter") <
-      script.find("patchelf --set-rpath")
+    check script.contains("m9r14f_patch_elf \"$f\" --set-interpreter")
+    check script.find("--set-interpreter") < script.find("--set-rpath")
 
   test "M9.R.26.5 emitted_script_enumerates_internal_versioned_subdirs":
     # DSL-port M9.R.26.5 — for recipes that ship internal-implementation

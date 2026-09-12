@@ -122,7 +122,8 @@ suite "install mirror tool metadata":
     let iface = artifactFromRegisteredDsl(MirrorRecipeSource).projectInterface
     when defined(linux):
       for name in ["find", "head", "od", "tr", "sort", "grep",
-                   "dirname", "basename", "wc", "patchelf", "readlink"]:
+                   "dirname", "basename", "wc", "patchelf", "readlink",
+                   "mktemp", "mv"]:
         let uses = iface.toolUses.filterIt(it.executableName == name)
         check uses.len == 1
         if uses.len == 1:
