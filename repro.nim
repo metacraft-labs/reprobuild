@@ -858,6 +858,74 @@ package reprobuild:
       when defined(windows): "build/bin/repro.exe"
       else: "build/bin/repro"
 
+    # OPT-IN TEST LAYERS, AND WHY THEY NEEDED A SECOND EDGE.
+    #
+    # A few test binaries carry an expensive second layer switched on by an
+    # environment variable — a real swtpm, a real guest, a real disk. Until
+    # this table existed the variable was simply INHERITED: the launcher
+    # layers an action's environment over the one it was started with, so
+    # the variable did reach the binary and the layer really did run, but
+    # it contributed NOTHING to the action's weak fingerprint. Measured on
+    # this repository: with the layer requested and its tools pointed at a
+    # path that does not exist — a configuration in which the binary run
+    # directly exits 1 — ``repro build`` returned exit 0, replaying a
+    # result recorded with the layer OFF. A green engine run said nothing
+    # about the layer at all.
+    #
+    # The fix is in two halves and both are needed:
+    #
+    #   * the ORDINARY edge declares the variable OFF. A declared name
+    #     replaces the inherited one, so an ambient export can no longer
+    #     change what that action does without changing its key.
+    #   * the layer's ON setting is a SEPARATE, NAMED edge that declares
+    #     the variable ON. Two declarations, two environments, two weak
+    #     fingerprints — so asking for the layer cannot be answered from
+    #     the other setting's cache entry.
+    #
+    # Two edges rather than one edge reading the host, because reading the
+    # host here would not work: the provider graph snapshot and the
+    # lowered-graph cache are both reused across invocations that differ
+    # only in the ambient environment (both report ``providerInvocations:
+    # 0`` / ``loweredGraphCache: hit`` on such a pair), so the first
+    # build's value would be baked into every later one.
+    #
+    # The ON edge is NOT added to the ``test`` collection: it needs tools
+    # that are not part of this repository's toolchain, so a full suite run
+    # must not schedule it. It is reachable by its target name only, and it
+    # is not cacheable — it launches a transient emulator and seeds it from
+    # the system random source, so its result is not a function of its
+    # declared inputs and must never be replayed.
+    const
+      OptInLayerDeclaredEnv = "REPRO_GATE_DECLARED_LAYERS"
+      OptInLayerUnreachableEnv = "REPRO_GATE_UNREACHABLE_LAYERS"
+      optInLayerEdges = [
+        (source: "tests/integration/t_pcr_composite_matches_tpm.nim",
+         layerEnv: "REPROOS_TPM_QUOTE_GATE",
+         targetName: "test-live-tpm-quote",
+         evidenceEnv: "REPROOS_TPM_QUOTE_EVIDENCE",
+         evidencePath: "build/test-evidence/live-tpm-quote.txt")
+      ]
+
+    proc optInLayerEnvFor(source: string; on: bool):
+        seq[(string, string)] =
+      ## The environment an execute edge declares about its opt-in layer.
+      ## Empty for the overwhelming majority of tests, which have none.
+      for row in optInLayerEdges:
+        if row.source != source: continue
+        result.add((row.layerEnv, if on: "1" else: "0"))
+        # The evidence path is declared on BOTH edges, and empty on the
+        # off one. That is what makes the file an answer to "which edge
+        # ran" rather than to "what did the caller export": the off edge's
+        # declaration replaces any inherited value, so the off edge cannot
+        # be made to write the file from outside.
+        result.add((row.evidenceEnv, if on: row.evidencePath else: ""))
+        result.add((OptInLayerDeclaredEnv, row.layerEnv))
+        # Nothing here is out of reach: this edge inherits the host PATH,
+        # so the layer's tools resolve when the caller has them. The name
+        # is still declared, so a gate can tell a build action apart from
+        # a shell without guessing.
+        result.add((OptInLayerUnreachableEnv, ""))
+
     proc reproTestExecuteId(binary: string): string =
       ## Compute the per-test EXECUTE-edge action id from the build
       ## edge's binary path. Uses raw string-slicing instead of
@@ -1345,8 +1413,24 @@ package reprobuild:
         requiredBinaries = requiredBinaries,
         actionId = executeActionId,
         registerImplicitName = false,
+        extraEnv = optInLayerEnvFor(spec.source, on = false),
         dependencyPolicy = executePolicy)
       reprobuildTestExecuteActions.add(executeEdge)
+      # The ON edge for a test that has an opt-in layer. See
+      # ``optInLayerEdges`` above for why this is a second edge and not a
+      # flag read out of the environment.
+      for row in optInLayerEdges:
+        if row.source != spec.source: continue
+        let liveEdge = edge.testBinary.run(
+          deps = executeDeps,
+          after = executeAfter,
+          requiredBinaries = requiredBinaries,
+          actionId = executeActionId & ".live",
+          registerImplicitName = false,
+          cacheable = false,
+          extraEnv = optInLayerEnvFor(spec.source, on = true),
+          dependencyPolicy = executePolicy)
+        discard target(row.targetName, liveEdge)
 
     # Bootstrap-And-Self-Build B4: Python tests join the ``test``
     # collection as additional execute edges. Each entry in

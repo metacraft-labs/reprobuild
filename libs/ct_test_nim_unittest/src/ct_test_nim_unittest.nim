@@ -298,6 +298,7 @@ proc run*(self: NimUnittestBinary; filter = "";
           cacheable = true;
           actionCachePolicy = defaultActionCachePolicy();
           registerImplicitName = true;
+          extraEnv: openArray[(string, string)] = [];
           dependencyPolicy = automaticMonitorPolicy()):
     BuildActionDef {.discardable.} =
   ## Emit one execution edge that runs the test binary. The bound
@@ -344,6 +345,25 @@ proc run*(self: NimUnittestBinary; filter = "";
   ## removed from this codebase and must not return; see the note on
   ## ``dgDeclaredOnly`` in repro_core/dependency_gathering.nim.
   ##
+  ## ``extraEnv`` declares environment variables ON THE EXECUTE EDGE.
+  ##
+  ## A test binary that reads an environment variable to decide whether to
+  ## run an expensive layer has, until it is declared here, a behaviour the
+  ## action cache cannot see. The variable still REACHES the binary — the
+  ## launcher layers the action's environment over the inherited one, so an
+  ## undeclared name is simply inherited — but it contributes nothing to the
+  ## weak fingerprint, so a later build may replay a result computed under a
+  ## different setting of it and report success. Declaring the variable fixes
+  ## both halves: the declared value REPLACES whatever the caller exported,
+  ## and ``keyedOnActionEnvironment`` mixes the (name, value) pair into the
+  ## key, so the two settings are two different cache entries.
+  ##
+  ## The value must be a constant of the RECIPE. Reading the host with
+  ## ``getEnv`` at graph-construction time does NOT work: the provider graph
+  ## snapshot and the lowered-graph cache are both reused across invocations
+  ## that differ only in the ambient environment, so the first build's value
+  ## would be baked in. Give each setting its own edge instead.
+  ##
   ## ``pool`` / ``poolUnits`` forward the execute edge into a named
   ## engine build pool (``recordToolInvocation`` → ``BuildAction.pool``;
   ## the engine's ``poolRunning`` capacity tracker sequences edges that
@@ -380,7 +400,8 @@ proc run*(self: NimUnittestBinary; filter = "";
     poolUnits = poolUnits,
     cacheable = cacheable,
     dependencyPolicy = dependencyPolicy,
-    actionCachePolicy = actionCachePolicy)
+    actionCachePolicy = actionCachePolicy,
+    extraEnv = extraEnv)
   if registerImplicitName:
     let implicitNames = computeImplicitTargetNames(call, @["binary"])
     if implicitNames.len > 0:

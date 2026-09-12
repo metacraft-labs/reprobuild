@@ -98,6 +98,15 @@ const
   LiveGateEnv = "REPROOS_TPM_QUOTE_GATE"
   SwtpmBinEnv = "REPROOS_SWTPM_BIN"
   Tpm2ToolsBinEnv = "REPROOS_TPM2_TOOLS_BIN"
+  LiveEvidenceEnv = "REPROOS_TPM_QUOTE_EVIDENCE"
+    ## Where the live layer records that it ran. Declared by the ON edge
+    ## and declared EMPTY by the ordinary edge, so the file is a statement
+    ## about which edge executed rather than about who exported what.
+  GateDeclaredLayersEnv = "REPRO_GATE_DECLARED_LAYERS"
+    ## Declared by the recipe on both execute edges for this test. Its
+    ## presence says "you are inside a build action that has an opinion
+    ## about this layer", which is what lets the skip below say which of
+    ## two different things it means.
 
 type
   LiveTpm = ref object
@@ -345,9 +354,50 @@ suite "PCR composite against a real TPM":
     ## compiles from a development shell and FAILS under the engine's own
     ## `nim c` invocation, which is where it was caught — so the shape is
     ## load-bearing rather than stylistic.
+    ##
+    ## THE SKIP BELOW IS NOT THE SAME STATEMENT IN BOTH PLACES IT CAN
+    ## HAPPEN, and it used to be printed as though it were. Run from a
+    ## shell, it means "you did not ask for it". Run inside a build action
+    ## that DECLARES this layer, it means the action chose the off setting
+    ## — which is a fact about the graph, not about the caller, because a
+    ## declared variable replaces the inherited one. The distinction is
+    ## what makes the on setting worth anything: the two settings are two
+    ## edges with two environments and therefore two cache keys, so a
+    ## green run of the on edge cannot be the off edge's recorded result
+    ## being replayed. Before that was true, it could be, and was: with
+    ## the layer requested and its tools pointed at a path that does not
+    ## exist, `repro build` returned exit 0 while the same binary run
+    ## directly exited 1.
     if getEnv(LiveGateEnv) != "1":
+      if existsEnv(GateDeclaredLayersEnv):
+        checkpoint("this layer is OFF on this edge: the action declares " &
+          LiveGateEnv & "=0, which replaces anything the caller exported. " &
+          "Nothing was measured and no TPM was started. Build the edge " &
+          "that declares it on instead: repro build test-live-tpm-quote")
       skip()
     else:
+      # EVIDENCE THAT THIS BODY RAN, written before anything can refuse.
+      #
+      # "Did the engine execute the opt-in layer?" cannot be answered from
+      # a summary line: a skipped layer and an executed one both end in a
+      # green suite, and a layer that is absent but reports its absence
+      # honestly looks exactly like a layer that ran. So the layer leaves
+      # something behind that only running can produce — a nonce drawn
+      # from the process at this instant, which no cached result and no
+      # structural check can manufacture, and which differs on every run.
+      #
+      # Written HERE, above the tool probe, on purpose. The point being
+      # evidenced is that the ACTION's declared environment reached this
+      # body and this body executed; whether the host happens to carry
+      # swtpm is a different question, and tying the evidence to it would
+      # make the check unrunnable exactly where it is most needed.
+      randomize(int(epochTime() * 1000) xor getCurrentProcessId())
+      let evidencePath = getEnv(LiveEvidenceEnv)
+      if evidencePath.len > 0:
+        createDir(parentDir(evidencePath))
+        writeFile(evidencePath,
+          "live-layer-entered pid=" & $getCurrentProcessId() &
+          " nonce=" & $rand(int.high) & " at=" & $epochTime() & "\n")
       let toolsDir = getEnv(Tpm2ToolsBinEnv)
       let swtpmDir = getEnv(SwtpmBinEnv)
       let probe = execCmdEx(

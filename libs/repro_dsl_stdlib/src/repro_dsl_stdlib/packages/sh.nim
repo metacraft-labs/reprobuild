@@ -99,8 +99,33 @@ proc shell*(command: string; args: seq[string] = @[]; actionId = "";
             depfile = ""; cacheable = true;
             actionCachePolicy = defaultActionCachePolicy();
             commandStatsId = "";
+            extraEnv: openArray[(string, string)] = [];
             dependencyPolicy = automaticMonitorPolicy()): BuildActionDef
     {.discardable.} =
+  ## ``extraEnv`` declares environment variables ON THIS ACTION. Two
+  ## consequences, and the second is the one worth reaching for:
+  ##
+  ##   * the value is LAYERED OVER the inherited environment, and a
+  ##     declared name REPLACES the inherited one — so the action stops
+  ##     reading whatever the caller happened to export;
+  ##   * the (name, value) pair is mixed into the action's weak
+  ##     fingerprint by ``keyedOnActionEnvironment``, so two builds that
+  ##     differ only in a declared value get different cache keys.
+  ##
+  ## That pairing is the whole point. An environment variable a script
+  ## READS but the action does not DECLARE still reaches the script (the
+  ## launcher inherits), yet contributes nothing to the key — so the
+  ## engine may serve a result computed under a different value of it.
+  ## Declaring it closes both halves at once.
+  ##
+  ## Values must be a function of the RECIPE, not of the host: the
+  ## provider snapshot and the lowered-graph cache are both reused across
+  ## invocations that differ only in the ambient environment, so a value
+  ## read here with ``getEnv`` would be snapshotted at the first build and
+  ## served to every later one. Where a build must be switchable, declare
+  ## the two settings as two actions (or route the choice through a
+  ## variant, which IS folded into the lowered-graph cache key).
+  ##
   ## ``dependencyPolicy`` selects how the engine gathers this shell
   ## action's dependency evidence. It defaults to
   ## ``automaticMonitorPolicy()`` — automatic monitoring is the spec
@@ -147,4 +172,5 @@ proc shell*(command: string; args: seq[string] = @[]; actionId = "";
     cacheable = cacheable,
     commandStatsId = commandStatsId,
     dependencyPolicy = resolvedPolicy,
-    actionCachePolicy = actionCachePolicy)
+    actionCachePolicy = actionCachePolicy,
+    extraEnv = extraEnv)
