@@ -2547,6 +2547,56 @@ proc cachedResultReusableInPlace(action: BuildAction;
   ## edge with nothing to restore from being treated as one that failed to.
   action.declaresNoOutputs() or declaredOutputsPresent
 
+proc restoreWouldOverwriteMatchingOutputs(action: BuildAction;
+                                          record: ActionResultRecord): bool =
+  ## "Is every declared output already exactly what this record describes?"
+  ##
+  ## Asked on a RESTORE-mode cache hit, immediately before
+  ## ``materializeActionCacheOutputs``. The restore path replaces each
+  ## declared output from the CAS unconditionally, and it cannot do that
+  ## without giving the file a new identity: ``applyPermissions`` excludes the
+  ## shared-inode (hardlink) arm, and the reflink/copy arms stage a fresh file
+  ## and rename it into place. The destination therefore comes back with a new
+  ## mtime and ctime on every build.
+  ##
+  ## That is invisible for the restored edge itself — nothing downstream of
+  ## the restore re-reads its own output metadata — and fatal one edge later.
+  ## A consumer of those outputs fingerprints them as INPUTS, and under
+  ## ``ffpTimestamp`` (the default policy) a new mtime is a changed input. So a
+  ## warm re-run in restore mode re-executed every edge above the leaves,
+  ## forever: measured on a four-compile + one-link graph, the four compiles
+  ## hit and restored, the link missed with "input changed" and relinked, on
+  ## every single build. That contradicts Incremental-Invalidation.md
+  ## §"Validation Criteria" — "a warm re-run of an unchanged graph still
+  ## executes zero actions" — which is unqualified by mode, and it is the same
+  ## clause ``cachedResultReusableInPlace`` above is written to satisfy.
+  ##
+  ## The mode's own name is what settles the fix. Caching-Architecture.md
+  ## §"What is on by default" calls the capability "**Restore an output you no
+  ## longer have**", and §"Memoization Layer" contrasts "rebuild missing
+  ## outputs" with "restore missing outputs". An output that is present and
+  ## matches the record is not missing, so restoring it is work the mode never
+  ## promised and whose only observable effect is the cascade above.
+  ##
+  ## THE COMPARISON IS THE PRODUCTION ONE, not a weaker existence probe.
+  ## ``outputStateMismatch`` is Incremental-Invalidation.md Step 3.3 — the
+  ## same revalidation the in-place (metadata-only) arm performs before
+  ## reusing a record — so an output that was truncated, rewritten, retargeted
+  ## or had its tree tampered with still fails this test and is restored. It
+  ## costs one ``lstat`` per declared output, on a path that has just paid for
+  ## a full CAS blob verification.
+  ##
+  ## ``allOutputsExist`` is asked first and is not redundant:
+  ## ``outputStateMismatch`` skips outputs recorded as ``ffkMissing``, so a
+  ## record that describes nothing would otherwise answer "matching"
+  ## vacuously. An edge that declares no outputs answers false and keeps the
+  ## restore path it has today.
+  if action.declaresNoOutputs():
+    return false
+  if not action.allOutputsExist():
+    return false
+  outputStateMismatch(record, action.cwd).len == 0
+
 proc addUnique(values: var seq[string]; value: string) =
   if value.len == 0:
     return
@@ -10704,16 +10754,24 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 "missing-output"
               runResult.trace(id, "cache-skipped", "missing-output")
             else:
-              let restoreStart = statStart()
-              cas.materializeActionCacheOutputs(lookup.record, action.cwd)
-              fileMetadataCache.clear()
-              finishStat("repro cache restore", restoreStart)
+              # Nothing to restore when the outputs are already the recorded
+              # ones — see `restoreWouldOverwriteMatchingOutputs`. Restoring
+              # them anyway gives every one a new mtime and re-runs every
+              # consumer of them on every warm build.
+              let alreadyInPlace =
+                restoreWouldOverwriteMatchingOutputs(action, lookup.record)
+              if not alreadyInPlace:
+                let restoreStart = statStart()
+                cas.materializeActionCacheOutputs(lookup.record, action.cwd)
+                fileMetadataCache.clear()
+                finishStat("repro cache restore", restoreStart)
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
-              completeSuccess(id, asCacheHit, cdHit, false, "restored")
+              completeSuccess(id, asCacheHit, cdHit, false,
+                if alreadyInPlace: "outputs-present" else: "restored")
               inc completed
               launchedAny = true
               continue
@@ -10736,16 +10794,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 "missing-output"
               runResult.trace(id, "cache-skipped", "missing-output")
             else:
-              let restoreStart = statStart()
-              cas.materializeActionCacheOutputs(lookup.record, action.cwd)
-              fileMetadataCache.clear()
-              finishStat("repro cache restore", restoreStart)
+              # Same reasoning as the `aclHit` arm above.
+              let alreadyInPlace =
+                restoreWouldOverwriteMatchingOutputs(action, lookup.record)
+              if not alreadyInPlace:
+                let restoreStart = statStart()
+                cas.materializeActionCacheOutputs(lookup.record, action.cwd)
+                fileMetadataCache.clear()
+                finishStat("repro cache restore", restoreStart)
               runResult.results[idToIndex.resultIndex(id)].evidence =
                 cacheHitEvidence(action, lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
-              completeSuccess(id, asCacheHit, cdHybridCutoff, false, "restored")
+              completeSuccess(id, asCacheHit, cdHybridCutoff, false,
+                if alreadyInPlace: "outputs-present" else: "restored")
               inc completed
               launchedAny = true
               continue
