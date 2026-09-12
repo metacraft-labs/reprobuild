@@ -80,6 +80,54 @@ proc renderWithVariants(order: seq[Dep];
 
 suite "solver input rendering is order-independent":
 
+  test "repeated registration preserves the declaration and input digest":
+    resetVariantState()
+    defer: resetVariantState()
+    registerSolverDependency("app", "zlib", "zlib >=1.2")
+    let baseline = currentSolverInputsFixture()
+    registerSolverDependency("app", "zlib", "zlib >=1.2")
+    check pendingSolverDependencies().len == 1
+    check currentSolverInputsFixture() == baseline
+    check inputsDigestOf(currentSolverInputsFixture()) == inputsDigestOf(baseline)
+
+  test "overlapping import paths do not multiply solver inputs":
+    let baseline = renderWith(Deps)
+    let repeated = renderWith(Deps & Deps.reversed() & Deps)
+    check repeated == baseline
+    check inputsDigestOf(repeated) == inputsDigestOf(baseline)
+
+  test "distinct dependency fields are not collapsed":
+    resetVariantState()
+    defer: resetVariantState()
+    let base = SolverPackageInput(parentPackage: "app", depPackage: "zlib",
+      rng: "zlib >=1.2", gateVariant: "tls", gateValue: "true", depKind: "target")
+    var declarations = @[base]
+    for field in 0 .. 6:
+      var changed = base
+      case field
+      of 0: changed.parentPackage = "other-app"
+      of 1: changed.depPackage = "other-lib"
+      of 2: changed.rng = "zlib >=1.3"
+      of 3: changed.gateVariant = "other-gate"
+      of 4: changed.gateValue = "false"
+      of 5: changed.depKind = "native"
+      else: changed.depKind = "runtime"
+      declarations.add(changed)
+    for entry in declarations & declarations.reversed():
+      registerSolverDependency(entry.parentPackage, entry.depPackage, entry.rng,
+        entry.gateVariant, entry.gateValue, entry.depKind)
+    check pendingSolverDependencies() == declarations
+
+  test "reset permits a previously registered dependency again":
+    resetVariantState()
+    defer: resetVariantState()
+    registerSolverDependency("app", "zlib", "zlib >=1.2")
+    let baseline = pendingSolverDependencies()
+    resetVariantState()
+    check pendingSolverDependencies().len == 0
+    registerSolverDependency("app", "zlib", "zlib >=1.2")
+    check pendingSolverDependencies() == baseline
+
   test "the same declarations render identically in reversed order":
     let forward = renderWith(Deps)
     let reversed = renderWith(Deps.reversed())

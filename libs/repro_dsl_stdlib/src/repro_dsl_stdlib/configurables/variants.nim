@@ -220,13 +220,16 @@ proc registerSolverDependency*(parentPackage, depPackage, rng: string;
   ## non-empty pair means the dependency only contributes when the
   ## named variant resolves to ``gateValue`` (the M2c
   ## ``ConditionalGate`` shape).
-  pendingSolverPackages.add(SolverPackageInput(
+  let entry = SolverPackageInput(
     parentPackage: parentPackage,
     depPackage: depPackage,
     rng: rng,
     gateVariant: gateVariant,
     gateValue: gateValue,
-    depKind: depKind))
+    depKind: depKind)
+  # A dependency reached through several imports is still the same constraint.
+  if entry notin pendingSolverPackages:
+    pendingSolverPackages.add(entry)
 
 proc pendingSolverDependencies*(): seq[SolverPackageInput] =
   ## Test-facing accessor for the queued solver-package list. Returns a

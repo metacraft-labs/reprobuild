@@ -2422,7 +2422,8 @@ suite "every_launch_path_is_monitored":
 
   when defined(linux) or defined(macosx):
     let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-hm4-launch-paths", "")
+    # The fixture's Unix socket must fit sun_path even with a deep TMPDIR.
+    let tempRoot = createTempDir("repro-hm4-launch-paths", "", "/tmp")
     let fixtureSource = tempRoot / "fixture.c"
     let fixtureBin = tempRoot / "fixture"
     writeFile(fixtureSource, FixtureSource)
