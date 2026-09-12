@@ -1774,6 +1774,11 @@ proc quarantineUnique(s: var Store; absolutePath: string): string =
   let token = s.uniqueStoreToken()
   result = s.gcPendingRoot / (leaf & "." & token)
   createDir(extendedPath(s.gcPendingRoot))
+  if getFileInfo(extendedPath(absolutePath), followSymlink = false).kind != pcDir:
+    raise newException(OSError, "refusing non-directory quarantine source: " & absolutePath)
+  # Rename preserves mtime. Stamp before a concurrent sweep can see the tree;
+  # the age of the original build must not consume its quarantine grace.
+  setLastModificationTime(extendedPath(absolutePath), getTime())
   moveDir(extendedPath(absolutePath), extendedPath(result))
 
 proc gcPrefix*(s: var Store; prefixId: PrefixIdBytes;
