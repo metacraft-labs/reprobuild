@@ -257,6 +257,12 @@ package patchelf:
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
 
+package readelf:
+  provisioning:
+    nixPackage "nixpkgs#binutils", executablePath = "bin/readelf",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
 package `mkdir`:
   provisioning:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/mkdir",

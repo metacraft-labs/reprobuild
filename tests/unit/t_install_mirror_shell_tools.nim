@@ -3,7 +3,7 @@ import repro_project_dsl/install_mirror_resolver
 
 const Common = @["sh", "rm", "mkdir", "cp", "touch", "sed", "chmod"]
 const LinuxExtra = @["find", "head", "od", "tr", "sort", "grep",
-  "dirname", "basename", "wc", "patchelf", "readlink", "mktemp", "mv"]
+  "dirname", "basename", "wc", "patchelf", "readlink", "mktemp", "mv", "readelf"]
 const Expected = when defined(linux): Common & LinuxExtra else: Common
 const GlibcExpected = when defined(linux): Expected & @["ln"]
                       else: Expected
