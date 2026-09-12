@@ -131,6 +131,13 @@ type
     watchedPaths*: seq[string]
     tierState*: string
     lastResult*: string
+    writer*: string
+      ## Writer identity (`writer_identity.encodeWriterIdentity`), so a record
+      ## left non-terminal by a crashed writer can be told from a build still
+      ## in flight. ON-DISK ONLY and deliberately absent from `writeSession`
+      ## / `readSession`: reclamation is a daemon-local concern about its own
+      ## state directory, and putting it on the wire would be a protocol
+      ## change for no consumer.
 
   UserDaemonBuildRequest* = object
     runId*: string
