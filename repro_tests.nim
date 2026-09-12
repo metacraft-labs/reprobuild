@@ -657,6 +657,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/test_m6_entropy_image_attribution.nim",
+    binary: "build/test-bin/test_m6_entropy_image_attribution",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim",
     binary: "build/test-bin/test_m9r72_monitor_loss_classifier",
     defines: @[],
@@ -1352,6 +1361,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_doc_comment_reaches_listing_and_diagnostic.nim",
     binary: "build/test-bin/t_doc_comment_reaches_listing_and_diagnostic",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_entropy_image_blessings.nim",
+    binary: "build/test-bin/t_entropy_image_blessings",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

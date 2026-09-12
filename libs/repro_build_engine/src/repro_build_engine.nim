@@ -824,6 +824,35 @@ type
       ## `RtlGenRandom`, `CryptGenRandom`, `getentropy`, `arc4random`,
       ## `getrandom`, ...
     origin*: EntropyCallerOrigin
+    image*: string
+      ## The IMAGE OF THE PROCESS THAT EMITTED THE RECORD, resolved from the
+      ## record's `osPid` against the capture's own `mrProcessExec` records --
+      ## or the EMPTY STRING when no exec record in this capture names that
+      ## pid.
+      ##
+      ## WHY IT IS HERE. `BuildAction.nonDeterminism` is action-scoped and the
+      ## evidence is process-tree-scoped; see `repro_core/entropy_blessings`
+      ## for why that gap makes an action-scoped waiver on a SHELL unsound and
+      ## a per-image one sound. This field is the attribution the per-image
+      ## check runs on.
+      ##
+      ## THE EMPTY STRING IS NOT A NEUTRAL VALUE, it is the fail-closed one.
+      ## `entropyBlessedTool("")` is `none`, so an unattributable record keeps
+      ## its full consequence: an entropy read whose author cannot be named
+      ## must never inherit somebody else's blessing. Two real shapes land
+      ## here, both of which SHOULD stay consequential: the action's own root
+      ## process (io-mon's `execve` hook runs in the process that is about to
+      ## be replaced, so the launcher's exec of the root image precedes the
+      ## shim constructor and there is no record to resolve against -- the
+      ## same gap `executedToolImagePath` closes for the read set), and a pid
+      ## whose image arrived through a route this capture did not record.
+      ##
+      ## IT IS A PATH, NOT A PID, and that is load-bearing for
+      ## `tests/integration/t_every_launch_path_is_monitored.nim`, which
+      ## compares rendered `entropyObservations` across launch paths for
+      ## EQUALITY. A pid differs on every run and would make that comparison
+      ## fail for a difference that means nothing; the resolved image is the
+      ## same on both paths because it is the same program.
 
   EntropyObservability* = enum
     ## Whether the capture's own backend declaration says entropy COULD be
@@ -3517,6 +3546,24 @@ type
 
     monitorDirectoryEnumerations*: HashSet[string]
 
+    execImageByPid*: Table[uint64, string]
+      ## pid -> the image that pid was last observed EXEC'ing, built from the
+      ## capture's own `mrProcessExec` records and read by the
+      ## `mrNonDeterministic` arm to attribute an entropy read to the program
+      ## that made it. See `EntropyObservation.image`.
+      ##
+      ## LAST EXEC WINS, and the fold is ordered, so the value read for an
+      ## entropy record is the image that pid was running WHEN IT DREW -- not
+      ## whatever it exec'd afterwards. io-mon's `execve` hook emits from the
+      ## process about to be replaced (`shim/linux_preload.repro_hook_execve`
+      ## emits before `callNext`), so `osPid` on the exec record is already
+      ## the pid that will run `path`, and a re-exec of the same pid (the Nix
+      ## gcc/rustc bash-wrapper shape) correctly re-points it.
+      ##
+      ## It lives on the SEEN SETS rather than on `PathSetEvidence` because it
+      ## is scaffolding for the fold, not evidence: nothing downstream keys a
+      ## cache entry on a pid, and a pid is not stable across runs.
+
 proc monitorProfileEvidenceComplete(detail: string): bool =
   result = true
   for part in detail.split(';'):
@@ -3601,12 +3648,19 @@ proc describeEntropyOrigin(origin: EntropyCallerOrigin): string =
     "the program's own code (shim-side attribution, no caller token)"
 
 proc addEntropyObservation(evidence: var PathSetEvidence;
-                           source: string; origin: EntropyCallerOrigin) =
+                           source: string; origin: EntropyCallerOrigin;
+                           image: string) =
+  ## Deduped on ALL THREE components. Collapsing two records that differ only
+  ## in `image` would be the defect this whole mechanism exists to avoid: a
+  ## `getrandom` from `mktemp` and a `getrandom` from `uuidgen` differ in no
+  ## other field, and a set that kept only the first would grade the pair by
+  ## whichever process happened to run first.
   for existing in evidence.entropyObservations:
-    if existing.source == source and existing.origin == origin:
+    if existing.source == source and existing.origin == origin and
+        existing.image == image:
       return
   evidence.entropyObservations.add(
-    EntropyObservation(source: source, origin: origin))
+    EntropyObservation(source: source, origin: origin, image: image))
 
 proc benignRawSyscallLoss*(detail: string): bool =
   ## Recognise the io-mon "raw syscall unsupported" event-loss class and say
@@ -5472,9 +5526,30 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   # names, not filesystem paths, so nothing about them should be resolved
   # against the action's cwd or tested for volatility.
   case record.kind
+  of mrProcessExec:
+    # ATTRIBUTION ONLY. The read-set half of `mrProcessExec` is folded further
+    # down, past the `materialPath` / volatile-path guard, because an executed
+    # binary is a content dependency and has to be resolved and filtered like
+    # one. This arm is deliberately ABOVE that guard: attribution is not a
+    # cache-key entry, so a tool that happens to live under a volatile prefix
+    # must still be NAMEABLE. Dropping it there would turn its children's
+    # entropy into unattributed entropy, which fails closed -- safe, but it
+    # would silently lose the blessing for a legitimately blessed tool and
+    # look like a caching bug.
+    #
+    # The two guards below match that other arm's, for its reasons: an
+    # `execvp` family call records the UNRESOLVED name the caller passed (glibc
+    # does the PATH walk internally, where no interposer sees it), so a
+    # relative path names nothing this fold can trust; and a failed exec ran no
+    # bytes at all, so it must not overwrite the image the pid is really
+    # running.
+    if record.osPid != 0 and record.path.isAbsolute and
+        not record.detail.contains(FailedExecDetailToken):
+      seen.execImageByPid[record.osPid] = record.path
   of mrNonDeterministic:
     addEntropyObservation(evidence, record.path,
-      entropyCallerOrigin(record.detail))
+      entropyCallerOrigin(record.detail),
+      seen.execImageByPid.getOrDefault(record.osPid, ""))
   of mrBackendProfile:
     # A gap record already seen wins: ``entNotObserved`` is the
     # conservative answer and must not be relaxed by a profile parsed
@@ -5980,6 +6055,18 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
   ## i.e. a .NET interpreter host drawing randomness through its own runtime
   ## — precisely the case a `caller=system` filter would have excused.
   ##
+  ## TWO SCOPES, ASKED IN THIS ORDER. `action.nonDeterminism` is a claim about
+  ## the tool the action INVOKES and, when it is `ndpEntropyBlessed`, covers
+  ## the whole process tree -- which is right for a compiler, where the tree is
+  ## nim, gcc and ld and all of it is "what nim does". It is wrong for an
+  ## interpreter, where the tree is chosen by the script, and `packages/sh.nim`
+  ## refuses to carry such a blessing for that reason. So when the invoking
+  ## tool is NOT blessed, each observation is asked separately about the image
+  ## its own pid resolved to (`EntropyObservation.image`, matched against
+  ## `repro_core/entropy_blessings.EntropyBlessedTools`). The action keeps its
+  ## cache entry only if every record is spoken for; one unattributable or
+  ## unblessed record withholds it.
+  ##
   ## ABSENCE OF EVIDENCE IS NOT EVIDENCE OF ABSENCE. If the capture's own
   ## backend profile says entropy could not be observed, "no entropy records"
   ## carries no information, and an unblessed action is treated exactly as if
@@ -6005,19 +6092,69 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
         "milestones.org M6.")
     return
   if observations.len > 0:
-    var described: seq[string] = @[]
+    # PER-IMAGE ATTRIBUTION. The action's own tool is not blessed, but an
+    # individual record may still belong to a tool that IS -- and for a shell
+    # action every record does belong to somebody else, because the shell
+    # emits none of its own. Each observation is therefore asked separately,
+    # about the image its pid resolved to, and the action keeps its cache
+    # entry only if EVERY one of them is spoken for.
+    #
+    # UNANIMITY, not a majority and not a filter. One unattributable or
+    # unblessed record is enough to withhold the entry, because the entry is a
+    # promise about the WHOLE action's output. This is what keeps the
+    # mechanism sound where an action-scoped shell waiver was not: a script
+    # that runs `mktemp` and `uuidgen` produces two records identical in every
+    # field but the emitting image, `mktemp`'s is excused, `uuidgen`'s is not,
+    # and the action stays unpublished on the strength of the second.
+    var excused: seq[string] = @[]
+    var blocking: seq[string] = @[]
+    var blockingTools: seq[string] = @[]
     for observation in observations:
-      described.add(observation.source & " from " &
-        describeEntropyOrigin(observation.origin))
-    collection.evidence.diagnostics.add(
+      let blessing = entropyBlessedTool(observation.image)
+      if blessing.isSome:
+        excused.add(observation.source & " from " & blessing.get.image &
+          " (" & observation.image & ")")
+      else:
+        blocking.add(observation.source & " from " &
+          (if observation.image.len > 0: observation.image
+           else: "an unattributed process (no `mrProcessExec` record in " &
+                 "this capture names its pid)") & ", " &
+          describeEntropyOrigin(observation.origin))
+        if observation.image.len > 0:
+          let key = entropyBlessingImageKey(observation.image)
+          if key.len > 0 and key notin blockingTools:
+            blockingTools.add(key)
+    if blocking.len == 0:
+      collection.evidence.diagnostics.add(
+        "entropy observed (" & excused.join("; ") & ") but every record is " &
+        "attributed by its own pid to a tool blessed in that tool's CLI " &
+        "spec, so it is not treated as a determinism problem. The invoking " &
+        "tool itself is unblessed; the waiver is per-image, not per-action. " &
+        "Spec: Windows-Build-Correctness-Bitness-And-Capabilities." &
+        "milestones.org M6.")
+      return
+    var text =
       "action-cache publish skipped: this action's process tree read " &
-      "entropy (" & described.join("; ") & ") and the tool it invokes is " &
-      "not blessed. Declare `nonDeterminism entropyBlessed, justification " &
-      "= \"...\"` in the tool's CLI spec if its randomness cannot reach " &
-      "its output. Note that caller attribution is one-way: an entropy " &
-      "read reported from outside the main image is NOT evidence that the " &
+      "entropy (" & blocking.join("; ") & ") and the tool it invokes is " &
+      "not blessed, nor is the tool that emitted the record."
+    if excused.len > 0:
+      text.add(" Other records in the same capture WERE excused by " &
+        "per-image attribution (" & excused.join("; ") & "), which is the " &
+        "distinction: a waiver here is a claim about one TOOL's randomness, " &
+        "so it cannot be cashed in for a stranger the same script happened " &
+        "to run.")
+    text.add(" Declare `nonDeterminism entropyBlessed, justification = " &
+      "\"...\"` in the EMITTING tool's CLI spec -- and add its image to " &
+      "`repro_core/entropy_blessings.EntropyBlessedTools`, which is what " &
+      "this check reads -- if that tool's randomness cannot reach its " &
+      "output")
+    if blockingTools.len > 0:
+      text.add(" (here: " & blockingTools.join(", ") & ")")
+    text.add(". Note that caller attribution is one-way: an entropy read " &
+      "reported from outside the main image is NOT evidence that the " &
       "program itself drew none. Spec: " &
       "Windows-Build-Correctness-Bitness-And-Capabilities.milestones.org M6.")
+    collection.evidence.diagnostics.add(text)
     collection.disableCacheHits = true
     collection.cacheIneligibilityReasons.incl(cirUnblessedEntropy)
     return

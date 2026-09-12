@@ -1519,15 +1519,40 @@ proc renderEntropyObservations(observations: seq[EntropyObservation]):
   ## `seq[string]`, so it needs its own flattening before the generic
   ## `render` below can put it in the shape.
   ##
-  ## BOTH COMPONENTS, not just the source. `EntropyCallerOrigin` is exactly
-  ## the axis on which the two hosting mechanisms could plausibly disagree —
-  ## the hosted arm runs io-mon INSIDE the engine process, so an attribution
-  ## that leaned on "which image is the main one" could grade the same read
-  ## differently there than in a separate monitor process. Rendering only
-  ## `source` would drop that difference on the floor, which is the P6/P10
-  ## defect restated in a field whose elements happen to be objects.
+  ## ALL THREE COMPONENTS, not just the source. `EntropyCallerOrigin` is
+  ## exactly the axis on which the two hosting mechanisms could plausibly
+  ## disagree — the hosted arm runs io-mon INSIDE the engine process, so an
+  ## attribution that leaned on "which image is the main one" could grade the
+  ## same read differently there than in a separate monitor process.
+  ## Rendering only `source` would drop that difference on the floor, which
+  ## is the P6/P10 defect restated in a field whose elements happen to be
+  ## objects.
+  ##
+  ## `image` — the pid-resolved emitter — is the third, and it is the one
+  ## this comparison had to be told about explicitly. The engine resolves it
+  ## from each arm's OWN `mrProcessExec` records, so if the two arms saw
+  ## different execs they would attribute the same read to different
+  ## programs, and no other rendered field would notice. What must NOT be
+  ## rendered is the raw `MonitorRecord.osPid` it was resolved from: a pid
+  ## differs on every run by construction, so it would make this comparison
+  ## fail for a difference that means nothing. The resolved image is the same
+  ## on both paths because it is the same program.
+  ##
+  ## SAID PLAINLY, because rendering is not comparing: on THIS fixture the
+  ## `image` component is the EMPTY STRING on both arms. The fixture's
+  ## `getentropy` call is made by the fixture binary itself — the action's
+  ## root process — and io-mon's `execve` hook runs in the process that is
+  ## about to be replaced, so the launcher's exec of the root image precedes
+  ## the shim constructor and no `mrProcessExec` record names that pid on
+  ## either path. The component is rendered so it cannot be dropped
+  ## silently, and it is NOT claimed here that the two arms were shown to
+  ## attribute a RESOLVABLE emitter identically. Producing that class would
+  ## need a fixture that forks a child which draws randomness; the per-image
+  ## attribution itself is covered by
+  ## `libs/repro_build_engine/tests/test_m6_entropy_image_attribution.nim`.
   for observation in observations:
-    result.add observation.source & "@" & $observation.origin
+    result.add observation.source & "@" & $observation.origin & "@" &
+      observation.image
 
 proc evidenceShape(res: ActionResult;
                    subs: seq[(string, string)]): string =
@@ -2397,7 +2422,8 @@ suite "every_launch_path_is_monitored":
 
   when defined(linux) or defined(macosx):
     let repoRoot = getCurrentDir()
-    let tempRoot = createTempDir("repro-hm4-launch-paths", "")
+    # The fixture's Unix socket must fit sun_path even with a deep TMPDIR.
+    let tempRoot = createTempDir("repro-hm4-launch-paths", "", "/tmp")
     let fixtureSource = tempRoot / "fixture.c"
     let fixtureBin = tempRoot / "fixture"
     writeFile(fixtureSource, FixtureSource)

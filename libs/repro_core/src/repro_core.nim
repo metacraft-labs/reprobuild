@@ -2,6 +2,7 @@ import repro_core/types
 import repro_core/paths
 import repro_core/process_specs
 import repro_core/dependency_gathering
+import repro_core/entropy_blessings
 import repro_core/edge_determinism
 import repro_core/parallel
 import repro_core/codec
@@ -20,6 +21,7 @@ export types
 export paths
 export process_specs
 export dependency_gathering
+export entropy_blessings
 export edge_determinism
 export parallel
 export codec

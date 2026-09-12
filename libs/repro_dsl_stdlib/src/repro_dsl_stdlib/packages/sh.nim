@@ -73,10 +73,20 @@ package sh:
       # a product that is different on every run.
       #
       # The right mechanism is to bless the tool that emitted -- `mktemp`,
-      # `git` -- in its own CLI spec, which needs the engine to keep
-      # `MonitorRecord.osPid` on an `EntropyObservation` and resolve it
-      # against the capture's own `mrProcessExec` records. Until that exists
-      # a shell gate stays uncacheable, which is the safe answer.
+      # `git` -- in its own CLI spec, and THAT MECHANISM NOW EXISTS: the
+      # engine keeps `MonitorRecord.osPid` on an `EntropyObservation`,
+      # resolves it against the capture's own `mrProcessExec` records, and
+      # asks `repro_core/entropy_blessings.EntropyBlessedTools` about the
+      # resolved image. `packages/mktemp.nim` and `packages/git.nim` carry
+      # those declarations. A gate whose every entropy record belongs to a
+      # blessed tool now publishes; one that also runs `uuidgen` still does
+      # not, and that pair is the whole point.
+      #
+      # NONE OF WHICH CHANGES THIS FILE'S ANSWER. The per-image waiver is a
+      # claim about ONE TOOL's randomness, made by somebody who can make it.
+      # A blessing here would still be a claim about every program a script
+      # chooses to run, made by somebody who cannot -- and it is now not even
+      # needed for the case it was asked for.
       #
       # Guarded by `tests/t_shell_entropy_is_not_blessed.nim`, which asserts
       # BOTH wrappers separately because a blessing reaches them by
