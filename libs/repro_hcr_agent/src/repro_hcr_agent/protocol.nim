@@ -56,6 +56,17 @@ const
     ## engine continues unreloaded. Unlike every other refusal here, the
     ## session is degraded rather than untouched.
 
+  HcrReloadReasonCompileError* = "compile-error"
+    ## GDH-M8b. The new content PARSES and ANALYZES and the compiler refuses
+    ## it. It cannot be pre-checked: `GDScriptCompiler::compile` writes into a
+    ## `GDScript`, so the only candidate to compile into is the live script the
+    ## pre-check exists to protect. The host therefore finds out after the
+    ## swap, which puts this in §8.1's steps-4-6 class — the trace is closed
+    ## with the reason recorded in it and the engine is put back on the source
+    ## it was running. Its own name rather than `parse-error` because the two
+    ## have different consequences: `parse-error` means nothing was touched,
+    ## and this one does not. `outcome` is `failed`, not `refused`.
+
   HcrMacosArm64DirectSupportProfile* =
     "macos-arm64-direct-hcr-in-codetracer-v1"
     ## The Mach-O/arm64 direct-patch profile (M26-M28).
