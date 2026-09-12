@@ -1282,6 +1282,12 @@ package reprobuild:
             else: artifact.path
           requiredBinaries.add(artifactPath)
           executeDeps.add(artifact.actionId)
+      when defined(linux) or defined(macosx):
+        if spec.source == "libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim":
+          # These cases load a shared library, not an executable fixture.
+          requiredBinaries.add("build/lib/" & (when defined(macosx):
+            "librepro_monitor_shim.dylib" else: "librepro_monitor_shim.so"))
+          executeDeps.add("reprobuild.test_fixtures.monitor_shim")
       when defined(linux):
         if spec.source == "tests/unit/t_m9r83_install_mirror_action_shapes.nim":
           # ELF fixtures have no Windows/macOS producer or execution cases.
