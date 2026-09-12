@@ -167,6 +167,36 @@ suite "DSL-port M9.R.6 — convention narrowing + default-build synthesis":
   test "defaultBuildConventionFor: unknown package returns empty":
     check defaultBuildConventionFor("m9r6NotARealPackageName") == ""
 
+  test "narrowing ignores tools the generated fetch script needs":
+    # Regression pin. ``registerSourceFetchTools`` /
+    # ``registerInstallMirrorTools`` append the external commands the
+    # GENERATED fetch and install-mirror shell scripts run onto the
+    # package's native-dep row, and that row is what convention
+    # narrowing reads. The generated list starts with ``sh``, so every
+    # recipe declaring ``fetch:`` — regardless of its real toolset —
+    # narrowed to ``ConventionCustom``, and the M9.R.10b dispatch turns
+    # that into a ``raiseCustomBuildRequired`` AT MODULE INIT. The
+    # binary then died before ``main``, so it could not answer
+    # ``--list-json`` and every case in it fell out of the catalog.
+    #
+    # Both halves are pinned: the tools must STILL be registered (the
+    # generated scripts need them present), and the narrowing must not
+    # see them.
+    let complete = registeredNativeBuildDeps("m9r6NoToolFixture")
+    let authored = registeredAuthoredNativeBuildDeps("m9r6NoToolFixture")
+    check "sh" in complete
+    check "curl" in complete
+    check "sh" notin authored
+    check "curl" notin authored
+    check authored == @["gcc >=11"]
+    check defaultBuildConventionFor("m9r6NoToolFixture") == ""
+
+  test "narrowing still honours an authored shell-driver toolset":
+    # The subtraction removes the GENERATED entries only. A recipe that
+    # genuinely declares ``sh`` keeps narrowing to custom.
+    check "sh" in registeredAuthoredNativeBuildDeps("m9r6CustomFixture")
+    check defaultBuildConventionFor("m9r6CustomFixture") == ConventionCustom
+
   test "shouldSynthesizeDefaultBuild: fires for meson without explicit build":
     check shouldSynthesizeDefaultBuild(
       packageName = "m9r6MesonFixture",

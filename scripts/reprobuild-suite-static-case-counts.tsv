@@ -1508,7 +1508,7 @@ tests/unit/t_m9r4_library_api_exports.nim	nim	8
 tests/unit/t_m9r5a_recipe_sweep_smoke.nim	nim	12
 tests/unit/t_m9r5b_recipe_options_sweep.nim	nim	6
 tests/unit/t_m9r6_1_convention_minimal_emission.nim	nim	5
-tests/unit/t_m9r6_convention_narrowing_default_synthesis.nim	nim	17
+tests/unit/t_m9r6_convention_narrowing_default_synthesis.nim	nim	19
 tests/unit/t_m9r76_install_mirror_resolver.nim	nim	18
 tests/unit/t_m9r77_cas_cli.nim	nim	12
 tests/unit/t_m9r77_hashed_mirror_wiring.nim	nim	15

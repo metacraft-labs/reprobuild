@@ -32196,7 +32196,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r6_convention_narrowing_default_synthesis.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 17,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
