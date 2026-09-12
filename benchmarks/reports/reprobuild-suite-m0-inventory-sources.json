@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1554,
+    "nimTestBinaries": 1556,
     "pureUnitConsolidationGroups": 46,
-    "pureUnitTests": 562,
+    "pureUnitTests": 564,
     "staticallyDetectedRuntimeCompilerFlowTests": 97,
-    "testEntries": 1562
+    "testEntries": 1564
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -23,13 +23,14 @@
       "targetOs": "soAny"
     },
     {
-      "count": 4,
+      "count": 5,
       "defines": [],
       "dependencyShape": [
         "repro_build_engine"
       ],
       "owner": "libs/repro_build_engine",
       "sources": [
+        "libs/repro_build_engine/tests/t_daemon_check_platform_refusal.nim",
         "libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim",
         "libs/repro_build_engine/tests/t_fingerprint_audit_every_action_has_lock_identity.nim",
         "libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim",
@@ -132,7 +133,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 28,
+      "count": 29,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -167,7 +168,8 @@
         "libs/repro_dsl_stdlib/tests/t_packaging_shipped_payload.nim",
         "libs/repro_dsl_stdlib/tests/t_prefix_layout.nim",
         "libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim",
-        "libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim"
+        "libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim",
+        "libs/repro_dsl_stdlib/tests/t_shell_extra_env.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1046,7 +1048,7 @@
       "graph-fixture": 12,
       "integration": 710,
       "platform/destructive": 115,
-      "pure unit": 562,
+      "pure unit": 564,
       "unclassified": 163
     },
     "graphOwnedTestArtifacts": [
@@ -1171,9 +1173,9 @@
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
       }
     ],
-    "nimTestBinaryCount": 1554,
+    "nimTestBinaryCount": 1556,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1562
+    "testEntryCount": 1564
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -6265,6 +6267,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_daemon_check_platform_refusal",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_daemon_check_platform_refusal.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_dark_window_cache_records_are_drained",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -8992,6 +9011,24 @@
       "source": "libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_shell_extra_env",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_shell_extra_env.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
