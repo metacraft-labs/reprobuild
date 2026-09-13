@@ -12285,21 +12285,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-<<<<<<< HEAD
-<<<<<<< HEAD
-    source: "tests/integration/t_thin_daemon_client.nim",
-    binary: "build/test-bin/t_thin_daemon_client",
-    defines: @[],
-    requiresReproBinary: true,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny,
-    selfInterposes: false),
-  TestSpec(
-||||||| parent of 84c73fe9 (Never record a sibling revision that has not been pushed)
-=======
-||||||| parent of d4e5e6d2 (Report the same recordability the refresh will act on)
-=======
     source: "tests/integration/t_the_status_report_does_not_call_an_unpublished_row_recordable.nim",
     binary: "build/test-bin/t_the_status_report_does_not_call_an_unpublished_row_recordable",
     defines: @[],
@@ -12309,7 +12294,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
->>>>>>> d4e5e6d2 (Report the same recordability the refresh will act on)
     source: "tests/integration/t_the_unpushed_skip_names_the_push_that_would_make_it_lockable.nim",
     binary: "build/test-bin/t_the_unpushed_skip_names_the_push_that_would_make_it_lockable",
     defines: @[],
@@ -12319,7 +12303,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
->>>>>>> 84c73fe9 (Never record a sibling revision that has not been pushed)
+    source: "tests/integration/t_thin_daemon_client.nim",
+    binary: "build/test-bin/t_thin_daemon_client",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_ti1_interface_artifact_edge.nim",
     binary: "build/test-bin/t_ti1_interface_artifact_edge",
     defines: @[],

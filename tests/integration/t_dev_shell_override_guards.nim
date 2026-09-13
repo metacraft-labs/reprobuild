@@ -276,10 +276,23 @@ suite "dev-shell override guards":
   test "t_dev_shell_guard_is_silent_when_no_knob_is_set":
     ## A repository that does not ask for overrides must not be nagged about a
     ## plugin it never needed.
+    ##
+    ## The knobs are UNSET by the script rather than assumed unset, because the
+    ## bare guard reads them from the AMBIENT environment — and this
+    ## repository's own `.envrc` exports two of them, so anybody running the
+    ## suite from a direnv-activated shell inherits exactly the state this case
+    ## claims is absent. Left implicit, the case passed or failed on how the
+    ## runner happened to be invoked rather than on the guard, and it reported
+    ## the guard warning correctly doing its job as a defect.
     if findExe("bash").len == 0:
       skip()
     else:
-      let res = runBash(guardScript(fixtureOldPlugin, "true"), repoRoot())
+      # The list is the library's own `DEV_SHELL_KNOWN_OVERRIDE_KNOBS`, which
+      # `guardScript` has already sourced by this point, so the set unset here
+      # cannot drift from the set the guard reads.
+      let res = runBash(guardScript(fixtureOldPlugin,
+        "for _k in \"${DEV_SHELL_KNOWN_OVERRIDE_KNOBS[@]}\"; do " &
+        "unset \"$_k\"; done"), repoRoot())
       checkpoint("output:\n" & res.output)
       check guardExit(res.output) == 0
       check not res.output.contains("dev-shell:")

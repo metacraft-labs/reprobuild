@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1593,
+    "nimTestBinaries": 1599,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 578,
     "staticallyDetectedRuntimeCompilerFlowTests": 97,
-    "testEntries": 1604
+    "testEntries": 1610
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1058,7 +1058,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 728,
+      "integration": 734,
       "platform/destructive": 115,
       "pure unit": 578,
       "unclassified": 171
@@ -1197,9 +1197,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1593,
+    "nimTestBinaryCount": 1599,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1604
+    "testEntryCount": 1610
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -21856,6 +21856,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_a_gate_refusal_over_an_unpublished_sibling_names_the_push_first",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_gate_refusal_over_an_unpublished_sibling_names_the_push_first.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_a_linked_worktree_sibling_is_reported_and_gated",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -21880,6 +21895,36 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_a_mixed_workspace_records_only_the_ahead_inputs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_mixed_workspace_records_only_the_publishable_inputs",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_mixed_workspace_records_only_the_publishable_inputs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_pushed_sibling_is_still_recorded",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_pushed_sibling_is_still_recorded.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -22300,6 +22345,21 @@
       "source": "tests/integration/t_an_unobservable_sibling_is_not_substituted.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_an_unpushed_sibling_revision_is_not_recorded",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_an_unpushed_sibling_revision_is_not_recorded.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -29926,6 +29986,36 @@
       "source": "tests/integration/t_the_resolving_launcher_execs_the_pinned_image.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_the_status_report_does_not_call_an_unpublished_row_recordable",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_the_status_report_does_not_call_an_unpublished_row_recordable.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_the_unpushed_skip_names_the_push_that_would_make_it_lockable",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_the_unpushed_skip_names_the_push_that_would_make_it_lockable.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
