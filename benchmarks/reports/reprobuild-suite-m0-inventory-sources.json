@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1569,
+    "nimTestBinaries": 1570,
     "pureUnitConsolidationGroups": 47,
-    "pureUnitTests": 571,
+    "pureUnitTests": 572,
     "staticallyDetectedRuntimeCompilerFlowTests": 97,
-    "testEntries": 1577
+    "testEntries": 1578
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1064,7 +1064,7 @@
       "graph-fixture": 12,
       "integration": 715,
       "platform/destructive": 115,
-      "pure unit": 571,
+      "pure unit": 572,
       "unclassified": 164
     },
     "graphOwnedTestArtifacts": [
@@ -1201,9 +1201,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1569,
+    "nimTestBinaryCount": 1570,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1577
+    "testEntryCount": 1578
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7988,6 +7988,23 @@
       "requiresReproBinary": true,
       "source": "libs/repro_core/tests/t_show_conventions_cli.nim",
       "sourceSuiteCount": 2,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_active_session_tally",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim",
+      "sourceSuiteCount": 1,
       "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
