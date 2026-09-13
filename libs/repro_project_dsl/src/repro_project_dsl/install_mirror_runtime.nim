@@ -238,29 +238,18 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("if [ \"$m9r14f_use_ldp\" = 1 ]; then rpath=\"$rpath:$ldp\"; fi; ")
   script.add("done; ")
   script.add("fi; ")
-  # DSL-port M9.R.15h.14.4 — preserve the toolchain libstdc++ / libgcc_s
-  # path. Without a from-source gcc recipe, the C++ compiler is the
-  # nix-shell-provisioned gcc-wrapper which links against libstdc++.so.6
-  # at e.g. ``/nix/store/<gcc-lib>-gcc-N.M.0-lib/lib/libstdc++.so.6``.
-  # The plain $ORIGIN + dep-mirror rpath chain doesn't reach this path,
-  # so executables that need C++ runtime (qtpaths, lupdate, lrelease,
-  # KF6 binaries) hit ``error while loading shared libraries:
-  # libstdc++.so.6: cannot open shared object file`` at run time even
-  # when launched from inside the originating nix-shell.
-  #
-  # Append the gcc-wrapper's resolved libstdc++ dirname to the rpath
-  # so the dynamic loader finds it without LD_LIBRARY_PATH. We resolve
-  # the path at install-mirror time via ``gcc -print-file-name=...``,
-  # which echoes the absolute path of the named library file even when
-  # the compiler isn't on PATH. The directory of that path is what we
-  # want on rpath.
-  script.add("if printf '%s\\n' \"$needed_sonames\" | grep -qx 'libstdc++.so.6' && ")
-  script.add("! m9r14f_soname_resolved 'libstdc++.so.6'; then ")
-  script.add("stdcxx_file=$(gcc -print-file-name=libstdc++.so.6 2>/dev/null); ")
-  script.add("if [ -n \"$stdcxx_file\" ] && [ \"$stdcxx_file\" != \"libstdc++.so.6\" ]; then ")
-  script.add("stdcxx_dir=$(dirname \"$stdcxx_file\"); ")
-  script.add("case \":$rpath:\" in *\":$stdcxx_dir:\"*) ;; *) rpath=\"$rpath:$stdcxx_dir\";; esac; ")
-  script.add("fi; fi; ")
+  # A declared GCC wrapper can keep C++ and OpenMP runtimes in separate
+  # outputs. Query only libraries that are needed and still unresolved;
+  # source dependency mirrors and declared library paths retain precedence.
+  script.add("for gcc_soname in libstdc++.so.6 libgomp.so.1; do ")
+  script.add("if printf '%s\\n' \"$needed_sonames\" | grep -Fxq \"$gcc_soname\" && ")
+  script.add("! m9r14f_soname_resolved \"$gcc_soname\"; then ")
+  script.add("gcc_runtime_file=$(gcc -print-file-name=\"$gcc_soname\" 2>/dev/null || true); ")
+  script.add("case \"$gcc_runtime_file\" in /*) ")
+  script.add("if [ -f \"$gcc_runtime_file\" ]; then ")
+  script.add("gcc_runtime_dir=$(dirname \"$gcc_runtime_file\"); ")
+  script.add("case \":$rpath:\" in *\":$gcc_runtime_dir:\"*) ;; *) rpath=\"$rpath:$gcc_runtime_dir\";; esac; ")
+  script.add("fi;; esac; fi; done; ")
   # DSL-port M9.R.26.5 — discover the recipe's OWN internal versioned
   # subdirs under lib/ + lib64/ (e.g. mutter-15/, qt6/plugins/, etc.)
   # and append each as an absolute path to the rpath. Without this,

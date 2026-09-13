@@ -24584,7 +24584,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_install_mirror_atomic_patching.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
