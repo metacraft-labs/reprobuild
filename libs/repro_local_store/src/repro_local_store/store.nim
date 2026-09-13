@@ -27,7 +27,9 @@ import blake3
 import repro_core
 
 import ./prefix_paths
+import ./realization_hash
 export prefix_paths
+export realization_hash
 # The pure path-arithmetic half of the store (``PrefixIdBytes``,
 # ``prefixRelativePath``, ``casBlobRelative``, ...) lives in its own
 # dependency-free module so non-store callers — notably
@@ -472,27 +474,6 @@ proc writeReceiptFile*(path: string; rec: RealizationReceipt) =
 # ---------------------------------------------------------------------------
 # Realization-hash computation
 # ---------------------------------------------------------------------------
-
-proc computeRealizationHash*(packageName, version, adapter,
-                            lockIdentity, declaredExecutablePath: string;
-                            provenanceUrl = ""; provenanceChecksum = "";
-                            extra: openArray[string] = []): PrefixIdBytes =
-  ## Deterministic identity for a realized prefix. Adapters compose the
-  ## inputs that fully determine the bytes of the prefix; the store then
-  ## treats this hash as opaque.
-  var buf: seq[byte] = @[]
-  buf.writeString("reprobuild.realization.v1")
-  buf.writeString(adapter)
-  buf.writeString(packageName)
-  buf.writeString(version)
-  buf.writeString(lockIdentity)
-  buf.writeString(declaredExecutablePath)
-  buf.writeString(provenanceUrl)
-  buf.writeString(provenanceChecksum)
-  buf.writeU32Le(uint32(extra.len))
-  for value in extra:
-    buf.writeString(value)
-  blake3.digest(buf)
 
 proc computeOutputRealizationHash*(packageName, version, adapter,
                                   lockIdentity, declaredExecutablePath: string;
@@ -1726,6 +1707,27 @@ proc rootsHolding*(s: Store; prefixId: PrefixIdBytes): seq[string] =
   stmt.bindBlob(1, prefixId)
   while stmt.step() == SqliteRow:
     result.add(stmt.columnText(0))
+
+proc prefixesHeldByRoot*(s: Store; rootId: string): seq[PrefixIdBytes] =
+  ## The prefixes ``rootId`` currently holds, in insertion order.
+  ##
+  ## The mirror of `rootsHolding`, which answers "who keeps this alive" for
+  ## one prefix. This answers "what does this root keep alive" for one root,
+  ## which is the question a caller re-deriving a root has to ask before it
+  ## can say whether the re-derivation CHANGED anything. Without it, "the pin
+  ## still points where it did" and "the pin moved" are indistinguishable,
+  ## and a report that cannot tell them apart is a report that cannot show a
+  ## pin change happening.
+  var stmt = s.db.prepare(
+    "SELECT prefix_id FROM root_holds_prefix WHERE root_id = ? " &
+    "ORDER BY rowid")
+  defer: stmt.finalize()
+  stmt.bindText(1, rootId)
+  while stmt.step() == SqliteRow:
+    let blob = stmt.columnBlob(0)
+    var id: PrefixIdBytes
+    for i in 0 ..< 32: id[i] = blob[i]
+    result.add(id)
 
 proc appendAudit(s: var Store; action: GcAction; prefixId: PrefixIdBytes;
                  reason: string) =

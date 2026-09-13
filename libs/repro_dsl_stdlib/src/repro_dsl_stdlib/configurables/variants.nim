@@ -128,6 +128,66 @@ var pendingSolverPackages {.threadvar.}: seq[SolverPackageInput]
   ## solver consumes without importing the ``repro_project_dsl``
   ## registry (that would create a layering loop).
 
+var pendingPackageSources {.threadvar.}: Table[string, string]
+  ## M5 SELF-HOST — the declared SOURCE PROVENANCE of a depended-on package,
+  ## keyed by package name.
+  ##
+  ## WHY THIS REGISTRY EXISTS. `repro_lock` has carried MO-11's lift since
+  ## MO-11 landed: a solved package whose `source` is `"store"` becomes a
+  ## first-class `LockedDep` with `ckStore` coordinates and a
+  ## `blake3:<addr>` integrity, and one whose `source` is
+  ## `"registry:<n>"` becomes `ckRegistry`. `parseExplainFixture` reads the
+  ## `source:` directive out of a `repro.solver` sidecar and threads it into
+  ## `PackageDecl.source`. But `buildPackageDecls` — the path EVERY compiled
+  ## recipe takes — never set the field, so no recipe could declare it and
+  ## `source` came out as the bare definition identity every time. The lock
+  ## format, the lift, the fixture reader and the fixture writer could all say
+  ## "store"; the recipe front end could not. This registry closes that, and
+  ## the `packageSource` proc below is its DSL spelling.
+  ##
+  ## Thread-local and cleared by `resetVariantState` for the same reason
+  ## `pendingSolverPackages` is: both are populated by statements the
+  ## `package` macro lowers, and a scenario must not inherit the previous
+  ## one's declarations.
+
+proc packageSource*(packageName, source: string) =
+  ## Declare where a depended-on package's realized artifact COMES FROM, so
+  ## the committed lock can pin it with a coordinate instead of only a name
+  ## and a version.
+  ##
+  ## Written as a statement in a `package` body, beside `defaultToolProvisioning`:
+  ##
+  ## ```nim
+  ## package myApp:
+  ##   packageSource "reprobuild", "store"
+  ##   uses:
+  ##     "reprobuild >=0.1.4"
+  ## ```
+  ##
+  ## Accepted values are the two `repro_lock.parsePackageSource` recognizes
+  ## as external: `"store"` (a reprobuild-store-realized artifact, lifted to
+  ## `ckStore` with `solvedPackageStoreHash` as both address and integrity)
+  ## and `"registry:<registry-name>"` (lifted to `ckRegistry`). Anything else
+  ## is refused HERE rather than silently degrading to a bare definition
+  ## identity in the lock — a mis-typed `"stor"` that writes an unlifted
+  ## package is precisely the failure that would present as "the pin does not
+  ## work" several layers away from its cause.
+  if packageName.len == 0:
+    raise newException(ValueError,
+      "packageSource: the package name is empty")
+  if source != "store" and
+      not (source.startsWith("registry:") and source.len > "registry:".len):
+    raise newException(ValueError,
+      "packageSource: \"" & source & "\" is not a source provenance " &
+      "reprobuild can pin; expected \"store\" or \"registry:<name>\" " &
+      "(package " & packageName & ")")
+  pendingPackageSources[packageName] = source
+
+proc declaredPackageSource*(packageName: string): string =
+  ## The provenance declared for `packageName`, or "" when none was.
+  if packageName in pendingPackageSources: pendingPackageSources[packageName]
+  else: ""
+
 var governingLockPins {.threadvar.}: LockPins
 var governingLockPinsLoaded {.threadvar.}: bool
   ## Named-Lock-Files NLF-M3 — the pins from the committed lock governing this
@@ -197,6 +257,7 @@ proc resetVariantState*() =
   pendingCliOverrides.setLen(0)
   loadedEnvOverrides = false
   pendingSolverPackages.setLen(0)
+  pendingPackageSources.clear()
   resetDevelopSourceCache()
   # NLF-M3: a test that points the lock-pin env somewhere new must not be
   # served the previous scenario's pins. Same contract as the develop cache.
@@ -715,12 +776,20 @@ proc buildPackageDecls(parentPackages: openArray[string]): seq[PackageDecl] =
   # Materialize the dep packages first so they're available before the
   # parent packages reference them.
   for depName in depNames:
-    if depName in pinnedVersions:
-      result.add(newPinnedPackage(depName, pinnedVersions[depName]))
-    else:
-      var versions = depVersions[depName]
-      versions.sort()
-      result.add(newPackage(depName, versions))
+    var decl =
+      if depName in pinnedVersions:
+        newPinnedPackage(depName, pinnedVersions[depName])
+      else:
+        var versions = depVersions[depName]
+        versions.sort()
+        newPackage(depName, versions)
+    # M5 SELF-HOST — carry the declared provenance onto the decl so
+    # `renderSolverInputsFixture` renders a `source:` line and
+    # `lockedDepsFromPackages` lifts the solved package into a `LockedDep`
+    # with real coordinates. Set on the DEPENDENCY decls only: a parent
+    # package is the consumer, has a synthetic `0.1.0`, and is never lifted.
+    decl.source = declaredPackageSource(depName)
+    result.add(decl)
 
   # Materialize parent packages with their dependency edges.
   var sortedParents: seq[string] = @[]

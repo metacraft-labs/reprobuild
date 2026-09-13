@@ -2148,6 +2148,37 @@ proc parsePackageDef(name: NimNode; body: NimNode;
                                docForStmt.strip())
       else:
         parsePlatformsSection(stmt, result)
+    elif calleeName(stmt).normalize == "packagesource":
+      # M5 SELF-HOST — ``packageSource "<name>", "<provenance>"``: where the
+      # realized artifact of a depended-on package comes from, so the
+      # committed lock can pin it with a coordinate rather than only a name
+      # and a version. Recognized HERE rather than left as a loose top-level
+      # call because this loop silently ignores a package-body statement it
+      # does not recognize; a declaration that reads as part of the package
+      # and quietly does nothing is the worst of the three options.
+      if stmt.len != 3:
+        error("packageSource expects two string literals: " &
+          "packageSource \"<package>\", \"store\"|\"registry:<name>\"",
+          stmt)
+      let sourcedPackage = requireStrLit(stmt[1], "packageSource")
+      let provenance = requireStrLit(stmt[2], "packageSource")
+      if sourcedPackage.len == 0:
+        error("packageSource: the package name is empty", stmt[1])
+      if provenance != "store" and
+          not (provenance.startsWith("registry:") and
+               provenance.len > "registry:".len):
+        error("packageSource: \"" & provenance & "\" is not a source " &
+          "provenance reprobuild can pin; expected \"store\" or " &
+          "\"registry:<name>\"", stmt[2])
+      for existing in result.packageSources:
+        if existing.packageName == sourcedPackage:
+          error("packageSource: " & sourcedPackage &
+            " already has a declared source provenance (\"" &
+            existing.source & "\")", stmt)
+      let psLoc = stmt.lineInfoObj
+      result.packageSources.add(PackageSourceDecl(
+        packageName: sourcedPackage, source: provenance,
+        sourceFile: psLoc.filename, sourceLine: psLoc.line))
     elif calleeName(stmt).normalize == "uses":
       for i in 1 ..< stmt.len:
         collectUses(stmt[i], @[], result.toolUses)

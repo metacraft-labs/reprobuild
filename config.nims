@@ -409,6 +409,14 @@ for libName in [
   # git-checkout backend (``GitCheckoutLockStore``) on top of the
   # existing byte-identical publish/read procs.
   "repro_lock_store",
+  # M5 SELF-HOST: the pin-resolution leaf. Turns a project's committed
+  # `reprobuild` LockedDep into the store prefix holding that version's
+  # image. Depends on `repro_lock` and the store's PURE naming/hash pair
+  # (`repro_local_store/prefix_paths` + `.../realization_hash`) and on
+  # nothing else — that is what lets the resolving launcher link it without
+  # opening SQLite. `repro_cli_support` imports it for `repro self`, and
+  # `apps/repro-trampoline` is the launcher.
+  "repro_selfhost",
   # Incremental-Test-Runner M0b-3: the former vendored ``repro_ct_incremental``
   # engine copy was DELETED. The ``repro watch --ct-incremental`` decision seam
   # now flows through the engine-free ``ct_incremental_adapter`` (resolved from

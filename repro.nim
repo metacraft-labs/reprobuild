@@ -1853,6 +1853,54 @@ package reprobuild:
       nimcache = "build/nimcache/repro_catalog_harvester",
       actionId = "reprobuild.test_helpers.repro_catalog_harvester"))
 
+    # M5 SELF-HOST — the resolving launcher, built as a TEST HELPER.
+    #
+    # WHY IT IS HERE AND NOT IN ``apps/entrypoints.txt``. It is not a
+    # shipping entrypoint of this repository: what installs it on a user's
+    # ``PATH`` is the packaging layer, under the name ``repro``, beside the
+    # bootstrap image it delegates to. Listing it as an app would (a) put a
+    # fourteenth binary into every payload the packaging gates measure, and
+    # (b) subject it to ``t_b1_repro_build_apps_byte_equivalent``'s
+    # "every shipped binary answers ``--help`` with some text" probe — which
+    # this binary cannot satisfy without contradicting the one property that
+    # makes it a launcher, namely that it interprets NO argument of its own
+    # and forwards argv untouched.
+    #
+    # NEITHER COST APPLIES HERE, and the precedent is directly above:
+    # ``repro_catalog_harvester`` is a non-shipping tool built into
+    # ``build/test-bin/`` for the tests that drive it. ``build/test-bin`` is
+    # in no dist payload, the ``apps`` collection is unchanged, and no
+    # ``executable`` declaration is needed (the harvester has none either).
+    #
+    # WHAT IT BUYS. Without this edge the launcher's end-to-end behaviour —
+    # two projects, two versions, one store, a refusal that does not fall
+    # back — existed only in a hand-run gate transcript, which is how a
+    # working feature quietly stops working. With it,
+    # ``t_the_resolving_launcher_execs_the_pinned_image`` runs in the
+    # ordinary suite on every host.
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "apps/repro-trampoline/repro_trampoline.nim",
+      binary = "build/test-bin/repro_trampoline",
+      paths = sourceOnlyNimPaths,
+      passL = testRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro_trampoline",
+      actionId = "reprobuild.test_helpers.repro_trampoline"))
+
+    # The image the launcher is supposed to land on. Four of these are
+    # installed per scenario (two pinned versions, a bootstrap, and a
+    # decoy), each reporting the version named by the ``VERSION`` file in
+    # the prefix it was materialised into — so "the launcher picked the
+    # right DIRECTORY" is what the test actually observes.
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "tests/fixtures/selfhost/m5_stub_repro_image.nim",
+      binary = "build/test-bin/m5_stub_repro_image",
+      paths = sourceOnlyNimPaths,
+      passL = testRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/m5_stub_repro_image",
+      actionId = "reprobuild.test_helpers.m5_stub_repro_image"))
+
     discard collect("test-helpers", reprobuildTestHelpersActions)
 
     # Test-Fixtures-In-Build-Graph M2: the monitor-shim ``test-fixtures``

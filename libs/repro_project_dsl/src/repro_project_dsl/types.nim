@@ -244,6 +244,14 @@ type
     sourceFile*: string
     sourceLine*: int
 
+  PackageSourceDecl* = object
+    ## One ``packageSource <package>, <provenance>`` declaration. See
+    ## ``PackageDef.packageSources``.
+    packageName*: string
+    source*: string
+    sourceFile*: string
+    sourceLine*: int
+
   PackageUseDef* = object
     rawConstraint*: string
     packageSelector*: string
@@ -532,6 +540,19 @@ type
       ## name going forward; ``uses:`` is kept as a synonym until the
       ## M9.R.5 recipe sweep renames the existing 84 recipes onto the
       ## new spelling. Accessor: ``registeredBuildDeps(packageName)``.
+    packageSources*: seq[PackageSourceDecl]
+      ## M5 SELF-HOST — the declared SOURCE PROVENANCE of depended-on
+      ## packages, from the package body's ``packageSource <name>,
+      ## <provenance>`` statements.
+      ##
+      ## MACRO-TIME ONLY, and deliberately: this field is read by
+      ## ``emitVariantDeclarations`` to emit one ``packageSource(...)`` call
+      ## ahead of the ``registerSolverDependency`` calls, so the declaration
+      ## reaches ``buildPackageDecls`` before ``finalizeVariants()`` solves.
+      ## It is NOT serialized into the emitted ``PackageDef(...)`` literal
+      ## because the registry's consumers ask about artifacts and members,
+      ## not about how the solved lock addresses a dependency — that question
+      ## is answered by the lock itself.
     nativeBuildDeps*: seq[PackageUseDef]
       ## DSL-port M9.R.1: BUILD-platform tools and code generators
       ## needed to drive the build (Nix ``nativeBuildInputs``

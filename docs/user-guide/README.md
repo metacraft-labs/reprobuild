@@ -29,6 +29,11 @@ rest of the implementation documentation.
   [Workspace Locking](workspace-locking.md) for choosing a public / team /
   personal scheme, restoring a workspace on a new machine, and recovering
   from a refused push.
+- **Need a specific reprobuild version?** See
+  [Pinning reprobuild itself](pinning-reprobuild-itself.md). It is an
+  ordinary `uses:` dependency plus a committed lock entry — several versions
+  coexist in the store and a launcher on `PATH` runs the one your project
+  pins. There is no version file.
 
 ## What is reprobuild?
 

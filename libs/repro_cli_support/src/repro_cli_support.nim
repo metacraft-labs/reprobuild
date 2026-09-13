@@ -134,6 +134,7 @@ import repro_cli_support/dev_env_shell_export
 import repro_cli_support/dev_env_rollback_manifest
 import repro_cli_support/dev_env_shell_hook_templates
 import repro_cli_support/home
+import repro_cli_support/selfhost as cli_selfhost
 import repro_cli_support/infra
 import repro_cli_support/deploy_agent as cli_deploy_agent
 import repro_cli_support/hardware as cli_hardware
@@ -350,6 +351,8 @@ proc renderUsage*(programName: string): string =
       " stats [status|overview|rank|show|snapshot|compare]\n       " &
           programName &
       " store {gc | recover | roots | list | daemon} ...\n       " &
+          programName &
+      " self {install | provision | hold | which | list | prune-roots} ...\n       " &
           programName &
       " infra {plan | apply | install-root} ...\n       " &
           programName &
@@ -26959,10 +26962,31 @@ proc runStoreCommand*(args: seq[string]): int =
   try:
     case sub
     of "gc":
+      # M5 SELF-HOST — re-derive the `rkPin` roots BEFORE the dead-set query.
+      #
+      # A pin root is a consequence of what a project's committed lock says,
+      # not an assertion somebody made, and a project stops pinning by
+      # editing `repro.lock` rather than by calling the store. If gc asked
+      # only the `roots` table, a version whose pin was deleted would stay
+      # reachable forever and "remove the pin and gc" would reclaim nothing
+      # — the gc equivalent of a root nobody can reach to delete. So the
+      # pin roots are re-read from the locks they name first, and the sweep
+      # then sees the truth. Every other root kind is untouched.
+      let pinOutcomes = cli_selfhost.prunePinRootsForGc(root)
+      var droppedPins = 0
+      for outcome in pinOutcomes:
+        if outcome.action == praDropped:
+          inc droppedPins
       var store = openStore(root)
       defer: store.close()
       let report = store.gc(graceSeconds = graceSeconds)
       echo "repro store gc: store-root=" & root
+      echo "pin roots re-derived: " & $pinOutcomes.len &
+        " (dropped: " & $droppedPins & ")"
+      for outcome in pinOutcomes:
+        echo "  - " & outcome.rootId & " " & $outcome.action &
+          (if outcome.prefixIdHex.len > 0: " -> " & outcome.prefixIdHex
+           else: "")
       echo "quarantined: " & $report.quarantined.len
       for row in report.quarantined:
         echo "  - " & row.adapter & " " & row.packageName & " " &
@@ -61835,6 +61859,11 @@ const reproTopLevelCommands = [
   # Binary-Caches.md §"Client CLI Surface" — ``repro cache <sub>`` folds
   # in the retired standalone ``repro-binary-cache-client`` toolset.
   "cache",
+  # M5 SELF-HOST — ``repro self <sub>``: install / provision / hold / which /
+  # list / prune-roots for reprobuild's OWN versions in the store. The pin a
+  # project acts on is its ordinary committed ``repro.lock`` entry; these
+  # verbs never read or write a version file of their own.
+  "self",
 ]
 
 const reproCacheSubcommands = [
@@ -67322,6 +67351,13 @@ proc runThinAppDispatch(programName: string): int =
     except CatchableError as err:
       stderr.writeLine("repro develop: error: " & err.msg)
       return 1
+  if programName == "repro" and args.len > 0 and args[0] == "self":
+    let selfArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return cli_selfhost.runSelfCommand(selfArgs)
   if programName == "repro" and args.len > 0 and args[0] == "store":
     let storeArgs =
       if args.len > 1:

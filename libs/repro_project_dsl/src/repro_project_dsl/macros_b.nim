@@ -618,7 +618,8 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
   ## runtime cost.
   result = newStmtList()
   if variants.len == 0 and pkg.toolUses.len == 0 and
-      pkg.nativeBuildDeps.len == 0 and pkg.runtimeDeps.len == 0:
+      pkg.nativeBuildDeps.len == 0 and pkg.runtimeDeps.len == 0 and
+      pkg.packageSources.len == 0:
     return
   # Emit the import lazily so package files without variants OR
   # solver-bound dependencies don't get an unused import.
@@ -651,6 +652,14 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
       "  site = newSourceSite(" & fileLit & ", " & lineLit &
         ", 0, ckDefault))\n"
     result.add(parseStmt(declCode))
+  # M5 SELF-HOST — the declared source provenances go FIRST. They are read
+  # by `buildPackageDecls` inside `finalizeVariants()`, which the last
+  # statement of this block calls, so anything emitted after that call would
+  # arrive too late to reach the solve and the lock.
+  for decl in pkg.packageSources:
+    result.add(parseStmt(
+      "packageSource(" & escForCode(decl.packageName) & ", " &
+      escForCode(decl.source) & ")\n"))
   # Spec-Implementation M2d: emit one registerSolverDependency call per
   # parsed PackageUseDef. The solver consumes these to (a) materialize
   # the package version universe (via ``chosenVersion(...)``) and (b)

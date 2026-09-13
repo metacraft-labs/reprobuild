@@ -34,7 +34,17 @@ export jsts_dep_scanner
 export convention_attribution
 export injected_libraries
 
-const ReprobuildVersion* = "0.1.3"
+const ReprobuildVersion* {.strdefine.} = "0.1.3"
+  ## The release version this image reports through ``repro --version``.
+  ##
+  ## M5 SELF-HOST: a ``{.strdefine.}`` rather than a bare literal so ONE
+  ## source tree can produce the several reprobuild images a multi-version
+  ## store holds (``nim c -d:ReprobuildVersion=0.1.4 …``). The default is the
+  ## release literal, so an ordinary build -- and ``tests/unit/t_version.nim``,
+  ## which cross-checks it against ``reprobuild.nimble`` -- is unchanged.
+  ## The version is what a project PINS (``uses: "reprobuild >=X"`` -> the
+  ## committed ``repro.lock``), so it has to be settable by the build that
+  ## produces the artifact being pinned rather than only by editing a file.
 
 proc versionString*(): string =
   ReprobuildVersion

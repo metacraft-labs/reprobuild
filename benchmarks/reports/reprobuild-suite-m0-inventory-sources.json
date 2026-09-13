@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
-    "graphOwnedHelperArtifacts": 20,
-    "nimTestBinaries": 1544,
-    "pureUnitConsolidationGroups": 46,
-    "pureUnitTests": 560,
+    "graphOwnedHelperArtifacts": 22,
+    "nimTestBinaries": 1549,
+    "pureUnitConsolidationGroups": 47,
+    "pureUnitTests": 563,
     "staticallyDetectedRuntimeCompilerFlowTests": 95,
-    "testEntries": 1552
+    "testEntries": 1557
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -488,6 +488,21 @@
         "libs/repro_resources/tests/t_l3_reaper.nim",
         "libs/repro_resources/tests/t_resource_provider_lane.nim",
         "libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_local_store",
+        "repro_lock",
+        "repro_selfhost"
+      ],
+      "owner": "libs/repro_selfhost",
+      "sources": [
+        "libs/repro_selfhost/tests/t_removing_the_pin_makes_the_version_collectable.nim",
+        "libs/repro_selfhost/tests/t_the_pin_lives_in_the_lock.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1042,10 +1057,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 705,
+      "integration": 706,
       "platform/destructive": 113,
-      "pure unit": 560,
-      "unclassified": 162
+      "pure unit": 563,
+      "unclassified": 163
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1145,6 +1160,12 @@
         "source": "tests/fixtures/local-daemons-control-plane/live-endpoint-helper/live_endpoint_helper.nim"
       },
       {
+        "actionId": "reprobuild.test_helpers.m5_stub_repro_image",
+        "kind": "test-helper",
+        "output": "build/test-bin/m5_stub_repro_image",
+        "source": "tests/fixtures/selfhost/m5_stub_repro_image.nim"
+      },
+      {
         "actionId": "reprobuild.test_helpers.repro_binary_cache",
         "kind": "test-helper",
         "output": "build/test-bin/repro_binary_cache",
@@ -1167,11 +1188,17 @@
         "kind": "test-helper",
         "output": "build/test-bin/repro_catalog_harvester",
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
+      },
+      {
+        "actionId": "reprobuild.test_helpers.repro_trampoline",
+        "kind": "test-helper",
+        "output": "build/test-bin/repro_trampoline",
+        "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1544,
+    "nimTestBinaryCount": 1549,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1552
+    "testEntryCount": 1557
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8056,6 +8083,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_declared_package_source_reaches_the_solver_inputs",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_declared_package_source_reaches_the_solver_inputs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_develop_dependency_source_is_read_not_solved",
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",
@@ -13388,6 +13432,62 @@
       "source": "libs/repro_resources/tests/t_rss_ssz_envelope_roundtrip.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_removing_the_pin_makes_the_version_collectable",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store",
+        "repro_lock",
+        "repro_selfhost"
+      ],
+      "owner": "libs/repro_selfhost",
+      "requiresReproBinary": false,
+      "source": "libs/repro_selfhost/tests/t_removing_the_pin_makes_the_version_collectable.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_self_store_root_matches_the_store",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store",
+        "repro_selfhost"
+      ],
+      "owner": "libs/repro_selfhost",
+      "requiresReproBinary": false,
+      "source": "libs/repro_selfhost/tests/t_self_store_root_matches_the_store.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_the_pin_lives_in_the_lock",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store",
+        "repro_lock",
+        "repro_selfhost"
+      ],
+      "owner": "libs/repro_selfhost",
+      "requiresReproBinary": false,
+      "source": "libs/repro_selfhost/tests/t_the_pin_lives_in_the_lock.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -29002,6 +29102,25 @@
       "source": "tests/integration/t_test_execute_edge_declares_repro_binary_reached_via_helper.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_the_resolving_launcher_execs_the_pinned_image",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_lock",
+        "repro_selfhost"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_the_resolving_launcher_execs_the_pinned_image.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
