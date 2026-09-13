@@ -1807,35 +1807,42 @@ proc gcPrefix*(s: var Store; prefixId: PrefixIdBytes;
   ## separate question, decided by the retention vocabulary, and this
   ## store consumes that rather than growing a second one.
   result.reason = ""
-  let holders = s.rootsHolding(prefixId)
-  if holders.len > 0:
-    result.refused = true
-    result.holdingRoots = holders
-    result.found = true
-    result.reason = "refused: prefix is held by root(s) " & holders.join(", ")
-    s.appendAudit(gaRefuse, prefixId, result.reason)
-    return result
-
-  let lookup = s.lookupPrefix(prefixId)
-  if not lookup.found:
-    result.found = false
-    result.reason = "no such prefix in the index"
-    return result
-  result.found = true
-
-  let absPath = s.absolutePrefixPath(lookup.row.realizedPath)
-  if dirExists(extendedPath(absPath)):
-    try:
-      result.quarantinedPath = s.quarantineUnique(absPath)
-    except OSError as err:
-      s.appendAudit(gaQuarantine, prefixId,
-        "quarantine deferred: " & err.msg)
-      result.reason = "quarantine deferred: " & err.msg
-      return result
-
+  # Serialize the reachability decision and rename with root registration.
   s.db.exec("BEGIN IMMEDIATE")
   var committed = false
   try:
+    let holders = s.rootsHolding(prefixId)
+    if holders.len > 0:
+      result.refused = true
+      result.holdingRoots = holders
+      result.found = true
+      result.reason = "refused: prefix is held by root(s) " & holders.join(", ")
+      s.appendAudit(gaRefuse, prefixId, result.reason)
+      s.db.exec("COMMIT")
+      committed = true
+      return result
+
+    let lookup = s.lookupPrefix(prefixId)
+    if not lookup.found:
+      result.found = false
+      result.reason = "no such prefix in the index"
+      s.db.exec("COMMIT")
+      committed = true
+      return result
+    result.found = true
+
+    let absPath = s.absolutePrefixPath(lookup.row.realizedPath)
+    if dirExists(extendedPath(absPath)):
+      try:
+        result.quarantinedPath = s.quarantineUnique(absPath)
+      except OSError as err:
+        s.appendAudit(gaQuarantine, prefixId,
+          "quarantine deferred: " & err.msg)
+        result.reason = "quarantine deferred: " & err.msg
+        s.db.exec("COMMIT")
+        committed = true
+        return result
+
     var del = s.db.prepare("DELETE FROM prefixes WHERE prefix_id = ?")
     del.bindBlob(1, prefixId)
     discard del.step()
@@ -1876,21 +1883,29 @@ proc gc*(s: var Store; graceSeconds = DefaultGcGraceSeconds): GcReport =
   result.ranAt = getTime().toUnix
   let dead = s.deadSet()
   for row in dead:
-    let absPath = s.absolutePrefixPath(row.realizedPath)
     var movedTo = ""
-    if dirExists(extendedPath(absPath)):
-      try:
-        movedTo = s.quarantineUnique(absPath)
-      except OSError as err:
-        # The directory exists but cannot be renamed (busy reader, etc).
-        # Defer; the next GC pass will retry.
-        s.appendAudit(gaQuarantine, row.prefixId,
-          "quarantine deferred: " & err.msg)
-        continue
-    # Delete the prefix row (cascades through root_holds_prefix).
     s.db.exec("BEGIN IMMEDIATE")
     var committed = false
     try:
+      # A root or another collector may have changed the initial dead set.
+      let current = s.lookupPrefix(row.prefixId)
+      if not current.found or s.rootsHolding(row.prefixId).len > 0:
+        s.db.exec("COMMIT")
+        committed = true
+        continue
+      let absPath = s.absolutePrefixPath(current.row.realizedPath)
+      if dirExists(extendedPath(absPath)):
+        try:
+          movedTo = s.quarantineUnique(absPath)
+        except OSError as err:
+          # The directory exists but cannot be renamed (busy reader, etc).
+          # Defer; the next GC pass will retry.
+          s.appendAudit(gaQuarantine, row.prefixId,
+            "quarantine deferred: " & err.msg)
+          s.db.exec("COMMIT")
+          committed = true
+          continue
+      # Delete the prefix row (cascades through root_holds_prefix).
       var del = s.db.prepare("DELETE FROM prefixes WHERE prefix_id = ?")
       del.bindBlob(1, row.prefixId)
       discard del.step()

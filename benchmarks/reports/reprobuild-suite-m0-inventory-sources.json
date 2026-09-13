@@ -10368,7 +10368,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
