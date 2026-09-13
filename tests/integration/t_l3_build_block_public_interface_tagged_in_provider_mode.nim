@@ -1,130 +1,64 @@
-## L3 PUBLISH-SCOPE — PROVIDER-MODE tagging of hand-authored ``build:``
-## block public-interface artifacts.
-##
-## The review REJECTED the first L3 cut because the public-interface
-## tagging never fired in the REAL build path: a real ``repro build``
-## compiles the recipe as a PROVIDER (``--define:reproProviderMode``),
-## where the per-artifact ``build:`` body-splice is gated off and the
-## flattened ``buildXxxPackage`` executor runs under only the M5 package
-## frame — so the M4 per-artifact frame ``maybeTagPublicInterface`` keys
-## off was never on the stack, and the tag only fired in unit tests
-## (neither define). This test closes that gap: it compiles a fixture
-## recipe WITH ``--define:reproProviderMode`` and drives the real
-## provider fragment-build path, then asserts:
-##
-##   1. A DECLARED ``executable`` member built by a hand-authored
-##      ``nim.c`` edge IS tagged (``publishToBinaryCache`` +
-##      ``cacheEntryIdentity``) in provider mode.
-##   2. The tag's identity matches the Nim-CONVENTION composition
-##      byte-for-byte (member name as packageName, toolchain ``"nim"``,
-##      providerRevision = BLAKE3 of the recipe file) — so a build-block
-##      publish and a Nim-convention publish of the same member land
-##      under one cache key.
-##   3. A declared member with ``publish = some(false)`` stays UNTAGGED
-##      (explicit opt-out honoured on the provider path).
-##   4. A package-level ``build:`` edge (no owning public-interface
-##      member) stays UNTAGGED.
+## Real provider-mode tagging must not authorize entry-file-only package keys.
 
-import std/[os, osproc, sequtils, strutils, tables, unittest]
+import std/[json, os, osproc, strutils, tables, tempfiles, unittest]
 
 import repro_binary_cache_client/cache_key
-import blake3
+import repro_project_dsl/source_cache_identity
 
 const FixtureDir = currentSourcePath().parentDir.parentDir /
   "fixtures" / "l3-build-block-publish"
 
-proc q(value: string): string =
-  "'" & value.replace("'", "'\\''") & "'"
+proc compileRunner(root: string): string =
+  result = root / "runner"
+  let compiled = execCmdEx(quoteShellCommand(@["nim", "c", "--verbosity:0", "--hints:off",
+    "-d:reproProviderMode", "--nimcache:" & root / "nimcache", "--out:" & result,
+    FixtureDir / "runner.nim"]))
+  doAssert compiled.exitCode == 0, compiled.output
 
-proc runNim(args: openArray[string]): tuple[code: int; output: string] =
-  let res = execCmdEx(args.mapIt(q(it)).join(" "))
-  (code: res.exitCode, output: res.output)
+proc inspect(binary, recipeDir: string): Table[string, JsonNode] =
+  let ran = execCmdEx(quoteShellCommand(@[binary, recipeDir]))
+  doAssert ran.exitCode == 0, ran.output
+  result = initTable[string, JsonNode]()
+  for line in ran.output.splitLines():
+    if line.startsWith("{"):
+      let row = parseJson(line)
+      result[row["action"].getStr()] = row
 
-proc recipeRevisionHex(recipeDir: string): string =
-  ## Independently recompute the expected ``providerRevision`` the exact
-  ## way ``from_source_identity.providerRevisionHex`` /
-  ## ``nim.nim.nimRecipeRevisionHex`` do — BLAKE3 of the recipe bytes,
-  ## truncated to 32 hex chars — so the key check is a genuine
-  ## cross-path equivalence, not a tautology.
-  let body = readFile(recipeDir / "repro.nim")
-  let full = blake3.toHex(blake3.digest(body))
-  if full.len >= 32: full[0 ..< 32] else: full
+suite "provider-mode public-interface cache identity":
+  test "automatic and explicit publication tags retain the incomplete identity guard":
+    let root = createTempDir("nim-public-interface-", "")
+    defer: removeDir(root)
+    let rows = inspect(compileRunner(root), FixtureDir)
+    for (action, member) in [("publicTool", "publicTool"), ("forcedTool", "forcedTool"),
+                             ("customNamedTool", "renamedTool")]:
+      let row = rows[action]
+      let convention = sourceCacheEntryIdentity(FixtureDir, member, "", "nim")
+      check row["publish"].getBool()
+      check row["packageName"].getStr() == member
+      check row["toolchain"].getStr() == "nim"
+      check row["providerRevision"].getStr() == convention.providerRevision
+      check row["keyHex"].getStr() == ""
+      check row["identityError"].getStr() == cacheEntryIdentityError(convention)
+      expect CacheKeyError:
+        discard deriveCacheEntryKeyHex(convention)
+    for name in ["optedOutTool", "internalHelper"]:
+      check not rows[name]["publish"].getBool()
+      check rows[name]["keyHex"].getStr() == ""
 
-proc expectedPublicToolKeyHex(recipeDir: string): string =
-  ## Compose the identity the NIM CONVENTION would stamp for member
-  ## ``publicTool`` (member name as packageName, no version, toolchain
-  ## ``"nim"``, recipe-hash providerRevision) and derive its key hex.
-  let idy = publicInterfaceIdentity(
-    packageName = "publicTool",
-    packageVersion = "",
-    toolchainName = "nim",
-    providerRevision = recipeRevisionHex(recipeDir))
-  deriveCacheEntryKeyHex(idy)
-
-type RunnerRow = object
-  publish: bool
-  keyHex: string
-  pkgName: string
-  toolchain: string
-  providerRev: string
-
-proc parseRows(output: string): Table[string, RunnerRow] =
-  ## Each runner line: ``<kind>|<publish>|<keyHex>|<pkg>|<tc>|<rev>``.
-  result = initTable[string, RunnerRow]()
-  for line in output.splitLines():
-    let parts = line.split('|')
-    if parts.len != 6:
-      continue
-    result[parts[0]] = RunnerRow(
-      publish: parts[1] == "true",
-      keyHex: parts[2],
-      pkgName: parts[3],
-      toolchain: parts[4],
-      providerRev: parts[5])
-
-suite "L3 PUBLISH-SCOPE — provider-mode public-interface tagging":
-
-  test "declared build-block executable is tagged + keyed like the Nim convention":
-    let tmp = getTempDir() / "l3-build-block-publish-runner"
-    let nimcache = tmp / "nimcache"
-    let outBin = tmp / "runner"
-    createDir(nimcache)
-
-    # Compile the runner WITH the provider define — the exact posture a
-    # real ``repro build`` uses to compile a recipe.
-    let compiled = runNim(@["nim", "c", "--verbosity:0", "--hints:off",
-      "-d:reproProviderMode",
-      "--nimcache:" & nimcache, "--out:" & outBin,
-      FixtureDir / "runner.nim"])
-    if compiled.code != 0:
-      checkpoint(compiled.output)
-    check compiled.code == 0
-
-    # Run the provider fragment build against the fixture recipe dir.
-    let ran = execCmdEx(q(outBin) & " " & q(FixtureDir))
-    if ran.exitCode != 0:
-      checkpoint(ran.output)
-    check ran.exitCode == 0
-
-    let rows = parseRows(ran.output)
-
-    # (1) + (2): the declared executable's edge is tagged AND its key
-    # matches the Nim-convention key byte-for-byte.
-    check rows.hasKey("publicTool")
-    let pub = rows["publicTool"]
-    check pub.publish
-    check pub.pkgName == "publicTool"
-    check pub.toolchain == "nim"
-    check pub.providerRev == recipeRevisionHex(FixtureDir)
-    check pub.keyHex == expectedPublicToolKeyHex(FixtureDir)
-    check pub.keyHex.len > 0
-
-    # (3): explicit ``publish = some(false)`` on a declared member — the
-    # edge stays UNTAGGED even though it is public interface.
-    check rows.hasKey("optedOutTool")
-    check (not rows["optedOutTool"].publish)
-
-    # (4): a package-level ``build:`` edge with no owning public-interface
-    # member stays UNTAGGED.
-    check rows.hasKey("internalHelper")
-    check (not rows["internalHelper"].publish)
+  test "implementation edits cannot alias under an unchanged entry recipe":
+    let root = createTempDir("nim-implementation-identity-", "")
+    defer: removeDir(root)
+    let recipe = root / "recipe"
+    createDir(recipe / "src")
+    copyFile(FixtureDir / "repro.nim", recipe / "repro.nim")
+    let program = recipe / "src" / "publicTool.nim"
+    writeFile(program, "echo 1\n")
+    let runner = compileRunner(root)
+    let before = inspect(runner, recipe)["publicTool"]
+    writeFile(program, "echo 2\n")
+    let after = inspect(runner, recipe)["publicTool"]
+    check before["providerRevision"] == after["providerRevision"]
+    check before["publish"].getBool() and after["publish"].getBool()
+    for row in [before, after]:
+      check row["keyHex"].getStr() == ""
+      check row["identityError"].getStr().startsWith("incomplete binary-cache identity")

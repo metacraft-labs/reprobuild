@@ -8,13 +8,10 @@
 ## active project root so ``providerRevision`` resolves exactly as it
 ## does under a live ``repro build``.
 ##
-## For every registered build action it prints one line:
-##   ``<actionId>|<publish>|<keyHex>|<pkgName>|<toolchain>|<providerRev>``
-## The test parses these lines and asserts the DECLARED executable's
-## ``nim.c`` edge is tagged with a ``publicInterfaceIdentity`` matching
-## the Nim-convention composition byte-for-byte.
+## Each JSON line records a real provider-mode action's publication tag,
+## identity fields and the result of attempting canonical key derivation.
 
-import std/[options, os]
+import std/[json, options, os]
 
 import repro_project_dsl
 import repro_provider_runtime
@@ -60,11 +57,16 @@ when isMainModule:
     var pkgName = ""
     var toolchain = ""
     var providerRev = ""
+    var identityError = ""
     if action.cacheEntryIdentity.isSome:
       let idy = action.cacheEntryIdentity.get()
-      keyHex = deriveCacheEntryKeyHex(idy)
+      try:
+        keyHex = deriveCacheEntryKeyHex(idy)
+      except CacheKeyError as error:
+        identityError = error.msg
       pkgName = idy.packageName
       toolchain = idy.toolchain.name
       providerRev = idy.providerRevision
-    echo actionKind(action) & "|" & $publish & "|" & keyHex & "|" &
-      pkgName & "|" & toolchain & "|" & providerRev
+    echo $(%*{"action": actionKind(action), "publish": publish, "keyHex": keyHex,
+      "packageName": pkgName, "toolchain": toolchain, "providerRevision": providerRev,
+      "identityError": identityError})

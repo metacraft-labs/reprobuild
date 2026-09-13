@@ -29,6 +29,16 @@ package l3pub:
     build:
       discard nim.c(source = "src/publicTool.nim", binary = "publicTool")
 
+  executable forcedTool:
+    build:
+      discard nim.c(source = "src/publicTool.nim", binary = "forcedTool",
+                    publish = some(true))
+
+  executable namedTool:
+    build:
+      discard nim.c(source = "src/publicTool.nim", binary = "customNamedTool",
+                    publishAs = "renamedTool")
+
   # A DECLARED public-interface executable that opts OUT via
   # ``publish = false``. Even though it is a declared member its edge
   # must stay UNTAGGED — proves the explicit override is honoured on the
