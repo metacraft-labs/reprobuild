@@ -42,14 +42,8 @@ export packages_schema
 # one.
 import repro_dsl_stdlib/openssl_layout
 
-# L3 PUBLISH-SCOPE (public-interface publishing for hand-authored
-# ``build:`` blocks). ``blake3`` composes the recipe-revision digest;
-# ``repro_core`` resolves the recipe file bytes. ``repro_project_dsl``
-# re-exports the ``CacheEntryIdentity`` shape + ``publicInterfaceIdentity``
-# (cache_key) + the ``registeredVersions`` / ``activeProviderProjectRoot`` /
-# ``currentBuild*`` context surface used below.
-import blake3
-import repro_core
+# Hand-authored builds use the same pending identity as source conventions.
+import repro_project_dsl/source_cache_identity
 
 var reproNimPathsEnabled {.threadvar.}: bool
 var reproConfigNimsFile {.threadvar.}: string
@@ -432,23 +426,6 @@ proc compileDependencyPolicy(cacheDir: string;
 # The default is AUTOMATIC: no recipe change is needed for the common
 # case where the artifact name IS the public-interface member.
 
-proc nimRecipeRevisionHex(projectRoot: string): string =
-  ## BLAKE3 of the recipe file bytes, truncated to 32 hex chars — the
-  ## exact ``providerRevision`` shape ``from_source_identity.
-  ## providerRevisionHex`` produces, so a build-block publish and a
-  ## Nim-convention publish of the same member derive an identical key.
-  let match = resolveProjectFile(projectRoot)
-  if match.path.len == 0:
-    return ""
-  let bodyStr =
-    try: readFile(extendedPath(match.path))
-    except CatchableError: ""
-  if bodyStr.len == 0:
-    return ""
-  let dig = blake3.digest(bodyStr)
-  let full = blake3.toHex(dig)
-  if full.len >= 32: full[0 ..< 32] else: full
-
 proc nimMemberIsPublicInterface(packageName, memberName: string): bool =
   ## True when ``memberName`` is a declared ``executable``/``library`` of
   ## ``packageName`` — i.e. part of the package's PUBLIC INTERFACE. The
@@ -477,11 +454,11 @@ proc nimPublicInterfaceIdentity(packageName, memberName: string):
     if vs.len > 0:
       v = vs[^1].version
     v
-  publicInterfaceIdentity(
+  sourceCacheEntryIdentity(
+    projectRoot = activeProviderProjectRoot(),
     packageName = memberName,
     packageVersion = versionStr,
-    toolchainName = "nim",
-    providerRevision = nimRecipeRevisionHex(activeProviderProjectRoot()))
+    conventionTag = "nim")
 
 proc maybeTagPublicInterface(action: BuildActionDef;
                              publish: Option[bool]; publishAs: string) =

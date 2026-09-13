@@ -11,6 +11,12 @@ option. Presence of this option, including an empty value, prevents key
 derivation. It is serialized with the identity so graph-cache restoration
 cannot accidentally make an incomplete identity usable.
 
+This also applies to hand-authored `nim.c` outputs. Automatic public-interface
+tagging, `publish = true`, and `publishAs` select publication intent; none of
+them supplies the missing source/dependency/toolchain inputs. They use the same
+pending constructor as the source conventions. `publish = false` still opts
+out, and ordinary builds and local action caching continue normally.
+
 ## Current Behavior
 
 - Ordinary builds still run and use the local action cache. Their separate

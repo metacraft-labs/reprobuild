@@ -3935,15 +3935,15 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
-            "nimcache",
-            "outBin"
+            "root",
+            "runner"
           ],
-          "line": 95,
+          "line": 13,
           "path": "tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim",
           "patterns": [
             "nim-argv"
           ],
-          "snippet": "let compiled = runNim(@[\"nim\", \"c\", \"--verbosity:0\", \"--hints:off\","
+          "snippet": "let compiled = execCmdEx(quoteShellCommand(@[\"nim\", \"c\", \"--verbosity:0\", \"--hints:off\","
         }
       ],
       "source": "tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim"
@@ -25596,13 +25596,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_binary_cache_client"
+        "repro_binary_cache_client",
+        "repro_project_dsl"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
