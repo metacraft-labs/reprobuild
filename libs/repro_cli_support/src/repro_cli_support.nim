@@ -65504,10 +65504,29 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
   let bindings = flakeBindInputsToCheckouts(declared.names,
     selection.checkoutOf, suffixes, identity, notices)
 
-  let state = flakeOverrideStateReport(flakeRoot, bindings, identity)
+  var state = flakeOverrideStateReport(flakeRoot, bindings, identity)
   if not state.ok:
     for r in state.refusals: refusals.add(r)
     return refuse()
+  # The publication axis, for the `recordable` field below.
+  #
+  # `flakeRowIsRecordable` is the ONE predicate the refresh, the pre-push gate
+  # and this report all answer through, precisely so that no two of them can
+  # give different answers about the same row. It reads `row.unpublished`,
+  # which only `flakeAnnotatePublication` ever sets — so a consumer that skips
+  # the annotation does not get a cheaper answer, it gets a WRONG one: an ahead
+  # sibling whose HEAD has never been pushed was reported `"recordable": true`
+  # while the refresh withheld the write, the two halves disagreeing about the
+  # same row in the same workspace in the same second. That field is the
+  # machine-readable surface, so a script gating on it was told the pin would
+  # move and it did not.
+  #
+  # `flakeOverrideStateReport` still does not ask the question itself, and that
+  # is still right: it also backs `repro flake override-args`, which `.envrc`
+  # runs on every directory entry. THIS verb is not that path — `.envrc` no
+  # longer calls it — and it already resolves the develop set, so one
+  # `git rev-list` per substituted input is not a cost worth being wrong for.
+  flakeAnnotatePublication(state, identity)
 
   if asJson:
     var rows = newJArray()

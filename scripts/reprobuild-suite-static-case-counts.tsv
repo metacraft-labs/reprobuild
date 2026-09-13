@@ -1372,9 +1372,14 @@ tests/integration/t_test_edge_migration_covers_all_test_files.nim	nim	1
 tests/integration/t_test_execute_edge_declares_repro_binary_reached_via_helper.nim	nim	4
 tests/integration/t_the_resolving_launcher_execs_the_pinned_image.nim	nim	12
 <<<<<<< HEAD
+<<<<<<< HEAD
 tests/integration/t_thin_daemon_client.nim	nim	7
 ||||||| parent of 84c73fe9 (Never record a sibling revision that has not been pushed)
 =======
+||||||| parent of d4e5e6d2 (Report the same recordability the refresh will act on)
+=======
+tests/integration/t_the_status_report_does_not_call_an_unpublished_row_recordable.nim	nim	1
+>>>>>>> d4e5e6d2 (Report the same recordability the refresh will act on)
 tests/integration/t_the_unpushed_skip_names_the_push_that_would_make_it_lockable.nim	nim	1
 >>>>>>> 84c73fe9 (Never record a sibling revision that has not been pushed)
 tests/integration/t_ti1_interface_artifact_edge.nim	nim	4
