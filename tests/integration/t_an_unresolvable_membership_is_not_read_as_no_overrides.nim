@@ -154,6 +154,13 @@ suite "NF-2: an unresolvable membership is not read as no overrides":
         " commit -q -a -m " & q("gamma revision 2"))
       let newGamma = gitIn(fx, gammaDir, "rev-parse HEAD").strip()
       check newGamma != fx.seedSha[2]
+      # PUBLISHED, because this case's subject is the manifest PATH lookup and
+      # nothing else. An unpushed revision is separately not recordable
+      # (Workspace-And-Develop-Mode.md §"Reproducibility And `repro check`":
+      # "dirty **or only locally committed**"), so leaving it unpushed would
+      # make (1) fail for a reason that has nothing to do with `path` ≠ `name`.
+      publishRepo(fx, gammaDir)
+      check siblingRevIsPublished(fx, "refs/gamma", newGamma)
 
       let first = tryCommitInApp(fx, "build against the relocated gamma")
       if first.code != 0:
@@ -179,7 +186,7 @@ suite "NF-2: an unresolvable membership is not read as no overrides":
         "schema = \"reprobuild.solved-graph-lock.v2\"\n\n[lock\n" &
         "this file is not parseable TOML\n")
 
-      let newAlpha = moveSibling(fx, "alpha", "revision 2")
+      let newAlpha = moveAndPublishSibling(fx, "alpha", "revision 2")
       let lockBefore = readFile(lockPath(fx))
       let second = tryCommitInApp(fx, "commit with an unreadable membership")
       # A tooling fault is not a reason to reject a developer's commit.
@@ -230,7 +237,7 @@ suite "NF-2: an unresolvable membership is not read as no overrides":
       removeFile(fx.ws / "repro.lock")
       check not fileExists(fx.ws / "repro.lock")
 
-      let newBeta = moveSibling(fx, "beta", "revision 2")
+      let newBeta = moveAndPublishSibling(fx, "beta", "revision 2")
       let lockBeforeRaise = readFile(lockPath(fx))
       let third = tryCommitInApp(fx, "commit with an unresolvable project")
       if third.code != 0:

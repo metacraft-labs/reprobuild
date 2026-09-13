@@ -52,7 +52,7 @@ suite "NF-2: a dirty sibling outside the closure does not block":
       isolateNf2Config(fx)
       defer: releaseNf2Config()
 
-      let newAlpha = moveSibling(fx, "alpha", "revision 2")
+      let newAlpha = moveAndPublishSibling(fx, "alpha", "revision 2")
 
       # `delta`: a real, dirty, entirely unrelated repo of the same workspace.
       dirtySibling(fx, "delta")
@@ -91,7 +91,7 @@ suite "NF-2: a dirty sibling outside the closure does not block":
       # `epsilon` is declared as a dependency of `app` and is named by no flake
       # input. The policy is about develop-mode DEPENDENCIES, so its dirt
       # suppresses the refresh even though `flake.lock` carries no pin for it.
-      let newBeta = moveSibling(fx, "beta", "revision 2")
+      let newBeta = moveAndPublishSibling(fx, "beta", "revision 2")
       dirtySibling(fx, "epsilon")
       let before = readFile(lockPath(fx))
       let second = tryCommitInApp(fx, "commit beside a dirty dependency")

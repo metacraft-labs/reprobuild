@@ -52,11 +52,6 @@ proc nf3Prerequisites*(caseName: string): bool =
   ## the same LOUD announcement when they are missing.
   nf2Prerequisites(caseName)
 
-proc publishRepo*(fx: Nf2Fixture; dir: string) =
-  ## Push a checkout's HEAD to its origin, so the gate's stage-2
-  ## ("HEAD is published") observation passes on it for real.
-  discard gitIn(fx, dir, "push -q origin HEAD:main")
-
 proc publishAll*(fx: Nf2Fixture) =
   for name in Nf2Repos:
     publishRepo(fx, fx.ws / name)
@@ -89,6 +84,17 @@ proc advanceSibling*(fx: Nf2Fixture; name: string; steps: int): string =
   for i in 1 .. steps:
     discard moveSibling(fx, name, "step-" & $i)
   headOf(fx, siblingDir(fx, name))
+
+proc advancePublishedSibling*(fx: Nf2Fixture; name: string;
+    steps: int): string =
+  ## `advanceSibling` followed by a real push: the sibling ends AHEAD of its
+  ## pin at a revision anybody can fetch — the §3.1 shape NF-2 exists to record.
+  ##
+  ## The two helpers differ by exactly one real `git push`, which is what lets a
+  ## case isolate the publication axis from the direction axis instead of
+  ## conflating them.
+  result = advanceSibling(fx, name, steps)
+  publishSibling(fx, name)
 
 proc rewindSibling*(fx: Nf2Fixture; name: string; steps: int): string =
   ## Move the CHECKOUT back ``steps`` commits without discarding the objects,

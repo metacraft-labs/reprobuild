@@ -92,7 +92,7 @@ suite "NF-2: the commit records the sibling revision the shell used":
       check nodeText(before, "alpha-src").contains(seedAlpha)
 
       # The sibling moves ahead of its pin: this is `AUTO` building local work.
-      let newAlpha = moveSibling(fx, "alpha", "revision 2")
+      let newAlpha = moveAndPublishSibling(fx, "alpha", "revision 2")
       check newAlpha != seedAlpha
 
       # A REAL `git commit`. The installed `pre-commit` hook fires inside it.
@@ -174,7 +174,7 @@ suite "NF-2: the commit records the sibling revision the shell used":
       discard requireCmd(q(fx.gitBin) & " -C " & q(fx.app) & " add -A")
       discard requireCmd(q(fx.gitBin) & " -C " & q(fx.app) &
         " commit -q -m " & q("seed a tracked file"))
-      let newBeta = moveSibling(fx, "beta", "revision 2")
+      let newBeta = moveAndPublishSibling(fx, "beta", "revision 2")
       writeFile(fx.app / "tracked.txt", "modified, committed with -a\n")
       let dashA = run(q(fx.gitBin) & " -C " & q(fx.app) &
         " commit -q -a -m " & q("commit -a against a moved beta"))

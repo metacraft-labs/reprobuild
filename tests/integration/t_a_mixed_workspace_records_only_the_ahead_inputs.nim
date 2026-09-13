@@ -78,7 +78,7 @@ suite "NF-2: a mixed workspace records only the ahead inputs":
       commitLockAndPublish(fx, "a four-input flake with siblings all over")
 
       let before = readFile(lockPath(fx))
-      let alphaHead = advanceSibling(fx, "alpha", 2)
+      let alphaHead = advancePublishedSibling(fx, "alpha", 2)
       check alphaHead != fx.seedSha[0]
 
       let committed = tryCommitInApp(fx, "work built against the newer alpha")

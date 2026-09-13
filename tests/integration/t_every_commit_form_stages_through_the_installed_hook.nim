@@ -138,7 +138,7 @@ suite "NF-2: every commit form stages through the installed hook":
         " commit -q -m " & q("seed a tracked file"))
 
       # ---- form 1: `git commit`. GIT_INDEX_FILE=.git/index. --------------
-      let alphaTwo = moveSibling(fx, "alpha", "revision 2")
+      let alphaTwo = moveAndPublishSibling(fx, "alpha", "revision 2")
       let plain = tryCommitInApp(fx, "plain commit")
       if plain.code != 0:
         checkpoint("`git commit` failed:\n" & plain.output & "\nlog:\n" &
@@ -153,7 +153,7 @@ suite "NF-2: every commit form stages through the installed hook":
       check lastFlakeLogLine(fx).contains("staged into this commit")
 
       # ---- form 2: `git commit --amend`. Also .git/index. -----------------
-      let betaTwo = moveSibling(fx, "beta", "revision 2")
+      let betaTwo = moveAndPublishSibling(fx, "beta", "revision 2")
       let amended = run(q(fx.gitBin) & " -C " & q(fx.app) &
         " commit -q --amend --no-edit")
       if amended.code != 0:
@@ -173,7 +173,7 @@ suite "NF-2: every commit form stages through the installed hook":
       # The first of the two forms the managed body's scrub broke: git is
       # already holding that lock for the commit in flight, so a `git add`
       # without the variable exits 128 rather than staging somewhere harmless.
-      let gammaTwo = moveSibling(fx, "gamma", "revision 2")
+      let gammaTwo = moveAndPublishSibling(fx, "gamma", "revision 2")
       writeFile(fx.app / "tracked.txt", "modified, committed with -a\n")
       let dashA = run(q(fx.gitBin) & " -C " & q(fx.app) &
         " commit -q -a -m " & q("commit -a against a moved gamma"))
@@ -196,7 +196,7 @@ suite "NF-2: every commit form stages through the installed hook":
       # HEAD plus the named paths and commits THAT tree, so a refresh staged
       # into the default index would be absent from the commit even where the
       # `git add` succeeded.
-      let alphaThree = moveSibling(fx, "alpha", "revision 3")
+      let alphaThree = moveAndPublishSibling(fx, "alpha", "revision 3")
       writeFile(fx.app / "tracked.txt", "modified, committed by pathspec\n")
       let pathspec = run(q(fx.gitBin) & " -C " & q(fx.app) &
         " commit -q -m " & q("pathspec commit against a moved alpha") &

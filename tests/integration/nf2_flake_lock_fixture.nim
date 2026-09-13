@@ -378,6 +378,47 @@ proc moveSibling*(fx: Nf2Fixture; name, marker: string): string =
     q(marker))
   headOf(fx, dir)
 
+proc publishRepo*(fx: Nf2Fixture; dir: string) =
+  ## Push a checkout's HEAD to its origin — a real `git push` to a real bare
+  ## repository, which is also what makes the pre-push gate's "HEAD is
+  ## published" stage pass honestly rather than by being skipped.
+  discard gitIn(fx, dir, "push -q origin HEAD:main")
+
+proc publishSibling*(fx: Nf2Fixture; name: string) =
+  ## Publish one sibling's HEAD.
+  ##
+  ## `git push` also updates `refs/remotes/origin/main` in the pushing clone,
+  ## which is exactly the state the production publication check reads — so the
+  ## fixture and the code under test meet at git's own data rather than at an
+  ## agreement between them.
+  publishRepo(fx, siblingDir(fx, name))
+
+proc moveAndPublishSibling*(fx: Nf2Fixture; name, marker: string): string =
+  ## `moveSibling` followed by a real push.
+  ##
+  ## The two are kept apart, and the choice at each call site is deliberate. A
+  ## sibling revision that has never been pushed is NOT recordable into
+  ## `flake.lock` — Workspace-And-Develop-Mode.md §"Reproducibility And
+  ## `repro check`": a develop-mode dependency that is "dirty **or only locally
+  ## committed**" is not lockable for other people yet — so a case whose subject
+  ## is the RECORDING uses this, and a case whose subject is the withholding
+  ## uses bare `moveSibling`. The difference between them is one real
+  ## `git push`, and nothing else.
+  result = moveSibling(fx, name, marker)
+  publishSibling(fx, name)
+
+proc siblingRevIsPublished*(fx: Nf2Fixture; name, rev: string): bool =
+  ## Is ``rev`` reachable from any remote-tracking ref in ``ws/<name>``?
+  ##
+  ## Asked with git's own `rev-list … --not --remotes`, which is the predicate
+  ## the classifier uses, so a case can ASSERT that its published / unpublished
+  ## arrangement really is one instead of assuming it. Without this, an
+  ## arrangement that silently landed the other way would make the case vacuous
+  ## in whichever direction it happened to fall.
+  let res = run(q(fx.gitBin) & " -C " & q(siblingDir(fx, name)) &
+    " rev-list --max-count=1 " & rev & " --not --remotes")
+  res.code == 0 and res.output.strip().len == 0
+
 proc dirtySibling*(fx: Nf2Fixture; name: string) =
   ## Leave UNCOMMITTED modifications in a sibling's working tree.
   writeFile(siblingDir(fx, name) / "marker.txt",

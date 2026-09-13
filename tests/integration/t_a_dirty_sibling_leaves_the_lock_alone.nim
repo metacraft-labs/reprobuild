@@ -64,7 +64,7 @@ suite "NF-2: a dirty sibling leaves the lock alone":
 
       # Ahead of its pin AND dirty: there is something to record, and it must
       # not be recorded.
-      let newAlpha = moveSibling(fx, "alpha", "revision 2")
+      let newAlpha = moveAndPublishSibling(fx, "alpha", "revision 2")
       dirtySibling(fx, "alpha")
       check gitIn(fx, siblingDir(fx, "alpha"), "status --porcelain").strip().len > 0
 

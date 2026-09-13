@@ -86,8 +86,8 @@ suite "NF-2: only overridden nodes are rewritten":
       check before.contains("\"flake-utils\"")
       check revCount(before) == 5
 
-      let newAlpha = moveSibling(fx, "alpha", "revision 2")
-      let newBeta = moveSibling(fx, "beta", "revision 2")
+      let newAlpha = moveAndPublishSibling(fx, "alpha", "revision 2")
+      let newBeta = moveAndPublishSibling(fx, "beta", "revision 2")
 
       let commit = tryCommitInApp(fx, "move two of five")
       if commit.code != 0:

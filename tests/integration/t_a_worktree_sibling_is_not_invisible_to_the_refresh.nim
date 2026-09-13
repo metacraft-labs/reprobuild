@@ -91,7 +91,7 @@ suite "NF-2: a worktree sibling is not invisible to the refresh":
       check headOf(fx, alphaDir) == fx.seedSha[0]
 
       # ---- (1) a moved worktree sibling is recorded. -----------------------
-      let newAlpha = moveSibling(fx, "alpha", "revision 2")
+      let newAlpha = moveAndPublishSibling(fx, "alpha", "revision 2")
       check newAlpha != fx.seedSha[0]
       let commit = tryCommitInApp(fx, "build against the worktree sibling")
       if commit.code != 0:
@@ -114,7 +114,7 @@ suite "NF-2: a worktree sibling is not invisible to the refresh":
       check "alpha" in log.split("dirt-scope: ")[^1].split(",")
 
       # ---- (3) a DIRTY worktree sibling suppresses the refresh. ------------
-      let newBeta = moveSibling(fx, "beta", "revision 2")
+      let newBeta = moveAndPublishSibling(fx, "beta", "revision 2")
       dirtySibling(fx, "alpha")
       check gitIn(fx, alphaDir, "status --porcelain").strip().len > 0
       let before = readFile(lockPath(fx))

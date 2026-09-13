@@ -114,7 +114,7 @@ suite "NF-2: amend and rebase are idempotent":
       defer: releaseNf2Config()
 
       # ---- (1) a baseline that actually moved a pin. ----------------------
-      let newAlpha = moveSibling(fx, "alpha", "revision 2")
+      let newAlpha = moveAndPublishSibling(fx, "alpha", "revision 2")
       let first = tryCommitInApp(fx, "first")
       if first.code != 0:
         checkpoint("git commit failed:\n" & first.output)
@@ -200,7 +200,7 @@ suite "NF-2: amend and rebase are idempotent":
       # A sibling moves WHILE the rebase is stopped, so the refresh would have
       # something to record if it did not stand down — otherwise "the lock is
       # unchanged" would again be true for the wrong reason.
-      let newGamma = moveSibling(fx, "gamma", "revision 2")
+      let newGamma = moveAndPublishSibling(fx, "gamma", "revision 2")
       writeFile(fx.app / "during-rebase.txt", "edited mid-rebase\n")
       discard requireCmd(q(fx.gitBin) & " -C " & q(fx.app) & " add -A")
       let midRebase = run(q(fx.gitBin) & " -C " & q(fx.app) &

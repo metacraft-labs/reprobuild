@@ -8109,6 +8109,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_a_gate_refusal_over_an_unpublished_sibling_names_the_push_first.nim",
+    binary: "build/test-bin/t_a_gate_refusal_over_an_unpublished_sibling_names_the_push_first",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_a_linked_worktree_sibling_is_reported_and_gated.nim",
     binary: "build/test-bin/t_a_linked_worktree_sibling_is_reported_and_gated",
     defines: @[],
@@ -8120,6 +8129,24 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_a_mixed_workspace_records_only_the_ahead_inputs.nim",
     binary: "build/test-bin/t_a_mixed_workspace_records_only_the_ahead_inputs",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_a_mixed_workspace_records_only_the_publishable_inputs.nim",
+    binary: "build/test-bin/t_a_mixed_workspace_records_only_the_publishable_inputs",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_a_pushed_sibling_is_still_recorded.nim",
+    binary: "build/test-bin/t_a_pushed_sibling_is_still_recorded",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -8336,6 +8363,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_an_unobservable_sibling_is_not_substituted.nim",
     binary: "build/test-bin/t_an_unobservable_sibling_is_not_substituted",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_an_unpushed_sibling_revision_is_not_recorded.nim",
+    binary: "build/test-bin/t_an_unpushed_sibling_revision_is_not_recorded",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -12249,6 +12285,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+<<<<<<< HEAD
     source: "tests/integration/t_thin_daemon_client.nim",
     binary: "build/test-bin/t_thin_daemon_client",
     defines: @[],
@@ -12258,6 +12295,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+||||||| parent of 84c73fe9 (Never record a sibling revision that has not been pushed)
+=======
+    source: "tests/integration/t_the_unpushed_skip_names_the_push_that_would_make_it_lockable.nim",
+    binary: "build/test-bin/t_the_unpushed_skip_names_the_push_that_would_make_it_lockable",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+>>>>>>> 84c73fe9 (Never record a sibling revision that has not been pushed)
     source: "tests/integration/t_ti1_interface_artifact_edge.nim",
     binary: "build/test-bin/t_ti1_interface_artifact_edge",
     defines: @[],

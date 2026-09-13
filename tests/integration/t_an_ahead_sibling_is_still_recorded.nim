@@ -63,7 +63,7 @@ suite "NF-2: an ahead sibling is still recorded":
 
       # alpha moves FORWARD: this is §3.1's situation exactly — the shell builds
       # this revision and the lock still names the older one.
-      let alphaHead = advanceSibling(fx, "alpha", 1)
+      let alphaHead = advancePublishedSibling(fx, "alpha", 1)
       check alphaHead != fx.seedSha[0]
 
       let committed = tryCommitInApp(fx, "work built against the newer alpha")

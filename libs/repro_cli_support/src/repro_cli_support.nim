@@ -63212,6 +63212,25 @@ type
     aheadBy*: int         ## commits in HEAD that the pin does not have
     behindBy*: int        ## commits in the pin that HEAD does not have
     detail*: string       ## why an unknown/unpinned row is what it is
+    unpublished*: bool
+      ## ``siblingRev`` was NOT shown to be obtainable from a remote — the
+      ## SECOND axis of this row, orthogonal to ``relation``. A sibling can be
+      ## ahead of its pin (so §3.1 says record it) and simultaneously carry a
+      ## revision that exists only in this checkout (so it must not be
+      ## recorded), which is why this is its own field rather than another
+      ## ``FlakePinRelation`` member.
+      ##
+      ## Defaults to ``false``, so a row nobody asked the publication question
+      ## about behaves exactly as it did before the question existed. Only
+      ## ``flakeAnnotatePublication`` sets it.
+    publicationDetail*: string
+      ## Why ``unpublished`` is set, in the words the notice prints. It
+      ## distinguishes the two ways the answer comes out negative — reachable
+      ## from no remote-tracking ref, versus a probe that could not run — which
+      ## a bare boolean would flatten into one message that is true of only one
+      ## of them.
+    pushRemote*: string   ## the remote the publishing command names
+    pushBranch*: string   ## the branch the publishing command names
 
   FlakeOverrideState* = object
     ## The §5 report. ``ok`` and ``examined`` are separate on purpose: NF-1's
@@ -63390,6 +63409,193 @@ proc flakeClassifyPin(identity: GitToolIdentity;
     return (relation: fprBehind, aheadBy: 0, behindBy: onlyPin, detail: "")
   (relation: fprDiverged, aheadBy: onlyHead, behindBy: onlyPin, detail: "")
 
+proc flakePushTarget(identity: GitToolIdentity;
+    dir, headRev: string): tuple[remote, branch: string] =
+  ## Which remote, and which branch on it, a publishing `git push` from this
+  ## checkout should name — so the command the notice prints is one line that
+  ## runs, rather than a shape the operator has to fill in.
+  ##
+  ## The remote is the one the current branch tracks, falling back to `origin`
+  ## and then to whatever remote the checkout does have. When it has NONE the
+  ## name `origin` is still printed: the command then fails with git's own
+  ## "'origin' does not appear to be a git repository", which is a true and
+  ## specific account of the situation, and is strictly better than printing no
+  ## command at all. (A sibling of a repro workspace always has an origin — it
+  ## was cloned from one — so this arm exists for completeness rather than for
+  ## a shape anyone runs.)
+  ##
+  ## A DETACHED HEAD names no branch, and detached siblings are ordinary here:
+  ## `repro branch ../<name>` produces linked worktrees, and `repro ws pull`
+  ## checks out pinned revisions. What makes a revision obtainable is
+  ## reachability from SOME ref on the remote, not from a particular one, so the
+  ## fallback publishes to a deterministic name derived from the revision
+  ## itself: re-running the command is then idempotent, and the branch it
+  ## creates says what it is for.
+  var branch = ""
+  let sym = gitRunPlain(identity,
+    ["-C", dir, "symbolic-ref", "--quiet", "--short", "HEAD"])
+  if sym.code == 0: branch = sym.output.strip()
+  var remote = ""
+  if branch.len > 0:
+    let cfg = gitRunPlain(identity,
+      ["-C", dir, "config", "--get", "branch." & branch & ".remote"])
+    if cfg.code == 0: remote = cfg.output.strip()
+  if remote.len == 0 or remote == ".":
+    var names: seq[string]
+    let listed = gitRunPlain(identity, ["-C", dir, "remote"])
+    if listed.code == 0:
+      for line in listed.output.splitLines():
+        let n = line.strip()
+        if n.len > 0: names.add(n)
+    remote =
+      if "origin" in names: "origin"
+      elif names.len > 0: names[0]
+      else: "origin"
+  if branch.len == 0:
+    branch = "repro/published/" & shortRev(headRev)
+  (remote: remote, branch: branch)
+
+proc flakeClassifyPublication(identity: GitToolIdentity;
+    dir, headRev: string):
+    tuple[unpublished: bool; detail, remote, branch: string] =
+  ## Is ``headRev`` obtainable by anybody but this checkout?
+  ##
+  ## ## The defect this answers, measured 2026-09-13 in this workspace
+  ##
+  ## `repro flake refresh-lock` recorded `runquota-src` at
+  ## `18f64e103c19453b939882c9190c7c180934bb3d` — a commit that existed only in
+  ## the local checkout and had never been pushed. `flake.lock` then named
+  ## content nobody else can obtain, and nix answered
+  ##
+  ##     error: unable to download
+  ##     'https://api.github.com/repos/metacraft-labs/runquota/tarball/18f64e10…':
+  ##     HTTP error 404
+  ##
+  ## which nix-direnv turned into a FALLBACK to the previous environment rather
+  ## than a failure — so the developer kept working in a stale shell while the
+  ## lock claimed something else. `codetracer` and `codetracer-native-recorder`
+  ## were in the same state in the same moment, so it is systemic.
+  ##
+  ## Workspace-And-Develop-Mode.md §"Reproducibility And `repro check`" already
+  ## covers it: a develop-mode dependency that is "dirty **or only locally
+  ## committed**" is not properly lockable for other people yet. NF-2 honoured
+  ## the dirty half and two of the unclassifiable ones; this is the fourth
+  ## member of that family, in the same shape.
+  ##
+  ## ## HOW STRONGLY this is checked, and why it stops there
+  ##
+  ## LOCAL REMOTE-TRACKING REFS ONLY. One `git rev-list --max-count=1 <rev>
+  ## --not --remotes`: empty output means every ancestor of the revision,
+  ## including the revision, is reachable from something under `refs/remotes/`;
+  ## any output names a commit that is not, and the walk stops at the first one.
+  ## NO NETWORK IS CONSULTED, ever, on any path.
+  ##
+  ## The alternative — `git ls-remote` — is rejected on both cost and
+  ## behaviour. This runs on the pre-commit path, where "the sibling I just
+  ## committed is not pushed yet" is the COMMON state rather than the rare one,
+  ## so the remote would be dialled on a large fraction of commits; a commit
+  ## that blocks on network reachability is a commit that fails on a train, and
+  ## a hook that does that is a hook people uninstall.
+  ##
+  ## The two ways a local-only answer can be wrong are NOT symmetric, and that
+  ## is what makes the cheap check the right one:
+  ##
+  ##   * we say PUBLISHED when it is not — only possible if a remote-tracking
+  ##     ref names a commit the remote has since lost (a force-push or a branch
+  ##     deletion). A tracking ref is only ever written by an operation that
+  ##     observed the remote holding that value, so this requires the remote to
+  ##     have gone BACKWARDS. Rare, and a different failure.
+  ##   * we say LOCAL-ONLY when it is not — the ordinary staleness case: the
+  ##     revision was published from some other clone and this one has not
+  ##     fetched. Cost: one refresh skipped, one loud notice, and a `flake.lock`
+  ##     still naming a pin that IS obtainable. Nothing wrong is written and no
+  ##     operation is refused, so the wrong answer costs a re-run — which is why
+  ##     the notice names a `git fetch` as its alternative remedy.
+  ##
+  ## The cheap check errs in the direction that leaves the lock correct. A
+  ## network check would cost every commit to remove an error whose cost is a
+  ## warning.
+  ##
+  ## ## What counts as "a remote"
+  ##
+  ## Everything under `refs/remotes/`. In this workspace the shared bare cache
+  ## is attached as an `objects/info/alternates` entry rather than as a git
+  ## remote, so cache-only objects — which nix cannot fetch either — do not
+  ## count as published. That is the required behaviour, and it is a property of
+  ## how the cache is wired rather than of a rule spelled here; a cache attached
+  ## as a REMOTE would be read as publication, wrongly.
+  if headRev.len == 0:
+    # Nothing was observed to publish. `flakeClassifyPin` already reports this
+    # as `unknown` and it is already not recordable; saying it twice, in a
+    # second vocabulary, would only make the notice contradict itself.
+    return
+  let target = flakePushTarget(identity, dir, headRev)
+  result.remote = target.remote
+  result.branch = target.branch
+  let unreachable = gitRunPlain(identity,
+    ["-C", dir, "rev-list", "--max-count=1", headRev, "--not", "--remotes"])
+  if unreachable.code != 0:
+    # The probe itself failed, so publication is UNPROVEN — and unproven is not
+    # "published". The same rule `fprUnfetched` follows: a pin that cannot be
+    # established must not be filed. Worded as its own sentence so the notice
+    # does not assert the stronger claim (`exists only here`) that the probe
+    # never established.
+    result.unpublished = true
+    # The quoted probe is spelled with `-C <dir>` so that it, like every other
+    # backticked chunk this campaign emits, is a command line the operator can
+    # paste and run unchanged from wherever the message was printed.
+    result.detail = "could not be shown to exist anywhere but this checkout " &
+      "— `git -C " & dir & " rev-list --max-count=1 " & headRev &
+      " --not --remotes` failed (" & unreachable.output.strip() & ")"
+    return
+  if unreachable.output.strip().len == 0:
+    return
+  result.unpublished = true
+  result.detail = "exists ONLY in this local checkout: " & shortRev(headRev) &
+    " is reachable from no remote-tracking ref under refs/remotes/ in " & dir &
+    ", so a pin naming it would name content nobody else can obtain"
+
+proc flakeAnnotatePublication*(state: var FlakeOverrideState;
+    identity: GitToolIdentity) =
+  ## Ask the publication question of every row that has a revision to publish.
+  ##
+  ## Opt-in, and deliberately NOT asked by `flakeOverrideStateReport` itself.
+  ## That report is computed on every directory entry (`repro flake
+  ## override-args` drives `.envrc`), and this adds one `git rev-list` per
+  ## substituted input. The two places that need the answer — the refresh, which
+  ## decides what to WRITE, and the pre-push gate, which decides what to
+  ## PUBLISH — are both rare and both already resolve the develop set, so they
+  ## pay it and the hot path does not.
+  ##
+  ## ## Asked of AHEAD and DIVERGED rows, and of no others
+  ##
+  ## Those two are exactly the relations under which a refresh writes a NEW
+  ## revision taken from the sibling's `HEAD` — the only writes a pin can be
+  ## made unobtainable by. Restricting the question to them is what keeps every
+  ## consumer downstream unambiguous: an annotated row is always one that WOULD
+  ## have been recorded, so `row.unpublished` never has to be weighed against a
+  ## relation that had already declined.
+  ##
+  ##   * AT — the pin already names this revision, so the rewrite is a no-op and
+  ##     the file is not opened at all. Withholding a write of nothing would
+  ##     print a warning on every commit and change no byte. (A pin that is
+  ##     itself unobtainable is a real problem, but it is the LOCK's problem and
+  ##     the pre-push publication stage's to raise, not this refresh's.)
+  ##   * BEHIND — `HEAD` is an ancestor of the pin, so if the pin is reachable
+  ##     from a remote ref then so is `HEAD`, by construction. A behind row can
+  ##     only be unpublished when the PIN is, which is the already-broken lock
+  ##     above. It is also already not recordable, and its remedy — move the
+  ##     checkout up to the pin — is the right first move regardless.
+  ##   * UNFETCHED / UNKNOWN / UNPINNED — never recorded, so there is no write
+  ##     to withhold and no second reason worth printing.
+  for row in state.rows.mitems:
+    if row.relation notin {fprAhead, fprDiverged}: continue
+    let verdict = flakeClassifyPublication(identity, row.path, row.siblingRev)
+    row.unpublished = verdict.unpublished
+    row.publicationDetail = verdict.detail
+    row.pushRemote = verdict.remote
+    row.pushBranch = verdict.branch
+
 proc flakeOverrideStateReport*(flakeRoot: string;
     bindings: openArray[FlakeOverrideBinding];
     identity: GitToolIdentity;
@@ -63558,45 +63764,83 @@ proc flakeRowIsRecordable*(row: FlakeOverrideStateRow): bool =
   ##     result and a failure must not look alike, applied to a pin.
   ##   * UNPINNED — nothing to write; the rewriter says so per input.
   ##
+  ##   * UNPUBLISHED — **no**, whatever the relation says. This is the second
+  ##     axis (``row.unpublished``), and it OVERRULES the first: an ahead
+  ##     sibling whose HEAD has never left this machine is exactly the §3.1 case
+  ##     the relation blesses and exactly the revision a pin must not name.
+  ##     Workspace-And-Develop-Mode.md §"Reproducibility And `repro check`" puts
+  ##     "dirty **or only locally committed**" in one clause for this reason:
+  ##     both describe build state that is not lockable for other people yet.
+  ##     Measured 2026-09-13 — see `flakeClassifyPublication` — the refresh
+  ##     recorded three siblings' unpushed HEADs and nix answered HTTP 404 while
+  ##     nix-direnv fell back to the previous shell.
+  ##
   ## Withholding is per INPUT and never per refresh: a workspace normally has
   ## siblings drifting in different directions at once, and one behind-pin
   ## sibling must not suppress the recording of an unrelated ahead one.
-  row.relation notin {fprBehind, fprUnfetched, fprUnknown}
+  row.relation notin {fprBehind, fprUnfetched, fprUnknown} and
+    not row.unpublished
 
-proc flakeReconcileCommand(row: FlakeOverrideStateRow;
-    flakeRoot, workspaceRoot: string): string =
-  ## The ONE command that reconciles ONE row — a single command line, spelled
-  ## so it runs unchanged from anywhere, including from the directory the
-  ## message is printed in. §"the named command must RUN where the message is
-  ## printed", rule 2: "spell out the location flag", because
-  ## `repro flake refresh-lock` resolves a bare invocation against the current
-  ## directory.
+proc flakeRefreshLockCommand(flakeRoot, workspaceRoot: string): string =
+  ## The refresh, spelled with BOTH location flags so it runs unchanged from
+  ## wherever the message quoting it was printed — `repro flake refresh-lock`
+  ## resolves a bare invocation against the current directory.
+  "repro flake refresh-lock --flake=" & flakeRoot &
+    " --workspace-root=" & workspaceRoot
+
+proc flakeReconcileCommands(row: FlakeOverrideStateRow;
+    flakeRoot, workspaceRoot: string): seq[string] =
+  ## Every command that reconciles ONE row, in the order they must be run.
   ##
-  ## SINGLE is a hard requirement, not a preference. This string is emitted
-  ## inside backticks for the operator to copy, so anything that is not a
-  ## runnable command line — a parenthesised aside, an "or", a second command
-  ## glued on — becomes `bash: syntax error near unexpected token '('` in the
-  ## hands of the person the message was written for. The alternative remedy a
-  ## BEHIND row also has is returned separately by
-  ## ``flakeReconcileAlternative`` and quoted in its own backticks.
+  ## THE single generator. Both the withheld notice NF-2 prints and the refusal
+  ## NF-3's pre-push gate prints are built from this list, so the two halves of
+  ## the campaign cannot grow different opinions about what fixes a row — a
+  ## defect this file has already produced once, when the refresh recorded what
+  ## the gate then refused.
+  ##
+  ## Each element is a SINGLE command line, and that is a hard requirement
+  ## rather than a preference. These strings are emitted inside backticks for
+  ## the operator to copy, so anything that is not a runnable command line — a
+  ## parenthesised aside, an "or", a second command glued on — becomes
+  ## `bash: syntax error near unexpected token '('` in the hands of the person
+  ## the message was written for. Multiple commands are multiple ELEMENTS, each
+  ## quoted on its own.
+  if row.unpublished:
+    # The revision has to EXIST for other people before a pin may name it, so
+    # the publishing push comes first; the refresh that then records it comes
+    # second, because after the push the row is recordable and one more refresh
+    # is all that is missing. Both are named because either alone leaves the
+    # operator with a lock that still does not describe the build.
+    return @["git -C " & row.path & " push " & row.pushRemote & " " &
+               row.siblingRev & ":refs/heads/" & row.pushBranch,
+             flakeRefreshLockCommand(flakeRoot, workspaceRoot)]
   case row.relation
   of fprBehind:
     # The checkout is the stale half, so the FIRST remedy moves the checkout,
     # not the lock.
-    "git -C " & row.path & " merge --ff-only " & row.pinnedRev
+    @["git -C " & row.path & " merge --ff-only " & row.pinnedRev]
   of fprUnfetched:
     # Nothing can be reconciled before anything can be CONCLUDED, and the one
     # thing missing is the object. This is the only remedy in this proc that
     # answers a question rather than closing a gap, and it is first for that
     # reason: after it, the row classifies and its real remedy is knowable.
-    "git -C " & row.path & " fetch --all"
+    @["git -C " & row.path & " fetch --all"]
   else:
-    "repro flake refresh-lock --flake=" & flakeRoot &
-      " --workspace-root=" & workspaceRoot
+    @[flakeRefreshLockCommand(flakeRoot, workspaceRoot)]
+
+proc flakeReconcileCommand(row: FlakeOverrideStateRow;
+    flakeRoot, workspaceRoot: string): string =
+  ## The FIRST command that reconciles ONE row. Kept as its own name because
+  ## most renderings quote exactly one, and it is by construction
+  ## ``flakeReconcileCommands``'s head rather than a second derivation of it.
+  flakeReconcileCommands(row, flakeRoot, workspaceRoot)[0]
 
 proc flakeReconcileAlternative(row: FlakeOverrideStateRow;
     flakeRoot, workspaceRoot: string): string =
-  ## The SECOND runnable command a BEHIND row has, and only a behind row.
+  ## The runnable command a row has BESIDE the ones that reconcile it — the
+  ## one that is an alternative rather than a step. Two kinds of row have one
+  ## (BEHIND and UNPUBLISHED); every other kind returns the empty string.
+  ##
   ## Recording a downgrade stays available because deliberately testing an
   ## older dependency is legitimate (§3.2) — it is named second because a
   ## checkout behind its pin almost always means the checkout is stale.
@@ -63608,7 +63852,18 @@ proc flakeReconcileAlternative(row: FlakeOverrideStateRow;
   ## naming the bare form would print a command that exits 0 and changes
   ## nothing, which is the failure mode §"the named command must RUN where the
   ## message is printed" exists to forbid, in its quietest form.
-  if row.relation == fprBehind:
+  ##
+  ## An UNPUBLISHED row has a second command too, and it is a different kind of
+  ## thing: the publication check reads only local remote-tracking refs (see
+  ## `flakeClassifyPublication`), so the one way its answer can be wrong is that
+  ## the revision WAS published from another clone and this one has not fetched
+  ## since. `git fetch` is the command that settles that, and naming it is what
+  ## keeps the cheap check honest — the operator is told both what was concluded
+  ## and how to disprove it. It is second because the common case by far is that
+  ## the commit really has never left this machine.
+  if row.unpublished:
+    "git -C " & row.path & " fetch " & row.pushRemote
+  elif row.relation == fprBehind:
     "repro flake refresh-lock --flake=" & flakeRoot &
       " --workspace-root=" & workspaceRoot & " --record-downgrade"
   else:
@@ -64313,9 +64568,10 @@ proc flakeWithheldNotice(row: FlakeOverrideStateRow;
   ## The §3.2 announcement for ONE input whose pin the refresh declined to move.
   ##
   ## Naming the sibling, the DISTANCE and the reconciling command is the rule
-  ## verbatim, and the commands come from `flakeReconcileCommand` /
-  ## `flakeReconcileAlternative` — the same two the pre-push refusal prints —
-  ## rather than from a second generator here. There was very nearly one: the
+  ## verbatim, and the commands come from `flakeReconcileCommands` /
+  ## `flakeReconcileAlternative` — the same generators the pre-push refusal
+  ## prints from — rather than from a second one here. There was very nearly
+  ## one: the
   ## first behind-pin remedy in this file quoted a command and a parenthesised
   ## alternative inside ONE pair of backticks, which pastes as `bash: syntax
   ## error near unexpected token '('`. Reusing the fixed generators means that
@@ -64327,6 +64583,29 @@ proc flakeWithheldNotice(row: FlakeOverrideStateRow;
   ## dispatching), and the commands are spelled so they run unchanged there.
   result = "flake.lock NOT refreshed for input '" & row.input & "': " &
     flakeRowSentence(row) & ". "
+  if row.unpublished:
+    # The fourth member of the "not properly lockable for other people yet"
+    # family, and the one whose absence was measured: a pin naming a revision
+    # only this machine has produces `HTTP error 404` from nix, which
+    # nix-direnv turns into a SILENT fallback to the previous dev shell.
+    let cmds = flakeReconcileCommands(row, flakeRoot, workspaceRoot)
+    # NOTE for anyone editing this string: backticks are reserved for RUNNABLE
+    # command lines. `backtickedCommands` lifts every one of them out and the
+    # cases run what it finds, so quoting an error message or an aside in them
+    # hands the operator something that is not a command.
+    result.add("Its HEAD " & row.publicationDetail &
+      ". Recording it would file a pin nix cannot resolve for anybody else — " &
+      "the measured symptom is HTTP error 404 from the forge, which " &
+      "nix-direnv reports by falling back to the PREVIOUS dev shell rather " &
+      "than by failing — so the pin was LEFT ALONE. This is a warning, not " &
+      "an error: nothing was written and no operation was refused. From " &
+      flakeRoot & " run: `" & cmds.join("` then `") &
+      "` — or, if you believe this revision is already published and only " &
+      "this checkout has not seen it, `" &
+      flakeReconcileAlternative(row, flakeRoot, workspaceRoot) &
+      "` first, since publication is judged from local remote-tracking refs " &
+      "alone and never over the network.")
+    return
   case row.relation
   of fprBehind:
     result.add("Recording this checkout's HEAD would file a DOWNGRADE nobody " &
@@ -64483,18 +64762,31 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   # The classification is `flakeOverrideStateReport`'s — the same derivation the
   # ambient §3.2 report and the pre-push gate use — over the SAME lock bytes
   # this call is about to rewrite.
-  let state = flakeOverrideStateReport(flakeRoot, bound, identity, lockText)
+  var state = flakeOverrideStateReport(flakeRoot, bound, identity, lockText)
   if not state.ok:
     result.tag = "refused-unreadable-lock"
     result.diagnostic = state.refusals.join("; ")
     result.exitCode = 2
     return
+  # (3b) …and against the OTHER axis: is the revision obtainable by anybody but
+  # this checkout? A pin is a promise that the named content can be fetched, and
+  # a revision that has never been pushed cannot honour it. Same shape as every
+  # other skip: per input, lock left alone, commit unaffected, said loudly.
+  # Asked HERE rather than inside the report because the report also runs on
+  # every directory entry; see `flakeAnnotatePublication`.
+  flakeAnnotatePublication(state, identity)
 
   var revisions: seq[tuple[input, rev: string]]
   for row in state.rows:
     # ``row.siblingRev`` is the revision the BINDER observed, in the pass that
     # decided this input is substituted at all — so the pin filed here and the
     # revision the dev shell was given cannot be two different answers.
+    #
+    # `--record-downgrade` is unaffected by the publication axis, and does not
+    # need to be guarded against it: a BEHIND row's `HEAD` is an ancestor of the
+    # pin, so it is reachable from a remote whenever the pin is, and
+    # `flakeAnnotatePublication` does not ask the question there for exactly
+    # that reason.
     let permitted = flakeRowIsRecordable(row) or
       (recordDowngrade and row.relation == fprBehind)
     if permitted:
@@ -64957,6 +65249,16 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
     result.summary = "flake.lock could not be verified: " &
       state.refusals.join("; ")
     return
+  # The publication axis, asked here for the SAME reason NF-2's refresh asks it
+  # (`flakeAnnotatePublication`) and to keep the two halves consistent: a
+  # sibling NF-2 declined to record must not be described here as ordinary
+  # drift whose remedy is a refresh, because that refresh would decline again
+  # and the operator would loop on a command that cannot work. With the
+  # annotation, an unpublished offender's remedy names the push FIRST and the
+  # refresh second — the sequence that actually clears it. This gate already
+  # resolves the develop set, a minutes-scale query, so one `git rev-list` per
+  # substituted input is not a cost worth avoiding here.
+  flakeAnnotatePublication(state, identity)
   let c = flakeStateCounts(state)
   result.examined = state.examined
   result.substituted = state.rows.len
@@ -64980,7 +65282,10 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
       " node=" & row.node & " pinned=" & row.pinnedRev &
       " sibling=" & row.siblingRev &
       " relation=" & flakePinRelationTag(row.relation) &
-      " ahead=" & $row.aheadBy & " behind=" & $row.behindBy)
+      " ahead=" & $row.aheadBy & " behind=" & $row.behindBy &
+      # Appended only when TRUE, so the evidence of every row that was already
+      # describable stays byte-for-byte what it was.
+      (if row.unpublished: " unpublished=true" else: ""))
   result.evidence = "lock=" & state.lockPath & " " & evidence.join("; ")
   result.summary = "flake.lock disagrees with the workspace siblings: " &
     sentences.join("; ")
@@ -64999,10 +65304,17 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   # correctly and produces `bash: syntax error near unexpected token '('` when
   # the person it was written for pastes it, which is the same class of failure
   # as printing a command that must be run somewhere else.
+  #
+  # EVERY command a row needs, not only its first: an UNPUBLISHED offender is
+  # cleared by a push AND a refresh, and naming only the push would leave the
+  # lock still stale while naming only the refresh would name a command that
+  # declines (NF-2 will not record an unpublished revision). That is the
+  # "remedy that cannot work" this gate and that refresh are kept consistent
+  # about.
   var remedies: seq[string]
   for row in offenders:
-    let cmd = flakeReconcileCommand(row, flakeRoot, workspaceRoot)
-    if cmd notin remedies: remedies.add(cmd)
+    for cmd in flakeReconcileCommands(row, flakeRoot, workspaceRoot):
+      if cmd notin remedies: remedies.add(cmd)
   result.remediation = sentences.join("; ") &
     " — flake.lock is an IN-TREE committed lock, so this gate verifies it " &
     "and never writes it. From " & flakeRoot & " run: `" &

@@ -138,7 +138,7 @@ suite "NF-2: hooks ensure installs a managed pre-commit hook":
       defer: delEnv("REPROBUILD_REPRO")
 
       # ---- (3) a real commit refreshes AND stages. ------------------------
-      let newAlpha = moveSibling(fx, "alpha", "revision 2")
+      let newAlpha = moveAndPublishSibling(fx, "alpha", "revision 2")
       let runsBefore = userHookRuns(fx)
       let commit = tryCommitInApp(fx, "through the managed pre-commit hook")
       if commit.code != 0:
@@ -172,7 +172,7 @@ suite "NF-2: hooks ensure installs a managed pre-commit hook":
       setFilePermissions(hooksDir / "pre-commit.repro-local", perms)
       let lockBeforeRefusal = readFile(lockPath(fx))
       let logBeforeRefusal = preCommitLog(fx)
-      discard moveSibling(fx, "beta", "revision 2")
+      discard moveAndPublishSibling(fx, "beta", "revision 2")
       let refused = tryCommitInApp(fx, "a commit the project rejects")
       check refused.code != 0
       check refused.output.contains("the project refuses this commit")
