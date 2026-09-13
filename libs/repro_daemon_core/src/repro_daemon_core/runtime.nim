@@ -1,4 +1,4 @@
-import std/[algorithm, net, os, osproc, strtabs, strutils, times]
+import std/[algorithm, net, os, osproc, strtabs, strutils, tables, times]
 
 import repro_core
 import blake3
@@ -330,19 +330,6 @@ proc imageDigestHex*(imagePath: string): string =
   hasher.update("primary=" & primary & "\n")
   hasher.update("companion=" & companionDigest & "\n")
   "blake3-256:" & hasher.finalize().toHex()
-
-proc expectedDaemonRunningDigestHex(sourceExe: string; devMode: bool): string =
-  if sourceExe.len == 0 or not isAbsolute(sourceExe) or
-      not fileExists(sourceExe):
-    return ""
-  if devMode:
-    return imageDigestHex(sourceExe)
-  let companion = companionFullCliPath(sourceExe)
-  if companion.len > 0:
-    let companionDigest = fileDigestHex(companion)
-    if companionDigest.len > 0:
-      return companionDigest
-  fileDigestHex(sourceExe)
 
 proc stageFullCliCompanion(sourceExe, generationDir: string) =
   ## No-op after the single-`repro` consolidation: there is no `repro-full`
@@ -705,7 +692,115 @@ proc atomicWriteTextFile(path, content: string) =
     try: removeFile(tmpPath) except OSError: discard
     raise
 
-proc writeSessionRecord(config: UserDaemonConfig; session: UserDaemonSession) =
+const ActiveSessionStates = ["accepted", "running", "cancelling", "watching",
+                            "idle"]
+  ## The states that make a session count as ACTIVE. Named once so the
+  ## from-disk count and the incremental count cannot drift apart; they used
+  ## to be the same literal list in one place because there was only one
+  ## counter.
+
+proc sessionStateIsActive(state: string): bool {.inline.} =
+  state in ActiveSessionStates
+
+proc noteSessionRecordWritten(config: UserDaemonConfig;
+                              session: UserDaemonSession)
+  ## Forward-declared: the tally is defined below, after
+  ## `loadSessionRecords` which primes it, but the single write funnel that
+  ## folds into it is above.
+
+proc imageDigestCachePath(config: UserDaemonConfig; imagePath: string): string =
+  config.stateDir / "image-digests" /
+    (safePathSegment(imagePath, "image") & ".digest")
+
+proc cachedImageDigestHex(config: UserDaemonConfig; imagePath: string): string =
+  ## `imageDigestHex` memoized on `fileIdentityStamp`.
+  ##
+  ## The digest is hashed over the whole `repro` image -- 15.66 MiB on this
+  ## host -- and the ONLY consumer is the daemon-staleness comparison in
+  ## `startUserDaemon`, which every `repro build` performs. Measured in situ
+  ## it cost 16.5 ms of a 74.7 ms warm no-op: the second-largest term in the
+  ## invocation's fixed cost, and pure re-derivation of an answer that does
+  ## not change between builds.
+  ##
+  ## WHY A STAT STAMP IS ENOUGH HERE, checked rather than assumed. The worry
+  ## is an image whose bytes change without the key moving.
+  ##
+  ## * `fileIdentityStamp` folds DEVICE, INODE, SIZE and mtime at full
+  ##   nanosecond resolution, so a rename-over is a new identity even at an
+  ##   identical size and timestamp -- its own docstring makes that the
+  ##   point, and the daemon's dev-restart poll already trusts it for this
+  ##   exact question (see `restartCandidateReady`).
+  ## * The one in-place-rewrite mechanism in this codebase,
+  ##   `writeExecutableIfChanged`, does NOT truncate in place: it stages
+  ##   beside the target and replaces it with one rename, precisely so an
+  ##   active reader keeps a whole inode. Truncating in place was the bug it
+  ##   was changed away from. It also writes only VCS hook dispatchers, never
+  ##   this image.
+  ## * An unreadable or unstattable image yields an empty stamp, and an empty
+  ##   stamp NEVER consults the cache. A probe failure must not be able to
+  ##   make a stale daemon look current, which is the one direction that
+  ##   matters: the comparison exists to catch a daemon running old code.
+  ##
+  ## WHY NOT ASK THE DAEMON FOR ITS OWN HASH, which looks cheaper still: the
+  ## daemon's `runningHash` covers a DIFFERENT FILE. It digests the STAGED
+  ## image it is executing; this digests the SOURCE image on disk now. The
+  ## comparison is between those two, so the daemon already supplies one side
+  ## for free and cannot supply the other. A daemon asked for the source
+  ## digest would answer from its own init-time reading, which agrees with
+  ## its own running hash by construction -- self-confirming, and a daemon
+  ## that could never look stale is the failure this check exists to prevent.
+  let stamp = fileIdentityStamp(imagePath)
+  if stamp.len == 0:
+    return imageDigestHex(imagePath)
+  let cachePath = imageDigestCachePath(config, imagePath)
+  try:
+    let cached = readFile(cachePath).splitLines()
+    if cached.len >= 2 and cached[0] == stamp and cached[1].len > 0:
+      return cached[1]
+  except CatchableError:
+    discard
+  result = imageDigestHex(imagePath)
+  if result.len > 0:
+    try:
+      createDir(parentDir(cachePath))
+      atomicWriteTextFile(cachePath, stamp & "\n" & result & "\n")
+    except CatchableError:
+      # A cache that cannot be written must not fail the build; the next
+      # invocation simply re-derives. Deliberately silent for that reason.
+      discard
+
+proc expectedDaemonRunningDigestHex(config: UserDaemonConfig;
+                                    sourceExe: string;
+                                    devMode: bool): string
+
+proc expectedDaemonRunningDigestHexForTest*(config: UserDaemonConfig;
+                                           sourceExe: string): string =
+  ## Exported for `t_daemon_image_digest_cache.nim`, which grades the memoized
+  ## digest against the uncached `imageDigestHex` across mutations chosen to
+  ## attack the cache key. Dev mode, because that is the arm the cache is on.
+  expectedDaemonRunningDigestHex(config, sourceExe, devMode = true)
+
+proc expectedDaemonRunningDigestHex(config: UserDaemonConfig;
+                                    sourceExe: string;
+                                    devMode: bool): string =
+  if sourceExe.len == 0 or not isAbsolute(sourceExe) or
+      not fileExists(sourceExe):
+    return ""
+  if devMode:
+    return cachedImageDigestHex(config, sourceExe)
+  let companion = companionFullCliPath(sourceExe)
+  if companion.len > 0:
+    let companionDigest = fileDigestHex(companion)
+    if companionDigest.len > 0:
+      return companionDigest
+  fileDigestHex(sourceExe)
+
+proc writeSessionRecord*(config: UserDaemonConfig; session: UserDaemonSession) =
+  ## Exported for `t_daemon_active_session_tally.nim`. It is the daemon's
+  ## SINGLE write funnel for session records -- creation and every state
+  ## transition go through it -- which is why the active-session tally is
+  ## maintained here and why a test that drives it exercises every mutation
+  ## path the daemon has.
   createDir(sessionRecordsDir(config))
   atomicWriteTextFile(sessionRecordPath(config, session.sessionId),
     "sessionId=" & flattenRecordValue(session.sessionId) & "\n" &
@@ -721,6 +816,7 @@ proc writeSessionRecord(config: UserDaemonConfig; session: UserDaemonSession) =
     "watchedPaths=" & flattenRecordSeq(session.watchedPaths) & "\n" &
     "tierState=" & flattenRecordValue(session.tierState) & "\n" &
     "lastResult=" & flattenRecordValue(session.lastResult) & "\n")
+  noteSessionRecordWritten(config, session)
 
 proc readSessionRecord(path: string): UserDaemonSession =
   for line in readFile(path).splitLines:
@@ -776,11 +872,78 @@ proc loadSessionRecords(config: UserDaemonConfig): seq[UserDaemonSession] =
     except CatchableError:
       discard
 
-proc countActiveSessionRecords(config: UserDaemonConfig): int =
+proc countActiveSessionRecordsFromDisk*(config: UserDaemonConfig): int =
+  ## The DEFINITION of the active-session count, by reading every record.
+  ##
+  ## No longer on the hot path -- `activeSessionTallyFor` answers `status`
+  ## requests -- but kept as the reference the incremental tally is graded
+  ## against, and used to prime it. Exported for that test.
   for session in loadSessionRecords(config):
-    if session.state in ["accepted", "running", "cancelling", "watching",
-        "idle"]:
+    if sessionStateIsActive(session.state):
       inc result
+
+# ACTIVE-SESSION COUNT, MAINTAINED RATHER THAN RECOUNTED.
+#
+# `statusFor` needs one integer: how many sessions are active. It used to get
+# it from a from-disk count, which walks `sessions/` and parses
+# every record ever written. Records are never pruned, so that walk grows
+# without bound with use: measured on a developer machine with 2,108 records
+# (9.2 MB, oldest seven weeks old) it cost 37.6 ms of a 76 ms `repro build`
+# no-op -- about half the invocation's fixed cost, and the largest single term
+# in it. A `status` request is issued on EVERY build (the daemon-staleness
+# check in `startUserDaemon`), so every build paid it.
+#
+# The count is therefore primed ONCE from disk and maintained from then on.
+# Priming from disk rather than starting at zero is the load-bearing half: a
+# daemon that counted only the sessions its own process had seen would report
+# LOW after a dev self-restart, and a status consumer that believes there are
+# no active sessions where there are is worse than a slow one. `writeSession`
+# is the single funnel for both creation and every state transition, so
+# maintaining it there covers every mutation without a second bookkeeping
+# site.
+#
+# Keyed on the records directory, so a differently-configured `stateDir`
+# re-primes instead of inheriting another daemon's tally.
+var activeSessionCacheDir = ""
+var activeSessionStateById = initTable[string, bool]()
+var activeSessionTally = 0
+
+proc primeActiveSessionTally(config: UserDaemonConfig) =
+  activeSessionStateById = initTable[string, bool]()
+  activeSessionTally = 0
+  for session in loadSessionRecords(config):
+    let active = sessionStateIsActive(session.state)
+    activeSessionStateById[session.sessionId] = active
+    if active:
+      inc activeSessionTally
+  activeSessionCacheDir = sessionRecordsDir(config)
+
+proc noteSessionRecordWritten(config: UserDaemonConfig;
+                              session: UserDaemonSession) =
+  if activeSessionCacheDir != sessionRecordsDir(config):
+    # Not primed for this directory yet. The record is already on disk by the
+    # time this runs, so a prime counts it; do not also fold it in.
+    primeActiveSessionTally(config)
+    return
+  let active = sessionStateIsActive(session.state)
+  if not activeSessionStateById.hasKey(session.sessionId):
+    if active:
+      inc activeSessionTally
+  elif activeSessionStateById[session.sessionId] != active:
+    if active: inc activeSessionTally else: dec activeSessionTally
+  activeSessionStateById[session.sessionId] = active
+
+proc activeSessionTallyFor*(config: UserDaemonConfig): int =
+  ## The number `statusFor` reports. O(1) after the first call.
+  ##
+  ## Exported for `t_daemon_active_session_tally.nim`, which asserts the
+  ## invariant this exists to preserve: it equals a fresh from-disk
+  ## `countActiveSessionRecordsFromDisk` after any sequence of opens and
+  ## terminations.
+  if activeSessionCacheDir != sessionRecordsDir(config):
+    primeActiveSessionTally(config)
+  activeSessionTally
+
 
 proc removeStatusFile(config: UserDaemonConfig) =
   try:
@@ -1544,7 +1707,7 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
   of udkStatus:
     socket.writeFrame(udkStatusResponse,
       statusBody(statusFor(config, startedAt, generation,
-        countActiveSessionRecords(config), devRestart)))
+        activeSessionTallyFor(config), devRestart)))
   of udkShutdown:
     for session in loadSessionRecords(config):
       if session.mode == "watch" and session.state in ["accepted", "running",
@@ -1679,14 +1842,18 @@ proc restartCandidateReady(config: UserDaemonConfig;
     return false
   if nowMs < state.deferredUntilMs:
     return false
-  let active = countActiveSessionRecords(config)
+  let active = activeSessionTallyFor(config)
   if active > 0:
-    # The SECOND re-read loop reachable from this proc, and it is worse than
-    # the digest one: ``countActiveSessionRecords`` opens and parses EVERY
+    # The SECOND re-read loop reachable from this proc, and it used to be
+    # worse than the digest one: the count opened and parsed EVERY
     # ``*.session`` record in the state directory (1343 of them on the host
-    # this was found on), and at the 250 ms poll cadence that is thousands
+    # this was found on), and at the 250 ms poll cadence that was thousands
     # of opens a second plus one repeated log line per pass, for as long as
-    # a candidate stays deferred. Sessions that block a restart are
+    # a candidate stayed deferred. The count is now maintained rather than
+    # recounted (``activeSessionTallyFor``), so the re-read is gone; the
+    # cadence and log-on-change below are kept because they are still the
+    # right shape and because nothing here should depend on the count being
+    # cheap. Sessions that block a restart are
     # long-lived by nature — and records stuck non-terminal by a crashed
     # writer never clear at all — so re-asking on the poll cadence buys
     # nothing. Re-ask on the stability cadence, and log only when the
@@ -1838,7 +2005,7 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
   while not shuttingDown:
     if restartCandidateReady(config, devRestart):
       writeStatusFile(config, statusFor(config, startedAt, generation,
-        countActiveSessionRecords(config), devRestart))
+        activeSessionTallyFor(config), devRestart))
       if performDevSelfRestart(config, listener, daemonLock, devRestart):
         selfRestarting = true
         return 0
@@ -2177,7 +2344,8 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
     # single full-CLI image (no thin wrapper / `repro-full` companion), so the
     # digest tracks that one binary. If either hash is unavailable we cannot
     # prove staleness, so we leave the daemon running (fail safe).
-    let expectedHash = expectedDaemonRunningDigestHex(sourceExe, config.devMode)
+    let expectedHash = expectedDaemonRunningDigestHex(config, sourceExe,
+      config.devMode)
     if expectedHash.len == 0 or existing.runningHash.len == 0 or
         existing.runningHash == expectedHash:
       return existing
