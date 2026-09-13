@@ -43,7 +43,7 @@ proc writeFixtureProvider(path: string) =
     "  RootEntryPoint = \"" & RootEntryPoint & "\"\n" &
     "  MemberEntryPoint = \"" & MemberEntryPoint & "\"\n" &
     "  RootBodyHash = \"" & RootBodyHash & "\"\n" &
-    "  MemberBodyHash = when defined(memberBodyV2): \"" & MemberBodyHashV2 &
+    "  MemberBodyHash = when defined(memberBodyV2) or defined(binaryOnlyV2): \"" & MemberBodyHashV2 &
       "\" else: \"" & MemberBodyHashV1 & "\"\n" &
     "  ProviderArtifact = when defined(memberBodyV2) or defined(providerArtifactV2): \"" & ArtifactV2 &
       "\" else: \"" & ArtifactV1 & "\"\n\n" &
@@ -231,7 +231,8 @@ suite "integration_provider_fragment_refresh_and_pruning":
         tempRoot / "nimcache-provider-v1")
 
       proc refresh(providerPath, artifactId: string; malformed = false;
-                   store = storeRoot; lockSlice = "lock-v1"): ProviderRefreshReport =
+                   store = storeRoot; lockSlice = "lock-v1";
+                   members = srcDir; working = repoRoot): ProviderRefreshReport =
         var extraArgs = @["--fixture-counts", countsPath]
         if malformed:
           extraArgs.add("--malformed-response")
@@ -240,12 +241,12 @@ suite "integration_provider_fragment_refresh_and_pruning":
           providerBinaryPath: providerPath,
           providerArtifactId: artifactId,
           rootEntryPointId: RootEntryPoint,
-          rootArguments: srcDir,
+          rootArguments: members,
           namespace: "workspace",
           lockSliceId: lockSlice,
           activity: "build",
           providerExtraArgs: extraArgs,
-          providerWorkingDir: repoRoot))
+          providerWorkingDir: working))
 
       let cold = refresh(providerV1, ArtifactV1)
       check nonEmptyLines(countsPath) == @["root", "member:a.txt", "member:b.txt"]
@@ -348,6 +349,91 @@ suite "integration_provider_fragment_refresh_and_pruning":
       check nonEmptyLines(countsPath) == @["member:a.txt"]
       check cutoff.invoked.len == 1
       check cutoff.earlyCutoffs.len == 1
+
+      # Change the actual executable and its manifest, but retain ArtifactV1.
+      # A stale manifest would dispatch the member with its old body hash.
+      let binaryStore = tempRoot / "binary-store"
+      let binaryMembers = tempRoot / "binary-members"
+      let binaryOutputs = tempRoot / "binary-outputs"
+      createDir(binaryMembers)
+      createDir(binaryOutputs / "build")
+      for name in ["a.txt", "b.txt"]:
+        writeFile(binaryMembers / name, name)
+        writeFile(binaryOutputs / "build" / (name & ".out"), name)
+      let mutableProvider = binDir / "mutable-provider"
+      copyFileWithPermissions(providerV1, mutableProvider)
+      let binaryCold = refresh(mutableProvider, ArtifactV1,
+        store = binaryStore, members = binaryMembers)
+      check providerSnapshotBinaryFresh(binaryCold.snapshot, mutableProvider)
+      let binaryWarm = refresh(mutableProvider, ArtifactV1,
+        store = binaryStore, members = binaryMembers)
+      check binaryWarm.invoked.len == 0
+      let relativeWarm = refresh(relativePath(mutableProvider, repoRoot), ArtifactV1,
+        store = binaryStore, members = binaryMembers)
+      check relativeWarm.invoked.len == 0
+      let aliasPath = binDir / "provider-alias"
+      createSymlink(mutableProvider, aliasPath)
+      let previousPath = getEnv("PATH")
+      try:
+        putEnv("PATH", binDir & PathSep & previousPath)
+        let pathWarm = refresh(mutableProvider.extractFilename(), ArtifactV1,
+          store = binaryStore, members = binaryMembers)
+        check pathWarm.invoked.len == 0
+        let aliasCold = refresh(aliasPath.extractFilename(), ArtifactV1,
+          store = tempRoot / "alias-store", members = binaryMembers)
+        check providerSnapshotBinaryFresh(aliasCold.snapshot, aliasPath)
+        let aliasWarm = refresh(aliasPath.extractFilename(), ArtifactV1,
+          store = tempRoot / "alias-store", members = binaryMembers)
+        check aliasWarm.invoked.len == 0
+        putEnv("PATH", relativePath(binDir, tempRoot) & PathSep & previousPath)
+        let relativePathWarm = refresh(mutableProvider.extractFilename(), ArtifactV1,
+          store = binaryStore, members = binaryMembers, working = tempRoot)
+        check relativePathWarm.invoked.len == 0
+        let relativePathCold = refresh(mutableProvider.extractFilename(), ArtifactV1,
+          store = tempRoot / "relative-path-store", members = binaryMembers,
+          working = tempRoot)
+        check relativePathCold.invoked.len > 0
+        check providerSnapshotBinaryFresh(relativePathCold.snapshot, mutableProvider)
+        let blockedDir = tempRoot / "blocked-bin"
+        createDir(blockedDir)
+        let blockedBinary = blockedDir / mutableProvider.extractFilename()
+        writeFile(blockedBinary, "not an executable")
+        setFilePermissions(blockedBinary, {fpUserRead, fpUserWrite})
+        putEnv("PATH", blockedDir & PathSep & binDir & PathSep & previousPath)
+        let blockedPathCold = refresh(mutableProvider.extractFilename(), ArtifactV1,
+          store = tempRoot / "blocked-path-store", members = binaryMembers)
+        check providerSnapshotBinaryFresh(blockedPathCold.snapshot, mutableProvider)
+        putEnv("PATH", $PathSep & previousPath)
+        let emptyPathCold = refresh(mutableProvider.extractFilename(), ArtifactV1,
+          store = tempRoot / "empty-path-store", members = binaryMembers,
+          working = binDir)
+        check providerSnapshotBinaryFresh(emptyPathCold.snapshot, mutableProvider)
+        let literalDir = tempRoot / "~"
+        createDir(literalDir)
+        let literalBinary = literalDir / mutableProvider.extractFilename()
+        createSymlink(mutableProvider, literalBinary)
+        putEnv("PATH", "~" & PathSep & previousPath)
+        let literalPathCold = refresh(mutableProvider.extractFilename(), ArtifactV1,
+          store = tempRoot / "literal-path-store", members = binaryMembers,
+          working = tempRoot)
+        check providerSnapshotBinaryFresh(literalPathCold.snapshot, literalBinary)
+      finally:
+        putEnv("PATH", previousPath)
+      discard compileProvider(providerSource, mutableProvider,
+        tempRoot / "nimcache-binary-only", ["binaryOnlyV2"])
+      check not providerSnapshotBinaryFresh(binaryCold.snapshot, mutableProvider)
+      removeFile(binaryMembers / "b.txt")
+      let binaryChanged = refresh(mutableProvider, ArtifactV1,
+        store = binaryStore, members = binaryMembers)
+      check binaryChanged.invoked.len == 2
+      check binaryChanged.snapshot.providerArtifactId == ArtifactV1
+      check memberBodyHashes(binaryChanged.snapshot).allIt(it == MemberBodyHashV2)
+      check providerSnapshotBinaryFresh(binaryChanged.snapshot, mutableProvider)
+      check binaryChanged.effectIdentities().contains("build/b.txt.out")
+      let binaryCleanup = applyOutputCleanup(binaryChanged, binaryOutputs)
+      check binaryCleanup.deleted == 1
+      check fileExists(binaryOutputs / "build" / "a.txt.out")
+      check not fileExists(binaryOutputs / "build" / "b.txt.out")
 
       let beforeMalformed = readFile(providerSnapshotPath(storeRoot))
       writeFile(srcDir / "a.txt", "malformed response should not publish\n")

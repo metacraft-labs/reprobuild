@@ -1,5 +1,8 @@
 import std/[algorithm, os, osproc, sets, streams, strutils, tables, times]
 
+when defined(posix):
+  import std/posix
+
 import repro_core
 import repro_hash
 import repro_provider_runtime/codec
@@ -385,6 +388,23 @@ proc fileReadInput*(path: string): GraphEvaluationInput =
   GraphEvaluationInput(kind: gevFileRead, identity: path,
     digest: fileContentDigest(path))
 
+proc providerSnapshotBinaryFresh*(snapshot: ProviderGraphSnapshot;
+                                  binaryPath: string): bool =
+  ## Legacy snapshots have no binary binding and must be evaluated once.
+  let digest = fileContentDigest(binaryPath)
+  if digest == "missing":
+    return false
+  for fragment in snapshot.fragments:
+    for input in fragment.evaluationInputs:
+      if input.kind == gevFileRead and input.identity == binaryPath:
+        if input.digest != digest:
+          return false
+        result = true
+
+proc requireUnchangedProviderBinary(input: GraphEvaluationInput) =
+  if fileContentDigest(input.identity) != input.digest:
+    raiseRuntime("provider binary changed during graph refresh")
+
 proc directoryEnumerationInput*(path, memberEntryPointId,
                                 memberEntryPointBodyHash: string;
                                 memberArgumentRoot = "";
@@ -522,12 +542,51 @@ proc currentDescriptor(manifest: ProviderManifest; entryPointId: string):
     (found: false, descriptor: GraphEntryPointDescriptor())
 
 proc execConfig(config: RefreshConfig): ProviderExecutionConfig =
-  ProviderExecutionConfig(
+  result = ProviderExecutionConfig(
     binaryPath: config.providerBinaryPath,
     extraArgs: config.providerExtraArgs,
     workingDir: if config.providerWorkingDir.len > 0:
       config.providerWorkingDir else: getCurrentDir(),
     tempRoot: config.storeRoot / "tmp")
+
+proc providerBinaryInputPath(provider: ProviderExecutionConfig): string =
+  let workingDir = absolutePath(provider.workingDir)
+  if provider.binaryPath.isAbsolute() or provider.binaryPath.splitPath().head.len > 0:
+    return absolutePath(provider.binaryPath, workingDir)
+
+  # Match process lookup from the child's directory without changing the
+  # parent's cwd or the command spelling supplied to the provider.
+  var searchDirs: seq[string] = @[]
+  when defined(windows):
+    searchDirs.add(workingDir)
+  var searchPath = getEnv("PATH")
+  when defined(posix):
+    if not existsEnv("PATH"):
+      let size = posix.confstr(posix.CS_PATH, nil, 0)
+      if size <= 0:
+        return ""
+      searchPath = newString(size)
+      let written = posix.confstr(posix.CS_PATH, searchPath.cstring, size)
+      if written <= 0 or written > size:
+        return ""
+      searchPath.setLen(written - 1)
+  for entry in searchPath.split(PathSep):
+    when defined(windows):
+      if entry.len == 0:
+        continue
+      let directory = if entry.len >= 2 and entry[0] == '"' and entry[^1] == '"':
+        entry[1 ..< entry.len - 1] else: entry
+    else:
+      let directory = if entry.len == 0: workingDir else: entry
+    searchDirs.add(absolutePath(directory, workingDir))
+  for directory in searchDirs:
+    for extension in ExeExts:
+      let candidate = addFileExt(directory / provider.binaryPath, extension)
+      if fileExists(extendedPath(candidate)):
+        when defined(posix):
+          if posix.access(candidate.cstring, posix.X_OK) != 0:
+            continue
+        return candidate
 
 proc enqueue(plans: var seq[InvocationPlan]; planKeys: var HashSet[string];
              plan: InvocationPlan) =
@@ -663,6 +722,7 @@ proc handleDirectoryChanges(config: RefreshConfig; manifest: ProviderManifest;
     inc ownerIndex
 
 proc executePlan(config: RefreshConfig; provider: ProviderExecutionConfig;
+                 binaryInput: GraphEvaluationInput;
                  manifest: ProviderManifest; snapshot: var ProviderGraphSnapshot;
                  report: var ProviderRefreshReport; plan: InvocationPlan):
     StoredGraphFragment =
@@ -683,11 +743,18 @@ proc executePlan(config: RefreshConfig; provider: ProviderExecutionConfig;
     entryPointId: plan.entryPointId,
     arguments: plan.arguments,
     reason: plan.reason))
-  result = storedFragmentFrom(response.fragment, config.providerArtifactId,
+  var fragment = response.fragment
+  if plan.entryPointId == config.rootEntryPointId:
+    # A monitored recompile may change the binary without changing the
+    # protocol's textual source identity. Bind its graph to the actual code.
+    fragment.evaluationInputs.add(binaryInput)
+    fragment.fragmentDigest = computeGraphFragmentDigest(fragment)
+  result = storedFragmentFrom(fragment, config.providerArtifactId,
     config.lockSliceId, config.activity)
   applyStoredFragment(snapshot, report, result)
 
 proc runRootAndChildren(config: RefreshConfig; provider: ProviderExecutionConfig;
+                        binaryInput: GraphEvaluationInput;
                         manifest: ProviderManifest;
                         snapshot: var ProviderGraphSnapshot;
                         report: var ProviderRefreshReport;
@@ -695,7 +762,7 @@ proc runRootAndChildren(config: RefreshConfig; provider: ProviderExecutionConfig
   let root = currentDescriptor(manifest, config.rootEntryPointId)
   if not root.found:
     raiseRuntime("root entry point is missing from provider manifest")
-  let rootStored = executePlan(config, provider, manifest, snapshot, report,
+  let rootStored = executePlan(config, provider, binaryInput, manifest, snapshot, report,
     InvocationPlan(
       entryPointId: root.descriptor.id,
       entryPointBodyHash: root.descriptor.bodyHash,
@@ -703,7 +770,7 @@ proc runRootAndChildren(config: RefreshConfig; provider: ProviderExecutionConfig
       namespace: config.namespace,
       reason: reason))
   for child in rootStored.childEntryPoints:
-    discard executePlan(config, provider, manifest, snapshot, report, InvocationPlan(
+    discard executePlan(config, provider, binaryInput, manifest, snapshot, report, InvocationPlan(
       entryPointId: child.entryPointId,
       entryPointBodyHash: child.entryPointBodyHash,
       arguments: child.arguments,
@@ -765,10 +832,14 @@ proc detectEvaluationInputChanges(manifest: ProviderManifest;
 proc refreshProviderGraph*(config: RefreshConfig): ProviderRefreshReport =
   result.persistedSnapshotPath = providerSnapshotPath(config.storeRoot)
   let provider = execConfig(config)
+  let binaryInput = fileReadInput(providerBinaryInputPath(provider))
+  if binaryInput.digest == "missing":
+    raiseRuntime("provider binary is missing: " & config.providerBinaryPath)
   var snapshot = loadProviderGraphSnapshot(config.storeRoot)
 
   if snapshot.fragments.len > 0 and
-      snapshot.providerArtifactId == config.providerArtifactId:
+      snapshot.providerArtifactId == config.providerArtifactId and
+      providerSnapshotBinaryFresh(snapshot, binaryInput.identity):
     let manifest = snapshot.manifest
     validateManifest(manifest, config.providerArtifactId)
     refreshStoredBindings(snapshot, manifest)
@@ -782,13 +853,14 @@ proc refreshProviderGraph*(config: RefreshConfig): ProviderRefreshReport =
     detectEvaluationInputChanges(manifest, snapshot, plans, planKeys)
 
     if rootNeedsRerun:
-      runRootAndChildren(config, provider, manifest, snapshot, result,
+      runRootAndChildren(config, provider, binaryInput, manifest, snapshot, result,
         girDirectoryMembershipChanged)
     else:
       for plan in plans:
-        discard executePlan(config, provider, manifest, snapshot, result, plan)
+        discard executePlan(config, provider, binaryInput, manifest, snapshot, result, plan)
 
     ensureNoDuplicateEffects(snapshot)
+    requireUnchangedProviderBinary(binaryInput)
     if plans.len > 0 or rootNeedsRerun or result.prunedInvocationKeys.len > 0 or
         result.staleEffects.len > 0 or result.staleEdges.len > 0:
       saveProviderGraphSnapshot(config.storeRoot, snapshot)
@@ -800,16 +872,31 @@ proc refreshProviderGraph*(config: RefreshConfig): ProviderRefreshReport =
 
   if snapshot.fragments.len == 0:
     snapshot = emptyProviderGraphSnapshot(config.providerArtifactId, manifest)
-    runRootAndChildren(config, provider, manifest, snapshot, result,
+    runRootAndChildren(config, provider, binaryInput, manifest, snapshot, result,
       girColdStart)
     ensureNoDuplicateEffects(snapshot)
+    requireUnchangedProviderBinary(binaryInput)
     saveProviderGraphSnapshot(config.storeRoot, snapshot)
     result.snapshot = snapshot
     return
 
+  let previous = snapshot
   snapshot = emptyProviderGraphSnapshot(config.providerArtifactId, manifest)
-  runRootAndChildren(config, provider, manifest, snapshot, result,
+  runRootAndChildren(config, provider, binaryInput, manifest, snapshot, result,
     girProviderArtifactChanged)
   ensureNoDuplicateEffects(snapshot)
+  requireUnchangedProviderBinary(binaryInput)
+  for oldFragment in previous.fragments:
+    let index = reusableIndex(snapshot, oldFragment)
+    if index >= 0:
+      recordReplacement(result, oldFragment, snapshot.fragments[index])
+    else:
+      result.prunedInvocationKeys.add(oldFragment.invocationKey)
+      for claim in oldFragment.effectClaims:
+        result.staleEffects.add(StaleOwnedEffect(
+          invocationKey: oldFragment.invocationKey, claim: claim))
+      for edge in oldFragment.edges:
+        result.staleEdges.add(StaleOwnedEdge(
+          invocationKey: oldFragment.invocationKey, edge: edge))
   saveProviderGraphSnapshot(config.storeRoot, snapshot)
   result.snapshot = snapshot

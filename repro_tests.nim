@@ -2232,6 +2232,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_provider_source_discovery.nim",
+    binary: "build/test-bin/t_provider_source_discovery",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_reprobuild_source_root_from_binary_location.nim",
     binary: "build/test-bin/t_reprobuild_source_root_from_binary_location",
     defines: @[],
@@ -7004,6 +7013,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/local-build-engine/t_e2e_m51_dsl_stdlib_file_ops.nim",
     binary: "build/test-bin/t_e2e_m51_dsl_stdlib_file_ops",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/local-build-engine/t_e2e_provider_graph_tracks_binary.nim",
+    binary: "build/test-bin/t_e2e_provider_graph_tracks_binary",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -13907,6 +13925,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_provider_compile_cache_entry_is_content_addressed.nim",
     binary: "build/test-bin/t_provider_compile_cache_entry_is_content_addressed",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_provider_snapshot_binary_binding.nim",
+    binary: "build/test-bin/t_provider_snapshot_binary_binding",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
