@@ -4875,9 +4875,10 @@
           "commandVariableExecuted": true,
           "directExecutionLine": false,
           "executedVariables": [
+            "c",
             "coldCmd"
           ],
-          "line": 208,
+          "line": 217,
           "path": "tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim",
           "patterns": [
             "nim-compile-verb"
@@ -9580,7 +9581,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -22666,7 +22667,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_certificate_policy_required_advisory_off_modes.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -28513,7 +28514,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

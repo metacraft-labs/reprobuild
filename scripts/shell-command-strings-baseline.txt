@@ -18,28 +18,24 @@
 #     `sh` as argv[0].
 # Break any of those three properties and the site appears here.
 
-# DEFECT, found 2026-08-27 by this check on the day it was written; NOT fixed
-# (milestone W10 reports it rather than absorbing it).
-# `typecheckConsumerAgainstInterface` (the RP8 LSP typecheck capability,
-# reached today only by `t_rp8_lsp_typecheck_and_goto_def`)
-# builds `"cd " & quoteShell(repoRoot) & " && " & cmd` and runs it through
-# `execCmdEx`. On Windows there is no shell, so the whole string is looked up
-# as an executable named `cd` and `execCmdEx` RAISES rather than returning a
-# verdict. Measured:
-#   OSError: Requested command not found:
-#     'cd C:\…\w10probe && git.exe rev-parse --git-dir'
-# Fix shape: pass `workingDir` to an argv `startProcess` and drop the `cd &&`.
-libs/repro_cli_support/src/repro_cli_support.nim|execCmdEx|and-or-pipe|&&
-
-# DEFECT, found 2026-08-27 by this check; NOT fixed (reported by W10). The
-# `zekZstdPipe` extractor builds `zstd -dc <archive> | tar -xf - -C <dest>`
-# and runs it through `execCmdEx`. Its own comment asserts "execCmdEx runs
-# through cmd.exe on Windows, which honors | natively" — that is false, and
-# it is the exact misconception this check encodes. Measured with the same
-# shape: the `|` and everything after it arrive as argv to the FIRST program.
-#   git --version | git hash-object --stdin  ->  exit 129,
-#   "error: unknown option `stdin'" from `git version`
-# Fix shape: spawn the two processes and connect the pipe in-process, or make
-# the shell explicit. The comment's own note that Windows "typically takes the
-# (ii) path before falling through here" is why this has not been seen.
-libs/repro_home_apply/src/repro_home_apply/builtin_adapter.nim|execCmdEx|and-or-pipe||
+# EMPTY ON PURPOSE, as of W11/W12/W13 (2026-09-13). Both entries this file
+# carried were the SAME family and both are fixed, so the list of sites that
+# already carry the defect is now the empty list:
+#
+#   - `typecheckConsumerAgainstInterface` built `"cd " & quoteShell(repoRoot) &
+#     " && " & cmd` for `execCmdEx` and RAISED on Windows instead of returning
+#     a verdict (W12). It now passes `workingDir` to an argv `startProcess`
+#     (`runArgvCapturingInDir`). Its only caller,
+#     `t_rp8_lsp_typecheck_and_goto_def`, carried a TEST-SIDE instance of the
+#     same family that masked it, and that one is fixed too -- fixing either
+#     alone leaves the case red on Windows.
+#   - the `zekZstdPipe` extractor built `zstd -dc <archive> | tar -xf - -C
+#     <dest>` for `execCmdEx` under a comment asserting that cmd.exe honours
+#     the `|` (W13). The pipe is now connected in-process and the comment says
+#     what actually happens.
+#
+# Keep it empty. A candidate that is not listed here fails the check, which is
+# now the whole first-party production scope: every `execCmdEx` / `execProcess`
+# command string in `libs`, `apps`, `tools` and `repro.nim` is free of shell
+# metacharacters, and the three structurally-exempt sites above are the only
+# redirect tokens left in it.

@@ -18676,6 +18676,59 @@ type
     ok*: bool
     output*: string
 
+proc runArgvCapturingInDir(exe: string;
+                           args: openArray[string];
+                           workingDir: string):
+    tuple[code: int; output: string] =
+  ## Run ``exe`` with an ARGV in ``workingDir``, folding stderr into stdout.
+  ##
+  ## The working directory is the CHILD's, handed to ``startProcess`` — not a
+  ## ``"cd " & quoteShell(dir) & " && " & cmd`` prefix on a command string.
+  ## That prefix is what this replaces, and it only ever worked on POSIX:
+  ## ``execCmdEx`` adds ``poEvalCommand``, so on POSIX Nim runs the string
+  ## through ``/bin/sh -c`` (where ``cd`` and ``&&`` mean what a shell author
+  ## expects) while on Windows ``startProcess`` hands the whole string to
+  ## ``CreateProcessW`` VERBATIM. There is no shell and no ``cd.exe``, so the
+  ## entire line is looked up as one executable named ``cd`` and the call
+  ## RAISES instead of returning. Measured on a Windows host with the identical
+  ## shape:
+  ##
+  ##   command: cd M:\m\dev\reprobuild && git.exe rev-parse --git-dir
+  ##   RAISED OSError: The system cannot find the file specified.
+  ##   Additional info: Requested command not found:
+  ##     'cd M:\m\dev\reprobuild && git.exe rev-parse --git-dir'
+  ##
+  ## An argv has neither problem: no metacharacter in a path is interpreted on
+  ## either platform, and the directory is a parameter rather than a command.
+  ## A spawn failure is returned as a non-zero code, never raised — a proc
+  ## whose contract is to return a verdict must not make every caller
+  ## exception-safe for a reason unrelated to the verdict.
+  ##
+  ## Draining: Nim 2.2's ``readAll`` stops at the first SHORT pipe read on
+  ## Windows, which is how ``git log --name-only`` once yielded only its first
+  ## format marker here. Read with ``readData`` until it returns 0 (a genuine
+  ## EOF) instead, so a compiler's diagnostics — which ARE the explanation the
+  ## caller surfaces — cannot arrive truncated.
+  var process: Process
+  try:
+    process = startProcess(exe, workingDir = workingDir, args = @args,
+      options = {poStdErrToStdOut, poUsePath})
+  except CatchableError as err:
+    return (code: 127, output: "could not start " & exe & ": " & err.msg)
+  defer: process.close()
+  const DrainChunk = 4096
+  var chunk = newString(DrainChunk)
+  let outStream = process.outputStream
+  while true:
+    var read = 0
+    try:
+      read = outStream.readData(addr chunk[0], DrainChunk)
+    except CatchableError:
+      break
+    if read <= 0: break
+    result.output.add(chunk[0 ..< read])
+  result.code = process.waitForExit()
+
 proc typecheckConsumerAgainstInterface*(consumerProjectFile: string;
                                         repoRoot: string;
                                         nimcache: string;
@@ -18695,15 +18748,18 @@ proc typecheckConsumerAgainstInterface*(consumerProjectFile: string;
   ## ``config.nims`` wires the ``--path`` set. Returns the check verdict + the
   ## compiler diagnostics; a failing check (e.g. a reference to a non-existent
   ## public symbol) reports ``ok = false`` with the compiler's error text.
+  ##
+  ## ``repoRoot`` is the CHILD's working directory (``runArgvCapturingInDir``),
+  ## not a ``cd <repoRoot> && …`` prefix on a command string. The prefix form
+  ## made this proc raise an ``OSError`` on Windows instead of returning a
+  ## verdict at all — see that proc for the measurement.
   let nim = if nimExe.len > 0: nimExe else: findExe("nim")
   doAssert nim.len > 0, "nim compiler not on PATH"
   createDir(extendedPath(nimcache))
-  let cmd =
-    nim & " check --hints:off --warnings:off" &
-    " --nimcache:" & quoteShell(nimcache) &
-    " " & quoteShell(consumerProjectFile)
-  let (output, code) =
-    execCmdEx("cd " & quoteShell(repoRoot) & " && " & cmd)
+  let (code, output) = runArgvCapturingInDir(nim,
+    ["check", "--hints:off", "--warnings:off",
+     "--nimcache:" & nimcache, consumerProjectFile],
+    repoRoot)
   InterfaceTypecheckResult(ok: code == 0, output: output)
 
 # ---------------------------------------------------------------------------
@@ -44147,6 +44203,24 @@ type
     body*: string
     diagnostic*: string  ## why, when ``status == gorUnreadable``
 
+const
+  gitNotesShowNoNoteExit* = 1
+    ## The exit code ``git notes --ref <ref> show <commit>`` uses for the ONE
+    ## condition that is a genuine absence: ``error: no note found for object
+    ## <sha>.`` Every other non-zero exit is a failed READ, not an absence —
+    ## measured in a throwaway repository:
+    ##
+    ##   git notes --ref refs/notes/x show <commit-with-no-note>
+    ##     -> exit 1,   error: no note found for object <sha>.
+    ##   (delete the note BLOB, keep the ref)
+    ##   git notes --ref refs/notes/x show <commit-with-a-note>
+    ##     -> exit 128, fatal: bad object <blob-sha>
+    ##
+    ## In the second case ``rev-parse --verify --quiet refs/notes/x`` still
+    ## exits 0, so the ref-existence probe cannot separate them and the exit
+    ## code is the only thing that can. Named rather than spelled ``1`` inline
+    ## so the claim this classification rests on is legible at the constant.
+
 proc noteBlobFromNotesCommit(gitBin, repoPath, notesCommitSha,
                              commit: string;
                              received = ReceivedObjectStore()): GitNoteRead =
@@ -44210,22 +44284,32 @@ proc readAttachedCertificatesFrom*(gitBin, repoPath, commit,
   ## accepts a ref name, so we try the raw-SHA tree-walk first and fall back to
   ## ``git notes show`` for a ref name.
   ##
-  ## The raw-SHA read — the one the pre-receive gate depends on, where the
-  ## object is known to have been delivered — reports unreadability apart.
+  ## BOTH reads report unreadability apart from absence, each by classifying on
+  ## the exit code of its own steps the way ``gatewayReadPushedLock`` does:
   ##
-  ## The ref-NAME read does NOT, and that is a KNOWN RESIDUAL rather than a
-  ## property to rely on. "No such ref" is separated out by the ``rev-parse
-  ## --verify --quiet`` probe below, but every remaining ``git notes show``
-  ## failure is reported ``gorAbsent``, and they are not all absences: git
-  ## itself tells them apart, with exit 1 / ``error: no note found for object``
-  ## for the genuine absence and exit 128 / ``fatal: bad object <sha>`` when the
-  ## note object cannot be read. Folding the second into the first is the same
-  ## shape as the collapse that made the lock gate a no-op — narrower, and
-  ## harmless to the VERDICT (the cert gate refuses on absence anyway), but it
-  ## costs the same wrong remedy on the fallback path the pre-receive gate takes
-  ## when the incoming-notes read yields nothing. Fixing it means classifying on
-  ## the exit code here, the way ``gatewayReadPushedLock`` classifies on its
-  ## three steps.
+  ##   * the raw-SHA read (the one the pre-receive gate depends on, where the
+  ##     object is known to have been delivered) — see
+  ##     ``noteBlobFromNotesCommit``;
+  ##   * the ref-NAME read (the post-receive / settled case), below, in three
+  ##     steps:
+  ##
+  ##       1. ``rev-parse --verify --quiet <notesRef>`` — is there a notes ref
+  ##          at all? No such ref means nothing is attached to anything, which
+  ##          is a genuine ``gorAbsent``.
+  ##       2. ``notes show`` exit ``gitNotesShowNoNoteExit`` — git's own
+  ##          "no note found for object" verdict: ``gorAbsent``.
+  ##       3. ``notes show`` exit ANYTHING ELSE (128 / ``fatal: bad object
+  ##          <sha>`` when the note blob is gone, and every other git failure):
+  ##          ``gorUnreadable``, naming the step and git's message.
+  ##
+  ## This used to fold step 3 into step 2 and report every ``git notes show``
+  ## failure as ``gorAbsent`` — the same collapse-shape that made the lock gate
+  ## a no-op, on the one read path the earlier fix left alone. It was harmless
+  ## to the VERDICT (the cert gate refuses on absence anyway) and cost the wrong
+  ## REMEDY on the fallback path the pre-receive gate takes when the
+  ## incoming-notes read yields nothing: a receiving bare whose settled notes
+  ## ref is damaged told the author to mint a certificate they had already
+  ## minted and pushed.
   var read: GitNoteRead
   let looksLikeSha = notesRef.len == 40 and
     notesRef.allCharsInSet(HexDigits)
@@ -44237,14 +44321,28 @@ proc readAttachedCertificatesFrom*(gitBin, repoPath, commit,
       ["-C", repoPath, "rev-parse", "--verify", "--quiet", notesRef],
       received)
     if exists.code != 0 or exists.output.strip().len == 0:
+      # STEP 1 — no such notes ref here. Nothing is attached to any commit, so
+      # this is an absence and not a failed read.
       read = GitNoteRead(status: gorAbsent, body: "")
     else:
       let res = gitNoteRun(gitBin,
         ["-C", repoPath, "notes", "--ref", notesRef, "show", commit],
         received)
       read =
-        if res.code == 0: GitNoteRead(status: gorPresent, body: res.output)
-        else: GitNoteRead(status: gorAbsent, body: "")
+        if res.code == 0:
+          GitNoteRead(status: gorPresent, body: res.output)
+        elif res.code == gitNotesShowNoNoteExit:
+          # STEP 2 — git looked and there is no note for this commit.
+          GitNoteRead(status: gorAbsent, body: "")
+        else:
+          # STEP 3 — git could not complete the read. Measured: a notes ref
+          # whose note BLOB has been removed exits 128 with
+          # ``fatal: bad object <sha>`` while the ref itself still resolves, so
+          # step 1 cannot see it and only the exit code tells the two apart.
+          GitNoteRead(status: gorUnreadable, body: "",
+            diagnostic: "the note attached to " & commit & " under " &
+              notesRef & " in '" & repoPath & "' cannot be read (git notes " &
+              "show exit " & $res.code & ": " & res.output.strip() & ")")
   result.status = read.status
   result.diagnostic = read.diagnostic
   if read.status != gorPresent or read.body.len == 0:
