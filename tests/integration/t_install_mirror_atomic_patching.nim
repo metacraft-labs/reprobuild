@@ -26,6 +26,72 @@ when defined(linux):
     true
 
   suite "atomic install mirror ELF normalization":
+    test "OpenMP runtime is resolved through the declared compiler":
+      let original = graphArtifactPath(
+        "build/test-fixtures/install-mirror-runtime/openmp-probe")
+      requireBinary(original, "reprobuild.test_fixtures.install_mirror_openmp_probe")
+      let scratch = createTempDir("repro-openmp-runtime-", "")
+      defer: removeDir(scratch)
+      let mirror = scratch / "usr"
+      let executable = mirror / "bin" / "openmp-probe"
+      createDir(executable.parentDir)
+      copyFileWithPermissions(original, executable)
+      let fixtureEnv = cleanEnv()
+      let interpreter = runTool("patchelf", @["--print-interpreter", original], fixtureEnv)
+      require interpreter.exitCode == 0
+      fixtureEnv["LIBRARY_PATH"] = interpreter.output.strip().parentDir
+      fixtureEnv["REPRO_M9R30_NEEDED_CHECK"] = "1"
+      let runtime = runTool("gcc", @["-print-file-name=libgomp.so.1"], fixtureEnv)
+      require runtime.exitCode == 0
+      require runtime.output.strip().isAbsolute()
+      require fileExists(runtime.output.strip())
+      let normalized = runTool("sh", @["-ec",
+        m9r14fEmitRpathPatchScript(mirror, @[],
+          ownManifestPath = scratch / "manifest", packageName = "openmpProbe")], fixtureEnv)
+      checkpoint normalized.output
+      require normalized.exitCode == 0
+      let rpath = runTool("patchelf", @["--print-rpath", executable], fixtureEnv)
+      require rpath.exitCode == 0
+      check runtime.output.strip().parentDir in rpath.output.strip().split(':')
+      let executed = runTool(executable, @[], fixtureEnv)
+      checkpoint executed.output
+      check executed.exitCode == 0
+      check noPatchTemps(scratch)
+
+      let dependencyLib = scratch / "source dependency" / "lib"
+      createDir(dependencyLib)
+      copyFile(runtime.output.strip(), dependencyLib / "libgomp.so.1")
+      copyFileWithPermissions(original, executable)
+      let withDependency = runTool("sh", @["-ec",
+        m9r14fEmitRpathPatchScript(mirror, @[dependencyLib])], fixtureEnv)
+      checkpoint withDependency.output
+      require withDependency.exitCode == 0
+      let dependencyRpath = runTool("patchelf", @["--print-rpath", executable], fixtureEnv)
+      require dependencyRpath.exitCode == 0
+      check dependencyLib in dependencyRpath.output.strip().split(':')
+      check runtime.output.strip().parentDir notin dependencyRpath.output.strip().split(':')
+      check runTool(executable, @[], fixtureEnv).exitCode == 0
+
+      let fakeBin = scratch / "tools"
+      createDir(fakeBin)
+      let fakeGcc = fakeBin / "gcc"
+      writeFile(fakeGcc, "#!/bin/sh\nprintf '%s\\n' libgomp.so.1\n")
+      setFilePermissions(fakeGcc, {fpUserRead, fpUserWrite, fpUserExec})
+      fixtureEnv["PATH"] = fakeBin & ":" & fixtureEnv["PATH"]
+      let missingManifest = scratch / "missing-runtime-manifest"
+      let completion = scratch / "published"
+      copyFileWithPermissions(original, executable)
+      let missing = runTool("sh", @["-ec",
+        m9r14fEmitRpathPatchScript(mirror, @[],
+          ownManifestPath = missingManifest, packageName = "missingOpenmp") &
+          "printf '%s\\n' published > " & quoteShell(completion)], fixtureEnv)
+      checkpoint missing.output
+      check missing.exitCode == 75
+      check "soname=libgomp.so.1" in missing.output
+      check not fileExists(completion)
+      check "libgomp.so.1" in readFile(missingManifest & ".m9r30_unresolved")
+      check noPatchTemps(scratch)
+
     test "static executables are left byte-identical without a runtime path":
       let original = graphArtifactPath(
         "build/test-fixtures/install-mirror-runtime/static-probe")

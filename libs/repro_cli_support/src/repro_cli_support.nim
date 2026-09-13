@@ -6027,7 +6027,8 @@ proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
         return false
   true
 
-proc readFreshProviderGraphSnapshot(storeRoot, providerArtifactId: string):
+proc readFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
+                                   providerBinaryPath: string):
     Option[ProviderGraphSnapshot] =
   if not fileExists(extendedPath(providerSnapshotPath(storeRoot))):
     return none(ProviderGraphSnapshot)
@@ -6035,13 +6036,15 @@ proc readFreshProviderGraphSnapshot(storeRoot, providerArtifactId: string):
     let snapshot = loadProviderGraphSnapshot(storeRoot)
     if snapshot.providerArtifactId != providerArtifactId:
       return none(ProviderGraphSnapshot)
-    if not providerSnapshotInputsFresh(snapshot):
+    if not providerSnapshotBinaryFresh(snapshot, providerBinaryPath) or
+        not providerSnapshotInputsFresh(snapshot):
       return none(ProviderGraphSnapshot)
     return some(snapshot)
   except CatchableError:
     return none(ProviderGraphSnapshot)
 
-proc warmReadFreshProviderGraphSnapshot(storeRoot, providerArtifactId: string):
+proc warmReadFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
+                                       providerBinaryPath: string):
     Option[ProviderGraphSnapshot] =
   let path = providerSnapshotPath(storeRoot)
   let key = storeRoot & "\0" & providerArtifactId
@@ -6050,9 +6053,11 @@ proc warmReadFreshProviderGraphSnapshot(storeRoot, providerArtifactId: string):
     if warm.providerArtifactId == providerArtifactId and
         evidenceFresh(path, warm.snapshotEvidence) and
         warm.snapshot.providerArtifactId == providerArtifactId and
+        providerSnapshotBinaryFresh(warm.snapshot, providerBinaryPath) and
         providerSnapshotInputsFresh(warm.snapshot):
       return some(warm.snapshot)
-  result = readFreshProviderGraphSnapshot(storeRoot, providerArtifactId)
+  result = readFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
+    providerBinaryPath)
   if result.isSome:
     warmProviderSnapshots[key] = WarmProviderSnapshot(
       providerArtifactId: providerArtifactId,
@@ -9989,7 +9994,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if forceRebuild or dryRun:
         none(ProviderGraphSnapshot)
       else:
-        warmReadFreshProviderGraphSnapshot(providerGraphStore, providerArtifactId)
+        warmReadFreshProviderGraphSnapshot(providerGraphStore, providerArtifactId,
+          provider.outputBinaryPath)
     if freshSnapshot.isSome:
       refresh.snapshot = freshSnapshot.get()
       refresh.persistedSnapshotPath = providerSnapshotPath(providerGraphStore)
@@ -20771,7 +20777,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     if forceRefresh:
       none(ProviderGraphSnapshot)
     else:
-      warmReadFreshProviderGraphSnapshot(providerGraphStore, result.providerArtifactId)
+      warmReadFreshProviderGraphSnapshot(providerGraphStore, result.providerArtifactId,
+        provider.outputBinaryPath)
   if freshSnapshot.isSome:
     refresh.snapshot = freshSnapshot.get()
     refresh.persistedSnapshotPath = providerSnapshotPath(providerGraphStore)
@@ -20952,7 +20959,8 @@ proc refreshRecipeProviderSnapshot(target: string;
   let providerGraphStore = providerGraphStoreRoot(outDir / "provider-graph")
   var refresh: ProviderRefreshReport
   let freshSnapshot =
-    warmReadFreshProviderGraphSnapshot(providerGraphStore, providerArtifactId)
+    warmReadFreshProviderGraphSnapshot(providerGraphStore, providerArtifactId,
+      provider.outputBinaryPath)
   if freshSnapshot.isSome:
     refresh.snapshot = freshSnapshot.get()
   else:

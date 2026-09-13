@@ -326,6 +326,39 @@ proc readU64*(r: var Tpm2Reader; field: string): uint64 =
     result = (result shl 8) or uint64(uint8(r.data[r.pos + i]))
   r.pos += 8
 
+proc readU16Le*(r: var Tpm2Reader; field: string): uint16 =
+  ## Little-endian `UINT16`.
+  ##
+  ## Every integer in a TPM 2.0 *structure* is big-endian, and the four
+  ## readers above are the ones a structure uses. The TCG *event log* is
+  ## the opposite: it is a firmware-authored memory image, so its
+  ## `PCRIndex`, `EventType`, `EventSize`, digest count, algorithm
+  ## identifier and digest size are all little-endian. The two encodings
+  ## meet in one place — an event log carries `TPM_ALG_ID` values, which
+  ## a TPM2 structure also carries, in the opposite byte order.
+  ##
+  ## These live here rather than in a cursor of their own because the
+  ## bounds discipline is the part worth having exactly once: `need`, the
+  ## offsets it reports, and `finish` are the checks an event-log reader
+  ## would otherwise reimplement slightly differently. The byte order is
+  ## a parameter of the read, not a reason for a second cursor.
+  r.need(field, 2)
+  result = uint16(uint8(r.data[r.pos])) or
+           (uint16(uint8(r.data[r.pos + 1])) shl 8)
+  r.pos += 2
+
+proc readU32Le*(r: var Tpm2Reader; field: string): uint32 =
+  ## Little-endian `UINT32`. See `readU16Le`.
+  r.need(field, 4)
+  result = 0'u32
+  for i in countdown(3, 0):
+    result = (result shl 8) or uint32(uint8(r.data[r.pos + i]))
+  r.pos += 4
+
+proc readAlgLe*(r: var Tpm2Reader; field: string): TpmAlgId =
+  ## A `TPM_ALG_ID` as an event log spells it.
+  TpmAlgId(r.readU16Le(field))
+
 proc readBytes*(r: var Tpm2Reader; field: string; n: int): string =
   if n < 0:
     raise newException(Tpm2CodecError,
@@ -379,6 +412,17 @@ proc writeU32*(w: var Tpm2Writer; v: uint32) =
 proc writeU64*(w: var Tpm2Writer; v: uint64) =
   for i in countdown(7, 0):
     w.data.add char(uint8((v shr (8 * i)) and 0xFF'u64))
+
+proc writeU16Le*(w: var Tpm2Writer; v: uint16) =
+  ## Little-endian `UINT16`. The mirror of `readU16Le`; see it for why
+  ## one cursor carries both byte orders.
+  w.data.add char(uint8(v and 0xFF'u16))
+  w.data.add char(uint8(v shr 8))
+
+proc writeU32Le*(w: var Tpm2Writer; v: uint32) =
+  ## Little-endian `UINT32`. See `readU16Le`.
+  for i in 0 .. 3:
+    w.data.add char(uint8((v shr (8 * i)) and 0xFF'u32))
 
 proc writeAlg*(w: var Tpm2Writer; a: TpmAlgId) =
   w.writeU16(uint16(a))
