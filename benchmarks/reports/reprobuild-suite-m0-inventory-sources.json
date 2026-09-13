@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1563,
+    "nimTestBinaries": 1566,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 569,
     "staticallyDetectedRuntimeCompilerFlowTests": 97,
-    "testEntries": 1571
+    "testEntries": 1574
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1062,7 +1062,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 711,
+      "integration": 714,
       "platform/destructive": 115,
       "pure unit": 569,
       "unclassified": 164
@@ -1201,9 +1201,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1563,
+    "nimTestBinaryCount": 1566,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1571
+    "testEntryCount": 1574
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -24006,6 +24006,57 @@
       "source": "tests/integration/t_envrc_needs_no_override_env_vars.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_event_log_parser_rejects_malformed",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_event_log_parser_rejects_malformed.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 26,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_event_log_replay_mismatch_rejected",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_event_log_replay_mismatch_rejected.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_event_log_replay_reproduces_pcrs",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_event_log_replay_reproduces_pcrs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

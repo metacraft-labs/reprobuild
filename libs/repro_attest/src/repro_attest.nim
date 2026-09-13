@@ -15,6 +15,10 @@
 ##   * ``repro_attest/tpm2`` — the TPM 2.0 structure codec: the
 ##     big-endian TLV a measured-boot machine signs, plus recomputation
 ##     of a quote's PCR composite digest.
+##   * ``repro_attest/event_log`` — the TCG event log: both wire shapes
+##     (TCG 1.2 and crypto-agile), and the replay that recomputes a
+##     machine's PCR values from it so a quote can be checked against
+##     what the log claims produced it.
 ##   * ``repro_attest/binding`` — the 64-byte report data an instance
 ##     binds into hardware evidence, constructed once for every backend.
 ##   * ``repro_attest/report`` — the ``reproos.attestation-report.v1``
@@ -28,10 +32,11 @@
 
 import ./repro_attest/measurement
 import ./repro_attest/tpm2
+import ./repro_attest/event_log
 import ./repro_attest/manifest
 import ./repro_attest/binding
 import ./repro_attest/report
 import ./repro_attest/driver
 import ./repro_attest/mock_backend
 
-export measurement, tpm2, manifest, binding, report, driver, mock_backend
+export measurement, tpm2, event_log, manifest, binding, report, driver, mock_backend
