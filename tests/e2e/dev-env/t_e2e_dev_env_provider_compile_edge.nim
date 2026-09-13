@@ -47,13 +47,13 @@ proc reproBinary(repoRoot: string): string =
   requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
-proc providerText(): string =
+proc providerText(bakedExpression = "staticRead(\"payload.txt\").strip()"): string =
   # ``staticRead`` is the whole point: ``payload.txt`` is a COMPILE-TIME input
   # of this module that no ``import``/``include`` statement mentions, so the
   # text-closure key the removed gate used cannot see it.
-  "import std/strutils\n" &
+  "import std/[os, strutils]\n" &
     "import repro_project_dsl\n\n" &
-    "const bakedPayload = staticRead(\"payload.txt\").strip()\n\n" &
+    "const bakedPayload = " & bakedExpression & "\n\n" &
     "package fixture:\n" &
     "  defaultToolProvisioning \"path\"\n" &
     "  uses:\n" &
@@ -203,3 +203,35 @@ suite "e2e_dev_env_provider_compile_edge":
       # The freshness sidecar is a DECLARED output of the edge, so a cache
       # answer leaves the full output set on disk rather than two of three.
       check fileExists(second.providerArtifactPath & ".inputs")
+
+      # These entries are not read by the recipe. The discovery helper must
+      # not turn its own directory scan into a monitored compile dependency.
+      createDir(c.projectRoot / "build")
+      createDir(c.projectRoot / "src")
+      writeFile(c.projectRoot / "unused.nim", "const unused = true\n")
+      let afterBuildDirectories = computeDevEnvEdge(cfg)
+      check not afterBuildDirectories.stats.providerBuildLaunched
+      check afterBuildDirectories.stats.providerBuildSkippedFresh
+      check afterBuildDirectories.providerCompileAction.cacheDecision == cdHit
+      check afterBuildDirectories.artifactPath.bakedValue() == "alpha"
+
+    test "provider_compile_rebuilds_when_the_recipe_reads_directory_membership":
+      let c = prepareCase("repro-provider-directory-read", "alpha")
+      defer: removeDir(c.tempRoot)
+      writeFile(c.projectRoot / "fixture_provider.nim", providerText("""block:
+  var found = false
+  for kind, path in walkDir(currentSourcePath().parentDir()):
+    if path.extractFilename() == "build": found = true
+  if found: "present" else: "absent"
+"""))
+      let cfg = configFor(c.projectRoot, c.outDir, c.reproBin,
+        c.monitorCliPath, c.monitorCliArgs, c.shim, c.repoRoot)
+      let first = computeDevEnvEdge(cfg)
+      check first.stats.providerBuildLaunched
+      check first.artifactPath.bakedValue() == "absent"
+
+      createDir(c.projectRoot / "build")
+      let second = computeDevEnvEdge(cfg)
+      check second.stats.providerBuildLaunched
+      check not second.stats.providerBuildSkippedFresh
+      check second.artifactPath.bakedValue() == "present"

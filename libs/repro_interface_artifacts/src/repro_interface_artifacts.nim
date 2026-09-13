@@ -3225,19 +3225,20 @@ proc nimImportSpecs(line: string): seq[string] =
       return @[rest[0 ..< pos].strip()]
 
 proc discoverNimSources*(rootModulePath: string;
-                         extraRoots: openArray[string] = []): seq[string] =
+                         extraRoots: openArray[string] = [];
+                         includeSiblingSources = false): seq[string] =
   ## Enumerate the provider compile's input source set.
   ##
-  ## Imports reachable from ``rootModulePath`` are included transitively
-  ## (only within the project root, never outside; std/ and pkg/ specs are
-  ## ignored). In addition every ``.nim`` file directly in the project
-  ## root is included even when it is not currently imported, so that
-  ## adding a sibling module to the project invalidates the provider
-  ## compile cache: a later edit to ``reprobuild.nim`` might import it,
-  ## and Nim's own compilation already treats project-root siblings as
-  ## eligible imports. Sibling enumeration is intentionally
-  ## non-recursive — subdirectory sources only enter the set through an
-  ## explicit import edge.
+  ## Follow imports reachable from ``rootModulePath`` without enumerating
+  ## unrelated siblings. An edit that adds an import already changes the
+  ## importing source. Scanning its directory here would also record unused
+  ## build directories as inputs of the monitored compile.
+  ##
+  ## This is a bootstrap source set, not a complete freshness check. The
+  ## monitored compiler still records non-import reads, including staticRead,
+  ## macro inputs, and directory listings performed by the recipe itself.
+  ## Legacy unmonitored callers opt into their existing sibling census;
+  ## narrowing that census would weaken their incomplete freshness checks.
   ##
   ## TI2 residual fix (b): ``extraRoots`` are additional ``--path`` search
   ## roots (the lift's ``extraPaths``). A bare ``import somemod`` that resolves
@@ -3282,7 +3283,7 @@ proc discoverNimSources*(rootModulePath: string;
             if extraPath.len > 0 and extraPath notin seen:
               pending.add(extraPath)
               break
-  if dirExists(extendedPath(projectRoot)):
+  if includeSiblingSources and dirExists(extendedPath(projectRoot)):
     for kind, child in walkDir(projectRoot):
       if kind notin {pcFile, pcLinkToFile}:
         continue
@@ -3419,7 +3420,8 @@ proc reproLibStampsForCache(workDir: string): seq[FileStamp] =
   fileStamps(reproLibSources(workDir))
 
 proc interfaceLiftSources(modulePath, resourceModule: string;
-                          extraPaths: openArray[string] = []): seq[string] =
+                          extraPaths: openArray[string] = [];
+                          includeSiblingSources = false): seq[string] =
   ## The full source closure a lift compiles: the producer's own module
   ## closure plus, when a producer declares a separate resource module (TI1),
   ## that module's closure. Both feed the extraction fingerprint so a
@@ -3429,10 +3431,10 @@ proc interfaceLiftSources(modulePath, resourceModule: string;
   ## walk so a resource module's cross-directory dependency reachable ONLY via
   ## an extra ``--path`` is discovered (with its CONTENT), not just named by
   ## basename. A change to such a file re-keys the lift.
-  result = discoverNimSources(modulePath, extraPaths).mapIt(
+  result = discoverNimSources(modulePath, extraPaths, includeSiblingSources).mapIt(
     normalizedStampPath(it))
   if resourceModule.len > 0:
-    for src in discoverNimSources(resourceModule, extraPaths):
+    for src in discoverNimSources(resourceModule, extraPaths, includeSiblingSources):
       let normalized = normalizedStampPath(src)
       if normalized notin result:
         result.add(normalized)
@@ -3441,9 +3443,11 @@ proc interfaceExtractionContext(modulePath: string;
                                 workDir = getCurrentDir();
                                 includeReproLibFingerprint = true;
                                 resourceModule = "";
-                                extraPaths: openArray[string] = []):
+                                extraPaths: openArray[string] = [];
+                                includeSiblingSources = false):
     InterfaceExtractionContext =
-  let sources = interfaceLiftSources(modulePath, resourceModule, extraPaths)
+  let sources = interfaceLiftSources(modulePath, resourceModule, extraPaths,
+    includeSiblingSources)
   var libPathFlags = reproLibPathFlags(workDir)
   # TI1: the producer's declared resource module + extra ``--path``s are part
   # of the lift's input identity — a change to the extra path set re-keys the
@@ -3647,7 +3651,7 @@ proc interfaceExtractionCacheProbe(modulePath, artifactPath, stubPath: string;
 
   result.fingerprintContext = interfaceExtractionContext(modulePath, workDir,
     includeReproLibFingerprint = true, resourceModule = resourceModule,
-    extraPaths = extraPaths)
+    extraPaths = extraPaths, includeSiblingSources = true)
   result.inputFingerprint =
     interfaceExtractionFingerprint(result.fingerprintContext)
   let cached = cachedInterfaceArtifactByFingerprint(artifactPath, stubPath,
@@ -5433,13 +5437,15 @@ proc providerLibraryCompileActionKey*(modulePath, outputBinaryPath: string;
 proc providerCompilePlan*(modulePath, outputBinaryPath: string;
                           interfaceFingerprint: ContentDigest;
                           workDir = getCurrentDir();
-                          scratchDir = ""): ProviderCompilePlan =
+                          scratchDir = "";
+                          includeSiblingSources = false): ProviderCompilePlan =
   # The compiler runs in an exclusive scratch CWD, so every path that belongs
   # to the provider itself must be independent of that CWD.
   let absoluteModulePath = absolutePath(modulePath)
   let normalizedOutputPath = absolutePath(
     normalizedProviderOutputPath(outputBinaryPath))
-  let sources = discoverNimSources(absoluteModulePath)
+  let sources = discoverNimSources(absoluteModulePath,
+    includeSiblingSources = includeSiblingSources)
   let providerFingerprint = providerFingerprintFor(sources, interfaceFingerprint,
     workDir)
   let command = providerCompileCommand(absoluteModulePath,
@@ -5694,7 +5700,7 @@ proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
       return none(ProviderCompileArtifact)
     if cached.outputBinaryPath != normalizedOutputPath:
       return none(ProviderCompileArtifact)
-    let sources = discoverNimSources(modulePath)
+    let sources = discoverNimSources(modulePath, includeSiblingSources = true)
     if cachedProviderFreshnessByMetadata(artifactPath, modulePath,
         normalizedOutputPath, workDir, sources, cached):
       return some(cached)
@@ -5763,7 +5769,8 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
   ## key inside the child would veto the engine's decision and re-publish the
   ## very stale binary the edge was re-run to replace.
   let plan = providerCompilePlan(modulePath, outputBinaryPath,
-    interfaceFingerprint, workDir, scratchDir)
+    interfaceFingerprint, workDir, scratchDir,
+    includeSiblingSources = useFreshnessCache)
   if useFreshnessCache and artifactPath.len > 0 and
       providerCompileArtifactFresh(artifactPath,
         plan.outputBinaryPath, interfaceFingerprint, plan.providerFingerprint,
