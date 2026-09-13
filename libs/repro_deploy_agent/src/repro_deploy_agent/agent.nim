@@ -2,7 +2,7 @@
 ##
 ## A signed desired-state manifest PULL LOOP: the reprobuild-native analog
 ## of the Linux ``mcl-deploy-agent`` (nixos-modules
-## ``packages/mcl/src/mcl/commands/deploy_agent.d``). One agent tick:
+## ``packages/mcl-devops/src/mcl/commands/deploy_agent.d``). One agent tick:
 ##
 ##   1. POLL every configured manifest source. A source is an HTTP(S) URL
 ##      (fetched with ``std/httpclient``), a ``file://`` URL, or a plain
