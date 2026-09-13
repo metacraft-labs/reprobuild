@@ -31,6 +31,8 @@ import std/[os, strutils, unittest]
 # entries against it rather than against a duplicate of it.
 import repro_dsl_stdlib/nixpkgs_pin
 
+from repro_test_support import nimSourceCodeOnly, nimSourceCommentsBlanked
+
 const
   PackagesRel = "libs" / "repro_dsl_stdlib" / "src" / "repro_dsl_stdlib" /
     "packages"
@@ -125,8 +127,32 @@ iterator catalogFiles(): tuple[name, path: string] =
       if name in AuditExemptions: continue
       yield (name: name, path: path)
 
-proc readCatalog(path: string): string =
-  readFile(path)
+# NEITHER READER RETURNS RAW TEXT, AND THE TWO ARE NOT INTERCHANGEABLE.
+#
+# A catalog entry is a Nim file whose doc comment usually EXPLAINS its
+# provisioning fan-out by naming the very arms this suite scans for. MEASURED
+# (DA-8): all three provisioning arms were deleted from ``nsis.nim`` — the
+# ``nixPackage``, the ``scoopApp`` and the ``tarball`` — leaving only its
+# header comment, which lists them; "every catalog entry declares a
+# provisioning shape" stayed GREEN at 5/5 over an entry that declares none.
+# Two entries (``nsis``, ``rustup``) carry such a comment today, so the audit
+# was not fail-closed even though no entry had yet reached the state that
+# turns it red.
+
+proc readCatalogCode(path: string): string =
+  ## Comments AND literals blanked. The mode for a needle that is a CODE
+  ## spelling — ``nixPackage``, ``VersionedProvisioning(``, ``tarball url``
+  ## are all DSL calls, never quoted text — so blanking literals costs
+  ## nothing and also stops a URL or a description string from matching.
+  nimSourceCodeOnly(readFile(path))
+
+proc readCatalogLiterals(path: string): string =
+  ## Comments blanked, literals KEPT. The mode for the pin case below, whose
+  ## needles ARE literals (``"nixpkgs#``, and the two ``notin`` assertions
+  ## that spell out the pin's hex). Blanking literals there would delete the
+  ## subject of every one of them; leaving comments in would let a sentence
+  ## quoting an old pin redden a file that no longer carries it.
+  nimSourceCommentsBlanked(readFile(path))
 
 suite "M29 Part B — catalog audit":
 
@@ -167,7 +193,7 @@ suite "M29 Part B — catalog audit":
     # only arm was ``tarball`` before.
     var seen = 0
     for entry in catalogFiles():
-      let body = readCatalog(entry.path)
+      let body = readCatalogCode(entry.path)
       checkpoint "entry: " & entry.name & " (" & entry.path & ")"
       let hasNixPackage = "nixPackage " in body
       let hasVersionedProvisioning = "VersionedProvisioning(" in body or
@@ -197,7 +223,7 @@ suite "M29 Part B — catalog audit":
     # A pasted literal is the regression; catching it early is what keeps the
     # guarantee structural rather than conventional.
     for entry in catalogFiles():
-      let body = readCatalog(entry.path)
+      let body = readCatalogLiterals(entry.path)
       if "\"nixpkgs#" notin body:
         # Local expression (stylus-style) — skip the rev pin check.
         continue

@@ -85,15 +85,47 @@ suite "Deferred-Item D1: pythonUnittest resolves in path mode":
     let reproNim = repoRoot / "repro.nim"
     check fileExists(reproNim)
 
-    let reproNimText = readFile(reproNim)
+    # COMPUTED OVER CODE, NOT OVER PROSE — mode: COMMENTS BLANKED, LITERALS
+    # KEPT. The needle below IS a string literal (``"python3"``, quotes
+    # included), so ``nimSourceCodeOnly`` would blank exactly what is being
+    # searched for and the positive assertion would pass on nothing.
+    # ``nimSourceCommentsBlanked`` is the mode a literal needle requires.
+    #
+    # ONE READER PER MODE, never a shared one. A text that keeps literals is
+    # the right reader for a literal needle and the WRONG reader for a code
+    # needle, because a ``checkpoint``/``debugEcho`` argument spelling the
+    # code satisfies it exactly as a comment does. The wrapper scan below is
+    # therefore split in two rather than sharing this one.
+    #
+    # MEASURED (DA-8): the ``"python3"`` entry was deleted from the ``uses:``
+    # block of ``repro.nim`` and this case stayed GREEN, because the twelve
+    # lines of ``#`` comment that INTRODUCE that entry themselves write
+    # ``executableName = "python3"`` and the words ``Deferred-Item D1``. The
+    # audit was reading its own rationale.
+    let reproNimLiterals = nimSourceCommentsBlanked(readFile(reproNim))
 
     # The ``uses:`` block must declare ``"python3"`` — that is the
     # constraint the path-mode resolver iterates when building the
     # ``python3 | python3`` profile entry. Without it the resolver's
     # profile table has no key matching the python execute edges'
     # recorded ``executableName = "python3"``.
-    check "\"python3\"" in reproNimText
-    check "Deferred-Item D1" in reproNimText
+    #
+    # Graded as a whole LINE inside the ``uses:`` block rather than as a
+    # substring anywhere in the file: ``"python3"`` also occurs as an
+    # argument to unrelated calls, so a bare ``in`` would survive the entry's
+    # deletion on the strength of one of those.
+    var sawPython3Use = false
+    for line in reproNimLiterals.splitLines():
+      if line.strip() == "\"python3\"":
+        sawPython3Use = true
+    check sawPython3Use
+
+    # DELIBERATELY OVER RAW TEXT, and not part of the soundness argument
+    # above. This one grades the feature TAG the implementation comments
+    # carry, which only exists in prose — blanking comments would delete its
+    # subject. Keep it separate from the code assertions so it is never
+    # mistaken for one.
+    check "Deferred-Item D1" in readFile(reproNim)
 
     # The targeted Python source must exist; otherwise the test
     # cannot be invoked.
@@ -107,10 +139,31 @@ suite "Deferred-Item D1: pythonUnittest resolves in path mode":
     let wrapper = repoRoot / "libs" / "repro_dsl_stdlib" / "src" /
       "repro_dsl_stdlib" / "packages" / "python_unittest_runner.nim"
     check fileExists(wrapper)
-    let wrapperText = readFile(wrapper)
-    check "packageName = \"python3\"" in wrapperText
-    check "executableName = \"python3\"" in wrapperText
-    check "cacheable = false" in wrapperText
+    # TWO READERS, ONE PER MODE, because this scan's three needles are not
+    # all the same kind of thing. The wrapper is a live instance of the
+    # hazard in both directions: its own doc comment explains that the edge
+    # is "non-cacheable by default", one rewording away from spelling the
+    # needle.
+    #
+    #   * ``packageName = "python3"`` / ``executableName = "python3"`` carry
+    #     a string LITERAL. Code-only text blanks it, so those two must read
+    #     the literal-keeping text.
+    #   * ``cacheable = false`` is pure CODE — an assignment of a keyword,
+    #     never quoted. Over literal-keeping text it is satisfied by any
+    #     string that happens to spell it.
+    #
+    # MEASURED (DA-8, review bypass): with the single shared
+    # comments-blanked reader this file used to have, flipping the wrapper's
+    # real default to ``cacheable = true`` and adding
+    # ``debugEcho "…default policy was cacheable = false"`` left the case
+    # ``[OK]``. The literal was doing the work. Over ``wrapperCode`` that
+    # same bypass reddens, because ``nimSourceCodeOnly`` blanks the
+    # ``debugEcho`` argument along with the comments.
+    let wrapperLiterals = nimSourceCommentsBlanked(readFile(wrapper))
+    let wrapperCode = nimSourceCodeOnly(readFile(wrapper))
+    check "packageName = \"python3\"" in wrapperLiterals
+    check "executableName = \"python3\"" in wrapperLiterals
+    check "cacheable = false" in wrapperCode
 
     checkpoint("D1 python structural assertion: OK")
 

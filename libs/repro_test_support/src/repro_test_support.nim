@@ -1165,6 +1165,19 @@ proc nimSourceStripped*(src: string; blankStrings: bool): string =
   ## Handles ``#`` line comments, nestable ``#[ … ]#`` block comments,
   ## ``"…"`` / ``"""…"""`` / raw ``r"…"`` string literals and ``'c'`` char
   ## literals — including the apostrophe of ``1'u32``, which is not one.
+  ##
+  ## KNOWN LIMIT, stated rather than hidden: ``when false:`` is NOT handled,
+  ## and it is a third way to write a comment. Nim only PARSES such a body —
+  ## measured, a ``when false:`` block referencing nothing that is declared
+  ## and importing nothing compiles — so "delete the code, leave its exact
+  ## text standing" has a spelling that reaches BOTH modes as code. It was
+  ## demonstrated against ``t_b1``'s apps-block slice: the tier-2 edge moved
+  ## out of the collection and left behind under ``when false:`` widens the
+  ## slice through the opening marker, satisfies the offset-anchored closing
+  ## marker, and supplies every literal the case then looks for — six
+  ## assertions green over a project file that no longer builds the binary.
+  ## Closing it means blanking such bodies here, which re-measures every
+  ## converted site; tracked as the next DA-8 item.
   result = src
   var i = 0
   let n = src.len
@@ -1246,3 +1259,138 @@ proc nimSourceCommentsBlanked*(src: string): string =
   ## audit is looking for, which fails in the SAFE direction for a positive
   ## assertion and in the unsafe direction for a negative one.
   nimSourceStripped(src, blankStrings = false)
+
+# ---------------------------------------------------------------------------
+# Whole-identifier counting, folded the way Nim folds identifiers.
+# ---------------------------------------------------------------------------
+#
+# STRIPPING COMMENTS IS NECESSARY AND NOT SUFFICIENT. A substring search for a
+# call spelling — `"someProc("` — was defeated three ways in this repository,
+# all compiling, all the identical call, all leaving the audit green:
+#
+#   * `obj.someProc arg` — Nim has FOUR spellings of one call (`f(a, b)`,
+#     `a.f(b)`, `f a, b`, `a.f b`) and only two of them carry a paren;
+#   * `some_proc(obj, arg)` — Nim identifiers are case-insensitive after the
+#     first character and underscore-insensitive, so a literal-text needle
+#     counts ZERO for a name the compiler treats as identical;
+#   * `myOwnProc(x)` — a substring needle without a left boundary also counts
+#     the WRONG name, in the other direction.
+#
+# So a structural audit that means "this name is used" must count the WHOLE
+# identifier, folded the way the language folds it, over code-only text.
+
+proc nimIdentKey*(name: string): string =
+  ## ``name`` folded to the key the Nim compiler compares identifiers by: the
+  ## first character is significant (and case-sensitive), every character
+  ## after it is lowercased, and underscores after the first character are
+  ## dropped. ``someProc``, ``some_proc`` and ``somePROC`` share a key;
+  ## ``SomeProc`` does not.
+  result = newStringOfCap(name.len)
+  var first = true
+  for c in name:
+    if first:
+      result.add(c)
+      first = false
+    elif c == '_':
+      discard
+    else:
+      result.add(toLowerAscii(c))
+
+iterator nimWholeIdentifiers*(src: string): tuple[name: string; called: bool] =
+  ## Every maximal identifier in ``src``, with whether it is immediately
+  ## followed by ``(``.
+  ##
+  ## ``called = false`` is the half that sees an ALIAS and a command-syntax
+  ## call. ``let engineSpawn = startDirect`` moves no paren-call count, and
+  ## neither does `obj.startDirect arg`, but neither can avoid writing the
+  ## name down.
+  ##
+  ## ``src`` should already have been through ``nimSourceCodeOnly`` — this
+  ## iterator does not strip, because the caller's needle decides the mode.
+  var i = 0
+  while i < src.len:
+    if isNimIdentChar(src[i]) and src[i] notin {'0' .. '9'} and
+       (i == 0 or not isNimIdentChar(src[i - 1])):
+      var stop = i
+      while stop < src.len and isNimIdentChar(src[stop]): inc stop
+      yield (src[i ..< stop], stop < src.len and src[stop] == '(')
+      i = stop
+    else:
+      inc i
+
+proc countNimIdentifier*(src, name: string): int =
+  ## How many times ``name`` occurs in ``src`` as a WHOLE identifier, under
+  ## Nim's identifier folding. Not a substring count: ``myOwnProc`` does not
+  ## count for ``ownProc``, and ``own_proc`` does.
+  ##
+  ## ``src`` must already have been stripped by the caller —
+  ## ``nimSourceCodeOnly`` for a code needle, which is what an identifier
+  ## always is. Passing raw source counts prose, which is the whole defect
+  ## this exists to close.
+  let key = nimIdentKey(name)
+  for ident in nimWholeIdentifiers(src):
+    if nimIdentKey(ident.name) == key:
+      inc result
+
+proc containsNimIdentifier*(src, name: string): bool =
+  ## ``countNimIdentifier(src, name) > 0``, spelled for a presence assertion.
+  countNimIdentifier(src, name) > 0
+
+# ---------------------------------------------------------------------------
+# The same stripping problem, for POSIX shell.
+# ---------------------------------------------------------------------------
+
+proc shellSourceCommentsBlanked*(src: string): string =
+  ## ``src`` with every ``#`` comment replaced by spaces, preserving length
+  ## and line structure. String literals are KEPT, because a shell audit's
+  ## needle is almost always a command line — ``cp -f a b`` — whose operands
+  ## may or may not be quoted.
+  ##
+  ## A ``#`` opens a comment only at the start of a word and only outside
+  ## quotes: ``echo a#b`` and ``echo "#x"`` and ``echo '#x'`` are not
+  ## comments. ``$#`` and ``${#x}`` are not either, and both are covered by
+  ## the start-of-word rule.
+  ##
+  ## KNOWN LIMIT, stated rather than hidden: heredoc BODIES are not tracked,
+  ## so a ``#``-leading line inside one is blanked as though it were a
+  ## comment. That errs toward blanking, i.e. toward a positive assertion
+  ## going RED — the direction an audit can survive. A negative assertion
+  ## whose subject lives in a heredoc needs a different reader.
+  result = src
+  var i = 0
+  var quote = '\0'
+  var atWordStart = true
+  while i < src.len:
+    let c = src[i]
+    if quote == '\'':
+      if c == '\'': quote = '\0'
+      inc i
+    elif quote == '"':
+      if c == '\\': i += 2
+      else:
+        if c == '"': quote = '\0'
+        inc i
+    elif c == '\\':
+      # A backslash-newline is a LINE CONTINUATION, so the next line starts a
+      # word: `cp -f a \` / `  # b` really is a comment. Any other escaped
+      # character is part of the current word.
+      atWordStart = i + 1 < src.len and src[i + 1] == '\n'
+      i += 2
+    elif c == '\'' or c == '"':
+      quote = c
+      inc i
+      atWordStart = false
+    elif c == '#' and atWordStart:
+      var j = i
+      while j < src.len and src[j] != '\n': inc j
+      result.blankRange(i, j)
+      i = j
+    elif c == '\n':
+      atWordStart = true
+      inc i
+    elif c in {' ', '\t', ';', '&', '|', '(', ')'}:
+      atWordStart = true
+      inc i
+    else:
+      atWordStart = false
+      inc i

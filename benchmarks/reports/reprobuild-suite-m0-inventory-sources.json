@@ -13271,6 +13271,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_test_support",
         "repro_tests"
       ],
       "owner": "libs/repro_project_dsl",
@@ -23464,7 +23465,9 @@
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_d4_evidence_collection_scales_linearly.nim",
@@ -32044,7 +32047,9 @@
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r10a_exec_name_audit.nim",
