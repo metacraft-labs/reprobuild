@@ -28,6 +28,7 @@ import repro_core
 import repro_depfile
 import repro_hash
 import repro_local_store
+import repro_project_dsl/shell_fetch
 import io_mon/writer
 from io_mon import findShimLibrary, ShimLibOverrideEnv
 from repro_test_support import testCaseScratchSlug
@@ -328,6 +329,59 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
       @[dependencyLib, "/existing/runtime"]
 
   when defined(posix):
+    test "source fetch overrides loader paths without removing tool or monitor channels":
+      resetTmp()
+      var actionEnv: seq[string]
+      for (name, value) in shellFetchRuntimeEnv():
+        actionEnv.add(name & "=" & value)
+      let paths = ResolvedAuxPaths(libDirs: @["/target/dependency/lib"],
+        includeDirs: @["/target/dependency/include"],
+        pkgConfigDirs: @["/target/dependency/lib/pkgconfig"])
+      let inherited = @["PATH=/tools/bin", "LD_PRELOAD=/monitor/shim.so",
+        "LD_LIBRARY_PATH=/caller/lib", "DYLD_LIBRARY_PATH=/caller/dyld",
+        "PKG_CONFIG_PATH=/caller/pkgconfig", "PKG_CONFIG_PATH_FOR_TARGET=",
+        "PKG_CONFIG_PATH_FOR_BUILD=", "CPATH=/caller/include",
+        "LIBRARY_PATH=/caller/link"]
+      let projected = applyResolvedAuxPathsArgv(inherited, paths)
+      check envValue(projected, "LD_LIBRARY_PATH").startsWith(
+        "/target/dependency/lib:")
+      let isolated = applyExplicitRuntimeLibraryEnvOverrides(projected, actionEnv)
+      let tableEnv = newStringTable(modeCaseSensitive)
+      for entry in inherited:
+        let eq = entry.find('=')
+        tableEnv[entry[0 ..< eq]] = entry[eq + 1 .. ^1]
+      applyResolvedAuxPathsTable(tableEnv, paths)
+      applyExplicitRuntimeLibraryEnvOverrides(tableEnv, actionEnv)
+      for entry in isolated:
+        let eq = entry.find('=')
+        check tableEnv[entry[0 ..< eq]] == entry[eq + 1 .. ^1]
+      check envValue(isolated, "LD_LIBRARY_PATH") == ""
+      when defined(macosx):
+        check envValue(isolated, "DYLD_LIBRARY_PATH") == ""
+      else:
+        check envValue(isolated, "DYLD_LIBRARY_PATH") == "/caller/dyld"
+      check envValue(isolated, "PATH") == "/tools/bin"
+      check envValue(isolated, "LD_PRELOAD") == "/monitor/shim.so"
+      check envValue(isolated, "LIBRARY_PATH") ==
+        "/target/dependency/lib:/caller/link"
+      check envValue(isolated, "PKG_CONFIG_PATH") ==
+        "/target/dependency/lib/pkgconfig:/caller/pkgconfig"
+      check envValue(isolated, "CPATH") ==
+        "/target/dependency/include:/caller/include"
+
+      let cacheRoot = TmpDir / "cache-fetch-loader"
+      createDir(cacheRoot)
+      var table = initTable[string, ResolvedToolIdentity]()
+      table["dependency"] = mockedIdentity(@[], libDirs = paths.libDirs)
+      let g = oneAction("fetch-loader", @["dependency"], actionEnv = actionEnv,
+        argvOverride = @["sh", "-c",
+          "printf '%s|%s' \"$LD_LIBRARY_PATH\" \"$LIBRARY_PATH\""])
+      let res = runBuild(g, runnerCfg(cacheRoot, makeResolver(table)))
+      require res.results.len == 1
+      check res.results[0].status == asSucceeded
+      check readBypassStdout(cacheRoot, "fetch-loader").startsWith(
+        "|/target/dependency/lib")
+
     test "explicit action loader env wins at process launch":
       resetTmp()
       let cacheRoot = TmpDir / "cache-loader-override"

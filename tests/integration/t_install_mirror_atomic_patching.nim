@@ -1,4 +1,4 @@
-import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import std/[dynlib, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 import repro_project_dsl/install_mirror_runtime
 import repro_test_support
 
@@ -26,6 +26,85 @@ when defined(linux):
     true
 
   suite "atomic install mirror ELF normalization":
+    test "shared-only mirrors retain their declared prelinked C runtime":
+      let original = graphArtifactPath(
+        "build/test-fixtures/install-mirror-runtime/libc-probe.so")
+      requireBinary(original, "reprobuild.test_fixtures.install_mirror_libc_library")
+      let scratch = createTempDir("repro-shared-libc-", "")
+      defer: removeDir(scratch)
+      let fixtureEnv = cleanEnv()
+      let runtime = runTool("gcc", @["-print-file-name=libc.so.6"], fixtureEnv)
+      require runtime.exitCode == 0
+      require runtime.output.strip().isAbsolute()
+      require fileExists(runtime.output.strip())
+      let runtimeDir = runtime.output.strip().parentDir
+      let priorRpath = runTool("patchelf", @["--print-rpath", original], fixtureEnv)
+      require priorRpath.exitCode == 0
+      require runtimeDir in priorRpath.output.strip().split(':')
+      let needed = runTool("patchelf", @["--print-needed", original], fixtureEnv)
+      require needed.exitCode == 0
+      require "libc.so.6" in needed.output.splitLines()
+      require runTool("patchelf", @["--print-interpreter", original], fixtureEnv).exitCode != 0
+      let declared = scratch / "declared runtime"
+      createSymlink(runtimeDir, declared)
+      let unrelated = scratch / "unrelated runtime"
+      createDir(unrelated)
+      copyFile(runtime.output.strip(), unrelated / "libc.so.6")
+      var loader = ""
+      for path in walkFiles(runtimeDir / "ld-linux-*.so.*"):
+        loader = path
+        break
+      require loader.len > 0
+      copyFileWithPermissions(loader, unrelated / loader.extractFilename())
+      let mirror = scratch / "usr"
+      let libraryPath = mirror / "lib" / "libc-probe.so"
+      createDir(libraryPath.parentDir)
+      copyFileWithPermissions(original, libraryPath)
+      fixtureEnv["LIBRARY_PATH"] = unrelated & ":" & declared
+      fixtureEnv["REPRO_M9R30_NEEDED_CHECK"] = "1"
+      let normalized = runTool("sh", @["-ec",
+        m9r14fEmitRpathPatchScript(mirror, @[],
+          ownManifestPath = scratch / "runtime-dirs", packageName = "sharedLibc")], fixtureEnv)
+      checkpoint normalized.output
+      require normalized.exitCode == 0
+      let rpath = runTool("patchelf", @["--print-rpath", libraryPath], fixtureEnv)
+      require rpath.exitCode == 0
+      check declared in rpath.output.strip().split(':')
+      check unrelated notin rpath.output.strip().split(':')
+      check runTool("patchelf", @["--print-interpreter", libraryPath], fixtureEnv).exitCode != 0
+      block:
+        let library = loadLib(libraryPath)
+        require library != nil
+        defer: unloadLib(library)
+        let probe = cast[proc(): cint {.cdecl.}](symAddr(library, "repro_libc_probe"))
+        require probe != nil
+        check probe() == 0
+      copyFileWithPermissions(original, libraryPath)
+      fixtureEnv["LIBRARY_PATH"] = unrelated
+      let undeclared = runTool("sh", @["-ec",
+        m9r14fEmitRpathPatchScript(mirror, @[],
+          ownManifestPath = scratch / "undeclared-dirs", packageName = "undeclaredLibc")], fixtureEnv)
+      checkpoint undeclared.output
+      check undeclared.exitCode == 75
+      check "soname=libc.so.6" in undeclared.output
+      check noPatchTemps(scratch)
+      copyFileWithPermissions(original, libraryPath)
+      let secondLibrary = mirror / "lib" / "other-runtime.so"
+      copyFileWithPermissions(original, secondLibrary)
+      require runTool("patchelf", @["--set-rpath", unrelated, secondLibrary], fixtureEnv).exitCode == 0
+      let originalBytes = readFile(libraryPath)
+      let secondBytes = readFile(secondLibrary)
+      fixtureEnv["LIBRARY_PATH"] = unrelated & ":" & declared
+      let conflicting = runTool("sh", @["-ec",
+        m9r14fEmitRpathPatchScript(mirror, @[],
+          ownManifestPath = scratch / "conflicting-dirs", packageName = "conflictingLibc")], fixtureEnv)
+      checkpoint conflicting.output
+      check conflicting.exitCode == 75
+      check "conflicting linked runtime loaders" in conflicting.output
+      check readFile(libraryPath) == originalBytes
+      check readFile(secondLibrary) == secondBytes
+      check noPatchTemps(scratch)
+
     test "OpenMP runtime is resolved through the declared compiler":
       let original = graphArtifactPath(
         "build/test-fixtures/install-mirror-runtime/openmp-probe")

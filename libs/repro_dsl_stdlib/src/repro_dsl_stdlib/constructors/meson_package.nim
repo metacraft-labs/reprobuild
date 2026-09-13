@@ -132,6 +132,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     pool = "fetch",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "meson_package.fetch." & hashAlgTag,
+    env = shellFetchRuntimeEnv(),
     toolIdentityRefs = fetchToolRefs)
   some(act)
 

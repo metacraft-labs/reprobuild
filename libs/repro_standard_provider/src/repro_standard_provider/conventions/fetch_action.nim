@@ -213,4 +213,5 @@ proc emitFetchAction*(projectRoot, packageName: string;
     cacheable = false,
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ccpp-fetch." & kindTag & "." & hashAlgTag,
+    env = shellFetchRuntimeEnv(),
     toolIdentityRefs = fetchToolRefs)

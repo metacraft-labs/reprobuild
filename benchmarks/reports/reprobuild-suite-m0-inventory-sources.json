@@ -2,7 +2,7 @@
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
     "nimTestBinaries": 1576,
-    "pureUnitConsolidationGroups": 48,
+    "pureUnitConsolidationGroups": 49,
     "pureUnitTests": 575,
     "staticallyDetectedRuntimeCompilerFlowTests": 97,
     "testEntries": 1584
@@ -837,7 +837,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 3,
+      "count": 2,
       "defines": [
         "reproProviderMode"
       ],
@@ -849,8 +849,25 @@
       "owner": "tests/unit",
       "sources": [
         "tests/unit/t_configure_build_tree_cleanup.nim",
-        "tests/unit/t_constructor_fetch_tool_refs.nim",
         "tests/unit/t_library_stage_alias.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [
+        "reproProviderMode"
+      ],
+      "dependencyShape": [
+        "repro_core",
+        "repro_dsl_stdlib",
+        "repro_project_dsl",
+        "repro_standard_provider"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_constructor_fetch_tool_refs.nim",
+        "tests/unit/t_install_mirror_optional_version.nim"
       ],
       "targetOs": "soAny"
     },
@@ -7162,13 +7179,14 @@
         "repro_depfile",
         "repro_hash",
         "repro_local_store",
+        "repro_project_dsl",
         "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -24704,7 +24722,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_install_mirror_atomic_patching.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31380,13 +31398,14 @@
       "localDependencyShape": [
         "repro_core",
         "repro_dsl_stdlib",
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_standard_provider"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_constructor_fetch_tool_refs.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

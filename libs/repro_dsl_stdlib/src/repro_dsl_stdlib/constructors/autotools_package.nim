@@ -249,6 +249,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     cacheable = false,
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "autotools_package.fetch." & hashAlgTag,
+    env = shellFetchRuntimeEnv(),
     toolIdentityRefs = fetchToolRefs)
   some(act)
 

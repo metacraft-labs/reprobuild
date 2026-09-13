@@ -1,9 +1,18 @@
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, sequtils, strutils, tempfiles, unittest]
 
 when defined(reproProviderMode):
   import repro_core
   import repro_project_dsl
   import repro_dsl_stdlib/constructors
+  import repro_standard_provider/conventions/fetch_action
+
+  proc expectedFetchEnv(): seq[(string, string)] =
+    when defined(macosx):
+      @[("LD_LIBRARY_PATH", ""), ("DYLD_LIBRARY_PATH", "")]
+    elif defined(posix):
+      @[("LD_LIBRARY_PATH", "")]
+    else:
+      @[]
 
   type ConstructorKind = enum
     ckCmake,
@@ -121,6 +130,11 @@ suite "constructor fetch tool identities":
         let action = findById(constructorActions(root, packageName, kind),
           actionId)
         check action.toolIdentityRefs == expected
+        check action.env.filterIt(it[0] != "OUT_MIRROR") == expectedFetchEnv()
+        check action.dependencyPolicy == automaticMonitorPolicy()
+        for other in constructorActions(root, packageName, kind):
+          if other.id != actionId:
+            check ("LD_LIBRARY_PATH", "") notin other.env
     else:
       skip()
 
@@ -146,6 +160,27 @@ suite "constructor fetch tool identities":
         "ccpp-fetch-" & PackageName)
       check action.toolIdentityRefs ==
         @["sh", "rm", "mkdir", "curl", "mv", "sha256sum", "tar", "gzip"]
+      check action.env.filterIt(it[0] != "OUT_MIRROR") == expectedFetchEnv()
+      check action.dependencyPolicy == automaticMonitorPolicy()
+    else:
+      skip()
+
+  test "standard fetch isolates its loader paths for every source kind":
+    when defined(reproProviderMode):
+      let root = createTempDir("repro-standard-fetch-env-", "")
+      defer: removeDir(root)
+      for kind in DslFetchKind:
+        let spec = DslFetchSpec(
+          url: "https://example.invalid/source.tar.gz",
+          gitRevision: "v1",
+          hashAlg: dshaSha256,
+          hashHex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          kind: kind,
+          extractStrip: 1)
+        let action = emitFetchAction(root, "standardFetchEnv", spec)
+        check action.env == expectedFetchEnv()
+        check action.dependencyPolicy == automaticMonitorPolicy()
+        check not action.cacheable
     else:
       skip()
 

@@ -140,6 +140,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     pool = "fetch",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "cmake_package.fetch." & hashAlgTag,
+    env = shellFetchRuntimeEnv(),
     toolIdentityRefs = fetchToolRefs)
   some(act)
 

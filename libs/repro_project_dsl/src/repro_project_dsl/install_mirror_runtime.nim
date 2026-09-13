@@ -297,7 +297,8 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   # LIBRARY_PATH carries declared link inputs, including libc directories that
   # the engine intentionally excludes from LD_LIBRARY_PATH. If no declared
   # mirror supplied a loader, retain only the runtime already selected by the
-  # linker. Matching PT_INTERP avoids importing unrelated compiler runtimes.
+  # linker. Executables anchor this choice through PT_INTERP; shared-only
+  # outputs use their prelinked CRT directories below.
   script.add("if [ -z \"$m9r14f_runtime_loader\" ] && [ -n \"${LIBRARY_PATH:-}\" ]; then ")
   script.add("m9r14f_linked_loaders=$(for d in \"" & escapedDstUsr &
     "/lib\" \"" & escapedDstUsr & "/lib64\" \"" & escapedDstUsr &
@@ -309,6 +310,30 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("case \"$m9r14f_interp\" in /*) ")
   script.add("readlink -f \"$m9r14f_interp\" 2>/dev/null || true;; esac; ")
   script.add("done; fi; done | sort -u); ")
+  # Shared-only glibc outputs have no PT_INTERP. Keep their prelinked CRT
+  # directories as anchors, but admit them only through declared LIBRARY_PATH
+  # entries below. Other old RPATH entries must not leak into the mirror.
+  script.add("m9r14f_prelinked_libdirs=; ")
+  script.add("if [ -z \"$m9r14f_linked_loaders\" ]; then ")
+  script.add("m9r14f_prelinked_libdirs=$(for d in \"" & escapedDstUsr &
+    "/lib\" \"" & escapedDstUsr & "/lib64\" \"" & escapedDstUsr &
+    "/bin\" \"" & escapedDstUsr & "/sbin\" \"" & escapedDstUsr & "/libexec\"; do ")
+  script.add("if [ -d \"$d\" ]; then ")
+  script.add("find \"$d\" -type f \\( -name '*.so' -o -name '*.so.*' -o -perm -u+x \\) 2>/dev/null | ")
+  script.add("while IFS= read -r f; do ")
+  script.add("m9r14f_crt_needed=$(patchelf --print-needed \"$f\" 2>/dev/null | ")
+  script.add("grep -Fx -e libc.so.6 -e libm.so.6 || true); ")
+  script.add("if [ -z \"$m9r14f_crt_needed\" ]; then continue; fi; ")
+  script.add("m9r14f_old_rpaths=$(patchelf --print-rpath \"$f\" 2>/dev/null || true); ")
+  script.add("while [ -n \"$m9r14f_old_rpaths\" ]; do ")
+  script.add("m9r14f_rp=${m9r14f_old_rpaths%%:*}; ")
+  script.add("if [ \"$m9r14f_old_rpaths\" = \"$m9r14f_rp\" ]; then m9r14f_old_rpaths=; ")
+  script.add("else m9r14f_old_rpaths=${m9r14f_old_rpaths#*:}; fi; ")
+  script.add("case \"$m9r14f_rp\" in /*) ;; *) continue;; esac; ")
+  script.add("for so in $m9r14f_crt_needed; do ")
+  script.add("if [ -f \"$m9r14f_rp/$so\" ]; then ")
+  script.add("readlink -f \"$m9r14f_rp\" 2>/dev/null || true; break; fi; ")
+  script.add("done; done; done; fi; done | sort -u); fi; ")
   script.add("m9r14f_linkdirs=${LIBRARY_PATH}; m9r14f_linked_libdir=; ")
   script.add("while [ -n \"$m9r14f_linkdirs\" ]; do ")
   script.add("ldp=${m9r14f_linkdirs%%:*}; ")
@@ -316,12 +341,20 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("else m9r14f_linkdirs=${m9r14f_linkdirs#*:}; fi; ")
   script.add("case \"$ldp\" in /*) ;; *) continue;; esac; ")
   script.add("if ! [ -d \"$ldp\" ]; then continue; fi; ")
+  script.add("if [ -z \"$m9r14f_linked_loaders\" ]; then ")
+  script.add("m9r14f_real_ldp=$(readlink -f \"$ldp\" 2>/dev/null) || continue; ")
+  script.add("if ! printf '%s\\n' \"$m9r14f_prelinked_libdirs\" | ")
+  script.add("grep -Fxq -- \"$m9r14f_real_ldp\"; then continue; fi; fi; ")
   script.add("for candidate in \"$ldp\"/ld-linux-*.so.* \"$ldp\"/ld-musl-*.so.*; do ")
   script.add("if ! [ -f \"$candidate\" ]; then continue; fi; ")
   script.add("m9r14f_linked_loader=$(readlink -f \"$candidate\" 2>/dev/null) || continue; ")
+  script.add("if [ -n \"$m9r14f_linked_loaders\" ]; then ")
   script.add("if ! printf '%s\\n' \"$m9r14f_linked_loaders\" | ")
   script.add("grep -Fxq -- \"$m9r14f_linked_loader\"; then continue; fi; ")
   script.add("if [ \"$m9r14f_linked_loaders\" != \"$m9r14f_linked_loader\" ]; then ")
+  script.add("printf '%s\\n' 'install-mirror: conflicting linked runtime loaders' >&2; exit 75; fi; fi; ")
+  script.add("if [ -n \"$m9r14f_runtime_loader\" ] && ")
+  script.add("[ \"$m9r14f_runtime_loader\" != \"$m9r14f_linked_loader\" ]; then ")
   script.add("printf '%s\\n' 'install-mirror: conflicting linked runtime loaders' >&2; exit 75; fi; ")
   script.add("case \"${candidate##*/}\" in ld-linux-*) ")
   script.add("for so in libc.so.6 libm.so.6; do ")
