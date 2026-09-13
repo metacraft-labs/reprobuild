@@ -1300,6 +1300,8 @@ package reprobuild:
           executeDeps.add("reprobuild.test_fixtures.install_mirror_static_probe")
           requiredBinaries.add(installMirrorFixtureRoot & "/openmp-probe")
           executeDeps.add("reprobuild.test_fixtures.install_mirror_openmp_probe")
+          requiredBinaries.add(installMirrorFixtureRoot & "/libc-probe.so")
+          executeDeps.add("reprobuild.test_fixtures.install_mirror_libc_library")
       # NO TOOL REFS ON THE EXECUTE EDGE, AND THAT IS A DECISION.
       #
       # The BUILD edge above declares `gcc` because `nim c` shells out to
@@ -2131,6 +2133,11 @@ package reprobuild:
         output = installMirrorFixtureRoot & "/openmp-probe",
         libs = @["gomp"], after = @[mirrorFixtureDir],
         actionId = "reprobuild.test_fixtures.install_mirror_openmp_probe"))
+      reprobuildTestFixturesActions.add(gcc(
+        source = "tests/fixtures/install-mirror-runtime/libc-library.c",
+        output = installMirrorFixtureRoot & "/libc-probe.so",
+        shared = true, pic = true, after = @[mirrorFixtureDir],
+        actionId = "reprobuild.test_fixtures.install_mirror_libc_library"))
       let mirrorLibrary = gcc(
         source = "tests/fixtures/install-mirror-runtime/library.c",
         output = installMirrorFixtureRoot & "/librepro_mirror_fixture.so",
