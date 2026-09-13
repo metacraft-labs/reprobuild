@@ -47,6 +47,7 @@ libs/repro_binary_cache_server/tests/t_a2_p2_rest_surface.nim	nim	2
 libs/repro_binary_cache_server/tests/t_repro_binary_cache_https_publish_authz.nim	nim	1
 libs/repro_build_engine/tests/t_action_cache_output_integrity.nim	nim	12
 libs/repro_build_engine/tests/t_annotation_perturbs_no_fingerprint.nim	nim	5
+libs/repro_build_engine/tests/t_child_cpu_stats_row.nim	nim	5
 libs/repro_build_engine/tests/t_da1i_evidence_scope.nim	nim	24
 libs/repro_build_engine/tests/t_daemon_check_platform_refusal.nim	nim	2
 libs/repro_build_engine/tests/t_dark_window_cache_records_are_drained.nim	nim	9
@@ -102,7 +103,7 @@ libs/repro_cas_store/tests/t_link_capability_facts.nim	nim	41
 libs/repro_cas_store/tests/t_link_capability_probe.nim	nim	20
 libs/repro_cas_store/tests/t_repro_cas_store_basic.nim	nim	14
 libs/repro_cli_support/tests/t_action_cache_root_resolution.nim	nim	3
-libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	8
+libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	13
 libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced.nim	nim	17
 libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim	nim	8
 libs/repro_cli_support/tests/t_hcr_support_profile_follows_the_host.nim	nim	4
@@ -139,9 +140,11 @@ libs/repro_core/tests/t_nim_dep_scanner.nim	nim	19
 libs/repro_core/tests/t_project_file_alias.nim	nim	9
 libs/repro_core/tests/t_python_dep_scanner.nim	nim	16
 libs/repro_core/tests/t_show_conventions_cli.nim	nim	7
-libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim	nim	7
+libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim	nim	17
+libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_image_digest_cache.nim	nim	8
 libs/repro_daemon_core/tests/t_daemon_image_path.nim	nim	8
+libs/repro_daemon_core/tests/t_daemon_writer_identity.nim	nim	9
 libs/repro_daemon_core/tests/t_l4_daemon_leases.nim	nim	4
 libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	nim	3
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim	nim	2
@@ -266,6 +269,7 @@ libs/repro_interface_artifacts/tests/t_windows_long_command_script.nim	nim	2
 libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim	nim	6
 libs/repro_launch_plan/tests/t_codec_smoke.nim	nim	12
 libs/repro_local_store/tests/t_a4_p4_eviction.nim	nim	4
+libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim	nim	8
 libs/repro_local_store/tests/t_c3_sandbox_manifest.nim	nim	8
 libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	nim	6
 libs/repro_local_store/tests/t_m8_multi_output_realize.nim	nim	6

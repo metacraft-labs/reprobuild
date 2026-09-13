@@ -1,7 +1,7 @@
 ## Windows-Runner-Binary-Cache-Deploy M5 — signed desired-state manifest.
 ##
 ## The reprobuild-native analog of the Linux ``mcl-deploy-agent`` manifest
-## (nixos-modules ``packages/mcl/src/mcl/utils/deploy_manifest.d``). Where
+## (nixos-modules ``packages/mcl-devops/src/mcl/utils/deploy_manifest.d``). Where
 ## the Linux model uses a JSON document + an OpenSSH ``allowed-signers``
 ## file, this reuses reprobuild's OWN signature scheme:
 ##

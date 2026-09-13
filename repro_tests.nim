@@ -369,6 +369,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_child_cpu_stats_row.nim",
+    binary: "build/test-bin/t_child_cpu_stats_row",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_da1i_evidence_scope.nim",
     binary: "build/test-bin/t_da1i_evidence_scope",
     defines: @[],
@@ -1206,6 +1215,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim",
+    binary: "build/test-bin/t_daemon_deferral_log_is_bounded",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_daemon_core/tests/t_daemon_image_digest_cache.nim",
     binary: "build/test-bin/t_daemon_image_digest_cache",
     defines: @[],
@@ -1217,6 +1235,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_daemon_core/tests/t_daemon_image_path.nim",
     binary: "build/test-bin/t_daemon_image_path",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_daemon_core/tests/t_daemon_writer_identity.nim",
+    binary: "build/test-bin/t_daemon_writer_identity",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -2333,6 +2360,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_local_store/tests/t_a4_p4_eviction.nim",
     binary: "build/test-bin/t_a4_p4_eviction",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim",
+    binary: "build/test-bin/t_absent_store_inputs_skip_revalidation",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

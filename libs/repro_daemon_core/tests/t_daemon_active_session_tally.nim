@@ -37,11 +37,20 @@
 import std/[os, strutils, tempfiles, unittest]
 
 import repro_daemon_core
+import repro_daemon_core/writer_identity
 
 proc tempConfig(root: string): UserDaemonConfig =
   result = defaultUserDaemonConfig(devMode = false)
   result.stateDir = root
   result.endpoint = root / "daemon.sock"
+
+proc deadWriter(): string =
+  ## An identity that is provably not running: this boot, a pid that cannot
+  ## exist. Not a mock -- `writerLiveness` really probes for it and really
+  ## fails to find it.
+  var identity = currentWriterIdentity()
+  identity.pid = 999_999
+  encodeWriterIdentity(identity)
 
 proc session(id, state: string): UserDaemonSession =
   result.sessionId = id
@@ -173,3 +182,168 @@ suite "daemon active-session tally equals a from-disk recount":
     resetTallyAsIfRestarted(config)
     check activeSessionTallyFor(config) == 4
     check countActiveSessionRecordsFromDisk(config) == 4
+
+suite "abandoned sessions are reclaimed, and only provably dead ones":
+  test "a non-terminal record with a dead writer becomes abandoned":
+    let root = createTempDir("repro-reclaim-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    # Prime first: priming reclaims, and an unprimed write triggers one, so
+    # without this the record is reclaimed before the assertion below runs.
+    check activeSessionTallyFor(config) == 0
+    var stuck = session("stuck", "running")
+    stuck.writer = deadWriter()
+    writeSessionRecord(config, stuck)
+    check countActiveSessionRecordsFromDisk(config) == 1
+    check reclaimAbandonedSessions(config) == 1
+    checkpoint("after reclaim: fromDisk=" &
+      $countActiveSessionRecordsFromDisk(config))
+    check countActiveSessionRecordsFromDisk(config) == 0
+    # The record is REWRITTEN, not deleted: history is what `repro daemon
+    # sessions` promises, and the evidence that a build was interrupted is
+    # exactly what someone looks for.
+    check fileExists(root / "sessions" / "stuck.session")
+    check AbandonedSessionState in readFile(root / "sessions" / "stuck.session")
+
+  test "a live writer is never reclaimed":
+    let root = createTempDir("repro-reclaim-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    var live = session("live", "running")
+    live.writer = encodeWriterIdentity(currentWriterIdentity())
+    writeSessionRecord(config, live)
+    check reclaimAbandonedSessions(config) == 0
+    check countActiveSessionRecordsFromDisk(config) == 1
+
+  test "a record with no writer is left alone, not reclaimed":
+    # Every record written before this field existed. Treating an
+    # unestablishable identity as live is the safe direction, and it means
+    # the fix is not retroactive -- stated here so nobody "fixes" that.
+    let root = createTempDir("repro-reclaim-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    writeSessionRecord(config, session("legacy", "running"))
+    check reclaimAbandonedSessions(config) == 0
+    check countActiveSessionRecordsFromDisk(config) == 1
+
+  test "an already-terminal record is not touched":
+    let root = createTempDir("repro-reclaim-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    var done = session("done", "succeeded")
+    done.writer = deadWriter()
+    writeSessionRecord(config, done)
+    check reclaimAbandonedSessions(config) == 0
+    check "succeeded" in readFile(root / "sessions" / "done.session")
+
+  test "reclamation is idempotent":
+    let root = createTempDir("repro-reclaim-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    check activeSessionTallyFor(config) == 0
+    var stuck = session("stuck", "running")
+    stuck.writer = deadWriter()
+    writeSessionRecord(config, stuck)
+    check reclaimAbandonedSessions(config) == 1
+    check reclaimAbandonedSessions(config) == 0
+    check reclaimAbandonedSessions(config) == 0
+
+  test "the tally reflects reclamation without a separate recount":
+    # The end the whole thing is for: the number `restartCandidateReady`
+    # gates on must drop, and must still equal a from-disk recount.
+    let root = createTempDir("repro-reclaim-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    check activeSessionTallyFor(config) == 0
+    for i in 0 ..< 5:
+      var stuck = session("stuck" & $i, "running")
+      stuck.writer = deadWriter()
+      writeSessionRecord(config, stuck)
+    var live = session("live", "running")
+    live.writer = encodeWriterIdentity(currentWriterIdentity())
+    writeSessionRecord(config, live)
+    check countActiveSessionRecordsFromDisk(config) == 6
+    # Priming reclaims first, so the first tally a daemon reports is already
+    # free of phantom work.
+    resetTallyAsIfRestarted(config)
+    checkpoint("tally=" & $activeSessionTallyFor(config) &
+      " fromDisk=" & $countActiveSessionRecordsFromDisk(config))
+    check activeSessionTallyFor(config) == 1
+    check countActiveSessionRecordsFromDisk(config) == 1
+
+  test "abandoned is distinguishable from cancelled and failed":
+    # A user cancelling, a build losing, and a writer vanishing are three
+    # different events. Collapsing any two loses the reason someone is
+    # reading the record.
+    check AbandonedSessionState != "cancelled"
+    check AbandonedSessionState != "failed"
+    check AbandonedSessionState != "succeeded"
+    let root = createTempDir("repro-reclaim-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    var stuck = session("stuck", "running")
+    stuck.writer = deadWriter()
+    writeSessionRecord(config, stuck)
+    discard reclaimAbandonedSessions(config)
+    let body = readFile(root / "sessions" / "stuck.session")
+    check "state=" & AbandonedSessionState in body
+    check "writer process no longer exists" in body
+
+suite "which identity governs is encoded in the state":
+  test "an `accepted` record with a dead daemon is reclaimable":
+    # `accepted` means the worker has not stamped itself yet, so the DAEMON's
+    # identity governs -- and no work can have begun, which is what makes it
+    # safe to reclaim. This is the half of the rule that must stay
+    # reclaimable, or a daemon killed between accepting and forking leaks a
+    # record forever.
+    let root = createTempDir("repro-governs-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    check activeSessionTallyFor(config) == 0
+    var accepted = session("accepted-one", "accepted")
+    accepted.writer = deadWriter()
+    writeSessionRecord(config, accepted)
+    check countActiveSessionRecordsFromDisk(config) == 1
+    check reclaimAbandonedSessions(config) == 1
+    check countActiveSessionRecordsFromDisk(config) == 0
+
+  test "a `running` record with a live worker is never reclaimable":
+    # `running` means the worker stamped itself in the same write that left
+    # `accepted`, so the WORKER's identity governs. The daemon may be long
+    # gone; that must not make this reclaimable.
+    #
+    # Graded end to end by a mutation rather than only here: removing the
+    # worker's stamp makes a real `running` record carry the LISTENER's pid
+    # (measured: writer == listener), and with the stamp it carries the
+    # worker's (writer != listener). See the commit message.
+    let root = createTempDir("repro-governs-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    check activeSessionTallyFor(config) == 0
+    var running = session("running-one", "running")
+    running.writer = encodeWriterIdentity(currentWriterIdentity())
+    writeSessionRecord(config, running)
+    check reclaimAbandonedSessions(config) == 0
+    check countActiveSessionRecordsFromDisk(config) == 1
+
+  test "the record never carries `running` with a stale identity":
+    # The window the one-write stamp closes. A worker that stamped itself
+    # AFTER the transition would leave the record briefly `running` under the
+    # daemon's identity, and a new daemon reclaiming in that instant would
+    # kill a live session. Asserted on the FILE, because the file is what a
+    # concurrent daemon reads.
+    let root = createTempDir("repro-governs-", "")
+    defer: removeDir(root)
+    let config = tempConfig(root)
+    check activeSessionTallyFor(config) == 0
+    var s = session("one-write", "accepted")
+    s.writer = deadWriter()
+    writeSessionRecord(config, s)
+    # The worker's first act: stamp, then transition -- one write.
+    s.writer = encodeWriterIdentity(currentWriterIdentity())
+    s.state = "running"
+    writeSessionRecord(config, s)
+    let body = readFile(root / "sessions" / "one-write.session")
+    check "state=running" in body
+    check ("writer=" & encodeWriterIdentity(currentWriterIdentity())) in body
+    check reclaimAbandonedSessions(config) == 0

@@ -237,3 +237,95 @@ suite "daemon carried environment":
       environment: hostileEnvironment))
     check watchBody.replaceAscii(LookalikeEnv, OwnerTokenEnv)
     check parseWatchRequestBody(watchBody).environment == expected
+
+suite "daemon request environment authority":
+  # The invariant, not a duration: a daemon started with one value must honour
+  # a client that sets a different value, and a client that sets NOTHING must
+  # get reprobuild's default rather than whatever the daemon was started with.
+  # The second half is the case an overlay could not express and therefore got
+  # wrong for every variable in reprobuild's namespace.
+
+  template withEnv(pairs: openArray[(string, string)]; body: untyped) =
+    var saved: seq[tuple[key: string; value: string; present: bool]] = @[]
+    for item in pairs:
+      saved.add((key: item[0], value: getEnv(item[0]),
+                 present: existsEnv(item[0])))
+      putEnv(item[0], item[1])
+    try:
+      body
+    finally:
+      restoreDaemonRequestEnvironment(saved)
+
+  test "a client value beats the daemon's start value":
+    withEnv({"REPROBUILD_MAX_PARALLELISM": "1"}):
+      check buildMaxParallelismResolved().value == 1'u32
+      let saved = applyDaemonRequestEnvironment(
+        @["REPROBUILD_MAX_PARALLELISM=4"])
+      check buildMaxParallelismResolved().value == 4'u32
+      restoreDaemonRequestEnvironment(saved)
+      check buildMaxParallelismResolved().value == 1'u32
+
+  test "a client that sets nothing gets the default, not the daemon's value":
+    withEnv({"REPROBUILD_MAX_PARALLELISM": "1"}):
+      check buildMaxParallelismResolved().value == 1'u32
+      let saved = applyDaemonRequestEnvironment(@["PATH=" & getEnv("PATH")])
+      # This is the defect: the request carries no parallelism, so the
+      # daemon's 1 used to survive and serialise an unrelated client's build.
+      check buildMaxParallelismResolved().value == 8'u32
+      check buildMaxParallelismResolved().source == "default"
+      restoreDaemonRequestEnvironment(saved)
+      check buildMaxParallelismResolved().value == 1'u32
+
+  test "the effective value reports where it came from":
+    withEnv({"REPROBUILD_MAX_PARALLELISM": "3"}):
+      check buildMaxParallelismResolved() ==
+        (value: 3'u32, source: "REPROBUILD_MAX_PARALLELISM")
+      # Provenance must follow the value across the request boundary, or the
+      # reported source is the daemon's while the value is the client's --
+      # a diagnostic that actively misleads. Asserted INSIDE the block that
+      # sets the variable, so it can only pass if the unset happened.
+      let cleared = applyDaemonRequestEnvironment(@["PATH=" & getEnv("PATH")])
+      check buildMaxParallelismResolved() == (value: 8'u32, source: "default")
+      restoreDaemonRequestEnvironment(cleared)
+      let carried = applyDaemonRequestEnvironment(
+        @["REPROBUILD_MAX_PARALLELISM=6"])
+      check buildMaxParallelismResolved() ==
+        (value: 6'u32, source: "REPROBUILD_MAX_PARALLELISM")
+      restoreDaemonRequestEnvironment(carried)
+
+  test "the rule covers the whole namespace, not just parallelism":
+    let current = @[
+      "REPROBUILD_MAX_PARALLELISM=1",
+      "REPROBUILD_ACTION_CACHE_ROOT=/daemon-cache",
+      "REPRO_STATS_DIR=/daemon-stats",
+      "PATH=/daemon-path",
+      "HOME=/daemon-home",
+      "LANG=C",
+    ]
+    let unsets = daemonWorkerEnvUnsets(@["REPROBUILD_MAX_PARALLELISM=4"],
+      current)
+    # Carried by the request: left alone, the overlay installs the new value.
+    check "REPROBUILD_MAX_PARALLELISM" notin unsets
+    # Reprobuild's own knobs the request does not carry: unset. If parallelism
+    # leaked, its neighbours leaked too.
+    check "REPROBUILD_ACTION_CACHE_ROOT" in unsets
+    check "REPRO_STATS_DIR" in unsets
+    # Outside reprobuild's namespace: a request cannot distinguish "absent"
+    # from "not forwarded", so clearing the ambient environment is not ours
+    # to claim.
+    check "PATH" notin unsets
+    check "HOME" notin unsets
+    check "LANG" notin unsets
+
+  test "an unset is restored exactly, including having been absent":
+    const Key = "REPROBUILD_ACTION_CACHE_ROOT"
+    withEnv({Key: "/daemon-cache"}):
+      let saved = applyDaemonRequestEnvironment(@["PATH=" & getEnv("PATH")])
+      check not existsEnv(Key)
+      restoreDaemonRequestEnvironment(saved)
+      check getEnv(Key) == "/daemon-cache"
+    delEnv(Key)
+    let saved = applyDaemonRequestEnvironment(@[Key & "=/from-request"])
+    check getEnv(Key) == "/from-request"
+    restoreDaemonRequestEnvironment(saved)
+    check not existsEnv(Key)
