@@ -41,7 +41,7 @@ when defined(reproProviderMode):
     ""
 
 when defined(linux) and defined(reproProviderMode):
-  proc verifyLibexecMirror(custom, propagated: bool) =
+  proc verifyLibexecMirror(custom, propagated: bool; ownLibrary = false) =
     let scratch = createTempDir("repro-libexec-mirror-", "")
     defer: removeDir(scratch)
     let patchelf = findExe("patchelf", followSymlinks = false)
@@ -50,18 +50,20 @@ when defined(linux) and defined(reproProviderMode):
     requireBinary(fixtures / "probe", "reprobuild.test_fixtures.install_mirror_probe")
     requireBinary(fixtures / "librepro_mirror_fixture.so",
       "reprobuild.test_fixtures.install_mirror_library")
-    let packageName = if custom: "customLibexecRuntime" & $propagated
-      else: "typedLibexecRuntime"
+    let packageName = (if custom: "customLibexecRuntime" & $propagated
+      else: "typedLibexecRuntime") & $ownLibrary
     let projectRoot = scratch / packageName
     let staging = projectRoot / ".repro/build/from-source-custom" / packageName
     let installedUsr = staging / "install/usr"
     let inputBinary = installedUsr / "libexec/compiler/cc1-probe"
     let directMirror = scratch / "direct" / ".repro/output/install"
     let transitiveLib = scratch / "transitive" / ".repro/output/install/usr/lib"
-    let library = transitiveLib / "librepro_mirror_fixture.so"
+    let library = (if ownLibrary: installedUsr / "lib" else: transitiveLib) /
+      "librepro_mirror_fixture.so"
     createDir(inputBinary.parentDir)
     createDir(directMirror / "usr/lib")
     createDir(transitiveLib)
+    createDir(library.parentDir)
     if propagated:
       writeFile(directMirror / m9r30PropagatedManifestName,
         transitiveLib & "\n" & transitiveLib & "\n")
@@ -120,7 +122,7 @@ when defined(linux) and defined(reproProviderMode):
     let mirror = findById(extractActions(fragment), mirrorId)
     let scriptPath = scratch / "mirror.sh"
     writeFile(scriptPath, inlineScriptOf(mirror))
-    if not propagated:
+    if not propagated and not ownLibrary:
       putEnv("LD_LIBRARY_PATH", transitiveLib)
     let mirrored = run(@["sh", scriptPath], projectRoot)
     checkpoint mirrored.output
@@ -134,8 +136,19 @@ when defined(linux) and defined(reproProviderMode):
     check executed.exitCode == 0
     let manifest = mirrorRoot / m9r30PropagatedManifestName
     require fileExists(manifest)
-    check readFile(manifest).splitLines().count(transitiveLib) == 1
-    check transitiveLib in run(@[patchelf, "--print-rpath", binary]).output.strip().split(':')
+    let runtimePaths = run(@[patchelf, "--print-rpath", binary]).output.strip().split(':')
+    if ownLibrary:
+      check transitiveLib notin readFile(manifest).splitLines()
+      check "$ORIGIN/../../lib" in runtimePaths
+      check "$ORIGIN/../lib" notin runtimePaths
+      let relocated = scratch / "relocated mirror"
+      moveDir(mirrorRoot, relocated)
+      let relocatedRun = run(@[relocated / "usr/libexec/compiler/cc1-probe"])
+      checkpoint relocatedRun.output
+      check relocatedRun.exitCode == 0
+    else:
+      check readFile(manifest).splitLines().count(transitiveLib) == 1
+      check transitiveLib in runtimePaths
 
     removeFile(library)
     for output in mirror.outputs:
@@ -149,6 +162,13 @@ when defined(linux) and defined(reproProviderMode):
       check not fileExists(output)
 
 suite "M9.R.83 install mirror emitted action shape":
+
+  when defined(linux) and defined(reproProviderMode):
+    test "typed nested executables resolve their own relocatable libraries":
+      verifyLibexecMirror(custom = false, propagated = false, ownLibrary = true)
+
+    test "custom nested executables resolve their own relocatable libraries":
+      verifyLibexecMirror(custom = true, propagated = false, ownLibrary = true)
 
   test "typed emitInstallTreeMirror keeps legacy copy and adds publish":
     when defined(reproProviderMode):

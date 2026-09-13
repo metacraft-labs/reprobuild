@@ -58,7 +58,8 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   ## DSL-port M9.R.14f.2 — emit a POSIX shell snippet that walks every
   ## ELF under ``<mirror>/lib`` + ``<mirror>/lib64`` + ``<mirror>/bin`` +
   ## ``<mirror>/sbin`` + ``<mirror>/libexec``
-  ## and runs ``patchelf --set-rpath`` on each. RPATH layout:
+  ## and runs ``patchelf --set-rpath`` on each. Same-package lib/lib64
+  ## paths are relative to each ELF's depth; bin/ executables use
   ## ``$ORIGIN:$ORIGIN/../lib:$ORIGIN/../lib64:<dep1>:<dep2>:...``.
   ##
   ## DSL-port M9.R.30.2 — when ``depManifestPaths`` is non-empty, the
@@ -346,6 +347,20 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   # Keep this libc ahead of any partial runtime directory lacking a loader.
   script.add("if [ -n \"$m9r14f_linked_libdir\" ]; then ")
   script.add("rpath=\"$m9r14f_linked_libdir:$rpath\"; fi; fi; ")
+  # Rebase only the same-package library entries for each ELF's depth. Keep
+  # declared dependencies, including the selected libc, in their original order.
+  script.add("m9r14f_elf_rpath() ( ")
+  script.add("m9r14f_relative=${1#\"" & escapedDstUsr & "/\"}; ")
+  script.add("m9r14f_relative=${m9r14f_relative%/*}; m9r14f_up='$ORIGIN'; ")
+  script.add("while [ -n \"$m9r14f_relative\" ]; do ")
+  script.add("m9r14f_up=\"$m9r14f_up/..\"; ")
+  script.add("case \"$m9r14f_relative\" in */*) m9r14f_relative=${m9r14f_relative#*/};; ")
+  script.add("*) m9r14f_relative=;; esac; done; ")
+  script.add("m9r14f_separator=; IFS=':'; set -f; ")
+  script.add("for rp in $rpath; do case \"$rp\" in ")
+  script.add("'$ORIGIN/../lib') rp=\"$m9r14f_up/lib\";; ")
+  script.add("'$ORIGIN/../lib64') rp=\"$m9r14f_up/lib64\";; esac; ")
+  script.add("printf '%s%s' \"$m9r14f_separator\" \"$rp\"; m9r14f_separator=:; done; ); ")
   # DSL-port M9.R.30.2 — write the consumer's own propagated-libdirs
   # manifest BEFORE walking the ELFs so a parallel build pass that
   # races against this consumer's downstream recipe can read the
@@ -396,12 +411,13 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("magic=$(head -c 4 \"$f\" 2>/dev/null | od -An -c | head -1 | tr -d ' '); ")
   script.add("case \"$magic\" in 177ELF*) ")
   script.add("m9r14f_old_interpreter=; ")
+  script.add("file_rpath=$(m9r14f_elf_rpath \"$f\"); ")
   script.add("if [ -n \"$m9r14f_runtime_loader\" ]; then ")
   script.add("m9r14f_old_interpreter=$(patchelf --print-interpreter \"$f\" 2>/dev/null || true); ")
   script.add("fi; ")
   script.add("if [ -n \"$m9r14f_old_interpreter\" ]; then ")
-  script.add("m9r14f_patch_elf \"$f\" --set-interpreter \"$m9r14f_runtime_loader\" --set-rpath \"$rpath\"; ")
-  script.add("else m9r14f_patch_elf \"$f\" --set-rpath \"$rpath\"; fi; ")
+  script.add("m9r14f_patch_elf \"$f\" --set-interpreter \"$m9r14f_runtime_loader\" --set-rpath \"$file_rpath\"; ")
+  script.add("else m9r14f_patch_elf \"$f\" --set-rpath \"$file_rpath\"; fi; ")
   script.add(";; esac; ")
   script.add("done; ")
   script.add("fi; done; ")
@@ -442,10 +458,11 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
     script.add("magic=$(head -c 4 \"$f\" 2>/dev/null | od -An -c | head -1 | tr -d ' '); ")
     script.add("case \"$magic\" in 177ELF*) ")
     script.add("origin_dir=$(dirname \"$f\"); ")
+    script.add("file_rpath=$(m9r14f_elf_rpath \"$f\"); ")
     script.add("for so in $(patchelf --print-needed \"$f\" 2>/dev/null); do ")
     script.add("found=0; ")
     script.add("OLD_IFS=$IFS; IFS=':'; ")
-    script.add("for rp in $rpath; do ")
+    script.add("for rp in $file_rpath; do ")
     script.add("expanded=$(printf '%s' \"$rp\" | sed \"s|\\$ORIGIN|$origin_dir|g\"); ")
     script.add("if [ -f \"$expanded/$so\" ]; then ")
     script.add("found=1; break; ")

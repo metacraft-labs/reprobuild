@@ -33054,7 +33054,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r83_install_mirror_action_shapes.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
