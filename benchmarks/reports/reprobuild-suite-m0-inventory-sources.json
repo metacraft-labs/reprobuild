@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1575,
+    "nimTestBinaries": 1576,
     "pureUnitConsolidationGroups": 49,
     "pureUnitTests": 575,
     "staticallyDetectedRuntimeCompilerFlowTests": 97,
-    "testEntries": 1583
+    "testEntries": 1584
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1097,7 +1097,7 @@
       "integration": 716,
       "platform/destructive": 115,
       "pure unit": 575,
-      "unclassified": 165
+      "unclassified": 166
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1233,9 +1233,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1575,
+    "nimTestBinaryCount": 1576,
     "pythonTestFileCount": 8,
-    "testEntryCount": 1583
+    "testEntryCount": 1584
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -19786,7 +19786,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/local-build-engine/t_e2e_repro_build_multiple_named_targets.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -33434,6 +33434,23 @@
       "source": "tests/unit/t_rx_runquotad_forwards_custom_pools.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_same_project_fragment_selectors",
+      "class": "unclassified",
+      "classificationReason": "mutates the process working directory",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_same_project_fragment_selectors.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

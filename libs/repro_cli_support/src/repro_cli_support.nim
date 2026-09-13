@@ -862,7 +862,7 @@ type
       ## is ``"."`` or ``".#<firstName>"`` so the legacy
       ## ``parseBuildTarget`` codepath still resolves a module.
     extraNameSelectors*: seq[string]
-      ## Name-shaped positionals beyond the first. The lowering pass in
+      ## Names and same-project action fragments beyond the first. The lowering pass in
       ## ``lowerProviderSnapshot`` unions every selector's dependency
       ## closure in one engine pass.
     targetWasOmitted*: bool
@@ -937,9 +937,9 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
   ##
   ## - The first positional whose ``classifyBuildSelector`` kind is
   ##   ``bskPath`` becomes the engine's project anchor (``target``).
-  ##   A second path-shaped positional is rejected — the engine still
-  ##   expects exactly one project anchor in M3 (qualified-name +
-  ##   ``--list-targets`` polish lands in M5).
+  ##   Additional action fragments for that same project join the
+  ##   selector union. Different project anchors and legacy module
+  ##   selections remain separate invocations.
   ## - The first name-shaped positional, when no path anchor is present,
   ##   becomes ``".#<name>"`` so ``parseBuildTarget`` routes it through
   ##   the fragment / action-selection codepath. When a path anchor is
@@ -966,10 +966,20 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
         result.target = sel
         anchorSet = true
       else:
+        let anchor = parseBuildTarget(result.target)
+        let candidate = parseBuildTarget(sel)
+        if anchor.fragmentKind == tfkActionSelection and
+            candidate.fragmentKind == tfkActionSelection and
+            cmpPaths(os.normalizedPath(absolutePath(anchor.modulePath)),
+              os.normalizedPath(absolutePath(candidate.modulePath))) == 0:
+          if candidate.selectedActionId != anchor.selectedActionId and
+              candidate.selectedActionId notin result.extraNameSelectors:
+            result.extraNameSelectors.add(candidate.selectedActionId)
+          continue
         raise newException(ValueError,
-          command & ": multiple path / fragment selectors are not " &
-            "supported in M3 (got '" & result.target & "' and '" & sel &
-            "'); name-shaped selectors may follow a single path anchor")
+          command & ": multiple path / fragment selectors must select " &
+            "actions in the same project (got '" & result.target & "' and '" &
+            sel & "'); use separate invocations for different project roots or modules")
     of bskQualified:
       # **Deferred Item D2** cross-project selector resolution. A
       # qualified selector ``<pkg>:<target>`` whose LHS names a sibling
@@ -65544,6 +65554,50 @@ proc membershipKeyFor(manifestRoot, name: string): string =
     return memberSetsKey
   ""
 
+const includesKey = "includes"
+
+type
+  ProjectEdgeStyle = enum
+    ## Which membership spelling a PROJECT manifest already uses. A project is
+    ## the one file kind that can be authored either way: `includes` (fragment
+    ## PATHS — the original spelling, still the one
+    ## `reprobuild-specs/Workspace-Manifests.md` §"`projects/<project>.toml`"
+    ## documents) or `member_sets`/`member_repos` (NAMES — the membership
+    ## model's two namespaces, which a converted manifest carries).
+    ##
+    ## The authoring verbs read the style off the FILE rather than assuming
+    ## one. Writing the model's spelling into an `includes`-only manifest does
+    ## not convert it — the fresh array lands next to an `includes` array the
+    ## reader still honours, so the operator is left with one project declaring
+    ## its repos in two places, and `repos remove` can only find half of them.
+    pesNone      ## declares neither array (a freshly scaffolded project)
+    pesIncludes  ## declares `includes` and no membership array
+    pesMembers   ## declares `member_sets` and/or `member_repos`
+
+proc projectEdgeStyle(projectFile: string): ProjectEdgeStyle =
+  ## The spelling in `projectFile`, decided the same way `editSetMember`
+  ## locates an array — by a line whose key opens a multi-line array — so the
+  ## style that is reported and the array that is then edited cannot disagree.
+  ##
+  ## `member_*` wins over `includes` in a half-converted manifest: the
+  ## conversion direction is includes -> members, and a new edge belongs with
+  ## the spelling the file is moving to.
+  result = pesNone
+  var content: string
+  try:
+    content = readFile(projectFile)
+  except CatchableError:
+    return pesNone
+  for line in content.splitLines():
+    let stripped = line.strip()
+    if not stripped.endsWith("["):
+      continue
+    if stripped.startsWith(memberReposKey) or
+        stripped.startsWith(memberSetsKey):
+      return pesMembers
+    if stripped.startsWith(includesKey):
+      result = pesIncludes
+
 proc editSetMember(setFile, key, member: string; add: bool): bool =
   ## Add or drop ``"<member>",`` in the named membership array of a repo-set.
   ## Returns true when the file changed, false when it already said what was
@@ -65578,13 +65632,37 @@ proc editSetMember(setFile, key, member: string; add: bool): bool =
       lines.insert("  " & quoted & ",", arrayEnd)
       writeFile(setFile, lines.join("\n"))
       return true
-    # No such array yet — append a fresh one rather than guessing that the
+    # No such array yet — write a fresh one rather than guessing that the
     # other key's array was meant.
-    lines.add("")
-    lines.add(key & " = [")
-    lines.add("  " & quoted & ",")
-    lines.add("]")
-    writeFile(setFile, lines.join("\n"))
+    #
+    # WHERE it goes is load-bearing rather than cosmetic. Appended at the END
+    # of the file, a bare `key = [ … ]` sits AFTER the last `[table]` header,
+    # and standard TOML binds a bare key to the table that precedes it: the
+    # strict decode then sees `project.member_repos`, rejects it, and the whole
+    # manifest stops parsing. This is the same trap `projectManifestStub`
+    # documents when it writes the membership arrays BEFORE `[project]`, and a
+    # freshly scaffolded project — which declares no array for this code to
+    # find — is exactly the file that reaches this branch.
+    #
+    # So the array is inserted ahead of the FIRST table header (where a bare
+    # key is top-level), and appended only when the file declares no table.
+    let fresh = @[key & " = [", "  " & quoted & ",", "]"]
+    var headerIdx = -1
+    for idx, line in lines:
+      if line.strip().startsWith("["):
+        headerIdx = idx
+        break
+    var outLines: seq[string]
+    if headerIdx < 0:
+      outLines = lines
+      outLines.add("")
+      for f in fresh: outLines.add(f)
+    else:
+      for idx in 0 ..< headerIdx: outLines.add(lines[idx])
+      for f in fresh: outLines.add(f)
+      outLines.add("")
+      for idx in headerIdx ..< lines.len: outLines.add(lines[idx])
+    writeFile(setFile, outLines.join("\n"))
     return true
 
   if arrayStart < 0 or arrayEnd < 0:
@@ -65631,6 +65709,22 @@ proc membershipsDeclaringRepo(manifestRoot, repoName: string): seq[string] =
   ## something still needs.
   let fragmentRel = "repos/" & repoName & ".toml"
   result = projectsIncludingFragment(manifestRoot, fragmentRel)
+  # A CONVERTED project declares its repos by name under `member_repos`, the
+  # same as a repo-set, and `projectsIncludingFragment` above answers only for
+  # the `includes` spelling. Asking it alone is how `repos remove <repo>` with
+  # no target reports "nothing to do" for a repo a project plainly declares,
+  # and how `--delete-fragment` deletes a declaration that project still needs.
+  for file in projectFilesUnder(manifestRoot):
+    let name = file.splitFile.name
+    if name in result:
+      continue
+    var manifest: ProjectManifest
+    try:
+      manifest = readProjectManifest(file)
+    except CatchableError:
+      continue  # the textual probe in projectsIncludingFragment already ran
+    if repoName in manifest.member_repos:
+      result.add(name)
   for file in repoSetFilesUnder(manifestRoot):
     var manifest: RepoSetManifest
     try:
@@ -66404,23 +66498,61 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           fragmentExisted = true
         if plan.mintedFetch.len > 0:
           ensureRemoteEntry(target.abs, plan.remoteName, plan.mintedFetch)
-        # Same rule as the repo-set branch above: the membership key is read
-        # off what the name resolves to, and the array is located BY ITS KEY.
+        # THE EDGE. Declaring the fragment is only half of `repos add`: the
+        # project has to say it participates, or the manifest is left
+        # incoherent — a fragment nothing references (CLI/workspace.md
+        # §"`repro workspace project`": "records a repo fragment
+        # (`repos/<repo>.toml`), wires its remote + `includes` edge into the
+        # project manifest, commits, and pushes").
         #
-        # This used to call `appendFragmentInclude`, which inserts before the
-        # first line that is a lone `]`. A project manifest declares
-        # `member_sets` before `member_repos`, so the fragment path landed in
-        # `member_sets` and the whole project stopped resolving — not just the
-        # added repo: "member set 'repos/<name>.toml' does not exist (looked
-        # for 'repo-sets/repos/<name>.toml.toml')".
-        let memberKey = membershipKeyFor(manifestRoot, repo)
-        if memberKey != memberReposKey:
-          stderr.writeLine("repro workspace repos add: '" & repo &
-            "' does not resolve to a repo fragment (" &
-            (manifestRoot / "repos" / (repo & ".toml")) &
-            "); refusing to guess which membership key it belongs under")
-          return 2
-        discard editSetMember(target.abs, memberKey, repo, add = true)
+        # WHICH spelling the edge takes is read off the project FILE, because
+        # a project is the one file kind that can be authored either way:
+        # `includes` (fragment PATHS, the spelling Workspace-Manifests.md
+        # §"`projects/<project>.toml`" documents) or `member_repos` (NAMES,
+        # the membership model's spelling, which the converted manifests in
+        # the metacraft workspace carry). Both resolve — `resolveProject`
+        # expands `member_*` after `includes` — so a manifest may sit in
+        # either state, and the verb must add to the array that is THERE.
+        #
+        # Writing `member_repos` unconditionally is what this branch used to
+        # do, and against an `includes`-only project it appended a SECOND,
+        # empty-until-now membership array beside the `includes` array the
+        # project actually uses. The repo resolved, so the damage was quiet:
+        # `includes` no longer listed every repo the project declares, and
+        # `repos remove`, which answers "who still references this fragment"
+        # from `includes`, could no longer see the edge it had just written.
+        #
+        # Conversely, writing an `includes` path unconditionally is the
+        # regression `t_repos_add_records_project_membership_by_key` pins: in
+        # a converted manifest the positional `appendFragmentInclude` put the
+        # path inside `member_sets` and the project stopped resolving
+        # entirely. Neither spelling is right for both shapes; the file's own
+        # is.
+        case projectEdgeStyle(target.abs)
+        of pesIncludes, pesNone:
+          # Located by key, never positionally, for the reason above.
+          #
+          # `pesNone` — a project scaffolded by `projects add` with no
+          # `--template`, which carries neither array — is authored as an
+          # `includes` edge: that is the shape
+          # `reprobuild-specs/Workspace-Manifests.md`
+          # §"`projects/<project>.toml`" documents for a project manifest,
+          # and the one `projectsIncludingFragment` — hence `repos remove`
+          # and `--delete-fragment` — can see. A project that a template DID
+          # seed carries both membership arrays and is `pesMembers` below.
+          discard editSetMember(target.abs, includesKey, fragmentRel,
+            add = true)
+        of pesMembers:
+          # Same rule as the repo-set branch above: the membership key is read
+          # off what the name resolves to, and the array is located BY ITS KEY.
+          let memberKey = membershipKeyFor(manifestRoot, repo)
+          if memberKey != memberReposKey:
+            stderr.writeLine("repro workspace repos add: '" & repo &
+              "' does not resolve to a repo fragment (" &
+              (manifestRoot / "repos" / (repo & ".toml")) &
+              "); refusing to guess which membership key it belongs under")
+            return 2
+          discard editSetMember(target.abs, memberKey, repo, add = true)
         paths.add(target.rel)
         remoteNames.add(target.name & "=" & plan.remoteName &
           (if plan.mintedFetch.len > 0: " (new, fetch " & plan.mintedFetch & ")"
@@ -66492,19 +66624,31 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           return 2
         dropped = editSetMember(target.abs, memberKey, repo, add = false)
       of mkProject:
-        # Mirrors the add path: the entry is a NAME under `member_repos`, not a
-        # fragment path under `includes`, so removing it has to use the same
-        # key-located edit or `remove` cannot undo what `add` wrote.
+        # Mirrors the add path, and has to mirror BOTH of its spellings: a
+        # project declares its repos either as fragment paths under `includes`
+        # or as names under `member_repos`, so `remove` drops the edge from
+        # whichever array carries it or it cannot undo what `add` wrote.
+        #
+        # Both are attempted rather than one being selected, because a
+        # half-converted project can legitimately carry the same repo in both
+        # arrays (that is what a conversion in progress looks like), and
+        # dropping only the spelling that `projectEdgeStyle` prefers would
+        # leave the other edge behind — the repo would still be declared after
+        # a command that reported it removed.
+        if editSetMember(target.abs, includesKey, fragmentRel, add = false):
+          dropped = true
         let memberKey = membershipKeyFor(manifestRoot, repo)
         if memberKey.len == 0:
-          stderr.writeLine("repro workspace repos remove: '" & repo &
-            "' resolves to neither a repo fragment nor a repo-set (looked " &
-            "for " & (manifestRoot / "repos" / (repo & ".toml")) & " and " &
-            (manifestRoot / "repo-sets" / (repo & ".toml")) &
-            "); refusing to guess which membership key to edit in " &
-            target.rel)
-          return 2
-        dropped = editSetMember(target.abs, memberKey, repo, add = false)
+          if not dropped:
+            stderr.writeLine("repro workspace repos remove: '" & repo &
+              "' resolves to neither a repo fragment nor a repo-set (looked " &
+              "for " & (manifestRoot / "repos" / (repo & ".toml")) & " and " &
+              (manifestRoot / "repo-sets" / (repo & ".toml")) &
+              "); refusing to guess which membership key to edit in " &
+              target.rel)
+            return 2
+        elif editSetMember(target.abs, memberKey, repo, add = false):
+          dropped = true
       if dropped:
         droppedFrom.add(project)
         paths.add(target.rel)
