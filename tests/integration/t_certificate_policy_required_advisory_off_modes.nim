@@ -274,3 +274,161 @@ suite "TC-6 — certificate policy required/advisory/off modes (receiving side)"
         check ("key_id '" & modesUnregisteredKeyId & "' not registered") in
           pushed.output
         check "untrusted certs ignored" in pushed.output
+
+  test "t_certificate_note_ref_name_read_tells_unreadable_from_absent":
+    ## W11 — the ref-NAME certificate-note read reports an UNREADABLE note
+    ## apart from an ABSENT one, by direct call against a real git repository.
+    ##
+    ## ``readAttachedCertificatesFrom`` has two read paths: a raw notes-COMMIT
+    ## SHA (what ``pre-receive`` uses, where the object has just been delivered)
+    ## and a ref NAME (the settled / post-receive case, and the FALLBACK the
+    ## pre-receive gate takes when the incoming-notes read yields nothing). The
+    ## raw-SHA path already separated the two conditions. The ref-NAME path did
+    ## not: it reported every ``git notes show`` failure as ``gorAbsent``, on
+    ## the stated grounds that git cannot tell them apart.
+    ##
+    ## It can, and that is what this case pins. Measured in a throwaway repo:
+    ##
+    ##   git notes --ref <ref> show <commit-with-no-note>
+    ##     -> exit 1,   error: no note found for object <sha>.
+    ##   (delete the note BLOB, leave the ref alone)
+    ##   git notes --ref <ref> show <commit-with-a-note>
+    ##     -> exit 128, fatal: bad object <blob-sha>
+    ##
+    ## and ``rev-parse --verify --quiet <ref>`` STILL exits 0 in the second
+    ## case, so the ref-existence probe cannot see it. The exit code is the only
+    ## thing that can, and this case asserts git's side of that premise before
+    ## asserting the product's — a fixture whose git behaves differently must
+    ## refuse rather than pass.
+    ##
+    ## No verdict changes either way (the cert gate refuses on absence anyway);
+    ## the REMEDY does. A receiving bare whose settled notes ref is damaged used
+    ## to tell the author "no covering test certificate (run 'repro certify'
+    ## then push)" — sending them to mint a certificate they had already minted.
+    ##
+    ## Falsifiability, each direction failing differently: collapse the
+    ## classification back to ``else: gorAbsent`` and (3) trips while (1), (2)
+    ## and (4) still pass; call EVERY non-zero exit unreadable and (2) trips
+    ## instead. Neither mutation is caught by the other's assertions, which is
+    ## why both directions are here.
+    ##
+    ## Hermetic: one local ``git init``, no hooks, no network, no ``repro``
+    ## binary. Skip rule: ``git`` missing on PATH.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let scratch = createTempDir("repro-w11-noteread-", "")
+      defer: removeDir(scratch)
+      let repo = scratch / "repo"
+      discard requireGit(q(gitBin) & " init -b main " & q(repo))
+      discard requireGit(q(gitBin) & " -C " & q(repo) &
+        " config user.email tester@example.invalid")
+      discard requireGit(q(gitBin) & " -C " & q(repo) &
+        " config user.name \"W11 Tester\"")
+      writeFile(repo / "a.txt", "one\n")
+      discard requireGit(q(gitBin) & " -C " & q(repo) & " add a.txt")
+      discard requireGit(q(gitBin) & " -C " & q(repo) & " commit -m one")
+      let covered = requireGit(q(gitBin) & " -C " & q(repo) &
+        " rev-parse HEAD").strip()
+      writeFile(repo / "a.txt", "two\n")
+      discard requireGit(q(gitBin) & " -C " & q(repo) & " add a.txt")
+      discard requireGit(q(gitBin) & " -C " & q(repo) & " commit -m two")
+      let uncovered = requireGit(q(gitBin) & " -C " & q(repo) &
+        " rev-parse HEAD").strip()
+      doAssert covered != uncovered,
+        "fixture collision: the two commits have the same sha"
+
+      var cert = TestCertificate(
+        schema: testCertificateSchemaV1,
+        framework: reprobuildFrameworkId,
+        project: "w11",
+        platform: currentPlatformTag(),
+        targets: @["t-unit"],
+        issuedAt: "2026-08-27T00:00:00Z",
+        issuer: "w11-fixture",
+        keyId: "w11-note-read-key",
+        vcs: TestCertificateVcs(repo: "repo", commit: covered,
+          clean: true, untracked: false),
+        commands: @[TestCertificateCommand(argv: @["repro", "test"])],
+        signature: TestCertificateSignature(
+          algorithm: "ed25519",
+          value: "dzExLW5vdC1hLXJlYWwtc2lnbmF0dXJl"))
+      cert.result = tcrPassed
+      let att = attachCertificate(gitBin, repo, covered, cert)
+      check att.ok
+
+      # ---- (1) the note IS there and readable -----------------------------
+      # Asserted first, and not separable from the rest: a reader that called
+      # everything unreadable, or everything absent, would satisfy one of the
+      # cases below and fail here.
+      let present = readAttachedCertificatesFrom(
+        gitBin, repo, covered, certificateNotesRef)
+      check present.status == gorPresent
+      check present.certs.len == 1
+      check present.diagnostic.len == 0
+
+      # ---- (2) GENUINE ABSENCE: a commit with no note, ref intact ---------
+      let rawAbsent = runCmd(q(gitBin) & " -C " & q(repo) & " notes --ref " &
+        q(certificateNotesRef) & " show " & q(uncovered))
+      checkpoint("git notes show <no-note> exit=" & $rawAbsent.code &
+        " output=" & rawAbsent.output.strip())
+      # git's own premise, before the product's: this exit code and no other is
+      # what "no note found for object" means.
+      check rawAbsent.code == gitNotesShowNoNoteExit
+      let absent = readAttachedCertificatesFrom(
+        gitBin, repo, uncovered, certificateNotesRef)
+      check absent.status == gorAbsent
+      check absent.certs.len == 0
+      check absent.diagnostic.len == 0
+
+      # ---- (3) UNREADABLE: the note blob is gone, the ref is not ----------
+      let noteBlob = requireGit(q(gitBin) & " -C " & q(repo) & " notes --ref " &
+        q(certificateNotesRef) & " list " & q(covered)).strip().
+        splitWhitespace()[0]
+      check noteBlob.len in {40, 64}
+      let looseBlob = repo / ".git" / "objects" / noteBlob[0 ..< 2] /
+        noteBlob[2 .. ^1]
+      # A freshly written note is a LOOSE object; were it packed this fixture
+      # would be removing nothing and (3) would pass vacuously.
+      check fileExists(looseBlob)
+      # git writes objects read-only, and Windows refuses to delete a read-only
+      # file.
+      setFilePermissions(looseBlob, {fpUserRead, fpUserWrite})
+      removeFile(looseBlob)
+      check not fileExists(looseBlob)
+      # The two premises this classification rests on, measured here rather
+      # than assumed: the ref STILL resolves (so the ref-existence probe cannot
+      # separate this case) and git's exit code is NOT the no-note one.
+      let refStillResolves = runCmd(q(gitBin) & " -C " & q(repo) &
+        " rev-parse --verify --quiet " & q(certificateNotesRef))
+      check refStillResolves.code == 0
+      check refStillResolves.output.strip().len > 0
+      let rawBroken = runCmd(q(gitBin) & " -C " & q(repo) & " notes --ref " &
+        q(certificateNotesRef) & " show " & q(covered))
+      checkpoint("git notes show <broken-blob> exit=" & $rawBroken.code &
+        " output=" & rawBroken.output.strip())
+      check rawBroken.code != 0
+      check rawBroken.code != gitNotesShowNoNoteExit
+      let unreadable = readAttachedCertificatesFrom(
+        gitBin, repo, covered, certificateNotesRef)
+      checkpoint("read status=" & $unreadable.status & " diagnostic=" &
+        unreadable.diagnostic)
+      check unreadable.status == gorUnreadable
+      check unreadable.certs.len == 0
+      # The diagnostic has to be actionable, which means naming what could not
+      # be read and what git said — the wrong remedy this milestone removes is
+      # the one the gate renders from this string.
+      check covered in unreadable.diagnostic
+      check certificateNotesRef in unreadable.diagnostic
+      check ("git notes show exit " & $rawBroken.code) in unreadable.diagnostic
+      check noteBlob in unreadable.diagnostic
+
+      # ---- (4) no notes ref AT ALL: an absence, not a failed read ---------
+      discard requireGit(q(gitBin) & " -C " & q(repo) & " update-ref -d " &
+        q(certificateNotesRef))
+      let noRef = readAttachedCertificatesFrom(
+        gitBin, repo, covered, certificateNotesRef)
+      check noRef.status == gorAbsent
+      check noRef.certs.len == 0
+      check noRef.diagnostic.len == 0

@@ -52,9 +52,14 @@
 ## `file://` is exercised by the M64 unit tests (hermetic), HTTP/HTTPS
 ## is exercised by the optional integration gate.
 
-import std/[algorithm, os, osproc, strutils, tables, times]
+import std/[algorithm, os, osproc, streams, strutils, tables, times]
 when defined(windows):
   import std/widestrs
+else:
+  # Only these names, and only for the pipe-write guard in the ``zekZstdPipe``
+  # extractor arm — ``from … import`` keeps the rest of ``std/posix`` out of
+  # this module's namespace.
+  from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN
 from repro_core/paths import extendedPath
 
 import repro_local_store
@@ -2064,21 +2069,138 @@ proc extractTarZst*(packageId, archivePath, destDir: string;
           resExplicit.output & "\n" &
           "  -xf exit=" & $resAuto.exitCode & ": " & resAuto.output)
   of zekZstdPipe:
-    # ``zstd -dc <archive> | tar -xf - -C <destDir>``. Cross-platform
-    # POSIX pipe shape. We use ``execShellCmd`` indirectly via
-    # ``execCmdEx`` because the shell-pipeline form needs the shell to
-    # parse the ``|``. ``execCmdEx`` runs through cmd.exe on Windows,
-    # which honors ``|`` natively — but Windows hosts typically take
-    # the (ii) path before falling through here, so this branch is
-    # primarily a POSIX path.
-    let command = quoteShell(extractor.zstdExe) & " -dc " &
-      quoteShell(archivePath) & " | " &
-      quoteShell(extractor.tarExeForPipe) & " -xf - -C " &
-      quoteShell(destDir)
-    let res = execCmdEx(command)
-    if res.exitCode != 0:
+    # ``zstd -dc <archive>`` feeding ``tar -xf - -C <destDir>``, with the pipe
+    # connected IN THIS PROCESS.
+    #
+    # It used to be ONE command string carrying a ``|``, handed to
+    # ``execCmdEx`` under a comment asserting that "``execCmdEx`` runs through
+    # cmd.exe on Windows, which honors ``|`` natively". That is false, and it
+    # is precisely the misconception ``scripts/check_shell_command_strings.sh``
+    # exists to encode: there is no ``cmd.exe`` anywhere in the path.
+    # ``execCmdEx`` adds ``poEvalCommand``, and on Windows ``startProcess``
+    # passes the command line to ``CreateProcessW`` VERBATIM, so the ``|`` and
+    # everything after it arrive as ORDINARY ARGV ENTRIES to the first program.
+    # Measured with the identical shape:
+    #
+    #   git --version | git hash-object --stdin
+    #     -> exit 129, "error: unknown option `stdin'"
+    #
+    # ``git version`` — the FIRST program — received ``|``, ``git``,
+    # ``hash-object`` and ``--stdin`` as its own arguments and rejected them;
+    # the second program never ran. Nothing corrupt was produced (this arm
+    # fails loudly), but the extraction could not work at all on a Windows host
+    # that reached here — and it IS reachable: bare ``zstd`` plus a ``tar``
+    # without ``--zstd`` and no zstd-capable ``7z`` is discovery step (iii).
+    #
+    # Two real processes and a real copy loop have no shell in them, so the
+    # arm now behaves the same way on every host.
+    var zstdProc, tarProc: Process
+    try:
+      zstdProc = startProcess(extractor.zstdExe,
+        args = ["-dc", archivePath], options = {poUsePath})
+    except CatchableError as err:
       raiseExtractFailed(packageId, archivePath, "tar.zst",
-        "zstd | tar pipeline exited " & $res.exitCode & "\n" & res.output)
+        "could not start " & extractor.zstdExe & ": " & err.msg)
+    try:
+      tarProc = startProcess(extractor.tarExeForPipe,
+        args = ["-xf", "-", "-C", destDir],
+        options = {poUsePath, poStdErrToStdOut})
+    except CatchableError as err:
+      zstdProc.terminate()
+      discard zstdProc.waitForExit()
+      zstdProc.close()
+      raiseExtractFailed(packageId, archivePath, "tar.zst",
+        "could not start " & extractor.tarExeForPipe & ": " & err.msg)
+    # POSIX: if ``tar`` dies early (a truncated stream, a full disk) the next
+    # write lands on a pipe with no reader, and the DEFAULT disposition of
+    # SIGPIPE kills US — silently, with no exception and no exit code to
+    # report. Ignoring it across the copy turns that into an ordinary EPIPE
+    # ``IOError``, and tar's own exit code stays the diagnosis. The previous
+    # disposition is restored, so this is not a process-wide policy change.
+    when not defined(windows):
+      var ignoredSigPipe, previousSigPipe: Sigaction
+      ignoredSigPipe.sa_handler = SIG_IGN
+      discard sigemptyset(ignoredSigPipe.sa_mask)
+      ignoredSigPipe.sa_flags = 0
+      let sigPipeGuardInstalled =
+        sigaction(SIGPIPE, ignoredSigPipe, addr previousSigPipe) == 0
+    const PipeChunk = 64 * 1024
+    var chunk = newString(PipeChunk)
+    var copied = 0
+    var pipeError = ""
+    var sawDecompressorEof = false
+    let decompressed = zstdProc.outputStream
+    let intoTar = tarProc.inputStream
+    while true:
+      var read = 0
+      try:
+        read = decompressed.readData(addr chunk[0], PipeChunk)
+      except CatchableError as err:
+        pipeError = "reading the decompressor's output failed after " &
+          $copied & " byte(s): " & err.msg
+        break
+      if read <= 0:
+        sawDecompressorEof = true
+        break
+      try:
+        intoTar.writeData(addr chunk[0], read)
+      except CatchableError as err:
+        pipeError = "writing to tar's stdin failed after " & $copied &
+          " byte(s): " & err.msg
+        break
+      copied += read
+    try:
+      intoTar.flush()
+    except CatchableError:
+      discard
+    # EOF for tar, so it can finish and exit. Closing the INPUT stream is
+    # anticipated by ``osproc``: ``fileClose`` blanks the handle, so
+    # ``process.close``'s second close of it is a no-op on both platforms.
+    intoTar.close()
+    when not defined(windows):
+      if sigPipeGuardInstalled:
+        discard sigaction(SIGPIPE, previousSigPipe)
+    # If the loop stopped BEFORE the decompressor's EOF — tar died early, or the
+    # read itself failed — ``zstd`` is still producing into a pipe nobody drains
+    # any more, so it blocks on a write that can never complete and
+    # ``waitForExit`` below would HANG instead of reporting. End it instead.
+    # Measured with a deliberately broken copy loop: this arm hung indefinitely
+    # rather than raising, which is a worse failure than the one W13 fixed.
+    if not sawDecompressorEof:
+      try:
+        zstdProc.terminate()
+      except CatchableError:
+        discard
+    # Drain with ``readData`` until a genuine EOF rather than ``readAll``:
+    # Nim 2.2's ``readAll`` stops at the first SHORT pipe read on Windows, and
+    # these two streams carry the only explanation a failure has.
+    proc drain(stream: Stream): string =
+      var buf = newString(4096)
+      while true:
+        var n = 0
+        try:
+          n = stream.readData(addr buf[0], buf.len)
+        except CatchableError:
+          break
+        if n <= 0: break
+        result.add(buf[0 ..< n])
+    # ``tar -xf -`` and ``zstd -dc`` are both silent on success and emit a line
+    # or two on failure, so neither can fill its pipe buffer before it is read
+    # here; a verbose tar would need draining inside the copy loop instead.
+    let tarOutput = drain(tarProc.outputStream)
+    let tarCode = tarProc.waitForExit()
+    let zstdCode = zstdProc.waitForExit()
+    let zstdErrors = drain(zstdProc.errorStream)
+    zstdProc.close()
+    tarProc.close()
+    if pipeError.len > 0 or zstdCode != 0 or tarCode != 0:
+      raiseExtractFailed(packageId, archivePath, "tar.zst",
+        "zstd | tar pipeline failed" &
+        (if pipeError.len > 0: " (" & pipeError & ")" else: "") &
+        ": zstd exit=" & $zstdCode & ", tar exit=" & $tarCode &
+        ", " & $copied & " byte(s) piped\n" &
+        "  zstd stderr: " & zstdErrors.strip() & "\n" &
+        "  tar output: " & tarOutput.strip())
 
 proc flattenExtractPath(packageId, destDir, extractPath: string) =
   ## If `extract_path` is non-empty, the archive shipped its contents

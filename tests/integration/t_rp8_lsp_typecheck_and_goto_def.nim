@@ -38,6 +38,15 @@
 ##      (``rp8PrivateIdentity``) and an unknown name do NOT resolve
 ##      (``gdskNotFound``) — the interface only exposes the public surface, so a
 ##      private symbol has no location.
+##
+## W12 adds a THIRD case, about the typecheck capability's CONTRACT rather than
+## its resolution power: ``typecheckConsumerAgainstInterface`` must RETURN a
+## verdict. It used to build ``cd <repoRoot> && <cmd>`` for ``execCmdEx``, which
+## on Windows raises an ``OSError`` instead — and property (1) above could not
+## observe that, because this file's own cold-compile step carried a second
+## instance of the same family and died at it first. The new case drives the
+## proc directly on two trivial files, so the contract is measured without the
+## producer fixture in the way.
 
 import std/[os, osproc, strutils, unittest]
 
@@ -209,8 +218,16 @@ suite "RP8: LSP typecheck + go-to-definition via interface extraction":
       quoteShell(coldCache / "consumer_bin") &
       " --nimcache:" & quoteShell(coldCache) &
       " " & quoteShell(coldDir / "repro.nim")
-    let (coldOut, coldCode) =
-      execCmdEx("cd " & quoteShell(repoRoot) & " && " & coldCmd)
+    # ``workingDir``, not ``"cd " & quoteShell(repoRoot) & " && " & coldCmd``.
+    # ``execCmdEx`` adds ``poEvalCommand``: on POSIX the string reaches
+    # ``/bin/sh -c`` and the ``cd`` works, but on Windows ``startProcess``
+    # hands it to ``CreateProcessW`` verbatim, so the whole line is looked up
+    # as an executable named ``cd`` and this RAISES. That killed the case here,
+    # at the fixture's cold compile — masking the identical defect in
+    # ``typecheckConsumerAgainstInterface`` thirty lines below, which the case
+    # never reached. Both had to go; fixing either one alone leaves this test
+    # red on Windows.
+    let (coldOut, coldCode) = execCmdEx(coldCmd, workingDir = repoRoot)
     if coldCode != 0:
       checkpoint(coldOut)
     check coldCode == 0
@@ -348,3 +365,76 @@ suite "RP8: LSP typecheck + go-to-definition via interface extraction":
       gotoDefinitionForProducerSymbol(producerSelector, workspace,
         "no_such_symbol")
     check unknown.kind == gdskNotFound
+
+  test "t_rp8_typecheck_capability_returns_a_verdict_rather_than_raising":
+    ## W12 — the RP8 typecheck capability RETURNS its verdict, driven DIRECTLY
+    ## rather than through the producer fixture above.
+    ##
+    ## ``typecheckConsumerAgainstInterface`` used to assemble
+    ## ``"cd " & quoteShell(repoRoot) & " && " & cmd`` and hand it to
+    ## ``execCmdEx``. On POSIX that string reaches ``/bin/sh -c`` and the ``cd``
+    ## means what its author meant. On Windows ``execCmdEx`` adds
+    ## ``poEvalCommand`` and ``startProcess`` passes the line to
+    ## ``CreateProcessW`` VERBATIM: there is no shell and no ``cd.exe``, so the
+    ## whole line is looked up as one executable named ``cd`` and the call
+    ## RAISES an ``OSError`` out of a proc whose contract is to return an
+    ## ``InterfaceTypecheckResult``. Measured on a Windows host with the
+    ## identical shape:
+    ##
+    ##   command: cd M:\m\dev\reprobuild && git.exe rev-parse --show-toplevel
+    ##   RAISED OSError: The system cannot find the file specified.
+    ##   Additional info: Requested command not found:
+    ##     'cd M:\m\dev\reprobuild && git.exe rev-parse --show-toplevel'
+    ##
+    ## DIRECTLY, because the case above could not reach the product defect on
+    ## Windows even after it was fixed: that fixture's own cold ``nim c`` step
+    ## carried a SECOND instance of the same family and died at it, thirty lines
+    ## before the product call. Both are fixed now, but a property observable
+    ## only at the end of a multi-minute producer fixture is a property nobody
+    ## measures — this case needs no producer, no accessor cache and no
+    ## cross-project resolution, so it is a statement about the capability's
+    ## CONTRACT and costs two trivial ``nim check`` runs.
+    ##
+    ## BOTH verdicts, because either alone is satisfiable by a stub: a proc
+    ## hard-coded to ``ok = true`` passes the first arm and fails the second,
+    ## and one hard-coded to ``ok = false`` does the reverse. Falsifiability:
+    ## restore the ``cd … &&`` form and on Windows both ``raised`` assertions
+    ## trip; drop the ``output`` plumbing and the diagnostic assertions trip
+    ## while the two verdicts still pass.
+    let scratch = repoRoot / "build" / "nimcache" /
+      ("rp8-verdict-" & $getCurrentProcessId())
+    removeDir(scratch)
+    createDir(scratch)
+    defer: removeDir(scratch)
+    let goodFile = scratch / "verdict_good.nim"
+    writeFile(goodFile, "echo \"rp8 verdict fixture\"\n")
+    let badFile = scratch / "verdict_bad.nim"
+    writeFile(badFile, "let wrong: int = \"rp8 not an int\"\n")
+
+    var raisedGood, raisedBad = ""
+    var good, bad: InterfaceTypecheckResult
+    try:
+      good = typecheckConsumerAgainstInterface(goodFile, repoRoot,
+        scratch / "nc_verdict_good")
+    except CatchableError as err:
+      raisedGood = $err.name & ": " & err.msg
+    try:
+      bad = typecheckConsumerAgainstInterface(badFile, repoRoot,
+        scratch / "nc_verdict_bad")
+    except CatchableError as err:
+      raisedBad = $err.name & ": " & err.msg
+    if raisedGood.len > 0: checkpoint("good raised: " & raisedGood)
+    if raisedBad.len > 0: checkpoint("bad raised: " & raisedBad)
+    # The contract: a verdict comes back. Both arms, because the raise did not
+    # depend on WHICH file was being checked — it happened before the compiler
+    # was ever reached.
+    check raisedGood.len == 0
+    check raisedBad.len == 0
+    if not good.ok: checkpoint("good output: " & good.output)
+    check good.ok
+    check not bad.ok
+    # ...and the compiler's own words come with it. A verdict with no
+    # explanation is a diagnostic an editor cannot show.
+    checkpoint("bad output: " & bad.output)
+    check bad.output.len > 0
+    check "type mismatch" in bad.output.toLowerAscii()
