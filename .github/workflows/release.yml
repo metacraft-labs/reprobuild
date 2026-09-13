@@ -526,6 +526,103 @@ jobs:
           cat SHA256SUMS
           sha256sum -c SHA256SUMS
 
+      # ── Sign the release ──────────────────────────────────────────────────
+      #
+      # SHA256SUMS above is SAME-ORIGIN integrity: it proves the bytes on
+      # this release page match a list on the same release page, which an
+      # attacker who can replace one can replace both. Signing is what makes
+      # it trust. See docs/release-signing.md.
+      #
+      # This step is a NO-OP UNTIL A RELEASE KEY EXISTS, and says so out
+      # loud, because scripts/release-signing/trusted-release-keys.txt is
+      # empty by design: M2 built the machinery, the governance secret
+      # pipeline mints the key. Until then a release still publishes, with
+      # exactly the same-origin integrity it had before -- what it must never
+      # do is publish something that LOOKS signed.
+      #
+      # When the key exists, the secret holds an ASCII-armoured private key
+      # and the fingerprint must also be committed to trusted-release-keys.txt
+      # in a reviewed change; the signer refuses an unlisted key rather than
+      # falling back, so forgetting the second half fails the release rather
+      # than silently signing with something nobody blessed.
+      - name: Sign SHA256SUMS and artifacts
+        shell: bash
+        env:
+          REPRO_RELEASE_SIGNING_KEY: ${{ secrets.REPRO_RELEASE_SIGNING_KEY }}
+          REPRO_RELEASE_SIGNING_KEY_ID: ${{ secrets.REPRO_RELEASE_SIGNING_KEY_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${REPRO_RELEASE_SIGNING_KEY:-}" ]; then
+            echo "::warning::No REPRO_RELEASE_SIGNING_KEY secret is configured."
+            echo "::warning::This release carries SHA256SUMS (same-origin integrity) but NO signature."
+            echo "::warning::See docs/release-signing.md -- the key is a governance deliverable, not a code one."
+            exit 0
+          fi
+          if [ -z "${REPRO_RELEASE_SIGNING_KEY_ID:-}" ]; then
+            echo "::error::REPRO_RELEASE_SIGNING_KEY is set but REPRO_RELEASE_SIGNING_KEY_ID is not."
+            echo "::error::Refusing to guess which key in the imported material should sign."
+            exit 1
+          fi
+          # The key material lives in a file only for the lifetime of this
+          # step, in a directory the signer shreds. `repro-sign-release.sh`
+          # imports it into an ephemeral GNUPGHOME and never touches
+          # ~/.gnupg. Nothing is echoed: `set -x` is deliberately absent.
+          keydir="$(mktemp -d)"
+          trap 'rm -rf "${keydir}"' EXIT
+          printf '%s' "${REPRO_RELEASE_SIGNING_KEY}" > "${keydir}/key.asc"
+          # The exported PUBLIC key goes to the runner's temp directory and
+          # NOT into staging/, because staging/ is what gets uploaded to the
+          # release page. docs/release-signing.md step 4 is explicit that the
+          # public key must be published somewhere that is not the release
+          # page: verifying a release against a key fetched from that same
+          # release is circular, and shipping the key beside the artifacts
+          # invites exactly that. The next step still needs it, so it lives
+          # somewhere both steps can reach and no consumer can.
+          pubkey="${RUNNER_TEMP:-/tmp}/reprobuild-release-key.asc"
+          # Invoked through `sh` rather than as ./script so the run does
+          # not depend on the executable bit surviving checkout.
+          sh ./scripts/release-signing/repro-sign-release.sh \
+            --dir staging \
+            --key "${REPRO_RELEASE_SIGNING_KEY_ID}" \
+            --secret-key-file "${keydir}/key.asc" \
+            --export-key "${pubkey}"
+          rm -f "${keydir}/key.asc"
+          echo "=== signed release contents ==="
+          ls -la staging
+
+      # A signature nobody checks is decoration. Verify what we just
+      # produced with the SAME script the installer runs.
+      #
+      # This is a WELL-FORMEDNESS check, not a trust check, and the
+      # difference matters: the key it verifies against is the one this job
+      # just exported, so it cannot tell you the right key signed. What it
+      # does tell you is that the manifest, the per-artifact signatures and
+      # the bytes all agree under the installer's own code path -- so a
+      # release can never ship a signature the installer would reject. The
+      # trust check happens on the user's machine, against a key they got
+      # from somewhere other than this release.
+      - name: Verify the signed release exactly as the installer will
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f staging/SHA256SUMS.asc ]; then
+            echo "::warning::Release is unsigned (no key configured); nothing to verify."
+            exit 0
+          fi
+          pubkey="${RUNNER_TEMP:-/tmp}/reprobuild-release-key.asc"
+          if [ ! -s "${pubkey}" ]; then
+            # A signed staging dir with no exported key means the previous
+            # step did not run the way it thinks it did. Fail rather than
+            # skip: "there was nothing to verify against" is the one excuse
+            # this milestone does not accept.
+            echo "::error::staging/SHA256SUMS.asc exists but ${pubkey} does not; refusing to skip verification."
+            exit 1
+          fi
+          sh ./scripts/release-signing/repro-verify-release.sh \
+            --keyring "${pubkey}" \
+            --dir staging \
+            --require-all
+
       # ── Force any pre-existing release for this tag back to draft ──────────
       #
       # `softprops/action-gh-release@v2` does NOT honour `draft: true` for a
@@ -638,9 +735,24 @@ jobs:
               return;
             }
 
+            // Signing (see "Sign the release") drops a detached signature
+            // beside SHA256SUMS and beside every archive. Those are ALLOWED
+            // to be present but are never REQUIRED here: until the governance
+            // pipeline mints a release key the signing step is a documented
+            // no-op and none of them exist, so requiring them would fail every
+            // release today. Their completeness is not this step's job --
+            // "Verify the signed release exactly as the installer will" runs
+            // the installer's own verifier with --require-all, which fails the
+            // job if any manifest entry lacks a signature that verifies.
+            //
+            // Without this, the FIRST signed release would upload correctly
+            // and then be refused here as "unexpected asset(s)", leaving a
+            // permanent draft on the day the key arrives.
+            const allowed = new Set([...expected].map(a => `${a}.asc`));
+
             const present = new Set(release.assets.map(a => a.name));
             const missing = [...expected].filter(a => !present.has(a));
-            const extra = [...present].filter(a => !expected.has(a));
+            const extra = [...present].filter(a => !expected.has(a) && !allowed.has(a));
 
             core.info(`release ${tag} (id=${release.id}, draft=${release.draft}) carries: ${[...present].sort().join(', ') || '(nothing)'}`);
 
