@@ -41,6 +41,7 @@ import std/[os, sequtils, strutils, tempfiles, times, unittest]
 from repro_core/paths import extendedPath
 
 import repro_local_store
+import repro_local_store/sqlite3_binding
 
 type Fixture = object
   root: string
@@ -187,6 +188,47 @@ suite "store GC refuses an entry a live root holds":
     check not dirExists(extendedPath(entry.path))
     check fileExists(extendedPath(report.quarantinedPaths[0] / "bin" / "tool"))
     check f.store.gc(graceSeconds = 5 * 60).reclaimed.len == 0
+
+  test "collection cannot move a prefix while another connection registers its root":
+    for targeted in [false, true]:
+      checkpoint("targeted=" & $targeted)
+      var f = openFixture("root-transaction-" & $targeted)
+      defer: closeFixture(f)
+      let entry = f.realizeEntry("tool", "1.0", "retained payload")
+      var writer = openStore(f.store.root)
+      defer: writer.close()
+      f.store.db.exec("PRAGMA busy_timeout = 0")
+
+      # The other connection owns the write lock, but its new root is not
+      # visible to the collector's read snapshot until COMMIT.
+      writer.db.exec("BEGIN IMMEDIATE")
+      var committed = false
+      defer:
+        if not committed:
+          writer.db.exec("ROLLBACK")
+      writer.registerRoot("active-session", rkSession)
+      writer.attachPrefixToRoot("active-session", entry.id)
+      check f.store.deadSet().len == 1
+      expect SqliteError:
+        if targeted:
+          discard f.store.gcPrefix(entry.id, graceSeconds = 60)
+        else:
+          discard f.store.gc(graceSeconds = 60)
+      check dirExists(extendedPath(entry.path))
+      check f.store.lookupPrefix(entry.id).found
+      check f.store.listAudit().len == 0
+
+      writer.db.exec("COMMIT")
+      committed = true
+      check f.store.rootsHolding(entry.id) == @["active-session"]
+      check f.store.gc(graceSeconds = 60).quarantined.len == 0
+      check dirExists(extendedPath(entry.path))
+
+      writer.deleteRoot("active-session")
+      let released = f.store.gc(graceSeconds = 0)
+      check released.quarantined.len == 1
+      check not f.store.lookupPrefix(entry.id).found
+      check not dirExists(extendedPath(entry.path))
 
   when defined(posix):
     test "quarantine refuses a symlink without stamping its external target":
