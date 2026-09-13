@@ -442,51 +442,44 @@ const
   LegacyStrongHex =
     "28c642b92be7b7deafe4cc2394d8a4f0c99d9e0e1c3a8e6de09ee44d7ddb3a51"
 
-suite "records written before the format change still read":
+suite "records written before the trust epoch are refused":
+  ## INVERTED, DELIBERATELY. This suite used to be called "records written
+  ## before the format change still read" and asserted that a v3/v4 record and
+  ## a legacy container kept working, on the §5.5 "Compatibility" reasoning
+  ## that "a cache full of records this binary's predecessor wrote must keep
+  ## working, or upgrading reprobuild silently discards every warm build on
+  ## the machine".
+  ##
+  ## That reasoning was correct for a FORMAT bump and is wrong for a TRUST
+  ## one. Every record version that existed before
+  ## `ActionRecordVersionEvidenceEpoch` — 2, 3, 4 and 5 — was written by a
+  ## binary whose no-evidence publish guard was dead, so those records are
+  ## internally consistent but were never validated against anything, and no
+  ## predicate can pick the bad ones out (see the constant's own comment).
+  ## Discarding every warm build on the machine is not a regrettable side
+  ## effect here; it is the remediation. The fixtures are kept exactly as they
+  ## were so that what changed is visibly the VERDICT and not the input.
 
-  test "a v3 record produced by the parent commit decodes":
-    ## §5.5 "Compatibility" allows the bump to lock an OLDER binary out of
-    ## NEWER records. It does not allow the reverse: a cache full of records
-    ## this binary's predecessor wrote must keep working, or upgrading
-    ## reprobuild silently discards every warm build on the machine.
+  test "a v3 record produced by an older binary is refused, not decoded":
+    ## Refused rather than misread: the decoder raises on the version word
+    ## before it interprets a single byte of the body, so there is no path on
+    ## which these bytes are parsed under the wrong schema.
+    expect EnvelopeError:
+      discard decodeActionResultRecord(unhex(V3Hex))
+
+  test "a v4 record produced by an older binary is refused, env included":
+    expect EnvelopeError:
+      discard decodeActionResultRecord(unhex(V4Hex))
+
+  test "a container written by an older binary reads as EMPTY, not as an error":
+    ## End to end, not just the codec, and this is the case that matters most:
+    ## the drain is only safe if a pre-epoch container degrades to a cache
+    ## MISS. If it escaped as an exception it would take down builds that
+    ## merely happen to have a warm cache directory.
     ##
-    let decoded = decodeActionResultRecord(unhex(V3Hex))
-    check decoded.weakFingerprint == weakOf("legacy-fixture-edge")
-    check decoded.policy == ffpTimestamp
-    check decoded.inputs.mapIt(it.path) == @[
-      "/work/checkout/src/alpha.c", "/work/checkout/src/beta.c",
-      "relative.h"]
-    check decoded.inputs[0].metadata.sizeBytes == 11'u64
-    check decoded.inputs[2].metadata.mtimeNs == 66'u64
-    check decoded.envInputs.len == 0
-    check decoded.outputPayloadKind == opkCasBlobs
-    check decoded.outputs.len == 1
-    check decoded.outputs[0].path == "out/alpha.o"
-    check decoded.outputs[0].blob.sizeBytes == 77'u64
-    check digestHex(decoded.strongFingerprint) == LegacyStrongHex
-
-  test "a v4 record produced by the parent commit decodes, env included":
-    let decoded = decodeActionResultRecord(unhex(V4Hex))
-    check decoded.envInputs.len == 2
-    check decoded.envInputs[0].name == "SOURCE_DATE_EPOCH"
-    check decoded.envInputs[0].present
-    check decoded.envInputs[0].value == "17"
-    check decoded.envInputs[1].name == "CFLAGS"
-    check not decoded.envInputs[1].present
-    check decoded.inputs.len == 3
-    check digestHex(decoded.strongFingerprint) ==
-      "5b03cfce4f66a4cc78d246c58ebfa898eb4767db766c584e1ba1eec2b98a6e07"
-
-  test "a container written by the parent commit is served off disk":
-    ## End to end, not just the codec. The `.rec` file this drops into the
-    ## edge directory is the exact byte sequence the parent commit's
-    ## `writePerEdgeRecords` produced — no alias beside it, no sidecars, the
-    ## state of every edge directory in every cache on every machine that has
-    ## not yet run this binary.
-    ##
-    ## It must be READ (not "missing permanently"), and the union fallback
-    ## must then leave an alias behind, so an upgraded cache gains the
-    ## accelerator without being rewritten.
+    ## The `.rec` file dropped here is the exact byte sequence an older
+    ## `writePerEdgeRecords` produced — the state of every edge directory in
+    ## every cache on every machine right now.
     var f = openFixture("legacy-container")
     defer: closeFixture(f)
     let weak = weakOf("legacy-fixture-edge")
@@ -496,34 +489,24 @@ suite "records written before the format change still read":
     for b in unhex(V2ContainerHex):
       raw.add(char(b))
     writeFile(dir / LegacyContainerName, raw)
-    check not fileExists(f.aliasPath(weak))
 
+    # No raise, and nothing servable comes out of it.
     let union = f.cache.loadPerEdgeRecords(weak)
-    check union.len == 1
-    check union[0].inputs.len == 3
-    check union[0].inputs[0].path == "/work/checkout/src/alpha.c"
-    check digestHex(union[0].strongFingerprint) == LegacyStrongHex
+    check union.len == 0
 
     resetOutputStateCheckStats()
-    let first = f.cache.readHotRecord(weak)
-    check first.found
-    check first.record.inputs.len == 3
-    check fileExists(f.aliasPath(weak))
+    let hot = f.cache.readHotRecord(weak)
+    check not hot.found
 
-    resetOutputStateCheckStats()
-    let second = f.cache.readHotRecord(weak)
-    check second.found
-    check actionRecordDecodeStats().records == 1
-    check second.record.inputs == first.record.inputs
+    # The file is left ALONE rather than deleted. Draining is a read-side
+    # refusal; reaching in and unlinking a user's cache entries would be a
+    # second, much larger decision, and `repro store gc` already owns it.
+    check fileExists(dir / LegacyContainerName)
 
-  test "a v5 record is refused by the older decoder, not misread":
-    ## The other half of the compatibility boundary §5.5 draws: "an older
-    ## reader treats the newer records as absent, missing permanently rather
-    ## than incorrectly". This binary cannot run the older decoder, so what
-    ## is checked here is the mechanism that produces that outcome — the
-    ## version field moved, and the decoder rejects versions it does not
-    ## know. A bump that left the version alone would be the dangerous case:
-    ## an old reader would parse new bytes as if they were old ones.
+  test "the record this binary writes is at the epoch, and only that decodes":
+    ## The boundary from the other side. A bump that left the version word
+    ## alone would be the dangerous case: an old reader would parse new bytes
+    ## as if they were old ones.
     var record = ActionResultRecord(
       weakFingerprint: weakOf("boundary"),
       policy: ffpTimestamp,
@@ -532,7 +515,21 @@ suite "records written before the format change still read":
       metadata: FileMetadata(kind: ffkRegular, sizeBytes: 1, mtimeNs: 2))]
     let encoded = encodeActionResultRecord(record)
     let version = uint16(encoded[4]) or (uint16(encoded[5]) shl 8)
-    check version == 5'u16
+    check version == 6'u16
+    check decodeActionResultRecord(encoded).inputs.len == 1
+
+    # Every pre-epoch version is refused on bytes that are otherwise a valid
+    # v6 frame — 5 included. 5 is the one worth naming: it is what a binary
+    # built from mainline writes today, and accepting it would drain the old
+    # records while leaving the recent ones, which is the failure mode this
+    # whole change exists to avoid.
+    for stale in [2'u16, 3'u16, 4'u16, 5'u16]:
+      var patched = encoded
+      patched[4] = byte(stale and 0xff'u16)
+      patched[5] = byte((stale shr 8) and 0xff'u16)
+      expect EnvelopeError:
+        discard decodeActionResultRecord(patched)
+
     # And an unknown FUTURE version is refused rather than guessed at, which
     # is the same rule applied in the same direction.
     var future = encoded

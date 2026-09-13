@@ -73,15 +73,22 @@
 ## Bless the tool that actually emitted -- `mktemp`, `git` -- in ITS own CLI
 ## spec, which is the stated model ("bless nonDeterminism based on domain
 ## knowledge of the invoked tool") read correctly: the invoked tool is the
-## child that drew the randomness, not the shell that forked it. That needs
-## plumbing this milestone does not have. `EntropyObservation` records
-## `source` and `origin` and drops `MonitorRecord.osPid`, so the engine
-## cannot tell which image in the tree emitted, even though io-mon reports it
-## and the `mrProcessExec` records in the same capture name every pid's
-## image.
+## child that drew the randomness, not the shell that forked it.
 ##
-## Until that exists, a shell gate stays uncacheable. That is the correct
-## outcome, not a gap.
+## THAT MECHANISM NOW EXISTS. `EntropyObservation` carries an `image`
+## resolved from `MonitorRecord.osPid` against the capture's own
+## `mrProcessExec` records, and `applyEntropyBlessingPolicy` asks
+## `repro_core/entropy_blessings.EntropyBlessedTools` about it per record;
+## `packages/mktemp.nim` and `packages/git.nim` carry the declarations, and
+## `t_entropy_image_blessings.nim` holds the table and those specs to the
+## same text. A gate whose every record belongs to a blessed tool publishes;
+## one that also runs `uuidgen` does not.
+##
+## SO THIS FILE IS NOT A PLACEHOLDER THAT THE NEW MECHANISM RETIRES. It is
+## the statement that the shell itself is still not the thing being vouched
+## for, and the per-image waiver makes that cheaper to hold rather than
+## harder: the case the shell blessing was asked for is now served by a claim
+## somebody can actually make.
 ##
 ## # One more measured trap, for whoever tries anyway
 ##

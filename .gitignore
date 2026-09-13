@@ -164,3 +164,9 @@ libs/repro_build_engine/tests/test_m9r75_source_write_reject
 # sources (column-aware tracer). Build noise for reprobuild; ignore it.
 macro_sourcemap_*.json
 **/macro_sourcemap_*.json
+
+# Agent tooling scratch. `claude --isolation worktree` materialises one git
+# worktree per agent under this path, inside the repo. They are disposable and
+# per-machine, and while an agent holds one the repo reads DIRTY — which the
+# pre-push gate refuses, so an untracked one blocks every push in the tree.
+.claude/worktrees/

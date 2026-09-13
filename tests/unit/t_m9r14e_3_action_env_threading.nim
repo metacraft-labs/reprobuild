@@ -256,6 +256,103 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       check deferred.argv[10] == "sh"
       check deferred.argv[11 .. ^1] == argv[7 .. ^1]
 
+    test "the runtime-env splice goes in front of a payload that has its own `--`":
+      ## THE THIRD CONSUMER OF `monitorPayloadArgIndex`, and the one nothing
+      ## graded.
+      ##
+      ## That function used to locate the payload by scanning the WHOLE argv
+      ## for the LAST `--`, and the 2026-09-09 repair made it scan FORWARD
+      ## from the wrapper's first argument to the FIRST one — the grammar
+      ## io-mon's own `parseRun` applies. Two consumers of the corrected index
+      ## were covered by `t_executed_binary_is_a_recorded_input` (the class-1
+      ## elision and the key mix). This is the third: it decides which SLICE of
+      ## a monitored argv the `export LD_LIBRARY_PATH=…` shell is spliced in
+      ## front of, so the repair moved a LOADER-PATH behaviour as well as an
+      ## attribution one — and nothing graded that consumer, in either
+      ## direction. Restoring the old backwards scan reddens these two cases
+      ## and no other case in this file.
+      ##
+      ## Every existing case in this file uses a payload with no `--` of its
+      ## own, where the two scans agree by construction. `cargo test -- …`,
+      ## `sh -c … -- …` and `git … -- <path>` all carry one, so this shape is
+      ## ordinary rather than adversarial.
+      ##
+      ## WHAT THE WRONG INDEX DOES, which is why the assertion is on the
+      ## SPLICE POSITION and not on a returned number. Pointed at the argument
+      ## after the PAYLOAD's separator, `wrapMonitoredPayloadWithRuntimeEnv`
+      ## copies `… -- /usr/bin/env runner --` through verbatim and puts the
+      ## exporting shell after it. The action then runs `/usr/bin/env runner`
+      ## — the program whose libraries the export exists for — with the loader
+      ## paths still absent, and hands it a `/bin/sh -c 'export …; exec "$@"'`
+      ## as a positional argument. The deferral silently applies to the wrong
+      ## program, and the symptom is a load failure inside the tool rather
+      ## than anything that names this function.
+      let payload = @["/usr/bin/env", "runner", "--", "/data/input.txt"]
+      let wrapper = @[
+        "/opt/repro/bin/repro", "internal", "io", "monitor",
+        "--depfile", "/tmp/action.iomon", "--interest", "file,proc,lib", "--"]
+      # THE DENOMINATOR: the wrapper's own separator is the last element of
+      # `wrapper`, and the payload carries a second one. Without both, the two
+      # scans cannot disagree and this case measures nothing.
+      check wrapper[^1] == "--"
+      check "--" in payload
+      let argv = wrapper & payload
+      let env = @["PATH=/usr/bin", "LD_LIBRARY_PATH=/source/sqlite/lib"]
+
+      let deferred = deferRuntimeLibraryEnvForShell(argv, env)
+      check envValue(deferred.env, "LD_LIBRARY_PATH") == ""
+      check envValue(deferred.env, "PATH") == "/usr/bin"
+      # Everything up to and including the WRAPPER's separator is untouched ...
+      check deferred.argv[0 ..< wrapper.len] == wrapper
+      # ... the exporting shell is spliced immediately after it ...
+      when defined(macosx):
+        check deferred.argv[wrapper.len] == resolveNonSipShell()
+        check deferred.argv[wrapper.len] != "/bin/sh"
+      else:
+        check deferred.argv[wrapper.len] == "/bin/sh"
+      check deferred.argv[wrapper.len + 1] == "-c"
+      check deferred.argv[wrapper.len + 2].startsWith(
+        "export LD_LIBRARY_PATH=/source/sqlite/lib; ")
+      check deferred.argv[wrapper.len + 2].endsWith("exec \"$@\"")
+      check deferred.argv[wrapper.len + 3] == "sh"
+      # ... and the WHOLE payload, its own `--` included, sits under that
+      # shell. This is the assertion the old backwards scan fails: it would
+      # put `/usr/bin/env runner --` before the shell and only
+      # `/data/input.txt` after it.
+      check deferred.argv[wrapper.len + 4 .. ^1] == payload
+      check deferred.argv[wrapper.len + 4] == "/usr/bin/env"
+      check deferred.argv.len == argv.len + 4
+
+    test "the StringTable launcher splices at the same index":
+      ## `deferRuntimeLibraryEnvForShell` has TWO overloads and they ask
+      ## `monitorPayloadArgIndex` separately — the seq/seq one above for the
+      ## RunQuota paths, this one for the direct bypass launcher. Rule 8: a
+      ## behaviour that exists at two call sites is graded at both, because
+      ## the second is what a later contributor edits without touching the
+      ## first.
+      let payload = @["/usr/bin/env", "runner", "--", "/data/input.txt"]
+      let wrapper = @[
+        "/opt/repro/bin/repro", "internal", "io", "monitor",
+        "--depfile", "/tmp/action.iomon", "--interest", "file,proc,lib", "--"]
+      let argv = wrapper & payload
+      let table = newStringTable(modeCaseSensitive)
+      table["PATH"] = "/usr/bin"
+      table["LD_LIBRARY_PATH"] = "/source/sqlite/lib"
+
+      let deferredArgv = deferRuntimeLibraryEnvForShell(argv, table)
+      check not table.hasKey("LD_LIBRARY_PATH")
+      check table["PATH"] == "/usr/bin"
+      check deferredArgv[0 ..< wrapper.len] == wrapper
+      when defined(macosx):
+        check deferredArgv[wrapper.len] == resolveNonSipShell()
+        check deferredArgv[wrapper.len] != "/bin/sh"
+      else:
+        check deferredArgv[wrapper.len] == "/bin/sh"
+      check deferredArgv[wrapper.len + 1] == "-c"
+      check deferredArgv[wrapper.len + 2].contains(
+        "export LD_LIBRARY_PATH=/source/sqlite/lib; ")
+      check deferredArgv[wrapper.len + 4 .. ^1] == payload
+
     test "non-shell actions retain runtime paths in their environment":
       let argv = @["/usr/bin/cc", "input.c"]
       let env = @["LD_LIBRARY_PATH=/source/lib"]

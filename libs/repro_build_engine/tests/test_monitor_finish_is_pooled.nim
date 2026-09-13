@@ -84,6 +84,41 @@ from repro_core/dependency_gathering import automaticMonitorGatheringPolicy
 
 when defined(linux) or defined(macosx):
   import io_mon
+  import std/posix as unix
+
+  proc detachedDescendantFixture() =
+    var ready: array[2, cint]
+    if unix.pipe(ready) != 0: quit(1)
+    let child = unix.fork()
+    if child < 0: quit(1)
+    if child == 0:
+      discard unix.close(ready[0])
+      let nullFd = unix.open("/dev/null", unix.O_RDWR)
+      if nullFd < 0: unix.exitnow(1)
+      for fd in 0.cint .. 2.cint:
+        if unix.dup2(nullFd, fd) < 0: unix.exitnow(1)
+      if nullFd > 2: discard unix.close(nullFd)
+      var signal = 'r'
+      var count: int
+      while true:
+        count = unix.write(ready[1], addr signal, 1)
+        if count >= 0 or osLastError() != OSErrorCode(unix.EINTR): break
+      if count != 1: unix.exitnow(1)
+      discard unix.close(ready[1])
+      sleep(4000)
+      unix.exitnow(0)
+    discard unix.close(ready[1])
+    var signal: char
+    var count: int
+    while true:
+      count = unix.read(ready[0], addr signal, 1)
+      if count >= 0 or osLastError() != OSErrorCode(unix.EINTR): break
+    discard unix.close(ready[0])
+    quit(if count == 1 and signal == 'r': 0 else: 1)
+
+  # Reuse the graph-built test executable; no compiler is spawned by the case.
+  if paramCount() == 1 and paramStr(1) == "--detached-descendant-fixture":
+    detachedDescendantFixture()
 
 template checkOrEcho(cond: untyped; msg: string) =
   ## `check` inside a plain `proc` prints "Check failed" and still reports
@@ -343,13 +378,19 @@ else:
         for entry in value:
           entries.add normalisePath(entry, workDir)
       elif value is seq[EntropyObservation]:
-        # BOTH components. `EntropyCallerOrigin` is the axis on which a
+        # ALL THREE components. `EntropyCallerOrigin` is the axis on which a
         # hosted monitor (io-mon running inside the ENGINE process) could
         # plausibly attribute the same read differently from a monitor in a
         # process of its own, so rendering only `source` would drop exactly
-        # the difference this case exists to find.
+        # the difference this case exists to find. `image` is the pid-resolved
+        # emitter, rendered for the stronger version of the same reason: the
+        # two arms resolve it from their OWN `mrProcessExec` records, so a
+        # difference in which execs each arm saw would show up here and
+        # nowhere else. It is normalised like any other path -- it IS one --
+        # and it is never a pid, which differs on every run by construction.
         for entry in value:
-          entries.add entry.source & "@" & $entry.origin
+          entries.add entry.source & "@" & $entry.origin & "@" &
+            normalisePath(entry.image, workDir)
       elif value is EntropyObservability:
         entries.add $value
       else:
@@ -398,7 +439,7 @@ else:
       ## quiesced fixture is the control: it exists so the detached-descendant
       ## fixture below cannot pass because io-mon grades this whole family
       ## ``mcIncomplete`` for some unrelated reason. The descendant fixture is
-      ## the acceptance: a real ``sleep`` is left running past the root's
+      ## the acceptance: a real child is left running past the root's
       ## exit, held alive across every grace window either path can open, so
       ## BOTH arms must reach ``mcIncomplete`` through the §4.1 guard. Two
       ## paths agreeing on ``mcComplete`` proves nothing.
@@ -435,18 +476,18 @@ else:
         let actionId = "tp2-evidence-" & tag
         let command =
           if descendant:
-            # A REAL detached descendant. The subshell's ``sleep`` outlives
-            # the root shell, inherits the shim through ``LD_PRELOAD``, and
-            # is therefore a live INJECTED descendant for the whole of the
-            # §4.1 grace window — which is the state that must downgrade the
-            # edge on both paths.
-            "cat marker.txt > out.txt; (sleep 4 >/dev/null 2>&1 &)"
+            # The child signals after fork-hook startup and stdio detachment.
+            # The root cannot exit before that, unlike an asynchronous sleep
+            # whose exec/constructor may still be pending at the first drain.
+            "cat marker.txt > out.txt; " & quoteShell(getAppFilename()) &
+              " --detached-descendant-fixture"
           else:
             "cat marker.txt > out.txt"
         let run = runBuild(graph([action(actionId,
           @["sh", "-c", command],
           cwd = work,
-          inputs = ["marker.txt"],
+          inputs = (if descendant: @["marker.txt", getAppFilename()]
+                    else: @["marker.txt"]),
           outputs = ["out.txt"],
           cacheable = false,
           dependencyPolicy = automaticMonitorGatheringPolicy(),
@@ -554,7 +595,7 @@ else:
       checkOrEcho liveHosted.pidCount > quiescedHosted.pidCount,
         "the descendant fixture produced no MORE processes than the " &
         "quiesced one (" & $liveHosted.pidCount & " vs " &
-        $quiescedHosted.pidCount & "), so the detached `sleep` this case " &
+        $quiescedHosted.pidCount & "), so the detached child this case " &
         "is built on is not in the evidence at all"
       checkOrEcho liveHosted.evidence == liveWrapped.evidence,
         "the ENGINE's evidence differs between the two arms for the " &
@@ -645,9 +686,9 @@ else:
           actions.add action("tp2-timing-" & tag & "-" & $i,
             @["sh", "-c",
               "cat marker.txt > out-" & $i & ".txt; " &
-              "(sleep 4 >/dev/null 2>&1 &)"],
+              quoteShell(getAppFilename()) & " --detached-descendant-fixture"],
             cwd = work,
-            inputs = ["marker.txt"],
+            inputs = ["marker.txt", getAppFilename()],
             outputs = ["out-" & $i & ".txt"],
             cacheable = false,
             governingLockIdentity = lockIdentityOutsideSolvedGraph())

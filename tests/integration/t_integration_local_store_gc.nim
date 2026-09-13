@@ -165,9 +165,8 @@ suite "integration_local_store_gc":
 
   test "public_cli_repro_store_gc_drives_the_same_protocol":
     ## End-to-end coverage of the actual `repro store gc` public CLI
-    ## binary. Builds the CLI in a temp dir, lays out a rooted prefix,
-    ## un-roots it, invokes `repro store gc --store-root=<root>`, and
-    ## checks the prefix moved into `gc/pending-deletion/`.
+    ## binary. An old prefix must retain the full default quarantine grace;
+    ## an explicit zero-grace sweep must then reclaim its payload.
     let root = createTempDir("repro-m56-gc-cli-", "")
     defer:
       try: removeDir(root) except OSError: discard
@@ -183,11 +182,30 @@ suite "integration_local_store_gc":
       s.registerRoot("session.delta", rkSession)
       s.attachPrefixToRoot("session.delta", real.prefixId)
       s.deleteRoot("session.delta")
+      setLastModificationTime(real.absolutePath,
+        getTime() - initDuration(days = 30))
+
+    let retained = execCmdEx(shellCommand([reproBin, "store", "gc",
+      "--store-root=" & storeRoot]))
+    check retained.exitCode == 0
+    check retained.output.contains("quarantined: 1")
+    check retained.output.contains("reclaimed: 0")
+    block retainedPayload:
+      var verifier = openStore(storeRoot)
+      defer: verifier.close()
+      check verifier.listPrefixes().len == 0
+      var pending: seq[string]
+      for kind, path in walkDir(verifier.gcPendingRoot):
+        if kind == pcDir:
+          pending.add(path)
+      require pending.len == 1
+      check readFile(pending[0] / "bin" / "tool") == "delta-body\n"
 
     let res = execCmdEx(shellCommand([reproBin, "store", "gc",
       "--store-root=" & storeRoot, "--grace-seconds=0"]))
     check res.exitCode == 0
-    check res.output.contains("quarantined: 1")
+    check res.output.contains("quarantined: 0")
+    check res.output.contains("reclaimed: 1")
 
     # Verify the prefix's index row is gone and the prefix tree is no
     # longer under prefixes/.

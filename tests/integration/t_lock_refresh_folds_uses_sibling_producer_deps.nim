@@ -40,6 +40,7 @@
 ## Skip rule: ``git`` missing on PATH, or repro unbuilt.
 
 import std/[os, osproc, strutils, unittest]
+import repro_lock
 
 const ReprobuildRepoRoot = currentSourcePath().parentDir().parentDir().parentDir()
   ## The reprobuild checkout root, resolved from THIS SOURCE FILE's path
@@ -73,6 +74,31 @@ package consumer:
     "producer"
   build:
     discard aggregate("consumer-aggregate", actions = @[])
+"""
+
+const resourceProducerRecipe = staticRead("../prodres5a/repro.nim") & """
+
+package constraintCarrier:
+  uses:
+    "nim >=2.2 <3.0"
+"""
+
+const resourceConsumerRecipe = """
+import repro_project_dsl
+import repro_dsl_stdlib/packages/sh
+
+package consumer:
+  defaultToolProvisioning "$mode"
+  uses:
+    "nim"
+    "producer"
+    "sh"
+  build:
+    discard shell(command = "exit 93", extraOutputs = @["must-not-build"],
+      actionId = "consumer.must-not-build")
+
+static:
+  doAssert not declared(containerDriver)
 """
 
 proc q(value: string): string = quoteShell(value)
@@ -155,3 +181,67 @@ suite "FUP-M: lock refresh folds uses: sibling producer deps":
       # sibling exists, so only genuine cross-repo source siblings are locked.
       check "path = \"../nim\"" notin lockBody
       check "name = \"nim\", path" notin lockBody
+
+  test "t_lock_refresh_folds_resource_provider_constraints_without_a_build_block":
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    require fileExists(reproBinary)
+    let scratch = getTempDir() / ("resource-lock-" & $getCurrentProcessId())
+    removeDir(scratch)
+    createDir(scratch)
+    defer: removeDir(scratch)
+    let producer = scratch / "producer"
+    let consumer = scratch / "consumer"
+    let hadSourceRoot = existsEnv("REPRO_FROM_SOURCE_ROOT")
+    let sourceRoot = getEnv("REPRO_FROM_SOURCE_ROOT")
+    putEnv("REPRO_FROM_SOURCE_ROOT", scratch / "empty-source-catalog")
+    defer:
+      if hadSourceRoot: putEnv("REPRO_FROM_SOURCE_ROOT", sourceRoot)
+      else: delEnv("REPRO_FROM_SOURCE_ROOT")
+    for repo in [producer, consumer]:
+      createDir(repo)
+      initRepo(gitBin, repo)
+    writeFile(producer / "repro.nim", resourceProducerRecipe)
+    require git(gitBin, producer, "add repro.nim").code == 0
+    require git(gitBin, producer, "commit -q -m resource").code == 0
+
+    for mode in ["path", "from-source"]:
+      checkpoint("provisioning mode=" & mode)
+      if mode == "from-source":
+        let leaf = scratch / "leaf"
+        createDir(leaf)
+        initRepo(gitBin, leaf)
+        writeFile(leaf / "repro.nim", resourceProducerRecipe
+          .replace("vm_harness.container", "leaf.instance")
+          .replace("wrapper: container", "wrapper: instance")
+          .replace("prodres5a", "leafProducer")
+          .replace("constraintCarrier", "leafConstraints")
+          .replace(">=2.2", ">=2.4"))
+        require git(gitBin, leaf, "add repro.nim").code == 0
+        require git(gitBin, leaf, "commit -q -m leaf").code == 0
+        writeFile(producer / "repro.nim", resourceProducerRecipe & "    \"leaf\"\n")
+        require git(gitBin, producer, "add repro.nim").code == 0
+        require git(gitBin, producer, "commit -q -m transitive").code == 0
+      writeFile(consumer / "repro.nim", resourceConsumerRecipe.replace("$mode", mode))
+      require git(gitBin, consumer, "add repro.nim").code == 0
+      require git(gitBin, consumer, "commit -q -m consumer").code == 0
+      let refresh = run(q(reproBinary) & " lock refresh " & q(consumer))
+      checkpoint(refresh.output)
+      require refresh.code == 0
+      let lockPath = consumer / "repro.lock"
+      let before = readFile(lockPath)
+      var nimVersion = ""
+      for pkg in parseSolvedGraphLock(before).packages:
+        if pkg.name == "nim": nimVersion = pkg.version
+      check nimVersion == (if mode == "path": "2.2.0" else: "2.4.0")
+      check not fileExists(consumer / "must-not-build")
+      check not dirExists(producer / ".repro/output")
+      check not dirExists(scratch / "leaf/.repro/output")
+
+      let warm = run(q(reproBinary) & " lock refresh " & q(consumer))
+      checkpoint(warm.output)
+      require warm.code == 0
+      check readFile(lockPath) == before
+      let validated = run(q(reproBinary) & " lock validate " & q(consumer))
+      checkpoint(validated.output)
+      check validated.code == 0

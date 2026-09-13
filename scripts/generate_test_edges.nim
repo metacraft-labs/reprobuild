@@ -544,7 +544,8 @@ proc legacySingleFileScan(repoRoot, rel: string): bool =
 
 const SelfInterposingTestStems = [
   "t_stackable_hooks_extracted_process_tree",
-  "t_m9r40_1_probe_clean_env"
+  "t_m9r40_1_probe_clean_env",
+  "test_monitor_finish_is_pooled"
 ]
   ## Tests that perform ``LD_PRELOAD`` interposition THEMSELVES, and so cannot
   ## be observed by the engine's io-monitor: two interposers on the same libc

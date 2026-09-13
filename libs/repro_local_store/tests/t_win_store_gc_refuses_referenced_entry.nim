@@ -41,6 +41,7 @@ import std/[os, sequtils, strutils, tempfiles, times, unittest]
 from repro_core/paths import extendedPath
 
 import repro_local_store
+import repro_local_store/sqlite3_binding
 
 type Fixture = object
   root: string
@@ -155,6 +156,102 @@ suite "store GC refuses an entry a live root holds":
     let report = f.store.gc(graceSeconds = 5 * 60)
     check report.reclaimed.len >= 1
     check not dirExists(extendedPath(collected.quarantinedPath))
+
+  test "targeted collection starts the grace when an old prefix is quarantined":
+    var f = openFixture("old-target")
+    defer: closeFixture(f)
+
+    let entry = f.realizeEntry("zstd", "1.5.6", "old source-built payload")
+    setLastModificationTime(entry.path, getTime() - initDuration(days = 30))
+    let collected = f.store.gcPrefix(entry.id, graceSeconds = 5 * 60)
+
+    check collected.found
+    check not collected.refused
+    check not collected.reclaimed
+    check not f.store.lookupPrefix(entry.id).found
+    check not dirExists(extendedPath(entry.path))
+    check fileExists(extendedPath(collected.quarantinedPath / "bin" / "tool"))
+    check f.store.gc(graceSeconds = 5 * 60).reclaimed.len == 0
+
+  test "a sweep retains an old prefix for a full quarantine grace":
+    var f = openFixture("old-sweep")
+    defer: closeFixture(f)
+
+    let entry = f.realizeEntry("zstd", "1.5.6", "old source-built payload")
+    setLastModificationTime(entry.path, getTime() - initDuration(days = 30))
+    let report = f.store.gc(graceSeconds = 5 * 60)
+
+    check report.quarantined.len == 1
+    require report.quarantinedPaths.len == 1
+    check report.reclaimed.len == 0
+    check not f.store.lookupPrefix(entry.id).found
+    check not dirExists(extendedPath(entry.path))
+    check fileExists(extendedPath(report.quarantinedPaths[0] / "bin" / "tool"))
+    check f.store.gc(graceSeconds = 5 * 60).reclaimed.len == 0
+
+  test "collection cannot move a prefix while another connection registers its root":
+    for targeted in [false, true]:
+      checkpoint("targeted=" & $targeted)
+      var f = openFixture("root-transaction-" & $targeted)
+      defer: closeFixture(f)
+      let entry = f.realizeEntry("tool", "1.0", "retained payload")
+      var writer = openStore(f.store.root)
+      defer: writer.close()
+      f.store.db.exec("PRAGMA busy_timeout = 0")
+
+      # The other connection owns the write lock, but its new root is not
+      # visible to the collector's read snapshot until COMMIT.
+      writer.db.exec("BEGIN IMMEDIATE")
+      var committed = false
+      defer:
+        if not committed:
+          writer.db.exec("ROLLBACK")
+      writer.registerRoot("active-session", rkSession)
+      writer.attachPrefixToRoot("active-session", entry.id)
+      check f.store.deadSet().len == 1
+      expect SqliteError:
+        if targeted:
+          discard f.store.gcPrefix(entry.id, graceSeconds = 60)
+        else:
+          discard f.store.gc(graceSeconds = 60)
+      check dirExists(extendedPath(entry.path))
+      check f.store.lookupPrefix(entry.id).found
+      check f.store.listAudit().len == 0
+
+      writer.db.exec("COMMIT")
+      committed = true
+      check f.store.rootsHolding(entry.id) == @["active-session"]
+      check f.store.gc(graceSeconds = 60).quarantined.len == 0
+      check dirExists(extendedPath(entry.path))
+
+      writer.deleteRoot("active-session")
+      let released = f.store.gc(graceSeconds = 0)
+      check released.quarantined.len == 1
+      check not f.store.lookupPrefix(entry.id).found
+      check not dirExists(extendedPath(entry.path))
+
+  when defined(posix):
+    test "quarantine refuses a symlink without stamping its external target":
+      var f = openFixture("symlink")
+      defer: closeFixture(f)
+
+      let entry = f.realizeEntry("zstd", "1.5.6", "external payload")
+      let outside = f.root / "external"
+      moveDir(entry.path, outside)
+      createSymlink(outside, entry.path)
+      setLastModificationTime(outside, getTime() - initDuration(days = 30))
+      let originalTime = getLastModificationTime(outside)
+
+      let collected = f.store.gcPrefix(entry.id, graceSeconds = 5 * 60)
+      check collected.found
+      check not collected.reclaimed
+      check collected.quarantinedPath.len == 0
+      check collected.reason.contains("refusing non-directory quarantine source")
+      check f.store.gc(graceSeconds = 5 * 60).quarantined.len == 0
+      check f.store.lookupPrefix(entry.id).found
+      check symlinkExists(entry.path)
+      check readFile(outside / "bin" / "tool") == "external payload"
+      check getLastModificationTime(outside) == originalTime
 
   test "a second root keeps the entry alive after the first releases":
     ## Reachability, not refcounting -- but the observable consequence has
