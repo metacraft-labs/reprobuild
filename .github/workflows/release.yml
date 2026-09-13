@@ -58,7 +58,7 @@ on:
 jobs:
   plan:
     name: Plan release
-    runs-on: eph-linux-x64
+    runs-on: [self-hosted, linux, x64]
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       version: ${{ steps.plan.outputs.version }}
@@ -428,7 +428,7 @@ jobs:
   publish-release:
     name: Publish release (all-or-nothing)
     needs: [plan, build-release]
-    runs-on: eph-linux-x64
+    runs-on: [self-hosted, linux, x64]
     # `always()` so a failed matrix reaches the explicit assertion below and
     # reports a RED publish job. Plain `needs:` semantics would SKIP this job,
     # which renders green-ish in the UI -- the same quiet non-event that let

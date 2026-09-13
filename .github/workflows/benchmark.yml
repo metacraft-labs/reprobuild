@@ -28,7 +28,7 @@ jobs:
           - platform: linux
             runner: '["self-hosted", "Linux", "X64", "benchmark"]'
           - platform: macos
-            runner: '["eph-macos-arm64"]'  # CIP-5: nix macOS benchmark leg → eph-macos-arm64
+            runner: '["self-hosted", "macos", "arm64"]'  # CIP-5: nix macOS benchmark leg → eph-macos-arm64
     runs-on: ${{ fromJSON(matrix.runner) }}
     steps:
       # Deliberately the first step. It decides whether the two
