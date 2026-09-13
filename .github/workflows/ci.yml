@@ -42,7 +42,7 @@ concurrency:
 jobs:
   lint:
     name: Lint
-    runs-on: eph-linux-x64  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
+    runs-on: [self-hosted, linux, x64]  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
     steps:
       - uses: actions/checkout@v4
       # Mint a GitHub App installation token via the CI Token Provider
@@ -164,7 +164,7 @@ jobs:
     # M3f is an execution-boundary contract, not a cross-compiled unit test.
     # Keeping this as its own required PR job means an unavailable Windows
     # service leaves the gate queued/pending; there is no skip-as-pass branch.
-    runs-on: eph-win-x64
+    runs-on: [self-hosted, windows, x64]
     steps:
       - uses: actions/checkout@v4
 
@@ -765,7 +765,7 @@ jobs:
 
   nix-build:
     name: Nix Build
-    runs-on: eph-linux-x64  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
+    runs-on: [self-hosted, linux, x64]  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
     steps:
       - uses: actions/checkout@v4
       - name: Mint installation token for cross-repo sibling access
