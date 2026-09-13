@@ -12157,6 +12157,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     stats.addCounterMetric("repro output record dir walks", osc.recordDirWalks)
     stats.addCounterMetric("repro output record dir entries",
       int(osc.recordDirEntries))
+    # Recorded-input checks answered without a syscall because the input was
+    # absent inside a published store output path. Read beside `repro fs
+    # probe`: the two must move in opposite directions by the same count, or
+    # the probes went away for some other reason. See
+    # `storeAbsenceSkipStats`.
+    stats.addCounterMetric("repro store absence skips",
+      storeAbsenceSkipStats())
     # The byte-scaled half of the cost model, beside the count-scaled half
     # above. Caching-Architecture.md §"Known Limit: The Default Policy Can
     # Serve A Stale Result" is a claim about which of the two a consultation
