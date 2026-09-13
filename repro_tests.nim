@@ -14049,6 +14049,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_same_project_fragment_selectors.nim",
+    binary: "build/test-bin/t_same_project_fragment_selectors",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_shared_mime_info_dev_stub.nim",
     binary: "build/test-bin/t_shared_mime_info_dev_stub",
     defines: @[],

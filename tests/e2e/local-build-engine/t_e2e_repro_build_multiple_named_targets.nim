@@ -90,22 +90,23 @@ proc writeMultiTargetProject(path: string) =
     "    \"m2-tool >=1.0 <2.0\"\n\n" &
     "  build:\n" &
     "    let marker = \".repro/m2-runs.log\"\n" &
-    "    m2Tool(actionId = \"build-alpha\",\n" &
+    "    let alpha = m2Tool(actionId = \"build-alpha\",\n" &
     "      input = \"src/alpha.txt\",\n" &
     "      output = \"build/alpha\",\n" &
     "      marker = marker)\n" &
-    "    m2Tool(actionId = \"build-beta\",\n" &
+    "    let beta = m2Tool(actionId = \"build-beta\",\n" &
     "      input = \"src/beta.txt\",\n" &
     "      output = \"build/beta\",\n" &
     "      marker = marker)\n" &
-    "    m2Tool(actionId = \"build-gamma\",\n" &
+    "    let gamma = m2Tool(actionId = \"build-gamma\",\n" &
     "      input = \"src/gamma.txt\",\n" &
     "      output = \"build/gamma\",\n" &
     "      marker = marker)\n" &
-    "    m2Tool(actionId = \"build-delta\",\n" &
+    "    let delta = m2Tool(actionId = \"build-delta\",\n" &
     "      input = \"src/delta.txt\",\n" &
     "      output = \"build/delta\",\n" &
-    "      marker = marker)\n")
+    "      marker = marker)\n" &
+    "    discard collect(\"test\", [alpha, beta, gamma, delta])\n")
 
 proc valueAfter(output, prefix: string): string =
   for line in output.splitLines:
@@ -129,9 +130,7 @@ proc reportAction(report: JsonNode; id: string): JsonNode =
       return item
   newJNull()
 
-suite "t_e2e_repro_build_multiple_named_targets":
-
-  test "t_e2e_repro_build_multiple_named_targets":
+proc checkMultiTargetBuild(selectors: openArray[string]) =
     let repoRoot = getCurrentDir()
     let tempRoot = createTempDir("repro-m2-multi-targets", "")
     defer: removeDir(tempRoot)
@@ -173,8 +172,7 @@ suite "t_e2e_repro_build_multiple_named_targets":
     # the pin applied in ``t_e2e_repro_build_named_target.nim``
     # (commit 30a7ce6) and ``t_e2e_m51_dsl_stdlib_file_ops.nim``
     # (commit 091cba4).
-    let output = requireSuccess(shellCommand([
-      reproBin, "build", "alpha", "beta", "gamma",
+    let output = requireSuccess(shellCommand(@[reproBin, "build"] & @selectors & @[
       "--daemon=off",
       "--tool-provisioning=path", "--log=actions", "--write-report"
     ], [("PATH", pathValue)]), projectRoot)
@@ -211,3 +209,10 @@ suite "t_e2e_repro_build_multiple_named_targets":
     check reportAction(report, "build-gamma"){"status"}.getStr() ==
       "asSucceeded"
     check reportAction(report, "build-delta").kind == JNull
+
+suite "t_e2e_repro_build_multiple_named_targets":
+  test "named target closures execute in one scheduler pass":
+    checkMultiTargetBuild(["alpha", "beta", "gamma"])
+
+  test "collection member closures execute in one scheduler pass":
+    checkMultiTargetBuild([".#test#alpha", "./#test#beta", ".#test#gamma"])

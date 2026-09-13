@@ -862,7 +862,7 @@ type
       ## is ``"."`` or ``".#<firstName>"`` so the legacy
       ## ``parseBuildTarget`` codepath still resolves a module.
     extraNameSelectors*: seq[string]
-      ## Name-shaped positionals beyond the first. The lowering pass in
+      ## Names and same-project action fragments beyond the first. The lowering pass in
       ## ``lowerProviderSnapshot`` unions every selector's dependency
       ## closure in one engine pass.
     targetWasOmitted*: bool
@@ -937,9 +937,9 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
   ##
   ## - The first positional whose ``classifyBuildSelector`` kind is
   ##   ``bskPath`` becomes the engine's project anchor (``target``).
-  ##   A second path-shaped positional is rejected — the engine still
-  ##   expects exactly one project anchor in M3 (qualified-name +
-  ##   ``--list-targets`` polish lands in M5).
+  ##   Additional action fragments for that same project join the
+  ##   selector union. Different project anchors and legacy module
+  ##   selections remain separate invocations.
   ## - The first name-shaped positional, when no path anchor is present,
   ##   becomes ``".#<name>"`` so ``parseBuildTarget`` routes it through
   ##   the fragment / action-selection codepath. When a path anchor is
@@ -966,10 +966,20 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
         result.target = sel
         anchorSet = true
       else:
+        let anchor = parseBuildTarget(result.target)
+        let candidate = parseBuildTarget(sel)
+        if anchor.fragmentKind == tfkActionSelection and
+            candidate.fragmentKind == tfkActionSelection and
+            cmpPaths(os.normalizedPath(absolutePath(anchor.modulePath)),
+              os.normalizedPath(absolutePath(candidate.modulePath))) == 0:
+          if candidate.selectedActionId != anchor.selectedActionId and
+              candidate.selectedActionId notin result.extraNameSelectors:
+            result.extraNameSelectors.add(candidate.selectedActionId)
+          continue
         raise newException(ValueError,
-          command & ": multiple path / fragment selectors are not " &
-            "supported in M3 (got '" & result.target & "' and '" & sel &
-            "'); name-shaped selectors may follow a single path anchor")
+          command & ": multiple path / fragment selectors must select " &
+            "actions in the same project (got '" & result.target & "' and '" &
+            sel & "'); use separate invocations for different project roots or modules")
     of bskQualified:
       # **Deferred Item D2** cross-project selector resolution. A
       # qualified selector ``<pkg>:<target>`` whose LHS names a sibling
