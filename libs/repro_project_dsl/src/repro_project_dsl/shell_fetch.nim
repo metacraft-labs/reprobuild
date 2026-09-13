@@ -44,6 +44,17 @@ proc shellFetchToolIdentityRefs*(hashTools: openArray[string];
 proc shellDoubleQuote(value: string): string =
   value.replace("\\", "/").replace("\"", "\\\"")
 
+proc shellFetchRuntimeEnv*(): seq[(string, string)] =
+  ## Acquisition tools must use their own runtimes, not the fetched product's
+  ## dependency libraries. Explicit action overrides survive auxiliary-path
+  ## projection without changing PATH, linker inputs, or monitor injection.
+  when defined(macosx):
+    @[("LD_LIBRARY_PATH", ""), ("DYLD_LIBRARY_PATH", "")]
+  elif defined(posix):
+    @[("LD_LIBRARY_PATH", "")]
+  else:
+    @[]
+
 proc appendCurlDownload*(script: var string; destination, url: string) =
   ## Download into a sibling temporary file and promote it only after curl
   ## succeeds. This keeps interrupted transfers from poisoning later runs.

@@ -91,7 +91,7 @@ libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim	nim	5
 libs/repro_build_engine/tests/test_no_progress_diagnostic.nim	nim	1
 libs/repro_build_engine/tests/test_s5_own_output_is_not_a_cache_input.nim	nim	6
 libs/repro_build_engine/tests/test_s7_cached_output_restore_mode.nim	nim	13
-libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	10
+libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	11
 libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	8
 libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim	nim	3
 libs/repro_cas_store/tests/t_cas_ingest_link.nim	nim	25
@@ -1448,7 +1448,7 @@ tests/unit/t_cached_source_dependency_closure.nim	nim	11
 tests/unit/t_capabilities.nim	nim	2
 tests/unit/t_config_nims_lib_resolution.nim	nim	7
 tests/unit/t_configure_build_tree_cleanup.nim	nim	5
-tests/unit/t_constructor_fetch_tool_refs.nim	nim	3
+tests/unit/t_constructor_fetch_tool_refs.nim	nim	4
 tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	2
 tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	5
 tests/unit/t_da1i_evidence_help_names_the_hazard.nim	nim	9

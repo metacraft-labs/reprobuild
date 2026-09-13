@@ -4251,6 +4251,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       pool = "fetch",
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "from-source-custom.fetch." & hashAlgTag,
+      env = shellFetchRuntimeEnv(),
       toolIdentityRefs = fetchToolRefs)
   # Shell-action chain: action[0] depends on the fetch action (or no
   # deps when no fetch); action[i>0] depends on action[i-1].
