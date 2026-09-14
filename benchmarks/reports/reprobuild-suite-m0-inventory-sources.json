@@ -34206,7 +34206,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_publish_surface_routing.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 35,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

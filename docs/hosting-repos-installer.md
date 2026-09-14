@@ -213,6 +213,17 @@ looks least like a misconfiguration and most like a broken product.
 `--archives <dir>` (release.yml's `staging/`) closes it, publishing the exact
 bytes that were released rather than a rebuild of them.
 
+All four of those names are fetched **fail-closed** — `repro-install.sh`'s
+`fetch` helper dies on a non-2xx and again on an empty body, and the tarball
+path verifies before unpacking with no rescue branch — so the publisher checks
+all four rather than one. `SHA256SUMS` and every asset it names are hard
+requirements (a manifest published without the assets it lists is a broken
+install, not a partial one); a missing `SHA256SUMS.asc` or `<asset>.asc` is a
+loud warning that says installs will **fail**, because there is no same-origin
+fallback to degrade to. It stays a warning so that a missing signature cannot
+take the trust anchor — published by the step that runs after these surfaces —
+down with it.
+
 **`scoop` was the wrong one.** A Scoop bucket is a **git repository** —
 `scoop bucket add` clones it — and R2 serves objects, not git. An R2 prefix
 full of `bucket/reprobuild.json` is a tree no client can consume. Terraform is
@@ -237,11 +248,25 @@ current published tree down first. Without it, publishing 0.1.4 would
 install would break. The S3/R2 uploads deliberately omit `--delete` for
 the same reason.
 
+`downloads` is the exception, and it is ignored there. Every key that surface
+writes is under `v<version>/`, no key outside this version's directory is read
+or rewritten, and the uploads do not delete — so a past release is untouched
+whether or not it was fetched. Fetching would download every archive of every
+past release, the largest objects the pipeline publishes and growing without
+bound, to write none of them back.
+
 `release.yml` runs this as the last step of `publish-release`, **after**
 the release is visible: metadata referencing assets nobody can fetch yet
 would make `apt update` succeed and `apt install` fail. It *skips with a
 warning* when there is no signing key (an unsigned repository is worse
 than none) or no `REPRO_PUBLISH_TARGET` (nowhere to publish).
+
+The step's closing line reports `published N of M selected ecosystem(s)` and
+then lists, by name and reason, every selected surface that published nothing.
+It used to count one per *selected* surface, so a git-backed surface with no
+repository and a skipped homebrew both read as published — on both releases so
+far the line overstated the result by two channels, and that line is the one an
+operator reads.
 
 ## The gate
 
@@ -519,19 +544,51 @@ from this checkout.
      `PUBLISH-THIS-SURFACE.md` into the staged tree so the instruction
      travels with the artifact.
    * `release.yml` turns each of those into a GitHub **`::warning::`** on
-     every release. That placement is the point: the gap used to be
-     recorded only as `infra`'s `git_backed_surfaces` terraform output,
-     which renders under `tofu output` — needing credentials that root will
-     not have until it is applied — so the one place it was written down
-     was a place nobody doing a release would look.
+     every release that reaches the surface. That placement is the point:
+     the gap used to be recorded only as `infra`'s `git_backed_surfaces`
+     terraform output, which renders under `tofu output` — needing
+     credentials that root will not have until it is applied — so the one
+     place it was written down was a place nobody doing a release would
+     look.
+   * when a git-backed surface **publishes nothing at all**, it still
+     announces. `announce_git_surface_prerequisite` is reached only from
+     `upload_tree`, and the homebrew skip below used to return before it —
+     so on every release shipped so far homebrew emitted no `PREREQUISITE:`
+     block, no marker and no `::warning::`, which is exactly the silence
+     this machinery exists to remove. A skipped surface now emits **both**
+     announcements when both apply, under two separate markers:
+
+     | marker | fact | remedy |
+     |---|---|---|
+     | `REPRO_PUBLISH_PREREQUISITE` | the surface is a git repository and that repository does not exist | one-off, by an org admin |
+     | `REPRO_PUBLISH_SKIPPED` | the surface generated nothing for this release's artifact set | build the missing artifact, or accept it for this release |
+
+     They are deliberately **not** one message. "homebrew was skipped
+     because this release has no macOS archive" and "homebrew needs a
+     repository that does not exist" have different owners and different
+     fixes, and collapsing them sends the operator to the wrong one.
 
    **Homebrew now has a manifest generator.** `--ecosystem homebrew`
    writes `Formula/reprobuild.rb` from the macOS archive's real SHA-256.
    Under `--ecosystem all` it *skips* when the release carries no macOS
    archive (v0.1.2 and v0.1.3 were both such releases, and dying there
-   would take the trust anchor with it); asked for by name it fails,
-   because a run told to publish a formula that silently published none is
-   the worse answer.
+   would take the trust anchor with it) — and says so, loudly, rather than
+   returning silently; asked for by name it fails, because a run told to
+   publish a formula that silently published none is the worse answer.
+
+   **The version segment is appended once, by the publisher.**
+   `--scoop-downloads-base` names the **root** the per-release directory
+   hangs under, and the script appends `/v<version>/<asset>`. That is what
+   `repro-install.sh --method tarball` fetches and what the `downloads`
+   bucket layout writes, and for a GitHub release the appended
+   `v<version>` *is* the tag, so the root
+   `https://github.com/<owner>/<repo>/releases/download` yields the
+   canonical asset URL. `release.yml` used to pass the release directory
+   itself, so the generated URL doubled the segment
+   (`…/download/v0.1.3/v0.1.3/<asset>`) and 404'd — for Scoop from the
+   start, and for the Homebrew formula the moment it started using the same
+   base. A base that already ends in the version is now **refused**, so the
+   defect cannot return from the other end.
 
 6. **One change that belongs in `infra`, stated and not made.** Nothing in
    the five-bucket layout is wrong. The one thing worth moving is where the
