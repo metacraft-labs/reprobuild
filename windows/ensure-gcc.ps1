@@ -278,7 +278,7 @@ function Ensure-Gcc {
       $reported = if ($installedVersion) { $installedVersion } else { "unknown" }
       throw ("ensure-gcc: GCC_VERSION pins $version but the WinLibs release " +
              "'$release' installed a compiler reporting $reported. Fix the " +
-             "pins in windows/toolchain-versions.env — and keep them in step " +
+             "pins in windows/toolchain-versions.env and keep them in step " +
              "with the gcc-winlibs entry in the builtin catalog, " +
              "libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/gcc_winlibs.nim.")
     }

@@ -51,6 +51,11 @@ you suspect the code.
 
 ## What `env.ps1` provisions that is not obvious
 
+CI parses `env.ps1` and `windows/*.ps1` with Windows PowerShell 5.1 before
+provisioning tools. Keep executable strings ASCII in scripts without a UTF-8
+BOM: 5.1's legacy file decoding can turn punctuation into a quote and prevent
+the entire bootstrap script from loading.
+
 `windows/toolchain-versions.env` holds the pins; `windows/ensure-*.ps1` do the
 work. Four of them are hard dependencies whose absence produces a misleading
 error rather than a missing-dependency message:
