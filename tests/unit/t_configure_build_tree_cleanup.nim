@@ -19,6 +19,10 @@ when defined(reproProviderMode):
     config:
       discard
 
+  package autotoolsCleanupTest:
+    config:
+      discard
+
   proc dummyRequest(projectRoot, packageName: string): ProviderGraphRequest =
     ProviderGraphRequest(
       kind: prkGraphInvocation,
@@ -113,7 +117,74 @@ when defined(reproProviderMode):
       check not dirExists(root / buildDir)
       check readFile(unrelated) == "keep\n"
 
+  proc autotoolsConfigure(root, srcDir, buildDir: string;
+                         srcPatches: seq[string] = @[];
+                         bootstrap = false;
+                         skipConfigure = false): BuildActionDef =
+    let name = "autotoolsCleanupTest"
+    let pkg = PackageDef(packageName: name, sourceFile: root / "repro.nim")
+    let fragment = buildPackageFragment(pkg, dummyRequest(root, name),
+      proc() =
+        discard autotools_package(srcDir = srcDir, buildDir = buildDir,
+          srcPatches = srcPatches, patchHardcodedFile = bootstrap,
+          skipConfigure = skipConfigure),
+      includeDefault = false)
+    for action in extractActions(fragment):
+      if action.commandStatsId == "autotools_package.configure":
+        return action
+    raise newException(ValueError, "missing Autotools configure action")
+
 suite "configure build-tree cleanup caching":
+  test "Autotools excludes only the discarded out-of-tree configure state":
+    when defined(reproProviderMode):
+      let root = createTempDir("repro-autotools-discarded-", "")
+      defer: removeDir(root)
+      writeFile(root / "repro.nim", "discard\n")
+      let configure = autotoolsConfigure(root, "src", "build")
+      check configure.dependencyPolicy.kind == bdpAutomaticMonitor
+      check configure.dependencyPolicy.ignoredInputPrefixes == @[root / "build"]
+      check configure.outputs == @[root / "build" / ".repro-configure.stamp"]
+      check root / "src" in configure.readOnlyRoots
+
+  test "Autotools in-source configure retains its observed inputs":
+    when defined(reproProviderMode):
+      let root = createTempDir("repro-autotools-in-source-", "")
+      defer: removeDir(root)
+      writeFile(root / "repro.nim", "discard\n")
+      let configure = autotoolsConfigure(root, "./src", "src")
+      check configure.dependencyPolicy.kind == bdpAutomaticMonitor
+      check configure.dependencyPolicy.ignoredInputPrefixes.len == 0
+      check configure.outputs.len == 0
+
+  test "Autotools pre-cleanup patches and bootstrap retain observed inputs":
+    when defined(reproProviderMode):
+      let root = createTempDir("repro-autotools-before-clean-", "")
+      defer: removeDir(root)
+      writeFile(root / "repro.nim", "discard\n")
+      let patched = autotoolsConfigure(root, "src", "build",
+        srcPatches = @["test ! -f build/input || cp build/input src/settings"])
+      let bootstrapped = autotoolsConfigure(root, "src", "build", bootstrap = true)
+      check patched.dependencyPolicy.ignoredInputPrefixes.len == 0
+      check bootstrapped.dependencyPolicy.ignoredInputPrefixes.len == 0
+
+  test "Autotools raw Makefile copying creates its configure stamp in the build tree":
+    when defined(reproProviderMode) and not defined(windows):
+      let root = createTempDir("repro-autotools-copy-stamp-", "")
+      defer: removeDir(root)
+      writeFile(root / "repro.nim", "discard\n")
+      createDir(root / "src")
+      writeFile(root / "src" / "Makefile", "all:\n\t@true\n")
+      let configure = autotoolsConfigure(root, "src", "build", skipConfigure = true)
+      check configure.dependencyPolicy.ignoredInputPrefixes == @[root / "build"]
+      let execution = execCmdEx(quoteShellCommand(configure.inlineArgv()),
+        workingDir = root)
+      checkpoint execution.output
+      check execution.exitCode == 0
+      check fileExists(root / "build" / ".repro-configure.stamp")
+      check readFile(root / "build" / "Makefile") == readFile(root / "src" / "Makefile")
+    else:
+      skip()
+
   test "CMake cleanup creates its missing stamp directory at execution":
     when defined(reproProviderMode) and not defined(windows):
       let root = createTempDir("repro-cmake-clean-exec-", "")

@@ -521,7 +521,8 @@ proc autotools_package*(srcDir: string;
   var postConfigureSuffix = ""
   for command in postConfigureCommands:
     postConfigureSuffix.add(" && ( " & command & " )")
-  let configureScript =
+  let configureStampName = ".repro-configure.stamp"
+  var configureScript =
     if skipConfigure:
       patchPrefix & bootstrapPrefix &
       cleanBuildPrefix & "mkdir -p " & shellBuildDir & " && cp -aL " &
@@ -532,6 +533,13 @@ proc autotools_package*(srcDir: string;
         shellBuildDir & " && " & nativeBuildEnvPrefix & srcFromBuild & "/" &
         configureScriptName & " " & configureArgs.join(" ") &
         postConfigureSuffix
+  if relBuildDir != relSrcDir:
+    # Keep the configure witness in the tree, but outside make's generated
+    # files. Removing the build tree must also invalidate configure reuse.
+    let stampPath =
+      if skipConfigure: relBuildDir & "/" & configureStampName
+      else: configureStampName
+    configureScript.add(" && : > " & quoteShell(stampPath))
   let configureArgv = @["sh", "-c", configureScript]
   let call = inlineExecCall(configureArgv)
   let actionId = defaultToolActionId(call)
@@ -573,6 +581,13 @@ proc autotools_package*(srcDir: string;
   let m9r79ConfSrcDirAbs =
     if projectRoot.len > 0: projectRoot / srcDir
     else: srcDir
+  var configureIgnoredRoots, configureOutputs: seq[string] = @[]
+  if relBuildDir != relSrcDir:
+    configureOutputs.add(m9r79ConfBuildDirAbs / configureStampName)
+    if srcPatches.len == 0 and not patchHardcodedFile:
+      # Cleanup runs first, so later make writes are not prior inputs.
+      # Patches/bootstrap run before cleanup and may read the old tree.
+      configureIgnoredRoots.add(m9r79ConfBuildDirAbs)
   var m9r79ConfReadOnly: seq[string] = @[]
   if not patchHardcodedFile and not allowSourceWrites and
       srcPatches.len == 0 and
@@ -583,8 +598,9 @@ proc autotools_package*(srcDir: string;
     call = call,
     deps = configureDeps,
     inputs = configureInputs,
+    outputs = configureOutputs,
     pool = "compile",
-    dependencyPolicy = automaticMonitorPolicy(),
+    dependencyPolicy = automaticMonitorPolicy(configureIgnoredRoots),
     commandStatsId = "autotools_package.configure",
     toolIdentityRefs = @["sh"],
     env = extraEnv,
