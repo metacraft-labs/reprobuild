@@ -60,7 +60,11 @@ die() { printf 'reprobuild-buildusers: %s\n' "$1" >&2; exit "${2:-1}"; }
 note() { printf 'reprobuild-buildusers: %s\n' "$1" >&2; }
 
 usage() {
-  sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'
+  # Print the header comment block, from line 2 to the first line that
+  # is not a comment. A hardcoded last line drifts: `2,48p` already cut
+  # the exit-code-4 description off mid-sentence, and would silently cut
+  # more off every time a line is added above it.
+  sed -n '2,${/^#/!q;s/^# \{0,1\}//;p;}' "$0"
 }
 
 # --- argument parsing -------------------------------------------------------
