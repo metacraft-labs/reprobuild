@@ -102,17 +102,85 @@ suite "Bootstrap-And-Self-Build B1: repro build apps collection":
     # Keep this assertion tied to the collection body, rather than accepting
     # matching literals elsewhere in the project file. The dynamic test below
     # then drives that collection and verifies every declared output.
-    let projectText = readFile(repoRoot / "repro.nim")
-    check "executable reproPeerCacheTier2:" in projectText
-    check "executable reproCacheDaemon:" notin projectText
-    let appsStart = projectText.find(
+    #
+    # COMPUTED OVER CODE, NOT OVER PROSE — and over TWO readings of the same
+    # file, one per mode, because this scan's needles are not all the same
+    # kind of thing and a single reading is wrong for half of them.
+    #
+    #   * ``executable reproPeerCacheTier2:``, ``executable
+    #     reproCacheDaemon:`` and BOTH slice markers
+    #     (``var reprobuildAppsActions: seq[BuildActionDef] = @[]``,
+    #     ``collect(… reprobuildAppsActions)``) are CODE spellings — DSL
+    #     command syntax, a variable declaration, a call. They must be read
+    #     off ``projectCode`` (``nimSourceCodeOnly``: comments AND literals
+    #     blanked), because over literal-keeping text a ``const`` or a
+    #     ``debugEcho`` argument spelling them satisfies the needle exactly
+    #     as a comment does.
+    #   * ``source = "apps/…"``, ``binary = "build/bin/…"``, ``actionId =
+    #     "reprobuild.apps.…"`` and the negative ``"apps/repro-cache-daemon/"``
+    #     ARE string literals. They must be read off ``projectLiterals``
+    #     (``nimSourceCommentsBlanked``), because code-only text blanks the
+    #     very thing they look for.
+    #
+    # Both readers BLANK IN PLACE and preserve length and line structure, so
+    # an offset located in one indexes the other. That is what lets the apps
+    # block be delimited by code markers and then searched for literals; the
+    # ``doAssert`` below pins the property the splice depends on rather than
+    # trusting it.
+    #
+    # MEASURED (DA-8): the ``executable reproPeerCacheTier2:`` slot AND the
+    # whole ``nim.c`` edge that puts it in the apps collection were commented
+    # out — code deleted, its exact text left standing as prose — and this
+    # case stayed GREEN on all six assertions. That is why comments are
+    # blanked at all.
+    #
+    # MEASURED AGAIN (DA-8, review bypass): with the single comments-blanked
+    # reader that first fixed the above, renaming the real slot to
+    # ``reproPeerCacheTierTwo`` with NO comment and adding
+    # ``const tier2SlotDoc = "executable reproPeerCacheTier2:"`` left all
+    # three cases ``[OK]`` — the literal did the work.
+    #
+    # BOTH SLICE MARKERS HAD THE IDENTICAL HOLE, and both were measured:
+    #   * opening marker — the tier-2 ``nim.c`` edge MOVED OUT of the apps
+    #     collection into another seq, with a bare ``const`` re-spelling
+    #     ``var reprobuildAppsActions: seq[BuildActionDef] = @[]`` earlier in
+    #     the file so the slice widened to swallow it: ``[OK]`` pre-split.
+    #   * closing marker — the collection renamed to ``collect(
+    #     "applications", …)`` with a triple-quoted ``const`` re-spelling the
+    #     old line after the block: ``[OK]`` pre-split.
+    # Both go RED here. That is why the code needles are on ``projectCode``.
+    #
+    # STILL OPEN, and measured against THIS code so nobody reads the two
+    # readers as making the markers unforgeable: a ``when false:`` block is
+    # neither a comment nor a literal, so NEITHER reader blanks it, and Nim
+    # only parses such a body. The same tier-2 edge moved out of the
+    # collection and left standing under ``when false:`` — at the top level
+    # or here — keeps all six assertions ``[OK]``. The fix belongs in
+    # ``nimSourceStripped``, whose doc comment records it; see DA-8.
+    let rawProject = readFile(repoRoot / "repro.nim")
+    let projectCode = nimSourceCodeOnly(rawProject)
+    let projectLiterals = nimSourceCommentsBlanked(rawProject)
+    doAssert projectCode.len == projectLiterals.len
+    check "executable reproPeerCacheTier2:" in projectCode
+    check "executable reproCacheDaemon:" notin projectCode
+    let appsStart = projectCode.find(
       "var reprobuildAppsActions: seq[BuildActionDef] = @[]")
-    let appsEnd = projectText.find(
-      "discard collect(\"apps\", reprobuildAppsActions)", appsStart)
+    # The closing marker is spelled WITHOUT its ``"apps"`` argument, because
+    # ``projectCode`` has blanked that literal out. Its literal half is then
+    # graded AT THE OFFSET the code half was found at, not by searching for
+    # it — ``check "collect(\"apps\", …)" in projectLiterals`` would be
+    # satisfied by any ``const`` elsewhere in the file spelling it, which is
+    # the very bypass this case is being hardened against.
+    const CollectHead = "discard collect(\"apps\""
+    let appsEnd = projectCode.find(", reprobuildAppsActions)", appsStart)
     check appsStart >= 0
     check appsEnd > appsStart
     if appsStart >= 0 and appsEnd > appsStart:
-      let appsBlock = projectText[appsStart ..< appsEnd]
+      check appsEnd >= CollectHead.len
+      if appsEnd >= CollectHead.len:
+        check projectLiterals[appsEnd - CollectHead.len ..< appsEnd] ==
+          CollectHead
+      let appsBlock = projectLiterals[appsStart ..< appsEnd]
       check "source = \"apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim\"" in
         appsBlock
       check "binary = \"build/bin/repro-peer-cache-tier2\"" in appsBlock
@@ -121,7 +189,14 @@ suite "Bootstrap-And-Self-Build B1: repro build apps collection":
 
   test "standalone bootstrap stages the Nix provisioning daemon":
     let repoRoot = findRepoRoot()
-    let buildScript = readFile(repoRoot / "scripts" / "build_apps.sh")
+    # The same defect has a SHELL form, and the Nim stripper does not apply.
+    # ``shellSourceCommentsBlanked`` blanks ``#`` comments outside quotes;
+    # literals stay, because a shell needle is a command line whose operands
+    # may or may not be quoted. The script already carries a ``#`` comment
+    # naming ``reprobuild-nix-daemon`` three lines above the staging it
+    # documents, so this scan is one reworded sentence from auditing prose.
+    let buildScript = shellSourceCommentsBlanked(
+      readFile(repoRoot / "scripts" / "build_apps.sh"))
     check "cp -f tools/reprobuild-nix-daemon/reprobuild-nix-daemon" in
       buildScript
     check "build/bin/reprobuild-nix-daemon" in buildScript

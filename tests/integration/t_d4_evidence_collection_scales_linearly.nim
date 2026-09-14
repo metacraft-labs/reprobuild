@@ -55,6 +55,8 @@
 
 import std/[os, sets, strutils, unittest]
 
+from repro_test_support import nimSourceCodeOnly
+
 const RepoMarker = "repro.nim"
 
 proc findRepoRoot(): string =
@@ -162,12 +164,30 @@ suite "Deferred-D4: collectEvidence aggregation scales linearly":
     let enginePath = repoRoot / "libs" / "repro_build_engine" / "src" /
       "repro_build_engine.nim"
     check fileExists(enginePath)
-    let src = readFile(enginePath)
+    # COMPUTED OVER CODE, NOT OVER PROSE — mode: CODE ONLY (comments AND
+    # literals blanked). Every needle in this case is a CODE spelling — a
+    # proc signature, a type name, a dotted call — and none of them is a
+    # quoted string, so blanking literals costs nothing and closes the second
+    # half of the hazard.
+    #
+    # MEASURED (DA-8): the ``EvidenceSeenSets`` declaration was renamed away
+    # in the engine and this case stayed GREEN at 2/2, satisfied by the one
+    # ``##`` doc comment further down the file that cites the type as a
+    # precedent. Two separate defects were behind that: the scan read prose,
+    # and the needle graded the NAME rather than the DECLARATION. Both are
+    # fixed below.
+    #
+    # It matters in the other direction too — this case carries eight
+    # ``check not (… in …)`` anti-regression assertions, and over raw text a
+    # comment that merely QUOTES the legacy call shape reddens an engine that
+    # no longer contains one.
+    let src = nimSourceCodeOnly(readFile(enginePath))
 
     # The HashSet overload must exist in the source.
     check "proc addUnique(values: var seq[string]; seen: var HashSet[string]" in src
-    # The side-car type must exist.
-    check "EvidenceSeenSets" in src
+    # The side-car type must be DECLARED — not merely named, which any use
+    # site or any sentence about it also does.
+    check "EvidenceSeenSets* = object" in src
     # The hot procs must each receive or initialise an EvidenceSeenSets / HashSet.
     check "proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets" in src
     check "proc collectConvertedEvidence" in src

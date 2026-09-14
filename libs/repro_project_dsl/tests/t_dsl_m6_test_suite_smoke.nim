@@ -25,6 +25,8 @@ import std/[os, strutils, unittest]
 
 import repro_tests
 
+from repro_test_support import nimSourceCodeOnly
+
 const RepoRootMarker = "repro.nim"
 
 proc findRepoRoot(): string =
@@ -80,7 +82,18 @@ suite "Project-DSL-Composition M6 smoke":
     # ``build/test-bin/`` paths (which contain ``build:``-adjacent
     # substrings in unrelated contexts) don't false-positive.
     let repoRoot = findRepoRoot()
-    let content = readFile(repoRoot / "repro_tests.nim")
+    # COMPUTED OVER CODE, NOT OVER PROSE — mode: CODE ONLY (comments AND
+    # literals blanked). Every needle here is a CODE spelling — a declaration
+    # header, an exported identifier — never a quoted string, so blanking
+    # literals costs nothing and closes the second half of the hazard: a
+    # ``checkpoint``/``echo`` argument naming the symbol matches a raw scan
+    # just as a comment does.
+    #
+    # MEASURED (DA-8): ``const reprobuildTestSpecs*`` was renamed away in
+    # ``repro_tests.nim`` and this case stayed GREEN at 7/7, satisfied by the
+    # generator's own header comment — "This module is a plain Nim module
+    # exporting a single const, ``reprobuildTestSpecs*``".
+    let content = nimSourceCodeOnly(readFile(repoRoot / "repro_tests.nim"))
     var sawBuildBlockOpener = false
     var sawBuildNimUnittestCall = false
     for line in content.splitLines():
@@ -91,8 +104,12 @@ suite "Project-DSL-Composition M6 smoke":
         sawBuildNimUnittestCall = true
     check not sawBuildBlockOpener
     check not sawBuildNimUnittestCall
-    check "reprobuildTestSpecs*" in content
-    check "TestSpec*" in content
+    # GRADE THE DECLARATION, NOT THE NAME. A bare ``"reprobuildTestSpecs*" in
+    # content`` is still satisfied by any USE of the symbol, so it cannot tell
+    # "this module declares the table" — which is the whole claim — from
+    # "this module mentions it". Pin the two declaration headers.
+    check "const reprobuildTestSpecs*: seq[TestSpec] = @[" in content
+    check "TestSpec* = object" in content
 
   test "repro.nim no longer includes repro.tests.nim":
     # The pre-M6 ``include "repro.tests.nim"`` line is what the

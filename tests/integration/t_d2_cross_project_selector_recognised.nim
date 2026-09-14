@@ -69,17 +69,72 @@ suite "Deferred Item D2: <pkg>:<target> cross-project selector recognised":
     let resolverSource = reprobuildRoot / "libs" / "repro_cli_support" /
       "src" / "repro_cli_support.nim"
     check fileExists(resolverSource)
-    let body = readFile(resolverSource)
-    # Structural guards — at least one of each must be present so a
-    # future refactor can rename internals without breaking the test,
-    # but cannot accidentally remove the cross-project recognition.
-    check ("findSiblingProjectFile" in body)
-    check ("D2" in body) # The implementation comments tag the feature.
-    # The qualified-selector arm must reach the sibling-discovery
-    # helper. Without this call site the recognition path is dead.
-    # One call site (in ``parseAndResolveSelectors``) plus the proc
-    # definition itself == 2 occurrences of ``findSiblingProjectFile``.
-    check body.count("findSiblingProjectFile") >= 2
+
+    # NON-VACUITY FIXTURE FOR THE TWO HELPERS THIS CASE RESTS ON.
+    #
+    # Without it, a stripper that returned the empty string and a counter
+    # that always returned a large number would both leave the assertions
+    # below green while measuring nothing — the "audit that always counts
+    # zero" the campaign has already been bitten by once. The fixture spells
+    # one instance of every bypass the review found, so this case reddens if
+    # any of them stops being seen.
+    const CounterFixture = """
+proc findSiblingProjectFile*(name: string): string = ""   # definition
+let a = findSiblingProjectFile(name)                      # f(a)
+let b = root.findSiblingProjectFile(name)                 # a.f(b)
+let c = find_sibling_project_file(name)                   # folded spelling
+let d = root.findSiblingProjectFile name                  # command syntax
+let e = myFindSiblingProjectFileHelper(name)              # NOT this one
+echo "findSiblingProjectFile"                             # NOT a literal
+# findSiblingProjectFile                                  # NOT a comment
+"""
+    let fixtureCode = nimSourceCodeOnly(CounterFixture)
+    check countNimIdentifier(fixtureCode, "findSiblingProjectFile") == 5
+    check countNimIdentifier(CounterFixture, "findSiblingProjectFile") == 7
+    check countNimIdentifier(fixtureCode, "noSuchHelperAnywhere") == 0
+    check countNimIdentifier(fixtureCode, "myFindSiblingProjectFileHelper") == 1
+
+    # COMPUTED OVER CODE, NOT OVER PROSE — mode: CODE ONLY (comments AND
+    # literals blanked). The needle is an identifier, which is always a code
+    # spelling, and an identifier is exactly what a ``checkpoint`` string or
+    # a doc comment can also contain.
+    #
+    # MEASURED (DA-8), and this one was LIVE rather than prospective: the
+    # ``findSiblingProjectFile`` DEFINITION and ALL FIVE of its call sites
+    # were renamed away, and this case stayed GREEN — the CLI carries three
+    # ``##``/``#`` mentions of the name today, which satisfied both the
+    # presence check and the ``>= 2`` count on their own. The comment that
+    # used to sit here claimed the audit "cannot accidentally remove the
+    # cross-project recognition"; removing it was precisely what it could not
+    # see.
+    let code = nimSourceCodeOnly(readFile(resolverSource))
+
+    # COUNTED AS A WHOLE IDENTIFIER, FOLDED THE WAY NIM FOLDS IDENTIFIERS.
+    # Stripping comments alone is necessary and not sufficient: a substring
+    # count of ``"findSiblingProjectFile("`` is defeated by
+    # ``root.findSiblingProjectFile selector`` (Nim has four call spellings
+    # and only two carry a paren) and by ``find_sibling_project_file(...)``
+    # (identifiers are case- and underscore-insensitive after the first
+    # character). ``countNimIdentifier`` sees all of those and does not see a
+    # longer name that merely contains this one.
+    let mentions = countNimIdentifier(code, "findSiblingProjectFile")
+    checkpoint "whole-identifier uses in code: " & $mentions
+
+    # The helper must be DEFINED here, not merely named. Graded separately
+    # from the count so "the proc is gone and something else spells its name"
+    # cannot pass as "the proc is here".
+    check "proc findSiblingProjectFile*(" in code
+
+    # The qualified-selector arm must reach the sibling-discovery helper.
+    # Without a call site the recognition path is dead code. The definition
+    # accounts for one occurrence, so N call sites means N + 1 identifiers.
+    check mentions >= 3
+
+    # DELIBERATELY OVER RAW TEXT, and not part of the soundness argument
+    # above: the feature tag lives only in the implementation comments, so
+    # blanking comments would delete its subject. Kept apart from the code
+    # assertions so it is never mistaken for one.
+    check ("D2" in readFile(resolverSource))
 
   test "engine accepts runquota:runquotad without a usage dump":
     let reprobuildRoot = findRepoRoot()

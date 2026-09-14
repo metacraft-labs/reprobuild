@@ -23,6 +23,8 @@
 
 import std/[algorithm, os, sets, strutils, tables, unittest]
 
+from repro_test_support import nimSourceCommentsBlanked
+
 const ReproBuildRoot {.strdefine.} = ""
 
 proc reproRoot(): string =
@@ -221,10 +223,26 @@ suite "M9.R.10a exec-name audit":
     let mesonRecipe = root / "recipes" / "packages" / "source" / "meson" /
       "repro.nim"
     check fileExists(mesonRecipe)
-    let content = readFile(mesonRecipe)
+    # COMPUTED OVER CODE, NOT OVER PROSE — mode: COMMENTS BLANKED, LITERALS
+    # KEPT. Both needles below ARE string literals (``"python3 >=3.8"``,
+    # quotes included), so ``nimSourceCodeOnly`` would blank the very text
+    # this case looks for and the positive assertion would be vacuous.
+    # ``nimSourceCommentsBlanked`` is the mode a literal needle requires.
+    #
+    # MEASURED (DA-8): the recipe's whole ``nativeBuildDeps:`` block was
+    # deleted — the dep entry and its doc comments with it — and this case
+    # stayed GREEN at 5/5, because the import note further up the file spells
+    # ``nativeBuildDeps: "python3 >=3.8"`` inside a ``#`` comment. The audit
+    # was reading that sentence, not the declaration.
+    let content = nimSourceCommentsBlanked(readFile(mesonRecipe))
     check content.contains("\"python3 >=3.8\"")
     # Must NOT contain the bare ``"python "`` form in a dep block — the
-    # rename is the load-bearing fix.
+    # rename is the load-bearing fix. Blanking comments matters in this
+    # direction too, though PROSPECTIVELY rather than today: the audited
+    # RECIPE carries no mention of the old spelling at present (this test
+    # file's own header does, but that is not the text being scanned), so a
+    # future comment recording the rename would redden a recipe that is
+    # correct. The positive needle above is the one that was measured live.
     check not content.contains("\"python >=3.8\"")
 
   test "test_m9r10a_python3_resolves_to_stdlib_package":
