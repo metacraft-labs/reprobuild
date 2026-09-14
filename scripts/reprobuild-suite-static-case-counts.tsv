@@ -168,6 +168,7 @@ libs/repro_dsl_stdlib/tests/t_doc_comment_reaches_listing_and_diagnostic.nim	nim
 libs/repro_dsl_stdlib/tests/t_entropy_image_blessings.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_m68_baseline_catalog.nim	nim	8
+libs/repro_dsl_stdlib/tests/t_module_init_solve_is_deferred_to_first_read.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_n48_apt_jammy_tar_operands.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_nde0a_apt_jammy.nim	nim	14
 libs/repro_dsl_stdlib/tests/t_nde0d_dbus_broker.nim	nim	18
@@ -1452,6 +1453,7 @@ tests/integration/t_workspace_vcs_hybrid_workspace_clone.nim	nim	1
 tests/integration/t_workspace_vcs_switch_preserves_dirty_state.nim	nim	3
 tests/test_dev_env_m9_policy.py	python	4
 tests/unit/t_action_compatibility_key.nim	nim	4
+tests/unit/t_action_index_platform_arm.nim	nim	3
 tests/unit/t_bootstrap_nim_monitoring.nim	nim	3
 tests/unit/t_cached_source_dependency_closure.nim	nim	11
 tests/unit/t_capabilities.nim	nim	2

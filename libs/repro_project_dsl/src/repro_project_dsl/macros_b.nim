@@ -623,10 +623,13 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
     return
   # Emit the import lazily so package files without variants OR
   # solver-bound dependencies don't get an unused import.
-  # ``finalizeVariants`` is the sentinel symbol that tells us the
-  # configurables module is in scope.
+  # ``finalizeVariantsAtModuleInit`` is the sentinel symbol that tells us the
+  # configurables module is in scope. It is the symbol this expansion actually
+  # CALLS, which is the property a sentinel needs: keying on ``finalizeVariants``
+  # instead would skip the import for a module that somehow had only the older
+  # name in scope, and the emission below would then not compile.
   result.add(parseStmt(
-    "when not declared(finalizeVariants):\n" &
+    "when not declared(finalizeVariantsAtModuleInit):\n" &
     "  import repro_dsl_stdlib/configurables\n"))
   for entry in variants:
     let nameLit = escForCode(entry.name)
@@ -705,7 +708,13 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
         ", gateVariant = " & escForCode(useDef.gateVariant) &
         ", gateValue = " & escForCode(useDef.gateValue) &
         ", depKind = " & escForCode(kind) & ")\n"))
-  result.add(parseStmt("finalizeVariants()\n"))
+  # ``finalizeVariantsAtModuleInit`` rather than ``finalizeVariants``: this
+  # call sits at MODULE SCOPE, and the imports emitted above it mean one runs
+  # per recipe in the transitive closure, over a registry that only grows. The
+  # module-init spelling defers the solve to the first read of the answer so a
+  # deep recipe pays ONE solve (or none) instead of one per imported recipe.
+  # See ``repro_dsl_stdlib/configurables/variants.finalizeVariantsAtModuleInit``.
+  result.add(parseStmt("finalizeVariantsAtModuleInit()\n"))
 
 # ---------------------------------------------------------------------------
 # DSL-port M2 — ``config:`` + ``versions:`` block lowerers.

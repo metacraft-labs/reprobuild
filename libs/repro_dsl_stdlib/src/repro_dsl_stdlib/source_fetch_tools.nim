@@ -29,4 +29,8 @@ proc registerSourceFetchTools*(packageName, sourceFile: string; sourceLine: int)
       registerGeneratedToolDep(packageName, DepKindNative, toolName)
       registerSolverDependency(packageName, toolName, toolName,
         depKind = DepKindNative)
-  finalizeVariants()
+  # Module-init spelling: the `package` macro emits the call to this proc at
+  # module scope, so it runs once per imported recipe over the same growing
+  # registry the macro's own finalize does. See
+  # `configurables/variants.finalizeVariantsAtModuleInit`.
+  finalizeVariantsAtModuleInit()
