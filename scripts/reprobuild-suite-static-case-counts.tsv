@@ -938,6 +938,7 @@ tests/integration/t_apply_if_binds_config_by_workspace_path.nim	nim	1
 tests/integration/t_arm_outside_declared_platforms_is_a_lint_error.nim	nim	1
 tests/integration/t_attestation_report.nim	nim	3
 tests/integration/t_attested_image_manifest.nim	nim	3
+tests/integration/t_autotools_configure_cache.nim	nim	1
 tests/integration/t_b0_develop_mode_uses_local_source.nim	nim	1
 tests/integration/t_b0_repro_build_runquota_daemon.nim	nim	1
 tests/integration/t_b0_runquota_repro_nim_compiles.nim	nim	2
@@ -1468,7 +1469,7 @@ tests/unit/t_bootstrap_nim_monitoring.nim	nim	3
 tests/unit/t_cached_source_dependency_closure.nim	nim	11
 tests/unit/t_capabilities.nim	nim	2
 tests/unit/t_config_nims_lib_resolution.nim	nim	7
-tests/unit/t_configure_build_tree_cleanup.nim	nim	7
+tests/unit/t_configure_build_tree_cleanup.nim	nim	11
 tests/unit/t_constructor_fetch_tool_refs.nim	nim	8
 tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	2
 tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	5
