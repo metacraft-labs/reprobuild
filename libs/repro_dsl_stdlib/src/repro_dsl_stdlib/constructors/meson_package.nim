@@ -97,7 +97,6 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     archiveUrl = resolvedUrl)
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
-  let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
   let staged = extracted & ".repro-extract-" & spec.hashHex
   let escapedStaged = staged.replace("\\", "/").replace("\"", "\\\"")
@@ -122,7 +121,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     script.appendTarExtraction(tarball, staged, spec.extractStrip)
   script.add("rm -rf \"" & escapedExtracted & "\"; ")
   script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
-  script.add(": > \"" & escapedStamp & "\"")
+  script.appendVerifiedFetchStamp(stamp)
   let argv = @["sh", "-c", script]
   let act = buildAction(
     id = mesonFetchActionId(packageName),
@@ -130,6 +129,7 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     inputs = @[],
     outputs = @[stamp],
     pool = "fetch",
+    cacheable = false,
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "meson_package.fetch." & hashAlgTag,
     env = shellFetchRuntimeEnv(),

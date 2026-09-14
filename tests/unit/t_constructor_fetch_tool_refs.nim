@@ -1,10 +1,12 @@
-import std/[os, sequtils, strutils, tempfiles, unittest]
+import std/[os, osproc, sequtils, strutils, tempfiles, times, unittest]
 
 when defined(reproProviderMode):
   import repro_core
+  import repro_core/ambient_execution
   import repro_project_dsl
   import repro_dsl_stdlib/constructors
   import repro_standard_provider/conventions/fetch_action
+  import nimcrypto/sha2
 
   proc expectedFetchEnv(): seq[(string, string)] =
     when defined(macosx):
@@ -95,7 +97,178 @@ when defined(reproProviderMode):
       includeDefault = false)
     extractActions(fragment)
 
+  proc executeArgv(argv: seq[string]): int =
+    # Exercise emitted shell bytes directly; full engine reuse has a separate
+    # integration probe. Inherit the test environment's declared host tools.
+    let process = uncontrolledStartProcess(findExe(argv[0]), args = argv[1 .. ^1],
+      options = {poParentStreams})
+    try:
+      result = process.waitForExit()
+    finally:
+      process.close()
+
+  proc executeFetch(action: BuildActionDef): int =
+    for argument in action.call.arguments:
+      if argument.name == "argv":
+        let argv = argument.encodedValue.split('\x1f')
+        doAssert argv.len == 3
+        return executeArgv(argv)
+    raise newException(ValueError, "fetch has no argv")
+
+  proc fetchFor(root, packageName: string; emitter: int;
+                spec: DslFetchSpec): BuildActionDef =
+    resetDslPortFetchState()
+    registerFetchSpec(packageName, spec.url, spec.gitRevision, spec.hashAlg,
+      spec.hashHex, spec.kind, spec.extractStrip, spec.extractedRoot)
+    if emitter == 4:
+      return emitFetchAction(root, packageName, spec)
+    let actions =
+      if emitter == 3: customSynthActions(root, packageName)
+      else: constructorActions(root, packageName, ConstructorKind(emitter))
+    for action in actions:
+      if "-fetch-" in action.id:
+        return action
+    raise newException(ValueError, "missing emitted fetch action")
+
+  proc dataFetchSpec(root: string): DslFetchSpec =
+    let source = root / "payload"
+    writeFile(source, "fetch-stamp-regression\n")
+    DslFetchSpec(url: "file://" & source.replace('\\', '/'),
+      hashAlg: dshaSha256, hashHex: ($sha256.digest(readFile(source))).toLowerAscii(),
+      kind: dfkDataFile, extractStrip: 0, extractedRoot: "src")
+
 suite "constructor fetch tool identities":
+  test "verified unchanged fetches preserve consumer stamp timestamps":
+    when defined(reproProviderMode):
+      let root = createTempDir("repro-fetch-stamp-reuse-", "")
+      defer:
+        resetDslPortFetchState()
+        removeDir(root)
+      for emitter in 0 .. 4:
+        let project = root / $emitter
+        createDir(project)
+        writeFile(project / "repro.nim", "package stampReuse:\n  discard\n")
+        let spec = dataFetchSpec(project)
+        let action = fetchFor(project, "stampReuse" & $emitter, emitter, spec)
+        check not action.cacheable
+        require executeFetch(action) == 0
+        let stamp = action.outputs[0]
+        require fileExists(project / "src" / "source")
+        check readFile(project / "src" / "source") == "fetch-stamp-regression\n"
+        setLastModificationTime(stamp, fromUnix(1_700_000_000))
+        let before = getLastModificationTime(stamp)
+        writeFile(project / "src" / "source", "locally damaged extraction")
+        require executeFetch(action) == 0
+        check readFile(project / "src" / "source") == "fetch-stamp-regression\n"
+        check getLastModificationTime(stamp) == before
+    else:
+      skip()
+
+  test "changed fetch programs update stamps and malformed stamps are repaired":
+    when defined(reproProviderMode):
+      let root = createTempDir("repro-fetch-stamp-identity-", "")
+      defer:
+        resetDslPortFetchState()
+        removeDir(root)
+      for emitter in 0 .. 4:
+        let project = root / $emitter
+        createDir(project)
+        writeFile(project / "repro.nim", "package stampIdentity:\n  discard\n")
+        var spec = dataFetchSpec(project)
+        let action = fetchFor(project, "stampIdentity" & $emitter, emitter, spec)
+        require executeFetch(action) == 0
+        let stamp = action.outputs[0]
+        let original = readFile(stamp)
+        # A different URL with identical verified bytes still changes the
+        # acquisition contract. The cached archive remains valid and local.
+        spec.url.add("-new-location")
+        let changed = fetchFor(project, "stampIdentity" & $emitter, emitter, spec)
+        setLastModificationTime(stamp, fromUnix(1_700_000_000))
+        let before = getLastModificationTime(stamp)
+        require executeFetch(changed) == 0
+        check getLastModificationTime(stamp) != before
+        check readFile(stamp) != original
+        let expected = readFile(stamp)
+        for malformed in ["", "wrong\n", expected & "extra\n", expected & "tail"]:
+          writeFile(stamp, malformed)
+          require executeFetch(changed) == 0
+          check readFile(stamp) == expected
+        removeFile(stamp)
+        require executeFetch(changed) == 0
+        check readFile(stamp) == expected
+    else:
+      skip()
+
+  test "failed verification leaves the previous stamp and extraction untouched":
+    when defined(reproProviderMode):
+      let root = createTempDir("repro-fetch-stamp-failure-", "")
+      defer:
+        resetDslPortFetchState()
+        removeDir(root)
+      for emitter in 0 .. 4:
+        let project = root / $emitter
+        createDir(project)
+        writeFile(project / "repro.nim", "package stampFailure:\n  discard\n")
+        let spec = dataFetchSpec(project)
+        let action = fetchFor(project, "stampFailure" & $emitter, emitter, spec)
+        require executeFetch(action) == 0
+        let stamp = action.outputs[0]
+        let expected = readFile(stamp)
+        setLastModificationTime(stamp, fromUnix(1_700_000_000))
+        let before = getLastModificationTime(stamp)
+        writeFile(project / ".repro" / "fetch" / (spec.hashHex & ".tar"), "bad archive")
+        check executeFetch(action) != 0
+        check getLastModificationTime(stamp) == before
+        check readFile(stamp) == expected
+        check readFile(project / "src" / "source") == "fetch-stamp-regression\n"
+    else:
+      skip()
+
+  test "archive replay preserves stamps but changed extraction settings invalidate them":
+    when defined(reproProviderMode):
+      let root = createTempDir("repro-fetch-stamp-archive-", "")
+      defer:
+        resetDslPortFetchState()
+        removeDir(root)
+      createDir(root / "vendor" / "outer" / "inner")
+      writeFile(root / "vendor" / "outer" / "inner" / "payload", "archive payload\n")
+      let archive = root / "source.tar"
+      require executeArgv(@["tar", "-cf", archive, "-C", root / "vendor", "outer"]) == 0
+      for emitter in 0 .. 4:
+        let project = root / $emitter
+        createDir(project)
+        writeFile(project / "repro.nim", "package archiveStamp:\n  discard\n")
+        var spec = DslFetchSpec(url: "file://" & archive.replace('\\', '/'),
+          hashAlg: dshaSha256, hashHex: ($sha256.digest(readFile(archive))).toLowerAscii(),
+          kind: dfkTarball, extractStrip: 1, extractedRoot: "src")
+        let action = fetchFor(project, "archiveStamp" & $emitter, emitter, spec)
+        require executeFetch(action) == 0
+        let stamp = action.outputs[0]
+        let original = readFile(stamp)
+        setLastModificationTime(stamp, fromUnix(1_700_000_000))
+        let before = getLastModificationTime(stamp)
+        require executeFetch(action) == 0
+        check getLastModificationTime(stamp) == before
+        check readFile(project / "src" / "inner" / "payload") == "archive payload\n"
+        spec.extractStrip = 2
+        let changed = fetchFor(project, "archiveStamp" & $emitter, emitter, spec)
+        require executeFetch(changed) == 0
+        check readFile(project / "src" / "payload") == "archive payload\n"
+        check not dirExists(project / "src" / "inner")
+        check readFile(stamp) != original
+        check getLastModificationTime(stamp) != before
+
+        let invalidArchive = project / "invalid.tar"
+        writeFile(invalidArchive, "valid hash, invalid tar")
+        spec.url = "file://" & invalidArchive.replace('\\', '/')
+        spec.hashHex = ($sha256.digest(readFile(invalidArchive))).toLowerAscii()
+        let failed = fetchFor(project, "archiveStamp" & $emitter, emitter, spec)
+        check executeFetch(failed) != 0
+        check not fileExists(failed.outputs[0])
+        check readFile(project / "src" / "payload") == "archive payload\n"
+    else:
+      skip()
+
   test "CMake, Meson, and Autotools declare every shell command tool":
     when defined(reproProviderMode):
       resetDslPortFetchState()
