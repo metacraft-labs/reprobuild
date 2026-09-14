@@ -216,7 +216,9 @@ done
 require_contains .github/workflows/ci.yml "metacraft-labs/metacraft-github-actions/setup-dev-env"
 require_contains .github/workflows/ci.yml "run: dev-exec just lint"
 require_contains .github/workflows/ci.yml "run: dev-exec just test"
-require_contains .github/workflows/ci.yml "run: dev-exec nix build .#default"
+require_contains .github/workflows/ci.yml "git diff --exit-code -- flake.lock"
+require_contains .github/workflows/ci.yml "dev-exec nix flake metadata --no-update-lock-file --json"
+require_contains .github/workflows/ci.yml "run: dev-exec nix build --no-update-lock-file .#default"
 require_contains .github/workflows/ci.yml "if: always()"
 require_contains .github/workflows/ci.yml "actions/upload-artifact@v4"
 require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "Linux", "X64", "benchmark"]'\'''

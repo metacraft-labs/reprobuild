@@ -4363,7 +4363,7 @@
       },
       "original": {
         "owner": "metacraft-labs",
-        "repo": "devops-modules",
+        "repo": "nixos-modules",
         "type": "github"
       }
     },
