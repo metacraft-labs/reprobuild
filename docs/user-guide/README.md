@@ -22,6 +22,11 @@ rest of the implementation documentation.
 - **Mixing languages in one workspace:** see
   [Cross-Language Builds](cross-language/README.md).
 - **Common patterns and recipes:** see [Recipes](recipes/README.md).
+- **Writing recipes that cache well — and the traps that look like
+  correct use:** see [Idiomatic Reprobuild](idiomatic-reprobuild.md). It
+  covers action granularity, narrow input declarations, collections,
+  non-determinism and entropy blessings, monitor evidence grades, and how
+  to measure a cache honestly.
 - **Faster test watching:** see [Trace-Based Incremental Testing](incremental-testing.md)
   for `repro watch --ct-incremental`, which skips re-running a test when the
   functions it executed haven't changed *(experimental)*.

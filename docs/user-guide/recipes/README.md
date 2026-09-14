@@ -185,6 +185,10 @@ automatically.
 
 ## See also
 
+- [Idiomatic Reprobuild](../idiomatic-reprobuild.md) — the reasoning
+  behind these recipes: why action granularity buys caching, why declared
+  inputs should be narrow, how non-determinism is handled, and the traps
+  that look like correct use.
 - [The Three Modes](../three-modes.md) — full mode model.
 - [Getting Started](../getting-started.md) — five-minute Nim tutorial.
 - [Languages](../README.md#languages) — per-language details.

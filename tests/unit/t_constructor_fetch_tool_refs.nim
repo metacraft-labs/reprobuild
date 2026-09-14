@@ -1,8 +1,9 @@
-import std/[os, osproc, sequtils, strutils, tempfiles, times, unittest]
+import std/[os, osproc, sequtils, strutils, tempfiles, times, unittest, uri]
 
 when defined(reproProviderMode):
   import repro_core
   import repro_core/ambient_execution
+  from repro_core/paths import tarOperand
   import repro_project_dsl
   import repro_dsl_stdlib/constructors
   import repro_standard_provider/conventions/fetch_action
@@ -130,10 +131,15 @@ when defined(reproProviderMode):
         return action
     raise newException(ValueError, "missing emitted fetch action")
 
+  proc localFileUrl(path: string): string =
+    let encoded = absolutePath(path).replace('\\', '/').split('/').mapIt(
+      encodeUrl(it, usePlus = false).replace("%3A", ":")).join("/")
+    $Uri(scheme: "file", path: (if encoded.startsWith("/"): encoded else: "/" & encoded))
+
   proc dataFetchSpec(root: string): DslFetchSpec =
     let source = root / "payload"
     writeFile(source, "fetch-stamp-regression\n")
-    DslFetchSpec(url: "file://" & source.replace('\\', '/'),
+    DslFetchSpec(url: localFileUrl(source),
       hashAlg: dshaSha256, hashHex: ($sha256.digest(readFile(source))).toLowerAscii(),
       kind: dfkDataFile, extractStrip: 0, extractedRoot: "src")
 
@@ -233,12 +239,16 @@ suite "constructor fetch tool identities":
       createDir(root / "vendor" / "outer" / "inner")
       writeFile(root / "vendor" / "outer" / "inner" / "payload", "archive payload\n")
       let archive = root / "source.tar"
-      require executeArgv(@["tar", "-cf", archive, "-C", root / "vendor", "outer"]) == 0
+      var createArgs = @["tar"]
+      when defined(windows):
+        createArgs.add("--force-local")
+      createArgs.add(@["-cf", tarOperand(archive), "-C", tarOperand(root / "vendor"), "outer"])
+      require executeArgv(createArgs) == 0
       for emitter in 0 .. 4:
         let project = root / $emitter
         createDir(project)
         writeFile(project / "repro.nim", "package archiveStamp:\n  discard\n")
-        var spec = DslFetchSpec(url: "file://" & archive.replace('\\', '/'),
+        var spec = DslFetchSpec(url: localFileUrl(archive),
           hashAlg: dshaSha256, hashHex: ($sha256.digest(readFile(archive))).toLowerAscii(),
           kind: dfkTarball, extractStrip: 1, extractedRoot: "src")
         let action = fetchFor(project, "archiveStamp" & $emitter, emitter, spec)
@@ -260,7 +270,7 @@ suite "constructor fetch tool identities":
 
         let invalidArchive = project / "invalid.tar"
         writeFile(invalidArchive, "valid hash, invalid tar")
-        spec.url = "file://" & invalidArchive.replace('\\', '/')
+        spec.url = localFileUrl(invalidArchive)
         spec.hashHex = ($sha256.digest(readFile(invalidArchive))).toLowerAscii()
         let failed = fetchFor(project, "archiveStamp" & $emitter, emitter, spec)
         check executeFetch(failed) != 0
