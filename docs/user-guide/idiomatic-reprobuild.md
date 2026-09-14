@@ -314,11 +314,14 @@ whose default `ndpUnblessed` is the fail-closed one: the action still
 action cache.
 
 There is no specification document for any of this. The authoritative
-prose lives in the source comments and test headers cited below, and the
-engine's own diagnostics point operators at a spec file
+prose lives in the source comments and test headers cited below. The
+engine's diagnostics used to send operators to a spec file
 (`Windows-Build-Correctness-Bitness-And-Capabilities.milestones.org`)
-that does not exist in this workspace. That gap is why this section is
-long.
+that does not exist anywhere in this workspace; they now cite
+`Failure-Semantics.md` §"General Rules", which does, and name
+`repro_core/entropy_blessings.EntropyBlessedTools` as the place the
+blessings themselves live. The missing spec is still missing, and that
+gap is why this section is long.
 
 ### 4.1 Bless in the tool's own module, once
 
@@ -593,14 +596,16 @@ defaults to Level 2, which is the fail-closed direction.
 class to Level 1 a **soundness gate**: it demands a written proof for
 that class, and "without a row here, the classifier defaults to Level 2".
 
-> ⚠ **Two comments in `repro_build_engine.nim` are stale and say the
-> opposite.** Line 949 annotates `mesKnownScopeLoss` as *"Level 1
-> (currently treated as Level 2)"*, and the block at line 6726 says Level
-> 1 "currently uses the same Level-2 handling until Gap II's narrow
-> path-set invalidation ships". Gap II shipped (M9.R.73.2): the code at
-> line 6322 publishes at Level 1, and `registerEvidenceInvalidation`
-> (line 12709) deliberately excludes Level 1 from the session bit. Trust
-> the code, not those two comments.
+> **Level 1 and Level 2 are genuinely different, and two comments used
+> to say they were not.** `mesKnownScopeLoss` was annotated *"Level 1
+> (currently treated as Level 2)"* and the `applyMonitorEvidenceStatus`
+> block said Level 1 "currently uses the same Level-2 handling until Gap
+> II's narrow path-set invalidation ships". Gap II shipped in M9.R.73.2
+> and both comments now describe what the code does: Level 1 **publishes**
+> its own record and narrows the consequence to the paths it produced,
+> Level 2 withholds the publish and disables hits session-wide.
+> `registerEvidenceInvalidation` deliberately excludes Level 1 from the
+> session bit.
 
 ### The failure mode, stated concretely
 
@@ -938,8 +943,12 @@ test were actually present.
 
   That line goes **directly to stderr** and is **not** suppressed by
   `--progress=quiet` — `repro_runquota` does not import the module where
-  `BuildProgressMode` lives, so there is no path by which the mode could
-  be consulted. If you see it, the build is queued, not wedged. If you
+  `BuildProgressMode` lives (and could not: the type is module-private to
+  `repro_cli_support`, which sits above runquota in the dependency
+  order), so there is no path by which the mode could be consulted. This
+  is deliberate and the spec now says so —
+  `reprobuild-specs/CLI/build.md` §"The one thing `quiet` does not
+  silence". If you see it, the build is queued, not wedged. If you
   see nothing at all for minutes, that is what the bounded deadline is
   for: after 10 minutes of genuine transport silence (no grant frame
   *and* no successful status probe) the client raises an actionable
@@ -953,7 +962,7 @@ test were actually present.
   a queued build really is indistinguishable from a wedged one.
 
 > **Agents, note:** `configuredBuildProgressMode`
-> (`repro_cli_support.nim:6913`) defaults to `bpmQuiet` whenever
+> (`repro_cli_support.nim:6942`) defaults to `bpmQuiet` whenever
 > `IN_AGENT_SHELL` is set. So an agent's `repro build` is quiet by
 > default — but, per the above, still not silent about runquota.
 
@@ -976,10 +985,10 @@ test were actually present.
 |---|---|---|
 | Capability facts / probes / skip reasons (§7) | ☐ Not implemented | Pattern only; no DSL vocabulary. `gevHostFact` is a placeholder with no producers or consumers. |
 | Typed per-edge `determinism` (§7) | ☐ Design draft | `reprobuild-specs/Edge-Determinism-And-Soft-Rebuild.md`. |
-| A spec for entropy blessings (§4) | ☐ Missing | Engine diagnostics cite `Windows-Build-Correctness-Bitness-And-Capabilities.milestones.org`, which does not exist in this workspace. The source comments are the authority. |
+| A spec for entropy blessings (§4) | ☐ Missing | No spec document exists. The source comments are the authority; the diagnostics no longer cite a file that does not exist. |
 | `Build-Graph-Collections.md` status header (§3) | ⚠ Stale | Says "not yet implemented"; `collect` and the exclude rule ship. |
-| `mesKnownScopeLoss` comments (§5) | ⚠ Stale | Two comments say Level 1 is treated as Level 2; the code publishes at Level 1. |
-| `--progress=quiet` vs runquota output (§9) | ⚠ Divergent | `reprobuild-specs/CLI/build.md` says quiet "disables all progress output"; `runquota.waiting` is emitted regardless, per `docs/runquota-policy.md` and `Interactive-UX-And-Progress.md` Principle 1. Nobody has reconciled the three. |
+| `mesKnownScopeLoss` comments (§5) | ✓ Fixed | Both comments now say what the code does: Level 1 publishes and narrows, Level 2 withholds and disables session-wide. |
+| `--progress=quiet` vs runquota output (§9) | ✓ Reconciled | `reprobuild-specs/CLI/build.md` §"The one thing `quiet` does not silence" now states the heartbeat as a deliberate exception, and says why: `Interactive-UX-And-Progress.md` Principle 1 outranks "disable all progress output" for a wait the build cannot bound. The spec was the thing that was wrong. |
 
 ## Related documentation
 

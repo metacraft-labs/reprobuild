@@ -63,6 +63,7 @@ libs/repro_build_engine/tests/t_engine_typed_output_recorded_in_normalized_graph
 libs/repro_build_engine/tests/t_fingerprint_audit_every_action_has_lock_identity.nim	nim	6
 libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim	nim	3
 libs/repro_build_engine/tests/t_m4_publisher_path_stores_output_blobs.nim	nim	8
+libs/repro_build_engine/tests/t_m9r73_session_invalidation_reaches_every_consumer.nim	nim	4
 libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim	nim	13
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6

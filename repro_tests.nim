@@ -513,6 +513,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_m9r73_session_invalidation_reaches_every_consumer.nim",
+    binary: "build/test-bin/t_m9r73_session_invalidation_reaches_every_consumer",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim",
     binary: "build/test-bin/t_nix_daemon_search_roots",
     defines: @[],

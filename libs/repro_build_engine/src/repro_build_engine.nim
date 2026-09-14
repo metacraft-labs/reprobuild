@@ -1017,7 +1017,16 @@ type
     ## and ``collectEvidence``. See recipes/reproos-image/run-evidence/m9r72/
     ## m9r72_phaseB_gap_enumeration.txt Gap I.
     mesComplete            ## Level 0
-    mesKnownScopeLoss      ## Level 1 (currently treated as Level 2)
+    mesKnownScopeLoss
+      ## Level 1. NOT the same handling as Level 2, and the difference is
+      ## the one a reader most needs: a Level 1 action PUBLISHES its own
+      ## action-cache record and narrows the consequence to the paths it
+      ## produced (``EvidenceCollection.invalidatedPaths``), while a Level
+      ## 2 action withholds its publish and disables hits session-wide.
+      ## The two were collapsed until M9.R.73.2 shipped Gap II's narrow
+      ## path-set invalidation; a comment still saying so invites the
+      ## conclusion that a Level 1 action is as safe as one that never
+      ## published, which is exactly backwards.
     mesUnknownScopeLoss    ## Level 2
     mesMonitorUnavailable  ## Level 3
 
@@ -1075,9 +1084,10 @@ type
       ## kill-before-flush to the action's own materialized declared
       ## outputs — the tight closed-form bound derived in the memo.
       ## The scheduler folds this into a session-wide accumulator and
-      ## consults it on each downstream cache lookup: a lookup whose
-      ## action's declared inputs (materialized to cwd) intersect the
-      ## accumulator is skipped as ``cdMiss``. Empty for Levels 0/2/3.
+      ## consults it on each downstream cache lookup, on BOTH the
+      ## action's declared inputs and the candidate record's keyed input
+      ## set (the memo's ``cacheInputPaths``); an intersection on either
+      ## is skipped as ``cdMiss``. Empty for Levels 0/2/3.
     monitorStatus: MonitorEvidenceStatus
     engineSuppliedRootImage: string
       ## The one entry in ``evidence.monitorReads`` that no monitor reported:
@@ -5901,7 +5911,7 @@ proc gradeCaptureScope(profileRecords: openArray[MonitorRecord];
   # input set that is narrower than this build trusts.
   #
   # AND THE COST IS NAMED RATHER THAN ELIDED: Level 2 additionally flips the
-  # scheduler's session-wide `sessionCachePublishDisabled`, so one refused
+  # scheduler's session-wide `sessionCacheHitsDisabled`, so one refused
   # capture turns every later lookup in the session into a miss. That is
   # broader than the contract asks for — the untrusted evidence belongs to one
   # action — and it is accepted here rather than papered over, because the
@@ -6103,7 +6113,7 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
   ## forever. Note also what is NOT done: `publishable` stays true (a
   ## non-deterministic action is not a failed action) and
   ## `monitorStatus` is untouched, so this does NOT trip the scheduler's
-  ## session-wide `sessionCachePublishDisabled` — one tool's randomness must
+  ## session-wide `sessionCacheHitsDisabled` — one tool's randomness must
   ## not make every other action in the build uncacheable.
   ##
   ## HOW `caller=system` IS HANDLED, which is the load-bearing decision.
@@ -6159,8 +6169,10 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
         "entropy observed (" & sources.join(", ") & ") but the invoking " &
         "tool is blessed in its CLI spec, so it is not treated as a " &
         "determinism problem: " & action.nonDeterminismJustification &
-        " Spec: Windows-Build-Correctness-Bitness-And-Capabilities." &
-        "milestones.org M6.")
+        " Rule: Failure-Semantics.md §General Rules (ambiguous " &
+        "correctness failures fail closed); the blessing itself is " &
+        "declared in that tool's CLI spec and mirrored in " &
+        "repro_core/entropy_blessings.EntropyBlessedTools.")
     return
   if observations.len > 0:
     # PER-IMAGE ATTRIBUTION. The action's own tool is not blessed, but an
@@ -6201,8 +6213,10 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
         "attributed by its own pid to a tool blessed in that tool's CLI " &
         "spec, so it is not treated as a determinism problem. The invoking " &
         "tool itself is unblessed; the waiver is per-image, not per-action. " &
-        "Spec: Windows-Build-Correctness-Bitness-And-Capabilities." &
-        "milestones.org M6.")
+        "Rule: Failure-Semantics.md §General Rules (ambiguous " &
+        "correctness failures fail closed); the per-image blessings are " &
+        "declared in each tool's CLI spec and mirrored in " &
+        "repro_core/entropy_blessings.EntropyBlessedTools.")
       return
     var text =
       "action-cache publish skipped: this action's process tree read " &
@@ -6223,8 +6237,9 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
       text.add(" (here: " & blockingTools.join(", ") & ")")
     text.add(". Note that caller attribution is one-way: an entropy read " &
       "reported from outside the main image is NOT evidence that the " &
-      "program itself drew none. Spec: " &
-      "Windows-Build-Correctness-Bitness-And-Capabilities.milestones.org M6.")
+      "program itself drew none. Rule: Failure-Semantics.md " &
+      "§General Rules (ambiguous correctness failures fail " &
+      "closed).")
     collection.evidence.diagnostics.add(text)
     collection.disableCacheHits = true
     collection.cacheIneligibilityReasons.incl(cirUnblessedEntropy)
@@ -6239,8 +6254,9 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
          "observability is unknown") &
       ", and the tool this action invokes is not blessed. No " &
       "`mrNonDeterministic` record is therefore not evidence that no " &
-      "randomness was consumed. Spec: " &
-      "Windows-Build-Correctness-Bitness-And-Capabilities.milestones.org M6.")
+      "randomness was consumed. Rule: Failure-Semantics.md " &
+      "§General Rules (ambiguous correctness failures fail " &
+      "closed).")
     collection.disableCacheHits = true
     collection.cacheIneligibilityReasons.incl(
       if collection.evidence.entropyObservability == entNotObserved:
@@ -6418,7 +6434,7 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
     # ``cache.recordActionResult`` publish. The unknown-scope
     # semantic is fully realized by the scheduler by observing this
     # ``mesUnknownScopeLoss`` status and flipping its own
-    # ``sessionCachePublishDisabled`` bit — see the scheduler.
+    # ``sessionCacheHitsDisabled`` bit — see the scheduler.
     col.evidence.diagnostics.add(
       "monitor depfile is incomplete (unknown-scope loss); " &
       "action-cache publish skipped this session per " &
@@ -6794,16 +6810,24 @@ proc collectEvidence(action: BuildAction; strict: bool;
     # M9.R.72.3 — implement the spec's monitor-loss ladder from
     # Failure-Semantics.md §"Monitoring Failures":
     #   Level 0 (mesComplete):        publish action-cache record.
-    #   Level 1 (mesKnownScopeLoss):  disable cache hits for this session
-    #                                 (skip action-cache publish) but let
-    #                                 the action succeed; a KNOWN scope
-    #                                 loss (e.g. kill-before-flush of a
-    #                                 specific pid) currently uses the same
-    #                                 Level-2 handling until Gap II's
-    #                                 narrow path-set invalidation ships.
-    #   Level 2 (mesUnknownScopeLoss): disable cache hits for the session.
-    #                                 Same handling as Level 1: succeed
-    #                                 without publishing.
+    #   Level 1 (mesKnownScopeLoss):  the action succeeds AND PUBLISHES
+    #                                 its own action-cache record; the
+    #                                 consequence is narrowed to the paths
+    #                                 the loss can have reached, which for
+    #                                 kill-before-flush is this action's
+    #                                 own declared outputs. Those go into
+    #                                 ``EvidenceCollection.invalidatedPaths``
+    #                                 and the scheduler refuses DOWNSTREAM
+    #                                 hits keyed on them for the rest of
+    #                                 the session. Gap II's narrow path-set
+    #                                 invalidation shipped in M9.R.73.2;
+    #                                 Level 1 has not been the same as
+    #                                 Level 2 since.
+    #   Level 2 (mesUnknownScopeLoss): the action succeeds and does NOT
+    #                                 publish (``disableCacheHits``), and
+    #                                 every subsequent lookup in the
+    #                                 session misses. The scope cannot be
+    #                                 bounded, so nothing is narrowed.
     #   Level 3 (mesMonitorUnavailable): fail closed. Only when the iomon
     #                                 path itself is absent OR the reader
     #                                 hits a decode error — genuine
@@ -12784,37 +12808,71 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # ``sessionInvalidatedPaths`` — accumulator of the certainly-invalidated
   # + ambiguous paths from EVERY completed Level 1 (known-scope) loss in
   # this session. Grows monotonically; downstream cache LOOKUPS whose
-  # action.inputs (materialized to cwd) intersect this set are skipped
-  # as ``cdMiss`` with reason ``"monitor-loss-narrow-invalidation"``.
-  # Empty in the healthy case, so the intersection test is a cheap
-  # ``len == 0`` short-circuit.
+  # input set intersects it are skipped as ``cdMiss`` with reason
+  # ``"monitor-loss-narrow-invalidation"``. Empty in the healthy case, so
+  # the intersection test is a cheap ``len == 0`` short-circuit.
   #
-  # ``sessionCachePublishDisabled`` — set to ``true`` on the FIRST Level
-  # 2 (unknown-scope) loss observed in this session. Realizes the spec's
-  # "disable cache hits for the affected session" language: all
-  # subsequent cache lookups are treated as ``cdMiss``. Level 1 does NOT
-  # set this bit — its narrow ``sessionInvalidatedPaths`` accumulator is
-  # the whole story.
+  # WHICH INPUT SET, and why there are two tests rather than one. The memo
+  # states the predicate against the action's ``cacheInputPaths`` — the set
+  # the action-cache record is KEYED on, which is the declared inputs plus
+  # the depfile / monitor-read / monitor-probe channels. That set does not
+  # exist before the action runs, so it cannot be evaluated at lookup time
+  # from the action alone; what DOES carry it is the candidate RECORD,
+  # whose ``inputs`` are the producing run's ``cacheInputPaths``. So:
+  #
+  #   * ``cacheLookupBlockedByMonitorLoss`` tests the DECLARED inputs
+  #     before the lookup — cheap, and it also covers an action with no
+  #     record at all;
+  #   * ``monitorLossBlockedRecordPath`` tests the RECORD's keyed inputs
+  #     after it, at the ``unservableCacheRecordReason`` seam every record
+  #     crosses. This is the one that implements the memo, and the one the
+  #     declared-input test cannot stand in for: an action that CONSUMES a
+  #     Level 1 action's output without DECLARING it has the path in its
+  #     record's key and not in ``action.inputs``, which on an engine whose
+  #     premise is that observed reads are the truth is ordinary, not
+  #     exotic. Measured before this seam existed: such a consumer was
+  #     served ``cdHit`` across a kill-before-flush loss.
+  #
+  # ``sessionCacheHitsDisabled`` — set to ``true`` on the FIRST Level 2
+  # (unknown-scope) loss observed in this session. Realizes the spec's
+  # "disable cache hits for the affected session" language: all subsequent
+  # cache lookups are treated as ``cdMiss``. It gates LOOKUPS and nothing
+  # else; the Level 2 action's own publish is withheld separately, by
+  # ``EvidenceCollection.disableCacheHits``. It was called
+  # ``sessionCachePublishDisabled``, which named the one thing it does not
+  # do. Level 1 does NOT set this bit — its narrow
+  # ``sessionInvalidatedPaths`` accumulator is the whole story.
   var sessionInvalidatedPaths = initHashSet[string]()
-  var sessionCachePublishDisabled = false
+  var sessionCacheHitsDisabled = false
 
   proc registerEvidenceInvalidation(evidence: EvidenceCollection) =
     ## M9.R.73.2 — fold a completed action's evidence into the
     ## session-scoped invalidation state.
+    ##
+    ## CALLED FROM EVERY PATH THAT COLLECTS EVIDENCE, including the
+    ## "outputs are present, call it up to date" shortcut, which collects
+    ## evidence and used not to fold it. A Level 1 loss seen there
+    ## invalidated nothing for the rest of the session, and a Level 2 loss
+    ## seen there did not disable hits at all — the failure direction that
+    ## costs soundness rather than cache.
     for path in evidence.invalidatedPaths:
       sessionInvalidatedPaths.incl(path)
     if evidence.monitorStatus == mesUnknownScopeLoss:
-      sessionCachePublishDisabled = true
+      sessionCacheHitsDisabled = true
 
   proc cacheLookupBlockedByMonitorLoss(action: BuildAction): bool =
-    ## M9.R.73.2 — return ``true`` when ``action``'s declared inputs
+    ## M9.R.73.2 — return ``true`` when ``action``'s DECLARED inputs
     ## intersect the session-wide ``sessionInvalidatedPaths`` accumulator
-    ## OR ``sessionCachePublishDisabled`` is set (a Level 2 loss has
+    ## OR ``sessionCacheHitsDisabled`` is set (a Level 2 loss has
     ## fired earlier in the session). The scheduler treats such a
     ## lookup as ``cdMiss`` with reason ``"monitor-loss-invalidation"``.
     ## The check is defensive against the common healthy path: when
     ## both accumulators are empty/false this returns immediately.
-    if sessionCachePublishDisabled:
+    ##
+    ## The declared half only. ``monitorLossBlockedRecordPath`` below is
+    ## the half that reads the record's keyed input set; see the block
+    ## comment above for why the memo's predicate needs both.
+    if sessionCacheHitsDisabled:
       return true
     if sessionInvalidatedPaths.len == 0:
       return false
@@ -12823,6 +12881,28 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if sessionInvalidatedPaths.contains(materialized):
         return true
     false
+
+  proc monitorLossBlockedRecordPath(action: BuildAction;
+                                    record: ActionResultRecord): string =
+    ## The invalidated path this RECORD is keyed on, or ``""``.
+    ##
+    ## ``record.inputs`` is the producing run's ``cacheInputPaths``
+    ## materialized against that run's cwd, which is this action's cwd —
+    ## the paths are already absolute, and ``materialPath`` is applied
+    ## anyway so a relative entry from an older record version is compared
+    ## in the same spelling ``registerEvidenceInvalidation`` stored.
+    ##
+    ## Returns the PATH rather than a bool so the diagnostic can name what
+    ## stopped the hit. An operator reading ``monitor-loss-narrow-
+    ## invalidation`` with no path cannot tell this apart from the
+    ## session-wide Level 2 refusal.
+    if sessionInvalidatedPaths.len == 0:
+      return ""
+    for input in record.inputs:
+      let materialized = materialPath(action.cwd, input.path)
+      if sessionInvalidatedPaths.contains(materialized):
+        return materialized
+    ""
 
   proc invalidateCachedPath(path: string) =
     fileMetadataCache.invalidate(path)
@@ -13436,10 +13516,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # the invalidation. See ``registerEvidenceInvalidation``.
           runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
           runResult.results[idToIndex.resultIndex(id)].reason =
-            if sessionCachePublishDisabled: "monitor-loss-session-disabled"
+            if sessionCacheHitsDisabled: "monitor-loss-session-disabled"
             else: "monitor-loss-narrow-invalidation"
           runResult.trace(id, "cache-skipped",
             runResult.results[idToIndex.resultIndex(id)].reason)
+          # And it must set this, for the same reason
+          # ``rebuildSelectorInvalidates`` above does: without it the
+          # "outputs are present, call it up to date" shortcut further
+          # down re-declares the action up to date and the invalidation
+          # does NOTHING. That shortcut only asks whether the declared
+          # output paths exist, and after a monitor loss they all still
+          # do — which is precisely the case this branch exists to force
+          # a re-execution for. "Skip the hit so the action re-executes"
+          # (Monitor-Loss-Path-Invalidation.md §"Consequences For The
+          # Engine") is not satisfied by a `cdMiss` the next branch
+          # swallows.
+          cacheInvalidatedByPolicy = true
         elif action.cacheable:
           if config.rebuildMissingOutputsOnCacheHit:
             if not action.declaresNoOutputs():
@@ -13516,6 +13608,32 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               runResult.trace(id, "cache-record-refused", refusal)
               lookup = ActionCacheLookup(status: aclMissNoRecord,
                 message: refusal)
+            else:
+              # M9.R.73.2 — the memo's downstream predicate, on the set it
+              # actually names: the RECORD's keyed inputs, not the action's
+              # declared ones. Same seam and the same argument as the
+              # refusal above — a record that arrived from a LAN peer or a
+              # binary cache reaches the graph through here and through
+              # nothing else.
+              #
+              # ``aclMissInputChanged`` rather than ``aclMissNoRecord``
+              # because of what the arm below it does with each: the
+              # input-changed arm sets ``cacheMissInputChanged``, which is
+              # what stops the outputs-present shortcut from re-declaring
+              # this action up to date and skipping the re-execution the
+              # refusal exists to force. It is also the honest diagnosis —
+              # an input this record is keyed on can no longer be trusted
+              # to be what the record says it was.
+              let blocked = action.monitorLossBlockedRecordPath(lookup.record)
+              if blocked.len > 0:
+                let reason = "monitor-loss-narrow-invalidation: " & blocked &
+                  " was invalidated by a known-scope monitor loss earlier " &
+                  "in this session, and this cached record is keyed on it " &
+                  "(Monitor-Loss-Path-Invalidation.md §\"Consequences For " &
+                  "The Engine\")"
+                runResult.trace(id, "cache-skipped", reason)
+                lookup = ActionCacheLookup(status: aclMissInputChanged,
+                  message: reason, changedInputPath: blocked)
           case lookup.status
           of aclHit:
             if config.rebuildMissingOutputsOnCacheHit and reusableInPlace:
@@ -13649,6 +13767,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             config = addr config)
           finishStat("repro evidence collect", evidenceStart)
           runResult.results[idToIndex.resultIndex(id)].evidence = evidence.evidence
+          # M9.R.73.2 — the FOURTH evidence-collection site, and it was the
+          # one that did not fold its result into the session accumulator.
+          # An action reached here has not re-run, but the evidence just
+          # read still carries whatever loss its capture recorded, and the
+          # ladder's consequences are about that loss, not about whether
+          # this particular action was launched. Omitting the fold meant a
+          # Level 2 (unknown-scope) loss observed on an up-to-date action
+          # left ``sessionCacheHitsDisabled`` clear and every later lookup
+          # in the build served normally — uncaught because the three
+          # LAUNCH sites all fold and this one is only reached on a warm
+          # graph.
+          registerEvidenceInvalidation(evidence)
           if not evidence.publishable:
             statuses[id] = asFailed
             runResult.results[idToIndex.resultIndex(id)].status = asFailed

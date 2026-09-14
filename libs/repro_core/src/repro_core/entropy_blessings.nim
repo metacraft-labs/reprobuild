@@ -61,8 +61,26 @@
 ##     somebody else's action is vouched for.
 ##
 ## ADDING AN ENTRY IS A SOUNDNESS DECISION, NOT A CONVENIENCE. The rule is
-## `Monitor-Hook-Shim.md`'s: uncacheable is safe, falsely-cacheable is not. An
-## entry must rest on MEASURED domain knowledge about what that tool draws
+## that uncacheable is safe and falsely-cacheable is not.
+##
+## THAT SENTENCE WAS ATTRIBUTED HERE TO `Monitor-Hook-Shim.md` AND IS NOT IN
+## IT. That file says one thing about cacheability, at :501, and it is the
+## narrower "injection failure MUST fail the monitored action or make it
+## non-cacheable, depending on policy" -- which is what the other two dozen
+## citations of it in this repo correctly quote. The rule as stated here is
+## spelled out in `Compiles-Are-Normal-Edges.md` §"The part that makes it
+## more than a rename": "an edge with no dependency evidence that is also
+## cacheable is worse than an uncached one: it would publish and serve
+## entries keyed on inputs it never observed, and fail by returning a stale
+## binary rather than by erroring". That is the specific form of
+## `Failure-Semantics.md` §"General Rules" -- "ambiguous correctness
+## failures MUST fail closed: reject cache reuse, rerun, or require review
+## rather than silently accepting stale state". Cite those two. A reader who
+## greps the named spec for a sentence it does not contain has no way to
+## tell a paraphrase from an invention, and a dangling citation costs more
+## than none.
+##
+## An entry must rest on MEASURED domain knowledge about what that tool draws
 ## randomness FOR, the way `nim`'s does -- never on the inconvenience of the
 ## signal. And note what an entry does NOT bless: it is scoped to entropy
 ## (`mrNonDeterministic`). Clock reads (`mrTimeRead`) are a separate signal
