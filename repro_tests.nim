@@ -4617,6 +4617,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim",
+    binary: "build/test-bin/t_path_sidecar_batches",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim",
     binary: "build/test-bin/t_workspace_sibling_ignore_set",
     defines: @[],
