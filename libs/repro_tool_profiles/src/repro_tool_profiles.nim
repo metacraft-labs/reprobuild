@@ -789,8 +789,45 @@ proc readSidecarToolProfile(sidecarPath: string): Table[string, string] =
 proc sidecarToolProfile(path: string): Table[string, string] =
   readSidecarToolProfile(path & ".repro-tool-profile")
 
+type
+  SidecarDirectory = object
+    names: HashSet[string]
+    probeCandidates: bool
+
+  SidecarPathLookup = ref object
+    directories: Table[string, SidecarDirectory]
+
+proc asciiPathComponent(value: string): bool =
+  for ch in value:
+    if ord(ch) > 127 or ch in {'/', '\\', ':'}:
+      return false
+  true
+
+proc mayHaveSidecar(lookup: SidecarPathLookup; dir, name: string): bool =
+  if lookup.isNil or not asciiPathComponent(name):
+    return true
+  if not lookup.directories.hasKey(dir):
+    var directory = SidecarDirectory(names: initHashSet[string]())
+    try:
+      for _, path in walkDir(extendedPath(dir), relative = true, checkDir = true):
+        # Non-ASCII case/normalization rules depend on the mounted filesystem.
+        # An uncertain directory retains the original per-candidate lookup.
+        if not asciiPathComponent(path):
+          directory.probeCandidates = true
+        elif path.toLowerAscii.endsWith(".repro-tool-profile"):
+          directory.names.incl(path.toLowerAscii)
+    except OSError as error:
+      when defined(windows):
+        directory.probeCandidates = error.errorCode notin [2'i32, 3'i32]
+      else:
+        directory.probeCandidates = error.errorCode notin [2'i32, 20'i32]
+    lookup.directories[dir] = directory
+  lookup.directories[dir].probeCandidates or
+    name.toLowerAscii in lookup.directories[dir].names
+
 proc findToolProfileSidecarOnPath(executableName: string;
-                                  pathSearchList: openArray[string]): string =
+                                  pathSearchList: openArray[string];
+                                  lookup: SidecarPathLookup = nil): string =
   ## Look for a freestanding ``<dir>/<executableName>.repro-tool-profile``
   ## on PATH. Generators that already know the tool's absolute location
   ## (e.g. the CMake Reprobuild generator, which gets the compiler path
@@ -804,7 +841,10 @@ proc findToolProfileSidecarOnPath(executableName: string;
   for dir in pathSearchList:
     if dir.len == 0:
       continue
-    let candidate = dir / (executableName & ".repro-tool-profile")
+    let name = executableName & ".repro-tool-profile"
+    if not mayHaveSidecar(lookup, dir, name):
+      continue
+    let candidate = dir / name
     if fileExists(extendedPath(candidate)):
       return absolutePath(candidate)
   ""
@@ -848,8 +888,8 @@ proc applySidecarProfile(profile: var PathOnlyToolProfile;
     else:
       discard
 
-proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
-                          pathValue = getEnv("PATH")): PathOnlyToolProfile =
+proc resolvePathOnlyTool(useDef: InterfaceToolUse; pathValue: string;
+                         lookup: SidecarPathLookup): PathOnlyToolProfile =
   let searchList = splitPathList(pathValue)
 
   # Sidecar-first lookup: when a generator already knows the tool's
@@ -857,7 +897,7 @@ proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
   # that profile directly. The sidecar's `resolvedExecutablePath` IS the
   # tool; no wrapper executable file needs to exist next to it.
   let sidecarPath =
-    findToolProfileSidecarOnPath(useDef.executableName, searchList)
+    findToolProfileSidecarOnPath(useDef.executableName, searchList, lookup)
   if sidecarPath.len > 0:
     let sidecar = readSidecarToolProfile(sidecarPath)
     let resolvedFromSidecar = sidecar.getOrDefault("resolvedExecutablePath")
@@ -903,10 +943,15 @@ proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
 
   refreshProfileIdentity(result)
 
-proc pathOnlyResolutionSignature*(useDef: InterfaceToolUse;
-                                  pathValue = getEnv("PATH")): string =
+proc resolvePathOnlyTool*(useDef: InterfaceToolUse;
+                          pathValue = getEnv("PATH")): PathOnlyToolProfile =
+  resolvePathOnlyTool(useDef, pathValue, nil)
+
+proc pathOnlyResolutionSignature(useDef: InterfaceToolUse; pathValue: string;
+                                 lookup: SidecarPathLookup): string =
   ## WHERE path-mode resolution lands for ``useDef`` under ``pathValue`` —
-  ## and nothing else. No file is opened, no probe is spawned.
+  ## and nothing else. No executable is opened and no probe is spawned;
+  ## a selected profile sidecar is read to obtain its executable path.
   ##
   ## This mirrors ``resolvePathOnlyTool``'s lookup exactly (sidecar-first,
   ## then ``findExecutableOnPath``, same order, same predicates) and stops
@@ -930,7 +975,7 @@ proc pathOnlyResolutionSignature*(useDef: InterfaceToolUse;
   ## grow the same branch or the key stops covering it.
   let searchList = splitPathList(pathValue)
   let sidecarPath =
-    findToolProfileSidecarOnPath(useDef.executableName, searchList)
+    findToolProfileSidecarOnPath(useDef.executableName, searchList, lookup)
   if sidecarPath.len > 0:
     let sidecar = readSidecarToolProfile(sidecarPath)
     let resolvedFromSidecar = sidecar.getOrDefault("resolvedExecutablePath")
@@ -938,6 +983,18 @@ proc pathOnlyResolutionSignature*(useDef: InterfaceToolUse;
         fileExists(extendedPath(resolvedFromSidecar)):
       return "sidecar\x1f" & sidecarPath & "\x1f" & resolvedFromSidecar
   "executable\x1f" & findExecutableOnPath(useDef.executableName, searchList)
+
+proc pathOnlyResolutionSignature*(useDef: InterfaceToolUse;
+                                  pathValue = getEnv("PATH")): string =
+  pathOnlyResolutionSignature(useDef, pathValue, nil)
+
+proc pathOnlyResolutionSignatures*(uses: openArray[InterfaceToolUse];
+                                   pathValue = getEnv("PATH")): seq[string] =
+  ## Share directory discovery only within this resolution operation. A later
+  ## operation must see added or removed profiles, including in daemon mode.
+  let lookup = SidecarPathLookup()
+  for useDef in uses:
+    result.add(pathOnlyResolutionSignature(useDef, pathValue, lookup))
 
 proc lockedNixpkgsRef(baseRef, narHash: string): string =
   result = baseRef
@@ -5542,14 +5599,15 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
                       Table[string, ProducerExecutableDirs] =
                         initTable[string, ProducerExecutableDirs]();
                     producerAuxSelectors: Table[string, ProducerAuxDirs] =
-                      initTable[string, ProducerAuxDirs]()):
+                      initTable[string, ProducerAuxDirs]();
+                    pathLookup: SidecarPathLookup = nil):
     PathOnlyToolProfile =
   if useDef.packageSelector.len > 0 and
       producerExecutableSelectors.hasKey(useDef.packageSelector):
     let producerPath =
       producerExecutableSelectors[useDef.packageSelector].binDirs.
         join($PathSep)
-    return resolvePathOnlyTool(useDef, producerPath)
+    return resolvePathOnlyTool(useDef, producerPath, pathLookup)
   # SC-3: a selector materialized as a library-channel producer is consumed
   # through the aux channels, not PATH — skip path-mode executable resolution
   # for it and hand back a profile carrying the producer's realized library
@@ -5572,7 +5630,7 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     # resolver's original "not found in PATH" diagnostic propagates
     # unchanged.
     try:
-      result = resolvePathOnlyTool(useDef, pathValue)
+      result = resolvePathOnlyTool(useDef, pathValue, pathLookup)
     except OSError:
       if hasHostTarballProvisioning(useDef):
         result = resolveTarballTool(useDef, storeRoot)
@@ -5815,9 +5873,10 @@ proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
   ## non-producer build.
   result.projectName = artifact.projectInterface.projectName
   result.interfaceFingerprint = artifact.interfaceFingerprint
+  let pathLookup = SidecarPathLookup()
   for useDef in artifact.projectInterface.toolUses:
     var profile = toolProfileFor(useDef, mode, pathValue, storeRoot,
-      producerExecutableSelectors, producerAuxSelectors)
+      producerExecutableSelectors, producerAuxSelectors, pathLookup)
     if mode == tpmFromSource:
       resolveSourceDependencyClosure(profile, useDef, storeRoot)
     result.profiles.add(profile)

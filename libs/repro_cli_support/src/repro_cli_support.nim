@@ -5848,14 +5848,18 @@ proc pathModeResolutionSignature(artifact: ProjectInterfaceArtifact;
   ## folded into the key separately below.
   var payload = ""
   payload.addCacheField("path-resolution.v1")
+  var uses: seq[InterfaceToolUse] = @[]
   for useDef in artifact.projectInterface.toolUses:
     if useDef.packageSelector.len > 0 and
         (producerMaterializedBinDirs.hasKey(useDef.packageSelector) or
          producerMaterializedAuxPaths.hasKey(useDef.packageSelector)):
       continue
+    uses.add(useDef)
+  let signatures = pathOnlyResolutionSignatures(uses, pathValue)
+  for index, useDef in uses:
     payload.addCacheField(useDef.packageSelector)
     payload.addCacheField(useDef.executableName)
-    payload.addCacheField(pathOnlyResolutionSignature(useDef, pathValue))
+    payload.addCacheField(signatures[index])
   payload
 
 proc toolIdentityCacheKey*(artifact: ProjectInterfaceArtifact;
