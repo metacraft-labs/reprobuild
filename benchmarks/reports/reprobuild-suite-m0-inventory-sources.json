@@ -886,7 +886,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 23,
+      "count": 22,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -895,7 +895,6 @@
       "owner": "tests/unit",
       "sources": [
         "tests/unit/t_fribidi_dev_stub.nim",
-        "tests/unit/t_host_system_tools.nim",
         "tests/unit/t_m9r10b_synthesis_wiring.nim",
         "tests/unit/t_m9r11_stub_provisioning_widening.nim",
         "tests/unit/t_m9r12_4_autotools_emits_fetch.nim",
@@ -31736,13 +31735,14 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_dsl_stdlib",
+        "repro_interface_artifacts",
         "repro_project_dsl"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_host_system_tools.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

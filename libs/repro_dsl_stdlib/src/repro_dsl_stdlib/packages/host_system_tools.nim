@@ -179,6 +179,18 @@ package wc:
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
 
+package cut:
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/cut",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package uname:
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/uname",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+
 package readlink:
   provisioning:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/readlink",
