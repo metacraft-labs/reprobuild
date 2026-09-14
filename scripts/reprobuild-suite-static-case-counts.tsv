@@ -1467,7 +1467,7 @@ tests/unit/t_bootstrap_nim_monitoring.nim	nim	3
 tests/unit/t_cached_source_dependency_closure.nim	nim	11
 tests/unit/t_capabilities.nim	nim	2
 tests/unit/t_config_nims_lib_resolution.nim	nim	7
-tests/unit/t_configure_build_tree_cleanup.nim	nim	5
+tests/unit/t_configure_build_tree_cleanup.nim	nim	7
 tests/unit/t_constructor_fetch_tool_refs.nim	nim	8
 tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	2
 tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	5

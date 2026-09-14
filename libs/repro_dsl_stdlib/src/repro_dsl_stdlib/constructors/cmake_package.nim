@@ -519,7 +519,8 @@ proc cmake_package*(srcDir: string;
       cleanIdentityParts.add(entry[0] & "=" & entry[1])
     let cleanIdentity = cleanIdentityParts.join("\x1e")
     let cleanScript = "set -e; rm -rf \"" &
-      buildDirAbs.replace("\"", "\\\"") & "\"; : > \"" &
+      buildDirAbs.replace("\"", "\\\"") & "\"; mkdir -p \"" &
+      parentDir(cleanStamp).replace("\"", "\\\"") & "\"; : > \"" &
       cleanStamp.replace("\"", "\\\"") & "\""
     var cleanDeps: seq[string] = @[]
     var cleanInputs: seq[string] = @[]
@@ -539,7 +540,7 @@ proc cmake_package*(srcDir: string;
       # invalidate this cleanup edge on every warm build.
       dependencyPolicy = automaticMonitorPolicy(@[buildDirAbs]),
       commandStatsId = "cmake_package.clean_build_dir",
-      toolIdentityRefs = @["sh", "rm"])
+      toolIdentityRefs = @["sh", "rm", "mkdir"])
     configureAfter = @[cleanEdge]
 
   var configureIdentityInputs: seq[string] = @[]
