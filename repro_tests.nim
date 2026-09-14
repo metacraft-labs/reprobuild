@@ -1458,6 +1458,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_module_init_solve_is_deferred_to_first_read.nim",
+    binary: "build/test-bin/t_module_init_solve_is_deferred_to_first_read",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_n48_apt_jammy_tar_operands.nim",
     binary: "build/test-bin/t_n48_apt_jammy_tar_operands",
     defines: @[],

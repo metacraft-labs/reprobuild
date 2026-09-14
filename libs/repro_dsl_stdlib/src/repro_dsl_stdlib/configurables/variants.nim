@@ -203,6 +203,49 @@ proc currentLockPins*(): LockPins =
     governingLockPins = lockPinsFromEnv()
   governingLockPins
 
+var moduleInitSolveDeferred {.threadvar.}: bool
+  ## True when a ``package`` block's MODULE-INIT finalize
+  ## (``finalizeVariantsAtModuleInit``) decided the solve it would have run is
+  ## not observable yet and left it owed. ``ensureUnifiedSolution`` pays it on
+  ## the first read of the solved answer.
+  ##
+  ## WHY THIS EXISTS. The ``package`` macro emits ``finalizeVariants()`` at
+  ## module scope (``macros_b.emitVariantDeclarations``), and it also emits an
+  ## ``import`` of every declared dependency's ``repro.nim`` — each of which is
+  ## another ``package`` block with its own module-scope finalize. The pending
+  ## dependency registry is process-wide and CUMULATIVE, so a recipe whose
+  ## transitive closure is N recipes ran N clingo solves before ``main``, each
+  ## over a strictly larger ASP program than the last, and every one of them
+  ## overwritten by the next.
+  ##
+  ## **[MEASURED]** on ``test_kcmutils_source`` (a KF6 recipe whose transitive
+  ## recipe closure is 84 recipes), host load ~120: eagerly, ``--list-json``
+  ## ran 1029 clingo solves over a steadily growing ASP program and answered
+  ## after 497 s. Deferred, the same binary emits the SAME 2160-byte catalog in
+  ## 1.7 s, having run no solve at all. The work terminates — it is not a hang
+  ## — but ``DefaultProbeTimeoutSec`` is 300 s, so the runner's discovery probe
+  ## expired, downgraded the binary to whole-binary execution, and that run
+  ## then paid the same 497 s again out of the per-test budget. Under heavier
+  ## load the same binary was still running at 300 s in ``--list-json``,
+  ## ``--run=<case>`` and default mode alike, which is why this reads as an
+  ## intermittent timeout rather than as a slow test.
+  ##
+  ## The cost tracks closure size, not recipe count. Same-binary A/B across 19
+  ## recipe tests, re-entering the eager path by setting
+  ## ``REPRO_EMIT_SOLVER_INPUTS`` (the carve-out below): closure ≤7 costs under
+  ## a second either way; ``gtk4`` (closure 31) 30.3 s → 0.28 s over 222
+  ## solves; ``kservice`` (55) 99 s → 0.77 s over 393; ``ktexteditor`` (93)
+  ## 320 s+ → 2.5 s over 771. 71 of the 201 ``recipes/packages/source`` test
+  ## binaries have a closure of 31 or more and 16 have 61 or more, so that is
+  ## the population this moves; no claim is made here about test binaries
+  ## outside that family.
+  ##
+  ## Only the LAST of those solves can be read by anything: the intermediate
+  ## answers are dead stores. Deferring them to the first read collapses N
+  ## solves to at most one, and to ZERO for a binary that only reads the
+  ## registration registries (which is every ``test_<pkg>_source`` smoke test
+  ## and every ``--list-json`` probe).
+
 var lastUnifiedSolution {.threadvar.}: UnifiedSolution
 var hasUnifiedSolution {.threadvar.}: bool
   ## Spec-Implementation M2d: cache the last ``solve(...)`` result so
@@ -268,6 +311,7 @@ proc resetVariantState*() =
     packages: initTable[string, string](),
     optimal: false)
   hasUnifiedSolution = false
+  moduleInitSolveDeferred = false
 
 proc registerSolverDependency*(parentPackage, depPackage, rng: string;
                                 gateVariant = ""; gateValue = "";
@@ -1023,6 +1067,46 @@ proc emitSolverInputsIfRequested(variants: openArray[VariantDecl];
   except CatchableError:
     discard
 
+proc runUnifiedSolve(applyTo: ConfigContext) =
+  ## The solve half of ``finalizeVariants`` — build the solver inputs from the
+  ## ambient variant context plus the pending dependency registry, drive
+  ## clingo once, and cache the answer.
+  ##
+  ## Hoisted out of ``finalizeVariants`` so the deferred module-init path
+  ## (``finalizeVariantsAtModuleInit`` / ``ensureUnifiedSolution`` below) runs
+  ## the IDENTICAL solve rather than a second copy of it that could drift.
+  ##
+  ## ``applyTo`` is the context the chosen variant values are written back to,
+  ## or ``nil`` when there is none (the package-only case).
+  let variants = solverVariantDecls()
+  var parentSet: seq[string] = @[]
+  for entry in pendingSolverPackages:
+    if entry.parentPackage notin parentSet:
+      parentSet.add(entry.parentPackage)
+  let packages = buildPackageDecls(parentSet)
+
+  # Drive the solver. When neither variants nor packages are present
+  # we skip the call entirely — the solver has nothing to do and the
+  # priority-lattice fallback in the caller handles the degenerate case.
+  if variants.len == 0 and packages.len == 0:
+    return
+  try:
+    let sol = solve(variants, packages)
+    lastUnifiedSolution = sol
+    hasUnifiedSolution = true
+    # MO-12 — surface the EXACT inputs this solve consumed to the lock-
+    # refresh caller when it asked for them (env-var gated; no-op otherwise).
+    emitSolverInputsIfRequested(variants, packages)
+    if not applyTo.isNil:
+      applySolverAssignments(applyTo, sol.variants)
+  except EUnsatisfiable:
+    # Bubble the structured unsat error up so callers can render the
+    # diagnostic. M2e will replace this with a richer explanation
+    # path; for M2d we surface the encoder's best-effort
+    # ``unsatCore`` annotation verbatim.
+    hasUnifiedSolution = false
+    raise
+
 proc finalizeVariants*() =
   ## Spec-Implementation M2d: finalize the ambient variant context by
   ## driving the unified ASP solver from ``repro_solver``. M1's
@@ -1049,37 +1133,16 @@ proc finalizeVariants*() =
   let ctxPresent = not ambientVariantContext.isNil and
     ambientVariantContext.state != ccsFinalized
 
-  # Build the solver inputs. Variants come from the ambient context (if
-  # any); package decls come from the pending dependency registry that
-  # the ``package`` macro populated immediately after
-  # ``registerPackageDef``.
-  let variants = solverVariantDecls()
-  var parentSet: seq[string] = @[]
-  for entry in pendingSolverPackages:
-    if entry.parentPackage notin parentSet:
-      parentSet.add(entry.parentPackage)
-  let packages = buildPackageDecls(parentSet)
+  # An explicit finalize supersedes any deferred module-init solve: the
+  # solve below consumes the same (cumulative) registry the deferred one
+  # would have.
+  moduleInitSolveDeferred = false
 
-  # Drive the solver. When neither variants nor packages are present
-  # we skip the call entirely — the solver has nothing to do and the
-  # priority-lattice fallback below handles the degenerate case.
-  if variants.len > 0 or packages.len > 0:
-    try:
-      let sol = solve(variants, packages)
-      lastUnifiedSolution = sol
-      hasUnifiedSolution = true
-      # MO-12 — surface the EXACT inputs this solve consumed to the lock-
-      # refresh caller when it asked for them (env-var gated; no-op otherwise).
-      emitSolverInputsIfRequested(variants, packages)
-      if ctxPresent:
-        applySolverAssignments(ambientVariantContext, sol.variants)
-    except EUnsatisfiable:
-      # Bubble the structured unsat error up so callers can render the
-      # diagnostic. M2e will replace this with a richer explanation
-      # path; for M2d we surface the encoder's best-effort
-      # ``unsatCore`` annotation verbatim.
-      hasUnifiedSolution = false
-      raise
+  # Build the solver inputs and solve. Variants come from the ambient
+  # context (if any); package decls come from the pending dependency
+  # registry that the ``package`` macro populated immediately after
+  # ``registerPackageDef``.
+  runUnifiedSolve(if ctxPresent: ambientVariantContext else: nil)
 
   if ctxPresent:
     let ctx = ambientVariantContext
@@ -1095,6 +1158,71 @@ proc finalizeVariants*() =
     if tryCurrentContext() == ctx:
       discard popContext()
 
+proc finalizeVariantsAtModuleInit*() =
+  ## The module-scope spelling of ``finalizeVariants`` — the call the
+  ## ``package`` macro emits at the end of every lowered package block.
+  ##
+  ## Identical to ``finalizeVariants`` in everything it makes OBSERVABLE, and
+  ## different in exactly one thing: when this package block declared no
+  ## variants, the solve is not run here but OWED, and the first read of the
+  ## solved answer (``chosenVersion`` / ``lastSolverSolution`` /
+  ## ``hasSolverSolution``, via ``ensureUnifiedSolution``) pays it.
+  ##
+  ## The deferral is sound because a package block with no variants has nothing
+  ## to write the solved values BACK to: with ``ctxPresent`` false the whole of
+  ## ``finalizeVariants`` reduces to "solve, cache the answer in
+  ## ``lastUnifiedSolution``, and return" — and that cache is overwritten by the
+  ## next package block's finalize before anything can read it. Deferring turns
+  ## one-solve-per-imported-recipe into one-solve-per-read, over the SAME
+  ## cumulative registry, so the answer a reader gets is the answer the LAST
+  ## module-init solve would have produced.
+  ##
+  ## Two cases keep the eager behaviour verbatim:
+  ##
+  ## * ``ctxPresent`` — this block declared variants, so the solve must run now
+  ##   to assign them and to finalize + pop the ambient context.
+  ## * ``REPRO_EMIT_SOLVER_INPUTS`` set — ``repro lock refresh`` compiles the
+  ##   recipe to a provider binary and runs it PRECISELY for the module-init
+  ##   solve's emitted inputs (``repro_cli_support.solverInputsFromCompiledProvider``:
+  ##   "a manifest request provisions no tools and builds nothing"), so under
+  ##   that env var the module-init solve IS the observable effect and may not
+  ##   be deferred.
+  ##
+  ## ``finalizeVariants`` itself is unchanged and stays eager: it is the
+  ## spelling unit tests call directly, and they rely on it raising
+  ## ``EUnsatisfiable`` / ``ELockConflict`` at the call
+  ## (``t_unsatisfiable_lock_reports_conflict.nim:97-99`` does exactly that,
+  ## with no ambient context).
+  let ctxPresent = not ambientVariantContext.isNil and
+    ambientVariantContext.state != ccsFinalized
+  if ctxPresent or getEnv(SolverInputsEmitEnvVar).len > 0:
+    finalizeVariants()
+  else:
+    moduleInitSolveDeferred = true
+
+proc ensureUnifiedSolution() =
+  ## Pay any solve that ``finalizeVariantsAtModuleInit`` deferred. A no-op when
+  ## none is owed, so a reader on the eager path costs nothing.
+  ##
+  ## The debt is cleared BEFORE the solve runs, so a solve that raises
+  ## (``ELockConflict`` from the lock-vs-declaration check, ``EUnsatisfiable``
+  ## from clingo) is never retried: the first read reports the real refusal and
+  ## a second read reports ``EPackageNotResolved``. That is deliberate — a
+  ## retry would re-run a solve already known to fail, once per read — and it
+  ## is not a path anything in the tree takes, because eagerly the same raise
+  ## happened at module init and ended the process before a second read could
+  ## exist. ``t_module_init_solve_is_deferred_to_first_read`` holds the line.
+  ##
+  ## Because the solve now runs at the read rather than at module init, it also
+  ## sees dependencies registered in between — ``registerPackageNativeTool``
+  ## (``packaging/runtime_contract``) registers from inside a ``build:`` body.
+  ## The registry is monotonic, so this only ever widens the answer: every
+  ## package the module-init solve would have seen is still in it.
+  if not moduleInitSolveDeferred:
+    return
+  moduleInitSolveDeferred = false
+  runUnifiedSolve(nil)
+
 proc chosenVersion*(packageName: string): string =
   ## Spec-Implementation M2d: return the solver-chosen version for the
   ## named package. Raises ``EPackageNotResolved`` when called before
@@ -1104,6 +1232,7 @@ proc chosenVersion*(packageName: string): string =
   ## ``uses:`` resolution paths and provisioning catalog lookups
   ## consume this accessor to materialize the concrete version after
   ## the solve completes.
+  ensureUnifiedSolution()
   if not hasUnifiedSolution:
     raise newException(EPackageNotResolved,
       "chosenVersion('" & packageName & "') read before " &
@@ -1121,11 +1250,13 @@ proc lastSolverSolution*(): UnifiedSolution =
   ## ``UnifiedSolution``. Returns an empty solution before
   ## ``finalizeVariants()`` runs. Tests consume this to verify the
   ## solver actually ran and that the assignment matches expectations.
+  ensureUnifiedSolution()
   lastUnifiedSolution
 
 proc hasSolverSolution*(): bool =
   ## True iff ``finalizeVariants()`` has driven the solver to
   ## completion. False before finalize or after a ``resetVariantState``.
+  ensureUnifiedSolution()
   hasUnifiedSolution
 
 proc variantNodeOf[T](c: Configurable[T]): ConfigurableNode =
