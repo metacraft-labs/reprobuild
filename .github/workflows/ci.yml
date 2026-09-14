@@ -82,7 +82,7 @@ jobs:
             nim-shm-queue
             nim-stackable-hooks
             nim-termctl
-            nixos-modules
+            devops-modules
             repo-workspaces
             reprobuild-ct-test-runner
             reprobuild-test-adapters
@@ -275,7 +275,7 @@ jobs:
             nim-shm-queue
             nim-stackable-hooks
             nim-termctl
-            nixos-modules
+            devops-modules
             repo-workspaces
             reprobuild-ct-test-runner
             reprobuild-test-adapters
@@ -803,7 +803,7 @@ jobs:
             nim-shm-queue
             nim-stackable-hooks
             nim-termctl
-            nixos-modules
+            devops-modules
             repo-workspaces
             reprobuild-ct-test-runner
             reprobuild-test-adapters
@@ -827,8 +827,12 @@ jobs:
           attic-token: ${{ secrets.ATTIC_TOKEN }}
           attic-cache: ${{ vars.ATTIC_CACHE }}
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+      - name: Verify committed Nix inputs
+        run: |
+          git diff --exit-code -- flake.lock
+          dev-exec nix flake metadata --no-update-lock-file --json > /dev/null
       - name: nix build
-        run: dev-exec nix build .#default
+        run: dev-exec nix build --no-update-lock-file .#default
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
