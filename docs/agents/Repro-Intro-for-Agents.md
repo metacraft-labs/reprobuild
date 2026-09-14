@@ -6,6 +6,20 @@ Reprobuild is a unified build, dependency, environment, and workspace tool.
 
 Reprobuild models the workspace as a directed acyclic graph (DAG) of type-checked actions defined in the **`repro.nim`** DSL. Sibling repositories declared in **`repro-workspace.toml`** are routed dynamically using **`repro develop`** (develop-mode). Build hermeticity is enforced using the **`librepro_monitor_shim`** user-space filesystem interceptor, and execution is cached locally through a per-edge disk store fronted by a host-wide **shared-memory grow-only index** that every engine inserts into directly. Package toolchains are concretized using a **`clingo`** solver, and background services are orchestrated using **`servicePlaceholder`** declarations.
 
+## Before You Edit a `repro.nim`
+
+Read **[Idiomatic Reprobuild](../user-guide/idiomatic-reprobuild.md)**.
+It is the cookbook for using this tool well, and — more to the point —
+it enumerates the changes that look like correct use and are not.
+Several have been made repeatedly, in good faith, by agents: a
+declared-only dependency policy (a soundness hole — four distinct forms
+of it have been added and removed, and the enum now carries a comment
+saying so); an entropy blessing on the shell (unsound, and the plumbing
+looks broken in a way that makes repairing it the route by which the
+waiver actually gets made); and "fixes" that improve a monitor evidence
+grade without improving the evidence. Each trap is cited to the guard
+that stops it.
+
 ## Replaced Systems
 
 - **[Build Systems (Bazel, Buck2, BuildXL, Tup)](Replaces/How-Repro-Replaces-Build-Systems-Like-Bazel-Buck2-BuildXL-and-Tup.md)**: Models the workspace as a type-checked DAG. Enforces hermetic builds using a user-space filesystem monitor shim (`librepro_monitor_shim`) and uses a shared-memory action cache daemon for sub-millisecond cache checks.
