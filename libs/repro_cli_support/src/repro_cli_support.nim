@@ -16491,25 +16491,23 @@ const
     "NIX_PROFILES"
   ]
 
-proc daemonCarriedEnvironment*(): seq[string] =
-  ## Snapshot the user-facing CLI environment for the daemon-hosted build/watch
-  ## executor. Direct builds evaluate providers and resolve action
-  ## ``envPassthrough`` values against this environment; daemon builds must be
-  ## byte-for-byte equivalent even when a project declares an arbitrary name
-  ## that reprobuild could not know in advance.
-  ##
-  ## The request worker installs this snapshot only for the duration of one
-  ## session and restores its prior environment afterwards. The build engine
-  ## still filters each action down to its declared passthrough set. The wire
-  ## sanitizer removes the test runner's private ownership marker before any
-  ## request is encoded.
-  var seen = initHashSet[string]()
-  for key, value in envPairs():
-    if key.len == 0 or seen.contains(key):
-      continue
-    seen.incl(key)
-    result.add(key & "=" & value)
-  result = sanitizeUserDaemonRequestEnvironment(result)
+# ``daemonCarriedEnvironment`` used to live here. It now lives in
+# ``repro_daemon_core/protocol`` and reaches this module through the
+# ``import repro_daemon_core`` at the top of the file.
+#
+# WHY IT MOVED (Dependency-Attribution MAC-1). The thin ``repro-client``
+# (``apps/repro-client``) composes the SAME ``UserDaemonBuildRequest`` this
+# module composes, and the request's environment is an INPUT to every action
+# fingerprint and cache key the daemon-hosted build then computes. Two
+# snapshots of "the user-facing environment" that agree today and drift
+# tomorrow would make the two clients produce different cache decisions for
+# the same command — silently, and only for whichever client the user
+# happened to run. One definition, in the lowest library both clients link,
+# removes the possibility rather than testing for it.
+#
+# It cannot live in this module: ``repro_cli_support`` is the build engine and
+# the DSL runtime, and linking it is exactly what the thin client exists not
+# to do.
 
 const DaemonRequestAuthoritativeEnvPrefixes* = ["REPROBUILD_", "REPRO_"]
   ## Reprobuild's own control namespace, over which a build REQUEST is
@@ -28221,6 +28219,42 @@ proc installUserDaemonBuildExecutor() =
       # overlay let through and what it cost.
       previousEnv.add(applyDaemonRequestEnvironment(
         sanitizeUserDaemonRequestEnvironment(request.environment)))
+      # RE-SEED THE EMBEDDED SOURCE ROOTS AFTER THE REQUEST IS INSTALLED, so
+      # a hosted build does not depend on WHICH CLIENT sent it.
+      #
+      # `runThinAppDispatch` runs this before any subcommand routing, so a
+      # request composed by the full `repro` already carries whatever the
+      # seeding produced and this call is a no-op on that path (it only ever
+      # fills a name that is currently unset). The thin `repro-client`
+      # (`apps/repro-client`, MAC-1) has no prologue of its own -- seeding
+      # would mean linking `repro_interface_artifacts` for its compile-time
+      # constants, which is the engine dependency it exists not to have.
+      #
+      # This is not cosmetic. Measured before the call was added: outside a
+      # dev shell, where the `*_SRC` names are unset, the same `repro build`
+      # of the same project produced provider-compile cache keys
+      # e1fef85b... through the full client and b7f03810... through the thin
+      # one -- a cache MISS where there should have been a hit, from a
+      # difference in the caller rather than in the build. Inside the dev
+      # shell, where the names are already set and the seeding is inert for
+      # both, the two clients' stdout and stderr were byte-identical.
+      #
+      # Placed after `applyDaemonRequestEnvironment` so a value the REQUEST
+      # carries still wins: the seeding fills unset names only, and the
+      # restore list above already covers anything the request displaced.
+      #
+      # A name this call fills for the FIRST time is NOT added to that restore
+      # list, so it outlives the session in the worker. That is deliberate and
+      # it is why it is safe: the value seeded is a compile-time constant of
+      # the daemon's own image, so every session would seed the same string.
+      # A leak can only carry one session's value into another when the
+      # sessions could disagree, and here they cannot. Two of these names
+      # (`REPRO_TEST_ADAPTERS_SRC`, `REPRO_CT_TEST_RUNNER_SRC`) do fall under
+      # `DaemonRequestAuthoritativeEnvPrefixes`, so a request that omits them
+      # has them unset by `applyDaemonRequestEnvironment` and then re-seeded
+      # here to that same constant -- which is the point: it is the value a
+      # DIRECT build through the full CLI's prologue would have used too.
+      ensureBuiltSourcePackageEnvironment()
       previousEnv.add((key: ProviderNimcacheSessionEnv,
         value: getEnv(ProviderNimcacheSessionEnv),
         present: existsEnv(ProviderNimcacheSessionEnv)))
@@ -28298,6 +28332,10 @@ proc installUserDaemonWatchExecutor() =
       # request's authority over reprobuild's own namespace.
       previousEnv.add(applyDaemonRequestEnvironment(
         sanitizeUserDaemonRequestEnvironment(request.environment)))
+      # Same re-seed as the build executor, for the reason its comment gives:
+      # a hole closed for builds and left open for watch cycles reappears on
+      # the next `repro watch` that spawns the same actions.
+      ensureBuiltSourcePackageEnvironment()
       if request.workingDir.len > 0:
         setCurrentDir(request.workingDir)
       let cliPath =

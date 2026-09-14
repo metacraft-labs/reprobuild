@@ -63,3 +63,29 @@ repro-harvest-apt apps/repro-harvest-apt/repro_harvest_apt.nim --define:ssl --pa
 # transport nobody is meant to rely on (the binding, not the transport, is
 # what makes the evidence trustworthy).
 attestation-agent apps/attestation-agent/attestation_agent.nim
+# Dependency-Attribution MAC-1: the thin daemon client. Links ONLY
+# `repro_daemon_core` -- no build engine, no DSL runtime -- which is what
+# keeps it at 802,880 bytes / 396 dyld fixups against `repro`'s 22,189,816 /
+# 12,418 (debug images, macOS arm64; see the table in the module header), and
+# therefore cheaper to start.
+#
+# `--opt:size` because the saving being bought here is image size: the fixup
+# reduction is almost entirely REBASES, which scale with the image, not binds.
+#
+# `--define:reproVendoredHash` is load-bearing and NOT redundant, even though
+# `config.nims` already selects the vendored backend by default. The dev shell
+# exports `REPROBUILD_USE_SYSTEM_HASH_LIBS=1`, and `config.nims` reads it as
+# `useSystemHashLibs = not defined(reproVendoredHash) and <that var is true>`.
+# The define on this line is what makes the first conjunct false. Verified by
+# counterfactual build: WITHOUT it this binary links libblake3 and libxxhash
+# out of /nix/store and loads two more images before `main`; WITH it the only
+# dylib is /usr/lib/libSystem.B.dylib. Measured cost of those two loads on an
+# otherwise identical binary, 60 alternating runs: 3.16 ms against 2.33 ms,
+# so 0.83 ms. That is 26% of this binary's whole start cost -- worth keeping --
+# but it is NOT "a third of the saving": the end-to-end saving is ~20 ms and
+# this is 4% of it. Do not quote it as the former.
+#
+# NOT in `repro.nim`'s `apps` collection, so `.#apps` / `.#release` does not
+# build it -- only this file does. `attestation-agent` above has the same gap.
+# Closing both is a follow-up; until then a release image has no repro-client.
+repro-client apps/repro-client/repro_client.nim --opt:size --define:reproVendoredHash
