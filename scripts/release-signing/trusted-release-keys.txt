@@ -1,0 +1,33 @@
+# Reprobuild release signing — the trusted RELEASE key allowlist.
+#
+# One 40-hex-character OpenPGP primary-key fingerprint per line (case
+# insensitive, spaces tolerated). Comments start with '#'.
+#
+# THIS FILE IS THE ONLY THING THAT MAKES A KEY A RELEASE KEY.
+# `lib-signing.sh` classifies every key it is handed as exactly one of
+#
+#   release  — fingerprint appears below
+#   test     — a UID carries the literal marker
+#              "REPROBUILD UNTRUSTED TEST KEY"
+#   unknown  — neither
+#
+# and the release signing path refuses `test` and `unknown` alike. There
+# is deliberately NO fallback: an unlisted key does not get to sign a
+# release by being the only key present, and a test key does not get
+# promoted by an environment variable — `REPRO_SIGNING_ALLOW_TEST_KEY=1`
+# admits a `test` key and NOTHING else, and when it does, the signer
+# drops the `SIGNING-KEY-IS-A-TEST-KEY` marker beside `SHA256SUMS` so the
+# output can never be mistaken for a release by a later consumer.
+#
+# ── The list is empty on purpose ──────────────────────────────────────
+#
+# M2 builds the machinery; it does not mint the key. A reprobuild
+# release key must be generated inside the governance secret pipeline
+# (or replaced entirely by cosign keyless/OIDC — see
+# docs/release-signing.md §"Where the external boundary falls"), and its
+# fingerprint added here in a reviewed commit. Until that happens every
+# release-mode signing attempt fails closed, which is the correct
+# behaviour for a repository that has no release key yet.
+#
+# Adding a line here is a trust decision. It should be reviewed like
+# one.

@@ -28,6 +28,10 @@ tools/multi-distro-harness/
     smoke_hello.sh                  # POSIX-sh hello-world test (Recipe-Val M0)
     sandbox_check_bubblewrap.sh     # bwrap + user-ns probe (Sandbox-MVP M0)
     sandbox_transparency_probe.sh   # bwrap passthrough transparency probe (Sandbox-MVP M0)
+    m2_signing_keypolicy.sh         # release/test key policy (M2 SIGNING; any distro)
+    m2_signing_apt.sh               # apt InRelease/Release.gpg gate (M2 SIGNING; debian, ubuntu)
+    m2_signing_dnf.sh               # rpm gpgcheck + repo_gpgcheck gate (M2 SIGNING; fedora)
+    m2_signing_pacman.sh            # pacman package + database sig gate (M2 SIGNING; arch)
 scripts/
   run_multi_distro_tests.sh # cross-distro test driver
 ```
