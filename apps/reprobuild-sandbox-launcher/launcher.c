@@ -89,6 +89,23 @@
  *     ``darling_bin=/abs/path``      Darling launcher binary (defaults
  *                                    to /usr/bin/darling if absent).
  *
+ *   M6 reprobuild-buildusers key/value lines (additive; OFF unless the
+ *   manifest explicitly carries them, which only a system/shared-store
+ *   install ever emits):
+ *
+ *     ``build_uid=<n>``              numeric uid of the system build
+ *                                    account this build must run as.
+ *     ``build_gid=<n>``              numeric gid of the build group.
+ *
+ *   Both must be present together and both must be non-zero. They are
+ *   honoured only when the launcher itself is running as real root; an
+ *   unprivileged launcher that is handed them fails closed (exit 6)
+ *   rather than silently running the build as the calling user.
+ *
+ *   When these keys are ABSENT -- the default, per-user, namespace
+ *   sandboxed shape -- not one instruction of the build-user path
+ *   executes and the launcher behaves exactly as it did before M6.
+ *
  *   Empty / comment / unknown-key lines are tolerated for forward
  *   compatibility.
  *
@@ -112,6 +129,8 @@
  *   3    mount(2) failed.
  *   4    execve(2) failed.
  *   5    other I/O error.
+ *   6    build-user privilege drop failed (M6 buildusers mode only;
+ *        never reachable unless the manifest carries build_uid=).
  *
  * Windows
  * -------
@@ -148,6 +167,7 @@ static int setenv(const char *name, const char *value, int overwrite) {
 #  include <fcntl.h>
 #  include <sched.h>
 #  include <signal.h>
+#  include <grp.h>
 #  include <sys/mount.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
@@ -195,6 +215,14 @@ typedef struct {
     char       darling_prefix[MAX_PATH_LEN];
     char       darling_exec[MAX_PATH_LEN];
     char       darling_bin[MAX_PATH_LEN];
+    /* M6 reprobuild-buildusers: optional system build-user mode.
+     * build_user_set stays 0 for every manifest that does not name a
+     * build account, which is what a default per-user install emits.
+     * Everything downstream keys off this flag, so the default path
+     * is not merely "the flag is false" -- it is the identical code. */
+    int        build_user_set;
+    unsigned   build_uid;
+    unsigned   build_gid;
 } manifest_t;
 
 static int g_verbose = 0;
@@ -257,6 +285,23 @@ static int copy_field(char *dst, size_t cap, const char *src) {
 /* ---------------------------------------------------------------------- */
 /* Manifest parsing                                                        */
 /* ---------------------------------------------------------------------- */
+
+/* M6 buildusers: strict base-10 unsigned parse. Rejects empty input,
+ * trailing garbage, signs and overflow. A sloppy parse here would be a
+ * silent "ran as uid 0" bug, so nothing is tolerated. */
+static int parse_uint_field(const char *src, unsigned *out) {
+    if (src == NULL || *src == '\0') return -1;
+    for (const char *q = src; *q != '\0'; q++) {
+        if (*q < '0' || *q > '9') return -1;
+    }
+    errno = 0;
+    char *end = NULL;
+    unsigned long v = strtoul(src, &end, 10);
+    if (errno != 0 || end == src || *end != '\0') return -1;
+    if (v > 0xFFFFFFFFUL) return -1;
+    *out = (unsigned)v;
+    return 0;
+}
 
 static int parse_flags(const char *flags, int *ro) {
     *ro = 0;
@@ -386,6 +431,8 @@ static int parse_manifest(const char *path, manifest_t *m) {
     }
 
     memset(m, 0, sizeof(*m));
+    /* M6 buildusers: both keys must appear, or neither. */
+    int saw_build_uid = 0, saw_build_gid = 0;
     char line[MAX_LINE];
     int lineno = 0;
     while (fgets(line, sizeof(line), fp)) {
@@ -453,6 +500,25 @@ static int parse_manifest(const char *path, manifest_t *m) {
             }
             continue;
         }
+        /* M6: build_uid= / build_gid= (reprobuild-buildusers mode). */
+        if (starts_with(p, "build_uid=")) {
+            if (parse_uint_field(p + 10, &m->build_uid) != 0) {
+                err_log("bad build_uid value at %s:%d: '%s'",
+                        path, lineno, p + 10);
+                fclose(fp); return -1;
+            }
+            saw_build_uid = 1;
+            continue;
+        }
+        if (starts_with(p, "build_gid=")) {
+            if (parse_uint_field(p + 10, &m->build_gid) != 0) {
+                err_log("bad build_gid value at %s:%d: '%s'",
+                        path, lineno, p + 10);
+                fclose(fp); return -1;
+            }
+            saw_build_gid = 1;
+            continue;
+        }
         if (strcmp(p, "proc") == 0) {
             if (m->n_ops >= MAX_MOUNTS) { fclose(fp); return -1; }
             mount_op_t *op = &m->ops[m->n_ops++];
@@ -475,6 +541,24 @@ static int parse_manifest(const char *path, manifest_t *m) {
         }
     }
     fclose(fp);
+
+    /* M6 buildusers validation. Fail closed on every half-specified or
+     * privilege-preserving shape rather than quietly falling back to
+     * "run the build as whoever invoked us". */
+    if (saw_build_uid != saw_build_gid) {
+        err_log("build_uid= and build_gid= must be given together "
+                "(%s has only %s)", path,
+                saw_build_uid ? "build_uid" : "build_gid");
+        return -1;
+    }
+    if (saw_build_uid) {
+        if (m->build_uid == 0 || m->build_gid == 0) {
+            err_log("build_uid/build_gid must not be 0: a build user that "
+                    "is root is not a build user (%s)", path);
+            return -1;
+        }
+        m->build_user_set = 1;
+    }
     return 0;
 }
 
@@ -701,6 +785,72 @@ static int setup_namespace(const manifest_t *m) {
             return -5;
         }
     }
+    return 0;
+}
+
+/* M6 reprobuild-buildusers: irreversibly become the system build
+ * account before handing control to the build.
+ *
+ * Called only when the manifest carried build_uid=/build_gid=. For the
+ * default per-user manifest this returns at the first line having
+ * touched nothing, so the default sandbox path is byte-for-byte the
+ * pre-M6 path rather than a differently-configured one.
+ *
+ * Ordering is the whole security argument:
+ *   setgroups(0) first  -- drop the supplementary set while still root;
+ *                          doing it after setuid() is not permitted and
+ *                          would silently leave root's groups attached.
+ *   setgid() second     -- once uid is dropped we can no longer change gid.
+ *   setuid() last       -- the irreversible step.
+ *
+ * Every one of those is then re-read back out of the kernel, and we
+ * additionally prove the drop is irreversible by requiring that
+ * seteuid(0) FAILS. A check that only read the values we just asked for
+ * would pass even if the kernel had ignored us. */
+static int drop_to_build_user(const manifest_t *m) {
+    if (!m->build_user_set) return 0;   /* default path: nothing happens */
+
+    if (getuid() != 0) {
+        err_log("build_uid=%u requested but launcher runs as uid %u; "
+                "the system build-user mode needs real root. Refusing to "
+                "run the build as the calling user.",
+                m->build_uid, (unsigned)getuid());
+        return -6;
+    }
+    if (setgroups(0, NULL) != 0) {
+        err_log("setgroups(0) failed: %s", strerror(errno));
+        return -6;
+    }
+    if (setgid((gid_t)m->build_gid) != 0) {
+        err_log("setgid(%u) failed: %s", m->build_gid, strerror(errno));
+        return -6;
+    }
+    if (setuid((uid_t)m->build_uid) != 0) {
+        err_log("setuid(%u) failed: %s", m->build_uid, strerror(errno));
+        return -6;
+    }
+
+    /* Read the credentials back from the kernel rather than trusting
+     * that the three calls above did what they returned 0 for. */
+    if (getuid() != (uid_t)m->build_uid || geteuid() != (uid_t)m->build_uid) {
+        err_log("privilege drop did not stick: uid=%u euid=%u wanted=%u",
+                (unsigned)getuid(), (unsigned)geteuid(), m->build_uid);
+        return -6;
+    }
+    if (getgid() != (gid_t)m->build_gid || getegid() != (gid_t)m->build_gid) {
+        err_log("gid drop did not stick: gid=%u egid=%u wanted=%u",
+                (unsigned)getgid(), (unsigned)getegid(), m->build_gid);
+        return -6;
+    }
+    /* Must be irreversible. If we can climb back to root the build is
+     * not contained and we must not exec it. */
+    if (seteuid(0) == 0) {
+        err_log("privilege drop is reversible (regained euid 0); refusing");
+        return -6;
+    }
+
+    vlog("build user: dropped to uid=%u gid=%u (irreversible)",
+         m->build_uid, m->build_gid);
     return 0;
 }
 
@@ -959,12 +1109,30 @@ int main(int argc, char **argv) {
     child_argv[ci] = NULL;
 
     if (g_dry_run) {
+        if (m.build_user_set) {
+            vlog("dry-run: would drop to build uid=%u gid=%u",
+                 m.build_uid, m.build_gid);
+        }
         vlog("dry-run: would execve(%s)", exec_target);
         for (int j = 0; j < ci; j++) {
             vlog("  argv[%d]=%s", j, child_argv[j]);
         }
         return 0;
     }
+
+    /* M6 buildusers: the last thing before execv, so that every mount
+     * above still ran with the privilege it needed and nothing after
+     * this point holds root. No-op unless the manifest named a build
+     * account. */
+#ifndef _WIN32
+    if (drop_to_build_user(&m) != 0) return 6;
+#else
+    if (m.build_user_set) {
+        err_log("build_uid=/build_gid= are Linux-only; refusing to honour "
+                "a build-user manifest on this platform");
+        return 6;
+    }
+#endif
 
 #ifdef _WIN32
     /* _execv on Windows replaces the current process. */

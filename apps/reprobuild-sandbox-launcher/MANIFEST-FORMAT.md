@@ -112,6 +112,55 @@ When `runtime=darling` is set, the following three keys are consulted:
 Any value other than `native`, `wine`, or `darling` for `runtime=` is
 rejected at parse time.
 
+#### M6 system build-user keys (`reprobuild-buildusers`)
+
+Two optional keys select the **off-by-default** system build-user mode,
+the hardened multi-user posture in which a build executes as a
+dedicated, unprivileged system account instead of as the invoking user:
+
+| Key | Meaning |
+| --- | --- |
+| `build_uid=<n>` | numeric uid of the system build account the target must run as |
+| `build_gid=<n>` | numeric gid of the build group |
+
+Semantics:
+
+* **Both or neither.** A manifest carrying only one of the pair is a
+  parse error (exit 1), not a half-configured run.
+* **Neither may be 0.** `build_uid=0` is rejected: a build user that is
+  root is not a build user.
+* **Values must be numeric.** Names are not resolved. `getpwnam(3)` is
+  not async-signal-safe and the launcher must stay allocation-free on
+  this path, so the *caller* resolves the account -- with `getent(1)` or
+  equivalent -- and passes the resolved ids. A non-numeric value is a
+  parse error rather than a silent 0.
+* **Real root required.** The keys are honoured only when the launcher
+  itself runs as uid 0. An unprivileged launcher handed a build-user
+  manifest exits **6** and executes nothing; it never falls back to
+  running the build as the calling user.
+* **Ordering.** The drop happens after every mount and immediately
+  before `execve(2)`: `setgroups(0)`, then `setgid`, then `setuid`. The
+  launcher then re-reads the credentials from the kernel and requires
+  that `seteuid(0)` *fails*, so a drop that did not actually take effect
+  cannot be mistaken for one that did.
+* **No user namespace is created in this mode.** The caller is already
+  root, so `setup_namespace()` takes the pre-existing `outer_uid == 0`
+  branch and unshares only `CLONE_NEWNS`. Containment here comes from
+  the unprivileged uid, not from a uid map.
+
+When both keys are **absent** -- the default, per-user shape, and the
+only shape a default install emits -- none of the above executes and the
+launcher behaves exactly as it did before M6.
+
+> **Deployment hazard.** Unknown keys are tolerated (see *Forward
+> compatibility* below). That tolerance means an **older launcher binary
+> will silently ignore `build_uid=`** and run the build with whatever
+> privilege it already holds -- as root, if the caller was root. The
+> launcher binary and the component generating the manifest must
+> therefore be upgraded together. Do not rely on a manifest key alone to
+> enforce a privilege boundary across mixed launcher versions; check the
+> launcher version at deploy time.
+
 ### Bind-mount lines
 
 The default line form is:

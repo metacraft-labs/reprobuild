@@ -106,9 +106,45 @@ install_from_local_checkout() {
   eprint_success
 }
 
+# M6 clause 2: optional system build-user mode (reprobuild-buildusers).
+#
+# OFF unless --system-build-users is passed. A default install never
+# reaches past the first line of this function, never consults a config
+# file for it, and never creates a system account or group. The hardened
+# multi-user mode is something an administrator opts into deliberately,
+# as root, on a host where that is the intended posture.
+maybe_provision_system_build_users() {
+  [ "${SYSTEM_BUILD_USERS:-0}" -eq 1 ] || return 0
+
+  case "$(uname -s 2>/dev/null || echo Unknown)" in
+    Linux) ;;
+    *) eprint_error "--system-build-users is Linux-only on this release" ;;
+  esac
+
+  local root="${REPROBUILD_SOURCE_ROOT:-$(script_dir)}"
+  local provisioner="$root/scripts/reprobuild-buildusers.sh"
+  [ -f "$provisioner" ] ||
+    eprint_error "cannot find $provisioner"
+  [ "$(id -u)" -eq 0 ] ||
+    eprint_error "--system-build-users creates system accounts and needs root"
+
+  eprint_note "Provisioning system build users (opt-in hardened mode)"
+  # shellcheck disable=SC2086
+  bash "$provisioner" provision ${REPROBUILD_BUILD_USERS_ARGS:-} ||
+    eprint_error "system build-user provisioning failed"
+}
+
 usage() {
   cat <<'EOF'
 Usage: install-on-distributions.sh [--method auto|nix-profile|local-prefix] [--prefix PATH]
+                                   [--system-build-users]
+
+  --system-build-users  OPT-IN, Linux + root only. Also provision the
+                        shared build group and build accounts used by
+                        the hardened system/shared-store mode. Omitted,
+                        the install is per-user and creates no system
+                        account -- which is the default and the only
+                        shape CI and the release artifacts exercise.
 
 Environment:
   REPROBUILD_FLAKE_REF        Nix flake package to install
@@ -121,6 +157,7 @@ EOF
 }
 
 method="${REPROBUILD_INSTALL_METHOD:-auto}"
+SYSTEM_BUILD_USERS=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -134,6 +171,10 @@ while [ "$#" -gt 0 ]; do
       export REPROBUILD_INSTALL_PREFIX="$2"
       shift 2
       ;;
+    --system-build-users)
+      SYSTEM_BUILD_USERS=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -143,6 +184,8 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+maybe_provision_system_build_users
 
 case "$method" in
   auto)
