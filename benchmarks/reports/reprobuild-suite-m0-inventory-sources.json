@@ -2794,7 +2794,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 247,
+          "line": 248,
           "path": "tests/integration/t_compiler_scratch_isolation.nim",
           "patterns": [
             "repro-extract-interface"
@@ -2810,7 +2810,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 256,
+          "line": 257,
           "path": "tests/integration/t_compiler_scratch_isolation.nim",
           "patterns": [
             "repro-extract-interface"
@@ -2818,6 +2818,22 @@
           "runtimeCompilerApi": "extractInterfaceFromModule",
           "runtimeCompilerApiModule": "repro_interface_artifacts",
           "snippet": "let second = extractInterfaceFromModule(modulePath,"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 292,
+          "path": "tests/integration/t_compiler_scratch_isolation.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "discard extractInterfaceFromModule(source, artifactPath,"
         }
       ],
       "source": "tests/integration/t_compiler_scratch_isolation.nim"
@@ -5463,16 +5479,65 @@
             "firstEntered",
             "firstStarted",
             "nimcache",
+            "output",
             "runner",
             "secondEntered",
             "secondStarted"
           ],
-          "line": 236,
+          "line": 237,
           "path": "tests/unit/t_m9r13a_provider_compile_sharing.nim",
           "patterns": [
             "nim-variable-argv"
           ],
           "snippet": "let cmd = @[nimExe, \"c\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 339,
+          "path": "tests/unit/t_m9r13a_provider_compile_sharing.nim",
+          "patterns": [
+            "repro-compile-provider-binary"
+          ],
+          "runtimeCompilerApi": "compileProviderBinary",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "let compiled = compileProviderBinary(source, output,"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 359,
+          "path": "tests/unit/t_m9r13a_provider_compile_sharing.nim",
+          "patterns": [
+            "repro-compile-provider-binary"
+          ],
+          "runtimeCompilerApi": "compileProviderBinary",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "discard compileProviderBinary(source, output,"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 365,
+          "path": "tests/unit/t_m9r13a_provider_compile_sharing.nim",
+          "patterns": [
+            "repro-compile-provider-binary"
+          ],
+          "runtimeCompilerApi": "compileProviderBinary",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "discard compileProviderBinary(source, output,"
         }
       ],
       "source": "tests/unit/t_m9r13a_provider_compile_sharing.nim"
@@ -32032,6 +32097,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_dsl_stdlib",
+        "repro_hash",
         "repro_interface_artifacts",
         "repro_tool_profiles"
       ],
@@ -32039,7 +32105,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r13a_provider_compile_sharing.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 17,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
