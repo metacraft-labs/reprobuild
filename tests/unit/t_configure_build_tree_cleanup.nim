@@ -120,14 +120,16 @@ when defined(reproProviderMode):
   proc autotoolsConfigure(root, srcDir, buildDir: string;
                          srcPatches: seq[string] = @[];
                          bootstrap = false;
-                         skipConfigure = false): BuildActionDef =
+                         skipConfigure = false;
+                         configureOutputFiles: seq[string] = @["Makefile"]): BuildActionDef =
     let name = "autotoolsCleanupTest"
     let pkg = PackageDef(packageName: name, sourceFile: root / "repro.nim")
     let fragment = buildPackageFragment(pkg, dummyRequest(root, name),
       proc() =
         discard autotools_package(srcDir = srcDir, buildDir = buildDir,
           srcPatches = srcPatches, patchHardcodedFile = bootstrap,
-          skipConfigure = skipConfigure),
+          skipConfigure = skipConfigure,
+          configureOutputFiles = configureOutputFiles),
       includeDefault = false)
     for action in extractActions(fragment):
       if action.commandStatsId == "autotools_package.configure":
@@ -143,8 +145,19 @@ suite "configure build-tree cleanup caching":
       let configure = autotoolsConfigure(root, "src", "build")
       check configure.dependencyPolicy.kind == bdpAutomaticMonitor
       check configure.dependencyPolicy.ignoredInputPrefixes == @[root / "build"]
-      check configure.outputs == @[root / "build" / ".repro-configure.stamp"]
+      check configure.outputs == @[root / "build" / ".repro-configure.stamp",
+        root / "build" / "Makefile"]
       check root / "src" in configure.readOnlyRoots
+
+  test "Autotools custom configure files are relative to the build directory":
+    when defined(reproProviderMode):
+      let root = createTempDir("repro-autotools-custom-outputs-", "")
+      defer: removeDir(root)
+      writeFile(root / "repro.nim", "discard\n")
+      let configure = autotoolsConfigure(root, "src", "build",
+        configureOutputFiles = @["GNUmakefile", "generated/config.h"])
+      check configure.outputs == @[root / "build" / ".repro-configure.stamp",
+        root / "build" / "GNUmakefile", root / "build" / "generated/config.h"]
 
   test "Autotools in-source configure retains its observed inputs":
     when defined(reproProviderMode):
@@ -154,7 +167,7 @@ suite "configure build-tree cleanup caching":
       let configure = autotoolsConfigure(root, "./src", "src")
       check configure.dependencyPolicy.kind == bdpAutomaticMonitor
       check configure.dependencyPolicy.ignoredInputPrefixes.len == 0
-      check configure.outputs.len == 0
+      check configure.outputs == @[root / "src" / "Makefile"]
 
   test "Autotools pre-cleanup patches and bootstrap retain observed inputs":
     when defined(reproProviderMode):

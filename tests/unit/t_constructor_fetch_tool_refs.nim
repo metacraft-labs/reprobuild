@@ -1,4 +1,4 @@
-import std/[os, osproc, sequtils, strutils, tempfiles, times, unittest, uri]
+import std/[os, osproc, sequtils, strtabs, strutils, tempfiles, times, unittest, uri]
 
 when defined(reproProviderMode):
   import repro_core
@@ -142,6 +142,46 @@ when defined(reproProviderMode):
     DslFetchSpec(url: localFileUrl(source),
       hashAlg: dshaSha256, hashHex: ($sha256.digest(readFile(source))).toLowerAscii(),
       kind: dfkDataFile, extractStrip: 0, extractedRoot: "src")
+
+suite "constructor auxiliary tool identities":
+  test "Meson timestamp refresh runs with only its declared shell tools":
+    when defined(reproProviderMode):
+      let root = createTempDir("repro-meson-refresh-tools-", "")
+      defer: removeDir(root)
+      writeFile(root / "repro.nim", "discard\n")
+      let action = constructorActions(root, "refreshTools", ckMeson).findById(
+        "meson-refresh-generated-mtime-refreshTools")
+      check "sh" in action.toolIdentityRefs
+      check "touch" in action.toolIdentityRefs
+      when not defined(windows):
+        let binDir = root / "bin"
+        createDir(binDir)
+        for name in action.toolIdentityRefs:
+          let tool = findExe(name)
+          require tool.len > 0
+          createSymlink(tool, binDir / name)
+        createDir(root / "build")
+        let generated = root / "build" / "build.ninja"
+        writeFile(generated, "# unchanged generated rules\n")
+        setLastModificationTime(generated, fromUnix(1_700_000_000))
+        let before = getLastModificationTime(generated)
+        var argv: seq[string]
+        for argument in action.call.arguments:
+          if argument.name == "argv":
+            argv = argument.encodedValue.split('\x1f')
+        require argv.len == 3
+        let environment = newStringTable(modeCaseSensitive)
+        for name, value in envPairs():
+          environment[name] = value
+        environment["PATH"] = binDir
+        let execution = uncontrolledExecCmdEx(quoteShellCommand(argv),
+          env = environment, workingDir = root)
+        checkpoint execution.output
+        check execution.exitCode == 0
+        check readFile(generated) == "# unchanged generated rules\n"
+        check getLastModificationTime(generated) > before
+    else:
+      skip()
 
 suite "constructor fetch tool identities":
   test "verified unchanged fetches preserve consumer stamp timestamps":

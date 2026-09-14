@@ -365,7 +365,7 @@ proc meson_package*(srcDir: string;
     outputs = @[buildNinja],
     dependencyPolicy = automaticMonitorPolicy(@[m9r79BuildDirAbs]),
     commandStatsId = "meson_package.refresh_generated_mtime",
-    toolIdentityRefs = @["sh"])
+    toolIdentityRefs = @["sh", "touch"])
   var compileEdge = meson.compile(workDir = buildDir,
     after = @[refreshGeneratedMtime], extraEnv = extraEnv)
   compileEdge.inputs = setupIdentityInputs
