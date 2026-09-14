@@ -101,6 +101,16 @@ when not defined(windows):
       check not warm["launched"].getBool
       check warm["cacheDecision"].getStr in ["cdHit", "cdHybridCutoff"]
 
+      removeFile(project / "build" / "Makefile")
+      let missingMakefile = build("missing-makefile").configureAction()
+      check missingMakefile["launched"].getBool
+      check fileExists(project / "build" / "Makefile")
+
+      writeFile(project / "build" / "Makefile", "broken make syntax\n")
+      let corruptMakefile = build("corrupt-makefile").configureAction()
+      check corruptMakefile["launched"].getBool
+      check readFile(project / "build" / "Makefile").contains("include .deps/probe.Po")
+
       writeFile(project / "src" / "settings.txt", "source-two-longer\n")
       let sourceChanged = build("source-changed").configureAction()
       check sourceChanged["launched"].getBool
@@ -110,6 +120,20 @@ when not defined(windows):
       let optionsChanged = build("options-changed").configureAction()
       check optionsChanged["launched"].getBool
       check readFile(project / "build" / "configured.txt").contains("second")
+
+      writeFile(project / "src" / "configure", Configure.replace("Makefile", "GNUmakefile"))
+      writeFile(project / "repro.nim", Recipe.replace("first", "second").replace(
+        "configureOptions = @[\"second\"]",
+        "configureOptions = @[\"second\"], configureOutputFiles = @[\"GNUmakefile\"]"))
+      let customMakefile = build("custom-makefile").configureAction()
+      check customMakefile["launched"].getBool
+      check fileExists(project / "build" / "GNUmakefile")
+      check not fileExists(project / "build" / "Makefile")
+
+      removeFile(project / "build" / "GNUmakefile")
+      let missingCustomMakefile = build("missing-custom-makefile").configureAction()
+      check missingCustomMakefile["launched"].getBool
+      check fileExists(project / "build" / "GNUmakefile")
 
       removeDir(project / "build")
       let missingOutput = build("missing-output").configureAction()

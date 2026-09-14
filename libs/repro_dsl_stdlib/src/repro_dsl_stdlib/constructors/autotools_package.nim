@@ -275,7 +275,8 @@ proc autotools_package*(srcDir: string;
                         srcPatches: seq[string] = @[];
                         postConfigureCommands: seq[string] = @[];
                         postInstallCommands: seq[string] = @[];
-                        extraEnv: seq[(string, string)] = @[]):
+                        extraEnv: seq[(string, string)] = @[];
+                        configureOutputFiles: seq[string] = @["Makefile"]):
                         AutotoolsPackageResult =
   ## Configure → build → install pipeline for an upstream autotools
   ## project. The configure step is emitted via ``inlineExecCall`` so
@@ -305,6 +306,9 @@ proc autotools_package*(srcDir: string;
   ## supplies recipe-specific environment overrides to the configure, compile,
   ## and install actions. The values are kept outside the typed call identity,
   ## matching the other package constructors.
+  ## ``configureOutputFiles`` names stable generated files relative to the build
+  ## directory. Declare the files make needs so their deletion or modification
+  ## invalidates configure reuse; use custom names for nonstandard upstreams.
   # M9.R.15a.3 — accept a custom prefix flag format (openssl's
   # ``./Configure`` uses ``--prefix=`` like autotools, but Configure
   # also accepts ``--openssldir=`` etc. via the same channel; we keep
@@ -588,6 +592,8 @@ proc autotools_package*(srcDir: string;
       # Cleanup runs first, so later make writes are not prior inputs.
       # Patches/bootstrap run before cleanup and may read the old tree.
       configureIgnoredRoots.add(m9r79ConfBuildDirAbs)
+  for outputFile in configureOutputFiles:
+    configureOutputs.add(m9r79ConfBuildDirAbs / outputFile)
   var m9r79ConfReadOnly: seq[string] = @[]
   if not patchHardcodedFile and not allowSourceWrites and
       srcPatches.len == 0 and
