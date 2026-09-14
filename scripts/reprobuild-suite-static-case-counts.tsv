@@ -1598,7 +1598,7 @@ tests/unit/test_ct_test_surface_addressability.py	python	14
 tests/unit/test_dev_shell_hook_scope.py	python	6
 tests/unit/test_graph_owned_test_artifacts.py	python	23
 tests/unit/test_package_root_anchor.py	python	3
-tests/unit/test_reprobuild_suite_inventory.py	python	64
+tests/unit/test_reprobuild_suite_inventory.py	python	68
 tools/catalog-harvester/tests/test_gh_releases_source.nim	nim	26
 tools/catalog-harvester/tests/test_harvester_app_name_validation.nim	nim	6
 tools/catalog-harvester/tests/test_harvester_history.nim	nim	3

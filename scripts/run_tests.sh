@@ -441,36 +441,29 @@ repro_build_collection ".#test-builds" || exit 1
 REPROBUILD_BIN_ABS="$(cd build/bin && pwd)"
 export PATH="${REPROBUILD_BIN_ABS}:${PATH}"
 
-# Step 4 (B5): run Python tests first, then the Nim binaries via
-# ct-test-runner when available or the M3 fallback runner.
+# Step 4 (B5): run the Nim binaries via ct-test-runner when available or the
+# M3 fallback runner, then the Python tests.
 #
-# `.#test-builds` has just completed, so every test binary the checked-in
-# graph declares is supposed to be on disk. The suite-inventory tests that
-# read a per-binary catalog step aside with a loud reason in a partially
-# built working tree; HERE a missing binary is a build defect, so tell them
-# to refuse instead. Without this the same shortfall would be reported as a
-# skip in the one place it must be an error.
-export REPROBUILD_SUITE_INVENTORY_REQUIRE_BUILT_TREE=1
-# A failing module must not hide the modules after it, nor the entire Nim
-# phase below it. Under `set -e` a bare `python3 "${test_file}"` aborted the
-# whole script: one stale assertion in the fifth of eight modules meant three
-# later modules and all 1441 test binaries never ran, and the suite reported
-# that as a single failure rather than as "nothing after this was measured".
+# WHY THE NIM PHASE IS FIRST. Both phases enumerate the same ~1500 test
+# binaries through the same `--list-json`, and neither could see the other, so
+# the suite paid for that enumeration twice in a single run. The runner's pass
+# is not optional -- probing IS how it builds its per-case work queue -- so the
+# duplicate that can be removed is the Python one. The runner now publishes
+# what it probed (`--catalog-write`) and the suite inventory consumes it
+# (`REPROBUILD_SUITE_INVENTORY_RUN_CATALOG`), which requires the runner to have
+# run first.
 #
-# Failures are collected and re-raised at the very end of this script, so the
-# run still fails -- it just fails after measuring everything it can.
-python_failed_modules=()
-while IFS= read -r -d '' test_file; do
-  if ! python3 "${test_file}"; then
-    python_failed_modules+=("${test_file}")
-    printf '::error:: python module FAILED: %s (continuing)\n' "${test_file}" >&2
-  fi
-done < <(
-  # Sorted so the module order is the same on every host and in every run;
-  # `find` order is filesystem-dependent, which makes "module N of M" in a
-  # report mean nothing.
-  find tests -type f -name 'test_*.py' -print0 | sort -z
-)
+# The import is validated, never trusted: each binary's size and mtime travel
+# with its catalog rows and the inventory re-stats before reusing anything, so
+# a binary that moved -- and every binary the document does not cover -- is
+# probed by the inventory exactly as before. If the `ct-test-runner` branch is
+# taken it writes no catalog at all and the inventory probes everything, which
+# is the old behaviour and stays correct.
+run_catalog="build/reprobuild-run-catalog.json"
+# This run's catalog is written by this run. A leftover from an earlier one
+# would be rejected binary-by-binary on size/mtime anyway, but "rejected on
+# every entry" and "never present" read very differently in a log.
+rm -f "${run_catalog}"
 
 # D6 per-test timeout plus an outer wall-clock backstop for runner wedges.
 RUNNER_TIMEOUT="${REPROBUILD_RUNNER_TIMEOUT:-4h}"
@@ -565,13 +558,24 @@ ct_test_runner="${CT_TEST_RUNNER:-}"
 if [[ -z "${ct_test_runner}" ]]; then
   ct_test_runner="$(command -v "ct-test-runner${exe_ext}" 2>/dev/null || true)"
 fi
+#
+# The Nim phase's status is CAPTURED rather than allowed to abort the script.
+# It used to be the last thing that ran, so `set -e` killing the script here
+# cost nothing; now the Python phase is downstream of it, and the same rule
+# that already applies to a failing Python module applies to a failing runner:
+# a real failure must not also delete the measurement of everything after it.
+# The status is re-raised at the very end, so the run still fails.
+nim_phase_status=0
 if [[ -n "${ct_test_runner}" && -x "${ct_test_runner}" ]]; then
   printf 'Using ct-test-runner: %s (overall timeout %s)\n' \
     "${ct_test_runner}" "${RUNNER_TIMEOUT}" >&2
+  # No `--catalog-write`: this is a different program with a different CLI.
+  # The inventory below therefore probes for itself on this branch, exactly
+  # as it did before the runner learned to publish.
   timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${ct_test_runner}" run \
     --bin-dir=build/test-bin \
     --summary-json=test-logs/parallel-run.json \
-    --results-dir=test-logs/results
+    --results-dir=test-logs/results || nim_phase_status=$?
 else
   printf 'ct-test-runner not built; falling back to M3 internal runner (overall timeout %s)\n' \
     "${RUNNER_TIMEOUT}" >&2
@@ -579,20 +583,67 @@ else
   # binary is an input to a dozen tests, not just this fallback path, so it
   # cannot be built here without leaving those tests running a stale one on
   # every host that has ct-test-runner.
+  #
+  # ``--catalog-write`` costs this run nothing: the probe it records has
+  # already happened by the time the file is written, and the file is written
+  # before the first case executes, so even a runner that later wedges or is
+  # cut by RUNNER_TIMEOUT still leaves the inventory a usable catalog.
   timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${runner_bin}" \
     --no-build \
     --threads=${REPROBUILD_TEST_THREADS} \
     --test-timeout=${TEST_TIMEOUT} \
     --bin-dir=build/test-bin \
+    --catalog-write="${run_catalog}" \
     --summary-json=test-logs/parallel-run.json \
-    --results-dir=test-logs/results
+    --results-dir=test-logs/results || nim_phase_status=$?
 fi
 
-# Re-raise any Python module failure recorded above. This runs after the Nim
-# phase on purpose: a failing module is a real failure, but it must not cost us
-# the measurement of everything downstream of it.
+# `.#test-builds` has just completed, so every test binary the checked-in
+# graph declares is supposed to be on disk. The suite-inventory tests that
+# read a per-binary catalog step aside with a loud reason in a partially
+# built working tree; HERE a missing binary is a build defect, so tell them
+# to refuse instead. Without this the same shortfall would be reported as a
+# skip in the one place it must be an error.
+#
+# Still true after the phase reorder above, and for the same reason: the
+# guarantee comes from `.#test-builds` having succeeded, not from the Python
+# phase's position relative to the Nim one. Nothing between the two deletes a
+# test binary.
+export REPROBUILD_SUITE_INVENTORY_REQUIRE_BUILT_TREE=1
+# Hand the inventory the catalog the runner just published. Absent, stale or
+# unreadable, this is a no-op and the inventory probes as before.
+export REPROBUILD_SUITE_INVENTORY_RUN_CATALOG="${run_catalog}"
+# A failing module must not hide the modules after it. Under `set -e` a bare
+# `python3 "${test_file}"` aborted the whole script: one stale assertion in the
+# fifth of eight modules meant three later modules never ran, and the suite
+# reported that as a single failure rather than as "nothing after this was
+# measured".
+#
+# Failures are collected and re-raised at the very end of this script, so the
+# run still fails -- it just fails after measuring everything it can.
+python_failed_modules=()
+while IFS= read -r -d '' test_file; do
+  if ! python3 "${test_file}"; then
+    python_failed_modules+=("${test_file}")
+    printf '::error:: python module FAILED: %s (continuing)\n' "${test_file}" >&2
+  fi
+done < <(
+  # Sorted so the module order is the same on every host and in every run;
+  # `find` order is filesystem-dependent, which makes "module N of M" in a
+  # report mean nothing.
+  find tests -type f -name 'test_*.py' -print0 | sort -z
+)
+
+# Re-raise both phases' failures. Neither is allowed to suppress the other's
+# measurement, and neither is allowed to be forgotten.
+suite_status=0
 if (( ${#python_failed_modules[@]} > 0 )); then
   printf '\n%d python module(s) failed:\n' "${#python_failed_modules[@]}" >&2
   printf '  %s\n' "${python_failed_modules[@]}" >&2
-  exit 1
+  suite_status=1
 fi
+if (( nim_phase_status != 0 )); then
+  printf '\nNim test phase exited %d\n' "${nim_phase_status}" >&2
+  suite_status="${nim_phase_status}"
+fi
+exit "${suite_status}"

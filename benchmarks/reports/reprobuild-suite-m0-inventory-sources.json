@@ -34046,7 +34046,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_reprobuild_suite_inventory.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 64,
+      "staticCaseCount": 68,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

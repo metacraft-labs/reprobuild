@@ -2311,6 +2311,41 @@ def format_static_case_count_drift(drift: Mapping[str, Any]) -> str:
 DEFAULT_CASE_CATALOG = Path("build/reprobuild-suite-case-catalog.json")
 CASE_CATALOG_SCHEMA = "reprobuild-suite-case-catalog/1"
 
+# Run-catalog seed: the OTHER probe of the same 1500 binaries.
+#
+# `tools/test-runner/repro_test_runner.nim` runs `--list-json` on every test
+# binary before it can build its work queue -- it has no choice, that probe IS
+# how per-case addressability exists -- and `scripts/run_tests.sh` runs both
+# that runner and this inventory in the same suite invocation. So the suite
+# paid for the identical enumeration twice, by two mechanisms that could not
+# see each other. The runner now publishes what it learned
+# (`--catalog-write`), and this reads it.
+#
+# IT IS A CACHE SEED, NOT A SOURCE OF TRUTH, and the distinction is the whole
+# design. Imported entries are injected into exactly the same dict the on-disk
+# probe cache populates and pass through exactly the same gate:
+#
+#   * the entry's `key` must equal `binary_cache_key(binary)` -- the binary's
+#     CURRENT size and mtime -- so a binary rebuilt or touched since the runner
+#     looked is re-probed, not believed;
+#   * only `status == "ok"` is ever reusable, which is what keeps the
+#     quarantine taxonomy honest: the runner classifies every probe failure as
+#     the single fact "opaque", and that word cannot be imported into a
+#     taxonomy whose entire purpose is to separate `timeout` (a fact about the
+#     host, and grounds to abort) from `no-protocol-support` (a fact about the
+#     binary). A binary the runner could not enumerate simply arrives with no
+#     information and this module probes it itself.
+#
+# Every way of not understanding the document -- absent, unreadable, wrong
+# version, written under a different project root, a binary it does not
+# mention, a binary whose stat it could not take, an ambiguous stem -- resolves
+# to PROBE IT. There is no path on which failing to understand the seed causes
+# a case count to be invented.
+RUN_CATALOG_ENV = "REPROBUILD_SUITE_INVENTORY_RUN_CATALOG"
+# The runner's `caseDetailVersion`, which is versioned separately from its
+# selection contract. See `runCatalogDocument` in the runner.
+RUN_CATALOG_CASE_DETAIL_VERSION = 1
+
 CATALOG_CACHE_PATH = Path("build/reprobuild-suite-catalog-cache.json")
 # Version 2 refuses to read a version-1 cache. Version 1 stored NEGATIVE
 # results (a `timeout`, a `dynamic-link-failure`) keyed by the binary's
@@ -2875,6 +2910,134 @@ def store_catalog_cache(path: Path, entries: dict[str, Any]) -> None:
         pass
 
 
+def run_catalog_seed(
+    root: Path,
+    specs: list[TestSpec],
+    path: Path | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Probe outcomes republished by the test runner, in cache-entry shape.
+
+    Returns ``(entries, report)``. ``entries`` maps ``spec.source`` onto the
+    same ``{"key": ..., "result": ...}`` record ``load_catalog_cache``
+    produces, so the caller can merge it into the cache dict and let the
+    existing validation decide. ``report`` is the provenance this run should
+    record: never a silent optimisation.
+
+    See ``RUN_CATALOG_ENV`` for why this is a seed and not an authority. Every
+    refusal below returns the binary to the ordinary probe path.
+
+    The ``key`` written here is the CATALOG'S claim about the binary's size and
+    mtime, not a fresh stat. That is deliberate: the caller re-stats and
+    compares, so an entry that disagrees with the binary on disk is rejected by
+    the same code that rejects a stale disk-cache entry. Stating the claim and
+    checking it elsewhere is what makes the check a check.
+    """
+    # Recorded relative to the root whenever it is inside it. The tracked
+    # artifact must not carry a developer's home directory or a CI runner's
+    # workspace path: those differ per host, so an absolute path here would
+    # make the document differ per host for a reason that says nothing about
+    # the suite. Same rule `redact_absolute_paths` applies elsewhere.
+    display_path: str | None = None
+    if path is not None:
+        try:
+            display_path = path.relative_to(root).as_posix()
+        except ValueError:
+            display_path = redact_absolute_paths(path.as_posix())
+    report: dict[str, Any] = {
+        "path": display_path,
+        "used": False,
+        "reason": "",
+        "importedBinaries": 0,
+    }
+    if path is None:
+        report["reason"] = f"no {RUN_CATALOG_ENV} set"
+        return {}, report
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        report["reason"] = f"could not read {display_path}: {exc}"
+        return {}, report
+    except ValueError as exc:
+        report["reason"] = f"{display_path} is not valid JSON: {exc}"
+        return {}, report
+    if not isinstance(document, Mapping):
+        report["reason"] = f"{display_path} is not a JSON object"
+        return {}, report
+    detail_version = document.get("caseDetailVersion")
+    if detail_version != RUN_CATALOG_CASE_DETAIL_VERSION:
+        report["reason"] = (
+            f"{display_path} carries caseDetailVersion {detail_version!r}; this "
+            f"reader understands {RUN_CATALOG_CASE_DETAIL_VERSION}"
+        )
+        return {}, report
+    recorded_root = document.get("projectRoot")
+    # `bodyHash` bakes the source file's ABSOLUTE path into the hashed body
+    # (campaign defect #52), so a catalog from another checkout describes
+    # different hashes for the same cases. The size/mtime check below would
+    # almost certainly reject it anyway; rejecting it HERE means the log says
+    # which of the two things went wrong.
+    if recorded_root != str(root):
+        report["reason"] = (
+            f"{display_path} was written under project root {recorded_root!r}, "
+            f"this run is under {str(root)!r}"
+        )
+        return {}, report
+    binaries = document.get("binaries")
+    if not isinstance(binaries, Mapping):
+        report["reason"] = f"{display_path} carries no `binaries` object"
+        return {}, report
+
+    # stem -> source, refusing ambiguity rather than picking one. Two specs
+    # naming the same binary would make the import a coin flip, and a coin
+    # flip that lands on the wrong source is a case count attributed to the
+    # wrong file -- silently, and with the right total.
+    by_stem: dict[str, str | None] = {}
+    for spec in specs:
+        if spec.language != "nim" or not spec.binary:
+            continue
+        stem = Path(spec.binary).stem
+        by_stem[stem] = None if stem in by_stem else spec.source
+
+    entries: dict[str, Any] = {}
+    for stem, node in binaries.items():
+        source = by_stem.get(stem)
+        if source is None or not isinstance(node, Mapping):
+            continue
+        cases = node.get("cases")
+        size = node.get("size")
+        mtime_ns = node.get("mtimeNs")
+        # No rider means the runner found the binary opaque, or wrote this
+        # document before the rider existed, or could not stat it. All three
+        # are "no information", and all three are answered by probing.
+        if (
+            not node.get("protocol")
+            or not isinstance(cases, list)
+            or not isinstance(size, int)
+            or not isinstance(mtime_ns, int)
+        ):
+            continue
+        rows: list[dict[str, Any]] = []
+        malformed = False
+        for entry in cases:
+            if not isinstance(entry, Mapping):
+                malformed = True
+                break
+            # Same projection `probe_binary_catalog` applies to a live probe,
+            # applied to the same rows. `entry.get` -- not `entry[...]` -- so
+            # an absent key stays `None` on both paths rather than raising on
+            # one of them.
+            rows.append({field: entry.get(field) for field in CATALOG_CASE_FIELDS})
+        if malformed:
+            continue
+        entries[source] = {
+            "key": f"{size}:{mtime_ns}",
+            "result": {"status": "ok", "cases": rows},
+        }
+    report["used"] = True
+    report["importedBinaries"] = len(entries)
+    return entries, report
+
+
 def specs_digest(specs: list[TestSpec]) -> str:
     """Identity of the spec set a catalog index was built for.
 
@@ -2896,7 +3059,28 @@ def specs_digest(specs: list[TestSpec]) -> str:
     return digest.hexdigest()
 
 
-_CATALOG_INDEX_MEMO: dict[tuple[str, str, int, int, bool], dict[str, Any]] = {}
+_CATALOG_INDEX_MEMO: dict[tuple[str, str, int, int, bool, str], dict[str, Any]] = {}
+
+# Provenance of the most recent `catalog_index` call, for the inventory
+# document to record. A reused probe that says nothing about being reused is
+# indistinguishable from a probe that ran, which is how "this is cheaper now"
+# becomes unfalsifiable.
+_LAST_RUN_CATALOG_REPORT: dict[str, Any] = {
+    "path": None,
+    "used": False,
+    "reason": "catalog_index has not run",
+    "importedBinaries": 0,
+}
+_RUN_CATALOG_REPORT_MEMO: dict[tuple[str, str, int, int, bool, str], dict[str, Any]] = {}
+
+
+def configured_run_catalog(root: Path) -> Path | None:
+    """The run catalog `scripts/run_tests.sh` published, if any."""
+    raw = os.environ.get(RUN_CATALOG_ENV, "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw)
+    return candidate if candidate.is_absolute() else root / candidate
 
 
 def catalog_index(
@@ -2932,19 +3116,45 @@ def catalog_index(
     directory, and ``source_fingerprint`` hashes untracked files, so probing
     in-tree let the measurement change the fingerprint it was recording.
     """
+    global _LAST_RUN_CATALOG_REPORT
+    run_catalog = configured_run_catalog(root) if use_cache else None
     memo_key = (
         str(root),
         specs_digest(specs),
         timeout_seconds,
         workers,
         use_cache,
+        "" if run_catalog is None else str(run_catalog),
     )
     memoized = _CATALOG_INDEX_MEMO.get(memo_key)
     if memoized is not None:
+        # The provenance is memoized with the result, not recomputed and not
+        # left behind. A second call that returned the first call's index
+        # while `_LAST_RUN_CATALOG_REPORT` still described some third call
+        # would put a true index next to a false account of where it came
+        # from, which is worse than having no account at all.
+        _LAST_RUN_CATALOG_REPORT = _RUN_CATALOG_REPORT_MEMO[memo_key]
         return memoized
 
     cache_path = root / CATALOG_CACHE_PATH
     cached = load_catalog_cache(cache_path) if use_cache else {}
+    # The seed is merged over the disk cache, not under it: both are validated
+    # against the binary's current size and mtime by the identical gate below,
+    # so neither can be stale, and the runner's copy is the one taken THIS
+    # run. `--no-cache` suppresses both -- it means "do not reuse a probe
+    # result", and a republished probe result is a probe result.
+    seeded, run_catalog_report = (
+        run_catalog_seed(root, specs, run_catalog) if use_cache else ({}, {
+            "path": None,
+            "used": False,
+            "reason": "catalog cache disabled for this call",
+            "importedBinaries": 0,
+        })
+    )
+    _LAST_RUN_CATALOG_REPORT = run_catalog_report
+    _RUN_CATALOG_REPORT_MEMO[memo_key] = run_catalog_report
+    if seeded:
+        cached = {**cached, **seeded}
     env = catalog_probe_env()
 
     results: dict[str, dict[str, Any]] = {}
@@ -4588,6 +4798,19 @@ def build_inventory(
         "probeTimeoutSeconds": CATALOG_PROBE_TIMEOUT_SECONDS,
         "probeRetryTimeoutSeconds": CATALOG_PROBE_RETRY_TIMEOUT_SECONDS,
         "cacheEnabled": use_catalog_cache,
+        # Where these counts came from. A probe reused from the test runner
+        # and a probe this module ran are supposed to be the same fact, and
+        # that is exactly why the artifact has to say which one happened:
+        # "the inventory got cheaper" is only checkable if the document
+        # records how many binaries it stopped probing and why the rest it
+        # still did. `used: false` with a stated reason is the normal,
+        # unremarkable case outside `scripts/run_tests.sh`.
+        "runCatalog": dict(_LAST_RUN_CATALOG_REPORT) if use_catalog else {
+            "path": None,
+            "used": False,
+            "reason": "catalog enumeration disabled (--no-catalog)",
+            "importedBinaries": 0,
+        },
         # The taxonomy is published in the artifact so a reader can tell,
         # without reading this script, which quarantine memberships are
         # claims about the tree and which could never have been recorded.
