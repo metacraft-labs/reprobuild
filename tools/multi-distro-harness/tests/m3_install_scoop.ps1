@@ -18,6 +18,23 @@ with the control that makes S1 and S5 mean anything:
       and the GENUINE one with the same URL is ACCEPTED. Without the
       pair, S5 could be passing because the download failed.
 
+## The arm reports on ITSELF, two ways (N54)
+
+A harness that dies must not look green, and must not look absent either.
+Two independent guards, at the summary:
+
+  * a terminating error anywhere in the body is CAUGHT and reported as
+    `HARNESS DIED EARLY`, with the message and position. Before this, a
+    `throw` unwound through `finally { Cleanup }` and killed the script
+    there -- exit 1, stack trace, and NO summary line at all, so the
+    check-count guard below never even evaluated;
+  * a run that finished without throwing but performed fewer checks than
+    the floor is a FAILURE too. That is a different fault (a branch that
+    skipped its assertions) and neither guard implies the other.
+
+Both were verified by injection: a `throw` after the S1 banner produces
+the first, and raising the floor on a complete run produces the second.
+
 ## A REAL local bucket, not a placeholder
 
 runquota's packaging leaves `@SCOOP_URL@` unsubstituted because no bucket
@@ -59,11 +76,25 @@ $BucketName = 'reprobuild'
 
 $script:checks = 0
 $script:fails = 0
-# The number of checks a COMPLETE run performs. Asserted at the end,
-# because the first version of this arm threw at step 3 and still printed
-# "2 checks, 0 failure(s)" -- an arm that dies early must never look
-# green. This is the same class of false green the campaign keeps
-# catching, produced by the test harness itself.
+# Set by the `catch` around the arm body when a terminating error kills the
+# run. It is what turns an ABORT into a reported FAILURE: see the
+# "TWO SEPARATE GUARDS" block above the summary.
+$script:aborted = $null
+# The FLOOR a complete run must clear -- not the number it performs. A
+# complete green run at this revision performs 58 checks (measured, twice);
+# the floor is left below that so adding or removing one assertion is not a
+# red line, and far enough below nothing that an arm which stopped half way
+# could clear it.
+#
+# N54: this guard covers a run that COMPLETED but performed FEWER CHECKS
+# THAN EXPECTED -- a branch that quietly skipped its assertions, a
+# refactor that dropped a Step, a condition that short-circuited an
+# AssertX. It does NOT, on its own, catch an arm that DIES: a terminating
+# error unwinds straight through `finally { Cleanup }` and the summary
+# below is never reached at all, so the comparison never runs. That is
+# what `$script:aborted` and the `catch` are for, and the two are
+# independent. Raising this number is the way to prove the FIRST half
+# fires; injecting a `throw` is the way to prove the SECOND.
 $script:ExpectedMinChecks = 45
 function Step { param([string]$m) Write-Host "`n=== $m ===" }
 function Ok   { param([string]$m) $script:checks++; Write-Host "PASS  $m" }
@@ -505,16 +536,58 @@ $RealBucketAfter = if (Test-Path -LiteralPath $RealBuckets) {
   @(Get-ChildItem -LiteralPath $RealBuckets -Directory).Count } else { 0 }
 AssertEq $RealBucketAfter $RealBucketBefore "the real Scoop root still has $RealBucketBefore bucket(s)"
 
+} catch {
+  # N54. WITHOUT THIS CATCH the summary below was unreachable from an
+  # abort. A terminating error inside the body unwinds through
+  # `finally { Cleanup }` and terminates the script there, so `Step
+  # 'summary'` never ran, the min-check comparison never evaluated, and
+  # the only evidence of the abort was PowerShell's own stack trace plus
+  # a non-zero exit -- with NO summary line at all. A caller that greps
+  # for "0 failure(s)" saw nothing; a caller that greps for the summary
+  # line to decide "did the arm run?" saw nothing either.
+  #
+  # Catching converts the abort into a recorded FAILURE that reaches the
+  # summary. It does not swallow anything: the error's message and
+  # position are printed, `Bad` makes `$script:fails` non-zero, and the
+  # exit code stays 1.
+  #
+  # WHAT IT STILL DOES NOT COVER, stated rather than implied: a bare
+  # `exit` inside the body. PowerShell runs `finally` and then leaves,
+  # so the summary below is skipped exactly as it was before this catch.
+  # There is no `exit` in the body today and none should be added --
+  # `Bad` is how this arm reports a failure. Moving the summary into
+  # `finally` would cover it but would also overwrite the exit code the
+  # `exit` chose, which is a worse trade.
+  $script:aborted = $_
 } finally {
   Cleanup
 }
 
 Step 'summary'
-# A run that bailed out early performed fewer checks than a complete one.
-# Without this, an exception anywhere above would produce a short,
-# all-PASS report.
+# TWO SEPARATE GUARDS, because they catch two different failures and
+# neither implies the other (N54):
+#
+#   1. THE ARM DIED. A terminating error anywhere in the body lands in
+#      the `catch` above. Reported here, by name, in the harness's own
+#      PASS/FAIL vocabulary -- the same shape M6's buildusers gates use
+#      with their EXIT trap ("HARNESS DIED EARLY"). A dead arm must never
+#      produce a summary that reads green, and must never produce NO
+#      summary either.
+#   2. THE ARM COMPLETED BUT WAS SHORT. It reached the end without
+#      throwing, yet performed fewer checks than a complete run. Nothing
+#      about (1) detects that: no error was raised. This is the check
+#      count floor, and it is defence in depth against a silently skipped
+#      branch rather than against an abort.
+if ($null -ne $script:aborted) {
+  $pos = ''
+  if ($script:aborted.InvocationInfo) { $pos = ($script:aborted.InvocationInfo.PositionMessage -replace "`r?`n", ' ').Trim() }
+  Bad ("HARNESS DIED EARLY after {0} check(s): {1} {2}" -f ($script:checks), ($script:aborted.Exception.Message), $pos)
+  Write-Host 'vvv terminating error vvv'
+  Write-Host ($script:aborted | Out-String)
+  Write-Host '^^^ end ^^^'
+}
 if ($script:checks -lt $script:ExpectedMinChecks) {
-  Bad ("the arm performed only {0} checks; a complete run performs at least {1}. It exited early -- treat this as a FAILURE, not a pass." -f ($script:checks), $script:ExpectedMinChecks)
+  Bad ("the arm performed only {0} checks; a complete run performs at least {1}. It exited early or skipped assertions -- treat this as a FAILURE, not a pass." -f ($script:checks), $script:ExpectedMinChecks)
 }
 Write-Host ("m3_install_scoop: {0} checks, {1} failure(s)" -f $script:checks, $script:fails)
 if ($script:fails -gt 0) { exit 1 }

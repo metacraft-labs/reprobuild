@@ -46,6 +46,35 @@ test:
 
 t: test
 
+# N55. `tests/integration/buildusers/t_m6_buildusers_system_state.sh` (48
+# checks) and `t_m6_default_install_unchanged.sh` (20 checks) were
+# standalone: nothing in this file, in scripts/run_tests.sh or in CI named
+# them, so their figures came from a route nothing else took. This recipe
+# is that route.
+#
+# They are deliberately NOT wired into `just test`. Not because wiring is
+# hard — because running them by accident is harmful: the first CREATES AND
+# DELETES SYSTEM ACCOUNTS AND GROUPS and its own header says "Run it only on
+# a disposable host, as root." A suite that ran it whenever the invoker
+# happened to be root would mutate a developer's machine as a side effect of
+# running tests. On any host that cannot run them the driver REFUSES,
+# non-zero, naming the missing property; it never reports a skip as a pass.
+# `just test` prints a notice saying this recipe exists.
+
+# M6 build-user gates (48+20 checks) — disposable Linux host, as ROOT; mutates system accounts
+test-buildusers:
+    mkdir -p test-logs
+    bash ./scripts/run_buildusers_gates.sh 2>&1 | tee test-logs/test-buildusers.log
+
+# A notice, not a gate: it exits 0 whatever it finds, because "wire every one
+# of these in" is a per-gate decision (several need root, a display server or
+# a bootable host) and a red line nobody can action is how a suite trains its
+# readers to ignore it. `just test` prints its one-paragraph form.
+
+# Which shell gates under tests/integration/ does any recipe actually run?
+list-standalone-gates:
+    bash ./scripts/list_standalone_shell_gates.sh
+
 dev-env-full-regression:
     mkdir -p test-logs
     bash ./scripts/run_tests.sh 2>&1 | tee test-logs/dev-env-full-regression.log

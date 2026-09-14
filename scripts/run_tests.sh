@@ -110,6 +110,15 @@ _repro_test_daemon_cleanup() {
     "build/bin/repro${exe_ext}" daemon stop >/dev/null 2>&1 || true
   fi
   rm -rf "${REPRO_TEST_DAEMON_DIR}" 2>/dev/null || true
+  # N55. This suite runs `.nim` test binaries and nothing else, so every
+  # shell gate under tests/integration/ is outside it. Printed from the
+  # EXIT trap so it lands whether the run passed, failed or died, and
+  # LAST so it is the thing still on screen. It is a notice, never a
+  # verdict — it cannot change this script's exit status. `|| true` keeps a
+  # broken notice from mattering; stderr is NOT swallowed, so a broken one
+  # is visible rather than silently absent. Absolute path: the trap fires
+  # from whatever directory the run ended in.
+  bash "${repo_root}/scripts/list_standalone_shell_gates.sh" --notice || true
 }
 trap _repro_test_daemon_cleanup EXIT
 

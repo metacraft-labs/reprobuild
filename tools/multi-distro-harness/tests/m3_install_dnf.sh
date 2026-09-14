@@ -21,6 +21,13 @@
 #   N0  the SAME genuine repository is REJECTED under a DIFFERENT trust
 #       anchor.
 #
+# and one step that is its own control:
+#
+#   N1  a GENUINELY BINARY trust anchor installs, because the installer
+#       re-encodes it as ASCII armour -- proved by running the SAME
+#       installer with that conversion short-circuited and watching rpm
+#       refuse the key in its own words.
+#
 # ## Why gpgcheck AND repo_gpgcheck both get their own step
 #
 # They are independent and neither implies the other: R7 tampers a
@@ -661,6 +668,130 @@ R9B_RC=$?
 set -e
 assert_eq "$R9B_RC" '0' 'R9 a SECOND uninstall is a no-op, not an error'
 
+# =====================================================================
+step 'N1  CONTROL+PROOF: a BINARY trust anchor is normalised for rpm --import'
+# =====================================================================
+# N53. `armour_keyring_to` in the installer converts a binary keyring to
+# ASCII armour because `rpm --import` reads ONLY armour. Until this step
+# NO arm drove that conversion: every anchor this arm hands the installer
+# is ALREADY armoured -- `repro-publish-repos.sh --export-keyring` emits
+# armour on the rpm path, and N0's adversary anchor is deliberately
+# armoured -- so `armour_keyring_to` took its `cp` fast path in every gate
+# run. The product fix that the inert-control discovery produced was
+# therefore itself untested: the discovery hardened the test AND the
+# product, and only the test half had a test.
+#
+# The anchor below is a GENUINELY BINARY export of the SAME good key --
+# `gpg --export` with no `--armor`, which is exactly what M2's apt signer
+# emits and what a publisher who only ever served apt would put on the
+# keys host. Both halves are asserted, negative control FIRST:
+#
+#   * WITHOUT the conversion (the format test short-circuited to the `cp`
+#     fast path in a copy of the installer) the run DIES with rpm's own
+#     "key 1 not an armored public key";
+#   * WITH it the same binary anchor installs, and the two files at the
+#     two fixed paths are the binary bytes and the armour respectively.
+#
+# WHAT WOULD MAKE THIS VACUOUS, and how each is ruled out:
+#   (a) the fixture being armoured after all -- then the `cp` fast path is
+#       taken and every assertion below passes with the conversion
+#       deleted. Ruled out by asserting the fixture has NO armour header
+#       and starts with OpenPGP packet tag 0x99.
+#   (b) the mutant failing for some unrelated reason (a broken sed, a
+#       digest mismatch, a dead HTTP server) -- then "it fails without the
+#       conversion" proves nothing. Ruled out by `sh -n` on the mutant, by
+#       asserting the mutation touched EXACTLY one line, by asserting the
+#       mutant got as far as "trust anchor digest OK", and by requiring
+#       rpm's exact message rather than merely a non-zero exit.
+#   (c) the positive run passing while still taking the `cp` fast path --
+#       ruled out by requiring the "re-encoded as ASCII armour" log line
+#       AND by asserting the .asc digest DIFFERS from the binary input's.
+
+BIN_KR="$WORK/binary-keyring.gpg"
+GNUPGHOME="$GOOD_HOME" gpg --batch --export "$GOOD_FPR" > "$BIN_KR"
+[ -s "$BIN_KR" ] || { echo 'N1 fixture: binary keyring export is empty' >&2; exit 1; }
+head -c 64 "$BIN_KR" > "$WORK/binary-keyring.head"
+assert_eq "$(LC_ALL=C grep -a -c 'BEGIN PGP PUBLIC KEY BLOCK' "$WORK/binary-keyring.head" || true)" '0' \
+  'N1 fixture: the anchor carries NO armour header (so the cp fast path CANNOT be taken)'
+assert_eq "$(od -An -tx1 -N1 "$BIN_KR" | tr -d ' \n')" '99' \
+  'N1 fixture: the anchor starts with OpenPGP tag 0x99 (a binary public-key packet)'
+BIN_SHA="$(sha256sum "$BIN_KR" | awk '{print $1}')"
+echo "binary anchor sha256 = $BIN_SHA ($(wc -c < "$BIN_KR") bytes)"
+
+# --- negative control FIRST: the same run with the conversion removed ---
+MUT="$WORK/repro-install-no-armour.sh"
+sed "s@^  if head -c 64 .*BEGIN PGP PUBLIC KEY BLOCK.*then\$@  if true; then  # N53-MUTATION format test short-circuited to the cp fast path@" \
+  "$INSTALL_SH" > "$MUT"
+assert_eq "$(grep_count "$MUT" 'N53-MUTATION')" '1' \
+  'N1 control: the mutation applied to exactly ONE line'
+assert_eq "$(diff "$INSTALL_SH" "$MUT" | grep -c '^[<>]' || true)" '2' \
+  'N1 control: the mutant differs from the installer in exactly one line (one < and one >)'
+if sh -n "$MUT" 2>"$WORK/n1-mutant-syntax.log"; then
+  ok 'N1 control: the mutant is still a syntactically valid shell script'
+else
+  bad "N1 control: the mutant does not parse: $(cat "$WORK/n1-mutant-syntax.log")"
+fi
+
+"$DNF" -y remove "$PKG" >/dev/null 2>&1 || true
+rm -f "$REPO_DEST" "$KEYRING_DEST" "$KEYRING_DEST.asc"
+purge_reprobuild_rpm_keys
+dnf_reset
+set +e
+env REPRO_BASE_URL="$BASE" \
+    REPRO_KEYRING_LOCAL="$BIN_KR" \
+    REPRO_KEYRING_SHA256="$BIN_SHA" \
+  sh "$MUT" --method dnf >"$WORK/n1-control.log" 2>&1
+N1C_RC=$?
+set -e
+sed -n '1,40p' "$WORK/n1-control.log"
+assert_ne "$N1C_RC" '0' 'N1 control: WITHOUT the conversion the installer exits non-zero'
+assert_matches "$WORK/n1-control.log" 'trust anchor digest OK' \
+  'N1 control: it got PAST verification (so the failure below is not a digest refusal)'
+assert_eq "$(grep_count "$WORK/n1-control.log" 're-encoded as ASCII armour')" '0' \
+  'N1 control: the mutant did NOT re-encode (the conversion really is disabled)'
+assert_matches "$WORK/n1-control.log" 'key 1 not an armored public key' \
+  "N1 control: it dies with rpm's own 'key 1 not an armored public key'"
+assert_eq "$(sha256sum "$KEYRING_DEST.asc" 2>/dev/null | awk '{print $1}')" "$BIN_SHA" \
+  'N1 control: the mutant put the BINARY bytes at the rpm path -- which is WHY rpm refused'
+assert_eq "$(installed_version)" '' 'N1 control: nothing was installed'
+
+# --- and now the real installer, same binary anchor, same repository ---
+rm -f "$REPO_DEST" "$KEYRING_DEST" "$KEYRING_DEST.asc"
+purge_reprobuild_rpm_keys
+dnf_reset
+set +e
+env REPRO_BASE_URL="$BASE" \
+    REPRO_KEYRING_LOCAL="$BIN_KR" \
+    REPRO_KEYRING_SHA256="$BIN_SHA" \
+  sh "$INSTALL_SH" --method dnf >"$WORK/n1.log" 2>&1
+N1_RC=$?
+set -e
+sed -n '1,50p' "$WORK/n1.log"
+assert_eq "$N1_RC" '0' 'N1 the installer SUCCEEDS with a binary trust anchor'
+assert_matches "$WORK/n1.log" 're-encoded as ASCII armour' \
+  'N1 the installer reported re-encoding the anchor (the conversion ran, not the cp fast path)'
+assert_eq "$(grep_count "$WORK/n1.log" 'not an armored public key')" '0' \
+  'N1 rpm --import did not report an unarmoured key'
+assert_file "$KEYRING_DEST"     'N1 the binary anchor at the apt-shaped fixed path'
+assert_file "$KEYRING_DEST.asc" 'N1 the armoured copy at the rpm-shaped fixed path'
+assert_eq "$(sha256sum "$KEYRING_DEST" | awk '{print $1}')" "$BIN_SHA" \
+  'N1 the installed anchor is byte-identical to the BINARY input (apt still gets binary)'
+assert_matches "$KEYRING_DEST.asc" 'BEGIN PGP PUBLIC KEY BLOCK' \
+  'N1 the rpm copy is ASCII armour'
+assert_ne "$(sha256sum "$KEYRING_DEST.asc" | awk '{print $1}')" "$BIN_SHA" \
+  'N1 the armoured copy is a re-encoding, not a copy of the binary file'
+assert_eq "$(installed_version)" "$V2" "N1 dnf installed $V2 under the binary anchor"
+assert_eq "$(payload_version)" "reprobuild $V2" "N1 the INSTALLED PAYLOAD reports $V2"
+N1_KEYS="$(rpm -qa 'gpg-pubkey*' 2>/dev/null | while read -r k; do rpm -qi "$k" 2>/dev/null | grep -qi 'UNTRUSTED TEST KEY' && echo x; done | wc -l | tr -d ' ')"
+assert_eq "$N1_KEYS" '1' 'N1 rpm --import really imported the CONVERTED key'
+
+set +e
+env REPRO_BASE_URL="$BASE" sh "$INSTALL_SH" --method dnf --uninstall >"$WORK/n1-uninstall.log" 2>&1
+N1U_RC=$?
+set -e
+assert_eq "$N1U_RC" '0' 'N1 the box is returned to the uninstalled state'
+assert_absent "$KEYRING_DEST"     'N1 teardown: the binary anchor'
+assert_absent "$KEYRING_DEST.asc" 'N1 teardown: the armoured copy'
 # ---------------------------------------------------------------------
 step 'summary'
 # ---------------------------------------------------------------------

@@ -190,6 +190,57 @@ proc buildTarArgv*(archive, destination: string;
   ## ``tar.exe`` in System32). ``-x`` extracts; ``-f`` selects the
   ## archive; ``-C`` selects the destination; the compression switch
   ## (``-z`` / ``-j`` / ``-J``) is inserted only when non-empty.
+  ##
+  ## BOTH OPERANDS ARE RAW AND BOTH W16/N48 WINDOWS DEFECTS REACH THEM.
+  ## This is N48's R3, left OPEN rather than swept, and re-measured on
+  ## this host (GNU tar 1.35 from the MSYS2/Git-for-Windows tree, bsdtar
+  ## 3.8.8 from ``%WINDIR%\System32``) rather than inherited:
+  ##
+  ##   * ``-f C:\...\arch.tar``  GNU: exit 128, "Cannot connect to C:
+  ##     resolve failed", 0 files. GNU tar reads an operand whose first
+  ##     ``:`` precedes any ``/`` as a remote ``host:path``.
+  ##   * ``-C <abs>\tango``      GNU, with the archive operand made to
+  ##     work: exit 2, "C\:\\Users\\…\r3probe\tango: Cannot open", 0
+  ##     files. ``--unquote`` is GNU tar's default and it ate the ``\t``.
+  ##   * the same run with the destination forward-slashed: exit 0, 1
+  ##     file. So ``tarOperand`` IS the remedy for ``-C``.
+  ##
+  ## WHY THE REMEDY IS NOT APPLIED HERE, stated so no one re-derives it:
+  ##
+  ##   1. The ``-f`` half needs ``--force-local``, and there is nowhere
+  ##      to put it. ``repro_home_apply.runTarExtract`` and
+  ##      ``repro_tool_profiles.runTarTwice`` hang it on an attempt that
+  ##      is ALLOWED TO FAIL, retrying without the GNU-only flag. This
+  ##      argv is not a retryable attempt: it is lowered into ONE
+  ##      cacheable ``BuildActionDef``, and ``BuildActionDef`` carries no
+  ##      fallback-argv or allow-failure field.
+  ##   2. Adding it unconditionally is not merely a cache-key change, it
+  ##      is BREAKING. This proc is shared with macOS, whose tar IS
+  ##      bsdtar, and with any Windows host whose ``tar`` resolves to
+  ##      System32. Measured: ``bsdtar 3.8.8`` answers ``--force-local``
+  ##      with "Option --force-local is not supported", exit 1, 0 files —
+  ##      a hard refusal, not a warning. So the flag cannot live in an
+  ##      argv that is platform-agnostic by construction.
+  ##   3. There is no operand rewrite free of a cache-key change either.
+  ##      The argv is hashed VERBATIM into the action identity on both
+  ##      lowering paths — ``repro_cli_support``'s
+  ##      ``reprobuild.localInlineExecAction.v1`` fingerprint folds the
+  ##      whole encoded ``BuildActionDef`` (the argv arrives inside
+  ##      ``PublicCliArg.encodedValue``), and
+  ##      ``repro_profile_compile/apply_build_actions``'s
+  ##      ``reprobuild.profileBuildAction.v1`` adds one ``argv:<elem>``
+  ##      line per element. Normalising ``destination`` earlier — in
+  ##      ``build``, before the argv exists — moves the change but does
+  ##      not remove it, and drags ``marker``/``outputs`` along with it.
+  ##
+  ## So the correct fix is an ARM-SELECTION DESIGN CHANGE (a Windows
+  ## tar-family branch that can retry, or one that targets a tar known to
+  ## be immune), not an operand sweep. Until that lands, tar-family
+  ## ``expandArchive`` on Windows with absolute paths is BROKEN, not
+  ## quietly wrong: defect 1 exits 128 and extracts nothing. Every
+  ## tar-family caller in this tree today passes POSIX forward-slash
+  ## paths; every Windows-absolute-path caller is a ``.zip``, which takes
+  ## the ``buildZipArgvWindows`` branch and is unaffected.
   if not isTarFamily(fmt):
     raise newException(ValueError,
       "buildTarArgv: not a tar-family format: " & $fmt)
