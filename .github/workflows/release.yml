@@ -428,6 +428,29 @@ jobs:
   publish-release:
     name: Publish release (all-or-nothing)
     needs: [plan, build-release]
+    # A job-level `permissions:` block REPLACES the workflow-level one rather
+    # than merging with it, so `contents: write` is restated here -- without it
+    # this job could not create or update the release at all.
+    #
+    # `id-token: write` is what lets a step in this job ask GitHub for an OIDC
+    # token ($ACTIONS_ID_TOKEN_REQUEST_URL / _TOKEN), which is the ONLY way
+    # cosign keyless can derive a signer identity on a runner. It is granted
+    # ahead of the rest of that work because it is the one half of the boundary
+    # that cannot be arranged from the infra repo, and it is INERT until
+    # something actually requests a token: nothing here passes `--cosign` yet,
+    # and `rs_cosign_sign_blob` refuses (exit 2, SKIPPED, no .sigstore) rather
+    # than fabricating anything.
+    #
+    # Installing cosign and passing `--cosign` land as their own reviewed
+    # change, deliberately NOT bundled with the first release that has a real
+    # signing key -- and the first bundle it produces is unverified until
+    # someone runs `cosign verify-blob --certificate-identity
+    # --certificate-oidc-issuer` against Rekor. See
+    # docs/release-signing.md and metacraft-labs/infra
+    # docs/runbooks/secret-rotation/reprobuild-release-signing-key.md (Section 8).
+    permissions:
+      contents: write
+      id-token: write
     runs-on: [self-hosted, linux, x64]
     # `always()` so a failed matrix reaches the explicit assertion below and
     # reports a RED publish job. Plain `needs:` semantics would SKIP this job,
