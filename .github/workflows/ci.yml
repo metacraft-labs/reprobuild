@@ -168,6 +168,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check Windows PowerShell bootstrap syntax
+        shell: powershell
+        run: .\scripts\check_windows_bootstrap_syntax.ps1
+
       - name: Mint installation token for Windows dev environment
         id: ci_token
         uses: actions/create-github-app-token@v2
