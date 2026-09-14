@@ -497,6 +497,14 @@ lint:
     # entry-set change this line refuses. It says nothing about the
     # catalog-derived half, which needs the build; see the flag's help text.
     python3 ./scripts/reprobuild_suite_inventory.py --check-inventory 2>&1 | tee -a test-logs/lint.log
+    # The UNDECLARED-SOURCE gate, and the reason it is a third line rather
+    # than a third assertion inside either of the two above: both of those
+    # derive the set they compare from repro_tests.nim, so a test file that
+    # was never enrolled is outside both by construction -- not reported as
+    # missing, not reported at all -- and nothing builds or runs it either.
+    # Measured at 6b3f6099: two such files (18 passing cases between them)
+    # while every gate over the suite was green. This one walks the TREE.
+    python3 ./scripts/reprobuild_suite_inventory.py --check-declared-sources 2>&1 | tee -a test-logs/lint.log
     # The vacuous-case gate, sibling to the case-count gate above and for the
     # same reason: a source scan, no compiler, answers in seconds. It refuses
     # a test case whose only assertion is `check true` -- a shape that reports

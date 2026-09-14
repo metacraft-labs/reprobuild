@@ -7449,5 +7449,215 @@ compileProfileBinary()
             )
 
 
+class DeclaredSourceGateTests(unittest.TestCase):
+    """The only gate whose universe is the filesystem.
+
+    Every other check in this file starts from `repro_tests.nim`, so a test
+    file that was never enrolled is outside all of them by construction: not
+    reported as missing, not reported at all, and -- because nothing gives it
+    a build edge -- never compiled and never run either. Two files sat in the
+    tree in exactly that state (`apps/repro-harvest-apt/tests/
+    t_c2_signature.nim`, 6 cases, and `recipes/sandbox-tools/
+    test_sandbox_tools.nim`, 12 cases), both passing, while
+    `check_suite_case_counts.sh` reported green.
+
+    The cases below are negative-first: each one is written so that the thing
+    it asserts is FALSE in a tree where the gate is broken.
+    """
+
+    def scratch(self):
+        root = Path(tempfile.mkdtemp(prefix="declared-sources-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        return root
+
+    SPEC = (
+        "  TestSpec(\n"
+        '    source: "{source}",\n'
+        '    binary: "build/test-bin/{stem}",\n'
+        "    defines: @[],\n"
+        "    requiresReproBinary: false,\n"
+        "    extraPassC: @[],\n"
+        "    extraPassL: @[],\n"
+        "    targetOs: soAny,\n"
+        "    selfInterposes: false),\n"
+    )
+
+    def write_tree(self, root, declared, present):
+        """Declare `declared`, put `present` on disk. Returns the root."""
+        specs = "".join(
+            self.SPEC.format(source=src, stem=Path(src).stem)
+            for src in declared
+        )
+        (root / "repro_tests.nim").write_text(
+            "const reprobuildTestSpecs*: seq[TestSpec] = @[\n"
+            + specs
+            + "]\n"
+            + "const pythonTestPaths*: seq[string] = @[\n]\n",
+            encoding="utf-8",
+        )
+        for src in present:
+            target = root / src
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                'import std/unittest\n\nsuite "s":\n  test "t":\n'
+                "    check true\n",
+                encoding="utf-8",
+            )
+        return root
+
+    def test_an_unenrolled_test_file_is_reported(self):
+        """The defect itself: a file on disk that nothing builds."""
+        root = self.scratch()
+        self.write_tree(
+            root,
+            declared=["tests/unit/t_enrolled.nim"],
+            present=["tests/unit/t_enrolled.nim", "tests/unit/t_orphan.nim"],
+        )
+        drift = inventory.declared_source_drift(root)
+        self.assertFalse(drift["clean"])
+        self.assertEqual(drift["undeclared"], ["tests/unit/t_orphan.nim"])
+        self.assertEqual(drift["unreachable"], [])
+        self.assertIn(
+            "tests/unit/t_orphan.nim",
+            inventory.format_declared_source_drift(drift),
+        )
+
+    def test_a_fully_enrolled_tree_is_clean(self):
+        """...and the same tree without the orphan is not reported.
+
+        Paired with the case above on purpose. A gate that fired on
+        everything would satisfy that one while being useless.
+        """
+        root = self.scratch()
+        self.write_tree(
+            root,
+            declared=["tests/unit/t_enrolled.nim"],
+            present=["tests/unit/t_enrolled.nim"],
+        )
+        drift = inventory.declared_source_drift(root)
+        self.assertTrue(drift["clean"], drift)
+        self.assertEqual(drift["candidateCount"], 1)
+
+    def test_the_rule_reaches_every_root_the_generator_walks_and_apps(self):
+        """`apps/` was the missing root, and it is asserted BY NAME.
+
+        Adding a root is a one-line change that is just as easy to lose
+        again, and losing it is silent -- the tree simply stops being looked
+        at. So each root gets its own orphan and each has to be reported.
+        """
+        locations = {
+            "tests": "tests/unit/t_a.nim",
+            "libs": "libs/some_lib/tests/t_b.nim",
+            "tools": "tools/some-tool/tests/test_c.nim",
+            "recipes": "recipes/packages/source/pkg/test_d.nim",
+            "recipes-outside-packages-source": (
+                "recipes/sandbox-tools/test_e.nim"
+            ),
+            "apps": "apps/some-app/tests/t_f.nim",
+        }
+        root = self.scratch()
+        self.write_tree(root, declared=[], present=sorted(locations.values()))
+        drift = inventory.declared_source_drift(root)
+        for label, source in locations.items():
+            with self.subTest(root=label):
+                self.assertIn(source, drift["undeclared"])
+
+    def test_a_module_that_merely_starts_with_test_is_not_a_test(self):
+        """`libs/<lib>/src/.../test_*.nim` is a module, not a test case file.
+
+        Two such modules exist in this repository. Reporting them would make
+        the gate wrong on day one, and a gate that is wrong on day one gets
+        an allowlist, which is where the next orphan hides.
+        """
+        root = self.scratch()
+        self.write_tree(
+            root,
+            declared=[],
+            present=[
+                "libs/ct_test_interface/src/ct_test_interface/test_ext.nim",
+                "tests/fixtures/packaging/thing/tests/t_fixture.nim",
+            ],
+        )
+        drift = inventory.declared_source_drift(root)
+        self.assertTrue(drift["clean"], drift)
+        self.assertEqual(drift["candidateCount"], 0)
+
+    def test_a_walk_that_reaches_nothing_fails_instead_of_passing(self):
+        """NON-VACUITY. An empty result must not read as "no orphans".
+
+        This is the failure the gate is most likely to have and least likely
+        to notice: a root renamed, a case difference between a developer's
+        filesystem and the CI runner's, a prune that swallowed the tree. The
+        undeclared list would be empty and the gate would exit 0 with an
+        answer it never computed. So a declared source the walk's own rule
+        says it should have seen, and did not, is itself a failure.
+        """
+        root = self.scratch()
+        self.write_tree(
+            root,
+            declared=["tests/unit/t_enrolled.nim"],
+            present=[],  # declared, but NOT on disk -- an unreachable walk
+        )
+        drift = inventory.declared_source_drift(root)
+        self.assertFalse(drift["clean"])
+        self.assertEqual(drift["unreachable"], ["tests/unit/t_enrolled.nim"])
+        self.assertEqual(drift["undeclared"], [])
+        self.assertIn(
+            "The walk is broken",
+            inventory.format_declared_source_drift(drift),
+        )
+
+    def test_a_bundle_member_is_declared_by_its_bundle(self):
+        """A source folded into a pure-unit bundle is not an orphan.
+
+        Its cases are carried by the bundle's own TestSpec; emitting it
+        separately would double-count it. Sixty-seven sources are in this
+        state in the real tree, so getting this wrong would bury the two real
+        orphans under sixty-seven false ones.
+        """
+        root = self.scratch()
+        member = "libs/some_lib/tests/t_member.nim"
+        bundle = "tests/bundles/bundle_some_lib_pure_unit.nim"
+        self.write_tree(root, declared=[bundle], present=[member])
+        (root / bundle).parent.mkdir(parents=True, exist_ok=True)
+        (root / bundle).write_text(
+            '# AUTO-GENERATED\nimport "../../libs/some_lib/tests/t_member"\n',
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            inventory.bundled_test_sources(
+                root, inventory.parse_repro_tests(root)[0]
+            ),
+            [member],
+        )
+        drift = inventory.declared_source_drift(root)
+        self.assertTrue(drift["clean"], drift)
+        self.assertEqual(drift["bundledCount"], 1)
+
+    def test_the_real_tree_is_clean(self):
+        """The repository itself, which is the claim being made by landing it."""
+        drift = inventory.declared_source_drift(REPO_ROOT)
+        self.assertTrue(
+            drift["clean"], inventory.format_declared_source_drift(drift)
+        )
+        # Non-vacuity for THIS case: a walk that found nothing would also be
+        # "clean" if the guard above were removed, so pin the magnitude too.
+        self.assertGreater(drift["candidateCount"], 1000)
+
+    def test_the_push_gate_runs_it(self):
+        """Wiring, asserted at the call site rather than assumed.
+
+        A check nothing invokes is not a gate. `check_suite_case_counts.sh`
+        is what flake.nix's pre-push hook, the CI lint job and `just lint`
+        all run.
+        """
+        text = (REPO_ROOT / "scripts" / "check_suite_case_counts.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("--check-declared-sources", text)
+        self.assertIn("sources_status", text)
+
+
+
 if __name__ == "__main__":
     unittest.main()

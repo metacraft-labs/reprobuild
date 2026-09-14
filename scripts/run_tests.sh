@@ -394,6 +394,31 @@ repro_build_collection() {
   local collection="$1"
   # Suite setup uses the local pool gate; dedicated tests cover RunQuota itself.
   local repro_exe="./build/bin/repro${exe_ext}"
+  # WINDOWS: run a COPY, and do not "fix" this by naming the copy
+  # `repro.exe`. `.#apps` contains the `reprobuild.apps.repro` edge, which
+  # relinks `build/bin/repro.exe`, and Windows refuses to open a running
+  # image for writing:
+  #
+  #   ld.exe: cannot open output file .../build/bin/repro.exe: Permission
+  #   denied
+  #
+  # -- measured here, not assumed. So the driver must be a differently
+  # named file, and it must not be `build/bin/repro.exe`.
+  #
+  # For 55 days that was fatal for a second reason: the engine decided
+  # whether an image could be spawned with an internal verb by looking at
+  # its FILENAME, so the copy was refused and every Windows run died in
+  # the build phase with "no `repro` image to spawn it with". The engine
+  # now asks the image what it IS (`runThinApp("repro")` -> the mark that
+  # `runningImageIsReproCli` reads in repro_cli_support.nim), so a copy
+  # under any name is accepted -- which is what makes this line workable
+  # rather than a workaround for one platform.
+  #
+  # Exporting REPRO_PUBLIC_CLI_PATH=./build/bin/repro.exe would also get
+  # past the old check, and is the WRONG fix: it points the engine's
+  # self-spawn at the very file `.#apps` is relinking, so a monitored
+  # action that spawns it mid-link takes the Permission denied above
+  # instead. The copy is deliberately the image that runs.
   if [[ -n "${exe_ext}" ]]; then
     cp -f "./build/bin/repro${exe_ext}" "./build/bin/repro_run${exe_ext}"
     repro_exe="./build/bin/repro_run${exe_ext}"

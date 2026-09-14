@@ -81,6 +81,15 @@ type
 
 const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
+    source: "apps/repro-harvest-apt/tests/t_c2_signature.nim",
+    binary: "build/test-bin/t_c2_signature",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/ct_test_interface/tests/t_smoke_ct_test_interface.nim",
     binary: "build/test-bin/t_smoke_ct_test_interface",
     defines: @[],
@@ -911,6 +920,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_cli_support/tests/t_hcr_support_profile_follows_the_host.nim",
     binary: "build/test-bin/t_hcr_support_profile_follows_the_host",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_cli_support/tests/t_image_identity_is_declared_not_filename.nim",
+    binary: "build/test-bin/t_image_identity_is_declared_not_filename",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -6410,6 +6428,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "recipes/packages/source/zlib/test_zlib_source.nim",
     binary: "build/test-bin/test_zlib_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "recipes/sandbox-tools/test_sandbox_tools.nim",
+    binary: "build/test-bin/test_sandbox_tools",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

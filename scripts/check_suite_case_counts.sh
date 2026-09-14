@@ -102,6 +102,7 @@ baseline="scripts/reprobuild-suite-static-case-counts.tsv"
 entry_set="benchmarks/reports/reprobuild-suite-m0-inventory-sources.json"
 regenerate="python3 ${inventory} --write-static-case-counts"
 regenerate_entry_set="python3 ${inventory} --write-inventory-sources"
+regenerate_edges="nim r scripts/generate_test_edges.nim"
 
 # Deliberately fatal rather than skipped. A check that quietly succeeds when
 # its own inputs are missing reports green and proves nothing -- which is the
@@ -140,8 +141,18 @@ counts_status=0
 "${python_bin}" "${inventory}" --check-static-case-counts || counts_status=$?
 entries_status=0
 "${python_bin}" "${inventory}" --check-inventory || entries_status=$?
+# The third check is not a third view of the same set. The two above both
+# derive what they compare from repro_tests.nim, so a test file that was
+# never enrolled is outside both by construction: it is not reported as
+# missing, it is not reported at all, and -- because nothing builds it --
+# it is not run either. Measured at 6b3f6099: with an unregistered test
+# source sitting in tests/unit/, this script exited 0 and printed two
+# confident green lines. This one walks the TREE.
+sources_status=0
+"${python_bin}" "${inventory}" --check-declared-sources || sources_status=$?
 
-if [ "${counts_status}" -eq 0 ] && [ "${entries_status}" -eq 0 ]; then
+if [ "${counts_status}" -eq 0 ] && [ "${entries_status}" -eq 0 ] &&
+   [ "${sources_status}" -eq 0 ]; then
   exit 0
 fi
 
@@ -163,6 +174,13 @@ fi
     echo "  Regenerate it and commit the diff alongside your change. It is a"
     echo "  source scan: no build, no compiler, no nix."
     echo "    ${regenerate_entry_set}"
+  fi
+  if [ "${sources_status}" -ne 0 ]; then
+    echo
+    echo "  A test source in the tree is in no build edge, so nothing"
+    echo "  compiles it and nothing runs it. Enrol it by regenerating the"
+    echo "  edge table and commit repro_tests.nim alongside your change:"
+    echo "    ${regenerate_edges}"
   fi
 } >&2
 exit 1

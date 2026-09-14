@@ -6590,6 +6590,70 @@ proc stablePublicCliPath(): string =
     return os.normalizedPath(getCurrentDir() / resolved)
   os.normalizedPath(getCurrentDir() / app)
 
+var runningImageIsReproCliFlag = false
+  ## Set by ``markRunningImageAsReproCli`` — see ``runningImageIsReproCli``.
+
+when defined(reproImageIdentityTest):
+  proc resetRunningImageReproCliMarkForTest*() =
+    ## Undo ``markRunningImageAsReproCli`` — compiled ONLY under
+    ## ``-d:reproImageIdentityTest``, which one test turns on for itself
+    ## through its own ``.nim.cfg``.
+    ##
+    ## It is gated rather than exported outright because the mark is what
+    ## permits self-spawning: a test binary that set it and left it set would
+    ## be a test binary the engine is willing to re-execute with an internal
+    ## verb, which is the unbounded self-exec chain this whole predicate
+    ## exists to prevent. So the regression test restores the refusal in a
+    ## ``finally``, and no ordinary build has a way to clear the mark at all.
+    runningImageIsReproCliFlag = false
+
+proc markRunningImageAsReproCli*() =
+  ## Record that the process this code is running in IS the `repro` CLI: the
+  ## image that dispatches ``internal io monitor``,
+  ## ``__repro-extract-interface`` and ``__repro-compile-provider``.
+  ##
+  ## Called from ``runThinApp`` when the entry point declares itself `repro`,
+  ## which `apps/repro/repro.nim` does as a LITERAL in its own source
+  ## (``quit runThinApp("repro")``). That literal is the CLI's own statement
+  ## about what it is; the filename it happens to be invoked under is not.
+  runningImageIsReproCliFlag = true
+
+proc runningImageIsReproCli(): bool =
+  ## Does the running image implement the internal verbs?
+  ##
+  ## This used to be asked as ``extractFilename(getAppFilename()) == "repro"``
+  ## — a program identifying itself by the name it was invoked under — and
+  ## that has now failed three times in three different disguises:
+  ##
+  ##   * N36: Nix's ``wrapProgram`` renames the real image to
+  ##     ``.repro-wrapped`` and puts a shell wrapper at `repro`. Every wrapped
+  ##     package therefore ran with ``getAppFilename()`` = ``.repro-wrapped``
+  ##     and silently lost its io-monitor driver — silently, because "" is a
+  ##     SUPPORTED answer here (fall back to declared inputs/outputs).
+  ##   * The M5 trampoline: a bootstrap installed as ``repro-bootstrap.exe``
+  ##     answers "no `repro` image to spawn it with", which is why
+  ##     ``apps/repro-trampoline/repro_trampoline.nim`` is forced to hide the
+  ##     bootstrap in a DIRECTORY named `reprobuild` rather than give the file
+  ##     a distinct name.
+  ##   * ``scripts/run_tests.sh``: Windows cannot relink a running image, so
+  ##     the suite copies ``repro.exe`` to ``repro_run.exe`` and runs the copy
+  ##     — a byte-identical `repro` that this predicate refused, killing the
+  ##     entire Windows suite in its build phase for 55 days.
+  ##
+  ## In all three the image IS `repro` and only the filename says otherwise.
+  ## So the question is answered from the image's own declaration instead.
+  ## The old filename test is kept as an additional ACCEPT (it can only widen,
+  ## never narrow, so it cannot regress a caller that relies on it) for images
+  ## that reach the engine without going through ``runThinApp``.
+  ##
+  ## What still says NO — and is the whole reason this predicate exists — is
+  ## the embedded caller: a TEST BINARY that links the engine in-process never
+  ## calls ``runThinApp("repro")`` and is not named `repro`, so it is still
+  ## refused, and the unbounded self-exec chain that refusal prevents stays
+  ## prevented.
+  runningImageIsReproCliFlag or
+    extractFilename(getAppFilename()) == addFileExt("repro", ExeExt)
+
 proc spawnableWithInternalVerb(candidate: string): bool =
   ## May ``candidate`` be spawned with an internal selector — ``internal io
   ## monitor``, ``__repro-extract-interface``, ``__repro-compile-provider``?
@@ -6613,9 +6677,9 @@ proc spawnableWithInternalVerb(candidate: string): bool =
   ## validating those.
   if candidate.len == 0:
     return false
-  if extractFilename(candidate) == addFileExt("repro", ExeExt):
+  if os.normalizedPath(candidate) != os.normalizedPath(getAppFilename()):
     return true
-  os.normalizedPath(candidate) != os.normalizedPath(getAppFilename())
+  runningImageIsReproCli()
 
 # Executable-Consolidation M1: the internal io-monitor driver is no longer a
 # standalone monitor binary. ``repro`` self-spawns its own image with this
@@ -6625,7 +6689,7 @@ proc spawnableWithInternalVerb(candidate: string): bool =
 # ``BuildEngineConfig.monitorCliArgs``.
 const internalIoMonitorArgs* = @["internal", "io", "monitor"]
 
-proc selfSpawnIoMonitorPath(publicCliPath = ""): string =
+proc selfSpawnIoMonitorPath*(publicCliPath = ""): string =
   ## Path to the running ``repro`` image used to self-spawn the internal
   ## io-monitor role, or "" when no such image can be named.
   ##
@@ -6687,7 +6751,7 @@ proc internalReproHelperCliPath(publicCliPath: string): string =
   ## in-process; `extractInterfaceModuleArtifact` already does exactly that,
   ## and its in-process path is the same code the helper would have run.
   let current = os.normalizedPath(getAppFilename())
-  if extractFilename(current) == addFileExt("repro", ExeExt):
+  if runningImageIsReproCli():
     return current
   if publicCliPath.len > 0 and
       spawnableWithInternalVerb(os.normalizedPath(publicCliPath)):
@@ -68088,6 +68152,16 @@ proc runThinAppDispatch(programName: string): int =
 proc runThinApp*(programName: string): int =
   ## Single chokepoint for the outcome-dependent report default: the verbs
   ## stage what they would leave behind, and the real exit code decides.
+  ##
+  ## Also the single place the running image gets to say what it IS. The
+  ## entry point passes ``programName`` as a literal in its own source
+  ## (`apps/repro/repro.nim`: ``quit runThinApp("repro")``), so it is the
+  ## image's own declaration rather than the filename it was invoked under —
+  ## see ``runningImageIsReproCli`` for the three defects that distinction
+  ## fixes. Set before dispatch, because every verb that reaches the engine
+  ## reads it.
+  if programName == "repro":
+    markRunningImageAsReproCli()
   result = runThinAppDispatch(programName)
   flushStagedFailureReport(result)
 

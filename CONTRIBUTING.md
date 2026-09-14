@@ -60,12 +60,56 @@ catalog-derived half stays an output of the job that already builds
 everything. **Do not regenerate the full inventory by hand**; `just test`
 produces it.
 
-## Why these two refreshes are enforced
+## Adding a test file in a new place
+
+The two refreshes above both answer "has the checked-in description of the
+suite gone stale?", and both derive the set they compare from
+`repro_tests.nim`. That file is written by `scripts/generate_test_edges.nim`
+from a filesystem walk. A test file the walk does not pick up is therefore
+outside both of them **by construction** — it is not reported as missing, it
+is not reported at all — and because nothing gives it a build edge, nothing
+compiles it and nothing runs it either. A green `just lint` says nothing
+whatsoever about it.
+
+Two files sat in exactly that state: `apps/repro-harvest-apt/tests/
+t_c2_signature.nim` (6 cases) and `recipes/sandbox-tools/
+test_sandbox_tools.nim` (12 cases). Both pass. Neither had ever been run by
+the suite, because `apps` was not a walked root and the `recipes` rule
+accepted only `recipes/packages/source/<pkg>/`.
+
+`scripts/check_suite_case_counts.sh` now also runs
+
+```bash
+python3 scripts/reprobuild_suite_inventory.py --check-declared-sources
+```
+
+which walks the **tree** rather than `repro_tests.nim`, and fails when a
+test-shaped source is in no build edge. Its rule is deliberately wider than
+the generator's: a `.nim` file whose stem starts with `t_` or `test_`, living
+inside a directory named `tests` (or anywhere under `recipes/`), is a test.
+A copy of the generator's own accept predicates could only ever have agreed
+with the generator's blind spots.
+
+So when you add a test **in a directory that has never held one**, regenerate
+the edge table and commit `repro_tests.nim` with the change:
+
+```bash
+nim r scripts/generate_test_edges.nim
+```
+
+If the generator runs and still does not pick your file up, the accept
+predicates in `scripts/generate_test_edges.nim` are what need widening. That
+is the defect — do not work around it by renaming the file out of the gate's
+view. A test that needs its own `--path` or `-d:` flag carries it in a
+sibling `<test>.nim.cfg`; `TestSpec` has no field for either, and every build
+route honours the `.cfg`.
+
+## Why these refreshes are enforced
 
 Forgetting either refresh used to be somebody else's problem: `just lint` went
 red for everyone, and the next branch had to carry the regeneration in order
-to land. `scripts/check_suite_case_counts.sh` runs both checks at four points,
-so it cannot get that far:
+to land. `scripts/check_suite_case_counts.sh` runs all three checks at four
+points, so it cannot get that far:
 
 - as a **pre-push hook** installed by the Nix dev shell (`flake.nix`,
   `pre-commit-check`), which refuses the push and prints the commands above;
@@ -74,9 +118,9 @@ so it cannot get that far:
 - as an early step of the CI lint job, ahead of the whole-tree compile;
 - inside `just lint`, where the case-count half always ran.
 
-Both are source scans — no compiler, no built binaries, a couple of minutes on
-the full tree against the hours a build costs — which is what makes them
-affordable at every push.
+All three are source scans — no compiler, no built binaries, a couple of
+minutes on the full tree against the hours a build costs — which is what
+makes them affordable at every push.
 
 ## Nix Dev Shell
 

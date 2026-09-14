@@ -481,11 +481,22 @@ proc acceptLibsTree(rel: string): bool =
     (stem.startsWith("t_") or stem.startsWith("test_"))
 
 proc acceptToolsTree(rel: string): bool =
+  ## Both stems, like every other root. `tools/` and `recipes/` used to
+  ## accept only ``test_``; `tests/` accepts only ``t_``; `libs/` accepts
+  ## both. Nothing depended on the difference -- there is no ``t_`` file
+  ## under `tools/` or `recipes/` today -- but the asymmetry is a trap for
+  ## the gate that now audits this walk. That gate is deliberately WIDER than
+  ## these predicates (see `--check-declared-sources`), so a stem this
+  ## predicate refuses and the gate accepts would be reported as an orphan
+  ## that regenerating cannot enrol: a gate demanding a fix the contributor
+  ## cannot perform, which is the failure mode the rest of this machinery is
+  ## built to avoid.
   let parts = rel.split('/')
   if parts.len < 4: return false
   if parts[2] != "tests": return false
   let stem = rel.splitFile().name
-  rel.endsWith(".nim") and stem.startsWith("test_")
+  rel.endsWith(".nim") and
+    (stem.startsWith("t_") or stem.startsWith("test_"))
 
 proc acceptRecipesTree(rel: string): bool =
   # M9.N from-source recipes ship a ``test_<pkg>_source.nim`` next to each
@@ -493,11 +504,47 @@ proc acceptRecipesTree(rel: string): bool =
   # reprobuild unittest binaries (built + run as part of the ``test``
   # collection), so they need a build edge like any other test — they
   # simply live outside the tests/ ∙ libs/ ∙ tools/ roots.
+  #
+  # This used to require exactly that layout — ``parts.len >= 5`` and
+  # ``recipes/packages/source/…`` — and the requirement was silent. A
+  # ``test_*.nim`` anywhere else under ``recipes/`` was not rejected with a
+  # diagnostic; it was simply never seen, so it was never built, never run,
+  # and (because the suite-inventory gate derives its universe from the file
+  # THIS generator writes) never missed. ``recipes/sandbox-tools/
+  # test_sandbox_tools.nim`` sat there for months with 12 passing cases that
+  # nothing executed. The shape rule is therefore gone: a ``test_*.nim``
+  # under ``recipes/`` is a test wherever it lives.
+  #
+  # Both stems, for the same reason as ``acceptToolsTree``: the gate that
+  # audits this walk accepts ``t_`` too, and a stem only one of the two
+  # recognises is an orphan report that regenerating cannot clear.
   let parts = rel.split('/')
-  if parts.len < 5: return false
-  if parts[1] != "packages" or parts[2] != "source": return false
+  if parts.len < 3: return false
   let stem = rel.splitFile().name
-  rel.endsWith(".nim") and stem.startsWith("test_")
+  rel.endsWith(".nim") and
+    (stem.startsWith("t_") or stem.startsWith("test_"))
+
+proc acceptAppsTree(rel: string): bool =
+  ## ``apps/<app>/tests/{t_,test_}*.nim``.
+  ##
+  ## ``apps`` was not a walked root at all, which is why
+  ## ``apps/repro-harvest-apt/tests/t_c2_signature.nim`` — six passing cases
+  ## — was invisible to the suite and to every gate over it. The apps are
+  ## ordinary Nim code with ordinary tests; there was never a reason for
+  ## their ``tests/`` directories to be the one kind this generator could not
+  ## see.
+  ##
+  ## An app test that needs its own ``--path`` (the harvest-apt one imports
+  ## ``repro_harvest_apt/…`` out of ``apps/<app>/src``) carries it in a
+  ## sibling ``<test>.nim.cfg``, which nim picks up from the project
+  ## directory on every build route. ``TestSpec`` has no ``--path`` field and
+  ## does not need one.
+  let parts = rel.split('/')
+  if parts.len < 4: return false
+  if parts[2] != "tests": return false
+  let stem = rel.splitFile().name
+  rel.endsWith(".nim") and
+    (stem.startsWith("t_") or stem.startsWith("test_"))
 
 proc walkRoot(repoRoot, dir: string;
               accept: proc (rel: string): bool): seq[string] =
@@ -713,6 +760,7 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
   candidates.add(walkRoot(repoRoot, "libs", acceptLibsTree))
   candidates.add(walkRoot(repoRoot, "tools", acceptToolsTree))
   candidates.add(walkRoot(repoRoot, "recipes", acceptRecipesTree))
+  candidates.add(walkRoot(repoRoot, "apps", acceptAppsTree))
   for bundle in PureUnitBundles:
     candidates.add(bundleSourcePath(bundle))
 

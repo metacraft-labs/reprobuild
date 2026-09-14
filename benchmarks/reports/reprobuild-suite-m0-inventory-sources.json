@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1587,
+    "nimTestBinaries": 1590,
     "pureUnitConsolidationGroups": 48,
-    "pureUnitTests": 576,
+    "pureUnitTests": 578,
     "staticallyDetectedRuntimeCompilerFlowTests": 97,
-    "testEntries": 1596
+    "testEntries": 1599
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1077,8 +1077,8 @@
       "graph-fixture": 12,
       "integration": 725,
       "platform/destructive": 115,
-      "pure unit": 576,
-      "unclassified": 168
+      "pure unit": 578,
+      "unclassified": 169
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1214,9 +1214,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1587,
+    "nimTestBinaryCount": 1590,
     "pythonTestFileCount": 9,
-    "testEntryCount": 1596
+    "testEntryCount": 1599
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5801,6 +5801,23 @@
   ],
   "tests": [
     {
+      "binary": "build/test-bin/t_c2_signature",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_harvest_apt"
+      ],
+      "owner": "apps",
+      "requiresReproBinary": false,
+      "source": "apps/repro-harvest-apt/tests/t_c2_signature.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_smoke_ct_test_interface",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -7540,6 +7557,23 @@
       "source": "libs/repro_cli_support/tests/t_hcr_support_profile_follows_the_host.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_image_identity_is_declared_not_filename",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_image_identity_is_declared_not_filename.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18537,6 +18571,24 @@
       "source": "recipes/packages/source/zlib/test_zlib_source.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_sandbox_tools",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_standard_provider"
+      ],
+      "owner": "recipes/sandbox-tools/test_sandbox_tools.nim",
+      "requiresReproBinary": false,
+      "source": "recipes/sandbox-tools/test_sandbox_tools.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -34097,7 +34149,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_reprobuild_suite_inventory.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 68,
+      "staticCaseCount": 76,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
