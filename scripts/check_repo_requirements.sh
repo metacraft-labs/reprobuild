@@ -80,7 +80,7 @@ require_contains .envrc "use flake"
 package_nix=nix/pkgs/by-name/re/reprobuild/package.nix
 require_file "${package_nix}"
 
-require_contains flake.nix 'nixos-modules.url = "github:metacraft-labs/nixos-modules"'
+require_contains flake.nix 'nixos-modules.url = "github:metacraft-labs/devops-modules"'
 require_contains flake.nix 'nixpkgs.follows = "nixos-modules/nixpkgs-unstable"'
 require_contains flake.nix 'flake-parts.follows = "nixos-modules/flake-parts"'
 require_contains flake.nix 'git-hooks.follows = "nixos-modules/git-hooks-nix"'
