@@ -505,6 +505,17 @@ lint:
     # Measured at 6b3f6099: two such files (18 passing cases between them)
     # while every gate over the suite was green. This one walks the TREE.
     python3 ./scripts/reprobuild_suite_inventory.py --check-declared-sources 2>&1 | tee -a test-logs/lint.log
+    # The SHAPE-PARITY gate, which is what stops the line above from being a
+    # trap. That gate's rule and the edge generator's are one rule with two
+    # implementations, in two languages; where they disagree, one of two
+    # things is true, and both are bad: either the gate reports an orphan that
+    # `nim r scripts/generate_test_edges.nim` cannot enrol -- a gate demanding
+    # a fix the contributor cannot perform -- or a test is built and run that
+    # the gate never audits. They agreed on the tree as it stood and on
+    # nothing else. This compares them over a synthetic corpus of path SHAPES,
+    # so the disagreement surfaces when the RULE is edited rather than when
+    # the first file of a new shape lands on it.
+    python3 ./scripts/reprobuild_suite_inventory.py --check-shape-parity 2>&1 | tee -a test-logs/lint.log
     # The vacuous-case gate, sibling to the case-count gate above and for the
     # same reason: a source scan, no compiler, answers in seconds. It refuses
     # a test case whose only assertion is `check true` -- a shape that reports

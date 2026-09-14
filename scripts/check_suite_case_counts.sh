@@ -76,10 +76,10 @@
 #   1 -- one or both are stale; stderr names the sources that moved and the
 #        exact command that regenerates each.
 #
-# BOTH checks always run. The second is not skipped when the first fails:
-# they name different sources for different reasons, and a contributor who
-# has to build to fix the second wants to know that on the first attempt
-# rather than after regenerating the first and pushing again.
+# ALL FOUR checks always run. A later one is not skipped when an earlier one
+# fails: they name different things for different reasons, and a contributor
+# who has to build to fix one of them wants to know that on the first attempt
+# rather than after regenerating another and pushing again.
 #
 # Wired in four places, deliberately:
 #   - flake.nix's `pre-commit-check`, at the `pre-push` stage (this hook);
@@ -150,9 +150,22 @@ entries_status=0
 # confident green lines. This one walks the TREE.
 sources_status=0
 "${python_bin}" "${inventory}" --check-declared-sources || sources_status=$?
+# The fourth check is what keeps the third from becoming a trap. The gate
+# above and `scripts/generate_test_edges.nim` implement ONE rule for "is this
+# file a test" in two languages, and while they disagree one of two things is
+# true: the gate names an orphan that regenerating cannot enrol -- a gate
+# demanding a fix the contributor cannot perform -- or a test is built and run
+# that the gate never audits. They agreed on the tree as it stood and on
+# nothing else: `tests/unit/test_foo.nim` was accepted by one and refused by
+# the other, and nothing stopped one being added. This compares them over a
+# synthetic corpus of path SHAPES, so a divergence is caught when the RULE is
+# edited rather than when the first file of a new shape lands on it. It reads
+# one generated file and no tree at all.
+parity_status=0
+"${python_bin}" "${inventory}" --check-shape-parity || parity_status=$?
 
 if [ "${counts_status}" -eq 0 ] && [ "${entries_status}" -eq 0 ] &&
-   [ "${sources_status}" -eq 0 ]; then
+   [ "${sources_status}" -eq 0 ] && [ "${parity_status}" -eq 0 ]; then
   exit 0
 fi
 
@@ -180,6 +193,16 @@ fi
     echo "  A test source in the tree is in no build edge, so nothing"
     echo "  compiles it and nothing runs it. Enrol it by regenerating the"
     echo "  edge table and commit repro_tests.nim alongside your change:"
+    echo "    ${regenerate_edges}"
+  fi
+  if [ "${parity_status}" -ne 0 ]; then
+    echo
+    echo "  The edge generator and the undeclared-source gate no longer"
+    echo "  classify test sources the same way. Fix whichever of the two"
+    echo "  rules is wrong -- isTestShapedSource / walkAcceptsSource in"
+    echo "  scripts/generate_test_edges.nim, or _is_test_shaped_source /"
+    echo "  gate_accepts_source in ${inventory} -- and regenerate the"
+    echo "  recorded verdicts:"
     echo "    ${regenerate_edges}"
   fi
 } >&2

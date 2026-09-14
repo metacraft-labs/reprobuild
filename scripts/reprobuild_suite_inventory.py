@@ -1137,21 +1137,41 @@ def parse_repro_tests(root: Path) -> tuple[list[TestSpec], list[TestSpec]]:
 # (6 cases) and `recipes/sandbox-tools/test_sandbox_tools.nim` (12 cases) sat
 # in the tree in exactly that state; both pass when run by hand.
 #
-# WHY IT IS DELIBERATELY WIDER THAN THE GENERATOR. The obvious implementation --
-# reimplement the generator's accept predicates here and compare -- cannot work,
-# and the sandbox-tools orphan is the proof: it was excluded by the generator's
-# SHAPE rule (`recipes/packages/source/<pkg>/` only), so a faithful copy of
-# that rule would have excluded it here too and the gate would have agreed,
-# confidently, with the blind spot it exists to find. A gate that reproduces
-# the rule it is auditing can only ever report that the rule was applied.
+# WHY IT WAS DELIBERATELY WIDER THAN THE GENERATOR, AND WHAT CHANGED. The
+# obvious implementation -- reimplement the generator's accept predicates here
+# and compare -- could not work, and the sandbox-tools orphan is the proof: it
+# was excluded by the generator's SHAPE rule (`recipes/packages/source/<pkg>/`
+# only), so a faithful copy of that rule would have excluded it here too and
+# the gate would have agreed, confidently, with the blind spot it exists to
+# find. A gate that reproduces a NARROWER rule it is auditing can only ever
+# report that the rule was applied.
 #
-# So the rule below is the broad one -- a test-shaped file in a test directory
-# is a test -- and the generator's job is to pick those up. Where the two
-# disagree, the gate says so and someone decides. There is no allowlist: as of
-# this writing the rule produced 1650 candidates across the tree -- the gate
-# prints the live figure on every run, which is the authoritative one -- and
-# every one of them is accounted for, so an exception file would be a place
-# for the next orphan to hide rather than a necessity.
+# So the rule below is the broad one: a test-shaped file in a test directory is
+# a test. What has changed is that `scripts/generate_test_edges.nim` no longer
+# holds a narrower one. Its five per-root shape predicates are gone, replaced
+# by this same rule (`isTestShapedSource` / `walkAcceptsSource` there), because
+# the alternative was a gate reporting an orphan that regenerating cannot
+# enrol -- a gate demanding a fix the contributor cannot perform, which is the
+# one failure mode the rest of this machinery exists to avoid. The two rules
+# agreed on the tree as it stood and on nothing else: `tests/unit/test_foo.nim`
+# and `libs/<name>/<sub>/tests/t_foo.nim` were both accepted here and refused
+# there, and nothing stopped one being added.
+#
+# That does NOT make this gate a copy in the sense the paragraph above warns
+# about. The warning is about inheriting a narrower rule's blind spot, and
+# there is no narrower rule left to inherit. What this gate still measures
+# independently is everything that is not shape: whether `repro_tests.nim` was
+# regenerated at all, whether a candidate was dropped further down the
+# generator (`discoverTests` drops a binary-stem collision with only a stderr
+# line), and whether bundle membership is bookkept correctly.
+#
+# And the agreement between the two IMPLEMENTATIONS -- one Nim, one Python --
+# is measured rather than assumed: see `--check-shape-parity` below.
+#
+# There is no allowlist. Every candidate the rule produces is accounted for,
+# and the gate prints the live figure on every run, which is the authoritative
+# one; a number written here would be a baseline for a set that moves whenever
+# anyone adds a test.
 #
 # WHAT IT DOES NOT COVER. Python tests (`pythonTestPaths`) are out of scope
 # here; `run_tests.sh` finds those with its own `find tests -name 'test_*.py'`
@@ -1164,7 +1184,8 @@ DECLARED_SOURCE_ROOTS = ("tests", "libs", "tools", "recipes", "apps")
 DECLARED_SOURCE_SKIP_PREFIXES = (
     # Spec exhibits and staged trees. Their per-fixture `tests/t_*.nim` files
     # mimic real test binaries and cannot compile against the live engine --
-    # `acceptTestsTree` in the generator skips them for the same reason, and
+    # `DeclaredSourceSkipPrefixes` in the generator skips them for the same
+    # reason, and
     # this is the one place the two rules must agree, because the alternative
     # is ~741 permanent false positives.
     "tests/fixtures/",
@@ -1240,6 +1261,236 @@ def bundled_test_sources(root: Path, nim_specs: list[TestSpec]) -> list[str]:
         ):
             members.add(member)
     return sorted(members)
+
+
+# ---------------------------------------------------------------------------
+# The shape-parity gate.
+#
+# WHAT IT MEASURES. `_is_test_shaped_source` above and `isTestShapedSource` in
+# `scripts/generate_test_edges.nim` are one rule with two implementations in
+# two languages. Nothing about writing the same words twice makes them stay the
+# same words, and the consequence of a drift is not symmetric:
+#
+#   * generator narrower than gate -> this gate reports an orphan and tells the
+#     contributor to regenerate, and regenerating does not enrol it. The
+#     contributor cannot clear the gate.
+#   * generator wider than gate -> a file is built and run that the gate never
+#     considers, which is only harmless until it is not.
+#
+# HOW. The generator classifies a synthetic corpus of path SHAPES and checks
+# the verdicts in. This gate rebuilds the same corpus from the same lists and
+# classifies it with its own rule. Any row the two answer differently is named.
+#
+# WHY A SYNTHETIC CORPUS AND NOT THE TREE. The tree is what the two already
+# agree on -- they agreed before this check existed. A divergence appears when
+# someone adds a file of a shape neither rule has seen, and the corpus contains
+# those shapes today so the disagreement is caught when the RULE is edited
+# rather than when the first file lands on it.
+#
+# WHY AN ARTIFACT AND NOT A SUBPROCESS. Shelling out to `nim r` would put a
+# multi-minute Nim compile inside a pre-push hook, and a gate that costs a
+# compile is a gate people learn to bypass.
+#
+# NON-VACUITY. Three ways this could report green while proving nothing, each
+# refused explicitly below: the artifact could be absent (fatal, not skipped);
+# the two corpora could have drifted apart, so that the rows compared are not
+# the rows either side thinks it is classifying (fatal, and reported as "this
+# run proves nothing" rather than as agreement); and either side could have
+# answered one way for every single row, which compares nothing (fatal).
+
+SHAPE_PARITY_PATH = Path("scripts/reprobuild-test-shape-parity.tsv")
+
+SHAPE_PARITY_REGENERATE_COMMAND = "nim r scripts/generate_test_edges.nim"
+
+# These four lists MUST equal `CorpusRoots` / `CorpusMiddles` / `CorpusStems` /
+# `CorpusExts` in scripts/generate_test_edges.nim, and the product below MUST
+# be built in the same nesting order. They are not required to stay in sync by
+# discipline: if they drift, the two corpora differ and the check fails loudly
+# naming both files, which is the whole design -- a smaller corpus can never
+# quietly become a smaller comparison.
+SHAPE_CORPUS_ROOTS = ("tests", "libs", "tools", "recipes", "apps", "docs")
+SHAPE_CORPUS_MIDDLES = (
+    "",
+    "pkg",
+    "pkg/tests",
+    "pkg/src",
+    "pkg/src/tests",
+    "tests",
+    "fixtures",
+    "fixtures/x/tests",
+    "pkg/a/b/tests",
+)
+SHAPE_CORPUS_STEMS = ("t_x", "test_x", "x_test", "bundle_x", "helper")
+SHAPE_CORPUS_EXTS = (".nim", ".txt")
+
+
+def shape_parity_corpus() -> list[str]:
+    """Every path shape the parity artifact records, in a fixed order."""
+    paths: list[str] = []
+    for root in SHAPE_CORPUS_ROOTS:
+        for middle in SHAPE_CORPUS_MIDDLES:
+            for stem in SHAPE_CORPUS_STEMS:
+                for ext in SHAPE_CORPUS_EXTS:
+                    directory = root if not middle else root + "/" + middle
+                    paths.append(directory + "/" + stem + ext)
+    return paths
+
+
+def gate_accepts_source(rel: str) -> bool:
+    """Would `walk_test_shaped_sources` pick `rel` up?
+
+    Root membership and the skip prefixes -- which the walk applies by pruning
+    directories -- and then the shape rule. This is the exact counterpart of
+    `walkAcceptsSource` in the generator, and it is what the parity artifact
+    records, because it is the whole of what "the gate considers this a test"
+    means.
+
+    Comparisons here are case-SENSITIVE on both sides, deliberately and to the
+    same effect: no path is resolved against the filesystem, so a root spelled
+    `Tests` is a different root on Windows and on Linux alike. The walk's own
+    case sensitivity is a separate question, and the "the walk is broken, so
+    this run proves nothing" guard in `declared_source_drift` is what covers
+    it.
+    """
+    segments = rel.split("/")
+    if len(segments) < 2:
+        return False
+    if segments[0] not in DECLARED_SOURCE_ROOTS:
+        return False
+    for prefix in DECLARED_SOURCE_SKIP_PREFIXES:
+        if rel.startswith(prefix):
+            return False
+    return _is_test_shaped_source(rel)
+
+
+def parse_shape_parity(text: str) -> dict[str, str]:
+    """Read `path<TAB>verdict` rows, ignoring comments and blank lines."""
+    rows: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split("\t")
+        if len(parts) != 2:
+            continue
+        rows[parts[0]] = parts[1]
+    return rows
+
+
+def shape_parity_drift(root: Path) -> dict[str, Any]:
+    """Compare the generator's recorded verdicts against this file's rule."""
+    path = root / SHAPE_PARITY_PATH
+    if not path.is_file():
+        return {"clean": False, "missing": True}
+
+    recorded = parse_shape_parity(read_text(path))
+    expected = shape_parity_corpus()
+    expected_set = set(expected)
+    recorded_set = set(recorded)
+
+    # The corpora must be the same set, or the rows being compared are not the
+    # rows either side believes it is classifying.
+    corpus_only_here = sorted(expected_set - recorded_set)
+    corpus_only_there = sorted(recorded_set - expected_set)
+
+    disagreements: list[tuple[str, str, str]] = []
+    gate_accepts = 0
+    generator_accepts = 0
+    if not corpus_only_here and not corpus_only_there:
+        for rel in expected:
+            mine = "ACCEPT" if gate_accepts_source(rel) else "REJECT"
+            theirs = recorded[rel]
+            if mine == "ACCEPT":
+                gate_accepts += 1
+            if theirs == "ACCEPT":
+                generator_accepts += 1
+            if mine != theirs:
+                disagreements.append((rel, theirs, mine))
+
+    # A corpus that either side answers uniformly compares nothing. This is a
+    # failure, not a pass: it is exactly how a check reports a confident green
+    # off a comparison it never made.
+    total = len(expected)
+    degenerate = (
+        total == 0
+        or gate_accepts in (0, total)
+        or generator_accepts in (0, total)
+    )
+
+    return {
+        "clean": (
+            not corpus_only_here
+            and not corpus_only_there
+            and not disagreements
+            and not degenerate
+        ),
+        "missing": False,
+        "rows": total,
+        "gateAccepts": gate_accepts,
+        "generatorAccepts": generator_accepts,
+        "degenerate": degenerate,
+        "corpusOnlyHere": corpus_only_here,
+        "corpusOnlyThere": corpus_only_there,
+        "disagreements": disagreements,
+    }
+
+
+def format_shape_parity_drift(drift: dict[str, Any]) -> str:
+    lines: list[str] = []
+    if drift.get("missing"):
+        lines.append(
+            f"FAIL: {SHAPE_PARITY_PATH} not found. It is a generated artifact "
+            "and its absence is a failure rather than a skip -- a parity "
+            "check that passes when it has nothing to compare against proves "
+            "nothing. Generate it and commit it:"
+        )
+        lines.append(f"  {SHAPE_PARITY_REGENERATE_COMMAND}")
+        return "\n".join(lines)
+
+    if drift["corpusOnlyHere"] or drift["corpusOnlyThere"]:
+        lines.append(
+            "FAIL: the two sides no longer describe the same corpus, so this "
+            "run proves nothing about whether the rules agree. The corpus "
+            "lists in scripts/reprobuild_suite_inventory.py and in "
+            "scripts/generate_test_edges.nim have drifted (or the artifact is "
+            "stale -- regenerate it first):"
+        )
+        for rel in drift["corpusOnlyHere"][:20]:
+            lines.append(f"  - only this gate builds: {rel}")
+        for rel in drift["corpusOnlyThere"][:20]:
+            lines.append(f"  - only the artifact carries: {rel}")
+        lines.append(f"  {SHAPE_PARITY_REGENERATE_COMMAND}")
+
+    if drift["degenerate"]:
+        lines.append(
+            "FAIL: the corpus is degenerate -- "
+            f"{drift['rows']} row(s), gate ACCEPT={drift['gateAccepts']}, "
+            f"generator ACCEPT={drift['generatorAccepts']}. A corpus that one "
+            "side answers uniformly compares nothing, so this run proves "
+            "nothing. Widen the corpus lists rather than accepting the green."
+        )
+
+    if drift["disagreements"]:
+        lines.append(
+            f"FAIL: {len(drift['disagreements'])} path shape(s) are "
+            "classified differently by the edge generator and by this gate. "
+            "One of the two is wrong, and while they disagree one of these is "
+            "happening: the gate reports an orphan that regenerating cannot "
+            "enrol, or a file is built and run that the gate never audits."
+        )
+        for rel, theirs, mine in drift["disagreements"][:40]:
+            lines.append(
+                f"  - {rel}: generate_test_edges.nim says {theirs}, "
+                f"this gate says {mine}"
+            )
+        lines.append(
+            "Fix the rule in scripts/generate_test_edges.nim "
+            "(isTestShapedSource / walkAcceptsSource) or in this file "
+            "(_is_test_shaped_source / gate_accepts_source) so both say the "
+            "same thing, then regenerate:"
+        )
+        lines.append(f"  {SHAPE_PARITY_REGENERATE_COMMAND}")
+    return "\n".join(lines)
 
 
 def declared_source_drift(root: Path) -> dict[str, Any]:
@@ -6726,6 +6977,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--check-shape-parity",
+        action="store_true",
+        help=(
+            "compare this file's test-source shape rule against the one in "
+            "scripts/generate_test_edges.nim, over the synthetic corpus of "
+            "path shapes the generator records in "
+            "scripts/reprobuild-test-shape-parity.tsv, and exit non-zero on "
+            "any path the two classify differently. Needs no built test "
+            "binaries, no compiler and no nix. This is what stops the gate "
+            "and the generator agreeing by coincidence on today's tree while "
+            "disagreeing about the first file of a new shape that lands"
+        ),
+    )
+    parser.add_argument(
         "--no-catalog",
         action="store_true",
         help=(
@@ -6823,6 +7088,22 @@ def main(argv: list[str]) -> int:
             )
             return 0
         print(format_declared_source_drift(drift), file=sys.stderr)
+        return 1
+
+    # Same placement and the same reason: this one reads one generated file
+    # and nothing else -- not even the tree.
+    if args.check_shape_parity:
+        drift = shape_parity_drift(root)
+        if drift["clean"]:
+            print(
+                "test-source shape parity: "
+                f"{drift['rows']} path shapes classified identically by "
+                "scripts/generate_test_edges.nim and by this gate "
+                f"({drift['generatorAccepts']} accepted by both, "
+                f"{drift['rows'] - drift['generatorAccepts']} refused by both)"
+            )
+            return 0
+        print(format_shape_parity_drift(drift), file=sys.stderr)
         return 1
 
     # Same placement and the same reason: BEFORE any binary probing. A gate

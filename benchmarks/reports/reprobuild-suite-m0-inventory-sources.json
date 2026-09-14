@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 578,
     "staticallyDetectedRuntimeCompilerFlowTests": 97,
-    "testEntries": 1602
+    "testEntries": 1603
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1061,7 +1061,7 @@
       "integration": 727,
       "platform/destructive": 115,
       "pure unit": 578,
-      "unclassified": 170
+      "unclassified": 171
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1198,8 +1198,8 @@
       }
     ],
     "nimTestBinaryCount": 1592,
-    "pythonTestFileCount": 10,
-    "testEntryCount": 1602
+    "pythonTestFileCount": 11,
+    "testEntryCount": 1603
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -34178,6 +34178,21 @@
     },
     {
       "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `shutil`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_publish_surface_routing.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
       "class": "platform/destructive",
       "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
@@ -34187,7 +34202,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_reprobuild_suite_inventory.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 76,
+      "staticCaseCount": 85,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

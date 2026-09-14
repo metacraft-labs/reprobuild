@@ -48,7 +48,12 @@ suite "self-spawn image identity":
       check selfSpawnIoMonitorPath("") == ""
 
       try:
-        markRunningImageAsReproCli()
+        # The SETTER is gated behind the same define as the clear, so this
+        # name exists only here. `markRunningImageAsReproCli` itself is
+        # module-private: nothing outside `repro_cli_support` can grant
+        # itself the mark, and `runThinApp` is the only path that sets it in
+        # an ordinary build.
+        markRunningImageAsReproCliForTest()
         # Declared: accepted, under a filename that is NOT `repro`.
         check selfSpawnIoMonitorPath("") ==
           os.normalizedPath(getAppFilename())

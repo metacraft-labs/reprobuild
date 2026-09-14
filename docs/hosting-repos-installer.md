@@ -155,21 +155,76 @@ passes every "did it install?" check downstream.
 signers (it reimplements no signing), asserts the new version really
 landed in the generated index, and uploads.
 
-### The upload target is a variable
-
-`--target` / `$REPRO_PUBLISH_TARGET`:
+### The upload target is a variable — one per surface
 
 | scheme | meaning |
 | --- | --- |
 | `local:<path>` | copy the tree to a directory — what the gate uses |
 | `s3://<bucket>/<prefix>` | `aws s3 sync`; with an R2 endpoint this is R2 |
 | `r2:<bucket>/<prefix>` | `rclone` against `$REPRO_RCLONE_REMOTE` |
+| `git:<url>[#<branch>]` | clone, replace, commit, push — Scoop and Homebrew |
 | `none` | generate, upload nothing |
 
 Generating signed metadata is local and fully tested. Pushing to R2 needs
 credentials and a bucket that do not exist yet. Making the destination a
 parameter is what lets the gate exercise **the same code path** production
 will use, instead of testing a different one.
+
+#### Seven surfaces, five buckets, and one `--target` that could not reach them
+
+`infra`'s `terraform/cloudflare/reprobuild-prod` provisions **five** R2
+buckets — `reprobuild-{deb,rpm,arch,downloads,keys}-prod` — each bound by an R2
+custom domain to one hostname and therefore served at the **root** of it:
+`deb.reprobuild.com/dists/stable/InRelease` needs a bucket whose key
+`dists/stable/InRelease` is at its root. A single `--target` writing six
+prefixes underneath one destination addresses none of the five.
+
+So the destination is resolved **per surface**:
+
+```
+--target-deb r2:reprobuild-deb-prod   --target-rpm  r2:reprobuild-rpm-prod
+--target-arch r2:reprobuild-arch-prod --target-keys r2:reprobuild-keys-prod
+--target-downloads r2:reprobuild-downloads-prod
+--target-scoop  git:https://github.com/metacraft-labs/scoop-reprobuild
+--target-homebrew git:https://github.com/metacraft-labs/homebrew-reprobuild
+```
+
+or the matching `$REPRO_PUBLISH_TARGET_{DEB,RPM,ARCH,DOWNLOADS,KEYS,SCOOP,HOMEBREW}`.
+These are exactly the values `tofu output r2_buckets` emits.
+
+`--target` still works and still means what it meant: with no per-surface
+override it **derives** a destination per surface by appending the surface
+name as a prefix — `$base/deb`, `$base/rpm`, … — which is what the gate uses
+and what `repro-install.sh`'s `$REPRO_BASE_URL` mode already expects. Every
+pre-existing invocation is unchanged.
+
+#### `scoop` had a prefix and no bucket; `downloads` had a bucket and no prefix
+
+Both were wrong, in opposite directions.
+
+**`downloads` was the missing one.** `repro-install.sh --method tarball` — the
+repo-less fallback, and the only install path on a distribution none of
+apt/dnf/pacman covers — fetches `$REPRO_DOWNLOADS_URL/v<version>/<asset>`,
+`/SHA256SUMS`, `/SHA256SUMS.asc` and `/<asset>.asc`, and Terraform provisions
+`downloads.reprobuild.com` for exactly that. Nothing wrote it: the archives
+went to the GitHub release and stopped there, so on the first real release
+that hostname would have resolved, served, and held nothing — the failure that
+looks least like a misconfiguration and most like a broken product.
+`--archives <dir>` (release.yml's `staging/`) closes it, publishing the exact
+bytes that were released rather than a rebuild of them.
+
+**`scoop` was the wrong one.** A Scoop bucket is a **git repository** —
+`scoop bucket add` clones it — and R2 serves objects, not git. An R2 prefix
+full of `bucket/reprobuild.json` is a tree no client can consume. Terraform is
+right to provision no bucket for it, and the publisher now refuses an
+object-store target for a git-backed surface **at target-resolution time**,
+before anything is signed or generated. A generic `--target r2:…` fans out to
+the five object-store surfaces and to neither git-backed one.
+
+**Nothing here changes `infra`.** The five buckets, their custom domains and
+the absence of a `scoop` bucket are all already correct; the defect was
+entirely on the publisher's side. The one change that would belong in `infra`
+is recorded below and deliberately not made here.
 
 ### The repository tree is stateful, and that is what makes upgrades work
 
@@ -442,10 +497,50 @@ from this checkout.
 5. **A Scoop bucket and a Homebrew tap** are **git repositories**;
    `scoop bucket add` and `brew tap` clone them, and R2 serves objects,
    not git. They need `metacraft-labs/scoop-reprobuild` and
-   `metacraft-labs/homebrew-reprobuild`, which do not exist. The gate
+   `metacraft-labs/homebrew-reprobuild`, **and neither exists**. The gate
    stands up a **real local bucket** (a git repo) rather than leaving
    runquota's `@SCOOP_URL@` placeholder, so the manifest generator is
    exercised with a real URL and a real hash.
+
+   The publisher is now built right up to that boundary and no further.
+   Creating a GitHub repository is a one-off act by a human with
+   organisation rights; nothing in this pipeline can do it and nothing in
+   this pipeline should. What the publisher does instead:
+
+   * `git:<url>` is a real target scheme — clone, replace the tracked
+     content, commit, push — so the channel works the moment a remote is
+     named. Exercised against a real bare repository by
+     `tests/unit/test_publish_surface_routing.py`.
+   * an object-store target for either surface is **refused**, before any
+     signing, naming why.
+   * with no target, the manifest or formula is generated and **staged**,
+     and the run prints a `PREREQUISITE:` block naming the repository that
+     must exist and the exact flag to pass once it does. It also writes
+     `PUBLISH-THIS-SURFACE.md` into the staged tree so the instruction
+     travels with the artifact.
+   * `release.yml` turns each of those into a GitHub **`::warning::`** on
+     every release. That placement is the point: the gap used to be
+     recorded only as `infra`'s `git_backed_surfaces` terraform output,
+     which renders under `tofu output` — needing credentials that root will
+     not have until it is applied — so the one place it was written down
+     was a place nobody doing a release would look.
+
+   **Homebrew now has a manifest generator.** `--ecosystem homebrew`
+   writes `Formula/reprobuild.rb` from the macOS archive's real SHA-256.
+   Under `--ecosystem all` it *skips* when the release carries no macOS
+   archive (v0.1.2 and v0.1.3 were both such releases, and dying there
+   would take the trust anchor with it); asked for by name it fails,
+   because a run told to publish a formula that silently published none is
+   the worse answer.
+
+6. **One change that belongs in `infra`, stated and not made.** Nothing in
+   the five-bucket layout is wrong. The one thing worth moving is where the
+   git-backed gap is *recorded*: `git_backed_surfaces` is a terraform
+   `output`, and an output renders only on `tofu output`. Moving it into
+   the root's `README.md` prose (it is already there) is enough for a human
+   reading the root; the release-time half is what this repository now
+   carries. Nothing else in `terraform/cloudflare/reprobuild-prod` needs to
+   change for this publisher to work, and this change touches none of it.
 
 ### `install.` vs `get.`, unresolved on purpose
 
@@ -491,7 +586,10 @@ commit that populates the anchor pin.
   repository) — but hand verification is not a gate, and this deserves a
   step of its own.
 * **`release.yml`'s repo-metadata step has never run, and needs five tools
-  the job does not install.** `--ecosystem all` reaches
+  the job does not install.** (Unchanged by the five-bucket work: the
+  publisher now addresses the right destinations, but the tooling the
+  `--ecosystem all` legs shell out to is still not installed on the
+  runner.) `--ecosystem all` reaches
   `rpmbuild` (rpm-build), `createrepo_c`, `dpkg-scanpackages` (dpkg-dev),
   `apt-ftparchive` (apt-utils) and `repo-add` — and `repo-add` ships only
   with **pacman**, so on anything but an Arch runner the arch leg will
@@ -502,7 +600,15 @@ commit that populates the anchor pin.
   the step skip per ecosystem the way it already skips per missing
   credential — that is a choice about runners, not a bug with one obvious
   fix, so it is recorded rather than guessed at here.
-* **Homebrew** has no manifest generator at all.
+* ~~**Homebrew** has no manifest generator at all.~~ — **closed.**
+  `--ecosystem homebrew` writes `Formula/reprobuild.rb` with the real
+  digest of the macOS archive. What is still absent is the **tap
+  repository** (`metacraft-labs/homebrew-reprobuild`), which is a human's
+  to create; see item 5 above for what the publisher does until then. No
+  gate arm drives `brew tap` / `brew install` against the generated
+  formula — the routing and the digest are covered by
+  `tests/unit/test_publish_surface_routing.py`, a real `brew` install is
+  not, and that needs a macOS runner.
 * `apt 2.x` was not exercised by the M3 arms; only apt 3.0.3. The
   diagnostic patterns are alternations covering both wordings (M2 verified
   both generations), but that is an inherited claim here, not a measured

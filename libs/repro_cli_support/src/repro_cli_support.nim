@@ -6597,21 +6597,7 @@ proc stablePublicCliPath(): string =
 var runningImageIsReproCliFlag = false
   ## Set by ``markRunningImageAsReproCli`` — see ``runningImageIsReproCli``.
 
-when defined(reproImageIdentityTest):
-  proc resetRunningImageReproCliMarkForTest*() =
-    ## Undo ``markRunningImageAsReproCli`` — compiled ONLY under
-    ## ``-d:reproImageIdentityTest``, which one test turns on for itself
-    ## through its own ``.nim.cfg``.
-    ##
-    ## It is gated rather than exported outright because the mark is what
-    ## permits self-spawning: a test binary that set it and left it set would
-    ## be a test binary the engine is willing to re-execute with an internal
-    ## verb, which is the unbounded self-exec chain this whole predicate
-    ## exists to prevent. So the regression test restores the refusal in a
-    ## ``finally``, and no ordinary build has a way to clear the mark at all.
-    runningImageIsReproCliFlag = false
-
-proc markRunningImageAsReproCli*() =
+proc markRunningImageAsReproCli() =
   ## Record that the process this code is running in IS the `repro` CLI: the
   ## image that dispatches ``internal io monitor``,
   ## ``__repro-extract-interface`` and ``__repro-compile-provider``.
@@ -6620,7 +6606,49 @@ proc markRunningImageAsReproCli*() =
   ## which `apps/repro/repro.nim` does as a LITERAL in its own source
   ## (``quit runThinApp("repro")``). That literal is the CLI's own statement
   ## about what it is; the filename it happens to be invoked under is not.
+  ##
+  ## NOT EXPORTED, and that is the point. This is the DANGEROUS direction:
+  ## setting the mark is what makes the engine willing to re-execute the
+  ## running image with an internal verb, so an exported setter lets any
+  ## module that links the engine be accepted as `repro` without ever having
+  ## reached ``runThinApp("repro")`` — which is exactly the embedded test
+  ## binary the refusal exists to stop, granting itself the permission by
+  ## calling one proc. ``runThinApp`` is in THIS module, so the export bought
+  ## nothing but that hole. The counterpart clear
+  ## (``resetRunningImageReproCliMarkForTest``) was already gated behind
+  ## ``-d:reproImageIdentityTest`` for the weaker version of the same reason;
+  ## the set is gated below under the same define, so the pair is symmetric
+  ## and NO ordinary build can either set or clear the mark off the real
+  ## dispatch path.
   runningImageIsReproCliFlag = true
+
+when defined(reproImageIdentityTest):
+  ## The test-only handles on the mark, both compiled ONLY under
+  ## ``-d:reproImageIdentityTest``, which one test turns on for itself
+  ## through its own ``.nim.cfg``.
+  ##
+  ## Two directions, one reason. The mark is what permits self-spawning: an
+  ## image that can SET it is an image the engine will re-execute with an
+  ## internal verb without that image ever having declared itself through
+  ## ``runThinApp("repro")``, and an image that can CLEAR it and leaves it
+  ## clear is fine — but one that sets it and leaves it set is the unbounded
+  ## self-exec chain this whole predicate exists to prevent. So the
+  ## regression test that must observe the refusal in BOTH directions gets
+  ## both handles here and restores the refusal in a ``finally``, and no
+  ## ordinary build has a way to reach either.
+
+  proc markRunningImageAsReproCliForTest*() =
+    ## Set the mark without going through ``runThinApp``. The only caller is
+    ## the image-identity regression test, which has to observe the accept
+    ## side of the predicate from a binary that is not named `repro` and
+    ## cannot dispatch the real CLI to get there.
+    markRunningImageAsReproCli()
+
+  proc resetRunningImageReproCliMarkForTest*() =
+    ## Undo ``markRunningImageAsReproCliForTest`` — called from the test's
+    ## ``finally`` so the refusal is restored and the rest of the process is
+    ## as safe as it was before the case ran.
+    runningImageIsReproCliFlag = false
 
 proc runningImageIsReproCli(): bool =
   ## Does the running image implement the internal verbs?

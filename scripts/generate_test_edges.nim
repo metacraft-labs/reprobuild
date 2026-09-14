@@ -51,6 +51,11 @@ import repro_binary_reachability
 
 const
   GeneratedFile = "repro_tests.nim"
+  ShapeParityFile = "scripts/reprobuild-test-shape-parity.tsv"
+    ## The second generated artifact: this generator's verdict on a synthetic
+    ## corpus of path SHAPES, checked in so the Python gate can compare it
+    ## against its own rule without running a Nim compiler. See
+    ## ``renderShapeParity``.
   BinaryRoot = "build/test-bin"
 
   # Bootstrap-And-Self-Build B4: the three macOS-arm64 HCR tests
@@ -463,88 +468,104 @@ proc identFromBasename(stem: string): string =
     else:
       result.add('_')
 
-proc acceptTestsTree(rel: string): bool =
-  # Fixture trees are spec exhibits / test scaffolding, not reprobuild
-  # tests; their per-fixture `tests/t_*.nim` files mimic real test
-  # binaries but cannot compile against the live engine. Skip them.
-  if rel.startsWith("tests/fixtures/"):
+const
+  DeclaredSourceRoots* = ["tests", "libs", "tools", "recipes", "apps"]
+    ## The roots walked for Nim test sources.
+    ##
+    ## MUST equal ``DECLARED_SOURCE_ROOTS`` in
+    ## ``scripts/reprobuild_suite_inventory.py``. Not "should": the parity
+    ## artifact below is generated from this list and checked against that
+    ## one, so a root added to only one of the two is a gate failure that
+    ## names both files, not a silent blind spot.
+
+  DeclaredSourceSkipPrefixes* = ["tests/fixtures/"]
+    ## Spec exhibits and staged trees. Their per-fixture ``tests/t_*.nim``
+    ## files mimic real test binaries and cannot compile against the live
+    ## engine, so neither this generator nor the gate may enrol them. MUST
+    ## equal ``DECLARED_SOURCE_SKIP_PREFIXES`` in the inventory script; the
+    ## alternative is ~741 permanent false positives on one side or ~741
+    ## permanent build failures on the other.
+
+proc isTestShapedSource*(rel: string): bool =
+  ## THE shape rule: is ``rel`` (a repo-relative, forward-slashed path) a
+  ## reprobuild Nim test source?
+  ##
+  ## ONE RULE, TWO IMPLEMENTATIONS, AND WHY THAT IS NOW SAFE
+  ##
+  ## This used to be five per-root predicates, each with its own shape
+  ## requirement — ``tests/`` accepted only the ``t_`` stem, ``libs/``,
+  ## ``tools/`` and ``apps/`` required the ``tests`` directory at exactly
+  ## ``<root>/<name>/tests/``, ``recipes/`` accepted anything at depth 3. The
+  ## gate that audits this walk (``--check-declared-sources``) asks the
+  ## broader question instead: a ``t_``/``test_``-stemmed ``.nim`` file in a
+  ## directory named ``tests`` at ANY depth, or anywhere under ``recipes/``.
+  ##
+  ## The two agreed on the tree as it stood, and on nothing else. Every path
+  ## the gate accepted and this walk refused would have been reported as an
+  ## orphan that regenerating cannot enrol — a gate demanding a fix the
+  ## contributor cannot perform, which is the single failure mode the rest of
+  ## this machinery exists to avoid. ``tests/unit/test_foo.nim`` is such a
+  ## path, and so is ``libs/<name>/<sub>/tests/t_foo.nim``; neither existed,
+  ## and nothing stopped one being added.
+  ##
+  ## So the shape restrictions are gone and this is the gate's rule. The gate
+  ## does NOT thereby become a copy of a predicate it audits in the sense its
+  ## own block comment warns about: that warning is about reproducing a
+  ## NARROWER rule and inheriting its blind spot, and there is no narrower
+  ## rule left to reproduce. What the gate still measures independently is
+  ## everything that is not shape — whether ``repro_tests.nim`` was
+  ## regenerated at all, whether a candidate was dropped further down this
+  ## file (``discoverTests`` drops a binary-stem collision with only a stderr
+  ## line), and whether bundle membership is bookkept correctly.
+  ##
+  ## Drift between the two implementations is caught by measurement, not by
+  ## hope: ``renderShapeParity`` below classifies a synthetic corpus of path
+  ## shapes with THIS proc, the result is checked in, and
+  ## ``--check-shape-parity`` re-derives the same corpus and re-classifies it
+  ## with the Python rule. Any path the two answer differently fails that
+  ## gate and names both files.
+  if not rel.endsWith(".nim"):
     return false
   let stem = rel.splitFile().name
-  rel.endsWith(".nim") and stem.startsWith("t_")
+  if not (stem.startsWith("t_") or stem.startsWith("test_")):
+    return false
+  let segments = rel.split('/')
+  if segments.len < 2:
+    return false
+  if segments[0] == "recipes":
+    # The recipes' own convention puts ``test_<pkg>_source.nim`` beside the
+    # recipe with no ``tests/`` directory at all. ``recipes/sandbox-tools/
+    # test_sandbox_tools.nim`` sat there for months with 12 passing cases
+    # that nothing executed, because the old rule demanded
+    # ``recipes/packages/source/<pkg>/`` and said nothing when a file missed
+    # that shape.
+    return segments.len >= 3
+  # A directory named ``tests`` anywhere above the file. This is what keeps
+  # an ordinary library module that happens to start with ``test_`` out —
+  # ``libs/ct_test_interface/src/ct_test_interface/
+  # test_execution_extension.nim`` is a module, not a test, and lives under
+  # ``src/``.
+  "tests" in segments[0 ..< segments.high]
 
-proc acceptLibsTree(rel: string): bool =
-  let parts = rel.split('/')
-  if parts.len < 4: return false
-  if parts[2] != "tests": return false
-  let stem = rel.splitFile().name
-  rel.endsWith(".nim") and
-    (stem.startsWith("t_") or stem.startsWith("test_"))
-
-proc acceptToolsTree(rel: string): bool =
-  ## Both stems, like every other root. `tools/` and `recipes/` used to
-  ## accept only ``test_``; `tests/` accepts only ``t_``; `libs/` accepts
-  ## both. Nothing depended on the difference -- there is no ``t_`` file
-  ## under `tools/` or `recipes/` today -- but the asymmetry is a trap for
-  ## the gate that now audits this walk. That gate is deliberately WIDER than
-  ## these predicates (see `--check-declared-sources`), so a stem this
-  ## predicate refuses and the gate accepts would be reported as an orphan
-  ## that regenerating cannot enrol: a gate demanding a fix the contributor
-  ## cannot perform, which is the failure mode the rest of this machinery is
-  ## built to avoid.
-  let parts = rel.split('/')
-  if parts.len < 4: return false
-  if parts[2] != "tests": return false
-  let stem = rel.splitFile().name
-  rel.endsWith(".nim") and
-    (stem.startsWith("t_") or stem.startsWith("test_"))
-
-proc acceptRecipesTree(rel: string): bool =
-  # M9.N from-source recipes ship a ``test_<pkg>_source.nim`` next to each
-  # recipe under ``recipes/packages/source/<pkg>/``. They are real
-  # reprobuild unittest binaries (built + run as part of the ``test``
-  # collection), so they need a build edge like any other test — they
-  # simply live outside the tests/ ∙ libs/ ∙ tools/ roots.
-  #
-  # This used to require exactly that layout — ``parts.len >= 5`` and
-  # ``recipes/packages/source/…`` — and the requirement was silent. A
-  # ``test_*.nim`` anywhere else under ``recipes/`` was not rejected with a
-  # diagnostic; it was simply never seen, so it was never built, never run,
-  # and (because the suite-inventory gate derives its universe from the file
-  # THIS generator writes) never missed. ``recipes/sandbox-tools/
-  # test_sandbox_tools.nim`` sat there for months with 12 passing cases that
-  # nothing executed. The shape rule is therefore gone: a ``test_*.nim``
-  # under ``recipes/`` is a test wherever it lives.
-  #
-  # Both stems, for the same reason as ``acceptToolsTree``: the gate that
-  # audits this walk accepts ``t_`` too, and a stem only one of the two
-  # recognises is an orphan report that regenerating cannot clear.
-  let parts = rel.split('/')
-  if parts.len < 3: return false
-  let stem = rel.splitFile().name
-  rel.endsWith(".nim") and
-    (stem.startsWith("t_") or stem.startsWith("test_"))
-
-proc acceptAppsTree(rel: string): bool =
-  ## ``apps/<app>/tests/{t_,test_}*.nim``.
-  ##
-  ## ``apps`` was not a walked root at all, which is why
-  ## ``apps/repro-harvest-apt/tests/t_c2_signature.nim`` — six passing cases
-  ## — was invisible to the suite and to every gate over it. The apps are
-  ## ordinary Nim code with ordinary tests; there was never a reason for
-  ## their ``tests/`` directories to be the one kind this generator could not
-  ## see.
-  ##
-  ## An app test that needs its own ``--path`` (the harvest-apt one imports
-  ## ``repro_harvest_apt/…`` out of ``apps/<app>/src``) carries it in a
-  ## sibling ``<test>.nim.cfg``, which nim picks up from the project
-  ## directory on every build route. ``TestSpec`` has no ``--path`` field and
-  ## does not need one.
-  let parts = rel.split('/')
-  if parts.len < 4: return false
-  if parts[2] != "tests": return false
-  let stem = rel.splitFile().name
-  rel.endsWith(".nim") and
-    (stem.startsWith("t_") or stem.startsWith("test_"))
+proc walkAcceptsSource*(rel: string): bool =
+  ## Would the walk below enrol ``rel``? Root membership and the shared skip
+  ## prefixes, then the shape rule. This is the function the parity artifact
+  ## records, because it is the whole of what "the generator would pick this
+  ## up" means.
+  let segments = rel.split('/')
+  if segments.len < 2:
+    return false
+  var rooted = false
+  for root in DeclaredSourceRoots:
+    if segments[0] == root:
+      rooted = true
+      break
+  if not rooted:
+    return false
+  for prefix in DeclaredSourceSkipPrefixes:
+    if rel.startsWith(prefix):
+      return false
+  isTestShapedSource(rel)
 
 proc walkRoot(repoRoot, dir: string;
               accept: proc (rel: string): bool): seq[string] =
@@ -756,11 +777,11 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
   let bundled = bundledMembers()
 
   var candidates: seq[string] = @[]
-  candidates.add(walkRoot(repoRoot, "tests", acceptTestsTree))
-  candidates.add(walkRoot(repoRoot, "libs", acceptLibsTree))
-  candidates.add(walkRoot(repoRoot, "tools", acceptToolsTree))
-  candidates.add(walkRoot(repoRoot, "recipes", acceptRecipesTree))
-  candidates.add(walkRoot(repoRoot, "apps", acceptAppsTree))
+  # One predicate, every root. The roots come from the same list the parity
+  # artifact is generated from, so adding a root here cannot silently fail to
+  # reach the gate's side.
+  for root in DeclaredSourceRoots:
+    candidates.add(walkRoot(repoRoot, root, walkAcceptsSource))
   for bundle in PureUnitBundles:
     candidates.add(bundleSourcePath(bundle))
 
@@ -817,9 +838,9 @@ proc acceptPythonTest(rel: string): bool =
   ## generator preserves the same discovery rule.
   if not rel.endsWith(".py"):
     return false
-  # Fixture trees are excluded for the same reason ``acceptTestsTree``
-  # excludes them on the Nim side: they are spec exhibits and test
-  # scaffolding, not reprobuild's own tests.
+  # Fixture trees are excluded for the same reason
+  # ``DeclaredSourceSkipPrefixes`` excludes them on the Nim side: they are
+  # spec exhibits and test scaffolding, not reprobuild's own tests.
   #
   # The Python arm needs the rule MORE than the Nim arm does, and did
   # not have it. A fixture that is itself a reprobuild project leaves a
@@ -992,6 +1013,91 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
     result.add("  \"" & path & "\"" & sep & "\n")
   result.add("]\n")
 
+const
+  # The synthetic corpus. Its whole job is to exercise the axes on which the
+  # two implementations of the shape rule could disagree, on paths that do
+  # NOT have to exist in the tree -- which is the point, because the two rules
+  # already agree on every path that does exist, and would have gone on
+  # agreeing right up until somebody added a file of a shape neither had seen.
+  #
+  # ``scripts/reprobuild_suite_inventory.py`` builds this same product from
+  # the same four lists, in this same order, and refuses to compare anything
+  # if the two corpora are not identical -- see ``--check-shape-parity``.
+  # Changing a list here without changing it there is therefore a loud failure
+  # naming both files, not a silently smaller comparison.
+  CorpusRoots = [
+    # every walked root, plus one directory that is NOT a root, so "the root
+    # list itself drifted" is a shape the corpus can see.
+    "tests", "libs", "tools", "recipes", "apps", "docs"]
+  CorpusMiddles = [
+    "",                 # directly under the root
+    "pkg",              # <root>/<name>/<file> -- no tests dir at all
+    "pkg/tests",        # the classic <root>/<name>/tests/ shape
+    "pkg/src",          # library source, not a test dir
+    "pkg/src/tests",    # a tests dir BELOW src -- the depth divergence
+    "tests",            # a tests dir directly under the root
+    "fixtures",         # the skip prefix, under `tests/`
+    "fixtures/x/tests", # a tests dir *inside* the skipped tree
+    "pkg/a/b/tests"]    # a deeply nested tests dir
+  CorpusStems = [
+    "t_x",       # accepted stem
+    "test_x",    # accepted stem -- the one `tests/` used to refuse
+    "x_test",    # the stem spelled backwards: must NOT be accepted
+    "bundle_x",  # generated bundle sources: must NOT be accepted
+    "helper"]    # an ordinary module
+  CorpusExts = [".nim", ".txt"]
+
+proc shapeParityCorpus(): seq[string] =
+  ## Every path shape the parity artifact records, in a fixed order.
+  result = @[]
+  for root in CorpusRoots:
+    for middle in CorpusMiddles:
+      for stem in CorpusStems:
+        for ext in CorpusExts:
+          let dir = if middle.len == 0: root else: root & "/" & middle
+          result.add(dir & "/" & stem & ext)
+
+proc renderShapeParity(): string =
+  ## The checked-in record of what THIS file's shape rule says about the
+  ## corpus, so that a gate written in another language can measure the
+  ## agreement instead of assuming it.
+  ##
+  ## WHY AN ARTIFACT AND NOT A CALL. The gate is Python and this is Nim.
+  ## Having the gate shell out to ``nim r`` would put a Nim compile --
+  ## minutes -- inside a pre-push hook, and a gate that costs a compile is a
+  ## gate people learn to bypass. Having this file reimplement the gate's rule
+  ## in order to self-check would compare a copy against a copy. So the
+  ## verdicts travel as data, regenerated by the same command that regenerates
+  ## ``repro_tests.nim`` and therefore covered by the same "regenerating is a
+  ## byte-identical no-op" check.
+  ##
+  ## NO COUNT IS FROZEN HERE. The corpus size is whatever the four lists above
+  ## multiply out to; the header states it as a fact about this run, and the
+  ## gate re-derives it rather than comparing against a number.
+  let corpus = shapeParityCorpus()
+  result = ""
+  result.add("# GENERATED by `nim r scripts/generate_test_edges.nim`. Do not edit.\n")
+  result.add("#\n")
+  result.add("# One row per synthetic path shape: the path, and whether THIS\n")
+  result.add("# repository's edge generator would enrol it as a Nim test source.\n")
+  result.add("# `scripts/reprobuild_suite_inventory.py --check-shape-parity` rebuilds\n")
+  result.add("# the same corpus from the same lists and classifies every row with the\n")
+  result.add("# gate's own rule (`_is_test_shaped_source`, plus the root and\n")
+  result.add("# skip-prefix filtering its walk applies). A row the two answer\n")
+  result.add("# differently is a defect in one of them and fails that gate by name.\n")
+  result.add("#\n")
+  result.add("# The paths are SHAPES, not files: none of them need exist. That is what\n")
+  result.add("# makes this a statement about the rules rather than about today's tree.\n")
+  result.add("#\n")
+  result.add("# rows in this run: " & $corpus.len & " -- a fact about this run, not a\n")
+  result.add("# baseline. The gate re-derives the corpus and compares the SET, never\n")
+  result.add("# a number written here.\n")
+  result.add("#\n")
+  result.add("#path\tgenerator\n")
+  for path in corpus:
+    result.add(path & "\t" &
+      (if walkAcceptsSource(path): "ACCEPT" else: "REJECT") & "\n")
+
 proc main() =
   let repoRoot = getCurrentDir()
   # Bundle sources must exist before discovery: each one is enrolled as an
@@ -1002,19 +1108,29 @@ proc main() =
       " bundle source(s) under " & BundleRoot)
   let edges = discoverTests(repoRoot)
   let pythonTests = discoverPythonTests(repoRoot)
-  let outputPath = repoRoot / GeneratedFile
-  let content = render(edges, pythonTests)
-  let existing =
-    if fileExists(outputPath): readFile(outputPath) else: ""
-  if existing == content:
-    stderr.writeLine("generate_test_edges: " & GeneratedFile &
-      " is up to date (" & $edges.len & " Nim tests, " &
-      $pythonTests.len & " Python tests)")
-    return
-  writeFile(outputPath, content)
-  stderr.writeLine("generate_test_edges: wrote " & GeneratedFile &
-    " (" & $edges.len & " Nim tests, " & $pythonTests.len &
-    " Python tests)")
+
+  proc writeIfChanged(rel, content, what: string) =
+    ## Both generated artifacts, same rule: rewrite only on a real change, so
+    ## that "regenerating is a byte-identical no-op" stays a meaningful check
+    ## for each of them separately.
+    let path = repoRoot / rel
+    let existing = if fileExists(path): readFile(path) else: ""
+    if existing == content:
+      stderr.writeLine("generate_test_edges: " & rel & " is up to date (" &
+        what & ")")
+      return
+    writeFile(path, content)
+    stderr.writeLine("generate_test_edges: wrote " & rel & " (" & what & ")")
+
+  writeIfChanged(GeneratedFile, render(edges, pythonTests),
+    $edges.len & " Nim tests, " & $pythonTests.len & " Python tests")
+  # Written unconditionally rather than behind the edge table's up-to-date
+  # early return. The two artifacts go stale for different reasons: the edge
+  # table moves when the TREE changes, the parity artifact moves when the
+  # RULE changes, and a rule change that enrols no new file would have left
+  # the second one stale for ever under a shared early return.
+  writeIfChanged(ShapeParityFile, renderShapeParity(),
+    $shapeParityCorpus().len & " path shapes")
 
 when isMainModule:
   main()
