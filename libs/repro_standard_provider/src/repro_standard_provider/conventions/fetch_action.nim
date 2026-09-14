@@ -114,7 +114,6 @@ proc emitFetchAction*(projectRoot, packageName: string;
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball =
     tarball.replace("\\", "/").replace("\"", "\\\"")
-  let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted =
     extracted.replace("\\", "/").replace("\"", "\\\"")
   let staged = extracted & ".repro-extract-" & spec.hashHex
@@ -174,7 +173,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
         escapedStaged & "/source\"; ")
     script.add("rm -rf \"" & escapedExtracted & "\"; ")
     script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
-    script.add(": > \"" & escapedStamp & "\"")
+    script.appendVerifiedFetchStamp(stamp)
     argv = @[shExe, "-c", script]
   else:
     # No sh on PATH — emit a best-effort direct argv. Caller can detect

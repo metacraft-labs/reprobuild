@@ -1,6 +1,7 @@
 ## Shell fragments shared by source-fetch action emitters.
 
 import std/strutils
+import blake3
 
 const
   CurlFetchRetryArgs* =
@@ -86,3 +87,18 @@ proc appendTarExtraction*(script: var string; archive, destination: string;
     script.add("if ! " & command & "; then " & command & "; fi; ")
   else:
     script.add(command & "; ")
+
+proc appendVerifiedFetchStamp*(script: var string; stamp: string) =
+  ## Called only after successful verification and extraction. Bind the whole
+  ## acquisition program so changed extraction settings invalidate consumers,
+  ## while repeated verification of the same source does not change its mtime.
+  ## Fetch actions remain noncacheable: the stamp is not evidence that a
+  ## previously extracted tree still exists or that acquisition was monitored.
+  let token = "repro-source-fetch-v1:" & blake3.toHex(blake3.digest(script))
+  let escapedStamp = shellDoubleQuote(stamp)
+  script.add("if [ -f \"" & escapedStamp & "\" ] && { " &
+    "IFS= read -r repro_fetch_stamp && " &
+    "[ \"$repro_fetch_stamp\" = \"" & token & "\" ] && " &
+    "! IFS= read -r repro_fetch_extra && [ -z \"$repro_fetch_extra\" ]; " &
+    "} < \"" & escapedStamp & "\"; then :; else " &
+    "printf '%s\\n' '" & token & "' > \"" & escapedStamp & "\"; fi")

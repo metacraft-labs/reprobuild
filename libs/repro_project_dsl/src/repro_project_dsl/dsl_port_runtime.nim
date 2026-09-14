@@ -4113,7 +4113,6 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
   ## via curl.
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
   let escapedTarball = tarball.replace("\\", "/").replace("\"", "\\\"")
-  let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
   let escapedExtracted = extracted.replace("\\", "/").replace("\"", "\\\"")
   let staged = extracted & ".repro-extract-" & spec.hashHex
   let escapedStaged = staged.replace("\\", "/").replace("\"", "\\\"")
@@ -4135,7 +4134,7 @@ proc dslPortCustomFetchScriptShell(spec: DslFetchSpec; tarball, extracted,
     script.appendTarExtraction(tarball, staged, spec.extractStrip)
   script.add("rm -rf \"" & escapedExtracted & "\"; ")
   script.add("mv \"" & escapedStaged & "\" \"" & escapedExtracted & "\"; ")
-  script.add(": > \"" & escapedStamp & "\"")
+  script.appendVerifiedFetchStamp(stamp)
   script
 
 proc dslPortSubstituteShellPlaceholders*(command, fetchPath, extractedPath,
@@ -4249,6 +4248,7 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
       inputs = @[],
       outputs = @[fetchStamp],
       pool = "fetch",
+      cacheable = false,
       dependencyPolicy = automaticMonitorPolicy(),
       commandStatsId = "from-source-custom.fetch." & hashAlgTag,
       env = shellFetchRuntimeEnv(),
