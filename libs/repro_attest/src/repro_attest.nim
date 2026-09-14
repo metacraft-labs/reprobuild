@@ -29,6 +29,10 @@
 ##     root of trust for, and the little it is allowed to tell it.
 ##   * ``repro_attest/mock_backend`` — a backend for a root of trust that
 ##     does not exist, so every other layer runs unmodified without one.
+##   * ``repro_attest/tpm2_backend`` — the measured-boot backend: the
+##     ``reproos.tpm2-evidence.v1`` composite that carries a quote, its
+##     signature and the TCG event log as one blob, and the driver that
+##     assembles it.
 
 import ./repro_attest/measurement
 import ./repro_attest/tpm2
@@ -38,5 +42,7 @@ import ./repro_attest/binding
 import ./repro_attest/report
 import ./repro_attest/driver
 import ./repro_attest/mock_backend
+import ./repro_attest/tpm2_backend
 
-export measurement, tpm2, event_log, manifest, binding, report, driver, mock_backend
+export measurement, tpm2, event_log, manifest, binding, report, driver,
+       mock_backend, tpm2_backend

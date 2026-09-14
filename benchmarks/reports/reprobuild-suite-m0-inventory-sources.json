@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1584,
+    "nimTestBinaries": 1587,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 576,
     "staticallyDetectedRuntimeCompilerFlowTests": 97,
-    "testEntries": 1593
+    "testEntries": 1596
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1075,7 +1075,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 722,
+      "integration": 725,
       "platform/destructive": 115,
       "pure unit": 576,
       "unclassified": 168
@@ -1214,9 +1214,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1584,
+    "nimTestBinaryCount": 1587,
     "pythonTestFileCount": 9,
-    "testEntryCount": 1593
+    "testEntryCount": 1596
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -29980,6 +29980,57 @@
       "source": "tests/integration/t_tpm2_codec_rejects_malformed.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tpm2_driver_composes_and_refuses",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tpm2_driver_composes_and_refuses.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 19,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tpm2_evidence_composite_roundtrip",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tpm2_evidence_composite_roundtrip.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tpm2_evidence_rejects_malformed",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tpm2_evidence_rejects_malformed.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 23,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -537,6 +537,43 @@ proc selectedPcrs*(sel: TpmlPcrSelection): seq[tuple[bank: TpmAlgId, index: int]
         if (b and uint8(1'u8 shl bit)) != 0'u8:
           result.add (bank: s.hashAlg, index: byteIndex * 8 + bit)
 
+proc pcrSelection*(bank: TpmAlgId; indices: openArray[int]): TpmlPcrSelection =
+  ## One bank's selection, built from the register indices it names.
+  ##
+  ## The inverse of `selectedPcrs`, and it lives here rather than beside
+  ## a caller for exactly the reason that one does: the bitmap layout
+  ## has to be written down once. A second copy that packed the bits the
+  ## other way round would produce a selection this file's own reader
+  ## disagreed with, and the disagreement would surface as a composite
+  ## that matches nothing.
+  ##
+  ## The bitmap is `PcrSelectMin` bytes, which is the three a 24-register
+  ## platform profile fixes; an index outside those registers is refused
+  ## rather than widening it, because a register a platform does not have
+  ## cannot have been quoted.
+  if indices.len == 0:
+    raise newException(Tpm2CodecError,
+      "TPML_PCR_SELECTION: a selection naming no register attests to " &
+      "nothing; its composite is the digest of the empty string")
+  var bitmap = newString(PcrSelectMin)
+  for i in 0 ..< bitmap.len: bitmap[i] = '\0'
+  var seen: seq[int] = @[]
+  for idx in indices:
+    if idx < 0 or idx >= PcrSelectMin * 8:
+      raise newException(Tpm2CodecError,
+        "TPML_PCR_SELECTION: PCR " & $idx & " is outside the " &
+        $(PcrSelectMin * 8) & " registers a platform profile fixes")
+    if idx in seen:
+      raise newException(Tpm2CodecError,
+        "TPML_PCR_SELECTION: PCR " & $idx & " is named twice; a bitmap " &
+        "cannot record the repetition, so accepting it would silently " &
+        "build a different selection from the one asked for")
+    seen.add idx
+    let byteIndex = idx div 8
+    bitmap[byteIndex] = char(uint8(bitmap[byteIndex]) or uint8(1'u8 shl (idx mod 8)))
+  result = TpmlPcrSelection(
+    selections: @[TpmsPcrSelection(hashAlg: bank, select: bitmap)])
+
 proc readPcrSelection(r: var Tpm2Reader): TpmlPcrSelection =
   let count = r.readU32("pcrSelect.count")
   if count > uint32(MaxPcrBanks):
