@@ -164,6 +164,10 @@ fi
 # what decides, exactly as it does in ``scripts/build_apps.sh``.
 # shellcheck source=scripts/lib/preloaded_shim_loader.sh
 source scripts/lib/preloaded_shim_loader.sh
+# A build report is attributable only to the invocation that wrote it; see the
+# header of the library for the failure this prevents.
+# shellcheck source=scripts/lib/build_report_attribution.sh
+source scripts/lib/build_report_attribution.sh
 if [[ "$(uname -s)" == "Linux" ]]; then
   shim_to_check="build/lib/librepro_monitor_shim.so"
   if [[ -f "${shim_to_check}" ]]; then
@@ -373,6 +377,17 @@ repro_build_collection() {
     repro_exe="./build/bin/repro_run${exe_ext}"
   fi
   local build_status=0
+  local report_dir="${REPRO_BUILD_REPORT_DIR_DEFAULT}"
+  # Drop any report an EARLIER invocation left at these fixed paths, so that a
+  # report present after the build is one THIS build wrote. A killed build
+  # (the timeout below is reached often enough to matter) writes none at all,
+  # and without this the leftover would be read as if it were this build's.
+  # Deliberately not tolerated with ``|| true``. ``set -e`` would not help
+  # here — this function is called as ``… || exit 1``, which suppresses it for
+  # the whole body — so the failure is returned explicitly: a reset that could
+  # not clear the directory stops the run now, with its own diagnostic, rather
+  # than spending four hours to produce a report nobody can attribute.
+  repro_build_report_reset "${report_dir}" || return 1
   # ``--write-report`` keeps the full record for the CI artefact. The FAILURE
   # report below needs no flag: a failed build writes it unasked, which is the
   # whole point of the outcome-dependent persist default.
@@ -384,23 +399,7 @@ repro_build_collection() {
     if (( build_status == 124 )); then
       printf 'Timed out building %s after %s\n' "${collection}" "${BUILD_TIMEOUT}" >&2
     fi
-
-    failure_report_path=".repro/build/repro/build-failure-report.json"
-    report_path=".repro/build/repro/build-report.json"
-    if [[ -f "${failure_report_path}" ]]; then
-      printf '\n=== Failed actions for %s (from %s) ===\n' "${collection}" "${failure_report_path}" >&2
-      if command -v jq >/dev/null 2>&1; then
-        jq '{counts, failedActions, blockedActions}' "${failure_report_path}" >&2 || true
-      else
-        cat "${failure_report_path}" >&2 || true
-      fi
-      mkdir -p test-logs
-      cp "${failure_report_path}" "test-logs/build-failure-report-${collection//[^a-zA-Z0-9]/_}.json" 2>/dev/null || true
-    fi
-    if [[ -f "${report_path}" ]]; then
-      mkdir -p test-logs
-      cp "${report_path}" "test-logs/build-report-${collection//[^a-zA-Z0-9]/_}.json" 2>/dev/null || true
-    fi
+    repro_collect_build_reports "${report_dir}" "${collection}" "test-logs"
     return "${build_status}"
   fi
 }

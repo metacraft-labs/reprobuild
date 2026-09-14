@@ -51,12 +51,39 @@
 ## executed this body", not "this host can run a TPM" — tying the two
 ## together would make the check unrunnable exactly where the defect lives.
 ##
+## ## The other half of the contract: a whole-suite sweep must not schedule it
+##
+## Arms 1–3 make the ON edge runnable and honest when it is ASKED for. The
+## reciprocal claim — that nobody who did not ask for it ever gets it — was
+## for a while only a comment in the recipe. That is the weaker half and the
+## easier one to break by accident: adding the ON edge to either suite
+## collection is a one-line change that no arm above notices, and the symptom
+## it produces is a whole-suite failure blamed on a missing system package.
+##
+## Arms 4–6 close it, and they are deliberately arranged so that none of them
+## can pass vacuously:
+##
+##   4. the ON edge IS in its own target's closure, declaring the variable ON
+##      and declaring itself non-cacheable — the positive control. Rename or
+##      delete the edge and this arm goes red, so arms 5 and 6 cannot be
+##      satisfied by the thing they look for having ceased to exist;
+##   5. the compile-only collection's closure declares the variable at no
+##      setting at all, while still containing the test's own compile edge —
+##      so the closure being examined is the real, populated one;
+##   6. the execute collection's closure contains exactly one action
+##      declaring the variable, at the OFF setting, and none at the ON
+##      setting.
+##
+## Each arm asserts the declared VALUE rather than the mere presence of the
+## name, and each reads the graph the engine itself lowers rather than the
+## recipe's text — a comment claiming the edge is excluded cannot satisfy it.
+##
 ## ## Mocking
 ##
 ## None. Every arm drives the real ``./build/bin/repro`` against this
 ## repository's real graph, and reads a real file off disk.
 
-import std/[os, osproc, strtabs, strutils, unittest]
+import std/[json, os, osproc, strtabs, strutils, unittest]
 
 import repro_test_support
 
@@ -66,6 +93,12 @@ const
   LiveTarget = "test-live-tpm-quote"
   LayerEnv = "REPROOS_TPM_QUOTE_GATE"
   EvidenceRel = "build/test-evidence/live-tpm-quote.txt"
+  # The three closures arms 4–6 compare: the ON edge's own target, and the
+  # two collections a whole-suite run materialises.
+  LiveSelector = ".#" & LiveTarget
+  SuiteCompileSelector = ".#test-builds"
+  SuiteExecuteSelector = ".#test"
+  TestBinaryRel = "build/test-bin/t_pcr_composite_matches_tpm"
 
 proc findRepoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -98,6 +131,57 @@ proc runBuild(repoRoot, reproBin, selector: string;
 
 proc evidence(path: string): string =
   if fileExists(path): readFile(path).strip() else: ""
+
+proc runGraph(repoRoot, reproBin, selector: string): JsonNode =
+  ## Ask the engine for the ACTIONS it would schedule for ``selector``. This
+  ## is the lowered graph, not the recipe's source, so a comment asserting an
+  ## exclusion cannot answer it.
+  var env = newStringTable()
+  for k, v in envPairs():
+    env[k] = v
+  let runquotaBin = requireRunQuotaDaemonBin(repoRoot).parentDir
+  env["PATH"] = runquotaBin & $PathSep & env.getOrDefault("PATH")
+  if env.hasKey(LayerEnv): env.del(LayerEnv)
+  let args = @[reproBin.quoteShell, "graph", selector,
+    "--view=actions", "--format=json", "--tool-provisioning=path"]
+  let res = execCmdEx(args.join(" "), env = env, workingDir = repoRoot)
+  if res.exitCode != 0:
+    raise newException(IOError,
+      "repro graph " & selector & " exited " & $res.exitCode & ":\n" &
+      res.output)
+  # ``execCmdEx`` merges stderr into stdout, so skip whatever preamble a
+  # diagnostic may have printed and parse from the document itself.
+  let start = res.output.find('{')
+  if start < 0:
+    raise newException(IOError,
+      "repro graph " & selector & " printed no JSON document:\n" & res.output)
+  parseJson(res.output[start .. ^1])
+
+type LayerDeclarations = object
+  ## How the actions of one closure declare the opt-in variable.
+  on: seq[string]   ## action ids declaring it ON
+  off: seq[string]  ## action ids declaring it OFF
+  nonCacheableOn: seq[string]
+
+proc layerDeclarations(graph: JsonNode): LayerDeclarations =
+  ## Read the DECLARED VALUE, not the presence of the name: an edge that
+  ## merely mentions the variable is not an edge that switches the layer on.
+  for action in graph{"actions"}:
+    let id = action{"id"}.getStr()
+    for entry in action{"env"}:
+      let pair = entry.getStr()
+      if pair == LayerEnv & "=1":
+        result.on.add(id)
+        if not action{"cacheable"}.getBool(true):
+          result.nonCacheableOn.add(id)
+      elif pair == LayerEnv & "=0":
+        result.off.add(id)
+
+proc producesTestBinary(graph: JsonNode; binaryPath: string): bool =
+  for action in graph{"actions"}:
+    for output in action{"outputs"}:
+      if output.getStr() == binaryPath:
+        return true
 
 suite "an opt-in layer is something repro build can run, and its setting is in the key":
 
@@ -135,3 +219,40 @@ suite "an opt-in layer is something repro build can run, and its setting is in t
       "=1 exported; exited " & $ordinary.exitCode)
     check ordinary.exitCode == 0
     check evidence(evidencePath) == secondEvidence
+
+    # ARM 4 — POSITIVE CONTROL. The ON edge is in its own target's closure,
+    # declares the layer ON, and declares itself non-cacheable. Arms 5 and 6
+    # assert an ABSENCE, and an absence is satisfied for free once the thing
+    # looked for no longer exists under the name looked for; this arm is what
+    # stops a rename or a deletion from turning them green.
+    let liveGraph = runGraph(repoRoot, reproBin, LiveSelector)
+    let liveDecl = layerDeclarations(liveGraph)
+    checkpoint(LiveSelector & " closure declares " & LayerEnv & "=1 on " &
+      $liveDecl.on)
+    check liveDecl.on.len == 1
+    check liveDecl.nonCacheableOn == liveDecl.on
+    check liveDecl.off.len == 0
+
+    # ARM 5 — the compile-only collection. It holds the test's own compile
+    # edge (so this is a real, populated closure and not an empty answer) and
+    # declares the layer at NO setting: a compile edge has no opinion on it.
+    let compileGraph = runGraph(repoRoot, reproBin, SuiteCompileSelector)
+    let compileDecl = layerDeclarations(compileGraph)
+    checkpoint(SuiteCompileSelector & " closure has " &
+      $compileGraph{"actions"}.len & " actions; " & LayerEnv &
+      " on=" & $compileDecl.on & " off=" & $compileDecl.off)
+    check producesTestBinary(compileGraph, TestBinaryRel)
+    check compileDecl.on.len == 0
+    check compileDecl.off.len == 0
+
+    # ARM 6 — the execute collection, which is what a whole-suite run runs.
+    # Exactly one action declares the variable, and it declares it OFF. A
+    # suite run therefore cannot schedule the ON edge, and cannot be failed
+    # by a host that lacks the tools the ON edge needs.
+    let executeGraph = runGraph(repoRoot, reproBin, SuiteExecuteSelector)
+    let executeDecl = layerDeclarations(executeGraph)
+    checkpoint(SuiteExecuteSelector & " closure has " &
+      $executeGraph{"actions"}.len & " actions; " & LayerEnv &
+      " on=" & $executeDecl.on & " off=" & $executeDecl.off)
+    check executeDecl.off.len == 1
+    check executeDecl.on.len == 0

@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 574,
     "staticallyDetectedRuntimeCompilerFlowTests": 97,
-    "testEntries": 1587
+    "testEntries": 1588
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1078,7 +1078,7 @@
       "integration": 720,
       "platform/destructive": 115,
       "pure unit": 574,
-      "unclassified": 166
+      "unclassified": 167
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1215,8 +1215,8 @@
       }
     ],
     "nimTestBinaryCount": 1579,
-    "pythonTestFileCount": 8,
-    "testEntryCount": 1587
+    "pythonTestFileCount": 9,
+    "testEntryCount": 1588
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -33769,6 +33769,21 @@
       "source": "tests/unit/t_workspace_root_for_repo_managed_worktree.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `subprocess`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_build_report_attribution.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

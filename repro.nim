@@ -889,12 +889,21 @@ package reprobuild:
     # 0`` / ``loweredGraphCache: hit`` on such a pair), so the first
     # build's value would be baked into every later one.
     #
-    # The ON edge is NOT added to the ``test`` collection: it needs tools
-    # that are not part of this repository's toolchain, so a full suite run
-    # must not schedule it. It is reachable by its target name only, and it
-    # is not cacheable — it launches a transient emulator and seeds it from
-    # the system random source, so its result is not a function of its
-    # declared inputs and must never be replayed.
+    # The ON edge is NOT added to the ``test`` collection, nor to the
+    # ``test-builds`` one: it needs tools that are not part of this
+    # repository's toolchain, so a full suite run must not schedule it. It is
+    # reachable by its target name only, and it is not cacheable — it
+    # launches a transient emulator and seeds it from the system random
+    # source, so its result is not a function of its declared inputs and must
+    # never be replayed.
+    #
+    # That exclusion is a CHECKED property rather than a claim made here:
+    # ``tests/integration/t_optin_layer_runs_under_the_engine.nim`` lowers all
+    # three closures through the engine and compares the layer variable's
+    # declared VALUE in each. Adding the edge below to either collection
+    # reddens it. Anyone adding a row to this table should extend that gate
+    # in step — it enumerates the collections, and an enumeration is only a
+    # check while it still matches what it enumerates.
     const
       OptInLayerDeclaredEnv = "REPRO_GATE_DECLARED_LAYERS"
       OptInLayerUnreachableEnv = "REPRO_GATE_UNREACHABLE_LAYERS"
