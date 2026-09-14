@@ -31,7 +31,13 @@
 ## Incremental selection::
 ##
 ##   --catalog-write PATH  after probing, record every catalogued case's
-##                         ``bodyHash`` to PATH.
+##                         ``bodyHash`` to PATH, together with the
+##                         producer's own catalog rows and each binary's
+##                         size/mtime. The hashes are what
+##                         ``--catalog-read`` consumes; the rows and the
+##                         stat are what lets a second consumer reuse this
+##                         probe instead of repeating it. See
+##                         ``runCatalogDocument``.
 ##   --catalog-read PATH   consult a catalog written earlier and skip
 ##                         cases whose ``bodyHash`` it positively
 ##                         vouches for.
@@ -938,8 +944,8 @@ proc extractCatalogDocument(text: string): JsonNode =
         discard
     idx = trimmed.find(Marker, idx + 1)
 
-proc probeBinary(binary: string): tuple[protocol: bool;
-                                        catalog: seq[CatalogEntry]] =
+proc probeBinary(binary: string; retainRawRows = false):
+    tuple[protocol: bool; catalog: seq[CatalogEntry]; rawRows: JsonNode] =
   ## Decide whether the binary speaks the protocol and return its test
   ## catalog when so. Two stages: (1) cheap byte-scan for one of
   ## ``ProtocolMarkers`` — if none is present, the binary is treated as
@@ -956,8 +962,20 @@ proc probeBinary(binary: string): tuple[protocol: bool;
   ## once per run; when it was silent, a stderr-merge bug in the probe
   ## (see ``runListJson``) mislabelled 170 of them for an entire test
   ## campaign and nothing in any artifact said so.
+  ##
+  ## ``retainRawRows`` additionally hands back the ``tests`` array EXACTLY
+  ## as the binary emitted it, for ``--catalog-write`` to republish. The
+  ## typed ``CatalogEntry`` above is deliberately not the thing
+  ## republished: it substitutes typed defaults for absent keys (``0``
+  ## for a missing ``line``, ``""`` for a missing ``kind``, ``false`` for
+  ## a missing ``deterministic``) and renders ``xfail`` to text, so a
+  ## consumer reading it back cannot tell "the producer said 0" from "the
+  ## producer said nothing". Republishing the producer's own rows keeps
+  ## that distinction intact and costs one retained reference per binary,
+  ## only when the flag that consumes it was given.
   result.protocol = false
   result.catalog = @[]
+  result.rawRows = nil
   if not looksProtocolAwareByStrings(binary):
     return
   let stem = splitFile(binary).name
@@ -1038,6 +1056,8 @@ proc probeBinary(binary: string): tuple[protocol: bool;
         deterministic: entry{"deterministic"}.getBool(false)))
     result.protocol = true
     result.catalog = cat
+    if retainRawRows:
+      result.rawRows = doc["tests"]
   except JsonParsingError:
     return
 
@@ -1084,6 +1104,20 @@ proc probeBinary(binary: string): tuple[protocol: bool;
 
 const RunCatalogVersion = 1
 
+# Case-detail rider on the SAME document (see ``runCatalogDocument``).
+#
+# WHY IT IS A SEPARATE VERSION. ``RunCatalogVersion`` is the contract for
+# the selection half — ``binaries.<stem>.{protocol,tests}`` — and
+# ``loadRunCatalog`` refuses anything that is not exactly that version.
+# The case detail added below is PURELY ADDITIVE: a reader of the
+# selection contract ignores the extra keys, and a catalog written before
+# this rider existed still selects correctly. Bumping the selection
+# version to announce an addition no selection reader can observe would
+# only make new runners refuse old catalogs and old runners refuse new
+# ones, for nothing. So the rider carries its own version, and a consumer
+# of the detail half checks THAT.
+const RunCatalogCaseDetailVersion = 1
+
 type
   RunCatalog = object
     ## A previously written run catalog, already validated against the
@@ -1108,16 +1142,54 @@ type
 
 proc runCatalogDocument(cwd, binDir: string;
                         probed: seq[tuple[stem: string;
+                                          path: string;
                                           protocol: bool;
-                                          catalog: seq[CatalogEntry]]]
+                                          catalog: seq[CatalogEntry];
+                                          rawRows: JsonNode]]
                        ): JsonNode =
   ## Render the just-probed binary set as a run-catalog document. The
   ## per-binary shape deliberately mirrors the codetracer-nim
   ## ``--catalog -`` payload (``{"version":1,"tests":{name: hash}}``) so
   ## the two are readable with the same eyes; the wrapper adds only the
   ## identity a *multi-binary* run needs and a single binary cannot know.
+  ##
+  ## ---- the case-detail rider -------------------------------------
+  ##
+  ## ``tests`` above is all the SELECTION half needs and all it reads.
+  ## The rider — ``cases``, ``size``, ``mtimeNs`` — exists for a second,
+  ## unrelated consumer: ``scripts/reprobuild_suite_inventory.py``, which
+  ## probes the same ~1500 binaries through the same ``--list-json`` in
+  ## the same suite run, for a different purpose (authoritative per-case
+  ## counts and protocol detail). That probe and this one were two full
+  ## passes over the same work, and the runner's has to happen anyway
+  ## because it is how the queue is built. So the runner now publishes
+  ## what it already learned.
+  ##
+  ## ``cases`` is the producer's own ``tests`` array, verbatim. NOT the
+  ## typed ``CatalogEntry`` view: see ``probeBinary``'s note on why a
+  ## typed re-serialisation cannot round-trip an absent key.
+  ##
+  ## ``size``/``mtimeNs`` are the binary's identity at probe time, in the
+  ## exact form the inventory's own on-disk probe cache is keyed by
+  ## (``binary_cache_key``). They are what lets the inventory VALIDATE
+  ## this document rather than trust it: a binary whose size or mtime has
+  ## moved since the runner looked is re-probed by the inventory, and so
+  ## is every binary this document does not mention, does not carry
+  ## ``cases`` for, or carries a stat failure for. The failure direction
+  ## is always "probe it yourself", never "assume".
+  ##
+  ## Only protocol-speaking binaries get a rider. A binary the runner
+  ## could not enumerate is published as ``protocol: false`` with no
+  ## ``cases``, which the inventory reads as "no information" and probes
+  ## itself — deliberately, because the inventory needs a much finer
+  ## answer than "opaque" (it separates a missing loader, a timeout, a
+  ## non-zero exit and an unparseable document, and treats the
+  ## environmental ones as grounds to abort rather than to record a
+  ## coverage fact). Publishing "opaque" into that taxonomy would flatten
+  ## exactly the distinctions it exists to make.
   result = newJObject()
   result["version"] = %RunCatalogVersion
+  result["caseDetailVersion"] = %RunCatalogCaseDetailVersion
   result["projectRoot"] = %cwd
   result["binDir"] = %binDir
   var binaries = newJObject()
@@ -1128,6 +1200,20 @@ proc runCatalogDocument(cwd, binDir: string;
     for c in entry.catalog:
       tests[c.runName] = %c.bodyHash
     node["tests"] = tests
+    if entry.rawRows != nil:
+      node["cases"] = entry.rawRows
+      # A stat that fails leaves both keys off, which is indistinguishable
+      # from an older writer and resolves the same way: the consumer
+      # re-probes. Never emit a placeholder — a zero size would compare
+      # unequal to the real one anyway, but only by luck.
+      try:
+        let info = getFileInfo(entry.path)
+        node["size"] = %info.size
+        node["mtimeNs"] = %(info.lastWriteTime.toUnix() * 1_000_000_000 +
+                            info.lastWriteTime.nanosecond)
+      except CatchableError:
+        discard
+    node["binary"] = %entry.path
     binaries[entry.stem] = node
   result["binaries"] = binaries
 
@@ -4377,14 +4463,19 @@ proc main() =
   var opaqueBinaries = 0
   var totalCases = 0
   var deselectedCases = 0
-  var probed: seq[tuple[stem: string; protocol: bool;
-                        catalog: seq[CatalogEntry]]] = @[]
+  var probed: seq[tuple[stem: string; path: string; protocol: bool;
+                        catalog: seq[CatalogEntry]; rawRows: JsonNode]] = @[]
+  # The producer's own catalog rows are retained ONLY when something is
+  # going to publish them. With no ``--catalog-write`` this is the run it
+  # always was, holding no extra bytes for ~1500 binaries.
+  let retainRawRows = opts.catalogWritePath.len > 0
   for binary in binaries:
     let stem = splitFile(binary).name
     if not matchesFilter(stem, opts.filters):
       continue
-    let probe = probeBinary(binary)
-    probed.add((stem: stem, protocol: probe.protocol, catalog: probe.catalog))
+    let probe = probeBinary(binary, retainRawRows)
+    probed.add((stem: stem, path: binary, protocol: probe.protocol,
+                catalog: probe.catalog, rawRows: probe.rawRows))
     if probe.protocol:
       inc protocolBinaries
       for entry in probe.catalog:

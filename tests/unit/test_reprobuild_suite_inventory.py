@@ -5583,6 +5583,275 @@ test "incomplete name" and:
             inventory.build_inventory(REPO_ROOT, None, use_catalog_cache=False)
         self.assertIs(captured.get("use_cache"), False)
 
+    # -----------------------------------------------------------------
+    # Run-catalog seed (the runner's probe, reused instead of repeated)
+    # -----------------------------------------------------------------
+    #
+    # `scripts/run_tests.sh` runs the test runner and this inventory in the
+    # same invocation, and both enumerated all ~1500 binaries through the
+    # same `--list-json`. The runner now publishes its probe and this module
+    # consumes it. Everything below is about the SAME property, stated from
+    # both sides: the seed may remove work and may never invent a fact.
+    #
+    # These use synthetic documents rather than a live runner on purpose. The
+    # property under test is what this module does with a document it is
+    # handed, including documents a correct runner would never write, and
+    # every one of those is reachable from a stale file, a half-written file,
+    # or a different checkout. A real runner can produce the good case only.
+
+    def _seed_document(self, stem, binary, cases, **overrides):
+        """A minimal run catalog naming one binary, with real stat values."""
+        info = binary.stat()
+        node = {
+            "protocol": True,
+            "tests": {row["name"]: row.get("bodyHash", "") for row in cases},
+            "cases": cases,
+            "size": info.st_size,
+            "mtimeNs": info.st_mtime_ns,
+            "binary": str(binary),
+        }
+        node.update(overrides.pop("node", {}))
+        document = {
+            "version": 1,
+            "caseDetailVersion": inventory.RUN_CATALOG_CASE_DETAIL_VERSION,
+            "projectRoot": str(REPO_ROOT),
+            "binDir": "build/test-bin",
+            "binaries": {stem: node},
+        }
+        document.update(overrides)
+        path = Path(tempfile.mkdtemp(prefix="repro-run-catalog-")) / "cat.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        return path
+
+    def _seed_spec(self):
+        """A spec whose binary exists on this tree, or None."""
+        nim_specs, _ = inventory.parse_repro_tests(REPO_ROOT)
+        for spec in nim_specs:
+            if (REPO_ROOT / spec.binary).is_file():
+                return spec
+        return None
+
+    def test_the_seed_removes_the_probe_and_carries_every_retained_field(self):
+        """The good case, and the only one a correct runner produces.
+
+        Asserted through `catalog_index` rather than through the loader, so
+        the thing measured is what the inventory ENDS UP WITH -- the same
+        `{"status": "ok", "cases": [...]}` shape a live probe produces, with
+        every `CATALOG_CASE_FIELDS` key present. A seed that dropped a field
+        would still make the inventory faster and would be a regression.
+        """
+        spec = self._seed_spec()
+        if spec is None:
+            raise unittest.SkipTest("no built test binary on this tree")
+        row = {field: None for field in inventory.CATALOG_CASE_FIELDS}
+        row.update(
+            {
+                "name": "seeded suite::seeded case",
+                "suite": "seeded suite",
+                "test": "seeded case",
+                "file": "t_seeded.nim",
+                "line": 7,
+                "column": 2,
+                "kind": "in-process",
+                "group": "@global",
+                "threadsRequired": 1,
+                "xfail": None,
+                "tags": [],
+                "bodyHash": "__seededhash",
+                "deterministic": True,
+            }
+        )
+        path = self._seed_document(
+            Path(spec.binary).stem, REPO_ROOT / spec.binary, [row]
+        )
+
+        def refuse(*args, **kwargs):
+            self.fail(
+                "catalog_index probed a binary the run catalog already "
+                "described; the seed is supposed to remove exactly this work"
+            )
+
+        with mock.patch.dict(
+            os.environ, {inventory.RUN_CATALOG_ENV: str(path)}
+        ), mock.patch.object(
+            inventory, "probe_binary_catalog", refuse
+        ), mock.patch.dict(
+            inventory._CATALOG_INDEX_MEMO, {}, clear=True
+        ), mock.patch.object(
+            inventory, "CATALOG_CACHE_PATH", Path(path.parent / "cache.json")
+        ):
+            index = inventory.catalog_index(REPO_ROOT, [spec], use_cache=True)
+        self.assertEqual(index[spec.source]["status"], "ok")
+        self.assertEqual(index[spec.source]["cases"], [row])
+        # Field coverage is the actual risk here, so it is asserted as a set
+        # identity and not by spot-checking three keys.
+        self.assertEqual(
+            set(index[spec.source]["cases"][0]),
+            set(inventory.CATALOG_CASE_FIELDS),
+        )
+        # `xfail: null` survives as None. The runner's own typed view renders
+        # it to "", which is why the document republishes the producer's rows
+        # rather than that view; if this ever reads "" the two have been
+        # confused again.
+        self.assertIsNone(index[spec.source]["cases"][0]["xfail"])
+
+    def test_every_way_of_not_understanding_the_seed_means_probe_it(self):
+        """Fail-closed, enumerated. None of these may reuse anything.
+
+        The failure mode being excluded is a seed that answers "ok, zero
+        cases" for a binary it did not understand: that is a coverage loss
+        with a green shape, which is the exact class this whole module's
+        quarantine taxonomy exists to prevent.
+        """
+        spec = self._seed_spec()
+        if spec is None:
+            raise unittest.SkipTest("no built test binary on this tree")
+        stem = Path(spec.binary).stem
+        binary = REPO_ROOT / spec.binary
+        row = {
+            "name": "s::c",
+            "suite": "s",
+            "test": "c",
+            "bodyHash": "__h",
+        }
+
+        cases = {
+            "future case-detail version": self._seed_document(
+                stem, binary, [row], caseDetailVersion=99
+            ),
+            "no case-detail version at all": self._seed_document(
+                stem, binary, [row], caseDetailVersion=None
+            ),
+            "another checkout's project root": self._seed_document(
+                stem, binary, [row], projectRoot="/somewhere/else"
+            ),
+            "size moved since the runner looked": self._seed_document(
+                stem, binary, [row], node={"size": 1}
+            ),
+            "mtime moved since the runner looked": self._seed_document(
+                stem, binary, [row], node={"mtimeNs": 1}
+            ),
+            "no stat recorded": self._seed_document(
+                stem, binary, [row], node={"size": None, "mtimeNs": None}
+            ),
+            "opaque to the runner": self._seed_document(
+                stem, binary, [row], node={"protocol": False}
+            ),
+            "rows the runner could not shape": self._seed_document(
+                stem, binary, [row], node={"cases": ["not an object"]}
+            ),
+            "a binary it does not mention": self._seed_document(
+                "t_some_other_binary_entirely", binary, [row]
+            ),
+            "not a catalog at all": self._seed_document(
+                stem, binary, [row], binaries="nope"
+            ),
+        }
+        missing = Path(tempfile.mkdtemp(prefix="repro-run-catalog-")) / "absent.json"
+        cases["no file there"] = missing
+        malformed = missing.parent / "malformed.json"
+        malformed.write_text("{not json", encoding="utf-8")
+        cases["not JSON"] = malformed
+
+        # Asserted through `catalog_index`, not through the loader, because
+        # the two halves refuse in different places and the property is about
+        # the OUTCOME, not about which half refused. The loader rejects a
+        # document it cannot read; a document that reads fine but claims a
+        # size or mtime the binary no longer has is rejected by the same gate
+        # that rejects a stale on-disk cache entry. Testing each half against
+        # its own half would let a case fall between them.
+        for label, path in cases.items():
+            with self.subTest(refusal=label):
+                probed: list[Path] = []
+
+                def record(binary_path, cwd, env, timeout_seconds):
+                    probed.append(binary_path)
+                    return {"status": "ok", "cases": []}
+
+                with mock.patch.dict(
+                    os.environ, {inventory.RUN_CATALOG_ENV: str(path)}
+                ), mock.patch.object(
+                    inventory, "probe_binary_catalog", record
+                ), mock.patch.dict(
+                    inventory._CATALOG_INDEX_MEMO, {}, clear=True
+                ), mock.patch.object(
+                    inventory,
+                    "CATALOG_CACHE_PATH",
+                    Path(path.parent / f"cache-{abs(hash(label))}.json"),
+                ):
+                    inventory.catalog_index(REPO_ROOT, [spec], use_cache=True)
+                self.assertEqual(
+                    [p.name for p in probed],
+                    [Path(spec.binary).name],
+                    f"{label!r} reused a catalog entry instead of probing; "
+                    "every way of not understanding the catalog must resolve "
+                    "to probing",
+                )
+
+    def test_no_cache_means_no_seed_either(self):
+        """`--no-cache` means "do not reuse a probe result".
+
+        A republished probe result is a probe result. Honouring the flag for
+        the on-disk cache but not for the seed would leave the documented
+        escape hatch quietly unable to force a real probe.
+        """
+        spec = self._seed_spec()
+        if spec is None:
+            raise unittest.SkipTest("no built test binary on this tree")
+        path = self._seed_document(
+            Path(spec.binary).stem,
+            REPO_ROOT / spec.binary,
+            [{"name": "s::c", "suite": "s", "test": "c", "bodyHash": "__h"}],
+        )
+        probed: list[Path] = []
+
+        def record(binary_path, cwd, env, timeout_seconds):
+            probed.append(binary_path)
+            return {"status": "ok", "cases": []}
+
+        with mock.patch.dict(
+            os.environ, {inventory.RUN_CATALOG_ENV: str(path)}
+        ), mock.patch.object(
+            inventory, "probe_binary_catalog", record
+        ), mock.patch.dict(
+            inventory._CATALOG_INDEX_MEMO, {}, clear=True
+        ):
+            inventory.catalog_index(REPO_ROOT, [spec], use_cache=False)
+        self.assertEqual(len(probed), 1)
+
+    def test_the_suite_runner_wires_the_runner_to_the_inventory(self):
+        """The wiring, not just the two halves.
+
+        Three separate things have to be true at once for the duplicate probe
+        to actually disappear, and each is invisible from the other two: the
+        runner must be asked to publish, the inventory must be told where,
+        and the Nim phase must run BEFORE the Python one. Any single one
+        silently reverting leaves a suite that still works and is still
+        paying twice, which is precisely the state this replaced.
+        """
+        runner = (REPO_ROOT / "scripts/run_tests.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("--catalog-write=", runner)
+        self.assertIn(f"export {inventory.RUN_CATALOG_ENV}=", runner)
+        nim_phase = runner.index("--catalog-write=")
+        python_phase = runner.index("find tests -type f -name 'test_*.py'")
+        self.assertLess(
+            nim_phase,
+            python_phase,
+            "the Nim phase must run before the Python phase; the inventory "
+            "consumes a catalog the runner has not written yet otherwise",
+        )
+        # The requirement that outlives the reorder: a missing binary is a
+        # build defect here, never a skip.
+        self.assertLess(
+            runner.index(f"export {REQUIRE_BUILT_TREE_ENV}=1"),
+            python_phase,
+        )
+        # A failing Nim phase must not delete the Python phase's measurement
+        # now that the Python phase is downstream of it.
+        self.assertIn("nim_phase_status", runner)
+
     def test_absolute_paths_are_redacted_to_their_basename(self):
         """The sanitizer keeps the signal and drops the host."""
         self.assertEqual(
