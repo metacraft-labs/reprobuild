@@ -46183,13 +46183,37 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
   let currentIsMembershipRepo = parsed.currentRepo.len > 0 and
     sameFilesystemPath(absolutePath(membershipRoot), parsed.currentRepo) and
     discoverGitWorktree(identity, membershipRoot).ok
+  # The WORKSPACE-FRAMEWORK repo: a checkout whose Git worktree ROOT *is* the
+  # workspace root. When membership was materialized under `.repro/manifests`
+  # (an `init --manifest-url` checkout, or the git-checkout lock-store backend),
+  # `manifestsRoot` answers with that subdirectory, so the repo AT the root is
+  # none of the three recognized identities — not a declared repo, not a
+  # `[[manifest]]` layer, and not the membership repo.
+  #
+  # That is precisely the residual case the whole-workspace fallback is
+  # documented to keep serving: Workspace-And-Develop-Mode.md §"Gate scope when
+  # the pushed repo is the membership repo" — "The fallback remains correct for
+  # its original case: a `--current-repo` that resolves to no declared repo
+  # *and* to no manifest layer, where the gate genuinely has no scope
+  # information and must not silently under-check."
+  #
+  # `discoverGitWorktree` accepts only a path that IS a worktree root (it
+  # rejects an ancestor's answer), so this cannot be satisfied by an arbitrary
+  # directory nested in the workspace. A stray second clone parked SOMEWHERE IN
+  # the workspace — the case the refusal below exists for — has its own
+  # worktree root below the workspace root and still fails closed.
+  let workspaceRootAbs = absolutePath(parsed.workspaceRoot)
+  let currentIsWorkspaceFrameworkRepo = parsed.currentRepo.len > 0 and
+    sameFilesystemPath(workspaceRootAbs, parsed.currentRepo) and
+    discoverGitWorktree(identity, parsed.workspaceRoot).ok
   if parsed.currentRepo.len > 0 and not currentRepoMatch.found and
-      currentManifestLayer.isNone and not currentIsMembershipRepo:
+      currentManifestLayer.isNone and not currentIsMembershipRepo and
+      not currentIsWorkspaceFrameworkRepo:
     # An explicit managed-hook root is an authority boundary, not a hint. If
-    # it cannot be identified as a declared repo, manifest layer, or the
-    # membership repo, do not widen to the ambient workspace. That fallback
-    # audits an unrelated project and can turn an invalid green hook into the
-    # push authorization result.
+    # it cannot be identified as a declared repo, manifest layer, the
+    # membership repo, or the workspace-framework repo at the root, do not
+    # widen to the ambient workspace. That fallback audits an unrelated project
+    # and can turn an invalid green hook into the push authorization result.
     result.failures.add(CheckFailure(
       repo: "",
       property: "current-repo-identity",
