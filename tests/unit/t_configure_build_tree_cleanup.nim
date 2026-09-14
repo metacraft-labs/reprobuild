@@ -1,7 +1,7 @@
 import std/unittest
 
 when defined(reproProviderMode):
-  import std/[os, strutils]
+  import std/[os, osproc, strutils, tempfiles]
 
   import repro_core
   import repro_project_dsl
@@ -93,7 +93,49 @@ when defined(reproProviderMode):
       includeDefault = false)
     extractActions(fragment)
 
+  proc exerciseCleanup(action: BuildActionDef; root, buildDir: string) =
+    let stamp = action.outputs[0]
+    let stampDir = parentDir(stamp)
+    let unrelated = root / "unrelated" / "keep.txt"
+    createDir(parentDir(unrelated))
+    writeFile(unrelated, "keep\n")
+    for attempt in 0 .. 1:
+      # Graph extraction or a previous build must not prepare the action's cwd.
+      if dirExists(stampDir):
+        removeDir(stampDir)
+      createDir(root / buildDir)
+      writeFile(root / buildDir / "stale.txt", "stale\n")
+      let execution = execCmdEx(quoteShellCommand(action.inlineArgv()),
+        workingDir = root)
+      checkpoint execution.output
+      check execution.exitCode == 0
+      check fileExists(stamp)
+      check not dirExists(root / buildDir)
+      check readFile(unrelated) == "keep\n"
+
 suite "configure build-tree cleanup caching":
+  test "CMake cleanup creates its missing stamp directory at execution":
+    when defined(reproProviderMode) and not defined(windows):
+      let root = createTempDir("repro-cmake-clean-exec-", "")
+      defer: removeDir(root)
+      writeFile(root / "repro.nim", "discard\n")
+      let cleanup = findById(cmakeActions(root, "Ninja", @[]),
+        "cmake-clean-build-dir-cmakeCleanupTest")
+      exerciseCleanup(cleanup, root, "build-cmake")
+    else:
+      skip()
+
+  test "Meson cleanup creates its missing stamp directory at execution":
+    when defined(reproProviderMode) and not defined(windows):
+      let root = createTempDir("repro-meson-clean-exec-", "")
+      defer: removeDir(root)
+      writeFile(root / "repro.nim", "discard\n")
+      let cleanup = findById(mesonActions(root, "release", @[]),
+        "meson-clean-build-dir-mesonCleanupTest")
+      exerciseCleanup(cleanup, root, "build-meson")
+    else:
+      skip()
+
   test "source patch actions inherit recipe tool identities":
     when defined(reproProviderMode):
       let root = getTempDir() / "repro-configure-patch-tools"
@@ -139,7 +181,7 @@ suite "configure build-tree cleanup caching":
       check first.dependencyPolicy.kind == bdpAutomaticMonitor
       check first.dependencyPolicy.ignoredInputPrefixes ==
         @[root / "build-cmake"]
-      check first.toolIdentityRefs == @["sh", "rm"]
+      check first.toolIdentityRefs == @["sh", "rm", "mkdir"]
       check first.inlineArgv() == same.inlineArgv()
       check first.inlineArgv() != changed.inlineArgv()
 
@@ -218,7 +260,7 @@ suite "configure build-tree cleanup caching":
       check first.dependencyPolicy.kind == bdpAutomaticMonitor
       check first.dependencyPolicy.ignoredInputPrefixes ==
         @[root / "build-meson"]
-      check first.toolIdentityRefs == @["sh", "rm"]
+      check first.toolIdentityRefs == @["sh", "rm", "mkdir"]
       check first.inlineArgv() == same.inlineArgv()
       check first.inlineArgv() != changed.inlineArgv()
 
