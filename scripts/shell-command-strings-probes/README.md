@@ -28,6 +28,21 @@ The extension is `.nim.probe`, not `.nim`, so nothing in the tree compiles,
 imports, or scans these by accident; the self-test copies each into a scratch
 directory under a `.nim` name and points the scanner at that.
 
+## A blind spot N48 CLOSED
+
+`uncontrolledExecCmdEx` / `uncontrolledExecProcess` /
+`uncontrolledStartProcess` are the same three APIs under the
+`repro_core/ambient_execution` wrappers, which exist so a PATH-resolved binary
+is visible to a reviewer and which change nothing about the command string.
+The scanner matched only the bare spellings, so every such call site was
+INVISIBLE to it — and that is not hypothetical: N48 found a live
+`zstd -dc <archive> | tar -xf - -C <dest>` in `repro_tool_profiles`'s conda arm
+sitting behind an EMPTY baseline whose own prose claimed the tree was free of
+shell metacharacters. The three wrapper names are now in `STRING_APIS` /
+`ARGV_APIS`, and `caught_14_pipe_through_uncontrolled_exec_cmd_ex` pins it.
+(`uncontrolledExecShellCmd` is absent for the same reason `execShellCmd` is:
+it runs a real shell on both platforms.)
+
 ## Blind spots that remain open
 
 These are the shapes the gate still does not reach. They are limitations of a

@@ -52,6 +52,10 @@ import std/[algorithm, hashes, os, osproc, sequtils, sets, strtabs, strutils]
 
 import nimcrypto/sha2 as nc_sha2
 
+# N48: the ONE ``tarOperand``. Every ``tar`` call site in the tree shares this
+# implementation rather than growing a copy of it.
+from repro_core/paths import tarOperand
+
 # ---------------------------------------------------------------------------
 # Public errors (spec §1, §2)
 # ---------------------------------------------------------------------------
@@ -418,12 +422,54 @@ proc tarExtractDataMember(debPath, debBytes, memberName: string;
   # entry (canonicalisation strips ./). We pass -C to chdir.
   # Use osproc to run tar; failure surfaces as a non-zero exit and we
   # collect stderr for the diagnostic.
-  let cmd = "tar " & flag & " " & quoteShell(tarInput) &
-            " -C " & quoteShell(outDir)
-  let res = execCmdEx(cmd)
+  #
+  # N48: both operands go through ``tarOperand`` and ``--force-local`` is
+  # offered in an attempt that is allowed to fail — W16's remedy, and both
+  # halves of it are needed here. ``outDir`` and ``tarInput`` are ordinary
+  # host paths, so on Windows they are absolute and backslashed, and GNU tar
+  # UNQUOTES command-line names by default: an ``outDir`` whose leaf begins
+  # ``a b f n r t v`` made tar raise with zero files extracted, and one
+  # beginning ``\0`` made tar chdir to the PARENT, unpack the whole .deb
+  # there and EXIT 0. GNU tar also reads a ``-f`` operand whose first ``:``
+  # precedes any ``/`` as a remote ``host:path``, so the drive letter alone
+  # ("Cannot connect to M: resolve failed") stopped it opening the member at
+  # all.
+  #
+  # The two halves do not reach the same operand, which is why both are here:
+  # measured on GNU tar 1.35, the unquoting reaches ``-C`` and NOT ``-f``, so
+  # ``tarOperand`` is load-bearing on ``outDir`` and defence in depth on
+  # ``tarInput``, while ``--force-local`` is the reverse. See the W16 block
+  # comment in
+  # ``libs/repro_home_apply/src/repro_home_apply/builtin_adapter.nim`` and
+  # ``repro_core/paths.tarOperand`` for the measurements and for why the
+  # rewrite is Windows-only.
+  let tailArgs = [flag, tarOperand(tarInput), "-C", tarOperand(outDir)]
+  proc tarCommand(withForceLocal: bool): string =
+    var argv = @["tar"]
+    if withForceLocal: argv.add("--force-local")
+    for a in tailArgs: argv.add(quoteShell(a))
+    argv.join(" ")
+  let gnuCmd = tarCommand(withForceLocal = true)
+  var res = execCmdEx(gnuCmd)
+  var cmd = gnuCmd
+  var attempts = ""
+  if res.exitCode != 0:
+    # ``--force-local`` is a GNU extension; bsdtar answers "Option
+    # --force-local is not supported" and exits 1, so the flag can never be
+    # mandatory. Retry without it and report BOTH attempts.
+    let plainCmd = tarCommand(withForceLocal = false)
+    let plainRes = execCmdEx(plainCmd)
+    attempts =
+      "\n  attempt 1 (GNU: --force-local) exit=" & $res.exitCode & ": " &
+      res.output.strip() &
+      "\n  attempt 2 (no GNU-only flags) exit=" & $plainRes.exitCode & ": " &
+      plainRes.output.strip()
+    res = plainRes
+    cmd = plainCmd
   if res.exitCode != 0:
     var e = newException(AptExtractError,
-      "tar extraction failed (exit " & $res.exitCode & "): " & res.output)
+      "tar extraction failed (exit " & $res.exitCode & "): " & res.output &
+      attempts)
     e.debPath = debPath
     e.command = cmd
     e.exitCode = res.exitCode

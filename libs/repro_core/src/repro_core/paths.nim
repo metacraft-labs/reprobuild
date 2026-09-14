@@ -169,3 +169,59 @@ func isVolatileRuntimeStatePath*(path: string): bool =
   if normalized == "/run" or normalized.startsWith("/run/"):
     return not normalized.isXdgRuntimeDirPath()
   false
+
+func tarOperand*(path: string): string =
+  ## W16/N48: a path about to be handed to ``tar`` as a COMMAND-LINE OPERAND.
+  ##
+  ## GNU tar unquotes names given on the command line — ``--unquote`` is the
+  ## DEFAULT — so on Windows every backslash that precedes an escape letter is
+  ## consumed before tar ever uses the path. (WHICH names is measured below,
+  ## not assumed: the archive operand turned out NOT to be one of them.)
+  ## A destination whose leaf begins ``a b f n r t v`` makes tar raise
+  ## (exit 2, zero files), and one beginning ``\0`` makes it SILENTLY
+  ## EXTRACT INTO THE PARENT and exit 0 — no error at all. Any path
+  ## COMPONENT can trigger it, not just the leaf. Replacing every backslash
+  ## with a forward slash removes the TRIGGER rather than asking tar to
+  ## behave, so it is correct on GNU tar, on bsdtar, and on anything else.
+  ##
+  ## WHICH OPERAND, measured on GNU tar 1.35 rather than assumed, because the
+  ## two defects do NOT reach the same ones:
+  ##
+  ##   * ``-C`` IS unquoted. Four leaves behind a single backslash, extracting
+  ##     a good archive: ``tango`` exit 2 / 0 files, ``rvw`` exit 2 / 0 files,
+  ##     ``0zero`` EXIT 0 with the payload in the PARENT and the destination
+  ##     empty, ``sierra`` exit 0 / correct. Any COMPONENT can trigger it, not
+  ##     just the leaf.
+  ##   * ``-f`` is NOT unquoted. The same four leaves in the ARCHIVE operand,
+  ##     with and without ``--force-local``, relative so no drive letter can
+  ##     confound: 8 of 8 exit 0 and list the archive correctly. So on this
+  ##     tar the rewrite is LOAD-BEARING for ``-C`` and DEFENCE IN DEPTH for
+  ##     ``-f`` — applied to both anyway, because one rule for every operand
+  ##     is one rule to keep true, the rewrite costs nothing on a path that
+  ##     did not need it, and "which operands does this tar unquote" is a
+  ##     property of the tar, not of us.
+  ##
+  ## It does NOT address the second Windows defect, which is the ``-f``
+  ## operand's own: GNU tar reads one whose first ``:`` precedes any ``/`` as
+  ## a remote ``host:path``, so ``C:/…`` fails exactly as ``C:\…`` does
+  ## (measured: exit 128, "Cannot connect to M: resolve failed"). That one
+  ## needs ``--force-local``, a GNU extension, offered in an attempt that is
+  ## ALLOWED TO FAIL so a bsdtar host still reaches its own shape.
+  ##
+  ## WINDOWS ONLY, and that asymmetry is deliberate. On POSIX a backslash is
+  ## a legal FILENAME character, so rewriting one here would corrupt a path
+  ## that means exactly what it says. The POSIX half is therefore a stated
+  ## RESIDUAL, not a solved case: a POSIX destination whose name literally
+  ## contains ``\t`` is still mis-read by GNU tar, and the only remedy is
+  ## the GNU-only ``--no-unquote`` — ruled out because bsdtar rejects it AND
+  ## then exits without reading its stdin, HANGING a piped copy.
+  ##
+  ## The full measured table lives in the W16 block comment above
+  ## ``extractTarZst`` in
+  ## ``libs/repro_home_apply/src/repro_home_apply/builtin_adapter.nim``.
+  ## This proc is the single implementation every ``tar`` call site shares;
+  ## a second one would be a second thing to keep true.
+  when defined(windows):
+    path.replace('\\', '/')
+  else:
+    path

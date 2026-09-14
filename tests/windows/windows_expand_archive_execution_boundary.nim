@@ -212,6 +212,44 @@ proc installDeleteDenyAcl(path: string): ProcessResult =
       "throw ('delete-deny ACE verification found ' + $matching.Count + " &
         "' matches') }")
 
+proc requireDeleteIsActuallyDenied(path: string) =
+  ## PROVE THE FIXTURE BITES BEFORE RELYING ON IT.
+  ##
+  ## The deny ACE names ``WindowsIdentity.GetCurrent().User`` — the USER SID —
+  ## and nothing else. Windows grants DELETE on a child when the caller holds
+  ## ``FILE_DELETE_CHILD`` on the PARENT, whichever ACE supplied it, so on a
+  ## host where the parent already carries an inherited
+  ## ``BUILTIN\Administrators: FullControl`` ACE and the process runs with an
+  ## ELEVATED token, that allow wins and the fixture is INERT. Measured on a
+  ## developer host: the ACE installed and verified exactly as
+  ## ``installDeleteDenyAcl`` asserts, and ``Remove-Item`` deleted the file
+  ## anyway.
+  ##
+  ## Without this probe the case still fails there — but it fails as
+  ## "``failed.exitCode`` was 0" and "``retained.len`` was 0", which reads as
+  ## a PRODUCT regression and cost a full investigation to tell apart from
+  ## one. The probe turns that into a sentence naming the host property
+  ## responsible. It deliberately does NOT skip: dropping the coverage
+  ## silently is how a gate stops being one.
+  let probe = path / "delete-deny-probe.txt"
+  writeFile(probe, "N50 delete-deny fixture probe\n")
+  var deleted = false
+  try:
+    removeFile(probe)
+    deleted = true
+  except OSError, IOError:
+    deleted = false
+  if deleted:
+    raise newException(IOError,
+      "the delete-deny fixture is INERT on this host: a file under " & path &
+      " was removed even though the DACL denies Delete and " &
+      "DeleteSubdirectoriesAndFiles to this user's SID. The usual cause is " &
+      "an ELEVATED token: the parent's inherited " &
+      "BUILTIN\\Administrators:FullControl grants FILE_DELETE_CHILD, which " &
+      "permits deleting a child regardless of the child's own DACL. Run this " &
+      "gate unelevated. This is a HOST property, not an expandArchive " &
+      "regression — the product is not exercised at all before this point.")
+
 proc restoreAccessAndResetChildren(path, accessSddl: string): ProcessResult =
   runPowerShell(
     "$ErrorActionPreference = 'Stop'; " &
@@ -372,6 +410,7 @@ suite "M3f Windows expandArchive runtime boundary":
       restoreRequired = true
       let denyInstall = installDeleteDenyAcl(root)
       requireProcessSuccess(denyInstall, "install fixture delete-deny ACL")
+      requireDeleteIsActuallyDenied(root)
 
       var env = processEnvironment()
       env["TEMP"] = root

@@ -69,10 +69,24 @@ import sys
 # Exec APIs that take a command STRING (poEvalCommand is in their default
 # options). `execShellCmd` is deliberately absent: it runs a real shell on both
 # platforms, so a redirect in its argument is correct, not a defect.
-STRING_APIS = ("execCmdEx", "execProcess", "execCmd")
+#
+# The `uncontrolled*` spellings are the SAME APIS. `repro_core/ambient_execution`
+# wraps each one in a `{.noRewrite.}` proc so a PATH-resolved binary is visible
+# to a reviewer; the wrapper changes nothing about the command string, which
+# still reaches `osproc.execCmdEx` with `poEvalCommand` and still arrives at
+# `CreateProcessW` verbatim on Windows. Leaving them out made this check
+# VACUOUS for every such call site, and it was: N48 found a live
+# `zstd -dc … | tar -xf - …` at `repro_tool_profiles`'s conda arm sitting
+# behind an EMPTY baseline that claimed "every `execCmdEx` / `execProcess`
+# command string in first-party production is free of shell metacharacters".
+# `uncontrolledExecShellCmd` is absent for the same reason `execShellCmd` is.
+STRING_APIS = (
+    "execCmdEx", "execProcess", "execCmd",
+    "uncontrolledExecCmdEx", "uncontrolledExecProcess",
+)
 # `startProcess` takes an argv by default; it only becomes a command-string API
 # when the caller opts into poEvalCommand.
-ARGV_APIS = ("startProcess",)
+ARGV_APIS = ("startProcess", "uncontrolledStartProcess")
 
 CALL_RE = re.compile(r"\b(" + "|".join(STRING_APIS + ARGV_APIS) + r")\s*\(")
 

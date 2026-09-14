@@ -1449,6 +1449,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_n48_apt_jammy_tar_operands.nim",
+    binary: "build/test-bin/t_n48_apt_jammy_tar_operands",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_nde0a_apt_jammy.nim",
     binary: "build/test-bin/t_nde0a_apt_jammy",
     defines: @[],
@@ -4538,6 +4547,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_system_rollback/tests/t_b3_rollback_unit.nim",
     binary: "build/test-bin/t_b3_rollback_unit",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim",
+    binary: "build/test-bin/t_n48_tool_profiles_tar_operands",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -14258,6 +14276,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tools/catalog-harvester/tests/test_msys2_source.nim",
     binary: "build/test-bin/test_msys2_source",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tools/catalog-harvester/tests/test_n48_msys2_tar_operands.nim",
+    binary: "build/test-bin/test_n48_msys2_tar_operands",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

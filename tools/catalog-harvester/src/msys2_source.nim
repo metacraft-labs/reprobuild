@@ -44,6 +44,10 @@
 import std/[algorithm, httpclient, os, osproc, strtabs, strutils]
 import repro_dsl_stdlib/packages_schema
 
+# N48: the ONE ``tarOperand``. Every ``tar`` call site in the tree shares this
+# implementation rather than growing a copy of it.
+from repro_core/paths import tarOperand
+
 # SHA-256 is computed by shelling out to the host hasher (sha256sum on
 # POSIX, certutil on Windows). This mirrors the existing
 # ``builtin_adapter.fileShaHex`` strategy and keeps the harvester free
@@ -504,6 +508,16 @@ proc tarListEntries*(archivePath: string): seq[string] =
   # connect to C: resolve failed". Pass ``--force-local`` so the
   # argument is always treated as a local path. bsdtar does NOT tolerate the
   # flag on some versions, so we only pass it for GNU tar.
+  #
+  # N48: every operand this proc builds is a ``-f``, and ``--force-local`` is
+  # therefore the half that matters — measured on GNU tar 1.35, the ARCHIVE
+  # operand is NOT unquoted (the same four escape-leading components that
+  # break a ``-C`` all list correctly through ``-f``, with and without the
+  # flag), while a drive-lettered one is read as ``host:path`` without it.
+  # ``tarOperand`` is applied anyway so every ``tar`` operand in this file
+  # goes through one rule; it is defence in depth here, not the fix. See
+  # ``repro_core/paths.tarOperand`` for the table. (N48 named the three sites
+  # in ``tarExtractMember``; this proc was swept with them.)
   let isGnu = isGnuTar(tar)
   let forceLocalFlag = if isGnu: " --force-local" else: ""
   var zstdOutput = ""
@@ -513,7 +527,7 @@ proc tarListEntries*(archivePath: string): seq[string] =
     let zstdRes = decompressZstdToFile(archivePath, scratchTar)
     if zstdRes.ok:
       let cmdList = quoteShell(tar) & forceLocalFlag &
-        " -tf " & quoteShell(scratchTar)
+        " -tf " & quoteShell(tarOperand(scratchTar))
       let resList = execCmdEx(cmdList)
       if resList.exitCode == 0:
         return collectTarListOutput(resList.output)
@@ -527,13 +541,13 @@ proc tarListEntries*(archivePath: string): seq[string] =
 
   # Fallback A: GNU tar's --zstd filter.
   let cmd1 = quoteShell(tar) & forceLocalFlag &
-    " --zstd -tf " & quoteShell(archivePath)
+    " --zstd -tf " & quoteShell(tarOperand(archivePath))
   let res1 = execCmdEx(cmd1)
   if res1.exitCode == 0:
     return collectTarListOutput(res1.output)
   # Fallback B: bsdtar auto-detect via bare ``-tf``.
   let cmdAuto = quoteShell(tar) & forceLocalFlag &
-    " -tf " & quoteShell(archivePath)
+    " -tf " & quoteShell(tarOperand(archivePath))
   let resAuto = execCmdEx(cmdAuto)
   if resAuto.exitCode == 0:
     return collectTarListOutput(resAuto.output)
@@ -563,6 +577,27 @@ proc tarExtractMember*(archivePath, member, destFile: string): bool =
     except OSError: discard
   # ``--force-local`` keeps GNU tar from reading ``C:\path`` as
   # ``host:path`` on Windows; same rationale as in ``tarListEntries``.
+  #
+  # N48: ``--force-local`` answers only ONE of the two Windows defects, and
+  # not the one that reaches the ``-C`` operand. GNU tar also UNQUOTES the
+  # directory it is told to chdir into — ``--unquote`` is the DEFAULT — so
+  # every backslash in ``-C`` that precedes an escape letter is consumed
+  # before tar opens anything. (Measured: the ARCHIVE operand is not unquoted,
+  # so ``tarOperand`` on ``-f`` here is defence in depth while ``-C`` is the
+  # load-bearing one. See ``repro_core/paths.tarOperand``.) ``scratch`` is
+  # ``<workDir>\.m6-extract-scratch``, i.e. an absolute Windows path, and a
+  # ``-C`` operand with a component beginning ``a b f n r t v`` made tar raise
+  # with zero files extracted while one beginning ``\0`` made tar chdir to the
+  # PARENT, extract there and EXIT 0 — the harvester would then have found no
+  # member, returned ``false``, and reported the package as lacking a file it
+  # had in fact just written somewhere else. ``tarOperand`` removes the
+  # trigger; it is Windows-only because a backslash is a legal POSIX filename
+  # character. See the W16 block comment in
+  # ``libs/repro_home_apply/src/repro_home_apply/builtin_adapter.nim``.
+  #
+  # ``member`` is NOT routed through it: it is an in-archive entry name, which
+  # tar matches against the archive's own forward-slash paths, and rewriting
+  # it would be rewriting archive content rather than a host path.
   let isGnu = isGnuTar(tar)
   let forceLocalFlag = if isGnu: " --force-local" else: ""
   var extractedOk = false
@@ -570,22 +605,22 @@ proc tarExtractMember*(archivePath, member, destFile: string): bool =
   let zstdRes = decompressZstdToFile(archivePath, scratchTar)
   if zstdRes.ok:
     let cmdScratch = quoteShell(tar) & forceLocalFlag &
-      " -xf " & quoteShell(scratchTar) &
-      " -C " & quoteShell(scratch) & " " & quoteShell(member)
+      " -xf " & quoteShell(tarOperand(scratchTar)) &
+      " -C " & quoteShell(tarOperand(scratch)) & " " & quoteShell(member)
     let resScratch = execCmdEx(cmdScratch)
     extractedOk = resScratch.exitCode == 0
   if not extractedOk:
     # Fallback A: GNU tar's --zstd filter.
     let cmd1 = quoteShell(tar) & forceLocalFlag &
-      " --zstd -xf " & quoteShell(archivePath) &
-      " -C " & quoteShell(scratch) & " " & quoteShell(member)
+      " --zstd -xf " & quoteShell(tarOperand(archivePath)) &
+      " -C " & quoteShell(tarOperand(scratch)) & " " & quoteShell(member)
     let res1 = execCmdEx(cmd1)
     extractedOk = res1.exitCode == 0
   if not extractedOk:
     # Fallback B: bsdtar auto-detect.
     let cmdAuto = quoteShell(tar) & forceLocalFlag &
-      " -xf " & quoteShell(archivePath) &
-      " -C " & quoteShell(scratch) & " " & quoteShell(member)
+      " -xf " & quoteShell(tarOperand(archivePath)) &
+      " -C " & quoteShell(tarOperand(scratch)) & " " & quoteShell(member)
     let resAuto = execCmdEx(cmdAuto)
     extractedOk = resAuto.exitCode == 0
   if not extractedOk:

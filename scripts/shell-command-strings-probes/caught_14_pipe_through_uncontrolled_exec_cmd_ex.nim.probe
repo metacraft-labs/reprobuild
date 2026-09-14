@@ -1,0 +1,22 @@
+## N48's shape: the SAME two-stage pipe as `caught_11`, but through the
+## `uncontrolled*` wrapper. `repro_core/ambient_execution` wraps `execCmdEx`
+## in a `{.noRewrite.}` proc so a PATH-resolved binary is visible to a
+## reviewer; it changes nothing about the command string, which still reaches
+## `osproc.execCmdEx` with `poEvalCommand` and still arrives at
+## `CreateProcessW` verbatim on Windows.
+##
+## The scanner did NOT see these spellings until N48, which is how a live
+## `zstd -dc … | tar -xf - …` sat in `repro_tool_profiles`'s conda arm behind
+## a baseline asserting the tree was free of shell metacharacters. This probe
+## exists so that blind spot cannot re-open silently.
+import std/[os, osproc]
+
+proc uncontrolledExecCmdEx(command: string;
+                           options: set[ProcessOption] = {poStdErrToStdOut,
+                                                          poUsePath}):
+    tuple[output: string, exitCode: int] =
+  {.noRewrite.}: osproc.execCmdEx(command, options)
+
+proc extract(archive, dest: string): int =
+  uncontrolledExecCmdEx("zstd -dc " & quoteShell(archive) &
+                        " | tar -xf - -C " & quoteShell(dest)).exitCode

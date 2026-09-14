@@ -1923,6 +1923,53 @@ proc verifiedDownload(plan: TarballAcquisitionPlan; storeRoot: string):
     "tool-resolution failed: all tarball archive URLs failed for " &
     plan.packageSelector & "\n" & diagnostics.join("\n"))
 
+type TarRunner = proc(command: string): tuple[output: string, exitCode: int]
+  ## How a ``runTarTwice`` attempt actually reaches the process table. The two
+  ## call sites below differ deliberately: the tarball arm runs the ``tar``
+  ## this repository's own execution profiles resolve, while the conda arm
+  ## runs one found on the ambient PATH by ``uncontrolledFindExe`` and must
+  ## say so through ``uncontrolledExecCmdEx``. Threading the runner keeps that
+  ## distinction visible instead of flattening both onto one API.
+
+proc runTarTwice(tarExe: string; gnuOnlyFlags, tailArgs: openArray[string];
+                 runner: TarRunner):
+    tuple[output: string, exitCode: int, attempts: string] =
+  ## N48 — W16's remedy, applied to this module's two ``tar`` call sites.
+  ##
+  ## Run ``tar`` twice at most: once with the GNU-only flags prepended, then
+  ## — ONLY if that failed — without them, for bsdtar. Returns the SECOND
+  ## attempt's result when there is one, plus a transcript of both so a
+  ## failure names what was tried rather than only that it did not work.
+  ## This mirrors ``runTarExtract`` in
+  ## ``libs/repro_home_apply/src/repro_home_apply/builtin_adapter.nim``; see
+  ## the W16 block comment there for the measurements.
+  ##
+  ## ``--force-local`` is the only remedy for GNU tar reading a ``-f`` operand
+  ## whose first ``:`` precedes any ``/`` as a remote ``host:path`` — every
+  ## absolute Windows path, in other words. It is a GNU extension: bsdtar
+  ## answers "Option --force-local is not supported" and exits 1. So it can
+  ## never be mandatory, and an attempt that is ALLOWED TO FAIL is how both
+  ## tars reach their own shape from one call site.
+  ##
+  ## No shell: the argv is assembled and quoted per element, and no element
+  ## carries an operator. ``scripts/check_shell_command_strings.sh`` is the
+  ## gate on that.
+  var gnuArgv = @[tarExe]
+  for f in gnuOnlyFlags: gnuArgv.add(f)
+  for a in tailArgs: gnuArgv.add(a)
+  let gnuRes = runner(shellCommand(gnuArgv))
+  if gnuRes.exitCode == 0:
+    return (gnuRes.output, 0, "")
+  var plainArgv = @[tarExe]
+  for a in tailArgs: plainArgv.add(a)
+  let plainRes = runner(shellCommand(plainArgv))
+  let transcript =
+    "\n  attempt 1 (GNU: " & gnuOnlyFlags.join(" ") & ") exit=" &
+    $gnuRes.exitCode & ": " & gnuRes.output.strip() &
+    "\n  attempt 2 (no GNU-only flags) exit=" & $plainRes.exitCode & ": " &
+    plainRes.output.strip()
+  (plainRes.output, plainRes.exitCode, transcript)
+
 proc validateTarEntries(archivePath, archiveType: string) =
   ## Sanity-check that the archive's entry names do not escape the
   ## extraction directory via absolute paths or `..` traversal. Only
@@ -1930,27 +1977,41 @@ proc validateTarEntries(archivePath, archiveType: string) =
   ## raw payloads the extraction tools themselves refuse unsafe
   ## entries (Expand-Archive, 7z, unzip all reject parent-relative
   ## paths in their default modes), so we skip the pre-listing pass.
+  ##
+  ## N48: this listing runs BEFORE the extraction below it and hands ``tar``
+  ## the same absolute Windows ``archivePath`` — so being first, it is where
+  ## the archive operand's defect BITES first. Fixing the extraction alone
+  ## left this raising "Cannot connect to M: resolve failed" and the
+  ## extraction was never reached at all.
+  ##
+  ## The ``--force-local`` attempt is the load-bearing half here: an ``-f``
+  ## operand is the one GNU tar reads as ``host:path``, and it is NOT the one
+  ## GNU tar unquotes (measured — see ``repro_core/paths.tarOperand``).
+  ## ``tarOperand`` rides along as defence in depth so every ``tar`` operand
+  ## in this module goes through one rule.
   let lowerType = archiveType.toLowerAscii()
-  let args =
+  let tailArgs =
     case lowerType
     of "tar.gz", "tgz":
-      @["tar", "-tzf", archivePath]
+      @["-tzf", tarOperand(archivePath)]
     of "tar.xz", "txz":
-      @["tar", "-tJf", archivePath]
+      @["-tJf", tarOperand(archivePath)]
     of "tar.bz2", "tbz", "tbz2":
-      @["tar", "-tjf", archivePath]
+      @["-tjf", tarOperand(archivePath)]
     of "tar":
-      @["tar", "-tf", archivePath]
+      @["-tf", tarOperand(archivePath)]
     of "zip", "7z", "7z.exe", "raw", "conda":
       return
     else:
       raise newException(ValueError,
         "tool-resolution failed: unsupported tarball archiveType " & archiveType)
-  let res = execCmdEx(shellCommand(args))
+  let res = runTarTwice("tar", ["--force-local"], tailArgs,
+    proc(command: string): tuple[output: string, exitCode: int] =
+      execCmdEx(command))
   if res.exitCode != 0:
     raise newException(OSError,
       "tool-resolution failed: tar listing failed for " & archivePath &
-      "\n" & res.output)
+      (if res.attempts.len > 0: res.attempts else: "\n" & res.output))
   for entry in res.output.splitLines:
     let normalized = entry.replace('\\', '/')
     if normalized.len == 0:
@@ -2194,23 +2255,47 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
   let lowerType = archiveType.toLowerAscii()
   case lowerType
   of "tar.gz", "tgz", "tar.xz", "txz", "tar.bz2", "tbz", "tbz2", "tar":
-    var args =
+    # N48: BOTH operands carry a Windows defect here and BOTH are fixed, for
+    # the reasons measured in builtin_adapter's W16 block comment.
+    #
+    #   * ``destination`` is a store prefix — an absolute Windows path whose
+    #     backslashes GNU tar UNQUOTES, because ``--unquote`` is its default.
+    #     A leaf beginning ``a b f n r t v`` made tar raise with zero files
+    #     extracted; a leaf beginning ``\0`` made tar chdir to the PARENT,
+    #     extract the whole tree there and EXIT 0 — a tool installed outside
+    #     its own prefix with a success verdict, and no error to notice.
+    #   * ``archivePath`` is the downloaded tarball's absolute path, and GNU
+    #     tar reads a ``-f`` operand whose first ``:`` precedes any ``/`` as a
+    #     remote ``host:path``, so ``M:\…`` and ``M:/…`` alike died with
+    #     "Cannot connect to M: resolve failed" before opening anything.
+    #
+    # ``tarOperand`` removes the unquoting trigger and ``--force-local``
+    # answers the ``host:path`` misreading, in an attempt that is ALLOWED TO
+    # FAIL so a bsdtar host still reaches its own shape. Measured, so the
+    # attribution is not guessed: on GNU tar 1.35 the unquoting reaches ``-C``
+    # and NOT ``-f``, so ``tarOperand`` is load-bearing on the destination and
+    # defence in depth on the archive, while ``--force-local`` is the reverse.
+    # Both operands go through both anyway — see
+    # ``repro_core/paths.tarOperand`` for the table.
+    var tailArgs =
       case lowerType
       of "tar.gz", "tgz":
-        @["tar", "-xzf", archivePath, "-C", destination]
+        @["-xzf", tarOperand(archivePath), "-C", tarOperand(destination)]
       of "tar.xz", "txz":
-        @["tar", "-xJf", archivePath, "-C", destination]
+        @["-xJf", tarOperand(archivePath), "-C", tarOperand(destination)]
       of "tar.bz2", "tbz", "tbz2":
-        @["tar", "-xjf", archivePath, "-C", destination]
+        @["-xjf", tarOperand(archivePath), "-C", tarOperand(destination)]
       else: # "tar"
-        @["tar", "-xf", archivePath, "-C", destination]
+        @["-xf", tarOperand(archivePath), "-C", tarOperand(destination)]
     if stripComponents > 0:
-      args.add("--strip-components=" & $stripComponents)
-    let res = execCmdEx(shellCommand(args))
+      tailArgs.add("--strip-components=" & $stripComponents)
+    let res = runTarTwice("tar", ["--force-local"], tailArgs,
+      proc(command: string): tuple[output: string, exitCode: int] =
+        execCmdEx(command))
     if res.exitCode != 0:
       raise newException(OSError,
         "tool-resolution failed: tar extraction failed for " & archivePath &
-        "\n" & res.output)
+        (if res.attempts.len > 0: res.attempts else: "\n" & res.output))
     mergeRustInstallerComponents(destination)
   of "zip":
     let extractor = resolveZipExtractor()
@@ -2258,12 +2343,20 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
     createDir(extendedPath(staging))
     try:
       extractTarballArchive(archivePath, staging, "zip", 0)
+      # N48: the walk is EXTENDED-LENGTH (``\\?\…``) because that is what
+      # opens reliably from Nim, but the result is a CHILD PROCESS OPERAND and
+      # the ``\\?\`` prefix does not survive one. Measured: MSYS2's zstd.exe
+      # answered ``can't stat \?M:mdevreprobuild…`` — it had eaten the prefix's
+      # backslashes along with every separator — so the conda arm could not
+      # decompress its own payload on Windows no matter what came after.
+      # ``relative = true`` keeps the extended path on the Nim side of the
+      # boundary and hands the child an ordinary one.
       var payload = ""
-      for kind, entry in walkDir(extendedPath(staging)):
+      for kind, entry in walkDir(extendedPath(staging), relative = true):
         if kind != pcFile: continue
         let leaf = entry.extractFilename.toLowerAscii()
         if leaf.startsWith("pkg-") and leaf.endsWith(".tar.zst"):
-          payload = entry
+          payload = staging / entry
           break
       if payload.len == 0:
         raise newException(OSError,
@@ -2337,10 +2430,56 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
             "neither was found." & probeTrail &
             "\n    zstd -> " & (if zstdExe.len == 0: "not on PATH" else: zstdExe) &
             "\n    tar  -> " & (if gnuTar.len == 0: "not on PATH" else: gnuTar))
-        resolvedVia = zstdExe & " | " & gnuTar
-        res = uncontrolledExecCmdEx(quoteShell(zstdExe) & " -dc " &
-          quoteShell(payload) & " | " & quoteShell(gnuTar) & " -xf - -C " &
-          quoteShell(destination))
+        # N48 / the W13 family. This WAS one command string carrying a ``|``:
+        #
+        #   zstd -dc <payload> | tar -xf - -C <destination>
+        #
+        # handed to ``uncontrolledExecCmdEx``. That contract is
+        # ``osproc.execCmdEx`` plus ``poEvalCommand``, and on Windows
+        # ``startProcess`` gives the command line to ``CreateProcessW``
+        # VERBATIM — there is no ``cmd.exe`` and no shell anywhere in the
+        # path. The ``|`` and everything after it arrive as ORDINARY ARGV
+        # ENTRIES to the FIRST program, which rejects them; the second never
+        # runs. Measured with the identical shape elsewhere in this tree:
+        # ``git --version | git hash-object --stdin`` -> exit 129, "unknown
+        # option `stdin'".
+        #
+        # Of W13's two remedies, "make the shell explicit" is not available
+        # here: this arm exists precisely for a host whose ``tar`` cannot do
+        # zstd, which on Windows is a host with no ``sh``, and ``cmd /c``
+        # re-introduces W4's quote-stripping. So the two processes are
+        # connected here instead of by a shell. They are connected THROUGH A
+        # FILE rather than through an in-process copy loop, and that choice is
+        # deliberate: ``staging`` already exists, is already removed in the
+        # ``finally`` below, and already holds this very payload, so the
+        # decompressed tar costs one transient file in a directory whose
+        # lifetime is settled — against a second copy of the ~150-line
+        # SIGPIPE-guarded pipe loop in ``builtin_adapter``'s ``zekZstdPipe``
+        # arm, which would be a second thing to keep true. It is also the
+        # shape the two other .tar.zst call sites in this tree already use
+        # (``apt_jammy``'s ``decompressZstdToFile``, the harvester's
+        # ``msys2_source``).
+        #
+        # The consequence is stated rather than left implicit: the archive is
+        # no longer tar's STDIN, so it is now a ``-f`` operand and the
+        # ``host:path`` misreading applies to it. That is why ``--force-local``
+        # is offered below, in an attempt allowed to fail, and why the
+        # decompressed tar's path goes through ``tarOperand`` too.
+        resolvedVia = zstdExe & " then " & gnuTar
+        let payloadTar = staging / "conda-payload.tar"
+        let zstdRes = uncontrolledExecCmdEx(shellCommand(
+          @[zstdExe, "-d", "-f", "-q", "-o", payloadTar, payload]))
+        if zstdRes.exitCode != 0:
+          raise newException(OSError,
+            "tool-resolution failed: decompressing the conda payload " &
+            payload & " with " & zstdExe & " exited " & $zstdRes.exitCode &
+            probeTrail & "\n" & zstdRes.output)
+        let tarRes = runTarTwice(gnuTar, ["--force-local"],
+          ["-xf", tarOperand(payloadTar), "-C", tarOperand(destination)],
+          proc(command: string): tuple[output: string, exitCode: int] =
+            uncontrolledExecCmdEx(command))
+        res = (output: tarRes.output & tarRes.attempts,
+               exitCode: tarRes.exitCode)
       if res.exitCode != 0:
         raise newException(OSError,
           "tool-resolution failed: conda payload extraction failed for " &

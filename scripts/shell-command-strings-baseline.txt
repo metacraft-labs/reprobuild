@@ -34,8 +34,19 @@
 #     the `|` (W13). The pipe is now connected in-process and the comment says
 #     what actually happens.
 #
+#   - `repro_tool_profiles`'s conda arm built `zstd -dc <payload> | tar -xf -
+#     -C <dest>` for `uncontrolledExecCmdEx` (N48). The two processes are now
+#     connected through a file in the staging directory the arm already owns,
+#     and both invocations are argv-quoted with no operator in any element.
+#     That site was INVISIBLE to this check until N48: the scanner matched
+#     only the bare `execCmdEx` / `execProcess` / `startProcess` spellings, so
+#     every `repro_core/ambient_execution` wrapper — which changes nothing
+#     about the command string — went unscanned. The wrappers are in scope now
+#     and `caught_14_pipe_through_uncontrolled_exec_cmd_ex` pins it.
+#
 # Keep it empty. A candidate that is not listed here fails the check, which is
-# now the whole first-party production scope: every `execCmdEx` / `execProcess`
-# command string in `libs`, `apps`, `tools` and `repro.nim` is free of shell
-# metacharacters, and the three structurally-exempt sites above are the only
-# redirect tokens left in it.
+# now the whole first-party production scope: every `execCmdEx` /
+# `execProcess` / `startProcess` command string in `libs`, `apps`, `tools` and
+# `repro.nim`, AND every `uncontrolledExecCmdEx` / `uncontrolledExecProcess` /
+# `uncontrolledStartProcess` one, is free of shell metacharacters; the three
+# structurally-exempt sites above are the only redirect tokens left in it.

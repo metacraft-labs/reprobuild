@@ -60,7 +60,7 @@ else:
   # extractor arm — ``from … import`` keeps the rest of ``std/posix`` out of
   # this module's namespace.
   from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN
-from repro_core/paths import extendedPath
+from repro_core/paths import extendedPath, tarOperand
 
 import repro_local_store
 import repro_dsl_stdlib/packages_schema
@@ -1878,14 +1878,24 @@ proc runPreInstallActions*(packageId, destDir: string;
 # ``--no-unquote`` ruled out above, and no such path has been observed — but
 # it is a residual, not a solved case.
 
-proc tarOperand(path: string): string =
-  ## W16: a path about to be handed to ``tar`` as a command-line operand.
-  ## Windows only — see the block comment above for why this must NOT touch
-  ## POSIX paths.
-  when defined(windows):
-    path.replace('\\', '/')
-  else:
-    path
+# ``tarOperand`` itself lives in ``repro_core/paths`` (imported at the top of
+# this file). N48 found FOUR more sites in the tree building a ``tar`` command
+# the way this comment condemns — two in ``repro_tool_profiles``, one in
+# ``apt_jammy``, one in the catalog harvester's ``msys2_source`` — and they
+# now share this one implementation rather than each growing a copy. The
+# measured table above is the evidence for all of them.
+#
+# ONE MORE SITE EXISTS AND IS NOT FIXED HERE, stated so the sweep does not
+# read as closed: ``repro_dsl_stdlib/packages/expand_archive.buildTarArgv``
+# builds ``tar -x[z|j|J] -f <archive> -C <destination>`` with both operands
+# RAW. It is reachable with GNU tar on Windows — ``packages/tar.nim``
+# provisions GNU tar 1.35 from the Git for Windows tree for exactly this
+# consumer — so both defects above apply to it. It cannot take this remedy as
+# written: that argv is lowered into a single cacheable BUILD ACTION whose
+# identity the argv is part of, so there is no "attempt allowed to fail" to
+# hang ``--force-local`` on and no operand rewrite that is free of a
+# cache-key change. Fixing it is an arm-selection design, not a sweep, and is
+# left as a named residual rather than done badly here.
 
 proc runTarExtract(tarExe: string; gnuOnlyFlags, tailArgs: openArray[string]):
     tuple[output: string, exitCode: int, attempts: string] =
