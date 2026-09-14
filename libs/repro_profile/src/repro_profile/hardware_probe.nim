@@ -329,6 +329,14 @@ proc execShellCmdCleanEnv*(cmd: string): tuple[output: string; exitCode: int] =
       options = {poUsePath, poStdErrToStdOut})
   except OSError:
     return
+  # N51 triage: LEFT AS `readAll` DELIBERATELY. The short-read defect is
+  # Windows-only — there `osproc`'s stream is a raw handle and one `ReadFile`
+  # on a pipe returns whatever is available, so `readAll`'s "stop at the first
+  # sub-1 KiB read" ends the capture early. On POSIX the stream is a stdio
+  # `File` and `fread` loops internally until the full count or real EOF, so
+  # `readAll` here already reads to EOF. This arm is POSIX-only: it
+  # spawns `/bin/sh`, and on a host without one the spawn raises and
+  # this proc returns the `-1` sentinel set above.
   let s = p.outputStream()
   try:
     result.output = s.readAll()

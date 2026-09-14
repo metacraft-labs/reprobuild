@@ -36,6 +36,7 @@
 ##     with the captured stderr tail.
 
 import std/[osproc, streams, strtabs, strutils]
+from repro_core/process_streams import drainStream
 
 import ./errors
 import ./operations
@@ -146,11 +147,17 @@ proc spawnInlineExecCall(argv: seq[string]; cwd: string;
   # last few KiB on a failure. Empty captures collapse to empty
   # strings — a "well-behaved" elevated command logs to syslog /
   # ApplyLog, not stdout.
+  #
+  # N51: drained to EOF, not to the first short read. The capture exists to
+  # put the elevated command's own words in the audit log on a failure, and
+  # `readAll` on Windows returns whatever one `ReadFile` yielded — measured at
+  # 5 bytes of a 409-byte diagnostic. A 5-byte audit record of a privileged
+  # failure is worse than none, because it reads as a complete one.
   let stdoutStream = process.outputStream()
   var captured = ""
   if stdoutStream != nil:
     try:
-      captured = stdoutStream.readAll()
+      captured = drainStream(stdoutStream)
     except IOError, OSError:
       captured = ""
   let exitCode = process.waitForExit()

@@ -17,6 +17,7 @@
 
 import std/[os, osproc, parseutils, streams, strtabs, strutils]
 from repro_core/paths import extendedPath
+from repro_core/process_streams import drainStream
 
 import repro_profile
 import repro_profile_intent
@@ -180,7 +181,11 @@ proc compileProfileBinary*(profileRoot, nimcacheDir, outBinary: string;
                          args = nimArgv[1 .. ^1],
                          env = childEnv,
                          options = {poUsePath, poStdErrToStdOut})
-    let output = p.outputStream.readAll()
+    # N51: a `nim c` transcript is the single most short-read-prone capture
+    # in this tree — the compiler writes progress chatter in many small
+    # bursts, and `readAll` ends at the first burst under 1 KiB. `err.stderrText`
+    # below is the ONLY thing a user sees when a profile fails to compile.
+    let output = drainStream(p.outputStream)
     let exitCode = p.waitForExit()
     p.close()
     let compileRes = (output: output, exitCode: exitCode)

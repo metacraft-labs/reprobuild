@@ -3397,6 +3397,13 @@ proc applyLinuxFhsSandbox*(op: PrivilegedOperation):
     # the M0 transparency posture).
     let process = startProcess(argv[0], args = argv[1 .. ^1],
       options = {poStdErrToStdOut, poUsePath})
+    # N51 triage: LEFT AS `readAll` DELIBERATELY. The short-read defect is
+    # Windows-only — there `osproc`'s stream is a raw handle and one
+    # `ReadFile` on a pipe returns whatever is available, so `readAll`'s
+    # "stop at the first sub-1 KiB read" ends the capture early. On POSIX the
+    # stream is a stdio `File` whose `fread` loops internally until the full
+    # count or real EOF, so `readAll` here already reads to EOF. This arm is
+    # `when defined(linux)` and spawns bubblewrap, so it is POSIX-only.
     let exitCode = process.waitForExit()
     let output = process.outputStream.readAll()
     process.close()

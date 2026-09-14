@@ -793,6 +793,34 @@ proc runListJson(binary: string): tuple[output: string; stderrOutput: string;
     else:
       # Unusual non-POSIX targets retain a compileable direct-process fallback.
       # Windows uses PeekNamedPipe above and does not enter this branch.
+      #
+      # N51 triage: LEFT AS `readAll` DELIBERATELY. Worth spelling out,
+      # because the N51 brief named these two lines as the sweep's
+      # highest-value site on the grounds that they are "how every test's
+      # output reaches a human". They are not. Two things are true instead:
+      #
+      #   * These are in `runListJson` — the `--list-json` DISCOVERY probe.
+      #     A test's actual run output is captured by `drainAndWait`, whose
+      #     `while outp.readLine(line)` loop reads to a newline or EOF and
+      #     loops until EOF, so it has no short-read defect to fix.
+      #   * Even here the branch is DEAD: it is the `else` of
+      #     `when defined(posix) or defined(windows)`, so on every platform
+      #     reprobuild supports the `drainProbePipe` loop above runs instead.
+      #
+      # It also must NOT become a `drainStream` loop. Every drain this file
+      # actually REACHES refuses to block for EOF, and each refusal was paid
+      # for: `drainProbePipe` here is bounded by `drainDeadline`;
+      # `drainAvailable` is a non-blocking read of what is already buffered;
+      # and the post-exit drain is `finalDrainNonBlocking`, which takes
+      # `FinalDrainPasses` quick passes and walks away. Its docstring records
+      # WHY it replaced the EOF-blocking `drainToEofBounded` at those sites —
+      # a failed `repro build` / `develop` / `watch` test can leave a daemon
+      # holding an inherited copy of this pipe's write end, and even a
+      # 10-second bounded wait stalled the runner before the ownership
+      # cleanup could terminate it. (`drainToEofBounded` and `drainToEof` are
+      # still DEFINED below but have NO call sites left; do not read either as
+      # the live capture path.) An unbounded `drainStream` here would be the
+      # one shape every one of those decisions rejected.
       if p.outputStream != nil:
         stdoutFile.write(p.outputStream.readAll())
       if p.errorStream != nil:

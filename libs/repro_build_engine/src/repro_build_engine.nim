@@ -98,6 +98,7 @@ else:
     0.0
 
 import repro_core
+from repro_core/process_streams import drainStream
 import repro_depfile
 import repro_hash
 import repro_local_store
@@ -7467,10 +7468,22 @@ proc runConverter(action: BuildAction; converterSpec: PostBuildDependencyConvert
     env = env,
     workingDir = action.processCwd(process),
     options = {poUsePath, poStdErrToStdOut})
+  # N51: drain BEFORE waiting, and drain to EOF rather than to the first
+  # short read. Both halves were wrong here. Waiting first deadlocks outright
+  # once a chatty converter fills the ~64 KiB pipe buffer — nobody is reading
+  # while `waitForExit` blocks — and `readAll` then returned only as far as
+  # the first sub-1 KiB read, which on Windows is whatever `ReadFile` happened
+  # to have (measured: 5 bytes of a 409-byte child diagnostic). The converter
+  # diagnostic below is the only thing a user sees when a converter fails, so
+  # a truncated one is a failure reported as a mystery.
+  #
+  # Residual, stated rather than hidden: `drainStream` blocks until the write
+  # end CLOSES, so a converter that leaks a descendant holding its stdout open
+  # would hang here. `readAll` escaped that only in the narrow case where the
+  # converter wrote at least one byte and then left the pipe open — it blocks
+  # identically on a silent one. See `repro_core/process_streams`.
+  var output = drainStream(child.outputStream)
   let exitCode = child.waitForExit()
-  var output = ""
-  if child.outputStream != nil:
-    output = child.outputStream.readAll()
   child.close()
   if exitCode != 0:
     var diagnostic = "converter failed with exit " & $exitCode
@@ -10976,6 +10989,30 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
     id: id,
     launched: true,
     runQuotaBackend: "runquota-helper")
+  # N51 triage: LEFT AS `readAll` DELIBERATELY. This IS short-read-prone on
+  # Windows, but the child is the RunQuota helper — a process supervisor
+  # (`repro __repro-runquota-helper`) whose own children are the build actions
+  # it launched. Draining to EOF here means waiting for every descendant that
+  # inherited the helper's stdout to close it, which is exactly the class of
+  # wait this call must not make: the outcome is carried by the result FILE
+  # parsed below, not by this string. `helperOutput` only ever decorates
+  # `result.stderr` — on the "helper wrote no result" path just below, and
+  # AGAIN on the normal path after the result file parses — so a short one
+  # costs a truncated note appended to a diagnostic, never a wrong verdict.
+  # Trading that for a possible hang in the engine's completion path is the
+  # wrong trade. The bounded remedy is `tools/test-runner`'s deadline-driven
+  # `drainProbePipe`, not `drainStream`.
+  #
+  # SECOND RESIDUAL, pre-existing and also left alone: this waits BEFORE it
+  # reads. That is the ordering `runConverter` above was fixed out of, and it
+  # deadlocks the same way if the helper — or a descendant holding the
+  # inherited write end — ever fills the ~64 KiB pipe buffer: the writer
+  # blocks, so the helper cannot exit, so `waitForExit` never returns. It has
+  # not been observed, because the helper's own chatter is a few lines and the
+  # action's real output goes into the result JSON rather than down this pipe.
+  # Reordering to read-then-wait would fix that, but only with a BOUNDED read:
+  # an unbounded one reintroduces the descendant wait this annotation exists
+  # to refuse. Named here so the next reader need not rediscover it.
   let helperExit = process.waitForExit()
   var helperOutput = ""
   if process.outputStream != nil:

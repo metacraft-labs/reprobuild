@@ -34,6 +34,7 @@
 ## external-CLI JSON) carry it losslessly.
 
 import std/[base64, json, options, os, osproc, streams, strtabs, strutils, tables]
+from repro_core/process_streams import drainStream
 
 import evidence as workspaceVcsEvidence
 import git_tool
@@ -340,7 +341,13 @@ proc runGit(gitBin: string; args: openArray[string];
   for (k, v) in extraEnv: env[k] = v
   var p = startProcess(gitBin, args = @args, env = env,
     options = {poStdErrToStdOut, poUsePath})
-  let output = p.outputStream.readAll()
+  # N51: drained to EOF. `readAll` returns at the first read that does not
+  # fill its 1 KiB buffer, which on Windows is one `ReadFile` on a pipe — so
+  # a `git` whose output arrives in more than one burst was captured short.
+  # Callers here PARSE this output (`git rev-parse`, `git notes list`,
+  # `git ls-tree`), so a short read is not a shabby diagnostic, it is a wrong
+  # answer that looks like a right one.
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   (code: code, output: output)
@@ -799,7 +806,8 @@ proc ecPutRaw(s: ExternalCliLockStore; key, value: string): StorePutResult =
     options = {poUsePath})
   p.inputStream.write(request)
   p.inputStream.close()
-  let output = p.outputStream.readAll()
+  # N51: see `runGit` above — drained to EOF, not to the first short read.
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   if code != 0:
@@ -810,7 +818,12 @@ proc ecPutRaw(s: ExternalCliLockStore; key, value: string): StorePutResult =
 proc ecGetRaw(s: ExternalCliLockStore; key: string): Option[string] =
   var p = startProcess(s.program, args = @["get", key], options = {poUsePath})
   p.inputStream.close()
-  let output = p.outputStream.readAll()
+  # N51: this one is the sharpest case in the file. The output is PARSED AS
+  # JSON below, and every parse failure returns `none(string)` — so a short
+  # read of an external-CLI store's answer does not surface as an error, it
+  # surfaces as "this key is not in the store", and the caller then behaves
+  # as though the lock record had never been written.
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   if code == 3: return none(string)

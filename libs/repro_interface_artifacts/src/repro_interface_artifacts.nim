@@ -2432,6 +2432,14 @@ proc runCommand(command: openArray[string];
         args = command[1 .. ^1],
         workingDir = cwd,
         options = {poUsePath, poStdErrToStdOut})
+    # N51 triage: LEFT AS `readAll` DELIBERATELY, on BOTH counts. This is the
+    # `else` of the `when defined(windows)` above, so it is the POSIX arm —
+    # and on POSIX `osproc`'s stream is a stdio `File` whose `fread` already
+    # loops to EOF, so there is no short read to fix. Draining to EOF would
+    # also be the WRONG remedy for the hazard this proc is shaped around: the
+    # Windows arm exists precisely because `nim` exits while `gcc` still holds
+    # the pipe's write handle and the pipe never EOFs. A drain loop is a
+    # stronger version of the read that deadlocks there.
     var output = ""
     if process.outputStream != nil:
       output = process.outputStream.readAll()

@@ -332,6 +332,91 @@ AssertMatches "$headOk" '^[0-9a-f]{7,}$' 'the bucket is a git repo with a commit
 # ---------------------------------------------------------------------
 Step 'serve the download surface over local HTTP (stands in for R2)'
 # ---------------------------------------------------------------------
+# N51 -- THE SERVER THIS STEP ASSERTS MUST BE THE SERVER THIS STEP STARTED.
+#
+# The dnf arm was measured failing this way: a stale `python3 -m http.server`
+# from an EARLIER run still held the port, this run's own server died at once
+# with "Address already in use", and the probe -- which asked only whether the
+# URL answered -- printed PASS. Everything after it ran against the orphan.
+# This arm had the identical shape (start a server, poll a URL, assert the
+# URL) and is fixed with it.
+#
+# A unique token in the served tree would NOT settle this: $Www is a stable
+# per-run path that a stale server rooted at the same string keeps serving, so
+# it would answer for the token too. What is asserted instead:
+#   (1) the port is FREE before we bind -- a pre-bound port is REFUSED here,
+#       never adopted. On Windows this is the check that does the work;
+#   (2) our own process has not exited after the readiness poll;
+#   (3) the port answers;
+#   (4) the set of LISTENING owner pids is exactly ours.
+#
+# WINDOWS DIFFERS FROM THE POSIX ARMS HERE, MEASURED RATHER THAN ASSUMED.
+# On Linux a second `python3 -m http.server` on a held port dies at once with
+# `[Errno 98] Address already in use`. On Windows it does NOT: python sets
+# SO_REUSEADDR, the bind SUCCEEDS, and the port ends up with TWO listening
+# sockets. Three runs on this host, a fresh port each time, first server "A"
+# already holding it and second server "B" started after:
+#
+#   port 8811  A=63640 B=47780  A.HasExited=False  B.HasExited=False
+#              netstat LISTENING pids = [47780, 63640]     served by A
+#   port 8812  A=28108 B=15524  A.HasExited=False  B.HasExited=False
+#              netstat LISTENING pids = [15524, 28108]     served by A
+#   port 8813  A=4760  B=7632   A.HasExited=False  B.HasExited=False
+#              netstat LISTENING pids = [4760, 7632]       served by A
+#
+# Two consequences, and both shape the code below:
+#
+#   * `HasExited` CANNOT catch a stale server on Windows. Our own process is
+#     alive, healthy and answering nothing, while the orphan serves the run.
+#     Check (2) is worth keeping for a server that dies for some OTHER reason,
+#     but it is not the guard against this one.
+#   * `Get-NetTCPConnection -State Listen` returned ONE of those two sockets
+#     every time -- and WHICH one is arbitrary: the stale A on 8811 and 8813,
+#     ours B on 8812. Asking it for "the" owner and comparing to our pid would
+#     therefore have printed PASS on 8812 while server A served every byte.
+#     That is the exact false green this whole step exists to delete, so the
+#     enumeration below uses `netstat -ano`, which reported BOTH pids in all
+#     three runs, and demands the set be exactly ours rather than "contains".
+function Test-PortBound {
+  param([int]$ThePort)
+  $c = New-Object System.Net.Sockets.TcpClient
+  try {
+    $iar = $c.BeginConnect('127.0.0.1', $ThePort, $null, $null)
+    if (-not $iar.AsyncWaitHandle.WaitOne(2000)) { return $false }
+    $c.EndConnect($iar)
+    return $true
+  } catch { return $false } finally { $c.Close() }
+}
+function Get-PortListenerPids {
+  # EVERY pid with a LISTENING socket on $ThePort, deduplicated and sorted.
+  # `netstat -ano` rather than `Get-NetTCPConnection`: see the measurement in
+  # the block comment above -- the cmdlet collapsed two listening sockets to
+  # one and picked between them arbitrarily, which is a coin flip standing in
+  # for an assertion. Returns an empty array if netstat is unavailable or
+  # parses to nothing, which the caller reports rather than treats as a pass.
+  param([int]$ThePort)
+  try {
+    return @(netstat -ano |
+      Select-String ":$ThePort\s+.*LISTENING" |
+      ForEach-Object { ($_ -split '\s+')[-1] } |
+      Where-Object { $_ -match '^[0-9]+$' } |
+      ForEach-Object { [int]$_ } |
+      Sort-Object -Unique)
+  } catch { return @() }
+}
+
+if (Test-PortBound $Port) {
+  Write-Host "FATAL: port $Port is already bound BEFORE this run started its"
+  Write-Host "       own server. Refusing to adopt it -- every check below"
+  Write-Host "       would have measured the orphan instead of this run."
+  $owners = @(Get-PortListenerPids $Port)
+  if ($owners.Count -gt 0) {
+    Write-Host ("       listening pid(s): " + ($owners -join ', '))
+  }
+  exit 1
+}
+Ok "port $Port was FREE before this run bound it (no orphan server adopted)"
+
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = (Get-Command $Py).Source
 $psi.Arguments = "-m http.server $Port --bind 127.0.0.1"
@@ -342,12 +427,33 @@ $psi.RedirectStandardError = $true
 $script:HttpProc = [System.Diagnostics.Process]::Start($psi)
 $served = $false
 for ($i = 0; $i -lt 50; $i++) {
+  if ($script:HttpProc.HasExited) { break }
   try {
     Invoke-WebRequest -Uri "$Base/downloads/v$V1/reprobuild-$V1-windows-x86_64.zip" -UseBasicParsing -Method Head -TimeoutSec 3 | Out-Null
     $served = $true; break
   } catch { Start-Sleep -Milliseconds 200 }
 }
-if ($served) { Ok "local HTTP server serves the archive over $Base" } else { Bad "local HTTP server did not serve $Base" }
+if ($script:HttpProc.HasExited) {
+  Bad "the HTTP server THIS run started (pid $($script:HttpProc.Id)) exited with $($script:HttpProc.ExitCode)"
+  Write-Host ($script:HttpProc.StandardError.ReadToEnd())
+} elseif ($served) {
+  Ok "local HTTP server (pid $($script:HttpProc.Id), started by THIS run) serves the archive over $Base"
+} else {
+  Bad "local HTTP server did not serve $Base"
+}
+$listenerPids = @(Get-PortListenerPids $Port)
+if ($listenerPids.Count -eq 0) {
+  Write-Host 'note: netstat listed no LISTENING socket for this port; ownership'
+  Write-Host '      rests on the pre-bind refusal asserted above, not on a read.'
+} elseif ($listenerPids.Count -eq 1 -and $listenerPids[0] -eq $script:HttpProc.Id) {
+  Ok "port $Port is held by OUR server ALONE (the only LISTENING pid is $($listenerPids[0]))"
+} else {
+  # Deliberately "exactly ours", not "includes ours": under SO_REUSEADDR a
+  # second listener can sit alongside ours and take every connection, so a
+  # membership test would pass on precisely the failure being looked for.
+  Bad ("port $Port has LISTENING pid(s) " + ($listenerPids -join ', ') +
+       " -- not exactly the server this run started (pid $($script:HttpProc.Id))")
+}
 
 # =====================================================================
 Step "S1  the installer registers a bucket and Scoop installs $V1"

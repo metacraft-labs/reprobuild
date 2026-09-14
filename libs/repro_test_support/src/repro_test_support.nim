@@ -32,6 +32,7 @@
 import std/[os, osproc, streams, strtabs, strutils, unittest]
 
 from repro_core/paths import extendedPath, runquotaEndpointPath
+from repro_core/process_streams import drainStream
 
 # Narrow, named import: ``runquota_ipc`` is RunQuota's own endpoint-trust
 # module, and ``runquotaRendezvousDir`` below delegates the "where may a
@@ -818,9 +819,10 @@ proc gitCommonDir(repoRoot: string): string =
       args = ["rev-parse", "--path-format=absolute", "--git-common-dir"],
       options = {poUsePath, poStdErrToStdOut})
     defer: process.close()
-    let output =
-      if process.outputStream != nil: process.outputStream.readAll()
-      else: ""
+    # N51: `git rev-parse --git-common-dir` prints ONE path and the result is
+    # used as a path. A short read yields a prefix of a directory name, which
+    # is a plausible-looking wrong answer rather than a visible failure.
+    let output = drainStream(process.outputStream)
     if process.waitForExit() == 0:
       result = output.strip()
   except OSError:

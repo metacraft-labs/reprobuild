@@ -55,6 +55,7 @@ import nimcrypto/sha2 as nc_sha2
 # N48: the ONE ``tarOperand``. Every ``tar`` call site in the tree shares this
 # implementation rather than growing a copy of it.
 from repro_core/paths import tarOperand
+from repro_core/host_tar import resolveHostTar, hostTarSearchDescription
 
 # ---------------------------------------------------------------------------
 # Public errors (spec §1, §2)
@@ -443,9 +444,24 @@ proc tarExtractDataMember(debPath, debBytes, memberName: string;
   # ``libs/repro_home_apply/src/repro_home_apply/builtin_adapter.nim`` and
   # ``repro_core/paths.tarOperand`` for the measurements and for why the
   # rewrite is Windows-only.
+  #
+  # N51: argv[0] WAS the bare string ``"tar"`` while the failure path named
+  # nothing at all. On Windows a bare name is resolved by ``CreateProcessW``,
+  # which searches the SYSTEM DIRECTORY before ``%PATH%`` — so this ran
+  # System32's bsdtar 3.8.8 on any host that also had GNU tar 1.35 on PATH,
+  # and no reader of this code could tell. ``resolveHostTar`` reproduces that
+  # order explicitly so the binary that runs is named, without changing WHICH
+  # binary runs; see ``repro_core/host_tar``.
   let tailArgs = [flag, tarOperand(tarInput), "-C", tarOperand(outDir)]
+  let hostTar = resolveHostTar()
+  if hostTar.exe.len == 0:
+    var e = newException(AptExtractError,
+      "no 'tar' found to extract " & memberName & " (looked in " &
+      hostTarSearchDescription() & ")")
+    e.debPath = debPath
+    raise e
   proc tarCommand(withForceLocal: bool): string =
-    var argv = @["tar"]
+    var argv = @[quoteShell(hostTar.exe)]
     if withForceLocal: argv.add("--force-local")
     for a in tailArgs: argv.add(quoteShell(a))
     argv.join(" ")

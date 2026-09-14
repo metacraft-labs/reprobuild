@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1582,
+    "nimTestBinaries": 1584,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 576,
     "staticallyDetectedRuntimeCompilerFlowTests": 97,
-    "testEntries": 1591
+    "testEntries": 1593
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1075,7 +1075,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 720,
+      "integration": 722,
       "platform/destructive": 115,
       "pure unit": 576,
       "unclassified": 168
@@ -1214,9 +1214,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1582,
+    "nimTestBinaryCount": 1584,
     "pythonTestFileCount": 9,
-    "testEntryCount": 1591
+    "testEntryCount": 1593
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8069,6 +8069,40 @@
       "source": "libs/repro_core/tests/t_jsts_dep_scanner.nim",
       "sourceSuiteCount": 4,
       "staticCaseCount": 19,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_n51_drain_process_stream",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_n51_drain_process_stream.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_n51_host_tar_resolution",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_n51_host_tar_resolution.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

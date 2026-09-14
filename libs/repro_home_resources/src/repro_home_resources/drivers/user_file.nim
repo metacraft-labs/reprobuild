@@ -39,6 +39,7 @@
 
 import std/[os, osproc, streams, strutils]
 from repro_core/paths import extendedPath
+from repro_core/process_streams import drainStream
 from repro_home_generations import Digest256
 
 import ./../manifest_record
@@ -162,16 +163,29 @@ proc runContentCommand*(argv: openArray[string]): seq[byte] =
   block:
     let outStream = p.outputStream()
     let errStream = p.errorStream()
-    # Drain stdout into the result bytes + stderr into a string
-    # buffer. `readAll` blocks until EOF — fine for the at-rest
-    # secrets pattern (an `age -d` invocation is bounded in size).
+    # Drain stdout into the result bytes + stderr into a string buffer.
+    #
+    # N51: `readAll` does NOT block until EOF, which is what the comment
+    # here used to claim. It returns at the first read that does not fill its
+    # 1 KiB buffer, and on Windows `osproc`'s stream is one `ReadFile` per
+    # read, so a writer that pauses mid-output ends the capture (measured: 5
+    # bytes of 409). For THIS caller that is silent corruption rather than a
+    # short diagnostic — the bytes are the decrypted secret, so a short read
+    # writes a truncated secret to disk with no error anywhere.
+    #
+    # PRE-EXISTING RESIDUAL, not introduced here and not fixed here: stdout is
+    # drained to completion BEFORE stderr is touched, so a child that fills
+    # the stderr pipe while still writing stdout deadlocks. That was already
+    # true (on POSIX `readAll` over stdio already read to EOF) and the remedy
+    # is concurrent draining, not a different read call. The `age -d` shape
+    # this driver exists for writes nothing to stderr on success.
     if outStream != nil:
-      let raw = outStream.readAll()
+      let raw = drainStream(outStream)
       stdoutBytes = newSeq[byte](raw.len)
       for i, ch in raw:
         stdoutBytes[i] = byte(ord(ch))
     if errStream != nil:
-      stderrBuf = errStream.readAll()
+      stderrBuf = drainStream(errStream)
   let exitCode = p.waitForExit()
   p.close()
   if exitCode != 0:

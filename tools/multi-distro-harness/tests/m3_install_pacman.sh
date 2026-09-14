@@ -369,22 +369,117 @@ echo "anchor sha256 = $ANCHOR_SHA"
 # ---------------------------------------------------------------------
 step 'serve the repo root over local HTTP (stands in for R2)'
 # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# N51 -- THE SERVER THIS STEP ASSERTS MUST BE THE SERVER THIS STEP STARTED.
+#
+# Observed on the dnf arm: a stale `python3 -m http.server` left over from
+# an EARLIER run still held $PORT. This run's own server died immediately
+# with `[Errno 98] Address already in use`, and the probe -- which asked
+# only whether the URL answered -- printed PASS. Every later step then ran
+# against the orphan, and the whole arm collapsed when the orphan exited.
+# The probe measured the URL. It never measured its own process.
+#
+# This arm shares the shape and is fixed with it: it was never
+# measured failing, but it is the same probe and the same fixed $WORK path.
+#
+# Why the obvious remedy does NOT work here, stated so it is not tried
+# again: $WORK is a FIXED path, this script `rm -rf`s and recreates it, and
+# python's http.server resolves its document root as a STRING on every
+# request. A stale server from a previous run therefore serves THIS run's
+# files -- including any nonce dropped into the tree. "Put a unique token in
+# the served tree and fetch it back" is vacuous against the failure that was
+# actually observed, because the orphan serves the token too.
+#
+# What is asserted instead:
+#   (1) the port is FREE before we bind. A pre-bound port is REFUSED, never
+#       adopted. This alone is fatal to the observed failure.
+#   (2) the process WE started is alive after the readiness poll, with
+#       `kill -0`'s zombie hole closed (see `http_server_alive`).
+#   (3) the port answers.
+# A listening TCP socket is exclusive, so (1)+(2)+(3) together identify the
+# answering server as ours. Where `ss(8)` exists the listener's pid is ALSO
+# compared to ours directly, which is the same claim without the inference.
+# ---------------------------------------------------------------------
+port_is_bound() {
+  # Deliberately the same python3 that is about to serve: "no python3 on
+  # this host" therefore cannot make this quietly answer "the port is free".
+  python3 - "$PORT" <<'N51_PORT_PY'
+import socket, sys
+s = socket.socket()
+s.settimeout(2)
+try:
+    s.connect(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    sys.exit(1)          # nothing is listening
+finally:
+    s.close()
+sys.exit(0)              # something is listening
+N51_PORT_PY
+}
+
+http_server_alive() {
+  [ -n "${HTTP_PID:-}" ] || return 1
+  kill -0 "$HTTP_PID" 2>/dev/null || return 1
+  # `kill -0` SUCCEEDS on a zombie, and a background child that exited but
+  # has not been waited for IS a zombie -- so `kill -0` on its own passes
+  # for exactly the failure this function exists to catch (a server that
+  # died instantly of EADDRINUSE). Reject state Z explicitly.
+  if [ -r "/proc/$HTTP_PID/stat" ]; then
+    # `|| true`: the process can exit between the `-r` test and this read,
+    # and under `set -e` a failed command substitution inside an assignment
+    # aborts the whole arm. An unreadable stat means "not a zombie we can
+    # see", which the `kill -0` above has already ruled on.
+    _n51_state="$(sed -n 's/.*) \([A-Za-z]\) .*/\1/p' "/proc/$HTTP_PID/stat" || true)"
+    [ "$_n51_state" != "Z" ] || return 1
+  fi
+  return 0
+}
+
+port_listener_pid() {
+  command -v ss >/dev/null 2>&1 || return 0
+  ss -H -ltnp "sport = :$PORT" 2>/dev/null |
+    sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1
+}
+
+if port_is_bound; then
+  printf 'FATAL: %s is already bound BEFORE this run started its own server.\n' "$BASE" >&2
+  printf '       Refusing to adopt it. A previous run left an orphan there, and\n' >&2
+  printf '       every check below would have measured the orphan instead of\n' >&2
+  printf '       anything this run published.\n' >&2
+  if command -v ss >/dev/null 2>&1; then ss -ltnp "sport = :$PORT" >&2 || true; fi
+  exit 1
+fi
+ok "port $PORT was FREE before this run bound it (no orphan server adopted)"
+
 ( cd "$WWW" && exec python3 -m http.server "$PORT" --bind 127.0.0.1 ) \
   >"$WORK/http.log" 2>&1 &
 HTTP_PID=$!
-# Poll rather than sleep-and-hope: a race here would look exactly like
-# "the repository was rejected".
 i=0
 while [ "$i" -lt 50 ]; do
+  http_server_alive || break
   if curl -fsS -o /dev/null "$BASE/arch/$DB.db" 2>/dev/null; then break; fi
   i=$((i + 1))
   sleep 0.2
 done
-if run_capture "$WORK/http-probe.log" curl -fsS -o /dev/null "$BASE/arch/$DB.db"; then
-  ok "local HTTP server serves $DB.db over $BASE"
+if ! http_server_alive; then
+  bad "the HTTP server THIS run started (pid ${HTTP_PID:-none}) is not running"
+  cat "$WORK/http.log"
+elif run_capture "$WORK/http-probe.log" curl -fsS -o /dev/null "$BASE/arch/$DB.db"; then
+  ok "local HTTP server (pid $HTTP_PID, started by THIS run) serves $DB.db over $BASE"
 else
   bad "local HTTP server did not serve $BASE/arch/$DB.db"
   cat "$WORK/http.log"
+fi
+N51_LISTENER="$(port_listener_pid)"
+if [ -n "$N51_LISTENER" ]; then
+  if [ "$N51_LISTENER" = "${HTTP_PID:-}" ]; then
+    ok "port $PORT is held by OUR server (ss reports pid $N51_LISTENER, = \$HTTP_PID)"
+  else
+    bad "port $PORT is held by pid $N51_LISTENER, NOT the server this run started (pid ${HTTP_PID:-none})"
+  fi
+else
+  printf 'note: no ss(8) on this host; port ownership rests on the pre-bind\n'
+  printf '      refusal plus pid liveness asserted above, not on a direct read.\n'
 fi
 # The .db and .db.sig are SYMLINKS to the .tar.gz pair in the generated
 # tree, and pacman fetches the symlink names. If publishing to the hosting

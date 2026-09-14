@@ -35,6 +35,7 @@
 
 import std/[options, os, osproc, sets, streams, strutils, tables, times]
 from repro_core/paths import extendedPath
+from repro_core/process_streams import drainStream
 
 import blake3
 import repro_home_intent
@@ -1509,7 +1510,10 @@ proc runCapture(program: string; args: seq[string]; input = ""):
   if input.len > 0:
     p.inputStream().write(input)
   p.inputStream().close()
-  result.output = p.outputStream().readAll()
+  # N51: `readAll` stops at the first short pipe read, not at EOF. This
+  # captures an `ssh`/`repro home __receive-bundle` transcript, so a truncated
+  # one turns a remote error into an unexplained one.
+  result.output = drainStream(p.outputStream())
   result.exitCode = p.waitForExit()
   p.close()
 

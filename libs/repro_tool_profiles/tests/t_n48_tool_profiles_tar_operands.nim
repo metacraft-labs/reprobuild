@@ -99,6 +99,7 @@ import std/[os, osproc, sequtils, strtabs, strutils, unittest]
 
 import repro_tool_profiles {.all.}
 from repro_core/paths import extendedPath
+from repro_core/host_tar import resolveHostTar, HostTarOverrideEnv
 
 const N48Root = "build/test-tmp/t-n48-tool-profiles"
   ## Deliberately RELATIVE and forward-slash-only, and deliberately NOT
@@ -330,6 +331,30 @@ proc n48ZstdFallbackVerdict(): tuple[reachable: bool, why: string] =
 # This block must precede the ``suite`` below: ``suite``/``test`` are
 # templates that run at module-init in declaration order, and the child must
 # not execute the suite.
+#
+# N51 UPDATE -- READ THIS BEFORE TRUSTING A GREEN FROM THIS FILE.
+#
+# The "copy the binary next to a GNU tar.exe" trick above worked because the
+# product named its tool as the bare string ``"tar"`` and let
+# ``CreateProcessW`` resolve it. N51 removed that: the product now resolves
+# its tar EXPLICITLY through ``repro_core/host_tar.resolveHostTar``, which
+# reproduces the same order (system directory, then PATH) but no longer looks
+# in the calling process's directory -- deliberately, because that entry is a
+# binary-planting hazard, and incidentally, because it was this driver's only
+# lever.
+#
+# Left alone, that would have made these cases VACUOUS RATHER THAN RED: the
+# neighbour copy would sit unused, the child's own
+# ``execCmdEx("tar --version")`` would still print a GNU tar banner from it,
+# ``n48AssertChildIsAWitness`` would still pass -- and the product would
+# quietly be running System32's bsdtar, which has neither defect. That is the
+# same false green this block's own header describes escaping from.
+#
+# So the driver now sets ``REPRO_HOST_TAR`` to the GNU tar it copied, and the
+# child reports the banner of ``resolveHostTar()`` -- THE BINARY THE PRODUCT
+# WILL ACTUALLY RUN -- instead of the banner of a bare ``tar`` nothing uses
+# any more. Those two changes are what keep the witness assertion meaningful.
+
 const N48TarChildEnv = "REPRO_N48_TAR_CHILD"
 
 type N48ChildRun = object
@@ -345,7 +370,15 @@ if n48ChildSpec.len > 0:
   let parts = n48ChildSpec.split('|')
   doAssert parts.len == 3, "bad N48 child spec: " & n48ChildSpec
   echo "N48-CHILD-ENTERED"
-  let banner = execCmdEx("tar --version")
+  # N51: the banner of the binary the PRODUCT will run. Reporting
+  # `execCmdEx("tar --version")` here would report a bare-name resolution the
+  # product no longer performs, which is how this witness would go quietly
+  # vacuous. `resolveHostTar` is the same call the product makes.
+  let resolvedTar = resolveHostTar()
+  let banner =
+    if resolvedTar.exe.len == 0: (output: "", exitCode: 1)
+    else: execCmdEx(quoteShell(resolvedTar.exe) & " --version")
+  echo "N48-CHILD-TAR-PATH=", resolvedTar.exe, " [", resolvedTar.origin, "]"
   echo "N48-CHILD-TAR=",
     (if banner.output.len > 0: banner.output.splitLines()[0].strip()
      else: "<no output>")
@@ -387,6 +420,12 @@ proc n48RunViaGnuTar(driverDir, archiveType, archivePath,
   ## Drive ``extractTarballArchive`` in the child whose neighbour is GNU tar.
   var env = newStringTable(modeCaseInsensitive)
   for k, v in envPairs(): env[k] = v
+  # N51: the product resolves its tar explicitly now, so the neighbouring
+  # `tar.exe` this driver copied is no longer reachable by proximity. Name it.
+  # Without this the child runs System32's bsdtar and every case below proves
+  # nothing -- silently, because it would still PASS.
+  if driverDir.len > 0:
+    env[HostTarOverrideEnv] = driverDir / "tar.exe"
   env[N48TarChildEnv] = archiveType & "|" & archivePath & "|" & destination
   let res = execCmdEx(shellArgv([driverDir / "n48-driver.exe"]), env = env,
     workingDir = getCurrentDir())

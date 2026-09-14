@@ -10,6 +10,7 @@ import cbor
 # docs/ambient-execution-linter.md.
 import repro_core
 import repro_core/ambient_execution
+import repro_core/host_tar
 import repro_core/paths as corepaths
 import repro_domain_types
 import repro_dsl_stdlib/nixpkgs_pin
@@ -1923,6 +1924,25 @@ proc verifiedDownload(plan: TarballAcquisitionPlan; storeRoot: string):
     "tool-resolution failed: all tarball archive URLs failed for " &
     plan.packageSelector & "\n" & diagnostics.join("\n"))
 
+proc requireHostTar(): string =
+  ## N51: the two ``tar`` call sites below named their tool as the bare
+  ## string ``"tar"`` and reported failures against ``findExe("tar")``. On
+  ## Windows those are different programs — ``CreateProcessW`` searches the
+  ## SYSTEM DIRECTORY before ``%PATH%``, so the bare string ran System32's
+  ## bsdtar 3.8.8 while the diagnostic named ``%PATH%``'s GNU tar 1.35.
+  ##
+  ## ``resolveHostTar`` reproduces that order explicitly (system directory,
+  ## then PATH) so the program that runs is the program that was resolved and
+  ## the program the error names — WITHOUT flipping which tar production
+  ## executes. See ``repro_core/host_tar`` for the measurement and for why
+  ## the obvious ``findExe``-only fix was rejected.
+  let tar = resolveHostTar()
+  if tar.exe.len == 0:
+    raise newException(OSError,
+      "tool-resolution failed: no 'tar' found (looked in " &
+      hostTarSearchDescription() & ")")
+  tar.exe
+
 type TarRunner = proc(command: string): tuple[output: string, exitCode: int]
   ## How a ``runTarTwice`` attempt actually reaches the process table. The two
   ## call sites below differ deliberately: the tarball arm runs the ``tar``
@@ -2005,12 +2025,14 @@ proc validateTarEntries(archivePath, archiveType: string) =
     else:
       raise newException(ValueError,
         "tool-resolution failed: unsupported tarball archiveType " & archiveType)
-  let res = runTarTwice("tar", ["--force-local"], tailArgs,
+  let tarExe = requireHostTar()
+  let res = runTarTwice(tarExe, ["--force-local"], tailArgs,
     proc(command: string): tuple[output: string, exitCode: int] =
       execCmdEx(command))
   if res.exitCode != 0:
     raise newException(OSError,
       "tool-resolution failed: tar listing failed for " & archivePath &
+      " using " & tarExe &
       (if res.attempts.len > 0: res.attempts else: "\n" & res.output))
   for entry in res.output.splitLines:
     let normalized = entry.replace('\\', '/')
@@ -2289,12 +2311,14 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
         @["-xf", tarOperand(archivePath), "-C", tarOperand(destination)]
     if stripComponents > 0:
       tailArgs.add("--strip-components=" & $stripComponents)
-    let res = runTarTwice("tar", ["--force-local"], tailArgs,
+    let tarExe = requireHostTar()
+    let res = runTarTwice(tarExe, ["--force-local"], tailArgs,
       proc(command: string): tuple[output: string, exitCode: int] =
         execCmdEx(command))
     if res.exitCode != 0:
       raise newException(OSError,
         "tool-resolution failed: tar extraction failed for " & archivePath &
+        " using " & tarExe &
         (if res.attempts.len > 0: res.attempts else: "\n" & res.output))
     mergeRustInstallerComponents(destination)
   of "zip":
