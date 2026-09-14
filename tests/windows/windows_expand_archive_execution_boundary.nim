@@ -147,9 +147,14 @@ proc runProcess(executable: string; args: seq[string];
     args = args,
     env = childEnv,
     options = {poUsePath, poStdErrToStdOut})
-  result.output = process.outputStream.readAll()
+  defer: process.close()
+  # Nim 2.2 readAll stops at a short pipe read, not necessarily EOF. These
+  # finite children must be drained completely, including late protocol lines
+  # and the full SDDL needed to restore the fixture's original permissions.
+  let output = process.outputStream
+  while not output.atEnd():
+    result.output.add(output.readAll())
   result.exitCode = process.waitForExit()
-  process.close()
 
 proc runPowerShell(command: string): ProcessResult =
   runProcess("powershell", @["-NoProfile", "-Command", command])
@@ -256,6 +261,15 @@ proc remainingScratchFiles(tempRoot: string): seq[string] =
     result.add(path)
 
 suite "M3f Windows expandArchive runtime boundary":
+
+  test "process capture retains delayed stdout and stderr after a short read":
+    let captured = runPowerShell(
+      "[Console]::Out.Write('first'); [Console]::Out.Flush(); " &
+      "Start-Sleep -Milliseconds 200; " &
+      "[Console]::Out.Write(('x' * 1024)); " &
+      "[Console]::Error.Write('last'); exit 7")
+    check captured.exitCode == 7
+    check captured.output == "first" & repeat('x', 1024) & "last"
 
   test "distinct PowerShell processes use distinct .zip scratch and clean success":
     let root = createTempDir("repro-expand-archive-boundary-", "")
