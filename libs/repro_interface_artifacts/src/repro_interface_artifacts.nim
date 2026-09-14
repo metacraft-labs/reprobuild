@@ -4648,7 +4648,17 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
       removeDir(extendedPath(tempRoot))
     except OSError:
       discard
-  let runnerPath = tempRoot / "extract_runner.nim"
+  # Nim includes the main module's directory in every C compiler invocation.
+  # Keep that directory stable so a new extraction does not invalidate all
+  # shared objects, while atomically allocating each invocation's source file.
+  let (runnerFile, runnerPath) =
+    createTempFile("extract_runner_", ".nim", tempParent)
+  close(runnerFile)
+  defer:
+    try:
+      removeFile(extendedPath(runnerPath))
+    except OSError:
+      discard
   # M9.R.14b.2: Pin the recipe import to its absolute path so that
   # ``import repro`` does not resolve through Nim's search path. The
   # generic ``import <moduleName>`` form used to ride on
@@ -4781,7 +4791,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # packages deliberately point it at their immutable source closure, so it is
   # not a valid compiler working directory: Nim writes relative linker response
   # files (for example `extract_runner_linkerArgs.txt`) into its process CWD.
-  # The runner scratch directory already owns every generated extractor file.
+  # Keep response files and binaries in the extraction's private directory.
   let compileExecution = runInterfaceCompilerCommand(command, cwd = tempRoot)
   let runnerExe = compiledExecutablePath(runnerBin)
   if not fileExists(extendedPath(runnerExe)):

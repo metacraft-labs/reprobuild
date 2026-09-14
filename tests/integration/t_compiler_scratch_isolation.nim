@@ -6,7 +6,7 @@
 ## prove their compiler CWD allocation is exclusive, not merely unlikely to
 ## collide.
 
-import std/[os, sequtils, strutils, tempfiles, unittest]
+import std/[os, sequtils, strutils, tables, tempfiles, times, unittest]
 
 import repro_core
 import repro_hash
@@ -37,7 +37,7 @@ proc transientChildren(root, prefix: string): seq[string] =
   if not dirExists(root):
     return
   for kind, path in walkDir(root):
-    if kind in {pcDir, pcLinkToDir} and path.extractFilename.startsWith(prefix):
+    if path.extractFilename.startsWith(prefix):
       result.add(path)
 
 proc writeCompilerObserver(path, cwdLog: string) =
@@ -152,6 +152,7 @@ when defined(posix) and isNixSupported:
       check fileExists(stubPath)
       check transientChildren(scratchRoot / "m7-temp",
         "repro-interface-extract-").len == 0
+      check transientChildren(scratchRoot / "m7-temp", "extract_runner_").len == 0
 
       # A forced compiler failure still removes the extractor's private CWD.
       putEnv("REPRO_TEST_NIM_FAIL", "1")
@@ -162,6 +163,7 @@ when defined(posix) and isNixSupported:
       putEnv("REPRO_TEST_NIM_FAIL", "")
       check transientChildren(scratchRoot / "m7-temp",
         "repro-interface-extract-").len == 0
+      check transientChildren(scratchRoot / "m7-temp", "extract_runner_").len == 0
 
       # Use a lightweight compiler response for the concurrency assertion; the
       # extractor above already exercised the real compiler. Each call still
@@ -235,3 +237,36 @@ when defined(posix) and isNixSupported:
       # input. Only the fixture module and library symlink exist there.
       check toSeq(walkDir(projectRoot)).mapIt(it.path.extractFilename) ==
         @["reprobuild.nim"]
+
+      # The real extractor must reuse shared objects even when the interface
+      # artifact cache is bypassed. Keep the process-wide compiler pin intact.
+      putEnv("REPRO_TEST_NIM_FAIL", "")
+      putEnv("REPROBUILD_RUNTIME_LIBRARY_PATH", oldRuntimeRpath)
+      putEnv("REPRO_PROVIDER_NIMCACHE_MODE", "shared")
+
+      let first = extractInterfaceFromModule(modulePath,
+        outputRoot / "first.rbsz", outputRoot / "first.nim", sourceRoot,
+        scratchRoot, useExtractionCache = false, consumerRoot = projectRoot)
+      var objectTimes = initTable[string, Time]()
+      for path in walkDirRec(scratchRoot / "nimcache-interface"):
+        if path.endsWith(".o") and "extract_runner" notin path.extractFilename:
+          objectTimes[path] = getLastModificationTime(path)
+      require objectTimes.len >= 4
+      writeFile(cwdLog, "")
+      let second = extractInterfaceFromModule(modulePath,
+        outputRoot / "second.rbsz", outputRoot / "second.nim", sourceRoot,
+        scratchRoot, useExtractionCache = false, consumerRoot = projectRoot)
+      check first.interfaceFingerprint == second.interfaceFingerprint
+      var rebuilt = 0
+      for path, modified in objectTimes:
+        if not fileExists(path) or getLastModificationTime(path) != modified:
+          inc rebuilt
+      checkpoint "shared objects: " & $objectTimes.len & ", rebuilt: " & $rebuilt
+      check rebuilt == 0
+      let compilerCwds = readFile(cwdLog).splitLines().filterIt(it.len > 0)
+      require compilerCwds.len == 1
+      check compilerCwds[0].parentDir == scratchRoot / "m7-temp"
+      check not dirExists(compilerCwds[0])
+      check transientChildren(scratchRoot / "m7-temp",
+        "repro-interface-extract-").len == 0
+      check transientChildren(scratchRoot / "m7-temp", "extract_runner_").len == 0
