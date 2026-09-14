@@ -111,18 +111,64 @@
 ## fails. Every other exit code is the daemon-hosted build's or the full
 ## image's.
 ##
-## WHAT IS NOT DONE YET, so nobody reads a saving into a binary nothing runs.
+## HOW A USER REACHES IT, AND WHY IT IS NOT ``repro`` ITSELF.
 ##
-##   * NOTHING INSTALLS THIS. No packaging rule, dev-env hook or PATH
-##     placement puts ``repro-client`` where ``repro`` is invoked from, and
-##     ``REPRO_FULL_CLI`` is set only by the tests. Until that ships, the
-##     measured saving is a property of the binary, not of anyone's prompt.
-##     ``resolveFullCli``'s ``libexec/reprobuild/repro`` probe describes the
-##     intended installed layout; no packaging rule produces it today.
-##   * It is NOT a member of ``repro.nim``'s ``apps`` collection, so the
-##     graph-owned ``.#apps`` / ``.#release`` path does not build it — only
-##     ``scripts/build_apps.sh`` does, from ``apps/entrypoints.txt``.
-##     (``attestation-agent`` has the same gap; see the entrypoints file.)
+## This binary is a member of ``repro.nim``'s ``apps`` collection, so
+## ``.#apps`` / ``.#release`` build it, and every packaging route this
+## repository has copies ``build/bin/*`` wholesale — the Nix derivation's
+## ``installPhase``, the ``.deb``/``.rpm``/pacman payloads, the release
+## tarball, and ``install-on-distributions.sh``. So an install puts
+## ``repro-client`` in the SAME bin directory as ``repro``, which is exactly
+## what ``resolveFullCli``'s sibling probe resolves: an installed
+## ``repro-client`` finds its full image with no environment variable set by
+## anyone. Verified end to end in an install-shaped directory with
+## ``REPRO_FULL_CLI`` and ``REPRO_PUBLIC_CLI_PATH`` both unset.
+##
+## Invoking it is therefore OPT-IN: ``repro-client build …`` where a script
+## would have written ``repro build …``. It is deliberately not installed AS
+## ``repro``, and the reason is structural rather than cautious:
+##
+##   * The full image must be NAMED ``repro``. ``internalReproHelperCliPath``
+##     returns "" for any other basename — its second candidate,
+##     ``publicCliPath``, is derived from ``getAppFilename()`` in an ordinary
+##     install and ``spawnableWithInternalVerb`` rejects a path identical to
+##     the running image, so there is nothing left to return. The two callers
+##     then diverge, and NEITHER outcome is acceptable: interface extraction
+##     silently falls back to in-process work, while provider compile does not
+##     fall back at all — ``providerCompileBuildAction`` RAISES "cannot
+##     schedule the provider-compile edge for <recipe>: no `repro` image to
+##     spawn it with". That hard error is not hypothetical; it is what M5
+##     observed for a bootstrap installed as ``repro-bootstrap.exe`` and is
+##     quoted verbatim in ``apps/repro-trampoline``. So "``repro`` is the thin
+##     client" necessarily means moving the full image to a DIFFERENT
+##     DIRECTORY, not renaming it.
+##   * Moving it breaks two things that resolve relative to it and fail
+##     SILENTLY: ``siblingTryCompileProviderPath`` /
+##     ``siblingStandardProviderPath`` look for the Tier-2a/2b provider
+##     binaries in ``parentDir(publicCliPath)`` and degrade to per-project
+##     provider compile when they are absent, and the Nix derivation's
+##     ``wrapProgram`` loop covers ``$out/bin/*`` only, so a full image in
+##     ``libexec`` would lose all ~19 ``--set-default`` runtime variables
+##     that ``runtime_contract.ReprobuildWrapperVariables`` contracts for.
+##   * ``bin/repro`` is already SPOKEN FOR by a different milestone.
+##     ``apps/repro-trampoline`` — M5 SELF-HOST — is documented as "installed
+##     on ``PATH`` under the name ``repro``", delegating to
+##     ``<bin>/../libexec/reprobuild/repro``. That binary decides WHICH
+##     ``repro`` runs, from the committed ``repro.lock``. A daemon fast-path
+##     client has to sit downstream of that decision, not upstream of it, so
+##     the two cannot both own the name.
+##
+## The consequence is stated plainly: the beneficiaries are callers that
+## change ``repro build`` to ``repro-client build``, not every invocation on
+## the machine. ``resolveFullCli``'s ``libexec/reprobuild/repro`` probe is
+## kept because it is what makes this binary correct if it is ever placed
+## into the M5 layout.
+##
+## WHAT IS NOT DONE YET, so nobody reads a saving into a surface it lacks.
+##
+##   * INTERACTIVE TERMINAL BUILDS ARE STILL NOT SERVED, by construction —
+##     see the progress-rendering paragraph above. Widening that surface
+##     needs the renderer lifted into a library both clients can link.
 ##   * ``isProgressPayload`` SWALLOWS SLIGHTLY MORE than the full client's
 ##     ``tryRenderDaemonProgress`` does. That proc also requires the payload's
 ##     ``kind`` (and non-empty ``status``) to parse as the engine's enums, and

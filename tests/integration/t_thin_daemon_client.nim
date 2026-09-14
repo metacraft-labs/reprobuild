@@ -49,6 +49,23 @@
 ##     client must hand over to an image that still builds the project
 ##     correctly, not exit non-zero and not silently do nothing.
 ##
+##   * ``thin_client_serves_an_install_layout_with_no_environment`` — the
+##     REACHABILITY gate, and the one that makes the milestone's saving
+##     something a user can obtain rather than a property of a binary nobody
+##     runs. Every packaging route this repository has copies ``build/bin/*``
+##     wholesale, so an install puts ``repro-client`` in the same bin
+##     directory as ``repro``; this case reproduces exactly that adjacency and
+##     asserts a build is SERVED through it with ``REPRO_FULL_CLI`` and
+##     ``REPRO_PUBLIC_CLI_PATH`` both unset. Deleting the sibling arm of
+##     ``resolveFullCli`` reddens it — verified, not assumed.
+##
+##   * ``thin_client_keeps_a_terminal_build_on_the_full_client`` — the TTY
+##     guard, which is the condition that keeps an INTERACTIVE build off the
+##     thin path. It is tested against a real pty because ``isatty(2)`` is the
+##     only thing the guard reads and nothing short of a real terminal makes
+##     it answer true. Deleting the ``stderrIsTerminal()`` arm of
+##     ``shouldRouteToDaemon`` reddens it — verified, not assumed.
+##
 ##   * ``thin_client_does_not_link_the_build_engine`` — the structural
 ##     property the milestone's number depends on. Importing
 ##     ``repro_cli_support`` from ``apps/repro-client`` reddens it.
@@ -93,17 +110,23 @@ type
 
 proc runCaptured(exe: string; args: openArray[string]; cwd: string;
                  env: openArray[(string, string)] = [];
-                 unset: openArray[string] = []): CapturedRun =
+                 unset: openArray[string] = [];
+                 stderrTo = ""): CapturedRun =
   ## Run ``exe`` with stdout and stderr captured SEPARATELY (``runShell``
   ## merges them, and this suite has to compare the two streams
   ## independently) and with the ability to REMOVE names from the child
   ## environment, which no existing helper offers.
   ##
+  ## ``stderrTo`` redirects stderr somewhere other than the capture file —
+  ## the TTY-guard case points it at a pty slave, which is the only way to
+  ## make the child's ``isatty(2)`` answer true. ``result.errors`` is then
+  ## empty, because there is no file to read back.
+  ##
   ## The redirection is done by an ``exec``-ing ``/bin/sh``, so the status
   ## this proc returns is the status of ``exe`` and not of a shell that ran
   ## it — the same trap as reading a build's exit code through a pipe.
   let outPath = cwd / "captured-stdout"
-  let errPath = cwd / "captured-stderr"
+  let errPath = if stderrTo.len > 0: stderrTo else: cwd / "captured-stderr"
   var envTable = newStringTable()
   for key, value in envPairs():
     envTable[key] = value
@@ -121,7 +144,8 @@ proc runCaptured(exe: string; args: openArray[string]; cwd: string;
   defer: process.close()
   result.code = process.waitForExit()
   result.output = if fileExists(outPath): readFile(outPath) else: ""
-  result.errors = if fileExists(errPath): readFile(errPath) else: ""
+  result.errors =
+    if stderrTo.len == 0 and fileExists(errPath): readFile(errPath) else: ""
 
 proc daemonEnv(tempRoot, endpoint: string): seq[(string, string)] =
   @[
@@ -194,6 +218,32 @@ proc freshProject(tempRoot: string): string =
 ## job is to record that it was reached and with which argv.
 const FallbackMarker = "REPRO-CLIENT-HANDED-OVER"
 
+when defined(posix):
+  ## A real pty, for the TTY guard. ``isatty(2)`` is the only thing
+  ## ``shouldRouteToDaemon`` reads on that arm, and nothing but a terminal
+  ## device makes it answer true — not a pipe, not a file, not an environment
+  ## variable. These four are POSIX and live in ``<stdlib.h>``; Nim's
+  ## ``std/posix`` does not declare them.
+  import std/posix as ptyPosix
+
+  proc posix_openpt(oflag: cint): cint
+    {.importc: "posix_openpt", header: "<stdlib.h>".}
+  proc grantpt(fd: cint): cint {.importc: "grantpt", header: "<stdlib.h>".}
+  proc unlockpt(fd: cint): cint {.importc: "unlockpt", header: "<stdlib.h>".}
+  proc ptsname(fd: cint): cstring {.importc: "ptsname", header: "<stdlib.h>".}
+
+  proc openPtySlavePath(): tuple[master: cint, slave: string] =
+    ## Returns the master fd — which the CALLER must keep open for the slave
+    ## to stay usable — and the filesystem path of its slave side, which a
+    ## shell redirection can open.
+    let master = posix_openpt(ptyPosix.O_RDWR or ptyPosix.O_NOCTTY)
+    doAssert master >= 0, "posix_openpt failed"
+    doAssert grantpt(master) == 0, "grantpt failed"
+    doAssert unlockpt(master) == 0, "unlockpt failed"
+    let name = ptsname(master)
+    doAssert name != nil, "ptsname failed"
+    (master, $name)
+
 proc writeFallbackScript(path: string) =
   writeFile(path,
     "#!/bin/sh\n" &
@@ -247,6 +297,73 @@ suite "MAC-1 thin daemon client":
         # the full client's parsed target and the thin client's working-dir
         # fallback. Equal roots means the same client composed both requests.
         check roots[0] != roots[1]
+
+    test "integration_thin_client_serves_an_install_layout_with_no_environment":
+      # WHAT THIS IS FOR. MAC-1's saving is only real if something a user
+      # actually runs reaches the thin client. Nothing sets `REPRO_FULL_CLI`
+      # outside this suite, and nothing is going to: what makes an installed
+      # `repro-client` work is that every packaging route — the Nix
+      # derivation's `installPhase`, the .deb/.rpm/pacman payloads, the
+      # release tarball, `install-on-distributions.sh` — copies
+      # `build/bin/*` WHOLESALE, so the thin client lands in the same bin
+      # directory as `repro` and `resolveFullCli`'s sibling probe finds it.
+      #
+      # That adjacency is the whole delivery mechanism, so it is gated here
+      # rather than left to the packaging layer's own tests: those check that
+      # files are installed, not that this binary can still name its full
+      # image once they are.
+      #
+      # THE LAYOUT IS BUILT, NOT MOCKED. `repro-client` is COPIED (a real
+      # file, so `getAppFilename()` is inside the install dir and
+      # `thinClientDir()` answers with it) and `repro` is SYMLINKED (22 MB;
+      # the probe only needs `fileExists`, and every digest the daemon
+      # handshake takes follows the link to the same bytes).
+      let tempRoot = createTempDir("repro-mac1-install", "")
+      let endpoint = daemonSocketEndpoint("mac1-install")
+      defer:
+        stopDaemon(tempRoot, endpoint)
+        removeDirEventually(tempRoot)
+      createDir(tempRoot / "state")
+      createDir(tempRoot / "store")
+
+      let installBin = tempRoot / "bin"
+      createDir(installBin)
+      let installedThin = installBin / addFileExt("repro-client", ExeExt)
+      copyFile(thinCliBin(), installedThin)
+      setFilePermissions(installedThin,
+        {fpUserRead, fpUserWrite, fpUserExec})
+      createSymlink(fullCliBin(), installBin / addFileExt("repro", ExeExt))
+
+      let project = freshProject(tempRoot)
+      # NOTE WHAT IS NOT IN THIS ENVIRONMENT: neither `REPRO_FULL_CLI` nor
+      # `REPRO_PUBLIC_CLI_PATH`. If `resolveFullCli` cannot name the full
+      # image from the layout alone, `handOver` reports "no full repro image
+      # to fall back to" and exits 127 — so a broken probe cannot be
+      # mistaken for a working one here.
+      let run = runCaptured(installedThin, buildArgs(project, tempRoot),
+        tempRoot,
+        @[("REPRO_DAEMON_ENDPOINT", endpoint),
+          ("REPRO_DAEMON_STATE_DIR", tempRoot / "state"),
+          ("REPROBUILD_STORE_ROOT", tempRoot / "store")],
+        unset = ["REPRO_FULL_CLI", "REPRO_PUBLIC_CLI_PATH"])
+      checkpoint("stdout:\n" & run.output)
+      checkpoint("stderr:\n" & run.errors)
+      check run.code == 0
+      check not run.errors.contains("no full repro image to fall back to")
+      check fileExists(project / "dist" / "copied.txt")
+
+      # ...and it was SERVED, not quietly handed over. Same discriminator as
+      # the parity case: the thin client leaves `projectRoot` empty so the
+      # daemon's `workingDir` fallback applies, and the full client fills it
+      # from the parsed target. Exactly one build session, recorded against
+      # the WORKING DIRECTORY rather than the project path, is a session the
+      # thin client composed.
+      let roots = daemonBuildSessionProjectRoots(tempRoot, endpoint)
+      checkpoint("daemon build sessions: " & roots.join(" | "))
+      check roots.len == 1
+      if roots.len == 1:
+        check roots[0] != project
+        check roots[0].endsWith(lastPathPart(tempRoot))
 
     test "integration_thin_client_falls_back_to_a_working_build_when_the_daemon_cannot_be_reached":
       let tempRoot = createTempDir("repro-mac1-fallback", "")
@@ -376,6 +493,74 @@ suite "MAC-1 thin daemon client":
     # this shape would have exec'd the fallback with no daemon work at all
     # and this directory would not exist.
     check dirExists(tempRoot / "runtime")
+
+  when defined(posix):
+    test "integration_thin_client_keeps_a_terminal_build_on_the_full_client":
+      # THE GUARD THIS PINS, and why it is load-bearing rather than cautious.
+      #
+      # `clearProgressLine` and `clearNativeProgress` in `repro_cli_support`
+      # are gated on `renderer.ansi` / `renderer.nativeProgress` — both derived
+      # from `supportsAnsiProgress()`, i.e. `isatty(stderr)` — and NOT on
+      # `renderer.enabled`. So the full client under `--progress=quiet` writes
+      # "\r\e[2K" per diagnostic and an OSC 9;4 reset at the end WHEN STDERR IS
+      # A TERMINAL, while the thin client's reproduction writes a bare "\r".
+      # Routing a terminal build would therefore put different bytes on stderr
+      # for the same command. `shouldRouteToDaemon`'s `stderrIsTerminal()` arm
+      # is what prevents that, and until this case existed nothing failed when
+      # it was removed.
+      #
+      # BOTH ARMS ARE RUN IN ONE CASE ON PURPOSE. A TTY-only assertion is
+      # satisfied by a gate that rejects everything — which is exactly the
+      # mutation the suite's other cases are built to survive. The contrast is
+      # the evidence: same binary, same argv, same environment, and the ONLY
+      # difference is what fd 2 is attached to.
+      let tempRoot = createTempDir("repro-mac1-tty", "")
+      defer: removeDirEventually(tempRoot)
+      let fallback = tempRoot / "fallback.sh"
+      writeFallbackScript(fallback)
+      createDir(tempRoot / "state")
+
+      proc runWith(label, stderrTo: string): string =
+        ## Returns the runtime directory the client was pointed at, after
+        ## checking it reached the fallback. Whether that directory EXISTS is
+        ## the witness of which path it took: `startUserDaemon` creates the
+        ## endpoint's parent before it launches anything, and an invocation the
+        ## gate rejected never calls it.
+        let runtimeDir = tempRoot / ("rt-" & label)
+        check not dirExists(runtimeDir)
+        let run = runCaptured(thinCliBin(),
+          @["build", ".", "--progress=quiet"], tempRoot,
+          @[("REPRO_FULL_CLI", fallback),
+            ("REPRO_DAEMON_ENDPOINT", runtimeDir / "repro-daemon.sock"),
+            ("REPRO_DAEMON_STATE_DIR", tempRoot / "state"),
+            ("REPROBUILD_PROGRESS", "")],
+          stderrTo = stderrTo)
+        checkpoint(label & " stdout:\n" & run.output)
+        # 23 and the marker both come from the fallback script, so an arm that
+        # passes these really did end up at the full image.
+        check run.code == 23
+        check run.output.contains(FallbackMarker)
+        runtimeDir
+
+      # Arm 1: stderr on a REAL pty. The master must stay open for the whole
+      # run or the slave becomes unusable mid-invocation.
+      let (master, slavePath) = openPtySlavePath()
+      var ttyRuntime: string
+      try:
+        ttyRuntime = runWith("tty", slavePath)
+      finally:
+        discard ptyPosix.close(master)
+      # Handed over WITHOUT touching the daemon: the gate rejected the shape.
+      checkpoint("tty arm: runtime dir must not exist: " & ttyRuntime)
+      check not dirExists(ttyRuntime)
+
+      # Arm 2: the identical invocation with stderr on a plain file. This one
+      # IS routed, so the client reaches `startUserDaemon` and the directory
+      # appears. Without this arm the case above would stay green under a gate
+      # that refused every invocation.
+      let fileRuntime = runWith("file", "")
+      checkpoint("file arm: runtime dir must exist: " & fileRuntime)
+      check dirExists(fileRuntime)
 
   test "integration_thin_client_does_not_link_the_build_engine":
     # The milestone's whole premise. `repro` is ~16 MB with ~12,000

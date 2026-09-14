@@ -392,6 +392,45 @@ stdenv.mkDerivation (finalAttrs: {
         --set-default CLINGO_PREFIX ${clingo} \
         --set-default REPRO_NIM_COMPILER ${nimFork}/bin/nim
     done
+
+    # Dependency-Attribution MAC-1 — name the full image for `repro-client`.
+    #
+    # WHAT GOES WRONG WITHOUT THIS, and it is not cosmetic. `repro-client`
+    # resolves the full CLI by probing `<bin>/../libexec/reprobuild/repro`
+    # and then its own sibling `<bin>/repro`. In an unwrapped install
+    # (.deb/.rpm/tarball/~/.local/bin) the sibling IS the full image and the
+    # probe is exact. Here it is NOT: the loop above has just replaced
+    # `$out/bin/repro` with a wrapper SCRIPT and moved the real 22 MB image
+    # to `$out/bin/.repro-wrapped`.
+    #
+    # That matters because the path each client hands `startUserDaemon`
+    # is the path whose DIGEST is compared against the running daemon's
+    # (`expectedDaemonRunningDigestHex`). The full CLI passes
+    # `getAppFilename()`, i.e. `.repro-wrapped`. A `repro-client` that
+    # passed the wrapper script would compute a different digest, conclude
+    # the daemon is stale, and shut it down -- and the next `repro build`
+    # would conclude the same in reverse. Alternating the two commands
+    # would restart the daemon every time, which destroys precisely the
+    # warm daemon this binary exists to exploit.
+    #
+    # Pointing the FIRST probe at the unwrapped image makes both clients
+    # name the same bytes, so the digests agree and no restart is
+    # triggered. `fileDigestHex` follows the symlink, so it is the image's
+    # digest and not the link's.
+    #
+    # `.<name>-wrapped` is makeWrapper's own convention
+    # (nixpkgs `setup-hooks/make-wrapper.sh`: `hidden="$(dirname
+    # "$prog")/.$(basename "$prog")"-wrapped`). It is asserted rather than
+    # assumed: if nixpkgs ever changes it, this fails the build here
+    # instead of shipping a package whose daemon restarts on every other
+    # invocation.
+    test -e "$out/bin/.repro-wrapped" || {
+      echo "expected makeWrapper to leave the unwrapped repro image at" \
+           "$out/bin/.repro-wrapped; the hidden-name convention changed." >&2
+      exit 1
+    }
+    mkdir -p "$out/libexec/reprobuild"
+    ln -sfn "$out/bin/.repro-wrapped" "$out/libexec/reprobuild/repro"
   '';
 
   # Exposed so a consumer that has to compile against the SAME prefixes this

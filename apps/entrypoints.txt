@@ -85,7 +85,9 @@ attestation-agent apps/attestation-agent/attestation_agent.nim
 # but it is NOT "a third of the saving": the end-to-end saving is ~20 ms and
 # this is 4% of it. Do not quote it as the former.
 #
-# NOT in `repro.nim`'s `apps` collection, so `.#apps` / `.#release` does not
-# build it -- only this file does. `attestation-agent` above has the same gap.
-# Closing both is a follow-up; until then a release image has no repro-client.
+# Both this row and `attestation-agent` above are now ALSO members of
+# `repro.nim`'s `apps` collection, so `.#apps` / `.#release` build them and a
+# release image carries them. `--opt:size` is the one flag on this row with no
+# counterpart there: `nim.c` has no slot for it. See the comment on
+# `reprobuild.apps.repro-client` for why that is acceptable.
 repro-client apps/repro-client/repro_client.nim --opt:size --define:reproVendoredHash
