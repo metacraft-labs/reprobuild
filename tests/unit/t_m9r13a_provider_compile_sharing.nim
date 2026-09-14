@@ -92,10 +92,11 @@
 ## pins the mechanism the smoke depends on; the smoke pins the end-to-
 ## end effect.
 
-import std/[os, osproc, sequtils, streams, strutils, times, unittest]
+import std/[os, osproc, sequtils, streams, strutils, tempfiles, times, unittest]
 
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_interface_artifacts
+import repro_hash
 import repro_tool_profiles
 
 const
@@ -321,6 +322,50 @@ suite "bootstrap compiler environment paths":
 
 suite "M9.R.13a provider-compile cache sharing":
 
+  test "provider recompilation observes a changed local C header":
+    let scratch = createTempDir("repro-provider-header-change-", "")
+    defer: removeDir(scratch)
+    let source = scratch / "repro.nim"
+    let header = scratch / "value.h"
+    let output = scratch / addFileExt("provider", ExeExt)
+    writeFile(source, """
+proc headerValue(): cint {.importc: "header_value", header: "\"value.h\"".}
+echo headerValue()
+""")
+    withSessionEnvBlock("header-change-" & $getCurrentProcessId()):
+      for value in [11, 23]:
+        writeFile(header, "static inline int header_value(void) { return " &
+          $value & "; }\n")
+        let compiled = compileProviderBinary(source, output,
+          default(ContentDigest), scratchDir = scratch,
+          useFreshnessCache = false)
+        check compiled.executionResult.exitCode == 0
+        let execution = execCmdEx(quoteShell(output))
+        check execution.exitCode == 0
+        check execution.output.strip == $value
+
+  test "provider recompilation rejects a removed local C header":
+    let scratch = createTempDir("repro-provider-header-remove-", "")
+    defer: removeDir(scratch)
+    let source = scratch / "repro.nim"
+    let header = scratch / "value.h"
+    let output = scratch / addFileExt("provider", ExeExt)
+    writeFile(source, """
+proc headerValue(): cint {.importc: "header_value", header: "\"value.h\"".}
+echo headerValue()
+""")
+    writeFile(header, "static inline int header_value(void) { return 11; }\n")
+    withSessionEnvBlock("header-remove-" & $getCurrentProcessId()):
+      discard compileProviderBinary(source, output,
+        default(ContentDigest), scratchDir = scratch,
+        useFreshnessCache = false)
+      check execCmdEx(quoteShell(output)).output.strip == "11"
+      removeFile(header)
+      expect OSError:
+        discard compileProviderBinary(source, output,
+          default(ContentDigest), scratchDir = scratch,
+          useFreshnessCache = false)
+
   test "test_m9r13a_provider_compile_command_nimcache_independent_of_module_path":
     ## Arm 1: ``providerCompileCommand``'s ``--nimcache:`` directory
     ## does NOT depend on the recipe's modulePath or outputBinaryPath.
@@ -409,8 +454,9 @@ suite "M9.R.13a provider-compile cache sharing":
 
     putEnv(ProviderParallelBuildEnv, "4")
     let command = boundedNimCompileCommand()
-    check command.len == 3
+    check command.len == 4
     check command[1 .. 2] == @["c", "--parallelBuild:4"]
+    check command[3] == "--forceBuild:on"
 
   test "concurrent provider commands serialize a shared nimcache":
     let scratch = getTempDir() /

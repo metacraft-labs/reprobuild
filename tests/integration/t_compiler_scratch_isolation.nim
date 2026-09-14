@@ -238,8 +238,9 @@ when defined(posix) and isNixSupported:
       check toSeq(walkDir(projectRoot)).mapIt(it.path.extractFilename) ==
         @["reprobuild.nim"]
 
-      # The real extractor must reuse shared objects even when the interface
-      # artifact cache is bypassed. Keep the process-wide compiler pin intact.
+      # Bypassing the complete artifact cache must still preserve the public
+      # interface and scratch isolation. C-object reuse alone is not a safety
+      # contract: Nim's incremental check misses local header changes (below).
       putEnv("REPRO_TEST_NIM_FAIL", "")
       putEnv("REPROBUILD_RUNTIME_LIBRARY_PATH", oldRuntimeRpath)
       putEnv("REPRO_PROVIDER_NIMCACHE_MODE", "shared")
@@ -262,7 +263,6 @@ when defined(posix) and isNixSupported:
         if not fileExists(path) or getLastModificationTime(path) != modified:
           inc rebuilt
       checkpoint "shared objects: " & $objectTimes.len & ", rebuilt: " & $rebuilt
-      check rebuilt == 0
       let compilerCwds = readFile(cwdLog).splitLines().filterIt(it.len > 0)
       require compilerCwds.len == 1
       check compilerCwds[0].parentDir == scratchRoot / "m7-temp"
@@ -270,3 +270,26 @@ when defined(posix) and isNixSupported:
       check transientChildren(scratchRoot / "m7-temp",
         "repro-interface-extract-").len == 0
       check transientChildren(scratchRoot / "m7-temp", "extract_runner_").len == 0
+
+      # Keep the process-wide compiler observer alive for this regression too.
+      block:
+        let root = createTempDir("repro-interface-header-change-", "")
+        defer: removeDir(root)
+        let source = root / "repro.nim"
+        let header = root / "value.h"
+        let expected = root / "expected.txt"
+        writeFile(source, "import std/strutils\nimport repro_project_dsl\n" &
+          "proc headerValue(): cint {.importc: \"header_value\", header: " &
+          ("\"" & header & "\"").escape & ".}\n" &
+          "doAssert $headerValue() == readFile(" & expected.escape & ").strip()\n" &
+          "package headerFixture:\n  build:\n    discard\n")
+        for value in [11, 23]:
+          checkpoint "interface C header value: " & $value
+          writeFile(header, "static inline int header_value(void) { return " &
+            $value & "; }\n")
+          writeFile(expected, $value)
+          let artifactPath = root / ($value & ".rbsz")
+          discard extractInterfaceFromModule(source, artifactPath,
+            root / ($value & ".nim"), getCurrentDir(), root / "scratch",
+            useExtractionCache = false, consumerRoot = root)
+          check fileExists(artifactPath)
