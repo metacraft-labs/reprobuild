@@ -1806,6 +1806,113 @@ proc runPreInstallActions*(packageId, destDir: string;
           "Expand-InnoArchive source missing: " & src)
       extractInnoSetup(packageId, src, outDir, innounpExe)
 
+# ---------------------------------------------------------------------------
+# W16 — handing a Windows path to ``tar``
+# ---------------------------------------------------------------------------
+#
+# A Windows path is NOT safe as a ``tar`` command-line operand, for TWO
+# independent reasons. Both were measured on this host against GNU tar 1.35
+# (Git for Windows, ``scoop/apps/git/current/usr/bin/tar.exe``) and bsdtar
+# 3.8.8 / libarchive 3.8.8 (``C:\Windows\System32\tar.exe``).
+#
+# (1) GNU tar UNQUOTES file and member names given on the command line —
+#     ``--unquote`` is the DEFAULT — so every backslash that precedes an
+#     escape letter is consumed. Driving the real ``zekZstdPipe`` arm at the
+#     checked-in M6 fixture, changing only the destination's leaf name:
+#
+#       dest leaf          files in dest   verdict
+#       m6-zstd-pipe-AAA   11              ok (exit 0)
+#       extra-AAA          11              ok (\e is not a GNU escape)
+#       alpha bravo foxtrot nope rvw13 tango verbose
+#                          0               tar exit=2, "Cannot open"
+#       0zero-AAA          0 IN THE DEST   exit 0 — NO ERROR
+#
+#     The ``\0`` row is the dangerous one: the NUL terminates tar's C string,
+#     so ``-C`` names the PARENT, tar chdirs into it, extracts and exits 0.
+#     The package's contents land OUTSIDE the prefix that was asked for, with
+#     a success verdict. Measured: ``.PKGINFO`` and the whole ``mingw64/``
+#     tree appeared next to the destination, which stayed empty.
+#
+#     It is not only the leaf: ANY component can trigger it. The scratch root
+#     this was first measured in was ``…\7b45a1a7-…\scratchpad\…`` and GNU tar
+#     read ``\7`` as an OCTAL escape, poisoning every row before the leaf even
+#     mattered.
+#
+#     bsdtar does NOT unquote — measured 11/11 with raw backslashes.
+#
+# (2) GNU tar reads an operand of ``-f`` whose first ``:`` precedes any ``/``
+#     as a REMOTE ``host:path`` spec and tries to rsh to it. So ``C:\…`` and
+#     ``C:/…`` BOTH fail:
+#
+#       tar (child): Cannot connect to C: resolve failed
+#       tar: Child returned status 128                      (exit 2)
+#
+#     A ``./`` prefix does not help (measured: fails on both tars). The only
+#     remedy is ``--force-local``, which is a GNU extension — bsdtar answers
+#     "Option --force-local is not supported" and exits 1. bsdtar itself needs
+#     no help here: it opened ``C:/…`` and ``C:\…`` alike, 4/4 files.
+#
+# THE REMEDY, and why this one:
+#
+#   * ``tarOperand`` removes every backslash on Windows. That removes the
+#     TRIGGER rather than asking tar to behave, so it is correct on GNU tar,
+#     on bsdtar, and on anything else — measured 10/10 destinations on both.
+#     ``--no-unquote`` also works on GNU tar (measured 10/10) but is a GNU
+#     extension: bsdtar rejects it AND, because it then exits without reading
+#     its stdin, a piped bsdtar given that flag HANGS the copy loop. (That is
+#     not hypothetical — the probe that measured it hung, and is the same
+#     shape the ``sawDecompressorEof`` guard below exists for.) So
+#     ``--no-unquote`` is not usable where ``tar`` may be bsdtar, which is
+#     exactly the case here: both tars are discovered with ``findExe("tar")``.
+#
+#   * ``--force-local`` IS used, but only in an attempt that is allowed to
+#     fail: ``runTarExtract`` tries the GNU-flavoured argv first and retries
+#     without the GNU-only flags, so a bsdtar host reaches its own shape.
+#
+# KNOWN RESIDUAL, stated rather than hidden: on POSIX a backslash is a legal
+# FILENAME character, so ``tarOperand`` cannot rewrite it there without
+# corrupting a path that means what it says. A POSIX destination whose name
+# literally contains ``\t`` is therefore still mis-read by GNU tar. Nothing in
+# this adapter's store layout can produce one (prefix paths are built from
+# package names and versions), the remedy would be the GNU-only
+# ``--no-unquote`` ruled out above, and no such path has been observed — but
+# it is a residual, not a solved case.
+
+proc tarOperand(path: string): string =
+  ## W16: a path about to be handed to ``tar`` as a command-line operand.
+  ## Windows only — see the block comment above for why this must NOT touch
+  ## POSIX paths.
+  when defined(windows):
+    path.replace('\\', '/')
+  else:
+    path
+
+proc runTarExtract(tarExe: string; gnuOnlyFlags, tailArgs: openArray[string]):
+    tuple[output: string, exitCode: int, attempts: string] =
+  ## Run ``tar`` twice at most: once with the GNU-only flags prepended, then —
+  ## only if that failed — without them, for bsdtar. Returns the SECOND
+  ## attempt's result when there is one, plus a transcript of both so a
+  ## failure names what was tried rather than only that it did not work.
+  ##
+  ## No shell: the argv is assembled and quoted per element, and no element
+  ## carries an operator. ``scripts/check_shell_command_strings.sh`` is the
+  ## gate on that and it sees this site.
+  var gnuArgv = @[quoteShell(tarExe)]
+  for f in gnuOnlyFlags: gnuArgv.add(quoteShell(f))
+  for a in tailArgs: gnuArgv.add(quoteShell(a))
+  let gnuRes = execCmdEx(gnuArgv.join(" "))
+  if gnuRes.exitCode == 0:
+    return (gnuRes.output, 0, "")
+  var plainArgv = @[quoteShell(tarExe)]
+  for a in tailArgs: plainArgv.add(quoteShell(a))
+  let plainRes = execCmdEx(plainArgv.join(" "))
+  let transcript =
+    "\n  attempt 1 (GNU: " & gnuOnlyFlags.join(" ") & ") exit=" &
+    $gnuRes.exitCode & ": " & gnuRes.output.strip() &
+    "\n  attempt 2 (no GNU-only flags) exit=" & $plainRes.exitCode & ": " &
+    plainRes.output.strip()
+  (plainRes.output, plainRes.exitCode, transcript)
+
 proc extractTar(packageId, archivePath, destDir, format: string) =
   createDir(extendedPath(destDir))
   let tar = findExe("tar")
@@ -1821,12 +1928,16 @@ proc extractTar(packageId, archivePath, destDir, format: string) =
       raiseExtractFailed(packageId, archivePath, format,
         "unsupported tar format: " & format)
       ""  # unreachable
-  let command = quoteShell(tar) & " " & flag & " " & quoteShell(archivePath) &
-    " -C " & quoteShell(destDir)
-  let res = execCmdEx(command)
+  # W16: both operands go through ``tarOperand``, and ``--force-local`` is
+  # offered to a GNU tar that would otherwise read ``C:\…`` as ``host:path``.
+  let res = runTarExtract(tar, ["--force-local"],
+    [flag, tarOperand(archivePath), "-C", tarOperand(destDir)])
   if res.exitCode != 0:
+    # When there were two attempts the transcript already carries BOTH
+    # outputs, so printing ``res.output`` beside it would repeat the second.
     raiseExtractFailed(packageId, archivePath, format,
-      "tar exited " & $res.exitCode & "\n" & res.output)
+      "tar exited " & $res.exitCode &
+      (if res.attempts.len > 0: res.attempts else: "\n" & res.output))
 
 # ---------------------------------------------------------------------------
 # M6 (Realize-Closure-And-Catalog-Expansion spec) — .tar.zst extraction
@@ -2047,27 +2158,29 @@ proc extractTarZst*(packageId, archivePath, destDir: string;
     except OSError:
       discard
   of zekTarFilter:
-    # GNU tar: ``tar --zstd -xf`` (explicit filter).
-    # bsdtar: ``tar -xf`` (libarchive auto-detects the zstd envelope).
-    # We try the explicit filter first because it short-circuits
-    # libarchive's auto-detection cost on GNU tar; if --zstd is
-    # rejected (bsdtar prints "Option --zstd is not supported") we
-    # fall back to bare ``-xf``.
-    let cmdExplicit = quoteShell(extractor.tarExe) & " --zstd -xf " &
-      quoteShell(archivePath) & " -C " & quoteShell(destDir)
-    let resExplicit = execCmdEx(cmdExplicit)
-    if resExplicit.exitCode == 0:
-      discard
-    else:
-      let cmdAuto = quoteShell(extractor.tarExe) & " -xf " &
-        quoteShell(archivePath) & " -C " & quoteShell(destDir)
-      let resAuto = execCmdEx(cmdAuto)
-      if resAuto.exitCode != 0:
-        raiseExtractFailed(packageId, archivePath, "tar.zst",
-          "tar extraction failed (both --zstd and auto-detect):\n" &
-          "  --zstd exit=" & $resExplicit.exitCode & ": " &
-          resExplicit.output & "\n" &
-          "  -xf exit=" & $resAuto.exitCode & ": " & resAuto.output)
+    # The two shapes this arm can meet, tried in order:
+    #   GNU tar: ``tar --force-local --zstd -xf <archive> -C <dest>``
+    #   bsdtar:  ``tar -xf <archive> -C <dest>`` (libarchive auto-detects the
+    #            zstd envelope, and rejects both GNU-only flags above).
+    #
+    # W16: this is the arm a Git-for-Windows host NORMALLY takes — discovery
+    # step (ii) — and it carried the same two Windows defects the pipe arm
+    # did. ``quoteShell`` does not save it: on Windows it only adds quotes
+    # when the string contains WHITESPACE, and the argv parser strips those
+    # before tar sees the value, so tar unquotes exactly as it would have.
+    # Both operands therefore go through ``tarOperand``, and ``--force-local``
+    # joins ``--zstd`` in the GNU-flavoured attempt. See the W16 block comment
+    # above ``tarOperand`` for the measurements.
+    #
+    # Nothing was seen here before because this arm's M6 tests extract into
+    # ``build/test-tmp/…`` — a relative, forward-slash-rooted path with no
+    # backslash to unquote and no drive letter to mistake for a host.
+    let res = runTarExtract(extractor.tarExe, ["--force-local", "--zstd"],
+      ["-xf", tarOperand(archivePath), "-C", tarOperand(destDir)])
+    if res.exitCode != 0:
+      raiseExtractFailed(packageId, archivePath, "tar.zst",
+        "tar extraction failed (both the GNU and the bsdtar shape):" &
+        res.attempts)
   of zekZstdPipe:
     # ``zstd -dc <archive>`` feeding ``tar -xf - -C <destDir>``, with the pipe
     # connected IN THIS PROCESS.
@@ -2094,6 +2207,16 @@ proc extractTarZst*(packageId, archivePath, destDir: string;
     #
     # Two real processes and a real copy loop have no shell in them, so the
     # arm now behaves the same way on every host.
+    #
+    # W16: removing the shell was not enough. The destination still reached
+    # GNU tar as a raw Windows path, and GNU tar UNQUOTES command-line names
+    # by default — seven leaf letters made the extraction fail and ``\0`` made
+    # it succeed INTO THE PARENT. ``tarOperand`` strips the backslashes. See
+    # the W16 block comment above ``tarOperand`` for the measured table.
+    #
+    # Only the destination needs it here: the archive never appears on tar's
+    # command line at all (``-f -`` is stdin), so this arm is immune to the
+    # ``host:path`` misreading that ``--force-local`` exists for.
     var zstdProc, tarProc: Process
     try:
       zstdProc = startProcess(extractor.zstdExe,
@@ -2103,7 +2226,7 @@ proc extractTarZst*(packageId, archivePath, destDir: string;
         "could not start " & extractor.zstdExe & ": " & err.msg)
     try:
       tarProc = startProcess(extractor.tarExeForPipe,
-        args = ["-xf", "-", "-C", destDir],
+        args = ["-xf", "-", "-C", tarOperand(destDir)],
         options = {poUsePath, poStdErrToStdOut})
     except CatchableError as err:
       zstdProc.terminate()

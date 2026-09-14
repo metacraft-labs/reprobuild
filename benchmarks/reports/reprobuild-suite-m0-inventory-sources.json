@@ -1094,10 +1094,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 716,
+      "integration": 717,
       "platform/destructive": 115,
       "pure unit": 575,
-      "unclassified": 166
+      "unclassified": 165
     },
     "graphOwnedTestArtifacts": [
       {
@@ -9701,8 +9701,8 @@
     },
     {
       "binary": "build/test-bin/t_builtin_adapter_msys2",
-      "class": "unclassified",
-      "classificationReason": "mutates the process environment",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -9715,7 +9715,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
