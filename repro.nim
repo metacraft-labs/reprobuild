@@ -747,6 +747,12 @@ package reprobuild:
   executable reproStandardProvider:
     name: "repro-standard-provider"
 
+  executable attestationAgent:
+    name: "attestation-agent"
+
+  executable reproClient:
+    name: "repro-client"
+
   # Bootstrap-And-Self-Build B2: test-helper executables.
   #
   # Three helper binaries that more than one test suite reuses. Before
@@ -1693,6 +1699,55 @@ package reprobuild:
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-harvest-apt",
       actionId = "reprobuild.apps.repro-harvest-apt"))
+
+    # The last two rows of ``apps/entrypoints.txt``. Both were listed there
+    # and absent HERE, so ``.#apps`` / ``.#release`` did not build them and a
+    # release image shipped neither — while ``scripts/build_apps.sh`` did
+    # build them, which is why the drift survived: every developer's
+    # ``build/bin`` had the binaries and only a release made from the graph
+    # did not.
+    #
+    # That also made ``t_b1_repro_build_apps_collection``'s "engine
+    # materialises every apps/entrypoints.txt binary" case green for the
+    # wrong reason: it asserts ``fileExists`` after ``repro build .#apps``,
+    # and the bootstrap had already left both files on disk. With the two
+    # edges below the assertion is about what the engine produced.
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/attestation-agent/attestation_agent.nim",
+      binary = "build/bin/attestation-agent",
+      defines = @["release"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/attestation-agent",
+      actionId = "reprobuild.apps.attestation-agent"))
+
+    # Dependency-Attribution MAC-1 — the thin daemon client. This edge is what
+    # puts ``repro-client`` into ``build/bin``, and therefore into every
+    # packaging route: the Nix derivation, the ``.deb``/``.rpm``/pacman
+    # packages, the release tarball and ``install-on-distributions.sh`` all
+    # copy ``build/bin/*`` wholesale, so the binary lands NEXT TO ``repro`` in
+    # whichever bin directory the install uses. That adjacency is not
+    # incidental — it is what ``resolveFullCli``'s sibling probe resolves, so
+    # an installed ``repro-client`` finds its full image with no environment
+    # variable set by anyone.
+    #
+    # ``reproVendoredHash`` is carried over from the entrypoints row because
+    # it is the one flag there with a MEASURED cost (0.83 ms of this binary's
+    # ~2.5 ms start, by avoiding two dylib loads). ``--opt:size`` is NOT
+    # carried over: ``nim.c`` has no slot for ``--opt:size`` and inventing one
+    # for a single edge would widen the shared alias for no other caller. The
+    # loss is bounded — this edge builds with ``-d:release`` while the
+    # entrypoints row builds the DEBUG image the milestone's 802,880-byte
+    # figure was measured on, so the graph-built image is the smaller of the
+    # two either way.
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-client/repro_client.nim",
+      binary = "build/bin/repro-client",
+      defines = @["release", "reproVendoredHash"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv & @[("REPROBUILD_USE_SYSTEM_HASH_LIBS", "0")],
+      nimcache = "build/nimcache/repro-client",
+      actionId = "reprobuild.apps.repro-client"))
 
     let reprobuildNixDaemon = shell(
       command = "mkdir -p build/bin && " &

@@ -1,4 +1,4 @@
-import std/[os, strutils, times]
+import std/[os, sets, strutils, times]
 
 import repro_core
 
@@ -36,6 +36,33 @@ proc sanitizeUserDaemonRequestEnvironment*(
     let key = if split < 0: item else: item[0 ..< split]
     if key != ReproTestRunnerOwnerTokenEnv:
       result.add(item)
+
+proc daemonCarriedEnvironment*(): seq[string] =
+  ## Snapshot the user-facing CLI environment for the daemon-hosted build/watch
+  ## executor. Direct builds evaluate providers and resolve action
+  ## ``envPassthrough`` values against this environment; daemon builds must be
+  ## byte-for-byte equivalent even when a project declares an arbitrary name
+  ## that reprobuild could not know in advance.
+  ##
+  ## The request worker installs this snapshot only for the duration of one
+  ## session and restores its prior environment afterwards. The build engine
+  ## still filters each action down to its declared passthrough set. The wire
+  ## sanitizer removes the test runner's private ownership marker before any
+  ## request is encoded.
+  ##
+  ## THIS LIVES HERE, not in ``repro_cli_support``, because BOTH clients that
+  ## can compose a ``UserDaemonBuildRequest`` must produce the same snapshot:
+  ## the full ``repro`` image and the thin ``repro-client`` (MAC-1). The
+  ## request's environment feeds action fingerprints and cache keys, so two
+  ## independently-maintained snapshots would let the same command get
+  ## different cache decisions depending on which client the user ran.
+  var seen = initHashSet[string]()
+  for key, value in envPairs():
+    if key.len == 0 or seen.contains(key):
+      continue
+    seen.incl(key)
+    result.add(key & "=" & value)
+  result = sanitizeUserDaemonRequestEnvironment(result)
 
 type
   UserDaemonMessageKind* = enum
