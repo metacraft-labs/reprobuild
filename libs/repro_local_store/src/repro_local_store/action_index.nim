@@ -40,10 +40,39 @@ import shm_gset
 
 export shm_gset.InsertStatus, shm_gset.AttachFailure, shm_gset.shmGSetSupported
 
-const actionIndexSupported* = shmGSetSupported
+const actionIndexSupported* = shmGSetSupported and not defined(windows)
   ## Linux and macOS, via `mmap(MAP_SHARED)` and C11 atomics (§6.8). On any
   ## other platform no chain is created and the cache runs Tier-1 only, which
   ## is correct.
+  ##
+  ## WHY THIS IS NOT SIMPLY `shmGSetSupported`, WHICH IT ONCE WAS. The two
+  ## constants answer different questions and only used to agree by accident.
+  ## `shmGSetSupported` asks whether the grow-only SET can be mapped and
+  ## mutated; `actionIndexSupported` asks whether THIS module's chain
+  ## management can run, and that is a strictly stronger requirement. Everything
+  ## under the `when actionIndexSupported` arm below is POSIX: the anchor is
+  ## published with an exclusive `link(2)` (the create-or-attach race in
+  ## `tryCreateChain`), and `flattenChain` serialises flatteners with
+  ## `posix.open` + `flock(2)` on that anchor. Neither call exists on Win32.
+  ##
+  ## `nim-shm-gset` grew a Windows arm (`shm_gset/platform`: `MapViewOfFileEx`,
+  ## `DeleteFileW`, `LockFileEx`), which flipped `shmGSetSupported` true on
+  ## Windows and, through the old alias, silently selected this POSIX arm there.
+  ## The breakage is at the C stage rather than at `nim check` — Nim only emits
+  ## a proc that is reached — so it surfaces as
+  ## `implicit declaration of function 'link'` / `'flock'` from gcc in any
+  ## binary that actually touches the index, and not at all in one that merely
+  ## reads this constant.
+  ##
+  ## The narrowing is the fix rather than a workaround: §6.8 scopes this tier to
+  ## Linux and macOS, and the spec's status table books the "Windows
+  ## shared-memory arm" as an OPEN item whose note reads "Windows runs Tier-1
+  ## only, correct". Tier 1 is authoritative and reaches the identical decision
+  ## (§8 step 5, §10), so Windows loses a lookup accelerator and nothing else.
+  ## Porting the two calls (`CreateHardLinkW`, `LockFileEx`) would close that
+  ## open item, but it is a spec'd feature to be designed and measured, not a
+  ## build repair — and shipping it as one would have made the ☐ row silently
+  ## untrue.
 
 # --- §6.2 element layout ----------------------------------------------------
 #
