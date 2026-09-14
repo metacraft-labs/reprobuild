@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -19,6 +20,37 @@ HOST_DYNAMIC_LOADER_ENV = (
     "DYLD_FALLBACK_LIBRARY_PATH",
     "DYLD_INSERT_LIBRARIES",
 )
+
+
+def close_inherited_descriptors() -> None:
+    """Do not keep the launcher's locks or pipe writers alive between requests."""
+    if os.name != "posix":
+        return
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        try:
+            descriptors = [int(name) for name in os.listdir(directory) if name.isdecimal()]
+            break
+        except OSError:
+            continue
+    else:
+        import resource
+
+        _, limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if limit == resource.RLIM_INFINITY:
+            limit = os.sysconf("SC_OPEN_MAX")
+        descriptors = range(3, limit)
+
+    # Enumeration covers descriptors above a subsequently lowered soft limit.
+    # Non-inheritable descriptors may belong to the running interpreter itself.
+    for descriptor in descriptors:
+        if descriptor <= 2:
+            continue
+        try:
+            if os.get_inheritable(descriptor):
+                os.close(descriptor)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
 
 
 def host_tool_environment() -> dict[str, str]:
@@ -245,6 +277,7 @@ def serve(socket_path: str, idle_exit_ms: int) -> int:
 
 
 def main(argv: list[str]) -> int:
+    close_inherited_descriptors()
     parser = argparse.ArgumentParser()
     parser.add_argument("--idle-exit-ms", type=int, default=300000)
     parser.add_argument("--socket-path", default=default_socket_path())
