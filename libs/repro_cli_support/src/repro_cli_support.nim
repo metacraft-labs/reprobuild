@@ -6709,7 +6709,10 @@ proc selfSpawnIoMonitorPath*(publicCliPath = ""): string =
   ##
   ## So the only images accepted are ones somebody has ASSERTED are `repro` —
   ## an explicit ``publicCliPath``, or ``REPRO_PUBLIC_CLI_PATH`` — plus the
-  ## running image when it is actually named `repro`.
+  ## running image when it has DECLARED itself `repro`, which
+  ## ``runThinApp("repro")`` does for the real CLI and a test binary linking
+  ## the engine never does. See ``runningImageIsReproCli``: the assertion is
+  ## the image's own, not the name it was invoked under.
   let candidate =
     if publicCliPath.len > 0:
       os.normalizedPath(publicCliPath)
@@ -6734,9 +6737,10 @@ proc internalReproHelperCliPath(publicCliPath: string): string =
   ##
   ## Returns "" when neither is available, and that empty string is the whole
   ## point of this proc: the ONLY images that may be spawned with a `__repro-*`
-  ## internal verb are an image actually named `repro` and an explicitly
-  ## supplied CLI path. Anything else is some other program that does not
-  ## implement those verbs.
+  ## internal verb are an image that has DECLARED itself `repro` (see
+  ## ``runningImageIsReproCli`` — the declaration, not the filename) and an
+  ## explicitly supplied CLI path. Anything else is some other program that
+  ## does not implement those verbs.
   ##
   ## This used to end by returning the current image regardless of its name. An
   ## embedded caller with no `publicCliPath` — a TEST BINARY linking the engine
