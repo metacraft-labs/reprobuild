@@ -832,7 +832,7 @@ jobs:
           echo "release version: ${version}"
 
           if [ -z "${REPRO_PUBLISH_TARGET:-}" ]; then
-            echo "::warning::REPRO_PUBLISH_TARGET is not set, so there is no repository to publish to. Skipping repo metadata. Set it to r2:<bucket> (or s3://<bucket>/<prefix>) once infra/terraform/cloudflare/reprobuild-prod has been applied."
+            echo "::warning::REPRO_PUBLISH_TARGET is not set, so there is no repository to publish to. Skipping repo metadata. Set it to r2:<bucket> (or s3://<bucket>/<prefix>) once the metacraft-labs/infra root terraform/cloudflare/reprobuild-prod has been applied."
             exit 0
           fi
           if [ -z "${REPRO_RELEASE_SIGNING_KEY:-}" ] || [ -z "${REPRO_RELEASE_SIGNING_KEY_ID:-}" ]; then

@@ -383,16 +383,27 @@ from this checkout.
 2. **R2 buckets.** Cannot be provisioned without Cloudflare credentials.
    `--target local:<path>` and `--target r2:<bucket>` are the same code
    path; only the scheme differs.
-3. **Terraform.** `infra/terraform/cloudflare/reprobuild-prod/` is
-   written and reviewable. `terraform validate` **passes** against the
-   real `cloudflare/cloudflare v5.25.0` provider and `fmt -check` is
-   clean — neither needs credentials. **`terraform plan` was NOT run
-   against real credentials, and `apply` was not run.** See that
-   directory's README, which also records that `cloudflare/metacraft-prod`
-   does not exist (the real precedent is `codetracer-prod`) and that
-   **there is no `deb.codetracer.com`/`rpm.codetracer.com` configuration
-   anywhere in the workspace to mirror** — the per-ecosystem bucket layout
-   is new work.
+3. **Terraform.** The root is written and reviewable, but **it does not
+   live in this repository.** It was first authored here under
+   `infra/terraform/cloudflare/reprobuild-prod/`, which was the wrong
+   place: Cloudflare changes go through the documented Terraform
+   workflow in **`metacraft-labs/infra`**, so it was ported to
+   `terraform/cloudflare/reprobuild-prod/` there — beside the
+   `codetracer-prod` root, with its own `backends/cloudflare-reprobuild-prod.hcl`,
+   its own agenix token pair under
+   `machines/ci/secrets/cloudflare/reprobuild_api_token_*.age`, and a `root` matrix
+   leg in that repo's `.github/workflows/terraform-cloudflare-ci.yml` —
+   and the copy here was deleted. Nothing in this repository configures
+   Cloudflare any more.
+
+   `tofu validate` **passes** against the real
+   `cloudflare/cloudflare v5.25.0` provider and `fmt -check` is clean —
+   neither needs credentials. **`plan` was NOT run against real
+   credentials, and `apply` was not run.** See that root's README, which
+   also records that `cloudflare/metacraft-prod` does not exist (the real
+   precedent is `codetracer-prod`) and that **there is no
+   `deb.codetracer.com`/`rpm.codetracer.com` configuration anywhere in the
+   workspace to mirror** — the per-ecosystem bucket layout is new work.
 
    Re-checked independently for the M3 review with **OpenTofu 1.11.6**
    (nixpkgs would have had to build `terraform` itself from source on a
@@ -404,11 +415,26 @@ from this checkout.
    **five** of them `Invalid resource type ... cloudflare_r2_custom_domain`
    — one per bucket — and the rest `cloudflare_zone` schema changes
    (`zone` and `account_id` required, `name` unsupported). So the v5
-   requirement is forced by more than one resource, and somebody has to
-   reconcile it with `codetracer-prod`'s `~> 4.52` pin before either root
-   can borrow from the other; note that `codetracer-prod`'s own main.tf
-   already carries a **commented-out** `cloudflare_r2_custom_domain`
-   template, which cannot be uncommented under its current pin.
+   requirement is forced by more than one resource.
+
+   Re-confirmed a second time after the port, from the root's new home in
+   `infra`, with **OpenTofu 1.9.1** (`nix shell nixpkgs#opentofu`, the
+   form `docs/runbooks/Add-New-Environment.runbook.md` prescribes; the
+   repo's dev shell ships `opentofu` and no HashiCorp `terraform`):
+   identical results — `init -backend=false` resolves v5.25.0,
+   `validate` succeeds, `fmt -check -diff` is clean, and the `~> 4.52`
+   control still fails with exactly nine errors, five of them
+   `Invalid resource type`.
+
+   Somebody still has to reconcile the pin with `codetracer-prod`'s
+   `~> 4.52`: that root's own `main.tf` carries a **commented-out**
+   `cloudflare_r2_custom_domain` template which **cannot be uncommented
+   under its current pin**, so it is independently blocked on the same
+   v4 → v5 upgrade. That is now recorded as a known open item in
+   `infra`'s `docs/runbooks/Cloudflare-Resource-Lifecycle.runbook.md` §4
+   and in `terraform/cloudflare/reprobuild-prod/versions.tf`. Upgrading
+   `codetracer-prod` is a state migration on a root that has been
+   applied, and was deliberately left out of the porting change.
 4. **The release key.** M2's boundary, inherited. While
    `trusted-release-keys.txt` is empty and `REPRO_KEYRING_SHA256` is
    empty, release-mode signing and release-mode installs both fail closed.
