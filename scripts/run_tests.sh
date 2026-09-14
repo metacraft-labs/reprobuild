@@ -370,11 +370,24 @@ fi
 printf 'Building apps + test-helpers + test-builds via repro (%s cores, %s MiB available, REPROBUILD_MAX_PARALLELISM=%s)\n' \
   "${available_cores}" "${available_mem_mb:-unknown}" \
   "${REPROBUILD_MAX_PARALLELISM}" >&2
-# A cold action cache has to compile every test binary from scratch, which
-# exceeds 90m on CI hardware (an observed cold run reached 969/1168 before
-# timing out). Match the runner's 4h backstop; a warm cache finishes far
-# sooner, so this only raises the ceiling for the cold case.
-BUILD_TIMEOUT="${REPROBUILD_BUILD_TIMEOUT:-4h}"
+# A cold action cache has to compile every test binary from scratch. This
+# ceiling has now been raised twice by the same observation, because the graph
+# keeps growing and the backstop does not: 90m cut a cold run at 969/1168, and
+# 4h cut one at 989/1538 (2026-09-12, 32-core host shared with two other
+# suite runs). A backstop a legitimate cold run cannot pass turns every such
+# run into a false failure.
+#
+# The evidence for 8h: the cold run that DID complete this collection was still
+# running 7h16m after its first action outcome landed, so 4h could never have
+# passed it.
+#
+# This cannot lift a platform ceiling. GitHub-hosted jobs are killed at 6h
+# regardless of what this says; there the answer is a warm cache, not a bigger
+# number here.
+#
+# A backstop is not a budget. It bounds an UNWEDGE, so exceeding it means
+# "nothing was concluded", never "the build failed" -- see the 124 arm below.
+BUILD_TIMEOUT="${REPROBUILD_BUILD_TIMEOUT:-8h}"
 
 # M3 accepts one fragment selector per invocation; loop over collections.
 repro_build_collection() {
@@ -406,7 +419,14 @@ repro_build_collection() {
     || build_status=$?
   if (( build_status != 0 )); then
     if (( build_status == 124 )); then
-      printf 'Timed out building %s after %s\n' "${collection}" "${BUILD_TIMEOUT}" >&2
+      # Say what this is, because it has already been misread once: a 2026-09-12
+      # run cut here at 989/1538 was reported as twenty-four failed compiles,
+      # and two days went into binaries that were sitting on disk, built by the
+      # very run whose failures they were said to be.
+      printf 'Timed out building %s after %s -- the build did NOT fail, it ran out of wall clock.\n' \
+        "${collection}" "${BUILD_TIMEOUT}" >&2
+      printf 'No action failed. Raise REPROBUILD_BUILD_TIMEOUT (a cold .#test-builds on a contended\n' >&2
+      printf 'host has been measured past 7h) or re-run with REPROBUILD_TEST_WARM_REUSE=1.\n' >&2
     fi
     repro_collect_build_reports "${report_dir}" "${collection}" "test-logs"
     return "${build_status}"
