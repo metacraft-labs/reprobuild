@@ -32,6 +32,10 @@ tools/multi-distro-harness/
     m2_signing_apt.sh               # apt InRelease/Release.gpg gate (M2 SIGNING; debian, ubuntu)
     m2_signing_dnf.sh               # rpm gpgcheck + repo_gpgcheck gate (M2 SIGNING; fedora)
     m2_signing_pacman.sh            # pacman package + database sig gate (M2 SIGNING; arch)
+    m3_install_apt.sh               # apt repo + installer + upgrade gate (M3; debian, ubuntu)
+    m3_install_dnf.sh               # dnf repo + installer + upgrade gate (M3; fedora)
+    m3_install_pacman.sh            # pacman repo + installer + upgrade gate (M3; arch)
+    m3_install_scoop.ps1            # Scoop bucket + installer + update gate (M3; Windows, run directly)
 scripts/
   run_multi_distro_tests.sh # cross-distro test driver
 ```

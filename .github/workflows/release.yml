@@ -777,3 +777,122 @@ jobs:
               release_id: release.id, draft: false,
             });
             core.info(`Published ${tag} with all ${expected.size} assets.`);
+
+      # ── M3: generate and upload the native repository metadata ─────────────
+      #
+      # This runs AFTER the release is published, on purpose. The repository
+      # metadata points at artifacts by URL; publishing an index that
+      # references assets nobody can fetch yet would make `apt update`
+      # succeed and `apt install` fail, which is the worse of the two
+      # orderings. A repository a few seconds behind a release is fine; one
+      # that is ahead of it is broken.
+      #
+      # The upload destination is a VARIABLE -- `--target` -- and that is
+      # what lets this step exist while the hosting does not. Generating
+      # signed metadata is entirely local and is covered by the M3 gate arms
+      # against a local HTTP server; pushing it to R2 needs credentials and a
+      # bucket that live outside this repository, and reprobuild.com's DNS
+      # delegation was still in flight when this was written. The same code
+      # path serves both and the only difference is the scheme in --target.
+      #
+      # It SKIPS rather than fails when either half of what it needs is
+      # absent, and says which half:
+      #
+      #   * no release signing key -> there is nothing to sign the indices
+      #     with, and an unsigned repository is worse than no repository:
+      #     apt/dnf/pacman either refuse it, or -- if a user turned the check
+      #     off to get past that -- accept anything. Skipping keeps the
+      #     "never publish something that only LOOKS signed" rule that
+      #     docs/release-signing.md sets for the artifacts.
+      #   * no REPRO_PUBLISH_TARGET -> no bucket exists to publish to.
+      #
+      # Both are `::warning::` rather than `::error::` for the same reason
+      # the signing step is: the release itself is complete and correct
+      # without them, and failing every release until external
+      # infrastructure lands would mean no releases at all.
+      - name: Generate and upload native repository metadata (apt/dnf/pacman/scoop)
+        if: success()
+        shell: bash
+        env:
+          REPRO_PUBLISH_TARGET: ${{ vars.REPRO_PUBLISH_TARGET }}
+          REPRO_RELEASE_SIGNING_KEY: ${{ secrets.REPRO_RELEASE_SIGNING_KEY }}
+          REPRO_RELEASE_SIGNING_KEY_ID: ${{ secrets.REPRO_RELEASE_SIGNING_KEY_ID }}
+          # rclone reads its remote from the environment, so no config file
+          # is written and no credential touches the disk. The remote name
+          # `r2` matches repro-publish-repos.sh's $REPRO_RCLONE_REMOTE default.
+          RCLONE_CONFIG_R2_TYPE: s3
+          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
+          RCLONE_CONFIG_R2_ENDPOINT: ${{ vars.REPRO_R2_ENDPOINT }}
+          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.REPRO_R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.REPRO_R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+
+          version=$(grep "^version\s*=" reprobuild.nimble | sed -E 's/version\s*=\s*"([^"]+)"/\1/')
+          echo "release version: ${version}"
+
+          if [ -z "${REPRO_PUBLISH_TARGET:-}" ]; then
+            echo "::warning::REPRO_PUBLISH_TARGET is not set, so there is no repository to publish to. Skipping repo metadata. Set it to r2:<bucket> (or s3://<bucket>/<prefix>) once infra/terraform/cloudflare/reprobuild-prod has been applied."
+            exit 0
+          fi
+          if [ -z "${REPRO_RELEASE_SIGNING_KEY:-}" ] || [ -z "${REPRO_RELEASE_SIGNING_KEY_ID:-}" ]; then
+            echo "::warning::No release signing key is configured, so repository indices cannot be signed. Skipping repo metadata rather than publishing an UNSIGNED repository. See docs/release-signing.md."
+            exit 0
+          fi
+
+          # Ephemeral GNUPGHOME, shredded in this step. Never ~/.gnupg: the
+          # publish scripts refuse to run without GNUPGHOME set precisely so
+          # a signature can never come from whatever key a runner happened to
+          # already trust.
+          export GNUPGHOME="${RUNNER_TEMP}/gnupg-publish"
+          mkdir -p "${GNUPGHOME}"
+          chmod 700 "${GNUPGHOME}"
+          cleanup() {
+            gpgconf --kill all >/dev/null 2>&1 || true
+            find "${GNUPGHOME}" -type f -exec shred -u {} + 2>/dev/null || true
+            rm -rf "${GNUPGHOME}"
+          }
+          trap cleanup EXIT
+
+          printf '%s' "${REPRO_RELEASE_SIGNING_KEY}" | gpg --batch --quiet --import
+          keyid="${REPRO_RELEASE_SIGNING_KEY_ID}"
+
+          # Build the native packages from the SAME archives that were just
+          # published, so the .deb/.rpm/.pkg and the tarball carry identical
+          # bytes. Rebuilding from source here would produce packages that
+          # nothing has verified.
+          mkdir -p pkgs
+          linux_tarball="staging/reprobuild-${version}-linux-x86_64.tar.gz"
+          if [ -f "${linux_tarball}" ]; then
+            sh ./scripts/release/repro-build-packages.sh \
+              --version "${version}" --tarball "${linux_tarball}" \
+              --out pkgs --ecosystem all --platform linux --asset-arch x86_64
+          else
+            echo "::warning::${linux_tarball} is absent; no Linux packages will be built."
+          fi
+          # The Windows archive is NOT repackaged: the Scoop manifest points
+          # at the published .zip itself, which is what Scoop fetches and
+          # hashes.
+          win_zip="staging/reprobuild-${version}-windows-x86_64.zip"
+          if [ -f "${win_zip}" ]; then
+            cp "${win_zip}" pkgs/
+          fi
+
+          tag="v${version}"
+          # --fetch-existing is load-bearing: it pulls the CURRENT published
+          # pool down before adding this version. Without it, publishing
+          # 0.1.4 would DELETE 0.1.3 from the repository -- `apt upgrade`
+          # would work exactly once and every pinned install would break.
+          sh ./scripts/release/repro-publish-repos.sh \
+            --version "${version}" \
+            --packages pkgs \
+            --key "${keyid}" \
+            --ecosystem all \
+            --repo-root "${RUNNER_TEMP}/repo" \
+            --target "${REPRO_PUBLISH_TARGET}" \
+            --fetch-existing \
+            --scoop-downloads-base "https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}" \
+            --export-keyring "${RUNNER_TEMP}/reprobuild-archive-keyring.gpg"
+
+          echo "::notice::Published repository metadata for ${version} to ${REPRO_PUBLISH_TARGET}."
+          echo "::notice::If the trust anchor changed, scripts/install/repro-install.sh must pin its new SHA-256 (printed above as 'TRUST ANCHOR sha256')."
