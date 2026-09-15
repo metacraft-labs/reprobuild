@@ -27,7 +27,7 @@
 ## ``no tool profile was resolved`` diagnostic; after D1 it lowers
 ## into a direct test-binary invocation and the test exits 0.
 
-import std/[json, os, osproc, strtabs, strutils, unittest]
+import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
 
 const RepoMarker = "repro.nim"
 
@@ -121,6 +121,19 @@ suite "Deferred-Item D1: buildNimUnittest resolves in path mode":
       # routes through the implicit-target-name table which today
       # picks the BUILD edge by binary basename, not the EXECUTE
       # edge.
+      # TEST ISOLATION. The assertions below describe a COLD execution of
+      # ``reprobuild.test_execute.t_dsl_outputs_statement_basic_accepted``, and
+      # ``t_b3_test_execute_edge_cache_hit`` asserts a cold execution of the
+      # very same action id. Sharing the run-wide
+      # ``REPROBUILD_ACTION_CACHE_ROOT`` that ``scripts/run_tests.sh`` exports
+      # made the outcome depend on which of the two the runner scheduled first:
+      # whichever ran first launched the action and warmed it for the other,
+      # which then read ``asUpToDate`` / ``launched=false`` / ``cdHit``. A
+      # private cache root per case — the pattern
+      # ``t_local_daemons_control_plane_m11``/``buildCommand`` already uses —
+      # means neither test can decide the other's result.
+      let cacheRoot = createTempDir("repro-d1-execute-cache-", "")
+      defer: removeDir(cacheRoot)
       let selector = ".#" & ExecuteActionId
       let cmd = @[
         reproBin.quoteShell,
@@ -128,6 +141,7 @@ suite "Deferred-Item D1: buildNimUnittest resolves in path mode":
         selector,
         "--tool-provisioning=path",
         "--daemon=off",
+        "--action-cache-root=" & cacheRoot.quoteShell,
         "--write-report",
         "--log=actions",
         "--progress=quiet"].join(" ")

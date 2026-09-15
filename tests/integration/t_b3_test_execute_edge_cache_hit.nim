@@ -1,12 +1,27 @@
 ## Bootstrap-And-Self-Build B3: a direct test execute-edge selector builds
 ## the selected test binary and runs that test through the engine.
 ##
-## The self-hosted Nim compile half is deliberately non-cacheable today:
-## compiler executions may produce incomplete io-mon evidence, so the graph
-## reports ``cdNotCacheable`` and runs the compile edge instead of publishing
-## an unsafe cache entry. The execute edge remains the behavioral proof here:
-## the engine lowers the selected ``reprobuild.test_execute.<stem>`` action,
-## runs it, and records a successful result.
+## The compile half is CACHEABLE, and the report must say so. This header used
+## to claim the opposite — "the self-hosted Nim compile half is deliberately
+## non-cacheable today ... so the graph reports ``cdNotCacheable``" — and the
+## engine arm asserted that decision. Both were superseded on 2026-08-19, when
+## the ``cacheable = false`` retreat was reversed for every compile edge in
+## ``repro.nim``; see the HISTORY note there and
+## ``reprobuild-specs/Compiles-Are-Normal-Edges.md``, which records that the
+## blocker (raw ``SYS_getrandom`` graded as a Level-2 evidence loss) was "a
+## classification gap, not a monitoring one" and that monitored pipelines now
+## publish and hit the cache. ``buildNimUnittest.build`` defaults
+## ``cacheable = true`` and ``repro.nim`` passes no override, so
+## ``cdNotCacheable`` is unreachable for this edge by construction.
+##
+## What the engine arm asserts instead is what the surrounding assertions
+## already imply: the test-build edge SUCCEEDED and LAUNCHED, and a monitored,
+## cacheable edge that launches on a cold cache is a cache MISS. The run is
+## scoped to this case's own ``--action-cache-root``, so "cold" is a property
+## of the case rather than of where it happens to fall in the suite's order.
+## The execute edge remains the behavioral proof: the engine lowers the
+## selected ``reprobuild.test_execute.<stem>`` action, runs it, and records a
+## successful result.
 
 import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
 import repro_test_support
@@ -104,7 +119,7 @@ proc fieldForCheckpoint(action: JsonNode; name: string): string =
     return field.getStr()
   $field
 
-proc runBuildTarget(reproBin, repoRoot, selector: string):
+proc runBuildTarget(reproBin, repoRoot, selector, cacheRoot: string):
     tuple[output: string; exitCode: int] =
   let args = @[
     reproBin.quoteShell,
@@ -112,6 +127,7 @@ proc runBuildTarget(reproBin, repoRoot, selector: string):
     selector,
     "--tool-provisioning=path",
     "--daemon=off",
+    "--action-cache-root=" & cacheRoot.quoteShell,
     "--write-report",
     "--log=actions",
     "--progress=quiet",
@@ -130,7 +146,23 @@ suite "Bootstrap-And-Self-Build B3: test execute edge":
     check "collect(\"test-builds\", reprobuildTestBuildActions" in
       reproNimText
     check "edge.testBinary.run(" in reproNimText
-    check "cacheable = false" in reproNimText
+
+    # This used to be a bare ``check "cacheable = false" in reproNimText``,
+    # written when every compile edge in the file carried that argument. Since
+    # 2026-08-19 they do not, and the only survivors are the Windows DLL-copy
+    # edges and the opt-in-layer ``.live`` execute variant — lines with nothing
+    # to do with this case, which made the assertion pass while saying nothing.
+    # Assert the contract the engine arm below reads from the build report:
+    # the test-build edge passes NO ``cacheable`` argument, so it takes
+    # ``buildNimUnittest``'s ``cacheable = true`` default.
+    let buildCallStart = reproNimText.find("let edge = buildNimUnittest.build(")
+    check buildCallStart >= 0
+    if buildCallStart >= 0:
+      let buildCallEnd = reproNimText.find(
+        "reprobuildTestBuildActions.add(edge.action)", buildCallStart)
+      check buildCallEnd > buildCallStart
+      if buildCallEnd > buildCallStart:
+        check "cacheable" notin reproNimText[buildCallStart ..< buildCallEnd]
 
     # Both dlopen-only runtimes belong on graph-built test binaries. Keep the
     # Clingo names in the shared test-runtime list (not only the shipping repro
@@ -166,8 +198,23 @@ suite "Bootstrap-And-Self-Build B3: test execute edge":
     check fileExists(runquotad)
 
     if fileExists(reproBin) and fileExists(runquotad):
+      # TEST ISOLATION. This case asserts a COLD execution of
+      # ``reprobuild.test_execute.t_dsl_outputs_statement_basic_accepted``, and
+      # so does ``t_d1_buildnimunittest_resolves_in_path_mode`` — the same
+      # action id, from a second binary, in the same suite. With both sharing
+      # the run-wide ``REPROBUILD_ACTION_CACHE_ROOT`` that
+      # ``scripts/run_tests.sh`` exports, whichever ran first warmed the other:
+      # measured, ``t_d1`` first passes 2/2 cold and this case then reads
+      # ``status=asUpToDate launched=false cacheDecision=cdHit
+      # reason=no-declared-outputs``. Neither test is wrong about what it
+      # asserts; they were simply not scoped. A private cache root per case is
+      # the remedy already used by
+      # ``t_local_daemons_control_plane_m11``/``buildCommand``.
+      let cacheRoot = createTempDir("repro-b3-execute-cache-", "")
+      defer: removeDir(cacheRoot)
       let selector = ".#" & ExecuteActionId
-      let (output, exitCode) = runBuildTarget(reproBin, repoRoot, selector)
+      let (output, exitCode) = runBuildTarget(reproBin, repoRoot, selector,
+                                              cacheRoot)
       checkpoint("exit=" & $exitCode)
       if exitCode != 0:
         checkpoint(output)
@@ -203,7 +250,7 @@ suite "Bootstrap-And-Self-Build B3: test execute edge":
             fieldForCheckpoint(buildAction, "cacheDecision"))
           check buildAction{"status"}.getStr() == "asSucceeded"
           check buildAction{"launched"}.getBool()
-          check buildAction{"cacheDecision"}.getStr() == "cdNotCacheable"
+          check buildAction{"cacheDecision"}.getStr() == "cdMiss"
 
         if executeAction != nil:
           checkpoint(ExecuteActionId & " status=" &
