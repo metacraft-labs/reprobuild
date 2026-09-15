@@ -159,6 +159,14 @@ suite "measurement flags: the new surface parses":
 # Build layer.
 # ---------------------------------------------------------------------------
 
+# Both recipes declare a C-family compiler alongside ``nim``. That is not
+# boilerplate: Language-Conventions/Nim.md lists "A **C-family compiler**
+# (`gcc`, `clang`, or `msvc/vcc`) for the C/C++/Objective-C backends — pulled
+# from the user's `uses:`", and `nim.c(...)` lowers to an edge that shells out
+# to a BARE `gcc`. Since an action's PATH is composed only from what the edge
+# declares, a recipe that names only `nim` gets `gcc: command not found` —
+# and an unmatched tool ref is inert, so the omission is silent until the
+# compile runs.
 const
   OkProject = """
 import repro_project_dsl
@@ -166,6 +174,7 @@ import repro_project_dsl
 package measok:
   uses:
     "nim >=2.2 <3.0"
+    "gcc >=1"
 
   executable measTool:
     build:
@@ -178,6 +187,7 @@ import repro_project_dsl
 package measbad:
   uses:
     "nim >=2.2 <3.0"
+    "gcc >=1"
 
   executable measBroken:
     build:

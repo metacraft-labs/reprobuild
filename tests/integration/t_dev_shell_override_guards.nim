@@ -70,9 +70,55 @@ proc libPath(): string =
 proc checkScript(): string =
   repoRoot() / "scripts" / "check_dev_shell_env.sh"
 
+const ScrubAmbientKnobs =
+  "for _n in \"${!NIX_FLAKE_OVERRIDE_@}\"; do unset \"$_n\"; done\n"
+  ## Remove every ``NIX_FLAKE_OVERRIDE_*`` name from the child's environment.
+  ##
+  ## Enumerated by PREFIX (``${!prefix@}``) rather than listed, so it cannot
+  ## drift from the guard library's ``DEV_SHELL_KNOWN_OVERRIDE_KNOBS`` and
+  ## covers a knob added tomorrow. Unset, not set-to-empty: the library reads
+  ## some of these with ``[[ -n "${X:-}" ]]``, where the two are equivalent,
+  ## but that is a property of today's implementation and not one a test
+  ## should rely on to stay hermetic.
+  ##
+  ## Why every subprocess in this file needs it. Each case states the knob
+  ## configuration it wants explicitly — an ``export`` in its own script, or
+  ## an `.envrc` written into a scratch tree — so anything still arriving
+  ## from the ambient environment is noise that changes what is measured.
+  ## That is not hypothetical: these knobs are part of this workspace's
+  ## launch discipline (the direnv cache is not keyed on the siblings root,
+  ## so one bare invocation poisons every later one), so the suite is
+  ## normally launched with ``_AUTO``, ``_AUTO_STRIP_SUFFIXES`` and
+  ## ``_SIBLINGS_ROOT`` all set.
+  ##
+  ## Measured on one binary, both ways: with them set, the two lint-gate
+  ## reachability cases fail — ``..._fails_when_the_auto_arm_cannot_reach_a_
+  ## sibling`` and ``..._declaration_arm_is_workspace_shape_aware`` — because
+  ## the ambient ``_SIBLINGS_ROOT`` points the auto arm away from the scratch
+  ## tree each case just staged its siblings in. With them unset, all 22
+  ## pass. The subject was identical in both runs; only the shell the suite
+  ## was launched from differed.
+  ##
+  ## Those two reach the gate through ``check_dev_shell_env.sh`` directly
+  ## rather than through ``runBash``, which is why the scrub belongs at the
+  ## spawn helper and not in any one case's script.
+
+proc hermeticBash(args: openArray[string];
+                  env: openArray[tuple[name, value: string]] = []): CmdSpec =
+  ## Spawn ``args`` (a ``bash …`` argv) with the override knobs scrubbed.
+  ##
+  ## The scrub is a wrapper shell rather than an argument to ``runShell``
+  ## because ``runShell`` overlays the parent environment and has no way to
+  ## REMOVE a name from it. Wrapping also covers both argv shapes this file
+  ## uses — ``bash -c <script>`` and ``bash <path/to/script.sh>`` — since the
+  ## inner argv is re-exec'd verbatim.
+  var argv = @[args[0], "-c", ScrubAmbientKnobs & "exec \"$@\"", "bash"]
+  for a in args: argv.add(a)
+  shellCommand(argv, env)
+
 proc runBash(script: string; cwd: string): CmdResult =
   let bash = findExe("bash")
-  runShell(shellCommand(@[bash, "-c", script]), cwd = cwd)
+  runShell(hermeticBash(@[bash, "-c", script]), cwd = cwd)
 
 ## A plugin that translates only the explicit `NIX_FLAKE_OVERRIDE_INPUTS`
 ## list — the observable behaviour of the `sha256-bqkW…` revision `.envrc`
@@ -550,7 +596,7 @@ suite "dev-shell override guards":
         "export RUNQUOTA_SRC='/nix/store/stale-source'\n")
 
       let bash = findExe("bash")
-      let orphan = runShell(shellCommand(@[bash,
+      let orphan = runShell(hermeticBash(@[bash,
         scratch / "scripts" / "check_dev_shell_env.sh"]), cwd = scratch)
       checkpoint("orphan cache:\n" & orphan.output)
       check orphan.code != 0
@@ -561,7 +607,7 @@ suite "dev-shell override guards":
       # everything.
       writeFile(scratch / ".direnv" / "flake-override-sources.fingerprint",
         "# reprobuild dev-shell override-source fingerprint v1\n")
-      let clean = runShell(shellCommand(@[bash,
+      let clean = runShell(hermeticBash(@[bash,
         scratch / "scripts" / "check_dev_shell_env.sh"]), cwd = scratch)
       checkpoint("accounted cache:\n" & clean.output)
       check clean.code == 0
@@ -587,7 +633,7 @@ suite "dev-shell override guards":
       let bash = findExe("bash")
 
       proc gate(): CmdResult =
-        runShell(shellCommand(@[bash,
+        runShell(hermeticBash(@[bash,
           scratch / "scripts" / "check_dev_shell_env.sh"]), cwd = scratch)
 
       let knob = "export NIX_FLAKE_OVERRIDE_AUTO=1\n" &
@@ -648,7 +694,7 @@ suite "dev-shell override guards":
         "export RUNQUOTA_SRC='/nix/store/stale-source'\n")
 
       let bash = findExe("bash")
-      let current = runShell(shellCommand(@[bash,
+      let current = runShell(hermeticBash(@[bash,
         scratch / "scripts" / "check_dev_shell_env.sh"]), cwd = scratch)
       checkpoint("cache newer than lock:\n" & current.output)
       check current.code == 0
@@ -660,7 +706,7 @@ suite "dev-shell override guards":
           seconds = 60)
       setLastModificationTime(scratch / "flake.lock", later)
 
-      let stale = runShell(shellCommand(@[bash,
+      let stale = runShell(hermeticBash(@[bash,
         scratch / "scripts" / "check_dev_shell_env.sh"]), cwd = scratch)
       checkpoint("lock newer than cache:\n" & stale.output)
       check stale.code != 0
@@ -685,7 +731,7 @@ suite "dev-shell override guards":
       writeFile(scratch / ".envrc", "use flake\n")
 
       let bash = findExe("bash")
-      let res = runShell(shellCommand(@[bash,
+      let res = runShell(hermeticBash(@[bash,
         scratch / "scripts" / "check_dev_shell_env.sh"]), cwd = scratch)
       checkpoint("knobless .envrc:\n" & res.output)
       check res.code != 0
@@ -720,7 +766,7 @@ suite "dev-shell override guards":
         " > .direnv/flake-override-sources.fingerprint\n", root)
 
       let bash = findExe("bash")
-      let fresh = runShell(shellCommand(@[bash,
+      let fresh = runShell(hermeticBash(@[bash,
         root / "scripts" / "check_dev_shell_env.sh"]), cwd = root)
       checkpoint("fresh:\n" & fresh.output)
       check fresh.code == 0
@@ -729,7 +775,7 @@ suite "dev-shell override guards":
       writeFile(sibling / "src.txt", "fifty-nine commits later\n")
       gitCommitAll(gitBin, sibling, "advance")
 
-      let stale = runShell(shellCommand(@[bash,
+      let stale = runShell(hermeticBash(@[bash,
         root / "scripts" / "check_dev_shell_env.sh"]), cwd = root)
       checkpoint("stale:\n" & stale.output)
       check stale.code != 0
@@ -777,7 +823,7 @@ suite "dev-shell override guards":
 
       let bash = findExe("bash")
       proc gate(): CmdResult =
-        runShell(shellCommand(@[bash,
+        runShell(hermeticBash(@[bash,
           root / "scripts" / "check_dev_shell_env.sh"]), cwd = root)
 
       # 1. Input named after the repository: the arm reaches `../nim-widget`.
@@ -892,7 +938,7 @@ suite "dev-shell override guards":
 
       let bash = findExe("bash")
       proc gate(): CmdResult =
-        runShell(shellCommand(@[bash,
+        runShell(hermeticBash(@[bash,
           root / "scripts" / "check_dev_shell_env.sh"]), cwd = root)
 
       # 1. THE SHAPE THAT USED TO FAIL: the row is present, the sibling it
@@ -1035,7 +1081,7 @@ suite "dev-shell override guards":
 
       proc sourceState(dir: string;
                        env: seq[tuple[name, value: string]]): string =
-        runShell(shellCommand(@[bash, "-c",
+        runShell(hermeticBash(@[bash, "-c",
           "set -uo pipefail\n" &
           "source " & quoteShell(libPath()) & "\n" &
           "dev_shell_source_state " & quoteShell(dir) & "\n"], env),
@@ -1045,7 +1091,7 @@ suite "dev-shell override guards":
       # digests `git status`, so the "it only passes because everything
       # errored" case has a name to be compared against instead of a
       # hard-coded constant that would rot with the hash choice.
-      let emptyDigest = runShell(shellCommand(@[bash, "-c",
+      let emptyDigest = runShell(hermeticBash(@[bash, "-c",
         "set -uo pipefail\n" &
         "source " & quoteShell(libPath()) & "\n" &
         "printf '' | _dev_shell_digest\n"]), cwd = scratch).output.strip()
@@ -1075,7 +1121,7 @@ suite "dev-shell override guards":
       # a fingerprint recorded outside a hook, reconciled from inside one.
       let args =
         "'--override-input' 'runquota-src' 'path:" & sibling & "' "
-      let record = runShell(shellCommand(@[bash, "-c",
+      let record = runShell(hermeticBash(@[bash, "-c",
         "set -uo pipefail\n" &
         "source " & quoteShell(libPath()) & "\n" &
         "printf '%s' " & quoteShell(args) &
@@ -1093,7 +1139,7 @@ suite "dev-shell override guards":
         "dev_shell_fingerprint_drift fp.txt\n" &
         "printf 'drift_exit=%s\\n' \"$?\"\n"
 
-      let quiet = runShell(shellCommand(@[bash, "-c", driftScript], hookEnv),
+      let quiet = runShell(hermeticBash(@[bash, "-c", driftScript], hookEnv),
         cwd = scratch)
       checkpoint("drift under a hook environment:\n" & quiet.output)
       check quiet.output.contains("drift_exit=0")
@@ -1104,7 +1150,7 @@ suite "dev-shell override guards":
       # genuinely moved, the same hook environment must still catch it.
       writeFile(sibling / "src.txt", "three\n")
       gitCommitAll(gitBin, sibling, "really advance")
-      let loud = runShell(shellCommand(@[bash, "-c", driftScript], hookEnv),
+      let loud = runShell(hermeticBash(@[bash, "-c", driftScript], hookEnv),
         cwd = scratch)
       checkpoint("real drift under a hook environment:\n" & loud.output)
       check loud.output.contains("drift_exit=1")
@@ -1234,7 +1280,7 @@ suite "dev-shell override guards":
       writeFile(decoy / "git-remote-http", "#!/bin/sh\nexit 0\n")
 
       proc helperRows(env: seq[tuple[name, value: string]]): string =
-        runShell(shellCommand(@[bash, "-c",
+        runShell(hermeticBash(@[bash, "-c",
           "set -uo pipefail\n" &
           "source " & quoteShell(libPath()) & "\n" &
           "dev_shell_subprocess_tool_binaries\n"], env),
@@ -1296,7 +1342,7 @@ suite "dev-shell override guards":
       check not fileExists(binDir / "awk")
 
       let bash = findExe("bash")
-      let res = runShell(shellCommand(@[bash,
+      let res = runShell(hermeticBash(@[bash,
         root / "scripts" / "check_dev_shell_env.sh"],
         @[("PATH", binDir)]), cwd = root)
       checkpoint("gate without awk:\n" & res.output)

@@ -20,6 +20,15 @@
 ## recording the project — with one participating repo cloned from a local bare
 ## origin, which is what gives the gate a lock to write.
 ##
+## The fixture OPTS IN to central publication (`[manifest] publish_locks =
+## true` in the host bootstrap config). That is not incidental: since MO-13/
+## MO-14 publication is opt-in, and under the default the gate must produce
+## "**no** `lock publish skipped/failed` diagnostic" at all
+## (Workspace-Manifests.md §"`publish_locks` — central publication is
+## opt-in"). A fixture that does not opt in never enters the publication
+## route, so the skip this test is about cannot occur and the test would pass
+## or fail for reasons having nothing to do with nesting.
+##
 ## Asserted: `repro check --mode=pre-push` reports the store as SKIPPED rather
 ## than failed, exits 0, stages nothing into the enclosing repo, and still
 ## writes its lock to disk.
@@ -107,6 +116,33 @@ suite "a nested lock store is not publishable":
         "[workspace]\nproject = \"demo\"\n\n" &
         "[[manifest]]\nlocal_path = \".repro/manifests\"\n" &
         "visibility = \"team\"\n")
+      # MO-13/MO-14 — central lock PUBLICATION is opt-in, so the fixture has
+      # to opt in or this test has no subject. Workspace-Manifests.md
+      # §"`publish_locks` — central publication is opt-in":
+      #
+      #   **Default (`publish_locks` absent or `false`) — committed-lock-only.**
+      #   The pre-push gate still writes/refreshes the lock in the record store
+      #   and **passes cleanly**; it does **not** commit or push the `locks/`
+      #   subtree to the store, and produces **no** "lock publish
+      #   skipped/failed" diagnostic.
+      #
+      # Without the opt-in the gate never enters the publication route at all,
+      # so the `lpoNotPublishable` branch this test is about is unreachable and
+      # the asserted diagnostic is one the spec positively forbids. The
+      # property under test — a nested store takes the benign SKIP instead of
+      # the `lock-publish-failure` that refused every push in the metacraft
+      # workspace — is a property OF that route, and `publish_locks = true` is
+      # now the only way in.
+      let manifestUpstream = scratch / "manifest-upstream.git"
+      discard requireGit(q(gitBin) & " init --bare -b main " &
+        q(manifestUpstream))
+      writeFile(workspaceRoot / ".repro-workspace.toml",
+        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
+        "[manifest]\n" &
+        "url = \"" & fileUrl(manifestUpstream) & "\"\n" &
+        "branch = \"main\"\n" &
+        "publish_locks = true\n")
+
       # `.repro/` is local state in this layout — exactly the ignore rule that
       # makes the nested store unpublishable.
       writeFile(workspaceRoot / ".gitignore", ".repro/\n")

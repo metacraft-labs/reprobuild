@@ -51,10 +51,20 @@
 ##      set to an existing path. Resilience pin: the operator override
 ##      always wins.
 ##
-##   2. ``findShimLibrary()`` falls through cleanly to the empty string
-##      when no shim is locatable AND the env var is unset / points at
-##      a non-existent file. Total-function pin: callers can probe
-##      cheaply without exception handling.
+##   2. A PINNED-BUT-MISSING ``$REPRO_MONITOR_SHIM_LIB`` is refused, not
+##      worked around. This arm used to assert the opposite — that the
+##      helper falls through to discovery and hands back the empty string
+##      or a discovered shim — and that contract was RETIRED in io-mon
+##      ``2326e7c`` (2026-08-14). ``findShimLibrary`` now raises
+##      ``IOError`` naming the pinned path, because falling through would
+##      capture a run with a shim the operator did not pin: a stale pin or
+##      a typo would silently change the capture's provenance and still
+##      report success. This arm pins the refusal, including the fact that
+##      the diagnostic names the env var and the missing path.
+##
+##      Note this arm never exercised "no shim is locatable" — it SETS the
+##      override, so the discovery walk is not what it reaches. Totality of
+##      the unpinned lookup is arm 3's job, and that is where it stays.
 ##
 ##   3. The ``candidateShimLibraries`` ordering pins the shape of the
 ##      lookup path so a refactor doesn't accidentally drop one of the
@@ -112,21 +122,32 @@ suite "DSL-port M9.R.13c.2 — monitor-shim DLL discovery":
     finally:
       try: removeFile(sentinel) except CatchableError: discard
 
-  test "findShimLibrary returns empty string when no shim is locatable":
-    ## Arm 2: a stale env var pointing at a non-existent file does
-    ## not poison the lookup. Either the fall-through finds the real
-    ## shim (when the test binary lives next to one) OR the lookup
-    ## returns the empty string. Either outcome is contractually
-    ## correct; what MUST NOT happen is the helper returning the
-    ## bogus path or raising.
+  test "findShimLibrary refuses a pinned shim that does not exist":
+    ## Arm 2: the override is a PIN, so a pin that names no file is a
+    ## refusal — never a silent fall-through to a different shim.
+    ##
+    ## This arm previously asserted the fall-through ("returns the empty
+    ## string, or whatever discovery finds, but never the bogus path and
+    ## never an exception"). io-mon ``2326e7c`` retired that: honouring a
+    ## pin has to mean honouring it, so a miss raises. Capturing a build
+    ## with a shim other than the pinned one yields evidence whose
+    ## provenance is not the one that was asked for, and it would do so
+    ## with no diagnostic and a successful-looking result.
     let bogus = getTempDir() / "m9r13c-this-file-does-not-exist.dll"
     putEnv("REPRO_MONITOR_SHIM_LIB", bogus)
-    let resolved = findShimLibrary()
-    check resolved != bogus
-    # If a real shim is locatable from the test binary's appDir, the
-    # helper returns it. If not, the empty string. Both are valid.
-    if resolved.len > 0:
-      check fileExists(resolved)
+    var raised = false
+    var message = ""
+    try:
+      discard findShimLibrary()
+    except IOError as err:
+      raised = true
+      message = err.msg
+    check raised
+    # The diagnostic has to be actionable: it names the env var that
+    # carries the pin and the path that pin resolved to, so an operator
+    # can see WHICH pin is stale without re-deriving it.
+    check message.contains("REPRO_MONITOR_SHIM_LIB")
+    check message.contains(bogus)
 
   test "findShimLibrary is total when REPRO_MONITOR_SHIM_LIB is unset":
     ## Arm 3: the unset case must also be total — no exception, just

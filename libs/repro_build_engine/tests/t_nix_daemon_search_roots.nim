@@ -42,6 +42,12 @@
 import std/[os, sets, strutils, unittest]
 
 import repro_build_engine
+# ``reproBinaryPath`` is the one spelling of a checkout's built CLI: it is
+# source-anchored and it carries the host's executable extension. These
+# fixtures stage a *synthetic* checkout, so they pass their scratch root in —
+# the alternative, a bare ``/ "build" / "bin" / "repro"``, models a layout that
+# exists on no Windows host and is exactly the shape W15's census refuses.
+import repro_test_support
 
 proc scratch(name: string): string =
   result = getTempDir() / "repro-n28-daemon-roots" / name
@@ -61,7 +67,7 @@ suite "the engine resolves reprobuild-nix-daemon from both layouts":
 
   test "dev tree: build/bin/repro finds the repo's tools/ helper":
     let repo = scratch("devtree")
-    let exe = repo / "build" / "bin" / "repro"
+    let exe = reproBinaryPath(repo)
     placeDaemon(exe)
     let helper = repo / "tools" / "reprobuild-nix-daemon" /
       "reprobuild-nix-daemon"
@@ -77,7 +83,7 @@ suite "the engine resolves reprobuild-nix-daemon from both layouts":
 
   test "dev tree: build/reprobuild-nix-daemon is found from a foreign cwd":
     let repo = scratch("devtree-built")
-    let exe = repo / "build" / "bin" / "repro"
+    let exe = reproBinaryPath(repo)
     placeDaemon(exe)
     let built = repo / "build" / "reprobuild-nix-daemon"
     placeDaemon(built)
@@ -111,14 +117,14 @@ suite "the engine resolves reprobuild-nix-daemon from both layouts":
 
   test "nothing on disk still answers the bare name for poUsePath":
     let repo = scratch("empty")
-    let exe = repo / "build" / "bin" / "repro"
+    let exe = reproBinaryPath(repo)
     placeDaemon(exe)
     doAssert resolveNixDaemonExecutable(cwd = repo, exePath = exe,
       envSourceRoot = "", envBin = "") == "reprobuild-nix-daemon"
 
   test "REPROBUILD_NIX_DAEMON_BIN wins, and refuses when it is a lie":
     let repo = scratch("override")
-    let exe = repo / "build" / "bin" / "repro"
+    let exe = reproBinaryPath(repo)
     placeDaemon(exe)
     let helper = repo / "tools" / "reprobuild-nix-daemon" /
       "reprobuild-nix-daemon"
@@ -138,7 +144,7 @@ suite "the engine resolves reprobuild-nix-daemon from both layouts":
 
   test "REPROBUILD_SOURCE_ROOT is first but no longer suppresses the rest":
     let repo = scratch("srcroot")
-    let exe = repo / "build" / "bin" / "repro"
+    let exe = reproBinaryPath(repo)
     placeDaemon(exe)
     let helper = repo / "tools" / "reprobuild-nix-daemon" /
       "reprobuild-nix-daemon"
@@ -268,7 +274,7 @@ suite "the engine resolves reprobuild-nix-daemon from both layouts":
     doAssert shebangInterpreter("#!python3") == ""
 
     let repo = scratch("shebang")
-    let exe = repo / "build" / "bin" / "repro"
+    let exe = reproBinaryPath(repo)
     placeDaemon(exe)
     # NOT A SCRIPT AT ALL, and not refused: the check must not turn
     # every ELF helper into a build failure by misreading its first

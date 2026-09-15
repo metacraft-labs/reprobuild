@@ -48,8 +48,12 @@ proc linesAt(path: string): seq[string] =
 when not defined(windows):
   suite "lock refresh monitored metadata cache":
     test "warm compiles, transitive invalidation, and fresh unpinned solves":
-      let repro = requireBinary(getEnv("REPRO_BIN",
-        RepoRoot / "build" / "bin" / "repro"), "reprobuild.apps.repro")
+      # ``reproBinaryPath`` is source-anchored and carries the host's
+      # executable extension. The bare join it replaces named the other
+      # platform's artefact wherever ``build/`` is shared between checkouts,
+      # and this case both stats and EXECUTES what it names.
+      let repro = requireBinary(getEnv("REPRO_BIN", reproBinaryPath(RepoRoot)),
+        "reprobuild.apps.repro")
       let nim = requireBinary(findExe("nim"), "Nim bootstrap compiler")
       let root = createTempDir("lock-provider-cache-", "")
       defer: removeDir(root)
