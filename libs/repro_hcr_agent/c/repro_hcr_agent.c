@@ -1742,6 +1742,80 @@ static const char *repro_hcr_direct_patch_failure_detail(void) {
       REPRO_HCR_LX_REFUSED_QUIESCENCE_FAILED) {
     return name;
   }
+  /*
+   * A thread that BLOCKS the quiescence signal gets its own sentence, because
+   * the generic one sends the operator the wrong way. `quiescence-timeout`
+   * plus a list of tids reads as "they were slow"; the remedy it suggests is a
+   * longer deadline, and no deadline can help a thread the kernel will never
+   * deliver the signal to. So this reports the NAME and the MASK of each such
+   * thread and says the deadline is not the problem.
+   *
+   * Measured example, on a Godot process rendering through Mesa:
+   *   quiescence-failed (quiescence-signal-blocked; 3 of 3 threads that did
+   *   not park still BLOCK signal 37, out of 38 threads: 1234 name=llvmpipe-0
+   *   SigBlk=fffffffe3ffbfaff, ...; masks read for 3 thread(s), unreadable for
+   *   0. The deadline is not the problem ...)
+   *
+   * NOTHING HERE MAY CONTAIN A DOUBLE QUOTE OR A BACKSLASH. This string is
+   * pasted into a JSON string field on the coordinator wire with no escaping,
+   * so a thread named `say"hi` would produce a message the coordinator cannot
+   * parse — measured, as `JsonParsingError: } expected`, the first time this
+   * diagnostic ran against a real Mesa process. The thread names are
+   * sanitised where they are collected, in the quiescence header.
+   */
+  if (repro_hcr_lx_quiesce.last_status ==
+      REPRO_HCR_LX_QUIESCE_SIGNAL_BLOCKED) {
+    int written = snprintf(
+        repro_hcr_lx_failure_detail_buffer,
+        sizeof(repro_hcr_lx_failure_detail_buffer),
+        "%s (%s; %d of %d threads that did not park still BLOCK signal %d, "
+        "out of %d threads:",
+        name,
+        repro_hcr_lx_quiesce_status_name(repro_hcr_lx_quiesce.last_status),
+        (int)repro_hcr_lx_quiesce.blocked_count,
+        (int)repro_hcr_lx_quiesce.unresponsive_count,
+        (int)repro_hcr_lx_quiesce.signo,
+        (int)repro_hcr_lx_quiesce.slot_count + 1);
+    int i;
+    int named = repro_hcr_lx_quiesce.blocked_count;
+    if (named > REPRO_HCR_LX_MAX_BLOCKED_THREADS) {
+      named = REPRO_HCR_LX_MAX_BLOCKED_THREADS;
+    }
+    for (i = 0; i < named && written > 0 &&
+                (size_t)written <
+                    sizeof(repro_hcr_lx_failure_detail_buffer) - 96;
+         ++i) {
+      written += snprintf(
+          repro_hcr_lx_failure_detail_buffer + written,
+          sizeof(repro_hcr_lx_failure_detail_buffer) - (size_t)written,
+          "%s %d name=%s SigBlk=%016llx", i == 0 ? "" : ",",
+          (int)repro_hcr_lx_quiesce.blocked_tids[i],
+          repro_hcr_lx_quiesce.blocked_names[i],
+          (unsigned long long)repro_hcr_lx_quiesce.blocked_masks[i]);
+    }
+    if (written > 0 &&
+        (size_t)written < sizeof(repro_hcr_lx_failure_detail_buffer) - 8) {
+      if (i < repro_hcr_lx_quiesce.blocked_count) {
+        written += snprintf(
+            repro_hcr_lx_failure_detail_buffer + written,
+            sizeof(repro_hcr_lx_failure_detail_buffer) - (size_t)written,
+            " (+%d more)", (int)repro_hcr_lx_quiesce.blocked_count - i);
+      }
+    }
+    if (written > 0 &&
+        (size_t)written < sizeof(repro_hcr_lx_failure_detail_buffer) - 8) {
+      (void)snprintf(
+          repro_hcr_lx_failure_detail_buffer + written,
+          sizeof(repro_hcr_lx_failure_detail_buffer) - (size_t)written,
+          "; masks read for %d thread(s), unreadable for %d. The deadline is "
+          "not the problem: these threads were created with the signal "
+          "masked. Run the target without the component that creates them, or "
+          "publish before it starts.)",
+          (int)repro_hcr_lx_quiesce.sigmask_read_ok,
+          (int)repro_hcr_lx_quiesce.sigmask_read_failed);
+    }
+    return repro_hcr_lx_failure_detail_buffer;
+  }
   {
     int written = snprintf(repro_hcr_lx_failure_detail_buffer,
                            sizeof(repro_hcr_lx_failure_detail_buffer),
@@ -1782,8 +1856,22 @@ static const char *repro_hcr_direct_patch_failure_detail(void) {
  * reporting all four as "target symbol was not found in process" would be a
  * wrong answer with no diagnostic attached to it.
  */
+static char repro_hcr_lx_symbol_detail_buffer[768];
+
 static const char *repro_hcr_symbol_failure_detail(void) {
-  return repro_hcr_elf_last_symbol_refusal_name();
+  const char *name = repro_hcr_elf_last_symbol_refusal_name();
+  const char *why = repro_hcr_elf_last_symbol_detail_text();
+  if (why == NULL || why[0] == '\0') {
+    return name;
+  }
+  /* Same shape as the sled path's `absent-sled (status: detail)`: the NAME is
+   * the class and the DETAIL is which object and why. `elf-build-id-absent`
+   * from a resolve can mean either "the library you asked about has no
+   * build-id" or "some other object in this process could not be verified, so
+   * I cannot say your symbol is absent", and those have different remedies. */
+  snprintf(repro_hcr_lx_symbol_detail_buffer,
+           sizeof(repro_hcr_lx_symbol_detail_buffer), "%s (%s)", name, why);
+  return repro_hcr_lx_symbol_detail_buffer;
 }
 #else
 static const char *repro_hcr_capabilities_json_array(void) {

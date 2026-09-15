@@ -778,11 +778,32 @@ static void repro_hcr_elf_version_name(
  * Object scanning.
  * ------------------------------------------------------------------------- */
 
+/* Bounded well under DETAIL_MAX so the two can be concatenated into one detail
+ * without truncating the first object's own sentence. */
+#define REPRO_HCR_ELF_REFUSED_NAMES_MAX 256u
+
 typedef struct repro_hcr_elf_scan_state {
   const repro_hcr_elf_query *query;
   repro_hcr_elf_resolution *result;
   int first_object_refusal;
   char first_object_refusal_detail[REPRO_HCR_ELF_DETAIL_MAX];
+  /*
+   * EVERY refused object, not just the first — basenames only, because the
+   * point is which library, and full nix-store paths exhaust the buffer after
+   * two.
+   *
+   * WHY THIS EXISTS. Keeping only the first refusal names whichever object
+   * `dl_iterate_phdr` happened to reach first, which is almost never the one
+   * the operator asked about. Measured while building H3's edit-surface gate:
+   * a process that loads a distribution `libzstd.so.1` built without
+   * `--build-id` records that refusal first, and from then on EVERY failed
+   * symbol resolution in that process reports `elf-build-id-absent` naming
+   * libzstd — including the one caused by stripping the build-id off the
+   * library the request was actually about. Two unsupported edits with
+   * completely different remedies produced byte-identical diagnostics, and the
+   * library that mattered was named nowhere.
+   */
+  char refused_object_names[REPRO_HCR_ELF_REFUSED_NAMES_MAX];
 } repro_hcr_elf_scan_state;
 
 static void repro_hcr_elf_note_object_refusal(repro_hcr_elf_scan_state *state,
@@ -790,6 +811,24 @@ static void repro_hcr_elf_note_object_refusal(repro_hcr_elf_scan_state *state,
                                               const char *path,
                                               const char *why) {
   state->result->objects_refused += 1;
+  {
+    const char *base = path;
+    const char *p;
+    size_t used = strlen(state->refused_object_names);
+    if (base == NULL) {
+      base = "?";
+    }
+    for (p = base; *p != '\0'; ++p) {
+      if (*p == '/') {
+        base = p + 1;
+      }
+    }
+    if (used + strlen(base) + 3u < sizeof(state->refused_object_names)) {
+      snprintf(state->refused_object_names + used,
+               sizeof(state->refused_object_names) - used, "%s%s",
+               used > 0u ? ", " : "", base);
+    }
+  }
   if (state->first_object_refusal != REPRO_HCR_ELF_OK) {
     return;
   }
@@ -1480,8 +1519,19 @@ static int repro_hcr_elf_resolve(const repro_hcr_elf_query *query,
      * refusal wins.
      */
     out->refusal = state.first_object_refusal;
-    repro_hcr_elf_copy_string(out->detail, sizeof(out->detail),
-                              state.first_object_refusal_detail);
+    /* Name EVERY refused object, not only the first one `dl_iterate_phdr`
+     * reached: the one the request was about is very often not the first. See
+     * `refused_object_names`. */
+    {
+      /* Truncate the FIRST detail rather than let the object list fall off the
+       * end: the list is the part that says which library mattered. */
+      char head[REPRO_HCR_ELF_DETAIL_MAX - REPRO_HCR_ELF_REFUSED_NAMES_MAX - 48u];
+      repro_hcr_elf_copy_string(head, sizeof(head),
+                                state.first_object_refusal_detail);
+      snprintf(out->detail, sizeof(out->detail),
+               "%s; %d object(s) refused: %s", head, out->objects_refused,
+               state.refused_object_names);
+    }
     return out->refusal;
   }
 
@@ -1987,6 +2037,27 @@ repro_hcr_elf_sled_address_for_entry(uint64_t entry_address) {
  */
 static int repro_hcr_elf_last_symbol_refusal = REPRO_HCR_ELF_OK;
 
+/*
+ * The resolver's own sentence about WHY, kept beside the name.
+ *
+ * The name alone is not always the diagnosis. `elf-build-id-absent` from a
+ * resolve means "one of the objects I had to scan could not be verified, so I
+ * cannot tell you the symbol is absent" — which is the designed precedence
+ * (see `repro_hcr_elf_refusal_is_scan_negative`) and is a different sentence
+ * from "the library you asked about has no build-id", even though both print
+ * the same name. Measured while building H3's edit-surface gate: two
+ * unsupported edits that fail for entirely different reasons — a library with
+ * its build-id stripped, and an internal-linkage symbol in a library with its
+ * `.symtab` stripped — reported the SAME six words, and the object the
+ * resolver was actually complaining about appeared nowhere. The sled path
+ * already appends its detail; this is the symbol path catching up.
+ */
+static char repro_hcr_elf_last_symbol_detail[REPRO_HCR_ELF_DETAIL_MAX] = {0};
+
+REPRO_HCR_ELF_MAYBE_UNUSED static const char *repro_hcr_elf_last_symbol_detail_text(void) {
+  return repro_hcr_elf_last_symbol_detail;
+}
+
 /* Optional sink for the resolved symbol's `st_size`. A pointer rather than an
  * extra parameter so the two existing call sites and the probe shim keep their
  * signatures; the agent points it at its own variable before resolving. */
@@ -2017,6 +2088,14 @@ REPRO_HCR_ELF_MAYBE_UNUSED static uint64_t repro_hcr_elf_resolve_function_addres
   rc = repro_hcr_elf_resolve(&query, &resolution);
   if (refusal_out != NULL) {
     *refusal_out = rc;
+  }
+  /* Carry the resolver's own sentence out with the code. Copied rather than
+   * pointed at: `resolution` is a stack local here. */
+  repro_hcr_elf_last_symbol_detail[0] = '\0';
+  if (rc != REPRO_HCR_ELF_OK) {
+    size_t n = sizeof(repro_hcr_elf_last_symbol_detail) - 1u;
+    strncpy(repro_hcr_elf_last_symbol_detail, resolution.detail, n);
+    repro_hcr_elf_last_symbol_detail[n] = '\0';
   }
   /* HLX-M4 needs the EXTENT, not just the entry: on-stack detection (§6.2 step
    * 5) asks whether any parked thread's PC or return address lies inside the

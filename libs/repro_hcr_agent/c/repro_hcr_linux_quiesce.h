@@ -158,6 +158,10 @@ static uint64_t repro_hcr_lx_monotonic_ns(void) {
 
 #define REPRO_HCR_LX_MAX_QUIESCE_THREADS 512
 #define REPRO_HCR_LX_MAX_QUIESCE_FRAMES 24
+/* How many signal-blocked threads are NAMED in the refusal. The count is
+ * reported in full regardless; this only bounds the static name table. */
+#define REPRO_HCR_LX_MAX_BLOCKED_THREADS 64
+#define REPRO_HCR_LX_COMM_MAX 16 /* TASK_COMM_LEN, including the NUL */
 #define REPRO_HCR_LX_TASK_DIR_BUFFER 65536
 #define REPRO_HCR_LX_DEFAULT_QUIESCE_TIMEOUT_NS 250000000ull /* §6.3: 250 ms */
 
@@ -169,7 +173,16 @@ enum {
   REPRO_HCR_LX_QUIESCE_TOO_MANY_THREADS = 4,
   REPRO_HCR_LX_QUIESCE_ALREADY_HELD = 5,
   REPRO_HCR_LX_QUIESCE_SIGNAL_FAILED = 6,
-  REPRO_HCR_LX_QUIESCE_MAPS_UNAVAILABLE = 7
+  REPRO_HCR_LX_QUIESCE_MAPS_UNAVAILABLE = 7,
+  /*
+   * A thread in this thread group was created with the quiescence signal
+   * BLOCKED, so it can never take the handshake and can never park. Distinct
+   * from `TIMEOUT` because the two have opposite remedies: a timeout invites
+   * "raise the deadline", and no deadline can help a thread the kernel will
+   * never deliver the signal to. See
+   * `repro_hcr_lx_census_unresponsive_signal_masks`.
+   */
+  REPRO_HCR_LX_QUIESCE_SIGNAL_BLOCKED = 8
 };
 
 static const char *repro_hcr_lx_quiesce_status_name(int code) {
@@ -190,6 +203,8 @@ static const char *repro_hcr_lx_quiesce_status_name(int code) {
       return "quiescence-signal-delivery-failed";
     case REPRO_HCR_LX_QUIESCE_MAPS_UNAVAILABLE:
       return "quiescence-maps-snapshot-unavailable";
+    case REPRO_HCR_LX_QUIESCE_SIGNAL_BLOCKED:
+      return "quiescence-signal-blocked";
     default:
       return "quiescence-unknown";
   }
@@ -266,6 +281,21 @@ typedef struct repro_hcr_lx_quiesce_state {
   int32_t signal_failed_tid;
   int32_t signal_failed_errno;    /* positive errno of the first such failure */
   int32_t exited_count;           /* deliveries that really did get ESRCH */
+  /*
+   * The signal-mask census taken AFTER the deadline expires, over the threads
+   * that did not park (see `repro_hcr_lx_census_unresponsive_signal_masks`,
+   * whose comment explains why it must not run before the wait).
+   * `sigmask_read_ok` is the anti-vacuity counter: a census that read nothing
+   * would report zero blocked threads, which is byte-for-byte what a healthy
+   * process reports.
+   */
+  int32_t sigmask_read_ok;
+  int32_t sigmask_read_failed;
+  int32_t blocked_count;
+  int32_t blocked_tids[REPRO_HCR_LX_MAX_BLOCKED_THREADS];
+  uint64_t blocked_masks[REPRO_HCR_LX_MAX_BLOCKED_THREADS];
+  char blocked_names[REPRO_HCR_LX_MAX_BLOCKED_THREADS]
+                    [REPRO_HCR_LX_COMM_MAX];
   repro_hcr_lx_parked_thread slots[REPRO_HCR_LX_MAX_QUIESCE_THREADS];
 } repro_hcr_lx_quiesce_state;
 
@@ -812,6 +842,266 @@ static int repro_hcr_lx_tid_sets_agree(const int32_t *a, int32_t a_count,
 }
 
 /* ---------------------------------------------------------------------------
+ * THE SIGNAL-MASK CENSUS, and why a timeout was the wrong report.
+ *
+ * Quiescence is a `SIGRTMIN+3` handshake. A thread whose blocked-signal mask
+ * contains that signal cannot run the handler, so it can never set `parked`,
+ * so `begin` waits out its full deadline and reports `quiescence-timeout` —
+ * naming tids, but describing the wrong thing. "Timeout" invites the one
+ * remedy that cannot work: a longer deadline. Such a thread is not slow. It is
+ * unreachable, and it will be unreachable for every future attempt too.
+ *
+ * MEASURED, and this is why it is worth a distinct status rather than a
+ * comment. A Godot process rendering through Mesa carries threads created by
+ * Mesa's `u_thread_create`, which is `sigfillset` minus `SIGSYS`:
+ *
+ *   tid 1234  llvmpipe-0       SigBlk=fffffffe3ffbfaff
+ *   tid 1235  <driver thread>  SigBlk=fffffffe3ffbfaff
+ *   tid 1236  godot.l:disk$0   SigBlk=fffffffe3ffbfaff
+ *
+ * Bit 36 of that mask is set, and bit 36 is signal 37 = `SIGRTMIN+3` on glibc.
+ * The same process's 24 Godot `WorkerThread`s carry `SigBlk=0` and park in
+ * single-digit milliseconds.
+ *
+ * WHY THE CENSUS RUNS AFTER THE DEADLINE AND NOT BEFORE IT. The first version
+ * of this ran as a PRE-FLIGHT check, refused before signalling anything, and
+ * was WRONG — measured, by
+ * `e2e_hcr_linux_concurrent_patch_no_torn_instruction`, which lost 9 of 192
+ * publications to it. `SigBlk` is not a property of a thread; it is a property
+ * of a thread AT AN INSTANT, and two ordinary things set it transiently:
+ * a thread executing any signal handler blocks that handler's `sa_mask`, and a
+ * thread still inside THIS file's own quiescence handler from a previous
+ * publication blocks everything (the handler's mask is `sigfillset` minus the
+ * synchronous faults). Both clear on their own, both would have parked, and a
+ * pre-flight refusal turned each into a failed patch.
+ *
+ * After the deadline the distinction is free. A thread that has had the signal
+ * pending for the whole deadline and STILL has it masked is the structural
+ * case; a transiently-masked thread took the signal and parked long before.
+ * And the failure direction is safe: a mislabelled refusal is still a refusal,
+ * whereas a pre-flight false positive was a refusal that should never have
+ * happened. NOTHING THAT USED TO SUCCEED CAN FAIL BECAUSE OF THIS CODE — it
+ * runs only on a path that had already decided to refuse.
+ *
+ * WHAT IT DOES NOT DO, stated because the tempting next step is unsound. It
+ * does not let the publication proceed while those threads run. To skip a
+ * thread you must establish that at the instant of the store its PC is not
+ * inside the 8-byte publication window, and the only in-process instrument
+ * that yields another thread's userspace PC is the `ucontext_t` handed to a
+ * signal handler — which is exactly what a signal-blocked thread denies you.
+ * `/proc/<tid>/stat`'s `kstkeip` was measured to answer 0 for a running task,
+ * the frame-pointer walk in this file is a LOWER bound by construction, and
+ * "that thread's code cannot reach this function" is a whole-program
+ * reachability claim about a process that `dlopen`s drivers at runtime. Tier 1
+ * — publishing with threads unparked — is already falsified by
+ * `e2e_hcr_linux_concurrent_patch_no_torn_instruction`, which runs the tier-1
+ * arm every time it runs: across observed runs 19 to 21 of its 24 processes
+ * crash, with 6.6% to 7.4% of the 2,800 sampled parked PCs inside the
+ * publication window. Those are per-run samples of a race, so the gate's own
+ * JSON is the authority and no single pair of digits is quoted as THE figure;
+ * what does not vary is that the arm never survives. So the honest outcome is
+ * the same refusal with the right name on it.
+ *
+ * A FAILED READ IS NOT A CLEAN ONE, and it is reported rather than swallowed:
+ * `sigmask_read_ok` / `sigmask_read_failed` travel into the diagnostic, so a
+ * census that read nothing says "masks read for 0 thread(s)" instead of
+ * quietly reporting that nothing was blocked.
+ * ------------------------------------------------------------------------- */
+
+/*
+ * Test-only lever. The census renames the refusal that HLX-M4's timeout
+ * fixture provokes, because the only way user space can manufacture an
+ * unparkable thread on demand is `pthread_sigmask` — the very thing the census
+ * recognises. Turning it off restores the pre-census reporting EXACTLY, so the
+ * bounded-abort path goes on being tested by the gate written for it.
+ *
+ * It cannot make anything unsafe. It runs only inside the timeout branch,
+ * after the release, and changes nothing but the NAME of a refusal that has
+ * already been decided. The agent never sets it.
+ */
+static int repro_hcr_lx_quiesce_sigmask_census_enabled = 1;
+
+static char repro_hcr_lx_status_buffer[8192];
+static char repro_hcr_lx_status_path[64];
+
+static void repro_hcr_lx_status_path_for(int32_t tid) {
+  static const char prefix[] = "/proc/self/task/";
+  static const char suffix[] = "/status";
+  char digits[16];
+  int nd = 0;
+  size_t at = 0;
+  uint32_t v = (uint32_t)tid;
+  size_t i;
+  for (i = 0; i < sizeof(prefix) - 1; ++i) {
+    repro_hcr_lx_status_path[at++] = prefix[i];
+  }
+  if (v == 0) {
+    digits[nd++] = '0';
+  }
+  while (v != 0 && nd < (int)sizeof(digits)) {
+    digits[nd++] = (char)('0' + (v % 10u));
+    v /= 10u;
+  }
+  while (nd > 0) {
+    repro_hcr_lx_status_path[at++] = digits[--nd];
+  }
+  for (i = 0; i < sizeof(suffix); ++i) { /* includes the NUL */
+    repro_hcr_lx_status_path[at++] = suffix[i];
+  }
+}
+
+/* `SigBlk:` and `Name:` out of one `/proc/self/task/<tid>/status`. Returns 1
+ * only when the mask line was found; `out_name` is best-effort and is left as
+ * an empty string when the process has no readable `Name:`. */
+static int repro_hcr_lx_read_thread_status(int32_t tid, uint64_t *out_mask,
+                                           char *out_name) {
+  long fd;
+  size_t held = 0;
+  int found_mask = 0;
+  size_t i;
+  out_name[0] = '\0';
+  *out_mask = 0;
+  repro_hcr_lx_status_path_for(tid);
+  fd = repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_OPENAT, REPRO_HCR_LX_AT_FDCWD,
+                             (long)(uintptr_t)repro_hcr_lx_status_path,
+                             REPRO_HCR_LX_O_RDONLY | REPRO_HCR_LX_O_CLOEXEC);
+  if (fd < 0) {
+    return 0;
+  }
+  for (;;) {
+    long got = repro_hcr_lx_syscall3(
+        REPRO_HCR_LX_NR_READ, fd,
+        (long)(uintptr_t)(repro_hcr_lx_status_buffer + held),
+        (long)(sizeof(repro_hcr_lx_status_buffer) - 1 - held));
+    if (got <= 0) {
+      break;
+    }
+    held += (size_t)got;
+    if (held >= sizeof(repro_hcr_lx_status_buffer) - 1) {
+      break;
+    }
+  }
+  (void)repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_CLOSE, fd, 0, 0);
+  repro_hcr_lx_status_buffer[held] = '\0';
+
+  /* Line-oriented scan. `SigBlk:` is a 16-digit hex mask; `Name:` is the
+   * thread's `comm`, which is what makes "three threads did not respond"
+   * actionable instead of three integers. */
+  i = 0;
+  while (i < held) {
+    size_t start = i;
+    size_t j;
+    while (i < held && repro_hcr_lx_status_buffer[i] != '\n') {
+      i += 1;
+    }
+    j = start;
+    if (held - start >= 7 &&
+        memcmp(repro_hcr_lx_status_buffer + start, "SigBlk:", 7) == 0) {
+      uint64_t mask = 0;
+      int digits = 0;
+      j = start + 7;
+      while (j < i && (repro_hcr_lx_status_buffer[j] == ' ' ||
+                       repro_hcr_lx_status_buffer[j] == '\t')) {
+        j += 1;
+      }
+      while (j < i) {
+        int value = repro_hcr_lx_hex_value(repro_hcr_lx_status_buffer[j]);
+        if (value < 0) {
+          break;
+        }
+        mask = (mask << 4) | (uint64_t)value;
+        digits += 1;
+        j += 1;
+      }
+      if (digits > 0) {
+        *out_mask = mask;
+        found_mask = 1;
+      }
+    } else if (held - start >= 5 &&
+               memcmp(repro_hcr_lx_status_buffer + start, "Name:", 5) == 0) {
+      size_t written = 0;
+      j = start + 5;
+      while (j < i && (repro_hcr_lx_status_buffer[j] == ' ' ||
+                       repro_hcr_lx_status_buffer[j] == '\t')) {
+        j += 1;
+      }
+      while (j < i && written + 1 < (size_t)REPRO_HCR_LX_COMM_MAX) {
+        out_name[written++] = repro_hcr_lx_status_buffer[j++];
+      }
+      out_name[written] = '\0';
+    }
+    i += 1;
+  }
+  return found_mask;
+}
+
+/*
+ * Censuses the tids already recorded in `unresponsive_tids` — the threads that
+ * did not park before the deadline. Returns the number that still block
+ * `signo`, which is the number that could never have parked at all.
+ */
+static int32_t repro_hcr_lx_census_unresponsive_signal_masks(int signo) {
+  int32_t i;
+  uint64_t signal_bit;
+  repro_hcr_lx_quiesce.sigmask_read_ok = 0;
+  repro_hcr_lx_quiesce.sigmask_read_failed = 0;
+  repro_hcr_lx_quiesce.blocked_count = 0;
+  if (signo <= 0 || signo > 64) {
+    return 0;
+  }
+  signal_bit = 1ull << (signo - 1);
+  for (i = 0; i < repro_hcr_lx_quiesce.unresponsive_count &&
+              i < REPRO_HCR_LX_MAX_QUIESCE_THREADS;
+       ++i) {
+    uint64_t mask = 0;
+    char name[REPRO_HCR_LX_COMM_MAX];
+    if (!repro_hcr_lx_read_thread_status(
+            repro_hcr_lx_quiesce.unresponsive_tids[i], &mask, name)) {
+      repro_hcr_lx_quiesce.sigmask_read_failed += 1;
+      continue;
+    }
+    repro_hcr_lx_quiesce.sigmask_read_ok += 1;
+    if ((mask & signal_bit) == 0) {
+      continue;
+    }
+    if (repro_hcr_lx_quiesce.blocked_count < REPRO_HCR_LX_MAX_BLOCKED_THREADS) {
+      int32_t at = repro_hcr_lx_quiesce.blocked_count;
+      size_t c;
+      repro_hcr_lx_quiesce.blocked_tids[at] =
+          repro_hcr_lx_quiesce.unresponsive_tids[i];
+      repro_hcr_lx_quiesce.blocked_masks[at] = mask;
+      /*
+       * SANITISED, and this is not defensiveness for its own sake. `comm` is
+       * 15 arbitrary bytes chosen by whoever created the thread, and this
+       * string ends up inside a JSON string field on the coordinator wire. A
+       * thread named with a double quote or a backslash produced a message the
+       * coordinator could not parse at all — measured: the first Mesa refusal
+       * this code reported killed the driver with
+       * `JsonParsingError: } expected`, because the names were being quoted
+       * into the diagnostic. Anything outside a conservative set becomes '_'.
+       */
+      for (c = 0; c < (size_t)REPRO_HCR_LX_COMM_MAX; ++c) {
+        char ch = name[c];
+        if (ch == '\0') {
+          repro_hcr_lx_quiesce.blocked_names[at][c] = '\0';
+          break;
+        }
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' ||
+              ch == '-' || ch == '+' || ch == ':' || ch == '$' ||
+              ch == ' ')) {
+          ch = '_';
+        }
+        repro_hcr_lx_quiesce.blocked_names[at][c] = ch;
+      }
+      repro_hcr_lx_quiesce.blocked_names[at][REPRO_HCR_LX_COMM_MAX - 1] = '\0';
+    }
+    repro_hcr_lx_quiesce.blocked_count += 1;
+  }
+  return repro_hcr_lx_quiesce.blocked_count;
+}
+
+/* ---------------------------------------------------------------------------
  * begin / release.
  * ------------------------------------------------------------------------- */
 
@@ -949,6 +1239,10 @@ static int repro_hcr_lx_quiesce_begin(uint64_t timeout_ns) {
   }
   __atomic_store_n(&repro_hcr_lx_quiesce.slot_count, expected,
                    __ATOMIC_RELEASE);
+
+  repro_hcr_lx_quiesce.sigmask_read_ok = 0;
+  repro_hcr_lx_quiesce.sigmask_read_failed = 0;
+  repro_hcr_lx_quiesce.blocked_count = 0;
 
   started = repro_hcr_lx_monotonic_ns();
   repro_hcr_lx_quiesce.last_begin_ns = started;
@@ -1117,6 +1411,20 @@ static int repro_hcr_lx_quiesce_begin(uint64_t timeout_ns) {
         }
       }
       repro_hcr_lx_quiesce.held = 0;
+      /*
+       * Everyone who parked is out of the futex and out of the handler, so
+       * reading `/proc` is allowed again — and the answer is now meaningful,
+       * because a thread that had the signal pending for the whole deadline
+       * and STILL masks it is structurally unreachable rather than slow. See
+       * the census's own comment for why this cannot run before the wait.
+       */
+      if (repro_hcr_lx_quiesce_sigmask_census_enabled &&
+          repro_hcr_lx_census_unresponsive_signal_masks(
+              repro_hcr_lx_quiesce.signo) > 0) {
+        repro_hcr_lx_quiesce.last_status =
+            REPRO_HCR_LX_QUIESCE_SIGNAL_BLOCKED;
+        return REPRO_HCR_LX_QUIESCE_SIGNAL_BLOCKED;
+      }
       repro_hcr_lx_quiesce.last_status = REPRO_HCR_LX_QUIESCE_TIMEOUT;
       return REPRO_HCR_LX_QUIESCE_TIMEOUT;
     }

@@ -429,6 +429,49 @@ void repro_hcr_lx_probe_set_quiesce_suppress_adjust(int value) {
   repro_hcr_lx_quiesce_suppress_adjust = value;
 }
 
+/* The post-deadline signal-mask census. Off restores the pre-census reporting
+ * exactly, which is what keeps HLX-M4's bounded-timeout arm testing the path
+ * it was written for; see the lever's own comment in the quiescence header. */
+void repro_hcr_lx_probe_set_quiesce_sigmask_census(int value) {
+  repro_hcr_lx_quiesce_sigmask_census_enabled = value;
+}
+
+int repro_hcr_lx_probe_quiesce_sigmask_read_ok(void) {
+  return (int)repro_hcr_lx_quiesce.sigmask_read_ok;
+}
+
+int repro_hcr_lx_probe_quiesce_sigmask_read_failed(void) {
+  return (int)repro_hcr_lx_quiesce.sigmask_read_failed;
+}
+
+int repro_hcr_lx_probe_quiesce_blocked_count(void) {
+  return (int)repro_hcr_lx_quiesce.blocked_count;
+}
+
+int repro_hcr_lx_probe_quiesce_blocked_tid(int index) {
+  if (index < 0 || index >= repro_hcr_lx_quiesce.blocked_count ||
+      index >= REPRO_HCR_LX_MAX_BLOCKED_THREADS) {
+    return -1;
+  }
+  return (int)repro_hcr_lx_quiesce.blocked_tids[index];
+}
+
+unsigned long long repro_hcr_lx_probe_quiesce_blocked_mask(int index) {
+  if (index < 0 || index >= repro_hcr_lx_quiesce.blocked_count ||
+      index >= REPRO_HCR_LX_MAX_BLOCKED_THREADS) {
+    return 0;
+  }
+  return (unsigned long long)repro_hcr_lx_quiesce.blocked_masks[index];
+}
+
+const char *repro_hcr_lx_probe_quiesce_blocked_name(int index) {
+  if (index < 0 || index >= repro_hcr_lx_quiesce.blocked_count ||
+      index >= REPRO_HCR_LX_MAX_BLOCKED_THREADS) {
+    return "";
+  }
+  return repro_hcr_lx_quiesce.blocked_names[index];
+}
+
 int repro_hcr_lx_probe_quiesce_install(int signo) {
   return repro_hcr_lx_quiesce_install(signo);
 }
