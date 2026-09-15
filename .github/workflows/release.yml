@@ -929,7 +929,6 @@ jobs:
             cp "${win_zip}" pkgs/
           fi
 
-          tag="v${version}"
           # --scoop-downloads-base IS A ROOT, NOT A RELEASE DIRECTORY.
           #
           # The publisher owns the version segment: it appends `/v<version>/`
