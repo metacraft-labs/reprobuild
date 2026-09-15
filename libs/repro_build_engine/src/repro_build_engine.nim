@@ -12410,8 +12410,47 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # probe`: the two must move in opposite directions by the same count, or
     # the probes went away for some other reason. See
     # `storeAbsenceSkipStats`.
-    stats.addCounterMetric("repro store absence skips",
-      storeAbsenceSkipStats())
+    # Counted, not counter: the row now carries a DURATION beside the count,
+    # and `addCounterMetric` appends one zero-duration sample per unit, which
+    # is what made it render a literal `0.0` in the total column. See
+    # `storeAbsenceSkipNanoStats` -- and the `repro file metadata *` rows
+    # below, which had the same hole and are fixed the same way.
+    stats.addCountedMetric("repro store absence skips",
+      storeAbsenceSkipStats(), float(storeAbsenceSkipNanoStats()) / 1000.0)
+    # The interval that ENCLOSES all five class rows. It is what `repro cache
+    # lookup` was assumed to be ~18 ms of; nothing measured it until this row
+    # existed, and the four class rows below could not be summed into a term
+    # without it because a sum of parts is not a measurement of a whole --
+    # the loop's own machinery and the per-check timers live in the gap.
+    let rir = recordedInputRevalidateStats()
+    stats.addCountedMetric("repro recorded input revalidate", rir.checks,
+      float(rir.nanos) / 1000.0)
+    # NESTED inside `repro file metadata warm revalidate`, not beside it: see
+    # `membershipRelistStats`. The entries row is what tells a reader whether
+    # a large duration is a slow filesystem or a big tree.
+    let mrl = membershipRelistStats()
+    stats.addCountedMetric("repro input membership relist", mrl.relists,
+      float(mrl.nanos) / 1000.0)
+    stats.addCountedMetric("repro input membership relist entries",
+      int(mrl.entries), 0.0)
+    # ENCLOSES the three record rows below. `perEdgeRecordLoadStats`.
+    let perl = perEdgeRecordLoadStats()
+    stats.addCountedMetric("repro per-edge record load", perl.loads,
+      float(perl.nanos) / 1000.0)
+    # The TAIL of the probe population, which is what says whether the
+    # `warm revalidate` average above describes the population or hides it.
+    # `slow probe` is zero on a healthy host and a zero row is not rendered,
+    # so it costs a reader nothing until there IS a tail. `slowest probe` is
+    # the max and renders on every build that probed anything; that is the
+    # point -- it is one row, and it is the number no division can produce.
+    # See `slowMetadataProbeStats` for the measurement that makes these
+    # necessary rather than decorative.
+    let smp = slowMetadataProbeStats()
+    stats.addCountedMetric("repro file metadata slow probe", smp.slowProbes,
+      float(smp.slowNanos) / 1000.0)
+    stats.addCountedMetric("repro file metadata slowest probe",
+      (if smp.slowestNanos > 0: 1 else: 0),
+      float(smp.slowestNanos) / 1000.0)
     # The byte-scaled half of the cost model, beside the count-scaled half
     # above. Caching-Architecture.md §"Known Limit: The Default Policy Can
     # Serve A Stale Result" is a claim about which of the two a consultation
@@ -12476,12 +12515,34 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       return
     finishOutputStateCheckStats()
     let metadataStats = cache.metadataStats()
-    stats.addCounterMetric("repro file metadata current-run hit",
-      metadataStats.currentRunHits)
-    stats.addCounterMetric("repro file metadata cold stat",
-      metadataStats.coldStats)
-    stats.addCounterMetric("repro file metadata warm revalidate",
-      metadataStats.warmRevalidated)
+    # Three of these five now carry a DURATION beside the count, for the same
+    # reason the record rows got one in the milestone before this: a count
+    # with a literal `0.0` in the total column reads as "measured, and free"
+    # when it means "never measured", and ~18 ms of a warm no-op was budgeted
+    # against that silence purely by subtraction.
+    #
+    # `addCountedMetric`, not `addCounterMetric`: the latter appends one
+    # zero-duration sample per counted unit, so the total column is 0.0 by
+    # construction and cannot be given a value.
+    #
+    # The durations are MEASURED, the averages they imply are not equally
+    # solid: `current-run hit` is a `Table` probe at the same order of
+    # magnitude as the ~34 ns timer pair that measures it, so read that row
+    # as an upper bound. `cold stat` and `warm revalidate` are syscalls and
+    # carry under 1% of their own instrument.
+    #
+    # `warm unchanged` and `warm changed` stay pure counts on purpose: they
+    # are a PARTITION of `warm revalidate` by outcome, decided after the
+    # syscall that row already times, so a duration here would double-count
+    # the same nanoseconds under a second name.
+    stats.addCountedMetric("repro file metadata current-run hit",
+      metadataStats.currentRunHits,
+      float(metadataStats.currentRunHitNanos) / 1000.0)
+    stats.addCountedMetric("repro file metadata cold stat",
+      metadataStats.coldStats, float(metadataStats.coldStatNanos) / 1000.0)
+    stats.addCountedMetric("repro file metadata warm revalidate",
+      metadataStats.warmRevalidated,
+      float(metadataStats.warmRevalidateNanos) / 1000.0)
     stats.addCounterMetric("repro file metadata warm unchanged",
       metadataStats.warmUnchanged)
     stats.addCounterMetric("repro file metadata warm changed",

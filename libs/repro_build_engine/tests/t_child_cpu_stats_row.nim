@@ -328,3 +328,97 @@ when defined(posix):
       check off.launchedCount(offGraph) == offGraph.actions.len
       check not off.hasMetric(ChildCpuRow)
       check not off.hasMetric(ProcessWaitRow)
+
+  suite "the recorded-input duration rows reach the stats TABLE":
+    ## MAC-4 measured a duration for the four `repro file metadata *` /
+    ## `repro store absence skips` rows and added three more. Those
+    ## measurements are guarded where they are TAKEN, in
+    ## `libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim`.
+    ## Nothing guarded where they are REPORTED, and the gap is not academic:
+    ## reverting the four `addCountedMetric` calls in `runBuild` to
+    ## `addCounterMetric` — which is precisely the defect MAC-4 exists to fix,
+    ## because that helper appends one ZERO-duration sample per counted unit
+    ## and so pins the total column at a literal `0.0` — left every case in
+    ## this repository green. Mutation-checked; MAC-3's three record-decode
+    ## rows had, and this suite also closes, the same hole.
+    ##
+    ## `totalUs > 0` is the exact discriminator and the reason these cases are
+    ## not duration assertions. `addCounterMetric` cannot produce a positive
+    ## total on any machine, at any speed, for any graph; `addCountedMetric`
+    ## over a real `lstat` population cannot produce zero on a monotonic
+    ## clock. So the property is the row's ZERO-VERSUS-POSITIVE behaviour,
+    ## exactly as for `repro child cpu` above, and no number is pinned.
+
+    const RevalidateLoopRow = "repro recorded input revalidate"
+    const WarmRevalidateRow = "repro file metadata warm revalidate"
+    const PerEdgeRecordLoadRow = "repro per-edge record load"
+
+    test "a warm consultation reports a DURATION, not a count with 0.0":
+      let tempRoot = createTempDir("repro-mac4-table-rows", "")
+      defer: removeDir(tempRoot)
+      let workRoot = tempRoot / "work"
+      let g = fixtureGraph(workRoot, "table-rows")
+      let config = statsConfig(tempRoot / "cache")
+
+      # Cold first, so there are records for the warm pass to revalidate
+      # against. Without it the warm pass has nothing to consult and every
+      # row below is legitimately absent.
+      let cold = runBuild(g, config)
+      for act in g.actions:
+        check cold.byId(act.id).status == asSucceeded
+
+      let warm = runBuild(g, config)
+      # The premise: this really was a warm consultation that reused
+      # everything, so the rows describe recorded-input revalidation and not
+      # a build that executed.
+      check allEdgesWereWarmHits(warm, g)
+
+      for row in [RevalidateLoopRow, WarmRevalidateRow, PerEdgeRecordLoadRow]:
+        checkpoint("row: " & row)
+        # `metricByName` raises on a missing row rather than defaulting to
+        # zero, so an un-emitted row fails here instead of silently
+        # satisfying the count assertion below.
+        let metric = warm.metricByName(row)
+        checkpoint("  count=" & $metric.count &
+          " totalUs=" & $metric.totalUs)
+        # Non-vacuity: the row was exercised at all.
+        check metric.count > 0
+        # The whole point of MAC-4. This is the assertion that
+        # `addCounterMetric` fails by construction.
+        check metric.totalUs > 0.0
+
+    test "the rows are per build, not cumulative across builds in a process":
+      ## Same rule as `repro child cpu` above, and it has to be stated for
+      ## these rows separately because their accumulators are process-GLOBALS
+      ## in `repro_local_store` cleared by `resetOutputStateCheckStats`,
+      ## not fields of a per-build object. A reset that stopped firing would
+      ## make every reading after the first include every earlier build in
+      ## the process — the daemon, `repro watch`, this binary — and the
+      ## decomposition MAC-4 exists to support would stop summing.
+      let tempRoot = createTempDir("repro-mac4-table-reset", "")
+      defer: removeDir(tempRoot)
+
+      # The LARGER graph first, warmed, so its revalidation population is
+      # the bigger one.
+      let firstRoot = tempRoot / "first"
+      let firstGraph = fixtureGraph(firstRoot, "reset-first", edges = 4)
+      let firstConfig = statsConfig(tempRoot / "first-cache")
+      discard runBuild(firstGraph, firstConfig)
+      let firstWarm = runBuild(firstGraph, firstConfig)
+      check allEdgesWereWarmHits(firstWarm, firstGraph)
+      let firstChecks = firstWarm.metricByName(RevalidateLoopRow).count
+      check firstChecks > 0
+
+      # A smaller graph, warmed, in the SAME process. A cumulative counter
+      # would report at least the first graph's checks here.
+      let secondRoot = tempRoot / "second"
+      let secondGraph = fixtureGraph(secondRoot, "reset-second", edges = 1)
+      let secondConfig = statsConfig(tempRoot / "second-cache")
+      discard runBuild(secondGraph, secondConfig)
+      let secondWarm = runBuild(secondGraph, secondConfig)
+      check allEdgesWereWarmHits(secondWarm, secondGraph)
+      let secondChecks = secondWarm.metricByName(RevalidateLoopRow).count
+      checkpoint("first checks=" & $firstChecks &
+        " second checks=" & $secondChecks)
+      check secondChecks > 0
+      check secondChecks < firstChecks

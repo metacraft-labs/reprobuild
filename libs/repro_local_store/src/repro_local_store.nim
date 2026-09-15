@@ -291,6 +291,26 @@ type
     warmRevalidated*: int
     warmUnchanged*: int
     warmChanged*: int
+    # The DURATION half of the three counts above, in nanoseconds, measured
+    # around the WHOLE check -- table probe, prefix scan, `lstat(2)`,
+    # comparison -- and attributed to the arm the check actually took.
+    #
+    # In the cache object rather than in a process-global, deliberately: the
+    # counts beside them are per-cache, a build makes more than one cache
+    # (the whole-graph fast-noop scan's and the scheduler's), and only one
+    # of those is ever reported. A global duration would describe both while
+    # the count described one, which is the failure mode that makes a row
+    # worse than no row at all.
+    #
+    # They cost one `getMonoTime` pair per outermost check, measured at
+    # 33-36 ns on macOS arm64. Against `cold stat` and `warm revalidate`,
+    # which are syscall-bound at microseconds, that is under 1%. Against
+    # `current-run hit`, which is a `Table` probe at ~100 ns, it is a large
+    # fraction of the reading, so READ THAT ROW AS AN UPPER BOUND: subtract
+    # ~34 ns per hit to recover the work alone.
+    currentRunHitNanos*: int64
+    coldStatNanos*: int64
+    warmRevalidateNanos*: int64
 
   ActionCacheLookupStatus* = enum
     aclMissNoRecord
@@ -1151,6 +1171,140 @@ var
   actionIndexResolvedHits = 0
   actionIndexUnionFallbacks = 0
   actionIndexUnresolvedRefs = 0
+  # The DURATION half of `storeAbsenceSkipStats`, and of the recorded-input
+  # revalidation LOOP that encloses every metadata check a consultation
+  # makes. Global rather than per-cache because that is the lifetime of the
+  # count each sits beside -- see `FileMetadataCacheStats` for the four rows
+  # whose durations live in the cache object instead, for exactly the same
+  # reason.
+  storeAbsenceSkipNanos = 0'i64
+  recordedInputRevalidateChecks = 0
+  recordedInputRevalidateNanos = 0'i64
+  # A SUBSET of `warm revalidate`, split out because the two are not the same
+  # kind of work at all: a plain warm revalidation is one `lstat(2)`, while a
+  # membership-tracked directory has to be RE-LISTED and digested. Without
+  # the split, `warm revalidate` is an average over two populations whose
+  # per-item costs differ by two orders of magnitude, and the average
+  # describes neither.
+  membershipRelists = 0
+  membershipRelistNanos = 0'i64
+  membershipRelistEntries = 0'i64
+  # The interval that ENCLOSES the three MAC-3 record rows. Those three time
+  # the `readFile` calls and the decode; this times everything a record load
+  # does, including the directory enumeration, the `fileExists` probes and
+  # the path building that sit between them. The gap between this and their
+  # sum was measured at ~40% of a `readHotRecord` and was previously
+  # invisible.
+  perEdgeRecordLoads = 0
+  perEdgeRecordLoadNanos = 0'i64
+  # The DISTRIBUTION, because on this population the average is known to be a
+  # lie. "One pathological path can dominate a whole probe population" is a
+  # recorded hazard of this campaign -- a single autofs lookup cost 15 ms of
+  # an 18 ms loop, and dividing by the count turned that into a plausible
+  # ~4 us that produced two wrong estimates. A max and a tail count cost one
+  # comparison per check, no extra clock read, and they are what makes the
+  # difference between "272 slow checks" and "one slow check" decidable from
+  # the stats table.
+  slowMetadataProbes = 0
+  slowMetadataProbeNanos = 0'i64
+  slowestMetadataProbeNanos = 0'i64
+  slowestMetadataProbePath = ""
+
+const SlowMetadataProbeNanos = 1_000_000'i64
+  ## 1 ms. A metadata probe is a `lstat(2)`; anything at millisecond scale is
+  ## not a local filesystem answering and is an actionable fact about the
+  ## ENVIRONMENT rather than about the build -- an automount, a network
+  ## mount, a sleeping disk. Deliberately far above any plausible local
+  ## answer (~1-5 us) so a busy host cannot populate the row.
+
+type
+  MetadataProbeClass = enum
+    ## Which arm a recorded-input metadata check took. The four non-`mpcNone`
+    ## values are one-to-one with the four `repro file metadata *` /
+    ## `repro store absence skips` rows, so a duration attributed here lands
+    ## beside the count it explains and nowhere else.
+    mpcNone
+      ## No counter moved: the caller passed no cache, so this check is
+      ## outside the population the rows describe.
+    mpcCurrentRunHit
+    mpcColdStat
+    mpcWarmRevalidate
+    mpcStoreAbsenceSkip
+
+var
+  metadataProbeClass = mpcNone
+    ## Set at each counter increment, read by the timing wrapper once the
+    ## call returns. A return value would be cleaner and is not available:
+    ## these procs have eight exits between them and every one already
+    ## returns a `FileMetadata`.
+  metadataProbeDepth = 0
+    ## Re-entrancy guard. `fingerprintRecordedMetadata` calls
+    ## `fingerprintMetadata` for the store-absence exclusion's condition 2,
+    ## and timing both would credit those nanoseconds to two classes at once
+    ## -- which breaks the one property these rows are worth having: that the
+    ## four are DISJOINT and sum to no more than the revalidation loop that
+    ## encloses them. Only the outermost call is timed, so the condition-2
+    ## probe is charged to the skip that needed it. Its COUNT still moves, so
+    ## `current-run hit` counts a few checks whose time is credited to
+    ## `store absence skips`; at 1,004 skips over a handful of distinct store
+    ## roots that is a handful of calls.
+    ##
+    ## LOAD-BEARING IN EXACTLY ONE OF THE TWO WRAPPERS, and it is worth
+    ## saying which, because the other reads as covered when it is not. The
+    ## guard in `fingerprintMetadata`'s wrapper is the one that matters:
+    ## deleting it reddens the recorded-input suite, mutation-checked. The
+    ## identical guard in `fingerprintRecordedMetadata`'s wrapper is
+    ## UNREACHABLE today -- nothing re-enters that proc -- so deleting it
+    ## changes no behaviour and no test catches it. It stays for symmetry and
+    ## for the day a caller does re-enter; it is not evidence of anything.
+  revalidateLoopDepth = 0
+    ## Non-zero while a recorded-input revalidation loop is on the stack.
+    ## Two jobs: it stops a nested loop from being counted twice, and it is
+    ## what tells the metadata wrapper that a check belongs to the
+    ## revalidation population rather than to record-time `observeFile`.
+
+template timedPerEdgeRecordLoad(body: untyped) =
+  ## Time ONE edge's record load, everything included.
+  ##
+  ## The three MAC-3 rows time the two `readFile` calls and the decode; this
+  ## times the whole load, so `perEdgeRecordLoadNanos` minus their sum is the
+  ## directory enumeration, the `fileExists` probes, the path building and
+  ## the record copying -- the part of "hot-record read and decode" that the
+  ## three rows do NOT cover, and which MAC-3 observed to be ~40% of a
+  ## `readHotRecord` without having a row to put it in.
+  ##
+  ## One pair per edge (~40 per no-op), and `try`/`finally` because both
+  ## bodies return from inside a loop.
+  let recordLoadStart = getMonoTime()
+  inc perEdgeRecordLoads
+  try:
+    body
+  finally:
+    perEdgeRecordLoadNanos +=
+      (getMonoTime() - recordLoadStart).inNanoseconds
+
+template timedRecordedInputRevalidation(body: untyped) =
+  ## Time ONE record's recorded-input loop, machinery included.
+  ##
+  ## One `getMonoTime` pair per RECORD (~40 per warm no-op), not per input
+  ## (~4,659), because at 33-36 ns a pair the per-input version would cost
+  ## ~0.16 ms of the very term it is trying to resolve. The per-input timers
+  ## that DO exist are the four class rows, and they are inside this
+  ## interval, so this reading includes them -- see
+  ## `recordedInputRevalidateStats`.
+  ##
+  ## `try`/`finally` because every one of these loops returns early the
+  ## moment an input compares unequal, which is the common case on a MISS
+  ## and the case an un-finallied timer would silently drop.
+  let revalidationStart = getMonoTime()
+  inc revalidateLoopDepth
+  try:
+    body
+  finally:
+    dec revalidateLoopDepth
+    if revalidateLoopDepth == 0:
+      recordedInputRevalidateNanos +=
+        (getMonoTime() - revalidationStart).inNanoseconds
 
 proc noteActionRecordDecode(frameBytes: int) =
   ## Count ONE decoded `RBAR` record frame and the bytes it spanned.
@@ -1484,6 +1638,13 @@ proc storeAbsenceSkipStats*(): int =
   ## describes THAT build.
   storeAbsenceSkips
 
+var lastMembershipWalkEntries = 0'i64
+  ## How many directory entries the LAST `fingerprintDirectoryMembership`
+  ## walked. Read by the recorded-input path, which is the only caller that
+  ## attributes the walk to revalidation; `observeEnumeratedDirectory` walks
+  ## the same trees at RECORD time and must not be counted there, exactly as
+  ## `recordDirWalks` is kept apart from `revalidateDirWalks`.
+
 proc fingerprintDirectoryMembership*(path: string): FileMetadata =
   ## `fingerprintMetadata` plus the membership digest, for a path the action
   ## ENUMERATED. Returns the plain existence fingerprint when the path is no
@@ -1491,6 +1652,7 @@ proc fingerprintDirectoryMembership*(path: string): FileMetadata =
   ## scratch directory records it as `ffkMissing` and keeps comparing as
   ## "still missing", which is what stops per-run temporary directories from
   ## making every such edge a permanent miss.
+  lastMembershipWalkEntries = 0
   result = fingerprintMetadata(path)
   if result.kind != ffkDirectory:
     return
@@ -1499,6 +1661,7 @@ proc fingerprintDirectoryMembership*(path: string): FileMetadata =
   try:
     var walked = 0'i64
     result.mtimeNs = directoryMembershipDigest(path, walked)
+    lastMembershipWalkEntries = walked
   except OSError, IOError:
     # The directory exists but could not be listed. Leaving `mtimeNs` at 0
     # would mean "not membership-tracked", i.e. existence-only, i.e. a false
@@ -1547,12 +1710,39 @@ proc invalidate*(cache: var FileMetadataCache; path: string) =
 proc metadataStats*(cache: FileMetadataCache): FileMetadataCacheStats =
   cache.stats
 
-proc fingerprintMetadata(path: string;
-                         cache: ptr FileMetadataCache): FileMetadata =
+proc attributeMetadataProbe(cache: ptr FileMetadataCache; path: string;
+                            elapsedNanos: int64) =
+  ## Credit one timed check to the row for the arm it took.
+  ##
+  ## The four arms are mutually exclusive by construction -- each is a
+  ## distinct `return` path -- so the four accumulators are DISJOINT
+  ## sub-intervals of the revalidation loop that called into here, and their
+  ## sum can never exceed `recordedInputRevalidateNanos`. That inequality is
+  ## what the tests assert; it is the only claim about these numbers that
+  ## does not depend on how busy the host is.
+  if revalidateLoopDepth > 0:
+    inc recordedInputRevalidateChecks
+  if elapsedNanos > slowestMetadataProbeNanos:
+    slowestMetadataProbeNanos = elapsedNanos
+    slowestMetadataProbePath = path
+  if elapsedNanos >= SlowMetadataProbeNanos:
+    inc slowMetadataProbes
+    slowMetadataProbeNanos += elapsedNanos
+  case metadataProbeClass
+  of mpcNone: discard
+  of mpcCurrentRunHit: cache[].stats.currentRunHitNanos += elapsedNanos
+  of mpcColdStat: cache[].stats.coldStatNanos += elapsedNanos
+  of mpcWarmRevalidate: cache[].stats.warmRevalidateNanos += elapsedNanos
+  of mpcStoreAbsenceSkip: storeAbsenceSkipNanos += elapsedNanos
+
+proc fingerprintMetadataImpl(path: string;
+                             cache: ptr FileMetadataCache): FileMetadata =
   if cache.isNil:
+    metadataProbeClass = mpcNone
     return fingerprintMetadata(path)
   if cache[].entries.hasKey(path):
     inc cache[].stats.currentRunHits
+    metadataProbeClass = mpcCurrentRunHit
     return cache[].entries[path]
   let hadWarmEntry = processWarmFileMetadataEntries.hasKey(path)
   let priorMetadata =
@@ -1561,8 +1751,10 @@ proc fingerprintMetadata(path: string;
   if hadWarmEntry:
     inc cache[].stats.warmEntries
     inc cache[].stats.warmRevalidated
+    metadataProbeClass = mpcWarmRevalidate
   else:
     inc cache[].stats.coldStats
+    metadataProbeClass = mpcColdStat
   result = fingerprintMetadata(path)
   if hadWarmEntry:
     if result == priorMetadata:
@@ -1572,8 +1764,28 @@ proc fingerprintMetadata(path: string;
   cache[].entries[path] = result
   processWarmFileMetadataEntries[path] = result
 
-proc fingerprintRecordedMetadata(path: string; recorded: FileMetadata;
-                                 cache: ptr FileMetadataCache): FileMetadata =
+proc fingerprintMetadata(path: string;
+                         cache: ptr FileMetadataCache): FileMetadata =
+  ## Timed wrapper over `fingerprintMetadataImpl`.
+  ##
+  ## See `FileMetadataCacheStats` for what the timer costs and which row it
+  ## is a material fraction of. The nesting guard is `metadataProbeDepth`:
+  ## when this is reached from inside `fingerprintRecordedMetadata` the outer
+  ## call is already holding the clock, and starting a second one here would
+  ## credit the same nanoseconds to two rows.
+  if cache.isNil or metadataProbeDepth > 0:
+    return fingerprintMetadataImpl(path, cache)
+  inc metadataProbeDepth
+  let started = getMonoTime()
+  try:
+    result = fingerprintMetadataImpl(path, cache)
+  finally:
+    dec metadataProbeDepth
+    attributeMetadataProbe(cache, path,
+      (getMonoTime() - started).inNanoseconds)
+
+proc fingerprintRecordedMetadataImpl(path: string; recorded: FileMetadata;
+                                     cache: ptr FileMetadataCache): FileMetadata =
   # A membership-tracked directory has to be re-listed, not just stat'd, and
   # it must not be served from (or stored into) the plain metadata cache:
   # that cache is keyed on path alone and is shared with call sites that
@@ -1582,17 +1794,30 @@ proc fingerprintRecordedMetadata(path: string; recorded: FileMetadata;
     if not cache.isNil:
       inc cache[].stats.warmEntries
       inc cache[].stats.warmRevalidated
+      metadataProbeClass = mpcWarmRevalidate
+    # Timed here as well as by the enclosing wrapper, deliberately: this is a
+    # strict sub-interval of the `warm revalidate` reading, not a fifth
+    # disjoint class, and the row says so. One pair per re-listed directory,
+    # a population in the hundreds at most.
+    let relistStart = getMonoTime()
     result = fingerprintDirectoryMembership(path)
     if not cache.isNil:
+      inc membershipRelists
+      membershipRelistNanos += (getMonoTime() - relistStart).inNanoseconds
+      # The load-independent half, and the one that says whether a duration
+      # is large because the work is slow or because there is a lot of it.
+      membershipRelistEntries += lastMembershipWalkEntries
       if result == recorded:
         inc cache[].stats.warmUnchanged
       else:
         inc cache[].stats.warmChanged
     return
   if cache.isNil:
+    metadataProbeClass = mpcNone
     return fingerprintMetadata(path)
   if cache[].entries.hasKey(path):
     inc cache[].stats.currentRunHits
+    metadataProbeClass = mpcCurrentRunHit
     return cache[].entries[path]
   # An input that was ABSENT inside a published store output path cannot
   # become present, so re-probing it every build buys nothing. This is the
@@ -1630,6 +1855,10 @@ proc fingerprintRecordedMetadata(path: string; recorded: FileMetadata;
       # that already moves for other reasons. `storeAbsenceSkips` is the only
       # place this shows up.
       inc storeAbsenceSkips
+      # Set AFTER the condition-2 probe above, which sets the class for
+      # itself: last write wins, and the outermost arm is the one that
+      # decided the outcome.
+      metadataProbeClass = mpcStoreAbsenceSkip
       # Cache the answer, or the REPEATS pay for the skip. A warm zlib no-op
       # consults these paths 11,893 times across only ~4,000 distinct paths,
       # and without this insert every repeat re-ran the prefix scan and the
@@ -1646,6 +1875,7 @@ proc fingerprintRecordedMetadata(path: string; recorded: FileMetadata;
       return recorded
   inc cache[].stats.warmEntries
   inc cache[].stats.warmRevalidated
+  metadataProbeClass = mpcWarmRevalidate
   result = fingerprintMetadata(path)
   if result == recorded:
     inc cache[].stats.warmUnchanged
@@ -1653,6 +1883,29 @@ proc fingerprintRecordedMetadata(path: string; recorded: FileMetadata;
     inc cache[].stats.warmChanged
   cache[].entries[path] = result
   processWarmFileMetadataEntries[path] = result
+
+proc fingerprintRecordedMetadata(path: string; recorded: FileMetadata;
+                                 cache: ptr FileMetadataCache): FileMetadata =
+  ## Timed wrapper over `fingerprintRecordedMetadataImpl`.
+  ##
+  ## This is THE recorded-input check: one call per input a cache
+  ## consultation revalidates, ~4,659 of them on a warm zlib CMake no-op. The
+  ## four counts it moves used to render a literal `0.0` in the stats table's
+  ## total column, which reads as "measured, and free" when what it meant was
+  ## "never measured" -- and an estimate of ~18 ms was carried against that
+  ## silence for two milestones because nothing in the table could contradict
+  ## it. See `FileMetadataCacheStats` for the timer's own cost and for which
+  ## of the four rows it is a material fraction of.
+  if cache.isNil or metadataProbeDepth > 0:
+    return fingerprintRecordedMetadataImpl(path, recorded, cache)
+  inc metadataProbeDepth
+  let started = getMonoTime()
+  try:
+    result = fingerprintRecordedMetadataImpl(path, recorded, cache)
+  finally:
+    dec metadataProbeDepth
+    attributeMetadataProbe(cache, path,
+      (getMonoTime() - started).inNanoseconds)
 
 proc fileBytesForHash(path: string; metadata: FileMetadata): seq[byte] =
   if metadata.kind != ffkRegular:
@@ -2080,6 +2333,90 @@ proc resetOutputStateCheckStats*() =
   actionIndexResolvedHits = 0
   actionIndexUnionFallbacks = 0
   actionIndexUnresolvedRefs = 0
+  storeAbsenceSkipNanos = 0'i64
+  recordedInputRevalidateChecks = 0
+  recordedInputRevalidateNanos = 0'i64
+  membershipRelists = 0
+  membershipRelistNanos = 0'i64
+  membershipRelistEntries = 0'i64
+  perEdgeRecordLoads = 0
+  perEdgeRecordLoadNanos = 0'i64
+  slowMetadataProbes = 0
+  slowMetadataProbeNanos = 0'i64
+  slowestMetadataProbeNanos = 0'i64
+  slowestMetadataProbePath = ""
+
+proc slowMetadataProbeStats*():
+    tuple[slowProbes: int; slowNanos, slowestNanos: int64;
+          slowestPath: string] =
+  ## The TAIL of the recorded-input probe population: how many checks took a
+  ## millisecond or more, what they cost together, and the single worst one
+  ## with its path.
+  ##
+  ## This exists because the average over this population is not evidence.
+  ## "One pathological path can dominate a whole probe population" is a
+  ## recorded hazard: 15 ms of an 18 ms loop went to ONE autofs lookup, and
+  ## the resulting 3.4 us/probe average was most of a figure that produced
+  ## two separate wrong estimates. A max plus a tail count settles from the
+  ## stats table which of the two shapes a reading has, and no division can.
+  (slowMetadataProbes, slowMetadataProbeNanos, slowestMetadataProbeNanos,
+   slowestMetadataProbePath)
+
+proc membershipRelistStats*():
+    tuple[relists: int; nanos, entries: int64] =
+  ## Recorded-input checks on a MEMBERSHIP-TRACKED DIRECTORY, which are
+  ## re-listed and digested rather than stat'd.
+  ##
+  ## A strict SUBSET of `repro file metadata warm revalidate` in both count
+  ## and duration -- these rows nest, they do not partition. Split out
+  ## because `warm revalidate` otherwise averages a one-syscall check
+  ## together with a whole-directory walk, and the average describes neither
+  ## population.
+  ##
+  ## `entries` is the load-independent half: a duration alone cannot say
+  ## whether a slow re-list walked a big tree or a slow filesystem.
+  (membershipRelists, membershipRelistNanos, membershipRelistEntries)
+
+proc perEdgeRecordLoadStats*(): tuple[loads: int; nanos: int64] =
+  ## The interval that ENCLOSES `repro per-edge container read`, `repro
+  ## per-edge sidecar read` and `repro action record decode`.
+  ##
+  ## Those three time file reads and CPU; this times the whole load. The
+  ## difference is the directory enumeration, the existence probes and the
+  ## record copying, which MAC-3 measured at roughly 40% of a `readHotRecord`
+  ## and had nowhere to report.
+  (perEdgeRecordLoads, perEdgeRecordLoadNanos)
+
+proc recordedInputRevalidateStats*(): tuple[checks: int; nanos: int64] =
+  ## The recorded-input revalidation LOOP: `checks` metadata checks in
+  ## `nanos` nanoseconds, summed over every record a build revalidated.
+  ##
+  ## This is the term that a warm no-op's `repro cache lookup` was assumed to
+  ## be almost entirely made of, on no measurement -- `cache lookup` minus
+  ## the three record-read rows, divided by these counts, quoted as "~4 us a
+  ## check". It is measured here instead, at the loop rather than at the
+  ## check: one `getMonoTime` pair per record costs ~35 ns against ~4,659
+  ## per-check pairs costing ~0.16 ms.
+  ##
+  ## `checks` counts checks made INSIDE such a loop, so it excludes the
+  ## record-time `observeFile` population that shares the same cache and the
+  ## same counters. It is therefore <= the sum of the four
+  ## `repro file metadata *` counts, not equal to it.
+  ##
+  ## The four class durations are measured INSIDE this interval and are
+  ## disjoint, so `currentRunHitNanos + coldStatNanos + warmRevalidateNanos +
+  ## storeAbsenceSkipNanos <= nanos` always. The difference is the loop's own
+  ## machinery: the `FileMetadata` comparison, the seen-set insert, and the
+  ## per-check timers themselves.
+  (recordedInputRevalidateChecks, recordedInputRevalidateNanos)
+
+proc storeAbsenceSkipNanoStats*(): int64 =
+  ## The DURATION half of `storeAbsenceSkipStats`, in nanoseconds.
+  ##
+  ## Process-global, like the count it explains, and reset with it -- unlike
+  ## the other three class durations, which live in the cache object because
+  ## their counts do. See `FileMetadataCacheStats`.
+  storeAbsenceSkipNanos
 
 proc actionRecordDecodeNanoStats*(): tuple[decode, container, sidecar: int64] =
   ## The DURATION half of `actionRecordDecodeStats`, in nanoseconds.
@@ -3682,24 +4019,25 @@ proc readHotRecord*(cache: var ActionCache; weak: ContentDigest):
   ## the same question from ONE container and returns `none` — falling through
   ## to the union read — whenever it cannot prove that container is the newest.
   ## The union read is last and is unconditionally correct.
-  let indexed = cache.indexedRecordsForWeak(weak)
-  if indexed.isSome:
-    let candidates = indexed.get()
-    for i in countdown(candidates.high, 0):
-      if candidates[i].weakFingerprint == weak:
-        return (found: true, record: hotMetadataRecord(candidates[i]))
+  timedPerEdgeRecordLoad:
+    let indexed = cache.indexedRecordsForWeak(weak)
+    if indexed.isSome:
+      let candidates = indexed.get()
+      for i in countdown(candidates.high, 0):
+        if candidates[i].weakFingerprint == weak:
+          return (found: true, record: hotMetadataRecord(candidates[i]))
+      return (found: false, record: ActionResultRecord())
+    let viaAlias = cache.loadNewestPerEdgeRecordsViaAlias(weak)
+    if viaAlias.isSome:
+      let aliasRecords = viaAlias.get()
+      for i in countdown(aliasRecords.high, 0):
+        if aliasRecords[i].weakFingerprint == weak:
+          return (found: true, record: hotMetadataRecord(aliasRecords[i]))
+    let records = cache.unionReadEdge(weak)
+    for i in countdown(records.high, 0):
+      if records[i].weakFingerprint == weak:
+        return (found: true, record: hotMetadataRecord(records[i]))
     return (found: false, record: ActionResultRecord())
-  let viaAlias = cache.loadNewestPerEdgeRecordsViaAlias(weak)
-  if viaAlias.isSome:
-    let aliasRecords = viaAlias.get()
-    for i in countdown(aliasRecords.high, 0):
-      if aliasRecords[i].weakFingerprint == weak:
-        return (found: true, record: hotMetadataRecord(aliasRecords[i]))
-  let records = cache.unionReadEdge(weak)
-  for i in countdown(records.high, 0):
-    if records[i].weakFingerprint == weak:
-      return (found: true, record: hotMetadataRecord(records[i]))
-  (found: false, record: ActionResultRecord())
 
 proc appendActionResultRecord*(cache: var ActionCache;
                                record: ActionResultRecord) {.gcsafe.} =
@@ -3728,15 +4066,16 @@ proc loadRecordsForWeak(cache: ActionCache; weak: ContentDigest):
   ## index.
   ##
   ## Either way this is O(records for THIS edge) and never a whole-cache scan.
-  let indexed = cache.indexedRecordsForWeak(weak)
-  let candidates =
-    if indexed.isSome: indexed.get()
-    else: cache.unionReadEdge(weak)
-  for record in candidates:
-    if record.weakFingerprint == weak:
-      result.add(record)
-      if result.len > MaxRecFilesPerEdge:
-        result = result[result.len - MaxRecFilesPerEdge .. ^1]
+  timedPerEdgeRecordLoad:
+    let indexed = cache.indexedRecordsForWeak(weak)
+    let candidates =
+      if indexed.isSome: indexed.get()
+      else: cache.unionReadEdge(weak)
+    for record in candidates:
+      if record.weakFingerprint == weak:
+        result.add(record)
+        if result.len > MaxRecFilesPerEdge:
+          result = result[result.len - MaxRecFilesPerEdge .. ^1]
 
 proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
                                           probes: openArray[HotMetadataProbe];
@@ -3790,12 +4129,13 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
         if envInputChanged(record, resolver, changedEnv):
           return HotMetadataScan(status: hmssInputChanged,
             recordCount: totalRecords, checkedInputCount: checkedInputs)
-        for input in record.inputs:
-          inc checkedInputs
-          if fingerprintRecordedMetadata(input.path, input.metadata,
-              metadataCache) != input.metadata:
-            return HotMetadataScan(status: hmssInputChanged,
-              recordCount: totalRecords, checkedInputCount: checkedInputs)
+        timedRecordedInputRevalidation:
+          for input in record.inputs:
+            inc checkedInputs
+            if fingerprintRecordedMetadata(input.path, input.metadata,
+                metadataCache) != input.metadata:
+              return HotMetadataScan(status: hmssInputChanged,
+                recordCount: totalRecords, checkedInputCount: checkedInputs)
         # Same rule as `lookupActionResultImpl`: unchanged inputs are only
         # half the hit condition. The declared outputs on disk must still be
         # the ones this record describes (Incremental-Invalidation.md
@@ -3998,14 +4338,15 @@ proc hotMetadataRecordInputsUnchanged*(records: openArray[ActionResultRecord];
       else: nil
     if envInputChanged(record, resolver, changedEnv):
       return false
-    for input in record.inputs:
-      let inputKey = hotInputKey(input)
-      if seen.contains(inputKey):
-        continue
-      seen.incl(inputKey)
-      if fingerprintRecordedMetadata(input.path, input.metadata,
-          metadataCache) != input.metadata:
-        return false
+    timedRecordedInputRevalidation:
+      for input in record.inputs:
+        let inputKey = hotInputKey(input)
+        if seen.contains(inputKey):
+          continue
+        seen.incl(inputKey)
+        if fingerprintRecordedMetadata(input.path, input.metadata,
+            metadataCache) != input.metadata:
+          return false
   true
 
 proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
@@ -4149,66 +4490,67 @@ proc refreshedInputs(record: ActionResultRecord; changed: var bool;
                      tuple[inputs: seq[FileFingerprint],
                            reusedRecordedInputs: bool] =
   result.reusedRecordedInputs = true
-  for i, recorded in record.inputs:
-    let currentMetadata = fingerprintRecordedMetadata(recorded.path,
-      recorded.metadata, metadataCache)
-    if recorded.metadata.membershipTrackedDirectory() and
-        currentMetadata != recorded.metadata:
-      # An enumerated directory whose membership moved. This returns BEFORE
-      # the policy switch on purpose: `fileBytesForHash` is empty for a
-      # directory, so both the `ffpChecksum` comparison and the `ffpHybrid`
-      # cutoff would find the content hashes equal and call it unchanged --
-      # turning the one signal that exists for a directory back into
-      # nothing. Incremental-Invalidation.md §"Validation Criteria" requires
-      # this to invalidate.
-      changed = true
-      changedInputPath = recorded.path
-      return
-    case recorded.policy
-    of ffpTimestamp:
-      if currentMetadata != recorded.metadata:
+  timedRecordedInputRevalidation:
+    for i, recorded in record.inputs:
+      let currentMetadata = fingerprintRecordedMetadata(recorded.path,
+        recorded.metadata, metadataCache)
+      if recorded.metadata.membershipTrackedDirectory() and
+          currentMetadata != recorded.metadata:
+        # An enumerated directory whose membership moved. This returns BEFORE
+        # the policy switch on purpose: `fileBytesForHash` is empty for a
+        # directory, so both the `ffpChecksum` comparison and the `ffpHybrid`
+        # cutoff would find the content hashes equal and call it unchanged --
+        # turning the one signal that exists for a directory back into
+        # nothing. Incremental-Invalidation.md §"Validation Criteria" requires
+        # this to invalidate.
         changed = true
         changedInputPath = recorded.path
         return
-      if not result.reusedRecordedInputs:
-        result.inputs[i] = recorded
-    of ffpChecksum:
-      let current = observeFileWithMetadata(recorded.path, recorded.policy,
-        currentMetadata)
-      if (not recorded.hasLocalHash) or (not current.hasLocalHash) or
-          current.localHash != recorded.localHash:
-        changed = true
-        changedInputPath = recorded.path
-        return
-      if not result.reusedRecordedInputs:
-        result.inputs[i] = recorded
-    of ffpHybrid:
-      if currentMetadata == recorded.metadata:
+      case recorded.policy
+      of ffpTimestamp:
+        if currentMetadata != recorded.metadata:
+          changed = true
+          changedInputPath = recorded.path
+          return
         if not result.reusedRecordedInputs:
           result.inputs[i] = recorded
-        continue
-      if not recorded.hasLocalHash:
-        changed = true
-        changedInputPath = recorded.path
-        return
-      let current = observeFileWithMetadata(recorded.path, recorded.policy,
-        currentMetadata)
-      if not current.hasLocalHash:
-        changed = true
-        changedInputPath = recorded.path
-        return
-      if current.localHash == recorded.localHash:
-        if result.reusedRecordedInputs:
-          result.inputs = newSeq[FileFingerprint](record.inputs.len)
-          for prior in 0 ..< i:
-            result.inputs[prior] = record.inputs[prior]
-          result.reusedRecordedInputs = false
-        result.inputs[i] = current
-        hybridCutoff = true
-      else:
-        changed = true
-        changedInputPath = recorded.path
-        return
+      of ffpChecksum:
+        let current = observeFileWithMetadata(recorded.path, recorded.policy,
+          currentMetadata)
+        if (not recorded.hasLocalHash) or (not current.hasLocalHash) or
+            current.localHash != recorded.localHash:
+          changed = true
+          changedInputPath = recorded.path
+          return
+        if not result.reusedRecordedInputs:
+          result.inputs[i] = recorded
+      of ffpHybrid:
+        if currentMetadata == recorded.metadata:
+          if not result.reusedRecordedInputs:
+            result.inputs[i] = recorded
+          continue
+        if not recorded.hasLocalHash:
+          changed = true
+          changedInputPath = recorded.path
+          return
+        let current = observeFileWithMetadata(recorded.path, recorded.policy,
+          currentMetadata)
+        if not current.hasLocalHash:
+          changed = true
+          changedInputPath = recorded.path
+          return
+        if current.localHash == recorded.localHash:
+          if result.reusedRecordedInputs:
+            result.inputs = newSeq[FileFingerprint](record.inputs.len)
+            for prior in 0 ..< i:
+              result.inputs[prior] = record.inputs[prior]
+            result.reusedRecordedInputs = false
+          result.inputs[i] = current
+          hybridCutoff = true
+        else:
+          changed = true
+          changedInputPath = recorded.path
+          return
 
 proc verifyOutputs(cas: LocalCas; record: ActionResultRecord) =
   if record.outputPayloadKind != opkCasBlobs:
@@ -4243,14 +4585,15 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
       # versus a stat per recorded input.
       if envInputChanged(hot.record, envResolver, changedInput):
         changed = true
-      for input in hot.record.inputs:
-        if changed:
-          break
-        if fingerprintRecordedMetadata(input.path, input.metadata,
-            metadataCache) != input.metadata:
-          changed = true
-          changedInput = input.path
-          break
+      timedRecordedInputRevalidation:
+        for input in hot.record.inputs:
+          if changed:
+            break
+          if fingerprintRecordedMetadata(input.path, input.metadata,
+              metadataCache) != input.metadata:
+            changed = true
+            changedInput = input.path
+            break
       if not changed:
         # Inputs are unchanged, so this record still describes the right
         # computation. It is still only a hit if the DECLARED OUTPUTS on disk
