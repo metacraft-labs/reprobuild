@@ -67,9 +67,11 @@ import repro_attest
 import ./challenge
 import ./evidence
 import ./policy
+import ./trust
 import ./verdict
+import ./x509
 
-export evidence, policy, verdict, challenge
+export evidence, policy, verdict, challenge, trust, x509
 
 type
   VerificationRequest* = object
@@ -91,8 +93,23 @@ type
       ## policy that requires a challenge, therefore a failure.
     challengeIssuedAtMs*: Option[int64]
     nowMs*: int64
+    trustAnchors*: seq[X509Cert]
+      ## The certificates this verifier's operator installed as roots.
+      ## Supplied by the caller and never taken from the report: a
+      ## machine that could contribute to the set it is checked against
+      ## would be vouching for itself.
+    revocationLists*: seq[X509Crl]
+      ## The revocation lists this verifier holds. An empty set is not
+      ## "nothing has been revoked" — it is a question that cannot be
+      ## asked, and `checkCertificateChain` refuses on it.
 
 const
+  SoftwareRootTestReportSymbol* = "verifySoftwareRootTestReport"
+    ## The NAME of the report driver a build without
+    ## ``-d:reproAttestSoftwareRootTestTrust`` does not have. See
+    ## ``SoftwareRootTestChainSymbol`` in ``trust.nim`` for why a spelling
+    ## has to be readable from the build that lacks the symbol.
+
   BuiltInReaders*: array[2, string] = [MockReaderName, Tpm2ReaderName]
     ## The readers this build carries. A verdict whose evidence was read
     ## by anything else is caveated, because it rests on a claim the
@@ -257,8 +274,10 @@ proc checkMeasurementMatch(inputs: AuthoritativeInputs;
   satisfied("the evidence attests launch measurement " & observed &
     ", which the manifest's " & key & " expectations contain")
 
-proc checkCertificateChain(p: AttestationPolicy;
-                           inputs: AuthoritativeInputs): CheckFinding =
+proc checkCertificateChain(req: VerificationRequest;
+                           p: AttestationPolicy;
+                           inputs: AuthoritativeInputs;
+                           evaluateChain: ChainEvaluator): CheckFinding =
   if not inputs.bundledCertificates:
     if p.measurements.requireCertificates:
       return violated("the policy requires a bundled certificate chain " &
@@ -268,10 +287,30 @@ proc checkCertificateChain(p: AttestationPolicy;
       "collateral itself does not need the instance's copy")
   case inputs.backend
   of abMock: describeMockChain(inputs)
-  of abSevSnp, abTdx, abTpm2:
+  of abSevSnp, abTdx:
     violated("this build carries no reader for a " & $inputs.backend &
       " certificate chain, so the " & $inputs.certificates.len &
       " bundled element(s) were compared against nothing")
+  of abTpm2:
+    # The evaluator is supplied by whichever of this module's two
+    # drivers is running. Both call the same eleven checks; the
+    # production one passes `evaluateProductionChain`, which has no
+    # policy argument and no way to widen what it recognises. See
+    # `trust.nim`'s header.
+    let verdict = evaluateChain(inputs.certificates,
+      req.trustAnchors, req.revocationLists,
+      ChainExpectation(
+        requiredEku: OidTcgAikCertificate,
+        requiredSubjectAltName: requiredSubjectAltNameFor($inputs.backend),
+        nowSeconds: req.nowMs div 1000))
+    if verdict.isAccepted:
+      satisfied("the " & $inputs.certificates.len &
+        "-element bundled chain was accepted by the " & verdict.evaluator &
+        ": " & verdict.detail)
+    else:
+      violated("the " & $inputs.certificates.len &
+        "-element bundled chain was refused by the " & verdict.evaluator &
+        " (" & $verdict.reason & "): " & verdict.detail)
 
 proc tdxStatusRank(status: string): int =
   ## Lower is better. ``-1`` for a status this build cannot order.
@@ -365,12 +404,17 @@ proc unverifiedClaimNotes*(r: AttestationReport;
 # The driver
 # ---------------------------------------------------------------------
 
-proc verifyWithReading*(req: VerificationRequest;
-                        report: AttestationReport;
-                        reading: EvidenceReading): Verdict =
-  ## Run every check against a report whose evidence has already been
-  ## read. The embedding seam; see the module header for why a caller
-  ## cannot steer the envelope through it.
+proc verifyUsing(req: VerificationRequest;
+                 report: AttestationReport;
+                 reading: EvidenceReading;
+                 evaluateChain: ChainEvaluator): Verdict =
+  ## Every check, against a report whose evidence has already been read,
+  ## with the certificate chain judged by ``evaluateChain``.
+  ##
+  ## Not exported. The evaluator is the ONLY thing either entry point
+  ## below varies, and there is no third caller — so "which rules a
+  ## chain is judged by" is decided by which procedure was called, and
+  ## that in turn is decided by which build this is.
   if reading.inputs.readerName.len == 0:
     raise newException(VerdictError,
       "an evidence reading must name the reader that produced it; a " &
@@ -448,7 +492,7 @@ proc verifyWithReading*(req: VerificationRequest;
          "will read: " & manifestComplaint)
      else: checkMeasurementMatch(inputs, manifest, haveManifest)))
   result.record(vcCertificateChain, p.measurements.requireCertificates,
-    checkCertificateChain(p, inputs))
+    checkCertificateChain(req, p, inputs, evaluateChain))
   result.record(vcTcbFloor, inputs.tier == atCvm, checkTcbFloor(p, inputs))
 
   result.seal(inputs.tier)
@@ -501,6 +545,37 @@ proc verifyWithReading*(req: VerificationRequest;
         $chk & " check: " & result.checks[chk].detail
 
   result.claimNotes = unverifiedClaimNotes(report, manifest, haveManifest)
+
+proc verifyWithReading*(req: VerificationRequest;
+                        report: AttestationReport;
+                        reading: EvidenceReading): Verdict =
+  ## Run every check against a report whose evidence has already been
+  ## read. The embedding seam; see the module header for why a caller
+  ## cannot steer the envelope through it.
+  ##
+  ## A bundled certificate chain is judged by the production evaluator,
+  ## and this procedure takes no argument that could change that.
+  verifyUsing(req, report, reading, evaluateProductionChain)
+
+when defined(reproAttestSoftwareRootTestTrust):
+  proc verifySoftwareRootTestReport*(req: VerificationRequest;
+                                     report: AttestationReport;
+                                     reading: EvidenceReading): Verdict =
+    ## The same eleven checks, with the chain judged by the evaluator
+    ## that additionally recognises the software-root marker.
+    ##
+    ## Compiled only into a build that asked for it by name; in every
+    ## other build this symbol does not exist, so a production binary
+    ## does not contain a path that could reach it. It is not a bypass
+    ## of anything else either: every other check runs unchanged, and
+    ## the chain still has to link, verify, reach an anchor, be inside
+    ## its window, be unrevoked and carry the right purpose.
+    verifyUsing(req, report, reading, evaluateSoftwareRootTestChain)
+
+  static:
+    doAssert declared(verifySoftwareRootTestReport)
+    doAssert astToStr(verifySoftwareRootTestReport) ==
+      SoftwareRootTestReportSymbol
 
 proc rejectUnparseable(req: VerificationRequest;
                        complaint: string): Verdict =

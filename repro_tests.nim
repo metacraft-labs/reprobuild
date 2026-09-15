@@ -9486,6 +9486,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_e2e_software_root_attestation_roundtrip.nim",
+    binary: "build/test-bin/t_e2e_software_root_attestation_roundtrip",
+    defines: @["reproAttestSoftwareRootTestTrust"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_e2e_variant_feature_flag_drops_tls.nim",
     binary: "build/test-bin/t_e2e_variant_feature_flag_drops_tls",
     defines: @[],
@@ -10926,6 +10935,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_negative_chain_fixtures.nim",
+    binary: "build/test-bin/t_negative_chain_fixtures",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_nested_bootstrap_runtime_closure.nim",
     binary: "build/test-bin/t_nested_bootstrap_runtime_closure",
     defines: @[],
@@ -11351,6 +11369,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_private_repo_participates_via_evidence_without_source_exposure.nim",
     binary: "build/test-bin/t_private_repo_participates_via_evidence_without_source_exposure",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_production_policy_rejects_all_software_roots.nim",
+    binary: "build/test-bin/t_production_policy_rejects_all_software_roots",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

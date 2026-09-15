@@ -368,6 +368,9 @@ type
     identName: string     # Nim identifier for the let-binding
     needsProviderMode: bool
     needsSsl: bool        # M6: carries --define:ssl (HTTPS transport gate)
+    needsSoftwareRootTestTrust: bool
+      ## Carries ``--define:reproAttestSoftwareRootTestTrust``. See
+      ## ``needsSoftwareRootTestTrustDefine`` below.
     requiresReproBinary: bool
       ## Bootstrap-And-Self-Build B3: ``true`` when running the test
       ## ends up executing ``./build/bin/repro``. When set, ``repro.nim``
@@ -416,6 +419,24 @@ proc needsSslDefine(path: string): bool =
   ##     binary now uses via ``apps/entrypoints.txt``).
   path.endsWith("/t_repro_binary_cache_https_publish_authz.nim") or
     path.endsWith("/t_repro_https_cache_end_to_end.nim")
+
+proc needsSoftwareRootTestTrustDefine(path: string): bool =
+  ## The attestation round-trip gate is compiled with
+  ## ``--define:reproAttestSoftwareRootTestTrust``, which is what brings
+  ## the chain evaluator and report driver that recognise a
+  ## software-root test hierarchy's critical marker into existence.
+  ##
+  ## Matched by path, so the generated diff is explicit and so the set of
+  ## binaries carrying that define is one list somebody has to edit on
+  ## purpose. Its companion gate is deliberately NOT in this list: it
+  ## asserts that those symbols do not compile, which only means
+  ## anything in a build that did not ask for them.
+  ##
+  ## The rule fails closed. A gate that needs the define and is not
+  ## named here does not compile at all, because the symbols it calls do
+  ## not exist — so a rename cannot quietly drop a binary out of the
+  ## list and leave it green.
+  path.endsWith("/t_e2e_software_root_attestation_roundtrip.nim")
 
 proc isProviderModePath(path: string): bool =
   ## Mirrors ``scripts/run_tests.sh`` lines ~128-167. ``path`` is a
@@ -825,6 +846,7 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
       identName: identFromBasename(stem),
       needsProviderMode: isProviderModePath(rel),
       needsSsl: needsSslDefine(rel),
+      needsSoftwareRootTestTrust: needsSoftwareRootTestTrustDefine(rel),
       requiresReproBinary: detectReproBinaryUsage(reach, repoRoot, rel),
       extraPassC: extraPassC,
       extraPassL: extraPassL,
@@ -982,6 +1004,8 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
     var definesList: seq[string] = @[]
     if edge.needsProviderMode: definesList.add("reproProviderMode")
     if edge.needsSsl: definesList.add("ssl")
+    if edge.needsSoftwareRootTestTrust:
+      definesList.add("reproAttestSoftwareRootTestTrust")
     if edge.source in ["tests/unit/t_source_fetch_tool_metadata.nim",
                        "tests/unit/t_install_mirror_tool_metadata.nim"]:
       definesList.add("reproInterfaceMode")

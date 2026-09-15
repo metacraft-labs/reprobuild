@@ -1060,6 +1060,7 @@ tests/integration/t_docs_hooks_reflect_public_tier_only_server_gate.nim	nim	2
 tests/integration/t_e2e_cross_compilation_aarch64.nim	nim	2
 tests/integration/t_e2e_engine_shim_removed.nim	nim	2
 tests/integration/t_e2e_selectable_toolchain_fixture.nim	nim	5
+tests/integration/t_e2e_software_root_attestation_roundtrip.nim	nim	7
 tests/integration/t_e2e_variant_feature_flag_drops_tls.nim	nim	5
 tests/integration/t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable.nim	nim	1
 tests/integration/t_emitted_overrides_match_the_develop_set.nim	nim	1
@@ -1220,6 +1221,7 @@ tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim	nim	3
 tests/integration/t_monitor_shim_edges_carry_static_libgcc.nim	nim	3
 tests/integration/t_monitored_zero_output_edge_input_completeness.nim	nim	5
 tests/integration/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted.nim	nim	2
+tests/integration/t_negative_chain_fixtures.nim	nim	14
 tests/integration/t_nested_bootstrap_runtime_closure.nim	nim	1
 tests/integration/t_nested_lock_push_capability_security.nim	nim	10
 tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	nim	1
@@ -1268,6 +1270,7 @@ tests/integration/t_pre_receive_accepts_clean_public_lock_and_stays_blind_to_pri
 tests/integration/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch.nim	nim	3
 tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim	nim	4
 tests/integration/t_private_repo_participates_via_evidence_without_source_exposure.nim	nim	1
+tests/integration/t_production_policy_rejects_all_software_roots.nim	nim	8
 tests/integration/t_project_dsl_build_action_payload.nim	nim	9
 tests/integration/t_project_extension_adds_edges_to_original_when_present.nim	nim	1
 tests/integration/t_project_extension_inert_when_absent_and_auto_activates_in_develop_workspace.nim	nim	1

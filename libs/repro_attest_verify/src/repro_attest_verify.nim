@@ -33,14 +33,22 @@
 ##     remembering when, so freshness can be bounded without a database.
 ##   * ``repro_attest_verify/verify`` — the driver, and the seam an
 ##     embedding caller with its own backend reader plugs into.
+##   * ``repro_attest_verify/x509`` — a strict DER reader for the two
+##     documents a certificate chain is made of, and the one public-key
+##     operation this library performs.
+##   * ``repro_attest_verify/trust`` — what a chain of those is worth:
+##     twelve refusals, one acceptance, and the structural separation
+##     between a production trust evaluator and a test one.
 ##   * ``repro_attest_verify/fetch`` — the command line's
 ##     ``--report-url``. Deliberately NOT imported by ``verify``: the
 ##     verifier proper touches no socket.
 
 import ./repro_attest_verify/policy
 import ./repro_attest_verify/verdict
+import ./repro_attest_verify/x509
+import ./repro_attest_verify/trust
 import ./repro_attest_verify/evidence
 import ./repro_attest_verify/challenge
 import ./repro_attest_verify/verify
 
-export policy, verdict, evidence, challenge, verify
+export policy, verdict, x509, trust, evidence, challenge, verify
