@@ -170,3 +170,16 @@ macro_sourcemap_*.json
 # per-machine, and while an agent holds one the repo reads DIRTY — which the
 # pre-push gate refuses, so an untracked one blocks every push in the tree.
 .claude/worktrees/
+
+# Nim linker response files. When a link command exceeds `MaxCmdLen` — 32_000
+# bytes on Linux (`compiler/extccomp.nim`) — Nim spills the arguments to
+# `<projectName>_linkerArgs.txt` and links via `@file` instead. It writes that
+# file into the CURRENT DIRECTORY, which for our builds is the repo root, and
+# it does NOT clean it up.
+#
+# Ignored for the same reason as the worktrees above, not merely for tidiness:
+# an untracked file at the root makes the tree read DIRTY, and the pre-push
+# gate refuses a dirty develop-set closure. So a link large enough to spill —
+# `repro-binary-cache` spills at ~37KB of arguments — blocks EVERY push in the
+# tree until someone notices a stray file and deletes it.
+*_linkerArgs.txt
