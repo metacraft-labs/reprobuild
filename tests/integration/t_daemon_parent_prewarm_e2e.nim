@@ -68,8 +68,24 @@ proc endpointBound(path: string): bool =
   except CatchableError:
     false
 
-proc startSharedRunQuota(tempRoot: string):
-    tuple[process: Process; env: seq[(string, string)]] =
+type SharedRunQuota = object
+  process: Process
+  env: seq[(string, string)]
+  socket: string
+
+proc stopSharedRunQuota(shared: SharedRunQuota) =
+  if shared.process != nil:
+    try:
+      if shared.process.running:
+        shared.process.terminate()
+      discard shared.process.waitForExit()
+    except CatchableError:
+      discard
+    try: shared.process.close() except CatchableError: discard
+  if shared.socket.len > 0 and dirExists(shared.socket.parentDir):
+    removeDirEventually(shared.socket.parentDir)
+
+proc startSharedRunQuota(tempRoot: string): SharedRunQuota =
   ## ONE RunQuota coordinator, shared by both arms, on a socket path both
   ## arms name.
   ##
@@ -89,14 +105,19 @@ proc startSharedRunQuota(tempRoot: string):
   ## of tolerating them, and it is the configuration the milestone's
   ## measurements use anyway.
   let root = repoRoot()
-  let rendezvous = runquotaRendezvousDir(tempRoot)
-  let socket = rendezvous / "runquota.sock"
+  # Use the product's length-bounded, private endpoint derivation. The
+  # scratch tree can exceed AF_UNIX's limit even on an ordinary workspace.
+  let socket = runquotaSocketEndpoint("mac2-" & tempRoot)
+  doAssert not dirExists(socket.parentDir), "fixture endpoint must be fresh"
+  result.socket = socket
+  var ready = false
+  defer:
+    if not ready: stopSharedRunQuota(result)
   let runquota = requireRunQuotaCliBin(root)
   let runquotad = requireRunQuotaDaemonBin(root)
-  removeFile(socket)
   let logFile = tempRoot / "runquotad.log"
   result.process = startProcess("/bin/sh", args = ["-c",
-    "exec \"$0\" --socket \"$1\" >" & logFile & " 2>&1",
+    "exec \"$0\" --socket \"$1\" >" & quoteShell(logFile) & " 2>&1",
     runquotad, socket], options = {})
   for _ in 0 ..< 300:
     if endpointBound(socket):
@@ -111,14 +132,7 @@ proc startSharedRunQuota(tempRoot: string):
     ("RUNQUOTAD_BIN", runquotad),
     ("PATH", runquota.parentDir & $PathSep & getEnv("PATH"))
   ]
-
-proc stopSharedRunQuota(process: Process) =
-  try:
-    process.terminate()
-    discard process.waitForExit()
-  except CatchableError:
-    discard
-  try: process.close() except CatchableError: discard
+  ready = true
 
 proc fixtureSource(): string =
   repoRoot() / "tests" / "fixtures" / "local-daemons-control-plane" /
@@ -242,14 +256,16 @@ proc runArm(tempRoot, arm, endpoint: string; prewarm: bool;
 suite "MAC-2 daemon parent prewarm end to end":
   when isNixSupported:
     test "integration_daemon_parent_prewarm_reaches_the_forked_worker":
-      let tempRoot = createTempDir("repro-mac2-e2e", "")
+      let tempBase = createTempDir("repro-mac2-e2e", "")
+      let tempRoot = tempBase / repeat("long-", 30)
+      createDir(tempRoot)
       let endpoint = daemonSocketEndpoint("mac2-warm")
       defer:
         stopDaemon(tempRoot, "warm", endpoint)
-        removeDirEventually(tempRoot)
+        removeDirEventually(tempBase)
       createDir(tempRoot / "store")
       let runquota = startSharedRunQuota(tempRoot)
-      defer: stopSharedRunQuota(runquota.process)
+      defer: stopSharedRunQuota(runquota)
 
       let last = runArm(tempRoot, "warm", endpoint, prewarm = true, passes = 3,
         runquota = runquota.env)
@@ -275,16 +291,18 @@ suite "MAC-2 daemon parent prewarm end to end":
       check inherited >= 1
 
     test "integration_a_prewarmed_daemon_builds_byte_identically_to_a_cold_one":
-      let tempRoot = createTempDir("repro-mac2-parity", "")
+      let tempBase = createTempDir("repro-mac2-parity", "")
+      let tempRoot = tempBase / repeat("long-", 30)
+      createDir(tempRoot)
       let warmEndpoint = daemonSocketEndpoint("mac2-parity-warm")
       let coldEndpoint = daemonSocketEndpoint("mac2-parity-cold")
       defer:
         stopDaemon(tempRoot, "warm", warmEndpoint)
         stopDaemon(tempRoot, "cold", coldEndpoint)
-        removeDirEventually(tempRoot)
+        removeDirEventually(tempBase)
       createDir(tempRoot / "store")
       let runquota = startSharedRunQuota(tempRoot)
-      defer: stopSharedRunQuota(runquota.process)
+      defer: stopSharedRunQuota(runquota)
 
       let cold = runArm(tempRoot, "cold", coldEndpoint, prewarm = false,
         passes = 3, runquota = runquota.env)

@@ -363,8 +363,8 @@ type
 
 const
   ActionRecordMagic = "RBAR"
-  # THE VERSIONS BELOW ARE FORMAT HISTORY. Only the last one is WRITTEN, and
-  # only the last one is READ -- see `ActionRecordVersionEvidenceEpoch`, which
+  # THE VERSIONS BELOW ARE FORMAT HISTORY. The evidence epochs below define
+  # which records may be read and written -- see `ActionRecordVersionEvidenceEpoch`, which
   # explains why this decoder refuses every earlier frame rather than
   # tolerating it. The earlier constants stay because the decoder's shape is
   # still expressed in terms of them ("does this frame have an env section?",
@@ -399,8 +399,13 @@ const
     ## it. Interning inside `strongIdentityPayload` would have shifted every
     ## strong fingerprint on every disk in the world; that is why the two
     ## payloads are separate functions and must stay separate.
+  ActionRecordVersionInheritedEnv = 7'u16
+    ## Same layout as v6, but observed environment values include inheritance
+    ## and launch overlays. A v6 record with env inputs can falsely label a
+    ## value as absent, so only v7 is trusted for that class of record.
+    ## Records without env inputs retain v6 and do not pay an unrelated miss.
   ActionRecordVersionEvidenceEpoch = 6'u16
-    ## THE ONLY VERSION THIS BINARY WRITES, AND THE ONLY ONE IT READS. This is
+    ## The minimum trusted version for records without environment inputs. This is
     ## a TRUST boundary, not a format one: byte-for-byte, a v6 frame is a v5
     ## frame. Nothing about the encoding changed; what changed is whether the
     ## producer's evidence could be believed.
@@ -2403,10 +2408,8 @@ proc encodeRecord(record: ActionResultRecord): seq[byte] =
   result.add(byte(ord(ActionRecordMagic[1])))
   result.add(byte(ord(ActionRecordMagic[2])))
   result.add(byte(ord(ActionRecordMagic[3])))
-  # v6 is the v5 LAYOUT with a version word that says the producer's evidence
-  # can be believed -- see `ActionRecordVersionEvidenceEpoch`. Nothing below
-  # this line changed when the epoch was drawn.
-  result.writeU16Le(ActionRecordVersionEvidenceEpoch)
+  result.writeU16Le(if record.envInputs.len > 0:
+    ActionRecordVersionInheritedEnv else: ActionRecordVersionEvidenceEpoch)
   result.writeDigest(record.weakFingerprint)
   result.add(byte(ord(record.policy)))
   let paths = buildRecordPathTable(record)
@@ -2461,7 +2464,7 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
   # the whole mechanism -- see `ActionRecordVersionEvidenceEpoch`. This is a
   # trust decision, so it is a SET and not a `>=`: a version is readable only
   # once someone has said why it is trustworthy.
-  if version notin {ActionRecordVersionEvidenceEpoch}:
+  if version notin {ActionRecordVersionEvidenceEpoch, ActionRecordVersionInheritedEnv}:
     raiseEnvelopeError(eeUnsupportedVersion, "unsupported action record version")
   let interned = version >= ActionRecordVersionInterned
   result.weakFingerprint = readDigest(payload, pos)
@@ -2502,6 +2505,9 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
       result.inputs[i] = readFingerprint(payload, pos)
   if version >= ActionRecordVersionEnv:
     let envCount = int(readU32Le(payload, pos))
+    if envCount > 0 and version < ActionRecordVersionInheritedEnv:
+      raiseEnvelopeError(eeUnsupportedVersion,
+        "action record predates inherited environment evidence")
     result.envInputs = newSeq[EnvFingerprint](envCount)
     for i in 0 ..< envCount:
       result.envInputs[i].name = readString(payload, pos)
