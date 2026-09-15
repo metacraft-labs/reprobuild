@@ -109,7 +109,22 @@
       # `undefined symbol: stackable_linux_chain_sigtrap` — surfacing as
       # `repro build: error: interface extraction edge asFailed`.
       # The engine also uses EvidenceScope and the scoped depfile format.
-      url = "github:metacraft-labs/io-mon/ac3e5b9714e6c2fd3c501a69ec2be8ff2abe6fc4";
+      #
+      # Bumped to 3ec0223, which is the revision this repo's flake.lock already
+      # builds. The two had silently diverged: a `repro flake refresh-lock` run
+      # moved `locked.rev` here without touching this url, and nix reuses a lock
+      # entry on its ORIGINAL ref alone — it never compares `locked` against
+      # `original` — so the pin below read as ac3e5b97 while every build fetched
+      # 3ec0223, with no warning. The engine now declines to move a pin stated
+      # here, so this class of divergence cannot recur; this line repairs the
+      # instance that already existed.
+      #
+      # Everything the paragraphs above justify still holds: ac3e5b97 is an
+      # ANCESTOR of 3ec0223, so the aarch64 `stackable_linux_*` fix, the
+      # event-interest API and the scoped depfile format are all carried
+      # forward. 3ec0223 is published on `dev` and is the revision the workspace
+      # has actually been building and testing against.
+      url = "github:metacraft-labs/io-mon/3ec0223c8a64a3749746a4a2cf598a19309dc6ef";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -232,7 +247,18 @@
       # different builds. 41ab1b9 is the revision that carries the explicit
       # Windows child environment (``6a53408``) io-mon's ``fs_snoop`` Windows
       # arm compiles against; 30f69b6 predates it.
-      url = "github:metacraft-labs/nim-stackable-hooks/41ab1b987aba67e8bcc34a5945ac33e17b6418ed";
+      #
+      # Bumped to 49006c3 for the reason the paragraph above gives: the pin and
+      # the sibling HAD stopped agreeing, which is the exact condition that
+      # makes them two different builds. A `repro flake refresh-lock` run moved
+      # `locked.rev` to 49006c3 without touching this url, and nix matches a
+      # lock entry on its ORIGINAL ref alone, so this line read as 41ab1b9 while
+      # every build fetched 49006c3 — silently, with no warning. The engine now
+      # declines to move a pin stated here; this repairs the existing instance.
+      #
+      # 41ab1b9 is an ANCESTOR of 49006c3, so the explicit Windows child
+      # environment (``6a53408``) this pin was chosen for is carried forward.
+      url = "github:metacraft-labs/nim-stackable-hooks/49006c311a9e0ae218e8a70cfa15c2f47286e8fd";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
