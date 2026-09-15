@@ -4331,12 +4331,52 @@ var producerSourceBindings*: Table[string, ResolvedPackageBinding] =
   ## Exported for the SC-4 integration test to observe the fold.
 
 proc attachProducerAuxRefs*(actions: var seq[BuildAction]) =
-  ## Resolve library aux channels only for the producer refs already carried by
-  ## each action. Selecting a producer for one target must not change unrelated
-  ## action identities or expose search paths those actions did not request.
-  ## String-based shell actions register library refs explicitly; typed
-  ## producer calls register the same refs while lowering.
-  discard actions
+  ## Resolve library aux channels for the producer refs each action carries,
+  ## PLUS the Nim library-source channel a Nim compile cannot name for itself.
+  ##
+  ## Selecting a producer for one target must not change unrelated action
+  ## identities or expose search paths those actions did not request, so a
+  ## C/C++ library producer is attached only where the recipe named it:
+  ## string-based ``shell(...)`` actions register those refs explicitly
+  ## (``appendRegisteredActionToolIdentityRefs``).
+  ##
+  ## Cross-Repo-Source-Consumption §4.2a (SC-11) is the one channel that cannot
+  ## work that way. The consuming edge is a typed ``nim.c(...)`` whose refs are
+  ## its OWN tools (``nim``, the C compiler) — by construction it never names
+  ## the sibling Nim ``library`` whose module it ``import``s, and the recipe
+  ## author has no ``nim.c`` parameter with which to name it. The spec's whole
+  ## SC-11 surface is a bare ``uses: "<nim lib>"`` on the package plus an
+  ## ordinary ``import`` (§4.2a, "the default makes every existing Nim-library
+  ## producer work unchanged"). So every producer this build materialized WITH
+  ## A NIM SOURCE ROOT (``nimPathDirs``) is attached to every action here; the
+  ## engine's per-ref resolver then fires and ``applyNimPathArgs`` puts the
+  ## sibling's ``src/`` on that action's ``nim c --path:``.
+  ##
+  ## This only ever BROADENS a Nim compile's module search path — it adds no
+  ## ``PATH`` entry (a pure-Nim-source producer materializes no ``bin`` dir) —
+  ## and it is a no-op unless this build actually materialized a Nim-source
+  ## producer, so a build consuming none keeps every action byte-identical.
+  if producerMaterializedAuxPaths.len == 0:
+    return
+  var nimSourceSelectors: seq[string] = @[]
+  for selector, aux in producerMaterializedAuxPaths.pairs:
+    if selector.len > 0 and aux.nimPathDirs.len > 0:
+      nimSourceSelectors.add(selector)
+  if nimSourceSelectors.len == 0:
+    return
+  nimSourceSelectors.sort()
+  for action in actions.mitems:
+    for selector in nimSourceSelectors:
+      if selector in action.toolIdentityRefs:
+        continue
+      action.toolIdentityRefs.add(selector)
+      # Keep ``toolIdentityRefKinds`` in sync when the action carries an
+      # explicit per-ref kind array (else it would silently fall back to the
+      # ``dkBuild`` default for every ref). ``dkBuild`` is the legacy ``uses:``
+      # kind — the HOST-platform cache key that collapses to ``"native"`` on a
+      # native build (``repro_build_engine.nim`` ``kindForRef``).
+      if action.toolIdentityRefKinds.len > 0:
+        action.toolIdentityRefKinds.add(dkBuild)
 
 proc foldProducerActionHashes*(actions: var seq[BuildAction]) =
   ## SC-2 (§4.2 point 3): after the consumer graph is lowered, fold each
@@ -9967,13 +10007,24 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # selector (host / nix / tarball / scoop / corpus-recipe) is untouched, so a
   # build that consumes no cross-repo producer is byte-identical to today.
   if not materializedOnly and result.projectRoot.len > 0:
-    # Producer materialization follows the selected action closure. Both typed
-    # calls and library-consuming actions carry their dependencies through
-    # ``toolIdentityRefs``; ``scopedToolArtifact`` retains only those refs.
-    # Package-wide ``uses:`` declarations remain available while compiling the
-    # provider and its public interface, but must not materialize producers for
-    # an unrelated target.
-    for useDef in buildArtifact.projectInterface.toolUses:
+    # Producer discovery must inspect the full package-level ``uses:`` set,
+    # not the focused tool-provisioning subset in ``buildArtifact``. Library
+    # producers are deliberately not present on an action's ``toolIdentityRefs``
+    # yet: this pass materializes their aux channels first, and only then does
+    # ``attachProducerAuxRefs`` add them to the selected consumer actions. If
+    # we scope them out here, the later attachment has no producer to attach
+    # and a Nim library's ``nimPathDirs`` silently disappears. Ordinary host /
+    # catalog tools still resolve from ``buildArtifact`` below, so focused
+    # builds remain lightweight.
+    #
+    # Cross-Repo-Source-Consumption §4.2a (SC-11) is what this guard protects:
+    # the consumer's edge is a typed ``nim.c(...)`` whose refs are its own
+    # tools (``nim``), never the sibling Nim ``library`` it ``import``s. A
+    # scoped loop here never resolves ``uses: "<nim lib>"`` at all, so the
+    # producer is neither fetched nor spliced and the consumer's compile fails
+    # with ``cannot open file: <module>`` — the exact pre-SC-11 failure the
+    # milestone's integration test pins.
+    for useDef in artifact.projectInterface.toolUses:
       let selector = useDef.packageSelector
       if selector.len == 0:
         continue
