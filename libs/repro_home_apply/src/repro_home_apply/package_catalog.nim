@@ -1629,8 +1629,16 @@ proc resolveBuiltinPackage*(packageId: string;
       pb.binary.bin_relpath_override
     else:
       picked.bin_relpath
+  # ``bin_relpath`` entries are TARGET-platform paths, not host paths: the
+  # Windows slice of ``gh`` carries ``bin\gh.exe``. ``extractFilename`` splits
+  # on the HOST's separator, so on a POSIX host it saw no separator in
+  # ``bin\gh.exe`` and handed back the whole relpath as the executable name.
+  # Split on both separators — the same spelling ``packages_schema``'s
+  # ``launcher_emit`` check uses to take the leaf of a ``bin_relpath`` entry —
+  # so the leaf is the leaf whichever platform is being resolved for.
   if effectiveBinRelpath.len > 0:
-    result.resolution.executableName = effectiveBinRelpath[0].extractFilename
+    result.resolution.executableName =
+      effectiveBinRelpath[0].split({'/', '\\'})[^1]
   else:
     result.resolution.executableName = packageId
   # Stable env-substitution order — sort by key so the realize loop
