@@ -16,7 +16,9 @@
 ##
 ## What the engine arm asserts instead is what the surrounding assertions
 ## already imply: the test-build edge SUCCEEDED and LAUNCHED, and a monitored,
-## cacheable edge that launches on a cold cache is a cache MISS.
+## cacheable edge that launches on a cold cache is a cache MISS. The run is
+## scoped to this case's own ``--action-cache-root``, so "cold" is a property
+## of the case rather than of where it happens to fall in the suite's order.
 ## The execute edge remains the behavioral proof: the engine lowers the
 ## selected ``reprobuild.test_execute.<stem>`` action, runs it, and records a
 ## successful result.
@@ -117,7 +119,7 @@ proc fieldForCheckpoint(action: JsonNode; name: string): string =
     return field.getStr()
   $field
 
-proc runBuildTarget(reproBin, repoRoot, selector: string):
+proc runBuildTarget(reproBin, repoRoot, selector, cacheRoot: string):
     tuple[output: string; exitCode: int] =
   let args = @[
     reproBin.quoteShell,
@@ -125,6 +127,7 @@ proc runBuildTarget(reproBin, repoRoot, selector: string):
     selector,
     "--tool-provisioning=path",
     "--daemon=off",
+    "--action-cache-root=" & cacheRoot.quoteShell,
     "--write-report",
     "--log=actions",
     "--progress=quiet",
@@ -195,8 +198,23 @@ suite "Bootstrap-And-Self-Build B3: test execute edge":
     check fileExists(runquotad)
 
     if fileExists(reproBin) and fileExists(runquotad):
+      # TEST ISOLATION. This case asserts a COLD execution of
+      # ``reprobuild.test_execute.t_dsl_outputs_statement_basic_accepted``, and
+      # so does ``t_d1_buildnimunittest_resolves_in_path_mode`` — the same
+      # action id, from a second binary, in the same suite. With both sharing
+      # the run-wide ``REPROBUILD_ACTION_CACHE_ROOT`` that
+      # ``scripts/run_tests.sh`` exports, whichever ran first warmed the other:
+      # measured, ``t_d1`` first passes 2/2 cold and this case then reads
+      # ``status=asUpToDate launched=false cacheDecision=cdHit
+      # reason=no-declared-outputs``. Neither test is wrong about what it
+      # asserts; they were simply not scoped. A private cache root per case is
+      # the remedy already used by
+      # ``t_local_daemons_control_plane_m11``/``buildCommand``.
+      let cacheRoot = createTempDir("repro-b3-execute-cache-", "")
+      defer: removeDir(cacheRoot)
       let selector = ".#" & ExecuteActionId
-      let (output, exitCode) = runBuildTarget(reproBin, repoRoot, selector)
+      let (output, exitCode) = runBuildTarget(reproBin, repoRoot, selector,
+                                              cacheRoot)
       checkpoint("exit=" & $exitCode)
       if exitCode != 0:
         checkpoint(output)
