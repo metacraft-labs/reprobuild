@@ -165,11 +165,20 @@ proc seedOrigin(fx: Nf2Fixture; name: string): string =
 proc originUrl*(fx: Nf2Fixture; name: string): string =
   "file://" & (fx.scratch / ("origin-" & name & ".git"))
 
-proc lockedNode*(name, url, rev, narHash: string; indent: string): string =
+proc lockedNode*(name, url, rev, narHash: string; indent: string;
+    originalRev = ""): string =
   ## One `flake.lock` node in nix's own on-disk shape. `lastModified`,
   ## `narHash` and `revCount` are present because a real lock carries them —
   ## they are exactly the fields a revision move has to DROP, so a fixture
   ## without them could not witness that.
+  ##
+  ## `originalRev` writes the OTHER half of a node: `original` mirrors the
+  ## flake-ref as it is written in `flake.nix`, so a non-empty value here is
+  ## the on-disk shape of an input `flake.nix` pins BY REVISION (nix hoists a
+  ## `?rev=` out of the url into its own attribute — verified against a real
+  ## `nix flake lock` run, and against every rev-pinned node of this repo's
+  ## own lock). Left empty, the node is the floating-`ref` shape every other
+  ## case uses and nothing about those cases changes.
   indent & "\"" & name & "\": {\n" &
   indent & "  \"locked\": {\n" &
   indent & "    \"lastModified\": 1787946353,\n" &
@@ -182,13 +191,16 @@ proc lockedNode*(name, url, rev, narHash: string; indent: string): string =
   indent & "  },\n" &
   indent & "  \"original\": {\n" &
   indent & "    \"ref\": \"main\",\n" &
+  (if originalRev.len > 0:
+     indent & "    \"rev\": \"" & originalRev & "\",\n"
+   else: "") &
   indent & "    \"type\": \"git\",\n" &
   indent & "    \"url\": \"" & url & "\"\n" &
   indent & "  }\n" &
   indent & "}"
 
-proc nf2FlakeLockText*(fx: Nf2Fixture; alphaRev, betaRev, gammaRev: string):
-    string =
+proc nf2FlakeLockText*(fx: Nf2Fixture; alphaRev, betaRev, gammaRev: string;
+    revPinned: openArray[string] = []): string =
   ## The fixture's `flake.lock`.
   ##
   ## `nixpkgs` is written with its members in a DELIBERATELY unusual order and
@@ -199,11 +211,14 @@ proc nf2FlakeLockText*(fx: Nf2Fixture; alphaRev, betaRev, gammaRev: string):
   "{\n" &
   "  \"nodes\": {\n" &
   lockedNode("alpha-src", originUrl(fx, "alpha"), alphaRev,
-    "sha256-fv2PzTwKsfeBptF8u/G0w9eh6GDsib/62l5cyuKNGYM=", "    ") & ",\n" &
+    "sha256-fv2PzTwKsfeBptF8u/G0w9eh6GDsib/62l5cyuKNGYM=", "    ",
+    originalRev = (if "alpha-src" in revPinned: alphaRev else: "")) & ",\n" &
   lockedNode("beta-src", originUrl(fx, "beta"), betaRev,
-    "sha256-EZvvEKnc/QXEXlosW7OiNDncXiBneXs4liR/64D3A90=", "    ") & ",\n" &
+    "sha256-EZvvEKnc/QXEXlosW7OiNDncXiBneXs4liR/64D3A90=", "    ",
+    originalRev = (if "beta-src" in revPinned: betaRev else: "")) & ",\n" &
   lockedNode("gamma-src", originUrl(fx, "gamma"), gammaRev,
-    "sha256-8CsSWf5teLoXzC7ay1QzNPN9tP204vk496y/wq+S/Lc=", "    ") & ",\n" &
+    "sha256-8CsSWf5teLoXzC7ay1QzNPN9tP204vk496y/wq+S/Lc=", "    ",
+    originalRev = (if "gamma-src" in revPinned: gammaRev else: "")) & ",\n" &
   "    \"flake-utils\": {\n" &
   "      \"locked\": {\n" &
   "        \"lastModified\": 1731533236,\n" &
@@ -282,10 +297,18 @@ proc removePreCommitDispatch*(fx: Nf2Fixture) =
   ## refresh (setting up a "the lock is stale" starting state).
   if fileExists(preCommitHookPath(fx)): removeFile(preCommitHookPath(fx))
 
-proc setupNf2Fixture*(label: string): Nf2Fixture =
+proc setupNf2Fixture*(label: string;
+    revPinned: openArray[string] = []): Nf2Fixture =
   ## Build the whole workspace. Returns a fixture whose `flake.lock` names
   ## exactly the revision every sibling checkout is sitting at — the
   ## "nothing has drifted" starting state.
+  ##
+  ## Every input named in `revPinned` is declared in `flake.nix` with an
+  ## EXPLICIT `rev=` — the shape an author writes when they mean "this exact
+  ## revision, not this branch's tip" — and its lock node carries the matching
+  ## `original.rev`. The default is the floating-`ref` shape, so a fixture
+  ## built without the argument is byte-identical to the one every other case
+  ## has always got.
   result.gitBin = findExe("git")
   result.repro = absolutePath(reproBinaryPath())
   result.scratch = createTempDir("nf2-" & label & "-", "")
@@ -332,14 +355,23 @@ proc setupNf2Fixture*(label: string): Nf2Fixture =
     "project = \"nf2\"\n" &
     "branch = \"main\"\n")
 
+  # `@revPinned` because an `openArray` cannot be captured by the closure
+  # below without violating memory safety — the compiler rejects it outright.
+  let pinnedInputs = @revPinned
+  proc inputUrl(fx: Nf2Fixture; input, repo, sha: string): string =
+    ## `?ref=main` is a FLOATING ref — "this branch's tip". Appending `&rev=`
+    ## makes it an explicit pin, which is a different statement about the same
+    ## input and is what `revPinned` selects.
+    "    " & input & ".url = \"git+" & originUrl(fx, repo) & "?ref=main" &
+      (if input in pinnedInputs: "&rev=" & sha else: "") & "\";\n"
   writeFile(result.app / "flake.nix",
     "{\n" &
     "  description = \"NF-2 fixture consumer\";\n" &
     "\n" &
     "  inputs = {\n" &
-    "    alpha-src.url = \"git+" & originUrl(result, "alpha") & "?ref=main\";\n" &
-    "    beta-src.url = \"git+" & originUrl(result, "beta") & "?ref=main\";\n" &
-    "    gamma-src.url = \"git+" & originUrl(result, "gamma") & "?ref=main\";\n" &
+    inputUrl(result, "alpha-src", "alpha", shas[0]) &
+    inputUrl(result, "beta-src", "beta", shas[1]) &
+    inputUrl(result, "gamma-src", "gamma", shas[2]) &
     "    nixpkgs.url = \"github:NixOS/nixpkgs\";\n" &
     "    flake-utils.url = \"github:numtide/flake-utils\";\n" &
     "  };\n" &
@@ -347,7 +379,7 @@ proc setupNf2Fixture*(label: string): Nf2Fixture =
     "  outputs = _: { };\n" &
     "}\n")
   writeFile(lockPath(result),
-    nf2FlakeLockText(result, shas[0], shas[1], shas[2]))
+    nf2FlakeLockText(result, shas[0], shas[1], shas[2], revPinned))
   discard requireCmd(q(result.gitBin) & " -C " & q(result.app) & " add -A")
   discard requireCmd(q(result.gitBin) & " -C " & q(result.app) &
     " commit -q -m " & q("add flake"))

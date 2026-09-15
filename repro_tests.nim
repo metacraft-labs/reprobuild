@@ -8163,6 +8163,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_a_flake_pinned_input_is_not_moved_behind_the_flakes_back.nim",
+    binary: "build/test-bin/t_a_flake_pinned_input_is_not_moved_behind_the_flakes_back",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_a_gate_refusal_over_an_unpublished_sibling_names_the_push_first.nim",
     binary: "build/test-bin/t_a_gate_refusal_over_an_unpublished_sibling_names_the_push_first",
     defines: @[],

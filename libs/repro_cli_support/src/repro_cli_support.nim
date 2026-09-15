@@ -64721,6 +64721,39 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
 # the integrity they carried is not silently downgraded: it is DEFERRED to the
 # `rev`, which is itself a content hash of the tree git will hand nix.
 #
+# ## …and why some `rev`s are not moved at all
+#
+# That whole argument is about the node's `locked` half. A node states the
+# revision TWICE: `locked.rev` is what the evaluation builds, and `original`
+# mirrors the flake-ref as WRITTEN IN `flake.nix` — carrying a `rev` of its own
+# only when the author pinned the input explicitly (`?rev=` / `github:o/r/<sha>`)
+# instead of floating it on a branch.
+#
+# Nix never reconciles the two. `src/libflake/flake.cc` reuses an existing lock
+# entry on `oldLock->originalRef.canonicalize() == input.ref->canonicalize()`
+# alone — `original` against `flake.nix`, with `locked` checked against
+# neither. Measured on this host with nix 2.32.8, two local git revisions
+# differing in one file:
+#
+#   * `original.rev` = R1 (agreeing with `flake.nix`), `locked.rev` rewritten
+#     to R2 → `nix eval` returns R2's content. No warning, no error, lock left
+#     byte-identical. The pin the author WROTE is inert. This is treatment (i)
+#     again, one level up: not a stale `narHash` under a fresh `rev`, but a
+#     stale `flake.nix` under a fresh lock — and "a pin that reads correct and
+#     builds something else" was the reason (i) was rejected;
+#   * moving `original.rev` to R2 as well → nix finds the lock disagreeing with
+#     `flake.nix`, REVERTS the node to R1 and rewrites `flake.lock`. The
+#     refresh is undone AND the no-churn property is lost.
+#
+# Editing `flake.nix` is the only treatment that makes such a node coherent,
+# and §13.2 does not put it in this refresh's hands. So a rev-pinned input's
+# pin is DECLINED — left exactly as it was, `narHash` included, since a node
+# that did not move has nothing to recompute — through the same `withheld`
+# channel as every other §3.2 decision, naming the file to edit.
+# `t_a_flake_pinned_input_is_not_moved_behind_the_flakes_back` pins both the
+# decline and its boundary: once `flake.nix` names the observed revision, the
+# refresh agrees with the flake and files it.
+#
 # ## Why the edit is surgical rather than a parse/serialize round trip
 #
 # `flake.lock` is nix's file, not ours. Reserializing it would reorder keys,
@@ -64892,11 +64925,46 @@ type
     text*: string           ## the refreshed document (== the input when not changed)
     rewrites*: seq[FlakeLockRewrite]
     notices*: seq[string]   ## inputs this refresh could NOT pin, and why
+    declined*: seq[string]
+      ## One sentence per input whose pin this refresh REFUSED to move because
+      ## `flake.nix` states that input's revision itself. Separate from
+      ## `notices` for the same reason `FlakeLockRefreshOutcome.withheld` is:
+      ## these are decisions, not remarks, and the caller promotes them into
+      ## `withheld` so they are warned about on stderr and named in the
+      ## outcome's own diagnostic. See `flakeDeclinedPinNotice`.
     failed*: bool           ## the document itself could not be read as a lock
     diagnostic*: string
 
+proc flakeDeclinedPinNotice(input, node, declaredRev, observedRev,
+    flakeRoot: string): string =
+  ## The announcement for ONE input whose pin `flake.nix` states itself.
+  ##
+  ## NOTE for anyone editing this string: backticks are reserved for RUNNABLE
+  ## command lines — `backtickedCommands` lifts every one of them out and the
+  ## cases run what it finds — and the remedy here is a FILE EDIT, not a
+  ## command. So it carries no backticks at all rather than handing the
+  ## operator something that is not runnable.
+  let flakeFile =
+    if flakeRoot.len > 0: flakeRoot / "flake.nix" else: "the flake's flake.nix"
+  "flake.lock NOT refreshed for input '" & input & "': " & flakeFile &
+    " pins this input BY REVISION, so its lock node '" & node &
+    "' states that revision in original.rev (" & declaredRev &
+    ") as well as in locked.rev, and the observed checkout is at " &
+    observedRev & ". Moving locked.rev alone would make the evaluation build " &
+    observedRev & " while " & flakeFile & " still reads as a pin on " &
+    declaredRev & " — measured with nix 2.32.8: no warning, no error, the " &
+    "flake's own pin simply inert. Moving original.rev with it is worse: nix " &
+    "then finds the lock disagrees with the flake, REVERTS the node to " &
+    declaredRev & " and rewrites flake.lock on the next evaluation. Neither " &
+    "is this refresh's to choose, so the pin was LEFT ALONE, with its " &
+    "narHash intact. This is a warning, not an error: nothing was written " &
+    "and no operation was refused. To record " & observedRev &
+    ", change the rev= in this input's url in " & flakeFile &
+    "; nix will then re-lock the input and compute its narHash itself."
+
 proc refreshFlakeLockText*(lockText: string;
-    revisions: openArray[tuple[input, rev: string]]): FlakeLockRefresh =
+    revisions: openArray[tuple[input, rev: string]];
+    flakeRoot = ""): FlakeLockRefresh =
   ## Rewrite the `locked` node of each named input to the given revision,
   ## leaving EVERY other byte of the document untouched. An input whose pin
   ## already names that revision produces no rewrite at all — that is what
@@ -64994,6 +65062,57 @@ proc refreshFlakeLockText*(lockText: string;
     if oldRevText == newRevText:
       # THE common case, and the reason most commits do not touch the file.
       continue
+
+    # The node's OTHER statement of "which revision". `original` mirrors the
+    # flake-ref as it is written in `flake.nix`; it carries a `rev` only when
+    # the author pinned the input explicitly (`?rev=` / `github:o/r/<sha>`,
+    # which nix hoists into its own attribute) rather than floating it on a
+    # branch. A floating input has no `rev` here at all, and that is the
+    # majority case this refresh was built for.
+    #
+    # Where it IS present and names something other than the revision about to
+    # be filed, the move is declined. Measured on this host with nix 2.32.8,
+    # against two local git revisions differing in one file's content:
+    #
+    #   * `original.rev` = R1 (matching flake.nix), `locked.rev` rewritten to
+    #     R2: `nix eval` returned R2's content, with NO warning, NO error, and
+    #     the lock left byte-identical. `src/libflake/flake.cc` reuses a lock
+    #     entry on `oldLock->originalRef.canonicalize() == input.ref` alone —
+    #     `locked` is never checked against `original` — so the explicit pin
+    #     the author wrote in flake.nix is simply INERT. That is the very
+    #     failure this refresh exists to remove, one level up: treatment (i)
+    #     above is rejected because it yields "a pin that reads correct and
+    #     builds something else", and this is flake.nix reading correct and
+    #     building something else;
+    #   * moving `original.rev` to R2 as well — the obvious "make the node
+    #     agree with itself" repair — is worse, not better: nix then finds the
+    #     lock disagrees with flake.nix, REVERTS the whole node to R1 and
+    #     rewrites flake.lock. The refresh is undone and the no-churn property
+    #     goes with it.
+    #
+    # The remaining option, editing `flake.nix`, is not this refresh's: §13.2
+    # confines it to "SIBLING PINNING records WHAT IS CHECKED OUT", over the
+    # lock file. So the pin is left alone — narHash included, because a node
+    # that did not move has nothing to recompute — and the decision is said
+    # out loud with the file to edit.
+    #
+    # An `original.rev` that ALREADY names the observed revision is the author
+    # having moved the pin: there the refresh agrees with the flake instead of
+    # contradicting it, and filing it makes the node coherent rather than less
+    # so, so it proceeds.
+    let originalIdx = jsonMemberIndex(lockedMembers, "original")
+    if originalIdx >= 0:
+      let originalFields = jsonObjectMembers(lockText,
+        lockedMembers[originalIdx].valueStart)
+      let originalRevIdx = jsonMemberIndex(originalFields, "rev")
+      if originalRevIdx >= 0:
+        let declaredRev = lockText[originalFields[originalRevIdx].valueStart ..<
+          originalFields[originalRevIdx].valueEnd].strip(chars = {'"'})
+        if declaredRev != entry.rev:
+          result.declined.add(flakeDeclinedPinNotice(entry.input, nodeKey,
+            declaredRev, entry.rev, flakeRoot))
+          continue
+
     var dropped: seq[string]
     for key in flakeLockRevisionDerivedKeys:
       if jsonMemberIndex(fields, key) >= 0: dropped.add(key)
@@ -65350,13 +65469,23 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   for w in result.withheld:
     stderr.writeLine(label & ": WARNING: " & w)
 
-  let refreshed = refreshFlakeLockText(lockText, revisions)
+  let refreshed = refreshFlakeLockText(lockText, revisions, flakeRoot)
   for n in refreshed.notices: result.notices.add(n)
   if refreshed.failed:
     result.tag = "refused-unreadable-lock"
     result.diagnostic = refreshed.diagnostic
     result.exitCode = 2
     return
+  # A pin `flake.nix` states BY REVISION is withheld for the same reason as
+  # every other §3.2 decision, and travels the same channel: into `withheld`,
+  # so it reaches the tag, the diagnostic and the log, and onto stderr, so a
+  # developer watching a commit scroll past sees it. It is discovered inside
+  # the rewrite rather than during row classification because the fact that
+  # decides it — the node's `original.rev` — lives in the lock, not in the
+  # sibling's git state the classifier reads.
+  for d in refreshed.declined:
+    result.withheld.add(d)
+    stderr.writeLine(label & ": WARNING: " & d)
   result.rewrites = refreshed.rewrites
   if not refreshed.changed:
     # §13.3: "most commits do not move a sibling, so most commits do not touch
