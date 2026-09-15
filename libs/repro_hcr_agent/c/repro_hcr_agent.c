@@ -1282,7 +1282,20 @@ static void *repro_hcr_apply_direct_patch(void *entry,
     return NULL;
   }
   entry_address = (uint64_t)(uintptr_t)entry;
-  sled_address = repro_hcr_lx_sled_address_for_entry(entry_address);
+  /*
+   * HLX-M2. The sled is looked up in the OBJECT THAT OWNS `entry_address`,
+   * which may be the main executable or any `dlopen`'d shared library — the
+   * `dl_iterate_phdr` walk that gives HLX-M1 the per-object load bias for
+   * symbols gives it for sled tables too. Before this, the table came from the
+   * linker-synthesised `__start_`/`__stop_` symbols, which name only the image
+   * the agent itself was linked into, so a function in a shared library
+   * resolved and then refused `absent-sled`.
+   *
+   * Called HERE, before quiescence begins: it opens and maps a file, which is
+   * neither async-signal-safe nor something to do with every other thread
+   * parked.
+   */
+  sled_address = repro_hcr_elf_sled_address_for_entry(entry_address);
 
   thread_count = repro_hcr_lx_enumerate_tids(
       repro_hcr_lx_quiesce_scratch_a, REPRO_HCR_LX_MAX_QUIESCE_THREADS);
@@ -1337,6 +1350,98 @@ static void *repro_hcr_apply_direct_patch(void *entry,
     repro_hcr_notify_did_patch(entry, patch_page, patch_len);
   }
   return patch_page;
+}
+
+/* ---------------------------------------------------------------------------
+ * HLX-M2 — evidence surface for the gates, and ONE lever.
+ *
+ * Why these are here rather than in the probe shim. The HLX-M4 fixtures link
+ * `repro_hcr_linux_x86_64_probe.c` INSTEAD of the agent, so the probe's copies
+ * of the provider statics are the ones they drive. An e2e gate that goes over
+ * the real wire links the AGENT, and the agent's copies are different objects —
+ * a probe setter would arm a provider that is not the one publishing. So the
+ * two gates that need to see (and, once, steer) the agent's own publication ask
+ * the agent directly.
+ *
+ * Every accessor below is a read of state the production path already recorded.
+ * The single writer, `repro_hcr_agent_force_far_patch_body_for_tests`, does not
+ * fake a distance: it removes the near-first preference for the body page, and
+ * `repro_hcr_lx_map_patch_page_far` then refuses to return a page that is NOT
+ * outside `rel32` reach. The gate measures the resulting gap from the addresses
+ * reported here rather than believing the flag.
+ *
+ * The `_for_tests` suffix is the contract. Nothing in the agent's own code
+ * calls any of them, and `repro_hcr_lx_force_far_patch_body` is 0 unless a test
+ * sets it.
+ * ------------------------------------------------------------------------- */
+
+void repro_hcr_agent_force_far_patch_body_for_tests(int enabled) {
+  repro_hcr_lx_force_far_patch_body = enabled;
+}
+
+int repro_hcr_agent_last_trampoline_kind_for_tests(void) {
+  return repro_hcr_lx_last_report.trampoline_kind;
+}
+
+unsigned long long repro_hcr_agent_last_island_address_for_tests(void) {
+  return (unsigned long long)repro_hcr_lx_last_report.island_address;
+}
+
+long long repro_hcr_agent_last_body_displacement_for_tests(void) {
+  return (long long)repro_hcr_lx_last_report.body_displacement;
+}
+
+unsigned long long repro_hcr_agent_last_window_address_for_tests(void) {
+  return (unsigned long long)repro_hcr_lx_last_report.window_address;
+}
+
+unsigned long long repro_hcr_agent_last_dispatch_address_for_tests(void) {
+  return (unsigned long long)repro_hcr_lx_last_report.dispatch_address;
+}
+
+const char *repro_hcr_agent_last_refusal_name_for_tests(void) {
+  return repro_hcr_lx_refusal_name(repro_hcr_lx_last_report.refusal);
+}
+
+const char *repro_hcr_agent_last_sled_status_name_for_tests(void) {
+  return repro_hcr_elf_sled_status_name(repro_hcr_elf_last_sled_lookup.status);
+}
+
+const char *repro_hcr_agent_last_sled_object_path_for_tests(void) {
+  return repro_hcr_elf_last_sled_lookup.object_path;
+}
+
+int repro_hcr_agent_last_sled_is_main_executable_for_tests(void) {
+  return repro_hcr_elf_last_sled_lookup.is_main_executable;
+}
+
+unsigned long long repro_hcr_agent_last_sled_section_start_for_tests(void) {
+  return (unsigned long long)repro_hcr_elf_last_sled_lookup.section_start;
+}
+
+unsigned long long repro_hcr_agent_last_sled_entry_count_for_tests(void) {
+  return (unsigned long long)repro_hcr_elf_last_sled_lookup.entry_count;
+}
+
+unsigned long long repro_hcr_agent_last_sled_load_bias_for_tests(void) {
+  return (unsigned long long)repro_hcr_elf_last_sled_lookup.load_bias;
+}
+
+unsigned long long repro_hcr_agent_island_alloc_count_for_tests(void) {
+  return (unsigned long long)repro_hcr_lx_island_alloc_count;
+}
+
+/* Trampoline-Mechanics §5.1 strategy 2. `scan` counts how many times the
+ * `/proc/self/maps` gap finder was ASKED; `hit` how many times it placed a page.
+ * A gate asserting "no island could be placed" needs the first to be non-zero,
+ * or the refusal would be evidence that strategy 2 never ran rather than that
+ * it found nothing. */
+unsigned long long repro_hcr_agent_gap_scan_count_for_tests(void) {
+  return (unsigned long long)repro_hcr_lx_gap_scan_count;
+}
+
+unsigned long long repro_hcr_agent_gap_hit_count_for_tests(void) {
+  return (unsigned long long)repro_hcr_lx_gap_hit_count;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1598,7 +1703,10 @@ static const char *repro_hcr_capabilities_json_array(void) {
   return buffer;
 }
 
-static char repro_hcr_lx_failure_detail_buffer[160];
+/* HLX-M2 widened this from 160: the sled lookup's detail names the object path
+ * and the two build-ids, and a truncated path is exactly the part of that
+ * message an operator needs. */
+static char repro_hcr_lx_failure_detail_buffer[768];
 
 /*
  * The named cause, and — for `quiescence-failed` — the tids that caused it.
@@ -1611,7 +1719,27 @@ static char repro_hcr_lx_failure_detail_buffer[160];
  */
 static const char *repro_hcr_direct_patch_failure_detail(void) {
   const char *name = repro_hcr_lx_refusal_name(repro_hcr_lx_last_report.refusal);
-  if (repro_hcr_lx_last_report.refusal != REPRO_HCR_LX_REFUSED_QUIESCENCE_FAILED) {
+  /*
+   * HLX-M2. `absent-sled` now has FIVE distinguishable causes — no loaded
+   * object maps the address, the object's file is unreadable or malformed, its
+   * build-id no longer matches the mapped image, it carries no
+   * `__patchable_function_entries` at all, or it has one and this function is
+   * not in it. A bare `absent-sled` makes "you built this library without the
+   * patchable profile" and "you rebuilt it since it was loaded" the same
+   * report, which is the one distinction whoever is debugging a failed patch
+   * needs most. The lookup's own named status and detail are appended.
+   */
+  if (repro_hcr_lx_last_report.refusal == REPRO_HCR_LX_REFUSED_ABSENT_SLED &&
+      repro_hcr_elf_last_sled_lookup.status != REPRO_HCR_ELF_SLED_OK) {
+    snprintf(repro_hcr_lx_failure_detail_buffer,
+             sizeof(repro_hcr_lx_failure_detail_buffer), "%s (%s: %s)", name,
+             repro_hcr_elf_sled_status_name(
+                 repro_hcr_elf_last_sled_lookup.status),
+             repro_hcr_elf_last_sled_lookup.detail);
+    return repro_hcr_lx_failure_detail_buffer;
+  }
+  if (repro_hcr_lx_last_report.refusal !=
+      REPRO_HCR_LX_REFUSED_QUIESCENCE_FAILED) {
     return name;
   }
   {
@@ -1864,15 +1992,29 @@ static const char *repro_hcr_skipped_functions_fragment(
     const char *changed_function) {
 #if defined(REPRO_HCR_TARGET_LINUX_X86_64)
   static char buffer[512];
-  if (repro_hcr_lx_last_report.refusal !=
-      REPRO_HCR_LX_REFUSED_CLAIMED_BY_RECORDER) {
+  /*
+   * HLX-M2 adds `island-unplaceable` to the reasons that are reported as a
+   * SKIPPED FUNCTION rather than only as a failure message, and it belongs in
+   * the same category for the same reason `claimed-by-recorder` does: it is not
+   * a property of the target's code. The function's sled is fine, its entry is
+   * fine, and it would patch cleanly in a process whose +/-2 GiB region around
+   * that window had a page free. The milestone's deliverable says so in as many
+   * words — "refuse the function with a named diagnostic and report it in
+   * `skippedFunctions`; never widen the store".
+   */
+  int refusal = repro_hcr_lx_last_report.refusal;
+  const char *reason;
+  if (refusal == REPRO_HCR_LX_REFUSED_CLAIMED_BY_RECORDER ||
+      refusal == REPRO_HCR_LX_REFUSED_ISLAND_UNPLACEABLE) {
+    reason = repro_hcr_lx_refusal_name(refusal);
+  } else {
     return "";
   }
   snprintf(buffer, sizeof(buffer),
            ",\"skippedFunctions\":[{\"function\":\"%s\","
-           "\"reason\":\"claimed-by-recorder\",\"holder\":%u,"
+           "\"reason\":\"%s\",\"holder\":%u,"
            "\"windowAddress\":\"0x%llx\"}]",
-           changed_function == NULL ? "" : changed_function,
+           changed_function == NULL ? "" : changed_function, reason,
            repro_hcr_lx_last_report.claim_holder,
            (unsigned long long)repro_hcr_lx_last_report.window_address);
   return buffer;
@@ -2734,7 +2876,7 @@ static void repro_hcr_handle_patch_frame(repro_hcr_agent_thread_args *args,
   uint8_t *unwind_bytes = NULL;
   void *dispatch_entry = NULL;
   void *entry = repro_hcr_find_symbol(args, target_symbol, changed_function);
-  char failure_detail[192];
+  char failure_detail[832];
   const char *failure_message = "C agent failed to apply direct patch";
   failure_detail[0] = '\0';
   if (patch_id == NULL) {

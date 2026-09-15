@@ -831,6 +831,41 @@ e2e_hcr_linux_x86_64_single_threaded_direct_patch:
         tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_x86_64_single_threaded_direct_patch.log
 
+# HLX-M2 — a function inside a `dlopen`ed shared library is patched.
+# Campaign: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org, HLX-M2.
+# Carries its own falsifier arm, which rebuilds the provider with the pre-M2
+# main-executable-only sled reach and must go red.
+e2e_hcr_linux_shared_library_sled_patch:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_hcr_linux_shared_library_sled_patch \
+        --out:build/test-bin/e2e_hcr_linux_shared_library_sled_patch \
+        tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim \
+        2>&1 | tee test-logs/e2e_hcr_linux_shared_library_sled_patch.log
+
+# HLX-M2 — a body deliberately mapped beyond +/-2 GiB is reached through a
+# 14-byte island, and the published store is still one 5-byte `E9 rel32`.
+e2e_hcr_linux_far_target_island_patch:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_hcr_linux_far_target_island_patch \
+        --out:build/test-bin/e2e_hcr_linux_far_target_island_patch \
+        tests/e2e/hcr-linux-far/t_e2e_hcr_linux_far_target_island_patch.nim \
+        2>&1 | tee test-logs/e2e_hcr_linux_far_target_island_patch.log
+
+# HLX-M2 — an exhausted +/-2 GiB region refuses by name and never widens the
+# published store to a 13- or 14-byte in-text write.
+integration_hcr_linux_island_exhaustion_refuses:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_island_exhaustion_refuses \
+        --out:build/test-bin/integration_hcr_linux_island_exhaustion_refuses \
+        tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_island_exhaustion_refuses.log
+
 # GDH-M4 — a session serves more than one reload.
 # Campaign: codetracer-specs/Planned-Features/
 #           GDScript-Hot-Reload-Multi-Version-Sources.milestones.org

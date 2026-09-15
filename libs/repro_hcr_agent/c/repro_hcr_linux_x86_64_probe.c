@@ -26,6 +26,12 @@
 #include <unistd.h>
 
 #include "repro_hcr_linux_x86_64.h"
+/* HLX-M2: sled discovery moved to the ELF layer so it can reach any loaded
+ * object's `__patchable_function_entries`, not only the image the agent was
+ * linked into. The shim follows it there so the gates keep driving the SAME
+ * lookup the agent runs — there is no main-executable-only variant left to
+ * accidentally test instead. */
+#include "repro_hcr_linux_elf_symbols.h"
 
 static size_t repro_hcr_lx_page_size(void) {
   long value = sysconf(_SC_PAGESIZE);
@@ -122,8 +128,149 @@ long long repro_hcr_lx_probe_protection_probe_rx_result(void) {
 
 unsigned long long repro_hcr_lx_probe_sled_address_for_entry(
     unsigned long long entry_address) {
-  return (unsigned long long)repro_hcr_lx_sled_address_for_entry(
+  return (unsigned long long)repro_hcr_elf_sled_address_for_entry(
       (uint64_t)entry_address);
+}
+
+/* HLX-M2 — the sled lookup's own report, so a gate can assert WHICH object the
+ * sled came from and, on a refusal, which of the five distinguishable causes it
+ * was. A bare address answers neither question. */
+int repro_hcr_lx_probe_sled_status(void) {
+  return repro_hcr_elf_last_sled_lookup.status;
+}
+
+const char *repro_hcr_lx_probe_sled_status_name(int status) {
+  return repro_hcr_elf_sled_status_name(status);
+}
+
+const char *repro_hcr_lx_probe_sled_object_path(void) {
+  return repro_hcr_elf_last_sled_lookup.object_path;
+}
+
+const char *repro_hcr_lx_probe_sled_detail(void) {
+  return repro_hcr_elf_last_sled_lookup.detail;
+}
+
+int repro_hcr_lx_probe_sled_is_main_executable(void) {
+  return repro_hcr_elf_last_sled_lookup.is_main_executable;
+}
+
+unsigned long long repro_hcr_lx_probe_sled_load_bias(void) {
+  return (unsigned long long)repro_hcr_elf_last_sled_lookup.load_bias;
+}
+
+unsigned long long repro_hcr_lx_probe_sled_section_start(void) {
+  return (unsigned long long)repro_hcr_elf_last_sled_lookup.section_start;
+}
+
+unsigned long long repro_hcr_lx_probe_sled_entry_count(void) {
+  return (unsigned long long)repro_hcr_elf_last_sled_lookup.entry_count;
+}
+
+int repro_hcr_lx_probe_sled_objects_seen(void) {
+  return repro_hcr_elf_last_sled_lookup.objects_seen;
+}
+
+/* ---------------------------------------------------------------------------
+ * HLX-M2 — islands and trampoline selection. Every one forwards to the
+ * production implementation.
+ * ------------------------------------------------------------------------- */
+
+void repro_hcr_lx_probe_encode_island(unsigned long long target_address,
+                                      unsigned char *out_bytes) {
+  repro_hcr_lx_encode_island((uint64_t)target_address, (uint8_t *)out_bytes);
+}
+
+int repro_hcr_lx_probe_island_bytes(void) {
+  return (int)REPRO_HCR_LX_ISLAND_BYTES;
+}
+
+int repro_hcr_lx_probe_select_trampoline(unsigned long long window_address,
+                                         unsigned long long body_address,
+                                         int *kind,
+                                         unsigned long long *jump_target,
+                                         unsigned long long *island_address,
+                                         long long *body_displacement) {
+  repro_hcr_lx_trampoline_choice choice;
+  int rc = repro_hcr_lx_select_trampoline((uint64_t)window_address,
+                                          (uint64_t)body_address, &choice);
+  if (kind != NULL) {
+    *kind = choice.kind;
+  }
+  if (jump_target != NULL) {
+    *jump_target = (unsigned long long)choice.jump_target;
+  }
+  if (island_address != NULL) {
+    *island_address = (unsigned long long)choice.island_address;
+  }
+  if (body_displacement != NULL) {
+    *body_displacement = (long long)choice.body_displacement;
+  }
+  return rc;
+}
+
+int repro_hcr_lx_probe_last_trampoline_kind(void) {
+  return repro_hcr_lx_last_report.trampoline_kind;
+}
+
+unsigned long long repro_hcr_lx_probe_last_island_address(void) {
+  return (unsigned long long)repro_hcr_lx_last_report.island_address;
+}
+
+long long repro_hcr_lx_probe_last_body_displacement(void) {
+  return (long long)repro_hcr_lx_last_report.body_displacement;
+}
+
+unsigned long long repro_hcr_lx_probe_island_alloc_count(void) {
+  return (unsigned long long)repro_hcr_lx_island_alloc_count;
+}
+
+unsigned long long repro_hcr_lx_probe_island_page_map_count(void) {
+  return (unsigned long long)repro_hcr_lx_island_page_map_count;
+}
+
+unsigned long long repro_hcr_lx_probe_island_reuse_count(void) {
+  return (unsigned long long)repro_hcr_lx_island_reuse_count;
+}
+
+/* The protection asked for on the reuse write transient, -1 if no page has been
+ * reused. The reuse hazard is only observable here: `allocate_island` restores
+ * `R|X` before returning, so nothing read afterwards can distinguish a
+ * transient that kept `PROT_EXEC` from one that dropped it. */
+int repro_hcr_lx_probe_island_reuse_transient_prot(void) {
+  return repro_hcr_lx_island_reuse_transient_prot;
+}
+
+int repro_hcr_lx_probe_prot_exec(void) { return REPRO_HCR_LX_PROT_EXEC; }
+
+unsigned long long repro_hcr_lx_probe_gap_scan_count(void) {
+  return (unsigned long long)repro_hcr_lx_gap_scan_count;
+}
+
+unsigned long long repro_hcr_lx_probe_gap_hit_count(void) {
+  return (unsigned long long)repro_hcr_lx_gap_hit_count;
+}
+
+int repro_hcr_lx_probe_island_page_count(void) {
+  return repro_hcr_lx_island_page_count;
+}
+
+void repro_hcr_lx_probe_set_force_far_patch_body(int value) {
+  repro_hcr_lx_force_far_patch_body = value;
+}
+
+/* Forget every island page. Tests only, and for the same reason
+ * `repro_hcr_lx_probe_reset_sites` exists: the island table is process-global
+ * and a gate that unmaps its pages between cases would otherwise hand case N+1
+ * a slot in a page that no longer exists. The agent never calls it. */
+void repro_hcr_lx_probe_reset_islands(void) {
+  int i;
+  for (i = 0; i < REPRO_HCR_LX_MAX_ISLAND_PAGES; ++i) {
+    repro_hcr_lx_island_pages[i].base = 0;
+    repro_hcr_lx_island_pages[i].used = 0;
+  }
+  repro_hcr_lx_island_page_count = 0;
+  repro_hcr_lx_island_reuse_transient_prot = -1;
 }
 
 int repro_hcr_lx_probe_membarrier_sync_core_cmd(void) {

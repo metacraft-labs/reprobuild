@@ -18,6 +18,15 @@ import std/[json, os, osproc, streams, strutils]
 # relocatable object contains.
 import "../hcr-linux-direct/elf_rel_reader"
 
+# HLX-M2. The compile AND link halves of the patchable profile come from the
+# DSL, not from flag strings retyped here. The link half became load-bearing
+# with HLX-M2: sled discovery reads `__patchable_function_entries`'s `sh_addr`
+# out of the object's FILE and turns it into a live address, so design §7.3's
+# build-id verification now governs the sled table too, and a fixture linked
+# without `--build-id` is refused `absent-sled (sled-object-build-id-mismatch)`
+# before anything about threads is exercised.
+import repro_project_dsl
+
 const
   PatchSymbolA* = "hcr_lx_m4_patch_body_a"
   PatchSymbolB* = "hcr_lx_m4_patch_body_b"
@@ -89,17 +98,22 @@ proc buildFixture*(repoRoot, source, outputName: string): string =
   let caseDir = m4CaseDir(repoRoot)
   let workDir = m4WorkDir(repoRoot)
   result = workDir / outputName
-  discard runOrFail(shellCommand([
-    "gcc", "-O2", "-g",
-    "-falign-functions=16",
-    "-fpatchable-function-entry=16,0",
-    "-fcf-protection=full",
+  let compileFlags = patchableCompileFlags(ReproHcr())
+  let linkFlags = patchableLinkFlags(ReproHcr())
+  # A profile that emitted nothing would build a NON-patchable fixture that then
+  # refused `absent-sled`, and every arm below would report a state it never
+  # reached. Assert the flags rather than trust them.
+  doAssert compileFlags.contains("-fpatchable-function-entry=16,0")
+  doAssert compileFlags.contains("-falign-functions=16")
+  doAssert linkFlags.contains("-Wl,--build-id=sha1")
+  discard runOrFail(shellCommand(
+    @["gcc", "-O2", "-g"] & compileFlags &
+    @["-fcf-protection=full",
     "-I", repoRoot / "libs" / "repro_hcr_agent" / "c",
     "-o", result,
     caseDir / source,
     repoRoot / "libs" / "repro_hcr_agent" / "c" /
-      "repro_hcr_linux_x86_64_probe.c",
-    "-lpthread"]), repoRoot)
+      "repro_hcr_linux_x86_64_probe.c"] & linkFlags & @["-lpthread"]), repoRoot)
 
 proc runFixture*(binary: string; args: openArray[string]): FixtureRun =
   let process = startProcess(binary, args = @args, options = {})

@@ -1543,6 +1543,441 @@ REPRO_HCR_ELF_MAYBE_UNUSED static int repro_hcr_elf_resolve_in_file(const char *
   return out->refusal;
 }
 
+/* ---------------------------------------------------------------------------
+ * HLX-M2 — `__patchable_function_entries` discovery, PER LOADED OBJECT.
+ *
+ * WHAT THIS REPLACES, AND WHY IT IS HERE AND NOT IN THE ARCH HEADER.
+ *
+ * HLX-M0 read the sled table through the linker-synthesised
+ * `__start___patchable_function_entries` / `__stop___patchable_function_entries`
+ * symbols. Those name exactly ONE object's section — the one the agent's own
+ * translation unit was linked into, i.e. the main executable — so a function
+ * resolved inside a `dlopen`'d shared library was refused with `absent-sled`
+ * even though HLX-M1's resolver had found it. That gap was recorded in HLX-M1's
+ * residue as "owned by HLX-M2"; it is closed here.
+ *
+ * Every loaded object carries its OWN `__patchable_function_entries`, and the
+ * enumeration that hands out per-object load biases is the same `dl_iterate_phdr`
+ * walk §7.2 already uses for symbols — which is why this lives beside the symbol
+ * resolver rather than in `repro_hcr_linux_x86_64.h`. There is now exactly one
+ * sled-discovery path in the provider; the `__start_`/`__stop_` mechanism is
+ * gone rather than retained as a fast path for the main executable, because a
+ * second path to the same observable is what retires a falsifier silently
+ * (`codetracer-specs/Testing/Verification-Harness-Traps.md` trap 10).
+ *
+ * THE PIPELINE, and which half each fact comes from:
+ *
+ *   1. `dl_iterate_phdr` → the object whose `PT_LOAD` range covers the entry
+ *      address, its `dlpi_addr` (load bias) and its program headers.
+ *   2. that object's FILE on disk → the section header named
+ *      `__patchable_function_entries`, for its `sh_addr` and `sh_size` only.
+ *      Section headers are not mapped at runtime, so this half must be read
+ *      from the file, exactly as `.symtab` is.
+ *   3. design §7.3 → the file's build-id must equal the MAPPED image's, or the
+ *      `sh_addr` read in step 2 describes a different build and the addresses
+ *      derived from it are wrong-but-plausible. Same rule, same reason, as the
+ *      symbol path.
+ *   4. the RUNTIME mapping at `load_bias + sh_addr` → the entries themselves.
+ *      Measured: the section is emitted `SHF_ALLOC|SHF_WRITE|SHF_LINK_ORDER`,
+ *      so it is mapped AND relocated by the dynamic loader; each 8-byte entry
+ *      then holds the runtime address of the first NOP. Reading them from the
+ *      file instead would yield link-time addresses and be silently wrong for
+ *      every PIE and every shared object.
+ *
+ * Nothing here dereferences a runtime address it has not first proved lies
+ * inside one of the object's own `PT_LOAD` segments: a section that is
+ * `SHF_ALLOC` but not actually covered by a load segment is a named refusal,
+ * never a fault.
+ * ------------------------------------------------------------------------- */
+
+#define REPRO_HCR_ELF_PATCHABLE_SECTION "__patchable_function_entries"
+#define REPRO_HCR_ELF_PATCHABLE_ENTRY_BYTES 8u
+
+/*
+ * How far past the function's entry address the recorded sled may sit.
+ *
+ * `-fpatchable-function-entry=N,0` puts the sled AT the entry label, so the
+ * recorded address equals it — except under `-fcf-protection`, where GCC emits
+ * `endbr64` (4 bytes) at the label and the section entry already points past
+ * it. Eight bytes is the bound that admits both without admitting the NEXT
+ * function's sled, since `-falign-functions=16` keeps entries 16 bytes apart.
+ */
+#define REPRO_HCR_ELF_MAX_LANDING_PAD_BYTES 8u
+
+enum {
+  REPRO_HCR_ELF_SLED_OK = 0,
+  /* No loaded object's `PT_LOAD` covers the address. Distinct from "this
+   * object has no sled table": it means the address is not in any image this
+   * process has loaded, which is a different bug entirely. */
+  REPRO_HCR_ELF_SLED_NO_OBJECT = 1,
+  REPRO_HCR_ELF_SLED_OBJECT_UNREADABLE = 2,
+  REPRO_HCR_ELF_SLED_OBJECT_MALFORMED = 3,
+  REPRO_HCR_ELF_SLED_BUILD_ID = 4,
+  /* The object is fine and simply was not compiled with
+   * `-fpatchable-function-entry`. This is the common, correct refusal. */
+  REPRO_HCR_ELF_SLED_SECTION_ABSENT = 5,
+  /* The object HAS a sled table and this function is not in it — e.g. an
+   * assembly stub, or a TU compiled without the profile inside an otherwise
+   * patchable image. */
+  REPRO_HCR_ELF_SLED_NO_ENTRY = 6
+};
+
+typedef struct repro_hcr_elf_sled_lookup {
+  int status;
+  int objects_seen;
+  int is_main_executable;
+  uint64_t load_bias;
+  uint64_t section_start; /* runtime address of the first 8-byte entry */
+  uint64_t section_size;  /* bytes */
+  uint64_t entry_count;
+  uint64_t sled_address; /* 0 unless status == REPRO_HCR_ELF_SLED_OK */
+  char object_path[REPRO_HCR_ELF_PATH_MAX];
+  char detail[REPRO_HCR_ELF_DETAIL_MAX];
+} repro_hcr_elf_sled_lookup;
+
+REPRO_HCR_ELF_MAYBE_UNUSED static const char *repro_hcr_elf_sled_status_name(
+    int status) {
+  switch (status) {
+    case REPRO_HCR_ELF_SLED_OK:
+      return "ok";
+    case REPRO_HCR_ELF_SLED_NO_OBJECT:
+      return "sled-object-not-found";
+    case REPRO_HCR_ELF_SLED_OBJECT_UNREADABLE:
+      return "sled-object-unreadable";
+    case REPRO_HCR_ELF_SLED_OBJECT_MALFORMED:
+      return "sled-object-malformed";
+    case REPRO_HCR_ELF_SLED_BUILD_ID:
+      return "sled-object-build-id-mismatch";
+    case REPRO_HCR_ELF_SLED_SECTION_ABSENT:
+      return "sled-section-absent";
+    case REPRO_HCR_ELF_SLED_NO_ENTRY:
+      return "sled-entry-absent";
+    default:
+      return "unknown-sled-status";
+  }
+}
+
+typedef struct repro_hcr_elf_owner_context {
+  uint64_t address;
+  int objects_seen;
+  int found;
+  int path_truncated;
+  int is_main_executable;
+  int image_replaced;
+  uint64_t load_bias;
+  const ElfW(Phdr) * phdr;
+  uint16_t phnum;
+  char object_path[REPRO_HCR_ELF_PATH_MAX];
+} repro_hcr_elf_owner_context;
+
+static int repro_hcr_elf_owner_callback(struct dl_phdr_info *info, size_t size,
+                                        void *data) {
+  repro_hcr_elf_owner_context *context = (repro_hcr_elf_owner_context *)data;
+  uint16_t i;
+
+  (void)size;
+  context->objects_seen += 1;
+
+  if (repro_hcr_elf_is_vdso(info->dlpi_name)) {
+    return 0;
+  }
+
+#if defined(REPRO_HCR_HLX_M2_FALSIFY_MAIN_EXECUTABLE_ONLY_SLED)
+  /*
+   * FALSIFIER ARM (HLX-M2). Restores the pre-M2 reach of sled discovery: only
+   * the image the agent was linked into is consulted, which is exactly what
+   * `__start___patchable_function_entries` named. An entry address inside a
+   * `dlopen`'d shared library then finds no owning object and the patch is
+   * refused — which is the state HLX-M1's residue recorded and this milestone
+   * closes. The shared-library gate must go RED under this define; if it stays
+   * green, the gate is not reading the library's own table and the arm has
+   * stopped discriminating (Verification-Harness-Traps.md trap 10).
+   *
+   * Compiled only when the define is present. The agent never defines it.
+   */
+  if (info->dlpi_name != NULL && info->dlpi_name[0] != '\0') {
+    return 0;
+  }
+#endif
+
+  for (i = 0; i < info->dlpi_phnum; ++i) {
+    const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+    uint64_t low;
+    uint64_t high;
+    if (ph->p_type != PT_LOAD) {
+      continue;
+    }
+    low = (uint64_t)info->dlpi_addr + (uint64_t)ph->p_vaddr;
+    high = low + (uint64_t)ph->p_memsz;
+    if (context->address < low || context->address >= high) {
+      continue;
+    }
+
+    context->load_bias = (uint64_t)info->dlpi_addr;
+    context->phdr = info->dlpi_phdr;
+    context->phnum = (uint16_t)info->dlpi_phnum;
+
+    if (info->dlpi_name == NULL || info->dlpi_name[0] == '\0') {
+      /* §7.2 step 2, and `readlink` rather than opening the magic link for the
+       * same reason the symbol path gives: opening "/proc/self/exe" always
+       * reaches the ORIGINAL inode, so a rebuilt executable would never be
+       * caught by the build-id comparison below. */
+      ssize_t written =
+          readlink("/proc/self/exe", context->object_path,
+                   sizeof(context->object_path) - 1);
+      if (written <= 0) {
+        context->found = 0;
+        return 1;
+      }
+      context->object_path[written] = '\0';
+      if (repro_hcr_elf_ends_with(context->object_path, " (deleted)")) {
+        context->object_path[written - 10] = '\0';
+        context->image_replaced = 1;
+        context->found = 0;
+        return 1;
+      }
+      context->is_main_executable = 1;
+    } else {
+      /*
+       * `repro_hcr_elf_copy_string` and not `repro_hcr_elf_copy_path`: this
+       * string is about to be handed to `open()`, and `copy_path`'s elided
+       * head is a DIAGNOSTIC form that would name a different file. A path too
+       * long for the buffer is reported as unreadable rather than silently
+       * truncated into something that might exist.
+       */
+      size_t length = strlen(info->dlpi_name);
+      if (length + 1 > sizeof(context->object_path)) {
+        context->path_truncated = 1;
+        repro_hcr_elf_copy_path(context->object_path,
+                                sizeof(context->object_path), info->dlpi_name);
+        context->found = 0;
+        return 1;
+      }
+      memcpy(context->object_path, info->dlpi_name, length + 1);
+    }
+    context->found = 1;
+    return 1; /* stop the walk: exactly one object can map an address */
+  }
+  return 0;
+}
+
+/* Is `[low, high)` wholly inside one of this object's PT_LOAD segments? The
+ * runtime entries are only safe to dereference if it is. */
+static int repro_hcr_elf_range_is_loaded(const repro_hcr_elf_owner_context *ctx,
+                                         uint64_t low, uint64_t high) {
+  uint16_t i;
+  if (ctx->phdr == NULL || high < low) {
+    return 0;
+  }
+  for (i = 0; i < ctx->phnum; ++i) {
+    const ElfW(Phdr) *ph = &ctx->phdr[i];
+    uint64_t seg_low;
+    uint64_t seg_high;
+    if (ph->p_type != PT_LOAD) {
+      continue;
+    }
+    seg_low = ctx->load_bias + (uint64_t)ph->p_vaddr;
+    seg_high = seg_low + (uint64_t)ph->p_memsz;
+    if (low >= seg_low && high <= seg_high) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int repro_hcr_elf_lookup_sled(uint64_t entry_address,
+                                     repro_hcr_elf_sled_lookup *out) {
+  repro_hcr_elf_owner_context context;
+  repro_hcr_elf_image image;
+  repro_hcr_elf_sections sections;
+  repro_hcr_elf_build_id file_id;
+  repro_hcr_elf_build_id mapped_id;
+  const Elf64_Shdr *section = NULL;
+  const uintptr_t *entries;
+  uint64_t section_end;
+  uint64_t best = 0;
+  uint64_t i;
+  int rc;
+
+  if (out == NULL) {
+    return REPRO_HCR_ELF_SLED_NO_OBJECT;
+  }
+  memset(out, 0, sizeof(*out));
+  if (entry_address == 0) {
+    out->status = REPRO_HCR_ELF_SLED_NO_OBJECT;
+    repro_hcr_elf_copy_string(out->detail, sizeof(out->detail),
+                              "entry address is 0");
+    return out->status;
+  }
+
+  memset(&context, 0, sizeof(context));
+  context.address = entry_address;
+  dl_iterate_phdr(repro_hcr_elf_owner_callback, &context);
+  out->objects_seen = context.objects_seen;
+  out->is_main_executable = context.is_main_executable;
+  out->load_bias = context.load_bias;
+  repro_hcr_elf_copy_string(out->object_path, sizeof(out->object_path),
+                            context.object_path);
+
+  if (!context.found) {
+    out->status = context.image_replaced ? REPRO_HCR_ELF_SLED_OBJECT_UNREADABLE
+                                         : REPRO_HCR_ELF_SLED_NO_OBJECT;
+    if (context.image_replaced) {
+      snprintf(out->detail, sizeof(out->detail),
+               "the running image's file was replaced or removed since exec: %s",
+               out->object_path);
+    } else if (context.path_truncated) {
+      out->status = REPRO_HCR_ELF_SLED_OBJECT_UNREADABLE;
+      snprintf(out->detail, sizeof(out->detail),
+               "object path does not fit in %u bytes: %s",
+               (unsigned)REPRO_HCR_ELF_PATH_MAX, out->object_path);
+    } else {
+      snprintf(out->detail, sizeof(out->detail),
+               "no PT_LOAD of any of the %d loaded object(s) covers 0x%llx",
+               out->objects_seen, (unsigned long long)entry_address);
+    }
+    return out->status;
+  }
+
+  rc = repro_hcr_elf_map_file(out->object_path, &image);
+  if (rc != REPRO_HCR_ELF_OK) {
+    out->status = REPRO_HCR_ELF_SLED_OBJECT_UNREADABLE;
+    snprintf(out->detail, sizeof(out->detail),
+             "could not map %s to read its section headers", out->object_path);
+    return out->status;
+  }
+
+  rc = repro_hcr_elf_read_sections(&image, &sections);
+  if (rc != REPRO_HCR_ELF_OK) {
+    repro_hcr_elf_unmap_file(&image);
+    out->status = REPRO_HCR_ELF_SLED_OBJECT_MALFORMED;
+    snprintf(out->detail, sizeof(out->detail),
+             "section headers of %s are unusable", out->object_path);
+    return out->status;
+  }
+
+  /*
+   * Design §7.3, applied to the sled table for the same reason it is applied to
+   * symbols: `sh_addr` below is read from the FILE and turned into a live
+   * address. A stale file yields a section range that is wrong but plausible,
+   * and the entries read out of it would be arbitrary process memory.
+   */
+  {
+    int have_file = repro_hcr_elf_file_build_id(&image, &sections, &file_id);
+    int have_mapped = repro_hcr_elf_mapped_build_id(
+        context.load_bias, context.phdr, context.phnum, &mapped_id);
+    if (!have_file || !have_mapped || file_id.length != mapped_id.length ||
+        memcmp(file_id.bytes, mapped_id.bytes, file_id.length) != 0) {
+      char file_hex[2 * REPRO_HCR_ELF_BUILD_ID_MAX + 1];
+      char mapped_hex[2 * REPRO_HCR_ELF_BUILD_ID_MAX + 1];
+      repro_hcr_elf_format_build_id(&file_id, file_hex, sizeof(file_hex));
+      repro_hcr_elf_format_build_id(&mapped_id, mapped_hex,
+                                    sizeof(mapped_hex));
+      repro_hcr_elf_unmap_file(&image);
+      out->status = REPRO_HCR_ELF_SLED_BUILD_ID;
+      snprintf(out->detail, sizeof(out->detail),
+               "%s: build-id on disk %s does not match the mapped image build-id "
+               "%s (file=%d mapped=%d)",
+               out->object_path, file_hex, mapped_hex, have_file, have_mapped);
+      return out->status;
+    }
+  }
+
+  for (i = 0; i < sections.count; ++i) {
+    const char *name = repro_hcr_elf_section_name(&image, &sections, i);
+    if (name != NULL &&
+        strcmp(name, REPRO_HCR_ELF_PATCHABLE_SECTION) == 0) {
+      section = &sections.headers[i];
+      break;
+    }
+  }
+  if (section == NULL || (section->sh_flags & SHF_ALLOC) == 0 ||
+      section->sh_addr == 0 ||
+      section->sh_size < REPRO_HCR_ELF_PATCHABLE_ENTRY_BYTES) {
+    repro_hcr_elf_unmap_file(&image);
+    out->status = REPRO_HCR_ELF_SLED_SECTION_ABSENT;
+    snprintf(out->detail, sizeof(out->detail),
+             "%s carries no usable %s section - it was not compiled with "
+             "-fpatchable-function-entry",
+             out->object_path, REPRO_HCR_ELF_PATCHABLE_SECTION);
+    return out->status;
+  }
+
+  out->section_start = context.load_bias + (uint64_t)section->sh_addr;
+  out->section_size = (uint64_t)section->sh_size;
+  out->entry_count = out->section_size / REPRO_HCR_ELF_PATCHABLE_ENTRY_BYTES;
+  section_end = out->section_start + out->entry_count *
+                                         REPRO_HCR_ELF_PATCHABLE_ENTRY_BYTES;
+  repro_hcr_elf_unmap_file(&image);
+
+  if (!repro_hcr_elf_range_is_loaded(&context, out->section_start,
+                                     section_end)) {
+    /* SHF_ALLOC without a covering PT_LOAD. Refused by name rather than
+     * dereferenced; this is the branch that keeps a malformed object from
+     * turning into a fault inside the patcher. */
+    out->status = REPRO_HCR_ELF_SLED_SECTION_ABSENT;
+    snprintf(out->detail, sizeof(out->detail),
+             "%s: %s at 0x%llx..0x%llx is not covered by any PT_LOAD",
+             out->object_path, REPRO_HCR_ELF_PATCHABLE_SECTION,
+             (unsigned long long)out->section_start,
+             (unsigned long long)section_end);
+    return out->status;
+  }
+
+  entries = (const uintptr_t *)(uintptr_t)out->section_start;
+  for (i = 0; i < out->entry_count; ++i) {
+    uint64_t value = (uint64_t)entries[i];
+    if (value < entry_address) {
+      continue;
+    }
+    if (value - entry_address > REPRO_HCR_ELF_MAX_LANDING_PAD_BYTES) {
+      continue;
+    }
+    if (best == 0 || value < best) {
+      best = value;
+    }
+  }
+  if (best == 0) {
+    out->status = REPRO_HCR_ELF_SLED_NO_ENTRY;
+    snprintf(out->detail, sizeof(out->detail),
+             "%s has %llu patchable entries and none of them is within %u "
+             "bytes of 0x%llx",
+             out->object_path, (unsigned long long)out->entry_count,
+             (unsigned)REPRO_HCR_ELF_MAX_LANDING_PAD_BYTES,
+             (unsigned long long)entry_address);
+    return out->status;
+  }
+
+  out->sled_address = best;
+  out->status = REPRO_HCR_ELF_SLED_OK;
+  snprintf(out->detail, sizeof(out->detail),
+           "%s (%s, bias 0x%llx): sled 0x%llx, +%lld from the entry, from %llu "
+           "entries at 0x%llx",
+           out->object_path,
+           out->is_main_executable ? "main executable" : "shared object",
+           (unsigned long long)out->load_bias,
+           (unsigned long long)out->sled_address,
+           (long long)(out->sled_address - entry_address),
+           (unsigned long long)out->entry_count,
+           (unsigned long long)out->section_start);
+  return out->status;
+}
+
+/*
+ * The most recent sled lookup, kept for the same reason the symbol refusal is:
+ * the agent puts the NAMED cause on the wire, and an `absent-sled` that cannot
+ * say whether the object was missing, stale, or simply built without the
+ * profile is the report that makes all three indistinguishable.
+ */
+static repro_hcr_elf_sled_lookup repro_hcr_elf_last_sled_lookup;
+
+REPRO_HCR_ELF_MAYBE_UNUSED static uint64_t
+repro_hcr_elf_sled_address_for_entry(uint64_t entry_address) {
+  (void)repro_hcr_elf_lookup_sled(entry_address,
+                                  &repro_hcr_elf_last_sled_lookup);
+  return repro_hcr_elf_last_sled_lookup.sled_address;
+}
+
 /*
  * The most recent symbol-resolution refusal, so the agent can put the NAMED
  * cause on the wire. Without this a build-id mismatch, an ambiguous `static`

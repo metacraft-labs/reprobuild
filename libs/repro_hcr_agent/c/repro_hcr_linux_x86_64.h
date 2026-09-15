@@ -87,7 +87,19 @@ enum {
    * the unresponsive tids. Distinct from every refusal above because it is a
    * property of the RUNNING PROCESS at this instant, not of the target's code
    * or the host — the same function is patchable a moment later. */
-  REPRO_HCR_LX_REFUSED_QUIESCENCE_FAILED = 16
+  REPRO_HCR_LX_REFUSED_QUIESCENCE_FAILED = 16,
+  /* HLX-M2, design §4.2 and §12 item 1. The patch body is outside `rel32`
+   * reach of the publication window AND no 14-byte island could be placed
+   * within +/-2 GiB of that window. Distinct from
+   * `patch-body-out-of-rel32-range`, which is the ENCODER refusing a
+   * displacement it was handed: this one is the ALLOCATOR reporting that the
+   * indirection which exists to make such a displacement unnecessary has
+   * nowhere to live. The defined outcome is a refusal reported in
+   * `skippedFunctions`; widening the published store to 13 or 14 bytes — which
+   * is what `Trampoline-Mechanics.md` §6's unamended ladder would have chosen —
+   * is never an option, because a 14-byte write into live text is not
+   * atomically publishable. */
+  REPRO_HCR_LX_REFUSED_ISLAND_UNPLACEABLE = 17
 };
 
 static const char *repro_hcr_lx_refusal_name(int code) {
@@ -126,6 +138,8 @@ static const char *repro_hcr_lx_refusal_name(int code) {
       return "sync-core-unavailable";
     case REPRO_HCR_LX_REFUSED_QUIESCENCE_FAILED:
       return "quiescence-failed";
+    case REPRO_HCR_LX_REFUSED_ISLAND_UNPLACEABLE:
+      return "island-unplaceable";
     default:
       return "unknown-refusal";
   }
@@ -424,55 +438,23 @@ static int repro_hcr_lx_rel32_reachable(uint64_t window_address,
 }
 
 /* ---------------------------------------------------------------------------
- * `__patchable_function_entries` lookup.
+ * `__patchable_function_entries` lookup — NOT HERE ANY MORE (HLX-M2).
  *
- * Measured (GCC 15.2 and Clang 21.1.8, x86_64): the section is emitted
- * `SHF_ALLOC|SHF_WRITE|SHF_LINK_ORDER` ("WAL"), so it is mapped at runtime and
- * relocated by the dynamic loader; each 8-byte entry then holds the runtime
- * address of the FIRST NOP — i.e. already past `endbr64`. The linker
- * synthesises `__start_`/`__stop_` symbols because the section name is a valid
- * C identifier, which is how the agent reaches it without parsing section
- * headers. Both symbols are weak so a target built without
- * `-fpatchable-function-entry` links and refuses cleanly instead of failing to
- * link.
+ * HLX-M0 read the table through the linker-synthesised
+ * `__start___patchable_function_entries` / `__stop___patchable_function_entries`
+ * symbols, which name exactly one object's section: whichever image the agent's
+ * own translation unit was linked into. That made a function living in a
+ * `dlopen`'d shared library resolve (HLX-M1) and then refuse `absent-sled`,
+ * which HLX-M1's residue recorded as owned by this milestone.
  *
- * HLX-M1 replaces this with the full ELF pipeline (multiple objects, shared
- * libraries, `dl_iterate_phdr`). HLX-M0 covers the main executable's own
- * section only.
+ * The lookup now lives in `repro_hcr_linux_elf_symbols.h` as
+ * `repro_hcr_elf_sled_address_for_entry`, because it needs the same
+ * `dl_iterate_phdr` enumeration and the same per-object load bias the symbol
+ * resolver uses. It is supplied to `repro_hcr_lx_apply_direct_patch_at` through
+ * its `sled_address` parameter, exactly as before — this header still knows
+ * nothing about ELF, and there is exactly ONE sled-discovery path in the
+ * provider rather than a general one plus a main-executable fast path.
  * ------------------------------------------------------------------------- */
-
-extern const uintptr_t __start___patchable_function_entries[]
-    __attribute__((weak));
-extern const uintptr_t __stop___patchable_function_entries[]
-    __attribute__((weak));
-
-#define REPRO_HCR_LX_MAX_LANDING_PAD_BYTES 8u
-
-static uint64_t repro_hcr_lx_sled_address_for_entry(uint64_t entry_address) {
-  const uintptr_t *start = __start___patchable_function_entries;
-  const uintptr_t *stop = __stop___patchable_function_entries;
-  uint64_t best = 0;
-  size_t count;
-  size_t i;
-
-  if (start == NULL || stop == NULL || stop <= start) {
-    return 0;
-  }
-  count = (size_t)(stop - start);
-  for (i = 0; i < count; ++i) {
-    uint64_t value = (uint64_t)start[i];
-    if (value < entry_address) {
-      continue;
-    }
-    if (value - entry_address > REPRO_HCR_LX_MAX_LANDING_PAD_BYTES) {
-      continue;
-    }
-    if (best == 0 || value < best) {
-      best = value;
-    }
-  }
-  return best;
-}
 
 /* ---------------------------------------------------------------------------
  * Host capability probe (design §5.2).
@@ -719,6 +701,182 @@ static uint64_t repro_hcr_lx_page_start(uint64_t address, size_t page_size) {
  * HLX-M2 adds the 14-byte island for targets that cannot be reached this way;
  * HLX-M0 refuses instead of ever widening the published store.
  */
+/*
+ * Strategy 2 of Trampoline-Mechanics §5.1: parse `/proc/self/maps` and place the
+ * page in a GAP, instead of probing addresses blindly.
+ *
+ * It is not a duplicate of the outward probe above, and the difference is what
+ * makes it worth having. The probe walks addresses — one page at a time for the
+ * first 64 steps and then doubling — so once it is doubling it SKIPS most of the
+ * space it crosses, and a single free page between two large mappings is
+ * invisible to it. An island needs 14 bytes; one page anywhere inside ±2 GiB is
+ * enough, and this is the strategy that finds it.
+ *
+ * Read streaming rather than into a bounded table: a truncated snapshot would
+ * report gaps that are not gaps, and `MAP_FIXED_NOREPLACE` would then fail on
+ * them — a silent downgrade to "no gap found". The first successful mapping
+ * returns immediately, so at most one mutation of the map happens while it is
+ * being read.
+ *
+ * WHEN THIS RUNS, because the answer constrains what it may do. Unlike sled
+ * discovery — which opens and maps the target's own ELF file and therefore runs
+ * BEFORE `quiesce_begin` — this is reached from inside the publication path,
+ * i.e. with every other thread parked under tier 2. So: no `malloc`, no
+ * `dl_iterate_phdr` (which takes the loader lock a parked thread may hold), a
+ * static buffer, and `openat`/`read`/`close` issued as RAW syscalls rather than
+ * through libc. The only libc call left is `mmap`, through
+ * `repro_hcr_lx_map_anonymous`, which the body-page path has always used.
+ * It is also only reached when the outward probe has already failed, so the
+ * common case pays nothing for it.
+ */
+#define REPRO_HCR_LX_GAP_CHUNK 8192u
+
+static char repro_hcr_lx_gap_chunk[REPRO_HCR_LX_GAP_CHUNK];
+static uint64_t repro_hcr_lx_gap_scan_count = 0;
+static uint64_t repro_hcr_lx_gap_hit_count = 0;
+
+/* Parse `START-END ...`; returns 1 and fills both on success. */
+static int repro_hcr_lx_parse_gap_line(const char *line, size_t length,
+                                       uint64_t *start_out,
+                                       uint64_t *end_out) {
+  uint64_t start = 0;
+  uint64_t end = 0;
+  size_t i = 0;
+  int digits = 0;
+  while (i < length) {
+    int value = repro_hcr_lx_hex_value(line[i]);
+    if (value < 0) break;
+    start = (start << 4) | (uint64_t)value;
+    i += 1;
+    digits += 1;
+  }
+  if (digits == 0 || i >= length || line[i] != '-') return 0;
+  i += 1;
+  digits = 0;
+  while (i < length) {
+    int value = repro_hcr_lx_hex_value(line[i]);
+    if (value < 0) break;
+    end = (end << 4) | (uint64_t)value;
+    i += 1;
+    digits += 1;
+  }
+  if (digits == 0) return 0;
+  *start_out = start;
+  *end_out = end;
+  return 1;
+}
+
+static void *repro_hcr_lx_map_patch_page_in_gap(uint64_t window_address,
+                                                size_t page_size) {
+  /* Stay inside the signed 2 GiB `rel32` limit with room for the instruction's
+   * own +5 bias; reachability is re-checked on the result regardless. */
+  const uint64_t reach = 0x7f000000ull;
+  uint64_t low = window_address > reach ? window_address - reach
+                                        : (uint64_t)page_size;
+  uint64_t high = window_address + reach;
+  uint64_t cursor;
+  long fd;
+  size_t held = 0;
+  void *result = NULL;
+
+  low = (low + (uint64_t)page_size - 1u) & ~((uint64_t)page_size - 1u);
+  high &= ~((uint64_t)page_size - 1u);
+  if (low == 0) {
+    low = (uint64_t)page_size;
+  }
+  cursor = low;
+
+  repro_hcr_lx_gap_scan_count += 1;
+  fd = repro_hcr_lx_syscall3(
+      REPRO_HCR_LX_NR_OPENAT, REPRO_HCR_LX_AT_FDCWD,
+      (long)(uintptr_t) "/proc/self/maps",
+      REPRO_HCR_LX_O_RDONLY | REPRO_HCR_LX_O_CLOEXEC);
+  if (fd < 0) {
+    return NULL;
+  }
+
+  for (;;) {
+    long got = repro_hcr_lx_syscall3(
+        REPRO_HCR_LX_NR_READ, fd,
+        (long)(uintptr_t)(repro_hcr_lx_gap_chunk + held),
+        (long)(sizeof(repro_hcr_lx_gap_chunk) - held));
+    size_t available;
+    size_t consumed = 0;
+    size_t j;
+    if (got <= 0) {
+      break;
+    }
+    available = held + (size_t)got;
+    for (j = 0; j < available && result == NULL; ++j) {
+      uint64_t start = 0;
+      uint64_t end = 0;
+      if (repro_hcr_lx_gap_chunk[j] != '\n') {
+        continue;
+      }
+      if (repro_hcr_lx_parse_gap_line(repro_hcr_lx_gap_chunk + consumed,
+                                      j - consumed, &start, &end)) {
+        if (end > low && start < high && start > cursor) {
+          uint64_t gap_low = cursor > low ? cursor : low;
+          uint64_t gap_high = start < high ? start : high;
+          if (gap_high > gap_low &&
+              gap_high - gap_low >= (uint64_t)page_size) {
+            void *mapped = repro_hcr_lx_map_anonymous(
+                (void *)(uintptr_t)gap_low, page_size,
+                REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
+                REPRO_HCR_LX_MAP_FIXED_NOREPLACE);
+            if (mapped != NULL) {
+              if ((uint64_t)(uintptr_t)mapped == gap_low &&
+                  repro_hcr_lx_rel32_reachable(
+                      window_address, (uint64_t)(uintptr_t)mapped)) {
+                result = mapped;
+              } else {
+                repro_hcr_lx_unmap(mapped, page_size);
+              }
+            }
+          }
+        }
+        if (end > cursor) {
+          cursor = end;
+        }
+      }
+      consumed = j + 1;
+    }
+    if (result != NULL) {
+      break;
+    }
+    held = available - consumed;
+    if (held >= sizeof(repro_hcr_lx_gap_chunk)) {
+      held = 0; /* a maps line never exceeds the chunk; drop rather than spin */
+    } else if (held > 0 && consumed > 0) {
+      memmove(repro_hcr_lx_gap_chunk, repro_hcr_lx_gap_chunk + consumed, held);
+    }
+  }
+  (void)repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_CLOSE, fd, 0, 0);
+
+  /* The tail gap, above the last mapping the scan saw and below the reach
+   * ceiling. Without this the highest gap in the region is never tried. */
+  if (result == NULL && cursor < high && high - cursor >= (uint64_t)page_size) {
+    void *mapped = repro_hcr_lx_map_anonymous(
+        (void *)(uintptr_t)cursor, page_size,
+        REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
+        REPRO_HCR_LX_MAP_FIXED_NOREPLACE);
+    if (mapped != NULL) {
+      if ((uint64_t)(uintptr_t)mapped == cursor &&
+          repro_hcr_lx_rel32_reachable(window_address,
+                                       (uint64_t)(uintptr_t)mapped)) {
+        result = mapped;
+      } else {
+        repro_hcr_lx_unmap(mapped, page_size);
+      }
+    }
+  }
+
+  if (result != NULL) {
+    repro_hcr_lx_gap_hit_count += 1;
+  }
+  return result;
+}
+
 static void *repro_hcr_lx_map_patch_page_near(uint64_t window_address,
                                               size_t page_size) {
   const uint64_t reach = 0x60000000ull; /* stay well inside the 2 GiB limit */
@@ -753,6 +911,14 @@ static void *repro_hcr_lx_map_patch_page_near(uint64_t window_address,
     distance = distance < 64 ? distance + 1 : distance * 2;
   }
 
+  /* Strategy 2 (Trampoline-Mechanics §5.1). The probe above doubles its stride
+   * after 64 pages and so steps over most of the region; a gap the size of one
+   * page — which is all an island needs — is invisible to it. */
+  fallback = repro_hcr_lx_map_patch_page_in_gap(window_address, page_size);
+  if (fallback != NULL) {
+    return fallback;
+  }
+
   fallback = repro_hcr_lx_map_anonymous(
       NULL, page_size, REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE, 0);
   if (fallback == NULL) {
@@ -763,6 +929,354 @@ static void *repro_hcr_lx_map_patch_page_near(uint64_t window_address,
     return fallback;
   }
   repro_hcr_lx_unmap(fallback, page_size);
+  return NULL;
+}
+
+/* ---------------------------------------------------------------------------
+ * HLX-M2 — ISLANDS.
+ *
+ * THE CONSTRAINT THIS EXISTS TO PRESERVE. The published store is, and stays,
+ * ONE naturally aligned 8-byte word holding a 5-byte `E9 rel32`. That is what
+ * makes publication atomic (design §4.2): any thread reads either the whole old
+ * word or the whole new one. A 14-byte `jmp [rip+0]; .quad target` written into
+ * live text would reach any address in the 64-bit space and would NOT be
+ * atomic — three stores, or one unaligned one, with a decodable-but-wrong
+ * intermediate state. `Trampoline-Mechanics.md` §6's unamended ladder selects
+ * exactly that encoding for a far target, which is why §6 is amended by this
+ * milestone rather than merely cited by it.
+ *
+ * So the 14 bytes move OUT of the target's text and into provider-owned memory:
+ *
+ *      target text (8-byte window)        provider page, within +/-2 GiB
+ *      E9 <rel32 to island> 90 90 90  ->  FF 25 00 00 00 00 ; .quad <body>
+ *
+ * The published store is unchanged in size, shape and atomicity; the island is
+ * written and made executable BEFORE the store, in memory no other thread can
+ * reach until the store makes it reachable, so it needs no atomicity of its own.
+ *
+ * An island-reachable body is entered through `jmp [rip+disp32]`, an INDIRECT
+ * branch, so on an IBT-enforcing process it must begin with `endbr64`. The
+ * publication path below already emits that landing pad on every body that does
+ * not carry one — written in HLX-M0 "in advance", and load-bearing from here on.
+ *
+ * PACKING. Islands are 14 bytes on a 16-byte stride, so one 4 KiB page holds
+ * 256 of them and a process patching many far functions pays for one near page,
+ * not one per function. A page is reused only for a window it can still reach;
+ * reachability is re-checked per allocation rather than assumed from the page's
+ * own placement, because two windows 3 GiB apart share no near page.
+ * ------------------------------------------------------------------------- */
+
+#define REPRO_HCR_LX_ISLAND_BYTES 14u
+#define REPRO_HCR_LX_ISLAND_STRIDE 16u
+#define REPRO_HCR_LX_MAX_ISLAND_PAGES 16
+
+/* `FF 25 00 00 00 00` is `jmp *0(%rip)`, i.e. jump to the 64-bit address stored
+ * immediately after the instruction. Zero displacement, no register clobbered,
+ * no flags touched — which is why it and not the 13-byte `movabs %r11` form is
+ * the indirection used here; `%r11` is caller-saved but a tail-called function
+ * entered through an island must not have it altered underneath it. */
+static void repro_hcr_lx_encode_island(uint64_t target_address,
+                                       uint8_t out_bytes[14]) {
+  out_bytes[0] = 0xff;
+  out_bytes[1] = 0x25;
+  out_bytes[2] = 0x00;
+  out_bytes[3] = 0x00;
+  out_bytes[4] = 0x00;
+  out_bytes[5] = 0x00;
+  memcpy(out_bytes + 6, &target_address, sizeof(target_address));
+}
+
+typedef struct repro_hcr_lx_island_page {
+  uint64_t base;
+  uint32_t used; /* slots consumed, each REPRO_HCR_LX_ISLAND_STRIDE bytes */
+} repro_hcr_lx_island_page;
+
+static repro_hcr_lx_island_page
+    repro_hcr_lx_island_pages[REPRO_HCR_LX_MAX_ISLAND_PAGES];
+static int repro_hcr_lx_island_page_count = 0;
+static uint64_t repro_hcr_lx_island_alloc_count = 0;
+static uint64_t repro_hcr_lx_island_page_map_count = 0;
+static uint64_t repro_hcr_lx_island_reuse_count = 0;
+
+/*
+ * The protection actually requested for the WRITE TRANSIENT on the most recent
+ * reused island page, and -1 when no page has been reused yet.
+ *
+ * This exists because the hazard it guards is a TRANSIENT and is therefore
+ * invisible to every post-hoc observation. `repro_hcr_lx_allocate_island`
+ * restores `R|X` before it returns, so a check that reads the first island's
+ * bytes, or even its page protection, afterwards sees an intact, executable
+ * page whether or not `PROT_EXEC` was dropped for the duration of the memcpy —
+ * and the bytes of an island already written are not touched by writing the
+ * NEXT slot either way. Such a check passes over the defect, which is
+ * `codetracer-specs/Testing/Verification-Harness-Traps.md` trap 4a's shape: a
+ * property whose subject is emptied by the very restoration that makes the
+ * function correct.
+ *
+ * Recording the transient is what makes the property falsifiable at all
+ * without racing a second thread through a live island. Asserted by
+ * `t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions`.
+ */
+static int repro_hcr_lx_island_reuse_transient_prot = -1;
+
+/*
+ * Place a 14-byte island that (a) is within `rel32` reach of `window_address`
+ * and (b) jumps to `target_address`. Returns the island's address, or 0 when no
+ * such placement exists — which is the exhaustion case, and is a refusal rather
+ * than a licence to widen the store.
+ */
+static uint64_t repro_hcr_lx_allocate_island(uint64_t window_address,
+                                             uint64_t target_address) {
+  size_t page_size = repro_hcr_lx_page_size();
+  uint32_t slots_per_page = (uint32_t)(page_size / REPRO_HCR_LX_ISLAND_STRIDE);
+  uint8_t island[REPRO_HCR_LX_ISLAND_BYTES];
+  uint64_t slot = 0;
+  repro_hcr_lx_island_page *page = NULL;
+  int i;
+  int fresh_page = 0;
+
+  if (slots_per_page == 0) {
+    return 0;
+  }
+
+  /*
+   * Strategy 1: an island page we already own that still has room AND can
+   * still be reached from THIS window.
+   *
+   * REUSE IS CONDITIONAL ON KEEPING `PROT_EXEC` ACROSS THE WRITE, and that is
+   * not a nicety. Every island already on a used page is LIVE — a published
+   * `rel32` in target text jumps to it — so dropping `PROT_EXEC` for the
+   * duration of the memcpy would fault any thread that called one of those
+   * patched functions in the window. It is the same hazard HLX-M4 found for
+   * the text transient, one page over. On a host that refuses `RW|EXEC` the
+   * page is simply not reused and a fresh one is taken instead; an unused page
+   * has no live island on it and is safe to write while non-executable.
+   */
+  for (i = 0; i < repro_hcr_lx_island_page_count; ++i) {
+    repro_hcr_lx_island_page *candidate = &repro_hcr_lx_island_pages[i];
+    uint64_t candidate_slot;
+    if (candidate->used >= slots_per_page) {
+      continue;
+    }
+    if (candidate->used > 0 &&
+        !repro_hcr_lx_capability_report()->text_rwx_transition) {
+      continue;
+    }
+    candidate_slot =
+        candidate->base + (uint64_t)candidate->used * REPRO_HCR_LX_ISLAND_STRIDE;
+    if (!repro_hcr_lx_rel32_reachable(window_address, candidate_slot)) {
+      continue;
+    }
+    page = candidate;
+    slot = candidate_slot;
+    repro_hcr_lx_island_reuse_count += 1;
+    break;
+  }
+
+  /* Strategy 2: a fresh page near the window. `map_patch_page_near` already
+   * implements Trampoline-Mechanics §5.1's outward `MAP_FIXED_NOREPLACE` probe
+   * and only returns a page it has PROVED is `rel32`-reachable, so exhaustion
+   * of the +/-2 GiB region shows up here as a NULL and nowhere else. */
+  if (page == NULL) {
+    void *mapped;
+    if (repro_hcr_lx_island_page_count >= REPRO_HCR_LX_MAX_ISLAND_PAGES) {
+      return 0;
+    }
+    mapped = repro_hcr_lx_map_patch_page_near(window_address, page_size);
+    if (mapped == NULL) {
+      return 0;
+    }
+    page = &repro_hcr_lx_island_pages[repro_hcr_lx_island_page_count];
+    page->base = (uint64_t)(uintptr_t)mapped;
+    page->used = 0;
+    repro_hcr_lx_island_page_count += 1;
+    repro_hcr_lx_island_page_map_count += 1;
+    slot = page->base;
+    fresh_page = 1;
+  }
+
+  repro_hcr_lx_encode_island(target_address, island);
+
+  /*
+   * A fresh page is still RW from the mapping and needs no transition. A reused
+   * page is RX and must be made writable — but it must KEEP `PROT_EXEC` while
+   * it is, because the islands already on it are live (see the reuse condition
+   * above, which is what guarantees `text_rwx_transition` is available here).
+   * The slot being written is not reachable from anywhere until the publishing
+   * store lands, so the write itself needs no atomicity.
+   */
+  if (!fresh_page && page->used > 0) {
+    /* The recorded value IS the argument, passed by name below rather than
+     * respelled. That coupling is the whole point: a control is only a control
+     * if the mechanism under suspicion cannot supply its answer
+     * (`codetracer-specs/Testing/Verification-Harness-Traps.md` trap 7a), and
+     * the mechanism under suspicion here is precisely the choice of protection
+     * bits. Do not separate the two — recording one constant and passing
+     * another would leave the assertion green over a transient that dropped
+     * `PROT_EXEC`, which is the defect this records. */
+    repro_hcr_lx_island_reuse_transient_prot =
+        REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE |
+        REPRO_HCR_LX_PROT_EXEC;
+    if (repro_hcr_lx_raw_mprotect(
+            page->base, page_size,
+            repro_hcr_lx_island_reuse_transient_prot) != 0) {
+      return 0;
+    }
+  }
+  if (!fresh_page && page->used == 0 &&
+      repro_hcr_lx_raw_mprotect(page->base, page_size,
+                                REPRO_HCR_LX_PROT_READ |
+                                    REPRO_HCR_LX_PROT_WRITE) != 0) {
+    return 0;
+  }
+  memcpy((void *)(uintptr_t)slot, island, sizeof(island));
+  if (repro_hcr_lx_raw_mprotect(page->base, page_size,
+                                REPRO_HCR_LX_PROT_READ |
+                                    REPRO_HCR_LX_PROT_EXEC) != 0) {
+    /* The island is written but not executable. Refuse rather than publish a
+     * jump into a non-executable page — that would fault every caller. */
+    return 0;
+  }
+  page->used += 1;
+  repro_hcr_lx_island_alloc_count += 1;
+  return slot;
+}
+
+/* ---------------------------------------------------------------------------
+ * Trampoline selection (HLX-M2), i.e. the algorithm `Trampoline-Mechanics.md`
+ * §6 now describes. ONE decision point, so the published encoding and the
+ * documented ladder cannot drift:
+ *
+ *   1. The published encoding is ALWAYS `E9 rel32` inside one aligned 8-byte
+ *      store. There is no sled length at which a 13- or 14-byte in-text form
+ *      becomes selectable; the sled length question was already settled by
+ *      `repro_hcr_lx_plan_sled`, which refuses a sled that admits no aligned
+ *      8-byte window.
+ *   2. Body within `rel32` reach of the window -> jump straight to it.
+ *   3. Otherwise -> a 14-byte island within +/-2 GiB, and the `rel32` points
+ *      at the island.
+ *   4. No island placeable -> refuse, by name.
+ * ------------------------------------------------------------------------- */
+
+enum {
+  REPRO_HCR_LX_TRAMPOLINE_REL32_BODY = 0,
+  REPRO_HCR_LX_TRAMPOLINE_REL32_ISLAND = 1
+};
+
+typedef struct repro_hcr_lx_trampoline_choice {
+  int refusal;
+  int kind;
+  uint64_t jump_target;    /* what the published `rel32` points at */
+  uint64_t island_address; /* 0 unless kind == ..._REL32_ISLAND */
+  int64_t body_displacement; /* body - (window + 5); evidence, signed */
+} repro_hcr_lx_trampoline_choice;
+
+static int repro_hcr_lx_select_trampoline(
+    uint64_t window_address, uint64_t body_address,
+    repro_hcr_lx_trampoline_choice *out) {
+  if (out == NULL) {
+    return REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
+  }
+  memset(out, 0, sizeof(*out));
+  out->body_displacement =
+      (int64_t)body_address -
+      (int64_t)(window_address + REPRO_HCR_LX_JMP_REL32_BYTES);
+
+  if (repro_hcr_lx_rel32_reachable(window_address, body_address)) {
+    out->kind = REPRO_HCR_LX_TRAMPOLINE_REL32_BODY;
+    out->jump_target = body_address;
+    out->refusal = REPRO_HCR_LX_OK;
+    return out->refusal;
+  }
+
+#if defined(REPRO_HCR_HLX_M2_FALSIFY_ISLAND_DISABLED)
+  /*
+   * FALSIFIER ARM (HLX-M2). Removes the island indirection and nothing else, so
+   * a far body has no publishable encoding left. The far gate must go RED here
+   * with `patch-body-out-of-rel32-range` and an unchanged function.
+   *
+   * What this arm proves is not that the code compiles two ways: it proves the
+   * body in the far gate is GENUINELY out of `rel32` reach. If the "force far"
+   * lever were a fiction — if the body actually landed within 2 GiB — this arm
+   * would publish successfully and the gate would stay green, which is exactly
+   * the non-discriminating shape trap 10 describes. The agent never defines it.
+   */
+  out->refusal = REPRO_HCR_LX_REFUSED_TARGET_OUT_OF_RANGE;
+  return out->refusal;
+#endif
+
+  out->island_address =
+      repro_hcr_lx_allocate_island(window_address, body_address);
+  if (out->island_address == 0) {
+    out->refusal = REPRO_HCR_LX_REFUSED_ISLAND_UNPLACEABLE;
+    return out->refusal;
+  }
+  out->kind = REPRO_HCR_LX_TRAMPOLINE_REL32_ISLAND;
+  out->jump_target = out->island_address;
+  out->refusal = REPRO_HCR_LX_OK;
+  return out->refusal;
+}
+
+/*
+ * Test-only lever (HLX-M2). When set, the patch BODY is deliberately mapped
+ * outside `rel32` reach of the window, so the island path is the one taken.
+ *
+ * It does not fake the distance. The page really is more than 2 GiB from the
+ * window — `repro_hcr_lx_map_patch_page_far` asserts that with the same
+ * `rel32_reachable` predicate the selector uses, and the gate measures the gap
+ * itself from the addresses the provider reports. What the lever removes is the
+ * near-first PREFERENCE, which in a process with free address space would
+ * otherwise make the far case unreachable and the island code dead.
+ *
+ * The agent never sets it, exactly as it never sets
+ * `repro_hcr_lx_sync_core_suppressed`.
+ */
+static int repro_hcr_lx_force_far_patch_body = 0;
+
+static void *repro_hcr_lx_map_patch_page_far(uint64_t window_address,
+                                             size_t page_size) {
+  /* Start 4 GiB out — comfortably past the 2 GiB `rel32` reach in both
+   * directions — and walk further until a `MAP_FIXED_NOREPLACE` takes. */
+  const uint64_t first = 0x100000000ull;
+  const uint64_t ceiling = 0x0000700000000000ull;
+  const uint64_t step = 0x10000000ull; /* 256 MiB */
+  uint64_t offset;
+
+  for (offset = first; offset < first + 64ull * step; offset += step) {
+    int direction_index;
+    for (direction_index = 0; direction_index < 2; ++direction_index) {
+      uint64_t hint;
+      void *mapped;
+      if (direction_index == 0) {
+        if (window_address + offset >= ceiling) {
+          continue;
+        }
+        hint = window_address + offset;
+      } else {
+        if (offset + page_size >= window_address) {
+          continue;
+        }
+        hint = window_address - offset;
+      }
+      hint = repro_hcr_lx_page_start(hint, page_size);
+      if (hint == 0) {
+        continue;
+      }
+      mapped = repro_hcr_lx_map_anonymous(
+          (void *)(uintptr_t)hint, page_size,
+          REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
+          REPRO_HCR_LX_MAP_FIXED_NOREPLACE);
+      if (mapped == NULL) {
+        continue;
+      }
+      if ((uint64_t)(uintptr_t)mapped == hint &&
+          !repro_hcr_lx_rel32_reachable(window_address,
+                                        (uint64_t)(uintptr_t)mapped)) {
+        return mapped;
+      }
+      repro_hcr_lx_unmap(mapped, page_size);
+    }
+  }
   return NULL;
 }
 
@@ -795,6 +1309,14 @@ typedef struct repro_hcr_lx_patch_report {
   /* 1 when the writable transient retained `PROT_EXEC`, so live threads
    * executing elsewhere in the same text page kept running across the store. */
   int transient_kept_exec;
+  /* HLX-M2. `trampoline_kind` is which of the two publishable forms was
+   * selected; `island_address` is 0 for the direct one. `body_displacement` is
+   * the signed `body - (window + 5)` the selector measured, carried so a gate
+   * can assert the body really was out of reach rather than take the selector's
+   * word for which branch it took. */
+  int trampoline_kind;
+  uint64_t island_address;
+  int64_t body_displacement;
 } repro_hcr_lx_patch_report;
 
 static repro_hcr_lx_patch_report repro_hcr_lx_last_report;
@@ -836,6 +1358,7 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
   int encode_rc;
   int claimed_here;
   int transient_protection;
+  repro_hcr_lx_trampoline_choice choice;
 
   memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
 
@@ -1004,8 +1527,29 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
     return NULL;
   }
 
-  patch_page =
-      (uint8_t *)repro_hcr_lx_map_patch_page_near(window_address, page_size);
+  /*
+   * HLX-M2: the body no longer HAS to be near. Near is still preferred, because
+   * a directly reachable body means one fewer indirection on every call into
+   * the patched function; but a body that lands outside `rel32` reach is now a
+   * supported case rather than a refusal, and is reached through an island.
+   *
+   * Order matters: the near probe runs first so nothing about the existing,
+   * measured behaviour of a normal patch changes. Only when it comes back NULL
+   * — a genuinely exhausted +/-2 GiB region — does the body go anywhere the
+   * kernel will put it.
+   */
+  if (repro_hcr_lx_force_far_patch_body) {
+    patch_page =
+        (uint8_t *)repro_hcr_lx_map_patch_page_far(window_address, page_size);
+  } else {
+    patch_page =
+        (uint8_t *)repro_hcr_lx_map_patch_page_near(window_address, page_size);
+    if (patch_page == NULL) {
+      patch_page = (uint8_t *)repro_hcr_lx_map_anonymous(
+          NULL, page_size,
+          REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE, 0);
+    }
+  }
   if (patch_page == NULL) {
   /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
    * the publishing store is reversible without touching target text, so a
@@ -1046,8 +1590,34 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
   }
   dispatch_address = (uint64_t)(uintptr_t)patch_page;
 
-  encode_rc =
-      repro_hcr_lx_encode_jmp_rel32(window_address, dispatch_address, jmp_bytes);
+  /*
+   * HLX-M2 — trampoline selection. One call, and it is the ONLY place that
+   * decides what the published `rel32` points at. Everything it can return is
+   * publishable in one aligned 8-byte store; the 13- and 14-byte in-text forms
+   * of `Trampoline-Mechanics.md` §1.2/§1.3 are not reachable from here at any
+   * sled length, which is the property §6's amended ladder now states.
+   */
+  repro_hcr_lx_select_trampoline(window_address, dispatch_address, &choice);
+  repro_hcr_lx_last_report.trampoline_kind = choice.kind;
+  repro_hcr_lx_last_report.island_address = choice.island_address;
+  repro_hcr_lx_last_report.body_displacement = choice.body_displacement;
+  if (choice.refusal != REPRO_HCR_LX_OK) {
+    repro_hcr_lx_unmap(patch_page, page_size);
+  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
+   * the publishing store is reversible without touching target text, so a
+   * failure must leave the window as unclaimed as it found it — otherwise the
+   * next patcher (or the next reload) is refused bytes nobody is using. */
+  if (claimed_here && ct_claimed_guest_text_release != NULL) {
+    ct_claimed_guest_text_release((uintptr_t)window_address);
+    claimed_here = 0;
+    repro_hcr_lx_last_report.claim_held = 0;
+  }
+    repro_hcr_lx_last_report.refusal = choice.refusal;
+    return NULL;
+  }
+
+  encode_rc = repro_hcr_lx_encode_jmp_rel32(window_address, choice.jump_target,
+                                            jmp_bytes);
   if (encode_rc != REPRO_HCR_LX_OK) {
     repro_hcr_lx_unmap(patch_page, page_size);
   /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to

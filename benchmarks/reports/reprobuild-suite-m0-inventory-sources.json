@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1601,
+    "nimTestBinaries": 1604,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 578,
-    "staticallyDetectedRuntimeCompilerFlowTests": 97,
-    "testEntries": 1612
+    "staticallyDetectedRuntimeCompilerFlowTests": 100,
+    "testEntries": 1615
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1058,7 +1058,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 736,
+      "integration": 739,
       "platform/destructive": 115,
       "pure unit": 578,
       "unclassified": 171
@@ -1197,9 +1197,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1601,
+    "nimTestBinaryCount": 1604,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1612
+    "testEntryCount": 1615
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1754,13 +1754,15 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
+            "PatchableCompileFlags",
+            "PatchableLinkFlags",
             "caseDir",
             "env",
             "patchObj",
             "repoRoot",
             "targetBin"
           ],
-          "line": 89,
+          "line": 104,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim",
           "patterns": [
             "gcc"
@@ -1772,21 +1774,229 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
+            "PatchableCompileFlags",
+            "PatchableLinkFlags",
             "caseDir",
             "env",
             "patchObj",
             "repoRoot",
             "targetBin"
           ],
-          "line": 110,
+          "line": 131,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim",
           "patterns": [
             "gcc"
           ],
-          "snippet": "\"gcc\", \"-O2\", \"-g\","
+          "snippet": "@[\"gcc\", \"-O2\", \"-g\"] & PatchableCompileFlags &"
         }
       ],
       "source": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "agentDir",
+            "caseDir",
+            "compileFlags",
+            "directDir",
+            "env",
+            "linkFlags",
+            "patchObj",
+            "repoRoot",
+            "targetBin"
+          ],
+          "line": 102,
+          "path": "tests/e2e/hcr-linux-far/t_e2e_hcr_linux_far_target_island_patch.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "\"gcc\", \"-c\", \"-O2\", \"-fcf-protection=full\", \"-ffunction-sections\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "agentDir",
+            "caseDir",
+            "compileFlags",
+            "directDir",
+            "env",
+            "linkFlags",
+            "patchObj",
+            "repoRoot",
+            "targetBin"
+          ],
+          "line": 113,
+          "path": "tests/e2e/hcr-linux-far/t_e2e_hcr_linux_far_target_island_patch.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "@[\"gcc\", \"-O2\", \"-g\"] & compileFlags &"
+        }
+      ],
+      "source": "tests/e2e/hcr-linux-far/t_e2e_hcr_linux_far_target_island_patch.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "agentDir",
+            "caseDir",
+            "compileFlags",
+            "directDir",
+            "env",
+            "linkFlags",
+            "patchObj",
+            "repoRoot",
+            "targetBin"
+          ],
+          "line": 89,
+          "path": "tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "\"gcc\", \"-c\", \"-O2\", \"-fcf-protection=full\", \"-ffunction-sections\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "agentDir",
+            "caseDir",
+            "compileFlags",
+            "directDir",
+            "env",
+            "linkFlags",
+            "patchObj",
+            "repoRoot",
+            "targetBin"
+          ],
+          "line": 97,
+          "path": "tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "@[\"gcc\", \"-O2\", \"-g\"] & compileFlags &"
+        }
+      ],
+      "source": "tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "gcc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "agentDir",
+            "caseDir",
+            "compileFlags",
+            "directDir",
+            "env",
+            "gcc",
+            "libPath",
+            "linkFlags",
+            "patchObj",
+            "repoRoot",
+            "result",
+            "targetBin"
+          ],
+          "line": 98,
+          "path": "tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "let gcc = findExe(\"gcc\")"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "agentDir",
+            "caseDir",
+            "compileFlags",
+            "directDir",
+            "env",
+            "gcc",
+            "libPath",
+            "linkFlags",
+            "patchObj",
+            "repoRoot",
+            "result",
+            "targetBin"
+          ],
+          "line": 117,
+          "path": "tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "\"gcc\", \"-c\", \"-O2\", \"-fcf-protection=full\", \"-ffunction-sections\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "agentDir",
+            "caseDir",
+            "compileFlags",
+            "directDir",
+            "env",
+            "gcc",
+            "libPath",
+            "linkFlags",
+            "patchObj",
+            "repoRoot",
+            "result",
+            "targetBin"
+          ],
+          "line": 132,
+          "path": "tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "@[\"gcc\", \"-O2\", \"-g\", \"-fPIC\", \"-shared\"] & compileFlags &"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "agentDir",
+            "caseDir",
+            "compileFlags",
+            "directDir",
+            "env",
+            "gcc",
+            "libPath",
+            "linkFlags",
+            "patchObj",
+            "repoRoot",
+            "result",
+            "targetBin"
+          ],
+          "line": 152,
+          "path": "tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "@[\"gcc\", \"-O2\", \"-g\"] & compileFlags &"
+        }
+      ],
+      "source": "tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim"
     },
     {
       "class": "integration",
@@ -19427,11 +19637,66 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_hcr_agent",
-        "repro_hcr_linker"
+        "repro_hcr_linker",
+        "repro_project_dsl"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_hcr_linux_far_target_island_patch",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-far/t_e2e_hcr_linux_far_target_island_patch.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_island_exhaustion_refuses",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_hcr_linux_shared_library_sled_patch",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": true,
@@ -34131,7 +34396,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 8,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

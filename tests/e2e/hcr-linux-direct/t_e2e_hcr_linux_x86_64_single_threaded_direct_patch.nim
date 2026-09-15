@@ -34,8 +34,23 @@ import std/[json, options, os, osproc, streams, strtabs, strutils, unittest]
 when defined(linux) and defined(amd64):
   import repro_hcr_agent
   import repro_hcr_linker
+  import repro_project_dsl
 
   import elf_rel_reader
+
+  # HLX-M2. The compile AND link halves of the patchable profile now come from
+  # the DSL (`repro_project_dsl.runtime_core`) rather than being retyped here.
+  #
+  # The link half is not cosmetic and it is why this changed: sled discovery
+  # reads `__patchable_function_entries`'s `sh_addr` out of the object's FILE
+  # and turns it into a live address, so design §7.3's build-id verification now
+  # governs the sled table as well as the symbol table. A target linked without
+  # `--build-id` is refused — correctly — with `absent-sled
+  # (sled-object-build-id-mismatch)`. `patchableLinkFlags` is what supplies it,
+  # and HLX-M1's residue recorded that it had "no in-tree target consuming it
+  # yet". This is that target.
+  let PatchableCompileFlags = patchableCompileFlags(ReproHcr())
+  let PatchableLinkFlags = patchableLinkFlags(ReproHcr())
 
   const
     # Taken from the registry rather than spelled locally, so a drift between
@@ -106,16 +121,20 @@ when defined(linux) and defined(amd64):
       # 2. Build the real target process with the real patchable build profile,
       #    linking the production C agent.
       let targetBin = binDir / "hcr_lx_m0_target"
-      discard runSuccess(shellCommand([
-        "gcc", "-O2", "-g",
-        "-falign-functions=16",
-        "-fpatchable-function-entry=16,0",
-        "-fcf-protection=full",
+      # A profile that emitted nothing would compile a NON-patchable target that
+      # then refused `absent-sled`, which is the drift `hcr_patchable_profile`
+      # exists to prevent. Assert the flags rather than trust them.
+      check PatchableCompileFlags.contains("-fpatchable-function-entry=16,0")
+      check PatchableCompileFlags.contains("-falign-functions=16")
+      check PatchableLinkFlags.contains("-Wl,--build-id=sha1")
+      discard runSuccess(shellCommand(
+        @["gcc", "-O2", "-g"] & PatchableCompileFlags &
+        @["-fcf-protection=full",
         "-I", repoRoot / "libs" / "repro_hcr_agent" / "c",
         "-o", targetBin,
         caseDir / "hcr_lx_m0_target.c",
-        repoRoot / "libs" / "repro_hcr_agent" / "c" / "repro_hcr_agent.c",
-        "-lpthread"]), repoRoot)
+        repoRoot / "libs" / "repro_hcr_agent" / "c" / "repro_hcr_agent.c"] &
+        PatchableLinkFlags & @["-lpthread"]), repoRoot)
       check fileExists(targetBin)
       # Direct entry patching, not dlopen/dlsym interposition (design §3.1).
       check not fileExists(targetBin & ".so")

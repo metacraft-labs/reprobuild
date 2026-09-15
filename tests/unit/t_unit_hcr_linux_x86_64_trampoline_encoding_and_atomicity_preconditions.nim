@@ -53,6 +53,34 @@ when defined(linux) and defined(amd64):
     "repro_hcr_lx_probe_published_word", cdecl.}
   proc probeRefusalName(code: cint): cstring {.importc:
     "repro_hcr_lx_probe_refusal_name", cdecl.}
+  # HLX-M2 — island allocation and trampoline selection, in the production
+  # implementation. Re-exported, never reimplemented.
+  proc probeSelectTrampoline(windowAddress, bodyAddress: uint64;
+                             kind: ptr cint; jumpTarget: ptr uint64;
+                             islandAddress: ptr uint64;
+                             bodyDisplacement: ptr int64): cint {.importc:
+    "repro_hcr_lx_probe_select_trampoline", cdecl.}
+  proc probeEncodeIsland(targetAddress: uint64;
+                         outBytes: ptr uint8) {.importc:
+    "repro_hcr_lx_probe_encode_island", cdecl.}
+  proc probeIslandBytes(): cint {.importc:
+    "repro_hcr_lx_probe_island_bytes", cdecl.}
+  proc probeIslandPageCount(): cint {.importc:
+    "repro_hcr_lx_probe_island_page_count", cdecl.}
+  proc probeIslandAllocCount(): uint64 {.importc:
+    "repro_hcr_lx_probe_island_alloc_count", cdecl.}
+  proc probeIslandReuseCount(): uint64 {.importc:
+    "repro_hcr_lx_probe_island_reuse_count", cdecl.}
+  proc probeIslandPageMapCount(): uint64 {.importc:
+    "repro_hcr_lx_probe_island_page_map_count", cdecl.}
+  proc probeResetIslands() {.importc:
+    "repro_hcr_lx_probe_reset_islands", cdecl.}
+  proc probeIslandReuseTransientProt(): cint {.importc:
+    "repro_hcr_lx_probe_island_reuse_transient_prot", cdecl.}
+  proc probeProtExec(): cint {.importc:
+    "repro_hcr_lx_probe_prot_exec", cdecl.}
+  proc probeTextRwxTransition(): cint {.importc:
+    "repro_hcr_lx_probe_text_rwx_transition", cdecl.}
   proc probeTextProtectionRoundtrip(): cint {.importc:
     "repro_hcr_lx_probe_text_protection_roundtrip", cdecl.}
   proc probeMembarrierSyncCore(): cint {.importc:
@@ -103,6 +131,7 @@ when defined(linux) and defined(amd64):
     RefusedWindowNotBoundary = 5.cint
     RefusedEntryModified = 6.cint
     RefusedOutOfRange = 7.cint
+    RefusedIslandUnplaceable = 17.cint
 
   type SledPlanResult = object
     refusal: cint
@@ -402,6 +431,126 @@ when defined(linux) and defined(amd64):
       check refusalName(probeLastRefusal()) == "entry-modified-externally"
 
       check probeUnmap(page, csize_t(pageSize)) == 0
+
+    test "far targets select an island, and islands are packed and reused":
+      ## HLX-M2. Drives the PRODUCTION `repro_hcr_lx_select_trampoline` and
+      ## `repro_hcr_lx_allocate_island`.
+      ##
+      ## Two properties the e2e gate cannot reach, because it publishes exactly
+      ## one far patch and so never allocates a SECOND island:
+      ##
+      ##   * packing — a second island for a nearby window lands in the SAME
+      ##     page, 16 bytes on;
+      ##   * and the reuse path's protection transition. Every island already on
+      ##     a used page is live — target text jumps to it — so making the page
+      ##     writable must keep `PROT_EXEC`. Reuse is conditional on the host
+      ##     allowing `RW|EXEC`; a host that refuses it takes a fresh page
+      ##     instead. Both branches are asserted, against what the host actually
+      ##     reports rather than against an assumption about it.
+      probeResetIslands()
+      let pageSize = int(probePageSize())
+      # A real executable page to act as the "target text" the windows live in,
+      # and a real far body.
+      let text = probeMap(csize_t(pageSize), ProtRead or ProtWrite or ProtExec)
+      check text != nil
+      let windowA = cast[uint64](text)
+      let windowB = windowA + 64'u64
+      check (windowA and 7'u64) == 0'u64
+      check (windowB and 7'u64) == 0'u64
+
+      # In range: no island, and the jump goes straight at the body.
+      var kind: cint
+      var jumpTarget: uint64
+      var islandAddress: uint64
+      var displacement: int64
+      check probeSelectTrampoline(windowA, windowA + 4096'u64, addr kind,
+        addr jumpTarget, addr islandAddress, addr displacement) == 0
+      check kind == 0
+      check jumpTarget == windowA + 4096'u64
+      check islandAddress == 0'u64
+      check probeIslandAllocCount() == 0'u64
+
+      # Out of range: an island, within rel32 of the window, jumping to the
+      # body. The displacement is asserted out of range so the branch cannot be
+      # taken for the wrong reason.
+      let farBody = windowA + 0x100000000'u64
+      check probeSelectTrampoline(windowA, farBody, addr kind,
+        addr jumpTarget, addr islandAddress, addr displacement) == 0
+      check kind == 1
+      check displacement > 0x7fffffff'i64
+      check islandAddress != 0'u64
+      check jumpTarget == islandAddress
+      check abs(int64(islandAddress) - int64(windowA + 5'u64)) <= 0x7fffffff'i64
+      check probeIslandAllocCount() == 1'u64
+      check probeIslandPageCount() == 1
+      check probeIslandPageMapCount() == 1'u64
+
+      # The island's bytes are the 14-byte `FF 25 00 00 00 00; .quad body`, and
+      # they equal what the production encoder emits for that target.
+      check probeIslandBytes() == 14
+      var expected = newSeq[byte](14)
+      probeEncodeIsland(farBody, addr expected[0])
+      check hexOf(expected).startsWith("ff2500000000")
+      var actual = newSeq[byte](14)
+      copyMem(addr actual[0], cast[pointer](islandAddress), 14)
+      check actual == expected
+
+      # A SECOND far target from a nearby window. On a host that allows
+      # `RW|EXEC` it packs into the same page 16 bytes on; on one that does not,
+      # a fresh page is taken rather than un-executing live islands.
+      let firstIsland = islandAddress
+      check probeIslandReuseTransientProt() == -1.cint
+      check probeSelectTrampoline(windowB, farBody + 0x1000'u64, addr kind,
+        addr jumpTarget, addr islandAddress, addr displacement) == 0
+      check kind == 1
+      check probeIslandAllocCount() == 2'u64
+      if probeTextRwxTransition() != 0:
+        check probeIslandReuseCount() == 1'u64
+        check probeIslandPageCount() == 1
+        check probeIslandPageMapCount() == 1'u64
+        check islandAddress == firstIsland + 16'u64
+        # THE ASSERTION THE REUSE HAZARD IS ACTUALLY ABOUT.
+        #
+        # Every island already on this page is LIVE: published `rel32`s in
+        # target text jump to it, so a thread may be executing one at any
+        # moment. Making the page writable to add the second island must
+        # therefore KEEP `PROT_EXEC`; dropping it would fault such a thread.
+        #
+        # It has to be asserted against the RECORDED TRANSIENT and not against
+        # anything read after the call. `allocate_island` restores `R|X` before
+        # it returns, and writing slot 2 does not touch slot 1's bytes, so a
+        # post-hoc read of the first island's bytes — or of its page
+        # protection — is identical under both implementations. Measured on
+        # 2026-09-15: with the `PROT_EXEC` dropped from the reuse transition,
+        # a byte-intactness check on `firstIsland` stayed GREEN. That check
+        # could not fail and is kept below only as a corruption guard, never as
+        # the evidence for this property.
+        check (probeIslandReuseTransientProt() and probeProtExec()) ==
+          probeProtExec()
+      else:
+        check probeIslandReuseCount() == 0'u64
+        check probeIslandPageCount() == 2
+        check probeIslandPageMapCount() == 2'u64
+        # No page was reused, so no transient was taken at all.
+        check probeIslandReuseTransientProt() == -1.cint
+      # A corruption guard only — see the note above on why this cannot be the
+      # evidence that the reuse kept `PROT_EXEC`.
+      var firstAgain = newSeq[byte](14)
+      copyMem(addr firstAgain[0], cast[pointer](firstIsland), 14)
+      check firstAgain == expected
+
+      check probeUnmap(text, csize_t(pageSize)) == 0
+      probeResetIslands()
+
+    test "island exhaustion refuses by name rather than widening the store":
+      ## The refusal exists and is named. The e2e half — that an exhausted
+      ## +/-2 GiB region really produces it and that nothing is written — is
+      ## `integration_hcr_linux_island_exhaustion_refuses`; this asserts only
+      ## that the vocabulary is distinct, which is design §4.3's rule.
+      check refusalName(RefusedIslandUnplaceable) == "island-unplaceable"
+      check refusalName(RefusedOutOfRange) == "patch-body-out-of-rel32-range"
+      check refusalName(RefusedIslandUnplaceable) !=
+        refusalName(RefusedOutOfRange)
 
 else:
   suite "unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions":
