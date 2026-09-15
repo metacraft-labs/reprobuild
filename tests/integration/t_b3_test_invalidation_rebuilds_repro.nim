@@ -5,9 +5,29 @@
 ## ``./build/bin/repro show-conventions`` and therefore carries
 ## ``requiresReproBinary = true`` in ``repro_tests.nim``. The engine-level
 ## arm builds the direct execute-edge selector and verifies that the
-## scheduler runs both ``reprobuild.apps.repro`` and the execute edge.
+## scheduler RUNS both ``reprobuild.apps.repro`` and the execute edge.
+##
+## "Runs" is the whole claim, and it needs a cold cache to mean anything, so
+## the arm brings its own: the build is scoped to a per-case
+## ``--action-cache-root``. Without that the outcome depends on what else
+## touched the run-wide cache first — ``scripts/run_tests.sh`` builds
+## ``.#apps`` before any test starts, which would leave
+## ``reprobuild.apps.repro`` a cache hit and ``launched = false`` here, and the
+## case would fail saying nothing about the wiring it exists to check.
+##
+## ``reprobuild.apps.repro`` IS CACHEABLE, and the report must say so. This arm
+## used to assert ``cdNotCacheable`` for it, from a period when every compile
+## edge in ``repro.nim`` carried ``cacheable = false``. That retreat was
+## reversed on 2026-08-19 — see the HISTORY note in ``repro.nim`` and
+## ``reprobuild-specs/Compiles-Are-Normal-Edges.md`` — and ``nim.c`` defaults
+## ``cacheable = true`` with no override on this edge, so ``cdNotCacheable``
+## became unreachable by construction. Against a cache root created by this
+## case, an edge that succeeded AND launched is a cache MISS, which is what the
+## arm asserts now. Re-running the same case against the SAME root instead
+## reports ``cdHit`` and no launch — that is the control that shows the
+## assertion is reading the engine's real decision rather than a constant.
 
-import std/[json, os, osproc, strtabs, strutils, unittest]
+import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
 import repro_test_support
 
 const RepoMarker = "repro.nim"
@@ -79,7 +99,7 @@ proc specSlice(reproTestsText, source: string): string =
   let limit = min(reproTestsText.len, pos + 400)
   reproTestsText[pos ..< limit]
 
-proc runBuildTarget(reproBin, repoRoot, selector: string):
+proc runBuildTarget(reproBin, repoRoot, selector, cacheRoot: string):
     tuple[output: string; exitCode: int] =
   let args = @[
     reproBin.quoteShell,
@@ -87,6 +107,7 @@ proc runBuildTarget(reproBin, repoRoot, selector: string):
     selector,
     "--tool-provisioning=path",
     "--daemon=off",
+    "--action-cache-root=" & cacheRoot.quoteShell,
     "--write-report",
     "--log=actions",
     "--progress=quiet",
@@ -133,8 +154,11 @@ suite "Bootstrap-And-Self-Build B3: repro binary input wiring":
     check fileExists(runquotad)
 
     if fileExists(reproBin) and fileExists(runquotad):
+      let cacheRoot = createTempDir("repro-b3-invalidation-cache-", "")
+      defer: removeDir(cacheRoot)
       let selector = ".#" & ExecuteActionId
-      let (output, exitCode) = runBuildTarget(reproBin, repoRoot, selector)
+      let (output, exitCode) = runBuildTarget(reproBin, repoRoot, selector,
+                                              cacheRoot)
       checkpoint("exit=" & $exitCode)
       if exitCode != 0:
         checkpoint(output)
@@ -166,7 +190,7 @@ suite "Bootstrap-And-Self-Build B3: repro binary input wiring":
             fieldForCheckpoint(reproAppAction, "cacheDecision"))
           check reproAppAction{"status"}.getStr() == "asSucceeded"
           check reproAppAction{"launched"}.getBool()
-          check reproAppAction{"cacheDecision"}.getStr() == "cdNotCacheable"
+          check reproAppAction{"cacheDecision"}.getStr() == "cdMiss"
 
         if executeAction != nil:
           checkpoint(ExecuteActionId & " status=" &
