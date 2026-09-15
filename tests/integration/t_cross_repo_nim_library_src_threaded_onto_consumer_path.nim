@@ -134,6 +134,22 @@ when isMainModule:
 # (which ``import greetlib``) and then runs the produced binary. ``uses:
 # "greetlib"`` names the sibling producer; the SC-11 channel threads its
 # ``src/`` onto the ``nim c --path:``. ``sh`` runs the produced binary. ----
+#
+# ``cc = "clang"``, NOT ``gccExe = "clang"``. The two are not interchangeable
+# and only ``cc`` matches what this recipe declares in ``uses:``. ``--cc:clang``
+# selects the clang BACKEND, so nim invokes ``clang`` for both the compile and
+# the link. ``--gcc.exe:clang`` selects the gcc backend and merely points its
+# COMPILER driver at ``clang``; the LINK step still shells out to whatever
+# ``gcc.linkerexe`` names, which defaults to a bare ``gcc`` this recipe never
+# declares (see the ``gccLinkerExe`` comment in
+# ``repro_dsl_stdlib/packages/nim.nim``). The original spelling was ``gccExe``
+# and it worked only while an action's PATH still ended in the launching
+# shell's ``$PATH`` — once a compile edge's PATH became exactly the
+# directories THAT EDGE declares, the undeclared linker stopped resolving and
+# this fixture died on ``gcc: command not found`` AFTER the SC-11 channel had
+# already done its job. Nothing about SC-11 is relaxed here: every assertion
+# below is unchanged, and the control case still fails on the same
+# ``cannot open file: greetlib``.
 const consumerReproWithGreetlib = """
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
@@ -151,7 +167,7 @@ package consumer:
     let compiled = nim.c(
       source = "src/app.nim",
       binary = "build/bin/app",
-      gccExe = "clang",
+      cc = "clang",
       parallelBuild = 1)
     discard shell(
       command = "mkdir -p build && ./build/bin/app",
@@ -179,7 +195,7 @@ package consumer:
     discard nim.c(
       source = "src/app.nim",
       binary = "build/bin/app",
-      gccExe = "clang",
+      cc = "clang",
       parallelBuild = 1)
 """
 
