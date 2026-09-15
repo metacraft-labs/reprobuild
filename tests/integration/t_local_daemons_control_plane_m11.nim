@@ -169,6 +169,19 @@ proc fakeProtocolHelperBin(): string =
   repoRoot() / "build" / "test-bin" /
     addFileExt("fake_protocol_daemon_helper", ExeExt)
 
+const FakeDaemonLifetimeSeconds = 600.0
+  ## How long the fake daemon must stay bound once started. The helper's own
+  ## default is 20 s, which is shorter than the cold ``repro build`` that runs
+  ## between two of the arms below — the fixture died mid-case and the arms
+  ## that need a LIVE incompatible daemon silently stopped testing one. The
+  ## lifetime is stated here, at the call site that knows what it needs, and
+  ## each arm still restarts the helper so its window starts fresh.
+
+const FakeDaemonMaxConnections = 200
+  ## Likewise for the connection budget: several ``repro`` invocations probe
+  ## the endpoint, and a budget of 20 is another silent way for the fixture to
+  ## stop answering part-way through a case.
+
 proc startFakeProtocolDaemon(tempRoot: string): owned(Process) =
   ## Spawn the portable Nim helper that mimics a live, protocol-
   ## incompatible daemon: it binds the endpoint and responds to every
@@ -184,7 +197,9 @@ proc startFakeProtocolDaemon(tempRoot: string): owned(Process) =
 
   try: removeFile(daemonEndpoint(tempRoot)) except OSError: discard
   result = startProcess(helperBin,
-    args = @[daemonEndpoint(tempRoot)],
+    args = @[daemonEndpoint(tempRoot),
+             $FakeDaemonLifetimeSeconds,
+             $FakeDaemonMaxConnections],
     workingDir = repoRoot(),
     options = {poUsePath, poStdErrToStdOut})
 
@@ -273,26 +288,65 @@ when isNixSupported:
       let mismatchProject = tempRoot / "mismatch-project"
       writeCopyProject(mismatchProject, "daemonM11Mismatch", "mismatch\n")
       var fake = startFakeProtocolDaemon(tempRoot)
-      defer:
-        if fake.running():
-          fake.terminate()
-          discard fake.waitForExit()
-        fake.close()
+      var fakeOpen = true
+      template stopFake() =
+        if fakeOpen:
+          if fake.running():
+            fake.terminate()
+            discard fake.waitForExit()
+          fake.close()
+          fakeOpen = false
+      defer: stopFake()
+      # The arm below must meet a LIVE, protocol-incompatible daemon; assert
+      # that it does rather than assuming it, because the fixture used to be
+      # dead here and the assertions still "passed" for the wrong reason.
+      check fake.running()
       let mismatch = requireSuccess(buildCommand(mismatchProject, tempRoot,
         "mismatch-work"), repoRoot())
       check mismatch.contains("repro build: daemon unavailable; falling back to direct mode:")
       check mismatch.contains("compatible status handshake") or
         mismatch.contains("protocol mismatch")
+      check fake.running()
       waitForFileContent(mismatchProject / "dist" / "copied.txt",
         "mismatch\n", tempRoot)
 
+      # Restart the fixture so the ``--daemon=require`` arm gets its own,
+      # freshly-opened window. The build above is a cold one — a from-scratch
+      # provider compile plus the copy edge — and with the helper's former
+      # fixed 20 s lifetime it had been gone for minutes by this point. What
+      # ``repro`` then met was an ABSENT endpoint, so it auto-started a real
+      # daemon, the require gate never fired, and both checks below failed
+      # (measured: lines 292 and 294 red on origin/dev). This is the arm that
+      # covers "daemon is live but speaks the wrong protocol"; nothing else
+      # does.
+      stopFake()
+      fake = startFakeProtocolDaemon(tempRoot)
+      fakeOpen = true
+      check fake.running()
+
+      # The project is real. It never was — ``writeCopyProject`` was never
+      # called for this path — which was latent rather than fatal because the
+      # ``--daemon=require`` gate fires before project resolution. With a real
+      # project on disk, a gate that STOPPED firing would let the build
+      # succeed and ``requireFailure`` would say so, instead of the run
+      # failing for an unrelated reason and looking like the gate.
+      let mismatchRequireProject = tempRoot / "mismatch-require-project"
+      writeCopyProject(mismatchRequireProject, "daemonM11MismatchRequire",
+        "mismatch require\n")
       let mismatchRequire = requireFailure(buildCommand(
-        tempRoot / "mismatch-require-project", tempRoot, "mismatch-require-work",
+        mismatchRequireProject, tempRoot, "mismatch-require-work",
         ["--daemon=require"]), repoRoot())
       check mismatchRequire.contains(
         "daemon mode required but repro-daemon is unavailable:")
-      check mismatchRequire.contains("compatible status handshake") or
-        mismatchRequire.contains("protocol mismatch")
+      # ``repro-daemon endpoint accepts connections but did not complete a
+      # compatible status handshake`` is raised (repro_daemon_core/runtime.nim)
+      # only when the endpoint EXISTS and ACCEPTS — so this string is the proof
+      # that the live-but-incompatible branch is what refused the build, and
+      # not an absent daemon that could not be started.
+      check mismatchRequire.contains("compatible status handshake")
+      check fake.running()
+      check not fileExists(mismatchRequireProject / "dist" / "copied.txt")
+      stopFake()
 
       let watchFallbackProject = tempRoot / "watch-fallback-project"
       writeCopyProject(watchFallbackProject, "daemonM11WatchFallback",
