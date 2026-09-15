@@ -1,12 +1,25 @@
 ## Bootstrap-And-Self-Build B3: a direct test execute-edge selector builds
 ## the selected test binary and runs that test through the engine.
 ##
-## The self-hosted Nim compile half is deliberately non-cacheable today:
-## compiler executions may produce incomplete io-mon evidence, so the graph
-## reports ``cdNotCacheable`` and runs the compile edge instead of publishing
-## an unsafe cache entry. The execute edge remains the behavioral proof here:
-## the engine lowers the selected ``reprobuild.test_execute.<stem>`` action,
-## runs it, and records a successful result.
+## The compile half is CACHEABLE, and the report must say so. This header used
+## to claim the opposite — "the self-hosted Nim compile half is deliberately
+## non-cacheable today ... so the graph reports ``cdNotCacheable``" — and the
+## engine arm asserted that decision. Both were superseded on 2026-08-19, when
+## the ``cacheable = false`` retreat was reversed for every compile edge in
+## ``repro.nim``; see the HISTORY note there and
+## ``reprobuild-specs/Compiles-Are-Normal-Edges.md``, which records that the
+## blocker (raw ``SYS_getrandom`` graded as a Level-2 evidence loss) was "a
+## classification gap, not a monitoring one" and that monitored pipelines now
+## publish and hit the cache. ``buildNimUnittest.build`` defaults
+## ``cacheable = true`` and ``repro.nim`` passes no override, so
+## ``cdNotCacheable`` is unreachable for this edge by construction.
+##
+## What the engine arm asserts instead is what the surrounding assertions
+## already imply: the test-build edge SUCCEEDED and LAUNCHED, and a monitored,
+## cacheable edge that launches on a cold cache is a cache MISS.
+## The execute edge remains the behavioral proof: the engine lowers the
+## selected ``reprobuild.test_execute.<stem>`` action, runs it, and records a
+## successful result.
 
 import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
 import repro_test_support
@@ -130,7 +143,23 @@ suite "Bootstrap-And-Self-Build B3: test execute edge":
     check "collect(\"test-builds\", reprobuildTestBuildActions" in
       reproNimText
     check "edge.testBinary.run(" in reproNimText
-    check "cacheable = false" in reproNimText
+
+    # This used to be a bare ``check "cacheable = false" in reproNimText``,
+    # written when every compile edge in the file carried that argument. Since
+    # 2026-08-19 they do not, and the only survivors are the Windows DLL-copy
+    # edges and the opt-in-layer ``.live`` execute variant — lines with nothing
+    # to do with this case, which made the assertion pass while saying nothing.
+    # Assert the contract the engine arm below reads from the build report:
+    # the test-build edge passes NO ``cacheable`` argument, so it takes
+    # ``buildNimUnittest``'s ``cacheable = true`` default.
+    let buildCallStart = reproNimText.find("let edge = buildNimUnittest.build(")
+    check buildCallStart >= 0
+    if buildCallStart >= 0:
+      let buildCallEnd = reproNimText.find(
+        "reprobuildTestBuildActions.add(edge.action)", buildCallStart)
+      check buildCallEnd > buildCallStart
+      if buildCallEnd > buildCallStart:
+        check "cacheable" notin reproNimText[buildCallStart ..< buildCallEnd]
 
     # Both dlopen-only runtimes belong on graph-built test binaries. Keep the
     # Clingo names in the shared test-runtime list (not only the shipping repro
@@ -203,7 +232,7 @@ suite "Bootstrap-And-Self-Build B3: test execute edge":
             fieldForCheckpoint(buildAction, "cacheDecision"))
           check buildAction{"status"}.getStr() == "asSucceeded"
           check buildAction{"launched"}.getBool()
-          check buildAction{"cacheDecision"}.getStr() == "cdNotCacheable"
+          check buildAction{"cacheDecision"}.getStr() == "cdMiss"
 
         if executeAction != nil:
           checkpoint(ExecuteActionId & " status=" &
