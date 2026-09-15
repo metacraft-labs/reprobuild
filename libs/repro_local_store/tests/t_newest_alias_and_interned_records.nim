@@ -27,7 +27,8 @@
 ## every container in the directory. A counter stuck at zero — or one that
 ## stopped counting — fails the control before it can pass the claim.
 
-import std/[algorithm, options, os, sequtils, strutils, tempfiles, unittest]
+import std/[algorithm, monotimes, options, os, sequtils, strutils, tempfiles,
+            times, unittest]
 
 import repro_core
 import repro_hash
@@ -441,6 +442,134 @@ const
     "28c642b92be7b7deafe4cc2394d8a4f0c99d9e0e1c3a8e6de09ee44d7ddb3a51.rec"
   LegacyStrongHex =
     "28c642b92be7b7deafe4cc2394d8a4f0c99d9e0e1c3a8e6de09ee44d7ddb3a51"
+
+suite "the duration rows beside the counts":
+  ## `actionRecordDecodeNanoStats` is a STOPWATCH, and the header of this file
+  ## explains at length why C1 and C4 are asserted with counts instead. The
+  ## duration rows do not restate C1 or C4; they answer a question the counts
+  ## cannot — "what share of a consultation is the record read and decode?" —
+  ## and that is the question a milestone budget is written against. MAC-3 was
+  ## budgeted at ~8 ms against a term since measured at ~0.4 ms, and these
+  ## rows rendered a literal `0.0` throughout, which reads as "measured, and
+  ## free" when it meant "never measured".
+  ##
+  ## So the cases below do not assert a DURATION, and no check here can go red
+  ## because the machine is busy. They assert the three things a duration row
+  ## can be wrong about without anyone noticing: that it is wired at all, that
+  ## it is reset with its count, and that the read and the decode are priced
+  ## into DIFFERENT rows rather than both into each.
+
+  proc manyInputRecord(tag: string; inputs: int): ActionResultRecord =
+    result = ActionResultRecord(
+      weakFingerprint: weakOf(tag),
+      policy: ffpTimestamp,
+      outputPayloadKind: opkMetadataOnly)
+    for i in 0 ..< inputs:
+      result.inputs.add(FileFingerprint(
+        path: "/a/long/shared/checkout/prefix/src/unit" & $i & ".c",
+        policy: ffpTimestamp,
+        metadata: FileMetadata(kind: ffkRegular, sizeBytes: uint64(i),
+          mtimeNs: 2)))
+    result.strongFingerprint = computeStrongFingerprint(
+      result.weakFingerprint, result.inputs)
+
+  test "the decode row is wired, is reset with its count, and tracks the work":
+    let small = encodeActionResultRecord(manyInputRecord("nanos.small", 1))
+    let large = encodeActionResultRecord(manyInputRecord("nanos.large", 2000))
+
+    resetOutputStateCheckStats()
+    # Before any decode. If `resetOutputStateCheckStats` stopped clearing the
+    # accumulator this is where it shows: the suites above have already run
+    # thousands of decodes in this process, so a surviving value is large and
+    # this check is nowhere near a boundary.
+    check actionRecordDecodeNanoStats().decode == 0
+
+    for _ in 0 ..< 50:
+      discard decodeActionResultRecord(small)
+    let smallNanos = actionRecordDecodeNanoStats().decode
+    check actionRecordDecodeStats().records == 50
+    # Wired at all. A monotonic clock cannot report zero across 50 decodes of
+    # even a one-input record, so this is the accumulator's existence and not
+    # a statement about how fast decoding is.
+    check smallNanos > 0
+
+    resetOutputStateCheckStats()
+    check actionRecordDecodeNanoStats().decode == 0
+    for _ in 0 ..< 50:
+      discard decodeActionResultRecord(large)
+    let largeNanos = actionRecordDecodeNanoStats().decode
+    check actionRecordDecodeStats().records == 50
+
+    # NOT VACUOUS. 2,000 inputs against 1, the same number of decodes, the
+    # same process. A row that accumulated a CONSTANT — a fixed overhead, or
+    # the timer's own cost — passes `> 0` and fails here. The bound is 10x for
+    # 2,000x the inputs, so it says the row moves with the work; it is not a
+    # performance assertion and ambient load cannot redden it.
+    check largeNanos > smallNanos * 10
+
+  test "the read and the decode are priced into different rows":
+    ## The hazard this closes is a one-line edit: widening the container timer
+    ## in `readRecContainer` to span `decodePerEdgeFileWithSeq` as well as the
+    ## `readFile`. Nothing about the resulting numbers looks wrong — both rows
+    ## stay positive and both stay plausible — and the container row silently
+    ## starts reporting the decode as I/O, which is the error that sends a
+    ## milestone after the wrong half of a term.
+    ##
+    ## The check is arithmetic, not a threshold: `container` and `decode` are
+    ## timed over sub-intervals of the single `readHotRecord` call below, and
+    ## disjoint sub-intervals of an interval cannot sum to more than it. It
+    ## therefore cannot go red on a slow machine — only on an overlap.
+    ##
+    ## The record carries 2,000 inputs so the decode is a large share of the
+    ## read; if it were a small one, double-counting it would still fit inside
+    ## the elapsed time and this would pass while the rows were wrong. The
+    ## margin is real but not large, and it is written down rather than
+    ## assumed: measured here at container≈65-80us, decode≈415us, elapsed
+    ## ≈850-890us, and the widened-timer mutation was RUN and pushed the sum
+    ## to 1,102us against an elapsed of 917us.
+    var f = openFixture("nanos-split")
+    defer: closeFixture(f)
+    let weak = weakOf("nanos.split")
+    var inputs: seq[string] = @[]
+    for i in 0 ..< 2000:
+      let p = f.workRoot / ("wide" & $i & ".c")
+      writeFile(p, "int w" & $i & "(void){return " & $i & ";}\n")
+      inputs.add(p)
+    let outputPath = f.workRoot / "wide.o"
+    writeFile(outputPath, "object-bytes\n")
+    discard f.cache.recordActionResult(f.store, weak, ffpTimestamp,
+      inputs, [outputPath], outputRoot = "", storeOutputBlobs = true)
+
+    resetOutputStateCheckStats()
+    let started = getMonoTime()
+    let hot = f.cache.readHotRecord(weak)
+    let elapsed = (getMonoTime() - started).inNanoseconds
+    check hot.found
+    check hot.record.inputs.len == 2000
+
+    let nanos = actionRecordDecodeNanoStats()
+    # The premise: this read really did open a container, really did decode
+    # one, and really did read a sidecar. Without all three, the sum below is
+    # trivially satisfied.
+    check actionRecordDecodeStats().containerReads == 1
+    check actionRecordDecodeStats().records == 1
+    check actionRecordDecodeStats().sidecarReads == 1
+    check nanos.container > 0
+    check nanos.decode > 0
+    # The SIDECAR row is the third of the three that used to print a literal
+    # `0.0`, and it was the one with nothing behind it: deleting both sidecar
+    # timers in `readRecContainer` outright left every case in this suite
+    # green. A row that silently stopped accumulating would report 0.0 —
+    # which is the exact "measured, and free" reading this milestone exists
+    # to stop — so it gets the same wired-at-all check as the other two.
+    check nanos.sidecar > 0
+
+    # Same disjointness argument as before, now over three sub-intervals
+    # instead of two, so it still cannot go red on a slow machine. Including
+    # the sidecar term also WIDENS the margin against the widened-container
+    # mutation rather than narrowing it: measured here at container≈65-72us,
+    # decode≈407-440us, sidecar≈21-25us against an elapsed of ≈850-912us.
+    check nanos.container + nanos.decode + nanos.sidecar <= elapsed
 
 suite "records written before the trust epoch are refused":
   ## INVERTED, DELIBERATELY. This suite used to be called "records written

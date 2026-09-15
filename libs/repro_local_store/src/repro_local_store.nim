@@ -1134,6 +1134,14 @@ var
   actionRecordDecodeBytes = 0'i64
   perEdgeContainerReads = 0
   perEdgeSidecarReads = 0
+  # The DURATION half of the three rows above. The counts say how much
+  # record content a consultation touched; these say what that cost. Both
+  # are needed: a count alone cannot tell an 8 ms term from a 0.4 ms one,
+  # and a duration alone is unreadable under ambient load without the count
+  # to divide by.
+  actionRecordDecodeNanos = 0'i64
+  perEdgeContainerReadNanos = 0'i64
+  perEdgeSidecarReadNanos = 0'i64
   actionIndexNegativeHits = 0
   actionIndexResolvedHits = 0
   actionIndexUnionFallbacks = 0
@@ -2060,10 +2068,32 @@ proc resetOutputStateCheckStats*() =
   actionRecordDecodeBytes = 0'i64
   perEdgeContainerReads = 0
   perEdgeSidecarReads = 0
+  actionRecordDecodeNanos = 0'i64
+  perEdgeContainerReadNanos = 0'i64
+  perEdgeSidecarReadNanos = 0'i64
   actionIndexNegativeHits = 0
   actionIndexResolvedHits = 0
   actionIndexUnionFallbacks = 0
   actionIndexUnresolvedRefs = 0
+
+proc actionRecordDecodeNanoStats*(): tuple[decode, container, sidecar: int64] =
+  ## The DURATION half of `actionRecordDecodeStats`, in nanoseconds.
+  ##
+  ## `decode` is the pure-CPU time inside `decodeRecord` and NOTHING else;
+  ## `container` is the `readFile` of a `<strongHex>.rec` alone, with its
+  ## decode excluded (that time lands in `decode`); `sidecar` is the read +
+  ## decode of a `.octime` witness file.
+  ##
+  ## Split this way on purpose: "hot-record read and decode" was a single
+  ## budgeted line item, and splitting the read from the decode is what shows
+  ## which half a change would have to attack. Reset by
+  ## `resetOutputStateCheckStats`, like every row beside it, so a reading
+  ## after a build describes THAT build.
+  ##
+  ## These are a stopwatch and inherit a stopwatch's weakness under ambient
+  ## load. They do NOT replace the counts, which are the load-independent
+  ## evidence for Action-Cache-Per-Edge-Store.md §5.5.
+  (actionRecordDecodeNanos, perEdgeContainerReadNanos, perEdgeSidecarReadNanos)
 
 proc actionIndexStats*(): tuple[negativeHits, resolvedHits, unionFallbacks,
                                 unresolvedReferences: int] =
@@ -2444,7 +2474,7 @@ proc encodeRecord(record: ActionResultRecord): seq[byte] =
     of opkMetadataOnly:
       discard
 
-proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
+proc decodeRecordImpl(payload: openArray[byte]): ActionResultRecord =
   # Counted here rather than at the call sites: a record is decoded from the
   # per-edge container read, from the shm slot, from a peer bundle and from a
   # standalone `.rbar` file, and the property C1 states is about the total.
@@ -2538,6 +2568,33 @@ proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
       result.outputs[i].permissions = readPermissions(payload, pos)
   if pos != payload.len:
     raiseEnvelopeError(eeMalformed, "trailing action record bytes")
+
+proc decodeRecord(payload: openArray[byte]): ActionResultRecord =
+  ## Timed wrapper over `decodeRecordImpl`.
+  ##
+  ## The COUNT rows (`actionRecordDecodes` / `actionRecordDecodeBytes`, see
+  ## `noteActionRecordDecode`) remain the load-independent evidence for
+  ## Action-Cache-Per-Edge-Store.md §5.5 C1/C4 and nothing here replaces
+  ## them. The nanosecond accumulator answers a DIFFERENT question — "how
+  ## much of a consultation is decode?" — which the count cannot answer at
+  ## all, and which the rows previously rendered as a literal `0.0`, a figure
+  ## indistinguishable from "measured and free".
+  ##
+  ## Two `getMonoTime` calls per decoded frame. Priced by amplification
+  ## rather than assumed negligible: repeating the decode 200 extra times
+  ## inside this same timed region on the zlib CMake no-op moved the
+  ## accumulator from 0.4 ms to ~68 ms — i.e. the timer region tracks
+  ## proportionally to real decode work over a 200x range, so the timer's own
+  ## overhead is not a material share of the reading at 1x.
+  ##
+  ## What this does NOT establish: that the accumulated figure is accurate to
+  ## better than the host clock, and that the decode of one record is
+  ## representative of another. It is an aggregate over the build.
+  let started = getMonoTime()
+  try:
+    result = decodeRecordImpl(payload)
+  finally:
+    actionRecordDecodeNanos += (getMonoTime() - started).inNanoseconds
 
 proc writeActionResultRecordFile*(path: string; record: ActionResultRecord) =
   createDir(extendedPath(parentDir(path)))
@@ -2925,7 +2982,13 @@ proc readRecContainer(dirPath, fileName: string): RecContainer =
   let path = dirPath / fileName
   var decoded: tuple[records: seq[ActionResultRecord]; writeSequence: uint64]
   try:
+    # Timed around the `readFile` ONLY, so the container row prices the I/O
+    # and the decode row prices the CPU. `decodePerEdgeFileWithSeq` below
+    # calls `decodeRecord`, which accumulates into its own row; overlapping
+    # the two regions would double-count the decode into both.
+    let readStart = getMonoTime()
     let raw = bytes(readFile(extendedPath(path)))
+    perEdgeContainerReadNanos += (getMonoTime() - readStart).inNanoseconds
     inc perEdgeContainerReads
     decoded = decodePerEdgeFileWithSeq(raw)
   except OSError, IOError, EnvelopeError:
@@ -2942,7 +3005,9 @@ proc readRecContainer(dirPath, fileName: string): RecContainer =
   if fileExists(extendedPath(witnessPath)):
     try:
       inc perEdgeSidecarReads
+      let sidecarStart = getMonoTime()
       let sidecar = decodeWitnesses(bytes(readFile(extendedPath(witnessPath))))
+      perEdgeSidecarReadNanos += (getMonoTime() - sidecarStart).inNanoseconds
       # The back-reference must name the record file we just read. If an
       # older binary rewrote the `.rec` (it cannot know about sidecars), the
       # sequence moved and this witness describes outputs that have since
@@ -2962,7 +3027,9 @@ proc readRecContainer(dirPath, fileName: string): RecContainer =
   if fileExists(extendedPath(detPath)):
     try:
       inc perEdgeSidecarReads
+      let detStart = getMonoTime()
       let det = decodeDeterminism(bytes(readFile(extendedPath(detPath))))
+      perEdgeSidecarReadNanos += (getMonoTime() - detStart).inNanoseconds
       if det.meta.declared and
           det.recordWriteSequence == decoded.writeSequence:
         for i in 0 ..< decoded.records.len:
