@@ -245,6 +245,14 @@ jobs:
             throw "HX-W-5 injection/transport gate failed with exit code $LASTEXITCODE"
           }
 
+      - name: Resolve Windows HCR patch source lines in WinDbg
+        shell: pwsh
+        run: |
+          python tests/windows/hx_w6_windbg_resolves_source_lines_inside_a_patched_windows_function.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "HX-W-6 debugger/PDB gate failed with exit code $LASTEXITCODE"
+          }
+
   test:
     name: Test
     # Self-hosted bare-metal Linux runner. Standard ubuntu-latest is
