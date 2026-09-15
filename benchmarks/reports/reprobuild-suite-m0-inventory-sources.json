@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1599,
+    "nimTestBinaries": 1601,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 578,
     "staticallyDetectedRuntimeCompilerFlowTests": 97,
-    "testEntries": 1610
+    "testEntries": 1612
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1058,7 +1058,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 734,
+      "integration": 736,
       "platform/destructive": 115,
       "pure unit": 578,
       "unclassified": 171
@@ -1197,9 +1197,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1599,
+    "nimTestBinaryCount": 1601,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1610
+    "testEntryCount": 1612
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -29849,6 +29849,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_tampered_uki_detected",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tampered_uki_detected.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_target_triple_drives_the_microarch_host_target",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -30230,6 +30248,24 @@
       "source": "tests/integration/t_tpm2_structure_vectors.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tpm_quote_verifies",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tpm_quote_verifies.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

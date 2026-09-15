@@ -12213,6 +12213,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_tampered_uki_detected.nim",
+    binary: "build/test-bin/t_tampered_uki_detected",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_target_triple_drives_the_microarch_host_target.nim",
     binary: "build/test-bin/t_target_triple_drives_the_microarch_host_target",
     defines: @[],
@@ -12404,6 +12413,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_tpm2_structure_vectors.nim",
     binary: "build/test-bin/t_tpm2_structure_vectors",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_tpm_quote_verifies.nim",
+    binary: "build/test-bin/t_tpm_quote_verifies",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

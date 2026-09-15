@@ -93,7 +93,7 @@ type
     nowMs*: int64
 
 const
-  BuiltInReaders*: array[1, string] = [MockReaderName]
+  BuiltInReaders*: array[2, string] = [MockReaderName, Tpm2ReaderName]
     ## The readers this build carries. A verdict whose evidence was read
     ## by anything else is caveated, because it rests on a claim the
     ## caller made rather than on code that shipped here.
@@ -480,6 +480,15 @@ proc verifyWithReading*(req: VerificationRequest;
 
   if inputs.tier == atMock:
     result.caveats.add MockCaveat
+  # The measured-boot reader establishes that a log explains a quote; it
+  # does not establish who signed the quote. A verdict that accepted on
+  # that basis without saying so would be read as more than it is, so the
+  # caveat is attached to the READER that has the limit rather than to
+  # the tier, and it is attached whether or not the verdict accepted —
+  # a rejection's reader is worth knowing about too.
+  if inputs.readerName == Tpm2ReaderName:
+    result.caveats.add "this verdict rests on a reading in which " &
+      NoSignatureCheckedNote
   if inputs.readerName notin BuiltInReaders:
     result.caveats.add "the backend-native evidence was read by " &
       inputs.readerName.escape() & ", which is not a reader this build " &
