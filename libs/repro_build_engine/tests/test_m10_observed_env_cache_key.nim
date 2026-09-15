@@ -329,20 +329,22 @@ suite "M10 the observed-environment record round-trips":
     check version == 6'u16
     check decodeActionResultRecord(encoded).envInputs.len == 0
 
-    # ... and the env-carrying record is at the SAME version, not the next
-    # one. This used to assert a PAIRING (env-free at N, env-carrying at N+1)
-    # because v4 appended the env section only when it was non-empty. Since
-    # v5 the count is always written, zero included, so the optional-section
-    # pairing no longer exists and asserting it would re-introduce a
-    # conditional the format deliberately dropped.
+    # Environment evidence needs the newer trust epoch: v6 writers could
+    # record an inherited value as absent. Env-free v6 records remain valid.
+    # The layout and strong-fingerprint payload have not changed.
     var withEnv = record
     withEnv.envInputs = @[EnvFingerprint(name: "X", present: true, value: "1")]
     withEnv.strongFingerprint = computeStrongFingerprint(
       withEnv.weakFingerprint, withEnv.inputs, withEnv.envInputs)
     let encodedEnv = encodeActionResultRecord(withEnv)
     let envVersion = uint16(encodedEnv[4]) or (uint16(encodedEnv[5]) shl 8)
-    check envVersion == 6'u16
+    check envVersion == 7'u16
     check decodeActionResultRecord(encodedEnv).envInputs.len == 1
+    var oldEnv = encodedEnv
+    oldEnv[4] = 6'u8
+    oldEnv[5] = 0'u8
+    expect EnvelopeError:
+      discard decodeActionResultRecord(oldEnv)
 
     # 3. THE REFUSAL, which is what makes the epoch a drain rather than a
     #    relabelling. A frame that is byte-identical to one this encoder

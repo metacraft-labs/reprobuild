@@ -6523,6 +6523,8 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
 proc preparedRunQuotaCommand(action: BuildAction;
                              config: BuildEngineConfig;
                              shellUmaskWrap = true): ReproCommandSpec
+proc preparedActionEnv(action: BuildAction;
+                       config: BuildEngineConfig): seq[string]
 # Forward-declared so `collectEvidence` can grade THE SET THAT GETS KEYED
 # rather than the set the monitor filled in — see `gradeKeyedInputSet`. The
 # definitions stay beside the other key-construction helpers further down;
@@ -7219,30 +7221,49 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
       continue
     result.addUnique(seen, path)
 
-proc actionEnvLookup*(action: BuildAction; name: string):
+proc lookupEnv(env: openArray[string]; name: string):
     tuple[present: bool, value: string] =
-  ## The value the ACTION would see for `name`, and whether it is set at all.
-  ##
-  ## Resolved against `action.env` -- the environment the engine composed for
-  ## this action -- and NOT against the daemon's own process environment,
-  ## which is a different set entirely. `envValue` above answers "" for both
-  ## unset and set-to-empty; the cache has to tell them apart, because a
-  ## program branching on "is this variable defined" sees the difference.
+  # Launch overlays are last-write-wins; unset and empty remain distinct.
   let prefix = name & "="
   when defined(windows):
-    # Case-insensitive, matching how Windows itself resolves a lookup.
     let wanted = prefix.toUpperAscii
-    for item in action.env:
+    for i in countdown(env.high, 0):
+      let item = env[i]
       if item.len >= wanted.len and item[0 ..< wanted.len].toUpperAscii == wanted:
         return (true, item.substr(wanted.len))
   else:
-    for item in action.env:
+    for i in countdown(env.high, 0):
+      let item = env[i]
       if item.startsWith(prefix):
         return (true, item.substr(prefix.len))
   (false, "")
 
-proc cacheEnvInputs*(action: BuildAction; evidence: PathSetEvidence):
-    seq[EnvFingerprint] =
+proc actionEnvLookup*(action: BuildAction; name: string):
+    tuple[present: bool, value: string] =
+  result = lookupEnv(action.env, name)
+  if not result.present and action.kind == bakProcess:
+    result = (existsEnv(name), getEnv(name))
+
+proc actionEnvResolver*(action: BuildAction;
+                        config: ptr BuildEngineConfig = nil): EnvResolver =
+  ## Snapshot the environment the launcher overlays, not just authored entries.
+  ## Only names actually observed by the action enter a strong fingerprint.
+  var env: seq[string]
+  if action.kind == bakProcess:
+    for name, value in envPairs():
+      env.add(name & "=" & value)
+    if config != nil:
+      env.add(preparedActionEnv(action, config[]))
+    else:
+      env.add(action.env)
+  else:
+    env = action.env
+  result = proc(name: string): tuple[present: bool, value: string]
+      {.gcsafe, raises: [].} =
+    lookupEnv(env, name)
+
+proc cacheEnvInputs*(action: BuildAction; evidence: PathSetEvidence;
+                     config: ptr BuildEngineConfig = nil): seq[EnvFingerprint] =
   ## The action-cache key's OBSERVED ENVIRONMENT set: each variable io-mon saw
   ## the action read, paired with the value it held at the time.
   ##
@@ -7259,32 +7280,16 @@ proc cacheEnvInputs*(action: BuildAction; evidence: PathSetEvidence):
   ## cache miss, indistinguishable from a correct invalidation.
   var names = evidence.monitorEnvReads
   names.sort(proc (a, b: string): int = cmp(envNameKey(a), envNameKey(b)))
+  var passthrough = initHashSet[string]()
+  for name in action.envPassthrough:
+    passthrough.incl(envNameKey(name))
+  let resolve = action.actionEnvResolver(config)
   for name in names:
-    let resolved = action.actionEnvLookup(name)
+    if envNameKey(name) in passthrough:
+      continue
+    let resolved = resolve(name)
     result.add(EnvFingerprint(name: name, present: resolved.present,
       value: resolved.value))
-
-proc actionEnvResolver*(action: BuildAction): EnvResolver =
-  ## `cacheEnvInputs`' counterpart for the LOOKUP side: how the action cache
-  ## re-reads a recorded variable when deciding hit or miss.
-  ##
-  ## A closure over a COPY of the action's env, because the resolver outlives
-  ## this call and the store calls it while walking records.
-  let env = action.env
-  result = proc(name: string): tuple[present: bool, value: string]
-      {.gcsafe, raises: [].} =
-    let prefix = name & "="
-    when defined(windows):
-      let wanted = prefix.toUpperAscii
-      for item in env:
-        if item.len >= wanted.len and
-            item[0 ..< wanted.len].toUpperAscii == wanted:
-          return (true, item.substr(wanted.len))
-    else:
-      for item in env:
-        if item.startsWith(prefix):
-          return (true, item.substr(prefix.len))
-    (false, "")
 
 proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
   ## S7 — the subset of the action's ``ignoredInputPrefixes`` that the
@@ -9451,6 +9456,20 @@ proc umaskWrappedArgv*(argv: openArray[string]): seq[string] =
   else:
     for entry in argv: result.add(entry)
 
+proc preparedActionEnv(action: BuildAction;
+                       config: BuildEngineConfig;
+                       auxPaths: ResolvedAuxPaths): seq[string] =
+  let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action, config))
+  let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
+  result = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
+  result = applyResolvedAuxPathsArgv(result, auxPaths)
+  result = applyExplicitRuntimeLibraryEnvOverrides(result, action.env)
+
+proc preparedActionEnv(action: BuildAction;
+                       config: BuildEngineConfig): seq[string] =
+  preparedActionEnv(action, config,
+    collectResolvedAuxPaths(action, config.toolIdentityResolver))
+
 proc preparedRunQuotaCommand(action: BuildAction;
                              config: BuildEngineConfig;
                              shellUmaskWrap = true): ReproCommandSpec =
@@ -9471,13 +9490,8 @@ proc preparedRunQuotaCommand(action: BuildAction;
       raiseEngine("SIP-safe monitored launch requires a non-SIP shell; " &
         "configure CT_SANDBOX_TOOLS_DIR or put a Nix/Homebrew sh on PATH " &
         "[" & nonSipShellSearchReport() & "]")
-  let mergedEnv = mergeActionEnvWithMsvc(launchChildEnv(action, config))
-  let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
-  var threadedEnv = prependPathDirsToArgvEnv(mergedEnv, toolBinDirs)
-  threadedEnv = applyResolvedAuxPathsArgv(threadedEnv, auxPaths)
-  threadedEnv = applyExplicitRuntimeLibraryEnvOverrides(threadedEnv,
-    action.env)
+  let threadedEnv = preparedActionEnv(action, config, auxPaths)
   let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs)
   let includePaths = partitionCompilerIncludePaths(auxPaths)
   let adjustedArgv = applyCompilerSystemIncludeArgs(nimAdjustedArgv,
@@ -12791,7 +12805,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # carries the scope so the scan can apply it where it already has
           # the record in hand. See `refusesRecordWithNoInputs`.
           refuseRecordWithNoInputs: action.refusesRecordWithNoInputs()))
-        hotEnvResolvers.add(action.actionEnvResolver())
+        hotEnvResolvers.add(action.actionEnvResolver(unsafeAddr config))
       let lookupStart = statStart()
       let navigatorStart = statStart()
       let scan = cache.scanHotIndexMetadataInputsUnchanged(hotProbes,
@@ -12856,7 +12870,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if action.unservableCacheRecordReason(hotRecord.get()).len > 0:
         return none(BuildRunResult)
       hotRecords.add(hotRecord.get())
-      hotRecordEnvResolvers.add(action.actionEnvResolver())
+      hotRecordEnvResolvers.add(action.actionEnvResolver(unsafeAddr config))
     let lookupStart = statStart()
     let inputScanStart = statStart()
     let inputsUnchanged =
@@ -13658,7 +13672,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             allowMetadataOnlyHit = config.rebuildMissingOutputsOnCacheHit and
               reusableInPlace,
             metadataCache = addr fileMetadataCache,
-            envResolver = action.actionEnvResolver(),
+            envResolver = action.actionEnvResolver(unsafeAddr config),
             outputRoot = action.cwd,
             retention = action.effectiveRetention,
             nowUnix = config.nowUnix,
@@ -13693,7 +13707,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                     config.rebuildMissingOutputsOnCacheHit and
                     reusableInPlace,
                   metadataCache = addr fileMetadataCache,
-                  envResolver = action.actionEnvResolver(),
+                  envResolver = action.actionEnvResolver(unsafeAddr config),
                   outputRoot = action.cwd,
                   retention = action.effectiveRetention,
                   nowUnix = config.nowUnix,
@@ -14030,7 +14044,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 action.outputs, action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
                 metadataCache = addr fileMetadataCache,
-                envInputs = action.cacheEnvInputs(evidence.evidence),
+                envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
                 # An elevated edge reaches this site instead of the
                 # monitored one, and it used to record every directory
                 # input with NO membership digest. That is not "less
@@ -14208,7 +14222,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 plan.action.outputs, plan.action.cwd,
                 storeOutputBlobs = storeOutputBlobs,
                 metadataCache = addr fileMetadataCache,
-                envInputs = plan.action.cacheEnvInputs(evidence.evidence),
+                envInputs = plan.action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
                 # Same omission as the elevated site above, reached by
                 # builtin edges and by anything whose plan is not a
                 # `bakProcess`. A builtin cannot be wrapped in the
@@ -14807,7 +14821,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             action.outputs, action.cwd,
             storeOutputBlobs = storeOutputBlobs,
             metadataCache = addr fileMetadataCache,
-            envInputs = action.cacheEnvInputs(evidence.evidence),
+            envInputs = action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
             enumeratedDirectories =
               action.cacheEnumeratedDirectories(evidence.evidence),
             determinism = entryDeterminismFor(config, action))

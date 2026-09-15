@@ -513,6 +513,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_inherited_environment_cache.nim",
+    binary: "build/test-bin/t_inherited_environment_cache",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_m4_publisher_path_stores_output_blobs.nim",
     binary: "build/test-bin/t_m4_publisher_path_stores_output_blobs",
     defines: @[],
