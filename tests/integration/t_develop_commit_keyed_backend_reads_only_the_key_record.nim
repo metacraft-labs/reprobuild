@@ -25,7 +25,7 @@
 ## has no row). That is measurable, was measured, and is why "DS-5 is green"
 ## is not evidence for this property. Case (2) below is the assertion that is.
 ##
-## Asserts, over ONE real git-checkout backend in three workspace shapes:
+## Asserts, over ONE real git-checkout backend in four workspace shapes:
 ##
 ##   1. THE KEY'S RECORD IS READ, and its body pins every sibling it names. A
 ##      partition written once under the root repo's trigger at the root's
@@ -49,6 +49,29 @@
 ##      by ANOTHER repo's trigger-keyed partition still resolves. This is the
 ##      shape a routed workspace normally has, and it is the reason (2) is a
 ##      key rule rather than a ban on reading partitions.
+##   4. THE NON-KEY READS ARE NOT PERFORMED AT ALL — the rule is a property of
+##      the READER, not only of the answer it publishes. Cases (1)–(3) pin WHAT
+##      the backend contributes; they are all satisfied by a reader that runs
+##      every non-key read and then throws the results away, which is exactly
+##      what the product did: `keyedOnly` was consulted only in the per-dep
+##      fold, while `populateLockedDeps` had already called
+##      `lockedShaFromStore` — `latestLockShas(project)` PLUS
+##      `latestLock(project, repo)`, two `git log --first-parent … --
+##      locks/<project>/…` history queries — once per routed repo, for a value
+##      the fold then discarded. On a real workspace that is a per-repo Git
+##      history walk over the whole manifests repo, serially, with no
+##      memoisation.
+##
+##      The assertion is structural rather than a wall-clock threshold: the
+##      backend's `locks/` history queries are COUNTED (a `git` shim on `PATH`
+##      logs every argv), and the count must NOT GROW when routed repos the key
+##      record does not name are added to the workspace. A per-repo read is
+##      ruled out by construction, and a constant overhead the composer
+##      legitimately pays is not mistaken for one. The repos added are
+##      deliberately NOT named by the key record: a fix that consults the key
+##      record but falls through to `lockedShaFromStore` whenever the key is
+##      silent is a per-repo read again for exactly those repos, and a fixture
+##      whose partition named everything would not see it.
 ##
 ## Falsifiability / mutation checks. Each was RUN against a rebuilt `repro`,
 ## and the case named is the one that actually caught it:
@@ -73,6 +96,13 @@
 ##   * *`isCommitAddressedLockStore` always false* — (1) and (2). (1) because
 ##     the key read stops finding the partition and the "holds no lock record"
 ##     notice appears where an exact hit was asserted.
+##   * *the populator ignores the key record and always calls
+##     `lockedShaFromStore`* (the shipped defect — `keyedOnly` consulted in the
+##     fold only) — (4) alone. Every other case in this file stays GREEN, which
+##     is the whole reason (4) exists.
+##   * *the populator consults the key record but FALLS THROUGH to
+##     `lockedShaFromStore` when the key record does not name the repo* — (4)
+##     alone, via the routed-but-unnamed repos the fixture adds.
 ##
 ## Mocks: NONE. Real git repositories on the real filesystem, a real manifest
 ## checkout, a real layer-5 config inside a real ``.git``, the real ``repro``
@@ -264,6 +294,51 @@ proc publish(f: Fixture; triggerRepo, triggerSha: string;
 proc list(f: Fixture): tuple[code: int; output: string] =
   run(f.repro & " develop --list --tool-provisioning=path", cwd = f.ws)
 
+proc installGitShim(scratch, realGit: string): tuple[dir, log: string] =
+  ## A REAL `git` on `PATH` that records its own argv and then `exec`s the real
+  ## one. Not a mock of any product code: the product resolves `git` from
+  ## `PATH` under `--tool-provisioning=path` and runs it as a subprocess, so
+  ## this observes the actual process boundary the cost lives at, with the
+  ## product's own resolution logic untouched.
+  ##
+  ## The log path is BAKED INTO the script rather than read from the
+  ## environment: the product scrubs `GIT_*` from the child environment
+  ## (`scrubbedGitRepositoryEnv`), so an env-carried log path is exactly the
+  ## kind of thing that could vanish and turn the count silently into zero —
+  ## which every "must not grow" assertion would then pass vacuously.
+  result.dir = scratch / "gitshim"
+  result.log = scratch / "git-argv.log"
+  createDir(result.dir)
+  writeFile(result.log, "")
+  let shim = result.dir / "git"
+  writeFile(shim,
+    "#!/bin/sh\n" &
+    "printf '%s\\n' \"$*\" >> " & quoteShell(result.log) & "\n" &
+    "exec " & quoteShell(realGit) & " \"$@\"\n")
+  discard tryRemoveFile(shim & ".tmp")
+  setFilePermissions(shim, {fpUserRead, fpUserWrite, fpUserExec,
+    fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+
+proc lockHistoryQueries(logPath: string): int =
+  ## How many `git log --first-parent … -- locks/mix/…` history queries ran —
+  ## the ONE shape `orderedLockCandidates` emits, and the read
+  ## `lockedShaFromStore` performs twice per repo.
+  for line in readFile(logPath).splitLines():
+    if "log --first-parent" in line and "locks/mix" in line:
+      inc result
+
+proc recordedGitInvocations(logPath: string): int =
+  ## Every argv the shim recorded, of any shape. This is what makes the
+  ## "must not grow" assertion below non-vacuous once the product is FIXED:
+  ## the fixed reader runs ZERO `locks/` history queries, so `large == small`
+  ## compares 0 to 0, and a shim that never got onto `PATH` — or that logged
+  ## somewhere nobody reads — would satisfy it just as well. A live shim
+  ## always records the composer's other git work (`rev-parse`, `cat-file`,
+  ## `show`), so a zero here means the SEAM broke, not that the product
+  ## stopped reading.
+  for line in readFile(logPath).splitLines():
+    if line.strip().len > 0: inc result
+
 proc rowFor(output, repo: string): string =
   for line in output.splitLines():
     if line.startsWith(repo & " "): return line
@@ -381,3 +456,83 @@ suite "W7: a commit-addressed backend reads the key's record and nothing else":
       check alphaShas.first in rowFor(res.output, "alpha")
       check betaShas.first in rowFor(res.output, "beta")
       check "there is no branch-tip fallback" notin res.output
+
+  test "t_develop_commit_keyed_backend_does_not_read_lock_history_per_repo":
+    # (4) — the rule is a property of the READER. See the file header.
+    if not haveTools or defined(windows):
+      # The argv-recording `git` on `PATH` is a POSIX `sh` shim; the property
+      # it observes is platform-independent, the seam is not.
+      skip()
+    else:
+      let originalPath = getEnv("PATH")
+
+      proc probe(extraSiblings: int):
+          tuple[reads, logged: int; code: int; output: string; libPin: string;
+                unnamed: seq[string]] =
+        ## Compose the develop set for a workspace of `2 + extraSiblings`
+        ## routed repos, of which the key record names exactly TWO, and return
+        ## how many `locks/` history queries the backend ran.
+        var repos: seq[(string, string)] = @[("ws-root", "."), ("lib", "lib")]
+        for i in 0 ..< extraSiblings:
+          repos.add(("extra" & $i, "extra" & $i))
+        var f = buildFixture(gitBin, repro, repos)
+        try:
+          putEnv("REPROBUILD_SYSTEM_CONFIG", f.scratch / "no-system.toml")
+          putEnv("REPROBUILD_USER_CONFIG", f.scratch / "no-user.toml")
+          let head = commitIn(gitBin, f.ws, "c1.txt")
+          let libShas = f.originShas["lib"]
+          # ONE partition at the key, naming the root and `lib` ONLY. Every
+          # `extra*` repo is ROUTED to this backend and named by NOTHING it
+          # holds — which is the case a "consult the key, else fall through"
+          # half-fix turns back into a per-repo read.
+          f.publish("ws-root", head,
+            [("ws-root", ".", head), ("lib", "lib", libShas.first)])
+          # The shim is installed AFTER the fixture is seeded, so only the
+          # product's own git calls are counted.
+          let shim = installGitShim(f.scratch, gitBin)
+          putEnv("PATH", shim.dir & PathSep & originalPath)
+          let res = f.list()
+          putEnv("PATH", originalPath)
+          result.reads = lockHistoryQueries(shim.log)
+          result.logged = recordedGitInvocations(shim.log)
+          result.code = res.code
+          result.output = res.output
+          result.libPin = libShas.first
+          for i in 0 ..< extraSiblings: result.unnamed.add("extra" & $i)
+        finally:
+          putEnv("PATH", originalPath)
+          delEnv("REPROBUILD_SYSTEM_CONFIG")
+          delEnv("REPROBUILD_USER_CONFIG")
+          removeDir(f.scratch)
+
+      let small = probe(1)
+      let large = probe(5)
+      checkpoint("small (3 routed repos): locks/ history queries=" &
+        $small.reads & " of " & $small.logged & " recorded git invocation(s)" &
+        "\n" & small.output)
+      checkpoint("large (7 routed repos): locks/ history queries=" &
+        $large.reads & " of " & $large.logged & " recorded git invocation(s)" &
+        "\n" & large.output)
+
+      # THE SEAM IS LIVE. Once the product is fixed both counts above are ZERO,
+      # so `large == small` below compares 0 to 0 and a shim that never reached
+      # `PATH` would satisfy it. The shim records the composer's OTHER git work
+      # either way, so this is the assertion that tells "read nothing" apart
+      # from "observed nothing".
+      check small.logged > 0
+      check large.logged > 0
+
+      # The composed set is unchanged by the extra repos — the correctness half,
+      # without which "no reads" could be satisfied by reading nothing ever.
+      check small.code == 0
+      check large.code == 0
+      check small.libPin in rowFor(small.output, "lib")
+      check large.libPin in rowFor(large.output, "lib")
+      for n in large.unnamed:
+        check (n & " (tier=team backend=git-checkout)") in large.output
+        check rowFor(large.output, n).len == 0
+
+      # THE PROPERTY. Four extra routed repos the key record does not name add
+      # ZERO lock-history queries: the key record is the backend's entire
+      # contribution, so there is nothing per-repo left to read.
+      check large.reads == small.reads

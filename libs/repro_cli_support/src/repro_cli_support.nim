@@ -19390,11 +19390,34 @@ type
     ## backend ``LockStore`` that holds their locked revisions, so a MIXED
     ## workspace routes different repo-sets (MO-4) to different sources, all
     ## feeding ONE object.
+    ##
+    ## ``commitKeyed`` / ``keyedOnly`` carry W7 (CLI/develop.md §"Which record,
+    ## for a commit-addressed backend") DOWN INTO the populator. They are the
+    ## caller's ALREADY-COMPLETED read of a commit-addressed backend's key
+    ## record: ``commitKeyed`` is that record's ``path -> revision`` body, and
+    ## ``keyedOnly`` says the record is the backend's ENTIRE contribution, so a
+    ## path the body does not name has no other answer in this store.
+    ##
+    ## Without them the populator had no way to know either fact and ran
+    ## ``lockedShaFromStore`` — ``latestLockShas(project)`` plus
+    ## ``latestLock(project, repo)``, two ``git log --first-parent`` history
+    ## queries over the record store — once per repo, for a value W7 then
+    ## required the caller to discard. That is the same rule stated twice: once
+    ## as a filter over results the reader had already paid for, and once (here)
+    ## as a reason not to read. Only the second spelling is free, and a rule
+    ## enforced in one place cannot disagree with itself.
+    ##
+    ## Both default to "absent" (empty table / ``false``), which is exactly the
+    ## pre-existing behaviour, so every source that does not set them — the
+    ## committed-lock kind, and every ``resolveWorkspaceLockedDeps`` caller —
+    ## is unaffected.
     kind*: LockSourceKind
     workspaceRoot*: string
     projectName*: string
     repos*: seq[ResolvedRepo]
     store*: LockStore
+    commitKeyed*: Table[string, string]
+    keyedOnly*: bool
 
   LockedIntegrityCause* = enum
     ## WHY a locked entry failed verification. "the content changed" and "the
@@ -33953,8 +33976,37 @@ proc lockedDepFromStoreRepo(source: LockSource; repo: ResolvedRepo): LockedDep =
   ## IS the integrity), tagged self-describingly. This is the SAME per-dep shape
   ## the committed-lock source produces from the lock's content, so the two
   ## populate one uniform model.
-  var rev = lockedShaFromStore(
-    source.store, source.projectName, repo.name, repo.path)
+  ##
+  ## W7 — when the caller supplied a commit-addressed backend's KEY RECORD
+  ## (``source.commitKeyed`` / ``source.keyedOnly``), that record decides this
+  ## repo and the per-repo history read is not performed at all. The three arms
+  ## are the same three ``composeDevelopLockSet``'s per-dep fold applies to the
+  ## populated result, moved to the only place that can act on them before the
+  ## cost is paid:
+  ##
+  ##   * the key record NAMES this path — it is the answer, and a project-wide
+  ##     or subtree-latest read could only disagree with it (that disagreement
+  ##     IS the branch-tip fallback the spec forbids);
+  ##   * ``keyedOnly`` and the key record is silent about this path — "a backend
+  ##     that yields no record for the resolved key contributes nothing", so
+  ##     there is no answer to go looking for;
+  ##   * otherwise — no key resolved, or not a commit-addressed backend — the
+  ##     ordinary project read, unchanged.
+  ##
+  ## The ``keyedOnly`` arm deliberately excludes an EVIDENCE-ONLY repo. Such a
+  ## repo joins the lock set to be NAMED (DS-4) rather than to be pinned, so it
+  ## is not subject to the "contributes nothing" outcome and must keep whatever
+  ## revision the ordinary read gives it: this proc's job for it is unchanged.
+  var rev = ""
+  var decided = false
+  if source.commitKeyed.len > 0 and source.commitKeyed.hasKey(repo.path):
+    rev = source.commitKeyed[repo.path]
+    decided = true
+  elif source.keyedOnly and not isEvidenceOnlyRepo(repo):
+    decided = true
+  if not decided:
+    rev = lockedShaFromStore(
+      source.store, source.projectName, repo.name, repo.path)
   if rev.len == 0: rev = repo.revision
   var integrity = ""
   if looksLikeSha(rev):
@@ -34854,9 +34906,14 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       else: lskManifestRepo
     var backendLd: LockedDependencies
     try:
+      # W7 — the key record travels WITH the source. The populator applies the
+      # same three arms the per-dep fold below applies, which is what stops it
+      # running ``lockedShaFromStore`` (two ``git log`` history queries over the
+      # record store) once per repo for an answer this rule then discards.
       backendLd = populateLockedDeps(LockSource(kind: srcKind,
         workspaceRoot: root, projectName: resolved.projectName,
-        repos: repos, store: store))
+        repos: repos, store: store,
+        commitKeyed: commitKeyed, keyedOnly: keyedOnly))
     except CatchableError as err:
       result.refusals.add(tierLbl & " lock backend (kind=" & kind &
         " location=" & location & ") failed while reading its records: " &
@@ -34913,6 +34970,16 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       # resolved, the key's record is the ONLY record that may answer. An empty
       # answer here is the spec's "contributes nothing", and the ``noRecord``
       # entry below is its "and says so".
+      #
+      # These three arms are also carried INTO the populator (``LockSource``'s
+      # ``commitKeyed`` / ``keyedOnly``), which is what stops the two keyed arms
+      # from running ``lockedShaFromStore`` — two ``git log`` history queries
+      # per repo — for an answer they discard. Kept here as well because this is
+      # where the answer is USED and where ``noRecord`` is reported: the
+      # populator cannot distinguish "the backend held no record" from "the
+      # backend held a record that is not an exact revision", and the
+      # manifest-advisory fallback above is exactly why that distinction must
+      # be made from the store's own answer rather than from ``d``.
       let backendRev =
         if commitKeyed.hasKey(d.path): commitKeyed[d.path]
         elif keyedOnly: ""

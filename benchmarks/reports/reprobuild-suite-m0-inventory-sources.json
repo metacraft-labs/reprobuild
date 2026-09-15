@@ -24325,7 +24325,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_develop_commit_keyed_backend_reads_only_the_key_record.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
