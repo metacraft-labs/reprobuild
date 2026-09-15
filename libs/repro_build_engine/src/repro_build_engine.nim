@@ -1058,12 +1058,38 @@ type
     ## how the two copies drift, and the direction that drift fails in is the
     ## cardinal one: accepting a narrowed capture as though it were complete.
     ##
-    ## DO NOT DEFAULT-CONSTRUCT THIS. The zero value has ``interest == {}``,
-    ## which ``observedInterestCovers`` accepts from ANY capture (a consumer
-    ## that needs no category cannot be missing one) — fail-open, and exactly
-    ## the wrong direction. Use ``FullMonitorEvidenceRequirement`` or build it
-    ## from the action and the config with ``monitorEvidenceRequirement``.
+    ## THE ZERO VALUE IS THE STRONGEST REQUIREMENT, on BOTH axes, and that is
+    ## enforced rather than asked for. It used to be asked for — this comment
+    ## read "DO NOT DEFAULT-CONSTRUCT THIS" — and a comment is not a check: Nim
+    ## hands the zero value out for a ``var``, a ``seq`` grow, a ``newSeq``, an
+    ## omitted named argument, or a field of any object that embeds one, and no
+    ## such site is obliged to have read this.
+    ##
+    ## The two axes disagreed at zero, in the same object:
+    ##
+    ##   ``evidenceScope``  zero is ``esFull`` — io-mon numbers it 0 on purpose
+    ##                      — so the zero value already DEMANDED EVERYTHING.
+    ##   ``interest``       zero is ``{}``, which ``observedInterestCovers``
+    ##                      reads as "this consumer needs no category, so
+    ##                      nothing can be missing" and therefore accepts from
+    ##                      ANY capture, however narrow. Fail-OPEN, and exactly
+    ##                      the wrong direction for a build cache: it makes an
+    ##                      action look MORE cacheable than its evidence
+    ##                      justifies.
+    ##
+    ## ``effectiveRequiredInterest`` closes that by giving the required side the
+    ## same "unset ⇒ everything" reading io-mon has always given the observed
+    ## side, so read this field THROUGH IT and never raw — see its doc comment
+    ## for why the asymmetry was io-mon's correct reading rather than io-mon's
+    ## bug, and why this normalisation costs reprobuild no expressiveness.
+    ##
+    ## ``FullMonitorEvidenceRequirement`` and ``monitorEvidenceRequirement``
+    ## remain the way to SAY what you require; they are now the explicit
+    ## spelling of what the zero value already means, rather than the only safe
+    ## values.
     interest*: set[EventCategory]
+      ## Read via ``effectiveRequiredInterest``, not directly: ``{}`` here means
+      ## "unset ⇒ every category", never "no category".
     evidenceScope*: EvidenceScope
 
   EvidenceCollection = object
@@ -5825,6 +5851,43 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
 const FullMonitorEvidenceRequirement* = MonitorEvidenceRequirement(
   interest: FullInterest, evidenceScope: esFull)
 
+func effectiveRequiredInterest*(required: MonitorEvidenceRequirement):
+                                set[EventCategory] =
+  ## The categories a capture must have observed before this build trusts it —
+  ## the ONE door onto ``MonitorEvidenceRequirement.interest``, so that no call
+  ## site has to rediscover what an empty required set means.
+  ##
+  ## IT MEANS "UNSET", NOT "NONE", and that makes the zero-valued requirement
+  ## the STRONGEST one instead of the weakest. Without this the zero value
+  ## reached ``observedInterestCovers`` as ``{}``, where ``{} <= anything`` is
+  ## vacuously true, and a requirement nobody filled in trusted a capture of
+  ## arbitrarily narrow scope — a capture that may have been told not to watch
+  ## the ``mrEnvRead``s that key the action or the ``mrIpcConnect``s whose loss
+  ## markers force ``mcIncomplete``. Both axes of the requirement now fail
+  ## closed at zero; ``evidenceScope`` always did, because io-mon numbers
+  ## ``esFull`` 0 for this very reason.
+  ##
+  ## THE MAPPING IS io-mon's OWN, not a second copy of it. ``normalizeInterest``
+  ## is the same function io-mon applies to a capture REQUEST on ingest, for the
+  ## same stated reason ("a zero-initialised request never silently disables all
+  ## observation"), and ``effectiveObservedInterest`` widens an absent stamp the
+  ## same way on the read side. Calling it here makes all three sides of the
+  ## DA-1j contract — what is asked for, what is stamped, what is demanded —
+  ## read ``{}`` identically, which is what stops the reading from drifting on
+  ## one side only.
+  ##
+  ## io-mon's CONTRACT IS DELIBERATELY NOT PATCHED. ``observedInterestCovers``
+  ## reading a required ``{}`` as "asked for nothing, so nothing can be missing"
+  ## is the correct answer to the question it is asked, and some other consumer
+  ## may genuinely want it. What is true of REPROBUILD specifically is that it
+  ## has no such consumer: ``monitorInterest`` returns ``FullInterest`` for
+  ## every action and says at length why no narrowing is safe at this
+  ## granularity, so an empty required set on this side is always the zero value
+  ## leaking and never an intent. Normalising here costs this engine no
+  ## expressiveness it uses, and changing io-mon would cost every other consumer
+  ## a reading it may rely on.
+  normalizeInterest(required.interest)
+
 proc monitorScopeRefusal*(dep: MonitorDepFile;
                           required: MonitorEvidenceRequirement): string =
   ## Is this capture's STATED scope enough for what this build requires? The
@@ -5860,7 +5923,13 @@ proc monitorScopeRefusal*(dep: MonitorDepFile;
       "` this build requires; its evidence is not trusted and the action-cache " &
       "publish is skipped this session (DA-1i, CLI/build.md " &
       "§Dependency Evidence Scope)"
-  if not dep.observedInterestCovers(required.interest):
+  # `effectiveRequiredInterest`, never `required.interest`: an empty set here is
+  # the zero value leaking, and handed to `observedInterestCovers` raw it would
+  # accept every capture. The refusal SENTENCE below reads through the same
+  # accessor so the categories an operator is told this build requires are the
+  # ones it actually required.
+  let requiredInterest = effectiveRequiredInterest(required)
+  if not dep.observedInterestCovers(requiredInterest):
     let stated =
       if dep.statesUnevaluableInterest:
         "declares event interest `" & dep.observedInterestTokens &
@@ -5869,7 +5938,7 @@ proc monitorScopeRefusal*(dep: MonitorDepFile;
         "was captured with event interest `" &
           interestToTokens(effectiveObservedInterest(dep)) & "`"
     return "monitor capture " & stated & ", which does not cover the `" &
-      interestToTokens(required.interest) &
+      interestToTokens(requiredInterest) &
       "` this build requires; its evidence is not trusted and the action-cache " &
       "publish is skipped this session (DA-1j)"
   ""

@@ -6629,8 +6629,8 @@
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/t_da1i_evidence_scope.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 24,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 30,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

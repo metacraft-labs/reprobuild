@@ -264,6 +264,154 @@ suite "DA-1j the event-interest consumer check":
     check dep.observedInterestStated == false
     check monitorScopeRefusal(dep, Full).len == 0
 
+suite "DA-1j the zero-valued requirement fails CLOSED":
+  ## THE TYPE, NOT THE CONVENTION. Every case above hands `monitorScopeRefusal`
+  ## a requirement someone deliberately built. This suite hands it the one
+  ## nobody builds on purpose — `MonitorEvidenceRequirement()`, the value Nim
+  ## hands out for a `var`, a `seq` grow, a `newSeq`, a missing named argument,
+  ## or a field of any object that embeds one — and requires it to behave like
+  ## the STRONGEST requirement rather than the weakest.
+  ##
+  ## WHY THIS IS THE CARDINAL DIRECTION, in the object's own terms. The two
+  ## axes disagreed at zero, in the same object:
+  ##
+  ##   evidenceScope   zero is `esFull` (io-mon numbers it 0 deliberately)
+  ##                   -> the zero value DEMANDS EVERYTHING. Fail-closed.
+  ##   interest        zero is `{}`, and `observedInterestCovers` reads a
+  ##                   required `{}` as "this consumer needs no category, so
+  ##                   nothing can be missing" -> ACCEPTS ANY capture, however
+  ##                   narrow. Fail-OPEN.
+  ##
+  ## So one field of the zero value refused a reads-only capture while the
+  ## other accepted a capture that had been told not to look at the env reads
+  ## keying the action or the IPC connects that downgrade it. A doc comment
+  ## saying "do not default-construct this" is not a check; the compiler hands
+  ## the zero value out on request and no call site is obliged to read the
+  ## comment. These cases assert the invariant instead of asking for it.
+  ##
+  ## THE ASYMMETRY IS NOT io-mon's BUG AND IS NOT PATCHED THERE. On the
+  ## OBSERVED side `{}` genuinely means "unset", which `normalizeInterest`
+  ## widens to `FullInterest` — a producer that names no category captures
+  ## everything. `observedInterestCovers`'s reading of a required `{}` is the
+  ## correct reading of a consumer that literally requires nothing. What was
+  ## missing is that reprobuild has no such consumer: `monitorInterest` returns
+  ## `FullInterest` for every action, and an empty required set here is always
+  ## the zero value leaking, never an intent. So reprobuild normalises its OWN
+  ## required side with io-mon's OWN mapping and io-mon's contract is untouched.
+  ##
+  ## PAIRED WITH THE ACCEPTANCE CASES, for the reason stated at the top of this
+  ## file: "the zero value refuses everything" would satisfy the refusal cases
+  ## perfectly and would break every caller that reaches the zero value by
+  ## accident — which is all of them. The matrix below pins the zero value to
+  ## exactly `FullInterest`: it refuses every proper narrowing (so it is not a
+  ## subset) and accepts a full capture (so it is not a superset or a refusal).
+
+  const Zero = MonitorEvidenceRequirement()
+
+  test "a default-constructed requirement refuses a narrowed capture":
+    ## The defect in one line. `interest=file,proc,lib` is the narrowing
+    ## `monitorInterest`'s own doc comment enumerates as unsafe: it drops
+    ## `nondet` (the `mrEnvRead`s that reach the strong fingerprint, and the
+    ## `mrNonDeterministic`s without which the entropy policy sees a false
+    ## clean) and `ipc` (the `mrIpcConnect`s whose synthetic loss markers force
+    ## `mcIncomplete`). A requirement nobody filled in must not trust it.
+    let dep = capture(";interest=file,proc,lib")
+    let refusal = monitorScopeRefusal(dep, Zero)
+    if refusal.len == 0:
+      echo "a DEFAULT-CONSTRUCTED MonitorEvidenceRequirement accepted a ",
+        "capture stamped `interest=file,proc,lib`. The zero value's ",
+        "`interest == {}` is read by `observedInterestCovers` as `{} <= ",
+        "anything`, which is vacuously true, so the value a caller gets for ",
+        "free trusts a capture of ARBITRARILY narrow scope. That is ",
+        "fail-open on the axis where the cost of being wrong is publishing a ",
+        "narrowed capture as complete evidence."
+    check refusal.len > 0
+    check refusal.contains("file,proc,lib")
+
+  test "a default-constructed requirement refuses an unnamable interest stamp":
+    ## `interest=gpu` degrades to an observed `{}` on the read side, and `{} <=
+    ## {}` is true as well — so the zero value accepted the unevaluable stamp
+    ## too, by a second route. Both routes are closed by the same normalisation
+    ## and both are graded, because a fix that only handled parseable
+    ## narrowings would leave the forward-in-time false-accept open.
+    let dep = capture(";interest=gpu")
+    check dep.statesUnevaluableInterest
+    check monitorScopeRefusal(dep, Zero).len > 0
+
+  test "a default-constructed requirement refuses EVERY proper narrowing":
+    ## THE CASE THAT PINS THE MAPPING. The two cases above are satisfied by any
+    ## normalisation whose result is not a subset of `{file,proc,lib}` — mapping
+    ## the zero value to `{ecIpc}` alone would pass both while still trusting a
+    ## capture that dropped the env reads. So drop each category in turn and
+    ## require a refusal for every one: that is only true if the zero value
+    ## demands a set no proper subset of `FullInterest` covers, i.e. exactly
+    ## `FullInterest` itself. Exhaustive over `EventCategory`, so a category
+    ## added to io-mon is covered here the day it is added.
+    for dropped in FullInterest:
+      let narrowed = FullInterest - {dropped}
+      let dep = capture(";interest=" & interestToTokens(narrowed))
+      let refusal = monitorScopeRefusal(dep, Zero)
+      if refusal.len == 0:
+        echo "a DEFAULT-CONSTRUCTED requirement accepted a capture that ",
+          "dropped `", interestToken(dropped), "` and kept `",
+          interestToTokens(narrowed), "`. The zero value must demand every ",
+          "category, not merely some of them."
+      check refusal.len > 0
+
+  test "a default-constructed requirement ACCEPTS a full-interest capture":
+    ## The anti-refuse-everything control. Normalising the zero value must make
+    ## it the STRONGEST requirement, not an unsatisfiable one: a capture that
+    ## really did observe every category answers it.
+    let dep = capture(FullInterestStamp)
+    let refusal = monitorScopeRefusal(dep, Zero)
+    if refusal.len > 0:
+      echo "a DEFAULT-CONSTRUCTED requirement REFUSED a full-interest ",
+        "capture: ", refusal,
+        "\n  Failing closed means demanding everything, not refusing ",
+        "everything. A zero value no capture can satisfy would stop every ",
+        "action in the build from publishing."
+    check refusal.len == 0
+
+  test "a default-constructed requirement accepts an ABSENT interest stamp":
+    ## The back-compat arm, which the normalisation must not disturb. A depfile
+    ## written before DA-1j states no interest; io-mon widens an ABSENT stamp to
+    ## full, and "silent" is a different fact from "narrowed".
+    let dep = capture("")
+    check dep.observedInterestStated == false
+    check monitorScopeRefusal(dep, Zero).len == 0
+
+  test "the zero value grades every capture exactly as the Full one does":
+    ## The invariant stated directly, over the whole fixture vocabulary this
+    ## file uses: a requirement nobody filled in is indistinguishable from
+    ## `FullMonitorEvidenceRequirement`. Stated as an EQUIVALENCE rather than as
+    ## a list of verdicts so that it cannot drift out of step with the cases
+    ## above — whatever `Full` decides, `Zero` decides.
+    ##
+    ## Note the evidence-scope stamps in the corpus: they are here to show the
+    ## OTHER axis is untouched. The zero value's `evidenceScope` is already
+    ## `esFull` and already fail-closed, and this fix must not have widened it.
+    const corpus = [
+      "",
+      FullInterestStamp,
+      FullInterestStamp & ";evidence=full",
+      FullInterestStamp & ";evidence=reads-only",
+      FullInterestStamp & ";evidence=writes-only",
+      ";interest=file,proc,lib",
+      ";interest=file",
+      ";interest=gpu",
+      ";interest=file,proc,lib,nondet",
+    ]
+    for stamp in corpus:
+      let dep = capture(stamp)
+      let zero = monitorScopeRefusal(dep, Zero)
+      let full = monitorScopeRefusal(dep, Full)
+      if (zero.len == 0) != (full.len == 0):
+        echo "stamp `", stamp, "` is graded differently by the zero value ",
+          "(refusal=`", zero, "`) and by FullMonitorEvidenceRequirement ",
+          "(refusal=`", full, "`). The value a caller gets for free must be ",
+          "the strongest requirement, not a weaker one."
+      check (zero.len == 0) == (full.len == 0)
+
 suite "DA-1i the refusal reaches the production fold":
 
   test "the fold downgrades a narrowed capture to Level 2, not Level 3":
