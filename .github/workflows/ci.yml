@@ -213,6 +213,14 @@ jobs:
             throw "HX-W-0 linked-image measurement gate failed with exit code $LASTEXITCODE"
           }
 
+      - name: Enforce Windows HCR quiescence-only publication
+        shell: pwsh
+        run: |
+          python tests/windows/hx_w1_windows_publication_refuses_or_quiesces_but_never_neither.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "HX-W-1 publication-serialization gate failed with exit code $LASTEXITCODE"
+          }
+
       - name: Exercise Windows HCR quiescence and resume mapping
         shell: pwsh
         run: |

@@ -21,6 +21,12 @@ The library now includes:
 - the HLX-M0 Linux x86_64 ELF direct-patch arm of the C agent
   (`c/repro_hcr_linux_x86_64.h`), support profile
   `linux-x86_64-elf-direct-hcr-v1`
+- the Windows x86_64 provider components: Tool Help quiescence and context
+  adjustment (`c/repro_hcr_windows_quiesce.h`), quiescence-only MSVC hotpatch
+  publication (`c/repro_hcr_windows_publish.h`), and compiler-owned unwind/CFG
+  admission (`c/repro_hcr_windows_unwind_cfg.h`)
+- the canonical Windows agent DLL, suspended-process launcher, named-pipe
+  transport, and debugger-aware direct-versus-DLL selection rule
 
 The executable-memory path is still a non-hardened macOS arm64 test profile; it
 does not validate the hardened-runtime MAP_JIT entitlement path.
