@@ -213,13 +213,22 @@ when defined(macosx) or defined(linux):
       cachedMonitorToolsReady = true
     cachedMonitorTools
 
-proc prepopulateCache(cacheRoot, workRoot, markerPath, outputPath: string) =
+proc prepopulateCache(cacheRoot, workRoot, markerPath, outputPath: string;
+                      cacheKey: ContentDigest) =
+  ## ``cacheKey`` is the EFFECTIVE weak fingerprint of the action this record
+  ## is meant to serve — ``BuildAction.weakFingerprint``, not the text the
+  ## caller handed to ``action(weakFingerprint = ...)``. The two stopped being
+  ## the same digest when ``keyedOnGoverningLock`` began mixing the governing
+  ## lock identity into every constructed action (Named-Lock-Files §7.2:
+  ## "A caller cannot opt out by supplying its own fingerprint"). Seeding under
+  ## the caller's text writes a record the engine never looks up, which reads
+  ## as "the cache refuses to serve" while the cache is in fact working.
   let inputPath = workRoot / "cache" / "input.txt"
   fixtureWrite(inputPath, "cache input\n")
   fixtureWrite(outputPath, "restored cached output\n")
   var cas = openStore(cacheRoot)
   var cache = openActionCache(cacheRoot / "action-cache")
-  discard cache.recordActionResult(cas, weak("cache-hit"), ffpTimestamp,
+  discard cache.recordActionResult(cas, cacheKey, ffpTimestamp,
     [inputPath], ["cache/out.txt"], workRoot)
   removeFile(outputPath)
   if fileExists(markerPath):
@@ -1115,17 +1124,32 @@ suite "integration_build_engine_api_ready_queue":
       check readFile(presentOutputPath) == "seed:cache input\n"
       var actionCache = openActionCache(cacheRoot / "action-cache")
       var cas = openStore(cacheRoot)
+      # Inspect the cache under the fingerprint the engine PUBLISHED under —
+      # `BuildAction.weakFingerprint`, which `action()` derives from the text
+      # below by mixing in the governing lock identity. Asking under the raw
+      # text reports `aclMissNoRecord` for a record that is present and sound.
+      let publishedKey = presentCacheAction.weakFingerprint
+      # The engine also records the ENVIRONMENT the action was observed to
+      # read, and revalidates it through the edge's own resolver. A lookup
+      # that omits the resolver reports every recorded variable as changed
+      # ("no environment resolver"), so this probe has to ask the same way
+      # `runBuild` does or it cannot see the record the engine just wrote.
+      let publishedEnv = presentCacheAction.actionEnvResolver()
       let seededLookup = actionCache.lookupActionResult(cas,
-        weak("cache-present-output"), ffpTimestamp)
+        publishedKey, ffpTimestamp, envResolver = publishedEnv,
+        outputRoot = workRoot)
       check seededLookup.status == aclHit
-      check actionCache.lookupActionResult(cas, weak("cache-present-output"),
-        ffpChecksum).status == aclMissNoRecord
+      check actionCache.lookupActionResult(cas, publishedKey,
+        ffpChecksum, envResolver = publishedEnv,
+        outputRoot = workRoot).status == aclMissNoRecord
       let casObject = cas.blobPath(seededLookup.record.outputs[0].blob.digest)
 
-      let presentContent = "local present output\n"
-      writeFile(presentOutputPath, presentContent)
-      let presentMtime = fromUnix(1_700_000_100)
-      setLastModificationTime(presentOutputPath, presentMtime)
+      # ARM 1 — the declared output is present AND still the one the record
+      # describes. Deleting the CAS object first is what makes this arm mean
+      # something: an in-place hit must not need the payload, so a lookup that
+      # reached for the CAS would fail here instead of returning a hit.
+      let presentContent = readFile(presentOutputPath)
+      let presentMtime = getFileInfo(presentOutputPath).lastWriteTime
       removeIfExists(casObject)
 
       let warmPresent = runOne(presentRestoreOnlyAction)
@@ -1135,6 +1159,27 @@ suite "integration_build_engine_api_ready_queue":
       check not fileExists(presentMarkerPath)
       check readFile(presentOutputPath) == presentContent
       check getFileInfo(presentOutputPath).lastWriteTime == presentMtime
+
+      # ARM 2 — the declared output is present but is NO LONGER the one the
+      # record describes. Incremental-Invalidation.md §"Minimum check set"
+      # step 3.3: "declared outputs must already exist and match the recorded
+      # output metadata", and "'Match the recorded output metadata' is a
+      # comparison, not an existence probe". The 2026-08-22 amendment
+      # §"Output change time is the tamper-evident field" added that sentence
+      # after a review "found that the in-place reuse paths validated outputs
+      # by existence only" — a locally rewritten artifact restored to its old
+      # mtime is precisely the case it names, and the kernel-maintained inode
+      # change time is what still catches it. So this must NOT be served.
+      let tamperedContent = "local present output\n"
+      writeFile(presentOutputPath, tamperedContent)
+      setLastModificationTime(presentOutputPath, presentMtime)
+
+      let warmTampered = runOne(presentRestoreOnlyAction)
+      check warmTampered.cacheDecision != cdHit
+      check warmTampered.launched
+      check fileExists(presentMarkerPath)
+      check readFile(presentOutputPath) != tamperedContent
+      removeIfExists(presentMarkerPath)
 
       fixtureWrite(inputPath, "changed cache input\n")
       let warmChangedInput = runOne(presentRestoreOnlyAction)
@@ -1169,21 +1214,24 @@ suite "integration_build_engine_api_ready_queue":
       fixtureWrite(inputPath, "checksum input\n")
       fixtureWrite(outputPath, "checksum cached output\n")
 
+      # Seed under the edge's OWN fingerprint, not under the text it was
+      # derived from — see `prepopulateCache` for why the two differ.
+      let checksumAction = action("explicit-checksum",
+        [app, "fixture-action", "cache-should-not-run", markerPath, outputPath],
+        cwd = workRoot, inputs = [inputPath], outputs = ["out/cached.txt"],
+        cacheable = true, weakFingerprint = weak("explicit-checksum"),
+        actionCachePolicy = ffpChecksum,
+        commandStatsId = "explicit-checksum",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+
       var cas = openStore(cacheRoot)
       var actionCache = openActionCache(cacheRoot / "action-cache")
-      discard actionCache.recordActionResult(cas, weak("explicit-checksum"),
+      discard actionCache.recordActionResult(cas,
+        checksumAction.weakFingerprint,
         ffpChecksum, [inputPath], ["out/cached.txt"], workRoot)
       removeFile(outputPath)
 
-      let buildResult = runBuild(graph([
-        action("explicit-checksum",
-          [app, "fixture-action", "cache-should-not-run", markerPath, outputPath],
-          cwd = workRoot, inputs = [inputPath], outputs = ["out/cached.txt"],
-          cacheable = true, weakFingerprint = weak("explicit-checksum"),
-          actionCachePolicy = ffpChecksum,
-          commandStatsId = "explicit-checksum",
-          governingLockIdentity = lockIdentityOutsideSolvedGraph())
-      ]), BuildEngineConfig(
+      let buildResult = runBuild(graph([checksumAction]), BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
         maxParallelism: 1'u32,
@@ -1197,7 +1245,8 @@ suite "integration_build_engine_api_ready_queue":
       check not buildResult.results[0].launched
       check not fileExists(markerPath)
       check readFile(outputPath) == "checksum cached output\n"
-      check actionCache.lookupActionResult(cas, weak("explicit-checksum"),
+      check actionCache.lookupActionResult(cas,
+        checksumAction.weakFingerprint,
         ffpHybrid).status == aclMissNoRecord
 
     test "normalized API schedules ready queue with RunQuota, cache, pools, failure, and evidence":
@@ -1231,7 +1280,18 @@ suite "integration_build_engine_api_ready_queue":
 
       let cacheMarker = workRoot / "cache" / "marker.txt"
       let cacheOutput = workRoot / "cache" / "out.txt"
-      prepopulateCache(cacheRoot, workRoot, cacheMarker, cacheOutput)
+      # Build the edge FIRST so the seeded record is keyed on the fingerprint
+      # the engine will actually look up. See `prepopulateCache`.
+      let cacheHitAction = action("cache-hit",
+        [app, "fixture-action", "cache-should-not-run",
+          cacheMarker, cacheOutput], cwd = workRoot,
+        inputs = [workRoot / "cache" / "input.txt"],
+        outputs = ["cache/out.txt"], cacheable = true,
+        weakFingerprint = weak("cache-hit"),
+        commandStatsId = "cache-hit",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+      prepopulateCache(cacheRoot, workRoot, cacheMarker, cacheOutput,
+        cacheHitAction.weakFingerprint)
 
       var actions: seq[BuildAction] = @[]
       actions.add action("diamond-left", [app, "fixture-action", "copy", "left", srcA,
@@ -1262,11 +1322,7 @@ suite "integration_build_engine_api_ready_queue":
           commandStatsId = "link-" & $i,
           governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
-      actions.add action("cache-hit", [app, "fixture-action", "cache-should-not-run",
-        cacheMarker, cacheOutput], cwd = workRoot, inputs = [workRoot / "cache" / "input.txt"],
-        outputs = ["cache/out.txt"], cacheable = true, weakFingerprint = weak("cache-hit"),
-        commandStatsId = "cache-hit",
-        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+      actions.add cacheHitAction
       actions.add action("cache-dependent", [app, "fixture-action", "copy", "cache-dep",
         cacheOutput, workRoot / "cache" / "dependent.txt"], cwd = workRoot,
         deps = ["cache-hit"], inputs = [cacheOutput], outputs = ["cache/dependent.txt"],
