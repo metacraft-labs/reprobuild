@@ -12399,13 +12399,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # Both are counts of work performed, so both are visible under ambient
     # load, which a wall-clock row on a shared machine is not.
     let ard = actionRecordDecodeStats()
-    stats.addCountedMetric("repro action record decode", ard.records, 0.0)
+    # The three rows carry a DURATION as well as a count. They used to render
+    # a literal `0.0` in the total column, which reads as "measured, and
+    # free" when what it meant was "never measured" -- and a milestone was
+    # budgeted at ~8 ms against a term that is actually ~0.4 ms partly
+    # because nothing here could contradict the estimate. The count stays
+    # the load-independent evidence for §5.5; the duration answers the
+    # separate question of what share of a consultation the term is.
+    let ardNanos = actionRecordDecodeNanoStats()
+    stats.addCountedMetric("repro action record decode", ard.records,
+      float(ardNanos.decode) / 1000.0)
     stats.addCountedMetric("repro action record decode bytes",
       int(ard.bytes), 0.0)
     stats.addCountedMetric("repro per-edge container read",
-      ard.containerReads, 0.0)
+      ard.containerReads, float(ardNanos.container) / 1000.0)
     stats.addCountedMetric("repro per-edge sidecar read",
-      ard.sidecarReads, 0.0)
+      ard.sidecarReads, float(ardNanos.sidecar) / 1000.0)
     # Action-Cache-Per-Edge-Store.md §11. The Tier-2 index is an ACCELERATOR
     # and fails silently by design, which is exactly why its health has to be
     # legible: a silently bypassed accelerator is indistinguishable from a

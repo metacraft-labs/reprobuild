@@ -10933,8 +10933,8 @@
       "owner": "libs/repro_local_store",
       "requiresReproBinary": false,
       "source": "libs/repro_local_store/tests/t_newest_alias_and_interned_records.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 15,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
