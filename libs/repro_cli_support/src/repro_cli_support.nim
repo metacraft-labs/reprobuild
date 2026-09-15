@@ -38762,6 +38762,64 @@ type EffectivePrePushHookKind = enum
   ephReproIncompatible
   ephThirdParty
 
+const
+  # The two anchors around the one machine-local value a managed hook body
+  # carries. Kept beside the reader rather than inside it so the coupling to
+  # `vcsManagedHookBody`'s escape-hatch block is visible from both ends.
+  ManagedHookAuthorEchoPrefix =
+    "      echo \"repro hooks:        REPROBUILD_REPRO="
+  ManagedHookAuthorEchoSuffix = " git push\" >&2"
+
+proc managedHookAuthorBin(body: string): string =
+  ## The `repro` path an installed managed hook advertises in its escape
+  ## hatch, or "" when the hook carries none.
+  for line in body.splitLines():
+    if line.startsWith(ManagedHookAuthorEchoPrefix) and
+        line.endsWith(ManagedHookAuthorEchoSuffix) and
+        line.len > ManagedHookAuthorEchoPrefix.len +
+          ManagedHookAuthorEchoSuffix.len:
+      return line[ManagedHookAuthorEchoPrefix.len ..
+        ^(ManagedHookAuthorEchoSuffix.len + 1)]
+  ""
+
+proc managedHookBodyIsCurrent(hookName, body: string): bool =
+  ## "Does this build generate the hook body in front of me?" — the question
+  ## `managedHookContract` was introduced to answer, asked here about the body
+  ## itself.
+  ##
+  ## A byte-exact comparison against `vcsManagedHookContent` cannot answer it,
+  ## because that rendering bakes in `getAppFilename()`: the path of the binary
+  ## doing the asking. Two builds that generate the identical hook then
+  ## disagree whenever they are INVOKED FROM DIFFERENT PATHS — a `repro` in the
+  ## build tree and the same `repro` in the Nix profile, or any in-process
+  ## caller of `publishWorkspaceLock` that is not itself the binary that ran
+  ## `hooks ensure`. The push is refused as "hooks are old or partially
+  ## upgraded", which is not true of them, and the refusal is unreachable by
+  ## any amount of upgrading because nothing about the hook is behind.
+  ##
+  ## That path is deliberately NOT part of the hook's identity. The contract
+  ## token digests `vcsManagedHookBody(hookName, "", "")` — empty token, empty
+  ## author — because, as `vcsManagedHookBody` puts it, "the contract must
+  ## identify the BODY, not the filesystem it was written from". The only
+  ## thing the author path feeds is an optional escape-hatch `echo`, which
+  ## changes no behaviour of the hook and gates itself on `[ -x ... ]`.
+  ##
+  ## So: accept the body when it is what this build renders for the author it
+  ## ADVERTISES. The re-render is byte-exact, so the extracted path only
+  ## proposes a candidate and cannot widen what is accepted — a body that
+  ## differs anywhere else still fails.
+  ##
+  ## Drift detection in `ensureVcsHookDetailed` stays byte-exact on purpose:
+  ## `ensure` SHOULD re-anchor a hook whose baked path no longer names a
+  ## binary that exists, which is what keeps the escape hatch runnable. This
+  ## is the authorization question, not the freshness one.
+  if body == vcsManagedHookContent(hookName):
+    return true
+  let author = managedHookAuthorBin(body)
+  if author.len == 0:
+    return false
+  body == vcsManagedHookBody(hookName, managedHookContract(hookName), author)
+
 proc effectivePrePushHook(identity: GitToolIdentity; repoRoot: string):
     tuple[kind: EffectivePrePushHookKind; hookPath: string;
           diagnostic: string] =
@@ -38784,7 +38842,7 @@ proc effectivePrePushHook(identity: GitToolIdentity; repoRoot: string):
   # require the complete canonical dispatcher/body pair and executable files;
   # a marker-only or partially refreshed bundle is incompatible, never v2.
   if dispatcher == vcsDispatcherContent("pre-push") and
-      managedContent == vcsManagedHookContent("pre-push") and
+      managedHookBodyIsCurrent("pre-push", managedContent) and
       executableFile(path) and executableFile(managed):
     return (ephReproV2, path, "")
   if recognizesRepro:
