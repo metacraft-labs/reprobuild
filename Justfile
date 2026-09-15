@@ -2036,6 +2036,15 @@ integration_hcr_linux_quiescence_timeout_aborts_without_writing:
         tests/e2e/hcr-linux-threads/t_integration_hcr_linux_quiescence_timeout_aborts_without_writing.nim \
         2>&1 | tee test-logs/integration_hcr_linux_quiescence_timeout_aborts_without_writing.log
 
+integration_hcr_linux_signal_blocked_thread_refused_by_name:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_signal_blocked_thread_refused_by_name \
+        --out:build/test-bin/integration_hcr_linux_signal_blocked_thread_refused_by_name \
+        tests/e2e/hcr-linux-threads/t_integration_hcr_linux_signal_blocked_thread_refused_by_name.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_signal_blocked_thread_refused_by_name.log
+
 integration_hcr_linux_on_stack_function_reported_skipped:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \

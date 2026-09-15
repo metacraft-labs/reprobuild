@@ -6957,6 +6957,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/hcr-linux-threads/t_integration_hcr_linux_signal_blocked_thread_refused_by_name.nim",
+    binary: "build/test-bin/t_integration_hcr_linux_signal_blocked_thread_refused_by_name",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim",
     binary: "build/test-bin/t_e2e_hcr_watch_inference",
     defines: @[],

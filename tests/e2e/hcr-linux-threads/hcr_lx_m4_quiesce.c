@@ -19,6 +19,32 @@
  *               text is BYTE-IDENTICAL afterwards, and the unresponsive tid is
  *               named.
  *
+ *               It runs with the SIGNAL-MASK CENSUS TURNED OFF, and that is not
+ *               a relaxation. The census (added for the Mesa finding — see the
+ *               quiescence header) runs AFTER the deadline and RENAMES the
+ *               refusal it finds a masked thread behind, so with it on this arm
+ *               would measure `quiescence-signal-blocked` — the only way user
+ *               space can manufacture an unparkable thread on demand is
+ *               `pthread_sigmask`, which is the very thing the census
+ *               recognises. The deadline path is still live in production for a
+ *               thread that is signal-deliverable and still does not park in
+ *               time (uninterruptible sleep, a mask taken after the signal was
+ *               delivered, a badly loaded host), and none of those can be
+ *               produced to order. So the lever keeps this arm pointed at the
+ *               path it was written for, and `signal-blocked` below covers the
+ *               new one.
+ *
+ *   signal-blocked  The SAME deaf thread, the SAME 120 ms deadline, census ON.
+ *               Proves the refusal is named `quiescence-signal-blocked` rather
+ *               than a timeout while the handshake is otherwise IDENTICAL —
+ *               four signals delivered, three threads parked and released, the
+ *               full deadline waited out — because the census explains a
+ *               refusal and must not replace the rendezvous. It also proves the
+ *               census actually READ the masks (rather than reporting "none
+ *               blocked" because it read nothing), that the tid, name and mask
+ *               it reports are the deaf thread's, and that the target's text is
+ *               byte-identical.
+ *
  *   onstack     A thread is parked INSIDE the function being patched, holding a
  *               live frame in the old body. Proves the frame is detected, the
  *               in-flight call still returns the OLD value, and the next call
@@ -115,6 +141,13 @@ extern int repro_hcr_lx_probe_quiesce_unresponsive_tid(int index);
 extern unsigned long long repro_hcr_lx_probe_quiesce_park_ns(void);
 extern unsigned long long repro_hcr_lx_probe_quiesce_release_ns(void);
 extern int repro_hcr_lx_probe_quiesce_signo(void);
+extern void repro_hcr_lx_probe_set_quiesce_sigmask_census(int value);
+extern int repro_hcr_lx_probe_quiesce_sigmask_read_ok(void);
+extern int repro_hcr_lx_probe_quiesce_sigmask_read_failed(void);
+extern int repro_hcr_lx_probe_quiesce_blocked_count(void);
+extern int repro_hcr_lx_probe_quiesce_blocked_tid(int index);
+extern unsigned long long repro_hcr_lx_probe_quiesce_blocked_mask(int index);
+extern const char *repro_hcr_lx_probe_quiesce_blocked_name(int index);
 extern int repro_hcr_lx_probe_quiesce_enumeration_rounds(void);
 extern unsigned long long repro_hcr_lx_probe_membarrier_issued_count(void);
 
@@ -341,6 +374,12 @@ int main(int argc, char **argv) {
   int onstack_next_value = -1;
   int publications = 0;
   int last_refusal = 0;
+  int sigmask_read_ok = 0;
+  int sigmask_read_failed = 0;
+  int blocked_count = 0;
+  int blocked_tid = -1;
+  unsigned long long blocked_mask = 0;
+  const char *blocked_name = "";
 
   if (body_a_len == 0 || body_b_len == 0) {
     fprintf(stderr, "HCR-M4-FATAL: patch bodies must be supplied as hex\n");
@@ -384,7 +423,8 @@ int main(int argc, char **argv) {
                      &g_threads[thread_count]);
       thread_count += 1;
     }
-  } else if (strcmp(mode, "timeout") == 0) {
+  } else if (strcmp(mode, "timeout") == 0 ||
+             strcmp(mode, "signal-blocked") == 0) {
     for (i = 0; i < 3; ++i) {
       g_threads[thread_count].kind = 0;
       pthread_create(&handles[thread_count], NULL, spin_main,
@@ -443,8 +483,12 @@ int main(int argc, char **argv) {
   window_before = read_window((unsigned long long)(uintptr_t)&hcr_lx_m4_q_victim_a);
 
   if (strcmp(mode, "timeout") == 0) {
-    /* §6.3: a bounded wait, then release, write nothing, and name the tid. */
-    uint64_t started = now_ns();
+    /* §6.3: a bounded wait, then release, write nothing, and name the tid.
+     * Census OFF so the refusal keeps its TIMEOUT name; the wait itself is the
+     * same either way, which is what the sibling arm below shows. */
+    uint64_t started;
+    repro_hcr_lx_probe_set_quiesce_sigmask_census(0);
+    started = now_ns();
     status = repro_hcr_lx_probe_quiesce_begin(120000000ull); /* 120 ms */
     park_ns_max = now_ns() - started;
     resumed_total = repro_hcr_lx_probe_quiesce_resumed_count();
@@ -458,6 +502,42 @@ int main(int argc, char **argv) {
     }
     /* No publication is attempted: the whole point is that the caller does not
      * reach the target's text. */
+    window_after =
+        read_window((unsigned long long)(uintptr_t)&hcr_lx_m4_q_victim_a);
+  } else if (strcmp(mode, "signal-blocked") == 0) {
+    /*
+     * The same deaf thread and the SAME 120 ms deadline as the `timeout` arm,
+     * with the census ON. Everything about the handshake is identical — four
+     * signals delivered, three threads parked and released, the wait bounded,
+     * nothing written; the ONE difference is what the refusal is called, which
+     * is the whole point. The census cannot run before the wait: `SigBlk` is
+     * transiently set by any thread executing a signal handler, including this
+     * file's own, and a pre-flight version of this check was measured losing
+     * 9 of 192 publications in
+     * `e2e_hcr_linux_concurrent_patch_no_torn_instruction`.
+     */
+    uint64_t started;
+    repro_hcr_lx_probe_set_quiesce_sigmask_census(1);
+    started = now_ns();
+    status = repro_hcr_lx_probe_quiesce_begin(120000000ull); /* 120 ms */
+    park_ns_max = now_ns() - started;
+    resumed_total = repro_hcr_lx_probe_quiesce_resumed_count();
+    unresponsive = repro_hcr_lx_probe_quiesce_unresponsive_count();
+    if (unresponsive > 0) {
+      unresponsive_tid = repro_hcr_lx_probe_quiesce_unresponsive_tid(0);
+    }
+    slot_count_last = repro_hcr_lx_probe_quiesce_slot_count();
+    for (i = 0; i < slot_count_last; ++i) {
+      if (repro_hcr_lx_probe_quiesce_slot_parked(i) == 1) parked_total += 1;
+    }
+    sigmask_read_ok = repro_hcr_lx_probe_quiesce_sigmask_read_ok();
+    sigmask_read_failed = repro_hcr_lx_probe_quiesce_sigmask_read_failed();
+    blocked_count = repro_hcr_lx_probe_quiesce_blocked_count();
+    if (blocked_count > 0) {
+      blocked_tid = repro_hcr_lx_probe_quiesce_blocked_tid(0);
+      blocked_mask = repro_hcr_lx_probe_quiesce_blocked_mask(0);
+      blocked_name = repro_hcr_lx_probe_quiesce_blocked_name(0);
+    }
     window_after =
         read_window((unsigned long long)(uintptr_t)&hcr_lx_m4_q_victim_a);
   } else if (strcmp(mode, "onstack") == 0) {
@@ -635,6 +715,12 @@ int main(int argc, char **argv) {
   printf("  \"unresponsiveCount\": %d,\n", unresponsive);
   printf("  \"unresponsiveTid\": %d,\n", unresponsive_tid);
   printf("  \"deafTid\": %d,\n", deaf_tid);
+  printf("  \"sigmaskReadOk\": %d,\n", sigmask_read_ok);
+  printf("  \"sigmaskReadFailed\": %d,\n", sigmask_read_failed);
+  printf("  \"blockedCount\": %d,\n", blocked_count);
+  printf("  \"blockedTid\": %d,\n", blocked_tid);
+  printf("  \"blockedMask\": \"%016llx\",\n", blocked_mask);
+  printf("  \"blockedName\": \"%s\",\n", blocked_name);
   printf("  \"windowBefore\": \"0x%llx\",\n", window_before);
   printf("  \"windowAfter\": \"0x%llx\",\n", window_after);
   printf("  \"onStackDetected\": %d,\n", onstack_detected);
