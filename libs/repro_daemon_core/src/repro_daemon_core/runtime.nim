@@ -114,7 +114,29 @@ type
                                   emit: UserDaemonBuildEmit;
                                   cancelCheck: UserDaemonBuildCancelCheck):
                                   int
-  UserDaemonBuildPrewarmer* = proc(request: UserDaemonBuildRequest)
+  UserDaemonParentPrewarmer* = proc(request: UserDaemonBuildRequest): string
+    ## Dependency-Attribution MAC-2 — warm the DAEMON PARENT's in-memory build
+    ## caches for an incoming request, so the worker about to be forked
+    ## inherits them copy-on-write.
+    ##
+    ## THE CONTRACT, which is narrower than the hook it replaces and is the
+    ## whole reason the hook is callable again:
+    ##
+    ##   1. READ-ONLY. It may decode files a previous build wrote. It may NOT
+    ##      run the build engine, compile or invoke a provider, spawn a
+    ##      process, or open the content store or the action cache. Those hold
+    ##      descriptors and advisory locks, which do not survive a fork
+    ##      safely: an inherited descriptor shares its file offset with every
+    ##      sibling, and an inherited lock can be released by any child.
+    ##   2. NO PROCESS-GLOBAL MUTATION. No `setCurrentDir`, no `putEnv`. The
+    ##      parent is shared; the disabled predecessor's restore-after
+    ##      cwd/environment mutation was safe only because it was supposed to
+    ##      run in a forked worker.
+    ##   3. DECISION-NEUTRAL. Anything it warms must be re-validated by its
+    ##      consumer before use, so a prewarmed daemon and a cold one reach
+    ##      the same cache decisions with the same reasons.
+    ##   4. BOUNDED AND NON-RAISING. It runs on the dispatch path; it returns
+    ##      a log line (or "") and must not throw.
   UserDaemonWatchEmit* = proc(kind: UserDaemonBuildEventKind;
                               message: string;
                               terminal: bool;
@@ -185,15 +207,47 @@ type
 const UserDaemonLockFileName = ".repro-daemon.lock"
 
 var userDaemonBuildExecutor: UserDaemonBuildExecutor
-var userDaemonBuildPrewarmer: UserDaemonBuildPrewarmer
+var userDaemonParentPrewarmer: UserDaemonParentPrewarmer
 var userDaemonWatchExecutor: UserDaemonWatchExecutor
 var userDaemonSubstituteExecutor: UserDaemonSubstituteExecutor
 
 proc setUserDaemonBuildExecutor*(executor: UserDaemonBuildExecutor) =
   userDaemonBuildExecutor = executor
 
-proc setUserDaemonBuildPrewarmer*(prewarmer: UserDaemonBuildPrewarmer) =
-  userDaemonBuildPrewarmer = prewarmer
+proc setUserDaemonParentPrewarmer*(prewarmer: UserDaemonParentPrewarmer) =
+  userDaemonParentPrewarmer = prewarmer
+
+var userDaemonWorkerNote: string
+
+proc setUserDaemonWorkerNote*(note: string) =
+  ## A line the build executor wants written to the DAEMON LOG once its
+  ## request finishes.
+  ##
+  ## This exists for one reason: MAC-2 needs a witness that a worker consumed
+  ## state it INHERITED from the parent, and that witness must not reach any
+  ## output stream. Byte-identical stdout is the correctness contract between a
+  ## prewarmed daemon and a cold one, so a marker printed there would be a
+  ## marker that breaks the thing it is meant to confirm. The daemon log is
+  ## outside that contract.
+  userDaemonWorkerNote = note
+
+proc takeUserDaemonWorkerNote*(): string =
+  result = userDaemonWorkerNote
+  userDaemonWorkerNote = ""
+
+proc runUserDaemonParentPrewarm*(request: UserDaemonBuildRequest): string =
+  ## Invoke the registered parent prewarmer, swallowing anything it raises.
+  ##
+  ## The swallow is the point, not laziness: this runs on the dispatch path of
+  ## a real build, and a prewarm is an optimisation. The failure mode of "warm
+  ## nothing" is exactly the behaviour of a daemon with no prewarmer at all,
+  ## which is what shipped before this milestone.
+  if userDaemonParentPrewarmer == nil:
+    return ""
+  try:
+    userDaemonParentPrewarmer(request)
+  except CatchableError:
+    ""
 
 proc setUserDaemonWatchExecutor*(executor: UserDaemonWatchExecutor) =
   userDaemonWatchExecutor = executor
@@ -1449,12 +1503,12 @@ proc runBuildRequestWorker(socket: IpcConn; config: UserDaemonConfig;
   proc cancelCheck(): bool =
     request.attached and request.cancelOnDisconnect and socket.clientDisconnected()
 
-  # Do not run the optional build prewarmer here. It duplicates the graph /
-  # provider-compile path that the executor below runs authoritatively, but it
-  # happens before any terminal build event and cannot observe
-  # cancel-on-disconnect while inside heavyweight project inspection. CMake
-  # generated projects made that duplication visible as detached workers
-  # consuming multi-GB RSS after the attached client was gone.
+  # Do not prewarm here. MAC-2's prewarm runs in the PARENT, before the fork
+  # that produced this worker (see `handleBuildRequest`), which is the only
+  # placement where warmed state reaches more than one build. Running it here
+  # would warm a process that is about to exit — and it would do so while an
+  # attached client waits for a terminal event, which is one of the three
+  # reasons the original prewarmer was disabled.
 
   try:
     # THE WORKER STAMPS ITSELF, IN THE SAME WRITE THAT LEAVES `accepted`.
@@ -1493,6 +1547,10 @@ proc runBuildRequestWorker(socket: IpcConn; config: UserDaemonConfig;
         "{\"fallbackAllowed\":true,\"deferredMilestone\":\"M4\"}")
       return
     let exitCode = userDaemonBuildExecutor(request, emit, cancelCheck)
+    let workerNote = takeUserDaemonWorkerNote()
+    if workerNote.len > 0:
+      logLine(config.logPath, "build worker " & workerNote & " session=" &
+        session.sessionId)
     let message =
       if exitCode == 0: "daemon-hosted build succeeded"
       else: "daemon-hosted build failed"
@@ -1572,11 +1630,47 @@ proc handleBuildRequest(socket: IpcConn; config: UserDaemonConfig;
         updateSessionState(config, session, "cancelled", 130,
           "daemon-hosted build cancelled before scheduling")
         return
-    # The worker runs the authoritative build entrypoint directly. Earlier
-    # versions ran a speculative graph/file-metadata prewarm before the real
-    # executor, but that duplicated provider inspection, happened before any
-    # terminal event, and could outlive an attached client disconnect.
+    # Dependency-Attribution MAC-2 — WARM THE PARENT, THEN FORK.
+    #
+    # This is deliberately on this side of the fork. The three in-memory build
+    # caches the warm pass fills (lowered graph, provider-graph snapshot, tool
+    # identity) are plain heap data, so the worker inherits them copy-on-write
+    # at zero copy cost; filled after the fork they would be private to a
+    # worker that is about to exit, and every later worker would start cold —
+    # which is precisely today's behaviour and the ~5 ms this milestone is
+    # about.
+    #
+    # WHY THIS IS NOT THE PREWARM THAT WAS DISABLED HERE. The earlier one ran
+    # the whole speculative graph/provider-compile path, and the reasons it was
+    # removed are addressed rather than sidestepped:
+    #
+    #   * DUPLICATION — the old pass re-ran provider inspection that the
+    #     executor then ran authoritatively. This pass has no compute path: it
+    #     decodes files that already exist and computes nothing the executor
+    #     will compute. Where it succeeds, the executor's read is REPLACED by a
+    #     memory hit, not repeated.
+    #   * BEFORE ANY TERMINAL EVENT — the old pass could sit in heavyweight
+    #     project inspection while an attached client waited. This one costs
+    #     what the forked worker would otherwise have spent on the same reads,
+    #     and in the steady state (the same project built again) it is a
+    #     handful of `stat` calls: `prewarmDaemonParentCaches` returns `reused`
+    #     without re-decoding when every warmed file is still stat-identical.
+    #     `bekAccepted` has already been written above either way.
+    #   * OUTLIVING A DISCONNECT — the old pass ran inside a DETACHED worker
+    #     that kept going after its client was gone, which on CMake-generated
+    #     projects meant multi-GB RSS with nobody listening. This runs in the
+    #     daemon parent, which is long-lived by design and holds ONE project's
+    #     warm set; there is no detached process to outlive anything, and the
+    #     inherited copy is shared with every worker instead of duplicated per
+    #     worker.
+    #
+    # Non-posix has no fork: `runBuildRequestWorker` runs in this process, so
+    # the caches warm naturally across requests and a prewarm would be pure
+    # cost.
     when defined(posix):
+      let prewarmLine = runUserDaemonParentPrewarm(workerRequest)
+      if prewarmLine.len > 0:
+        logLine(config.logPath, prewarmLine & " session=" & sessionId)
       spawnDetachedDaemonWorker(config, "build worker", sessionId, socket):
         runBuildRequestWorker(socket, config, workerRequest, session)
     else:

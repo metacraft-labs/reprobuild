@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1604,
+    "nimTestBinaries": 1606,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 578,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1615
+    "testEntries": 1617
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1058,10 +1058,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 739,
+      "integration": 740,
       "platform/destructive": 115,
       "pure unit": 578,
-      "unclassified": 171
+      "unclassified": 172
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1197,9 +1197,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1604,
+    "nimTestBinaryCount": 1606,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1615
+    "testEntryCount": 1617
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7697,6 +7697,26 @@
       "source": "libs/repro_cli_support/tests/t_daemon_carried_environment.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_parent_prewarm",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_core",
+        "repro_hash"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_daemon_parent_prewarm.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -23959,6 +23979,23 @@
       "source": "tests/integration/t_daemon_idle_does_not_reread_its_image.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_parent_prewarm_e2e",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_daemon_parent_prewarm_e2e.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
