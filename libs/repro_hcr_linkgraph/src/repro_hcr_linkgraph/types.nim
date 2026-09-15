@@ -2,6 +2,7 @@ type
   ObjectFormat* = enum
     ofMachO64Arm64
     ofElf64X86_64 ## HLX-M1: the Linux ELF analogue of the M26 Mach-O profile
+    ofCoffAmd64 ## HX-W-3: MSVC/COFF x86_64 relocatable objects
 
   SectionKind* = enum
     skCode

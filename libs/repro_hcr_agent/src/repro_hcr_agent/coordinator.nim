@@ -171,3 +171,30 @@ proc deliverPatchRequest*(client: var HcrCoordinatorClient;
     discard client.receiveAgentMessage(connection)
 
   client.delivery()
+
+when defined(windows):
+  proc receiveAgentMessage*(client: var HcrCoordinatorClient;
+                            connection: HcrAgentPipeConnection):
+                            HcrAgentMessage =
+    let (frame, message) = connection.readAgentMessageWithFrame()
+    client.observe(hmdAgentToCoordinator, frame, message)
+    message
+
+  proc sendCoordinatorMessage*(client: var HcrCoordinatorClient;
+                               connection: HcrAgentPipeConnection;
+                               message: HcrAgentMessage) =
+    let frame = connection.writeAgentMessage(message)
+    client.observe(hmdCoordinatorToAgent, frame, message)
+
+  proc deliverPatchRequest*(client: var HcrCoordinatorClient;
+                            connection: HcrAgentPipeConnection;
+                            request: HcrPatchRequest):
+                            HcrCoordinatorDelivery =
+    discard client.receiveAgentMessage(connection)
+    client.sendCoordinatorMessage(
+      connection, client.coordinatorHelloAckMessage())
+    client.sendCoordinatorMessage(
+      connection, client.coordinatorPatchRequestMessage(request))
+    while client.session.state == hssPatchRequested:
+      discard client.receiveAgentMessage(connection)
+    client.delivery()

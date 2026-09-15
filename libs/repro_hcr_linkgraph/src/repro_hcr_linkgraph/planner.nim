@@ -127,6 +127,64 @@ proc classifyRelocation*(graph: LinkGraph; relocation: RelocationFact;
     classifyElfRelocation(graph, relocation, snapshot, result)
     return
 
+  if graph.format == ofCoffAmd64:
+    if relocation.sectionId < 0 or relocation.sectionId >= graph.sections.len:
+      result.reason =
+        "COFF relocation names a section outside the object's section table"
+      return
+    if graph.sections[relocation.sectionId].kind != skCode:
+      result.reason = "HX-W-3 records " &
+        $graph.sections[relocation.sectionId].kind &
+        " relocation facts but does not apply them"
+      return
+    case relocation.typeCode
+    of 1'u8: # IMAGE_REL_AMD64_ADDR64
+      result.requiresTargetSymbol = true
+      var address = 0'u64
+      if not snapshot.targetAddress(relocation.targetName, address):
+        result.reason =
+          "target symbol is absent from the deterministic target snapshot"
+        return
+      result.targetAddress = address
+      if relocation.lengthBytes != 8:
+        result.reason = "IMAGE_REL_AMD64_ADDR64 must be an 8-byte field"
+        return
+      result.support = rsSupportedDirect
+      result.reason = "IMAGE_REL_AMD64_ADDR64 absolute address"
+    of 4'u8 .. 9'u8: # REL32 and REL32_1 ... REL32_5
+      result.requiresTargetSymbol = true
+      var address = 0'u64
+      if not snapshot.targetAddress(relocation.targetName, address):
+        result.reason =
+          "target symbol is absent from the deterministic target snapshot"
+        return
+      result.targetAddress = address
+      if not relocation.pcrel or relocation.lengthBytes != 4:
+        result.reason = relocation.kindName &
+          " must be a 4-byte PC-relative field"
+        return
+      result.support = rsSupportedDirect
+      result.reason = relocation.kindName &
+        " direct displacement with delta 4+" &
+        $(int(relocation.typeCode) - 4) &
+        "; the signed +-2 GiB reach check is deferred to patch placement"
+    of 2'u8:
+      result.reason = "IMAGE_REL_AMD64_ADDR32 is a 32-bit absolute VA and " &
+        "cannot represent a general x64 process address"
+    of 3'u8:
+      result.reason = "IMAGE_REL_AMD64_ADDR32NB is image-relative; it is " &
+        "recorded for .pdata/.xdata but requires the patch-region image-base " &
+        "layout owned by HX-W-4"
+    of 10'u8, 11'u8:
+      result.reason = relocation.kindName &
+        " is section metadata, not a code-address relocation"
+    of 0'u8:
+      result.reason = "IMAGE_REL_AMD64_ABSOLUTE carries no fixup"
+    else:
+      result.reason = relocation.kindName &
+        " is outside the HX-W-3 supported-direct subset"
+    return
+
   if relocation.scattered:
     result.reason = "scattered Mach-O relocations are rejected by M26"
     return
@@ -190,6 +248,7 @@ proc patchPlan*(oldGraph, newGraph: LinkGraph;
     case newGraph.format
     of ofMachO64Arm64: "m26-macho64-arm64-object-facts"
     of ofElf64X86_64: "hlx-m1-elf64-x86-64-object-facts"
+    of ofCoffAmd64: "hx-w3-coff-amd64-object-facts"
   result.targetSnapshotId = snapshot.snapshotId
   result.mutatesTarget = false
   result.targetMutationOperations = 0

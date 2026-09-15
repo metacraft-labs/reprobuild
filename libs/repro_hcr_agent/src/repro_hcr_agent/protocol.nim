@@ -76,6 +76,11 @@ const
     ## the session rejects a mismatch during negotiation. Must stay in sync
     ## with `REPRO_HCR_AGENT_SUPPORT_PROFILE_LINUX_X86_64` in
     ## `libs/repro_hcr_agent/c/repro_hcr_agent.h`.
+  HcrWindowsX86_64DirectSupportProfile* =
+    "windows-x86_64-msvc-pe-direct-hcr-v1"
+    ## HX-W-5: PE/COFF/MSVC direct-patch wire identity. The W5 agent
+    ## advertises this identity while withholding `direct-patch-injection`
+    ## until the W2-W4 mechanisms are connected behind its request path.
 
 proc defaultDirectSupportProfile*(): string =
   ## The profile a C agent compiled for this host advertises in its hello.
@@ -84,6 +89,8 @@ proc defaultDirectSupportProfile*(): string =
     HcrMacosArm64DirectSupportProfile
   elif defined(linux) and defined(amd64):
     HcrLinuxX86_64DirectSupportProfile
+  elif defined(windows) and defined(amd64):
+    HcrWindowsX86_64DirectSupportProfile
   else:
     ""
 

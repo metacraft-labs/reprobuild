@@ -205,6 +205,46 @@ jobs:
             throw "Windows expandArchive execution-boundary gate failed with exit code $LASTEXITCODE"
           }
 
+      - name: Measure Windows HCR linked-image publication geometry
+        shell: pwsh
+        run: |
+          python tests/windows/hx_w0_windows_publication_decision_is_recorded_and_measured.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "HX-W-0 linked-image measurement gate failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Exercise Windows HCR quiescence and resume mapping
+        shell: pwsh
+        run: |
+          python tests/windows/hx_w2_windows_quiescence_holds_and_the_hotpatch_resume_mapping_is_load_bearing.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "HX-W-2 quiescence gate failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Resolve Windows HCR COFF and PE/PDB symbols
+        shell: pwsh
+        run: |
+          python tests/windows/hx_w3_windows_symbol_resolution_and_coff_relocations.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "HX-W-3 symbol-resolution gate failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Register Windows HCR unwind tables and CFG targets
+        shell: pwsh
+        run: |
+          python tests/windows/hx_w4_windows_unwind_and_cfg_registration.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "HX-W-4 unwind/CFG gate failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Inject the Windows HCR agent and complete its handshake
+        shell: pwsh
+        run: |
+          python tests/windows/hx_w5_windows_agent_injection_and_transport.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "HX-W-5 injection/transport gate failed with exit code $LASTEXITCODE"
+          }
+
   test:
     name: Test
     # Self-hosted bare-metal Linux runner. Standard ubuntu-latest is

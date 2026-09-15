@@ -47,6 +47,10 @@ while read -r name path extra_flags; do
   case "${name}" in
     ""|\#*) continue ;;
   esac
+  # Git may check this file out with CRLF on Windows. Bash does not include
+  # carriage return in its default IFS, so strip it from the final field.
+  path="${path%$'\r'}"
+  extra_flags="${extra_flags%$'\r'}"
   # ``read -r name path extra_flags`` packs everything after ``path``
   # into ``extra_flags`` as a single whitespace-separated string;
   # word-split it here so each token becomes its own ``nim`` argv

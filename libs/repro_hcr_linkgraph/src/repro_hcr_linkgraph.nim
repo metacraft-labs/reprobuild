@@ -1,6 +1,9 @@
 import repro_hcr_linkgraph/types
 import repro_hcr_linkgraph/macho
 import repro_hcr_linkgraph/elf
+import repro_hcr_linkgraph/coff
+import repro_hcr_linkgraph/windows_symbols
+import repro_hcr_linkgraph/windows_unwind
 import repro_hcr_linkgraph/analysis
 import repro_hcr_linkgraph/planner
 import repro_hcr_linkgraph/json_view
@@ -9,6 +12,9 @@ import repro_hcr_linkgraph/cmake_metadata
 export types
 export macho
 export elf
+export coff
+export windows_symbols
+export windows_unwind
 export analysis
 export planner
 export json_view
