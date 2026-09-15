@@ -45,8 +45,11 @@ proc configureAction(report: JsonNode): JsonNode =
 when not defined(windows):
   suite "Autotools discarded build-tree inputs":
     test "warm configure reuse retains source, option and missing-output invalidation":
-      let repro = requireBinary(getEnv("REPRO_BIN",
-        RepoRoot / "build" / "bin" / "repro"), "reprobuild.apps.repro")
+      # ``reproBinaryPath`` is the one spelling: source-anchored and
+      # extension-correct. The bare join it replaces names the other
+      # platform's artefact wherever ``build/`` is shared between checkouts.
+      let repro = requireBinary(getEnv("REPRO_BIN", reproBinaryPath(RepoRoot)),
+        "reprobuild.apps.repro")
       let root = createTempDir("repro-autotools-configure-cache-", "")
       defer: removeDir(root)
       let project = root / "project"

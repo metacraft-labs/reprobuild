@@ -187,8 +187,11 @@ suite "an opt-in layer is something repro build can run, and its setting is in t
 
   test "t_optin_layer_runs_under_the_engine":
     let repoRoot = findRepoRoot()
-    let reproBin = repoRoot / "build" / "bin" / "repro"
-    check fileExists(reproBin)
+    # Presence is not the property: ``build/`` is gitignored and shared
+    # across platforms on some hosts, so a bare extension-less join can name
+    # an artefact this kernel cannot load while ``fileExists`` still says
+    # yes. This case EXECUTES the CLI, so it proves the machine format first.
+    let reproBin = requireHostBinary(reproBinaryPath(repoRoot))
     let evidencePath = repoRoot / EvidenceRel
     removeFile(evidencePath)
     check not fileExists(evidencePath)
