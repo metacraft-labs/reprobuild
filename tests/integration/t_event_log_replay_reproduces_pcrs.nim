@@ -253,10 +253,12 @@ suite "TCG event log replay reproduces the registers a TPM held":
     # the check that says the two constants describe ONE key — a name
     # pinned beside an unrelated key would otherwise never be noticed.
     #
-    # What it still does NOT do: verify the SIGNATURE. Nothing here
-    # proves this key is the key that signed the attest; only an ECDSA
-    # check does that, and this library performs none. `tpm2_checkquote`
-    # was run against these exact bytes out of band and accepted them.
+    # What THIS case still does NOT do: verify the SIGNATURE. Nothing
+    # here proves this key is the key that signed the attest; only an
+    # ECDSA check does that, and this library performs none.
+    # `t_pinned_attestation_signatures` performs one against these exact
+    # bytes — in a test, through an unrelated library, so the libraries
+    # under test still perform no public-key operation.
     let pem = agileQuoteAkPublic()
     check pem.startsWith("-----BEGIN PUBLIC KEY-----")
     check pem.strip(leading = false).endsWith("-----END PUBLIC KEY-----")

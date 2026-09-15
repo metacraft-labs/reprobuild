@@ -4,9 +4,18 @@
 #
 # Assembles a unified kernel image, boots it in a transient QEMU guest
 # through TPM-enabled UEFI firmware with a software TPM attached, has the
-# guest quote its own registers, and brings the three artifacts home:
-# the attestation structure, its signature, and the event log the
-# firmware wrote.
+# guest quote its own registers, and brings the evidence home: the
+# attestation structure, its signature, the event log the firmware wrote,
+# AND THE ATTESTATION KEY'S PUBLIC PART.
+#
+# The last of those is not decoration. The key is created inside the
+# guest and dies with it, and one signature does not determine one key --
+# recovery over a single (attest, signature) pair yields several
+# candidates that all verify, and the attest names only the key's
+# QUALIFIED name, whose parent component is never recorded here. A
+# signature pinned without its key can therefore never be checked by
+# anyone. Three captures were pinned that way before this was noticed.
+# See the README beside this script.
 #
 #   take-attested-boot-evidence.sh <workdir> [<kernel command line>]
 #

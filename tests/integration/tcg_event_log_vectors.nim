@@ -125,14 +125,15 @@
 ##     one, which is why the gate asserts the inequality rather than
 ##     leaving it to be rediscovered.
 ##
-##     What no gate here does is verify the SIGNATURE: nothing proves
-##     from inside this repository that this key is the key that signed
-##     the attest, because this library performs no ECDSA check.
-##     ``tpm2_checkquote`` was run against these exact bytes out of band
-##     and accepted them. The TPM2 codec's own quote vectors pin
-##     qualified NAMES but no public keys, so a later reader cannot
-##     re-run the tool against those pinned bytes. Against these they
-##     can.
+##     The SIGNATURE is verified too, and no longer only out of band:
+##     ``t_pinned_attestation_signatures`` checks this ``TPMT_SIGNATURE``
+##     against this key with an ECDSA-P256 verifier, and reddens under a
+##     one-byte change to the key, the attest or the signature. That is
+##     a *test* doing it — ``repro_attest`` and ``repro_attest_verify``
+##     still perform no public-key operation of any kind, so nothing a
+##     verdict rests on has changed. The TPM2 codec's own quote vectors
+##     pin qualified NAMES but no public keys, so a later reader cannot
+##     re-check those pinned bytes. These they can.
 ##   * **``qualifyingData``** — ``AgileQuoteQualifyingHex`` is 64 bytes
 ##     drawn from the HOST's ``/dev/urandom`` at capture time and passed
 ##     to the guest on the kernel command line. Neither the TPM, the

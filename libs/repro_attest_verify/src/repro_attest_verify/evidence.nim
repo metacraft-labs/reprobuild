@@ -60,9 +60,14 @@
 ## the bank the manifest speaks, rather than reading a value out of the
 ## log that nothing signed.
 ##
-## **NO SIGNATURE IS VERIFIED.** Nothing in this build performs the
-## public-key operation that would establish who produced the attestation
-## structure, and nothing here pins an attestation key. What the reader
+## **NO SIGNATURE IS VERIFIED.** This library performs no public-key
+## operation of any kind, so nothing on the verification path establishes
+## who produced the attestation structure, and no attestation key ever
+## reaches a verifier: there is no field to carry one and no flag that
+## would fetch one. (A *test* checks the signature of the one pinned boot
+## whose key was captured, out of band, through an unrelated library —
+## which says something about that fixture and nothing whatever about
+## what a verdict rests on.) What the reader
 ## establishes is that the three artifacts are internally consistent and
 ## that the log describes the boot the structure describes — which is
 ## exactly as much as a verifier can say when it has not checked a
@@ -150,9 +155,9 @@ const
     ## reads are one declaration.
 
   NoSignatureCheckedNote* =
-    "no signature was checked: this build performs no public-key " &
-    "operation on an attestation structure and pins no attestation key, " &
-    "so nothing here establishes WHO produced this evidence"
+    "no signature was checked: this verifier performs no public-key " &
+    "operation on an attestation structure and is given no attestation " &
+    "key, so nothing here establishes WHO produced this evidence"
     ## Carried into the finding that reads measured-boot evidence, and
     ## into a caveat on any verdict that rests on it. A limit a verdict
     ## does not state is a limit its reader does not know about.

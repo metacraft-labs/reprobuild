@@ -1,9 +1,10 @@
-## Two attested boots, pinned: one honest, one whose kernel command line
-## differs by a single character.
+## Four attested boots, pinned: one honest, one whose kernel command
+## line differs by a single character, one that measured no image at
+## all, and one whose ATTESTATION KEY was kept with it.
 ##
 ## ## Where these came from
 ##
-## Two transient QEMU guests, each booted from a unified kernel image
+## Transient QEMU guests, each booted from a unified kernel image
 ## through TPM-enabled UEFI firmware with a software TPM 2.0 attached.
 ## Nothing in this repository produced a byte of either attestation
 ## structure, either signature, or either event log:
@@ -16,15 +17,15 @@
 ##     guest's own TPM, in that same boot, seconds after the firmware
 ##     finished extending it — each structure's own clock field reads
 ##     between 23.6 and 24.4 seconds of TPM uptime — over an attestation
-##     key created in that guest, and the three keys are three different
-##     ones, which is what a single structure edited three ways could not
+##     key created in that guest, and the keys are all different ones,
+##     which is what a single structure edited several ways could not
 ##     be;
-##   * the **64 bytes both bind** were derived on the host from the nonce
-##     below, by the binding discipline, BEFORE either guest booted, and
-##     handed in over a channel outside the measurement — so a guest
+##   * the **64 bytes they all bind** were derived on the host from the
+##     nonce below, by the binding discipline, BEFORE any guest booted,
+##     and handed in over a channel outside the measurement — so a guest
 ##     could neither choose them nor derive them from anything measured.
 ##
-## Both images were built by the product's own assembler from the pinned
+## Every image was built by the product's own assembler from the pinned
 ## stub, and each ``…UkiPcr11`` was computed from that image's bytes
 ## before its guest booted.
 ##
@@ -51,11 +52,34 @@
 ##   3. The quote covers register 11, so (2) is a statement about
 ##      something the TPM signed rather than about a number in a file.
 ##
+## ## Which of these signatures can be checked, and which cannot
+##
+## A signature can only be checked against a public key, and for three
+## of the four boots below **no public key exists to check it against**.
+## Each guest created its own attestation key, signed once with it, and
+## was destroyed; the key's public part was not kept. Recovering it from
+## one signature is not possible: recovery over one ``(attest,
+## signature)`` pair yields SEVERAL candidate keys, every one of which
+## verifies that signature, and the attestation structure names the
+## key's *qualified* name — a digest over the parent's qualified name
+## and the key's own — whose parent component was never recorded, so no
+## candidate can be confirmed or excluded.
+##
+## That is measured rather than argued: ``…RecoveredPointsHex`` pins the
+## candidates for each of those three boots, and a gate requires every
+## one of them to verify. For the fourth boot the key WAS kept, and a
+## gate verifies its signature under it.
+##
+## ``PinnedBootEvidenceSet`` enumerates all four, so a boot pinned
+## without a key has to say so in a field a gate reads.
+##
 ## ## What these bytes do NOT establish
 ##
-## No signature is verified anywhere in this build, so "the TPM produced
-## this" rests on the provenance recorded here and not on a public-key
-## operation. Each TPM is a software implementation, not a discrete chip.
+## **No signature is verified by the product.** Neither ``repro_attest``
+## nor ``repro_attest_verify`` performs a public-key operation; the
+## checking described above is done by a test, out of band of the
+## libraries under test, and it changes nothing about what a verdict
+## rests on. Each TPM is a software implementation, not a discrete chip.
 ## Secure Boot is compiled into the firmware with no keys enrolled, so
 ## the signature-database events are present and empty.
 ##
@@ -996,3 +1020,479 @@ const
     ## What register 11 holds when nothing measured an image.
   NoImageBootEventLogBytes* = 6882
   NoImageBootEventLogEntries* = 32
+
+  # -- the boot whose ATTESTATION KEY was kept with it --------------
+  #
+  # A fourth guest, taken by the same harness on the same host, booting
+  # the same image inputs as the honest boot above. What is different
+  # is not the boot: it is that this guest's ATTESTATION PUBLIC KEY was
+  # kept with its evidence, so this is the one pinned boot whose
+  # signature anybody can check.
+  #
+  # Three artifacts describe that key, pinned together because each is
+  # checkable against the next:
+  #
+  #   * ``KeyedBootAkPublicAreaHex`` is the ``TPM2B_PUBLIC`` the TPM
+  #     itself returned (``tpm2_readpublic -f tss``): a template and
+  #     the public point;
+  #   * ``KeyedBootAkNameHex`` is the ``TPM2B_NAME`` body
+  #     ``tpm2_createak -n`` wrote, which by the TPM's own naming rule
+  #     is ``nameAlg`` followed by ``H_nameAlg(TPMT_PUBLIC)`` over
+  #     exactly those bytes;
+  #   * ``KeyedBootAkPointHex`` is the 65-byte uncompressed point
+  #     (``0x04``, X, Y) out of the PEM ``SubjectPublicKeyInfo`` the
+  #     same guest wrote, which is the form an ECDSA verifier consumes.
+  #
+  # A typo in any one of the three is caught by the other two: the name
+  # is a digest of the public area, the public area carries the point,
+  # and the point is what the signature verifies under.
+  KeyedBootAttestHex* =
+    "ff54434780180022000b6b628631d789959618557b251aa624021613de07f9f8" &
+    "e263be8bdde860008c03004054e3704c5cd45fac769563656dedfc4e2c278c78" &
+    "f1ef2c0e08a165374dee291d9ae82ffd0977c68f52136c03bc303df373ade496" &
+    "98d359bbbc49bbfa30c4678a00000000000066fe000000010000000101202401" &
+    "250012000000000001000b03ff08000020cc6b2a1225b315215df0c7fdfac6c4" &
+    "2671c04caa030b4ef3c8a75b2a5364e49e"
+  KeyedBootSignatureHex* =
+    "0018000b00208852f7a7b0b482255cedc9292cfa58bc9fed2c17e0cdf6532764" &
+    "8e79ba0142db0020ebfa4d89f2291c7d3ea2fbac8350f239600c5e7c0b442a39" &
+    "ab40dcc2d039b8d5"
+  KeyedBootAkPublicAreaHex* =
+    "00580023000b00050072000000100018000b00030010002086a66d9ed81376d1" &
+    "653ac8542a7d98dca5b4f60ddbc728b9b57f4a8e45d0d04300200173f8d7f24d" &
+    "82c06c1158abf6fe4484531cff787a3b8dadc890ba02e1adadf6"
+  KeyedBootAkNameHex* =
+    "000b618b72778a233eab3a3c0c872ac89872ef88d2b07746150b39b3123c3b94" &
+    "f71b"
+  KeyedBootAkPointHex* =
+    "0486a66d9ed81376d1653ac8542a7d98dca5b4f60ddbc728b9b57f4a8e45d0d0" &
+    "430173f8d7f24d82c06c1158abf6fe4484531cff787a3b8dadc890ba02e1adad" &
+    "f6"
+  KeyedBootEventLogHex* =
+    "000000000300000000000000000000000000000000000000000000002d000000" &
+    "53706563204944204576656e7430330000000000000200020400000004001400" &
+    "0b0020000c0030000d0040000000000000080000000400000004001489f923c4" &
+    "dca729178b3e3233458550d8dddf290b0096a296d224f285c67bee93c30f8a30" &
+    "9157f0daa35dc5b87e410b78630a09cfc70c001dd6f7b457ad880d840d41c961" &
+    "283bab688e94e4b59359ea45686581e90feccea3c624b1226113f824f315eb60" &
+    "ae0a7c0d005ea71dc6d0b4f57bf39aadd07c208c35f06cd2bac5fde210397f70" &
+    "de11d439c62ec1cdf3183758865fd387fcea0bada2f6c37a4a17851dd1d78fef" &
+    "e6f204ee540200000000000000000008000080040000000400fc6bb033ff4800" &
+    "14fdfe5283c5b39b9bc44087e90b00c95e244fb178e687e7374f371253eed61f" &
+    "f2c12e10f055cdaf5c14daff46bb150c00abd5ffc62d3b7946ab5e467891f435" &
+    "9e3f3bac88e04a89371d9206274931f452906102ec62e23c571f1613c7b56032" &
+    "5b0d00200a88f7e9c52391df4b157c839a216c34005591957e7bbc951e386bb4" &
+    "45dd2dd016479a782c57746b8d70b0d12e10ac864ac7020a0dc60a9037fad3f4" &
+    "b6729710000000000082000000000000000d0000000000000000000800008004" &
+    "00000004008922ba670a59a06104bc461da783a59a27daefd20b00b2147e98d1" &
+    "32bc6af9f9cd5c276ea4c7f7154c193fca6ff83320d52078dfb57c0c00880d76" &
+    "53df88527acc80ed1826952c13140e9884db5d4712cc67c43d250df8cd1692c1" &
+    "b88d179a69774a707dcac2a76b0d00a527af5e407caa27d59bcf937e909819f8" &
+    "4612c739d25dd92bfc6e38448f431e3a5295b2f6c87ab3bdf522d723314bdc6b" &
+    "159b5ce55dd2b58949c8bf4536a4651000000000009000000000000000e80000" &
+    "000000070000000100008004000000040057cd4dc19442475aa82743484f3b1c" &
+    "aa88e142b80b00115aa827dbccfb44d216ad9ecfda56bdea620b860a94bed5b7" &
+    "a27bba1c4d02d80c00cfa4e2c606f572627bf06d5669cc2ab1128358d27b45bc" &
+    "63ee9ea56ec109cfafb7194006f847a6a74b5eaed6b73332ec0d00d64901b6e1" &
+    "018f31046cbe3a09c36b1e5f2226fc1ddee9b893176d439a62fca8acd1c2b91a" &
+    "e25e99086087d72481ea9e05caa76e1777c0af75ad7e6ab82ce2253500000061" &
+    "dfe48bca93d211aa0d00e098032b8c0a00000000000000010000000000000053" &
+    "006500630075007200650042006f006f00740000070000000100008004000000" &
+    "04009b1387306ebb7ff8e795e7be77563666bbf4516e0b00dea7b80ab53a3daa" &
+    "a24d5cc46c64e1fa9ffd03739f90aadbd8c0867c4a5b48900c006f2e3cbc14f9" &
+    "def86980f5f66fd85e99d63e69a73014ed8a5633ce56eca5b64b692108c56110" &
+    "e22acadcef58c3250f1b0d00a102c0fdb43102c5546fb04758a70acc5f5e7985" &
+    "97d62bd2376cdeab37dddfb3b0ca67febc8c4e6069800449baebf9e0bbe7f063" &
+    "a7304a45652392f8c8bc7d172400000061dfe48bca93d211aa0d00e098032b8c" &
+    "0200000000000000000000000000000050004b00070000000100008004000000" &
+    "04009afa86c507419b8570c62167cb9486d9fc8097580b00e670e121fcebd473" &
+    "b8bc41bb801301fc1d9afa33904f06f7149b74f12c47a68f0c00d607c0efb41c" &
+    "0d757d69bca0615c3a9ac0b1db06c557d992e906c6b7dee40e0e031640c7bfd7" &
+    "bcd35844ef9edeadc6f90d0090bd5dac05d43171be2f1a705d7fc1937a566aab" &
+    "71031baab64ae6106160a148a8110d3326f5e22854a1823ad2131dea35560266" &
+    "01f8dd7628b37152ae97a68e2600000061dfe48bca93d211aa0d00e098032b8c" &
+    "030000000000000000000000000000004b0045004b0007000000010000800400" &
+    "000004005bf8faa078d40ffbd03317c93398b01229a0e1e00b00baf89a3ccace" &
+    "52750c5f0128351e0422a41597a1adfd50822aa363b9d124ea7c0c0008a74f89" &
+    "63b337acb6c93682f934496373679dd26af1089cb4eaf0c30cf260a12e814856" &
+    "385ab8843e56a9acea19e1270d0012152f5b5970582242a7ef7087f2a728b87e" &
+    "b9e58db8ca48b0921951a574e29e60887bf45bc00c15f6b96016a835b541bb80" &
+    "122a0409d37dbe6143c56207ed5a24000000cbb219d73a3d9645a3bcdad00e67" &
+    "656f020000000000000000000000000000006400620007000000010000800400" &
+    "00000400734424c9fe8fc71716c42096f4b74c88733b175e0b009f75b6823bff" &
+    "6af1024a4e2036719cdd548d3cbc2bf1de8e7ef4d0ed01f94bf90c0018cc6e01" &
+    "f0c6ea99aa23f8a280423e94ad81d96d0aeb5180504fc0f7a40cb3619dd39bd6" &
+    "a95ec1680a86ed6ab0f9828d0d00621bc3ee7b43730d1a34c7e9508b537204a1" &
+    "ce1fe5910dd77b5aada7e7a5f335de760b18cdd41dbf96c2588fa4652e35e2c1" &
+    "ca619646cae4f8aad51c953e77bd26000000cbb219d73a3d9645a3bcdad00e67" &
+    "656f030000000000000000000000000000006400620078000700000004000000" &
+    "0400000004009069ca78e7450a285173431b3e52c5c25299e4730b00df3f6198" &
+    "04a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b811190c003943" &
+    "41b7182cd227c5c6b07ef8000cdfd86136c4292b8e576573ad7ed9ae41019f58" &
+    "18b4b971c9effc60e1ad9f1289f00d00ec2d57691d9b2d40182ac565032054b7" &
+    "d784ba96b18bcb5be0bb4e70e3fb041eff582c8af66ee50256539f2181d7f9e5" &
+    "3627c0189da7e75a4d5ef10ea93b20b30400000000000000010000000a000000" &
+    "0400000004005a724185f608a16bdee52b0173d42a118eb77ac30b0024296206" &
+    "fea4353dedc0c4a8ec7b076de08982d8f47580701f0f88e024fc8f290c009a1c" &
+    "bb9479a3b2e62c56529868b89e0a996c2cb83a79bad449a123a4c37eed34172a" &
+    "dc6d62036855296bf0a9b9a525e50d0055eb5fa4abfad6c172df7dfa73fe94ed" &
+    "7c03d176ceac3c3144f860a1d4e89164bf764a2d270e219ddfea8a53fd8bc6d1" &
+    "9a1030cab0a8a33efe57d5e44b156a5109000000414350492044415441010000" &
+    "000a00000004000000040009cec4ee1869b130a2783d8c04c4ce56a1e5cba20b" &
+    "00e9c350bc1176e2b798a8f7ceb32a48085fbdb704fdad96a52bbeb5c7294af8" &
+    "c00c0048caf6c6b78765ac38677822285938809bb02f34d2b6c846a089c168bc" &
+    "e402c5d6a25bed543197c3285aa29eaa0b80350d00a1ca957b45e31698a9c9c8" &
+    "6a4bc191888145b16c60087ce316cd747c9461ea18d6a9f70e88576b14a6d7f7" &
+    "09fd57d7731144e22e20dea0d7ae424250af8a20e30900000041435049204441" &
+    "5441010000000a0000000400000004001adc95bebe9eea8c112d40cd04ab7a8d" &
+    "75c4f9610b00de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c" &
+    "23ae9ca9cc310c0069fca46943118a952e4f165e122a47f2b7b5336fa8fa1674" &
+    "a26437d183a7e947f15a4a0afabece6d6b28e3c84f60fac20d0073e4153936da" &
+    "b198397b74ee9efc26093dda721eaab2f8d92786891153b45b04265a161b169c" &
+    "988edb0db2c53124607b6eaaa816559c5ce54f3dbc9fa6a7a4b2090000004143" &
+    "50492044415441010000000a0000000400000004008bad680f1a3c36ad45826f" &
+    "1e268c2e05ce8bc69b0b0015a90cb2edeebae80a2cdd101240369a41eba19f30" &
+    "b911cfb52341278dfa8f350c006977d4595ea68e0ad0d0cf05fee0e37cf1c211" &
+    "e542d9dfa53d45e81d18ffa70abe9dbe5976162a9560af091a08c7ad4f0d00e4" &
+    "082f9dc11e3411e9a813593c4ecc8e930c8ac33001139c54ce6f342598344d4b" &
+    "30f661b5858f6101e460e863e45acb8ae4239e349ba37b4c2be360b0237ebd09" &
+    "0000004143504920444154410200000004000080040000000400d0c49e86f994" &
+    "a65fcfc3176cbb67d88c6891b13b0b0002455ba6e0a9fc78dd840a456dc68a0c" &
+    "4aa51db58823abcf904681052fd9d2970c005413672a5376ce2a170f67c56f88" &
+    "3f9e0972054be667c3cf6dc69f51d1efe2517a7bf023d79526a7ab755d53d1de" &
+    "73f80d00f0363b111680540fe9f7399fa4e238acde6e337ebd051e91856f9e00" &
+    "32aad42d371b2cef838dac1b1247ac638c0ff6e61b228b3c631e325910c7c0bd" &
+    "873eb91c4e0000001800667d00000000e0600200000000000000000000000000" &
+    "2e0000000000000002010c00d041030a00000000010106000002040818000000" &
+    "0000000c010000000000ff6d0200000000007fff040001000000020000800400" &
+    "000004003788d8bb7a27ba310ea2f6212e8c8f47ed60de170b00771042ab1990" &
+    "3664f075c65613976a8e20dfa482966ab505d6695e84ade772f50c00f28492d4" &
+    "1fa2e51e853bbcac62ec9afc0dc36b8a9f302afbbf3876cca7c76a92c7441509" &
+    "b7433aec71249b07e5da982d0d006281f4d62fed7f14fa99f90d20e77e0f3b8d" &
+    "0c2a24bdc9de2acc585ec54535f20d03cb86bb984142ae29b8e2baf4055b8f55" &
+    "5e182df30fb735c2cb5bdecc21c33800000061dfe48bca93d211aa0d00e09803" &
+    "2b8c0900000000000000060000000000000042006f006f0074004f0072006400" &
+    "6500720002000000010001000000020000800400000004002c1fa0c07b83d5f5" &
+    "28d04251ce7548e1be0383860b007d43f8316be25778fc1cfa35769a15003d8d" &
+    "b992065df9f8bb3ac043ff4fafe20c009d3b55240699db3cf6d149dc5d8aca5a" &
+    "6d59f2be0debc6d0acd50fa180a74cdc3a0ba187b58b1edbc4895fef97febfce" &
+    "0d0055604ab210cad112e39b9043ad725d8b46958ccd9100ba1f94ee893a2496" &
+    "8d6fa7e7b9d6bdb9331807ac104037f132ce9f1627030d795fb79f295ab63a6d" &
+    "ca9e9e00000061dfe48bca93d211aa0d00e098032b8c08000000000000006e00" &
+    "00000000000042006f006f007400300030003000320001000000200055004500" &
+    "460049002000510045004d005500200048004100520044004400490053004b00" &
+    "200051004d00300030003000300031002000000002010c00d041030a00000000" &
+    "01010600021f03120a000000ffff00007fff04004eac0881119f594d850ee21a" &
+    "522c59b20100000002000080040000000400d27fa5467668d1c330457262f3d3" &
+    "8ddbe8308bf80b007cecd39025081ffa990dbe7078111b2c15102f9da7ac85f2" &
+    "5ce54935b9ae0a960c005068e6a9ded2a1c3a8ebb5d26004410ea8670742d8f4" &
+    "44c5c3d161b76c66fa23a7b1d2fb3f9840570b675384b5818f2d0d00e97a4811" &
+    "0c191a92803b9221f4b3ba898a4860370f7f60cdfc054acc52504ab982cf7307" &
+    "16538dcac2ad03a7fb65816739e6aadc7cf1d006cb198e8fced35c3a88000000" &
+    "61dfe48bca93d211aa0d00e098032b8c08000000000000005800000000000000" &
+    "42006f006f0074003000300030003000090100002c0042006f006f0074004d00" &
+    "61006e0061006700650072004d0065006e007500410070007000000004071400" &
+    "c9bdb87cebf8344faaea3ee4af6516a104061400dc5bc2eef267954db1d5f81b" &
+    "2039d11d7fff040001000000020000800400000004005027f07abd8b3e979aa5" &
+    "121e014c3c36236cc0d30b00e52e99d0e07a49d2553de3de65e8da30fa0bddf3" &
+    "4002a1fa17e8c79356c2e1900c00dd424f2eeb35f3e8a2c2f50f6cc87ff90b75" &
+    "77e92ce63e13a22869d07d104fd5ea9800e6e4f12c5058fc4eaa78374f200d00" &
+    "31db46afb8b1ae9ec593eb5dcc95109cbff4a063334dd91701a6e6faadb5654d" &
+    "67b272600a7c1619444ff12629d726534253c814d01a7c38bcca258ce5eb07e5" &
+    "8800000061dfe48bca93d211aa0d00e098032b8c080000000000000058000000" &
+    "0000000042006f006f0074003000300030003100010100002c00450046004900" &
+    "20004600690072006d0077006100720065002000530065007400750070000000" &
+    "04071400c9bdb87cebf8344faaea3ee4af6516a10406140021aa2c4614760345" &
+    "836e8ab6f46623317fff04000400000007000080040000000400cd0fdb4531a6" &
+    "ec41be2753ba042637d6e5f7f2560b003d6772b4f84ed47595d72a2c4c5ffd15" &
+    "f5bb72c7507fe26f2aaee2c69d5633ba0c0077a0dab2312b4e1e57a84d865a21" &
+    "e5b2ee8d677a21012ada819d0a98988078d3d740f6346bfe0abaa938ca20439a" &
+    "8d710d0003020279c5ea3676d6630c82a9931343225e8eab81529b65c786aeb6" &
+    "a445d3852a34dd193178f938b6b47345a72d4b647df309c971f7c02f0ede296a" &
+    "136a10862800000043616c6c696e6720454649204170706c69636174696f6e20" &
+    "66726f6d20426f6f74204f7074696f6e00000000040000000400000004009069" &
+    "ca78e7450a285173431b3e52c5c25299e4730b00df3f619804a92fdb4057192d" &
+    "c43dd748ea778adc52bc498ce80524c014b811190c00394341b7182cd227c5c6" &
+    "b07ef8000cdfd86136c4292b8e576573ad7ed9ae41019f5818b4b971c9effc60" &
+    "e1ad9f1289f00d00ec2d57691d9b2d40182ac565032054b7d784ba96b18bcb5b" &
+    "e0bb4e70e3fb041eff582c8af66ee50256539f2181d7f9e53627c0189da7e75a" &
+    "4d5ef10ea93b20b3040000000000000001000000040000000400000004009069" &
+    "ca78e7450a285173431b3e52c5c25299e4730b00df3f619804a92fdb4057192d" &
+    "c43dd748ea778adc52bc498ce80524c014b811190c00394341b7182cd227c5c6" &
+    "b07ef8000cdfd86136c4292b8e576573ad7ed9ae41019f5818b4b971c9effc60" &
+    "e1ad9f1289f00d00ec2d57691d9b2d40182ac565032054b7d784ba96b18bcb5b" &
+    "e0bb4e70e3fb041eff582c8af66ee50256539f2181d7f9e53627c0189da7e75a" &
+    "4d5ef10ea93b20b3040000000000000002000000040000000400000004009069" &
+    "ca78e7450a285173431b3e52c5c25299e4730b00df3f619804a92fdb4057192d" &
+    "c43dd748ea778adc52bc498ce80524c014b811190c00394341b7182cd227c5c6" &
+    "b07ef8000cdfd86136c4292b8e576573ad7ed9ae41019f5818b4b971c9effc60" &
+    "e1ad9f1289f00d00ec2d57691d9b2d40182ac565032054b7d784ba96b18bcb5b" &
+    "e0bb4e70e3fb041eff582c8af66ee50256539f2181d7f9e53627c0189da7e75a" &
+    "4d5ef10ea93b20b3040000000000000003000000040000000400000004009069" &
+    "ca78e7450a285173431b3e52c5c25299e4730b00df3f619804a92fdb4057192d" &
+    "c43dd748ea778adc52bc498ce80524c014b811190c00394341b7182cd227c5c6" &
+    "b07ef8000cdfd86136c4292b8e576573ad7ed9ae41019f5818b4b971c9effc60" &
+    "e1ad9f1289f00d00ec2d57691d9b2d40182ac565032054b7d784ba96b18bcb5b" &
+    "e0bb4e70e3fb041eff582c8af66ee50256539f2181d7f9e53627c0189da7e75a" &
+    "4d5ef10ea93b20b3040000000000000004000000040000000400000004009069" &
+    "ca78e7450a285173431b3e52c5c25299e4730b00df3f619804a92fdb4057192d" &
+    "c43dd748ea778adc52bc498ce80524c014b811190c00394341b7182cd227c5c6" &
+    "b07ef8000cdfd86136c4292b8e576573ad7ed9ae41019f5818b4b971c9effc60" &
+    "e1ad9f1289f00d00ec2d57691d9b2d40182ac565032054b7d784ba96b18bcb5b" &
+    "e0bb4e70e3fb041eff582c8af66ee50256539f2181d7f9e53627c0189da7e75a" &
+    "4d5ef10ea93b20b3040000000000000005000000040000000400000004009069" &
+    "ca78e7450a285173431b3e52c5c25299e4730b00df3f619804a92fdb4057192d" &
+    "c43dd748ea778adc52bc498ce80524c014b811190c00394341b7182cd227c5c6" &
+    "b07ef8000cdfd86136c4292b8e576573ad7ed9ae41019f5818b4b971c9effc60" &
+    "e1ad9f1289f00d00ec2d57691d9b2d40182ac565032054b7d784ba96b18bcb5b" &
+    "e0bb4e70e3fb041eff582c8af66ee50256539f2181d7f9e53627c0189da7e75a" &
+    "4d5ef10ea93b20b3040000000000000006000000040000000400000004009069" &
+    "ca78e7450a285173431b3e52c5c25299e4730b00df3f619804a92fdb4057192d" &
+    "c43dd748ea778adc52bc498ce80524c014b811190c00394341b7182cd227c5c6" &
+    "b07ef8000cdfd86136c4292b8e576573ad7ed9ae41019f5818b4b971c9effc60" &
+    "e1ad9f1289f00d00ec2d57691d9b2d40182ac565032054b7d784ba96b18bcb5b" &
+    "e0bb4e70e3fb041eff582c8af66ee50256539f2181d7f9e53627c0189da7e75a" &
+    "4d5ef10ea93b20b3040000000000000001000000090000800400000004000b12" &
+    "e798b91f68d2b14c6d9f70a2b009747516e90b008dc8dfa208ca80fc9455cf83" &
+    "cfb3fb653a015e09cdf6e8b3ecaa80de3eb21ec60c007d8eb4d2fe8057f92cff" &
+    "b0367f3a12ceb5dd2c9b449c4617ff181da4a9c948199a2b0c524f1309d0bbad" &
+    "f066106d0f620d00965c1ce239c00c8c5470e660f6a3744437d21d310fffc7b2" &
+    "229102df4649d1325abffd388aff49651e6e840741c1168d9c1877689334758e" &
+    "2b00ea9c94f58532200000000100000000000000312d9deb882dd3119a160090" &
+    "273fc14d00509d7e000000000400000003000080040000000400eb3c94678878" &
+    "ccc0afc4bd211d9b2de47e00972b0b00967b3f62e625dfb8dbde6499b6dce75b" &
+    "403089003ed8864ad40deed5f22decb80c0017c18054f7a6c58927e70f9d9c4b" &
+    "714564dd2af4c1655c45ef85659f107ddfc7dee58fc1cfe81bea0dad98607be9" &
+    "755b0d00f45338dfa77ecfe18a2f445afb9995851a9d57875763cc03c8075547" &
+    "b6797b3f4673dadfb8a3ed03a59264d40de1abe07850a7ffe8dc8ffa4b3607d6" &
+    "95395d1d700000001890be7b0000000000b82c01000000000000f94d01000000" &
+    "500000000000000002010c00d041030a0000000001010600021f03120a000000" &
+    "ffff0000040430005c004500460049005c0042004f004f0054005c0042004f00" &
+    "4f0054005800360034002e0045004600490000007fff04000b0000000d000000" &
+    "040000000400f1a7ecb0cf7668e20d73177a1725b4d2aa4e57240b000da293e3" &
+    "7ad5511c59be47993769aacb91b243f7d010288e118dc90e95aaef5a0c002fdc" &
+    "8531577607d99031d70fb3063e9e4aecf50a7eaa9c2b0bcda5c5a6e111302996" &
+    "c138465920cadea4416d360896510d00a231b3aa8b950af9567d2f7b1c2f9576" &
+    "b2fbad386a179e389bfaf759cb774af2135e5ec63b2b079098de3af39668acab" &
+    "f5e0915e66d8747f30554997df89690a0e0000002e006c0069006e0075007800" &
+    "00000b0000000d000000040000000400f8a6b35be89d7a8e51e566358fbffadc" &
+    "812ab8340b005dc3814e8591c1fe70ae2d8182f3cde2bdace696aa9fcad9c38a" &
+    "bb37553336f30c0065aefd63850a91e062e7ebf3d4125a6014ca355e0d0b510e" &
+    "0f9c8420ff05f92c165d2e9dacd4741e7ff3bffd489792810d00380cd9afa3a5" &
+    "4cdf3b486987d5e5d4361f43395db9f756fd4cc19ae0cee1f2ff075bd88f7e0a" &
+    "274f394fe7da93e5c5d3d02d6760b6914a4650133ec0603a9bfb0e0000002e00" &
+    "6c0069006e007500780000000b0000000d00000004000000040093860b993799" &
+    "b71f0d0c34541e251ea0d6fc286c0b003fb9e4e3cc810d4326b5c13cef18aee1" &
+    "f9df8c5f4f7f5b96665724fa3b846e080c001d6077a2797911c374edbc610fa0" &
+    "1e184a1e8e4492ff35a1e355efeaf330e7c8cb03492dac7ee13d3efa6f099e0b" &
+    "bc810d00d319ac6f4bdd2cbce1bb949e241adbc2b0664f323fa00645e4787b1d" &
+    "72bdcd29b3b1ce06d70d3fb501fb28f000990e27bc912ead7ddf1947dbfd6128" &
+    "5497f5870e0000002e006f007300720065006c0000000b0000000d0000000400" &
+    "0000040094a123f41ad60d7c466ff20c5eb86fe78e65cf3e0b00a1fd8bf47383" &
+    "3478260d4fde5d73b78df7cd8e091943b1ea2662d09c678ef7600c00f77a25ad" &
+    "3d9e95508441dcd69d5b8cafbac0ecd17cfde20bfeba918b68c750eb8a8d2c46" &
+    "e981007bb2358c8346df41430d006d9d061908717d96686419c883df81fd02f3" &
+    "ba288d8e0f65a3c4decaabf6f6a97a545b360303b8256b2f4767c3d2df43986d" &
+    "4d0294e59c652770371d3f3cfef20e0000002e006f007300720065006c000000" &
+    "0b0000000d0000000400000004004ba066dbd5a063ff4a7d2deee4db04bdb704" &
+    "51cb0b00461203a89f23e36c3a4dc817f905b00484d2cf7e7d9376f13df91c41" &
+    "d84abe460c0093c4536618d5be4a74e2cb9caa0a4d8975ce70dc9efe0c53aa4c" &
+    "edbcda9d02f60c8a68fd01f960b876f9dd31818a6f410d00bc9a70f208c243bc" &
+    "9562241eb2bad568422a285f7ac49ac0419084fb1e7cef32a99792100a6cfffd" &
+    "3b8e0bd333be116d4ed13e257ad4794b1404fe28073b323e120000002e006300" &
+    "6d0064006c0069006e00650000000b0000000d000000040000000400a0533025" &
+    "66a52ba88fc197d8cd1171b82cbf5d240b00a8bb827a8b290c24f6d2fac2fd4f" &
+    "4da1a34aa57320f7f4172e4204fd31ce36300c00226598e669422266293d1dc8" &
+    "a16f2bbda9a8ec06b1e1a3566ac65dba101c18d5392ba3b5eac6df5241d9867d" &
+    "16e908c70d0080a09a3f2626932793251120df7aa0adf4afcf58fd4fbc366f18" &
+    "722df037be2349b238c43df009c99997befb859fdef587abffb96cf66a1007e0" &
+    "b17077d89015120000002e0063006d0064006c0069006e00650000000b000000" &
+    "0d000000040000000400cef6482ba7d6be694a6bed3411c3544214e984fd0b00" &
+    "15ee37e75f1e8d42080e91fdbbd2560780918c81fe3687ae6d15c472bbdaac75" &
+    "0c001bcd2ed729fb9dc7b1a168ab4a6e2e04b66d7405ea2622d666780ec9f1ec" &
+    "eb031010f0bdf37c46ab34e6a7201b73d5ae0d00c9a9f832cc896b291aa43873" &
+    "9bcaa2ed77f0b6a6664c33f1cebc056fb1465fa0431162e2336cbbf4e11522ec" &
+    "9351dbd41959c9e332016067c1fe9f231b891308100000002e0069006e006900" &
+    "74007200640000000b0000000d0000000400000004006dc902b2e0ba6e4caa68" &
+    "57a552a33aabae481a9b0b0082d1f33e17c192d31ec8915d1657205dcc1a9200" &
+    "9684c891586a8a52b07d67b00c00c7f5cfa4a7584f6818e5a001327e1142fd4c" &
+    "50ea7d5118228afdc2176ec292fda79bd240af11454e1c7f0c3b92dfab850d00" &
+    "020b07d803811f07887cc5c08bc38707d9fe73bd53e2cb17c823914f7b991422" &
+    "998c63afbb00660135e1c2569c4ebc08838aef39a9475ee098eaf050f1eb85d0" &
+    "100000002e0069006e00690074007200640000000b0000000d00000004000000" &
+    "040072344ca1ba34b18d672055e30ce9fc1339fa94000b00da7a6d941caa9d28" &
+    "b8a3665c4865c143db8f99400ac88d883370ae3021636c300c0016b48d924b98" &
+    "bdfe9d5c97983801443e5371dae2de1a9911636b417b1b14a7d54d9c648a8c64" &
+    "510c3dbd5d60603871710d008fab3a95061c62f231ebee9f915ed8c3963f1ff1" &
+    "9d7edbd38931546ff94732e8ef42cd37dc2fe20d5de00c3f77cb2c000cb151ba" &
+    "9c67a77c72e76f61f3370a130e0000002e0075006e0061006d00650000000b00" &
+    "00000d0000000400000004000aac4bac60f2e44a5d472809e11a1d59264dda0b" &
+    "0b00b6c9363758d01225d788522c8f634b17358961700c95afd50edac85fae05" &
+    "987f0c0097da27781dd5e3e830eef65026ee8eafd8ca6216ae43926628b97b87" &
+    "51e8c73ac208baa44383fd748c6ce80e27bbc0e10d00f38dbf4bd82ea5cea092" &
+    "0edbfbf246f662ef88ab4763365e882893f856c4461f0baf5ba423947446352a" &
+    "73f0d7393db4392d1d895983db4d4062b32cea262c5e0e0000002e0075006e00" &
+    "61006d00650000000b0000000d00000004000000040063af9d6ea7775d4cd2e4" &
+    "3de708edebca019c6c1b0b00ff552fd255be18a3d61c0da88976fc71559d13aa" &
+    "d12d1dfe1708cf950cc4b74c0c0052a957bc706ceae8f202046a07342684b10c" &
+    "e67c73756def7713fe1246935abe07f7043f6b76d78e1e05772aaa46c56c0d00" &
+    "0c15f37303126ccbb11b01046dbbc4f5d863a8d594edba01ef21b6888983c845" &
+    "f3b5f7c1149796b41f41e6f96e6def8114d5caf98d73c8e7c055ba6d195f361f" &
+    "0c0000002e00730062006100740000000b0000000d0000000400000004001fa1" &
+    "d502b7852dcc9588e704feabd4e5192adb320b005222a493b7d36f37db2003bf" &
+    "d108f2eb969f88f214384fe37654a23b435963660c00aa64eb324e4c398a26fc" &
+    "22f22091d7ada12a99104045a545c1de76edc8ca9e8646e5617be3a0b838f295" &
+    "589cdedb3d330d00a87b1cee088453b51ee5f9cafa1ae19299b968451285521e" &
+    "83f804a7348637637d1a0586879c9579e7ee26191eb50feecf89c59988220096" &
+    "f82ae4e87c9148c40c0000002e00730062006100740000000900000006000000" &
+    "04000000040028745d803893a61018456c937fbb8f7ca946e98c0b00728317e3" &
+    "f22d61571a94f1ba120f70f6a80f8c085c137b828fc508781900c29a0c00424d" &
+    "0eaba2f1de6d685f42c18029bd8d57b8e24e5f3aa8d8c3876a3112e30be8a43e" &
+    "344a697425749c6d5c1a443ed43c0d00f50474224136e6eb7d7f6b4b6ee8bab3" &
+    "f7a1bcb5bc3197eca458e70ffa79575d07d32310ded1e76acae9c237ebadf55e" &
+    "53cbf022bc1ceb38f1342a95b0f20e7a22000000ed223b8f1a0000004c4f4144" &
+    "45445f494d4147453a3a4c6f61644f7074696f6e730009000000060000000400" &
+    "0000040010820001a66c96b6614eac72011024a7dc9b731d0b00ef55e8f22f68" &
+    "82517b87cbe2e4464781cfb89dde26e3efb3c00954940f74f4850c00ce70e36a" &
+    "95f23d854541d8b1f5f56c75e805e886e692dee361af63ee73cd40bc2f029be5" &
+    "2c81749fd44fd8587317a2530d003d697fd01f86563ee1a59ebaa820895c07fb" &
+    "a5d4ba84ee855734bada22bfd595e152ce1ea9f24af243f2a0d12159ad7eff61" &
+    "fff094766e3503d5ce2f103303fd15000000ec223b8f0d0000004c696e757820" &
+    "696e69747264000500000007000080040000000400443a6b7b82b7af564f2e39" &
+    "3cd9d5a388b7fa4a980b00d8043d6b7b85ad358eb3b6ae6a873ab7ef23a26352" &
+    "c5dc4faa5aeedacf5eb41b0c00214b0bef1379756011344877743fdc2a5382ba" &
+    "c6e70362d624ccf3f654407c1b4badf7d8f9295dd3dabdef65b27677e00d000f" &
+    "ed3a4c9552021436534d27f3adb481e22b50b29e4b37a63f518540a651a174f1" &
+    "49b69f500b0bdb2cb3bf4e0e21e0781451090af33e88f6bee4cbebd15c16681d" &
+    "0000004578697420426f6f7420536572766963657320496e766f636174696f6e" &
+    "0500000007000080040000000400475545ddc978d7bfd036facc7e2e987f4818" &
+    "9f0d0b00b54f7542cbd872a81a9d9dea839b2b8d747c7ebd5ea6615c40f42f44" &
+    "a6dbeba00c000a2e01c85deae718a530ad8c6d20a84009babe6c8989269e950d" &
+    "8cf440c6e997695e64d455c4174a652cd080f6230b740d001bb30cdbd6da78fe" &
+    "2a8a161ef51176e22d64dce305b40b47243673af64a2b16fca6182116433e389" &
+    "1be94773f6d7d411275721d5bf7d40ea51a274d5c891637c2800000045786974" &
+    "20426f6f742053657276696365732052657475726e6564207769746820537563" &
+    "63657373"
+  KeyedBootUkiPcr11* =
+    "704134487d9af86d3440db5d15d5564b43feb8993d38718ba4febe3d040d8551"
+    ## Computed from THAT image's own bytes, and also what the guest's
+    ## own firmware log replays to. The two sides are joined by a gate
+    ## rather than asserted here.
+  KeyedBootUkiCmdline* =
+    "console=ttyS0 reproos.attest=1"
+  KeyedBootUkiTemplate* =
+    "systemd-stub-uki-sections.v1;bank=sha256" &
+    ";.linux=5dc3814e8591c1fe70ae2d8182f3cde2bdace696aa9fcad9c38abb37553336f3" &
+    ";.osrel=a1fd8bf473833478260d4fde5d73b78df7cd8e091943b1ea2662d09c678ef760" &
+    ";.cmdline=a8bb827a8b290c24f6d2fac2fd4f4da1a34aa57320f7f4172e4204fd31ce3630" &
+    ";.initrd=82d1f33e17c192d31ec8915d1657205dcc1a92009684c891586a8a52b07d67b0" &
+    ";.uname=b6c9363758d01225d788522c8f634b17358961700c95afd50edac85fae05987f" &
+    ";.sbat=5222a493b7d36f37db2003bfd108f2eb969f88f214384fe37654a23b43596366"
+  KeyedBootMeasuredSections*: array[6, string] =
+    [".linux", ".osrel", ".cmdline", ".initrd", ".uname", ".sbat"]
+    ## SIX sections, in the order THIS MACHINE'S OWN FIRMWARE LOG says
+    ## the stub measured them, read off the ``EV_IPL`` name events on
+    ## register 11. Five of them come from an assembler's own inputs;
+    ## ``.sbat`` comes from the stub. A list built from the assembler's
+    ## inputs alone is short by one and replays to a value no machine
+    ## holds.
+    ##
+    ## Pinned as a SEQUENCE rather than a set, because a stub measuring
+    ## the same six sections in a different order produces a different
+    ## register and a set would not notice.
+  KeyedBootEventLogBytes* = 9700
+  KeyedBootEventLogEntries* = 45
+  KeyedBootSectionNameEvents* = 12
+    ## Two events per measured section: the name, then the content.
+
+  UnrecoverableKeyReason* =
+    "no attestation public key was captured with this boot, and one " &
+    "signature does not determine one: recovery over these exact bytes " &
+    "yields more than one candidate key and every candidate verifies " &
+    "the signature, while the attestation structure carries the key's " &
+    "QUALIFIED name, whose parent component was never recorded, so no " &
+    "candidate can be confirmed or excluded"
+    ## Why the three boots above can never have their signatures
+    ## checked. This is a measurement rather than an argument: the
+    ## candidates are pinned below, per boot, and a gate requires every
+    ## one of them to verify.
+
+  AttestedBootRecoveredPointsHex*: seq[string] =
+    @[
+        "0408adc07e58794ae60690d20f7cb9d1ed7f4a822412f40cb044a78cac78ef82" &
+          "1435242abc62d798e629e279d4ce5394545705f805d2dac26b575eaa6a43498c40",
+        "04b31904ae61cfdb41b140a88959c206e68424f80a52145e57dc8cb0c6eb0f0d" &
+          "7ce980cd351f7908b1a30ec3bbeaf2b0f3a4d5f239f394eb8c3f24e0df753dcfb9"]
+  TamperedBootRecoveredPointsHex*: seq[string] =
+    @[
+        "045a0cc2c3c5a4d1967b2fedb38ea5f7364f982a48b621fd85c9558929223e81" &
+          "b35c7c4a25af2fd99fb48857da9d13f9522bfa666d019b86ab15cebf5ab7877d61",
+        "042c085d9e0abb25551df403534fc387a426968814d4a6b52d8f387750c6f0a7" &
+          "b1a04e8b6db23dae7623a6a51e74cb07f8ae73111b3a235d62bff21b600546b5bd"]
+  NoImageBootRecoveredPointsHex*: seq[string] =
+    @[
+        "04b97aef88d6f1ed7c8f65b69ec798899111e3177f1920c43342c3f76746a332" &
+          "f07083a52afc0bfac310471f09a2f8b3adee4c04141b5701c0e97e97c64203d8f2",
+        "0451f80450913c352029b9474c9559b71ecf4ae23f767e0870e8b9790dde5e27" &
+          "a605e88942cac01414ff6862e70cf8c6034b1478cb53c273a08530e31dc375e42b"]
+
+type
+  PinnedBootEvidence* = object
+    ## One pinned boot, and whether its attestation PUBLIC KEY was kept
+    ## with it.
+    ##
+    ## This table exists because of a defect in the first three boots:
+    ## their bytes were pinned and their keys were not, which makes
+    ## their signatures unverifiable IN PRINCIPLE rather than merely
+    ## unverified here. Enumerating every pinned boot in one place,
+    ## with the key or with the reason there is none, is what stops that
+    ## recurring quietly — a boot added without a key has to say so in
+    ## a field a gate reads, and has to carry the candidates that
+    ## demonstrate the claim.
+    name*: string
+    attestHex*: string
+    signatureHex*: string
+    akPointHex*: string
+      ## The 65-byte uncompressed ECDSA-P256 point this boot's
+      ## signature verifies under, or "" when the key was not kept.
+    keyAbsenceReason*: string
+      ## Non-empty exactly when ``akPointHex`` is empty.
+    recoveredPointsHex*: seq[string]
+      ## When the key was not kept: every public key recovery yields
+      ## from this boot's own (attest, signature) pair. More than one,
+      ## all of them verifying, is what "one signature does not
+      ## determine one key" means in bytes.
+
+const
+  PinnedBootEvidenceSet*: array[4, PinnedBootEvidence] = [
+    PinnedBootEvidence(
+      name: "the honest boot",
+      attestHex: AttestedBootAttestHex,
+      signatureHex: AttestedBootSignatureHex,
+      akPointHex: "",
+      keyAbsenceReason: UnrecoverableKeyReason,
+      recoveredPointsHex: AttestedBootRecoveredPointsHex),
+    PinnedBootEvidence(
+      name: "the one-character-different boot",
+      attestHex: TamperedBootAttestHex,
+      signatureHex: TamperedBootSignatureHex,
+      akPointHex: "",
+      keyAbsenceReason: UnrecoverableKeyReason,
+      recoveredPointsHex: TamperedBootRecoveredPointsHex),
+    PinnedBootEvidence(
+      name: "the machine that measured no image",
+      attestHex: NoImageBootAttestHex,
+      signatureHex: NoImageBootSignatureHex,
+      akPointHex: "",
+      keyAbsenceReason: UnrecoverableKeyReason,
+      recoveredPointsHex: NoImageBootRecoveredPointsHex),
+    PinnedBootEvidence(
+      name: "the boot whose key was kept",
+      attestHex: KeyedBootAttestHex,
+      signatureHex: KeyedBootSignatureHex,
+      akPointHex: KeyedBootAkPointHex,
+      keyAbsenceReason: "",
+      recoveredPointsHex: @[]),
+  ]
+    ## EVERY pinned boot in this file, so a gate can enumerate them
+    ## rather than name three and test one.

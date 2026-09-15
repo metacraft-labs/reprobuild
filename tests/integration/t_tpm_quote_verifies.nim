@@ -35,9 +35,13 @@
 ##
 ## ## What this gate does NOT prove
 ##
-## No signature is verified — by this gate or anywhere in this build —
-## so what is established is that the log explains the structure, not who
-## produced the structure. The verdict says so itself, and the gate reads
+## No signature is verified — by this gate, or by the verifier it drives,
+## or anywhere on the verification path — so what is established is that
+## the log explains the structure, not who produced the structure. (A
+## sibling gate does check the signature of the one pinned boot whose
+## attestation key was captured; it does so out of band, through an
+## unrelated library, and it changes nothing about what the verdict below
+## rests on.) The verdict says so itself, and the gate reads
 ## that caveat back rather than taking the library's word for it. The
 ## guest's TPM is a software implementation. And the manifest here is
 ## built from the image's own precomputed measurement rather than read
@@ -276,6 +280,23 @@ suite "a measured-boot machine's own evidence, verified":
       if NoSignatureCheckedNote in c: statedOnRejection = true
     check statedOnRejection
     check NoSignatureCheckedNote in renderVerdictText(refused)
+
+    # And on a refusal where the reader could not read ANYTHING. That
+    # case is the far end of the axis: the boot above was rejected on a
+    # rule, this one never got past the frame. The caveat has to survive
+    # both, because "the reader that made this verdict checks no
+    # signatures" is true of a reader that read nothing as much as of
+    # one that read everything — and a caveat wired to a successful
+    # parse would be invisible here while both cases above stayed green.
+    let unreadable = verifyBoot(bootReportText("not a composite at all"),
+      some(renderAttestedImageManifest(bootManifest())))
+    check not unreadable.decision.isAcceptance
+    check unreadable.checks[vcNativeEvidence].outcome == coFailed
+    var statedOnUnreadable = false
+    for c in unreadable.caveats:
+      if NoSignatureCheckedNote in c: statedOnUnreadable = true
+    check statedOnUnreadable
+    check NoSignatureCheckedNote in renderVerdictText(unreadable)
 
   test "t_tpm_quote_without_the_launch_register_is_refused":
     ## The precondition of the whole join, exercised on real bytes.

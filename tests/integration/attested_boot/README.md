@@ -11,9 +11,31 @@ three artifacts home:
 | `out/quote.sig` | the `TPMT_SIGNATURE` over it |
 | `out/binary_bios_measurements` | the TCG event log **firmware** wrote |
 | `out/pcrs.txt` | every register of every bank, read in the guest |
+| `out/ak.pub.pem` | the attestation key's PUBLIC part, PEM `SubjectPublicKeyInfo` |
+| `out/ak.pub.tss` | the same key as the TPM's own `TPM2B_PUBLIC` |
+| `out/ak.name` | that key's `TPM2B_NAME`, as `tpm2_createak -n` wrote it |
 
-Those three are what `attested_boot_vectors.nim` pins, and what
-`t_tpm_quote_verifies` and `t_tampered_uki_detected` verify.
+Those are what `attested_boot_vectors.nim` pins, and what
+`t_tpm_quote_verifies`, `t_tampered_uki_detected` and
+`t_pinned_attestation_signatures` read.
+
+## PIN THE KEY. A signature with no key is not evidence.
+
+The last three rows are not optional extras. A `TPMT_SIGNATURE` pinned
+without the public key it was made with **can never be checked by
+anybody** — not by this build and not by a reader in five years. One
+signature does not determine one key: recovery over a single `(attest,
+signature)` pair yields several candidate public keys and *all of them
+verify*, and the attestation structure carries only the key's
+**qualified** name, `H(QN_parent ‖ Name)`, whose parent component this
+harness never records. So there is no way back. Three boots were pinned
+that way before this was noticed and they are unverifiable for good;
+`PinnedBootEvidenceSet` names them and says why.
+
+If you pin a capture, pin its key with it. The three artifacts check each
+other — the name is `nameAlg ‖ SHA-256(TPMT_PUBLIC)`, the `TPM2B_PUBLIC`
+carries the point, and the point is what the signature verifies under —
+so a typo in any one of them is caught by the other two.
 
 ## Running it
 
@@ -32,7 +54,8 @@ anything it measured.
 
 A fresh run creates a fresh TPM and a fresh attestation key, so the
 attestation structure, the signature and the event log differ on every
-run — they are that boot's, not this image's.
+run — they are that boot's, not this image's. That is exactly why the
+key has to travel with them: it is destroyed with the guest.
 
 What *is* a function of the image, and what the gates rest on, is the
 **launch measurement**: the digests of the sections a stub measures. Two

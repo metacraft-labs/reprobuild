@@ -11034,6 +11034,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_pinned_attestation_signatures.nim",
+    binary: "build/test-bin/t_pinned_attestation_signatures",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_pkgconf_bootstrap_provisioning.nim",
     binary: "build/test-bin/t_pkgconf_bootstrap_provisioning",
     defines: @[],
