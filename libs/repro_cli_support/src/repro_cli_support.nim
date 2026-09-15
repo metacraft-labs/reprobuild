@@ -1044,16 +1044,21 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
     # every name selector contributes its closure on top.
     result.extraNameSelectors.add(firstNameSelector)
 
-proc scopedWorktreeRoot(modulePath, explicitWorkRoot: string): string =
-  let workRoot = configuredWorkRoot(explicitWorkRoot)
-  if workRoot.len == 0:
+proc scopedWorktreeRootFor(modulePath, resolvedWorkRoot: string): string =
+  ## The worktree root for ``modulePath`` under an ALREADY-RESOLVED work root.
+  ##
+  ## Split out of ``scopedWorktreeRoot`` for Dependency-Attribution MAC-2: the
+  ## daemon-parent prewarm has to name the same directory a hosted build will
+  ## name, and it must do so WITHOUT consulting the parent process's own
+  ## ``$REPROBUILD_WORK_ROOT`` or its current directory — both belong to the
+  ## daemon, not to the request. It resolves the work root from the request and
+  ## calls this. The naming rule itself stays in ONE place so the two callers
+  ## cannot drift; a prewarm that named a different directory would warm
+  ## entries no build ever looks up.
+  if resolvedWorkRoot.len == 0:
     return ""
-  let base =
-    if workRoot.isAbsolute:
-      os.normalizedPath(workRoot)
-    else:
-      os.normalizedPath(absolutePath(workRoot))
-  let projectRoot = os.normalizedPath(parentDir(absolutePath(modulePath)))
+  let base = os.normalizedPath(resolvedWorkRoot)
+  let projectRoot = os.normalizedPath(parentDir(modulePath))
   let (_, tail) = splitPath(projectRoot)
   let hash = digestHex(blake3DomainDigest(projectRoot.bytesOf(),
     hdMetadataEnvelope))
@@ -1078,9 +1083,29 @@ proc scopedWorktreeRoot(modulePath, explicitWorkRoot: string): string =
       combined
   base / "worktrees" / segment
 
+proc scopedWorktreeRoot(modulePath, explicitWorkRoot: string): string =
+  let workRoot = configuredWorkRoot(explicitWorkRoot)
+  if workRoot.len == 0:
+    return ""
+  let base =
+    if workRoot.isAbsolute: workRoot
+    else: absolutePath(workRoot)
+  scopedWorktreeRootFor(absolutePath(modulePath), base)
+
 proc outputDirForTarget(target: ParsedBuildTarget;
     explicitWorkRoot = ""): string =
   let scopedRoot = scopedWorktreeRoot(target.modulePath, explicitWorkRoot)
+  if scopedRoot.len > 0:
+    return scopedRoot / "build" / target.outputName
+  parentDir(target.modulePath) / ".repro" / "build" / target.outputName
+
+proc outputDirForTargetIn(target: ParsedBuildTarget;
+    resolvedWorkRoot: string): string =
+  ## ``outputDirForTarget`` with the work root already resolved and
+  ## ``target.modulePath`` already absolute — the ambient-free form MAC-2's
+  ## daemon-parent prewarm needs. ``resolvedWorkRoot`` empty means "no
+  ## worktree scope", NOT "look it up in the environment".
+  let scopedRoot = scopedWorktreeRootFor(target.modulePath, resolvedWorkRoot)
   if scopedRoot.len > 0:
     return scopedRoot / "build" / target.outputName
   parentDir(target.modulePath) / ".repro" / "build" / target.outputName
@@ -4094,6 +4119,7 @@ type
     mtimeNs: int64
 
   WarmToolIdentity = ref object
+    populatedByPid: int
     key: string
     identityPath: string
     inspectionPath: string
@@ -4102,12 +4128,14 @@ type
     identity: PathOnlyBuildIdentity
 
   WarmProviderSnapshot = ref object
+    populatedByPid: int
     providerArtifactId: string
     snapshotPath: string
     snapshotEvidence: DurableFileEvidence
     snapshot: ProviderGraphSnapshot
 
   WarmLoweredGraph = ref object
+    populatedByPid: int
     cachePath: string
     modulePath: string
     projectRoot: string
@@ -4121,6 +4149,30 @@ type
 var warmToolIdentities = initTable[string, WarmToolIdentity]()
 var warmProviderSnapshots = initTable[string, WarmProviderSnapshot]()
 var warmLoweredGraphs = initTable[string, WarmLoweredGraph]()
+
+type
+  WarmBuildCacheCounters* = object
+    ## Dependency-Attribution MAC-2 — how often the three warm tables above
+    ## MISSED and had to go to disk.
+    ##
+    ## These exist so a test can assert that a daemon-parent prewarm was
+    ## actually consumed, rather than asserting that a build produced the
+    ## right answer — which it does either way, by design. "The bytes match"
+    ## cannot distinguish a warm hit from a cold read; a counter that did not
+    ## move can. Same lesson as MAC-1's routing witness.
+    loweredGraphDiskReads*: int
+    providerSnapshotDiskReads*: int
+    toolIdentityResolves*: int
+    inheritedWarmHits*: int
+      ## Warm-table hits served from an entry this process did NOT populate —
+      ## i.e. one inherited across a fork from the daemon parent. This is the
+      ## MAC-2 witness, and it is the one fact that distinguishes a prewarmed
+      ## worker from a cold one that produced the same bytes. It is recorded
+      ## in the daemon LOG rather than on any output stream, so the two arms
+      ## of the parity comparison stay byte-identical.
+
+var warmBuildCacheCounters*: WarmBuildCacheCounters
+  ## Read by tests; never read by any decision.
 
 # DSL-port M9.R.9 — auto-recurse guards for from-source provisioning.
 # When ``--tool-provisioning=from-source`` is active, the dispatcher
@@ -4987,6 +5039,7 @@ proc loweredGraphCachePath(outDir, selectedActionId: string): string =
 proc readFreshLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
                                 pathEnv, cacheKey: string):
     Option[tuple[actions: seq[BuildAction]; pools: seq[BuildPool]]] =
+  inc warmBuildCacheCounters.loweredGraphDiskReads
   if not fileExists(extendedPath(path)):
     return none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
   try:
@@ -5011,12 +5064,15 @@ proc warmReadFreshLoweredGraphCache(path, modulePath, projectRoot,
         warm.selectedActionId == selectedActionId and
         warm.pathEnv == pathEnv and warm.cacheKey == cacheKey and
         evidenceFresh(path, warm.cacheEvidence):
+      if warm.populatedByPid != getCurrentProcessId():
+        inc warmBuildCacheCounters.inheritedWarmHits
       return some((actions: warm.actions, pools: warm.pools))
   result = readFreshLoweredGraphCache(path, modulePath, projectRoot,
     selectedActionId, pathEnv, cacheKey)
   if result.isSome:
     let lowered = result.get()
-    warmLoweredGraphs[tableKey] = WarmLoweredGraph(cachePath: path,
+    warmLoweredGraphs[tableKey] = WarmLoweredGraph(
+      populatedByPid: getCurrentProcessId(), cachePath: path,
       modulePath: modulePath, projectRoot: projectRoot,
       selectedActionId: selectedActionId, pathEnv: pathEnv,
       cacheKey: cacheKey, cacheEvidence: durableFileEvidence(path),
@@ -5036,7 +5092,8 @@ proc writeLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
     actions: lowered.actions,
     pools: lowered.pools)
   writeFile(extendedPath(path), fromBytes(encodeLoweredGraphCache(record)))
-  warmLoweredGraphs[path & "\0" & cacheKey] = WarmLoweredGraph(cachePath: path,
+  warmLoweredGraphs[path & "\0" & cacheKey] = WarmLoweredGraph(
+    populatedByPid: getCurrentProcessId(), cachePath: path,
     modulePath: modulePath, projectRoot: projectRoot,
     selectedActionId: selectedActionId, pathEnv: pathEnv, cacheKey: cacheKey,
     cacheEvidence: durableFileEvidence(path), actions: lowered.actions,
@@ -6044,6 +6101,7 @@ proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
 proc readFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
                                    providerBinaryPath: string):
     Option[ProviderGraphSnapshot] =
+  inc warmBuildCacheCounters.providerSnapshotDiskReads
   if not fileExists(extendedPath(providerSnapshotPath(storeRoot))):
     return none(ProviderGraphSnapshot)
   try:
@@ -6069,11 +6127,14 @@ proc warmReadFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
         warm.snapshot.providerArtifactId == providerArtifactId and
         providerSnapshotBinaryFresh(warm.snapshot, providerBinaryPath) and
         providerSnapshotInputsFresh(warm.snapshot):
+      if warm.populatedByPid != getCurrentProcessId():
+        inc warmBuildCacheCounters.inheritedWarmHits
       return some(warm.snapshot)
   result = readFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
     providerBinaryPath)
   if result.isSome:
     warmProviderSnapshots[key] = WarmProviderSnapshot(
+      populatedByPid: getCurrentProcessId(),
       providerArtifactId: providerArtifactId,
       snapshotPath: path,
       snapshotEvidence: durableFileEvidence(path),
@@ -6222,13 +6283,289 @@ proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
         evidenceFresh(warm.identityPath, warm.identityEvidence) and
         evidenceFresh(stableKeyPath, warm.keyEvidence) and
         warm.identity.toolIdentityRealizationsUsable():
+      if warm.populatedByPid != getCurrentProcessId():
+        inc warmBuildCacheCounters.inheritedWarmHits
       return (identity: warm.identity, identityPath: warm.identityPath,
         inspectionPath: warm.inspectionPath)
+  inc warmBuildCacheCounters.toolIdentityResolves
   result = resolveAndWriteIdentity(artifact, outDir, mode)
-  warmToolIdentities[tableKey] = WarmToolIdentity(key: key,
+  warmToolIdentities[tableKey] = WarmToolIdentity(
+    populatedByPid: getCurrentProcessId(), key: key,
     identityPath: result.identityPath, inspectionPath: result.inspectionPath,
     identityEvidence: durableFileEvidence(result.identityPath),
     keyEvidence: durableFileEvidence(stableKeyPath), identity: result.identity)
+
+# ---------------------------------------------------------------------------
+# Dependency-Attribution MAC-2 — the daemon-parent prewarm.
+#
+# WHAT THIS IS. The user daemon forks a fresh worker per build request, so
+# every worker starts with the three warm tables above EMPTY and re-reads the
+# same three persisted files the previous worker read. Populating those tables
+# in the PARENT, before the fork, hands them to every subsequent worker by
+# copy-on-write at zero copy cost.
+#
+# WHAT IT IS NOT, AND WHY. An earlier prewarmer ran the whole of
+# `prepareBuildGraphInspection` -- interface extract, provider compile,
+# provider-graph refresh, tool resolution, lowering. It was disabled (see
+# `runtime.handleBuildRequest`) because it duplicated the authoritative
+# executor's work, ran before any terminal event reached the client, and could
+# outlive an attached client's disconnect; on CMake-generated projects that
+# showed up as detached workers holding multi-GB RSS after the client was gone.
+#
+# NONE OF THAT CAN RECUR HERE, because this pass has no COMPUTE path at all:
+#
+#   * It never calls the build engine, never compiles a provider, never
+#     invokes a provider binary, never spawns a process, and never opens the
+#     content store or the action cache -- so nothing is duplicated, and the
+#     two handle classes that must NOT be inherited across a fork (descriptors
+#     share a file offset with every sibling; an inherited advisory lock can be
+#     released by any child) are never opened in the parent to begin with.
+#   * It only DECODES files another build already wrote. If a file is absent,
+#     partial or unreadable, it warms nothing and the worker does exactly what
+#     it does today.
+#   * It runs in the long-lived parent, not in a detached worker, so there is
+#     no process that can outlive a disconnect. Its RSS cost is one project's
+#     lowered graph -- which every worker was already holding a private copy
+#     of, so sharing one copy-on-write copy is a reduction, not an addition.
+#     `prewarmDaemonParentBuildCaches` keeps exactly ONE project warm, so a
+#     daemon serving many projects does not accumulate.
+#
+# WHY IT CANNOT CHANGE A DECISION. Each table is consulted through the
+# `warm*` reader above, and every one of those re-validates before returning:
+# the lowered graph against `modulePath / projectRoot / selectedActionId /
+# pathEnv / cacheKey` AND the cache file's current stat identity; the provider
+# snapshot against `providerArtifactId`, the provider binary, and every
+# evaluation input's digest; the tool identity against the cache key, the
+# interface fingerprint, and two stat identities. The value this pass inserts
+# is produced by decoding the same bytes the cold reader would have decoded,
+# so the only difference a warmed entry can make is that a file whose stat
+# identity is unchanged is not read twice. A stale entry is not consulted; it
+# is re-read.
+#
+# WHY IT TOUCHES NO PROCESS-GLOBAL STATE. The disabled prewarmer mutated the
+# working directory and the environment with restore-after. That is safe in a
+# forked worker and racy in a shared parent, which is the hazard that made
+# reviving it non-trivial. This pass resolves the hazard by construction: it
+# calls neither `setCurrentDir` nor `putEnv` nor
+# `setActionCacheRootOverride`. Every path is derived by explicit joining
+# against the REQUEST's working directory, and every table key comes from the
+# on-disk record's own self-describing fields rather than from ambient state.
+# `t_daemon_parent_prewarm` asserts the cwd and the whole environment are
+# byte-identical across a prewarm.
+
+type
+  DaemonParentPrewarmReport* = object
+    outDir*: string
+    loweredGraphs*: int
+    providerSnapshots*: int
+    toolIdentities*: int
+    reused*: bool
+      ## True when the previous prewarm's entries were all still fresh and
+      ## nothing had to be re-decoded. This is the steady state: after the
+      ## first warm, a prewarm costs a handful of `stat` calls.
+
+  PrewarmStamp = tuple[path: string; evidence: DurableFileEvidence]
+
+var prewarmedOutDir = ""
+var prewarmStamps: seq[PrewarmStamp] = @[]
+
+proc prewarmStampsStillFresh(): bool =
+  if prewarmStamps.len == 0:
+    return false
+  for stamp in prewarmStamps:
+    if not evidenceFresh(stamp.path, stamp.evidence):
+      return false
+  true
+
+proc forgetWarmBuildCaches*() =
+  ## Drop every warm table entry. Exported for the daemon parent, which keeps
+  ## one project warm at a time, and for tests that need a cold start.
+  warmToolIdentities.clear()
+  warmProviderSnapshots.clear()
+  warmLoweredGraphs.clear()
+  prewarmStamps.setLen(0)
+  prewarmedOutDir = ""
+
+proc prewarmLoweredGraphsFrom(outDir: string; stamps: var seq[PrewarmStamp]):
+    int =
+  ## Decode every persisted lowered-graph cache record under ``outDir`` and
+  ## insert it under the key the record itself describes.
+  ##
+  ## The record carries `modulePath`, `projectRoot`, `selectedActionId`,
+  ## `pathEnv` and `cacheKey`, so no key has to be re-derived here — which is
+  ## what makes this pass independent of the parent's environment. A record
+  ## whose fields do not match what a build computes simply is not looked up.
+  let dir = outDir / "lowered-graph-cache"
+  if not dirExists(extendedPath(dir)):
+    return 0
+  for kind, path in walkDir(dir):
+    if kind != pcFile or not path.endsWith(".rbbg"):
+      continue
+    try:
+      let record = decodeLoweredGraphCache(toBytes(readFile(extendedPath(path))))
+      let evidence = durableFileEvidence(path)
+      if not evidence.exists:
+        continue
+      warmLoweredGraphs[path & "\0" & record.cacheKey] = WarmLoweredGraph(
+        populatedByPid: getCurrentProcessId(),
+        cachePath: path,
+        modulePath: record.modulePath,
+        projectRoot: record.projectRoot,
+        selectedActionId: record.selectedActionId,
+        pathEnv: record.pathEnv,
+        cacheKey: record.cacheKey,
+        cacheEvidence: evidence,
+        actions: record.actions,
+        pools: record.pools)
+      stamps.add((path: path, evidence: evidence))
+      inc result
+    except CatchableError:
+      # A record written by a newer codec, or one being rewritten by the
+      # worker that was just forked, decodes to nothing. Warming nothing is
+      # the pre-MAC-2 behaviour, so there is no failure to report.
+      discard
+
+proc prewarmProviderSnapshotsFrom(outDir: string;
+                                  stamps: var seq[PrewarmStamp]): int =
+  ## Decode the provider-graph snapshot of every variant store under
+  ## ``outDir/provider-graph`` and key each one by the `providerArtifactId`
+  ## the snapshot itself carries.
+  ##
+  ## Enumerating the variant directories instead of computing
+  ## `providerGraphStoreRoot` is deliberate: that helper reads `$REPRO_VARIANTS`
+  ## from the process environment, which in the parent is the DAEMON's, not the
+  ## request's.
+  let base = outDir / "provider-graph"
+  if not dirExists(extendedPath(base)):
+    return 0
+  var stores = @[base]
+  for kind, path in walkDir(base):
+    if kind == pcDir and extractFilename(path).startsWith("variants-"):
+      stores.add(path)
+  for store in stores:
+    let path = providerSnapshotPath(store)
+    if not fileExists(extendedPath(path)):
+      continue
+    try:
+      let snapshot = loadProviderGraphSnapshot(store)
+      if snapshot.providerArtifactId.len == 0:
+        continue
+      let evidence = durableFileEvidence(path)
+      if not evidence.exists:
+        continue
+      warmProviderSnapshots[store & "\0" & snapshot.providerArtifactId] =
+        WarmProviderSnapshot(
+          populatedByPid: getCurrentProcessId(),
+          providerArtifactId: snapshot.providerArtifactId,
+          snapshotPath: path,
+          snapshotEvidence: evidence,
+          snapshot: snapshot)
+      stamps.add((path: path, evidence: evidence))
+      inc result
+    except CatchableError:
+      discard
+
+proc prewarmToolIdentitiesFrom(outDir: string;
+                               stamps: var seq[PrewarmStamp]): int =
+  ## Re-populate `warmToolIdentities` from the `<mode>.current-key` stamps a
+  ## previous build wrote next to the identity files.
+  ##
+  ## The key is READ rather than recomputed. `toolIdentityCacheKey` folds in
+  ## `$PATH`, and the parent's `$PATH` is the daemon's. Reading the stamp gives
+  ## the key the last build actually used; a request whose `$PATH` differs
+  ## computes a different key, misses, and resolves as it does today.
+  let dir = outDir / "tool-identity-cache"
+  if not dirExists(extendedPath(dir)):
+    return 0
+  for mode in [tpmPathOnly, tpmNix, tpmTarball, tpmScoop, tpmFromSource]:
+    let stableKeyPath = dir / (mode.modeName & ".current-key")
+    if not fileExists(extendedPath(stableKeyPath)):
+      continue
+    let paths = identityPaths(outDir, mode)
+    if not fileExists(extendedPath(paths.identityPath)):
+      continue
+    try:
+      let key = readFile(extendedPath(stableKeyPath)).strip()
+      if key.len == 0:
+        continue
+      let keyEvidence = durableFileEvidence(stableKeyPath)
+      let identityEvidence = durableFileEvidence(paths.identityPath)
+      if not keyEvidence.exists or not identityEvidence.exists:
+        continue
+      let identity = readPathOnlyBuildIdentity(paths.identityPath)
+      warmToolIdentities[outDir & "\0" & mode.modeName & "\0" & key] =
+        WarmToolIdentity(
+          populatedByPid: getCurrentProcessId(),
+          key: key,
+          identityPath: paths.identityPath,
+          inspectionPath: paths.inspectionPath,
+          identityEvidence: identityEvidence,
+          keyEvidence: keyEvidence,
+          identity: identity)
+      stamps.add((path: stableKeyPath, evidence: keyEvidence))
+      stamps.add((path: paths.identityPath, evidence: identityEvidence))
+      inc result
+    except CatchableError:
+      discard
+
+proc prewarmDaemonParentCaches*(outDir: string): DaemonParentPrewarmReport =
+  ## Warm the three in-memory build caches for ONE project output directory.
+  ##
+  ## Idempotent and self-limiting: when the files warmed by the previous call
+  ## are all still stat-identical the tables are left alone and `reused` is
+  ## set, which costs one `stat` per warmed file. Switching projects drops the
+  ## previous project's entries, so a long-lived daemon holds one project's
+  ## graph rather than every project it has ever served.
+  result.outDir = outDir
+  if outDir.len == 0:
+    return
+  if prewarmedOutDir == outDir and prewarmStampsStillFresh():
+    result.reused = true
+    return
+  if prewarmedOutDir != outDir:
+    forgetWarmBuildCaches()
+  var stamps: seq[PrewarmStamp] = @[]
+  result.loweredGraphs = prewarmLoweredGraphsFrom(outDir, stamps)
+  result.providerSnapshots = prewarmProviderSnapshotsFrom(outDir, stamps)
+  result.toolIdentities = prewarmToolIdentitiesFrom(outDir, stamps)
+  prewarmStamps = stamps
+  prewarmedOutDir = if stamps.len > 0: outDir else: ""
+
+when defined(reproDaemonParentPrewarmTest):
+  ## Seams for ``t_daemon_parent_prewarm``. The warm tables and the cache
+  ## writer are module-private, and the properties under test — "the read was
+  ## served from warm state", "a changed file is re-read" — are not observable
+  ## from the outside at all. They are compiled in only for that test so no
+  ## shipped image carries a way to write a cache record without a build.
+  proc loweredGraphCachePathForTest*(outDir, selectedActionId: string): string =
+    loweredGraphCachePath(outDir, selectedActionId)
+
+  proc writeLoweredGraphCacheFileForTest*(path, modulePath, projectRoot,
+                                          selectedActionId, pathEnv,
+                                          cacheKey: string;
+                                          actions: seq[BuildAction]) =
+    ## Write ONLY the file. `writeLoweredGraphCache` also inserts into
+    ## `warmLoweredGraphs`, which would make the staleness case impossible to
+    ## set up: the property under test is what happens when the table holds a
+    ## decode of bytes the file no longer has.
+    createDir(extendedPath(parentDir(path)))
+    let record = LoweredGraphCacheRecord(
+      modulePath: modulePath,
+      projectRoot: projectRoot,
+      selectedActionId: selectedActionId,
+      pathEnv: pathEnv,
+      cacheKey: cacheKey,
+      actions: actions,
+      pools: @[])
+    writeFile(extendedPath(path), fromBytes(encodeLoweredGraphCache(record)))
+
+  proc readLoweredGraphForTest*(path, modulePath, projectRoot,
+                                selectedActionId, pathEnv, cacheKey: string):
+      Option[tuple[actions: seq[BuildAction]; pools: seq[BuildPool]]] =
+    warmReadFreshLoweredGraphCache(path, modulePath, projectRoot,
+      selectedActionId, pathEnv, cacheKey)
+
+  proc warmLoweredGraphCountForTest*(): int = warmLoweredGraphs.len
 
 proc shouldEnterBuildPipeline*(mode: ToolProvisioningMode): bool =
   ## M9.R.8 Part 1 — extracted predicate for the build-pipeline dispatch
@@ -28099,137 +28436,161 @@ proc runPrivilegedBrokerMode(args: openArray[string]): int =
     stderr.writeLine("repro --privileged-broker: error: " & err.msg)
     return 7
 
-proc prewarmBuildFileMetadata(info: BuildGraphInspection) =
-  if info.actions.len == 0:
-    return
-  var cache = openActionCache(currentActionCacheRoot() / "action-cache")
-  var metadataCache = initFileMetadataCache()
-  var probes: seq[HotMetadataProbe] = @[]
-  for action in info.actions:
-    if action.cacheable and action.dynamicDepsFile.len == 0:
-      probes.add(HotMetadataProbe(
-        weakFingerprint: action.weakFingerprint,
-        policy: action.actionCachePolicy))
-  if probes.len == 0:
-    return
-  let scan = cache.scanHotIndexMetadataInputsUnchanged(probes,
-    addr metadataCache)
-  if scan.status != hmssUnavailable:
-    return
+const DaemonParentPrewarmEnv* = "REPROBUILD_DAEMON_PARENT_PREWARM"
+  ## Dependency-Attribution MAC-2 — set to ``0`` in the DAEMON's own
+  ## environment to turn the parent prewarm off.
+  ##
+  ## It exists so the two arms can be measured and compared on ONE binary,
+  ## which removes "a different image" as an explanation for any difference
+  ## found. It is read in the daemon parent only, at dispatch time, and it
+  ## reaches nothing that enters an action fingerprint — the arms are required
+  ## to produce byte-identical output, and
+  ## ``t_daemon_parent_prewarm_is_decision_neutral`` asserts exactly that.
+  ## Contrast ``#230``: the hazard there was a start-time environment that
+  ## silently changed what a build DID. This one can only change how long it
+  ## takes.
 
-  var records: seq[ActionResultRecord] = @[]
-  for action in info.actions:
-    if not action.cacheable or action.dynamicDepsFile.len > 0:
-      continue
-    let record = cache.lookupHotMetadataRecord(action.weakFingerprint,
-      action.actionCachePolicy)
-    if record.isSome:
-      records.add(record.get())
-  if records.len > 0:
-    discard hotMetadataRecordInputsUnchanged(records, addr metadataCache)
+proc daemonParentPrewarmEnabled*(): bool =
+  getEnv(DaemonParentPrewarmEnv, "1") != "0"
 
-proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
+proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
+                                   workingDir: string;
+                                   requestEnvironment: openArray[string]):
+    string =
+  ## The build output directory a hosted ``repro build`` will use, computed
+  ## from the REQUEST alone.
+  ##
+  ## Nothing here consults the calling process's current directory or its
+  ## environment: the target is absolutized against ``workingDir`` and the work
+  ## root comes from ``--work-root`` or from the request's own
+  ## ``REPROBUILD_WORK_ROOT``. That is the whole reason this is not simply
+  ## ``outputDirForTarget`` — in the daemon parent the ambient answers belong
+  ## to the daemon and would name a directory no build looks at.
+  ##
+  ## Returns "" when there is nothing to warm (a forced rebuild, or a target
+  ## that does not resolve to a project file). A wrong answer here cannot make
+  ## a build decide differently — every warm-table key embeds the full path, so
+  ## entries under the wrong directory are never looked up — but it would make
+  ## the pass useless, so it is derived rather than guessed.
   var target = ""
-  var mode = tpmUnspecified
   var workRoot = ""
-  var targetWasOmitted = true
   var forceRefresh = false
-  var prepareOnly = false
   var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
-      mode = parseToolProvisioning(valueFromFlag(args, i,
-        "--tool-provisioning"))
-    elif arg == "--work-root" or arg.startsWith("--work-root="):
-      workRoot = valueFromFlag(args, i, "--work-root")
-    elif arg == "--action-cache-root" or arg.startsWith("--action-cache-root="):
-      setActionCacheRootOverride(valueFromFlag(args, i,
-        "--action-cache-root"))
+  while i < rawArgs.len:
+    let arg = rawArgs[i]
+    if arg == "--work-root" or arg.startsWith("--work-root="):
+      workRoot = valueFromFlag(rawArgs, i, "--work-root")
     elif arg == "--force-rebuild" or arg == "--rebuild" or arg == "--dry-run":
       forceRefresh = true
-    elif arg in ["--daemon", "--progress", "--progress-bars",
-        "--write-diagnostics", "--show", "--measure", "--write-report",
-        "--log", "--write-benchmark", "--write-stats", "--monitor-hosting",
-        "--evidence"]:
-      discard valueFromFlag(args, i, arg)
-    elif arg == "--no-write-report":
-      discard
-    elif arg.startsWith("--daemon=") or arg.startsWith("--progress=") or
-        arg.startsWith("--progress-bars=") or
-        arg.startsWith("--write-diagnostics=") or
-        arg.startsWith("--show=") or arg.startsWith("--measure=") or
-        arg.startsWith("--write-report=") or
-        arg.startsWith("--log=") or arg.startsWith("--write-benchmark=") or
-        arg.startsWith("--write-stats=") or
-        arg.startsWith("--monitor-hosting=") or
-        arg.startsWith("--evidence=") or
-        arg.startsWith("--stats-groups="):
-      discard
-    elif arg == "--prepare-only":
-      prepareOnly = true
-    elif arg in ["-v", "--verbose", "-vv", "--very-verbose",
-        "--skip-cmake-regeneration", "--no-runquota", "--runquota"]:
-      discard
+    elif arg in ["--tool-provisioning", "--action-cache-root", "--daemon",
+        "--progress", "--progress-bars", "--write-diagnostics", "--show",
+        "--measure", "--write-report", "--log", "--write-benchmark",
+        "--write-stats", "--monitor-hosting", "--evidence"]:
+      discard valueFromFlag(rawArgs, i, arg)
     elif not arg.startsWith("-") and target.len == 0:
+      # THE FIRST POSITIONAL IS THE TARGET, with no `build` verb to skip.
+      # ``rawArgs`` is whatever ``runBuildCommand`` was handed, and every
+      # route into it strips the verb first — the dispatcher passes
+      # ``args[1 .. ^1]``, and the three internal callers compose their own
+      # argument vectors without one. Skipping a literal "build" here would
+      # therefore skip a real target: ``repro build build``, in a directory
+      # holding a ``build/`` project, would warm the caches of ``.``
+      # instead. Harmless (a wrongly-named directory warms entries no build
+      # looks up, because every warm-table key embeds the full path) but
+      # wrong, and it would have made the unit case feed an argument vector
+      # the daemon never produces.
       target = arg
-      targetWasOmitted = false
     inc i
-  if forceRefresh or prepareOnly:
-    return
+  if forceRefresh:
+    # A forced rebuild ignores all three caches, so warming them would be
+    # work with no consumer.
+    return ""
   if target.len == 0:
     target = "."
-  let info = prepareBuildGraphInspection(target, mode, publicCliPath,
-    selectDefaultAction = targetWasOmitted, workRoot = workRoot,
-    forceRefresh = false)
-  prewarmBuildFileMetadata(info)
+  if workRoot.len == 0:
+    for entry in requestEnvironment:
+      let eq = entry.find('=')
+      if eq > 0 and entry[0 ..< eq] == "REPROBUILD_WORK_ROOT":
+        workRoot = entry[eq + 1 .. ^1]
+        break
+  if workRoot.len > 0 and not workRoot.isAbsolute:
+    if workingDir.len == 0:
+      return ""
+    workRoot = absolutePath(workRoot, workingDir)
+  let parts = splitTarget(target)
+  var base = parts.base
+  if base.len == 0:
+    base = "."
+  if not base.isAbsolute:
+    if workingDir.len == 0:
+      return ""
+    base = absolutePath(base, workingDir)
+  let absoluteTarget =
+    if parts.fragment.len > 0: base & "#" & parts.fragment else: base
+  try:
+    var parsed = parseBuildTarget(absoluteTarget)
+    if not parsed.modulePath.isAbsolute:
+      return ""
+    if not fileExists(extendedPath(parsed.modulePath)):
+      return ""
+    outputDirForTargetIn(parsed, workRoot)
+  except CatchableError:
+    ""
 
-proc installUserDaemonBuildPrewarmer() =
-  setUserDaemonBuildPrewarmer(proc(request: UserDaemonBuildRequest) =
-    let previousCwd = getCurrentDir()
-    var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
-    proc setRestorableEnv(key, value: string) =
-      previousEnv.add((key: key, value: getEnv(key), present: existsEnv(key)))
-      putEnv(key, value)
-    try:
-      # Defense in depth for direct/in-process callers that bypass protocol
-      # serialization. Never install the runner-private ownership marker in
-      # the build prewarmer's live environment.
-      # Same funnel as the build and watch executors, so a re-enabled
-      # prewarm cannot reintroduce the overlay hole they no longer have.
-      previousEnv.add(applyDaemonRequestEnvironment(
-        sanitizeUserDaemonRequestEnvironment(request.environment)))
-      # Prewarm is a daemon-internal cache-warming pass, not user-scheduled
-      # work, so it must NOT contend for RunQuota leases. Forcing the documented
-      # full-bypass switch makes the nested provider-compile `runBuild` here run
-      # its actions as plain children instead of through the inline-RunQuota
-      # lease/exec path. That path, driven from inside the detached daemon
-      # worker, could deadlock: the worker launched a leased compile, the child
-      # exited, but the worker never reaped it / never sent LeaseFinished, so the
-      # lease stayed `running`, runquotad's connection worker blocked reading the
-      # next request, and the attached client blocked reading the build response.
-      # Bypassing here both avoids that hang and keeps the prewarm cheap; the
-      # subsequent real build reuses the provider-compile artifact this pass
-      # writes, so build output and scheduling are unaffected.
-      setRestorableEnv("REPROBUILD_NO_RUNQUOTA", "1")
-      let providerSession =
-        if request.runId.len > 0:
-          "daemon-build-" & request.runId
-        else:
-          "daemon-build-pid-" & $getCurrentProcessId()
-      setRestorableEnv(ProviderNimcacheSessionEnv, providerSession)
-      if request.workingDir.len > 0:
-        setCurrentDir(request.workingDir)
-      let cliPath =
-        if request.publicCliPath.len > 0: request.publicCliPath
-        else: stablePublicCliPath()
-      prewarmBuildCommand(request.rawArgs, cliPath)
-    finally:
-      try:
-        setCurrentDir(previousCwd)
-      except CatchableError:
-        discard
-      restoreDaemonRequestEnvironment(previousEnv))
+proc prewarmDaemonParentBuildCaches*(request: UserDaemonBuildRequest): string =
+  ## The daemon parent's per-request prewarm. Returns a log line, or "" when
+  ## nothing was done. Never raises: a prewarm that fails must leave the build
+  ## exactly as it would have been without one.
+  if not daemonParentPrewarmEnabled():
+    return ""
+  try:
+    let outDir = daemonPrewarmTargetOutputDir(request.rawArgs,
+      request.workingDir, request.environment)
+    if outDir.len == 0:
+      return ""
+    let report = prewarmDaemonParentCaches(outDir)
+    if report.reused:
+      return "parent prewarm reused outDir=" & outDir
+    if report.loweredGraphs + report.providerSnapshots +
+        report.toolIdentities == 0:
+      return ""
+    "parent prewarm warmed outDir=" & outDir &
+      " loweredGraphs=" & $report.loweredGraphs &
+      " providerSnapshots=" & $report.providerSnapshots &
+      " toolIdentities=" & $report.toolIdentities
+  except CatchableError:
+    ""
+
+proc installUserDaemonParentPrewarmer() =
+  ## Dependency-Attribution MAC-2 — register the DAEMON-PARENT prewarm.
+  ##
+  ## WHAT THIS REPLACED. The hook was previously handed a closure that ran
+  ## `prepareBuildGraphInspection` plus a file-metadata sweep: interface
+  ## extract, provider compile, provider-graph refresh, tool resolution,
+  ## lowering, and an `openActionCache` hot-index scan. It was never called,
+  ## and the three reasons recorded at its disabled call site were that it
+  ## duplicated the executor's provider inspection, that it ran before any
+  ## terminal event reached the client, and that it could outlive an attached
+  ## client's disconnect. On top of those it mutated the process working
+  ## directory and environment with restore-after, which is safe in a forked
+  ## worker and RACY in the shared parent this hook now runs in.
+  ##
+  ## The closure below has none of those properties; see the block comment on
+  ## `prewarmDaemonParentCaches` for the point-by-point account. In particular
+  ## it opens NEITHER the content store NOR the action cache, which is what the
+  ## old file-metadata sweep did — those hold descriptors and advisory locks,
+  ## an inherited descriptor shares its file offset with every sibling worker,
+  ## and an inherited lock can be released by any child. They stay per-worker,
+  ## where they cost about 1.2 ms and are correct.
+  ##
+  ## The file-metadata cache is named in the milestone as inheritable, and it
+  ## is — but there is no process-global one to warm: `prewarmBuildFileMetadata`
+  ## built a LOCAL `FileMetadataCache` and dropped it on return, so its only
+  ## lasting effect was on the OS page cache, and reaching it required the
+  ## action-cache handle above. Warming it in the parent would mean making it
+  ## process-global first, which is a separate change.
+  setUserDaemonParentPrewarmer(proc(request: UserDaemonBuildRequest): string =
+    prewarmDaemonParentBuildCaches(request))
 
 proc installUserDaemonBuildExecutor() =
   setUserDaemonBuildExecutor(proc(request: UserDaemonBuildRequest;
@@ -28307,6 +28668,18 @@ proc installUserDaemonBuildExecutor() =
         emit(eventKind, message, false, 0, "info", payloadJson)
       proc buildCancelRequested(): bool =
         cancelCheck != nil and cancelCheck()
+      let inheritedBefore = warmBuildCacheCounters.inheritedWarmHits
+      defer:
+        # Dependency-Attribution MAC-2 witness. How many warm-table reads this
+        # worker served from entries populated by ANOTHER process — which, in
+        # a forked daemon worker, can only be the parent's prewarm. Nothing
+        # reads this but the daemon log and the test that gates the milestone;
+        # a build decides identically whether it is zero or not.
+        let inherited =
+          warmBuildCacheCounters.inheritedWarmHits - inheritedBefore
+        setUserDaemonWorkerNote("inheritedWarmHits=" & $inherited &
+          " loweredGraphDiskReads=" &
+          $warmBuildCacheCounters.loweredGraphDiskReads)
       try:
         result = runBuildCommand(request.rawArgs, cliPath,
           forceDirect = true,
@@ -67249,7 +67622,7 @@ proc runThinAppDispatch(programName: string): int =
   if programName == "reprostored":
     return runReprostoredCommand(args)
   if programName == "repro-daemon":
-    installUserDaemonBuildPrewarmer()
+    installUserDaemonParentPrewarmer()
     installUserDaemonBuildExecutor()
     installUserDaemonWatchExecutor()
     return runUserDaemonCommand(args)
@@ -68447,7 +68820,7 @@ proc runThinAppDispatch(programName: string): int =
     # `daemon` subcommand (status / start / stop / restart / logs / sessions)
     # is a client control command.
     if daemonArgs.len > 0 and daemonArgs[0] == "serve":
-      installUserDaemonBuildPrewarmer()
+      installUserDaemonParentPrewarmer()
       installUserDaemonBuildExecutor()
       installUserDaemonWatchExecutor()
       return runUserDaemonCommand(daemonArgs[1 .. ^1])

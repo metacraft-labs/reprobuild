@@ -106,6 +106,7 @@ libs/repro_cas_store/tests/t_link_capability_probe.nim	nim	20
 libs/repro_cas_store/tests/t_repro_cas_store_basic.nim	nim	14
 libs/repro_cli_support/tests/t_action_cache_root_resolution.nim	nim	3
 libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	13
+libs/repro_cli_support/tests/t_daemon_parent_prewarm.nim	nim	6
 libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced.nim	nim	17
 libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim	nim	8
 libs/repro_cli_support/tests/t_hcr_support_profile_follows_the_host.nim	nim	4
@@ -1017,6 +1018,7 @@ tests/integration/t_d6_runner_test_timeout.nim	nim	3
 tests/integration/t_da1i_evidence_scope_reaches_io_mon.nim	nim	3
 tests/integration/t_daemon_accept_loop_survives_probe.nim	nim	3
 tests/integration/t_daemon_idle_does_not_reread_its_image.nim	nim	1
+tests/integration/t_daemon_parent_prewarm_e2e.nim	nim	2
 tests/integration/t_declared_daemon_ipc_trust.nim	nim	17
 tests/integration/t_declared_platforms_change_no_existing_resolution.nim	nim	1
 tests/integration/t_default_projects_auto_layer_on_fresh_workspace.nim	nim	3
