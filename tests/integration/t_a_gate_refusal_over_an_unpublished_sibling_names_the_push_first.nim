@@ -141,7 +141,14 @@ suite "NF-3: a gate refusal over an unpublished sibling names the push first":
             let premature = runNamedCommand(fx, commands[1], namedDir)
             checkpoint("ran `" & commands[1] & "` FIRST in " & namedDir &
               " -> " & $premature.code & "\n" & premature.output)
-            check premature.code == 0
+            # 3, not 0: the refresh RAN and WITHHELD, so the lock is not correct
+            # afterwards and the status says so (`flakeRefreshWithheldExit`).
+            # This assertion used to read `== 0`, which made the ordering claim
+            # below invisible to anything that reads only the status — a script
+            # running the two commands in the wrong order was told the first one
+            # had succeeded. The lock comparison on the next line is still the
+            # subject; this is now the second, cheaper witness of it.
+            check premature.code == 3
             check readFile(lockPath(fx)) == lockBefore
 
             # ---- (4) in the printed order, they clear it ------------------

@@ -64779,6 +64779,55 @@ proc flakeLockPinnedRevisions*(lockText: string):
     result.pins[name] = (node: nodeKey, rev: locked["rev"].getStr())
   result.ok = true
 
+proc flakeLockDeclaredRevisions*(lockText: string): Table[string, string] =
+  ## Every root input whose revision **`flake.nix` itself states**, keyed by
+  ## input name.
+  ##
+  ## A `flake.lock` node says "which revision" twice. `locked.rev` is what the
+  ## evaluation builds and is what `flakeLockPinnedRevisions` reads. `original`
+  ## is nix's mirror of the flake-ref as written in `flake.nix`, and it carries
+  ## a `rev` member ONLY when that url pins the input explicitly (`…?rev=<sha>`
+  ## / `github:o/r/<sha>`) rather than floating on a branch — nix hoists the
+  ## `?rev=` out of the url into its own attribute. So a non-empty answer here
+  ## means: this revision is the AUTHOR'S statement, and no refresh may move it.
+  ##
+  ## Read from the lock rather than by re-parsing `flake.nix`, for the reason
+  ## the refresh reads it there too: `original` is nix's own normalisation of
+  ## the flake-ref, so it answers the question without this file having to
+  ## reimplement flake-ref parsing and disagree with nix about a url.
+  ##
+  ## An unreadable or non-lock document yields an EMPTY table rather than a
+  ## refusal. Every caller reaches this only after `flakeLockPinnedRevisions`
+  ## has already read the same text and refused on its behalf, so a second
+  ## refusal here could only duplicate one that was already made — and the
+  ## consequence of an empty answer is that a remedy falls back to the generic
+  ## one, never that a wrong pin is filed.
+  var doc: JsonNode
+  try:
+    doc = parseJson(lockText)
+  except CatchableError:
+    return
+  if doc.kind != JObject or not doc.hasKey("nodes") or
+      doc["nodes"].kind != JObject:
+    return
+  let rootKey =
+    if doc.hasKey("root") and doc["root"].kind == JString: doc["root"].getStr()
+    else: "root"
+  let nodes = doc["nodes"]
+  if not nodes.hasKey(rootKey) or nodes[rootKey].kind != JObject or
+      not nodes[rootKey].hasKey("inputs") or
+      nodes[rootKey]["inputs"].kind != JObject:
+    return
+  for name, target in nodes[rootKey]["inputs"].pairs:
+    if target.kind != JString: continue
+    let nodeKey = target.getStr()
+    if not nodes.hasKey(nodeKey) or nodes[nodeKey].kind != JObject: continue
+    let original = nodes[nodeKey]{"original"}
+    if original == nil or original.kind != JObject: continue
+    let rev = original{"rev"}
+    if rev == nil or rev.kind != JString or rev.getStr().len == 0: continue
+    result[name] = rev.getStr()
+
 proc flakeClassifyPin(identity: GitToolIdentity;
     dir, pinnedRev, headRev: string):
     tuple[relation: FlakePinRelation; aheadBy, behindBy: int; detail: string] =
@@ -65660,6 +65709,49 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
 
 const
   flakeRefreshLockLabel = "repro flake refresh-lock"
+  flakeRefreshWithheldExit* = 3
+    ## `repro flake refresh-lock`'s status when it RAN and WITHHELD.
+    ##
+    ## The verb's contract is "exit 0 when the lock is CORRECT AFTERWARDS,
+    ## whether or not anything moved". After a withholding the lock is not
+    ## correct afterwards: the substituted sibling still disagrees with its pin,
+    ## and NF-3's pre-push gate refuses on exactly that. Reporting 0 there told
+    ## every exit-code-only consumer — a CI step, a script, a
+    ## `refresh-lock && git commit && git push` chain — that the situation was
+    ## resolved, and sent it onwards into the refusal. Measured on a rev-pinned
+    ## fixture: the gate refused, its remedy said to run this verb, the verb
+    ## exited 0 having printed the decline twice, and the next gate refused
+    ## identically.
+    ##
+    ## ## Why a THIRD value rather than reusing 2
+    ##
+    ## 2 already means "the refresh could not be performed at all" — an
+    ## unreadable flake, no resolvable git, an unwritable lock. Those are
+    ## environment faults, and a script's reasonable response to one is to fix
+    ## the environment and retry. A withholding is the opposite: the refresh ran
+    ## to completion and DECIDED, and retrying it is precisely the loop this
+    ## exists to break. Collapsing them would leave a caller unable to tell
+    ## "retry me" from "a human must act", which is the same defect one level
+    ## up.
+    ##
+    ## ## Why a PARTIAL refresh reports it too
+    ##
+    ## The status answers "is the lock correct afterwards", not "did any byte
+    ## change". A run that moved three pins and withheld a fourth leaves that
+    ## fourth input disagreeing with its sibling, and the gate refuses over it
+    ## exactly as if nothing had moved. Reporting 0 because something moved
+    ## would also make the status depend on how many inputs happened to be in
+    ## play, which no caller can know before invoking.
+    ##
+    ## ## What this does NOT cover, deliberately
+    ##
+    ## `skipped-dirty-sibling` keeps exit 0. That outcome travels a different
+    ## channel (`blockedBy`, not `withheld`) and returns before any input is
+    ## classified: the refresh was SUPPRESSED wholesale by the inherited
+    ## uncommitted-work policy rather than declining a pin. Its blocker is also
+    ## local developer state — CI checkouts are clean — so the exit-code-only
+    ## consumer this constant exists for does not meet it. Pinned as it stands
+    ## by `t_a_dirty_sibling_leaves_the_lock_alone`.
   flakePreCommitLabel = "repro pre-commit"
     ## What the refresh calls itself when the COMMIT HOOK is driving it. The
     ## same refresh prints the same sentences from both entry points, and the
@@ -65828,17 +65920,46 @@ type
     failed*: bool           ## the document itself could not be read as a lock
     diagnostic*: string
 
+proc flakeRevPinFile(flakeRoot: string): string =
+  if flakeRoot.len > 0: flakeRoot / "flake.nix" else: "the flake's flake.nix"
+
+proc flakeRevPinEditRemedy*(declaredRev, observedRev,
+    flakeRoot: string): string =
+  ## THE single generator for "the remedy here is a FILE EDIT, not a command".
+  ##
+  ## Both halves of the campaign print it: the refresh's own decline notice, and
+  ## NF-3's pre-push refusal over the same input. They are kept on one generator
+  ## for the reason `flakeReconcileCommands` is — the two used to disagree about
+  ## what fixes a row, and the gate named a command the refresh would decline,
+  ## which is the loop this milestone removes.
+  ##
+  ## NOTE for anyone editing this string: backticks are reserved for RUNNABLE
+  ## command lines — `backtickedCommands` lifts every one of them out and the
+  ## cases EXECUTE what they find — and the first step here is an edit to a
+  ## file. It therefore carries no backticks around the edit, and quotes only
+  ## the one thing that really is a command line: the re-lock.
+  ##
+  ## The re-lock is named because the edit ALONE does not clear the disagreement.
+  ## After it, `flake.nix` says one revision and the lock's `original` still says
+  ## the other; nix reconciles that on its next evaluation by re-locking the node
+  ## — moving `original.rev` and `locked.rev` together and computing the new
+  ## `narHash` itself, which is the one part of this no reprobuild command can
+  ## do. `nix flake lock` is that evaluation, asked for explicitly.
+  "change rev=" & declaredRev & " to rev=" & observedRev &
+    " in that input's url in " & flakeRevPinFile(flakeRoot) &
+    " — the revision is the author's statement and lives there, so no refresh " &
+    "can move it — then re-lock the node so flake.lock follows the edit (`nix " &
+    "flake lock" & (if flakeRoot.len > 0: " " & flakeRoot else: "") &
+    "`, or simply re-enter the dev shell), which is also what recomputes its " &
+    "narHash"
+
 proc flakeDeclinedPinNotice(input, node, declaredRev, observedRev,
     flakeRoot: string): string =
   ## The announcement for ONE input whose pin `flake.nix` states itself.
   ##
-  ## NOTE for anyone editing this string: backticks are reserved for RUNNABLE
-  ## command lines — `backtickedCommands` lifts every one of them out and the
-  ## cases run what it finds — and the remedy here is a FILE EDIT, not a
-  ## command. So it carries no backticks at all rather than handing the
-  ## operator something that is not runnable.
-  let flakeFile =
-    if flakeRoot.len > 0: flakeRoot / "flake.nix" else: "the flake's flake.nix"
+  ## Its remedy clause comes from `flakeRevPinEditRemedy`, the same generator
+  ## the pre-push refusal prints from.
+  let flakeFile = flakeRevPinFile(flakeRoot)
   "flake.lock NOT refreshed for input '" & input & "': " & flakeFile &
     " pins this input BY REVISION, so its lock node '" & node &
     "' states that revision in original.rev (" & declaredRev &
@@ -65851,9 +65972,8 @@ proc flakeDeclinedPinNotice(input, node, declaredRev, observedRev,
     declaredRev & " and rewrites flake.lock on the next evaluation. Neither " &
     "is this refresh's to choose, so the pin was LEFT ALONE, with its " &
     "narHash intact. This is a warning, not an error: nothing was written " &
-    "and no operation was refused. To record " & observedRev &
-    ", change the rev= in this input's url in " & flakeFile &
-    "; nix will then re-lock the input and compute its narHash itself."
+    "and no operation was refused. To record " & observedRev & ", " &
+    flakeRevPinEditRemedy(declaredRev, observedRev, flakeRoot) & "."
 
 proc refreshFlakeLockText*(lockText: string;
     revisions: openArray[tuple[input, rev: string]];
@@ -66394,6 +66514,11 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
       result.tag = "skipped-unrecordable-sibling"
       result.diagnostic = result.withheld.join(" | ") & "; dirt-scope: " &
         result.dirtyScope.join(",")
+      # The lock is NOT correct afterwards — see `flakeRefreshWithheldExit`.
+      # The COMMIT path is unaffected by this: it reaches this refresh through
+      # `refreshFlakeLockAtCommit`, whose return tuple carries no exit code at
+      # all, and `runPreCommitLockCommand` returns a literal 0 on every path.
+      result.exitCode = flakeRefreshWithheldExit
       return
     result.tag = "up-to-date"
     result.diagnostic = "flake.lock already names the observed sibling " &
@@ -66421,6 +66546,12 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
        "; WITHHELD: " & result.withheld.join(" | ")
      else: "") &
     "; dirt-scope: " & result.dirtyScope.join(",")
+  # A PARTIAL refresh reports the withholding too: the status answers "is the
+  # lock correct afterwards", and the withheld input still disagrees with its
+  # sibling exactly as it would have if nothing had moved. See
+  # `flakeRefreshWithheldExit`.
+  if result.withheld.len > 0:
+    result.exitCode = flakeRefreshWithheldExit
 
 proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
   ## ``repro flake refresh-lock [--all|--only=LIST|…every `repro develop`
@@ -66428,9 +66559,24 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
   ## [--workspace-root=PATH] [--current-repo=PATH] [--json]``.
   ##
   ## Rewrites the `locked` node of each flake input an override substituted to
-  ## that sibling's current `HEAD`, and touches nothing else. Exit 0 when the
-  ## lock is correct afterwards (whether or not anything moved); exit 2 when
-  ## the refresh could not be performed at all.
+  ## that sibling's current `HEAD`, and touches nothing else.
+  ##
+  ## Three statuses, and the middle one is the reason this list has three
+  ## members rather than two:
+  ##
+  ##   * **0** — the lock is CORRECT AFTERWARDS, whether or not anything moved.
+  ##     `up-to-date`, `refreshed` with nothing withheld, and the ordinary
+  ##     "this directory is not a locked flake" answers.
+  ##   * **3** (`flakeRefreshWithheldExit`) — the refresh RAN and WITHHELD at
+  ##     least one input, so a substituted sibling still disagrees with its pin
+  ##     and the pre-push gate will refuse over it. Reported for a total decline
+  ##     and for a partial one alike; see the constant for why, and for why
+  ##     `skipped-dirty-sibling` is not in this class.
+  ##   * **2** — the refresh could not be performed AT ALL (`refused-*`): an
+  ##     unreadable flake or lock, no resolvable git, an unresolvable workspace.
+  ##
+  ## 3 is distinct from 2 because a caller's response differs: an environment
+  ## fault is worth retrying, a decision is not.
   var
     flakeDir = ""
     stripSpec = ""
@@ -66882,15 +67028,51 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   # declines (NF-2 will not record an unpublished revision). That is the
   # "remedy that cannot work" this gate and that refresh are kept consistent
   # about.
+  #
+  # AND the one offender for which there is NO command. When `flake.nix` pins
+  # an input BY REVISION, that revision is the author's statement: NF-2's
+  # refresh declines to move it (moving `locked.rev` alone leaves the flake's
+  # own pin inert, and moving `original.rev` with it makes nix revert the node),
+  # so naming the refresh here printed a command that exits non-zero and changes
+  # nothing. Measured on a rev-pinned fixture before this branch existed: the
+  # gate refused, its remedy named the refresh, the refresh declined, and the
+  # next gate refused identically — the operator looped. The remedy for such a
+  # row is an EDIT to `flake.nix`, generated by `flakeRevPinEditRemedy` so the
+  # refresh's own decline notice and this refusal cannot drift apart.
+  #
+  # Scoped to the rows for which the refresh really would be the named remedy.
+  # A rev-pinned sibling that is BEHIND its pin, or whose pin is UNFETCHED, is
+  # cleared by moving the CHECKOUT (`git merge --ff-only`, `git fetch`) and
+  # needs no edit at all — advising one there would send the operator to change
+  # a file that is already correct. An UNPUBLISHED rev-pinned row needs BOTH:
+  # the publishing push still has to happen, and the refresh that follows it
+  # would still decline, so the push is kept and the refresh is replaced.
+  let declaredRevs = flakeLockDeclaredRevisions(lockText)
+  let refreshCommand = flakeRefreshLockCommand(flakeRoot, workspaceRoot)
   var remedies: seq[string]
+  var edits: seq[string]
   for row in offenders:
+    let declaredRev = declaredRevs.getOrDefault(row.input, "")
+    let authorPinned = declaredRev.len > 0 and
+      declaredRev != row.siblingRev and
+      row.relation in {fprAt, fprAhead, fprDiverged}
+    if authorPinned:
+      let edit = "Input '" & row.input & "' is pinned BY REVISION: " &
+        flakeRevPinEditRemedy(declaredRev, row.siblingRev, flakeRoot)
+      if edit notin edits: edits.add(edit)
     for cmd in flakeReconcileCommands(row, flakeRoot, workspaceRoot):
+      # The refresh is the command this row has just been shown not to have.
+      if authorPinned and cmd == refreshCommand: continue
       if cmd notin remedies: remedies.add(cmd)
   result.remediation = sentences.join("; ") &
     " — flake.lock is an IN-TREE committed lock, so this gate verifies it " &
-    "and never writes it. From " & flakeRoot & " run: `" &
-    remedies.join("` and `") & "`, then commit the refreshed flake.lock and " &
-    "re-push."
+    "and never writes it." &
+    (if edits.len > 0: " " & edits.join(". ") & "." else: "") &
+    (if remedies.len > 0:
+       " From " & flakeRoot & " run: `" & remedies.join("` and `") &
+         "`, then commit the refreshed flake.lock and re-push."
+     else:
+       " Then commit both files and re-push.")
 
 proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
   ## CONSUMER 2 — ``repro flake override-status [--all|--only=LIST|
