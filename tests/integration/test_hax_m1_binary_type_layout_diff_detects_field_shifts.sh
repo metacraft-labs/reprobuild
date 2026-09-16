@@ -28,7 +28,12 @@
 # 3. Positive arm: Altered function logic with identical struct layout passes validation cleanly.
 # 4. Refusal arm: Struct member offset shift and field reordering refused with `type-layout-incompatible`
 #    naming the struct, member, expected offset, and observed offset.
-# 5. Falsifier: Simulates omitting member offset validation (--falsify-ignore-offset-shift),
+# 5. Class-2 recording arm: the same object file resolved over two different
+#    single-tool search paths yields different type facts AND a different
+#    recorded DWARF-tool resolution / identity naming the tool that actually
+#    ran, its resolved executable path, the search path walked, and all four
+#    configured probes (reprobuild-specs/Package-Model.md class 2).
+# 6. Falsifier: Simulates omitting member offset validation (--falsify-ignore-offset-shift),
 #    causing incompatible patch to be accepted and triggering FALSIFIER-CAUGHT.
 
 set -euo pipefail
@@ -217,9 +222,10 @@ nim c --hints:off --warnings:off \
 echo "  [OK] Test driver compiled: $DRIVER_BIN"
 
 # -----------------------------------------------------------------------------
-# 4. Execute test driver: Anti-vacuity, Control, Positive, and Refusal arms
+# 4. Execute test driver: Anti-vacuity, Control, Positive, Refusal and
+#    Class-2 Recording arms
 # -----------------------------------------------------------------------------
-echo "[4/5] Running test driver (Anti-vacuity, Control, Refusal A, Refusal B)..."
+echo "[4/5] Running test driver (Anti-vacuity, Control, Refusal A, Refusal B, Class-2 Recording)..."
 
 "$DRIVER_BIN" "$BASE_O" "$CTRL_O" "$MUT_REORDER_O" "$MUT_SHIFT_O"
 

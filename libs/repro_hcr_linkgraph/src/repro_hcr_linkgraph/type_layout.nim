@@ -7,7 +7,7 @@
 # Related milestones:
 # - reprobuild-specs/HCR-Advanced-Lifecycle-And-Tooling.milestones.org (HAX-M1)
 
-import std/[os, osproc, strutils, sequtils, tables, sets]
+import std/[os, strutils, sequtils, tables, sets]
 
 type
   CompositeTypeKind* = enum
@@ -51,10 +51,95 @@ type
     isRefusal*: bool
     reason*: string
 
+  DwarfToolProbe* = object
+    ## One CONFIGURED probe of the DWARF-dumper plan, together with what the
+    ## resolution actually observed for it. Every configured candidate gets a
+    ## row — including the ones the search path did not carry (``resolvedPath``
+    ## empty, ``attempted`` false) — because "the tool was not installed here"
+    ## is exactly the fact that makes two hosts disagree.
+    binName*: string
+    args*: seq[string]
+    resolvedPath*: string
+      ## Absolute path the search-path walk produced, or ``""`` when no
+      ## directory on the search path carried this candidate.
+    attempted*: bool
+      ## True when the probe was actually executed.
+    exitCode*: int
+      ## Meaningful only when ``attempted``; ``-1`` when the run itself raised.
+    outputBytes*: int
+      ## Size of the captured stdout. Zero output is a rejection even at
+      ## exit code 0, which is the existing loop's behaviour.
+    accepted*: bool
+      ## True for the single probe whose output was used.
+    diagnostic*: string
+      ## Non-empty when the probe was executed and rejected.
+
+  DwarfToolResolution* = object
+    ## Package-Model class 2 (PATH-only executable) resolution record.
+    ##
+    ## The spec's class-2 tier is the weakest one reprobuild admits, and it
+    ## still demands that "the resulting action identity records the search
+    ## path, the resolved executable path, and configured probes". This object
+    ## IS that record. It is returned from every entry point that resolves a
+    ## DWARF dumper, so the resolution cannot be performed and discarded —
+    ## which is what ``docs/ambient-execution-linter.md`` calls "not class 2;
+    ## it is unclassified".
+    ##
+    ## The four configured candidates (``dwarfdump`` / ``llvm-dwarfdump`` /
+    ## ``objdump`` / ``readelf``) do NOT emit the same DWARF text, so which one
+    ## the host happened to carry changes the extracted layouts. Whoever owns
+    ## the action identity for a type-layout validation MUST fold
+    ## ``dwarfToolIdentity`` into it; otherwise two hosts produce different
+    ## layout facts under one cache key.
+    searchPath*: seq[string]
+      ## The directories the resolver walked, in order.
+    probes*: seq[DwarfToolProbe]
+      ## Every configured probe, in the configured order.
+    toolName*: string
+      ## Candidate whose output was used; ``""`` when none succeeded.
+    resolvedExecutablePath*: string
+      ## The winning candidate's resolved executable path.
+    argv*: seq[string]
+      ## The argv actually handed to the runner (``argv[0]`` is the resolved
+      ## executable path, not the bare candidate name).
+
+  DwarfDumpRunner* = proc (executablePath: string; args: seq[string]):
+      tuple[output: string, exitCode: int] {.closure.}
+    ## The execution half of the class-2 seam.
+    ##
+    ## This library parses object files; it does not own an action identity and
+    ## it is not allowed to spawn processes (see
+    ## ``scripts/check_ambient_execution.sh`` and
+    ## ``reprobuild-specs/Package-Model.md`` §"Executables, Libraries, And
+    ## Package Collections"). The identity owner supplies the runner — a build
+    ## edge passes one that spawns under the monitor with the tool bound
+    ## through ``BuildAction.toolIdentityRefs``; the HAX-M1 gate passes one
+    ## backed by ``std/osproc``.
+
+  DwarfToolHost* = object
+    ## The injected resolution+execution environment: the search path the
+    ## candidates are resolved against, and the runner that executes the
+    ## winner. Construct with ``newDwarfToolHost``.
+    searchPath*: seq[string]
+    run*: DwarfDumpRunner
+
+  TypeLayoutExtraction* = object
+    ## Extraction result. The resolution travels WITH the layouts by
+    ## construction: there is no entry point that returns layouts alone, so a
+    ## caller cannot end up holding type facts whose provenance it never saw.
+    layouts*: seq[CompositeTypeLayout]
+    resolution*: DwarfToolResolution
+
   TypeLayoutValidationResult* = object
     isCompatible*: bool
     refusalReason*: string
     diffs*: seq[TypeDiffFact]
+    toolResolutions*: seq[DwarfToolResolution]
+      ## One per object file compared (baseline first, then candidate). Empty
+      ## for ``diffTypeLayouts``, which is pure and resolves nothing.
+    toolIdentity*: string
+      ## Concatenation of ``dwarfToolIdentity`` over ``toolResolutions``. Fold
+      ## this into the action identity of whatever schedules the validation.
 
 type
   DieNode = ref object
@@ -384,37 +469,230 @@ proc extractTypeLayoutsFromDwarf*(dwarfOutput: string): seq[CompositeTypeLayout]
 
   return layouts
 
-proc runDwarfDump(objectPath: string): string =
-  if not fileExists(objectPath):
-    raise newException(IOError, "Object file does not exist: " & objectPath)
+type DwarfToolCandidate* = tuple[binName: string, args: seq[string]]
 
-  type CandidateTool = tuple[binName: string, args: seq[string]]
-  let candidates: seq[CandidateTool] = @[
+proc dwarfDumpCandidates*(objectPath: string): seq[DwarfToolCandidate] =
+  ## The configured probe plan, in priority order. Exported so the identity
+  ## owner can see the plan without running it, and so the order is pinnable
+  ## by a test rather than only observable through a successful dump.
+  @[
     ("dwarfdump", @["--debug-info", objectPath]),
     ("llvm-dwarfdump", @["--debug-info", objectPath]),
     ("objdump", @["--dwarf=info", objectPath]),
     ("readelf", @["--debug-dump=info", objectPath])
   ]
 
-  var errors: seq[string] = @[]
-  for (binName, args) in candidates:
-    let exePath = findExe(binName)
-    if exePath.len > 0:
+proc splitSearchPath*(pathValue: string): seq[string] =
+  ## Split a ``PATH``-shaped value into its directories, preserving order and
+  ## dropping empty entries.
+  for part in pathValue.split(PathSep):
+    if part.len > 0:
+      result.add(part)
+
+proc ambientSearchPath*(): seq[string] =
+  ## The host's ``PATH``, split. Reading the environment is not itself the
+  ## hazard the ambient-execution rule targets — resolving and executing a
+  ## binary while recording nothing is. Callers pass the result into
+  ## ``newDwarfToolHost``, where it is recorded on every resolution.
+  splitSearchPath(getEnv("PATH"))
+
+proc newDwarfToolHost*(run: DwarfDumpRunner;
+                       searchPath: openArray[string]): DwarfToolHost =
+  ## Bind an execution runner to the search path its candidates are resolved
+  ## against. Both halves are the caller's, and both are recorded.
+  if run == nil:
+    raise newException(ValueError,
+      "newDwarfToolHost: a DwarfDumpRunner is required — this library does " &
+      "not spawn processes; the owner of the action identity supplies the " &
+      "runner and receives the recorded resolution back")
+  DwarfToolHost(searchPath: @searchPath, run: run)
+
+proc expandExecutableSymlink(path: string): string =
+  ## Mirror ``os.findExe``'s ``followSymlinks = true`` behaviour so the
+  ## recorded ``resolvedExecutablePath`` names the real file rather than a
+  ## dispatcher symlink. Bounded so a symlink cycle cannot hang a build.
+  result = path
+  when not defined(windows):
+    var guard = 0
+    while guard < 64:
       try:
-        let cmd = quoteShell(exePath) & (if args.len > 0: " " & args.map(quoteShell).join(" ") else: "")
-        let res = execCmdEx(cmd)
-        if res.exitCode == 0 and res.output.len > 0:
-          return res.output
-        else:
-          errors.add(binName & " exited with code " & $res.exitCode)
-      except CatchableError as e:
-        errors.add(binName & " error: " & e.msg)
+        if not symlinkExists(result):
+          break
+        let target = expandSymlink(result)
+        result =
+          if target.isAbsolute: target
+          else: result.parentDir / target
+      except OSError:
+        break
+      inc guard
+
+proc resolveOnSearchPath*(binName: string;
+                          searchPath: openArray[string]): string =
+  ## Walk ``searchPath`` for ``binName`` and return the resolved executable
+  ## path, or ``""``.
+  ##
+  ## This replaces ``os.findExe``: not as a way to dodge the linter's grep, but
+  ## because ``findExe`` reads the ambient ``PATH`` itself and therefore cannot
+  ## tell the caller which directories it walked. Taking the search path as an
+  ## argument is what makes ``DwarfToolResolution.searchPath`` a fact rather
+  ## than a guess, and it is what lets a test drive the resolution over a
+  ## controlled directory.
+  if binName.len == 0:
+    return ""
+  when defined(windows):
+    const exeExts = ["exe", "cmd", "bat", ""]
+  else:
+    const exeExts = [""]
+
+  proc withExt(name, ext: string): string =
+    if ext.len == 0: name else: addFileExt(name, ext)
+
+  proc probeDir(dir, name: string): string =
+    for ext in exeExts:
+      let candidate =
+        if dir.len == 0: withExt(name, ext)
+        else: dir / withExt(name, ext)
+      if fileExists(candidate):
+        return expandExecutableSymlink(candidate)
+    ""
+
+  # ``findExe`` checks the current directory first on Windows, and on POSIX
+  # only when the name already carries a path separator. Preserved verbatim.
+  when defined(windows):
+    let here = probeDir("", binName)
+    if here.len > 0:
+      return here
+  else:
+    if '/' in binName:
+      let here = probeDir("", binName)
+      if here.len > 0:
+        return here
+
+  for dir in searchPath:
+    if dir.len == 0:
+      continue
+    let hit = probeDir(dir, binName)
+    if hit.len > 0:
+      return hit
+  ""
+
+proc dwarfToolIdentity*(resolution: DwarfToolResolution): string =
+  ## Deterministic, line-oriented rendering of the class-2 record, shaped like
+  ## the engine's own ``reprobuild.profileBuildAction.v1`` action key (one
+  ## ``argv:<elem>`` line per element). Fold this into the action identity of
+  ## whatever schedules a type-layout validation: it is what makes a host with
+  ## ``llvm-dwarfdump`` and a host with only ``readelf`` land on DIFFERENT
+  ## cache keys instead of sharing one.
+  var lines: seq[string] = @["dwarf-tool-resolution.v1"]
+  for dir in resolution.searchPath:
+    lines.add("search-path:" & dir)
+  for probe in resolution.probes:
+    lines.add("probe:" & probe.binName &
+              ":args=" & probe.args.join(" ") &
+              ":resolved=" & (if probe.resolvedPath.len > 0: probe.resolvedPath else: "-") &
+              ":attempted=" & $probe.attempted &
+              ":exit=" & $probe.exitCode &
+              ":bytes=" & $probe.outputBytes &
+              ":accepted=" & $probe.accepted)
+  lines.add("tool:" & (if resolution.toolName.len > 0: resolution.toolName else: "-"))
+  lines.add("resolved:" &
+            (if resolution.resolvedExecutablePath.len > 0:
+               resolution.resolvedExecutablePath
+             else: "-"))
+  for arg in resolution.argv:
+    lines.add("argv:" & arg)
+  lines.join("\n")
+
+proc runDwarfDump*(objectPath: string; host: DwarfToolHost;
+                   resolution: var DwarfToolResolution): string =
+  ## Resolve a DWARF dumper over ``host.searchPath``, run it through
+  ## ``host.run``, and record the whole resolution into ``resolution``.
+  ##
+  ## Behaviour is the pre-existing loop, unchanged: the candidate order is
+  ## ``dwarfdump`` → ``llvm-dwarfdump`` → ``objdump`` → ``readelf``; a
+  ## candidate missing from the search path is skipped silently; a candidate
+  ## that exits non-zero or emits nothing falls through to the next one; and
+  ## exhausting the list raises ``IOError`` with the same ``Attempts: …`` list.
+  ## What is new is that every one of those decisions is now written down.
+  if not fileExists(objectPath):
+    raise newException(IOError, "Object file does not exist: " & objectPath)
+  if host.run == nil:
+    raise newException(ValueError,
+      "runDwarfDump: DwarfToolHost carries no runner — build it with " &
+      "newDwarfToolHost")
+
+  resolution = DwarfToolResolution(
+    searchPath: host.searchPath,
+    probes: @[],
+    toolName: "",
+    resolvedExecutablePath: "",
+    argv: @[])
+
+  var errors: seq[string] = @[]
+  var dumped = ""
+  var found = false
+
+  for (binName, args) in dwarfDumpCandidates(objectPath):
+    var probe = DwarfToolProbe(
+      binName: binName,
+      args: args,
+      resolvedPath: "",
+      attempted: false,
+      exitCode: 0,
+      outputBytes: 0,
+      accepted: false,
+      diagnostic: "")
+
+    if found:
+      # Later candidates are not probed once one has won — recording them as
+      # "not attempted" keeps the plan visible without claiming a probe that
+      # never happened.
+      resolution.probes.add(probe)
+      continue
+
+    let exePath = resolveOnSearchPath(binName, host.searchPath)
+    probe.resolvedPath = exePath
+    if exePath.len == 0:
+      probe.diagnostic = binName & " not found on the recorded search path"
+      resolution.probes.add(probe)
+      continue
+
+    probe.attempted = true
+    try:
+      let res = host.run(exePath, args)
+      probe.exitCode = res.exitCode
+      probe.outputBytes = res.output.len
+      if res.exitCode == 0 and res.output.len > 0:
+        probe.accepted = true
+        resolution.toolName = binName
+        resolution.resolvedExecutablePath = exePath
+        resolution.argv = @[exePath] & args
+        dumped = res.output
+        found = true
+      else:
+        probe.diagnostic = binName & " exited with code " & $res.exitCode
+        errors.add(binName & " exited with code " & $res.exitCode)
+    except CatchableError as e:
+      probe.exitCode = -1
+      probe.diagnostic = binName & " error: " & e.msg
+      errors.add(binName & " error: " & e.msg)
+
+    resolution.probes.add(probe)
+
+  if found:
+    return dumped
 
   raise newException(IOError, "Failed to dump DWARF debug info from '" & objectPath & "'. Attempts: " & errors.join("; "))
 
-proc extractTypeLayoutsFromObject*(objectPath: string): seq[CompositeTypeLayout] =
-  let output = runDwarfDump(objectPath)
-  extractTypeLayoutsFromDwarf(output)
+proc extractTypeLayoutsFromObject*(objectPath: string;
+                                   host: DwarfToolHost): TypeLayoutExtraction =
+  ## Extract composite type layouts from ``objectPath``, returning the layouts
+  ## together with the class-2 resolution that produced them.
+  var resolution: DwarfToolResolution
+  let output = runDwarfDump(objectPath, host, resolution)
+  TypeLayoutExtraction(
+    layouts: extractTypeLayoutsFromDwarf(output),
+    resolution: resolution)
 
 proc diffTypeLayouts*(baseline: seq[CompositeTypeLayout],
                       candidate: seq[CompositeTypeLayout],
@@ -623,7 +901,21 @@ proc diffTypeLayouts*(baseline: seq[CompositeTypeLayout],
   )
 
 proc validatePatchTypeCompatibility*(baselineObjectPath, candidateObjectPath: string,
+                                     host: DwarfToolHost,
                                      ignoreOffsetShift: bool = false): TypeLayoutValidationResult =
-  let baselineLayouts = extractTypeLayoutsFromObject(baselineObjectPath)
-  let candidateLayouts = extractTypeLayoutsFromObject(candidateObjectPath)
-  return diffTypeLayouts(baselineLayouts, candidateLayouts, ignoreOffsetShift)
+  ## Phase C of the patch-loading lifecycle
+  ## (``reprobuild-specs/HCR/Patch-Loading-Lifecycle.md`` §"Phase C: Type
+  ## Layout Validation").
+  ##
+  ## The returned result carries ``toolResolutions`` / ``toolIdentity``: the
+  ## refusal or acceptance below is only as reproducible as the dumper that
+  ## produced the layouts, so the coordinator that schedules this validation
+  ## must fold ``toolIdentity`` into the identity it caches the verdict under.
+  let baseline = extractTypeLayoutsFromObject(baselineObjectPath, host)
+  let candidate = extractTypeLayoutsFromObject(candidateObjectPath, host)
+  result = diffTypeLayouts(baseline.layouts, candidate.layouts, ignoreOffsetShift)
+  result.toolResolutions = @[baseline.resolution, candidate.resolution]
+  var keys: seq[string] = @[]
+  for resolution in result.toolResolutions:
+    keys.add(dwarfToolIdentity(resolution))
+  result.toolIdentity = keys.join("\n--\n")
