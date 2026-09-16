@@ -422,6 +422,17 @@ type
       ## The label stays with the document; the aggregate exit does not.
       ## ``main`` counts disagreements and exits non-zero on any of them,
       ## so the crash-after-pass case can no longer leave a green run.
+    cancelled: bool
+      ## This case was in flight when the RUN was cut short, so the
+      ## harness killed it and no verdict about it exists.
+      ##
+      ## Implies ``status == tsHarnessError``. It is a separate bit rather
+      ## than a substring of ``harnessError`` because a consumer has to be
+      ## able to separate "we could not start this case" (a host or
+      ## harness fault worth chasing) from "we stopped the run and this
+      ## case happened to be running" (nothing to chase; re-run it). Both
+      ## are ERROR, and neither is a failure — that part is the whole
+      ## point — but they are not the same finding.
 
   Queue = object
     lock: Lock
@@ -1402,6 +1413,11 @@ const PostKillVerificationSec = 5
 proc drainAvailable(p: Process; output: var string): int
 proc finalDrainNonBlocking(p: Process; output: var string)
 proc describeChildExit(exitCode: int): string
+proc cutShortReason(sig: int): string
+proc cancelledCaseDiagnostic(resultFile: string; exitCode: int;
+                             sig: int): string
+proc timeoutCaseDiagnostic(resultFile, timeoutDescription: string;
+                           durationMs: int): string
 
 when defined(posix):
   const
@@ -1429,6 +1445,22 @@ when defined(posix):
 
   initLock(activeProcessGroupsLock)
 
+  proc cutShortSignal(): int =
+    ## The signal that cut this run short, or ``0`` while the run is its
+    ## own master.
+    ##
+    ## SHUTDOWN IS A PROPERTY OF THE RUN, NOT OF A CASE. Every consumer of
+    ## it — the per-case verdict, the console summary and the summary
+    ## document — reads it from here, so the three can never disagree
+    ## about whether the run was cut short (the defect this exists to
+    ## prevent was exactly such a disagreement: a summary that reported
+    ## eight ``fail`` and ``error=0`` for eight cases nobody had a verdict
+    ## about).
+    interruptedSignal.load(moAcquire)
+else:
+  proc cutShortSignal(): int = 0
+
+when defined(posix):
   proc appendCleanupTrace(event: string) =
     ## Optional production-path observability used by the real process-tree
     ## integration regression. Cleanup correctness never depends on this file:
@@ -2564,6 +2596,18 @@ type ChildRunOutcome = object
   timedOut: bool
   timeoutDescription: string
   memoryExceeded: bool
+  cancelled: bool
+    ## The RUNNER was told to stop while this child was still running, so
+    ## the child was killed by the shutdown path rather than by anything
+    ## it did.
+    ##
+    ## It rides beside ``timedOut`` rather than inside it because the two
+    ## mean opposite things about the code under test. A no-progress
+    ## timeout is an observation ABOUT THE CASE; a cancellation is an
+    ## observation about the RUN, and the case it landed on is incidental
+    ## — reporting it as ``timedOut`` alone is what made eight killed
+    ## workers reach a suite summary as eight test FAILURES, two of which
+    ## passed on the next isolated execution.
   peakRssBytes: uint64
 
 proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
@@ -2702,6 +2746,7 @@ proc drainAndWaitWithTimeout(testProcess: TestProcess; timeoutSec: int;
         discard finishInterruptedTestProcess(testProcess, output)
         return ChildRunOutcome(output: output, exitCode: TimeoutExitCode,
           timedOut: true, timeoutDescription: "INTERRUPTED",
+          cancelled: true,
           peakRssBytes: peakRssBytes)
     when defined(posix):
       var code = -1
@@ -3100,7 +3145,26 @@ proc runWholeBinary(tc: TestCase; resultsDir: string;
       memoryLimitBytes)
     let output = childOutcome.output
     let exitCode = childOutcome.exitCode
-    if childOutcome.memoryExceeded:
+    # Same two shutdown shapes as the per-case path, and the same reason
+    # the run-wide flag is what decides: see ``runOneProtocol``. A
+    # whole-binary entry stands for every case in the binary, so calling
+    # one FAIL on a shutdown asserts a defect about all of them at once.
+    let cutShortSig = cutShortSignal()
+    let exitedCleanly =
+      not childOutcome.timedOut and not childOutcome.memoryExceeded and
+      (exitCode == 0 or exitCode == 2)
+    if cutShortSig != 0 and not exitedCleanly:
+      result.status = tsHarnessError
+      result.cancelled = true
+      result.harnessError =
+        "cancelled in flight: " & cutShortReason(cutShortSig)
+      result.runnerDiagnosis = cancelledCaseDiagnostic(
+        (if result.resultFile.len > 0: result.resultFile
+         else: "(whole-binary run — this protocol takes no per-case " &
+           "document)"),
+        exitCode, cutShortSig)
+      result.stdout = result.runnerDiagnosis & output
+    elif childOutcome.memoryExceeded:
       # A FAIL, and one that the spine row will label ``oom_killed``
       # rather than ``exited`` — which is the whole point of recording a
       # termination kind beside an exit status.
@@ -3209,6 +3273,70 @@ proc describeChildExit(exitCode: int): string =
       ", consistent with termination by signal " & $sig & name & ")"
   else:
     result = "exit code " & $exitCode
+
+proc cutShortReason(sig: int): string =
+  ## One sentence naming why the run stopped, shared verbatim by the
+  ## per-case ``harness_error``, the console summary and the summary
+  ## document.
+  let named = signalName(sig)
+  let name = if named.len > 0: " (" & named & ")" else: ""
+  "the run was cut short by signal " & $sig & name &
+    " — an outer wall-clock backstop, a Ctrl-C, or an operator kill"
+
+proc cancelledCaseDiagnostic(resultFile: string; exitCode: int;
+                             sig: int): string =
+  ## The diagnosis owed to a case that was still running when the run was
+  ## cut short.
+  ##
+  ## WHY THIS TEXT EXISTS AT ALL. Before it, such a case reached the log
+  ## as a bare ``[FAIL] <name> (1800123ms)`` followed by a path to a
+  ## result document that was never written — no checkpoints, no
+  ## exception, no diagnosis. That shape is the signature of a killed
+  ## worker and of nothing else, but it is indistinguishable, to a reader,
+  ## from a case that failed for a reason the runner forgot to print. So
+  ## it is spelled out, and the word FAIL does not appear in it.
+  "repro_test_runner: this case was CANCELLED, not failed.\n" &
+    "  reason:      " & cutShortReason(sig) & "\n" &
+    "  state:       it was still running when the runner was told to " &
+      "stop, and the\n" &
+    "               runner killed its process group as part of shutting " &
+      "down\n" &
+    "  child:       " & describeChildExit(exitCode) & "\n" &
+    "  document:    " & resultFile & " (absent or pre-kill; not read)\n" &
+    # Hard-wrapped: printed to the console per affected case.
+    "  meaning:     NOTHING WAS OBSERVED ABOUT THE CODE UNDER TEST. This " &
+      "case did not\n" &
+    "               fail, did not pass, and did not time out on its own " &
+      "deadline; it\n" &
+    "               was stopped mid-flight. It is counted in " &
+      "summary.harness_errors,\n" &
+    "               never in summary.failed. Re-run it to learn anything " &
+      "about it.\n"
+
+proc timeoutCaseDiagnostic(resultFile, timeoutDescription: string;
+                           durationMs: int): string =
+  ## The diagnosis owed to a case the runner killed on ITS OWN deadline.
+  ##
+  ## Distinct from ``cancelledCaseDiagnostic`` because the verdict is the
+  ## opposite one: here the runner watched this case make no progress for
+  ## its whole budget, which is an observation about the case and stays a
+  ## FAIL. It needs its own text only because it had none: the timeout
+  ## description was written into ``stdout``, which ``emitProgress`` does
+  ## not print, so the console showed a bare ``[FAIL]`` line and a path to
+  ## a document the kill guaranteed would not exist.
+  "repro_test_runner: this case was killed on its own deadline.\n" &
+    "  kill reason: " & timeoutDescription & "; SIGKILLed\n" &
+    "  ran for:     " & $durationMs & "ms\n" &
+    "  document:    " & resultFile & " (absent or pre-kill; not read)\n" &
+    "  meaning:     the runner watched this ONE case and saw no forward " &
+      "progress for\n" &
+    "               its whole budget, so this is a verdict about the " &
+      "case and it is\n" &
+    "               a FAIL. It is NOT a cancelled case — the run was " &
+      "not shutting\n" &
+    "               down. Raise --test-timeout only if the case is " &
+      "legitimately this\n" &
+    "               slow on this host.\n"
 
 proc missingDocumentDiagnostic(resultFile: string; exitCode: int;
                                present: bool): string =
@@ -3334,6 +3462,36 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     result.harnessError = phase
     output = "repro_test_runner: " & phase & "\n" & output
   result.durationMs = int((epochTime() - t0) * 1000)
+  # WAS THIS CASE STOPPED BY THE SHUTDOWN, OR BY ITSELF?
+  #
+  # Read once, here, from the run-wide flag rather than from the child
+  # outcome alone, because a cut-short run kills an in-flight case in TWO
+  # observably different shapes and only one of them is self-describing:
+  #
+  #   1. the poll loop notices the flag first and returns
+  #      ``cancelled = true`` with ``INTERRUPTED``; or
+  #   2. the sigwait thread's group kill lands first, the wrapper writes
+  #      its status file, and the poll loop collects an ORDINARY exit
+  #      ``128+N`` that is indistinguishable from a case that crashed.
+  #
+  # Shape 2 is why ``childOutcome.cancelled`` is not sufficient on its
+  # own: in a four-worker shutdown, one of the four cases arrives in that
+  # shape and used to be the one FAIL that looked most like a real defect.
+  #
+  # The flag is never cleared, so reading it after the child has finished
+  # cannot miss a shutdown that began while the case was running. It can,
+  # in a window of microseconds, catch a case that genuinely finished just
+  # before the signal — the clean-exit guard below is what keeps that from
+  # costing a real PASS or SKIP.
+  let cutShortSig = cutShortSignal()
+  let childExitedCleanly =
+    childStarted and not timedOut and not childOutcome.memoryExceeded and
+    (exitCode == 0 or exitCode == 2)
+  let cancelled = childStarted and cutShortSig != 0 and not childExitedCleanly
+  if cancelled:
+    result.cancelled = true
+    result.harnessError =
+      "cancelled in flight: " & cutShortReason(cutShortSig)
   if timedOut or childOutcome.memoryExceeded:
     result.stdout =
       "repro_test_runner: " & timeoutDescription &
@@ -3355,10 +3513,25 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     # case leaked processes past a bounded kill — so this is a defect in
     # the tree and belongs in ``failed``.
     result.status = tsFail
+  elif cancelled:
+    # AHEAD OF THE TIMEOUT ARM ON PURPOSE. A cancelled case arrives with
+    # ``timedOut = true`` (the interrupt branch reuses the timeout return
+    # shape) so, ordered the other way, every shutdown kill would be
+    # absorbed into the FAIL below — which is the defect. The runner
+    # obtained no verdict here, so this is ERROR for exactly the reason a
+    # spawn fault is.
+    result.status = tsHarnessError
   elif timedOut or childOutcome.memoryExceeded:
     # A ceiling kill is a FAIL for the same reason a timeout is: the
     # runner observed the case misbehaving. What separates the two on the
     # spine is ``termination``, not the status.
+    #
+    # THIS ARM IS DELIBERATELY NOT MERGED INTO THE ONE ABOVE. A case the
+    # runner watched for its whole budget without seeing progress is an
+    # observation ABOUT THE CASE; relabelling it ERROR would move a real
+    # hang out of ``failed``, which is the count a gate reads for defects
+    # in the tree. What such a case was missing was not a different
+    # bucket but a diagnosis, and it gets one below.
     result.status = tsFail
   else:
     case exitCode
@@ -3484,8 +3657,23 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
   # Scoped to exactly the branch that would have read the document, so a
   # timeout, a refusal and a spawn fault — each of which already writes
   # its own account — are untouched.
-  if not spawnFailed and not timedOut and not childOutcome.memoryExceeded and
-      not groupRefused and
+  if cancelled:
+    # The killed-in-flight account. ``emitProgress`` prints only
+    # ``runnerDiagnosis``, never ``stdout``, so a cancelled case whose
+    # explanation lived only in ``stdout`` reached the console as a bare
+    # labelled line — the exact shape that was misread as eight failures.
+    result.runnerDiagnosis =
+      cancelledCaseDiagnostic(resultFile, exitCode, cutShortSig)
+    result.stdout.add(result.runnerDiagnosis)
+  elif timedOut or childOutcome.memoryExceeded:
+    # Same channel problem, opposite verdict. This one stays a FAIL (see
+    # the classification above); what it gains is a console diagnosis, so
+    # a deadline kill can no longer be told apart from a cancellation
+    # only by counting seconds in the log.
+    result.runnerDiagnosis = timeoutCaseDiagnostic(
+      resultFile, timeoutDescription, result.durationMs)
+    result.stdout.add(result.runnerDiagnosis)
+  elif not spawnFailed and not groupRefused and
       result.status != tsHarnessError and result.status != tsPass and
       (not documentPresent or documentUnreadable):
     result.runnerDiagnosis =
@@ -3759,10 +3947,18 @@ proc countStatusDisagreements(results: seq[TestResult]): int =
     if r.statusDisagreement.len > 0:
       inc result
 
+proc countCancelled(results: seq[TestResult]): int =
+  ## How many of this run's ERROR entries were cases killed in flight by
+  ## the shutdown, as opposed to cases the harness could not start.
+  for r in results:
+    if r.cancelled:
+      inc result
+
 proc writeSummary(summaryPath: string; results: seq[TestResult];
                   wallTimeMs: int; threadsUsed: int;
                   selection: SelectionDecision; deselectedCases: int;
                   historyCaptured: bool; historyUncaptured: int;
+                  plannedTotal: int; cutShortSig: int;
                   scheduling: JsonNode = nil) =
   var total = results.len
   var passed = 0
@@ -3854,6 +4050,18 @@ proc writeSummary(summaryPath: string; results: seq[TestResult];
     # binary, so it rides in the summary rather than only in stdout.
     if r.statusDisagreement.len > 0:
       node["status_disagreement"] = %r.statusDisagreement
+    # Killed in flight by the shutdown, not by anything this case did.
+    # Emitted only when true, so absence keeps meaning "the producer said
+    # nothing" rather than being confused with an explicit false.
+    if r.cancelled:
+      node["cancelled"] = %true
+    # The runner-authored account, as its own field. It used to exist only
+    # inside ``stdout``, which meant a triage script reading the artifact
+    # had to grep free-form text for it — and the console, which prints
+    # ``runner_diagnosis`` but never ``stdout``, and the summary, which did
+    # the reverse, could disagree about whether a case was explained at all.
+    if r.runnerDiagnosis.len > 0:
+      node["runner_diagnosis"] = %r.runnerDiagnosis
     # Include the captured merged stdout/stderr for FAIL entries so
     # the build report carries the failure context (e.g. D6's
     # ``IDLE TIMEOUT after Ns without output; SIGKILLed`` prefix). PASS entries are kept
@@ -3875,6 +4083,42 @@ proc writeSummary(summaryPath: string; results: seq[TestResult];
   # green. Like ``status_disagreements`` this count forces a non-zero
   # aggregate exit.
   summary["harness_errors"] = %harnessErrors
+  # ---- was this run allowed to finish? ---------------------------------
+  #
+  # ``total`` above is the number of cases that RAN. On a run that was cut
+  # short it is not the denominator anybody means, and reading it as one is
+  # exactly how a 4430-of-8711 run was reported as a complete 4430-case run
+  # with 84 failures. So the size of the intended run is stated beside it,
+  # unconditionally, and whether the run reached it is a boolean rather
+  # than something a consumer has to infer by comparing the two.
+  summary["planned_total"] = %plannedTotal
+  summary["cut_short"] = %(cutShortSig != 0)
+  # How many ERROR entries are cases that were still running at that
+  # moment. Always emitted: "the run finished and nothing was cancelled"
+  # and "the run was cut short" are different claims, and a consumer that
+  # sees only ``harness_errors`` cannot tell them apart.
+  summary["cancelled"] = %countCancelled(results)
+  if cutShortSig != 0:
+    var cut = newJObject()
+    cut["signal"] = %cutShortSig
+    cut["signal_name"] = %signalName(cutShortSig)
+    cut["reason"] = %cutShortReason(cutShortSig)
+    cut["cases_run"] = %total
+    cut["cases_planned"] = %plannedTotal
+    cut["cases_never_started"] = %max(plannedTotal - total, 0)
+    cut["cancelled_in_flight"] = %countCancelled(results)
+    # Said in words, in the artifact, because the artifact outlives the
+    # console log and this is the sentence that stops the misdiagnosis:
+    # the build backstop needed the same treatment and got it.
+    cut["note"] =
+      %("This run did NOT complete. It was stopped at case " & $total &
+        " of " & $plannedTotal & ". 'total', 'passed', 'failed' and " &
+        "'skipped' describe only the cases that ran; the remaining " &
+        $max(plannedTotal - total, 0) & " were never started and are " &
+        "absent from this document. Cases that were still running were " &
+        "killed by the runner and are reported as ERROR ('cancelled': " &
+        "true), never as failures — nothing was observed about them.")
+    summary["cut_short_detail"] = cut
   # A protocol disagreement is a first-class aggregate outcome, not a note
   # in a per-case record. It used to be written per case and influence
   # nothing at all — the run still exited 0. It now decides the exit code,
@@ -4941,8 +5185,12 @@ proc main() =
   let historyUncaptured = historyPtr.uncaptured()
   historyPtr.close()
 
+  let plannedTotal = progressTotal.load(moRelaxed)
+  let cutShortSig = cutShortSignal()
+
   writeSummary(opts.summaryPath, results, wallMs, nThreads,
     selection, deselectedCases, historyCaptured, historyUncaptured,
+    plannedTotal, cutShortSig,
     scheduling)
 
   var passed = 0
@@ -4956,20 +5204,59 @@ proc main() =
     of tsSkip: inc skipped
     of tsHarnessError: inc harnessErrors
   let disagreements = countStatusDisagreements(results)
+  let cancelled = countCancelled(results)
+
+  # ---- SAY IT BEFORE THE NUMBERS, NOT AFTER --------------------------
+  #
+  # A cut-short run's counts are a sample, not a census, and a reader who
+  # meets them first reads them as a census. The build backstop learned
+  # this the expensive way: a run cut by wall clock was reported as
+  # twenty-four failed compiles and two days went into binaries that were
+  # sitting on disk. The same sentence, in the same place, for the same
+  # reason.
+  if cutShortSig != 0:
+    stderr.writeLine "repro_test_runner: THIS RUN DID NOT COMPLETE — " &
+      cutShortReason(cutShortSig) & "."
+    stderr.writeLine "repro_test_runner: it stopped at case " &
+      $results.len & " of " & $plannedTotal & "; " &
+      $max(plannedTotal - results.len, 0) &
+      " case(s) were never started and say nothing about the tree."
+    stderr.writeLine "repro_test_runner: the counts below describe ONLY " &
+      "the cases that ran. 'total' is not the size of the suite."
+    if cancelled > 0:
+      stderr.writeLine "repro_test_runner: " & $cancelled &
+        " case(s) were still running and were killed by the shutdown. " &
+        "They are ERROR, not FAIL:"
+      stderr.writeLine "repro_test_runner: nothing was observed about " &
+        "them, so neither a pass nor a failure may be claimed. Re-run " &
+        "those cases to learn anything about them."
 
   stderr.writeLine "repro_test_runner: ran " & $results.len &
     " cases in " & $wallMs & "ms — pass=" & $passed &
     " fail=" & $failed & " skip=" & $skipped &
     " error=" & $harnessErrors &
+    (if cancelled > 0: " (cancelled=" & $cancelled & ")" else: "") &
     " disagree=" & $disagreements &
+    (if cutShortSig != 0: " — CUT SHORT at " & $results.len & "/" &
+       $plannedTotal
+     else: "") &
     " (summary at " & opts.summaryPath & ")"
   if harnessErrors > 0:
-    stderr.writeLine "repro_test_runner: " & $harnessErrors &
-      " case(s) could not be RUN (spawn/harness fault, not a test " &
-      "result); the run is FAILED (see harness_error in the summary)"
+    # Two different findings, so two different sentences. Before this,
+    # a cancelled case was not in this list at all — it was in ``failed``.
+    if harnessErrors > cancelled:
+      stderr.writeLine "repro_test_runner: " & $(harnessErrors - cancelled) &
+        " case(s) could not be RUN (spawn/harness fault, not a test " &
+        "result); the run is FAILED (see harness_error in the summary)"
+    if cancelled > 0:
+      stderr.writeLine "repro_test_runner: " & $cancelled &
+        " case(s) were CANCELLED in flight (the run was stopped, not a " &
+        "test result); they are excluded from fail= above"
     for r in results:
       if r.status == tsHarnessError:
-        stderr.writeLine "  ! ERROR " & r.testCase.binaryStem & " " &
+        stderr.writeLine "  ! " &
+          (if r.cancelled: "CANCELLED " else: "ERROR ") &
+          r.testCase.binaryStem & " " &
           r.testCase.qualifiedName & ": " & r.harnessError
   if disagreements > 0:
     stderr.writeLine "repro_test_runner: " & $disagreements &
