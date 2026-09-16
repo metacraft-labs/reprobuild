@@ -1,4 +1,4 @@
-import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
+import std/[json, os, osproc, sequtils, sets, strutils, tempfiles, unittest]
 
 import nimcrypto/sha2 as ncSha2
 import repro_tool_profiles
@@ -832,6 +832,223 @@ proc addCodeTracerFixtureTransitivePaths(projectRoot: string) =
       "addPathIfDir(workspaceRoot / \"nim-shm-gset\" / \"src\")\n")
     writeFile(configPath, content)
 
+proc stripNimLineComment(line: string): string =
+  ## Drop a trailing ``#`` comment while leaving ``#`` inside a string
+  ## literal alone. Import clauses and ``staticRead`` calls in CodeTracer
+  ## carry comments on the same line, and a naive ``find('#')`` would cut a
+  ## path such as ``"../config/#default.yaml"`` in half.
+  var inString = false
+  var i = 0
+  while i < line.len:
+    let c = line[i]
+    if inString:
+      if c == '\\':
+        i += 2
+        continue
+      if c == '"':
+        inString = false
+    else:
+      if c == '"':
+        inString = true
+      elif c == '#':
+        return line[0 ..< i]
+    inc i
+  line
+
+proc unclosedBrackets(payload: string): bool =
+  var depth = 0
+  for c in payload:
+    if c == '[': inc depth
+    elif c == ']': dec depth
+  depth > 0
+
+proc importClausePayloads(text: string): seq[string] =
+  ## Every ``import`` / ``from`` / ``include`` clause in ``text``, as one
+  ## payload string per clause with continuation lines folded in.
+  ##
+  ## An import clause is a STATEMENT, not a line: CodeTracer writes
+  ## ``import`` on its own line and lists the modules indented beneath it.
+  ## Reading one line at a time sees no module paths at all in that shape.
+  let lines = text.splitLines()
+  var i = 0
+  while i < lines.len:
+    let stripped = stripNimLineComment(lines[i]).strip()
+    var keyword = ""
+    for candidate in ["import", "from", "include"]:
+      if stripped == candidate or stripped.startsWith(candidate & " "):
+        keyword = candidate
+        break
+    if keyword.len == 0:
+      inc i
+      continue
+    var payload = stripped[keyword.len .. ^1].strip()
+    inc i
+    # A bare keyword line continues onto the next line, and so does a
+    # payload left open by a trailing comma or an open bracket group.
+    while i < lines.len and (payload.len == 0 or payload.endsWith(",") or
+        unclosedBrackets(payload)):
+      let raw = stripNimLineComment(lines[i])
+      if raw.strip().len == 0:
+        inc i
+        continue
+      if raw[0] notin {' ', '\t'}:
+        break
+      payload.add(" " & raw.strip())
+      inc i
+    if keyword == "from":
+      let importIdx = payload.find(" import")
+      if importIdx >= 0:
+        payload = payload[0 ..< importIdx]
+    result.add(payload)
+
+proc splitTopLevelCommas(payload: string): seq[string] =
+  var depth = 0
+  var current = ""
+  for c in payload:
+    if c == '[':
+      inc depth
+    elif c == ']':
+      dec depth
+    if c == ',' and depth == 0:
+      result.add(current)
+      current = ""
+    else:
+      current.add(c)
+  result.add(current)
+
+proc importedModulePaths(payload: string): seq[string] =
+  ## Expand one import payload into the module paths it names, including
+  ## the bracket groups CodeTracer uses (``../../ct/online_sharing/[
+  ## artifact ]`` names ``../../ct/online_sharing/artifact``).
+  for token in splitTopLevelCommas(payload.replace("\"", "").replace("'", "")):
+    var item = token.strip()
+    for separator in [" as ", " except "]:
+      let idx = item.find(separator)
+      if idx >= 0:
+        item = item[0 ..< idx]
+    var compact = ""
+    for c in item:
+      if c notin {' ', '\t'}:
+        compact.add(c)
+    if compact.len == 0:
+      continue
+    let openIdx = compact.find('[')
+    if openIdx >= 0 and compact.endsWith("]"):
+      let prefix = compact[0 ..< openIdx]
+      for entry in compact[openIdx + 1 ..< compact.len - 1].split(','):
+        if entry.len > 0:
+          result.add(prefix & entry)
+    else:
+      result.add(compact)
+
+proc staticReadLiterals(text: string): seq[string] =
+  ## Paths passed to ``staticRead`` / ``slurp``. These are compile-time
+  ## source dependencies that no import graph mentions.
+  for keyword in ["staticRead", "slurp"]:
+    var searchFrom = 0
+    while true:
+      let idx = text.find(keyword, searchFrom)
+      if idx < 0:
+        break
+      searchFrom = idx + keyword.len
+      if idx > 0 and (text[idx - 1].isAlphaNumeric or text[idx - 1] == '_'):
+        continue
+      if searchFrom < text.len and
+          (text[searchFrom].isAlphaNumeric or text[searchFrom] == '_'):
+        continue
+      # The literal may sit on the next line, indented under the call.
+      let limit = min(text.len, searchFrom + 400)
+      var scan = searchFrom
+      var quoteIdx = -1
+      while scan < limit:
+        if text[scan] == '"':
+          quoteIdx = scan
+          break
+        inc scan
+      if quoteIdx < 0:
+        continue
+      let closeIdx = text.find('"', quoteIdx + 1)
+      if closeIdx < 0:
+        continue
+      result.add(text[quoteIdx + 1 ..< closeIdx])
+
+proc referencedSourceRelPath(codeTracerRoot, relFile, reference: string;
+                             suffix = ""): string =
+  ## ``reference`` resolved against ``relFile``'s directory, as a path
+  ## relative to ``codeTracerRoot`` — or ``""`` when it names nothing there.
+  if reference.len == 0:
+    return ""
+  let joined = normalizedPath(relFile.parentDir / (reference & suffix))
+  if joined.len == 0 or joined.startsWith(".."):
+    return ""
+  if not fileExists(codeTracerRoot / joined):
+    return ""
+  joined
+
+proc completeCodeTracerCompileClosure(codeTracerRoot, projectRoot: string) =
+  ## Close the staged subset over the compile-time references its own
+  ## sources make.
+  ##
+  ## The copiers below name whole directories, and that enumeration is a
+  ## snapshot of what CodeTracer's modules happened to reach on the day it
+  ## was written. It rots silently: a module that starts importing across
+  ## subtrees, or embedding a document with ``staticRead``, leaves the
+  ## sandbox missing a file the compiler asks for, and the build stops at
+  ## ``cannot open file: ...`` — a message about staging, reported as if
+  ## the project under test were broken. Rather than appending the two
+  ## paths that rotted this time, walk what was staged and pull in
+  ## whatever it actually references, to a fixpoint. Only files that exist
+  ## under ``codeTracerRoot`` are copied, so a mis-parse adds nothing.
+  ##
+  ## Relative references are the ones this closes over. A bare ``import
+  ## foo`` resolves through the Nim search path, which the copied
+  ## ``config.nims`` already points at the checked-in libraries; the gap
+  ## this repairs is the reference that points OUT of the staged
+  ## directories, and those are spelled relative by construction.
+  var staged = initHashSet[string]()
+  var pending: seq[string]
+  for relPath in walkDirRec(projectRoot, relative = true):
+    staged.incl(relPath)
+    if relPath.endsWith(".nim"):
+      pending.add(relPath)
+  while pending.len > 0:
+    let relFile = pending.pop()
+    var text = ""
+    try:
+      text = readFile(projectRoot / relFile)
+    except IOError, OSError:
+      continue
+    var references: seq[string]
+    for payload in importClausePayloads(text):
+      for module in importedModulePaths(payload):
+        var resolved = referencedSourceRelPath(codeTracerRoot, relFile,
+          module, ".nim")
+        if resolved.len == 0:
+          # ``include "foo.nim"`` already carries the extension.
+          resolved = referencedSourceRelPath(codeTracerRoot, relFile, module)
+        if resolved.len > 0:
+          references.add(resolved)
+    for literal in staticReadLiterals(text):
+      let resolved = referencedSourceRelPath(codeTracerRoot, relFile, literal)
+      if resolved.len > 0:
+        references.add(resolved)
+    for reference in references:
+      if reference in staged:
+        continue
+      staged.incl(reference)
+      createDir((projectRoot / reference).parentDir)
+      copyFile(codeTracerRoot / reference, projectRoot / reference)
+      if reference.endsWith(".nim"):
+        pending.add(reference)
+
+proc finishCodeTracerProject(codeTracerRoot, projectRoot: string) =
+  ## Every copier ends here: complete the staged set, then bind the
+  ## checked-in libraries the compiler resolves non-relative imports from.
+  completeCodeTracerCompileClosure(codeTracerRoot, projectRoot)
+  discard requireSuccess(shellCommand([
+    "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
+  ]))
+
 proc copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot: string) =
   linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot)
   writeCodeTracerDevelopOverrides(projectRoot)
@@ -893,9 +1110,7 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
       "themes" / "customThemes" / "json" / theme)
   copyFile(codeTracerRoot / "test-programs" / "c_sudoku_solver" / "main.c",
     projectRoot / "test-programs" / "c_sudoku_solver" / "main.c")
-  discard requireSuccess(shellCommand([
-    "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
-  ]))
+  finishCodeTracerProject(codeTracerRoot, projectRoot)
 
 proc copyNativeCodeTracerProject(codeTracerRoot, projectRoot: string) =
   copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot)
@@ -916,9 +1131,7 @@ proc copyNativeCodeTracerProject(codeTracerRoot, projectRoot: string) =
   copyFile(codeTracerRoot / "src" / "frontend" / "viewmodel" /
     "agent_evidence.nim",
     projectRoot / "src" / "frontend" / "viewmodel" / "agent_evidence.nim")
-  discard requireSuccess(shellCommand([
-    "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
-  ]))
+  finishCodeTracerProject(codeTracerRoot, projectRoot)
 
 proc copyAggregateCodeTracerProject(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
@@ -962,9 +1175,7 @@ proc copyAggregateCodeTracerProject(codeTracerRoot, projectRoot: string) =
       "themes" / "customThemes" / "json" / theme)
   copyFile(codeTracerRoot / "test-programs" / "c_sudoku_solver" / "main.c",
     projectRoot / "test-programs" / "c_sudoku_solver" / "main.c")
-  discard requireSuccess(shellCommand([
-    "ln", "-s", codeTracerRoot / "libs", projectRoot / "libs"
-  ]))
+  finishCodeTracerProject(codeTracerRoot, projectRoot)
 
 proc codeTracerPathValue(tempRoot: string; includeClang = false): string =
   let binDir = tempRoot / "codetracer-tool-bin"
