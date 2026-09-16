@@ -555,7 +555,7 @@ recipes/packages/source/fontconfig/test_fontconfig_source.nim	nim	8
 recipes/packages/source/freetype/test_freetype_source.nim	nim	8
 recipes/packages/source/gawk/test_gawk_source.nim	nim	9
 recipes/packages/source/gcc/test_gcc_source.nim	nim	11
-recipes/packages/source/gdisk/test_gdisk_source.nim	nim	5
+recipes/packages/source/gdisk/test_gdisk_source.nim	nim	6
 recipes/packages/source/gdk-pixbuf/test_gdk_pixbuf_source.nim	nim	7
 recipes/packages/source/gdm/test_gdm_source.nim	nim	8
 recipes/packages/source/gettext/test_gettext_source.nim	nim	9

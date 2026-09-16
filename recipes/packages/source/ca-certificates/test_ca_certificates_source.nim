@@ -25,9 +25,11 @@ suite "caCertificatesSource source recipe":
     # AUTHORED, not the full row: reprobuild's fetch and install-mirror
     # emitters append the commands their generated scripts run (``sh``,
     # ``curl``, ``tar``, ``patchelf``, …) to every ``fetch:``-bearing
-    # recipe. That set is pinned by ``t_source_fetch_tool_metadata`` /
-    # ``t_install_mirror_tool_metadata``; what this case states is what
-    # the RECIPE declared, so it reads the authored accessor.
+    # recipe. What this case states is what the RECIPE declared, so it
+    # reads the authored accessor. The appended half is pinned on one
+    # real recipe only, by ``gdiskSource``'s "emitter-contributed build
+    # tools are exact"; it is NOT pinned here or by
+    # ``t_source_fetch_tool_metadata`` / ``t_install_mirror_tool_metadata``.
     check registeredAuthoredNativeBuildDeps("caCertificatesSource") == @["make"]
     check registeredBuildDeps("caCertificatesSource").len == 0
     check registeredRuntimeDeps("caCertificatesSource").len == 0
