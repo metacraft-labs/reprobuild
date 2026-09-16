@@ -34,7 +34,11 @@
 ##   7. Mixing `--set` and `--project` in one `repos add` is refused: a
 ##      fragment carries one spelling of where it comes from, and a fragment
 ##      that half-resolves for one of two targets is worse than a refusal.
-##   8. The `--json` surfaces name what the model HAS. "Project" was a ROLE a
+##   8. `sets remove --prune-orphan-repos` finds the removed definition's
+##      fragments under EITHER project spelling — `includes` paths and
+##      `member_repos` names — because a converted project carries only the
+##      latter and reading `includes` alone reported it as referencing nothing.
+##   9. The `--json` surfaces name what the model HAS. "Project" was a ROLE a
 ##      set plays when enabled, not a kind, so a schema keyed on it described a
 ##      distinction that does not exist. Both the schema STRING and the payload
 ##      key move together, so a consumer keyed on the schema breaks loudly on
@@ -296,6 +300,86 @@ suite "membership model — `repro ws sets` authoring":
         "--set=delta"])
       check unguessable.code == 2
       check unguessable.output.contains("resolves to neither")
+
+  test "t_sets_remove_prunes_orphans_declared_by_either_spelling":
+    ## `sets remove --prune-orphan-repos` deletes the fragments the removed
+    ## definition ALONE declared. Which fragments those are has to be read from
+    ## BOTH spellings a project can use.
+    ##
+    ## Regression: the collection read `.includes` only. A project on the
+    ## membership model — which every project manifest in the metacraft
+    ## manifest repo now is, and which `repos add` now authors from scratch —
+    ## declares its repos as NAMES under `member_repos` and carries no
+    ## `includes` at all, so it was reported as referencing NOTHING. The
+    ## command then pruned nothing, printed no orphan notice, and left the
+    ## fragments behind while telling the operator the removal was complete.
+    ##
+    ## Both spellings are asserted in one test on purpose: the `includes` arm
+    ## is what already worked, and a fix that quietly traded one for the other
+    ## would pass a test that only checked the new arm.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "prune")
+      defer: removeDir(fx.scratch)
+
+      # `alpha` is the fixture's project and declares NEITHER membership array,
+      # so this is also the freshly-scaffolded shape: the edge must land in
+      # `member_repos`, not in a new `includes` array.
+      check runRepro(fx, ["ws", "repos", "add", "lib-m", "--project=alpha",
+        "--remote=https://git.example.invalid/acme/lib-m",
+        "--branch=dev"]).code == 0
+      check runRepro(fx, ["ws", "repos", "add", "lib-i", "--project=alpha",
+        "--remote=https://git.example.invalid/acme/lib-i",
+        "--branch=dev"]).code == 0
+      let alphaFile = fx.workspaceRoot / "projects" / "alpha.toml"
+      block:
+        let m = readProjectManifest(alphaFile)
+        check m.member_repos == @["lib-m", "lib-i"]
+        check m.includes.len == 0
+
+      # Hand `lib-i` over to a project written in the OLD spelling, so the two
+      # arms are exercised against fragments of identical provenance. The
+      # membership array goes BEFORE `[project]`: a bare key after a table
+      # header is TOML-bound to that table and would not parse back.
+      check runRepro(fx, ["ws", "repos", "remove", "lib-i",
+        "--project=alpha"]).code == 0
+      check readProjectManifest(alphaFile).member_repos == @["lib-m"]
+      writeFile(fx.workspaceRoot / "projects" / "legacy.toml",
+        "schema = \"reprobuild.workspace.project.v1\"\n\n" &
+        "includes = [\n  \"repos/lib-i.toml\",\n]\n\n" &
+        "[project]\nname = \"legacy\"\ntrunk = \"main\"\n")
+      # Committed, not merely written: `sets remove` stages the files it
+      # deletes, and `git add` on a path git never tracked fails the whole
+      # command — which would make this arm fail for a reason that has nothing
+      # to do with orphan collection.
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+        " commit -m legacy-project")
+      check readProjectManifest(
+        fx.workspaceRoot / "projects" / "legacy.toml").includes ==
+        @["repos/lib-i.toml"]
+
+      # ---- the `includes` arm (this already worked) ------------------------
+      let legacyGone = runRepro(fx, ["ws", "sets", "remove", "legacy",
+        "--prune-orphan-repos"])
+      if legacyGone.code != 0:
+        checkpoint("output: " & legacyGone.output)
+      check legacyGone.code == 0
+      check legacyGone.output.contains("repos/lib-i.toml")
+      check not fileExists(fx.workspaceRoot / "repos" / "lib-i.toml")
+
+      # ---- the `member_repos` arm (the regression) -------------------------
+      let alphaGone = runRepro(fx, ["ws", "sets", "remove", "alpha",
+        "--prune-orphan-repos"])
+      if alphaGone.code != 0:
+        checkpoint("output: " & alphaGone.output)
+      check alphaGone.code == 0
+      check alphaGone.output.contains("pruned")
+      check alphaGone.output.contains("repos/lib-m.toml")
+      check not fileExists(fx.workspaceRoot / "repos" / "lib-m.toml")
+      check not fileExists(alphaFile)
 
   test "t_json_surfaces_are_set_based":
     let gitBin = findExe("git")
