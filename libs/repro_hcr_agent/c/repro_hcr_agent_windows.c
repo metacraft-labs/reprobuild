@@ -57,6 +57,9 @@ struct repro_hcr_windows_patch_state {
   struct repro_hcr_windows_patch_registration registration;
   void *region;
   size_t allocation_size;
+  uintptr_t target_entry;
+  uintptr_t dispatch;
+  LONG generation;
   struct repro_hcr_windows_patch_state *next;
 };
 
@@ -576,6 +579,18 @@ static void repro_hcr_windows_keep_failed_registration(
   repro_hcr_patch_states = state;
 }
 
+static struct repro_hcr_windows_patch_state *
+repro_hcr_windows_find_patch_state(uintptr_t entry) {
+  struct repro_hcr_windows_patch_state *state = repro_hcr_patch_states;
+  while (state != NULL) {
+    if (state->target_entry == entry) {
+      return state;
+    }
+    state = state->next;
+  }
+  return NULL;
+}
+
 static void repro_hcr_windows_hex32(const uint8_t *digest, char *out) {
   static const char digits[] = "0123456789abcdef";
   unsigned i;
@@ -841,6 +856,7 @@ static int repro_hcr_windows_apply_bundle(
     char *failure, size_t failure_capacity) {
   struct repro_hcr_windows_bundle bundle;
   struct repro_hcr_windows_patch_state *state = NULL;
+  struct repro_hcr_windows_patch_state *previous_state = NULL;
   struct repro_hcr_windows_publish_request publish;
   enum repro_hcr_windows_pe_status pe_status;
   enum repro_hcr_windows_registration_status registration_status;
@@ -882,8 +898,12 @@ static int repro_hcr_windows_apply_bundle(
              repro_hcr_windows_pe_status_name(pe_status));
     goto failed;
   }
+  previous_state = repro_hcr_windows_find_patch_state(entry);
   memset(&publish, 0, sizeof(publish));
   publish.entry = (uint8_t *)entry;
+  publish.previous_dispatch = previous_state != NULL
+      ? (const void *)previous_state->dispatch
+      : NULL;
   publish.first_instruction_length = bundle.first_instruction_length;
   publish.quiescence_available = 1;
   memcpy(publish.expected_padding, bundle.expected_padding,
@@ -957,13 +977,17 @@ static int repro_hcr_windows_apply_bundle(
   }
   memcpy(code_after, (const void *)(entry - REPRO_HCR_WP_PADDING_BYTES),
          REPRO_HCR_WINDOWS_PATCH_WINDOW_BYTES);
+  state->target_entry = entry;
+  state->dispatch = (uintptr_t)dispatch;
+  state->generation =
+      previous_state != NULL ? previous_state->generation + 1 : 1;
   state->next = repro_hcr_patch_states;
   repro_hcr_patch_states = state;
   *entry_address = entry;
   *dispatch_address = (uintptr_t)dispatch;
   *shared_library_positive =
       state->module.handle != GetModuleHandleW(NULL) ? 1 : 0;
-  InterlockedIncrement(&repro_hcr_symbol_generation);
+  InterlockedExchange(&repro_hcr_symbol_generation, state->generation);
   InterlockedExchange(&repro_hcr_last_publication_tier, 2);
   InterlockedExchange(&repro_hcr_last_first_instruction_length,
                       (LONG)bundle.first_instruction_length);

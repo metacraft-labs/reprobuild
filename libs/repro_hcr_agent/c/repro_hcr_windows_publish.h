@@ -44,6 +44,7 @@ enum repro_hcr_wp_status {
 struct repro_hcr_windows_publish_request {
   uint8_t *entry;
   const void *dispatch;
+  const void *previous_dispatch;
   uint32_t first_instruction_length;
   uint8_t expected_padding[REPRO_HCR_WP_PADDING_BYTES];
   uint8_t expected_first_instruction[REPRO_HCR_WP_MAX_INSTRUCTION_BYTES];
@@ -129,6 +130,20 @@ static int repro_hcr_wp_geometry_valid(
 
 static int repro_hcr_wp_live_bytes_match(
     const struct repro_hcr_windows_publish_request *request) {
+  if (request->previous_dispatch != NULL) {
+    int32_t displacement = 0;
+    const uint8_t *padding = request->entry - 5u;
+    uintptr_t live_dispatch;
+    if (*(request->entry - REPRO_HCR_WP_PADDING_BYTES) !=
+            request->expected_padding[0] ||
+        padding[0] != 0xe9u || request->entry[0] != 0xebu ||
+        request->entry[1] != 0xf9u) {
+      return 0;
+    }
+    memcpy(&displacement, padding + 1u, sizeof(displacement));
+    live_dispatch = (uintptr_t)request->entry + (intptr_t)displacement;
+    return live_dispatch == (uintptr_t)request->previous_dispatch;
+  }
   return memcmp(request->entry - REPRO_HCR_WP_PADDING_BYTES,
                 request->expected_padding,
                 REPRO_HCR_WP_PADDING_BYTES) == 0 &&
@@ -141,17 +156,38 @@ static int repro_hcr_wp_restore_original(
     DWORD original_protection) {
   uint8_t *padding = request->entry - 5u;
   SIZE_T span = 5u + request->first_instruction_length;
+  int64_t previous_displacement64 = 0;
+  int32_t previous_displacement = 0;
   DWORD ignored = 0;
   DWORD writable_old = 0;
   int ok = 1;
 
+  if (request->previous_dispatch != NULL) {
+    previous_displacement64 =
+        (int64_t)(uintptr_t)request->previous_dispatch -
+        (int64_t)(uintptr_t)request->entry;
+    if (previous_displacement64 < INT32_MIN ||
+        previous_displacement64 > INT32_MAX) {
+      return 0;
+    }
+    previous_displacement = (int32_t)previous_displacement64;
+  }
   if (!VirtualProtect(padding, span, PAGE_READWRITE, &writable_old)) {
     return 0;
   }
-  request->entry[0] = request->expected_first_instruction[0];
-  request->entry[1] = request->expected_first_instruction[1];
-  MemoryBarrier();
-  memcpy(padding, request->expected_padding + 1, 5u);
+  if (request->previous_dispatch != NULL) {
+    padding[0] = 0xe9u;
+    memcpy(padding + 1u, &previous_displacement,
+           sizeof(previous_displacement));
+    MemoryBarrier();
+    request->entry[0] = 0xebu;
+    request->entry[1] = 0xf9u;
+  } else {
+    request->entry[0] = request->expected_first_instruction[0];
+    request->entry[1] = request->expected_first_instruction[1];
+    MemoryBarrier();
+    memcpy(padding, request->expected_padding + 1, 5u);
+  }
   if (!VirtualProtect(padding, span, original_protection, &ignored)) {
     ok = 0;
   }
@@ -242,7 +278,8 @@ static int repro_hcr_windows_publish_hotpatch(
   }
   quiescence_status = repro_hcr_wq_validate_and_adjust_hotpatch_site(
       (uint64_t)(uintptr_t)request->entry,
-      request->first_instruction_length, 0u, 0);
+      request->first_instruction_length,
+      (uint64_t)(uintptr_t)request->previous_dispatch, 0);
   repro_hcr_wp_last_report.quiescence_status = quiescence_status;
   if (quiescence_status != REPRO_HCR_WQ_OK) {
     repro_hcr_wp_last_report.win32_error = repro_hcr_wq.win32_error;

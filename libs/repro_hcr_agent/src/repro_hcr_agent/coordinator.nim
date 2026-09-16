@@ -216,15 +216,33 @@ when defined(windows):
     let frame = connection.writeAgentMessage(message)
     client.observe(hmdCoordinatorToAgent, frame, message)
 
-  proc deliverPatchRequest*(client: var HcrCoordinatorClient;
-                            connection: HcrAgentPipeConnection;
-                            request: HcrPatchRequest):
-                            HcrCoordinatorDelivery =
+  proc completeHandshake*(client: var HcrCoordinatorClient;
+                          connection: HcrAgentPipeConnection) =
+    ## Named-pipe peer of the open Unix-socket session handshake. Keeping the
+    ## connection open after this call lets a Windows target accept the second
+    ## and later live edits without restarting the process.
     discard client.receiveAgentMessage(connection)
     client.sendCoordinatorMessage(
       connection, client.coordinatorHelloAckMessage())
+
+  proc requestPatchOnOpenSession*(client: var HcrCoordinatorClient;
+                                  connection: HcrAgentPipeConnection;
+                                  request: HcrPatchRequest):
+                                  HcrCoordinatorDelivery =
+    ## Publish one patch on an already-negotiated Windows named-pipe session.
+    ## Clear the prior verdict for the same reason as the socket overload: a
+    ## refusal of edit N must never inherit edit N-1's applied result.
+    client.patchApplied = none(HcrPatchApplied)
+    client.patchFailed = none(HcrPatchFailed)
     client.sendCoordinatorMessage(
       connection, client.coordinatorPatchRequestMessage(request))
     while client.session.state == hssPatchRequested:
       discard client.receiveAgentMessage(connection)
     client.delivery()
+
+  proc deliverPatchRequest*(client: var HcrCoordinatorClient;
+                            connection: HcrAgentPipeConnection;
+                            request: HcrPatchRequest):
+                            HcrCoordinatorDelivery =
+    client.completeHandshake(connection)
+    client.requestPatchOnOpenSession(connection, request)
