@@ -97,6 +97,8 @@ import repro_elevation
 import repro_cli_support/watch
 import repro_cli_support/dev_session
 import repro_cli_support/push_hook_protocol
+import repro_cli_support/cmake_direct
+import repro_cli_support/daemon_working_directory
 
 proc cloneUrlFor*(repo: ResolvedRepo): string =
   ## Fetch URL to clone this repo from: the ``repo.remotes`` entry that
@@ -9767,10 +9769,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     logSummary("providerBinary: " & tryCompileProviderBinary)
     logSummary("providerArtifact: " & TryCompileProviderArtifactId)
     logSummary("runQuotaSocket: " & runQuotaSocketDiagnostic())
-    let synthIdentity = PathOnlyBuildIdentity(
-      projectName: TryCompileProviderPackageName,
-      interfaceFingerprint: blake3DomainDigest(
-        toBytes(TryCompileProviderArtifactId), hdActionFingerprint))
+    let metadata = decodeTryCompileMetadata(
+      toBytes(readFile(extendedPath(tryCompileMetaPath))))
+    let synthIdentity = cmakeDirectBuildIdentity(metadata, pathEnv)
     let providerGraphStart = statStart(statsEnabled)
     progressRenderer.renderPhase("refreshing trycompile provider graph")
     let refresh = refreshProviderGraph(RefreshConfig(
@@ -28890,7 +28891,7 @@ proc installUserDaemonBuildExecutor() =
   setUserDaemonBuildExecutor(proc(request: UserDaemonBuildRequest;
       emit: UserDaemonBuildEmit;
       cancelCheck: UserDaemonBuildCancelCheck): int =
-    let previousCwd = getCurrentDir()
+    let previousCwd = enterDaemonRequestDirectory(request.workingDir)
     var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
     try:
       # Defense in depth for direct/in-process callers that bypass protocol
@@ -28947,8 +28948,6 @@ proc installUserDaemonBuildExecutor() =
         else:
           "daemon-build-pid-" & $getCurrentProcessId()
       putEnv(ProviderNimcacheSessionEnv, providerSession)
-      if request.workingDir.len > 0:
-        setCurrentDir(request.workingDir)
       let cliPath =
         if request.publicCliPath.len > 0: request.publicCliPath
         else: stablePublicCliPath()
@@ -29010,7 +29009,8 @@ proc installUserDaemonBuildExecutor() =
         result = 2
     finally:
       try:
-        setCurrentDir(previousCwd)
+        if previousCwd.len > 0:
+          setCurrentDir(previousCwd)
       except CatchableError:
         discard
       restoreDaemonRequestEnvironment(previousEnv))
@@ -29019,7 +29019,7 @@ proc installUserDaemonWatchExecutor() =
   setUserDaemonWatchExecutor(proc(request: UserDaemonWatchRequest;
       emit: UserDaemonWatchEmit;
       cancelCheck: UserDaemonWatchCancelCheck): int =
-    let previousCwd = getCurrentDir()
+    let previousCwd = enterDaemonRequestDirectory(request.workingDir)
     var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
     try:
       # Match the build executor: watch cycles may spawn the same actions and
@@ -29031,8 +29031,6 @@ proc installUserDaemonWatchExecutor() =
       # a hole closed for builds and left open for watch cycles reappears on
       # the next `repro watch` that spawns the same actions.
       ensureBuiltSourcePackageEnvironment()
-      if request.workingDir.len > 0:
-        setCurrentDir(request.workingDir)
       let cliPath =
         if request.publicCliPath.len > 0: request.publicCliPath
         else: stablePublicCliPath()
@@ -29086,7 +29084,8 @@ proc installUserDaemonWatchExecutor() =
         result = 2
     finally:
       try:
-        setCurrentDir(previousCwd)
+        if previousCwd.len > 0:
+          setCurrentDir(previousCwd)
       except CatchableError:
         discard
       restoreDaemonRequestEnvironment(previousEnv))

@@ -13365,6 +13365,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_cmake_direct_tool_identity.nim",
+    binary: "build/test-bin/t_cmake_direct_tool_identity",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_config_nims_lib_resolution.nim",
     binary: "build/test-bin/t_config_nims_lib_resolution",
     defines: @[],
@@ -13412,6 +13421,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_da1i_evidence_help_names_the_hazard.nim",
     binary: "build/test-bin/t_da1i_evidence_help_names_the_hazard",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_daemon_request_working_directory.nim",
+    binary: "build/test-bin/t_daemon_request_working_directory",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
