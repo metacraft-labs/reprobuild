@@ -13284,6 +13284,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_workspace_sync_selectors_narrow_the_default_path.nim",
+    binary: "build/test-bin/t_workspace_sync_selectors_narrow_the_default_path",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_workspace_sync_seven_corner_cases.nim",
     binary: "build/test-bin/t_workspace_sync_seven_corner_cases",
     defines: @[],

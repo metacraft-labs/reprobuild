@@ -36182,6 +36182,80 @@ proc saveForcePushedCommits(workspaceRoot: string; node: JsonNode) =
   let path = dir / "force-pushes.json"
   writeFile(path, pretty(node, indent = 2) & "\n")
 
+proc applyRepoSelectors(repos: seq[ResolvedRepo];
+                        only, exceptNames: seq[string];
+                        filterGlob: string): seq[ResolvedRepo] =
+  ## ``--only`` / ``--except`` / ``--filter``, with the same semantics
+  ## ``repro develop --all`` uses: names matched EXACTLY, a glob only through
+  ## ``--filter``, exclusion winning over inclusion. An unknown exact name is
+  ## an error rather than an empty result, because a typo that silently
+  ## selects nothing reads exactly like "there was nothing to do".
+  var known: seq[string]
+  for r in repos:
+    known.add(r.name)
+  for n in only:
+    if n notin known:
+      raise newException(ValueError,
+        "'--only=" & n & "' names no repo in this workspace (names are " &
+        "matched EXACTLY; use --filter for a glob, or `repro workspace " &
+        "repos list` to see the set)")
+  for n in exceptNames:
+    if n notin known:
+      raise newException(ValueError,
+        "'--except=" & n & "' names no repo in this workspace (names are " &
+        "matched EXACTLY; use --filter for a glob, or `repro workspace " &
+        "repos list` to see the set)")
+  for r in repos:
+    if only.len > 0 and r.name notin only:
+      continue
+    if filterGlob.len > 0 and not developNameGlobMatches(r.name, filterGlob):
+      continue
+    if r.name in exceptNames:
+      continue
+    result.add(r)
+
+proc narrowSyncRepoSet(args: WorkspaceSyncArgs;
+                       workspaceRoot: string;
+                       repos: seq[ResolvedRepo]): seq[ResolvedRepo] =
+  ## THE one place a ``repro workspace sync`` repo set is narrowed, for every
+  ## sync executor there is.
+  ##
+  ## It exists because the three narrowing steps used to be open-coded twice.
+  ## ``executeMainlineSync`` applied all three; ``executeWorkspaceSync`` --
+  ## the DEFAULT path, the one an operator reaches by typing
+  ## ``repro workspace sync`` -- applied scope and tags and simply never
+  ## called ``applyRepoSelectors``. So ``--only`` / ``--except`` / ``--filter``
+  ## parsed, validated, and were then dropped on the floor: measured on a
+  ## real workspace, ``repro workspace sync codetracer
+  ## --only=codetracer-miden-recorder --dry-run`` planned 112 repos and said
+  ## nothing about it. An operator trying to scope a recovery to ONE repo got
+  ## the whole workspace instead, which is how the narrowest available
+  ## recovery became unavailable.
+  ##
+  ## A silently-ignored selector is worse than an unsupported one. An
+  ## unsupported flag is refused at the parser and the operator learns
+  ## immediately; an ignored one is indistinguishable from a working one
+  ## until the blast radius arrives. Making the set of narrowing steps a
+  ## single proc is the structural version of that rule: a future executor
+  ## cannot honour two of the three and quietly widen to everything, because
+  ## there is no longer a place to apply two of them.
+  result = repos
+  if args.scopeProjects.len > 0:
+    let scopePaths = scopeRepoPathSet(workspaceRoot, args.scopeProjects)
+    var kept: seq[ResolvedRepo]
+    for repo in result:
+      if repo.path in scopePaths:
+        kept.add(repo)
+    result = kept
+  if args.includeTags.len > 0 or args.excludeTags.len > 0:
+    var kept: seq[ResolvedRepo]
+    for repo in result:
+      if repoSelectedByTags(repo, args.includeTags, args.excludeTags):
+        kept.add(repo)
+    result = kept
+  result = applyRepoSelectors(result, args.onlyRepos, args.exceptRepos,
+    args.filterGlob)
+
 proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   ## End-to-end driver. (1) Refresh manifest layers so the composer
   ## reads the freshest manifest data. (2) Resolve the project / compose
@@ -36239,30 +36313,11 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   report.scopeProjects = args.scopeProjects
   report.dryRun = args.dryRun
 
-  # Apply the scope filter: keep only repos that belong to one of the named
-  # projects (the resolver already knows project→repos). An unknown name
-  # raises a clear error inside ``scopeRepoPathSet`` (Principle 2).
-  if args.scopeProjects.len > 0:
-    let scopePaths = scopeRepoPathSet(args.workspaceRoot, args.scopeProjects)
-    var kept: seq[ResolvedRepo]
-    for repo in resolved.repos:
-      if repo.path in scopePaths:
-        kept.add(repo)
-    resolved.repos = kept
-
-  # RA-18: subset selection by manifest tag. ``--tags=a,b`` keeps only
-  # repos carrying one of the requested tags; ``-<tag>`` excludes. A repo with
-  # no declared ``tags`` carries the implicit ``default`` tag, so a
-  # plain ``--tags=default`` (or no filter at all) keeps every untagged
-  # repo. When no tag flags are given the filter is a no-op and the repo
-  # set is exactly the resolved set (no regression for fragments without
-  # ``tags``).
-  if args.includeTags.len > 0 or args.excludeTags.len > 0:
-    var kept: seq[ResolvedRepo]
-    for repo in resolved.repos:
-      if repoSelectedByTags(repo, args.includeTags, args.excludeTags):
-        kept.add(repo)
-    resolved.repos = kept
+  # Narrow the participating set: scope projects, then RA-18 manifest tags,
+  # then ``--only`` / ``--except`` / ``--filter``. All three go through
+  # ``narrowSyncRepoSet`` -- see the comment on it for why applying them in
+  # two hand-written copies is what made the selectors a no-op here.
+  resolved.repos = narrowSyncRepoSet(args, args.workspaceRoot, resolved.repos)
 
   # RA-27 Principle 1: ANNOUNCE the plan before acting. Build a real
   # preview from the now-final participating repo set + the cheap on-disk
@@ -37023,38 +37078,6 @@ proc mainlineFlavorTag(flavor: MainlineSyncFlavor): string =
   of msfRebase: "rebase"
   of msfMerge: "merge"
 
-proc applyRepoSelectors(repos: seq[ResolvedRepo];
-                        only, exceptNames: seq[string];
-                        filterGlob: string): seq[ResolvedRepo] =
-  ## ``--only`` / ``--except`` / ``--filter``, with the same semantics
-  ## ``repro develop --all`` uses: names matched EXACTLY, a glob only through
-  ## ``--filter``, exclusion winning over inclusion. An unknown exact name is
-  ## an error rather than an empty result, because a typo that silently
-  ## selects nothing reads exactly like "there was nothing to do".
-  var known: seq[string]
-  for r in repos:
-    known.add(r.name)
-  for n in only:
-    if n notin known:
-      raise newException(ValueError,
-        "'--only=" & n & "' names no repo in this workspace (names are " &
-        "matched EXACTLY; use --filter for a glob, or `repro workspace " &
-        "repos list` to see the set)")
-  for n in exceptNames:
-    if n notin known:
-      raise newException(ValueError,
-        "'--except=" & n & "' names no repo in this workspace (names are " &
-        "matched EXACTLY; use --filter for a glob, or `repro workspace " &
-        "repos list` to see the set)")
-  for r in repos:
-    if only.len > 0 and r.name notin only:
-      continue
-    if filterGlob.len > 0 and not developNameGlobMatches(r.name, filterGlob):
-      continue
-    if r.name in exceptNames:
-      continue
-    result.add(r)
-
 proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
   result.workspaceRoot = args.workspaceRoot
   result.flavor = mainlineFlavorTag(args.mainlineFlavor)
@@ -37065,21 +37088,7 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
   var resolved = resolveWorkspaceSyncProject(resolveArgs)
   result.project = resolved.projectName
 
-  if args.scopeProjects.len > 0:
-    let scopePaths = scopeRepoPathSet(args.workspaceRoot, args.scopeProjects)
-    var kept: seq[ResolvedRepo]
-    for repo in resolved.repos:
-      if repo.path in scopePaths:
-        kept.add(repo)
-    resolved.repos = kept
-  if args.includeTags.len > 0 or args.excludeTags.len > 0:
-    var kept: seq[ResolvedRepo]
-    for repo in resolved.repos:
-      if repoSelectedByTags(repo, args.includeTags, args.excludeTags):
-        kept.add(repo)
-    resolved.repos = kept
-  resolved.repos = applyRepoSelectors(resolved.repos, args.onlyRepos,
-    args.exceptRepos, args.filterGlob)
+  resolved.repos = narrowSyncRepoSet(args, args.workspaceRoot, resolved.repos)
 
   let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
