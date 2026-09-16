@@ -205,6 +205,13 @@ jobs:
             throw "Windows expandArchive execution-boundary gate failed with exit code $LASTEXITCODE"
           }
 
+      # env.ps1 provisions the compiler bootstrap, not the Python test drivers.
+      - name: Setup Python for Windows HCR checks
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+          architecture: 'x64'
+
       - name: Measure Windows HCR linked-image publication geometry
         shell: pwsh
         run: |
