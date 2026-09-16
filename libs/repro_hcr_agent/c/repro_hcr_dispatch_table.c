@@ -1,6 +1,25 @@
 #ifndef REPRO_HCR_DISPATCH_TABLE_C
 #define REPRO_HCR_DISPATCH_TABLE_C
 
+/* `_GNU_SOURCE` MUST be defined before the first system header, not beside the
+ * header that needs it. glibc's feature-test macros are consumed by
+ * <features.h>, which the first of <stdio.h>/<stdlib.h>/<string.h> pulls in and
+ * which then guards itself; a later `#define` is silently ignored. Defining it
+ * next to the <link.h> include below therefore left `struct dl_phdr_info`
+ * undeclared and the Linux build of `scripts/hcr_patch_driver.nim` failed with
+ * "invalid use of undefined type 'struct dl_phdr_info'". Present since this
+ * file was added in 72073aa97; measured 2026-09-16 by compiling the file at
+ * 72073aa97 and at its successor c3ee7ceca (17 errors each) and with this
+ * block in place (0). Kept __linux__-guarded so it does not leak into the
+ * Windows and macOS builds, where it means nothing, and scoped to this
+ * translation unit, which calls no libc routine whose behaviour _GNU_SOURCE
+ * changes. */
+#if defined(__linux__)
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+#endif
+
 #include "repro_hcr_dispatch_table.h"
 
 #include <stdio.h>
@@ -26,9 +45,7 @@
 #endif
 
 #if defined(__linux__)
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE 1
-#endif
+/* `_GNU_SOURCE` is defined at the TOP of this file; see the note there. */
 #include <link.h>
 #include <elf.h>
 #endif
