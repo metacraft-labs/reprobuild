@@ -106,7 +106,7 @@
 ## producer build is pointed at a scratch ``--action-cache-root``. Nothing
 ## touches $HOME.
 
-import std/[os, osproc, streams, strutils, unittest]
+import std/[json, os, osproc, streams, strutils, unittest]
 
 import repro_test_support
 
@@ -350,7 +350,9 @@ suite "e2e_dev_env_binds_materialized_producer":
     # vs ``activatedEnvironment``). A pin bound in one and missing from the
     # other would mean a developer's shell and the script they were shown
     # disagree, so it is asserted rather than assumed.
-    let printCmd = q(reproAbs) & " shell --print-env=posix"
+    let statsPath = scratch / "print-env-stats.json"
+    let printCmd = q(reproAbs) & " shell --print-env=posix " &
+      q("--dev-env-stats=" & statsPath)
     checkpoint("phase 2 print-env: " & printCmd)
     let printed = run(printCmd, consumerRoot)
     checkpoint("phase 2 print-env exit=" & $printed.code)
@@ -398,9 +400,10 @@ suite "e2e_dev_env_binds_materialized_producer":
     # assert that the ARTIFACT is identical while the ANSWER flips. That pair
     # is the whole staleness argument: the binding is re-derived per
     # activation, so a cached artifact can never serve a stale pin.
-    let artifactPath = consumerRoot / ".repro" / "dev-env" / "default" /
-      "dev-env.rbde"
-    check fileExists(artifactPath)
+    # The work root may be external; use the path actually activated by the CLI.
+    require fileExists(statsPath)
+    let artifactPath = parseJson(readFile(statsPath))["artifactPath"].getStr()
+    require fileExists(artifactPath)
     let artifactBefore = readFile(artifactPath)
 
     let hidden = producerBinary & ".hidden"

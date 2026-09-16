@@ -126,11 +126,11 @@ clang -target x86_64-linux-gnu -O2 -fno-asynchronous-unwind-tables -fno-unwind-t
 cp "$UNWIND_O" "$STRIPPED_O"
 objcopy --remove-section .eh_frame "$STRIPPED_O"
 
-# Mach-O arms (macOS arm64)
-clang -target arm64-apple-darwin -O2 -g -fasynchronous-unwind-tables \
+# An explicit deployment target is required for the fixture's thread-local data.
+clang -target arm64-apple-macos11.0 -O2 -g -fasynchronous-unwind-tables \
   -c "$C_FIXTURE" -o "$MAC_UNWIND_O"
 
-clang -target arm64-apple-darwin -O2 -fno-asynchronous-unwind-tables -fno-unwind-tables \
+clang -target arm64-apple-macos11.0 -O2 -fno-asynchronous-unwind-tables -fno-unwind-tables \
   -c "$C_FIXTURE" -o "$MAC_NOUNWIND_O"
 
 for obj in "$UNWIND_O" "$NOUNWIND_O" "$STRIPPED_O" "$MAC_UNWIND_O" "$MAC_NOUNWIND_O"; do
