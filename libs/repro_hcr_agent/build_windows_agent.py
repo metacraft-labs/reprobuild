@@ -50,7 +50,7 @@ def visual_studio_environment() -> dict[str, str]:
                     vcvars = candidate
                     break
     if vcvars is None:
-        program_files_x86 = env.get("ProgramFiles(x86)")
+        program_files_x86 = os.environ.get("ProgramFiles(x86)")
         if not program_files_x86:
             raise RuntimeError(
                 "neither cl.exe nor ProgramFiles(x86) can locate Visual Studio"

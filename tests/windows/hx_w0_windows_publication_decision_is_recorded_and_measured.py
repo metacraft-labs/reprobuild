@@ -100,7 +100,7 @@ def visual_studio_environment() -> dict[str, str]:
                     vcvars = candidate
                     break
     if vcvars is None:
-        program_files_x86 = env.get("ProgramFiles(x86)")
+        program_files_x86 = os.environ.get("ProgramFiles(x86)")
         if not program_files_x86:
             raise AssertionError(
                 "neither cl.exe nor ProgramFiles(x86) can locate Visual Studio"
@@ -349,6 +349,44 @@ def padding_run_before(image: PeImage, entry_rva: int) -> tuple[int, str]:
     while cursor >= 0 and image.data[cursor] == byte:
         cursor -= 1
     return entry - cursor - 1, f"0x{byte:02x}"
+
+
+class VisualStudioDiscovery(unittest.TestCase):
+    def check_discovery(self, module_dir: Path, module_name: str) -> None:
+        env = dict(os.environ)
+        self.assertTrue(env.get("PROGRAMFILES(X86)"), "standard Windows environment required")
+        env["PATH"] = os.pathsep.join(
+            entry for entry in env.get("PATH", "").split(os.pathsep)
+            if entry and not (Path(entry) / "cl.exe").is_file()
+        )
+        env.pop("INCLUDE", None)
+        env.pop("LIB", None)
+        self.assertIsNone(shutil.which("cl.exe", path=env["PATH"]))
+        script = (
+            "import shutil, sys; "
+            f"sys.path.insert(0, {str(module_dir)!r}); "
+            f"from {module_name} import visual_studio_environment; "
+            "env = visual_studio_environment(); "
+            "assert shutil.which('cl.exe', path=env['PATH']); "
+            "assert env.get('INCLUDE') and env.get('LIB'); "
+            "print('visual-studio-discovered')"
+        )
+        output = run_checked(
+            [sys.executable, "-c", script], Path(__file__).resolve().parent, env
+        )
+        self.assertIn("visual-studio-discovered", output)
+
+    def test_standard_environment_without_compiler_on_path(self) -> None:
+        self.check_discovery(
+            Path(__file__).resolve().parent,
+            "hx_w0_windows_publication_decision_is_recorded_and_measured",
+        )
+
+    def test_agent_builder_without_compiler_on_path(self) -> None:
+        self.check_discovery(
+            Path(__file__).resolve().parents[2] / "libs" / "repro_hcr_agent",
+            "build_windows_agent",
+        )
 
 
 class HxW0Measurement(unittest.TestCase):
