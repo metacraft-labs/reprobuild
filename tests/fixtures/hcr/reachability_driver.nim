@@ -1,4 +1,4 @@
-# test_hax_m0_reverse_relocation_index_and_dead_patch_reachability.nim
+# reachability_driver.nim
 #
 # Automated Integration Verification Gate for Milestone HAX-M0:
 # "Relocation Reverse Reference Index and Multi-Generation Reachability"
