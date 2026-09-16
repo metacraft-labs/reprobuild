@@ -358,6 +358,27 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   # ``resetTargetExportRegistry``, so the shell registry the
   # from-source-custom ``recognise`` consults survives — preserving the
   # original fix.
+  #
+  # The pass runs while the binary is still initialising, so a body that
+  # raises here aborts the process before it can answer a single request.
+  # Every recipe in a project is linked into ONE provider binary, so that
+  # turns one recipe's startup-time assumption into "no target in this
+  # project can be built" -- reported to the operator as nothing but
+  # "provider exited with code 1" and a stack trace naming neither the
+  # request nor the package.
+  #
+  # The pass is speculative by construction: its only durable effect is
+  # the shell/fetch registry pre-population, and the real invocation
+  # resets and rebuilds that per package. So a failure here is contained
+  # and recorded rather than fatal. It is NOT discarded: the failure is
+  # kept where a gate can assert it is empty, and nothing about the real
+  # invocation is weakened -- the same body runs again with a real project
+  # root, and if it raises THEN it raises as it always did.
+  #
+  # ``beginProviderStartupBody`` also lets a body ask, positively, whether
+  # it is in this pass. Bodies previously had to infer it from an empty
+  # ``activeProviderProjectRoot()``, which conflates the pass with a
+  # planning fault that must stay fatal.
   let providerModeInitCall =
     if buildBody.len > 0:
       quote do:
@@ -365,9 +386,14 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
           if registeredShellActions(`pkgNameLit`).len == 0:
             resetTargetExportRegistry()
             setCurrentOwningPackageOverride(`pkgNameLit`)
+            beginProviderStartupBody(`pkgNameLit`)
             try:
               `procName`()
+            except CatchableError as reproStartupBodyError:
+              noteProviderStartupBodyFailure(
+                `pkgNameLit`, reproStartupBodyError.msg)
             finally:
+              endProviderStartupBody()
               clearCurrentOwningPackageOverride()
               resetTargetExportRegistry()
     else:

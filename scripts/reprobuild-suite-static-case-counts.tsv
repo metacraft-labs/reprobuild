@@ -1600,6 +1600,7 @@ tests/unit/t_measurement_axes.nim	nim	14
 tests/unit/t_nix_propagated_store_paths.nim	nim	5
 tests/unit/t_provider_compile_cache_entry_is_content_addressed.nim	nim	7
 tests/unit/t_provider_snapshot_binary_binding.nim	nim	3
+tests/unit/t_provider_startup_body_containment.nim	nim	11
 tests/unit/t_run_consumes.nim	nim	6
 tests/unit/t_runquota_endpoint_paths.nim	nim	6
 tests/unit/t_runquota_grant_wait_unresponsive.nim	nim	11

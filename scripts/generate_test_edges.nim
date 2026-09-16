@@ -469,6 +469,9 @@ proc isProviderModePath(path: string): bool =
     "tests/unit/t_install_mirror_optional_version.nim",
     "tests/unit/t_m9r83_install_mirror_action_shapes.nim",
     "tests/unit/t_library_stage_alias.nim",
+    # Measures the macro's module-init startup pass over a ``build:``
+    # body, which the macro emits only under this define.
+    "tests/unit/t_provider_startup_body_containment.nim",
   ]:
     if p == exact:
       return true

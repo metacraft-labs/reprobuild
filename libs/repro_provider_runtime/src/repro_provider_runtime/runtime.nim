@@ -16,8 +16,42 @@ type
     namespace: string
     reason: GraphInvocationReason
 
+const ProviderStartupBodyFailurePrefix* =
+  "repro project provider: startup body failed: "
+  ## The line a provider writes when a ``build:`` body raised during the
+  ## DSL's module-init pass over it.
+  ##
+  ## Declared on the ENGINE side although the PROVIDER writes it, because
+  ## both ends have to agree on the text: the engine reads the provider's
+  ## merged output for exactly this prefix and re-emits it (see
+  ## ``runProviderProtocol``). Two spellings of it would fail silently --
+  ## the provider would report and the engine would drop it -- which is
+  ## the failure mode the prefix exists to prevent.
+
 proc raiseRuntime(message: string) {.noreturn.} =
   raise newException(ProviderRuntimeError, message)
+
+proc requireInvocationProjectRoot*(arguments, entryPointId,
+                                   providerArtifactId: string) =
+  ## A graph invocation's ``arguments`` slot carries the project root the
+  ## entry point evaluates against, and a recipe resolves every input and
+  ## output it declares against that root.
+  ##
+  ## Empty is not a value anything downstream checks for. The fragment /
+  ## request comparisons only require the two to MATCH, so an empty root
+  ## travels intact all the way into a recipe and surfaces as whatever
+  ## that recipe's first path resolution happens to raise -- a message
+  ## naming neither the invocation nor the package. Refuse it where the
+  ## invocation is assembled instead, and name the entry point.
+  ##
+  ## Called from the two places an invocation's root enters the runtime:
+  ## the caller-supplied root of a refresh, and every plan the refresh
+  ## then executes (children derive their root from the parent's, but a
+  ## plan can also be rebuilt from a stored fragment).
+  if arguments.len == 0:
+    raiseRuntime("provider graph invocation has no project root: entry " &
+      "point '" & entryPointId & "' of provider artifact '" &
+      providerArtifactId & "'")
 
 proc toByteString(bytes: openArray[byte]): string =
   result = newString(bytes.len)
@@ -174,6 +208,17 @@ proc runProviderProtocol*(config: ProviderExecutionConfig;
   process.close()
   if exitCode != 0:
     raiseRuntime("provider exited with code " & $exitCode & ": " & output)
+  # A provider that exits 0 has this captured output DROPPED: the pipe is
+  # here so a FAILING provider's diagnostics reach the operator inside the
+  # refusal above. A contained startup-body failure is the one diagnostic a
+  # SUCCEEDING provider can carry, and dropping it would make containment
+  # indistinguishable from nothing having gone wrong -- the provider would
+  # report a broken recipe into a pipe nobody reads. Forward those lines,
+  # and only those, so this cannot become a channel for arbitrary provider
+  # chatter.
+  for line in output.splitLines():
+    if line.startsWith(ProviderStartupBodyFailurePrefix):
+      stderr.writeLine(line)
   if not fileExists(extendedPath(responsePath)):
     raiseRuntime("provider did not write a response file")
   readProviderResponseFile(responsePath)
@@ -726,6 +771,8 @@ proc executePlan(config: RefreshConfig; provider: ProviderExecutionConfig;
                  manifest: ProviderManifest; snapshot: var ProviderGraphSnapshot;
                  report: var ProviderRefreshReport; plan: InvocationPlan):
     StoredGraphFragment =
+  requireInvocationProjectRoot(plan.arguments, plan.entryPointId,
+    config.providerArtifactId)
   let request = ProviderGraphRequest(
     kind: prkGraphInvocation,
     providerArtifactId: config.providerArtifactId,
@@ -830,6 +877,11 @@ proc detectEvaluationInputChanges(manifest: ProviderManifest;
           reason: girEvaluationInputChanged))
 
 proc refreshProviderGraph*(config: RefreshConfig): ProviderRefreshReport =
+  # Before anything is spawned or read: a refresh with no project root
+  # cannot produce a usable graph, and every plan below inherits this
+  # value.
+  requireInvocationProjectRoot(config.rootArguments, config.rootEntryPointId,
+    config.providerArtifactId)
   result.persistedSnapshotPath = providerSnapshotPath(config.storeRoot)
   let provider = execConfig(config)
   let binaryInput = fileReadInput(providerBinaryInputPath(provider))

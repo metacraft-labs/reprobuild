@@ -620,6 +620,14 @@ when defined(reproProviderMode):
                              request: ProviderGraphRequest): GraphFragment = nil;
                            devEnvProc: proc () = nil): int {.dynOrStatic.} =
     try:
+      # Any body that raised during the startup pass is reported here,
+      # once per process, before a single request is answered. The pass is
+      # speculative and its failures are contained -- a recipe must not be
+      # able to abort a binary that also carries every OTHER recipe in the
+      # project -- but contained is not the same as unreported, and this
+      # is the only place an operator can be told which package it was.
+      for failure in providerStartupBodyFailures():
+        stderr.writeLine(ProviderStartupBodyFailurePrefix & failure)
       let params = commandLineParams()
       if ProviderServeFlag in params:
         # RP2: long-lived stdio session (v1 §2-4).

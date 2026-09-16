@@ -27,6 +27,31 @@ var targetExportRegistry: TargetExportTable = TargetExportTable()
   ## emitting the GraphFragment so ``repro graph`` / ``repro why`` and
   ## the M2 CLI resolver consume one source of truth.
 
+var providerStartupBodyDepth = 0
+  ## Nesting depth of the STARTUP PASS over a package's ``build:`` body.
+  ##
+  ## The ``package`` macro runs every body once while the provider binary
+  ## is still initialising, so the shell-action registry is populated
+  ## before a convention decides whether it can claim the recipe. That
+  ## pass has no request behind it: there is no project root, no
+  ## dependency binding, and nothing it registers survives -- the real
+  ## invocation resets the per-package registries and rebuilds them.
+  ##
+  ## Depth rather than a bool because a body may call another package's
+  ## body directly (a project root that composes its recipes does exactly
+  ## that), and the inner call must still see the pass as active.
+
+var providerStartupBodyPackageLog: seq[string] = @[]
+  ## The packages whose body this binary ran during the startup pass, in
+  ## the order it ran them. A consumer asserting "no body failed" needs to
+  ## know that bodies ran AT ALL, or the assertion is vacuous.
+
+var providerStartupBodyFailureLog: seq[string] = @[]
+  ## ``<package>: <message>`` for each body that raised during the startup
+  ## pass. Raising there must not abort the binary -- one recipe would
+  ## then make every target in the project unbuildable, including targets
+  ## that never reference it -- but it must not vanish either.
+
 var currentOwningPackageOverride = ""
   ## Named-Targets M1: thread-local stash naming the package whose
   ## ``buildProc`` is currently executing. ``buildPackageFragment``
@@ -921,6 +946,44 @@ proc currentOwningPackage*(): string {.dynOrStatic.} =
   ## Named-Targets M1: return the active override, or empty when no
   ## ``buildProc`` is currently running.
   currentOwningPackageOverride
+
+proc beginProviderStartupBody*(packageName: string) {.dynOrStatic.} =
+  ## Enter the startup pass over ``packageName``'s ``build:`` body. The
+  ## ``package`` macro is the only caller; it pairs this with
+  ## ``endProviderStartupBody`` in a ``finally``.
+  if providerStartupBodyDepth == 0:
+    providerStartupBodyPackageLog.add(packageName)
+  inc providerStartupBodyDepth
+
+proc endProviderStartupBody*() {.dynOrStatic.} =
+  ## Leave the startup pass (paired with ``beginProviderStartupBody``).
+  if providerStartupBodyDepth > 0:
+    dec providerStartupBodyDepth
+
+proc providerStartupBodyActive*(): bool {.dynOrStatic.} =
+  ## True while a ``build:`` body is running as part of the startup pass.
+  ##
+  ## A body that cannot do useful work without a request should ask THIS
+  ## and return, rather than inferring the pass from an empty
+  ## ``activeProviderProjectRoot()``. The two are not the same statement:
+  ## an empty project root during a REAL invocation is a planning fault
+  ## that must be refused, and a body that treats the two alike turns that
+  ## fault into a silently empty graph.
+  providerStartupBodyDepth > 0
+
+proc noteProviderStartupBodyFailure*(packageName, message: string)
+    {.dynOrStatic.} =
+  ## Record that ``packageName``'s body raised during the startup pass.
+  providerStartupBodyFailureLog.add(packageName & ": " & message)
+
+proc providerStartupBodyPackages*(): seq[string] {.dynOrStatic.} =
+  ## The packages whose body ran during the startup pass, in order.
+  providerStartupBodyPackageLog
+
+proc providerStartupBodyFailures*(): seq[string] {.dynOrStatic.} =
+  ## ``<package>: <message>`` for every body that raised during the
+  ## startup pass. Empty is the only healthy value.
+  providerStartupBodyFailureLog
 
 proc activeProviderProjectRoot*(): string {.dynOrStatic.} =
   ## M9.R.12.4: return the active provider's project root (the
