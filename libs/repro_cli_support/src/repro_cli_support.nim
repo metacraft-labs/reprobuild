@@ -12778,7 +12778,8 @@ proc emitDevEnvDiagnostics(artifact: DevEnvArtifact): bool =
 proc runTaskCommand(artifact: DevEnvArtifact; artifactPath: string;
                     task: DevEnvTaskSummary; forwardedArgs: seq[string];
                     defaultWorkingDirectory: string;
-                    extraOps: openArray[DevEnvShellOp] = []): int =
+                    extraOps: openArray[DevEnvShellOp] = [];
+                    preOps: openArray[DevEnvShellOp] = []): int =
   when defined(windows):
     let shellLine =
       if forwardedArgs.len > 0:
@@ -12786,7 +12787,7 @@ proc runTaskCommand(artifact: DevEnvArtifact; artifactPath: string;
       else:
         task.command
     let activation = activatedEnvironment(artifact, artifactPath,
-      defaultWorkingDirectory, extraOps)
+      defaultWorkingDirectory, extraOps, preOps)
     let cmdExe = getEnv("COMSPEC", "cmd.exe")
     var process = startProcess(cmdExe,
       args = @["/c", shellLine],
@@ -12797,7 +12798,7 @@ proc runTaskCommand(artifact: DevEnvArtifact; artifactPath: string;
     process.close()
   else:
     let activation = activatedEnvironment(artifact, artifactPath,
-      defaultWorkingDirectory, extraOps)
+      defaultWorkingDirectory, extraOps, preOps)
     let shellPath = getEnv("SHELL", "/bin/sh")
     let shellLine = task.command & " \"$@\""
     var childArgs = @["-c", shellLine, "--"]
@@ -13321,10 +13322,11 @@ proc runReproRunCommand(args: openArray[string];
       if activeTask.name == parsed.target:
         task = activeTask
         break
-    let producerOps = devEnvToolShellOps(edge, parsed.selection) &
-      devEnvProducerActivation(artifact, parsed.selection.projectRoot)
+    let toolOps = devEnvToolShellOps(edge, parsed.selection)
+    let producerOps = devEnvProducerActivation(artifact,
+      parsed.selection.projectRoot)
     return runTaskCommand(artifact, edge.artifactPath, task,
-      parsed.forwardedArgs, parsed.selection.projectRoot, producerOps)
+      parsed.forwardedArgs, parsed.selection.projectRoot, producerOps, toolOps)
 
   if parsed.qualifier == rtqTask:
     # ``task:<name>`` explicitly requested the task tier, but no task
@@ -13458,14 +13460,14 @@ proc runReproExecCommand(args: openArray[string];
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if emitDevEnvDiagnostics(artifact):
     return 1
-  # Tool ops first, producer ops second: each `deskPrependPath` puts its own
-  # value at the front, so the LATER entries end up leftmost. A cross-repo
-  # producer the developer is actively building must win over a catalog
-  # realization of the same name — that is the whole point of develop-mode.
-  let producerOps = devEnvToolShellOps(edge, parsed.selection) &
-    devEnvProducerActivation(artifact, parsed.selection.projectRoot)
+  # Two channels, deliberately different. Provisioned packages go in `preOps`
+  # so the recipe's own `prependPath` can sit in front of them; cross-repo
+  # producer pins go in `extraOps` so they outrank both.
+  let toolOps = devEnvToolShellOps(edge, parsed.selection)
+  let producerOps = devEnvProducerActivation(artifact,
+    parsed.selection.projectRoot)
   runActivatedCommand(artifact, edge.artifactPath, parsed.command,
-    parsed.selection.projectRoot, producerOps)
+    parsed.selection.projectRoot, producerOps, toolOps)
 
 proc defaultInteractiveShell(): string =
   when defined(windows):
@@ -13487,11 +13489,12 @@ proc runReproShellCommand(args: openArray[string];
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if emitDevEnvDiagnostics(artifact):
     return 1
-  let producerOps = devEnvToolShellOps(edge, parsed.selection) &
-    devEnvProducerActivation(artifact, parsed.selection.projectRoot)
+  let toolOps = devEnvToolShellOps(edge, parsed.selection)
+  let producerOps = devEnvProducerActivation(artifact,
+    parsed.selection.projectRoot)
   if parsed.printEnv:
     stdout.write(renderDevEnvArtifact(artifact, edge.artifactPath,
-      parsed.printFormat, producerOps))
+      parsed.printFormat, producerOps, toolOps))
     return 0
   let shellPath =
     if parsed.shellPath.len > 0:
@@ -13499,7 +13502,7 @@ proc runReproShellCommand(args: openArray[string];
     else:
       defaultInteractiveShell()
   spawnActivatedShell(artifact, edge.artifactPath, shellPath,
-    parsed.selection.projectRoot, producerOps)
+    parsed.selection.projectRoot, producerOps, toolOps)
 
 # M74 — ``repro dev-env export <shell>``.
 #

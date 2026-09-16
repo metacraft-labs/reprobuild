@@ -82,7 +82,8 @@ proc metadataOps(artifact: DevEnvArtifact; artifactPath = ""): seq[DevEnvShellOp
     value: artifact.services.mapIt(it.name).join(",")))
 
 proc activationOps(artifact: DevEnvArtifact; artifactPath = "";
-                   extraOps: openArray[DevEnvShellOp] = []):
+                   extraOps: openArray[DevEnvShellOp] = [];
+                   preOps: openArray[DevEnvShellOp] = []):
     seq[DevEnvShellOp] =
   # TODO(io-mon live interpose): when a dev-env artifact carries io-mon's
   # monitor/shim build outputs, the Incremental-Test-Runner M8 live read-file
@@ -96,7 +97,19 @@ proc activationOps(artifact: DevEnvArtifact; artifactPath = "";
   # artifact producer. The honest platform gaps (macOS chained-fixups interpose,
   # Linux LD_PRELOAD validation, Windows CreateRemoteThread path) are tracked in
   # io-mon's capture CLI and codetracer/src/ct_test/incremental/io_mon_capture.nim.
-  result = artifact.shellOps
+  # ``preOps`` carries the bin dirs of packages the recipe declared in
+  # ``uses:`` and the engine realized. They are applied BEFORE the recipe's
+  # own shellOps, which is the opposite of ``extraOps`` below and for the
+  # opposite reason: a provisioned package is the DEFAULT the recipe asked
+  # for, so an explicit ``prependPath`` in the same recipe has to be able to
+  # sit in front of it. A project whose scripts need a locked virtualenv's
+  # interpreter ahead of the toolchain's cannot say so otherwise — which is
+  # exactly the order the environment this replaces used.
+  result = @[]
+  for op in preOps:
+    result.add(op)
+  for op in artifact.shellOps:
+    result.add(op)
   # W2 — ``extraOps`` carries environment the ARTIFACT cannot: the bin dirs of
   # cross-repo ``uses:`` producers whose output a previous ``repro build``
   # already materialized. They are deliberately NOT part of the cached RBDE
@@ -208,12 +221,13 @@ proc renderDevEnvShellOps*(ops: openArray[DevEnvShellOp];
 
 proc renderDevEnvArtifact*(artifact: DevEnvArtifact; artifactPath = "";
                            format: DevEnvPrintFormat;
-                           extraOps: openArray[DevEnvShellOp] = []): string =
+                           extraOps: openArray[DevEnvShellOp] = [];
+                           preOps: openArray[DevEnvShellOp] = []): string =
   case format
   of depJson:
     toJsonInspection(artifact) & "\n"
   else:
-    renderDevEnvShellOps(activationOps(artifact, artifactPath, extraOps),
+    renderDevEnvShellOps(activationOps(artifact, artifactPath, extraOps, preOps),
       format)
 
 proc baseEnvironment(): StringTableRef =
@@ -245,7 +259,8 @@ proc applyOp(env: StringTableRef; op: DevEnvShellOp;
 
 proc activatedEnvironment*(artifact: DevEnvArtifact; artifactPath = "";
                            defaultWorkingDirectory = "";
-                           extraOps: openArray[DevEnvShellOp] = []):
+                           extraOps: openArray[DevEnvShellOp] = [];
+                           preOps: openArray[DevEnvShellOp] = []):
     tuple[env: StringTableRef; workingDirectory: string] =
   result.env = baseEnvironment()
   result.workingDirectory =
@@ -253,7 +268,7 @@ proc activatedEnvironment*(artifact: DevEnvArtifact; artifactPath = "";
       defaultWorkingDirectory
     else:
       artifact.projectRoot
-  for op in activationOps(artifact, artifactPath, extraOps):
+  for op in activationOps(artifact, artifactPath, extraOps, preOps):
     result.env.applyOp(op, result.workingDirectory)
 
 proc containsPathSeparator(value: string): bool =
@@ -291,11 +306,12 @@ proc resolveFromActivatedPath(command: string; env: StringTableRef;
 proc runActivatedCommand*(artifact: DevEnvArtifact; artifactPath: string;
                           command: openArray[string];
                           defaultWorkingDirectory = "";
-                          extraOps: openArray[DevEnvShellOp] = []): int =
+                          extraOps: openArray[DevEnvShellOp] = [];
+                          preOps: openArray[DevEnvShellOp] = []): int =
   if command.len == 0:
     raise newException(ValueError, "dev-env command is empty")
   let activation = activatedEnvironment(artifact, artifactPath,
-    defaultWorkingDirectory, extraOps)
+    defaultWorkingDirectory, extraOps, preOps)
   var childArgs: seq[string] = @[]
   for i in 1 ..< command.len:
     childArgs.add(command[i])
@@ -312,11 +328,12 @@ proc runActivatedCommand*(artifact: DevEnvArtifact; artifactPath: string;
 proc spawnActivatedShell*(artifact: DevEnvArtifact; artifactPath,
                           shellPath: string;
                           defaultWorkingDirectory = "";
-                          extraOps: openArray[DevEnvShellOp] = []): int =
+                          extraOps: openArray[DevEnvShellOp] = [];
+                          preOps: openArray[DevEnvShellOp] = []): int =
   if shellPath.len == 0:
     raise newException(ValueError, "dev-env shell path is empty")
   let activation = activatedEnvironment(artifact, artifactPath,
-    defaultWorkingDirectory, extraOps)
+    defaultWorkingDirectory, extraOps, preOps)
   var process = startProcess(shellPath,
     env = activation.env,
     workingDir = activation.workingDirectory,
