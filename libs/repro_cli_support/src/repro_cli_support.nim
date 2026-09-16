@@ -63681,6 +63681,134 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
       rev: head.output.strip()))
   result.sort(proc (a, b: FlakeOverrideBinding): int = cmp(a.input, b.input))
 
+proc flakeLocalDirOfOverrideRef*(rf: string): string =
+  ## The local directory a ``--override-input`` reference names, or "" when it
+  ## names something that is not a working tree on this machine.
+  ##
+  ## TWO spellings denote a local directory and both must be recognised, for
+  ## the reason ``dev_shell_override_path_pairs_from_args`` records in
+  ## ``scripts/lib/dev_shell_overrides.sh``: ``path:`` was the only spelling
+  ## emitted until ``flakeSiblingOverrideRef`` began naming git checkouts as
+  ## git trees, and a matcher that knows only the old one does not fail — it
+  ## matches nothing and reports "no overrides", which is the silent-green
+  ## answer this whole campaign exists to remove.
+  ##
+  ##   path:/abs/dir
+  ##   git+file:///abs/dir[?submodules=1]
+  ##
+  ## Anything else (``github:``, ``git+https:``, a store path) is a remote or
+  ## already-content-addressed input. It is a legitimate override and it is NOT
+  ## a sibling substitution, so it has no working tree to stand ahead of or
+  ## behind a pin.
+  if rf.startsWith("path:"):
+    return rf["path:".len .. ^1]
+  if rf.startsWith("git+file://"):
+    var dir = rf["git+file://".len .. ^1]
+    let q = dir.find('?')
+    if q >= 0: dir = dir[0 ..< q]
+    return dir
+  ""
+
+proc flakeBindingsFromAppliedArgs*(args: openArray[string];
+    identity: GitToolIdentity;
+    report: var seq[string]): seq[FlakeOverrideBinding] =
+  ## The substitution set an ALREADY-APPLIED override argument vector performed
+  ## — read off the arguments themselves, never derived.
+  ##
+  ## ## This is not a second derivation of the override set
+  ##
+  ## NF-3's central rule is that there is ONE resolution of "which inputs are
+  ## substituted" (``flakeDevelopSelectionOf`` + ``flakeBindInputsToCheckouts``)
+  ## and that a second, cheaper derivation of the same question is forbidden,
+  ## because the one that was tried disagreed with the exact answer in BOTH
+  ## directions and made the pre-push gate fail open.
+  ##
+  ## This procedure derives NOTHING. It is handed the argument vector that was
+  ## actually spliced into ``use flake`` and reads the substitutions out of it.
+  ## The vector IS the ground truth about what nix was told to build: whatever
+  ## produced it — NF-1's binder, the legacy direnv plugin, or a hand-written
+  ## ``.env`` — is the thing whose answer this reports on. Two derivations can
+  ## disagree about what a shell builds; a derivation and the shell's own
+  ## applied arguments cannot, because the second is not an opinion.
+  ##
+  ## ## Why it exists at all, rather than everything going through the binder
+  ##
+  ## §3.2 requires the behind-pin report to reach the developer AT SHELL ENTRY,
+  ## and NF-3's own measurements record why it does not today: the only route to
+  ## it is ``repro flake override-args``, whose cost is dominated by
+  ## ``repro develop --list --all`` at ~226 s on this workspace, and that cost
+  ## is the recorded blocker on migrating this repository's ``.envrc`` off the
+  ## six ``NIX_FLAKE_OVERRIDE_*`` variables. So the report the spec mandates is
+  ## implemented, correct, and unreachable from the shell that needs it.
+  ##
+  ## Reporting over the APPLIED vector costs a handful of `git` calls per
+  ## substituted sibling and needs no develop-set resolution at all, so shell
+  ## entry can afford it TODAY — and for the ``.envrc`` this repository actually
+  ## runs it is the only answer that is even correct, because that ``.envrc``
+  ## does not use Reprobuild's derivation. Reporting on the binder's answer
+  ## while the plugin supplied a different one would be the two-derivations
+  ## error with the halves swapped.
+  ##
+  ## ## Substituted-but-unobservable is LOUD, and is not a binding
+  ##
+  ## ``FlakeOverrideBinding.rev`` is documented as never empty: the binder
+  ## refuses to substitute a checkout whose ``HEAD`` cannot be read, so
+  ## "substituted" implies "observable" by construction. Here the substitution
+  ## has ALREADY happened and that invariant cannot be enforced backwards — so
+  ## it is preserved by not manufacturing a binding, and the situation is named
+  ## in ``report`` instead. §3.3 describes exactly this state: the environment
+  ## is unreproducible by construction, because the pins are not the inputs.
+  var i = 0
+  while i < args.len:
+    if args[i] != "--override-input" or i + 2 >= args.len:
+      # Not a triple we act on. Advance ONE word rather than three: a stride of
+      # three is correct only for a vector that is nothing but triples, and it
+      # mis-aligns on every other shape instead of skipping it.
+      inc i
+      continue
+    let
+      input = args[i + 1]
+      rf = args[i + 2]
+    i += 3
+    let dir = flakeLocalDirOfOverrideRef(rf)
+    if dir.len == 0:
+      # A remote or content-addressed override. Stated rather than dropped —
+      # "there is no local tree here" and "we did not look" must not look alike.
+      report.add("not a sibling substitution: flake input '" & input &
+        "' is overridden to " & rf &
+        ", which names no working tree on this machine, so it has no HEAD " &
+        "to stand ahead of or behind a pin.")
+      continue
+    if not dirExists(extendedPath(dir)):
+      report.add("SUBSTITUTED but ABSENT: flake input '" & input &
+        "' is overridden to " & dir &
+        ", which does not exist. nix cannot evaluate that input at all; this " &
+        "is a broken override, not a drifted one.")
+      continue
+    if not flakeSiblingIsGitCheckout(dir):
+      report.add("SUBSTITUTED but UNOBSERVABLE: flake input '" & input &
+        "' is overridden to " & dir &
+        ", which is not a git checkout, so nothing can name the revision " &
+        "your shell is building. flake.lock still pins something else and " &
+        "there is no way to say whether they agree.")
+      continue
+    let head = gitRunPlain(identity, ["-C", dir, "rev-parse", "HEAD"])
+    if head.code != 0 or head.output.strip().len == 0:
+      report.add("SUBSTITUTED but UNOBSERVABLE: flake input '" & input &
+        "' is overridden to " & dir & ", whose HEAD could not be read (" &
+        head.output.strip() & "), so nothing can name the revision your " &
+        "shell is building. Remedy: repair that checkout (`git -C " & dir &
+        " rev-parse HEAD` shows the error).")
+      continue
+    # The repo NAME is the checkout's directory name. In the derived path it
+    # comes from the workspace membership; here there is no membership to ask,
+    # and the directory name is what the workspace convention makes it anyway.
+    # `lastPathPart` ignores a trailing separator, so `path:../io-mon/` and
+    # `path:../io-mon` name the same repo.
+    result.add(FlakeOverrideBinding(input: input, repo: lastPathPart(dir),
+      path: dir, rev: head.output.strip()))
+  result.sort(proc (a, b: FlakeOverrideBinding): int = cmp(a.input, b.input))
+
 # ---------------------------------------------------------------------------
 # NF-3 — ONE override-state report, read by every consumer.
 #
@@ -66002,16 +66130,26 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
 proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
   ## CONSUMER 2 — ``repro flake override-status [--all|--only=LIST|
   ## --except=LIST|--tier=LIST| …every other `repro develop` set-form selector]
-  ## [--flake=DIR] [--workspace-root=PATH] [--strip-suffix=LIST] [--json]``.
+  ## [--flake=DIR] [--workspace-root=PATH] [--strip-suffix=LIST] [--json]``,
+  ## or ``repro flake override-status --applied [--flake=DIR] [--json] --
+  ## <override argument vector>``.
   ##
   ## The §3.2 report on its own, for anyone who wants it without the override
-  ## arguments — CI, a script, `--json`. SHELL ENTRY DOES NOT NEED IT: `.envrc`
-  ## is NF-1's single line, and `repro flake override-args` prints this very
-  ## report on stderr from the bindings it just emitted, so the develop set is
-  ## resolved ONCE per directory entry rather than once per consumer:
+  ## arguments — CI, a script, `--json`. An `.envrc` that has MIGRATED does not
+  ## need it: it is NF-1's single line, and `repro flake override-args` prints
+  ## this very report on stderr from the bindings it just emitted, so the
+  ## develop set is resolved ONCE per directory entry rather than once per
+  ## consumer:
   ##
   ##     _fo_args="$(repro flake override-args --all)" || exit 1
   ##     eval "use flake '.?submodules=1' $_fo_args"
+  ##
+  ## An `.envrc` that has NOT migrated is the case `--applied` serves, and this
+  ## repository's own is one of them — NF-3's measurements record
+  ## `repro develop --list --all` at ~226 s here and name it as the blocker on
+  ## the migration. Until that is solved, the line above is unaffordable and
+  ## the §3.2 report the spec requires at shell entry is reachable only through
+  ## `--applied`, over whatever vector the shell did use.
   ##
   ## The SELECTION is `repro develop`'s, in full (§5's fourth bullet, and §2's
   ## "AUTO is all-or-nothing while `repro develop` selects a set"). A verb that
@@ -66038,12 +66176,32 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
   ## Exit 0 for every observation, INCLUDING behind. Exit 2 only when the
   ## report could not be produced at all — an empty report and a failed one
   ## must not look alike (NF-1's rule).
+  ##
+  ## ## ``--applied -- <override argument vector>``: the same report, over the
+  ## ## substitutions a shell ACTUALLY performed
+  ##
+  ## In this mode the substitution set is not resolved from the develop set at
+  ## all; it is READ OFF the ``--override-input`` triples supplied after
+  ## ``--`` — the very vector the caller spliced into ``use flake``. See
+  ## ``flakeBindingsFromAppliedArgs`` for why that is not the forbidden second
+  ## derivation (it derives nothing) and why it exists (the develop-set
+  ## resolution costs ~226 s on this workspace, which is the recorded blocker
+  ## on this repository's ``.envrc`` ever reaching the §3.2 report at all).
+  ##
+  ##     eval "repro flake override-status --applied -- $_fo_args"
+  ##
+  ## Every develop-set selector is REFUSED here rather than ignored: there is
+  ## no selection to make, and a ``--only=`` that silently did nothing would be
+  ## §5's inert knob in the one command whose subject is inert knobs.
   var
     flakeDir = ""
     stripSpec = ""
     stripGiven = false
     asJson = false
     explicitRoot = ""
+    applied = false
+    appliedArgs: seq[string]
+    selectors: seq[string]
     passthrough: seq[string]
     toolProvisioning = tpmPathOnly
       ## Seeded, not left ``tpmUnspecified`` — see the same note on
@@ -66053,8 +66211,16 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
     i = 0
   while i < args.len:
     let arg = args[i]
+    if arg == "--":
+      # Everything after the separator is the applied vector, verbatim —
+      # including words that look like flags of this command, because they are
+      # nix's arguments and not ours.
+      appliedArgs = @(args[i + 1 .. ^1])
+      break
     if arg == "--flake" or arg.startsWith("--flake="):
       flakeDir = valueFromFlag(args, i, "--flake")
+    elif arg == "--applied":
+      applied = true
     elif arg == "--strip-suffix" or arg.startsWith("--strip-suffix="):
       stripSpec = valueFromFlag(args, i, "--strip-suffix")
       stripGiven = true
@@ -66072,6 +66238,7 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
       # the composer verbatim. This is the ONE line that makes `--only=` and
       # `--except=` mean here what they mean there.
       passthrough.add(arg)
+      selectors.add(arg)
     inc i
 
   let flakeRoot =
@@ -66092,6 +66259,29 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
       "differently on purpose: a report that cannot tell those apart is the " &
       "silent green shell this command exists to remove.")
     2
+
+  if applied and stripGiven:
+    refusals.add("`--applied` was given together with `--strip-suffix`. " &
+      "The suffix convention maps a flake INPUT NAME to a repo name so the " &
+      "binder can find a checkout; `--applied` is told the checkout " &
+      "directly, so the option decides nothing here and accepting it would " &
+      "be an inert knob.")
+    return refuse()
+  if applied and selectors.len > 0:
+    refusals.add("`--applied` was given together with the develop-set " &
+      "selector(s) " & selectors.join(" ") & ". They are contradictory: " &
+      "`--applied` reports on the substitutions a shell ALREADY performed, " &
+      "read off the argument vector after `--`, and there is no selection " &
+      "left to make. Accepting the selector and ignoring it would be the " &
+      "inert knob this campaign exists to remove. Drop `--applied` to report " &
+      "on a selected develop set, or drop the selector(s).")
+    return refuse()
+  if (not applied) and appliedArgs.len > 0:
+    refusals.add("an argument vector was supplied after `--`, but " &
+      "`--applied` was not given, so nothing would read it. Re-run as " &
+      "`repro flake override-status --applied -- " & appliedArgs.join(" ") &
+      "`.")
+    return refuse()
 
   var identity: GitToolIdentity
   try:
@@ -66165,22 +66355,42 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
         "a sibling")
     return 0
 
-  let declared = flakeDeclaredInputsAt(flakeRoot)
-  if not declared.ok:
-    for r in declared.refusals: refusals.add(r)
-    return refuse()
+  var bindings: seq[FlakeOverrideBinding]
+  if applied:
+    # NOT a derivation. The caller hands over the argument vector its shell
+    # spliced into `use flake`, and the substitutions are read out of it. The
+    # flake's declared-input scan is deliberately NOT consulted: an
+    # `--override-input` naming an input the flake does not declare is nix's
+    # error to report, not a reason for this report to disagree with the
+    # command line it was shown. `flakeOverrideStateReport` already classifies
+    # such a row as `unpinned` with its reason.
+    bindings = flakeBindingsFromAppliedArgs(appliedArgs, identity, notices)
+    if bindings.len == 0 and appliedArgs.len == 0:
+      # An EMPTY vector is a legitimate answer ("this shell overrode nothing")
+      # and must not be reported as a failure — but it also must not be
+      # reported as "nothing has drifted", because nothing was substituted to
+      # drift. Said in those words, once.
+      notices.add("the applied argument vector was EMPTY: this shell " &
+        "substituted no sibling at all, so every input is built from its " &
+        "flake.lock pin. That is not the same statement as 'nothing has " &
+        "drifted' — there was nothing to drift.")
+  else:
+    let declared = flakeDeclaredInputsAt(flakeRoot)
+    if not declared.ok:
+      for r in declared.refusals: refusals.add(r)
+      return refuse()
 
-  # THE override set: `repro develop`'s composed selection, bound by NF-1's
-  # binder. One derivation, the same one `repro flake override-args` emits and
-  # the same one the pre-push gate verifies, so no two of them can disagree
-  # about which inputs the dev shell is actually building from.
-  let selection = flakeDevelopSelectionOf(passthrough, explicitRoot)
-  if not selection.ok:
-    for r in selection.refusals: refusals.add(r)
-    return refuse()
-  for n in selection.notices: notices.add(n)
-  let bindings = flakeBindInputsToCheckouts(declared.names,
-    selection.checkoutOf, suffixes, identity, notices)
+    # THE override set: `repro develop`'s composed selection, bound by NF-1's
+    # binder. One derivation, the same one `repro flake override-args` emits and
+    # the same one the pre-push gate verifies, so no two of them can disagree
+    # about which inputs the dev shell is actually building from.
+    let selection = flakeDevelopSelectionOf(passthrough, explicitRoot)
+    if not selection.ok:
+      for r in selection.refusals: refusals.add(r)
+      return refuse()
+    for n in selection.notices: notices.add(n)
+    bindings = flakeBindInputsToCheckouts(declared.names,
+      selection.checkoutOf, suffixes, identity, notices)
 
   var state = flakeOverrideStateReport(flakeRoot, bindings, identity)
   if not state.ok:
@@ -66201,9 +66411,17 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
   #
   # `flakeOverrideStateReport` still does not ask the question itself, and that
   # is still right: it also backs `repro flake override-args`, which `.envrc`
-  # runs on every directory entry. THIS verb is not that path — `.envrc` no
-  # longer calls it — and it already resolves the develop set, so one
-  # `git rev-list` per substituted input is not a cost worth being wrong for.
+  # runs on every directory entry.
+  #
+  # THIS verb pays for it on both of its paths. On the derived path it has
+  # already resolved the develop set, so one `git rev-list` per substituted
+  # input is not a cost worth being wrong for. On the `--applied` path — which
+  # an unmigrated `.envrc` DOES run at shell entry — the annotation is three
+  # local `git` calls per substituted sibling and consults no network on any
+  # branch (see `flakeClassifyPublication`), so shell entry can afford the
+  # correct answer here too. The alternative was to skip it and report
+  # `recordable: true` for a revision the refresh would withhold, which is the
+  # exact disagreement the note above records.
   flakeAnnotatePublication(state, identity)
 
   if asJson:

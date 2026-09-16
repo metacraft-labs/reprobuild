@@ -752,6 +752,110 @@ dev_shell_fingerprint_drift() {
 }
 
 # ---------------------------------------------------------------------------
+# The §3.2 ambient drift report, at shell entry
+# ---------------------------------------------------------------------------
+#
+# Nix-Flake-Coexistence.md §3.2 makes this a rule rather than a nicety:
+#
+#   > A behind-pin sibling is reported **ambiently, at shell entry**, naming
+#   > the sibling, the distance, and the command that reconciles it. It is not
+#   > an error: deliberately testing an older dependency is legitimate. It must
+#   > not be silent: unknowingly testing one is how a green shell certifies
+#   > nothing.
+#
+# The report itself has existed since NF-3 and is correct. What has been
+# missing is a route to it that shell entry can afford: the only one was
+# `repro flake override-args`, whose cost is dominated by
+# `repro develop --list --all` at ~226 s on this workspace, and NF-3's LANDED
+# notes record that cost as the blocker on migrating this repository's `.envrc`
+# off the direnv plugin. So the warning the spec requires has never actually
+# reached a developer here, and the four failures it would have named arrived
+# instead as Nim compile errors about undeclared identifiers — `KillEvidence`,
+# `EvidenceScope` — in repos that had nothing to do with the stale checkout.
+#
+# `--applied` closes that gap without re-opening the one NF-3 closed. It does
+# not DERIVE the override set a second way (the derivation that disagreed with
+# the exact answer in both directions, and made the pre-push gate fail open);
+# it is handed the vector this shell is about to splice into `use flake` and
+# reads the substitutions out of it. Whatever produced that vector — the plugin
+# today, `repro flake override-args` after the migration — is the thing being
+# reported on, so the report cannot describe a different shell than the one
+# being entered.
+#
+# NEVER FATAL. The overrides are correct and the shell is usable whatever this
+# says; a dev shell that refused to activate because `flake.lock` was
+# unreadable would stop work over something the shell does not depend on.
+# Absence of `repro` is likewise not an error: a fresh clone has no `repro`
+# yet, and that is exactly when nothing has drifted either.
+#
+# WHEN IT RUNS is the other half, and it is already right for free. direnv
+# re-evaluates `.envrc` when a watched file moves; `flake.lock` is watched (see
+# `.envrc`), and so is the override fingerprint, which moves precisely when an
+# overridden source does. Those are the only two ways this drift can arise, so
+# the report fires on exactly the events that can create it and stays silent
+# on every other directory entry.
+#
+# AND IT PROBES, for the same reason `dev_shell_guard_override_knobs` probes.
+# `repro` on `PATH` at shell entry is whatever the machine happens to have —
+# typically an installed build, not the one this checkout produces — and a copy
+# predating `--applied` does not reject the flag. It routes every unrecognised
+# word into `repro develop`'s selector composer, so the exact invocation below
+# would make an old binary resolve the whole develop set (~226 s) on every
+# directory entry and then report on a set nobody asked about. Refusing to ask
+# a version question and MAKING THE BINARY PERFORM the behaviour instead is the
+# same discipline the knob guard applies to the direnv plugin, and for the same
+# reason: a binary that renames its internals still passes, and one that does
+# not implement the flag still fails.
+#
+# The probe is the contradiction refusal, which only a binary that KNOWS
+# `--applied` can produce: `--applied` together with a develop selector exits 2
+# before git is resolved or any flake is read. `--flake` names a directory with
+# no flake in it so that a binary WITHOUT the flag takes its
+# "no flake.nix + flake.lock pair" early return and exits 0 in milliseconds,
+# rather than resolving a develop set to answer a probe.
+_dev_shell_applied_report_supported() {
+  local probe out code
+  probe="$(mktemp -d "${TMPDIR:-/tmp}/repro-applied-probe.XXXXXX")" || return 1
+  out="$(repro flake override-status --applied --only=__probe__ \
+    --flake="$probe" 2>&1)"
+  code=$?
+  rm -rf "$probe"
+  [[ "$code" -eq 2 && "$out" == *"contradictory"* ]]
+}
+
+dev_shell_report_override_drift() {
+  local args="$1"
+  command -v repro >/dev/null 2>&1 || return 0
+  if ! _dev_shell_applied_report_supported; then
+    # LOUD, once, and not fatal. Silence here would be the inert knob exactly:
+    # `.envrc` would say it reports drift while reporting none, which is the
+    # shape of every failure this file exists to prevent.
+    printf '%s\n' \
+      "dev shell: the \`repro\` on PATH ($(command -v repro)) predates" \
+      "  \`repro flake override-status --applied\`, so NO drift report can be" \
+      "  produced for this shell. That is NOT the same answer as 'nothing has" \
+      "  drifted': a sibling behind its flake.lock pin will be silent again," \
+      "  and will next be visible as a compiler error naming a symbol." \
+      "  Remedy: install a current repro (\`just build\` in this checkout puts" \
+      "  one at ./build/bin/repro), or put that build earlier on PATH." >&2
+    return 0
+  fi
+  local words=()
+  eval "words=( ${args} )"
+  # `${words[@]+…}` rather than a bare `"${words[@]}"`: an EMPTY array under
+  # `set -u` is an unbound-variable error on bash before 4.4, and an empty
+  # override vector is an ordinary state (a clone with no siblings beside it),
+  # not a reason to break shell activation on an older bash.
+  #
+  # `|| true` deliberately, and belt-and-braces with the caller: this function
+  # is sourced into `.envrc`, where direnv runs under `set -e`, and a report
+  # that ended shell activation would be a far larger harm than the drift it
+  # reports.
+  repro flake override-status --applied -- ${words[@]+"${words[@]}"} || true
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Loader injection: one glibc per dev-shell subprocess
 # ---------------------------------------------------------------------------
 #
