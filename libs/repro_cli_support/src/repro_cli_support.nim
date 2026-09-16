@@ -66949,16 +66949,21 @@ type
   ProjectEdgeStyle = enum
     ## Which membership spelling a PROJECT manifest already uses. A project is
     ## the one file kind that can be authored either way: `includes` (fragment
-    ## PATHS — the original spelling, still the one
-    ## `reprobuild-specs/Workspace-Manifests.md` §"`projects/<project>.toml`"
-    ## documents) or `member_sets`/`member_repos` (NAMES — the membership
-    ## model's two namespaces, which a converted manifest carries).
+    ## PATHS — the DEPRECATED original spelling, superseded by the membership
+    ## model) or `member_sets`/`member_repos` (NAMES — the model's two
+    ## namespaces, which every converted manifest carries).
     ##
     ## The authoring verbs read the style off the FILE rather than assuming
-    ## one. Writing the model's spelling into an `includes`-only manifest does
-    ## not convert it — the fresh array lands next to an `includes` array the
-    ## reader still honours, so the operator is left with one project declaring
-    ## its repos in two places, and `repos remove` can only find half of them.
+    ## one, and that is about not converting a file behind the operator's back
+    ## — NOT about the two spellings being equals. Writing the model's spelling
+    ## into an `includes`-only manifest does not convert it: the fresh array
+    ## lands next to an `includes` array the reader still honours, so the
+    ## operator is left with one project declaring its repos in two places, and
+    ## the `includes` half goes stale.
+    ##
+    ## A file that uses NEITHER spelling has nothing to preserve, so it is not
+    ## a style question at all — it is authored on the model. See `pesNone` at
+    ## the `repos add` site.
     pesNone      ## declares neither array (a freshly scaffolded project)
     pesIncludes  ## declares `includes` and no membership array
     pesMembers   ## declares `member_sets` and/or `member_repos`
@@ -67414,7 +67419,26 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     try:
       case target.kind
       of mkProject:
-        referencedFragments = readProjectManifest(target.abs).includes
+        # BOTH spellings. A project declares its repos as fragment PATHS under
+        # the deprecated `includes` or as NAMES under `member_repos`, and a
+        # converted project — which every project manifest in the metacraft
+        # manifest repo now is — carries only the latter. Reading `includes`
+        # alone reported a converted project as referencing NOTHING, so
+        # `--prune-orphan-repos` pruned nothing and the operator was told the
+        # removal left no orphans while the fragments it alone declared were
+        # still on disk.
+        let projectManifest = readProjectManifest(target.abs)
+        referencedFragments = projectManifest.includes
+        # `member_repos` only, for the same reason as the repo-set branch
+        # below: a `member_sets` entry names a SET, which has no fragment to
+        # orphan even when a repo happens to share its name. The existence
+        # check is what keeps a stale member name from naming a file that was
+        # never there.
+        for member in projectManifest.member_repos:
+          let memberRel = "repos/" & member & ".toml"
+          if memberRel notin referencedFragments and
+              fileExists(manifestRoot / memberRel):
+            referencedFragments.add(memberRel)
       of mkRepoSet:
         # `member_repos` only: an entry under `member_sets` names a set, and a
         # set has no fragment to orphan even when a repo shares its name.
@@ -67894,14 +67918,18 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         # (`repos/<repo>.toml`), wires its remote + `includes` edge into the
         # project manifest, commits, and pushes").
         #
-        # WHICH spelling the edge takes is read off the project FILE, because
-        # a project is the one file kind that can be authored either way:
-        # `includes` (fragment PATHS, the spelling Workspace-Manifests.md
-        # §"`projects/<project>.toml`" documents) or `member_repos` (NAMES,
-        # the membership model's spelling, which the converted manifests in
-        # the metacraft workspace carry). Both resolve — `resolveProject`
+        # WHICH spelling the edge takes is read off the project FILE, but
+        # only for a file that ALREADY uses one. A project is the one file
+        # kind that can be authored either way: `includes` (fragment PATHS,
+        # the deprecated original) or `member_repos` (NAMES, the membership
+        # model's spelling, which every project manifest in the metacraft
+        # manifest repo now carries). Both still resolve — `resolveProject`
         # expands `member_*` after `includes` — so a manifest may sit in
-        # either state, and the verb must add to the array that is THERE.
+        # either state, and the verb must add to the array that is THERE
+        # rather than convert the file as a side effect of adding one repo.
+        #
+        # A file that uses NEITHER is not a style question: it is authored on
+        # the model. See the `pesNone` arm below.
         #
         # Writing `member_repos` unconditionally is what this branch used to
         # do, and against an `includes`-only project it appended a SECOND,
@@ -67918,22 +67946,38 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         # entirely. Neither spelling is right for both shapes; the file's own
         # is.
         case projectEdgeStyle(target.abs)
-        of pesIncludes, pesNone:
+        of pesIncludes:
+          # An `includes`-only project keeps being authored in `includes`.
           # Located by key, never positionally, for the reason above.
           #
-          # `pesNone` — a project scaffolded by `projects add` with no
-          # `--template`, which carries neither array — is authored as an
-          # `includes` edge: that is the shape
-          # `reprobuild-specs/Workspace-Manifests.md`
-          # §"`projects/<project>.toml`" documents for a project manifest,
-          # and the one `projectsIncludingFragment` — hence `repos remove`
-          # and `--delete-fragment` — can see. A project that a template DID
-          # seed carries both membership arrays and is `pesMembers` below.
+          # This branch exists only to avoid CONVERTING a file as a side
+          # effect of adding one repo. `includes` is deprecated and nothing
+          # new is authored into it (see `pesNone` below); a manifest that
+          # still carries it is edited in place until someone converts it
+          # deliberately.
           discard editSetMember(target.abs, includesKey, fragmentRel,
             add = true)
-        of pesMembers:
+        of pesNone, pesMembers:
           # Same rule as the repo-set branch above: the membership key is read
           # off what the name resolves to, and the array is located BY ITS KEY.
+          #
+          # `pesNone` — a project scaffolded by `projects add` with no
+          # `--template`, which carries neither array — is authored HERE, on
+          # the membership model's spelling, not on `includes`. `includes` is
+          # the superseded mechanism: all 12 project manifests in the metacraft
+          # manifest repo carry `member_sets`/`member_repos` and none carries
+          # an `includes` array, so authoring a new project onto `includes`
+          # would create, on every `projects add`, the one shape a conversion
+          # exists to remove.
+          #
+          # There is no array for `editSetMember` to find in a freshly
+          # scaffolded file, so it takes its new-array fallback — which
+          # inserts ahead of the FIRST table header, because a bare
+          # `member_repos = [ … ]` written after `[project]` is
+          # TOML-bound to that table and the strict decode then rejects
+          # `project.member_repos`. That placement is the same one
+          # `projectManifestStub` documents, and a `pesNone` project is
+          # precisely the file that reaches it.
           let memberKey = membershipKeyFor(manifestRoot, repo)
           if memberKey != memberReposKey:
             stderr.writeLine("repro workspace repos add: '" & repo &

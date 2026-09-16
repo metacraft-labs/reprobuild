@@ -8,7 +8,13 @@
 ## upstream received the commit (the project file is present in the bare's
 ## tree).
 ##
-## `repos add` then records a repo fragment + include and pushes again.
+## `repos add` then records a repo fragment + membership edge and pushes again.
+## The edge is asserted to be the SETS one — the repo as a name under
+## `member_repos` — because a project scaffolded with no `--template` carries
+## neither membership array, and "which spelling does a brand-new project get"
+## is decided here and nowhere else. It used to get the deprecated `includes`
+## array, so every project created by this CLI was born on the superseded
+## mechanism.
 ##
 ## The second case pins WHICH repository those verbs act on: a workspace root
 ## that is a plain directory nested inside an unrelated checkout must be
@@ -20,6 +26,7 @@
 import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
 
@@ -110,11 +117,42 @@ suite "RA-6/WV-3 — repro workspace projects add (writes + pushes manifest)":
         checkpoint("repo add output: " & addRes.output)
       check addRes.code == 0
       check fileExists(manifestRoot / "repos" / "lib-x.toml")
-      # The include landed in the project file, pushed to the bare.
+      # The membership edge landed in the project file, pushed to the bare.
       let bareProj = runCmd(q(gitBin) & " -C " & q(bare) &
         " show main:projects/myproj.toml")
       check bareProj.code == 0
-      check bareProj.output.contains("repos/lib-x.toml")
+      # On the SETS mechanism — the repo as a NAME under `member_repos` —
+      # not as a fragment path under the deprecated `includes`.
+      #
+      # This is the one file kind that reaches the authoring path with NEITHER
+      # array present: `projects add` with no `--template` scaffolds a manifest
+      # carrying only `schema` and `[project]`. It used to be authored as an
+      # `includes` edge, which made every freshly created project the one shape
+      # a manifest conversion exists to remove — none of the project manifests
+      # in the metacraft manifest repo carries `includes` any more.
+      check bareProj.output.contains("member_repos")
+      check bareProj.output.contains("\"lib-x\"")
+      check not bareProj.output.contains("includes")
+      check not bareProj.output.contains("repos/lib-x.toml")
+      # And the array PARSES BACK as a top-level key, which is the trap this
+      # file is uniquely exposed to: with no array to extend, the writer takes
+      # its new-array fallback, and a bare `member_repos = [ … ]` appended
+      # after the `[project]` header would be standard-TOML-bound to that
+      # table — the strict decode would then reject `project.member_repos` and
+      # the manifest would stop parsing entirely. Asserted through the reader
+      # rather than by eyeballing the text, because the text looks identical
+      # either way; only the position differs.
+      let m = readProjectManifest(manifestRoot / "projects" / "myproj.toml")
+      check m.member_repos == @["lib-x"]
+      check m.includes.len == 0
+      # The edge RESOLVES: the repo is listed for the project by the same CLI
+      # surface an operator would use to check.
+      let listRes = runShell(shellCommand(@[reproBin, "workspace", "repos",
+        "list", "--project=myproj", "--workspace-root=" & workspaceRoot]))
+      if listRes.code != 0:
+        checkpoint("repos list output: " & listRes.output)
+      check listRes.code == 0
+      check listRes.output.contains("lib-x")
 
   test "test_ra6_projects_add_refuses_a_workspace_root_inside_another_checkout":
     ## The manifest verbs commit and PUSH; which repository they act on is

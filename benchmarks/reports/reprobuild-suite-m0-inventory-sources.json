@@ -27325,7 +27325,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_membership_model_sets_cli.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -28563,7 +28563,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_test_support"
+        "repro_test_support",
+        "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
