@@ -126,11 +126,11 @@ clang -target x86_64-linux-gnu -O2 -fno-asynchronous-unwind-tables -fno-unwind-t
 cp "$UNWIND_O" "$STRIPPED_O"
 objcopy --remove-section .eh_frame "$STRIPPED_O"
 
-# Mach-O arms (macOS arm64)
-clang -target arm64-apple-darwin -O2 -g -fasynchronous-unwind-tables \
+# An explicit deployment target is required for the fixture's thread-local data.
+clang -target arm64-apple-macos11.0 -O2 -g -fasynchronous-unwind-tables \
   -c "$C_FIXTURE" -o "$MAC_UNWIND_O"
 
-clang -target arm64-apple-darwin -O2 -fno-asynchronous-unwind-tables -fno-unwind-tables \
+clang -target arm64-apple-macos11.0 -O2 -fno-asynchronous-unwind-tables -fno-unwind-tables \
   -c "$C_FIXTURE" -o "$MAC_NOUNWIND_O"
 
 for obj in "$UNWIND_O" "$NOUNWIND_O" "$STRIPPED_O" "$MAC_UNWIND_O" "$MAC_NOUNWIND_O"; do
@@ -147,7 +147,7 @@ echo "  [OK] Real objects produced: ELF positive ($(wc -c < "$UNWIND_O" | tr -d 
 # -----------------------------------------------------------------------------
 echo "[3/5] Compiling Nim integration test driver..."
 
-DRIVER_SRC="$REPO_ROOT/tests/integration/test_hx_s1_unwind_metadata_driver.nim"
+DRIVER_SRC="$REPO_ROOT/tests/fixtures/hcr/unwind_metadata_driver.nim"
 DRIVER_BIN="$WORK_DIR/test_hx_s1_driver"
 
 nim c --hints:off --warnings:off \

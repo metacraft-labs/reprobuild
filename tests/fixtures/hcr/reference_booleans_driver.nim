@@ -1,4 +1,4 @@
-# test_hx_s4_reference_booleans.nim
+# reference_booleans_driver.nim
 #
 # Helper for Gate 2 (test_hx_s4_reported_booleans_track_the_observation.sh).
 # Runs the real Nim reference agent derivation across 4 configurations
