@@ -492,6 +492,13 @@ typedef struct repro_hcr_lx_capabilities {
 static repro_hcr_lx_capabilities repro_hcr_lx_caps;
 static int repro_hcr_lx_pretend_clang_cet_unsupported = 0;
 
+/* The capability probe may be linked without a patchable-entry section.
+ * These bounds are not used by the per-object ELF sled lookup. */
+extern const uintptr_t __start___patchable_function_entries[]
+    __attribute__((weak));
+extern const uintptr_t __stop___patchable_function_entries[]
+    __attribute__((weak));
+
 static void repro_hcr_lx_internal_set_pretend_clang_cet_unsupported(int val) {
   repro_hcr_lx_pretend_clang_cet_unsupported = val;
   repro_hcr_lx_caps.clang_cet_unsupported = val ? 1 : 0;
