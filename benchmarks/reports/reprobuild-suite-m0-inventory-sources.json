@@ -4910,7 +4910,7 @@
           "executedVariables": [
             "cmd"
           ],
-          "line": 277,
+          "line": 459,
           "path": "tests/integration/t_repro_test_runner_reporting_contract.nim",
           "patterns": [
             "nim-c"
