@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1628,
+    "nimTestBinaries": 1629,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 579,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1639
+    "testEntries": 1640
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1073,7 +1073,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 759,
+      "integration": 760,
       "platform/destructive": 115,
       "pure unit": 579,
       "unclassified": 174
@@ -1224,9 +1224,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1628,
+    "nimTestBinaryCount": 1629,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1639
+    "testEntryCount": 1640
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -32377,6 +32377,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/test_hax_m2_macho_lazy_symbol_and_vtable_interception.nim",
+      "sourceSuiteCount": 0,
+      "staticCaseCount": 0,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_hax_m3_cli_watcher_triggers_compilation_and_patch_push",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/test_hax_m3_cli_watcher_triggers_compilation_and_patch_push.nim",
       "sourceSuiteCount": 0,
       "staticCaseCount": 0,
       "staticallyDetectedRuntimeCompilerFlow": false,
