@@ -1,14 +1,7 @@
 ## DSL-port M9.R.10a — stdlib provisioning stub for ``m4``.
 ##
-## Widened in M9.R.11 from the original M9.R.10a single-nix stub.
-##
 ## ``m4`` is reached by every autotools driver: ``wayland → expat →
-## autoconf → m4`` AND ``wayland → gcc → binutils → m4``. The widening
-## adds the ScoopInstaller/Main scoop manifest (Windows) + the GNU
-## upstream tarball (cross-platform).
-##
-## sha256 cross-checked against nixpkgs's ``pkgs/os-specific/linux/
-## minimal-bootstrap/gnum4/default.nix`` (version 1.4.21).
+## autoconf → m4`` AND ``wayland → gcc → binutils → m4``.
 
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
@@ -21,19 +14,3 @@ package `m4`:
     scoopApp(bucket = "main", app = "m4",
       preferredVersion = ">=1", executablePath = "bin/m4.exe",
       requiresExecutionProfileChecksum = false)
-    # **executablePath = "configure"** (M9.R.11 source-tarball
-    # placeholder): the resolver requires this file to exist +x
-    # post-extract. The GNU m4 source tarball ships ``configure`` at
-    # the root with +x. The convention layer drives the configure +
-    # make + install cycle at build time to produce ``src/m4``.
-    # M9.R.11.1 follow-up — narrow to ``bin/m4`` once install-glue
-    # lands.
-    tarball url = "https://ftp.gnu.org/gnu/m4/m4-1.4.21.tar.xz",
-      sha256 = "f25c6ab51548a73a75558742fb031e0625d6485fe5f9155949d6486a2408ab66",
-      archiveType = "tar.xz",
-      stripComponents = 1,
-      executablePath = "configure",
-      packageId = "m4@1.4.21",
-      cpu = "any",
-      os = "any",
-      lockIdentity = "tarball:m4@1.4.21:sha256:f25c6ab51548a73a75558742fb031e0625d6485fe5f9155949d6486a2408ab66"

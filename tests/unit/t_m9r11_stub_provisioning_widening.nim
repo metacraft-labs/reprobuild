@@ -1,31 +1,15 @@
 ## DSL-port M9.R.11 — stub provisioning widening test.
 ##
-## M9.R.10a added 43 stdlib stub packages with **nix-only**
-## provisioning. The Windows from-source smoke for wayland trips on
-## the very first stub it reaches (``texinfo``) because nix-only
-## provisioning resolves to "no usable channel" on a non-nix host.
-##
-## M9.R.11 widens the canary set (``texinfo`` + the 10 tools the
-## ``wayland → gcc → binutils → ...`` auto-recurse chain transitively
-## reaches) to ``(nix, [scoop,] tarball)`` so the resolver lands a
-## usable channel on every host. This test pins the widening so a
-## later re-harvest cannot silently regress it.
-##
-## Stubs widened in M9.R.11 (this set MUST advertise a tarball channel;
-## scoop is added where the ScoopInstaller/Main bucket carries the
-## manifest):
-##
-##   texinfo, perl, m4, bison, flex, gperf, bc, file, rsync, swig,
-##   gmp, mpfr, mpc
-##
-## The remaining 30 M9.R.10a stubs (libpng, libjpeg, kf6/qt6 sub-modules,
-## ...) keep their nix-only single-channel shape for now; the
-## ``TODO(M9.R.11.1)`` markers in each unwidened file flag the
-## follow-up.
+## Preserve the existing Nix/Scoop channels and genuine binary tarballs.
+## The bounded source-archive set must not expose configure/configure.sh
+## as a ready-to-run package tool. Real catalog checks precede resolution
+## so restoring an invalid channel fails without a network download.
 
-import std/[strutils, unittest]
+import std/[os, strutils, tempfiles, unittest]
 
 import repro_project_dsl
+import repro_interface_artifacts
+import repro_tool_profiles
 # Pull every package whose provisioning we want to inspect into module
 # init so ``registeredPackages()`` carries the widened
 # ``nixProvisioning`` / ``scoopProvisioning`` / ``tarballProvisioning``
@@ -45,11 +29,24 @@ proc packageProvisioning(name: string):
               tarball: pkg.tarballProvisioning.len)
   (-1, -1, -1)
 
+proc bisonConsumerInterface(): ProjectInterface =
+  toProjectInterface(PackageDef(
+    packageName: "bisonToolConsumer",
+    nativeBuildDeps: @[PackageUseDef(
+      rawConstraint: "bison >=3.0", packageSelector: "bison",
+      executableName: "bison", depKind: "native")]), registeredPackages())
+
 const
-  WaylandChainStubsRequiringTarball = [
+  WaylandChainStubs = [
     "texinfo", "perl", "m4", "bison", "flex",
     "gperf", "bc", "file", "rsync", "swig",
     "gmp", "mpfr", "mpc",
+  ]
+  WaylandChainStubsRequiringTarball = ["perl", "swig"]
+  FormerConfigurePlaceholderPackages = [
+    "autoconf", "automake", "bc", "bison", "file", "flex", "gmp",
+    "gperf", "libtool", "libtoolize", "m4", "make", "mpc", "mpfr",
+    "rsync", "texinfo",
   ]
   StubsWithScoop = [
     "perl", "m4", "bison", "bc", "file", "swig",
@@ -57,50 +54,101 @@ const
 
 suite "DSL-port M9.R.11 — stub provisioning widening":
 
-  test "autoconf has a portable source-cycle bootstrap channel":
-    var found = false
-    for pkg in registeredPackages():
-      if pkg.packageName != "autoconf":
-        continue
-      found = true
-      check pkg.nixProvisioning.len >= 1
-      check pkg.tarballProvisioning.len == 1
-      let bootstrap = pkg.tarballProvisioning[0]
-      check bootstrap.archiveType == "tar.xz"
-      check bootstrap.executablePath == "configure"
-      check bootstrap.sha256 ==
-        "ba885c1319578d6c94d46e9b0dceb4014caafe2490e437a0dbca3f270a223f5a"
-    check found
+  test "bison exposes executable channels, not its source configure script":
+    let iface = bisonConsumerInterface()
+    require iface.toolUses.len == 1
+    let useDef = iface.toolUses[0]
+    check useDef.packageSelector == "bison"
+    check useDef.executableName == "bison"
+    check useDef.depKind == "native"
+    require useDef.nixProvisioning.len == 1
+    check useDef.nixProvisioning[0].selector == "nixpkgs#bison"
+    check useDef.nixProvisioning[0].executablePath == "bin/bison"
+    require useDef.scoopProvisioning.len == 1
+    check useDef.scoopProvisioning[0].app == "bison"
+    check useDef.scoopProvisioning[0].executablePath == "bin/bison.exe"
+    check useDef.tarballProvisioning.len == 0
 
-  test "remaining autotools packages have source-cycle bootstrap channels":
-    let expected = [
-      (name: "automake", hash:
-        "8920c1fc411e13b90bf704ef9db6f29d540e76d232cb3b2c9f4dc4cc599bd990"),
-      (name: "libtool", hash:
-        "f81f5860666b0bc7d84baddefa60d1cb9fa6fceb2398cc3baca6afaa60266675"),
-      (name: "libtoolize", hash:
-        "f81f5860666b0bc7d84baddefa60d1cb9fa6fceb2398cc3baca6afaa60266675"),
-    ]
-    for entry in expected:
+  test "forced bison tarball provisioning fails before materialization":
+    let iface = bisonConsumerInterface()
+    require iface.toolUses.len == 1
+    check iface.toolUses[0].tarballProvisioning.len == 0
+    # Check the pure planning gate first so restoring the old channel makes
+    # this regression fail without attempting a network download.
+    if iface.toolUses[0].tarballProvisioning.len == 0:
+      var diagnostic = ""
+      try:
+        discard tarballAcquisitionPlan(iface.toolUses[0])
+      except ValueError as exc:
+        diagnostic = exc.msg
+      require diagnostic.contains("does not declare provisioning: tarball metadata")
+      check diagnostic.contains("bison >=3.0")
+
+      let scratch = createTempDir("repro-bison-no-tarball-", "")
+      defer: removeDir(scratch)
+      let storeRoot = scratch / "tool-store"
+      try:
+        discard toolBuildIdentity(artifactFor(iface), tpmTarball,
+          pathValue = "", storeRoot = storeRoot)
+        check false
+      except ValueError as exc:
+        check exc.msg == diagnostic
+      check not dirExists(storeRoot)
+
+  when defined(posix):
+    test "bison already on PATH remains a path-resolved executable":
+      let scratch = createTempDir("repro-bison-on-path-", "")
+      defer: removeDir(scratch)
+      let binary = scratch / "bison"
+      writeFile(binary, "#!/bin/sh\necho 'bison fixture 3.8.2'\n")
+      setFilePermissions(binary, {fpUserRead, fpUserWrite, fpUserExec})
+      let storeRoot = scratch / "tool-store"
+      let identity = toolBuildIdentity(artifactFor(bisonConsumerInterface()),
+        tpmPathOnly, pathValue = scratch, storeRoot = storeRoot)
+      require identity.profiles.len == 1
+      let profile = identity.profiles[0]
+      check profile.installMethod == "path"
+      check profile.resolvedExecutablePath == binary
+      require profile.probes.len == 1
+      check profile.probes[0].exitCode == 0
+      check profile.probes[0].output.strip() == "bison fixture 3.8.2"
+      check not dirExists(storeRoot)
+
+  test "affected catalog entries reject source configure placeholders":
+    for name in FormerConfigurePlaceholderPackages:
       var found = false
       for pkg in registeredPackages():
-        if pkg.packageName != entry.name:
+        if pkg.packageName != name:
           continue
         found = true
+        checkpoint(name)
         check pkg.nixProvisioning.len >= 1
-        check pkg.tarballProvisioning.len == 1
-        let bootstrap = pkg.tarballProvisioning[0]
-        check bootstrap.archiveType == "tar.xz"
-        check bootstrap.executablePath == "configure"
-        check bootstrap.sha256 == entry.hash
+        if name == "make":
+          check pkg.tarballProvisioning.len == 1
+        else:
+          check pkg.tarballProvisioning.len == 0
+        for channel in pkg.tarballProvisioning:
+          check channel.executablePath notin ["configure", "configure.sh"]
       check found
 
-  test "texinfo (the canary) has nix + tarball provisioning":
-    let p = packageProvisioning("texinfo")
-    check p.nix >= 1
-    check p.tarball >= 1
+  test "make retains its pinned Windows binary tarball":
+    var found = false
+    for pkg in registeredPackages():
+      if pkg.packageName != "make":
+        continue
+      found = true
+      require pkg.tarballProvisioning.len == 1
+      let channel = pkg.tarballProvisioning[0]
+      check channel.executablePath == "bin/mingw32-make.exe"
+      check channel.cpu == "x86_64"
+      check channel.os == "windows"
+      check channel.archiveType == "7z"
+      check channel.packageId == "make-winlibs@16.1.0"
+      check channel.sha256 ==
+        "62fb8588d2deee7d662dbcbd386702adbf19643764c971c38aa4839472eee232"
+    check found
 
-  test "every wayland-chain stub advertises a tarball channel":
+  test "remaining binary tarball stubs retain their channels":
     var missing: seq[string] = @[]
     for name in WaylandChainStubsRequiringTarball:
       let p = packageProvisioning(name)
@@ -117,14 +165,12 @@ suite "DSL-port M9.R.11 — stub provisioning widening":
     # The widening must NOT delete the M9.R.10a nix entries — Nix-capable
     # hosts must still resolve via the nix channel as the highest
     # preference.
-    for name in WaylandChainStubsRequiringTarball:
+    for name in WaylandChainStubs:
       let p = packageProvisioning(name)
       check p.nix >= 1
 
   test "scoop entries match the ScoopInstaller/Main bucket coverage":
     # Stubs whose tool is in scoop's main bucket carry a scoop entry.
-    # Stubs NOT in scoop main keep tarball-only — flex, rsync, gperf,
-    # texinfo, gmp/mpfr/mpc fall in this set.
     for name in StubsWithScoop:
       let p = packageProvisioning(name)
       check p.scoop >= 1
@@ -158,7 +204,7 @@ suite "DSL-port M9.R.11 — stub provisioning widening":
     # that the unwidened stubs continue to register their single nix
     # channel, which guarantees the audit-test contract.
     for pkg in registeredPackages():
-      if pkg.packageName in WaylandChainStubsRequiringTarball:
+      if pkg.packageName in WaylandChainStubs:
         continue
       # The non-stub packages (nim, gcc, meson, ...) have multiple
       # channels already — skip them.

@@ -12078,6 +12078,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_shell_entry_reports_drift_over_the_applied_overrides.nim",
+    binary: "build/test-bin/t_shell_entry_reports_drift_over_the_applied_overrides",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_single_platform_entries_declare_platforms.nim",
     binary: "build/test-bin/t_single_platform_entries_declare_platforms",
     defines: @[],
