@@ -22,6 +22,14 @@
 ## history/reachability matrix is cross-platform. Advancing either bare tip
 ## contrary to an assertion makes the suite fail. No mocks, ignored tests, or
 ## network access are used.
+##
+## The last two cases pin INVARIANT 14 — a published lock record is immutable —
+## as a property over BYTES rather than over a refusal message: for a key that
+## is already published, the blob object id reachable from the upstream ref is
+## identical before and after the operation. One drives a stale store whose
+## checkout never saw the published record; the other drives a real lost
+## compare-and-swap that lands the competing record at the same key mid-push,
+## which is the only point at which the collision can be observed at all.
 
 import std/[os, sequtils, strutils, tempfiles, unittest]
 
@@ -649,3 +657,165 @@ suite "lock publication recovers verified ahead chains":
       let complete = publishWithHookCli(fx, exact)
       check complete.outcome == lpoNothingToPublish
       check fx.git("symbolic-ref --short HEAD").strip() == "main"
+
+  # ------------------------------------------------------------------
+  # INVARIANT 14 (push-hook-publication-protocol.md) — IMMUTABILITY BINDS
+  # PUBLISHED RECORDS. Two shapes of the SAME violation, both observed in
+  # production rather than imagined.
+  #
+  # On 2026-09-16 a local pre-push gate run published an `M` commit over
+  # `locks/codetracer/codetracer/3168f9ec....toml`, 261 insertions and 175
+  # deletions over a record published on 2026-09-10 and amended since. It
+  # destroyed the amendment and moved every sibling pin backwards onto the
+  # publishing workspace's feature branches, and it reported `OK`. Its
+  # reflog is the whole mechanism:
+  #
+  #   41298411 reset: moving to origin/latest        (store parks at a tip)
+  #   b28e332b commit: Publish 1 workspace lock entry     (an `M`, not `A`)
+  #   76f6f1d2 rebase (start): checkout origin/latest      (the push raced)
+  #   5536b109 rebase (pick): Publish 1 workspace lock entry
+  #
+  # The bytes that reached the remote were the REBASED ones, so the last
+  # gate a rewrite has to pass is the non-fast-forward re-apply — not the
+  # staging check that ran before it.
+  #
+  # These cases assert the PROPERTY, not the symptom: for a key that is
+  # already published, the bytes reachable from the upstream ref are
+  # IDENTICAL before and after the operation. They compare the blob's object
+  # id, a hash over the exact bytes, so a rewrite of any size fails here —
+  # including one whose repo coordinates happen to agree, which is precisely
+  # the class the writer's coordinate comparison cannot see.
+  #
+  # Falsifiable: teach `rebaseVerifiedLockChain` to resolve the collision in
+  # favour of the replayed commit (`rebase -X theirs`) AND relax
+  # `verifyLockOnlyAheadChain`'s additions-only rule to accept `M`, and the
+  # race case publishes the overwrite and fails here. Relaxing either one
+  # alone still refuses, which is the point: both are load-bearing.
+  proc lockWithSibling(repoName, oid, siblingName, siblingOid: string): string =
+    validLock(repoName, oid) &
+      "\n[[repo]]\nname = \"" & siblingName & "\"\n" &
+      "path = \"" & siblingName & "\"\nremote = \"origin\"\n" &
+      "revision = \"" & siblingOid & "\"\n"
+
+  proc remoteBlobId(fx: Fixture; rel: string): string =
+    ## The object id of the blob the upstream ref reaches at ``rel``. A hash
+    ## over the file's exact bytes, so "unchanged" here means byte-unchanged
+    ## and not merely "still parses the same".
+    let res = run(q(fx.gitBin) & " --git-dir=" & q(fx.origin) &
+      " rev-parse " & q("refs/heads/main:" & rel))
+    if res.code != 0: "" else: res.output.strip()
+
+  test "a stale store never rewrites a record already published at its key":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin)
+      defer: removeDir(fx.scratch)
+      let oid = repeat('e', 40)
+      let rel = lockRel("app", oid)
+
+      # Somebody else publishes the record for this key first, pinning a
+      # sibling at `aaa...`. Our checkout never learns about it — this is the
+      # stale store the incident's reflog shows parked at an old tip.
+      let other = fx.scratch / "publisher"
+      discard require(q(gitBin) & " clone " & q(fx.origin) & " " & q(other))
+      discard require(q(gitBin) & " -C " & q(other) &
+        " config user.email tester@example.invalid")
+      discard require(q(gitBin) & " -C " & q(other) &
+        " config user.name 'Prior Publisher'")
+      createDir((other / rel).parentDir())
+      writeFile(other / rel,
+        lockWithSibling("app", oid, "sibling", repeat('a', 40)))
+      discard require(q(gitBin) & " -C " & q(other) & " add locks")
+      discard require(q(gitBin) & " -C " & q(other) & " commit -m published")
+      discard require(q(gitBin) & " -C " & q(other) & " push origin main")
+      let publishedTip = fx.bareHead()
+      let publishedBlob = fx.remoteBlobId(rel)
+      check publishedBlob.len > 0
+
+      # Our workspace generates ITS answer for the same key: the same self
+      # coordinate (the path demands it), a different sibling pin. This is
+      # the difference the writer's coordinate comparison is blind to
+      # whenever the stale checkout does not hold the record at all.
+      createDir((fx.repo / rel).parentDir())
+      writeFile(fx.repo / rel,
+        lockWithSibling("app", oid, "sibling", repeat('b', 40)))
+      fx.commitAll("stale store lock")
+      let localHead = fx.git("rev-parse HEAD").strip()
+
+      let pub = publishWorkspaceLock(fx.identity, fx.repo,
+        @[expected("app", "app", oid)])
+      check pub.outcome != lpoPublished
+      check fx.bareHead() == publishedTip
+      check fx.remoteBlobId(rel) == publishedBlob
+      # Nothing local was rewritten or reset on the operator's behalf either.
+      check fx.git("rev-parse HEAD").strip() == localHead
+      check fx.git("symbolic-ref --short HEAD").strip() == "main"
+
+  test "a push race at one key leaves the published bytes byte-identical":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin)
+      defer: removeDir(fx.scratch)
+      let oid = repeat('d', 40)
+      let rel = lockRel("app", oid)
+
+      # Our record is an honest ADDITION against the tip we can see, so it
+      # passes the writer, the staging check and the ahead-chain verifier.
+      # The collision exists only on the remote and only becomes visible
+      # after the push is rejected — which is the state the re-apply runs in.
+      createDir((fx.repo / rel).parentDir())
+      writeFile(fx.repo / rel,
+        lockWithSibling("app", oid, "sibling", repeat('b', 40)))
+      fx.commitAll("local lock for a colliding race")
+
+      let other = fx.scratch / "collide-racer"
+      discard require(q(gitBin) & " clone " & q(fx.origin) & " " & q(other))
+      discard require(q(gitBin) & " -C " & q(other) &
+        " config user.email tester@example.invalid")
+      discard require(q(gitBin) & " -C " & q(other) &
+        " config user.name 'Colliding Race Tester'")
+      createDir((other / rel).parentDir())
+      writeFile(other / rel,
+        lockWithSibling("app", oid, "sibling", repeat('a', 40)))
+      discard require(q(gitBin) & " -C " & q(other) & " add locks")
+      discard require(q(gitBin) & " -C " & q(other) & " commit -m collide")
+      let racingTip = require(q(gitBin) & " -C " & q(other) &
+        " rev-parse HEAD").strip()
+      let racingBlob = require(q(gitBin) & " -C " & q(other) &
+        " rev-parse HEAD:" & q(rel)).strip()
+
+      # A third-party pre-push hook lands the competing record between our
+      # advertisement and our ref update: a real lost compare-and-swap, not a
+      # simulated one.
+      let marker = fx.scratch / "collide-race-fired"
+      let hook = fx.repo / ".git" / "hooks" / "pre-push"
+      createDir(hook.parentDir())
+      writeFile(hook,
+        "#!/usr/bin/env sh\nset -eu\n" &
+        "if [ ! -f " & q(marker) & " ]; then\n" &
+        "  : > " & q(marker) & "\n" &
+        "  " & q(gitBin) & " -C " & q(other) &
+          " push --no-verify origin " & q(racingTip & ":refs/heads/main") &
+          "\nfi\n")
+      var perms = getFilePermissions(hook)
+      perms.incl({fpUserExec, fpGroupExec, fpOthersExec})
+      setFilePermissions(hook, perms)
+
+      let pub = publishWorkspaceLock(fx.identity, fx.repo,
+        @[expected("app", "app", oid)])
+      check fileExists(marker)
+      check pub.outcome != lpoPublished
+      check fx.bareHead() == racingTip
+      check fx.remoteBlobId(rel) == racingBlob
+      check fx.git("symbolic-ref --short HEAD").strip() == "main"
+      # The refusal must NAME the condition. Reported as a merge failure it is
+      # indistinguishable from a broken checkout, and the operator's next move
+      # is to "fix the conflict" — which is how a published record gets
+      # rewritten by hand after the tool declined to rewrite it.
+      check "already published at" in pub.diagnostic
+      check "immutable" in pub.diagnostic
+      check rel in pub.diagnostic

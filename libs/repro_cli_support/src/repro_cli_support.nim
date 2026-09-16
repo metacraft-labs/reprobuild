@@ -39806,6 +39806,65 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
          advanced.oid]).code != 0:
       result.diagnostic = "remote moved non-fast-forward during lock publication"
       return
+
+    # INVARIANT 14 (push-hook-publication-protocol.md) — IMMUTABILITY BINDS
+    # PUBLISHED RECORDS, AND THIS IS THE LAST PLACE IT CAN BE CHECKED.
+    #
+    # The push was rejected because the remote moved, and the remote may have
+    # moved ONTO one of the very keys this operation is publishing. Until this
+    # fetch nobody could know that: at the tip we could see, our record was an
+    # honest ADDITION, so the writer's coordinate comparison, the staging
+    # check's ``A``-only rule and the ahead-chain verifier all passed on facts
+    # that were true when they ran. The collision exists only in the bytes we
+    # have just fetched.
+    #
+    # A lock store in this fleet (2026-09-16) is what happens without
+    # this check: 261 insertions / 175 deletions over
+    # ``locks/codetracer/codetracer/3168f9ec....toml``, a record published six
+    # days earlier and amended since, destroying the amendment and moving every
+    # sibling pin backwards onto the publishing workspace's feature branches —
+    # reported as ``OK``. Its reflog names the mechanism exactly: ``commit``,
+    # then ``rebase (start): checkout origin/latest``, then ``rebase (pick)``.
+    #
+    # WHY NOT LEAVE THIS TO THE REBASE. Replaying "add X" onto a tree that
+    # already holds X with other bytes is an add/add conflict, so today the
+    # rebase does fail and the additions-only verifier would refuse the ``M``
+    # afterwards even if it did not. Both are real, and both are ACCIDENTS OF
+    # HOW GIT MERGES rather than statements about lock records: a strategy
+    # option, a ``rerere`` resolution, or a merge driver in the operator's
+    # configuration resolves an add/add without asking, and the first guard is
+    # gone silently. This one compares BLOB OBJECT IDS — a hash over the exact
+    # bytes — so it is decided by the records themselves, and it says what the
+    # condition IS instead of reporting it as a merge failure.
+    #
+    # An IDENTICAL blob is not a violation and is deliberately not refused
+    # here: another publisher (or a retry of this one) filed the same record,
+    # the rebase drops the replayed commit as already applied, and the loop
+    # settles on its own.
+    for item in operationExpected:
+      let remoteBlob = gitRunPlain(identity,
+        ["-C", repoRoot, "rev-parse", "--verify", "--quiet",
+         advanced.oid & ":" & item.relPath])
+      if remoteBlob.code != 0 or remoteBlob.output.strip().len == 0:
+        continue
+      let localBlob = gitRunPlain(identity,
+        ["-C", repoRoot, "rev-parse", "--verify", "--quiet",
+         "HEAD:" & item.relPath])
+      if localBlob.code != 0 or localBlob.output.strip().len == 0:
+        continue
+      if remoteBlob.output.strip().toLowerAscii() !=
+          localBlob.output.strip().toLowerAscii():
+        result.diagnostic =
+          "a DIFFERENT lock record is already published at '" & item.relPath &
+          "' on " & target.display & " (published blob " &
+          remoteBlob.output.strip() & ", this operation generated " &
+          localBlob.output.strip() & "); published records are immutable and " &
+          "this one is not rewritten. Two sources disagree about the " &
+          "workspace state at that commit — bring this store up to date " &
+          "('git -C " & repoRoot & " pull --ff-only') and re-read the " &
+          "published record before deciding which answer is right"
+        return
+
     let rebased = rebaseVerifiedLockChain(identity, repoRoot, base,
       advanced.oid, operationExpected)
     if not rebased.ok:
