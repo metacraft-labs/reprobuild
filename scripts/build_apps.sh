@@ -423,6 +423,14 @@ for tok in ${NIX_LDFLAGS:-}; do
       ;;
   esac
 done
+if [ ${#openssl_passl[@]} -eq 0 ]; then
+  for candidate_dir in "/opt/homebrew/opt/openssl/lib" "/opt/homebrew/opt/openssl@3/lib" "/usr/local/opt/openssl/lib"; do
+    if [ -d "$candidate_dir" ]; then
+      openssl_passl=("--passL:-L${candidate_dir}" "--passL:-lssl" "--passL:-lcrypto")
+      break
+    fi
+  done
+fi
 
 has_any_library() {
   local dir="$1"
@@ -517,6 +525,14 @@ runtime_passl_for_libraries() {
 # dlopen'd libraries resolvable off the dev shell. The failure would surface
 # only on a remote host, which is exactly the case the gate above exists to
 # prevent. Route the producer through a file so its status is checked.
+if [ -z "${CLINGO_PREFIX:-}" ]; then
+  for d in /nix/store/*-clingo-*; do
+    if [ -d "$d/lib" ]; then
+      CLINGO_PREFIX="$d"
+      break
+    fi
+  done
+fi
 repro_runtime_passl_out="build/nimcache/.repro_runtime_passl"
 if ! runtime_passl_for_libraries \
     libclingo.so libclingo.dylib libzstd.so.1 libzstd.1.dylib -- \

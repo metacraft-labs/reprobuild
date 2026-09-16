@@ -322,7 +322,7 @@ proc renderUsage*(programName: string): string =
           programName &
       " switch <branch> [-b|--new-branch] [--yes] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n       " &
           programName &
-      " watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...] [--restore-cached-outputs]\n       " &
+      " watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr] [--hcr-mode=direct|shlib] [--hcr-debug=embedded|external|none] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...] [--restore-cached-outputs]\n       " &
           programName &
       " hcr coordinate --project PATH --target NAME --socket PATH --source-edit-driver PATH --artifacts PATH\n       " &
           programName &
@@ -7459,6 +7459,7 @@ type
     outDir: string
     buildReportPath: string
     inputEvidencePaths: seq[string]
+    compilerError: string
       ## Every input path the just-finished run observed, harvested
       ## straight off ``BuildRunResult.results[].evidence`` (declared +
       ## depfile + monitor reads/probes).
@@ -11070,6 +11071,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if buildResult.hasFailedActions():
       emitFailedActionSummaries(buildResult, eventSink, progressRenderer)
       persistFailureReport(buildResult, scheduledActions)
+      for item in buildResult.results:
+        if item.status == asFailed:
+          if item.stderr.len > 0:
+            if result.compilerError.len > 0:
+              result.compilerError.add("\n")
+            result.compilerError.add(item.stderr.strip())
+          elif item.reason.len > 0:
+            if result.compilerError.len > 0:
+              result.compilerError.add("\n")
+            result.compilerError.add(item.reason)
     let statsRenderStart = statStart(statsEnabled)
     emitMeasurements(buildResult)
     finishStat(buildStats, statsEnabled, "repro stats render", statsRenderStart)
@@ -11085,9 +11096,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   result.exitCode = 0
 
 proc isUnderReproDir(path: string): bool =
-  for part in path.split({'/', '\\'}):
-    if part == ".repro":
-      return true
+  isNonSourceOrIgnoredPath(path)
 
 proc addWatchCandidate(paths: var HashSet[string]; projectRoot, path: string) =
   if path.len == 0:
@@ -11098,12 +11107,13 @@ proc addWatchCandidate(paths: var HashSet[string]; projectRoot, path: string) =
     else:
       projectRoot / path
   candidate = os.normalizedPath(candidate)
-  if candidate.isUnderReproDir():
+  if isNonSourceOrIgnoredPath(candidate):
     return
   paths.incl(candidate)
-  let parent = parentDir(candidate)
-  if parent.len > 0 and not parent.isUnderReproDir():
-    paths.incl(parent)
+  if not fileExists(extendedPath(candidate)) and not dirExists(extendedPath(candidate)):
+    let parent = parentDir(candidate)
+    if parent.len > 0 and not isNonSourceOrIgnoredPath(parent):
+      paths.incl(parent)
 
 proc watchPathsFromOutcome(outcome: BuildCommandOutcome): seq[string] =
   ## The path set ``repro watch`` arms its filesystem watcher over: the
@@ -24116,6 +24126,9 @@ type
     socketPath: string
     artifacts: string
     metadataPath: string
+    enabled: bool
+    mode: string
+    debug: string
 
   HcrWatchPatchMetadata* = object
     functionName*: string
@@ -24273,14 +24286,32 @@ proc hcrUnwindMetadataFor*(supportProfile, objectPath: string): seq[byte] =
       if (section.segmentName in ["__TEXT", "__DATA"] or section.segmentName.len == 0) and
           section.name == "__eh_frame" and section.data.len > 0:
         return section.data
-    raise newException(ValueError,
-      "patch object carries no __eh_frame section to send as unwind metadata: " &
-        objectPath &
-        " (a Darwin arm64 toolchain emits one with -fasynchronous-unwind-tables; check that the patch target compiler flags include unwind tables)")
+    for section in graph.sections:
+      if section.name == "__eh_frame" and section.data.len > 0:
+        return section.data
+    for section in graph.sections:
+      if section.name == "__compact_unwind" and section.data.len > 0:
+        return section.data
+    return @[]
 
-proc hcrWatchEnabled(config: HcrWatchConfig): bool =
-  config.socketPath.len > 0 or config.artifacts.len > 0 or
+proc hcrWatchEnabled*(config: HcrWatchConfig): bool =
+  config.enabled or config.socketPath.len > 0 or config.artifacts.len > 0 or
     config.metadataPath.len > 0
+
+proc `hcrWatchEnabled=`*(config: var HcrWatchConfig; val: bool) =
+  config.enabled = val
+
+proc hcrWatchMode*(config: HcrWatchConfig): string =
+  if config.mode.len > 0: config.mode else: "direct"
+
+proc `hcrWatchMode=`*(config: var HcrWatchConfig; val: string) =
+  config.mode = val
+
+proc hcrWatchDebug*(config: HcrWatchConfig): string =
+  if config.debug.len > 0: config.debug else: "embedded"
+
+proc `hcrWatchDebug=`*(config: var HcrWatchConfig; val: string) =
+  config.debug = val
 
 proc hcrEventTargetLabel(config: HcrWatchConfig): string =
   ## Named-Targets M4: the ``target`` value carried in every HCR SSE
@@ -24389,7 +24420,10 @@ proc materialReportPath(projectRoot, path: string): string =
       path
     else:
       projectRoot / path
-  result = os.normalizedPath(result)
+  try:
+    result = os.expandFilename(result)
+  except CatchableError:
+    result = os.normalizedPath(result)
 
 proc isCxxSource(path: string): bool =
   splitFile(path).ext.toLowerAscii in [".c", ".cc", ".cpp", ".cxx"]
@@ -24417,11 +24451,25 @@ proc hcrWatchObjectCandidatesFromReport*(projectRoot, buildReportPath: string):
     var inputs: seq[string]
     for key in ["declaredInputs", "depfileInputs", "monitorReads"]:
       for path in evidence.jsonStringSeqField(key):
-        inputs.addUnique(projectRoot.materialReportPath(path))
+        let mat = projectRoot.materialReportPath(path)
+        if mat.len > 0 and not inputs.contains(mat):
+          inputs.add(mat)
     var sourceInputs: seq[string]
     for path in inputs:
       if path.isCxxSource and fileExists(extendedPath(path)):
-        sourceInputs.addUnique(path)
+        var already = false
+        for existing in sourceInputs:
+          if existing == path:
+            already = true
+            break
+          try:
+            if sameFile(existing, path):
+              already = true
+              break
+          except CatchableError:
+            discard
+        if not already:
+          sourceInputs.add(path)
     if sourceInputs.len != 1:
       continue
 
@@ -24527,13 +24575,32 @@ proc emitHcrEvent(emit: WatchHcrEventEmit; config: HcrWatchConfig;
     return
   emit(eventKind, message, hcrEventPayload(config, extra))
 
-proc initHcrWatchSession(config: HcrWatchConfig): HcrWatchSession =
-  config.validateHcrWatchConfig()
-  result.enabled = config.hcrWatchEnabled
-  result.config = config
+proc initHcrWatchSession(config: HcrWatchConfig; projectRoot = ""): HcrWatchSession =
+  var resolvedConfig = config
+  if projectRoot.len > 0:
+    if resolvedConfig.socketPath.len > 0 and not resolvedConfig.socketPath.isAbsolute:
+      let candidate = resolveProjectPath(projectRoot, resolvedConfig.socketPath)
+      when defined(posix):
+        if candidate.len >= 80:
+          var h: uint32 = 2166136261'u32
+          for ch in candidate:
+            h = (h xor uint32(ord(ch))) * 16777619'u32
+          resolvedConfig.socketPath = "/tmp/repro-hcr-" & toHex(h, 8) & ".sock"
+        else:
+          resolvedConfig.socketPath = candidate
+      else:
+        resolvedConfig.socketPath = candidate
+    if resolvedConfig.artifacts.len > 0 and not resolvedConfig.artifacts.isAbsolute:
+      resolvedConfig.artifacts = resolveProjectPath(projectRoot, resolvedConfig.artifacts)
+  resolvedConfig.validateHcrWatchConfig()
+  result.enabled = resolvedConfig.hcrWatchEnabled
+  result.config = resolvedConfig
   if result.enabled:
-    createDir(extendedPath(config.artifacts))
-    result.listener = listenHcrAgentUnixSocket(config.socketPath)
+    createDir(extendedPath(result.config.artifacts))
+    let sockDir = parentDir(result.config.socketPath)
+    if sockDir.len > 0:
+      createDir(extendedPath(sockDir))
+    result.listener = listenHcrAgentUnixSocket(result.config.socketPath)
     result.client = initHcrCoordinatorClient(CodetracerHcrSupportProfile)
 
 proc closeHcrWatchSession(session: var HcrWatchSession) =
@@ -24709,6 +24776,21 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
     %*{
       "patchId": request.patchId,
       "files": %*[session.metadata.sourcePath]
+    })
+  var compiledFuncs = newJArray()
+  compiledFuncs.add(%session.metadata.functionName)
+  emit.emitHcrEvent(session.config, "hcr/patchCompiled",
+    "repro watch: hcr patch compiled patchId=" & request.patchId,
+    %*{
+      "patchId": request.patchId,
+      "functions": compiledFuncs
+    })
+  emit.emitHcrEvent(session.config, "hcr/patchDelivering",
+    "repro watch: hcr patch delivering patchId=" & request.patchId &
+      targetLogSuffix(session.config),
+    %*{
+      "patchId": request.patchId,
+      "mode": session.config.hcrWatchMode
     })
   session.client.sendCoordinatorMessage(
     session.connection, session.client.coordinatorPatchRequestMessage(request))
@@ -24931,6 +25013,26 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
     elif arg == "--stop":
       raise newException(ValueError,
         "--stop requires an inline session id, for example --stop=watch-...")
+    elif arg == "--hcr":
+      hcrConfig.enabled = true
+    elif arg.startsWith("--hcr-mode="):
+      let val = arg.split("=", maxsplit = 1)[1]
+      if val != "direct" and val != "shlib":
+        raise newException(ValueError,
+          "--hcr-mode must be 'direct' or 'shlib', got '" & val & "'")
+      hcrConfig.mode = val
+    elif arg == "--hcr-mode":
+      raise newException(ValueError,
+        "--hcr-mode requires an inline value, for example --hcr-mode=direct")
+    elif arg.startsWith("--hcr-debug="):
+      let val = arg.split("=", maxsplit = 1)[1]
+      if val != "embedded" and val != "external" and val != "none":
+        raise newException(ValueError,
+          "--hcr-debug must be 'embedded', 'external', or 'none', got '" & val & "'")
+      hcrConfig.debug = val
+    elif arg == "--hcr-debug":
+      raise newException(ValueError,
+        "--hcr-debug requires an inline value, for example --hcr-debug=embedded")
     elif arg.startsWith("--hcr-agent-socket="):
       hcrConfig.socketPath = arg.split("=", maxsplit = 1)[1]
     elif arg == "--hcr-agent-socket":
@@ -25031,6 +25133,26 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       # Classification into path vs. name selectors happens below via
       # the shared ``parseAndResolveSelectors`` helper.
       positionalSelectors.add(arg)
+
+  if hcrConfig.enabled and hcrTargetConfigs.len == 0:
+    if hcrConfig.socketPath.len == 0:
+      hcrConfig.socketPath = ".repro/hcr/agent.sock"
+    if hcrConfig.artifacts.len == 0:
+      hcrConfig.artifacts = ".repro/hcr"
+    if hcrConfig.mode.len == 0:
+      hcrConfig.mode = "direct"
+    if hcrConfig.debug.len == 0:
+      hcrConfig.debug = "embedded"
+
+  for i in 0 ..< hcrTargetConfigs.len:
+    hcrTargetConfigs[i].enabled = true
+    if hcrTargetConfigs[i].mode.len == 0:
+      hcrTargetConfigs[i].mode = (if hcrConfig.mode.len > 0: hcrConfig.mode else: "direct")
+    if hcrTargetConfigs[i].debug.len == 0:
+      hcrTargetConfigs[i].debug = (if hcrConfig.debug.len > 0: hcrConfig.debug else: "embedded")
+
+  if (hcrConfig.hcrWatchEnabled or hcrTargetConfigs.len > 0) and not reportPersistence.suppressed:
+    reportPersistence.requested = true
 
   if not daemonModeExplicit:
     daemonMode = configuredBuildDaemonMode()
@@ -25207,6 +25329,18 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
          "")
     flushStdout()
 
+    let ctProjectRoot = requestProjectRoot()
+    let ctTestId = target
+    let ctTraceDir =
+      if ctFlags.traceDir.len > 0: ctFlags.traceDir
+      else: ctProjectRoot / ".repro" / "ct-incremental" / "trace"
+    let ctCachePath = defaultCachePath(ctProjectRoot)
+    # The watch paths last computed from a real build outcome, reused by the
+    # M2 skip branch so a skipped rebuild can resume watching the same paths
+    # without a stale ``outcome`` from a prior (out-of-scope) loop iteration.
+    var ctLastWatchPaths: seq[string] = @[]
+    var lastWatchPaths: seq[string] = @[]
+
     # Named-Targets M4 ----------------------------------------------------
     # Each ``--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA]`` adds one HCR
     # session to ``hcrSessions``. The legacy single-target triad still
@@ -25218,36 +25352,12 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
     # --------------------------------------------------------------------
     var hcrSessions: seq[HcrWatchSession] = @[]
     if hcrConfig.hcrWatchEnabled:
-      hcrSessions.add(initHcrWatchSession(hcrConfig))
+      hcrSessions.add(initHcrWatchSession(hcrConfig, ctProjectRoot))
     for cfg in hcrTargetConfigs:
-      hcrSessions.add(initHcrWatchSession(cfg))
+      hcrSessions.add(initHcrWatchSession(cfg, ctProjectRoot))
     defer:
       for i in 0 ..< hcrSessions.len:
         hcrSessions[i].closeHcrWatchSession()
-
-    # Trace-Based-Incremental-Testing M2 -----------------------------------
-    # When ``--ct-incremental`` is set, the watched target is treated as a
-    # single test edge (the prototype assumption). We resolve the seam inputs
-    # once: the test id is the resolved ``target`` selector, the source root is
-    # the project root the trace's recorded paths resolve under, the trace dir
-    # is ``--ct-incremental-trace-dir`` (defaulting to a fixed dir under the
-    # project root), and the cache lives at the engine's default path under the
-    # project root. On every *rebuild* cycle (cycle > 1, i.e. after a real
-    # filesystem change) we call the pure ``watchTestEdgeDecision`` seam: if it
-    # says skip, we emit ``skipped (unchanged: <test>)`` and do NOT re-run the
-    # edge; otherwise we re-run and ``record`` the fresh trace. Cycle 1 (the
-    # initial build) always runs + records so a baseline exists. None of this
-    # executes when the flag is absent, keeping the legacy path unchanged.
-    let ctProjectRoot = requestProjectRoot()
-    let ctTestId = target
-    let ctTraceDir =
-      if ctFlags.traceDir.len > 0: ctFlags.traceDir
-      else: ctProjectRoot / ".repro" / "ct-incremental" / "trace"
-    let ctCachePath = defaultCachePath(ctProjectRoot)
-    # The watch paths last computed from a real build outcome, reused by the
-    # M2 skip branch so a skipped rebuild can resume watching the same paths
-    # without a stale ``outcome`` from a prior (out-of-scope) loop iteration.
-    var ctLastWatchPaths: seq[string] = @[]
 
     # The shared SSE emit hook for HCR events — wires each per-target
     # ``hcr/*`` event into the watch event stream so SSE consumers can
@@ -25335,7 +25445,73 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         exitCode = outcome.exitCode,
         lastResult = "cycle=" & $cycle & " exitCode=" & $outcome.exitCode)
       if outcome.exitCode != 0:
-        return outcome.exitCode
+        if cycle > 1 and anyHcrEnabled:
+          let errMsg =
+            if outcome.compilerError.len > 0: outcome.compilerError
+            else: "compilation failed with exitCode=" & $outcome.exitCode
+          emitWatchLine("repro watch: hcr compilation failed: " & errMsg,
+            payloadJson = "{\"watchEvent\":\"hcr/compilationFailed\",\"errors\":[\"" &
+              errMsg.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") &
+              "\"],\"exitCode\":" & $outcome.exitCode & "}",
+            exitCode = outcome.exitCode,
+            lastResult = "cycle=" & $cycle & " exitCode=" & $outcome.exitCode)
+          for i in 0 ..< hcrSessions.len:
+            if hcrSessions[i].enabled and not hcrSessions[i].fallbackOnly:
+              hcrEmit.emitHcrEvent(hcrSessions[i].config, "hcr/compilationFailed",
+                "repro watch: hcr compilation failed target=" &
+                  hcrEventTargetLabel(hcrSessions[i].config) & " error=" & errMsg,
+                %*{"errors": [errMsg], "error": errMsg, "exitCode": outcome.exitCode})
+          if maxCycles > 0 and cycle >= maxCycles:
+            emitWatchLine("repro watch: max cycles reached",
+              payloadJson = "{\"watchEvent\":\"max-cycles\"}", terminal = true,
+              watchedPaths = @[], lastResult = "max-cycles")
+            if statsCapture.enabled and daemonHosted:
+              enqueueStatsObservation(scgSessions, "watch-finish", %*{
+                "exitCode": 0,
+                "cycles": cycle,
+                "reason": "max-cycles"
+              })
+            return 0
+          var failWatchPaths = lastWatchPaths
+          for p in watchPathsFromOutcome(outcome):
+            if not failWatchPaths.contains(p):
+              failWatchPaths.add(p)
+          if failWatchPaths.len == 0:
+            failWatchPaths = @[requestProjectRoot()]
+          var failWatcher = openFilesystemWatcher(failWatchPaths)
+          try:
+            emitWatchLine("repro watch: watching paths=" &
+              $failWatcher.watchedPathCount,
+              payloadJson = "{\"watchEvent\":\"watching\",\"pathCount\":" &
+                $failWatcher.watchedPathCount & "}",
+              watchedPaths = failWatchPaths)
+            while true:
+              let event = failWatcher.waitForEvent(
+                proc(): bool = cancelCheck != nil and cancelCheck())
+              if isNonSourceOrIgnoredPath(event.path):
+                continue
+              emitWatchLine("repro watch: event seen path=" & event.path &
+                " detail=" & event.detail,
+                payloadJson = "{\"watchEvent\":\"filesystem\",\"path\":\"" &
+                  event.path.replace("\\", "\\\\").replace("\"", "\\\"") &
+                  "\",\"detail\":\"" &
+                  event.detail.replace("\\", "\\\\").replace("\"", "\\\"") &
+                  "\"}",
+                watchedPaths = failWatchPaths)
+              let coalesced = failWatcher.drainDebouncedEvents(debounceMs)
+              emitWatchLine("repro watch: debounce complete coalesced=" & $coalesced,
+                payloadJson = "{\"watchEvent\":\"debounce\",\"coalesced\":" &
+                  $coalesced & "}",
+                watchedPaths = failWatchPaths)
+              emitWatchLine("repro watch: rebuild cycle after filesystem event",
+                payloadJson = "{\"watchEvent\":\"rebuild-queued\"}",
+                watchedPaths = failWatchPaths)
+              break
+          finally:
+            failWatcher.closeFilesystemWatcher()
+          continue
+        else:
+          return outcome.exitCode
       # Trace-Based-Incremental-Testing M2: the test edge actually ran this
       # cycle (fresh/changed/initial), so refresh the incremental cache from
       # the freshly-produced trace. ``recordWatchTestEdge`` execs codetracer's
@@ -25401,6 +25577,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
 
       let paths = watchPathsFromOutcome(outcome)
       ctLastWatchPaths = paths
+      lastWatchPaths = paths
       var watcher = openFilesystemWatcher(paths)
       try:
         emitWatchLine("repro watch: watching paths=" &
@@ -25408,24 +25585,28 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
           payloadJson = "{\"watchEvent\":\"watching\",\"pathCount\":" &
             $watcher.watchedPathCount & "}",
           watchedPaths = paths)
-        let event = watcher.waitForEvent(
-          proc(): bool = cancelCheck != nil and cancelCheck())
-        emitWatchLine("repro watch: event seen path=" & event.path &
-          " detail=" & event.detail,
-          payloadJson = "{\"watchEvent\":\"filesystem\",\"path\":\"" &
-            event.path.replace("\\", "\\\\").replace("\"", "\\\"") &
-            "\",\"detail\":\"" &
-            event.detail.replace("\\", "\\\\").replace("\"", "\\\"") &
-            "\"}",
-          watchedPaths = paths)
-        let coalesced = watcher.drainDebouncedEvents(debounceMs)
-        emitWatchLine("repro watch: debounce complete coalesced=" & $coalesced,
-          payloadJson = "{\"watchEvent\":\"debounce\",\"coalesced\":" &
-            $coalesced & "}",
-          watchedPaths = paths)
-        emitWatchLine("repro watch: rebuild cycle after filesystem event",
-          payloadJson = "{\"watchEvent\":\"rebuild-queued\"}",
-          watchedPaths = paths)
+        while true:
+          let event = watcher.waitForEvent(
+            proc(): bool = cancelCheck != nil and cancelCheck())
+          if isNonSourceOrIgnoredPath(event.path):
+            continue
+          emitWatchLine("repro watch: event seen path=" & event.path &
+            " detail=" & event.detail,
+            payloadJson = "{\"watchEvent\":\"filesystem\",\"path\":\"" &
+              event.path.replace("\\", "\\\\").replace("\"", "\\\"") &
+              "\",\"detail\":\"" &
+              event.detail.replace("\\", "\\\\").replace("\"", "\\\"") &
+              "\"}",
+            watchedPaths = paths)
+          let coalesced = watcher.drainDebouncedEvents(debounceMs)
+          emitWatchLine("repro watch: debounce complete coalesced=" & $coalesced,
+            payloadJson = "{\"watchEvent\":\"debounce\",\"coalesced\":" &
+              $coalesced & "}",
+            watchedPaths = paths)
+          emitWatchLine("repro watch: rebuild cycle after filesystem event",
+            payloadJson = "{\"watchEvent\":\"rebuild-queued\"}",
+            watchedPaths = paths)
+          break
       finally:
         watcher.closeFilesystemWatcher()
 

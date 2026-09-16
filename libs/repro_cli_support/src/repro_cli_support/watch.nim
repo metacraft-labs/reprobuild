@@ -13,6 +13,26 @@ type
 proc watchCancelled(cancelCheck: FilesystemWatchCancelCheck): bool =
   cancelCheck != nil and cancelCheck()
 
+proc isNonSourceOrIgnoredPath*(path: string): bool =
+  if path.len == 0:
+    return false
+  let norm = os.normalizedPath(path)
+  for part in norm.split({'/', '\\'}):
+    if part == ".repro" or part == ".git" or part == ".hg" or part == ".svn":
+      return true
+  let filename = extractFilename(norm)
+  if filename.len == 0:
+    return false
+  if filename.startsWith(".") and (filename.endsWith(".swp") or filename.endsWith(".swo") or
+      filename.endsWith(".swx") or filename.endsWith(".tmp")):
+    return true
+  if filename.endsWith(".swp") or filename.endsWith(".swo") or filename.endsWith(".swx") or
+      filename.endsWith(".tmp") or filename.endsWith(".bak"):
+    return true
+  if filename.endsWith("~") or filename.startsWith("#") or filename.endsWith("#") or filename.startsWith(".#"):
+    return true
+  return false
+
 when defined(macosx):
   type
     Kevent {.importc: "struct kevent", header: "<sys/event.h>", bycopy.} = object
@@ -164,11 +184,15 @@ when defined(macosx):
         raise newException(OSError, "kevent wait failed")
       if n > 0:
         let fd = cint(event.ident)
-        result.path = watcher.pathsByFd.getOrDefault(fd, "<unknown>")
-        result.detail = eventDetail(event.fflags)
-        return
+        let evPath = watcher.pathsByFd.getOrDefault(fd, "<unknown>")
+        if not isNonSourceOrIgnoredPath(evPath):
+          result.path = evPath
+          result.detail = eventDetail(event.fflags)
+          return
 
       for path, previous in snapshots.mpairs:
+        if isNonSourceOrIgnoredPath(path):
+          continue
         let current = snapshotPath(path)
         if current != previous:
           previous = current
@@ -310,6 +334,8 @@ elif defined(linux):
           entry.reportPath / eventName
         else:
           entry.reportPath
+      if isNonSourceOrIgnoredPath(reportPath):
+        continue
       watcher.pending.addLast(FilesystemWatchEvent(
         path: reportPath,
         detail: eventDetail(event.mask)))
@@ -615,8 +641,9 @@ elif defined(windows):
             entry.reportPath
           else:
             entry.reportPath / name
-        out_events.addLast(FilesystemWatchEvent(
-          path: reportPath, detail: actionDetail(record.action)))
+        if not isNonSourceOrIgnoredPath(reportPath):
+          out_events.addLast(FilesystemWatchEvent(
+            path: reportPath, detail: actionDetail(record.action)))
       let nextOffset = record.nextEntryOffset
       if nextOffset == 0:
         break

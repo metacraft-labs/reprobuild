@@ -537,7 +537,7 @@ addPackagePath("NIMCRYPTO_SRC", [
 addPackagePath("BEARSSL_SRC", [
   ".." / "nim-bearssl",
   "libs" / "nim-bearssl",
-], "bearssl.nim")
+], "bearssl.nim", useDevShellFallback = true)
 addPackagePath("RESULTS_SRC", [
   "libs" / "results" / "src",
 ], "results.nim")
