@@ -12683,17 +12683,46 @@ proc devEnvToolShellOps*(edge: DevEnvEdgeResult;
   if mode in {tpmUnspecified, tpmPathOnly}:
     return
 
-  var identity: PathOnlyBuildIdentity
+  let storeRoot = resolveStoreRoot() / "tool-store"
+  var binDirs: seq[string] = @[]
   try:
-    identity = resolveAndWriteIdentity(interfaceArtifact, selection.outDir,
-      mode, storeRootOverride = resolveStoreRoot() / "tool-store").identity
-  except CatchableError as err:
-    stderr.writeLine("repro dev-env: warning: " & mode.modeName &
-      " tool provisioning failed (" & err.msg &
-      "); the activated shell will resolve tools from the ambient PATH.")
-    return
+    binDirs = binDirsForDevelop(resolveAndWriteIdentity(interfaceArtifact,
+      selection.outDir, mode, storeRootOverride = storeRoot).identity)
+  except CatchableError as batchErr:
+    # The batch resolve is all-or-nothing: one package the catalog cannot
+    # realize on this platform takes down every OTHER tool's PATH entry with
+    # it, and the shell silently falls back to whatever the host has. That is
+    # the precise failure this whole migration exists to remove, so arriving
+    # at it BY WAY OF a provisioning error is the worst possible outcome —
+    # the environment looks fine and is not the one the recipe describes.
+    #
+    # So the error path re-resolves one tool at a time. Every package that CAN
+    # be realized still lands on PATH, and each one that cannot is named
+    # individually instead of hiding behind whichever selector happened to be
+    # evaluated first. The cost is paid only when something is already wrong.
+    var failures: seq[string] = @[]
+    for useDef in interfaceArtifact.projectInterface.toolUses:
+      var single = interfaceArtifact
+      single.projectInterface.toolUses = @[useDef]
+      try:
+        for dir in binDirsForDevelop(toolBuildIdentity(single, mode,
+            storeRoot = storeRoot)):
+          if dir notin binDirs:
+            binDirs.add(dir)
+      except CatchableError as toolErr:
+        failures.add(useDef.packageSelector & " (" & toolErr.msg & ")")
+    if failures.len == 0:
+      # The per-tool pass found nothing wrong, so the failure was in the
+      # batch path itself rather than in any one package. Report the original.
+      stderr.writeLine("repro dev-env: warning: " & mode.modeName &
+        " tool provisioning failed (" & batchErr.msg &
+        "); the activated shell will resolve tools from the ambient PATH.")
+      return
+    for failure in failures:
+      stderr.writeLine("repro dev-env: warning: " & mode.modeName &
+        " provisioning could not realize " & failure &
+        "; that tool will resolve from the ambient PATH if it is there at all.")
 
-  let binDirs = binDirsForDevelop(identity)
   # Reversed for the same reason `devEnvProducerShellOps` reverses: each
   # `deskPrependPath` puts its own value at the front, so walking the list
   # backwards leaves entry 0 leftmost — the order the resolver chose.

@@ -16,6 +16,37 @@ package clang:
     nixPackage "nixpkgs#clang", executablePath = "bin/clang",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: the official LLVM release tarball. Agent Harbor needs it for
+    # two distinct reasons and both want the whole toolchain rather than the
+    # driver alone — `clang-cl` is the compiler its arm64 slice selects for
+    # aws-lc-sys's ARM assembly, and several native build scripts reach for
+    # `llvm-ar` / `llvm-objcopy` from the same bin dir.
+    #
+    # The archive carries a `clang+llvm-<ver>-<triple>/` wrapper holding
+    # `bin/`, `lib/` and `include/`; clang resolves its resource directory
+    # relative to its own location, so stripComponents=1 flattens the wrapper
+    # and keeps that tree rather than isolating the driver from its headers.
+    #
+    # Digests are the `LLVM_SHA256_*` values Agent Harbor's toolchain pin
+    # file already carried, harvested independently of this catalog.
+    tarball url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.7/clang+llvm-21.1.7-x86_64-pc-windows-msvc.tar.xz",
+      sha256 = "70a2b73f2f14f787557f90abf380e7170b54e97b893218999144de5284b4f8f8",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/clang.exe",
+      packageId = "llvm@21.1.7",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:llvm@21.1.7:windows-x86_64:sha256:70a2b73f2f14f787557f90abf380e7170b54e97b893218999144de5284b4f8f8"
+    tarball url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.7/clang+llvm-21.1.7-aarch64-pc-windows-msvc.tar.xz",
+      sha256 = "e0054932e7ca46ad5f06c66a0d7405e3ed0d5c7dd47be0d8d172cfcb99f8a03f",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/clang.exe",
+      packageId = "llvm@21.1.7",
+      cpu = "aarch64",
+      os = "windows",
+      lockIdentity = "tarball:llvm@21.1.7:windows-aarch64:sha256:e0054932e7ca46ad5f06c66a0d7405e3ed0d5c7dd47be0d8d172cfcb99f8a03f"
 
   executable clang:
     cli:

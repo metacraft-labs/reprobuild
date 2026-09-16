@@ -27,7 +27,7 @@ export packages_schema
 # Linux). The downstream ``ninjaCatalog`` slice below remains intact
 # for the M64 ``cakBuiltin`` adapter on Windows.
 #
-# Direct-download pins use the official ninja-build/ninja v1.12.1
+# Direct-download pins use the official ninja-build/ninja v1.13.2
 # release artifacts. The Windows ``ninja-win.zip`` and Linux
 # ``ninja-linux.zip`` ship the ``ninja.exe`` / ``ninja`` binary flat
 # at the archive root (no enclosing directory), so ``stripComponents``
@@ -47,28 +47,40 @@ package ninja:
     scoopApp(bucket = "main", app = "ninja",
       preferredVersion = ">=1", executablePath = "ninja.exe",
       requiresExecutionProfileChecksum = false)
-    # Direct-download: ninja v1.12.1 Windows binary release. The .zip
+    # Direct-download: ninja v1.13.2 Windows binary release. The .zip
     # ships ``ninja.exe`` flat at the archive root.
-    tarball url = "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip",
-      sha256 = "f550fec705b6d6ff58f2db3c374c2277a37691678d6aba463adcbb129108467a",
+    tarball url = "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-win.zip",
+      sha256 = "07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65",
       archiveType = "zip",
       executablePath = "ninja.exe",
-      packageId = "ninja@1.12.1",
+      packageId = "ninja@1.13.2",
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:ninja@1.12.1:sha256:f550fec705b6d6ff58f2db3c374c2277a37691678d6aba463adcbb129108467a"
-    # Direct-download: ninja v1.12.1 Linux binary release. The .zip
+      lockIdentity = "tarball:ninja@1.13.2:sha256:07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65"
+    # Windows aarch64. Upstream has published `ninja-winarm64.zip` since
+    # 1.12; it is absent here only because nothing had asked for it. Digest
+    # matches the `NINJA_SHA256_WIN_ARM64` pin Agent Harbor harvested
+    # independently.
+    tarball url = "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-winarm64.zip",
+      sha256 = "e52f0bdef9dfb1003229dbd6508a508c4073fd017247002adc66e5e806cb0391",
+      archiveType = "zip",
+      executablePath = "ninja.exe",
+      packageId = "ninja@1.13.2",
+      cpu = "aarch64",
+      os = "windows",
+      lockIdentity = "tarball:ninja@1.13.2:windows-aarch64:sha256:e52f0bdef9dfb1003229dbd6508a508c4073fd017247002adc66e5e806cb0391"
+    # Direct-download: ninja v1.13.2 Linux binary release. The .zip
     # ships ``ninja`` (no .exe suffix) flat at the archive root.
     # ninja's upstream Linux build targets glibc 2.17 on its CI base
     # image — matches the M9.5 honest-scope target.
-    tarball url = "https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-linux.zip",
-      sha256 = "6f98805688d19672bd699fbbfa2c2cf0fc054ac3df1f0e6a47664d963d530255",
+    tarball url = "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-linux.zip",
+      sha256 = "5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6",
       archiveType = "zip",
       executablePath = "ninja",
-      packageId = "ninja@1.12.1-linux",
+      packageId = "ninja@1.13.2-linux",
       cpu = "x86_64",
       os = "linux",
-      lockIdentity = "tarball:ninja@1.12.1-linux:sha256:6f98805688d19672bd699fbbfa2c2cf0fc054ac3df1f0e6a47664d963d530255"
+      lockIdentity = "tarball:ninja@1.13.2-linux:sha256:5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6"
 
   # -------------------------------------------------------------------
   # DSL-port M9.R.2 — typed Layer-3 CLI surface for ``ninja``.

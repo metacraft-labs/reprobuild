@@ -13,6 +13,19 @@ package go:
     nixPackage "nixpkgs#go", executablePath = "bin/go",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: go.dev's own release zip. It carries a `go/` wrapper holding
+    # bin, pkg and src; the toolchain locates GOROOT relative to the
+    # executable, so stripComponents=1 flattens the wrapper and keeps that
+    # tree together. Digest is Agent Harbor's `GO_SHA256_WINDOWS_AMD64`.
+    tarball url = "https://go.dev/dl/go1.25.11.windows-amd64.zip",
+      sha256 = "b7401f1b41517428e537493316256fb7cf03c66a130a0103ab07f3a2152e2112",
+      archiveType = "zip",
+      stripComponents = 1,
+      executablePath = "bin/go.exe",
+      packageId = "go@1.25.11",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:go@1.25.11:windows-x86_64:sha256:b7401f1b41517428e537493316256fb7cf03c66a130a0103ab07f3a2152e2112"
 
 # ---------------------------------------------------------------------------
 # Versioned catalog (M63/M67 shape) consumed by the cakBuiltin adapter on
