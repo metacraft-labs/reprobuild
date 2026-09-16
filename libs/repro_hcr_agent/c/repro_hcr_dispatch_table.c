@@ -6,12 +6,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
+#include <tlhelp32.h>
 #else
 #include <dlfcn.h>
+#include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -38,7 +39,29 @@ static repro_hcr_dispatch_rollback_entry_t s_rollback_log[REPRO_HCR_DISPATCH_MAX
 static size_t s_rollback_count = 0;
 static uint64_t s_active_tx_id = 0;
 static uint64_t s_next_tx_id = 1;
+#if defined(_WIN32)
+static SRWLOCK s_dispatch_mutex = SRWLOCK_INIT;
+static void repro_hcr_dispatch_lock(void) {
+  AcquireSRWLockExclusive(&s_dispatch_mutex);
+}
+static void repro_hcr_dispatch_unlock(void) {
+  ReleaseSRWLockExclusive(&s_dispatch_mutex);
+}
+static void repro_hcr_dispatch_store_pointer(void **slot, void *value) {
+  (void)InterlockedExchangePointer((PVOID volatile *)slot, value);
+}
+#else
 static pthread_mutex_t s_dispatch_mutex = PTHREAD_MUTEX_INITIALIZER;
+static void repro_hcr_dispatch_lock(void) {
+  (void)pthread_mutex_lock(&s_dispatch_mutex);
+}
+static void repro_hcr_dispatch_unlock(void) {
+  (void)pthread_mutex_unlock(&s_dispatch_mutex);
+}
+static void repro_hcr_dispatch_store_pointer(void **slot, void *value) {
+  __atomic_store_n(slot, value, __ATOMIC_RELEASE);
+}
+#endif
 
 /*
  * Memory protection transition helper.
@@ -134,27 +157,27 @@ int repro_hcr_dispatch_restore_protection(void *page, size_t page_size, int was_
  * Transactional Rollback Log.
  */
 uint64_t repro_hcr_dispatch_begin_transaction(void) {
-  pthread_mutex_lock(&s_dispatch_mutex);
+  repro_hcr_dispatch_lock();
   if (s_next_tx_id == 0) {
     s_next_tx_id = 1;
   }
   uint64_t tx = s_next_tx_id++;
   s_active_tx_id = tx;
-  pthread_mutex_unlock(&s_dispatch_mutex);
+  repro_hcr_dispatch_unlock();
   return tx;
 }
 
 uint64_t repro_hcr_dispatch_active_transaction(void) {
-  pthread_mutex_lock(&s_dispatch_mutex);
+  repro_hcr_dispatch_lock();
   uint64_t tx = s_active_tx_id;
-  pthread_mutex_unlock(&s_dispatch_mutex);
+  repro_hcr_dispatch_unlock();
   return tx;
 }
 
 void repro_hcr_dispatch_set_active_transaction(uint64_t tx_id) {
-  pthread_mutex_lock(&s_dispatch_mutex);
+  repro_hcr_dispatch_lock();
   s_active_tx_id = tx_id;
-  pthread_mutex_unlock(&s_dispatch_mutex);
+  repro_hcr_dispatch_unlock();
 }
 
 int repro_hcr_dispatch_record_entry(
@@ -168,9 +191,9 @@ int repro_hcr_dispatch_record_entry(
   if (slot_addr == NULL) {
     return -1;
   }
-  pthread_mutex_lock(&s_dispatch_mutex);
+  repro_hcr_dispatch_lock();
   if (s_rollback_count >= REPRO_HCR_DISPATCH_MAX_ROLLBACK_ENTRIES) {
-    pthread_mutex_unlock(&s_dispatch_mutex);
+    repro_hcr_dispatch_unlock();
     return -2;
   }
   repro_hcr_dispatch_rollback_entry_t *entry = &s_rollback_log[s_rollback_count++];
@@ -181,12 +204,16 @@ int repro_hcr_dispatch_record_entry(
   entry->patched_target = patched_target;
   entry->slot_index = slot_index;
   if (symbol_name != NULL) {
-    strncpy(entry->symbol_name, symbol_name, sizeof(entry->symbol_name) - 1);
-    entry->symbol_name[sizeof(entry->symbol_name) - 1] = '\0';
+    size_t symbol_length = strlen(symbol_name);
+    if (symbol_length >= sizeof(entry->symbol_name)) {
+      symbol_length = sizeof(entry->symbol_name) - 1;
+    }
+    memcpy(entry->symbol_name, symbol_name, symbol_length);
+    entry->symbol_name[symbol_length] = '\0';
   } else {
     entry->symbol_name[0] = '\0';
   }
-  pthread_mutex_unlock(&s_dispatch_mutex);
+  repro_hcr_dispatch_unlock();
   return 0;
 }
 
@@ -200,13 +227,13 @@ static int rollback_single_entry_internal(const repro_hcr_dispatch_rollback_entr
   if (repro_hcr_dispatch_make_writable(entry->slot_addr, sizeof(void *), &page, &page_size, &was_writable) != 0) {
     return -2;
   }
-  __atomic_store_n(entry->slot_addr, entry->original_target, __ATOMIC_RELEASE);
+  repro_hcr_dispatch_store_pointer(entry->slot_addr, entry->original_target);
   repro_hcr_dispatch_restore_protection(page, page_size, was_writable);
   return 0;
 }
 
 int repro_hcr_dispatch_rollback_transaction(uint64_t tx_id) {
-  pthread_mutex_lock(&s_dispatch_mutex);
+  repro_hcr_dispatch_lock();
   int rolled_back = 0;
   if (s_rollback_count > 0) {
     size_t i = s_rollback_count;
@@ -225,12 +252,12 @@ int repro_hcr_dispatch_rollback_transaction(uint64_t tx_id) {
   if (s_active_tx_id == tx_id) {
     s_active_tx_id = 0;
   }
-  pthread_mutex_unlock(&s_dispatch_mutex);
+  repro_hcr_dispatch_unlock();
   return rolled_back;
 }
 
 int repro_hcr_dispatch_rollback_all(void) {
-  pthread_mutex_lock(&s_dispatch_mutex);
+  repro_hcr_dispatch_lock();
   int rolled_back = 0;
   if (s_rollback_count > 0) {
     size_t i = s_rollback_count;
@@ -242,12 +269,12 @@ int repro_hcr_dispatch_rollback_all(void) {
     s_rollback_count = 0;
   }
   s_active_tx_id = 0;
-  pthread_mutex_unlock(&s_dispatch_mutex);
+  repro_hcr_dispatch_unlock();
   return rolled_back;
 }
 
 int repro_hcr_dispatch_commit_transaction(uint64_t tx_id) {
-  pthread_mutex_lock(&s_dispatch_mutex);
+  repro_hcr_dispatch_lock();
   if (s_rollback_count > 0) {
     size_t i = s_rollback_count;
     while (i > 0) {
@@ -263,22 +290,22 @@ int repro_hcr_dispatch_commit_transaction(uint64_t tx_id) {
   if (s_active_tx_id == tx_id) {
     s_active_tx_id = 0;
   }
-  pthread_mutex_unlock(&s_dispatch_mutex);
+  repro_hcr_dispatch_unlock();
   return 0;
 }
 
 size_t repro_hcr_dispatch_rollback_log_count(void) {
-  pthread_mutex_lock(&s_dispatch_mutex);
+  repro_hcr_dispatch_lock();
   size_t c = s_rollback_count;
-  pthread_mutex_unlock(&s_dispatch_mutex);
+  repro_hcr_dispatch_unlock();
   return c;
 }
 
 void repro_hcr_dispatch_clear_rollback_log(void) {
-  pthread_mutex_lock(&s_dispatch_mutex);
+  repro_hcr_dispatch_lock();
   s_rollback_count = 0;
   s_active_tx_id = 0;
-  pthread_mutex_unlock(&s_dispatch_mutex);
+  repro_hcr_dispatch_unlock();
 }
 
 /*
@@ -378,7 +405,7 @@ int repro_hcr_patch_macho_lazy_symbol_tx(
                 if (repro_hcr_dispatch_make_writable(slot, sizeof(void *), &page, &page_size, &was_writable) != 0) {
                   return -2;
                 }
-                __atomic_store_n(slot, new_target, __ATOMIC_RELEASE);
+                repro_hcr_dispatch_store_pointer(slot, new_target);
                 repro_hcr_dispatch_restore_protection(page, page_size, was_writable);
 
                 repro_hcr_dispatch_record_entry(tx_id, REPRO_HCR_DISPATCH_MACHO_LAZY_SYMBOL_PTR,
@@ -487,7 +514,7 @@ static int elf_got_patch_callback(struct dl_phdr_info *info, size_t size, void *
       if (repro_hcr_dispatch_make_writable(got_slot, sizeof(void *), &page, &page_size, &was_writable) != 0) {
         return 0;
       }
-      __atomic_store_n(got_slot, ctx->new_target, __ATOMIC_RELEASE);
+      repro_hcr_dispatch_store_pointer(got_slot, ctx->new_target);
       repro_hcr_dispatch_restore_protection(page, page_size, was_writable);
 
       repro_hcr_dispatch_record_entry(ctx->tx_id, REPRO_HCR_DISPATCH_ELF_GOT_PLT,
@@ -540,14 +567,205 @@ int repro_hcr_patch_elf_got_plt(
 /*
  * Windows PE IAT Patching.
  */
+#if defined(_WIN32)
+static int repro_hcr_ascii_contains_case_insensitive(
+    const char *haystack, const char *needle) {
+  size_t needle_len;
+  if (needle == NULL || needle[0] == '\0') {
+    return 1;
+  }
+  if (haystack == NULL) {
+    return 0;
+  }
+  needle_len = strlen(needle);
+  while (*haystack != '\0') {
+    if (_strnicmp(haystack, needle, needle_len) == 0) {
+      return 1;
+    }
+    ++haystack;
+  }
+  return 0;
+}
+
+static int repro_hcr_pe_range_valid(
+    size_t image_size, uint64_t offset, size_t length) {
+  return offset <= image_size && length <= image_size - (size_t)offset;
+}
+
+static int repro_hcr_patch_pe_module_iat(
+    uint64_t tx_id,
+    const MODULEENTRY32 *module,
+    const char *symbol_name,
+    void *new_target,
+    void **out_old_target) {
+  uint8_t *base;
+  size_t image_size;
+  IMAGE_DOS_HEADER *dos;
+  IMAGE_NT_HEADERS64 *nt;
+  IMAGE_DATA_DIRECTORY imports;
+  size_t descriptor_count;
+  size_t descriptor_index;
+
+  if (module == NULL || module->modBaseAddr == NULL ||
+      module->modBaseSize < sizeof(IMAGE_DOS_HEADER)) {
+    return -1;
+  }
+  base = (uint8_t *)module->modBaseAddr;
+  image_size = (size_t)module->modBaseSize;
+  dos = (IMAGE_DOS_HEADER *)base;
+  if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0 ||
+      !repro_hcr_pe_range_valid(
+          image_size, (uint64_t)dos->e_lfanew, sizeof(IMAGE_NT_HEADERS64))) {
+    return -1;
+  }
+  nt = (IMAGE_NT_HEADERS64 *)(base + dos->e_lfanew);
+  if (nt->Signature != IMAGE_NT_SIGNATURE ||
+      nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+      nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IMPORT) {
+    return -1;
+  }
+  imports = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+  if (imports.VirtualAddress == 0 || imports.Size < sizeof(IMAGE_IMPORT_DESCRIPTOR) ||
+      !repro_hcr_pe_range_valid(
+          image_size, imports.VirtualAddress, imports.Size)) {
+    return -1;
+  }
+  descriptor_count = imports.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
+  for (descriptor_index = 0; descriptor_index < descriptor_count;
+       ++descriptor_index) {
+    IMAGE_IMPORT_DESCRIPTOR *descriptor =
+        (IMAGE_IMPORT_DESCRIPTOR *)(base + imports.VirtualAddress) +
+        descriptor_index;
+    IMAGE_THUNK_DATA64 *names;
+    IMAGE_THUNK_DATA64 *slots;
+    size_t thunk_index;
+    if (descriptor->Name == 0 && descriptor->FirstThunk == 0) {
+      break;
+    }
+    if (descriptor->OriginalFirstThunk == 0 || descriptor->FirstThunk == 0 ||
+        !repro_hcr_pe_range_valid(
+            image_size, descriptor->OriginalFirstThunk,
+            sizeof(IMAGE_THUNK_DATA64)) ||
+        !repro_hcr_pe_range_valid(
+            image_size, descriptor->FirstThunk,
+            sizeof(IMAGE_THUNK_DATA64))) {
+      continue;
+    }
+    names = (IMAGE_THUNK_DATA64 *)(base + descriptor->OriginalFirstThunk);
+    slots = (IMAGE_THUNK_DATA64 *)(base + descriptor->FirstThunk);
+    for (thunk_index = 0;; ++thunk_index) {
+      uint64_t name_offset = descriptor->OriginalFirstThunk +
+          thunk_index * sizeof(IMAGE_THUNK_DATA64);
+      uint64_t slot_offset = descriptor->FirstThunk +
+          thunk_index * sizeof(IMAGE_THUNK_DATA64);
+      IMAGE_IMPORT_BY_NAME *import_name;
+      const char *name;
+      size_t name_capacity;
+      void **slot;
+      void *old_target;
+      void *page = NULL;
+      size_t page_size = 0;
+      int was_writable = 0;
+      int record_status;
+      if (!repro_hcr_pe_range_valid(
+              image_size, name_offset, sizeof(IMAGE_THUNK_DATA64)) ||
+          !repro_hcr_pe_range_valid(
+              image_size, slot_offset, sizeof(IMAGE_THUNK_DATA64))) {
+        break;
+      }
+      if (names[thunk_index].u1.AddressOfData == 0) {
+        break;
+      }
+      if (IMAGE_SNAP_BY_ORDINAL64(names[thunk_index].u1.Ordinal)) {
+        continue;
+      }
+      if (!repro_hcr_pe_range_valid(
+              image_size, names[thunk_index].u1.AddressOfData,
+              sizeof(IMAGE_IMPORT_BY_NAME))) {
+        continue;
+      }
+      import_name = (IMAGE_IMPORT_BY_NAME *)(
+          base + names[thunk_index].u1.AddressOfData);
+      name = (const char *)import_name->Name;
+      name_capacity = image_size -
+          (size_t)names[thunk_index].u1.AddressOfData -
+          offsetof(IMAGE_IMPORT_BY_NAME, Name);
+      if (memchr(name, '\0', name_capacity) == NULL ||
+          strcmp(name, symbol_name) != 0) {
+        continue;
+      }
+      slot = (void **)&slots[thunk_index].u1.Function;
+      old_target = *slot;
+      if (repro_hcr_dispatch_make_writable(
+              slot, sizeof(void *), &page, &page_size, &was_writable) != 0) {
+        return -2;
+      }
+      repro_hcr_dispatch_store_pointer(slot, new_target);
+      (void)repro_hcr_dispatch_restore_protection(
+          page, page_size, was_writable);
+      record_status = repro_hcr_dispatch_record_entry(
+          tx_id, REPRO_HCR_DISPATCH_PE_IAT, slot, old_target, new_target,
+          symbol_name, (int)thunk_index);
+      if (record_status != 0) {
+        if (repro_hcr_dispatch_make_writable(
+                slot, sizeof(void *), &page, &page_size, &was_writable) == 0) {
+          repro_hcr_dispatch_store_pointer(slot, old_target);
+          (void)repro_hcr_dispatch_restore_protection(
+              page, page_size, was_writable);
+        }
+        return -3;
+      }
+      if (out_old_target != NULL) {
+        *out_old_target = old_target;
+      }
+      return 0;
+    }
+  }
+  return -1;
+}
+#endif
+
 int repro_hcr_patch_pe_iat_tx(
     uint64_t tx_id,
     const char *module_filter,
     const char *symbol_name,
     void *new_target,
     void **out_old_target) {
+#if defined(_WIN32)
+  HANDLE snapshot;
+  MODULEENTRY32 module;
+  int status = -1;
+  if (symbol_name == NULL || symbol_name[0] == '\0' || new_target == NULL) {
+    return -1;
+  }
+  snapshot = CreateToolhelp32Snapshot(
+      TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+  if (snapshot == INVALID_HANDLE_VALUE) {
+    return -2;
+  }
+  memset(&module, 0, sizeof(module));
+  module.dwSize = sizeof(module);
+  if (Module32First(snapshot, &module)) {
+    do {
+      if (!repro_hcr_ascii_contains_case_insensitive(
+              module.szModule, module_filter) &&
+          !repro_hcr_ascii_contains_case_insensitive(
+              module.szExePath, module_filter)) {
+        continue;
+      }
+      status = repro_hcr_patch_pe_module_iat(
+          tx_id, &module, symbol_name, new_target, out_old_target);
+      if (status == 0 || status < -1) {
+        break;
+      }
+    } while (Module32Next(snapshot, &module));
+  }
+  CloseHandle(snapshot);
+  return status;
+#else
   (void)tx_id; (void)module_filter; (void)symbol_name; (void)new_target; (void)out_old_target;
   return -1;
+#endif
 }
 
 int repro_hcr_patch_pe_iat(
@@ -619,7 +837,7 @@ int repro_hcr_patch_vtable_slot_tx(
   if (repro_hcr_dispatch_make_writable(slot, sizeof(void *), &page, &page_size, &was_writable) != 0) {
     return -2;
   }
-  __atomic_store_n(slot, new_method, __ATOMIC_RELEASE);
+  repro_hcr_dispatch_store_pointer(slot, new_method);
   repro_hcr_dispatch_restore_protection(page, page_size, was_writable);
 
   repro_hcr_dispatch_record_entry(tx_id, REPRO_HCR_DISPATCH_CPP_VTABLE,
