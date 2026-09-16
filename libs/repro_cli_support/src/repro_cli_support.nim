@@ -36548,6 +36548,19 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     config.suppressTrace = true
     config.maxParallelism = uint32(max(jobsNetwork, jobsCheckout))
     config.fallbackToRunQuotaBypass = true
+    # ``defaultBuildEngineConfig`` leaves ``runQuotaCliPath`` empty, and the
+    # engine's runquota launcher then falls back to
+    # ``defaultRunQuotaHelperPath()``, which RAISES unless
+    # ``REPRO_RUNQUOTA_HELPER`` is set. ``fallbackToRunQuotaBypass`` does not
+    # save it: that fallback only engages when the runquota daemon is
+    # UNREACHABLE, so on a host where the daemon IS running every sync fetch
+    # died with "BuildEngineConfig.runQuotaCliPath or REPRO_RUNQUOTA_HELPER
+    # is required" — a stderr line, and a workspace classified on refs
+    # nothing had refreshed. ``selfSpawnIoMonitorPath`` names the running
+    # image only when it has declared itself the `repro` CLI, so an embedded
+    # caller (a test binary linking the engine) still gets "" and the
+    # pre-existing behaviour.
+    config.runQuotaCliPath = selfSpawnIoMonitorPath()
     # The warm-up actions ride in the SAME graph so the engine orders each
     # fetch after its bare's refresh (via ``refreshDepId``) while still running
     # independent URLs concurrently.
@@ -36761,6 +36774,10 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     config.suppressTrace = true
     config.maxParallelism = uint32(max(jobsNetwork, jobsCheckout))
     config.fallbackToRunQuotaBypass = true
+    # Same reason as the fetch graph above: without a helper path the
+    # checkout actions die at the runquota gate on any host whose daemon is
+    # reachable.
+    config.runQuotaCliPath = selfSpawnIoMonitorPath()
     # RA-23: newly-declared-repo clones carry the ``vcs/fetch`` pool tag
     # (network economy), so the checkout graph must declare that pool with
     # the same ``jobs-network`` capacity. Non-clone checkout actions
