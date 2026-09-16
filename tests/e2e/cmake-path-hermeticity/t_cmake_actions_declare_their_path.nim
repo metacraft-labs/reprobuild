@@ -43,7 +43,7 @@
 ##      here rather than described. Under it the same two builds MUST
 ##      diverge: arm A must record its own decoy and arm B must record
 ##      its own. If that control ever passes silently — because the
-##      compiler stopped probing `PATH`, or because the monitor stopped
+##      build-time lookup stopped probing `PATH`, or because the monitor stopped
 ##      recording probes — then assertion 1 has become vacuous and this
 ##      suite says so instead of staying green.
 ##
@@ -75,12 +75,10 @@ from repro_test_support import CmdResult, requireBinary, runShell,
 const
   DecoyA = "repro-path-decoy-A"
   DecoyB = "repro-path-decoy-B"
-  # What `clang` looks for on `PATH` before falling back to plain `ld`.
-  # The decoy directories stay EMPTY: the recorded input is the failed
-  # probe, not a file, which is exactly the shape that made the original
-  # defect expensive (a miss is still an observation, and it is still in
-  # the key-bearing evidence).
-  ProbeWitness = "arm64-apple-darwin-ld"
+  # Compiler wrappers may resolve their linker without searching PATH.
+  # A real post-link file lookup supplies the same absent-file witness
+  # on every platform, while the compiler and linker still run normally.
+  ProbeWitness = "repro-path-hermeticity-missing"
 
 proc findForkedCMake(repoRoot: string): string =
   let explicit = getEnv("REPROBUILD_FORKED_CMAKE")
@@ -104,37 +102,62 @@ proc findForkedCMake(repoRoot: string): string =
   ""
 
 proc writeFixture(sourceDir: string) =
-  ## Smallest project that still produces a LINK edge, because the link
-  ## edge is the one that searches `PATH` for a linker driver. A compile
-  ## edge alone would not exercise the property.
+  ## Exercise compile/link actions and a generated post-build wrapper.
+  ## The post-build lookup makes the PATH-search witness independent of
+  ## the platform's compiler and linker discovery conventions.
   createDir(sourceDir)
   writeFile(sourceDir / "CMakeLists.txt",
     "cmake_minimum_required(VERSION 3.20)\n" &
     "project(ReproPathHermeticity C)\n" &
     "add_library(rph_lib STATIC lib.c)\n" &
     "add_executable(rph_app app.c)\n" &
-    "target_link_libraries(rph_app PRIVATE rph_lib)\n")
+    "target_link_libraries(rph_app PRIVATE rph_lib)\n" &
+    "add_custom_command(TARGET rph_app POST_BUILD\n" &
+    "  COMMAND \"$<TARGET_FILE:rph_app>\")\n")
   writeFile(sourceDir / "lib.c",
     "int rph_value(void) { return 7; }\n")
   writeFile(sourceDir / "app.c",
+    "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n" &
+    "#ifdef _WIN32\n#define PATH_SEPARATOR ';'\n#else\n#define PATH_SEPARATOR ':'\n#endif\n" &
     "int rph_value(void);\n" &
-    "int main(void) { return rph_value() == 7 ? 0 : 1; }\n")
+    "int main(void) {\n" &
+    "  const char *path = getenv(\"PATH\");\n" &
+    "  if (!path || !*path) return 2;\n" &
+    "  char *probe = malloc(strlen(path) + sizeof(\"/" & ProbeWitness & "\"));\n" &
+    "  if (!probe) return 3;\n" &
+    "  while (*path) {\n" &
+    "    const char *end = strchr(path, PATH_SEPARATOR);\n" &
+    "    size_t size = end ? (size_t)(end - path) : strlen(path);\n" &
+    "    if (size) {\n" &
+    "      memcpy(probe, path, size);\n" &
+    "      strcpy(probe + size, \"/" & ProbeWitness & "\");\n" &
+    "      FILE *file = fopen(probe, \"rb\");\n" &
+    "      if (file) { fclose(file); free(probe); return 4; }\n" &
+    "    }\n" &
+    "    if (!end) break;\n" &
+    "    path = end + 1;\n" &
+    "  }\n" &
+    "  free(probe);\n" &
+    "  return rph_value() == 7 ? 0 : 1;\n}\n")
 
 proc configure(cmakeBin, sourceDir, buildDir, reproBin: string;
                extraArgs: openArray[string] = []): CmdResult =
+  # A supported linker depfile intentionally replaces syscall monitoring.
+  # This gate inspects .iomon evidence, so select the monitored fallback.
   var args = @[cmakeBin, "-S", sourceDir, "-B", buildDir, "-G", "Reprobuild",
-    "-DCMAKE_MAKE_PROGRAM=" & reproBin, "-DCMAKE_BUILD_TYPE=Debug"]
+    "-DCMAKE_MAKE_PROGRAM=" & reproBin, "-DCMAKE_BUILD_TYPE=Debug",
+    "-DCMAKE_LINK_DEPENDS_USE_LINKER=OFF"]
   for extra in extraArgs:
     args.add(extra)
   runShell(shellCommand(args))
 
 proc build(reproBin, buildDir, workRoot, pathValue: string;
-           forceRebuild: bool): CmdResult =
+           forceRebuild: bool; target = "all"): CmdResult =
   ## THE SHELL IS THE VARIABLE. `PATH` is overlaid per invocation, which
   ## is the whole experiment: two otherwise identical builds, two
   ## different login environments.
   var args = @[
-    reproBin, "build", buildDir & "#all",
+    reproBin, "build", buildDir & "#" & target,
     "--tool-provisioning=path",
     "--work-root=" & workRoot
   ]
@@ -307,6 +330,7 @@ suite "CMake-generated actions declare their PATH":
       checkpoint("monitored actions: " & $monitored)
       check monitored.len > 0
       check "link-rph_app.iomon" in monitored
+      check "post-build-rph_app-0.iomon" in monitored
 
       for name in monitored:
         check fileExists(dirB / name)
@@ -378,12 +402,12 @@ suite "CMake-generated actions declare their PATH":
       let dirB = monitorDepfileDir(workB)
       check dirA.len > 0
       check dirB.len > 0
-      let linkDepfile = "link-rph_app.iomon"
-      check fileExists(dirA / linkDepfile)
-      check fileExists(dirB / linkDepfile)
+      let probeDepfile = "post-build-rph_app-0.iomon"
+      require fileExists(dirA / probeDepfile)
+      require fileExists(dirB / probeDepfile)
 
-      let inputsA = recordedInputs(dirA / linkDepfile, workA)
-      let inputsB = recordedInputs(dirB / linkDepfile, workB)
+      let inputsA = recordedInputs(dirA / probeDepfile, workA)
+      let inputsB = recordedInputs(dirB / probeDepfile, workB)
 
       # Each arm searched ITS OWN shell's directory and not the other's.
       let aInA = mentioning(inputsA, DecoyA)
@@ -395,8 +419,8 @@ suite "CMake-generated actions declare their PATH":
       check mentioning(inputsA, DecoyB).len == 0
       check mentioning(inputsB, DecoyA).len == 0
 
-      # And the probe really is the linker-driver search the declared
-      # PATH is there to bound, not some incidental read.
+      # Require the scheduled post-link lookup, not an incidental read
+      # or a platform-specific compiler helper search.
       var sawProbeWitness = false
       for path in aInA:
         if path.endsWith(ProbeWitness):
@@ -504,8 +528,10 @@ suite "CMake-generated actions declare their PATH":
     else:
       let buildDir = testRoot / "build-census"
       check configure(forkedCMake, sourceDir, buildDir, reproBin).code == 0
+      # The direct provider must export the same default alias as the
+      # generated Nim provider, not just select it for an unnamed build.
       let built = build(reproBin, buildDir, testRoot / "work-census", pathA,
-        forceRebuild = true)
+        forceRebuild = true, target = "default")
       checkpoint(built.output)
       check built.code == 0
       let census = censusLine(built.output)

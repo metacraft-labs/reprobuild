@@ -6046,6 +6046,31 @@ proc addCacheField(payload: var string; value: string) =
   payload.add(value)
   payload.add("\n")
 
+proc cmakeDirectBuildIdentity*(meta: TryCompileMetadata;
+                               pathValue: string): PathOnlyBuildIdentity =
+  # Inline commands already carry resolved executables. Only wrapper-backed
+  # actions need the normal resolver; resolving every usedTool would also
+  # reprobe compilers for each try_compile invocation.
+  var required = initHashSet[string]()
+  for action in meta.actions:
+    if not action.inline:
+      if action.toolId.len == 0 or action.toolId notin meta.usedTools:
+        raise newException(ValueError,
+          "CMake action " & action.id & " references undeclared tool " &
+            action.toolId)
+      required.incl(action.toolId)
+  var project = ProjectInterface(
+    projectName: TryCompileProviderPackageName,
+    packageName: TryCompileProviderPackageName)
+  for tool in meta.usedTools:
+    if tool in required:
+      project.toolUses.add(InterfaceToolUse(
+        rawConstraint: tool & " >=1.0 <2.0",
+        packageSelector: tool,
+        executableName: tool))
+      required.excl(tool)
+  pathOnlyBuildIdentity(artifactFor(project), pathValue)
+
 proc pathModeResolutionSignature(artifact: ProjectInterfaceArtifact;
                                  pathValue: string): string =
   ## What ``$PATH`` actually decides in path mode: for each declared tool
@@ -9767,10 +9792,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     logSummary("providerBinary: " & tryCompileProviderBinary)
     logSummary("providerArtifact: " & TryCompileProviderArtifactId)
     logSummary("runQuotaSocket: " & runQuotaSocketDiagnostic())
-    let synthIdentity = PathOnlyBuildIdentity(
-      projectName: TryCompileProviderPackageName,
-      interfaceFingerprint: blake3DomainDigest(
-        toBytes(TryCompileProviderArtifactId), hdActionFingerprint))
+    let metadata = decodeTryCompileMetadata(
+      toBytes(readFile(extendedPath(tryCompileMetaPath))))
+    let synthIdentity = cmakeDirectBuildIdentity(metadata, pathEnv)
     let providerGraphStart = statStart(statsEnabled)
     progressRenderer.renderPhase("refreshing trycompile provider graph")
     let refresh = refreshProviderGraph(RefreshConfig(
@@ -28886,11 +28910,22 @@ proc installUserDaemonParentPrewarmer() =
   setUserDaemonParentPrewarmer(proc(request: UserDaemonBuildRequest): string =
     prewarmDaemonParentBuildCaches(request))
 
+proc enterDaemonRequestDirectory*(workingDir: string): string =
+  ## Return the directory to restore, if it still has a name. A daemon may
+  ## outlive the temporary project directory from which it was started.
+  try:
+    result = getCurrentDir()
+  except OSError:
+    if workingDir.len == 0:
+      raise
+  if workingDir.len > 0:
+    setCurrentDir(workingDir)
+
 proc installUserDaemonBuildExecutor() =
   setUserDaemonBuildExecutor(proc(request: UserDaemonBuildRequest;
       emit: UserDaemonBuildEmit;
       cancelCheck: UserDaemonBuildCancelCheck): int =
-    let previousCwd = getCurrentDir()
+    let previousCwd = enterDaemonRequestDirectory(request.workingDir)
     var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
     try:
       # Defense in depth for direct/in-process callers that bypass protocol
@@ -28947,8 +28982,6 @@ proc installUserDaemonBuildExecutor() =
         else:
           "daemon-build-pid-" & $getCurrentProcessId()
       putEnv(ProviderNimcacheSessionEnv, providerSession)
-      if request.workingDir.len > 0:
-        setCurrentDir(request.workingDir)
       let cliPath =
         if request.publicCliPath.len > 0: request.publicCliPath
         else: stablePublicCliPath()
@@ -29010,7 +29043,8 @@ proc installUserDaemonBuildExecutor() =
         result = 2
     finally:
       try:
-        setCurrentDir(previousCwd)
+        if previousCwd.len > 0:
+          setCurrentDir(previousCwd)
       except CatchableError:
         discard
       restoreDaemonRequestEnvironment(previousEnv))
@@ -29019,7 +29053,7 @@ proc installUserDaemonWatchExecutor() =
   setUserDaemonWatchExecutor(proc(request: UserDaemonWatchRequest;
       emit: UserDaemonWatchEmit;
       cancelCheck: UserDaemonWatchCancelCheck): int =
-    let previousCwd = getCurrentDir()
+    let previousCwd = enterDaemonRequestDirectory(request.workingDir)
     var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
     try:
       # Match the build executor: watch cycles may spawn the same actions and
@@ -29031,8 +29065,6 @@ proc installUserDaemonWatchExecutor() =
       # a hole closed for builds and left open for watch cycles reappears on
       # the next `repro watch` that spawns the same actions.
       ensureBuiltSourcePackageEnvironment()
-      if request.workingDir.len > 0:
-        setCurrentDir(request.workingDir)
       let cliPath =
         if request.publicCliPath.len > 0: request.publicCliPath
         else: stablePublicCliPath()
@@ -29086,7 +29118,8 @@ proc installUserDaemonWatchExecutor() =
         result = 2
     finally:
       try:
-        setCurrentDir(previousCwd)
+        if previousCwd.len > 0:
+          setCurrentDir(previousCwd)
       except CatchableError:
         discard
       restoreDaemonRequestEnvironment(previousEnv))

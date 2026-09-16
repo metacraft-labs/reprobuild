@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1618,
+    "nimTestBinaries": 1620,
     "pureUnitConsolidationGroups": 48,
-    "pureUnitTests": 578,
+    "pureUnitTests": 579,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1629
+    "testEntries": 1631
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1075,8 +1075,8 @@
       "graph-fixture": 12,
       "integration": 751,
       "platform/destructive": 115,
-      "pure unit": 578,
-      "unclassified": 173
+      "pure unit": 579,
+      "unclassified": 174
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1224,9 +1224,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1618,
+    "nimTestBinaryCount": 1620,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1629
+    "testEntryCount": 1631
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -32349,6 +32349,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_cmake_direct_tool_identity",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_cmake_trycompile"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_cmake_direct_tool_identity.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_config_nims_lib_resolution",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -32457,6 +32475,23 @@
       "source": "tests/unit/t_da1i_evidence_help_names_the_hazard.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_request_working_directory",
+      "class": "unclassified",
+      "classificationReason": "mutates the process working directory",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_daemon_request_working_directory.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

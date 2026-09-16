@@ -89,11 +89,11 @@ const
   ## for the provider artifact itself. Bumping ``Version`` invalidates
   ## that share — keep it in lockstep with the binary protocol.
   TryCompileProviderArtifactId* =
-    "repro-cmake-trycompile-provider.v2"
+    "repro-cmake-trycompile-provider.v3"
   TryCompileProviderRootEntryPointId* =
     "cmakeReprobuildTryCompile.root"
   TryCompileProviderRootBodyHash* =
-    "cmakeReprobuildTryCompile.root.v2"
+    "cmakeReprobuildTryCompile.root.v3"
   TryCompileProviderPackageName* = "cmakeReprobuildTryCompile"
   TryCompileProviderNamespace* = "project"
 

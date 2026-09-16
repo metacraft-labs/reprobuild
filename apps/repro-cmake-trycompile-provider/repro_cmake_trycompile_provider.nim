@@ -154,6 +154,7 @@ when defined(reproProviderMode):
             aggregate(crossDef.name, targets = childTargets)
       if meta.defaultTargetName.len > 0 and
           meta.defaultTargetName in targetByName:
+        discard exportTarget("default", targetByName[meta.defaultTargetName])
         defaultTarget(targetByName[meta.defaultTargetName])
     buildPackageFragment(pkg, request, registerAll)
 
