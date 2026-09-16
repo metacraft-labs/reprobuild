@@ -14,7 +14,7 @@
 #     windows/toolchain-versions.env, downloaded and verified rather than
 #     discovered on the host -- gcc is a toolchain dependency like any
 #     other, and `nim c` shells out to it for every module. `just`, `gh`,
-#     `python3`, `gpg` and `git-repo` are NOT provisioned -- none is
+#     `python3`, `gpg` and `git-repo` are NOT provisioned by default -- none is
 #     required to build repro, and the gpg step in particular used to
 #     trigger a UAC elevation prompt.
 #   * bash                                                    -- resolved from
@@ -67,6 +67,9 @@
 #   themselves -- see the nim/gcc note above)
 #
 # Knobs specific to reprobuild:
+#   $env:WINDOWS_DIY_HCR_TESTS = "1" also provision pinned Python for the
+#       Windows HCR test drivers. This does not install pip or change any
+#       machine-wide settings; normal compiler-only bootstrap is unchanged.
 #   $env:WINDOWS_DIY_SKIP_CLINGO = "1" skip the clingo step. Note that
 #       every `repro` binary built afterwards will abort at startup with
 #       `could not load: clingo.dll` unless clingo is on PATH by some
@@ -195,6 +198,15 @@ if (Test-BootstrapStepEnabled "OPENSSL") {
     # Named explicitly as well, so a consumer that needs the directory (release
     # staging, a diagnostic) does not have to parse LIBRARY_PATH back apart.
     $env:REPRO_WINDOWS_OPENSSL_DIR = $openSslDir
+}
+
+# --- 1e. Optional Windows HCR test drivers ----------------------------------
+if ($env:WINDOWS_DIY_HCR_TESTS -eq "1") {
+    . (Join-Path $scriptDir "windows\ensure-python.ps1")
+    $reproToolchain = Read-KeyValueFile -Path (Join-Path $scriptDir "windows\toolchain-versions.env")
+    $pythonDir = Ensure-Python -Root $installRoot -Arch (Get-WindowsArch) -Toolchain $reproToolchain
+    Add-PathEntry -Dir $pythonDir
+    $env:REPRO_WINDOWS_PYTHON_DIR = $pythonDir
 }
 
 # --- 2. Sibling repo discovery -----------------------------------------------

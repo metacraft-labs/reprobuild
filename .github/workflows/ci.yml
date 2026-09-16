@@ -182,6 +182,8 @@ jobs:
 
       - name: Setup Windows dev environment
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        env:
+          WINDOWS_DIY_HCR_TESTS: '1'
         with:
           env-flavor: windows-diy
           gh-token: ${{ steps.ci_token.outputs.token }}
@@ -204,6 +206,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Windows expandArchive execution-boundary gate failed with exit code $LASTEXITCODE"
           }
+
+      - name: Verify Windows Python provisioning
+        shell: pwsh
+        run: ./scripts/check_windows_python_provisioning.ps1
 
       - name: Measure Windows HCR linked-image publication geometry
         shell: pwsh

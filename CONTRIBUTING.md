@@ -15,7 +15,27 @@ covers the behavior you touched.
 - `just test` runs the local Nim test suite.
 - `just lint` runs repository requirement and Nim source checks.
 
+## Windows HCR Test Environment
+
+Enable the same pinned Python runtime used by the Windows HCR CI job:
+
+```powershell
+$env:WINDOWS_DIY_HCR_TESTS = "1"
+. ./env.ps1
+./scripts/check_windows_python_provisioning.ps1
+python tests/windows/hx_w0_windows_publication_decision_is_recorded_and_measured.py
+```
+
+The opt-in uses the version and archive checksum in
+`windows/toolchain-versions.env`, installs only under `WINDOWS_DIY_INSTALL_ROOT`,
+and updates only the calling process's environment. It does not install pip,
+require administrator access, or change PowerShell execution policies. Without
+the opt-in, compiler-only bootstrap is unchanged. The HCR drivers also require
+their existing MSVC x64 toolchain and Windows SDK debugger prerequisites; this
+Python provisioning does not install those tools.
+
 ## Adding or removing test cases
+
 
 `scripts/reprobuild-suite-static-case-counts.tsv` records how many test cases
 each declared test source contains. When you add or remove a `test "…":`
