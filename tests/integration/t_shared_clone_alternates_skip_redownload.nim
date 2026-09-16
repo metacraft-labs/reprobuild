@@ -32,6 +32,7 @@
 import std/[algorithm, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import shared_clones
 
 proc q(value: string): string = quoteShell(value)
 
@@ -197,7 +198,24 @@ suite "RA-5 — shared clone alternates skip re-download":
       let altPath = w2 / "lib" / ".git" / "objects" / "info" / "alternates"
       check fileExists(altPath)
       let altContent = readFile(altPath)
-      check (bare / "objects") in altContent
+      # Compare NORMALISED paths, not raw strings. This entry is written by
+      # git (``clone --reference``), which spells every path with forward
+      # slashes on every platform, while ``bare / "objects"`` is Nim's join
+      # and spells it with the platform separator. On Windows the two name
+      # the same directory and are not the same string, so the substring
+      # test here failed on a correctly-wired checkout -- the same defect
+      # ``isWiredTo`` carried, in the test that was meant to catch it.
+      #
+      # Two assertions, deliberately. The first names the shared bare in the
+      # FILE, normalised here and not by any production proc, so this case
+      # still fails if the alternates entry ever points somewhere else --
+      # a predicate that always answered "yes" could not satisfy it. The
+      # second is the caller-visible contract, and is the one that was red
+      # before ``isWiredTo`` learned to normalise.
+      proc slashed(value: string): string =
+        value.replace('\\', '/').toLowerAscii()
+      check slashed(bare / "objects") in slashed(altContent)
+      check isWiredTo(w2 / "lib", bare)
 
       # (3a) Transparency: W2's HEAD matches the upstream tip exactly.
       let w2Head = requireGit(q(gitBin) & " -C " & q(w2 / "lib") &

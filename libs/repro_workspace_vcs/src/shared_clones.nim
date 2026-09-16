@@ -910,9 +910,52 @@ proc wireAlternates*(repoPath, sharedBarePath: string): SharedCloneResult =
         diagnostic: "could not write alternates " & altPath & ": " & e.msg)
   SharedCloneResult(ok: true, sharedBarePath: sharedBarePath)
 
+proc samePathOnDisk*(a, b: string): bool =
+  ## Path equality for two spellings of what may be ONE location.
+  ##
+  ## The alternates file has two authors with two conventions, and they
+  ## must still compare equal: ``wireAlternates`` writes Nim's ``/`` join,
+  ## which on Windows emits a backslash; ``git clone --reference`` writes
+  ## git's own spelling, which is a forward slash on every platform. An
+  ## exact string compare therefore answers "not wired" for every repo git
+  ## itself wired -- measured on this workspace, 162 of 162 repos reported
+  ## ``wired=false`` while their alternates files named exactly the right
+  ## shared bare.
+  ##
+  ## So normalise before comparing: unify separators, collapse ``.``/``..``,
+  ## drop a trailing separator, and fold case on the platforms whose
+  ## filesystems do. This compares two path STRINGS; it is deliberately not
+  ## a containment or filesystem-identity question (no stat, no symlink
+  ## resolution), so it stays correct for a path that does not exist yet.
+  proc canon(value: string): string =
+    if value.len == 0:
+      return ""
+    result = value
+    if DirSep != '/':
+      result = result.replace('/', DirSep)
+    if AltSep != DirSep:
+      result = result.replace(AltSep, DirSep)
+    try:
+      result = normalizedPath(result)
+    except CatchableError:
+      discard
+    while result.len > 1 and result[^1] == DirSep:
+      result.setLen(result.len - 1)
+    when defined(windows) or defined(macosx):
+      result = result.toLowerAscii()
+  canon(a) == canon(b)
+
 proc isWiredTo*(repoPath, sharedBarePath: string): bool =
   ## True when ``repoPath`` already reads the shared bare via alternates.
-  (sharedBarePath / "objects") in readAlternates(repoPath)
+  ## Compares NORMALISED paths (``samePathOnDisk``) rather than raw
+  ## strings: the entry may have been written by git (forward slashes) or
+  ## by ``wireAlternates`` (the platform separator), and both name the very
+  ## same object pool.
+  let wanted = sharedBarePath / "objects"
+  for entry in readAlternates(repoPath):
+    if samePathOnDisk(entry, wanted):
+      return true
+  false
 
 # ---- cache-ref push (RA-5 mechanism; RA-4 wires the hook) ------------------
 
