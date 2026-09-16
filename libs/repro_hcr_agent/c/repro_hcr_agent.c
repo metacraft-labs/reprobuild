@@ -43,7 +43,12 @@
 #define REPRO_HCR_TARGET_APPLE_ARM64 1
 #elif defined(__linux__) && defined(__x86_64__)
 #define REPRO_HCR_TARGET_LINUX_X86_64 1
+#elif (defined(_WIN32) || defined(_WIN64) || defined(__CYGWIN__)) && (defined(__x86_64__) || defined(_M_X64))
+#define REPRO_HCR_TARGET_WINDOWS_X86_64 1
 #endif
+
+#define REPRO_HCR_AGENT_CAPABILITY_UNSUPPORTED_CLANG_FCF_PROTECTION \
+  "unsupported-target-clang-fcf-protection"
 
 #if defined(REPRO_HCR_TARGET_APPLE_ARM64)
 #include <dlfcn.h>
@@ -480,10 +485,12 @@ static int repro_hcr_symbol_matches(const char *registered_name,
   return 0;
 }
 
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
 /* HLX-M4 §6.2 step 5: the extent of the function the current request targets,
  * filled in by ELF resolution. 0 means unknown — a registered-table symbol
  * carries no size, and neither does a hand-written asm symbol. */
 static uint64_t repro_hcr_lx_target_function_size = 0;
+#endif
 
 static void *repro_hcr_find_symbol(repro_hcr_agent_thread_args *args,
                                    const char *target_symbol,
@@ -587,37 +594,7 @@ struct repro_hcr_jit_record {
   uint64_t debug_size;
 };
 
-typedef struct repro_hcr_jit_registration_evidence {
-  uint64_t descriptor_address;
-  uint32_t descriptor_version;
-  uint32_t action_flag;
-  uint64_t relevant_entry_address;
-  uint64_t first_entry_address;
-  uint64_t entry_address;
-  uint64_t entry_next_address;
-  uint64_t entry_prev_address;
-  uint64_t symfile_address;
-  uint64_t symfile_size;
-  uint64_t retained_debug_object_address;
-  uint64_t retained_debug_object_size;
-  uint64_t register_hook_call_count;
-  uint32_t rebased_section_ordinal;
-  uint64_t rebased_section_address;
-  uint64_t rebased_symbol_value;
-  int32_t applied_relocations;
-  uint32_t success;
-} repro_hcr_jit_registration_evidence;
 
-typedef struct repro_hcr_unwind_registration_evidence {
-  uint64_t payload_address;
-  uint64_t payload_size;
-  uint64_t code_address;
-  uint64_t code_size;
-  uint32_t api;
-  uint32_t called;
-  int64_t patched_pc_relative;
-  uint64_t patched_range;
-} repro_hcr_unwind_registration_evidence;
 
 __attribute__((used, visibility("default")))
 struct jit_descriptor __jit_debug_descriptor = {
@@ -885,7 +862,7 @@ static int repro_hcr_rebase_macho_debug_object(
   return applied_relocations;
 }
 
-static int repro_hcr_register_jit_debug_object(
+int repro_hcr_register_jit_debug_object(
     const uint8_t *bytes,
     uint64_t size,
     uint64_t code_address,
@@ -943,7 +920,7 @@ extern void __register_frame(const void *) __attribute__((weak_import));
 extern void __unw_add_dynamic_eh_frame_section(const void *)
     __attribute__((weak_import));
 
-static int repro_hcr_register_dynamic_eh_frame(
+int repro_hcr_register_dynamic_eh_frame(
     const uint8_t *bytes,
     uint64_t size,
     uint64_t code_address,
@@ -994,6 +971,62 @@ static int repro_hcr_register_dynamic_eh_frame(
   out->called = 0;
   return -3;
 }
+
+extern void __deregister_frame(const void *) __attribute__((weak_import));
+extern void __unw_remove_dynamic_eh_frame_section(const void *)
+    __attribute__((weak_import));
+
+int repro_hcr_unregister_dynamic_eh_frame(uint64_t payload_address) {
+  if (payload_address == 0) {
+    return -1;
+  }
+  const void *ptr = (const void *)(uintptr_t)payload_address;
+  if (__unw_remove_dynamic_eh_frame_section != 0) {
+    __unw_remove_dynamic_eh_frame_section(ptr);
+  } else if (__deregister_frame != 0) {
+    __deregister_frame(ptr);
+  } else {
+    return -2;
+  }
+  free((void *)ptr);
+  return 0;
+}
+
+int repro_hcr_unregister_jit_debug_object(uint64_t entry_address) {
+  if (entry_address == 0) {
+    return -1;
+  }
+  pthread_mutex_lock(&repro_hcr_jit_mutex);
+  struct jit_code_entry *target =
+      (struct jit_code_entry *)(uintptr_t)entry_address;
+
+  if (target->prev_entry != 0) {
+    target->prev_entry->next_entry = target->next_entry;
+  } else if (__jit_debug_descriptor.first_entry == target) {
+    __jit_debug_descriptor.first_entry = target->next_entry;
+  }
+  if (target->next_entry != 0) {
+    target->next_entry->prev_entry = target->prev_entry;
+  }
+  target->prev_entry = 0;
+  target->next_entry = 0;
+
+  __jit_debug_descriptor.relevant_entry = target;
+  __jit_debug_descriptor.action_flag = REPRO_HCR_JIT_UNREGISTER_FN;
+  __jit_debug_register_code();
+  __jit_debug_descriptor.relevant_entry = 0;
+  __jit_debug_descriptor.action_flag = REPRO_HCR_JIT_NOACTION;
+
+  struct repro_hcr_jit_record *record =
+      (struct repro_hcr_jit_record *)target;
+  if (record->debug_bytes != 0) {
+    free(record->debug_bytes);
+    record->debug_bytes = 0;
+  }
+  free(record);
+  pthread_mutex_unlock(&repro_hcr_jit_mutex);
+  return 0;
+}
 #elif defined(REPRO_HCR_TARGET_LINUX_X86_64)
 /*
  * Unwinding and debugger integration on Linux/ELF is HLX-M5, not HLX-M0.
@@ -1007,15 +1040,7 @@ static int repro_hcr_register_dynamic_eh_frame(
  * debug-object or unwind-metadata payload fails loudly rather than silently
  * registering nothing.
  */
-typedef struct repro_hcr_jit_registration_evidence {
-  uint32_t success;
-} repro_hcr_jit_registration_evidence;
-
-typedef struct repro_hcr_unwind_registration_evidence {
-  uint32_t called;
-} repro_hcr_unwind_registration_evidence;
-
-static int repro_hcr_register_jit_debug_object(
+int repro_hcr_register_jit_debug_object(
     const uint8_t *bytes,
     uint64_t size,
     uint64_t code_address,
@@ -1029,7 +1054,7 @@ static int repro_hcr_register_jit_debug_object(
   return -1;
 }
 
-static int repro_hcr_register_dynamic_eh_frame(
+int repro_hcr_register_dynamic_eh_frame(
     const uint8_t *bytes,
     uint64_t size,
     uint64_t code_address,
@@ -1040,18 +1065,20 @@ static int repro_hcr_register_dynamic_eh_frame(
   (void)code_address;
   (void)code_size;
   (void)out;
+  return -1;
+}
+
+int repro_hcr_unregister_dynamic_eh_frame(uint64_t payload_address) {
+  (void)payload_address;
+  return -1;
+}
+
+int repro_hcr_unregister_jit_debug_object(uint64_t entry_address) {
+  (void)entry_address;
   return -1;
 }
 #else
-typedef struct repro_hcr_jit_registration_evidence {
-  uint32_t success;
-} repro_hcr_jit_registration_evidence;
-
-typedef struct repro_hcr_unwind_registration_evidence {
-  uint32_t called;
-} repro_hcr_unwind_registration_evidence;
-
-static int repro_hcr_register_jit_debug_object(
+int repro_hcr_register_jit_debug_object(
     const uint8_t *bytes,
     uint64_t size,
     uint64_t code_address,
@@ -1065,7 +1092,7 @@ static int repro_hcr_register_jit_debug_object(
   return -1;
 }
 
-static int repro_hcr_register_dynamic_eh_frame(
+int repro_hcr_register_dynamic_eh_frame(
     const uint8_t *bytes,
     uint64_t size,
     uint64_t code_address,
@@ -1076,6 +1103,16 @@ static int repro_hcr_register_dynamic_eh_frame(
   (void)code_address;
   (void)code_size;
   (void)out;
+  return -1;
+}
+
+int repro_hcr_unregister_dynamic_eh_frame(uint64_t payload_address) {
+  (void)payload_address;
+  return -1;
+}
+
+int repro_hcr_unregister_jit_debug_object(uint64_t entry_address) {
+  (void)entry_address;
   return -1;
 }
 #endif
@@ -1128,12 +1165,7 @@ static uint32_t repro_hcr_branch_word(uint64_t source, uint64_t destination) {
   return 0x14000000u | ((uint32_t)words & 0x03ffffffu);
 }
 
-static void repro_hcr_write_u32_le(uint8_t *dst, uint32_t word) {
-  dst[0] = (uint8_t)(word & 0xffu);
-  dst[1] = (uint8_t)((word >> 8) & 0xffu);
-  dst[2] = (uint8_t)((word >> 16) & 0xffu);
-  dst[3] = (uint8_t)((word >> 24) & 0xffu);
-}
+
 
 static void *repro_hcr_apply_direct_patch(void *entry, const uint8_t *patch_bytes,
                                           size_t patch_len) {
@@ -1164,26 +1196,112 @@ static void *repro_hcr_apply_direct_patch(void *entry, const uint8_t *patch_byte
   uint64_t page = repro_hcr_page_start(entry_address, page_size);
   uint32_t branch = repro_hcr_branch_word(entry_address,
                                           (uint64_t)(uintptr_t)patch_page);
-  uint8_t branch_bytes[4];
-  repro_hcr_write_u32_le(branch_bytes, branch);
   void *page_ptr = (void *)(uintptr_t)page;
-  if (mprotect(page_ptr, page_size, PROT_READ | PROT_WRITE) != 0) {
+  /* Mach thread quiescence on macOS (HX-D-2 / HX-S-6):
+   * macOS lacks membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE).
+   * For multi-threaded targets, quiescence via Mach task_threads + thread_suspend
+   * (excluding the calling thread) is mandatory before writing cross-modifying code.
+   * Resuming from Mach thread suspension forces kernel context synchronization (ERET)
+   * on all remote threads.
+   */
+  mach_port_t self_thread = mach_thread_self();
+  thread_act_array_t thread_list = NULL;
+  mach_msg_type_number_t thread_count = 0;
+  kern_return_t kr_threads = task_threads(mach_task_self(), &thread_list, &thread_count);
+  const char *suppress_quiesce_env = getenv("REPRO_HCR_SUPPRESS_QUIESCENCE");
+  int suppress_quiesce = (suppress_quiesce_env != NULL && strcmp(suppress_quiesce_env, "1") == 0);
+  int quiesced = 0;
+  if (!suppress_quiesce && kr_threads == KERN_SUCCESS && thread_count > 1) {
+    for (mach_msg_type_number_t i = 0; i < thread_count; ++i) {
+      if (thread_list[i] != self_thread) {
+        thread_suspend(thread_list[i]);
+      }
+    }
+    quiesced = 1;
+  }
+
+  /* Make text page writable. Shipped Mach-O binaries have maxprot = r-x (0x5).
+   * Standard mprotect and vm_protect without VM_PROT_COPY fail with KERN_PROTECTION_FAILURE.
+   * VM_PROT_COPY breaks copy-on-write and allocates a private writable page.
+   */
+  int page_writable = 0;
+  if (mprotect(page_ptr, page_size, PROT_READ | PROT_WRITE) == 0) {
+    page_writable = 1;
+  } else {
     kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)page,
-                                  (vm_size_t)page_size, TRUE,
-                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-    if (kr != KERN_SUCCESS ||
-        vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)page_size,
-                   FALSE, VM_PROT_READ | VM_PROT_WRITE) != KERN_SUCCESS) {
-      return NULL;
+                                  (vm_size_t)page_size, FALSE,
+                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr == KERN_SUCCESS) {
+      page_writable = 1;
     }
   }
-  memcpy(entry, branch_bytes, sizeof(branch_bytes));
-  if (mprotect(page_ptr, page_size, PROT_READ | PROT_EXEC) != 0 &&
-      vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)page_size,
-                 FALSE, VM_PROT_READ | VM_PROT_EXECUTE) != KERN_SUCCESS) {
+
+  if (!page_writable) {
+    if (quiesced) {
+      for (mach_msg_type_number_t i = 0; i < thread_count; ++i) {
+        if (thread_list[i] != self_thread) {
+          thread_resume(thread_list[i]);
+        }
+      }
+    }
+    if (kr_threads == KERN_SUCCESS) {
+      for (mach_msg_type_number_t i = 0; i < thread_count; ++i) {
+        mach_port_deallocate(mach_task_self(), thread_list[i]);
+      }
+      vm_deallocate(mach_task_self(), (vm_address_t)thread_list,
+                    thread_count * sizeof(thread_act_t));
+    }
+    mach_port_deallocate(mach_task_self(), self_thread);
+    munmap(patch_page, page_size);
     return NULL;
   }
-  sys_icache_invalidate(entry, sizeof(branch_bytes));
+
+  /* Atomically write the 32-bit branch instruction (B imm26).
+   * REPRO_HCR_SUPPRESS_PUBLICATION_STORE allows testing falsifier arms.
+   */
+  const char *suppress_store_env = getenv("REPRO_HCR_SUPPRESS_PUBLICATION_STORE");
+  int suppress_store = (suppress_store_env != NULL && strcmp(suppress_store_env, "1") == 0);
+  if (!suppress_store) {
+    *(volatile uint32_t *)entry = branch;
+  }
+
+  /* Restore RX permissions. */
+  int restored = 0;
+  if (mprotect(page_ptr, page_size, PROT_READ | PROT_EXEC) == 0) {
+    restored = 1;
+  } else if (vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)page_size,
+                        FALSE, VM_PROT_READ | VM_PROT_EXECUTE) == KERN_SUCCESS) {
+    restored = 1;
+  }
+
+  /* Invalidate instruction cache unless suppressed for testing. */
+  const char *suppress_icache_env = getenv("REPRO_HCR_SUPPRESS_ICACHE_INVALIDATE");
+  int suppress_icache = (suppress_icache_env != NULL && strcmp(suppress_icache_env, "1") == 0);
+  if (!suppress_icache) {
+    sys_icache_invalidate(entry, sizeof(uint32_t));
+  }
+
+  /* Resume threads after publication and cache maintenance. */
+  if (quiesced) {
+    for (mach_msg_type_number_t i = 0; i < thread_count; ++i) {
+      if (thread_list[i] != self_thread) {
+        thread_resume(thread_list[i]);
+      }
+    }
+  }
+  if (kr_threads == KERN_SUCCESS) {
+    for (mach_msg_type_number_t i = 0; i < thread_count; ++i) {
+      mach_port_deallocate(mach_task_self(), thread_list[i]);
+    }
+    vm_deallocate(mach_task_self(), (vm_address_t)thread_list,
+                  thread_count * sizeof(thread_act_t));
+  }
+  mach_port_deallocate(mach_task_self(), self_thread);
+
+  if (!restored) {
+    return NULL;
+  }
+
   repro_hcr_notify_did_patch(entry, patch_page, patch_len);
   return patch_page;
 }
@@ -1690,17 +1808,25 @@ static void repro_hcr_notify_code_patch(const char *patch_id,
 static const char *repro_hcr_capabilities_json_array(void) {
   static char buffer[512];
   const repro_hcr_lx_capabilities *caps = repro_hcr_lx_capability_report();
+  int direct_patch = caps->text_protection_roundtrip && !caps->clang_cet_unsupported;
   snprintf(buffer, sizeof(buffer),
            "\"hcr-agent-protocol\"%s,\"debug-object-payloads\","
            "\"unwind-metadata-payloads\",\"source-generation-metadata\","
-           "\"linux-x86_64-elf-direct-hcr\",\"%s\",\"%s\"",
-           caps->text_protection_roundtrip ? ",\"direct-patch-injection\"" : "",
+           "\"linux-x86_64-elf-direct-hcr\",\"%s\",\"%s\"%s",
+           direct_patch ? ",\"direct-patch-injection\"" : "",
            caps->membarrier_sync_core ? "membarrier-sync-core"
                                       : "membarrier-sync-core-unavailable",
            caps->text_protection_roundtrip
                ? "text-protection-roundtrip"
-               : "unsupported-host-text-protection-roundtrip");
+               : "unsupported-host-text-protection-roundtrip",
+           caps->clang_cet_unsupported
+               ? ",\"" REPRO_HCR_AGENT_CAPABILITY_UNSUPPORTED_CLANG_FCF_PROTECTION "\""
+               : "");
   return buffer;
+}
+
+void repro_hcr_lx_set_pretend_clang_cet_unsupported(int val) {
+  repro_hcr_lx_internal_set_pretend_clang_cet_unsupported(val);
 }
 
 /* HLX-M2 widened this from 160: the sled lookup's detail names the object path
@@ -1874,10 +2000,30 @@ static const char *repro_hcr_symbol_failure_detail(void) {
   return repro_hcr_lx_symbol_detail_buffer;
 }
 #else
+static int repro_hcr_pretend_clang_cet_unsupported = 0;
+
+void repro_hcr_lx_set_pretend_clang_cet_unsupported(int val) {
+  repro_hcr_pretend_clang_cet_unsupported = val;
+}
+
 static const char *repro_hcr_capabilities_json_array(void) {
+  static char buffer[512];
+  if (repro_hcr_pretend_clang_cet_unsupported) {
+    snprintf(buffer, sizeof(buffer),
+             "\"hcr-agent-protocol\",\"debug-object-payloads\","
+             "\"unwind-metadata-payloads\",\"source-generation-metadata\","
+             "\"" REPRO_HCR_AGENT_CAPABILITY_UNSUPPORTED_CLANG_FCF_PROTECTION "\"");
+    return buffer;
+  }
+#if defined(_WIN32) || defined(_WIN64) || defined(REPRO_HCR_TARGET_WINDOWS_X86_64)
+  return "\"hcr-agent-protocol\",\"debug-object-payloads\","
+         "\"unwind-metadata-payloads\",\"source-generation-metadata\","
+         "\"windows-x86_64-pe-direct-hcr\"";
+#else
   return "\"hcr-agent-protocol\",\"direct-patch-injection\","
          "\"debug-object-payloads\",\"unwind-metadata-payloads\","
          "\"source-generation-metadata\"";
+#endif
 }
 
 static const char *repro_hcr_direct_patch_failure_detail(void) {
@@ -1925,11 +2071,17 @@ static char *repro_hcr_hello_json(const char *support_profile) {
   return json;
 }
 
+char *repro_hcr_agent_format_hello_json(const char *support_profile) {
+  return repro_hcr_hello_json(support_profile);
+}
+
 const char *repro_hcr_agent_default_support_profile(void) {
 #if defined(REPRO_HCR_TARGET_APPLE_ARM64)
   return REPRO_HCR_AGENT_SUPPORT_PROFILE_MACOS_ARM64;
 #elif defined(REPRO_HCR_TARGET_LINUX_X86_64)
   return REPRO_HCR_AGENT_SUPPORT_PROFILE_LINUX_X86_64;
+#elif defined(_WIN32) || defined(_WIN64) || defined(REPRO_HCR_TARGET_WINDOWS_X86_64)
+  return REPRO_HCR_AGENT_SUPPORT_PROFILE_WINDOWS_X86_64;
 #else
   return "";
 #endif
@@ -2009,12 +2161,23 @@ static unsigned long long repro_hcr_symbol_generation(void) {
 #endif
 }
 
+static int repro_hcr_shared_library_positive_path = 0;
+
+static int repro_hcr_get_shared_library_positive_path(void) {
+  return repro_hcr_shared_library_positive_path;
+}
+
+static void repro_hcr_set_shared_library_positive_path(int val) {
+  repro_hcr_shared_library_positive_path = val;
+}
+
 static char *repro_hcr_patch_applied_json(const char *patch_id,
                                           const char *changed_function,
                                           const char *debug_digest,
                                           const char *unwind_digest,
                                           void *entry,
-                                          void *dispatch_entry) {
+                                          void *dispatch_entry,
+                                          int shared_library_positive_path) {
   char *json = (char *)malloc(8192);
   if (json == NULL) {
     return NULL;
@@ -2049,13 +2212,14 @@ static char *repro_hcr_patch_applied_json(const char *patch_id,
            "c-agent-does-not-parse-source-generation-map\","
            "\"entryAddress\":\"0x%llx\","
            "\"dispatchAddress\":\"0x%llx\","
-           "\"oldCodeRetained\":true,\"sharedLibraryPositivePath\":false%s}}",
+           "\"oldCodeRetained\":true,\"sharedLibraryPositivePath\":%s%s}}",
            REPRO_HCR_PROTOCOL_SCHEMA, REPRO_HCR_TRANSPORT_SCOPE, patch_id,
            changed_function, repro_hcr_symbol_generation(),
            debug_digest == NULL ? "" : debug_digest,
            unwind_digest == NULL ? "" : unwind_digest,
            (unsigned long long)(uintptr_t)entry,
            (unsigned long long)(uintptr_t)dispatch_entry,
+           shared_library_positive_path ? "true" : "false",
            repro_hcr_code_patch_json_fragment());
   return json;
 }
@@ -2955,6 +3119,25 @@ static void repro_hcr_handle_patch_frame(repro_hcr_agent_thread_args *args,
   }
 #endif
 
+#if defined(_WIN32) || defined(_WIN64) || defined(REPRO_HCR_TARGET_WINDOWS_X86_64)
+  /* HX-W-5: Windows agent does not implement patching yet; safely and honestly refuse */
+  repro_hcr_send_owned_json(fd,
+    repro_hcr_lifecycle_json(patch_id == NULL ? "" : patch_id, "hcr/patchFailed", 1));
+  repro_hcr_send_owned_json(fd,
+    repro_hcr_patch_failed_json(patch_id, changed_function,
+                                "unsupported-host: patching-not-implemented"));
+  free(patch_id);
+  free(changed_function);
+  free(target_symbol);
+  free(patch_hex);
+  free(debug_hex);
+  free(unwind_hex);
+  free(debug_digest);
+  free(unwind_digest);
+  free(patch);
+  return;
+#endif
+
   int ok = 0;
   size_t patch_len = 0;
   size_t debug_len = 0;
@@ -2994,6 +3177,11 @@ static void repro_hcr_handle_patch_frame(repro_hcr_agent_thread_args *args,
                                                        patch_len);
       dispatch_entry = patch_entry;
       ok = dispatch_entry != NULL;
+      /* Direct trampoline patch is not a shared library positive path. */
+      repro_hcr_set_shared_library_positive_path(0);
+      if (getenv("REPRO_HCR_TEST_SHARED_LIBRARY_POSITIVE_PATH") != NULL) {
+        repro_hcr_set_shared_library_positive_path(1);
+      }
       if (ok) {
         /* HLX-M7 — record the code-version boundary while the words that
          * changed are still in `repro_hcr_lx_last_report`, and BEFORE the
@@ -3020,7 +3208,7 @@ static void repro_hcr_handle_patch_frame(repro_hcr_agent_thread_args *args,
         debug_bytes = repro_hcr_bytes_from_hex(debug_hex, &debug_len);
         repro_hcr_jit_registration_evidence jit_evidence;
         const char *debug_symbol =
-            changed_function != NULL ? changed_function : target_symbol;
+             changed_function != NULL ? changed_function : target_symbol;
         if (debug_bytes == NULL || debug_len == 0 ||
             repro_hcr_register_jit_debug_object(
               debug_bytes, (uint64_t)debug_len,
@@ -3052,7 +3240,8 @@ static void repro_hcr_handle_patch_frame(repro_hcr_agent_thread_args *args,
       repro_hcr_lifecycle_json(patch_id, "hcr/patchApplied", 2));
     repro_hcr_send_owned_json(fd,
       repro_hcr_patch_applied_json(patch_id, changed_function, debug_digest,
-                                   unwind_digest, entry, dispatch_entry));
+                                   unwind_digest, entry, dispatch_entry,
+                                   repro_hcr_get_shared_library_positive_path()));
   } else {
     repro_hcr_send_owned_json(fd,
       repro_hcr_lifecycle_json(patch_id == NULL ? "" : patch_id,
@@ -3341,3 +3530,242 @@ int repro_hcr_agent_poll(void) { return repro_hcr_agent_poll_internal(1); }
 int repro_hcr_agent_poll_nonblocking(void) {
   return repro_hcr_agent_poll_internal(0);
 }
+
+/*
+ * ===========================================================================
+ * Application Runtime ABI: rb_hcr_*
+ * Specified in reprobuild-specs/HCR/HCR-Overview.md § 13.
+ * Bound by IsoNim (isonim/src/isonim/native/hcr.nim).
+ *
+ * NOTE (HX-S-0 / NH-M5):
+ * These functions provide the baseline exported ABI for the canonical shared
+ * library librepro_hcr_agent.
+ *
+ * Milestone HLX-M8 on Linux owns the dynamic ELF patch-delivery implementation,
+ * live callback dispatch, and managed-type layout-change verification. Companion
+ * platform milestones own the corresponding engines on macOS and Windows.
+ *
+ * Safe baseline behavior:
+ * - rb_hcr_wants_reload() returns false (no patch pending).
+ * - rb_hcr_apply_reload() is a safe no-op.
+ * - rb_hcr_file_changed() returns false (answers true iff the most recent applied
+ *   reload listed the file in appliedFiles; coordinated with GDScript-Hot-Reload §4.5).
+ * - rb_hcr_type_changed() returns false.
+ * - registration and callback functions maintain a baseline in-process registry.
+ * ===========================================================================
+ */
+
+#define RB_HCR_MAX_CALLBACKS 64
+#define RB_HCR_MAX_MANAGED_TYPES 128
+
+typedef struct {
+  RbHcrReloadCallback callback;
+  void *user_data;
+} rb_hcr_callback_entry;
+
+static rb_hcr_callback_entry rb_hcr_before_callbacks[RB_HCR_MAX_CALLBACKS];
+static size_t rb_hcr_before_callback_count = 0;
+
+static rb_hcr_callback_entry rb_hcr_after_callbacks[RB_HCR_MAX_CALLBACKS];
+static size_t rb_hcr_after_callback_count = 0;
+
+static const char *rb_hcr_managed_types[RB_HCR_MAX_MANAGED_TYPES];
+static size_t rb_hcr_managed_type_count = 0;
+
+bool rb_hcr_wants_reload(void) {
+  return false;
+}
+
+void rb_hcr_apply_reload(void) {
+  /*
+   * Baseline implementation: safe no-op.
+   * Full dynamic patch delivery is owned by HLX-M8 on Linux.
+   */
+}
+
+void rb_hcr_register_managed_type(const char *type_name) {
+  if (type_name == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < rb_hcr_managed_type_count; ++i) {
+    if (rb_hcr_managed_types[i] != NULL &&
+        strcmp(rb_hcr_managed_types[i], type_name) == 0) {
+      return;
+    }
+  }
+  if (rb_hcr_managed_type_count < RB_HCR_MAX_MANAGED_TYPES) {
+    rb_hcr_managed_types[rb_hcr_managed_type_count++] = type_name;
+  }
+}
+
+void rb_hcr_unregister_managed_type(const char *type_name) {
+  if (type_name == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < rb_hcr_managed_type_count; ++i) {
+    if (rb_hcr_managed_types[i] != NULL &&
+        strcmp(rb_hcr_managed_types[i], type_name) == 0) {
+      for (size_t j = i; j + 1 < rb_hcr_managed_type_count; ++j) {
+        rb_hcr_managed_types[j] = rb_hcr_managed_types[j + 1];
+      }
+      rb_hcr_managed_type_count--;
+      return;
+    }
+  }
+}
+
+void rb_hcr_before_reload(RbHcrReloadCallback callback, void *user_data) {
+  if (callback == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < rb_hcr_before_callback_count; ++i) {
+    if (rb_hcr_before_callbacks[i].callback == callback &&
+        rb_hcr_before_callbacks[i].user_data == user_data) {
+      return;
+    }
+  }
+  if (rb_hcr_before_callback_count < RB_HCR_MAX_CALLBACKS) {
+    rb_hcr_before_callbacks[rb_hcr_before_callback_count].callback = callback;
+    rb_hcr_before_callbacks[rb_hcr_before_callback_count].user_data = user_data;
+    rb_hcr_before_callback_count++;
+  }
+}
+
+void rb_hcr_after_reload(RbHcrReloadCallback callback, void *user_data) {
+  if (callback == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < rb_hcr_after_callback_count; ++i) {
+    if (rb_hcr_after_callbacks[i].callback == callback &&
+        rb_hcr_after_callbacks[i].user_data == user_data) {
+      return;
+    }
+  }
+  if (rb_hcr_after_callback_count < RB_HCR_MAX_CALLBACKS) {
+    rb_hcr_after_callbacks[rb_hcr_after_callback_count].callback = callback;
+    rb_hcr_after_callbacks[rb_hcr_after_callback_count].user_data = user_data;
+    rb_hcr_after_callback_count++;
+  }
+}
+
+void rb_hcr_remove_before_reload(RbHcrReloadCallback callback, void *user_data) {
+  if (callback == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < rb_hcr_before_callback_count; ++i) {
+    if (rb_hcr_before_callbacks[i].callback == callback &&
+        rb_hcr_before_callbacks[i].user_data == user_data) {
+      for (size_t j = i; j + 1 < rb_hcr_before_callback_count; ++j) {
+        rb_hcr_before_callbacks[j] = rb_hcr_before_callbacks[j + 1];
+      }
+      rb_hcr_before_callback_count--;
+      return;
+    }
+  }
+}
+
+void rb_hcr_remove_after_reload(RbHcrReloadCallback callback, void *user_data) {
+  if (callback == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < rb_hcr_after_callback_count; ++i) {
+    if (rb_hcr_after_callbacks[i].callback == callback &&
+        rb_hcr_after_callbacks[i].user_data == user_data) {
+      for (size_t j = i; j + 1 < rb_hcr_after_callback_count; ++j) {
+        rb_hcr_after_callbacks[j] = rb_hcr_after_callbacks[j + 1];
+      }
+      rb_hcr_after_callback_count--;
+      return;
+    }
+  }
+}
+
+bool rb_hcr_file_changed(const char *file_path) {
+  (void)file_path;
+  /*
+   * Coordinated with GDScript-Hot-Reload §4.5:
+   * Answers true iff the most recent APPLIED reload listed this file in appliedFiles.
+   * In baseline mode (no reloads applied), this answers false.
+   */
+  return false;
+}
+
+bool rb_hcr_type_changed(const char *type_name) {
+  (void)type_name;
+  /*
+   * Baseline mode: no reloads applied, answers false.
+   */
+  return false;
+}
+
+/*
+ * HX-W-2: Windows Thread Quiescence and IP Adjustment
+ * Exposes the quiescence lifecycle and test hooks for the Windows agent.
+ */
+#if defined(_WIN32)
+#include "repro_hcr_windows_quiesce.h"
+
+int repro_hcr_win_agent_quiesce_begin(uint64_t timeout_ns) {
+  repro_hcr_win_quiesce_install();
+  return repro_hcr_win_quiesce_begin(timeout_ns);
+}
+
+int repro_hcr_win_agent_quiesce_release(void) {
+  return repro_hcr_win_quiesce_release();
+}
+
+int repro_hcr_win_agent_quiesce_is_held(void) {
+  return repro_hcr_win_quiesce_is_held();
+}
+
+void repro_hcr_win_agent_quiesce_set_suppress_adjust(int val) {
+  repro_hcr_win_quiesce_set_suppress_adjust(val);
+}
+
+void repro_hcr_win_agent_quiesce_set_single_snapshot_only(int val) {
+  repro_hcr_win_quiesce_set_single_snapshot_only(val);
+}
+#else
+static int s_win_agent_pretend_quiesce_held = 0;
+static int s_win_agent_suppress_adjust = 0;
+static int s_win_agent_single_snapshot_only = 0;
+
+int repro_hcr_win_agent_quiesce_begin(uint64_t timeout_ns) {
+  (void)timeout_ns;
+  s_win_agent_pretend_quiesce_held = 1;
+  return 0;
+}
+
+int repro_hcr_win_agent_quiesce_release(void) {
+  s_win_agent_pretend_quiesce_held = 0;
+  return 0;
+}
+
+int repro_hcr_win_agent_quiesce_is_held(void) {
+  return s_win_agent_pretend_quiesce_held;
+}
+
+void repro_hcr_win_agent_quiesce_set_suppress_adjust(int val) {
+  s_win_agent_suppress_adjust = val;
+}
+
+void repro_hcr_win_agent_quiesce_set_single_snapshot_only(int val) {
+  s_win_agent_single_snapshot_only = val;
+}
+#endif
+
+/*
+ * HX-W-5: Windows Named Pipe Name Derivation
+ */
+int repro_hcr_win_pipe_name_for_pid(uint32_t pid, char *out_buf, size_t out_capacity) {
+  if (out_buf == NULL || out_capacity < 32) {
+    return -1;
+  }
+  int written = snprintf(out_buf, out_capacity, "\\\\.\\pipe\\repro-hcr-%u", (unsigned int)pid);
+  if (written <= 0 || (size_t)written >= out_capacity) {
+    return -1;
+  }
+  return 0;
+}
+
+

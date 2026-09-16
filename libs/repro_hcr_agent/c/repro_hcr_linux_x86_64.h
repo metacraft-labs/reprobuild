@@ -484,9 +484,18 @@ typedef struct repro_hcr_lx_capabilities {
   int text_rwx_transition;
   long protection_probe_rwx_result;
   int text_left_writable;          /* set if a PROT_EXEC restore ever failed */
+  /* HX-L-2: 1 when target uses Clang + CET, whose maximal-length NOP sleds
+   * placed after `endbr64` leave no admissible 8-byte-aligned window. */
+  int clang_cet_unsupported;
 } repro_hcr_lx_capabilities;
 
 static repro_hcr_lx_capabilities repro_hcr_lx_caps;
+static int repro_hcr_lx_pretend_clang_cet_unsupported = 0;
+
+static void repro_hcr_lx_internal_set_pretend_clang_cet_unsupported(int val) {
+  repro_hcr_lx_pretend_clang_cet_unsupported = val;
+  repro_hcr_lx_caps.clang_cet_unsupported = val ? 1 : 0;
+}
 
 /* Provided by the including translation unit: page-aligned anonymous mapping.
  * Kept as a hook so the probe shim and the agent can share this header without
@@ -501,9 +510,42 @@ static void repro_hcr_lx_probe_capabilities(void) {
   void *scratch;
 
   if (repro_hcr_lx_caps.probed) {
+    if (repro_hcr_lx_pretend_clang_cet_unsupported) {
+      repro_hcr_lx_caps.clang_cet_unsupported = 1;
+    }
     return;
   }
   repro_hcr_lx_caps.probed = 1;
+
+  if (repro_hcr_lx_pretend_clang_cet_unsupported) {
+    repro_hcr_lx_caps.clang_cet_unsupported = 1;
+  } else {
+    repro_hcr_lx_caps.clang_cet_unsupported = 0;
+    const uintptr_t *start = __start___patchable_function_entries;
+    const uintptr_t *stop = __stop___patchable_function_entries;
+    if (start != NULL && stop != NULL && stop > start) {
+      size_t count = (size_t)(stop - start);
+      for (size_t i = 0; i < count; ++i) {
+        uint64_t sled_addr = (uint64_t)start[i];
+        if (sled_addr >= 4) {
+          const uint8_t *entry = (const uint8_t *)(uintptr_t)(sled_addr - 4);
+          /* Check whether entry begins with endbr64 landing pad (0xf3, 0x0f, 0x1e, 0xfa) */
+          if (entry[0] == 0xf3 && entry[1] == 0x0f && entry[2] == 0x1e && entry[3] == 0xfa) {
+            /* Check whether sled begins with a multi-byte NOP (> 1 byte, e.g. Clang 15-byte NOP) */
+            size_t first_nop_len = repro_hcr_lx_nop_length((const uint8_t *)(uintptr_t)sled_addr, 16u);
+            if (first_nop_len > 1) {
+              repro_hcr_lx_sled_plan plan;
+              int rc = repro_hcr_lx_plan_sled((const uint8_t *)(uintptr_t)sled_addr, 16u, sled_addr, &plan);
+              if (rc == REPRO_HCR_LX_REFUSED_WINDOW_NOT_INSTRUCTION_BOUNDARY) {
+                repro_hcr_lx_caps.clang_cet_unsupported = 1;
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 
   repro_hcr_lx_caps.membarrier_query_mask =
       repro_hcr_lx_raw_membarrier(REPRO_HCR_LX_MEMBARRIER_CMD_QUERY, 0);

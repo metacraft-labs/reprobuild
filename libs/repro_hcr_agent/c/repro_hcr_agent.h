@@ -1,6 +1,7 @@
 #ifndef REPRO_HCR_AGENT_H
 #define REPRO_HCR_AGENT_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -138,6 +139,7 @@ typedef struct repro_hcr_source_changed_file {
  * spelling its refusals exactly as it did.
  */
 #define REPRO_HCR_RELOAD_REASON_SCRIPT_NOT_LOADED "script-not-loaded"
+#define REPRO_HCR_RELOAD_REASON_SCRIPT_NOT_GDSCRIPT "script-not-gdscript"
 #define REPRO_HCR_RELOAD_REASON_HOST_BUSY "host-busy"
 #define REPRO_HCR_RELOAD_REASON_NO_SAFE_POINT "no-safe-point"
 /*
@@ -261,6 +263,111 @@ REPRO_HCR_AGENT_API int repro_hcr_agent_last_publication_tier(void);
  * to read, and a symbol with no `st_size` has no extent to test against. It is
  * deliberately distinct from 0. */
 REPRO_HCR_AGENT_API int repro_hcr_agent_last_on_stack_threads(void);
+
+/* HX-D-3: Registration and unregistration of dynamic unwind metadata and JIT debug objects
+ * (design §1.2, §5.4, §5.6). */
+typedef struct repro_hcr_jit_registration_evidence {
+  uint64_t descriptor_address;
+  uint32_t descriptor_version;
+  uint32_t action_flag;
+  uint64_t relevant_entry_address;
+  uint64_t first_entry_address;
+  uint64_t entry_address;
+  uint64_t entry_next_address;
+  uint64_t entry_prev_address;
+  uint64_t symfile_address;
+  uint64_t symfile_size;
+  uint64_t retained_debug_object_address;
+  uint64_t retained_debug_object_size;
+  uint64_t register_hook_call_count;
+  uint32_t rebased_section_ordinal;
+  uint64_t rebased_section_address;
+  uint64_t rebased_symbol_value;
+  int32_t applied_relocations;
+  uint32_t success;
+} repro_hcr_jit_registration_evidence;
+
+typedef struct repro_hcr_unwind_registration_evidence {
+  uint64_t payload_address;
+  uint64_t payload_size;
+  uint64_t code_address;
+  uint64_t code_size;
+  uint32_t api;
+  uint32_t called;
+  int64_t patched_pc_relative;
+  uint64_t patched_range;
+} repro_hcr_unwind_registration_evidence;
+
+REPRO_HCR_AGENT_API int repro_hcr_register_jit_debug_object(
+    const uint8_t *bytes,
+    uint64_t size,
+    uint64_t code_address,
+    const char *symbol_name,
+    repro_hcr_jit_registration_evidence *out);
+
+REPRO_HCR_AGENT_API int repro_hcr_register_dynamic_eh_frame(
+    const uint8_t *bytes,
+    uint64_t size,
+    uint64_t code_address,
+    uint64_t code_size,
+    repro_hcr_unwind_registration_evidence *out);
+
+REPRO_HCR_AGENT_API int repro_hcr_unregister_dynamic_eh_frame(uint64_t payload_address);
+REPRO_HCR_AGENT_API int repro_hcr_unregister_jit_debug_object(uint64_t entry_address);
+
+/*
+ * ===========================================================================
+ * Application Runtime API: rb_hcr_*
+ * Specified in reprobuild-specs/HCR/HCR-Overview.md § 13.
+ * Bound by IsoNim (isonim/src/isonim/native/hcr.nim).
+ *
+ * NOTE (HX-S-0 / NH-M5):
+ * These declarations provide the canonical C API for embedding applications.
+ * Baseline implementations in repro_hcr_agent.c export these symbols with safe
+ * default behavior (wants_reload = false, file_changed = false, type_changed = false).
+ * Milestone HLX-M8 on Linux and companion platform milestones on macOS/Windows
+ * provide full dynamic patch delivery, managed-type layout checking, and
+ * live callback dispatch.
+ * ===========================================================================
+ */
+
+typedef struct RbHcrTypeChange {
+  const char *type_name;
+  uint32_t old_size;
+  uint32_t new_size;
+} RbHcrTypeChange;
+
+typedef struct RbHcrReloadInfo {
+  const char *const *changed_files;
+  uint32_t changed_files_count;
+  const RbHcrTypeChange *changed_types;
+  uint32_t changed_types_count;
+} RbHcrReloadInfo;
+
+typedef void (*RbHcrReloadCallback)(const RbHcrReloadInfo *info,
+                                    void *user_data);
+
+/* 13.1 Agent Lifecycle */
+REPRO_HCR_AGENT_API bool rb_hcr_wants_reload(void);
+REPRO_HCR_AGENT_API void rb_hcr_apply_reload(void);
+
+/* 13.2 Managed Type Registration */
+REPRO_HCR_AGENT_API void rb_hcr_register_managed_type(const char *type_name);
+REPRO_HCR_AGENT_API void rb_hcr_unregister_managed_type(const char *type_name);
+
+/* 13.3 Reload Callbacks */
+REPRO_HCR_AGENT_API void rb_hcr_before_reload(RbHcrReloadCallback callback,
+                                              void *user_data);
+REPRO_HCR_AGENT_API void rb_hcr_after_reload(RbHcrReloadCallback callback,
+                                             void *user_data);
+REPRO_HCR_AGENT_API void rb_hcr_remove_before_reload(RbHcrReloadCallback callback,
+                                                     void *user_data);
+REPRO_HCR_AGENT_API void rb_hcr_remove_after_reload(RbHcrReloadCallback callback,
+                                                    void *user_data);
+
+/* 13.4 Module Introspection */
+REPRO_HCR_AGENT_API bool rb_hcr_file_changed(const char *file_path);
+REPRO_HCR_AGENT_API bool rb_hcr_type_changed(const char *type_name);
 
 #ifdef __cplusplus
 }

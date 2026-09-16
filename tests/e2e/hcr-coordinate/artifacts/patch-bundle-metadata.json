@@ -1,0 +1,44 @@
+{
+  "schemaId": "reprobuild.hcr.codetracer-patch-bundle-metadata.v1",
+  "supportProfile": "macos-arm64-direct-hcr-in-codetracer-v1",
+  "patchId": "codetracer-hcr-patch-0001",
+  "changedFunction": "reprobuild_hcr_patchable_value",
+  "targetSymbol": "reprobuild_hcr_patchable_value",
+  "objectSymbol": "_reprobuild_hcr_patchable_value",
+  "oldObject": "/var/folders/by/qdc078sx5bn6m3xv734qrjg40000gn/T/tmp784dprko/artifacts/patchable-generation0.o",
+  "newObject": "/var/folders/by/qdc078sx5bn6m3xv734qrjg40000gn/T/tmp784dprko/artifacts/patchable-generation1.o",
+  "patchByteCount": 20,
+  "patchDigest": "blake3-256:b4b9870cfb44dc53169c9c87efb5af978ee62af5ca92f2d6f9d10210d589322e",
+  "debugObjectDigest": "blake3-256:91dfc7112211d72dd1a933ab43e77ffcf7b37b052fa9c51b3a1c0f80c7f469d8",
+  "unwindMetadataDigest": "blake3-256:92f8182a422015dbd6b15586e3de3dd9177bf74c52eeed08c96e420f3b623214",
+  "sourceGeneration": {
+    "sourcePath": "/var/folders/by/qdc078sx5bn6m3xv734qrjg40000gn/T/tmp784dprko/project/src/patchable.c",
+    "generation": 1,
+    "snapshotDigest": "blake3-256:97c9474815d8be1356a441730c166a0ce07c078442f23c14fbe97598fac6e939",
+    "lineTableDigest": "blake3-256:b4b9870cfb44dc53169c9c87efb5af978ee62af5ca92f2d6f9d10210d589322e"
+  },
+  "patchPlan": {
+    "schemaId": "reprobuild.hcr.patch-plan-evidence.v1",
+    "supportProfile": "macos-arm64-direct-hcr-in-codetracer-v1",
+    "targetSnapshotId": "codetracer-hcr-generation-1",
+    "changedFunctions": [
+      "reprobuild_hcr_patchable_value"
+    ],
+    "requiredTargetSymbols": [],
+    "unsupportedFallbackReasons": [],
+    "mutatesTarget": false,
+    "targetMutationOperations": 0,
+    "sharedLibraryPositivePath": false,
+    "plannedSectionBytes": [
+      {
+        "functionName": "reprobuild_hcr_patchable_value",
+        "sectionName": "__TEXT,__text",
+        "byteCount": 20,
+        "rawDigest": "blake3-256:b4b9870cfb44dc53169c9c87efb5af978ee62af5ca92f2d6f9d10210d589322e",
+        "normalizedDigest": "blake3-256:b4b9870cfb44dc53169c9c87efb5af978ee62af5ca92f2d6f9d10210d589322e",
+        "bytesHex": "fd7bbfa9fd030091a0098052fd7bc1a8c0035fd6"
+      }
+    ],
+    "relocationDecisions": []
+  }
+}

@@ -526,6 +526,62 @@ int repro_hcr_register_dynamic_eh_frame(
   out->called = 0;
   return -3;
 }
+
+extern void __deregister_frame(const void *) __attribute__((weak_import));
+extern void __unw_remove_dynamic_eh_frame_section(const void *)
+    __attribute__((weak_import));
+
+int repro_hcr_unregister_dynamic_eh_frame(uint64_t payload_address) {
+  if (payload_address == 0) {
+    return -1;
+  }
+  const void *ptr = (const void *)(uintptr_t)payload_address;
+  if (__unw_remove_dynamic_eh_frame_section != 0) {
+    __unw_remove_dynamic_eh_frame_section(ptr);
+  } else if (__deregister_frame != 0) {
+    __deregister_frame(ptr);
+  } else {
+    return -2;
+  }
+  free((void *)ptr);
+  return 0;
+}
+
+int repro_hcr_unregister_jit_debug_object(uint64_t entry_address) {
+  if (entry_address == 0) {
+    return -1;
+  }
+  pthread_mutex_lock(&repro_hcr_jit_mutex);
+  struct jit_code_entry *target =
+      (struct jit_code_entry *)(uintptr_t)entry_address;
+
+  if (target->prev_entry != 0) {
+    target->prev_entry->next_entry = target->next_entry;
+  } else if (__jit_debug_descriptor.first_entry == target) {
+    __jit_debug_descriptor.first_entry = target->next_entry;
+  }
+  if (target->next_entry != 0) {
+    target->next_entry->prev_entry = target->prev_entry;
+  }
+  target->prev_entry = 0;
+  target->next_entry = 0;
+
+  __jit_debug_descriptor.relevant_entry = target;
+  __jit_debug_descriptor.action_flag = REPRO_HCR_JIT_UNREGISTER_FN;
+  __jit_debug_register_code();
+  __jit_debug_descriptor.relevant_entry = 0;
+  __jit_debug_descriptor.action_flag = REPRO_HCR_JIT_NOACTION;
+
+  struct repro_hcr_jit_record *record =
+      (struct repro_hcr_jit_record *)target;
+  if (record->debug_bytes != 0) {
+    free(record->debug_bytes);
+    record->debug_bytes = 0;
+  }
+  free(record);
+  pthread_mutex_unlock(&repro_hcr_jit_mutex);
+  return 0;
+}
 """.}
 
   proc cRegisterJitDebugObject(bytes: ptr UncheckedArray[byte]; size: uint64;
@@ -540,6 +596,12 @@ int repro_hcr_register_dynamic_eh_frame(
                                outEvidence: ptr CUnwindRegistrationEvidence):
                                cint {.
     importc: "repro_hcr_register_dynamic_eh_frame", nodecl.}
+
+  proc cUnregisterJitDebugObject(entryAddress: uint64): cint {.
+    importc: "repro_hcr_unregister_jit_debug_object", nodecl.}
+
+  proc cUnregisterDynamicEhFrame(payloadAddress: uint64): cint {.
+    importc: "repro_hcr_unregister_dynamic_eh_frame", nodecl.}
 
 proc hexPrefix(bytes: openArray[byte]; maxBytes: int): string =
   let count = min(bytes.len, maxBytes)
@@ -612,6 +674,24 @@ proc registerDynamicEhFrame*(bytes: openArray[byte]; codeAddress: uint64;
   else:
     raise newException(ValueError, "dynamic .eh_frame registration currently requires macOS arm64")
 
+proc unregisterJitDebugObject*(entryAddress: uint64): bool =
+  ## HX-D-3: Unregister a JIT debug object from the GDB/LLDB descriptor.
+  if entryAddress == 0:
+    return false
+  when defined(macosx) and defined(arm64):
+    cUnregisterJitDebugObject(entryAddress) == 0
+  else:
+    false
+
+proc unregisterDynamicEhFrame*(payloadAddress: uint64): bool =
+  ## HX-D-3: Unregister dynamic .eh_frame section from libunwind.
+  if payloadAddress == 0:
+    return false
+  when defined(macosx) and defined(arm64):
+    cUnregisterDynamicEhFrame(payloadAddress) == 0
+  else:
+    false
+
 proc jitRegistrationJson*(evidence: JitRegistrationEvidence): JsonNode =
   %*{
     "descriptorAddress": evidence.descriptorAddress,
@@ -650,7 +730,7 @@ proc unwindRegistrationJson*(evidence: UnwindRegistrationEvidence): JsonNode =
     "payloadHexPrefix": evidence.payloadHexPrefix
   }
 
-proc minimalAarch64EhFrameTemplate*(): seq[byte] =
+proc minimalAarch64EhFrameTemplate*(): seq[byte] {.deprecated: "HX-D-3: Retired in favor of real __eh_frame metadata from the patch object".} =
   @[
     0x10'u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x01, 0x7a, 0x52, 0x00, 0x01, 0x78, 0x1e, 0x01,

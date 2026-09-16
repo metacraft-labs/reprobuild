@@ -22,6 +22,12 @@ const
     ## Advertised in `HcrHello.capabilities` by a host that can apply one
     ## (design §4.4).
 
+  HcrUnsupportedClangFcfProtectionCapability* = "unsupported-target-clang-fcf-protection"
+    ## Advertised in `HcrHello.capabilities` when the target was compiled with
+    ## Clang and -fcf-protection (HX-L-2). In this configuration direct patch
+    ## injection is impossible with standard-profile sleds, and the session is
+    ## refused at capability negotiation.
+
   HcrSourceChangedFirstGeneration* = 2'u32
     ## §4.3: `generation` 1 is the content the process STARTED with, so the
     ## first notification carries 2 and a literal 1 is never valid here. That
@@ -48,6 +54,7 @@ const
   # reason changes meaning. Kept in sync with the `REPRO_HCR_RELOAD_REASON_*`
   # block in `libs/repro_hcr_agent/c/repro_hcr_agent.h`.
   HcrReloadReasonScriptNotLoaded* = "script-not-loaded"
+  HcrReloadReasonScriptNotGDScript* = "script-not-gdscript"
   HcrReloadReasonHostBusy* = "host-busy"
   HcrReloadReasonNoSafePoint* = "no-safe-point"
   HcrReloadReasonTraceClosed* = "trace-closed"

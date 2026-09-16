@@ -1,0 +1,193 @@
+{
+  "schemaId": "reprobuild.hcr.coordinator-report.v1",
+  "supportProfile": "macos-arm64-direct-hcr-in-codetracer-v1",
+  "sessionState": "hssPatchFinished",
+  "activePatchId": "codetracer-hcr-patch-0001",
+  "agentCapabilities": [
+    "hcr-agent-protocol",
+    "direct-patch-injection",
+    "debug-object-payloads",
+    "unwind-metadata-payloads",
+    "source-generation-metadata"
+  ],
+  "lifecycleEvents": [
+    "hcr/patchApplying",
+    "hcr/patchApplied"
+  ],
+  "transcript": {
+    "schemaId": "reprobuild.hcr.agent-protocol-transcript.v1",
+    "messages": [
+      {
+        "direction": "agent-to-coordinator",
+        "kind": "hello",
+        "messageId": "agent-hello-1",
+        "rawFrameByteCount": 408,
+        "message": {
+          "schemaId": "reprobuild.hcr.agent-protocol.message.v1",
+          "transportScope": "hcr-agent-protocol",
+          "protocolVersion": 1,
+          "messageId": "agent-hello-1",
+          "kind": "hello",
+          "hello": {
+            "supportProfile": "macos-arm64-direct-hcr-in-codetracer-v1",
+            "agentPid": 72613,
+            "capabilities": [
+              "hcr-agent-protocol",
+              "direct-patch-injection",
+              "debug-object-payloads",
+              "unwind-metadata-payloads",
+              "source-generation-metadata"
+            ]
+          }
+        }
+      },
+      {
+        "direction": "coordinator-to-agent",
+        "kind": "helloAck",
+        "messageId": "coordinator-hello-ack-1",
+        "rawFrameByteCount": 375,
+        "message": {
+          "schemaId": "reprobuild.hcr.agent-protocol.message.v1",
+          "transportScope": "hcr-agent-protocol",
+          "protocolVersion": 1,
+          "messageId": "coordinator-hello-ack-1",
+          "kind": "helloAck",
+          "hello": {
+            "supportProfile": "macos-arm64-direct-hcr-in-codetracer-v1",
+            "agentPid": 0,
+            "capabilities": [
+              "hcr-agent-protocol",
+              "coordinator-agent-negotiation",
+              "direct-patch-bundle-delivery"
+            ]
+          }
+        }
+      },
+      {
+        "direction": "coordinator-to-agent",
+        "kind": "patchRequest",
+        "messageId": "coordinator-patch-request-2",
+        "rawFrameByteCount": 5235,
+        "message": {
+          "schemaId": "reprobuild.hcr.agent-protocol.message.v1",
+          "transportScope": "hcr-agent-protocol",
+          "protocolVersion": 1,
+          "messageId": "coordinator-patch-request-2",
+          "kind": "patchRequest",
+          "patch": {
+            "schemaId": "reprobuild.hcr.agent-protocol.patch-request.v1",
+            "patchId": "codetracer-hcr-patch-0001",
+            "supportProfile": "macos-arm64-direct-hcr-in-codetracer-v1",
+            "mode": "direct",
+            "changedFunctions": [
+              "reprobuild_hcr_patchable_value"
+            ],
+            "targetSymbols": [
+              "reprobuild_hcr_patchable_value"
+            ],
+            "directPatchPayload": {
+              "digest": "blake3-256:b4b9870cfb44dc53169c9c87efb5af978ee62af5ca92f2d6f9d10210d589322e",
+              "byteCount": 20,
+              "bytesHex": "fd7bbfa9fd030091a0098052fd7bc1a8c0035fd6"
+            },
+            "debugObjectPayload": {
+              "digest": "blake3-256:91dfc7112211d72dd1a933ab43e77ffcf7b37b052fa9c51b3a1c0f80c7f469d8",
+              "byteCount": 1912,
+              "bytesHex": "cffaedfe0c000001000000000100000004000000e803000000200000000000001900000068030000000000000000000000000000000000000000000000000000e9020000000000000804000000000000e90200000000000007000000070000000a000000000000005f5f74657874000000000000000000005f5f48435200000000000000000000000000000000000000140000000000000008040000020000000000000000000000000400800000000000000000000000005f5f64656275675f61626272657600005f5f4457415246000000000000000000140000000000000044000000000000001c040000000000000000000000000000000000020000000000000000000000005f5f64656275675f696e666f000000005f5f4457415246000000000000000000580000000000000053000000000000006004000000000000f806000002000000000000020000000000000000000000005f5f64656275675f73747200000000005f5f4457415246000000000000000000ab000000000000000701000000000000b3040000000000000000000000000000000000020000000000000000000000005f5f6170706c655f6e616d65730000005f5f4457415246000000000000000000b2010000000000003c00000000000000ba050000000000000000000000000000000000020000000000000000000000005f5f6170706c655f6f626a63000000005f5f4457415246000000000000000000ee010000000000002400000000000000f6050000000000000000000000000000000000020000000000000000000000005f5f6170706c655f6e616d65737061635f5f4457415246000000000000000000120200000000000024000000000000001a060000000000000000000000000000000000020000000000000000000000005f5f6170706c655f74797065730000005f5f4457415246000000000000000000360200000000000047000000000000003e060000000000000000000000000000000000020000000000000000000000005f5f636f6d706163745f756e77696e645f5f4c440000000000000000000000008002000000000000200000000000000088060000030000000807000001000000000000020000000000000000000000005f5f64656275675f6c696e65000000005f5f4457415246000000000000000000a0020000000000004900000000000000a80600000000000010070000010000000000000200000000000000000000000032000000180000000100000000000e0000040e00000000000200000018000000180700000300000048070000300000000b00000050000000000000000200000002000000010000000300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000fd7bbfa9fd030091a0098052fd7bc1a8c0035fd6011101250e1305030e827c0eef7f0e10171b0ee17f19110112060000022e001101120640187a19030e3a0b3b0b271949133f19e17f190000032400030e3e0b0b0b0000004f0000000400000000000801000000001d00150000002500000094000000000000009f00000000000000000000001400000002000000000000000014000000016de400000001014b0000000303010000050400636c616e672076657273696f6e2032312e312e38007372632f706174636861626c652e63002f6e69782f73746f72652f3439726e62766b70346e79776772327071636d69693064723473626a397a73372d6170706c652d73646b2d31342e342f506c6174666f726d732f4d61634f53582e706c6174666f726d2f446576656c6f7065722f53444b732f4d61634f53582e73646b004d61634f53582e73646b002f7661722f666f6c646572732f62792f716463303738737835626e366d33787637333471726a673430303030676e2f542f746d703738346470726b6f2f70726f6a65637400726570726f6275696c645f6863725f706174636861626c655f76616c756500696e7400485341480100000001000000010000000c0000000000000001000000010006000000000078ea777e2c000000e4000000010000003200000000000000485341480100000001000000000000000c000000000000000100000001000600ffffffff485341480100000001000000000000000c000000000000000100000001000600ffffffff48534148010000000100000001000000140000000000000003000000010006000300050004000b00000000003080880b3400000003010000010000004b00000024000000000000000000000000000000000014000000000000040000000000000000000000000000000045000000040027000000010101fb0e0d0001010101000000010000017372630000706174636861626c652e630001000000000902000000000000000001052c0a82060b4a0208000101000000000000003300000001000006260000000100000600000000010000063400000001000006270000000e0100000000000000000000210000000e0900008002000000000000010000000f0100000000000000000000005f726570726f6275696c645f6863725f706174636861626c655f76616c7565006c746d7031006c746d703000000000"
+            },
+            "unwindMetadataPayload": {
+              "digest": "blake3-256:92f8182a422015dbd6b15586e3de3dd9177bf74c52eeed08c96e420f3b623214",
+              "byteCount": 64,
+              "bytesHex": "1000000000000000017a520001781e01100c1f002800000018000000e4ffffffffffffff140000000000000000440e109d029e01440d1d480c1f000000000000"
+            },
+            "sourceGenerationMap": [
+              {
+                "sourcePath": "/var/folders/by/qdc078sx5bn6m3xv734qrjg40000gn/T/tmp784dprko/project/src/patchable.c",
+                "generation": 1,
+                "snapshotDigest": "blake3-256:97c9474815d8be1356a441730c166a0ce07c078442f23c14fbe97598fac6e939",
+                "lineTableDigest": "blake3-256:b4b9870cfb44dc53169c9c87efb5af978ee62af5ca92f2d6f9d10210d589322e"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "direction": "agent-to-coordinator",
+        "kind": "lifecycleEvent",
+        "messageId": "agent-lifecycle-1",
+        "rawFrameByteCount": 290,
+        "message": {
+          "schemaId": "reprobuild.hcr.agent-protocol.message.v1",
+          "transportScope": "hcr-agent-protocol",
+          "protocolVersion": 1,
+          "messageId": "agent-lifecycle-1",
+          "kind": "lifecycleEvent",
+          "lifecycleEvent": {
+            "patchId": "codetracer-hcr-patch-0001",
+            "event": "hcr/patchApplying",
+            "sequence": 1
+          }
+        }
+      },
+      {
+        "direction": "agent-to-coordinator",
+        "kind": "lifecycleEvent",
+        "messageId": "agent-lifecycle-2",
+        "rawFrameByteCount": 289,
+        "message": {
+          "schemaId": "reprobuild.hcr.agent-protocol.message.v1",
+          "transportScope": "hcr-agent-protocol",
+          "protocolVersion": 1,
+          "messageId": "agent-lifecycle-2",
+          "kind": "lifecycleEvent",
+          "lifecycleEvent": {
+            "patchId": "codetracer-hcr-patch-0001",
+            "event": "hcr/patchApplied",
+            "sequence": 2
+          }
+        }
+      },
+      {
+        "direction": "agent-to-coordinator",
+        "kind": "patchApplied",
+        "messageId": "agent-patch-applied-1",
+        "rawFrameByteCount": 728,
+        "message": {
+          "schemaId": "reprobuild.hcr.agent-protocol.message.v1",
+          "transportScope": "hcr-agent-protocol",
+          "protocolVersion": 1,
+          "messageId": "agent-patch-applied-1",
+          "kind": "patchApplied",
+          "patchApplied": {
+            "patchId": "codetracer-hcr-patch-0001",
+            "changedFunctions": [
+              "reprobuild_hcr_patchable_value"
+            ],
+            "symbolGeneration": 1,
+            "debugObjectDigest": "blake3-256:91dfc7112211d72dd1a933ab43e77ffcf7b37b052fa9c51b3a1c0f80c7f469d8",
+            "unwindMetadataDigest": "blake3-256:92f8182a422015dbd6b15586e3de3dd9177bf74c52eeed08c96e420f3b623214",
+            "sourceGenerationMapDigest": "unavailable:c-agent-does-not-parse-source-generation-map",
+            "oldCodeRetained": true,
+            "sharedLibraryPositivePath": false,
+            "dispatchAddress": "0x100634000",
+            "entryAddress": "0x10061c000"
+          }
+        }
+      }
+    ]
+  },
+  "patchApplied": {
+    "patchId": "codetracer-hcr-patch-0001",
+    "changedFunctions": [
+      "reprobuild_hcr_patchable_value"
+    ],
+    "symbolGeneration": 1,
+    "debugObjectDigest": "blake3-256:91dfc7112211d72dd1a933ab43e77ffcf7b37b052fa9c51b3a1c0f80c7f469d8",
+    "unwindMetadataDigest": "blake3-256:92f8182a422015dbd6b15586e3de3dd9177bf74c52eeed08c96e420f3b623214",
+    "sourceGenerationMapDigest": "unavailable:c-agent-does-not-parse-source-generation-map",
+    "oldCodeRetained": true,
+    "sharedLibraryPositivePath": false,
+    "dispatchAddress": "0x100634000",
+    "entryAddress": "0x10061c000"
+  }
+}
