@@ -220,3 +220,24 @@ reprobuild_default_nested_build_parallelism() {
   fi
   printf '%s\n' "${nested}"
 }
+
+# EXECUTION phase, EXCLUSIVE part: the build parallelism the nested
+# ``repro build`` gets inside a case that runs with no other test active.
+#
+# The divide above exists because the execution phase is multiplicative:
+# ``threads`` cases in flight, each able to spawn ``nested`` build workers.
+# The runner's exclusive phase breaks that assumption in the safe direction —
+# it runs the ~50 cases on ``ExclusiveStems`` strictly one at a time, on the
+# main thread, before any worker exists. With one case in flight the
+# multiplier is 1, so the same ``concurrent * nested <= budget`` invariant
+# permits the whole budget, and dividing anyway is pure waste: those cases are
+# exclusive BECAUSE they drive nested compiles, and they were getting the
+# smallest share on the emptiest machine. Below the stock default, even —
+# ``buildMaxParallelismResolved`` uses 8 when the variable is unset.
+#
+# This is the same invariant as the function above, evaluated at a divisor of
+# one. It does not change how many TESTS run at once, only how many build
+# workers the single running test may use.
+reprobuild_default_exclusive_build_parallelism() {
+  reprobuild_worker_budget "$@"
+}

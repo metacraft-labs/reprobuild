@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
-    "nimTestBinaries": 1614,
+    "nimTestBinaries": 1615,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 578,
-    "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1625
+    "staticallyDetectedRuntimeCompilerFlowTests": 101,
+    "testEntries": 1626
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1073,7 +1073,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 748,
+      "integration": 749,
       "platform/destructive": 115,
       "pure unit": 578,
       "unclassified": 172
@@ -1212,9 +1212,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1614,
+    "nimTestBinaryCount": 1615,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1625
+    "testEntryCount": 1626
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5289,6 +5289,26 @@
         }
       ],
       "source": "tests/integration/t_runner_cpu_progress_liveness.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "cmd",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd"
+          ],
+          "line": 102,
+          "path": "tests/integration/t_runner_exclusive_phase_budget.nim",
+          "patterns": [
+            "nim-c"
+          ],
+          "snippet": "let cmd = \"nim c --hints:off --warnings:off \" &"
+        }
+      ],
+      "source": "tests/integration/t_runner_exclusive_phase_budget.nim"
     },
     {
       "class": "integration",
@@ -29487,6 +29507,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_runner_exclusive_phase_budget",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_runner_exclusive_phase_budget.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_runner_progress_visibility",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -34805,7 +34840,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_reprobuild_suite_inventory.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 85,
+      "staticCaseCount": 88,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

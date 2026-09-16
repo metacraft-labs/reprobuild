@@ -136,6 +136,19 @@ const
   DefaultResultsSubdir = "test-logs/results"
   DefaultSummaryPath = "test-logs/parallel-run.json"
 
+  NestedParallelismEnv = "REPROBUILD_MAX_PARALLELISM"
+    ## The action concurrency a nested ``repro build`` inside a test process
+    ## gives itself (``buildMaxParallelismResolved``, which defaults to 8 when
+    ## the variable is absent). ``scripts/run_tests.sh`` sets it to the
+    ## per-worker share of the host budget for the execution phase.
+  ExclusiveParallelismEnv = "REPROBUILD_EXCLUSIVE_MAX_PARALLELISM"
+    ## The undivided host budget, for the phase that runs one case at a time.
+    ## Set by ``scripts/run_tests.sh`` only when it also derived
+    ## ``REPROBUILD_MAX_PARALLELISM``: an operator who pinned the build
+    ## parallelism by hand meant it for the whole run, exclusive phase
+    ## included, so nothing here overrides that. Absent or unparseable, the
+    ## exclusive phase keeps whatever the parallel phase was given.
+
   ## Test-binary basenames that are excluded from runner discovery.
   ## ``repro_test_runner`` is this binary itself (self-spawn would
   ## recurse). The rest are diagnostic / fixture / helper binaries left
@@ -4756,6 +4769,47 @@ proc main() =
     else:
       baseEnv.add((k, v))
 
+  # The exclusive phase runs ONE case at a time, so the nested-build share
+  # computed for the worker pool is the wrong number for it.
+  #
+  # ``scripts/run_tests.sh`` splits one host budget into ``threads`` test
+  # workers and ``nested = budget / threads`` workers for the ``repro build``
+  # each test process spawns, so ``threads * nested <= budget``. That
+  # invariant is about the PARALLEL phase, where ``threads`` cases really are
+  # in flight. During the exclusive phase the multiplier is 1, and handing the
+  # single running case ``budget / threads`` leaves the rest of the host idle:
+  # on a 32-core host the budget is 24, the pool gets 8 workers of 3, and the
+  # exclusive cases — which are exclusive precisely BECAUSE they drive
+  # nested compiles — each ran at 3. That is below the value they would get
+  # with the variable unset at all (``buildMaxParallelismResolved`` defaults to
+  # 8), so the split was actively derating the one phase that owns the machine.
+  #
+  # ``REPROBUILD_EXCLUSIVE_MAX_PARALLELISM`` carries the undivided budget.
+  # Applying it here keeps ``concurrent cases * nested <= budget`` true for
+  # this phase too — it is the same invariant evaluated at a divisor of one,
+  # not an exception to it. Test-level concurrency is unchanged: exactly one
+  # exclusive case runs at a time, before and after.
+  var exclusiveEnv = baseEnv
+  if exclusiveItems.len > 0:
+    let exclusiveBudget = getEnv(ExclusiveParallelismEnv, "")
+    var parsedBudget = 0
+    if exclusiveBudget.len > 0:
+      try:
+        parsedBudget = parseInt(exclusiveBudget.strip())
+      except ValueError:
+        parsedBudget = 0
+    if parsedBudget > 0:
+      var replaced = false
+      for entry in exclusiveEnv.mitems:
+        if entry.key == NestedParallelismEnv:
+          entry.value = $parsedBudget
+          replaced = true
+      if not replaced:
+        exclusiveEnv.add((NestedParallelismEnv, $parsedBudget))
+      stderr.writeLine "repro_test_runner: exclusive phase nested builds get " &
+        NestedParallelismEnv & "=" & $parsedBudget &
+        " (one case at a time owns the host)"
+
   when defined(posix):
     # mkdtemp-backed 0700 namespace prevents stale files from a crashed prior
     # runner (including a reused PID) from impersonating child completion or
@@ -4816,10 +4870,10 @@ proc main() =
         let caseTimeoutSec =
           if tc.timeoutSec > 0: tc.timeoutSec else: opts.testTimeoutSec
         if tc.protocolAware:
-          res = runOneProtocol(tc, opts.resultsDir, baseEnv,
+          res = runOneProtocol(tc, opts.resultsDir, exclusiveEnv,
             caseTimeoutSec, historyPtr, memoryLimitBytes)
         else:
-          res = runWholeBinary(tc, opts.resultsDir, baseEnv,
+          res = runWholeBinary(tc, opts.resultsDir, exclusiveEnv,
             caseTimeoutSec, historyPtr, memoryLimitBytes)
       except CatchableError as e:
         res = TestResult(
