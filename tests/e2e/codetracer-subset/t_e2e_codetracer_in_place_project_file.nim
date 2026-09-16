@@ -6,14 +6,14 @@ import repro_test_support
 
 const
   CodeTracerProjectContractCommit =
-    "602e7bb728311c230c9a42fa7fd8aab546b6467a"
+    "632fdceed037c52b0fd26b2195934bc32e82a0ed"
   PinnedCodeTracerProjectFile =
-    "tests/fixtures/codetracer-subset/repro-602e7bb7.nim"
+    "tests/fixtures/codetracer-subset/repro-632fdcee.nim"
   PinnedCodeTracerConfigFile =
-    "tests/fixtures/codetracer-subset/config-602e7bb7.nims"
+    "tests/fixtures/codetracer-subset/config-632fdcee.nims"
   PinnedCodeTracerFixtureHeaderLines = 6
   PinnedCodeTracerProjectPayloadSha256 =
-    "2a98164dfa3a03b42d3cdd440ce0ebc4a22ef592bf7a1161e267706e4d50a363"
+    "7848e4dd20607855b0900c71c5fefc393d0f6fb38ffc0d643436f6b9e81df2ad"
   PinnedCodeTracerConfigPayloadSha256 =
     "3ce6cff73a75c6bfed6e3ed9d0fe1128dff8bca2ef5ef0e23caa5450305d299e"
   # `reprobuild-provision` used to live in THIS repo, at
@@ -24,8 +24,15 @@ const
   # fixed 100-second per-action timeout, which the Windows lane could not
   # sustain. The contract below is unchanged; only where the file is read from
   # has moved, and it is now resolved from the sibling checkout.
+  #
+  # It has since moved once more, WITHIN that repo. The composite action's two
+  # per-OS inline `run:` blocks were collapsed into one `bash` step that execs
+  # `provision-reprobuild-siblings.sh`, so `action.yml` no longer contains a
+  # single `git ... submodule update` line — reading the contract from it now
+  # asserts nothing at all. Name the script that actually carries the pinned
+  # command instead.
   CodeTracerProvisionAction =
-    "reprobuild-provision/action.yml"
+    "reprobuild-provision/provision-reprobuild-siblings.sh"
   CodeTracerRequiredNimGitlinks = [
     (
       path: "libs/nim-serialization",
@@ -259,108 +266,6 @@ const CodeTracerSourcePackages = [
   "nim-acp"
 ]
 
-const IsonimAsyncCompatFixtureSource = r"""
-when defined(js):
-  import std/asyncjs
-
-  export asyncjs
-
-  type PlatformFuture*[T] = Future[T]
-
-  proc isSyncResolved*(future: PlatformFuture): bool =
-    var resolved: bool
-    {.emit: "`resolved` = (`future`.__syncResolved === true);".}
-    resolved
-
-  proc isSyncFailed*(future: PlatformFuture): bool =
-    var failed: bool
-    {.emit: "`failed` = (`future`.__syncFailed === true);".}
-    failed
-
-  proc getSyncValue*[T](future: PlatformFuture[T]): T =
-    var value: T
-    {.emit: "`value` = `future`.__syncValue;".}
-    value
-
-  proc getSyncError*(future: PlatformFuture): string =
-    var message: string
-    {.emit: "`message` = `future`.__syncError;".}
-    message
-
-  proc newCompletedFuture*[T](value: T): PlatformFuture[T] =
-    result = newPromise(proc(resolve: proc(response: T)) =
-      resolve(value))
-    {.emit: "`result`.__syncResolved = true; `result`.__syncValue = `value`;".}
-
-  proc newCompletedFuture*(): PlatformFuture[void] =
-    result = newPromise(proc(resolve: proc()) =
-      resolve())
-    {.emit: "`result`.__syncResolved = true;".}
-
-  proc newFailedFuture*[T](message: string): PlatformFuture[T] =
-    result = newPromise proc(resolve: proc(value: T)) =
-      raise newException(CatchableError, message)
-    {.emit: "`result`.__syncFailed = true; `result`.__syncError = `message`; `result`.catch(function(){});".}
-
-  proc attachPromiseHandlers[T](future: PlatformFuture[T];
-      onSuccess: proc(value: T); onError: proc(message: cstring))
-      {.importjs: "#.then(#).catch(function(err) { #(String(err && err.message || err)); })".}
-
-  proc attachPromiseHandlers(future: PlatformFuture[void];
-      onSuccess: proc(); onError: proc(message: cstring))
-      {.importjs: "#.then(#).catch(function(err) { #(String(err && err.message || err)); })".}
-
-  proc onComplete*[T](future: PlatformFuture[T]; onSuccess: proc(value: T);
-                      onError: proc(message: string) = nil) =
-    proc reject(message: cstring) =
-      if onError != nil:
-        onError($message)
-    attachPromiseHandlers(future, onSuccess, reject)
-
-  proc onComplete*(future: PlatformFuture[void]; onSuccess: proc();
-                   onError: proc(message: string) = nil) =
-    proc reject(message: cstring) =
-      if onError != nil:
-        onError($message)
-    attachPromiseHandlers(future, onSuccess, reject)
-else:
-  import std/asyncdispatch
-
-  export asyncdispatch
-
-  type PlatformFuture*[T] = Future[T]
-
-  proc newCompletedFuture*[T](value: T): PlatformFuture[T] =
-    result = newFuture[T]("isonim.async_compat.newCompletedFuture")
-    result.complete(value)
-
-  proc newCompletedFuture*(): PlatformFuture[void] =
-    result = newFuture[void]("isonim.async_compat.newCompletedFuture")
-    result.complete()
-
-  proc newFailedFuture*[T](message: string): PlatformFuture[T] =
-    result = newFuture[T]("isonim.async_compat.newFailedFuture")
-    result.fail(newException(CatchableError, message))
-
-  proc onComplete*[T](future: PlatformFuture[T]; onSuccess: proc(value: T);
-                      onError: proc(message: string) = nil) =
-    future.callback = proc(completed: Future[T]) =
-      if completed.failed:
-        if onError != nil:
-          onError(completed.error.msg)
-      else:
-        onSuccess(completed.read())
-
-  proc onComplete*(future: PlatformFuture[void]; onSuccess: proc();
-                   onError: proc(message: string) = nil) =
-    future.callback = proc(completed: Future[void]) =
-      if completed.failed:
-        if onError != nil:
-          onError(completed.error.msg)
-      else:
-        onSuccess()
-"""
-
 const IsonimHmrComponentFixtureSource = r"""
 template uiComponent*() {.pragma.}
 """
@@ -421,18 +326,49 @@ proc requireSuccess(command: repro_test_support.CmdSpec;
                     cwd = getCurrentDir()): string =
   repro_test_support.requireSuccess(command, cwd)
 
+const
+  CommandPrefix =
+    "git -C \"${WS}/codetracer\" submodule update"
+  ExactCommand = CommandPrefix &
+    " --init --depth 1 --recursive -- \\"
+  # In `provision-reprobuild-siblings.sh` the pinned command is the CONDITION
+  # of a shell `if`, so the script can report a failure with a named
+  # diagnostic instead of dying on `set -e`. That shape, and only that shape,
+  # adds two tokens the old inline-`run:` spelling did not have: a leading
+  # `if ! ` on the command line, and a `; then` closing the last continued
+  # entry.
+  #
+  # These two strippers exist so the parser sees the same tokens it always
+  # saw. They are deliberately EXACT and deliberately narrow — one fixed
+  # prefix, one fixed suffix, both re-stripped for whitespace — because every
+  # assertion below is a byte comparison against `ExactCommand` or a
+  # character-class check on an entry. Anything looser (a `contains`, a regex,
+  # a "skip leading shell noise" loop) would let a mutated command through the
+  # gate this parser exists to be, which is the one thing that must not
+  # happen: the five mutation oracles in
+  # `requireCodeTracerNimGitlinkProvisioningContract` are what prove it did
+  # not, and they are run against the real file on every pass.
+  ShellConditionPrefix = "if ! "
+  ShellConditionSuffix = "; then"
+
+proc withoutShellCondition(line: string): string =
+  if line.startsWith(ShellConditionPrefix):
+    line[ShellConditionPrefix.len .. ^1].strip()
+  else:
+    line
+
+proc withoutShellThen(entry: string): string =
+  if entry.endsWith(ShellConditionSuffix):
+    entry[0 ..< entry.len - ShellConditionSuffix.len].strip()
+  else:
+    entry
+
 proc provisionedCodeTracerNimGitlinks(actionText, actionPath: string):
     seq[string] =
-  const
-    CommandPrefix =
-      "git -C \"${WS}/codetracer\" submodule update"
-    ExactCommand = CommandPrefix &
-      " --init --depth 1 --recursive -- \\"
-
   let lines = actionText.splitLines()
   var blockStarts: seq[int]
   for index, rawLine in lines:
-    let line = rawLine.strip()
+    let line = rawLine.strip().withoutShellCondition()
     if line.startsWith(CommandPrefix):
       if line != ExactCommand:
         raise newException(MissingTestFixtureError,
@@ -456,7 +392,8 @@ proc provisionedCodeTracerNimGitlinks(actionText, actionPath: string):
 
     let hasContinuation = line.endsWith("\\")
     let entry =
-      (if hasContinuation: line[0 ..< line.high] else: line).strip()
+      if hasContinuation: line[0 ..< line.high].strip()
+      else: line.strip().withoutShellThen()
     var validEntry = entry.startsWith("libs/") and entry.len > "libs/".len
     for character in entry:
       if character notin {'a'..'z', 'A'..'Z', '0'..'9', '/', '_', '-', '.'}:
@@ -735,9 +672,27 @@ proc prepareNimLibraryFixture(sourcePath, destPath, packageName: string) =
 
 proc prepareIsonimFixture(sourcePath, destPath: string) =
   prepareNimLibraryFixture(sourcePath, destPath, "isonim")
-  createDir(destPath / "src" / "isonim" / "core")
-  writeFile(destPath / "src" / "isonim" / "core" / "async_compat.nim",
-    IsonimAsyncCompatFixtureSource)
+  # ``isonim/core/async_compat`` IS NOT SYNTHESISED HERE, AND USED TO BE.
+  #
+  # It was, back when IsoNim owned the cross-target async primitives: this
+  # file carried a ~100-line hand-written copy and overwrote the copied
+  # module with it. Those primitives have since moved to nim-everywhere and
+  # the real ``isonim/core/async_compat.nim`` is now a seven-line re-export
+  # of ``nim_everywhere/async_compat`` — which the substitute did not do.
+  #
+  # So the substitute silently became a SUBSET of the module it stood in for,
+  # and CodeTracer's frontend reaches for one of the symbols only the real one
+  # has: ``src/frontend/viewmodel/platform/outcome.nim`` imports this module
+  # and ``platform_host.nim`` calls ``drainPlatformCallbacks``, which the copy
+  # never defined. The frontend targets failed to compile against a module
+  # this test had replaced with a worse one.
+  #
+  # nim-everywhere is already prepared as a sibling package beside this
+  # fixture and is on the copied ``config.nims`` search path, so the real
+  # re-export resolves. Nothing is written here: the fixture uses the module
+  # CodeTracer actually compiles against, and a future move of these
+  # primitives fails loudly at compile time instead of being absorbed by a
+  # stale local copy.
   createDir(destPath / "src" / "isonim" / "web")
   writeFile(destPath / "src" / "isonim" / "web" / "hmr_component.nim",
     IsonimHmrComponentFixtureSource)
@@ -890,6 +845,20 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
   copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot)
   createDir(projectRoot / "src")
+  # src/frontend reads two assets out of src/config AT COMPILE TIME --
+  # `config.nim` does `staticRead("../config/default_config.yaml")` and
+  # `ui/layout.nim` does `staticRead("../../config/default_layout.json")`.
+  # A `staticRead` is a source dependency that no import graph mentions, so
+  # a subset assembled by listing modules misses it and the compile stops at
+  # `cannot open file: ../config/default_config.yaml` rather than at anything
+  # resembling the real cause. The aggregate copier below already carries
+  # both; the selected one copies the same frontend tree and needs them for
+  # the same reason.
+  createDir(projectRoot / "src" / "config")
+  copyFile(codeTracerRoot / "src" / "config" / "default_layout.json",
+    projectRoot / "src" / "config" / "default_layout.json")
+  copyFile(codeTracerRoot / "src" / "config" / "default_config.yaml",
+    projectRoot / "src" / "config" / "default_config.yaml")
   copyFile(codeTracerRoot / "src" / "helpers.js", projectRoot / "helpers.js")
   copyFile(codeTracerRoot / "src" / "helpers.js",
     projectRoot / "src" / "helpers.js")

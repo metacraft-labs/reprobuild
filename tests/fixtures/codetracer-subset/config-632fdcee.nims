@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Pinned verbatim payload from CodeTracer commit
-# 602e7bb728311c230c9a42fa7fd8aab546b6467a, config.nims.
-# Source: https://github.com/metacraft-labs/codetracer/blob/602e7bb728311c230c9a42fa7fd8aab546b6467a/config.nims
+# 632fdceed037c52b0fd26b2195934bc32e82a0ed, config.nims.
+# Source: https://github.com/metacraft-labs/codetracer/blob/632fdceed037c52b0fd26b2195934bc32e82a0ed/config.nims
 #
 # Keep every byte after this provenance header identical to the public source.
 import std/[os, strutils]

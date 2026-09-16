@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Pinned verbatim payload from CodeTracer commit
-# 602e7bb728311c230c9a42fa7fd8aab546b6467a, repro.nim.
-# Source: https://github.com/metacraft-labs/codetracer/blob/602e7bb728311c230c9a42fa7fd8aab546b6467a/repro.nim
+# 632fdceed037c52b0fd26b2195934bc32e82a0ed, repro.nim.
+# Source: https://github.com/metacraft-labs/codetracer/blob/632fdceed037c52b0fd26b2195934bc32e82a0ed/repro.nim
 #
 # Keep every byte after this provenance header identical to the public source.
 import std/[os, strutils]
@@ -79,7 +79,6 @@ const
   ]
   CodeTracerKnownSiblingDirs = [
     "codetracer-native-backend",
-    "codetracer-rr-backend",
     "codetracer-native-recorder",
     "codetracer-native-test-programs",
     "codetracer-python-recorder",
@@ -123,7 +122,12 @@ const
   ]
   CodeTracerRepoEnvAliases = [
     ("codetracer-native-backend", "CODETRACER_NATIVE_BACKEND_REPO_PATH"),
-    ("codetracer-rr-backend", "CODETRACER_RR_BACKEND_PATH"),
+    # Second alias for the SAME sibling: the RR-era variable name is what
+    # `just test` and check_rr_prerequisites still gate on. Keyed on
+    # "codetracer-rr-backend" until now, i.e. on a directory that never
+    # exists, so the dev shell never set it. The loop over this table is flat,
+    # so two entries for one repo simply export both names.
+    ("codetracer-native-backend", "CODETRACER_RR_BACKEND_PATH"),
     ("codetracer-native-recorder", "CODETRACER_NATIVE_RECORDER_REPO_PATH"),
     ("codetracer-native-test-programs", "CODETRACER_NATIVE_TEST_PROGRAMS_PATH"),
     ("codetracer-python-recorder", "CODETRACER_PYTHON_RECORDER_REPO_PATH"),
@@ -140,8 +144,32 @@ const
     ("runquota", "RUNQUOTA_SRC"),
     ("reprobuild", "CODETRACER_REPROBUILD_REPO_PATH")
   ]
-  WindowsZlibRoot = "D:/metacraft-dev-deps/zlib/1.3.1"
-  WindowsZstdRoot = "D:/metacraft-dev-deps/zstd/1.5.6/zstd-v1.5.6-win64"
+  # Relative to the Windows DIY install root. `non-nix-build/windows/
+  # ensure-zlib.ps1` and `ensure-zstd.ps1` install into `$Root/zlib/<ver>` and
+  # `$Root/zstd/<ver>` where `$Root` is whatever `Get-DefaultInstallRoot`
+  # resolved — so these READERS have to follow that root rather than pin one.
+  # They used to hard-code `D:/metacraft-dev-deps/...`, which was already
+  # wrong on any machine whose root is not D: and only stayed invisible
+  # because the bootstrap died earlier, at Ensure-Ttd.
+  WindowsZlibRelative = "zlib/1.3.1"
+  WindowsZstdRelative = "zstd/1.5.6/zstd-v1.5.6-win64"
+  # The historical default, kept verbatim so a developer box with a real D:
+  # dev drive resolves exactly as before.
+  WindowsDefaultInstallRoot = "D:/metacraft-dev-deps"
+
+# NOTE: `getEnv` here is a RUNTIME read and therefore not a tracked solver
+# input — see the buildType note at the top of this file. That is acceptable
+# for this one value because it names a per-MACHINE toolchain location rather
+# than anything that changes what is built, and because no CI lane exercises
+# it (the Windows jobs do not run tup or this Nim build; `just build-once`
+# runs only on the Linux and macOS legs).
+let
+  WindowsInstallRoot = block:
+    let fromEnv = getEnv("WINDOWS_DIY_INSTALL_ROOT").strip()
+    if fromEnv.len > 0: fromEnv.replace('\\', '/').strip(leading = false, chars = {'/'})
+    else: WindowsDefaultInstallRoot
+  WindowsZlibRoot = WindowsInstallRoot & "/" & WindowsZlibRelative
+  WindowsZstdRoot = WindowsInstallRoot & "/" & WindowsZstdRelative
   WindowsExtraPassC = @[
     "-I" & WindowsZlibRoot & "/include",
     "-I" & WindowsZstdRoot & "/include",
@@ -227,7 +255,20 @@ const
     projectRootPath / "libs/nim-uuid4/src"
   ]
   StylusCssEntryPoints = @[
-    "default_white_theme",
+    # `renderer.nim`'s `loadTheme` asks for `{name}_theme_electron.css`, so the
+    # `_electron` suffix is part of the contract rather than decoration.
+    #
+    # This list carried `default_white_theme`, which is a PALETTE — `@import
+    # "defaults"` plus colour variables, with no `@import "codetracer"` and so
+    # no rules at all. It compiled to a 0-byte file every time, silently, and
+    # the light theme was never built by `just build-once`.
+    # `toolbar-marks-contrast.spec.ts` had to carry a note telling readers the
+    # stylesheet its own error message asks for cannot be produced on macOS.
+    #
+    # `default_white_theme_electron` is the entry point that pairs that palette
+    # with `codetracer.styl`. Same fix in `nix/packages/default.nix`, which had
+    # the identical substitution in the packaged build.
+    "default_white_theme_electron",
     "default_dark_theme_electron",
     "default_dark_theme_extension",
     "loader",
@@ -753,12 +794,33 @@ package codeTracer:
       output = buildDebugPath("tests/reload_bootstrap_host.js"))
     target("reload-bootstrap-host-js", reloadBootstrapHost)
 
+    # `hotCodeReloadingOn` is OFF for the renderer on purpose.
+    #
+    # Under `--hotCodeReloading`, jsgen names a routine with
+    # `idOrSig` (compiler/sighashes.nim) instead of `mangleProcNameExt`.
+    # `idOrSig` is a hash of the routine's OWN signature plus a
+    # MODULE-LOCAL collision counter, and it appends the module name only
+    # for `ccInline` procs.  An anonymous `proc()` closure inside a
+    # generic — `createMemo`'s `initialFn`/`wrappedFn` in
+    # `isonim/core/computation.nim` — therefore hashes identically in
+    # every module that instantiates `createMemo[T]` (the closure's type
+    # is `proc()`, independent of `T`), gets the same `_2` counter in
+    # each, and is emitted as several top-level functions sharing one JS
+    # name.  JS keeps the LAST declaration, so `createMemo[CapabilityRung]`
+    # in one module ran another module's `createMemo[T']` body and copied
+    # the value with the WRONG type descriptor: `nimCopy` walked an enum
+    # as a 7-field tuple, read an absent `path` field as `undefined`, and
+    # threw `undefined.slice(0)` out of `nimCopy`'s `tyString` branch —
+    # inside `createUIComponents`, so the editor never mounted.
+    #
+    # Without HCR, `mangleProcNameExt` names every routine
+    # `__<module>_u<itemId>`, which is unique across modules.
     let frontendUiJs = ctNimJs(
       definesValue = CommonNimDefines & HmrRendererDefines,
       outputPath = buildDebugPath("ui.js"),
       sourcePath = "src/frontend/ui_js.nim",
       debugInfoOnValue = true,
-      hotCodeReloadingOnValue = true)
+      hotCodeReloadingOnValue = false)
     target("frontend-ui-js", frontendUiJs)
 
     let frontendPublicUiJs = fs.copyFile(
@@ -794,7 +856,15 @@ package codeTracer:
       sourcePath = "src/frontend/subwindow.nim",
       debugInfoOnValue = true,
       sourcemapOnValue = true,
-      hotCodeReloadingOnValue = true)
+      # Off for the same reason as `frontend-ui-js` above: under
+      # `--hotCodeReloading` jsgen names non-inline routines with a
+      # module-local counter, so one generic's anonymous closures collide
+      # across modules in a single bundle.  This bundle has not grown
+      # enough isonim-instantiating modules to collide yet — but it is the
+      # same trap armed, and it does not even build with `-d:ctHmr`
+      # (`RendererDefines`, not `HmrRendererDefines`), so the flag bought
+      # it nothing.
+      hotCodeReloadingOnValue = false)
     target("frontend-subwindow-js", frontendSubwindowJs)
 
     let frontendSrcSubwindowJs = fs.copyFile(
@@ -926,18 +996,28 @@ package codeTracer:
 
     var codetracerActions: seq[BuildActionDef] = @[]
 
+    # The files `ct` READS ON STARTUP, as opposed to the ones the product
+    # merely ships. `ct` resolves them under `<prefix>/config/` (`configDir`
+    # in src/common/config.nim), and on a profile with no
+    # `~/.config/codetracer/.config.yaml` yet, `loadConfig` COPIES
+    # `default_config.yaml` there before doing anything else — so a tree
+    # without them does not degrade, it dies with an uncaught OSError on the
+    # first command that loads config. They are collected here so the `ct`
+    # target below can name them; see the comment at that call.
+    var ctStartupAssets: seq[BuildTargetDef] = @[]
+
     if fileExists("src/config/default_layout.json"):
       let defaultLayout = fs.copyFile(
         source = "src/config/default_layout.json",
         output = buildDebugPath("config/default_layout.json"))
-      target("config-default-layout-json", defaultLayout)
+      ctStartupAssets.add(target("config-default-layout-json", defaultLayout))
       codetracerActions.add(defaultLayout)
 
     if fileExists("src/config/default_config.yaml"):
       let defaultConfig = fs.copyFile(
         source = "src/config/default_config.yaml",
         output = buildDebugPath("config/default_config.yaml"))
-      target("config-default-config-yaml", defaultConfig)
+      ctStartupAssets.add(target("config-default-config-yaml", defaultConfig))
       codetracerActions.add(defaultConfig)
 
     let hasFrontendInputs =
@@ -1005,16 +1085,47 @@ package codeTracer:
     # checkout, worktree and sandboxed build on the machine share a single
     # object directory keyed only by target name, so two builds of the same
     # target from different source roots overwrote each other's ``.o`` files
-    # and produced undefined-reference link failures. Honouring ``$TMPDIR``
-    # lets a caller that already scopes its temp directory (test harnesses,
-    # CI runners, sandboxes) scope the nimcache with it. The nimcache path is
+    # and produced undefined-reference link failures. The nimcache path is
     # consumed raw by nim.exe (not via bash), so backslash mixing is OK.
-    let ctNimCacheRoot =
+    #
+    # HONOURING ``$TMPDIR`` WAS NOT ENOUGH, and the paragraph above used to
+    # stop there and claim the defect fixed. ``$TMPDIR`` is per-USER on macOS
+    # and usually unset on Linux, so on the machine this is developed on it
+    # resolves to one directory for every checkout — which is the collision it
+    # was supposed to end, with an extra step. It helps only the callers that
+    # already scope their own temp directory (sandboxes, some CI runners), and
+    # those are not the common case.
+    #
+    # So the checkout itself is in the key. ``getCurrentDir()`` is the source
+    # root the build is running in — the same discrimination
+    # ``ci/lib/nim-cache-root.sh`` makes for the shell gates, which see the
+    # identical problem from the identical cause.
+    #
+    # FNV-1a WRITTEN OUT RATHER THAN ``std/hashes``: this value names a
+    # directory that must be found again on the next build, and ``hash()``
+    # offers no cross-version stability guarantee — a Nim upgrade would
+    # silently orphan every cache. This is fixed by definition. It is not a
+    # security boundary and does not need to be; it needs to differ when the
+    # path differs.
+    let ctNimCacheKey = block:
+      var h: uint64 = 0xcbf29ce484222325'u64
+      for ch in getCurrentDir():
+        h = h xor uint64(ord(ch))
+        h = h * 0x100000001b3'u64
+      toHex(h, 16).toLowerAscii()
+
+    let ctNimCacheBase =
       when defined(windows):
         (getEnv("TEMP") / "ct-nim-cache").replace('\\', '/')
       else:
         (if getEnv("TMPDIR").len > 0: getEnv("TMPDIR") else: "/tmp") /
           "ct-nim-cache"
+
+    # The basename is kept alongside the digest only so that a human reading
+    # the directory listing can tell the checkouts apart; the digest is what
+    # makes them distinct.
+    let ctNimCacheRoot =
+      ctNimCacheBase / (getCurrentDir().lastPathPart & "-" & ctNimCacheKey)
 
     if fileExists("src/ct/db_backend_record.nim"):
       let dbBackendRecord = ctNative(
@@ -1029,8 +1140,30 @@ package codeTracer:
         nimcachePath = ctNimCacheRoot & "/codetracer_codetracer_binary",
         outputPath = buildDebugPath("bin/ct"),
         sourcePath = "src/ct/codetracer.nim")
-      target("ct", ct)
+      # `ct` names a ct THAT STARTS: the binary plus the startup assets it
+      # reads out of `<prefix>/config/`. The name used to be attached to the
+      # compile alone, so `repro build ct` scheduled exactly one action and
+      # produced a `bin/ct` with no `config/` beside it. That is how
+      # reprobuild's Test job — `CODETRACER_REPROBUILD_TARGET=ct`, then
+      # `$CT_BIN test --incremental` — kept turning its mainline red on
+      # scripts/require-runtime-assets.sh, which runs at the end of EVERY
+      # build-once.sh build and is right to: the tree it was handed could not
+      # run `ct`.
+      #
+      # Fixed here rather than by letting callers name the three targets
+      # themselves. The guard applies to every build regardless of target, so
+      # "ask for `ct`, get something that cannot start" is a trap for the next
+      # caller as much as it was for this one, and the composition it would
+      # have to spell is not discoverable from the target list.
+      #
+      # `ct-binary` keeps a handle on the compile alone — for "relink the
+      # binary, skip the copies" — and is the id the build progress line
+      # shows for that action.
+      target("ct-binary", ct)
+      aggregate("ct", actions = @[ct], targets = ctStartupAssets)
       codetracerActions.add(ct)
+
+    var auxiliaryActionIds: seq[string] = @[]
 
     if fileExists("src/ct_test/ct_test.nim"):
       # The standalone cross-language test driver (`ct-test test discover` /
@@ -1100,8 +1233,13 @@ package codeTracer:
         nimcache = ctNimCacheRoot & "/ct_test_codetracer_binary",
         paths = CodeTracerNimPaths,
         output = buildDebugPath("bin/ct-test" & (when defined(windows): ".exe" else: "")),
+        extraOutputs = when defined(macosx):
+          @[buildDebugPath("bin/ct-test.dSYM")]
+        else:
+          @[],
         source = "src/ct_test/ct_test.nim")
       target("ct-test", ctTest)
+      auxiliaryActionIds.add(ctTest.id)
 
     if hasFrontendInputs and hasDbBackendRecordInput and hasCtInput:
       let codetracer = aggregate("codetracer",
@@ -1124,7 +1262,30 @@ package codeTracer:
           "cp resources/electron \"$MACOS/bin/electron\"\n" &
           "cp src/helpers.js \"$MACOS/src/helpers.js\"\n" &
           "cp src/helpers.js \"$MACOS/helpers.js\"\n" &
-          "if [ -d node_modules ]; then cp -a node_modules \"$MACOS/node_modules\"; fi\n" &
+          # `cp -a node_modules` used to sit here, and `cp -a` implies `-d`:
+          # it preserves symlinks. In a Nix dev shell `node_modules` IS a
+          # symlink into the store (nix/shells/ci-base.nix and
+          # scripts/build-once.sh both create it that way), so the .app shipped
+          # to users carried
+          #
+          #   Contents/MacOS/node_modules
+          #     -> /nix/store/dfpgz…-node-modules-derivation/bin/node_modules
+          #
+          # an ABSOLUTE path into the build machine's store. Measured on the
+          # published `CodeTracer-latest-arm64.dmg` (downloaded 2026-09-03,
+          # built 2026-08-30): 566 regular files in the whole bundle, no
+          # dependency tree at all. It resolved on the builder and on the
+          # `dmg-lib-check` runner because those are the same self-hosted
+          # aarch64-darwin host, which is why no release check ever saw it.
+          #
+          # The stager copies the CONTENTS, pruned to the production closure —
+          # both halves, because dereferencing alone would ship the development
+          # tree (measured here: 550 packages / 26,452 files / 297.6 MB outside
+          # the closure) that the AppImage stopped shipping in 0d5ad67d.
+          "if [ -e node_modules ]; then\n" &
+          "  python3 scripts/stage-desktop-node-modules.py stage " &
+            "node_modules \"$MACOS/node_modules\"\n" &
+          "fi\n" &
           "if [ -e \"$MACOS/bin/ct\" ]; then\n" &
           "  mv \"$MACOS/bin/ct\" \"$MACOS/bin/ct_unwrapped\"\n" &
           "  cat >\"$MACOS/bin/ct\" <<'EOF'\n" &
@@ -1227,15 +1388,69 @@ package codeTracer:
           "    fi\n" &
           "  done\n" &
           "}\n" &
+          # `../../`, NOT `../`. These binaries live in `Contents/MacOS/bin`,
+          # so one level up is `Contents/MacOS` and the Frameworks directory is
+          # two. The published 2026-08-30 dmg shipped `../` and every native
+          # program in it died before main():
+          #
+          #   dyld[65642]: Library not loaded:
+          #       @executable_path/../Frameworks/libcrypto.3.dylib
+          #     Reason: tried: '.../Contents/MacOS/Frameworks/libcrypto.3.dylib'
+          #       (no such file)
+          #
+          # The library was never missing -- all ten were in Contents/Frameworks
+          # the whole time. Only the load command was wrong, which is why a gate
+          # that walks symlinks and file trees could not see it;
+          # ci/test/macho-closure.py reads the load commands themselves.
+          #
+          # `@loader_path` rather than `@executable_path`: for a main executable
+          # the two are identical, but this loop rewrites whatever in `bin/` has
+          # the exec bit, and if a dylib ever lands there @executable_path would
+          # silently mean some other program's directory. @loader_path is the
+          # file's own directory in every case.
           "find \"$MACOS/bin\" -type f -print | while IFS= read -r binary; do\n" &
           "  [ -x \"$binary\" ] || continue\n" &
-          "  rewrite_macho_deps \"$binary\" '@executable_path/../Frameworks'\n" &
+          # Copied from the Nix store, which is 0555/0444, and install_name_tool
+          # writes in place -- the same read-only trap that stopped patchelf in
+          # the AppImage closure pass (1f7ca8dd).
+          "  chmod u+w \"$binary\"\n" &
+          "  rewrite_macho_deps \"$binary\" '@loader_path/../../Frameworks'\n" &
           "done\n" &
           "find \"$FRAMEWORKS\" -type f -print | while IFS= read -r dylib; do\n" &
           "  chmod u+w \"$dylib\"\n" &
           "  install_name_tool -id \"@rpath/$(basename \"$dylib\")\" \"$dylib\" 2>/dev/null || true\n" &
           "  rewrite_macho_deps \"$dylib\" '@loader_path'\n" &
-          "done",
+          "done\n" &
+          # Re-sign LAST, after every load-command edit. Editing a Mach-O
+          # invalidates the signature it was carrying, and on arm64 an invalid
+          # signature is not a link error -- the kernel kills the process, which
+          # looks nothing like the dyld message above and sends the next reader
+          # hunting the wrong defect. The shipped binaries are `adhoc,
+          # linker-signed`, so ad-hoc (`-s -`) is what restores them in kind.
+          #
+          # Not `--deep`: it is deprecated and it re-signs nested code that this
+          # loop already covers file by file. Frameworks first, then bin/, so a
+          # signature is never invalidated by a later edit to something it
+          # contains.
+          "find \"$FRAMEWORKS\" -type f -print | while IFS= read -r dylib; do\n" &
+          "  codesign -s - --force \"$dylib\" 2>/dev/null || true\n" &
+          "done\n" &
+          "find \"$MACOS/bin\" -type f -print | while IFS= read -r binary; do\n" &
+          "  [ -x \"$binary\" ] || continue\n" &
+          "  codesign -s - --force \"$binary\" 2>/dev/null || true\n" &
+          "done\n" &
+          # LAST, because it has to see the finished tree.
+          #
+          # Six of the .app's eight symlinks come from `src/public/third_party/`
+          # — committed links whose `../../../..` counts levels from the BUILD
+          # TREE to the repository root. Copied into the bundle that same count
+          # lands on `CodeTracer.app` itself, which has no `node_modules`, so
+          # they are broken in the published dmg on every machine including the
+          # builder's. `relink` re-aims them at the staged tree and FAILS on any
+          # symlink it cannot resolve inside the bundle, so a future asset that
+          # points outside is a red build rather than a missing panel.
+          "python3 scripts/stage-desktop-node-modules.py relink " &
+            "\"$APP_ROOT\" \"$MACOS/node_modules\"",
           extraInputsValue = @[
             "resources/electron",
             "resources/Icon.iconset",
@@ -1243,7 +1458,15 @@ package codeTracer:
             "src/ct/version.nim",
             "src/helpers.js",
             "node_modules",
-            "scripts/build-once.sh"
+            "scripts/build-once.sh",
+            # The stager and everything it reads: it computes the production
+            # closure from the workspace manifest + lockfile through the same
+            # module `ci/test/electron-supply-chain.sh` checks the artefact
+            # against, so a change to any of them changes this bundle.
+            "scripts/stage-desktop-node-modules.py",
+            "ci/test/electron-supply-chain-closure.py",
+            "node-packages/package.json",
+            "node-packages/yarn.lock"
           ],
           extraOutputsValue = @["non-nix-build/CodeTracer.app"],
           afterValue = codetracerActions & frontendActions & styleActions)
@@ -1309,16 +1532,47 @@ package codeTracer:
           "fs.cpSync(" & escape(buildDebugRootPath) & ",APP_ROOT,{recursive:true});" &
           "fs.copyFileSync('src/helpers.js',path.join(APP_ROOT,'src/helpers.js'));" &
           "fs.copyFileSync('src/helpers.js',path.join(APP_ROOT,'helpers.js'));" &
-          "if(fs.existsSync('node_modules'))" &
-            "fs.cpSync('node_modules',path.join(APP_ROOT,'node_modules')," &
-              "{recursive:true,dereference:false});" &
+          # node_modules is NOT copied here any more. `dereference:false` had
+          # the same shape as macOS's `cp -a`: it preserves symlinks, and
+          # `node_modules` in a configured checkout is one
+          # (`non-nix-build/env.sh:88` links it at `node-packages/node_modules`,
+          # `scripts/build-once.sh:322` at the Nix store path). The installer's
+          # `File /r "${STAGING_DIR}\*.*"` would then pack a link whose target
+          # is nowhere on the user's machine — the same defect measured in the
+          # published macOS dmg, on a platform where dangling symlinks are worse
+          # because creating them needs a privilege the installer may not have.
+          #
+          # `scripts/stage-desktop-node-modules.py` does the copy instead, so
+          # both desktop bundles get the same dereferenced, production-pruned
+          # tree from one implementation. `python3` is a declared tool of this
+          # recipe on every platform (see the `uses:` block above), unlike the
+          # POSIX-only entries next to it.
           "fs.copyFileSync('resources/CodeTracer.ico',path.join(APP_ROOT,'CodeTracer.ico'));" &
           "const ctExe=path.join(APP_ROOT,'bin','ct.exe');" &
           "if(fs.existsSync(ctExe)){" &
             "fs.renameSync(ctExe,path.join(APP_ROOT,'bin','ct_unwrapped.exe'));" &
             "fs.writeFileSync(path.join(APP_ROOT,'bin','ct.bat')," &
               escape(ctBatContents) & ");" &
-          "}"
+          "}" &
+          # `execFileSync`, not a shell: this action is `node -e` rather than a
+          # `ctShell` precisely to keep every child a single CreateProcessW and
+          # stay clear of the Git-Bash fork-emulation wedge documented above.
+          # `python3` first, then `python`, because Windows Python installs
+          # publish the latter and reprobuild's tool provisioning resolves the
+          # declared `python3` on POSIX.
+          "const cp=require('node:child_process');" &
+          "function py(args){" &
+            "for(const exe of ['python3','python']){" &
+              "try{cp.execFileSync(exe,args,{stdio:'inherit'});return;}" &
+              "catch(e){if(e.code==='ENOENT')continue;throw e;}" &
+            "}" &
+            "throw new Error('windows-app: no python3/python on PATH; " &
+              "cannot stage node_modules');" &
+          "}" &
+          "const NM=path.join(APP_ROOT,'node_modules');" &
+          "if(fs.existsSync('node_modules'))" &
+            "py(['scripts/stage-desktop-node-modules.py','stage','node_modules',NM]);" &
+          "py(['scripts/stage-desktop-node-modules.py','relink',APP_ROOT,NM]);"
         let windowsApp = node(
           args = @["-e", windowsAppScript],
           actionId = "windows-app",
@@ -1326,7 +1580,11 @@ package codeTracer:
             "resources/CodeTracer.ico",
             "src/ct/version.nim",
             "src/helpers.js",
-            "node_modules"
+            "node_modules",
+            "scripts/stage-desktop-node-modules.py",
+            "ci/test/electron-supply-chain-closure.py",
+            "node-packages/package.json",
+            "node-packages/yarn.lock"
           ],
           extraOutputs = @[appRoot],
           after = codetracerActions & frontendActions & styleActions)
@@ -1437,11 +1695,20 @@ package codeTracer:
       if ws.len == 0:
         break docsBookIsonim
 
-      # The eight paths ci/deploy/docs.sh writes, in its order.  A missing
+      # The nine paths ci/deploy/docs.sh writes, in its order.  A missing
       # sibling aborts the whole block: half a path set produces a confusing
       # "cannot open file" deep inside the SSG rather than an honest skip.
+      #
+      # `codetracer-design-system/nim` supplies `metacraft_docs_theme`, which
+      # `src/theme_tokens.nim` imports.  It was missing from this list while
+      # `ci/deploy/docs.sh:284` had it, so the deploy lane built the book and
+      # the `docs-book` action did not: it failed with
+      # `cannot open file: metacraft_docs_theme`.  The two path sets are the
+      # same set by contract -- keep them in the same order so a diff of this
+      # list against docs.sh's heredoc stays a one-to-one read.
       const BookSiblingPaths = [
-        ("isonim-docs", "src"), ("isonim", "src"),
+        ("isonim-docs", "src"), ("codetracer-design-system", "nim"),
+        ("isonim", "src"),
         ("nim-everywhere", "src"), ("nim-faststreams", ""),
         ("nim-stew", ""), ("isonim", "vendor/chronicles"),
         ("isonim", "vendor/serialization"),
@@ -1454,7 +1721,18 @@ package codeTracer:
           missingSibling = true
           break
         let full = if subPath.len > 0: repoRoot / subPath else: repoRoot
-        cfgLines.add("--path:\"" & full & "\"")
+        # Force forward slashes, for the same reason as ``buildDebugPath``:
+        # the value is interpolated into a file whose parser treats ``\`` as
+        # an escape introducer.  Here that parser is Nim's own cfg reader,
+        # which lexes the ``"..."`` as a string literal -- so on Windows
+        # ``--path:"M:\m\blocktracer\isonim-docs\src"`` dies at the first
+        # backslash pair with ``nim.cfg(1, 12) Error: invalid character
+        # constant`` (``\m``), or ``expected a hex digit`` under ``C:\Users``
+        # (``\U``).  That kills the whole ``docs-book`` action before the
+        # book is built.  ``nim`` accepts forward slashes in ``--path`` on
+        # Windows (``nim dump`` shows all nine registered), and POSIX repo
+        # paths carry no backslashes, so this is a no-op off Windows.
+        cfgLines.add("--path:\"" & full.replace('\\', '/') & "\"")
       if missingSibling:
         break docsBookIsonim
 
@@ -1495,3 +1773,16 @@ package codeTracer:
           @["scripts/docs/capture-visual-recording-screenshots.sh"],
         cacheableValue = false)
       target("docs-book-assets", bookAssets)
+
+    if not (hasFrontendInputs and hasDbBackendRecordInput and hasCtInput):
+      # A source-subset checkout intentionally exposes every action whose
+      # inputs were materialised. Preserve that legacy no-target graph while
+      # keeping auxiliary tools opt-in: without an explicit default,
+      # reprobuild's compatibility fallback would also schedule `ct-test`.
+      var sourceSubsetActions: seq[BuildActionDef] = @[]
+      for action in registeredBuildActions():
+        if action.id notin auxiliaryActionIds:
+          sourceSubsetActions.add(action)
+      let codetracer = aggregate("codetracer",
+        actions = sourceSubsetActions)
+      defaultBuildAction(codetracer)

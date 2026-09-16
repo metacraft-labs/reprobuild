@@ -134,7 +134,7 @@ require_contains tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_f
   '"CODETRACER_TRACE_FORMAT_NIM_SRC",'
 require_contains tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim \
   'let pinnedSource = getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC")'
-require_contains tests/fixtures/codetracer-subset/config-602e7bb7.nims \
+require_contains tests/fixtures/codetracer-subset/config-632fdcee.nims \
   'addPathIfDir(getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC"))'
 
 # The incremental-test seam (``ct_incremental_adapter.nim``), for the same

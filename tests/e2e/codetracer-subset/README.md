@@ -34,23 +34,30 @@ that the selected source slice resolves the same checked-in libraries.
 
 The in-place project-file tests use exact `repro.nim` and `config.nims`
 payloads pinned from reviewed CodeTracer `dev` commit
-`602e7bb728311c230c9a42fa7fd8aab546b6467a`. The files retain CodeTracer's
+`632fdceed037c52b0fd26b2195934bc32e82a0ed`. The files retain CodeTracer's
 `AGPL-3.0-or-later` license in explicit SPDX/provenance headers. Every byte
 after those headers is identical to the corresponding public source:
 
-- `https://github.com/metacraft-labs/codetracer/blob/602e7bb728311c230c9a42fa7fd8aab546b6467a/repro.nim`
-- `https://github.com/metacraft-labs/codetracer/blob/602e7bb728311c230c9a42fa7fd8aab546b6467a/config.nims`
+- `https://github.com/metacraft-labs/codetracer/blob/632fdceed037c52b0fd26b2195934bc32e82a0ed/repro.nim`
+- `https://github.com/metacraft-labs/codetracer/blob/632fdceed037c52b0fd26b2195934bc32e82a0ed/config.nims`
 
-This pin advances the contract from `879d1b22`, whose `repro.nim` scoped every
-build's Nim object cache to a single hardcoded `/tmp/ct-nim-cache`. That made
-every checkout, worktree and sandboxed build on a host share one object
-directory keyed only by target name, so two builds of the same target from
-different source roots overwrote each other's `.o` files and the `ct` and
-`codetracer` aggregate cases failed with undefined-reference link errors.
-`602e7bb7` derives that root from the ambient temporary directory instead, so a
-caller that already scopes its own `$TMPDIR` scopes the object cache with it.
-`config.nims` is unchanged between the two commits; its payload digest is
-therefore identical to the one this file previously recorded.
+This pin advances the contract from `602e7bb7`, which was 978 commits behind
+CodeTracer `dev` and whose `repro.nim` no longer matched any sibling checkout a
+developer is likely to have. That is exactly the drift these cases exist to
+report, and the report was correct: the remedy is to refresh the fixture, not
+to relax the comparison.
+
+`632fdceed` is not an arbitrary newer commit. It is the revision reprobuild
+already selected for its `codetracer-src` flake input when that pin was last
+moved deliberately (CodeTracer PR #723, "read a Nim import clause as a
+statement, not as one line"), and the revision the Reprobuild suite's own
+measurements are recorded against. Choosing it keeps the vendored project
+contract and the flake-pinned CodeTracer source on the same reviewed commit
+instead of inventing a third CodeTracer revision for this repository to track.
+
+`config.nims` is unchanged between `602e7bb7` and `632fdceed`; its payload
+digest is therefore identical to the one this file previously recorded. Only
+`repro.nim` moved.
 
 The real sibling still supplies every source file copied and built by the
 tests. Using Reprobuild-owned graph/config fixtures keeps an unrelated local
