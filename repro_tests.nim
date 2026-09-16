@@ -13302,6 +13302,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_workspace_sync_summary_counts_a_force_reset.nim",
+    binary: "build/test-bin/t_workspace_sync_summary_counts_a_force_reset",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_workspace_vcs_clone_cacheable.nim",
     binary: "build/test-bin/t_workspace_vcs_clone_cacheable",
     defines: @[],

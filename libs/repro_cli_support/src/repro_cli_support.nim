@@ -31509,6 +31509,21 @@ type
 proc summarize*(report: WorkspaceSyncReport): WorkspaceSyncSummary =
   result.total = report.repos.len
   for entry in report.repos:
+    # ``force_reset`` is tested BEFORE the status switch, and that ordering is
+    # the whole fix. A successful ``--force-sync`` overwrite reports
+    # ``executionStatus = "succeeded"``, so the switch claimed it on its
+    # first arm and the ``action == "force_reset"`` tests — which sat only in
+    # the ``noop`` and ``else`` arms — were never reached. Measured: three
+    # repos force-reset, ``summary.forceReset`` = 0, all three counted as
+    # ordinary successes. The digest's one line about destruction read zero
+    # while the destruction happened.
+    #
+    # A force-reset that FAILED or was REFUSED is not a force-reset, so those
+    # statuses fall through to the switch and are counted as what they are.
+    if entry.action == "force_reset" and entry.executionStatus notin
+        ["failed", "clone_failed", "declared_branch_missing", "refused"]:
+      inc result.forceReset
+      continue
     case entry.executionStatus
     of "succeeded": inc result.succeeded
     of "cloned": inc result.cloned
@@ -31516,14 +31531,8 @@ proc summarize*(report: WorkspaceSyncReport): WorkspaceSyncSummary =
     of "clone_failed", "declared_branch_missing": inc result.cloneFailed
     of "refused": inc result.refused
     of "failed": inc result.failed
-    of "noop":
-      if entry.action == "force_reset": inc result.forceReset
-      else: inc result.noop
-    else:
-      # Force-reset surfaces as a non-"noop" status path; count it via the
-      # action tag so it is not silently dropped from the digest.
-      if entry.action == "force_reset": inc result.forceReset
-      else: inc result.noop
+    of "noop": inc result.noop
+    else: inc result.noop
 
 proc toJsonNode*(summary: WorkspaceSyncSummary): JsonNode =
   result = newJObject()
