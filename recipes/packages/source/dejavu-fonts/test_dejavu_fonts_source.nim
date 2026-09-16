@@ -67,7 +67,13 @@ suite "DejaVu fonts source recipe":
     # FontForge generates the TTFs from the upstream SFD sources; make
     # drives the generated Makefile. Losing either dependency means no
     # font family is produced at all.
-    check registeredNativeBuildDeps("dejavuFontsSource") ==
+    # AUTHORED, not the full row: reprobuild's fetch and install-mirror
+    # emitters append the commands their generated scripts run (``sh``,
+    # ``curl``, ``tar``, ``patchelf``, …) to every ``fetch:``-bearing
+    # recipe. That set is pinned by ``t_source_fetch_tool_metadata`` /
+    # ``t_install_mirror_tool_metadata``; what this case states is what
+    # the RECIPE declared, so it reads the authored accessor.
+    check registeredAuthoredNativeBuildDeps("dejavuFontsSource") ==
       @["make", "fontforge"]
     check registeredBuildDeps("dejavuFontsSource").len == 0
     check registeredRuntimeDeps("dejavuFontsSource").len == 0
