@@ -1,4 +1,4 @@
-# test_hax_m1_binary_type_layout_diff_detects_field_shifts.nim
+# type_layout_driver.nim
 #
 # Automated Integration Verification Gate for Milestone HAX-M1:
 # "Pre-Flight Binary AST Type Layout Validation"

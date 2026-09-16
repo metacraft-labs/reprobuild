@@ -126,7 +126,7 @@ echo "  [OK] Compiled real objects: gen1.o ($(wc -c < "$GEN1_O" | tr -d ' ') B),
 # -----------------------------------------------------------------------------
 echo "[3/5] Compiling Nim integration test driver..."
 
-DRIVER_SRC="$REPO_ROOT/tests/integration/test_hax_m0_reverse_relocation_index_and_dead_patch_reachability.nim"
+DRIVER_SRC="$REPO_ROOT/tests/fixtures/hcr/reachability_driver.nim"
 DRIVER_BIN="$WORK_DIR/test_hax_m0_driver"
 
 nim c --hints:off --warnings:off \

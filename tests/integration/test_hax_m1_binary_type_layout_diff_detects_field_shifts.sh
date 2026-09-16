@@ -206,7 +206,7 @@ echo "  [OK] Compiled real objects with DWARF debug info."
 # -----------------------------------------------------------------------------
 echo "[3/5] Compiling Nim integration test driver..."
 
-DRIVER_SRC="$REPO_ROOT/tests/integration/test_hax_m1_binary_type_layout_diff_detects_field_shifts.nim"
+DRIVER_SRC="$REPO_ROOT/tests/fixtures/hcr/type_layout_driver.nim"
 DRIVER_BIN="$WORK_DIR/test_hax_m1_driver"
 
 nim c --hints:off --warnings:off \
