@@ -2081,7 +2081,12 @@ proc validateTarEntries(archivePath, archiveType: string) =
       @["-tjf", tarOperand(archivePath)]
     of "tar":
       @["-tf", tarOperand(archivePath)]
-    of "zip", "7z", "7z.exe", "raw", "conda":
+    of "zip", "7z", "7z.exe", "raw", "conda", "tar.zst", "tzst",
+        "pkg.tar.zst":
+      # Formats this pre-flight listing does not inspect. For the archive
+      # types host `tar` cannot read directly, listing would need the same
+      # decompression the extraction arm performs, which is work done twice
+      # to answer a question the extraction already answers.
       return
     else:
       raise newException(ValueError,
@@ -2126,6 +2131,15 @@ proc resolveZipExtractor(): tuple[exe: string; kind: string] =
     "tool-resolution failed: no zip extractor available (looked for " &
     (when defined(windows): "powershell + unzip" else: "unzip + powershell") &
     ")")
+
+proc resolveZstdExe(): string =
+  ## A standalone ``zstd`` for decompressing ``.tar.zst`` payloads.
+  ##
+  ## Separate from the conda arm's richer probe, which additionally looks for
+  ## a tar that speaks zstd natively so it can do the whole job in one pass.
+  ## Here the two steps are always separate — decompress, then untar — so the
+  ## only question is whether a zstd exists.
+  uncontrolledFindExe("zstd")
 
 proc resolveSevenZipExe(): string =
   ## Look up a `7z` / `7z.exe` on PATH. Used for `.7z` archives and
@@ -2572,6 +2586,44 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
     finally:
       removeDir(extendedPath(staging))
     flattenStripComponents(destination, stripComponents)
+  of "tar.zst", "tzst", "pkg.tar.zst":
+    # MSYS2 distributes its packages as ``<name>-<version>.pkg.tar.zst``, and
+    # nothing else in this catalog needed that format until a project asked
+    # for tmux — which has no native Windows build and runs on the MSYS2
+    # POSIX layer, so the MSYS2 package IS the upstream artifact.
+    #
+    # Decompress then untar, in two steps, rather than asking tar to do both:
+    # GNU tar shells out to a separate zstd and dies with "zstd: Cannot exec"
+    # when it is absent, while bsdtar links libzstd and handles it directly.
+    # Probing for which one is present is what the conda arm below does,
+    # because it has a second reason to care; here the two-step form works
+    # against either tar and is the shape the other ``.tar.zst`` call sites
+    # in this tree already use.
+    let zstdExe = resolveZstdExe()
+    if zstdExe.len == 0:
+      raise newException(OSError,
+        "tool-resolution failed: extracting " & archivePath &
+        " needs a `zstd` on PATH and none was found. MSYS2 packages are " &
+        "zstd-compressed tarballs; install zstd (it ships with Git for " &
+        "Windows' MSYS runtime and with 7-Zip 22+) and retry.")
+    let staging = destination & ".zst-staging"
+    removeDir(extendedPath(staging))
+    createDir(extendedPath(staging))
+    try:
+      let payloadTar = staging / "payload.tar"
+      let zstdRes = uncontrolledExecCmdEx(shellCommand(
+        @[zstdExe, "-d", "-f", "-q", "-o", payloadTar, archivePath]))
+      if zstdRes.exitCode != 0:
+        raise newException(OSError,
+          "tool-resolution failed: decompressing " & archivePath & " with " &
+          zstdExe & " exited " & $zstdRes.exitCode & "\n" & zstdRes.output)
+      # Recurse rather than re-implement: the plain-tar arm already owns the
+      # tar discovery, the ``--force-local`` retry for Windows drive letters,
+      # and the strip handling.
+      extractTarballArchive(payloadTar, destination, "tar", stripComponents,
+        declaredExecutablePath)
+    finally:
+      removeDir(extendedPath(staging))
   of "7z", "7z.exe":
     let sevenZipExe = resolveSevenZipExe()
     # `x` = extract with full paths preserved.
