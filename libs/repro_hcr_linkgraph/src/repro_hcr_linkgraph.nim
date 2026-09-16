@@ -8,6 +8,7 @@ import repro_hcr_linkgraph/analysis
 import repro_hcr_linkgraph/planner
 import repro_hcr_linkgraph/json_view
 import repro_hcr_linkgraph/cmake_metadata
+import repro_hcr_linkgraph/type_layout
 
 export types
 export macho
@@ -19,3 +20,4 @@ export analysis
 export planner
 export json_view
 export cmake_metadata
+export type_layout
