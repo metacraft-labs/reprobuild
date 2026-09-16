@@ -296,7 +296,10 @@ proc readPeImageBytesAtRva*(path: string; rva: uint64;
 
 when defined(windows):
   const moduleDirectory = currentSourcePath.parentDir
-  {.compile: moduleDirectory / "../../c/repro_hcr_windows_pdb.c".}
+  # The compiler reads this input on the build host, not the Windows target.
+  const pdbCSource =
+    (moduleDirectory / "../../c/repro_hcr_windows_pdb.c").replace('\\', '/')
+  {.compile: pdbCSource.}
   when defined(vcc):
     {.passL: "dbghelp.lib".}
   else:
