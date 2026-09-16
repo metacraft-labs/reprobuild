@@ -1,6 +1,6 @@
 import std/[os, tempfiles, unittest]
 
-import repro_cli_support
+import repro_cli_support/daemon_working_directory
 
 suite "daemon request working directory":
   var root, original: string

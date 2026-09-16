@@ -1,6 +1,6 @@
 import std/[os, tempfiles, unittest]
 
-import repro_cli_support
+import repro_cli_support/cmake_direct
 import repro_cmake_trycompile
 
 const Wrapper = "reprobuild-cmake-wrapper-fixture"

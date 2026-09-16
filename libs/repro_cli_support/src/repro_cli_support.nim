@@ -97,6 +97,8 @@ import repro_elevation
 import repro_cli_support/watch
 import repro_cli_support/dev_session
 import repro_cli_support/push_hook_protocol
+import repro_cli_support/cmake_direct
+import repro_cli_support/daemon_working_directory
 
 proc cloneUrlFor*(repo: ResolvedRepo): string =
   ## Fetch URL to clone this repo from: the ``repo.remotes`` entry that
@@ -6045,31 +6047,6 @@ proc addCacheField(payload: var string; value: string) =
   payload.add(":")
   payload.add(value)
   payload.add("\n")
-
-proc cmakeDirectBuildIdentity*(meta: TryCompileMetadata;
-                               pathValue: string): PathOnlyBuildIdentity =
-  # Inline commands already carry resolved executables. Only wrapper-backed
-  # actions need the normal resolver; resolving every usedTool would also
-  # reprobe compilers for each try_compile invocation.
-  var required = initHashSet[string]()
-  for action in meta.actions:
-    if not action.inline:
-      if action.toolId.len == 0 or action.toolId notin meta.usedTools:
-        raise newException(ValueError,
-          "CMake action " & action.id & " references undeclared tool " &
-            action.toolId)
-      required.incl(action.toolId)
-  var project = ProjectInterface(
-    projectName: TryCompileProviderPackageName,
-    packageName: TryCompileProviderPackageName)
-  for tool in meta.usedTools:
-    if tool in required:
-      project.toolUses.add(InterfaceToolUse(
-        rawConstraint: tool & " >=1.0 <2.0",
-        packageSelector: tool,
-        executableName: tool))
-      required.excl(tool)
-  pathOnlyBuildIdentity(artifactFor(project), pathValue)
 
 proc pathModeResolutionSignature(artifact: ProjectInterfaceArtifact;
                                  pathValue: string): string =
@@ -28909,17 +28886,6 @@ proc installUserDaemonParentPrewarmer() =
   ## process-global first, which is a separate change.
   setUserDaemonParentPrewarmer(proc(request: UserDaemonBuildRequest): string =
     prewarmDaemonParentBuildCaches(request))
-
-proc enterDaemonRequestDirectory*(workingDir: string): string =
-  ## Return the directory to restore, if it still has a name. A daemon may
-  ## outlive the temporary project directory from which it was started.
-  try:
-    result = getCurrentDir()
-  except OSError:
-    if workingDir.len == 0:
-      raise
-  if workingDir.len > 0:
-    setCurrentDir(workingDir)
 
 proc installUserDaemonBuildExecutor() =
   setUserDaemonBuildExecutor(proc(request: UserDaemonBuildRequest;
