@@ -17,12 +17,14 @@ covers the behavior you touched.
 
 ## Windows HCR Test Environment
 
-Enable the same pinned Python runtime used by the Windows HCR CI job:
+Enable the same pinned Python runtime and LLVM compilers used by the Windows
+HCR CI job:
 
 ```powershell
 $env:WINDOWS_DIY_HCR_TESTS = "1"
 . ./env.ps1
 ./scripts/check_windows_python_provisioning.ps1
+./scripts/check_windows_llvm_provisioning.ps1
 python tests/windows/hx_w0_windows_publication_decision_is_recorded_and_measured.py
 ```
 
@@ -30,9 +32,15 @@ The opt-in uses the version and archive checksum in
 `windows/toolchain-versions.env`, installs only under `WINDOWS_DIY_INSTALL_ROOT`,
 and updates only the calling process's environment. It does not install pip,
 require administrator access, or change PowerShell execution policies. Without
-the opt-in, compiler-only bootstrap is unchanged. The HCR drivers also require
-their existing MSVC x64 toolchain and Windows SDK debugger prerequisites; this
-Python provisioning does not install those tools.
+the opt-in, compiler-only bootstrap is unchanged. LLVM uses the upstream archive
+and Windows' built-in `tar.exe`, not a machine-wide installer.
+
+Install Visual Studio's x64 C++ build tools and the Windows SDK's x64 Debugging
+Tools for Windows (`cdb.exe`) separately. The opt-in checks those prerequisites
+using the HCR drivers' own discovery rules and fails before reporting the
+environment ready if any required tool is missing. It does not install MSVC or
+the debugger, or convert missing prerequisites into skipped tests. Recheck with
+`python scripts/check_windows_hcr_environment.py` after changing installed tools.
 
 ## Adding or removing test cases
 
