@@ -36,6 +36,63 @@ package clippy:
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
 
+    # Direct-download: the SAME rust standalone-distribution tarball
+    # ``rustc.nim`` / ``cargo.nim`` / ``rustfmt.nim`` name, because upstream
+    # publishes no standalone clippy archive — the component ships inside
+    # the per-channel toolchain archive under ``clippy-preview/bin/``.
+    #
+    # ``executablePath`` is ``bin/cargo-clippy`` rather than the
+    # ``clippy-preview/bin/...`` the ``clippyCatalog`` slice below uses,
+    # because the two adapters see different trees. The cakBuiltin adapter
+    # extracts the archive and points at the component in place; the realize
+    # loop behind ``tarball`` detects the rust-installer layout (the
+    # ``rust-installer-version`` + ``components`` sentinel files) and merges
+    # every component into one flat prefix, exactly as upstream's
+    # ``install.sh`` does. After that merge clippy sits beside rustc and
+    # cargo at ``<prefix>/bin/``. See ``mergeRustInstallerComponents`` in
+    # ``repro_tool_profiles.nim``.
+    #
+    # That merge is also what makes the entry WORK rather than merely
+    # resolve: ``cargo-clippy`` spawns ``clippy-driver``, which is a rustc
+    # shim and needs libstd at the canonical ``<exe>/../lib/rustlib/<triple>``
+    # sysroot location. The flat prefix puts it there; an extract-in-place of
+    # ``clippy-preview/`` alone would not, which is why the catalog slice
+    # below carries explicit ``piaMoveItem`` actions to reproduce it.
+    #
+    # Naming the same URL + digest as ``rustc.nim`` is deliberate and not a
+    # duplicated download: the realize step keys the fetch on the digest, so
+    # a project that names rustc, cargo, rustfmt and clippy together pays for
+    # one archive.
+    tarball url = "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-pc-windows-msvc.tar.xz",
+      sha256 = "7e536d87bb539cdf94a969ecb491e1340f2641a11cf57d6169892f395d68c702",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/cargo-clippy.exe",
+      packageId = "rust@1.92.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:rust@1.92.0:sha256:7e536d87bb539cdf94a969ecb491e1340f2641a11cf57d6169892f395d68c702"
+
+    tarball url = "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-unknown-linux-gnu.tar.xz",
+      sha256 = "d2ccef59dd9f7439f2c694948069f789a044dc1addcc0803613232af8f88ee0c",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/cargo-clippy",
+      packageId = "rust@1.92.0",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:rust@1.92.0:linux:sha256:d2ccef59dd9f7439f2c694948069f789a044dc1addcc0803613232af8f88ee0c"
+
+    tarball url = "https://static.rust-lang.org/dist/rust-1.92.0-aarch64-apple-darwin.tar.xz",
+      sha256 = "22276ecf826b22e718f099d7bf7ddb8c88aa46230fdba74962ab3c5031472268",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/cargo-clippy",
+      packageId = "rust@1.92.0",
+      cpu = "aarch64",
+      os = "macos",
+      lockIdentity = "tarball:rust@1.92.0:macos-aarch64:sha256:22276ecf826b22e718f099d7bf7ddb8c88aa46230fdba74962ab3c5031472268"
+
 let clippyCatalog* = @[
   VersionedProvisioning(
     version: "1.92.0",
