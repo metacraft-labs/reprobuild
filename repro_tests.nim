@@ -4644,6 +4644,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_workspace_vcs/tests/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths.nim",
+    binary: "build/test-bin/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim",
     binary: "build/test-bin/t_workspace_sibling_ignore_set",
     defines: @[],

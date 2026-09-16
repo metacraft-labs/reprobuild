@@ -589,6 +589,84 @@ proc looksLikeGitDir(path: string): bool =
 
 # ---- shared bare refresh ---------------------------------------------------
 
+const SharedBareFetchRefspec* = "+refs/heads/*:refs/heads/*"
+  ## The refspec every shared bare in the cache MUST carry on its
+  ## ``origin`` remote.
+  ##
+  ## ``git clone --bare`` deliberately configures NO ``remote.origin.fetch``
+  ## (git-clone(1): ``--bare`` creates no remote-tracking branches and no
+  ## refspec). A bare with no refspec still ACCEPTS ``git fetch --all
+  ## --prune``, and that fetch still exits 0 -- but it writes nothing except
+  ## ``FETCH_HEAD``. ``refs/heads/*`` never moves. Measured on this host's
+  ## cache: every bare in it had an EMPTY ``remote.origin.fetch``, and
+  ## ``refs/heads/dev`` sat at its clone-time SHA no matter how many times
+  ## the cache had been "refreshed".
+  ##
+  ## Three consequences, all silent. (1) The cache serves clone-time
+  ## objects forever, so nothing pushed after the bare was created is ever
+  ## accelerated. (2) The entire pre-rewrite history stays reachable from
+  ## the frozen ``refs/heads/*``, so ``maintainSharedBare``'s
+  ## ``git gc --prune=now`` can never drop it -- a history purge upstream
+  ## reclaims nothing locally. (3) The only objects gc CAN collect are the
+  ## freshly-fetched ones, because no ref was updated to name them: the
+  ## cache prunes exactly the half it should have kept.
+  ##
+  ## Why heads-only and NOT ``--mirror`` / ``+refs/*:refs/*``: the shared
+  ## bare is not a pure mirror. ``pushCacheRef`` publishes sibling-workspace
+  ## objects into it under ``refs/cache/<workspace>/*``, and those refs
+  ## exist on NO remote. A mirror refspec puts them inside the fetch's
+  ## destination namespace, so the very next ``--prune`` DELETES them and
+  ## RA-5's cross-workspace object sharing stops without a word. Verified
+  ## on a fixture: under ``+refs/*:refs/*`` the cache ref was gone after one
+  ## prune; under this refspec it survived and ``refs/heads/*`` still
+  ## advanced. Heads-only is the refspec that makes the bare current
+  ## without eating the half of it git does not know about.
+
+proc ensureSharedBareRefspec*(gitBin, barePath: string): bool =
+  ## Idempotently install ``SharedBareFetchRefspec`` (and
+  ## ``remote.origin.prune``) on ``barePath``'s ``origin``. This is ALSO the
+  ## in-place migration for every bare already in a user's cache: such a
+  ## directory needs no re-clone and no deletion, only these config writes,
+  ## after which its next refresh advances and prunes refs normally.
+  ## Returns ``false`` when the config could not be read/written.
+  # The early return checks BOTH keys. Checking only the refspec would make
+  # a bare that was migrated before ``remote.origin.prune`` joined this set
+  # permanently un-migratable: it would answer "already done" and never
+  # acquire the second half.
+  let current = runGit(gitBin,
+    ["-C", barePath, "config", "--get-all", "remote.origin.fetch"])
+  # A missing key exits 1 with empty output. That is the un-migrated bare,
+  # which is the case this proc exists to repair -- not an error.
+  var refspecPresent = false
+  if current.code == 0:
+    for line in current.output.splitLines():
+      if line.strip() == SharedBareFetchRefspec:
+        refspecPresent = true
+        break
+  if refspecPresent:
+    let prune = runGit(gitBin,
+      ["-C", barePath, "config", "--get", "remote.origin.prune"])
+    if prune.code == 0 and prune.output.strip().toLowerAscii() == "true":
+      return true
+  # ``--replace-all``, not ``--add``: a bare carrying some other refspec is
+  # being CORRECTED, and appending would leave the wrong one in force
+  # alongside the right one.
+  let applied = runGit(gitBin, ["-C", barePath, "config", "--replace-all",
+    "remote.origin.fetch", SharedBareFetchRefspec])
+  if applied.code != 0:
+    return false
+  # ``remote.origin.prune`` belongs with the refspec, not with the call
+  # site. The refresh already passes ``--prune``, but this cache is also
+  # read and refreshed by other code paths and by operators poking at it by
+  # hand, and a branch deleted upstream that lingers in the bare keeps its
+  # whole history reachable -- the same way the missing refspec did. Pinning
+  # the behaviour in the bare's own config makes "deleted upstream means
+  # gone here" a property of the cache rather than of who fetched it.
+  # Measured on the real cache: ``refs/heads/main`` was still present in
+  # bares whose remote had deleted that branch months earlier.
+  runGit(gitBin, ["-C", barePath, "config", "--replace-all",
+    "remote.origin.prune", "true"]).code == 0
+
 proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult =
   ## Clone-if-missing / fetch-if-present the shared bare for ``fetchUrl``.
   ## Returns ``ok = true`` with the bare path populated, or ``ok = false``
@@ -598,6 +676,14 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
   ## out, so concurrent clones read a consistent pool without racing.
   let bare = sharedBarePath(cacheRoot, fetchUrl)
   if looksLikeGitDir(bare):
+    # Migrate-then-fetch. Without the refspec the fetch below is a no-op
+    # that reports success (see ``SharedBareFetchRefspec``), so installing
+    # it is not an optimization -- it is what makes the refresh a refresh.
+    if not ensureSharedBareRefspec(gitBin, bare):
+      return SharedCloneResult(ok: false, sharedBarePath: bare,
+        diagnostic: "could not install the shared-bare fetch refspec (" &
+          SharedBareFetchRefspec & ") on " & bare &
+          "; a fetch there would silently advance no refs")
     # fetch-if-present: refresh all refs, prune deleted ones.
     let res = runGit(gitBin,
       ["-C", bare, "fetch", "--all", "--prune", "--quiet"])
@@ -626,6 +712,15 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
     return SharedCloneResult(ok: false, sharedBarePath: bare,
       diagnostic: "git clone --bare into shared cache failed (" & $res.code &
         "): " & res.output.strip())
+  # A freshly-cloned bare is current, but it is born WITHOUT a fetch
+  # refspec, so its NEXT refresh would be the silent no-op described on
+  # ``SharedBareFetchRefspec``. Install it at birth, so no bare in the cache
+  # ever spends a single refresh cycle frozen.
+  if not ensureSharedBareRefspec(gitBin, bare):
+    return SharedCloneResult(ok: false, sharedBarePath: bare,
+      diagnostic: "cloned the shared bare but could not install its fetch " &
+        "refspec (" & SharedBareFetchRefspec & ") on " & bare &
+        "; later refreshes there would silently advance no refs")
   SharedCloneResult(ok: true, sharedBarePath: bare)
 
 # ---- bootstrap manifest cache population (RA-11) ---------------------------
