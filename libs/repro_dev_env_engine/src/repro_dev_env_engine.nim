@@ -45,6 +45,15 @@ type
 
   DevEnvEdgeResult* = object
     artifactPath*: string
+    interfacePath*: string
+      ## The ``ProjectInterfaceArtifact`` this edge extracted, on disk.
+      ##
+      ## Exposed because the activation surfaces need the recipe's ``uses:``
+      ## declarations to realize the toolchain, and re-extracting the
+      ## interface to get them would run the provider compile a second time.
+      ## The path is deterministic (``<outDir>/project-interface.rbsz``) but
+      ## deriving it at each call site is how two spellings of one location
+      ## drift apart.
     shellFragmentPath*: string
     shellNavigatorStatsPath*: string
     providerArtifactPath*: string
@@ -223,11 +232,20 @@ proc parseDevEnvToolProvisioning(value: string): ToolProvisioningMode =
   else:
     raiseDevEnvEdge("unsupported dev-env tool provisioning mode: " & value)
 
-proc effectiveToolProvisioning(config: DevEnvEdgeConfig;
-                               artifact: ProjectInterfaceArtifact):
+proc effectiveToolProvisioning*(requested: ToolProvisioningMode;
+                                artifact: ProjectInterfaceArtifact):
     ToolProvisioningMode =
-  if config.toolProvisioning != tpmUnspecified:
-    return config.toolProvisioning
+  ## The provisioning mode an activation of ``artifact`` runs under.
+  ##
+  ## Precedence: an explicitly requested mode, then
+  ## ``REPRO_TOOL_PROVISIONING``, then the recipe's own
+  ## ``defaultToolProvisioning``. Taking a bare mode rather than a whole
+  ## ``DevEnvEdgeConfig`` is what lets the CLI's activation surfaces resolve
+  ## the SAME mode the edge ran under without rebuilding the config — two
+  ## spellings of this precedence is exactly how an activation ends up
+  ## realizing tools under one mode and reporting another.
+  if requested != tpmUnspecified:
+    return requested
   let envMode = getEnv("REPRO_TOOL_PROVISIONING").strip()
   if envMode.len > 0:
     return parseDevEnvToolProvisioning(envMode)
@@ -235,6 +253,11 @@ proc effectiveToolProvisioning(config: DevEnvEdgeConfig;
   if defaultMode.len > 0:
     return parseDevEnvToolProvisioning(defaultMode)
   tpmUnspecified
+
+proc effectiveToolProvisioning*(config: DevEnvEdgeConfig;
+                                artifact: ProjectInterfaceArtifact):
+    ToolProvisioningMode =
+  effectiveToolProvisioning(config.toolProvisioning, artifact)
 
 proc fingerprintText(parts: openArray[string]): ContentDigest =
   weakFingerprintFromText(parts.join("\n"))
@@ -499,6 +522,7 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
 
   let interfacePath = active.outDir / "project-interface.rbsz"
   let stubPath = active.outDir / "project-interface.nim"
+  result.interfacePath = interfacePath
 
   var interfaceArtifact: ProjectInterfaceArtifact
   var useCachedInterface = false

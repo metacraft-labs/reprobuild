@@ -6161,9 +6161,25 @@ proc loweredGraphCacheKey(artifact: ProjectInterfaceArtifact;
 
 proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
                              outDir: string;
-                             mode: ToolProvisioningMode):
+                             mode: ToolProvisioningMode;
+                             storeRootOverride = ""):
     tuple[identity: PathOnlyBuildIdentity; identityPath: string;
       inspectionPath: string] =
+  ## ``storeRootOverride`` names the tool store the realizations land in.
+  ##
+  ## Empty keeps the historical behaviour — a store under ``outDir`` — which
+  ## is what ``repro develop`` wants: its ``outDir`` is the project's own
+  ## ``.repro/develop``, so a develop session's realizations are scoped to
+  ## that checkout.
+  ##
+  ## The dev-env activation surfaces pass the USER-level store instead. Their
+  ## ``outDir`` is per-project AND per-activity, so inheriting it would give
+  ## every project, every activity and every worktree its own copy of the
+  ## same content-addressed archive. For a Rust toolchain that is ~300 MB of
+  ## identical bytes per checkout, re-downloaded rather than re-linked. The
+  ## identity CACHE stays under ``outDir`` either way: it is keyed on the
+  ## recipe's interface, which is a per-project fact, while a realized prefix
+  ## is keyed on the archive digest, which is not.
   let paths = identityPaths(outDir, mode)
   let cached = cachedToolIdentity(outDir, mode, artifact,
     paths.identityPath, paths.inspectionPath)
@@ -6189,7 +6205,9 @@ proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
     producerExecutableSelectors[selector] = ProducerExecutableDirs(
       binDirs: binDirs)
   let identity = toolBuildIdentity(artifact, mode,
-    storeRoot = outDir / "tool-store",
+    storeRoot =
+      (if storeRootOverride.len > 0: storeRootOverride
+       else: outDir / "tool-store"),
     producerExecutableSelectors = producerExecutableSelectors,
     producerAuxSelectors = producerAuxSelectors)
   writePathOnlyBuildIdentity(paths.identityPath, identity)
@@ -12046,6 +12064,76 @@ proc emitDevEnvProducerNotices(pins: openArray[DevEnvProducerPin];
     except IOError:
       discard
 
+proc devEnvToolShellOps*(edge: DevEnvEdgeResult;
+                         selection: DevEnvCliSelection): seq[DevEnvShellOp] =
+  ## The PATH contribution that makes a dev-env activation PROVIDE the
+  ## toolchain its recipe declares, rather than merely name it.
+  ##
+  ## Before this, `uses: "rustc >=1.92"` reached an activated shell as a
+  ## `toolProfiles` entry with an EMPTY `realizedPrefix`: the artifact knew
+  ## which packages the project wanted and even carried an execution-profile
+  ## identity for each, but nothing realized them and nothing put them on
+  ## PATH. `rustc` in that shell was whatever the host happened to have
+  ## installed — which is the property a declared toolchain exists to remove,
+  ## and the reason projects kept a second, imperative provisioning system
+  ## (an `env.ps1`, a flake dev shell) beside their recipe.
+  ##
+  ## `repro develop` has realized tools since the beginning, through exactly
+  ## the call below. What was missing was not the capability but its reach:
+  ## `repro shell`, `repro exec`, `repro run` and the shell-hook export all
+  ## went through the dev-env artifact, which had no realization step. The two
+  ## surfaces were each missing the other's half — `develop` provisioned tools
+  ## but applied none of the recipe's `devEnv:` block, and the artifact path
+  ## applied the block but provisioned nothing.
+  ##
+  ## Path-mode is deliberately a no-op. Its whole contract is "resolve against
+  ## the caller's PATH", so there is nothing to prepend and prepending the
+  ## resolver's own search list would merely re-order the host's PATH against
+  ## itself.
+  ##
+  ## Never fatal. A recipe that names a package with no realization for this
+  ## platform must leave the developer with a WORKING shell that says what it
+  ## could not provide — the same policy `devEnvProducerActivation` applies to
+  ## cross-repo producer pins, and for the same reason: an activation that
+  ## fails closed on one unprovisionable tool takes away the shell the
+  ## developer needs in order to fix it.
+  if edge.interfacePath.len == 0 or
+      not fileExists(extendedPath(edge.interfacePath)):
+    return
+  var interfaceArtifact: ProjectInterfaceArtifact
+  try:
+    interfaceArtifact = readInterfaceArtifact(edge.interfacePath)
+  except CatchableError as err:
+    stderr.writeLine("repro dev-env: warning: could not read the project " &
+      "interface at " & edge.interfacePath & " (" & err.msg &
+      "); the activated shell will resolve tools from the ambient PATH.")
+    return
+  if interfaceArtifact.projectInterface.toolUses.len == 0:
+    return
+
+  let mode = effectiveToolProvisioning(
+    resolveToolProvisioningWithEnv(tpmUnspecified), interfaceArtifact)
+  if mode in {tpmUnspecified, tpmPathOnly}:
+    return
+
+  var identity: PathOnlyBuildIdentity
+  try:
+    identity = resolveAndWriteIdentity(interfaceArtifact, selection.outDir,
+      mode, storeRootOverride = resolveStoreRoot() / "tool-store").identity
+  except CatchableError as err:
+    stderr.writeLine("repro dev-env: warning: " & mode.modeName &
+      " tool provisioning failed (" & err.msg &
+      "); the activated shell will resolve tools from the ambient PATH.")
+    return
+
+  let binDirs = binDirsForDevelop(identity)
+  # Reversed for the same reason `devEnvProducerShellOps` reverses: each
+  # `deskPrependPath` puts its own value at the front, so walking the list
+  # backwards leaves entry 0 leftmost — the order the resolver chose.
+  for i in countdown(binDirs.high, 0):
+    result.add(DevEnvShellOp(kind: deskPrependPath, name: "PATH",
+      value: binDirs[i]))
+
 proc devEnvProducerActivation(artifact: DevEnvArtifact; projectRoot: string;
                               appliesToPath = true): seq[DevEnvShellOp] =
   ## Resolve + report in one call, for the activation surfaces. Reporting is
@@ -12637,8 +12725,8 @@ proc runReproRunCommand(args: openArray[string];
       if activeTask.name == parsed.target:
         task = activeTask
         break
-    let producerOps = devEnvProducerActivation(artifact,
-      parsed.selection.projectRoot)
+    let producerOps = devEnvToolShellOps(edge, parsed.selection) &
+      devEnvProducerActivation(artifact, parsed.selection.projectRoot)
     return runTaskCommand(artifact, edge.artifactPath, task,
       parsed.forwardedArgs, parsed.selection.projectRoot, producerOps)
 
@@ -12774,8 +12862,12 @@ proc runReproExecCommand(args: openArray[string];
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if emitDevEnvDiagnostics(artifact):
     return 1
-  let producerOps = devEnvProducerActivation(artifact,
-    parsed.selection.projectRoot)
+  # Tool ops first, producer ops second: each `deskPrependPath` puts its own
+  # value at the front, so the LATER entries end up leftmost. A cross-repo
+  # producer the developer is actively building must win over a catalog
+  # realization of the same name — that is the whole point of develop-mode.
+  let producerOps = devEnvToolShellOps(edge, parsed.selection) &
+    devEnvProducerActivation(artifact, parsed.selection.projectRoot)
   runActivatedCommand(artifact, edge.artifactPath, parsed.command,
     parsed.selection.projectRoot, producerOps)
 
@@ -12799,8 +12891,8 @@ proc runReproShellCommand(args: openArray[string];
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if emitDevEnvDiagnostics(artifact):
     return 1
-  let producerOps = devEnvProducerActivation(artifact,
-    parsed.selection.projectRoot)
+  let producerOps = devEnvToolShellOps(edge, parsed.selection) &
+    devEnvProducerActivation(artifact, parsed.selection.projectRoot)
   if parsed.printEnv:
     stdout.write(renderDevEnvArtifact(artifact, edge.artifactPath,
       parsed.printFormat, producerOps))
