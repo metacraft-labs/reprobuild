@@ -808,12 +808,33 @@ suite "an action's PATH is a decision, and it is never the empty string":
     # The false universal claim must not come back.
     check "they do not replace it" notin clean
 
+    # The fourth class has a column too, and the clean line says zero of
+    # it. `classifyActionPath` returns four values; the line reported
+    # three, and both census arms `discard`ed `apdAbsent`, so an action
+    # that declared no `PATH` at all was reported by neither instrument.
+    check "0 ABSENT" in clean
+
     census.hermeticPathActions = 6
     census.emptyPathActions = 1
     let dirty = environmentInheritanceHeaderLine(census)
     checkpoint(dirty)
     check "1 EMPTY" in dirty
     check "DEFECT" in dirty
+
+    census.hermeticPathActions = 5
+    census.emptyPathActions = 0
+    census.absentPathActions = 2
+    let unkeyed = environmentInheritanceHeaderLine(census)
+    checkpoint(unkeyed)
+    check "2 ABSENT" in unkeyed
+    # Flagged, and flagged as a DEFECT rather than as a fact — an absent
+    # `PATH` is the launcher's `getEnv("PATH")` fallback with nothing in
+    # the key recording it, which is strictly worse than the empty `PATH`
+    # above (that one at least searches nothing).
+    check "DEFECT" in unkeyed
+    # Not folded into the inherited column: `apdInherited` keys the NAME
+    # `PATH`, `apdAbsent` keys nothing.
+    check "3 inherited" in unkeyed
 
   test "the hermetic branch is what keeps the shadow unreachable":
     # Ties the emission decision back to the property this branch

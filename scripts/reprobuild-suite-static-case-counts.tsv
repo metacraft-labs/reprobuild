@@ -52,7 +52,7 @@ libs/repro_build_engine/tests/t_child_cpu_stats_row.nim	nim	5
 libs/repro_build_engine/tests/t_da1i_evidence_scope.nim	nim	30
 libs/repro_build_engine/tests/t_daemon_check_platform_refusal.nim	nim	2
 libs/repro_build_engine/tests/t_dark_window_cache_records_are_drained.nim	nim	9
-libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim	nim	12
+libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim	nim	13
 libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim	nim	4
 libs/repro_build_engine/tests/t_engine_implicit_target_name_basename_rule.nim	nim	1
 libs/repro_build_engine/tests/t_engine_implicit_target_name_hook_overrides_canonical.nim	nim	1
@@ -1071,7 +1071,7 @@ tests/integration/t_emitted_overrides_match_the_develop_set.nim	nim	1
 tests/integration/t_emulator_is_not_a_verifier_bypass.nim	nim	14
 tests/integration/t_entrypoints.nim	nim	1
 tests/integration/t_enumerated_directory_evidence_producers.nim	nim	5
-tests/integration/t_env_inheritance_census_is_reported.nim	nim	4
+tests/integration/t_env_inheritance_census_is_reported.nim	nim	5
 tests/integration/t_envrc_needs_no_override_env_vars.nim	nim	1
 tests/integration/t_event_log_parser_rejects_malformed.nim	nim	26
 tests/integration/t_event_log_replay_mismatch_rejected.nim	nim	10

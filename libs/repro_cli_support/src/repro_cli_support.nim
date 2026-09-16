@@ -5454,6 +5454,23 @@ proc environmentInheritanceHeaderLine*(
   ## 1372 of this repository's 2753 process edges, and this line reported
   ## them as ordinary declaring actions. `pathEmpty=` is now on the line,
   ## and it is the one number here that is a defect rather than a fact.
+  ##
+  ## TWO NUMBERS ARE DEFECTS, and the second one was missing entirely.
+  ## `classifyActionPath` has four cases; this line reported three, and
+  ## both census arms `discard`ed `apdAbsent`. An action that declares no
+  ## `PATH` at all was therefore in NO column, so a graph made entirely of
+  ## them still printed `N hermetic (keyed by value), 0 inherited, 0
+  ## EMPTY` and read like a clean bill of health. `ABSENT` is now its own
+  ## column, and it is flagged at least as loudly as `EMPTY` because it is
+  ## the WORSE of the two: `PATH=` makes the child search nothing and fail
+  ## where the tool is missing, while an absent `PATH` makes the child
+  ## search the developer's entire machine with nothing in the key saying
+  ## so. The loud case was the harmless one.
+  ##
+  ## It is NOT folded into `inherited`. `apdInherited` names `PATH` in
+  ## `envPassthrough`, so the key records that the dependency exists;
+  ## `apdAbsent` records nothing. Folding would erase the distinction the
+  ## column exists to show.
   if census.totalActions == 0:
     return "env: no process actions in this graph"
   let percent = (census.undeclaredActions * 100) div census.totalActions
@@ -5464,7 +5481,22 @@ proc environmentInheritanceHeaderLine*(
     " REPLACES the inherited one, everything else is inherited" &
     "; PATH: " & $census.hermeticPathActions & " hermetic (keyed by value), " &
     $census.inheritedPathActions & " inherited (passthrough), " &
+    $census.absentPathActions & " ABSENT, " &
     $census.emptyPathActions & " EMPTY"
+  # The absent count is stated first when both are non-zero, because it is
+  # the one that silently changes what a build DOES between two machines.
+  if census.absentPathActions > 0:
+    # Phrased so the count is never the subject of a verb: this line is
+    # printed for counts of 1 and of 1372 alike, and "1 actions declare"
+    # is the kind of detail that gets a real diagnostic skimmed past.
+    result.add(" <- DEFECT: PATH is ABSENT on " & $census.absentPathActions &
+      " of them — neither a declared value nor a passthrough name, so the" &
+      " launcher falls back to the ambient $PATH and nothing in the cache" &
+      " key records that it did; two developers with different PATHs get" &
+      " different behaviour from the same action and the cache serves a HIT" &
+      " across the difference. Route those edges through" &
+      " actionPathDecision so each is either hermetic (PATH keyed by" &
+      " value) or passthrough (PATH named in the key)")
   if census.emptyPathActions > 0:
     result.add(" <- DEFECT: those actions run with no PATH at all")
 
@@ -23548,7 +23580,13 @@ proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
         of apdHermetic: inc census.hermeticPathActions
         of apdInherited: inc census.inheritedPathActions
         of apdEmpty: inc census.emptyPathActions
-        of apdAbsent: discard
+        # Counted here for the same reason, and in the same column, as in
+        # `repro_build_engine`'s own census loop. The two arms are
+        # deliberately identical: `classifyActionPath` is shared so that
+        # the build header and this instrument can never disagree about
+        # one graph, and an arm that `discard`ed a case here would
+        # re-open exactly that disagreement.
+        of apdAbsent: inc census.absentPathActions
         var declaredNames: seq[string] = @[]
         for entry in action.env:
           let eq = entry.find('=')

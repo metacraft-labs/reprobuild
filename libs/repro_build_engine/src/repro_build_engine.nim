@@ -1236,9 +1236,42 @@ type
       ## PASSTHROUGH so the name is in the key and the value is not.
       ## These are the edges that declare no tool refs; for them the host
       ## `$PATH` remains an unkeyed input.
+    absentPathActions*: int
+      ## THE MORE DANGEROUS OF THE TWO NUMBERS THAT MUST BE ZERO, and the
+      ## one that used to be invisible. Actions that declare no `PATH`
+      ## entry AND no `PATH` passthrough name — `classifyActionPath`'s
+      ## `apdAbsent`.
+      ##
+      ## NOT THE SAME THING AS `inheritedPathActions`, and the difference
+      ## is the entire reason this counter exists rather than being folded
+      ## into that one. Both end up running on the caller's `$PATH`; only
+      ## the passthrough form puts anything in the key about it. An
+      ## `apdInherited` action names `PATH`, so the NAME is in the weak
+      ## fingerprint and the dependency is on the record (the value is
+      ## deliberately not). An `apdAbsent` action records NOTHING: the
+      ## launcher's `getEnv("PATH")` fallback in `prependPathDirsToArgvEnv`
+      ## hands it the ambient value, and the key cannot tell that it did.
+      ## Two developers with different `PATH`s therefore get different
+      ## behaviour out of one action at one key, and a cache HIT is served
+      ## across the difference.
+      ##
+      ## It is a LOUDER defect than `emptyPathActions`, not a milder one.
+      ## `PATH=` is at least hermetic-by-accident — the child searches
+      ## nothing, and a tool that goes missing fails loudly. An absent
+      ## `PATH` searches the developer's whole machine and succeeds
+      ## quietly, differently, per machine. Both census arms nevertheless
+      ## spelled this case `of apdAbsent: discard` — so a graph full of
+      ## such actions reported `N hermetic / 0 inherited / 0 EMPTY` and
+      ## read like a clean bill of health. Structurally gated by case 13
+      ## of
+      ## `libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim`,
+      ## which forbids a `discard` arm and forbids folding this column
+      ## into `inheritedPathActions`.
     emptyPathActions*: int
-      ## THE ONE NUMBER THAT MUST BE ZERO. Actions carrying `PATH=` with
-      ## an empty value, i.e. actions that run with no `PATH` at all
+      ## THE OTHER NUMBER THAT MUST BE ZERO — see `absentPathActions`
+      ## above for the first, which is the worse of the pair. Actions
+      ## carrying `PATH=` with an empty value, i.e. actions that run with
+      ## no `PATH` at all
       ## because their declaration replaced the inherited one with
       ## nothing. Not a portability question and not a key question — a
       ## `findExe` inside such an action returns `""`, so a test that
@@ -12512,7 +12545,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     of apdHermetic: inc runResult.environmentInheritance.hermeticPathActions
     of apdInherited: inc runResult.environmentInheritance.inheritedPathActions
     of apdEmpty: inc runResult.environmentInheritance.emptyPathActions
-    of apdAbsent: discard
+    # `apdAbsent` had its own `discard` here, so an action that declared
+    # no `PATH` at all landed in NO column and the header could read
+    # `N hermetic / 0 inherited / 0 EMPTY` over a graph full of them.
+    # It is counted, not folded into `inheritedPathActions`: see the
+    # field doc for why the two must stay apart.
+    of apdAbsent: inc runResult.environmentInheritance.absentPathActions
   let validateStart = statStart()
   validateGraph(buildGraph)
   finishStat("repro graph validate", validateStart)
