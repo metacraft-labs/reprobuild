@@ -266,108 +266,6 @@ const CodeTracerSourcePackages = [
   "nim-acp"
 ]
 
-const IsonimAsyncCompatFixtureSource = r"""
-when defined(js):
-  import std/asyncjs
-
-  export asyncjs
-
-  type PlatformFuture*[T] = Future[T]
-
-  proc isSyncResolved*(future: PlatformFuture): bool =
-    var resolved: bool
-    {.emit: "`resolved` = (`future`.__syncResolved === true);".}
-    resolved
-
-  proc isSyncFailed*(future: PlatformFuture): bool =
-    var failed: bool
-    {.emit: "`failed` = (`future`.__syncFailed === true);".}
-    failed
-
-  proc getSyncValue*[T](future: PlatformFuture[T]): T =
-    var value: T
-    {.emit: "`value` = `future`.__syncValue;".}
-    value
-
-  proc getSyncError*(future: PlatformFuture): string =
-    var message: string
-    {.emit: "`message` = `future`.__syncError;".}
-    message
-
-  proc newCompletedFuture*[T](value: T): PlatformFuture[T] =
-    result = newPromise(proc(resolve: proc(response: T)) =
-      resolve(value))
-    {.emit: "`result`.__syncResolved = true; `result`.__syncValue = `value`;".}
-
-  proc newCompletedFuture*(): PlatformFuture[void] =
-    result = newPromise(proc(resolve: proc()) =
-      resolve())
-    {.emit: "`result`.__syncResolved = true;".}
-
-  proc newFailedFuture*[T](message: string): PlatformFuture[T] =
-    result = newPromise proc(resolve: proc(value: T)) =
-      raise newException(CatchableError, message)
-    {.emit: "`result`.__syncFailed = true; `result`.__syncError = `message`; `result`.catch(function(){});".}
-
-  proc attachPromiseHandlers[T](future: PlatformFuture[T];
-      onSuccess: proc(value: T); onError: proc(message: cstring))
-      {.importjs: "#.then(#).catch(function(err) { #(String(err && err.message || err)); })".}
-
-  proc attachPromiseHandlers(future: PlatformFuture[void];
-      onSuccess: proc(); onError: proc(message: cstring))
-      {.importjs: "#.then(#).catch(function(err) { #(String(err && err.message || err)); })".}
-
-  proc onComplete*[T](future: PlatformFuture[T]; onSuccess: proc(value: T);
-                      onError: proc(message: string) = nil) =
-    proc reject(message: cstring) =
-      if onError != nil:
-        onError($message)
-    attachPromiseHandlers(future, onSuccess, reject)
-
-  proc onComplete*(future: PlatformFuture[void]; onSuccess: proc();
-                   onError: proc(message: string) = nil) =
-    proc reject(message: cstring) =
-      if onError != nil:
-        onError($message)
-    attachPromiseHandlers(future, onSuccess, reject)
-else:
-  import std/asyncdispatch
-
-  export asyncdispatch
-
-  type PlatformFuture*[T] = Future[T]
-
-  proc newCompletedFuture*[T](value: T): PlatformFuture[T] =
-    result = newFuture[T]("isonim.async_compat.newCompletedFuture")
-    result.complete(value)
-
-  proc newCompletedFuture*(): PlatformFuture[void] =
-    result = newFuture[void]("isonim.async_compat.newCompletedFuture")
-    result.complete()
-
-  proc newFailedFuture*[T](message: string): PlatformFuture[T] =
-    result = newFuture[T]("isonim.async_compat.newFailedFuture")
-    result.fail(newException(CatchableError, message))
-
-  proc onComplete*[T](future: PlatformFuture[T]; onSuccess: proc(value: T);
-                      onError: proc(message: string) = nil) =
-    future.callback = proc(completed: Future[T]) =
-      if completed.failed:
-        if onError != nil:
-          onError(completed.error.msg)
-      else:
-        onSuccess(completed.read())
-
-  proc onComplete*(future: PlatformFuture[void]; onSuccess: proc();
-                   onError: proc(message: string) = nil) =
-    future.callback = proc(completed: Future[void]) =
-      if completed.failed:
-        if onError != nil:
-          onError(completed.error.msg)
-      else:
-        onSuccess()
-"""
-
 const IsonimHmrComponentFixtureSource = r"""
 template uiComponent*() {.pragma.}
 """
@@ -774,9 +672,27 @@ proc prepareNimLibraryFixture(sourcePath, destPath, packageName: string) =
 
 proc prepareIsonimFixture(sourcePath, destPath: string) =
   prepareNimLibraryFixture(sourcePath, destPath, "isonim")
-  createDir(destPath / "src" / "isonim" / "core")
-  writeFile(destPath / "src" / "isonim" / "core" / "async_compat.nim",
-    IsonimAsyncCompatFixtureSource)
+  # ``isonim/core/async_compat`` IS NOT SYNTHESISED HERE, AND USED TO BE.
+  #
+  # It was, back when IsoNim owned the cross-target async primitives: this
+  # file carried a ~100-line hand-written copy and overwrote the copied
+  # module with it. Those primitives have since moved to nim-everywhere and
+  # the real ``isonim/core/async_compat.nim`` is now a seven-line re-export
+  # of ``nim_everywhere/async_compat`` — which the substitute did not do.
+  #
+  # So the substitute silently became a SUBSET of the module it stood in for,
+  # and CodeTracer's frontend reaches for one of the symbols only the real one
+  # has: ``src/frontend/viewmodel/platform/outcome.nim`` imports this module
+  # and ``platform_host.nim`` calls ``drainPlatformCallbacks``, which the copy
+  # never defined. The frontend targets failed to compile against a module
+  # this test had replaced with a worse one.
+  #
+  # nim-everywhere is already prepared as a sibling package beside this
+  # fixture and is on the copied ``config.nims`` search path, so the real
+  # re-export resolves. Nothing is written here: the fixture uses the module
+  # CodeTracer actually compiles against, and a future move of these
+  # primitives fails loudly at compile time instead of being absorbed by a
+  # stale local copy.
   createDir(destPath / "src" / "isonim" / "web")
   writeFile(destPath / "src" / "isonim" / "web" / "hmr_component.nim",
     IsonimHmrComponentFixtureSource)
