@@ -205,7 +205,7 @@ clang -Wall -Wextra -O2 -I"$REPO_ROOT/libs/repro_hcr_agent/c" -I"$REPO_ROOT" \
 echo ""
 echo "[2/4] Executing real Nim reference agent across four distinct configurations..."
 
-NIM_REF_SRC="$REPO_ROOT/tests/integration/test_hx_s4_reference_booleans.nim"
+NIM_REF_SRC="$REPO_ROOT/tests/fixtures/hcr/reference_booleans_driver.nim"
 NIM_REF_BIN="$WORK_DIR/test_nim_reference_booleans"
 
 (cd "$REPO_ROOT" && nim c --hints:off --warnings:off \

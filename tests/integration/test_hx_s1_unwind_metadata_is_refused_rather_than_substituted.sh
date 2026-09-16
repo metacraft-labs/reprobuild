@@ -147,7 +147,7 @@ echo "  [OK] Real objects produced: ELF positive ($(wc -c < "$UNWIND_O" | tr -d 
 # -----------------------------------------------------------------------------
 echo "[3/5] Compiling Nim integration test driver..."
 
-DRIVER_SRC="$REPO_ROOT/tests/integration/test_hx_s1_unwind_metadata_driver.nim"
+DRIVER_SRC="$REPO_ROOT/tests/fixtures/hcr/unwind_metadata_driver.nim"
 DRIVER_BIN="$WORK_DIR/test_hx_s1_driver"
 
 nim c --hints:off --warnings:off \

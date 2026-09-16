@@ -1,4 +1,4 @@
-# test_hx_s1_unwind_metadata_driver.nim
+# unwind_metadata_driver.nim
 #
 # Integration test driver for Milestone HX-S-1:
 # "One unwind-metadata contract, three mechanisms"
@@ -41,7 +41,7 @@ proc main() =
       positionalArgs.add(arg)
 
   if positionalArgs.len < 3:
-    stderr.writeLine("Usage: test_hx_s1_unwind_metadata_driver [--falsify-fallback] <unwind.o> <nounwind.o> <stripped.o> [<mac_unwind.o> <mac_nounwind.o>]")
+    stderr.writeLine("Usage: unwind_metadata_driver [--falsify-fallback] <unwind.o> <nounwind.o> <stripped.o> [<mac_unwind.o> <mac_nounwind.o>]")
     quit(1)
 
   let unwindObjPath = positionalArgs[0]
