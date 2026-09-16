@@ -28,40 +28,40 @@ package npm:
     # at the same URL); the only difference is ``executablePath`` which
     # picks the ``npm`` / ``npm.cmd`` shim out of the shared archive.
     # Same shape as npx.nim. Sha256 + URL come from
-    # https://nodejs.org/dist/v20.18.0/SHASUMS256.txt.
-    tarball url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x64.zip",
-      sha256 = "f5cea43414cc33024bbe5867f208d1c9c915d6a38e92abeee07ed9e563662297",
+    # https://nodejs.org/dist/v24.16.0/SHASUMS256.txt.
+    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-x64.zip",
+      sha256 = "edaca9bd58ec8e92037dac4e877d52f6b8f430b81c18b57e264b4e2fb111cd56",
       archiveType = "zip",
       stripComponents = 1,
       executablePath = "npm.cmd",
-      packageId = "node@20.18.0",
+      packageId = "node@24.16.0",
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:node@20.18.0:sha256:f5cea43414cc33024bbe5867f208d1c9c915d6a38e92abeee07ed9e563662297"
-    tarball url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.xz",
-      sha256 = "4543670b589593f8fa5f106111fd5139081da42bb165a9239f05195e405f240a",
+      lockIdentity = "tarball:node@24.16.0:sha256:edaca9bd58ec8e92037dac4e877d52f6b8f430b81c18b57e264b4e2fb111cd56"
+    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-x64.tar.xz",
+      sha256 = "d804845d34eddc21dc1092b519d643ef40b1f58ec5dec5c22b1f4bd8fabde6c9",
       archiveType = "tar.xz",
       stripComponents = 1,
       executablePath = "bin/npm",
-      packageId = "node@20.18.0",
+      packageId = "node@24.16.0",
       cpu = "x86_64",
       os = "linux",
-      lockIdentity = "tarball:node@20.18.0:sha256:4543670b589593f8fa5f106111fd5139081da42bb165a9239f05195e405f240a"
-    tarball url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-arm64.tar.gz",
-      sha256 = "92e180624259d082562592bb12548037c6a417069be29e452ec5d158d657b4be",
+      lockIdentity = "tarball:node@24.16.0:sha256:d804845d34eddc21dc1092b519d643ef40b1f58ec5dec5c22b1f4bd8fabde6c9"
+    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-darwin-arm64.tar.gz",
+      sha256 = "39189dab4eeb15706c424af0ac08a3044c9e48f7db12a7d77f6b7aafc7dd5df6",
       archiveType = "tar.gz",
       stripComponents = 1,
       executablePath = "bin/npm",
-      packageId = "node@20.18.0",
+      packageId = "node@24.16.0",
       cpu = "aarch64",
       os = "macos",
-      lockIdentity = "tarball:node@20.18.0:sha256:92e180624259d082562592bb12548037c6a417069be29e452ec5d158d657b4be"
-    tarball url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-x64.tar.gz",
-      sha256 = "c02aa7560612a4e2cc359fd89fae7aedde370c06db621f2040a4a9f830a125dc",
+      lockIdentity = "tarball:node@24.16.0:sha256:39189dab4eeb15706c424af0ac08a3044c9e48f7db12a7d77f6b7aafc7dd5df6"
+    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-darwin-x64.tar.gz",
+      sha256 = "298b4c7b3cb80765c8703e42b90324a4ece3b6634947b89e769c3c980ab55185",
       archiveType = "tar.gz",
       stripComponents = 1,
       executablePath = "bin/npm",
-      packageId = "node@20.18.0",
+      packageId = "node@24.16.0",
       cpu = "x86_64",
       os = "macos",
-      lockIdentity = "tarball:node@20.18.0:sha256:c02aa7560612a4e2cc359fd89fae7aedde370c06db621f2040a4a9f830a125dc"
+      lockIdentity = "tarball:node@24.16.0:sha256:298b4c7b3cb80765c8703e42b90324a4ece3b6634947b89e769c3c980ab55185"

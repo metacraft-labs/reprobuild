@@ -14,15 +14,15 @@ package npx:
       requiresExecutionProfileChecksum = false)
     # Direct-download: same Node.js 7z as `node.nim`; npx.cmd ships at
     # the root of the flattened tree.
-    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-x64.7z",
-      sha256 = "9f0ad977a75a1ca1a2ebe1294caf64e6c6b4de89d3b6dff218455de3fa0a3211",
-      archiveType = "7z",
+    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-x64.zip",
+      sha256 = "edaca9bd58ec8e92037dac4e877d52f6b8f430b81c18b57e264b4e2fb111cd56",
+      archiveType = "zip",
       stripComponents = 1,
       executablePath = "npx.cmd",
       packageId = "node@24.16.0",
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:node@24.16.0:sha256:9f0ad977a75a1ca1a2ebe1294caf64e6c6b4de89d3b6dff218455de3fa0a3211"
+      lockIdentity = "tarball:node@24.16.0:sha256:edaca9bd58ec8e92037dac4e877d52f6b8f430b81c18b57e264b4e2fb111cd56"
     # Linux x86_64: same Node.js distribution as `node.nim` — the Linux
     # tar.xz ships `npx` as a shell wrapper at `bin/npx` (POSIX symlink
     # to the npm-cli script). stripComponents=1 flattens the outer
@@ -40,12 +40,12 @@ package npx:
     # darwin-arm64 tar.xz ships `npx` as a POSIX symlink at `bin/npx`
     # (pointing at the npm-cli script). stripComponents=1 flattens the
     # outer `node-v24.16.0-darwin-arm64/` dir.
-    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-darwin-arm64.tar.xz",
-      sha256 = "e28ad5531b2aafe0ea555a51b2412c42fdc0f91a6a53fbd03ac93e3847e91389",
-      archiveType = "tar.xz",
+    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-darwin-arm64.tar.gz",
+      sha256 = "39189dab4eeb15706c424af0ac08a3044c9e48f7db12a7d77f6b7aafc7dd5df6",
+      archiveType = "tar.gz",
       stripComponents = 1,
       executablePath = "bin/npx",
       packageId = "node@24.16.0",
       cpu = "aarch64",
       os = "macos",
-      lockIdentity = "tarball:node@24.16.0:macos-aarch64:sha256:e28ad5531b2aafe0ea555a51b2412c42fdc0f91a6a53fbd03ac93e3847e91389"
+      lockIdentity = "tarball:node@24.16.0:macos-aarch64:sha256:39189dab4eeb15706c424af0ac08a3044c9e48f7db12a7d77f6b7aafc7dd5df6"

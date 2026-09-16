@@ -61,56 +61,56 @@ package node:
     # nodejs.org's 20.x line publishes the win-x64 zip alongside the 7z
     # and the zip extractor path does not require a system-level ``7z``
     # binary at realize time. Sha256s lifted from
-    # https://nodejs.org/dist/v20.18.0/SHASUMS256.txt — single source of
-    # truth for the v20.18.0 release. The archive layout is
-    # ``node-v20.18.0-win-x64/node.exe`` + ``npm.cmd`` + ``npx.cmd`` so
+    # https://nodejs.org/dist/v24.16.0/SHASUMS256.txt — single source of
+    # truth for the v24.16.0 release. The archive layout is
+    # ``node-v24.16.0-win-x64/node.exe`` + ``npm.cmd`` + ``npx.cmd`` so
     # stripComponents=1 flattens the leading dir; npm.nim and npx.nim
     # declare the SAME tarball URL with their own executablePath so the
     # engine's content-addressed store dedupes the extracted prefix.
-    tarball url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x64.zip",
-      sha256 = "f5cea43414cc33024bbe5867f208d1c9c915d6a38e92abeee07ed9e563662297",
+    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-x64.zip",
+      sha256 = "edaca9bd58ec8e92037dac4e877d52f6b8f430b81c18b57e264b4e2fb111cd56",
       archiveType = "zip",
       stripComponents = 1,
       executablePath = "node.exe",
-      packageId = "node@20.18.0",
+      packageId = "node@24.16.0",
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:node@20.18.0:sha256:f5cea43414cc33024bbe5867f208d1c9c915d6a38e92abeee07ed9e563662297"
+      lockIdentity = "tarball:node@24.16.0:sha256:edaca9bd58ec8e92037dac4e877d52f6b8f430b81c18b57e264b4e2fb111cd56"
     # Linux x86_64: official Node.js tar.xz. Inner dir
-    # ``node-v20.18.0-linux-x64/`` flattens via stripComponents=1; the
+    # ``node-v24.16.0-linux-x64/`` flattens via stripComponents=1; the
     # interpreter lives at ``bin/node`` post-flatten (no .exe suffix,
     # no .cmd shims).
-    tarball url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.xz",
-      sha256 = "4543670b589593f8fa5f106111fd5139081da42bb165a9239f05195e405f240a",
+    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-x64.tar.xz",
+      sha256 = "d804845d34eddc21dc1092b519d643ef40b1f58ec5dec5c22b1f4bd8fabde6c9",
       archiveType = "tar.xz",
       stripComponents = 1,
       executablePath = "bin/node",
-      packageId = "node@20.18.0",
+      packageId = "node@24.16.0",
       cpu = "x86_64",
       os = "linux",
-      lockIdentity = "tarball:node@20.18.0:sha256:4543670b589593f8fa5f106111fd5139081da42bb165a9239f05195e405f240a"
+      lockIdentity = "tarball:node@24.16.0:sha256:d804845d34eddc21dc1092b519d643ef40b1f58ec5dec5c22b1f4bd8fabde6c9"
     # macOS arm64: official Node.js tar.gz for Apple silicon. Inner dir
-    # ``node-v20.18.0-darwin-arm64/`` flattens to bin/node.
-    tarball url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-arm64.tar.gz",
-      sha256 = "92e180624259d082562592bb12548037c6a417069be29e452ec5d158d657b4be",
+    # ``node-v24.16.0-darwin-arm64/`` flattens to bin/node.
+    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-darwin-arm64.tar.gz",
+      sha256 = "39189dab4eeb15706c424af0ac08a3044c9e48f7db12a7d77f6b7aafc7dd5df6",
       archiveType = "tar.gz",
       stripComponents = 1,
       executablePath = "bin/node",
-      packageId = "node@20.18.0",
+      packageId = "node@24.16.0",
       cpu = "aarch64",
       os = "macos",
-      lockIdentity = "tarball:node@20.18.0:sha256:92e180624259d082562592bb12548037c6a417069be29e452ec5d158d657b4be"
+      lockIdentity = "tarball:node@24.16.0:sha256:39189dab4eeb15706c424af0ac08a3044c9e48f7db12a7d77f6b7aafc7dd5df6"
     # macOS x86_64: official Node.js tar.gz for Intel Macs. Same shape
     # as the arm64 entry above.
-    tarball url = "https://nodejs.org/dist/v20.18.0/node-v20.18.0-darwin-x64.tar.gz",
-      sha256 = "c02aa7560612a4e2cc359fd89fae7aedde370c06db621f2040a4a9f830a125dc",
+    tarball url = "https://nodejs.org/dist/v24.16.0/node-v24.16.0-darwin-x64.tar.gz",
+      sha256 = "298b4c7b3cb80765c8703e42b90324a4ece3b6634947b89e769c3c980ab55185",
       archiveType = "tar.gz",
       stripComponents = 1,
       executablePath = "bin/node",
-      packageId = "node@20.18.0",
+      packageId = "node@24.16.0",
       cpu = "x86_64",
       os = "macos",
-      lockIdentity = "tarball:node@20.18.0:sha256:c02aa7560612a4e2cc359fd89fae7aedde370c06db621f2040a4a9f830a125dc"
+      lockIdentity = "tarball:node@24.16.0:sha256:298b4c7b3cb80765c8703e42b90324a4ece3b6634947b89e769c3c980ab55185"
 
   executable node:
     cli:
@@ -133,7 +133,7 @@ let nodeCatalog* = @[
     install_method: imExtract,
     bin_relpath: @["bin/node.exe", "bin/npm.cmd", "bin/npx.cmd", "node.exe", "npm.cmd", "npx.cmd"],
     platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-x64.7z", sha256: "9f0ad977a75a1ca1a2ebe1294caf64e6c6b4de89d3b6dff218455de3fa0a3211", sha512: "", extract_path: "node-v24.16.0-win-x64"),
+      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-x64.zip", sha256: "9f0ad977a75a1ca1a2ebe1294caf64e6c6b4de89d3b6dff218455de3fa0a3211", sha512: "", extract_path: "node-v24.16.0-win-x64"),
       PlatformBinary(cpu: pcAArch64, os: poWindows, url: "https://nodejs.org/dist/v24.16.0/node-v24.16.0-win-arm64.7z", sha256: "e4357cd1ef3b6c67fb99547c4b736aa6732e2b4abd38ece252e119332fb49621", sha512: "", extract_path: "node-v24.16.0-win-arm64"),
       # M9.5: Linux x86_64 slice. afTarXz (vs. Windows af7zip); bin
       # layout is the canonical Unix bin/node + bin/npm + bin/npx
