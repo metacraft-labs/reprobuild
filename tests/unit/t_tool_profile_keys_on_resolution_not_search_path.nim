@@ -852,3 +852,89 @@ suite "an action's PATH is a decision, and it is never the empty string":
     checkpoint("inherited: " & $inherited.env)
     check inherited.env[0].contains(shadowDir)
     check inherited.passthrough == @["PATH"]
+
+  test "a declared PATH is keyed by value; a passthrough PATH is not":
+    ## The CMake generator declares a `PATH` composed from the toolchain
+    ## CMake resolved, and `actionPathDecision` classifies that as
+    ## hermetic. This pins the two consequences that make the
+    ## classification worth anything, in the one place where they can be
+    ## isolated from everything else that also goes into an action's key.
+    ##
+    ## ## Why it is isolated here rather than driven end to end
+    ##
+    ## MEASURED: an end-to-end version of this claim — reconfigure a
+    ## CMake project with a different declared `PATH`, observe the
+    ## artifact get rebuilt — PASSES under a mutation that puts `PATH`
+    ## back in `envPassthrough`. The inline-exec weak fingerprint mixes
+    ## in the whole encoded action payload, `env` included, so the
+    ## rebuild happens whether or not the env keying does anything. The
+    ## only way to see the env keying on its own is to call it on its
+    ## own.
+    const ToolchainA = "/toolchain-a/bin"
+    const ToolchainB = "/toolchain-b/bin"
+    let base = weakFingerprintFromText("declared-path-keying-probe")
+
+    let declaredA = actionPathDecision("", edgeDeclaresTools = false,
+      declaredPath = ToolchainA)
+    let declaredB = actionPathDecision("", edgeDeclaresTools = false,
+      declaredPath = ToolchainB)
+
+    # 1. A declared PATH is HERMETIC and names nothing passthrough — the
+    #    two halves `classifyActionPath` reads back off the lowered
+    #    action to decide which column of the build header's env census
+    #    it lands in.
+    check declaredA.class == apcHermetic
+    check declaredA.passthrough.len == 0
+    check declaredA.env == @["PATH=" & ToolchainA]
+    check classifyActionPath(action("probe", ["/bin/true"],
+      governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+      env = declaredA.env,
+      envPassthrough = declaredA.passthrough)) == apdHermetic
+
+    # 2. The VALUE reaches the key. Two toolchains, two keys.
+    let keyA = keyedOnActionEnvironment(base, declaredA.env,
+      declaredA.passthrough)
+    let keyB = keyedOnActionEnvironment(base, declaredB.env,
+      declaredB.passthrough)
+    checkpoint("declared keys differ: " & $(keyA != keyB))
+    check keyA != keyB
+
+    # 3. NON-VACUITY, and the mutation this case exists to catch: with
+    #    the SAME two values declared but `PATH` also named passthrough —
+    #    which is what any arrangement that appends the declaration
+    #    instead of routing it through the decision produces — the two
+    #    keys COLLIDE. `actionEnvironmentKeyText` renders a passthrough
+    #    variable as its name with the value deliberately omitted, so the
+    #    toolchain stops being part of the action's identity while the
+    #    action still runs with it. That is a cache that serves one
+    #    toolchain's output for another's key.
+    let passthroughKeyA = keyedOnActionEnvironment(base, declaredA.env,
+      @["PATH"])
+    let passthroughKeyB = keyedOnActionEnvironment(base, declaredB.env,
+      @["PATH"])
+    checkpoint("passthrough keys collide: " &
+      $(passthroughKeyA == passthroughKeyB))
+    check passthroughKeyA == passthroughKeyB
+    check classifyActionPath(action("probe", ["/bin/true"],
+      governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+      env = declaredA.env,
+      envPassthrough = @["PATH"])) == apdInherited
+
+    # 4. A declared PATH composes with, and does not replace, whatever
+    #    the solved graph resolved for the edge's own tools — prefix
+    #    first, so a graph-resolved directory keeps priority over a
+    #    generator-supplied one.
+    let composed = actionPathDecision("/resolved/bin",
+      declaredPath = ToolchainA, edgeDeclaresTools = true)
+    check composed.class == apcHermetic
+    check composed.env == @["PATH=/resolved/bin" & $PathSep & ToolchainA]
+
+    # 5. An EMPTY declared value is not a declaration. It must fall
+    #    through to the inherited branch rather than emit `PATH=`, which
+    #    is the `apdEmpty` defect class this file's sibling
+    #    (`t_declared_env_is_in_the_cache_key.nim` case 11) exists for.
+    let empty = actionPathDecision("", declaredPath = "",
+      edgeDeclaresTools = false)
+    check empty.class == apcInherited
+    check empty.env.len == 0
+    check empty.passthrough == @["PATH"]

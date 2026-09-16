@@ -27,8 +27,26 @@ proc dependencyPolicyForAction(action: TryCompileActionDef):
   else:
     automaticMonitorPolicy()
 
-proc registerAction(action: TryCompileActionDef): BuildActionDef
+proc splitEnvEntries(entries: openArray[string]): seq[(string, string)] =
+  ## Turn the envelope's ``KEY=VALUE`` strings into the ``(name, value)``
+  ## pairs ``buildAction`` takes. Entries with no ``=`` or an empty name
+  ## carry no variable and are dropped — the same rule
+  ## ``actionEnvironmentKeyText`` applies when it builds the cache key, so
+  ## a malformed entry cannot key an action on something the process never
+  ## sees.
+  for entry in entries:
+    let eq = entry.find('=')
+    if eq <= 0:
+      continue
+    result.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
+
+proc registerAction(action: TryCompileActionDef;
+                    actionEnv: openArray[(string, string)]): BuildActionDef
     {.discardable.} =
+  ## ``actionEnv`` is the envelope's payload-level declaration and is
+  ## applied to EVERY action, which is the whole reason it lives on the
+  ## payload rather than on ``TryCompileActionDef``: there is exactly one
+  ## place that can forget it, and it is this one.
   let call =
     if action.inline:
       inlineExecCall(action.inlineArgv, action.inlineCwd)
@@ -48,6 +66,7 @@ proc registerAction(action: TryCompileActionDef): BuildActionDef
     dynamicDepsFile = action.dynamicDepsFile,
     cacheable = action.cacheable,
     commandStatsId = action.commandStatsId,
+    env = actionEnv,
     dependencyPolicy = dependencyPolicyForAction(action))
 
 proc readMetadataFromProjectRoot(projectRoot: string): TryCompileMetadata =
@@ -91,8 +110,9 @@ when defined(reproProviderMode):
         discard buildPool(pool.name, pool.capacity)
       var registered: seq[BuildActionDef] = @[]
       var actionById = initTable[string, BuildActionDef]()
+      let actionEnv = splitEnvEntries(meta.actionEnv)
       for action in meta.actions:
-        let registeredAction = registerAction(action)
+        let registeredAction = registerAction(action, actionEnv)
         registered.add(registeredAction)
         actionById[registeredAction.id] = registeredAction
       var targetByName = initTable[string, BuildTargetDef]()

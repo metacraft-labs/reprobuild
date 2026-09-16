@@ -1491,6 +1491,22 @@ type
     passthrough*: seq[string]
     class*: ActionPathClass
 
+proc joinPathDirs(head, tail: string): string =
+  ## Concatenate two `PathSep`-separated directory lists, dropping
+  ## duplicates and preserving first-occurrence order.
+  ##
+  ## Order is priority order: `head` wins. Deduplication is not
+  ## cosmetic — a repeated directory is a repeated SEARCH, and the
+  ## per-no-op cost this whole change is about was measured in exactly
+  ## those units (one dead `PATH` entry, ~14 ms of negative `lstat` on
+  ## an autofs mount, recorded as an observed input of five link edges).
+  var dirs: seq[string] = @[]
+  for source in [head, tail]:
+    for dir in source.split(PathSep):
+      if dir.len > 0 and dirs.find(dir) < 0:
+        dirs.add(dir)
+  dirs.join($PathSep)
+
 proc actionInheritedPathValue(actionPathPrefix: string): string =
   ## THE ONE AMBIENT READ, isolated in its own proc so the ban on
   ## `getEnv` inside `actionPathEntry` stays checkable by source scan
@@ -1519,7 +1535,8 @@ proc actionInheritedPathValue(actionPathPrefix: string): string =
   else: actionPathPrefix & $PathSep & hostPath
 
 proc actionPathDecision*(actionPathPrefix: string;
-                         edgeDeclaresTools: bool): ActionPathDecision =
+                         edgeDeclaresTools: bool;
+                         declaredPath = ""): ActionPathDecision =
   ## THE SINGLE PLACE AN ACTION'S `PATH` IS DECIDED. Every lowering site
   ## goes through here; `t_declared_env_is_in_the_cache_key.nim` case 10
   ## enforces that structurally, because the previous arrangement — the
@@ -1534,6 +1551,47 @@ proc actionPathDecision*(actionPathPrefix: string;
   ## directories those tools resolved into, and that value is keyed. An
   ## edge that names nothing has stated nothing to compose from, so it
   ## inherits — and says so, by declaring `PATH` passthrough.
+  ##
+  ## ## `declaredPath` — the SECOND way to name what an edge runs
+  ##
+  ## `toolIdentityRefs` is Reprobuild's own vocabulary and it only works
+  ## for tools the SOLVED GRAPH resolved. An upstream build system that
+  ## resolved its own toolchain has the same knowledge in a different
+  ## vocabulary, and no way to spell it here. That gap is not
+  ## hypothetical: EVERY action the CMake Reprobuild generator emits is
+  ## an `inlineExecCall` with an absolute argv[0], no `uses:` ref and
+  ## therefore an empty prefix — so every one of them took the inherited
+  ## branch below. MEASURED on the zlib benchmark, from this proc's own
+  ## census line in the build header:
+  ##
+  ##   PATH: 0 hermetic (keyed by value), 37 inherited (passthrough), 0 EMPTY
+  ##
+  ## 37 of 37. Two developers with different login `PATH`s therefore
+  ## recorded different input sets and computed different cache keys for
+  ## the same compile of the same source — the one property the product
+  ## exists to provide. It also cost: `clang` probes every `PATH` entry
+  ## looking for its linker driver `arm64-apple-darwin-ld`, one dead
+  ## entry (`/home/zahary/.pixi/bin`, under macOS's autofs `/home` map)
+  ## was ~14 ms per no-op, and the miss was RECORDED as an input of
+  ## `link-zlib`, `link-example`, `link-minigzip`, `link-zlibstatic` and
+  ## `symlink-zlib`. Ninja pays none of that: it records the files it
+  ## USED, not the ones it searched.
+  ##
+  ## So a lowering site may pass a `PATH` the GRAPH declared — read off
+  ## `BuildActionDef.env`, i.e. written by the recipe or by the upstream
+  ## generator — and that is treated as exactly the same kind of claim
+  ## as a `toolIdentityRefs` declaration: hermetic, no passthrough, keyed
+  ## BY VALUE. The two compose, prefix first, because an edge may have
+  ## both (a `uses:` tool AND a generator-declared toolchain) and the
+  ## graph-resolved directory must keep priority.
+  ##
+  ## WHAT THIS IS NOT: a merge with the host's `PATH`. A declared value
+  ## REPLACES. A tool the declaration omits is not found, and the spawn
+  ## fails with a diagnosable error rather than silently binding to
+  ## whatever the developer's shell offered — which is the same
+  ## fail-loud contract the `toolIdentityRefs` branch has. Falling back
+  ## to the ambient value on a miss would reintroduce precisely the
+  ## unkeyed channel this closes.
   ##
   ## This boundary is the same one `toolPathPrefix` already uses for the
   ## composition itself, so there is one notion of "what this edge
@@ -1575,6 +1633,18 @@ proc actionPathDecision*(actionPathPrefix: string;
   ## For those the host `$PATH` is once again an unkeyed input — the
   ## pre-existing hole, restored deliberately and now counted, not the
   ## empty `PATH` that replaced it.
+  # The graph's own `PATH` declaration is checked FIRST and does not
+  # consult `edgeDeclaresTools`: it IS a declaration, of the same kind
+  # and with the same consequences. Checking it second would make an
+  # edge that declares both compose in the wrong order; checking it
+  # under `edgeDeclaresTools` would make a CMake edge — which can never
+  # have a `uses:` ref — unable to declare anything at all, which is the
+  # defect.
+  if declaredPath.len > 0:
+    return ActionPathDecision(
+      env: @[actionPathEntry(joinPathDirs(actionPathPrefix, declaredPath))],
+      passthrough: @[],
+      class: apcHermetic)
   if edgeDeclaresTools and actionPathPrefix.len > 0:
     return ActionPathDecision(
       env: @[actionPathEntry(actionPathPrefix)],
@@ -1619,6 +1689,49 @@ proc actionPathDecision*(actionPathPrefix: string;
     env: @[actionPathEntry(actionInheritedPathValue(actionPathPrefix))],
     passthrough: @["PATH"],
     class: apcInherited)
+
+proc splitDeclaredPathEnv(env: openArray[(string, string)]):
+    tuple[path: string; rest: seq[string]] =
+  ## Split a graph-declared `PATH` out of an action's `env` so it can be
+  ## routed through `actionPathDecision` instead of being appended after
+  ## it.
+  ##
+  ## APPENDING IT WOULD BE THE BUG, and it is a QUIET one. The lowering
+  ## sites used to copy every `payload.env` pair into the action verbatim,
+  ## AFTER the decision's own entries. An edge that declared `PATH`
+  ## therefore ended up carrying both a `PATH=<value>` entry and `PATH` in
+  ## `envPassthrough`, which are contradictory claims about the same
+  ## variable.
+  ##
+  ## MEASURED, by building this arrangement deliberately and running the
+  ## CMake hermeticity suite against it
+  ## (`tests/e2e/cmake-path-hermeticity/`): the SPAWN honours the
+  ## declaration — `launchChildEnv`'s passthrough block skips any name the
+  ## action already declares, so the child really does run on the declared
+  ## `PATH` — and every behavioural assertion stayed green. What breaks is
+  ## the action's recorded IDENTITY. `classifyActionPath` reports
+  ## `apdInherited`, because passthrough wins in the classifier; the build
+  ## header's census counts the edge in the inherited column; and
+  ## `actionEnvironmentKeyText` renders the NAME and deliberately omits the
+  ## VALUE, so the toolchain the action actually used is absent from its
+  ## key. An action that runs hermetically while its key says it inherited
+  ## is worse than one that plainly inherits: the cache will serve one
+  ## toolchain's output under a key that never mentioned a toolchain.
+  ##
+  ## Name comparison is case-insensitive and last-write-wins, matching
+  ## `prependPathDirsToArgvEnv`'s collapse, so this proc and the spawn
+  ## agree on which entry is "the" `PATH`.
+  ##
+  ## AN EMPTY DECLARED VALUE IS NOT A DECLARATION. `("PATH", "")` returns
+  ## an empty `path` and is dropped from `rest`, so the decision falls
+  ## through to its inherited branch rather than emitting `PATH=`. That
+  ## value is the `apdEmpty` defect class — an action that runs with no
+  ## `PATH` at all — and this is one more place it cannot be produced.
+  for entry in env:
+    if cmpIgnoreCase(entry[0], "PATH") == 0:
+      result.path = entry[1]
+    else:
+      result.rest.add(entry[0] & "=" & entry[1])
 
 proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
                                   publicCliPath: string): BuildAction =
@@ -2808,13 +2921,20 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # the action really runs with. `actionPathDecision` makes the emit
     # decision instead, and cannot produce that value.
     var inlineEnv: seq[string] = @[]
+    # THE SITE THE CMAKE GENERATOR REACHES. Every edge the Reprobuild
+    # CMake generator emits is an `inlineExecCall`, so this is where a
+    # generator-declared `PATH` has to be honoured or the declaration is
+    # decorative. See `splitDeclaredPathEnv` for why it cannot simply be
+    # copied into `inlineEnv` alongside the decision's own entries.
+    let inlineDeclaredEnv = splitDeclaredPathEnv(payload.env)
     let inlinePath = actionPathDecision(actionPathPrefix,
+      declaredPath = inlineDeclaredEnv.path,
       edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
     var inlineEnvPassthrough = inlinePath.passthrough
     for entry in inlinePath.env:
       inlineEnv.add(entry)
-    for entry in payload.env:
-      inlineEnv.add(entry[0] & "=" & entry[1])
+    for entry in inlineDeclaredEnv.rest:
+      inlineEnv.add(entry)
     return repro_build_engine.action(
       payload.id,
       argv,
@@ -3093,16 +3213,29 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # site above for what the launcher's overlay actually does with an
     # emitted `PATH=`, and `actionPathDecision` itself for why declaring
     # a ref, not a non-empty prefix, is what selects the hermetic branch.
+    let unittestDeclaredEnv = splitDeclaredPathEnv(payload.env)
     let unittestPath = actionPathDecision(actionPathPrefix,
+      declaredPath = unittestDeclaredEnv.path,
       edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
     var mergedEnvPassthrough = unittestPath.passthrough
     for entry in unittestPath.env:
       mergedEnv.add(entry)
     # MR10: per-edge env-var injections from the typed-tool wrapper's
-    # ``extraEnv`` parameter. Appended after ``PATH`` so a recipe that
-    # explicitly sets ``PATH`` via ``extraEnv`` overrides the prefix.
-    for entry in payload.env:
-      mergedEnv.add(entry[0] & "=" & entry[1])
+    # ``extraEnv`` parameter.
+    #
+    # ``PATH`` IS NOT ONE OF THEM ANY MORE. The comment that used to
+    # stand here said these were "appended after ``PATH`` so a recipe
+    # that explicitly sets ``PATH`` via ``extraEnv`` overrides the
+    # prefix". The override half was true at SPAWN time and false
+    # everywhere else: the inherited branch had already named ``PATH``
+    # passthrough, so the edge claimed to inherit while running on the
+    # recipe's value, the census counted it as inherited, and
+    # ``actionEnvironmentKeyText`` rendered the name without the value.
+    # ``splitDeclaredPathEnv`` routes it into the decision instead, where
+    # one answer covers the spawn, the classification and the key. See
+    # that proc for the measurement.
+    for entry in unittestDeclaredEnv.rest:
+      mergedEnv.add(entry)
     return repro_build_engine.action(
       payload.id,
       argv,
@@ -3192,16 +3325,19 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   # measured defect landed on. `actionPathDecision` owns the emit
   # decision; see the inline-exec site above for what the launcher's
   # overlay actually does with an emitted `PATH=`.
+  let typedDeclaredEnv = splitDeclaredPathEnv(payload.env)
   let typedToolPath = actionPathDecision(actionPathPrefix,
+    declaredPath = typedDeclaredEnv.path,
     edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
   var mergedEnvPassthrough = typedToolPath.passthrough
   for entry in typedToolPath.env:
     mergedEnv.add(entry)
   # MR10: per-edge env-var injections from the typed-tool wrapper's
-  # ``extraEnv`` parameter. Appended after ``PATH`` so a recipe that
-  # explicitly sets ``PATH`` via ``extraEnv`` overrides the prefix.
-  for entry in payload.env:
-    mergedEnv.add(entry[0] & "=" & entry[1])
+  # ``extraEnv`` parameter. ``PATH`` is routed through the decision
+  # above instead of appended here — see the nim-unittest site for what
+  # appending it actually did.
+  for entry in typedDeclaredEnv.rest:
+    mergedEnv.add(entry)
   result = repro_build_engine.action(
     payload.id,
     invocationArgv,
