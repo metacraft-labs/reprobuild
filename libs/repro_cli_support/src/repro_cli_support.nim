@@ -36471,8 +36471,22 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     # borrowed from the shared bare via alternates), the network fetch
     # would transfer nothing the planner needs. Skip it entirely — this is
     # the single biggest re-``sync`` win for an already-current workspace.
+    #
+    # ONLY for a repo whose MANIFEST pins an immutable SHA. The skip's whole
+    # justification is "the answer cannot have changed", and that holds for a
+    # SHA pin and for nothing else. For a BRANCH pin the question sync asks
+    # is "where is the branch now", which the local object store cannot
+    # answer: the predicate used to accept the lock STORE's recorded SHA as
+    # the target, so a branch-pinned repo whose recorded SHA was still
+    # reachable locally skipped its fetch — and a force-push, whose entire
+    # signature is the remote tip moving off the recorded SHA, was therefore
+    # never observed. The optimization then produced defect 2's outcome
+    # without even a failed fetch to notice: unfetched refs, classified as
+    # current. A branch pin always fetches.
+    let pinIsImmutableSha =
+      repo.revision.len > 0 and looksLikeSha(repo.revision)
     let lockedSha = lockedShaFor(repo)
-    if lockedSha.len > 0 and
+    if pinIsImmutableSha and lockedSha.len > 0 and
         commitReachableLocally(identity, repoPath, lockedSha):
       inc optimizedFetchSkips
       continue
