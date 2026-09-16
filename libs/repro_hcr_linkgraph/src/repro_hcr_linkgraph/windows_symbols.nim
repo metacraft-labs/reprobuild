@@ -35,6 +35,7 @@ type
     status*: WindowsPdbResolveStatus
     reason*: string
     rva*: uint64
+    size*: uint32
     matchCount*: uint32
     win32Error*: uint32
     imageIdentity*: WindowsPdbIdentity
@@ -249,6 +250,50 @@ proc parsePeCodeViewFacts*(path: string): PeCodeViewFacts =
   if not found:
     raise newException(ValueError, "pe-codeview-identity-missing: " & path)
 
+proc readPeImageBytesAtRva*(path: string; rva: uint64;
+                            count: int): seq[byte] =
+  ## Read bytes from the file-backed image at one RVA. This is coordinator
+  ## evidence for the Windows live-byte check: the PE has already been tied to
+  ## its full PDB by CodeView GUID+age, and the in-process agent compares these
+  ## bytes with the retained loaded module before publishing anything.
+  if count < 0 or rva > uint64(high(uint32)) or
+      uint64(count) > uint64(high(uint32)):
+    raise newException(ValueError, "PE RVA byte request overflows uint32")
+  let data = readFile(extendedPath(path))
+  if data.len < 64 or data[0] != 'M' or data[1] != 'Z':
+    raise newException(ValueError, "not a PE image: " & path)
+  let peOffset = int(readU32Le(data, 0x3c, "PE header offset"))
+  checkedRange(data, uint64(peOffset), 24, "PE signature and COFF header")
+  if data[peOffset ..< peOffset + 4] != "PE\0\0":
+    raise newException(ValueError, "invalid PE signature: " & path)
+  if readU16Le(data, peOffset + 4, "PE machine") != 0x8664'u16:
+    raise newException(ValueError, "PE image is not AMD64: " & path)
+  let sectionCount = int(readU16Le(data, peOffset + 6, "PE section count"))
+  let optionalSize = int(readU16Le(data, peOffset + 20, "PE optional size"))
+  let optionalOffset = peOffset + 24
+  checkedRange(data, uint64(optionalOffset), uint64(optionalSize),
+               "PE optional header")
+  if optionalSize < 64 or
+      readU16Le(data, optionalOffset, "PE optional magic") != 0x20b'u16:
+    raise newException(ValueError, "PE image is not PE32+: " & path)
+  let sizeOfHeaders = readU32Le(data, optionalOffset + 60, "PE header size")
+  let sectionTable = optionalOffset + optionalSize
+  checkedRange(data, uint64(sectionTable), uint64(sectionCount) * 40'u64,
+               "PE section table")
+  var sections: seq[PeSection]
+  for index in 0 ..< sectionCount:
+    let pos = sectionTable + index * 40
+    sections.add PeSection(
+      virtualSize: readU32Le(data, pos + 8, "PE section virtual size"),
+      virtualAddress: readU32Le(data, pos + 12, "PE section RVA"),
+      rawSize: readU32Le(data, pos + 16, "PE section raw size"),
+      rawOffset: readU32Le(data, pos + 20, "PE section raw offset"))
+  let offset = peRvaToFileOffset(
+    data, uint32(rva), uint32(count), sizeOfHeaders, sections)
+  result = newSeq[byte](count)
+  for index in 0 ..< count:
+    result[index] = byte(ord(data[offset + index]))
+
 when defined(windows):
   const moduleDirectory = currentSourcePath.parentDir
   {.compile: moduleDirectory / "../../c/repro_hcr_windows_pdb.c".}
@@ -261,7 +306,7 @@ when defined(windows):
     status: uint32
     matchCount: uint32
     win32Error: uint32
-    reserved: uint32
+    functionSize: uint32
     rva: uint64
 
   proc nativeResolve(imagePath, searchPath, symbolName: WideCString):
@@ -296,6 +341,7 @@ proc resolveWindowsPdbFunction*(imagePath, pdbPath,
       newWideCString(parentDir(absolutePath(pdbPath))),
       newWideCString(symbolName))
     result.rva = native.rva
+    result.size = native.functionSize
     result.matchCount = native.matchCount
     result.win32Error = native.win32Error
     case native.status

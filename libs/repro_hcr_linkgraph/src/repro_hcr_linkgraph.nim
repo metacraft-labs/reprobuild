@@ -4,6 +4,7 @@ import repro_hcr_linkgraph/elf
 import repro_hcr_linkgraph/coff
 import repro_hcr_linkgraph/windows_symbols
 import repro_hcr_linkgraph/windows_unwind
+import repro_hcr_linkgraph/windows_direct_payload
 import repro_hcr_linkgraph/analysis
 import repro_hcr_linkgraph/planner
 import repro_hcr_linkgraph/json_view
@@ -16,6 +17,7 @@ export elf
 export coff
 export windows_symbols
 export windows_unwind
+export windows_direct_payload
 export analysis
 export planner
 export json_view

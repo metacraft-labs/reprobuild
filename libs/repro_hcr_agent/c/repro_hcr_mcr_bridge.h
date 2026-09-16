@@ -74,6 +74,8 @@ REPRO_HCR_WEAK void ct_claimed_guest_text_release(uintptr_t start);
 REPRO_HCR_WEAK int ct_claimed_guest_text_intersects(uintptr_t start, size_t len,
                                                     unsigned *holder_out);
 
+#endif /* __linux__ */
+
 /* ---------------------------------------------------------------------------
  * §10.3 — the CodePatchEvent bridge.
  *
@@ -126,9 +128,12 @@ typedef struct ct_repro_hcr_patch_note_v1 {
 #define REPRO_HCR_PUBLICATION_TIER_QUIESCED 2u
 
 /* Returns 1 recorded, 0 not recording, negative when the note is unusable. */
+#if defined(__linux__)
 REPRO_HCR_WEAK int ct_repro_hcr_agent_did_patch_v2(
     const ct_repro_hcr_patch_note_v1 *note);
+#endif
 
-#endif /* __linux__ */
+typedef int (*ct_repro_hcr_agent_did_patch_v2_fn)(
+    const ct_repro_hcr_patch_note_v1 *note);
 
 #endif /* REPRO_HCR_MCR_BRIDGE_H */

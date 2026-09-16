@@ -34,7 +34,9 @@
 #endif
 
 #ifndef REPRO_HCR_WQ_SINGLE_SNAPSHOT_FOR_TEST
-#define REPRO_HCR_WQ_SINGLE_SNAPSHOT_FOR_TEST() 0
+static int repro_hcr_wq_single_snapshot_for_test(void) { return 0; }
+#define REPRO_HCR_WQ_SINGLE_SNAPSHOT_FOR_TEST() \
+  repro_hcr_wq_single_snapshot_for_test()
 #endif
 
 typedef enum repro_hcr_wq_status {

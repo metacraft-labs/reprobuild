@@ -240,6 +240,18 @@ type
     holder*: uint32
     windowAddress*: string
 
+  HcrWindowsPatchEvidence* = object
+    ## Present only for the canonical Windows direct-patch endpoint. These are
+    ## observations made at the publication boundary, not coordinator-derived
+    ## restatements of the request.
+    present*: bool
+    publicationTier*: uint32
+    suspendedThreads*: int
+    capturedContexts*: int
+    quiescenceHeldAtStore*: bool
+    cacheFlushSucceeded*: bool
+    firstInstructionLength*: uint32
+
   HcrPatchApplied* = object
     patchId*: string
     changedFunctions*: seq[string]
@@ -253,6 +265,7 @@ type
     sharedLibraryPositivePath*: bool
     codePatchEvent*: HcrCodePatchEvent
     skippedFunctions*: seq[HcrSkippedFunction]
+    windowsEvidence*: HcrWindowsPatchEvidence
 
   HcrPatchFailed* = object
     patchId*: string
@@ -497,6 +510,15 @@ proc patchAppliedJson(value: HcrPatchApplied): JsonNode =
     result["codePatchEvent"] = codePatchEventJson(value.codePatchEvent)
   if value.skippedFunctions.len > 0:
     result["skippedFunctions"] = skippedFunctionsJson(value.skippedFunctions)
+  if value.windowsEvidence.present:
+    result["windowsEvidence"] = %*{
+      "publicationTier": value.windowsEvidence.publicationTier,
+      "suspendedThreads": value.windowsEvidence.suspendedThreads,
+      "capturedContexts": value.windowsEvidence.capturedContexts,
+      "quiescenceHeldAtStore": value.windowsEvidence.quiescenceHeldAtStore,
+      "cacheFlushSucceeded": value.windowsEvidence.cacheFlushSucceeded,
+      "firstInstructionLength": value.windowsEvidence.firstInstructionLength
+    }
 
 proc patchFailedJson(value: HcrPatchFailed): JsonNode =
   result = %*{
@@ -656,10 +678,25 @@ proc parseSkippedFunctions(node: JsonNode): seq[HcrSkippedFunction] =
       holder: uint32(value.requireInt("holder")),
       windowAddress: value.optionalStr("windowAddress"))
 
+proc parseWindowsPatchEvidence(node: JsonNode): HcrWindowsPatchEvidence =
+  if not node.hasKey("windowsEvidence") or
+      node["windowsEvidence"].kind != JObject:
+    return HcrWindowsPatchEvidence(present: false)
+  let value = node["windowsEvidence"]
+  HcrWindowsPatchEvidence(
+    present: true,
+    publicationTier: uint32(value.requireInt("publicationTier")),
+    suspendedThreads: value.requireInt("suspendedThreads"),
+    capturedContexts: value.requireInt("capturedContexts"),
+    quiescenceHeldAtStore: value.requireBool("quiescenceHeldAtStore"),
+    cacheFlushSucceeded: value.requireBool("cacheFlushSucceeded"),
+    firstInstructionLength: uint32(value.requireInt("firstInstructionLength")))
+
 proc parsePatchApplied(node: JsonNode): HcrPatchApplied =
   HcrPatchApplied(
     codePatchEvent: parseCodePatchEvent(node),
     skippedFunctions: parseSkippedFunctions(node),
+    windowsEvidence: parseWindowsPatchEvidence(node),
     patchId: node.requireStr("patchId"),
     changedFunctions: node.stringSeq("changedFunctions"),
     symbolGeneration: uint64(node.requireInt("symbolGeneration")),

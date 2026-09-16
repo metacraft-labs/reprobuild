@@ -223,6 +223,14 @@ jobs:
             throw "HX-W-0 linked-image measurement gate failed with exit code $LASTEXITCODE"
           }
 
+      - name: Build the emitted Windows HCR patchable profile
+        shell: pwsh
+        run: |
+          python tests/windows/hwg_m0_windows_patchable_profile.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "HWG-M0 Windows patchable-profile gate failed with exit code $LASTEXITCODE"
+          }
+
       - name: Enforce Windows HCR quiescence-only publication
         shell: pwsh
         run: |
@@ -261,6 +269,14 @@ jobs:
           python tests/windows/hx_w5_windows_agent_injection_and_transport.py
           if ($LASTEXITCODE -ne 0) {
             throw "HX-W-5 injection/transport gate failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Apply a real Windows HCR PE/COFF patch
+        shell: pwsh
+        run: |
+          python tests/windows/hwg_m1_windows_direct_patch.py
+          if ($LASTEXITCODE -ne 0) {
+            throw "HWG-M1 Windows direct-patch gate failed with exit code $LASTEXITCODE"
           }
 
       - name: Resolve Windows HCR patch source lines in WinDbg

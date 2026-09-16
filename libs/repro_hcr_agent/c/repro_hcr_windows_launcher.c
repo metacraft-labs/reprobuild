@@ -4,11 +4,14 @@
  * Usage:
  *   repro_hcr_windows_launcher.exe --agent <absolute-or-relative-dll> --
  *       <target.exe> [arguments...]
+ *   repro_hcr_windows_launcher.exe --agent <absolute-or-relative-dll>
+ *       --pid <existing-process-id>
  *
  * The ordering follows the recorder's proven inject_dll launcher: create the
  * target suspended, run LoadLibraryW alone in a remote thread, invoke the HCR
  * bootstrap export in a second remote thread, then resume the primary thread.
- * This v1 deliberately has no attach-to-pid mode.
+ * The attach form is used when another lifecycle owner (notably ct-mcr)
+ * created the target and must remain its parent.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -227,15 +230,16 @@ int wmain(int argc, wchar_t **argv) {
   wchar_t *command_line = NULL;
   STARTUPINFOW startup;
   PROCESS_INFORMATION process;
+  int attach_mode = 0;
   int result = 1;
 
   if (argc < 5 || wcscmp(argv[1], L"--agent") != 0 ||
-      wcscmp(argv[3], L"--") != 0) {
+      (wcscmp(argv[3], L"--") != 0 && wcscmp(argv[3], L"--pid") != 0)) {
     fwprintf(stderr,
              L"usage: repro_hcr_windows_launcher.exe --agent <dll> -- "
              L"<target.exe> [arguments...]\n"
-             L"This v1 starts a new x64 process; attach-to-pid is not "
-             L"supported.\n");
+             L"   or: repro_hcr_windows_launcher.exe --agent <dll> "
+             L"--pid <existing-process-id>\n");
     return 2;
   }
   if (repro_hcr_absolute_file(argv[2], dll_path,
@@ -243,40 +247,70 @@ int wmain(int argc, wchar_t **argv) {
     fwprintf(stderr, L"HCR launcher: agent DLL does not exist: %ls\n", argv[2]);
     return 2;
   }
-  if (repro_hcr_absolute_file(argv[4], target_path,
-                              sizeof(target_path) / sizeof(target_path[0])) != 0) {
-    fwprintf(stderr, L"HCR launcher: target does not exist: %ls\n", argv[4]);
-    return 2;
-  }
-  argv[4] = target_path;
-  command_line = repro_hcr_quote_command_line(argc - 4, argv + 4);
-  if (command_line == NULL) {
-    fwprintf(stderr, L"HCR launcher: could not allocate the command line\n");
-    return 1;
-  }
-
-  ZeroMemory(&startup, sizeof(startup));
-  startup.cb = sizeof(startup);
   ZeroMemory(&process, sizeof(process));
-  if (!CreateProcessW(target_path, command_line, NULL, NULL, FALSE,
-                      CREATE_SUSPENDED, NULL, NULL, &startup, &process)) {
-    fwprintf(stderr, L"HCR launcher: CreateProcessW failed (status %lu)\n",
-             (unsigned long)GetLastError());
-    goto done;
+  if (wcscmp(argv[3], L"--pid") == 0) {
+    wchar_t *end = NULL;
+    unsigned long parsed;
+    if (argc != 5) {
+      fwprintf(stderr, L"HCR launcher: --pid accepts exactly one value\n");
+      return 2;
+    }
+    parsed = wcstoul(argv[4], &end, 10);
+    if (end == argv[4] || *end != L'\0' || parsed == 0 ||
+        parsed > 0xffffffffu) {
+      fwprintf(stderr, L"HCR launcher: invalid process id: %ls\n", argv[4]);
+      return 2;
+    }
+    process.dwProcessId = (DWORD)parsed;
+    process.hProcess = OpenProcess(
+        PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
+            PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE |
+            SYNCHRONIZE,
+        FALSE, process.dwProcessId);
+    if (process.hProcess == NULL) {
+      fwprintf(stderr, L"HCR launcher: OpenProcess failed (status %lu)\n",
+               (unsigned long)GetLastError());
+      goto done;
+    }
+    attach_mode = 1;
+  } else {
+    if (repro_hcr_absolute_file(
+            argv[4], target_path,
+            sizeof(target_path) / sizeof(target_path[0])) != 0) {
+      fwprintf(stderr, L"HCR launcher: target does not exist: %ls\n", argv[4]);
+      return 2;
+    }
+    argv[4] = target_path;
+    command_line = repro_hcr_quote_command_line(argc - 4, argv + 4);
+    if (command_line == NULL) {
+      fwprintf(stderr, L"HCR launcher: could not allocate the command line\n");
+      return 1;
+    }
+    ZeroMemory(&startup, sizeof(startup));
+    startup.cb = sizeof(startup);
+    if (!CreateProcessW(target_path, command_line, NULL, NULL, FALSE,
+                        CREATE_SUSPENDED, NULL, NULL, &startup, &process)) {
+      fwprintf(stderr, L"HCR launcher: CreateProcessW failed (status %lu)\n",
+               (unsigned long)GetLastError());
+      goto done;
+    }
   }
   if (repro_hcr_inject(&process, dll_path) != 0) {
-    TerminateProcess(process.hProcess, 1);
+    if (!attach_mode) {
+      TerminateProcess(process.hProcess, 1);
+    }
     goto done;
   }
-  if (ResumeThread(process.hThread) == (DWORD)-1) {
+  if (!attach_mode && ResumeThread(process.hThread) == (DWORD)-1) {
     fwprintf(stderr, L"HCR launcher: ResumeThread failed (status %lu)\n",
              (unsigned long)GetLastError());
     TerminateProcess(process.hProcess, 1);
     goto done;
   }
   wprintf(L"{\"pid\":%lu,\"agent\":\"repro_hcr_agent.dll\"," \
-          L"\"attached\":false,\"primaryResumed\":true}\n",
-          (unsigned long)process.dwProcessId);
+          L"\"attached\":true,\"primaryResumed\":%ls}\n",
+          (unsigned long)process.dwProcessId,
+          attach_mode ? L"false" : L"true");
   fflush(stdout);
   result = 0;
 

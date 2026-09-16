@@ -142,6 +142,7 @@ def build_artifacts(
         [
             "/link",
             "advapi32.lib",
+            "mincore.lib",
             f"/PDB:{output_dir / 'repro_hcr_agent.pdb'}",
             f"/IMPLIB:{output_dir / 'repro_hcr_agent.lib'}",
         ]

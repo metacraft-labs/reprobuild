@@ -232,9 +232,13 @@ class HxW5WindowsAgentGate(unittest.TestCase):
             self.assertEqual(evidence["support_profile"], WINDOWS_PROFILE)
             self.assertIn("hcr-agent-protocol", evidence["capabilities"])
             self.assertIn("windows-named-pipe-transport", evidence["capabilities"])
-            self.assertFalse(evidence["direct_patch_advertised"])
+            self.assertTrue(evidence["direct_patch_advertised"])
             self.assertEqual(evidence["patch_failure_stage"], "applyDirectPatchRequest")
-            self.assertTrue(str(evidence["patch_failure"]).startswith("unsupported-host"))
+            self.assertTrue(
+                str(evidence["patch_failure"]).startswith(
+                    "windows-patch-bundle-invalid"
+                )
+            )
             self.assertGreaterEqual(int(evidence["transcript_frames"]), 5)
         finally:
             stop_process(pid, stop)

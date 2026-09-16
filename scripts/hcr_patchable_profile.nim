@@ -1,4 +1,4 @@
-## Emit the HCR patchable build profile as shell-assignable variables.
+## Emit the host HCR patchable build profile.
 ##
 ## HLX-M1 follow-on. The Linux ELF HCR provider only accepts a target whose
 ## translation units were compiled with the patchable profile and whose image
@@ -18,21 +18,24 @@
 ## fails much later, at patch time, as an ``absent-sled`` refusal that looks
 ## like a provider bug.
 ##
-## So this program is the bridge: one process, no arguments, whose entire job is
-## to print what the Nim definitions say, in a form ``sh`` can ``eval``. It is
-## not a copy of the profile; it is a projection of it. Change the flags in
-## ``runtime_core.nim`` and the next Godot build picks them up.
+## So this program is the bridge: one process whose entire job is to print what
+## the Nim definitions say. Its default remains the original ``sh`` form;
+## ``--format=json`` is the argv-safe form used by Windows PowerShell, Python,
+## SCons, and CMake consumers. It is not a copy of the profile; it is a
+## projection of it. Change the flags in ``runtime_core.nim`` and the next
+## Godot build picks them up.
 ##
 ## Usage:
 ##
 ##   nim c -d:release --outdir:<dir> scripts/hcr_patchable_profile.nim
 ##   eval "$(<dir>/hcr_patchable_profile)"
 ##   #  -> HCR_PATCHABLE_CCFLAGS / HCR_PATCHABLE_LINKFLAGS in the environment
+##   <dir>/hcr_patchable_profile --format=json
 ##
 ## The values are host-architecture dependent (``=16,0`` on x86_64, ``=4,0`` on
 ## aarch64), so it must be run on the machine that will do the build.
 
-import std/strutils
+import std/[json, os, strutils]
 import repro_project_dsl
 
 proc shellQuote(value: string): string =
@@ -57,6 +60,27 @@ when isMainModule:
       hostOS & "/" & hostCPU & "; refusing to emit an empty profile")
     quit(1)
 
-  emit("HCR_PATCHABLE_CCFLAGS", compileFlags)
-  emit("HCR_PATCHABLE_LINKFLAGS", linkFlags)
-  echo "export HCR_PATCHABLE_CCFLAGS HCR_PATCHABLE_LINKFLAGS"
+  let arguments = commandLineParams()
+  if arguments.len == 0 or arguments == @["--format=shell"]:
+    emit("HCR_PATCHABLE_CCFLAGS", compileFlags)
+    emit("HCR_PATCHABLE_LINKFLAGS", linkFlags)
+    echo "export HCR_PATCHABLE_CCFLAGS HCR_PATCHABLE_LINKFLAGS"
+  elif arguments == @["--format=json"]:
+    echo $(%*{
+      "schemaId": "reprobuild.hcr.patchable-profile.v1",
+      "hostOS": hostOS,
+      "hostCPU": hostCPU,
+      "supportProfile":
+        (when defined(windows):
+           "windows-x86_64-msvc-pe-direct-hcr-v1"
+         elif defined(macosx):
+           "macos-arm64-direct-hcr-in-codetracer-v1"
+         else:
+           "linux-x86_64-elf-direct-hcr-v1"),
+      "compileFlags": compileFlags,
+      "linkFlags": linkFlags
+    })
+  else:
+    stderr.writeLine(
+      "usage: hcr_patchable_profile [--format=shell|--format=json]")
+    quit(2)

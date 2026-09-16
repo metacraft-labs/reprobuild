@@ -317,6 +317,27 @@ suite "HCR agent protocol":
         hmdAgentToCoordinator,
         patchAppliedMessage(sharedLibraryPositivePath = true))
 
+  test "Windows direct session accepts a loaded-DLL positive path":
+    var session = initHcrAgentSession(
+      HcrWindowsX86_64DirectSupportProfile)
+    var hello = agentHello()
+    hello.hello.supportProfile = HcrWindowsX86_64DirectSupportProfile
+    session.observeAgentProtocolMessage(hmdAgentToCoordinator, hello)
+    var ack = coordinatorHelloAck()
+    ack.hello.supportProfile = HcrWindowsX86_64DirectSupportProfile
+    session.observeAgentProtocolMessage(hmdCoordinatorToAgent, ack)
+    var request = patchRequestMessage()
+    request.patchRequest.supportProfile =
+      HcrWindowsX86_64DirectSupportProfile
+    session.observeAgentProtocolMessage(hmdCoordinatorToAgent, request)
+    session.observeAgentProtocolMessage(
+      hmdAgentToCoordinator,
+      lifecycleMessage("patch-0001", "hcr/patchApplied"))
+    session.observeAgentProtocolMessage(
+      hmdAgentToCoordinator,
+      patchAppliedMessage(sharedLibraryPositivePath = true))
+    check session.state == hssPatchFinished
+
   # --- HLX-M7 -------------------------------------------------------------
   # Design: `reprobuild-specs/HCR/Linux-ELF-Provider.md` §10.3; protocol
   # `Hot-Code-Reloading-High-Level-Interfaces.md` §7.2 / §7.3.

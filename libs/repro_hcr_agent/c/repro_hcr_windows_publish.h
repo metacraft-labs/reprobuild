@@ -246,9 +246,8 @@ static int repro_hcr_windows_publish_hotpatch(
   repro_hcr_wp_last_report.quiescence_status = quiescence_status;
   if (quiescence_status != REPRO_HCR_WQ_OK) {
     repro_hcr_wp_last_report.win32_error = repro_hcr_wq.win32_error;
-    repro_hcr_wp_last_report.status =
-        REPRO_HCR_WP_CONTEXT_ADJUSTMENT_FAILED;
-    return REPRO_HCR_WP_CONTEXT_ADJUSTMENT_FAILED;
+    status = REPRO_HCR_WP_CONTEXT_ADJUSTMENT_FAILED;
+    goto release_without_write;
   }
   if (!VirtualProtect(padding, span, PAGE_READWRITE, &original_protection)) {
     repro_hcr_wp_last_report.win32_error = GetLastError();

@@ -13,6 +13,7 @@ struct repro_hcr_windows_pdb_enum_state {
   const wchar_t *expected_name;
   uint64_t module_base;
   uint64_t first_rva;
+  uint32_t first_size;
   uint32_t match_count;
   int invalid_address;
 };
@@ -40,6 +41,7 @@ static BOOL CALLBACK repro_hcr_windows_pdb_enum_callback(
   state->match_count += 1;
   if (state->match_count == 1) {
     state->first_rva = symbol->Address - state->module_base;
+    state->first_size = symbol->Size;
   }
   return TRUE;
 }
@@ -98,6 +100,7 @@ struct repro_hcr_windows_pdb_result repro_hcr_windows_pdb_resolve_function(
   } else {
     result.status = REPRO_HCR_WINDOWS_PDB_OK;
     result.rva = state.first_rva;
+    result.function_size = state.first_size;
   }
 
 unload:

@@ -2670,14 +2670,26 @@ proc patchableCompileFlags*(tool: ReproHcr; entryBytes = 0;
   ##
   ## ``entryBytes = 0`` means "use the architecture default"; pass a value to
   ## override.
-  let nopCount =
-    if entryBytes > 0: entryBytes
-    elif hostCPU == "arm64": 4
-    else: 16
-  result = @[
-    patchableFunctionEntryFlag(tool, nopCount, entryOffset),
-    functionAlignmentFlag(tool, alignment)
-  ]
+  when defined(windows):
+    ## HWG-M0 / HX-W-0. MSVC x86_64 does not use an in-function GCC/Clang
+    ## sled. The linked PE gets its six pre-entry bytes from LINK's
+    ## `/FUNCTIONPADMIN:6`; the compile half supplies the full PDB and forbids
+    ## whole-program code generation so a private function remains resolvable
+    ## and independently patchable. ICF is a linker decision below.
+    discard tool
+    discard entryBytes
+    discard entryOffset
+    discard alignment
+    result = @["/Zi", "/GL-"]
+  else:
+    let nopCount =
+      if entryBytes > 0: entryBytes
+      elif hostCPU == "arm64": 4
+      else: 16
+    result = @[
+      patchableFunctionEntryFlag(tool, nopCount, entryOffset),
+      functionAlignmentFlag(tool, alignment)
+    ]
 
 proc patchableLinkFlags*(tool: ReproHcr; segmentName = "__HCR";
                          buildIdStyle = "sha1"): seq[string] {.dynOrStatic.} =
@@ -2691,13 +2703,29 @@ proc patchableLinkFlags*(tool: ReproHcr; segmentName = "__HCR";
   ## The macOS segment-protection flag is carried alongside so that a target
   ## has one place to ask for "the flags the HCR provider needs at link time"
   ## on either platform.
-  result = @[]
-  let segment = machoSegmentLinkFlags(tool, segmentName)
-  if segment.len > 0:
-    result.add segment
-  let buildId = buildIdLinkFlag(tool, buildIdStyle)
-  if buildId.len > 0:
-    result.add buildId
+  when defined(windows):
+    ## The Windows v1 profile is PDB-centered and quiescence-only. These are
+    ## deliberately emitted here rather than repeated in SCons/CMake recipes:
+    ## `/FUNCTIONPADMIN:6` is the declaration the provider validates in the
+    ## linked image, while DEBUG/NOICF/non-incremental linking preserve the
+    ## one-to-one PDB RVA and function-entry contract.
+    discard tool
+    discard segmentName
+    discard buildIdStyle
+    result = @[
+      "/DEBUG:FULL",
+      "/FUNCTIONPADMIN:6",
+      "/INCREMENTAL:NO",
+      "/OPT:NOICF"
+    ]
+  else:
+    result = @[]
+    let segment = machoSegmentLinkFlags(tool, segmentName)
+    if segment.len > 0:
+      result.add segment
+    let buildId = buildIdLinkFlag(tool, buildIdStyle)
+    if buildId.len > 0:
+      result.add buildId
 
 proc copyFile*(tool: ReproFs; source, output: string; actionId = "";
                deps: openArray[string] = [];

@@ -190,9 +190,10 @@ proc observePatchApplied(session: var HcrAgentSession;
   session.requirePatchId(applied.patchId, "patch applied")
   if applied.changedFunctions.len == 0:
     raise newException(ValueError, "patch applied has no changed functions")
-  if applied.sharedLibraryPositivePath:
+  if applied.sharedLibraryPositivePath and
+      session.supportProfile != HcrWindowsX86_64DirectSupportProfile:
     raise newException(ValueError,
-      "direct profile cannot report a shared-library positive path")
+      "this direct profile cannot report a shared-library positive path")
   if not applied.oldCodeRetained:
     raise newException(ValueError,
       "direct profile must retain old code for debugger/replay identity")

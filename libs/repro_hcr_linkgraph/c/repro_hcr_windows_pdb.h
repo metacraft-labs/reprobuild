@@ -23,7 +23,7 @@ struct repro_hcr_windows_pdb_result {
   uint32_t status;
   uint32_t match_count;
   uint32_t win32_error;
-  uint32_t reserved;
+  uint32_t function_size;
   uint64_t rva;
 };
 

@@ -16,7 +16,7 @@ proc main() =
   defer: connection.close()
   var client = initHcrCoordinatorClient(HcrWindowsX86_64DirectSupportProfile)
   let request = directPatchRequest(
-    "hx-w5-unsupported-probe",
+    "hx-w5-malformed-bundle-probe",
     HcrWindowsX86_64DirectSupportProfile,
     ["hx_w5_changed"],
     ["hx_w5_target"],
@@ -27,11 +27,11 @@ proc main() =
   let delivery = client.deliverPatchRequest(connection, request)
   if delivery.patchFailed.isNone:
     raise newException(ValueError,
-      "Windows W5 agent accepted a patch before patch integration exists")
+      "Windows agent accepted the malformed W5 transport probe")
   let failure = delivery.patchFailed.get()
-  if not failure.message.startsWith("unsupported-host"):
+  if not failure.message.startsWith("windows-patch-bundle-invalid"):
     raise newException(ValueError,
-      "Windows W5 refusal is not named unsupported-host: " & failure.message)
+      "Windows malformed-bundle refusal is not named: " & failure.message)
   if HcrWindowsX86_64DirectSupportProfile != client.supportProfile:
     raise newException(ValueError, "coordinator profile changed during handshake")
   echo $(%*{
