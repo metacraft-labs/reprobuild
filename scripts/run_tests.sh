@@ -296,59 +296,10 @@ if [[ "${tap_runner_stale}" -eq 1 ]]; then
     tools/tap-test-runner/repro_tap_test_runner.nim
 fi
 
-# The M3 runner (`tools/test-runner`) is built here for exactly the reason the
-# M20 runner above is: a dozen tests SPAWN `build/bin/repro_test_runner`
-# (t_repro_test_runner_*, t_m20_second_runner_generic_layer,
-# t_ext_test_execution_rows, t_d6_runner_test_timeout, the B5 and sharding e2e
-# cases), so it is an INPUT to those tests and not an output of compiling them.
-#
-# It used to be built only in the `else` of the ct-test-runner branch further
-# down, i.e. only on hosts where `ct-test-runner` is absent from PATH. On any
-# host that HAS one, nothing rebuilt it and those tests silently exercised
-# whatever binary happened to be on disk. Conditions that a runner change is
-# supposed to make pass were therefore unreachable without a hand build, which
-# is the opposite of a gate.
-#
-# (An earlier version of this comment said the dev shell is such a host,
-# "since `ctTestTools` is in the shell's packages". That is wrong and worth
-# correcting rather than deleting, because it is the kind of claim that makes
-# a reader believe the branch below is live. `ctTestTools` installs a binary
-# named `ct-test`, not `ct-test-runner`; `command -v ct-test-runner` returns
-# nonzero in the dev shell. The unconditional build is still right, for the
-# reason in the paragraph above — a dozen tests spawn this binary — but not
-# for the reason that was given.)
-#
-# Staleness is judged against everything the runner LINKS, not just its own
-# entry point: `repro_test_runner.nim` imports `ct_test_history` and
-# `repro_test_stats`, and both of those import `ct_test_interface`. Watching
-# only the entry point let an edit to any of those three ship a stale runner —
-# the same class of miss the entry-point-only check was added to prevent.
+# The runner is built once by reprobuild.test_helpers.repro_test_runner in
+# the test-helpers collection below, including when another runner executes
+# the suite. Its source and transitive inputs are tracked by the graph.
 runner_bin="build/bin/repro_test_runner${exe_ext}"
-runner_stale=0
-if [[ ! -x "${runner_bin}" ]]; then
-  runner_stale=1
-else
-  while IFS= read -r runner_src; do
-    if [[ "${runner_src}" -nt "${runner_bin}" ]]; then
-      runner_stale=1
-      break
-    fi
-  done < <(
-    find tools/test-runner libs/repro_test_stats libs/ct_test_history \
-      libs/ct_test_interface -name '*.nim' 2>/dev/null
-  )
-fi
-if [[ "${runner_stale}" -eq 1 ]]; then
-  printf 'Building M3 runner: %s\n' "${runner_bin}" >&2
-  nim c \
-    -d:release \
-    --threads:on \
-    --hints:off \
-    --warnings:off \
-    --nimcache:build/nimcache/repro_test_runner \
-    --out:"${runner_bin}" \
-    tools/test-runner/repro_test_runner.nim
-fi
 
 # Step 3: build the apps, helpers, fixtures, and test binaries through the
 # engine. Parallelism comes from the host's real capacity — cores AND
