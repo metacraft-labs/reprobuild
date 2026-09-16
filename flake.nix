@@ -425,7 +425,7 @@
       flake = false;
     };
     ct-trace-format-src = {
-      # CodeTracer 602e7bb7 imports codetracer_trace_writer/span_stream. Keep
+      # CodeTracer 632fdceed imports codetracer_trace_writer/span_stream. Keep
       # this past the span-stream writer, cumulative-index, and encoder fixes;
       # the older c2f3dfc3 pin does not contain that module at all.
       url = "github:metacraft-labs/codetracer-trace-format-nim/bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26";

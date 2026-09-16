@@ -6,14 +6,14 @@ import repro_test_support
 
 const
   CodeTracerProjectContractCommit =
-    "602e7bb728311c230c9a42fa7fd8aab546b6467a"
+    "632fdceed037c52b0fd26b2195934bc32e82a0ed"
   PinnedCodeTracerProjectFile =
-    "tests/fixtures/codetracer-subset/repro-602e7bb7.nim"
+    "tests/fixtures/codetracer-subset/repro-632fdcee.nim"
   PinnedCodeTracerConfigFile =
-    "tests/fixtures/codetracer-subset/config-602e7bb7.nims"
+    "tests/fixtures/codetracer-subset/config-632fdcee.nims"
   PinnedCodeTracerFixtureHeaderLines = 6
   PinnedCodeTracerProjectPayloadSha256 =
-    "2a98164dfa3a03b42d3cdd440ce0ebc4a22ef592bf7a1161e267706e4d50a363"
+    "7848e4dd20607855b0900c71c5fefc393d0f6fb38ffc0d643436f6b9e81df2ad"
   PinnedCodeTracerConfigPayloadSha256 =
     "3ce6cff73a75c6bfed6e3ed9d0fe1128dff8bca2ef5ef0e23caa5450305d299e"
   # `reprobuild-provision` used to live in THIS repo, at
