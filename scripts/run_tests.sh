@@ -539,9 +539,19 @@ if (( repro_parallelism_is_default == 1 )); then
     reprobuild_default_nested_build_parallelism \
       "${available_cores}" "${available_mem_mb}"
   )"
+  # The runner's exclusive phase runs one case at a time with no worker pool,
+  # so the per-worker share above is the wrong number for it; it gets the
+  # undivided budget instead. Exported under the same guard and for the same
+  # reason: a hand-pinned REPROBUILD_MAX_PARALLELISM covers the whole run, and
+  # the runner leaves the exclusive phase alone when this is absent.
+  export REPROBUILD_EXCLUSIVE_MAX_PARALLELISM="$(
+    reprobuild_default_exclusive_build_parallelism \
+      "${available_cores}" "${available_mem_mb}"
+  )"
 fi
-printf 'Executing tests with %s worker(s); nested builds get REPROBUILD_MAX_PARALLELISM=%s\n' \
-  "${REPROBUILD_TEST_THREADS}" "${REPROBUILD_MAX_PARALLELISM}" >&2
+printf 'Executing tests with %s worker(s); nested builds get REPROBUILD_MAX_PARALLELISM=%s (exclusive phase: %s)\n' \
+  "${REPROBUILD_TEST_THREADS}" "${REPROBUILD_MAX_PARALLELISM}" \
+  "${REPROBUILD_EXCLUSIVE_MAX_PARALLELISM:-${REPROBUILD_MAX_PARALLELISM}}" >&2
 
 # Runner selection. Read this together with the note below before assuming a
 # `ct-test` on PATH belongs in it.

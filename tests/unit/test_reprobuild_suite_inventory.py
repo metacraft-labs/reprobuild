@@ -3981,6 +3981,76 @@ test "incomplete name" and:
                 self.assertGreaterEqual(nested, 1)
                 self.assertLessEqual(threads * nested, budget)
 
+    def test_exclusive_phase_spends_the_whole_budget_on_one_case(self):
+        # The runner's exclusive phase runs ~50 cases strictly one at a time,
+        # on the main thread, before any worker thread exists. The divide that
+        # produces `nested` assumes `threads` cases in flight; at one case in
+        # flight the same `concurrent * nested <= budget` invariant permits the
+        # entire budget, and anything less idles the host. Assert the identity
+        # (exclusive == budget), the invariant at a divisor of one, and that
+        # this is never a DERATING relative to the parallel phase.
+        for cores, mem_mb, mode in [
+            (32, 143000, "local"),
+            (64, 512000, "local"),
+            (16, 65536, "local"),
+            (8, 65536, "local"),
+            (4, 8192, "local"),
+            (4, 4096, "local"),
+            (2, 8192, "local"),
+            (1, 512, "local"),
+            (32, 8192, "local"),
+            (32, 143000, "ci"),
+            (8, 65536, "ci"),
+        ]:
+            with self.subTest(cores=cores, mem_mb=mem_mb, mode=mode):
+                budget = self._parallelism(
+                    "reprobuild_worker_budget", cores, mem_mb, mode
+                )
+                nested = self._parallelism(
+                    "reprobuild_default_nested_build_parallelism",
+                    cores,
+                    mem_mb,
+                    mode,
+                )
+                exclusive = self._parallelism(
+                    "reprobuild_default_exclusive_build_parallelism",
+                    cores,
+                    mem_mb,
+                    mode,
+                )
+                self.assertGreaterEqual(exclusive, 1)
+                # One case in flight: the invariant still holds, by identity.
+                self.assertLessEqual(1 * exclusive, budget)
+                self.assertEqual(exclusive, budget)
+                # Never worse than what the parallel phase hands a worker.
+                self.assertGreaterEqual(exclusive, nested)
+
+    def test_exclusive_budget_beats_the_divided_share_on_a_big_host(self):
+        # The exact numbers this change exists for. On the 32-core/143 GiB
+        # host the measured full-suite run spent 3h17m of its 8h40m in the
+        # exclusive phase at nested=3 — BELOW the value a nested build gives
+        # itself when the variable is absent entirely
+        # (`buildMaxParallelismResolved` defaults to 8). Pin the policy so a
+        # future edit cannot silently reintroduce the derating.
+        budget = self._parallelism(
+            "reprobuild_worker_budget", 32, 143000, "local"
+        )
+        threads = self._parallelism(
+            "reprobuild_default_test_threads", 32, 143000, "local"
+        )
+        nested = self._parallelism(
+            "reprobuild_default_nested_build_parallelism", 32, 143000, "local"
+        )
+        exclusive = self._parallelism(
+            "reprobuild_default_exclusive_build_parallelism",
+            32,
+            143000,
+            "local",
+        )
+        self.assertEqual((budget, threads, nested), (24, 8, 3))
+        self.assertEqual(exclusive, 24)
+        self.assertGreater(exclusive, nested)
+
     def test_available_memory_probe_reports_a_usable_number(self):
         # The policy is only host-aware if the host can actually be probed.
         # On Linux and macOS this must return a positive MiB figure; the
@@ -4023,6 +4093,41 @@ test "incomplete name" and:
         # An operator who pins the build parallelism means it for the whole
         # run, so the execution phase must not overwrite an explicit value.
         self.assertIn("repro_parallelism_is_default", text)
+        # The exclusive phase's undivided budget must actually be exported,
+        # and under the SAME guard: a hand-pinned REPROBUILD_MAX_PARALLELISM
+        # covers the exclusive cases too, so we must not smuggle a larger
+        # value past it.
+        self.assertIn("reprobuild_default_exclusive_build_parallelism", text)
+        self.assertIn("export REPROBUILD_EXCLUSIVE_MAX_PARALLELISM=", text)
+        guard_body = text.split("if (( repro_parallelism_is_default == 1 )); then", 1)[
+            1
+        ].split("\nfi\n", 1)[0]
+        self.assertIn("REPROBUILD_EXCLUSIVE_MAX_PARALLELISM", guard_body)
+
+    def test_runner_applies_the_exclusive_budget_only_to_the_serial_phase(self):
+        # The runner is where the override lands, so assert the seam rather
+        # than only the shell that feeds it: the exclusive loop must run its
+        # cases with the overridden env, and the worker pool must keep the
+        # un-overridden one. Getting this backwards would raise nested
+        # parallelism for EVERY case at once — exactly the multiplicative
+        # oversubscription the budget split exists to prevent.
+        text = (
+            REPO_ROOT / "tools" / "test-runner" / "repro_test_runner.nim"
+        ).read_text(encoding="utf-8")
+        self.assertIn('ExclusiveParallelismEnv = "REPROBUILD_EXCLUSIVE_MAX_PARALLELISM"', text)
+        self.assertIn("var exclusiveEnv = baseEnv", text)
+        # The serial loop consumes exclusiveEnv...
+        exclusive_loop = text.split("for tc in exclusiveItems:", 1)[1].split(
+            "let args = WorkerArgs(", 1
+        )[0]
+        self.assertIn("exclusiveEnv", exclusive_loop)
+        self.assertNotIn("opts.resultsDir, baseEnv", exclusive_loop)
+        # ...and the worker pool does not.
+        worker_dispatch = text.split("proc workerLoop(", 1)[1].split(
+            "proc workerMain(", 1
+        )[0]
+        self.assertIn("args.baseEnv[]", worker_dispatch)
+        self.assertNotIn("exclusiveEnv", worker_dispatch)
 
     # -----------------------------------------------------------------
     # Catalog enumeration gates

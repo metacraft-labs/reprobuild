@@ -1329,6 +1329,7 @@ tests/integration/t_run_consumes_opaque_out_of_tree.nim	nim	1
 tests/integration/t_run_consumes_session_store_out_of_tree.nim	nim	1
 tests/integration/t_run_edge_session_resolver_auto.nim	nim	2
 tests/integration/t_runner_cpu_progress_liveness.nim	nim	4
+tests/integration/t_runner_exclusive_phase_budget.nim	nim	2
 tests/integration/t_runner_progress_visibility.nim	nim	2
 tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim	nim	6
 tests/integration/t_runquota_long_temp_rendezvous.nim	nim	3
@@ -1629,7 +1630,7 @@ tests/unit/test_graph_owned_test_artifacts.py	python	23
 tests/unit/test_nix_daemon_descriptors.py	python	4
 tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_publish_surface_routing.py	python	35
-tests/unit/test_reprobuild_suite_inventory.py	python	85
+tests/unit/test_reprobuild_suite_inventory.py	python	88
 tools/catalog-harvester/tests/test_gh_releases_source.nim	nim	26
 tools/catalog-harvester/tests/test_harvester_app_name_validation.nim	nim	6
 tools/catalog-harvester/tests/test_harvester_history.nim	nim	3
