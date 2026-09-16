@@ -208,6 +208,9 @@ jobs:
       # env.ps1 provisions the compiler bootstrap, not the Python test drivers.
       - name: Setup Python for Windows HCR checks
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        env:
+          # The action starts Windows PowerShell itself; keep policy process-local.
+          PSExecutionPolicyPreference: RemoteSigned
         with:
           python-version: '3.13'
           architecture: 'x64'
