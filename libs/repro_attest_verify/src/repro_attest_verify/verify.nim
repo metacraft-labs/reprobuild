@@ -36,7 +36,10 @@
 ##     a verifier that does not know when it issued the challenge is a
 ##     **failure**: the window is a clause that has to bite.
 ##   * ``certificate-chain`` may be skipped only when the policy does not
-##     require a bundled chain.
+##     require a bundled chain — and only when no chain was bundled. A
+##     chain that IS bundled is always judged, whatever the policy says
+##     about requiring one, because a chain that arrived and was not
+##     looked at is worse than one that never came.
 ##   * ``tcb-floor`` may be skipped for any tier that reports no vendor
 ##     trusted computing base.
 ##
@@ -48,7 +51,7 @@
 ## ``verifyWithReading`` takes a reading a *caller* performed, for a
 ## backend this build carries no reader for. That is the API a downstream
 ## broker with its own SEV-SNP verifier plugs into, and it is not a
-## bypass of anything: the caller supplies only the five facts a reader
+## bypass of anything: the caller supplies only the six facts a reader
 ## produces, and the envelope's tier, backend, challenge and bindings are
 ## re-projected from the report here rather than taken from the reading.
 ## A reading that disagreed with the report about what tier it is cannot
@@ -420,15 +423,23 @@ proc verifyUsing(req: VerificationRequest;
       "an evidence reading must name the reader that produced it; a " &
       "verdict has to be able to say whose reading it rests on")
 
-  # The envelope is re-projected from the report. Only the five facts a
+  # The envelope is re-projected from the report. Only the six facts a
   # READER produces are taken from the reading, so a caller cannot make
   # the verdict disagree with the document it is about.
+  #
+  # Those six are taken on the reading's word, and that is the seam's
+  # contract rather than an oversight: this entry point exists for a
+  # caller with its own reader. ``attestationKeySubject`` joins them on
+  # the same terms as ``launchMeasurement`` — a caller that supplies one
+  # it never established is lying to itself, and the caveat below is a
+  # statement about the reading it was handed, not a check it performs.
   var inputs = projectEnvelope(report)
   inputs.readerName = reading.inputs.readerName
   inputs.launchMeasurement = reading.inputs.launchMeasurement
   inputs.reportDataInEvidence = reading.inputs.reportDataInEvidence
   inputs.sevSnpTcb = reading.inputs.sevSnpTcb
   inputs.tdxTcbStatus = reading.inputs.tdxTcbStatus
+  inputs.attestationKeySubject = reading.inputs.attestationKeySubject
 
   let p = req.policy
   result.reportSource = req.reportSource
@@ -524,13 +535,21 @@ proc verifyUsing(req: VerificationRequest;
 
   if inputs.tier == atMock:
     result.caveats.add MockCaveat
-  # The measured-boot reader establishes that a log explains a quote; it
-  # does not establish who signed the quote. A verdict that accepted on
-  # that basis without saying so would be read as more than it is, so the
-  # caveat is attached to the READER that has the limit rather than to
-  # the tier, and it is attached whether or not the verdict accepted —
-  # a rejection's reader is worth knowing about too.
-  if inputs.readerName == Tpm2ReaderName:
+  # The measured-boot reader establishes that a log explains a quote. It
+  # establishes who signed the quote only when the report bundled a chain
+  # to check the signature against; with no chain there is no key, and a
+  # verdict that accepted on that basis without saying so would be read
+  # as more than it is.
+  #
+  # So the caveat is attached to the READING that has the limit — not to
+  # the tier, and not to the outcome. It rides a rejection as much as an
+  # acceptance, because a refusal's reader is worth knowing about too,
+  # and it rides a reading that parsed nothing as much as one that parsed
+  # everything: "nobody checked a signature" is true of both. What lifts
+  # it is exactly one thing, and it is a fact the reader produced rather
+  # than a property of this function's arguments.
+  if inputs.readerName == Tpm2ReaderName and
+     inputs.attestationKeySubject.isNone:
     result.caveats.add "this verdict rests on a reading in which " &
       NoSignatureCheckedNote
   if inputs.readerName notin BuiltInReaders:
@@ -598,6 +617,20 @@ proc rejectUnparseable(req: VerificationRequest;
 proc verifyAttestationReport*(req: VerificationRequest): Verdict =
   ## Parse, read the evidence with this build's reader for its backend,
   ## and run every check.
+  ##
+  ## This is the entry point every *surface* uses — the CLI, and any
+  ## caller that has a document rather than a reading. The chain is
+  ## therefore judged by whichever evaluator this BUILD carries, and the
+  ## ``when`` below is the only place that is decided.
+  ##
+  ## A build compiled with ``-d:reproAttestSoftwareRootTestTrust`` judges
+  ## it by the evaluator that additionally recognises the software-root
+  ## marker; every other build has no such symbol to reach and compiles
+  ## the production call. The difference between a surface that accepts a
+  ## test hierarchy and one that refuses it is which binary is running,
+  ## exactly as it is for ``verifyWithReading`` and
+  ## ``verifySoftwareRootTestReport`` one layer down — and this procedure
+  ## takes no argument by which either could be selected at run time.
   var report: AttestationReport
   try:
     report = parseAttestationReport(req.reportText, req.reportSource)
@@ -605,4 +638,8 @@ proc verifyAttestationReport*(req: VerificationRequest): Verdict =
     return rejectUnparseable(req, err.msg)
   except BindingError as err:
     return rejectUnparseable(req, err.msg)
-  verifyWithReading(req, report, readAuthoritativeEvidence(report))
+  let reading = readAuthoritativeEvidence(report)
+  when defined(reproAttestSoftwareRootTestTrust):
+    verifySoftwareRootTestReport(req, report, reading)
+  else:
+    verifyWithReading(req, report, reading)

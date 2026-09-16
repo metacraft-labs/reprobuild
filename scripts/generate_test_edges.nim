@@ -421,22 +421,23 @@ proc needsSslDefine(path: string): bool =
     path.endsWith("/t_repro_https_cache_end_to_end.nim")
 
 proc needsSoftwareRootTestTrustDefine(path: string): bool =
-  ## The attestation round-trip gate is compiled with
+  ## Two attestation gates are compiled with
   ## ``--define:reproAttestSoftwareRootTestTrust``, which is what brings
   ## the chain evaluator and report driver that recognise a
   ## software-root test hierarchy's critical marker into existence.
   ##
   ## Matched by path, so the generated diff is explicit and so the set of
   ## binaries carrying that define is one list somebody has to edit on
-  ## purpose. Its companion gate is deliberately NOT in this list: it
-  ## asserts that those symbols do not compile, which only means
+  ## purpose. Each has a companion gate that is deliberately NOT in this
+  ## list: those assert that the symbols do not compile, which only means
   ## anything in a build that did not ask for them.
   ##
   ## The rule fails closed. A gate that needs the define and is not
   ## named here does not compile at all, because the symbols it calls do
   ## not exist — so a rename cannot quietly drop a binary out of the
   ## list and leave it green.
-  path.endsWith("/t_e2e_software_root_attestation_roundtrip.nim")
+  path.endsWith("/t_e2e_software_root_attestation_roundtrip.nim") or
+    path.endsWith("/t_e2e_local_attestation_emulator_all_protocol_paths.nim")
 
 proc isProviderModePath(path: string): bool =
   ## Mirrors ``scripts/run_tests.sh`` lines ~128-167. ``path`` is a

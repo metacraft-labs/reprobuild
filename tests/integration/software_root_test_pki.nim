@@ -116,6 +116,34 @@ proc sha256Of(msg: openArray[byte]): array[32, byte] =
     bsslHashAbi.sha224Update(ctx, unsafeAddr msg[0], uint(msg.len))
   bsslHashAbi.sha256Out(ctx, addr result[0])
 
+proc signRawEcdsa*(key: TestKey; message: openArray[byte]):
+                  tuple[r, s: string] =
+  ## ECDSA-P256 over SHA-256 of ``message``, as the two 32-byte scalars a
+  ## ``TPMT_SIGNATURE`` carries rather than as the DER ``SEQUENCE`` X.509
+  ## carries.
+  ##
+  ## Exported from here because this is the module that holds keys. A
+  ## signer living beside a caller would be a second place a private
+  ## scalar is handled, and the one property this file has to keep is
+  ## that there is only one.
+  var digest = sha256Of(message)
+  var scalar = key.priv
+  var sk: bsslEcAbi.EcPrivateKey
+  sk.curve = cint(bsslEcAbi.EC_secp256r1)
+  sk.x = addr scalar[0]
+  sk.xlen = uint(PrivLen)
+  var raw: array[64, byte]
+  let n = bsslEcAbi.ecdsaSignRawGetDefault()(
+    bsslEcAbi.ecGetDefault(), addr bsslHashAbi.sha256Vtable,
+    addr digest[0], addr sk, addr raw[0])
+  if n != 64'u:
+    raise newException(ValueError, "ecdsaSignRaw produced " & $n & " bytes")
+  result.r = newString(32)
+  result.s = newString(32)
+  for i in 0 ..< 32:
+    result.r[i] = char(raw[i])
+    result.s[i] = char(raw[32 + i])
+
 proc signDer(key: TestKey; message: openArray[byte]): seq[byte] =
   ## An ``ECDSA-Sig-Value`` over SHA-256 of ``message``.
   var digest = sha256Of(message)

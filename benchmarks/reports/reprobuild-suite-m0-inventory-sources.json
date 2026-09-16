@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1620,
+    "nimTestBinaries": 1623,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 579,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1631
+    "testEntries": 1634
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1073,7 +1073,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 751,
+      "integration": 754,
       "platform/destructive": 115,
       "pure unit": 579,
       "unclassified": 174
@@ -1224,9 +1224,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1620,
+    "nimTestBinaryCount": 1623,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1631
+    "testEntryCount": 1634
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -24768,6 +24768,28 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_local_attestation_emulator_all_protocol_paths",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "reproAttestSoftwareRootTestTrust"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_agent",
+        "repro_attest_verify",
+        "repro_cli_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_e2e_local_attestation_emulator_all_protocol_paths.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_selectable_toolchain_fixture",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -24851,6 +24873,25 @@
       "source": "tests/integration/t_emitted_overrides_match_the_develop_set.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_emulator_is_not_a_verifier_bypass",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify",
+        "repro_cli_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_emulator_is_not_a_verifier_bypass.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32242,6 +32283,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/test_hax_m2_macho_lazy_symbol_and_vtable_interception",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/test_hax_m2_macho_lazy_symbol_and_vtable_interception.nim",
+      "sourceSuiteCount": 0,
+      "staticCaseCount": 0,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "",
       "class": "unclassified",
       "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
@@ -32651,7 +32709,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_hcr_agent_protocol.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 27,
+      "staticCaseCount": 28,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -60,20 +60,31 @@
 ## the bank the manifest speaks, rather than reading a value out of the
 ## log that nothing signed.
 ##
-## **NO SIGNATURE IS VERIFIED.** This library performs no public-key
-## operation of any kind, so nothing on the verification path establishes
-## who produced the attestation structure, and no attestation key ever
-## reaches a verifier: there is no field to carry one and no flag that
-## would fetch one. (A *test* checks the signature of the one pinned boot
-## whose key was captured, out of band, through an unrelated library —
-## which says something about that fixture and nothing whatever about
-## what a verdict rests on.) What the reader
-## establishes is that the three artifacts are internally consistent and
-## that the log describes the boot the structure describes — which is
-## exactly as much as a verifier can say when it has not checked a
-## signature, and is stated in the finding rather than left for a reader
-## of the code to discover. A caller that needs more supplies its own
-## reading through the embedding seam.
+## ## Who produced the structure, and when that can be established
+##
+## The join above says the log and the quote describe one boot. It says
+## nothing about *who* produced the quote, and on its own a quote nobody
+## signed for is a document.
+##
+## When the report **bundles a certificate chain**, the reader closes
+## that gap: it verifies the signature over the attestation structure
+## under the public key of the chain's leaf, over the bytes that arrived.
+## The finding then names the key. What that establishes is bounded and
+## worth stating exactly — the evidence was produced by the key in that
+## certificate, and *nothing about whether that certificate is one to
+## believe*, which is the certificate-chain check's question and is
+## answered against the verifier's own trust store. The two halves are
+## separate checks on purpose: a chain that validates for a key that
+## signed nothing here, and a signature by a key nothing vouches for, are
+## different failures with different remedies, and a verifier that
+## reported them as one would send an operator to the wrong place.
+##
+## When the report bundles **no** chain there is no key to check against.
+## This build fetches none — there is no field to carry one and no flag
+## that would go looking — so no public-key operation is performed on the
+## structure at all, the reading carries no
+## ``attestationKeySubject``, and ``NoSignatureCheckedNote`` rides the
+## verdict. That is an unanswered question recorded as one, not a skip.
 ##
 ## ## Why the mock reader reports NO launch measurement
 ##
@@ -100,6 +111,7 @@ import repro_attest
 
 import ./policy
 import ./verdict
+import ./x509
 
 type
   AuthoritativeInputs* = object
@@ -130,6 +142,18 @@ type
       ## reader that cannot support a verdict.
     sevSnpTcb*: Option[SevSnpTcbMinimum]
     tdxTcbStatus*: Option[string]
+    attestationKeySubject*: Option[string]
+      ## A description of the key whose public half the attestation
+      ## structure's signature VERIFIED under, or ``none`` when no
+      ## public-key operation was performed on it.
+      ##
+      ## It is an ``Option`` rather than a ``bool`` for the same reason
+      ## ``launchMeasurement`` is: a verdict that says a signature was
+      ## checked owes the reader which key it was checked against, and a
+      ## flag cannot say. ``none`` is the honest answer wherever there is
+      ## no key to check against, and it is what keeps
+      ## ``NoSignatureCheckedNote`` attached to exactly the readings that
+      ## earn it.
 
   EvidenceReading* = object
     ## A reader's answer: what it found, and whether it was willing to
@@ -161,6 +185,24 @@ const
     ## Carried into the finding that reads measured-boot evidence, and
     ## into a caveat on any verdict that rests on it. A limit a verdict
     ## does not state is a limit its reader does not know about.
+    ##
+    ## It is attached to a reading in which no public-key operation was
+    ## performed on the attestation structure — which is every reading of
+    ## a report that bundles no certificate chain, because a signature
+    ## with no key is not weak evidence, it is none. A reading that DID
+    ## check one says so instead, through the two constants below, and
+    ## names the key it checked against.
+
+  SignatureCheckedNotePrefix* =
+    "the signature on the attestation structure verified under the " &
+    "public key of the leaf of this report's own bundled chain ("
+  SignatureCheckedNoteSuffix* =
+    "), so the evidence was produced by that certified key — whether " &
+    "that certificate is one to believe is the certificate-chain check's " &
+    "question and not this one's"
+    ## Split in two so the key's description sits INSIDE the sentence
+    ## rather than beside it. A note that named no key would be a claim
+    ## a reader cannot check against the chain the same report carries.
 
   NonAnchorMarker* = "NOT-A-TRUST-ANCHOR"
     ## The literal the mock backend's root subject must contain. Written
@@ -254,6 +296,68 @@ proc readTpm2Evidence(r: AttestationReport;
   # is one side of that comparison and never both.
   inputs.reportDataInEvidence = some(bytesToHex(qualifyingData(q)))
 
+  # THE JOIN BETWEEN A CHAIN AND A QUOTE.
+  #
+  # Until now a bundled chain was walked by one check and the attestation
+  # structure was read by another, and nothing connected them: a report
+  # could carry a perfectly valid chain for a key that had nothing to do
+  # with its evidence, and both checks would pass. That is not a
+  # hypothetical — it is the whole of what an evidence forger has to do,
+  # because chains are public and quotes are not.
+  #
+  # So when a chain is bundled, the signature over the attestation
+  # structure is verified under the LEAF certificate's public key. What
+  # each half then establishes is worth separating: this one says the
+  # evidence was produced by the key in that certificate; the chain check
+  # says whether that certificate is one this verifier has any reason to
+  # believe. Neither is sufficient and the report is refused unless both
+  # hold.
+  #
+  # When no chain is bundled there is no key to check against — a report
+  # is not required to carry one, and this build fetches nothing — so the
+  # reading says so, through `attestationKeySubject` and through
+  # `NoSignatureCheckedNote`. An absent key is recorded as an unanswered
+  # question rather than passed over.
+  if r.hasBundledCertificates:
+    let chain = r.certificatesForCrossCheck
+    if chain.len == 0:
+      return violated("this report declares a bundled certificate chain " &
+        "and carries no element of one, so the key that signed its " &
+        "attestation structure cannot be identified")
+    var leaf: X509Cert
+    try:
+      leaf = parseCertificateBytes(chain[0])
+    except X509Error as err:
+      return violated("the leaf of this report's bundled chain did not " &
+        "read as a certificate, so there is no public key to check its " &
+        "attestation structure against: " & err.msg)
+    if q.signature.sigAlg != TpmAlgEcdsa or
+       q.signature.hashAlg != LaunchMeasurementBank:
+      return violated("this evidence's attestation structure is signed " &
+        "with scheme " & $q.signature.sigAlg & " over " &
+        $q.signature.hashAlg & ", and the one public-key operation this " &
+        "build performs is ECDSA-P256 over " & $LaunchMeasurementBank &
+        "; an algorithm this verifier cannot check is refused rather " &
+        "than accepted unchecked")
+    var message = newSeq[byte](q.attestBytes.len)
+    for i in 0 ..< q.attestBytes.len: message[i] = byte(q.attestBytes[i])
+    var rr = newSeq[byte](q.signature.signatureR.len)
+    for i in 0 ..< q.signature.signatureR.len:
+      rr[i] = byte(q.signature.signatureR[i])
+    var ss = newSeq[byte](q.signature.signatureS.len)
+    for i in 0 ..< q.signature.signatureS.len:
+      ss[i] = byte(q.signature.signatureS[i])
+    # Over `attestBytes`, which are the bytes that ARRIVED. Verifying a
+    # re-serialisation would make a codec bug into a forgery oracle.
+    if not verifyEcdsaSha256Raw(message, rr, ss, leaf.publicKey):
+      return violated("the signature on this evidence's attestation " &
+        "structure does not verify under the public key of the leaf of " &
+        "its own bundled chain (" &
+        describeName(leaf.subjectDn, leaf.subjectCn) &
+        "); whatever produced this quote, that certified key did not")
+    inputs.attestationKeySubject =
+      some(describeName(leaf.subjectDn, leaf.subjectCn))
+
   var log: TcgEventLog
   try:
     log = tpm2EvidenceLog(ev)
@@ -320,7 +424,11 @@ proc readTpm2Evidence(r: AttestationReport;
     "attestation structure carries, and whose quote covers " &
     $LaunchMeasurementBank & ":" & $LaunchMeasurementRegister &
     ", so the launch measurement read out of the replay is a value that " &
-    "structure speaks for; " & NoSignatureCheckedNote)
+    "structure speaks for; " &
+    (if inputs.attestationKeySubject.isSome:
+       SignatureCheckedNotePrefix & inputs.attestationKeySubject.get &
+         SignatureCheckedNoteSuffix
+     else: NoSignatureCheckedNote))
 
 proc unreadableBackend(backend: AttestationBackend): CheckFinding =
   violated("this build carries no reader for " & ($backend).escape() &

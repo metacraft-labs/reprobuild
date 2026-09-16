@@ -105,6 +105,8 @@ type
     asJson*: bool
     challengeBytes*: int
     hexOnly*: bool
+    trustAnchorPaths*: seq[string]
+    revocationListPaths*: seq[string]
 
 type
   AttestExitCode* = enum
@@ -205,6 +207,16 @@ repro attest verify --report-file PATH | --report-url URL [options]
       --challenge-file PATH         a record from `repro attest challenge`,
                                     which also says when it was issued
       --challenge-issued-at TIME    that instant, as YYYY-MM-DDTHH:MM:SSZ
+      --trust-anchor PATH           a DER root certificate this verifier
+                                    trusts; repeatable. Never taken from
+                                    the report: a machine that could
+                                    contribute to the set it is checked
+                                    against would be vouching for itself.
+      --revocation-list PATH        a DER revocation list this verifier
+                                    holds; repeatable. Required for every
+                                    issuer in a bundled chain — an
+                                    unasked question is not an answer of
+                                    no.
       --json                        print the machine-readable verdict
       --out PATH                    write the verdict instead of printing it
 
@@ -257,6 +269,10 @@ proc parseAttestArgs*(args: seq[string]): AttestCliOptions =
       result.challengeFile = valueFor(args, i, "--challenge-file")
     of "--challenge-issued-at":
       result.challengeIssuedAt = valueFor(args, i, "--challenge-issued-at")
+    of "--trust-anchor":
+      result.trustAnchorPaths.add valueFor(args, i, "--trust-anchor")
+    of "--revocation-list":
+      result.revocationListPaths.add valueFor(args, i, "--revocation-list")
     of "--json":
       result.asJson = true
       inc i
@@ -486,6 +502,32 @@ proc runAttestVerify(opts: AttestCliOptions): int =
       return AttestExitUsage
     req.manifestSource = opts.manifestPath
     req.manifestText = some(readFile(opts.manifestPath))
+
+  # The trust store comes from the verifier's own disk and from nowhere
+  # else. A malformed anchor is a REFUSAL rather than an anchor quietly
+  # dropped: an operator who names a file believes it will be used, and a
+  # verifier that skipped the ones it could not read would be trusting a
+  # smaller set than the one it was configured with, silently.
+  for path in opts.trustAnchorPaths:
+    if not fileExists(path):
+      stderr.writeLine("repro attest verify: no trust anchor at " & path)
+      return AttestExitUsage
+    try:
+      req.trustAnchors.add parseCertificateBytes(readFile(path))
+    except X509Error as err:
+      stderr.writeLine("repro attest verify: --trust-anchor " & path &
+        " is not a certificate this build reads: " & err.msg)
+      return AttestExitUsage
+  for path in opts.revocationListPaths:
+    if not fileExists(path):
+      stderr.writeLine("repro attest verify: no revocation list at " & path)
+      return AttestExitUsage
+    try:
+      req.revocationLists.add parseCrlBytes(readFile(path))
+    except X509Error as err:
+      stderr.writeLine("repro attest verify: --revocation-list " & path &
+        " is not a revocation list this build reads: " & err.msg)
+      return AttestExitUsage
 
   req.expectedChallengeHex = opts.challengeHex
   if opts.challengeFile.len > 0:

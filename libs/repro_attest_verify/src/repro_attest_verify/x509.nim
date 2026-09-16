@@ -698,6 +698,90 @@ proc signatureVerifiesUnder*(crl: X509Crl;
                              issuerKey: array[P256PointLen, byte]): bool =
   verifyEcdsaSha256(crl.tbs, crl.signature, issuerKey)
 
+proc derUnsignedInteger(value: openArray[byte]): seq[byte] =
+  ## One ``INTEGER`` holding a non-negative big-endian quantity.
+  ##
+  ## DER has one spelling of a number: no leading zero octets, and a
+  ## leading ``0x00`` when the top bit of the first octet is set so the
+  ## value is not read as negative. Both rules matter here — an ECDSA
+  ## scalar is fixed-width and unsigned on the wire, so roughly one
+  ## signature in 256 has a leading zero to strip and roughly one in two
+  ## has a high bit to pad.
+  var first = 0
+  while first < value.len - 1 and value[first] == 0'u8: inc first
+  var payload: seq[byte] = @[]
+  if value.len == 0:
+    payload.add 0'u8
+  else:
+    if (value[first] and 0x80'u8) != 0'u8: payload.add 0'u8
+    for i in first ..< value.len: payload.add value[i]
+  result = @[0x02'u8]
+  result.add byte(payload.len)
+  for b in payload: result.add b
+
+proc ecdsaSigValueDer*(r, s: openArray[byte]): seq[byte] =
+  ## ``ECDSA-Sig-Value ::= SEQUENCE { r INTEGER, s INTEGER }``.
+  ##
+  ## A TPM emits the two scalars as raw, unpadded big-endian byte strings
+  ## and an X.509 toolchain expects this SEQUENCE. Converting is the
+  ## caller's job rather than either codec's, and this is where that job
+  ## is done once — a second conversion somewhere else is a second
+  ## opinion about which bytes a signature is, and a verifier holding two
+  ## opinions accepts under whichever one happens to agree.
+  ##
+  ## Refuses a scalar wider than a P-256 one rather than truncating it:
+  ## a truncated scalar still verifies against *something*, and that
+  ## something would be a signature nobody made.
+  if r.len == 0 or s.len == 0 or r.len > 32 or s.len > 32:
+    return @[]
+  var body = derUnsignedInteger(r)
+  for b in derUnsignedInteger(s): body.add b
+  # NOTHING CAN REACH THIS TODAY and it is kept anyway. The bound above
+  # caps each scalar at 32 bytes, so the body is at most 2 * (2 + 33) =
+  # 70 and the short-form length below always fits. It is here for the
+  # caller that one day widens the scalar bound and does not think about
+  # the length encoding — which is a likelier edit than it sounds, since
+  # the two rules are three lines apart and only one of them is obvious.
+  if body.len > 127: return @[]
+  result = @[0x30'u8, byte(body.len)]
+  for b in body: result.add b
+
+proc verifyEcdsaSha256Raw*(message: openArray[byte];
+                           r, s: openArray[byte];
+                           publicKey: array[P256PointLen, byte]): bool =
+  ## The same single public-key operation, over a signature whose two
+  ## scalars arrived separately — which is the shape a ``TPMT_SIGNATURE``
+  ## carries.
+  ##
+  ## ``message`` is hashed here and never pre-digested by a caller: a
+  ## verifier handed a digest verifies whatever the caller says the bytes
+  ## were, which is one indirection away from verifying nothing.
+  let der = ecdsaSigValueDer(r, s)
+  if der.len == 0: return false
+  verifyEcdsaSha256(message, der, publicKey)
+
+proc derBytesOf(text: string): seq[byte] =
+  result = newSeq[byte](text.len)
+  for i in 0 ..< text.len: result[i] = byte(text[i])
+
+proc parseCertificateBytes*(der: string): X509Cert =
+  ## The same reader, over DER that arrived as a ``string`` — which is
+  ## how a report carries a chain and how a file arrives off disk.
+  ## Written here rather than at each of the three call sites that needed
+  ## it, so the reader's own callers widen bytes one way.
+  ##
+  ## Not a tree-wide claim, and the difference matters: ``trust.nim``
+  ## still widens its own chain inline and the test PKI has a helper of
+  ## its own. A byte widening is not a decision — every spelling of it
+  ## produces the same bytes — so those are duplication rather than a
+  ## second opinion. ``ecdsaSigValueDer`` above is the case where a
+  ## second implementation WOULD be a second opinion, and that one has
+  ## exactly one.
+  parseCertificate(derBytesOf(der))
+
+proc parseCrlBytes*(der: string): X509Crl =
+  parseCrl(derBytesOf(der))
+
 proc criticalOids*(cert: X509Cert): seq[string] =
   for ext in cert.extensions:
     if ext.critical: result.add ext.oid
