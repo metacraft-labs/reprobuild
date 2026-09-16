@@ -35918,7 +35918,8 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
   let idSeg = safeRepoIdSegment(resolved.name) & "-" & $repoIdx
   case decision.action
   of saNone:
-    if decision.syncCase in {scDirty, scLocallyUnpublished, scForcePushRebase}:
+    if decision.syncCase in {scDirty, scLocallyUnpublished, scForcePushRebase,
+                             scFetchFailed}:
       # Named-Lock-Files §7.2. `hasAction: false` means the `action` field
       # is never read; the identity is supplied because the type requires it,
       # and it is the honest one for an edge that does not exist.
@@ -36462,6 +36463,12 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   var fetchActions: seq[BuildAction]
   var refreshActions: seq[BuildAction]
   var optimizedFetchSkips = 0
+  # Which repo each fetch action belongs to, and — after the graph runs —
+  # which repo paths could NOT be fetched. The second table is what stops a
+  # failed fetch from being laundered into a "clean" verdict (see the
+  # failure arm below and ``RepoSyncObservation.fetchFailed``).
+  var fetchRepoIdx = initTable[string, int]()
+  var fetchFailureByPath = initTable[string, string]()
   for repoIdx, repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
     if not dirExists(repoPath / ".git"):
@@ -36524,8 +36531,10 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         refreshActions.add(ra)
         sharedBareRefreshAction[cloneUrl] = rid
       refreshDepId = sharedBareRefreshAction[cloneUrl]
-    fetchActions.add(syncFetchActionFor(identity, args.workspaceRoot,
-      repo, repoIdx, refreshDepId))
+    let fetchAction = syncFetchActionFor(identity, args.workspaceRoot,
+      repo, repoIdx, refreshDepId)
+    fetchRepoIdx[fetchAction.id] = repoIdx
+    fetchActions.add(fetchAction)
 
   if optimizedFetchSkips > 0:
     stderr.writeLine("workspace sync: optimized-fetch skipped " &
@@ -36573,12 +36582,34 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     for a in fetchActions:
       let outcome = fetchById.getOrDefault(a.id)
       if outcome.status notin {asSucceeded, asCacheHit, asUpToDate}:
-        # A pre-classification fetch failure is non-fatal (e.g. transient
-        # network): the planner still classifies against whatever the
-        # local remote-tracking refs already say. Surface a diagnostic.
+        # A pre-classification fetch failure is NOT a thing the run can
+        # shrug off. It used to be: the comment here said "non-fatal (e.g.
+        # transient network): the planner still classifies against whatever
+        # the local remote-tracking refs already say", and the only trace was
+        # this stderr line. But classifying against refs nothing refreshed is
+        # not a degraded answer, it is a DIFFERENT QUESTION — "where was the
+        # remote last time anyone looked" — answered in the voice of the one
+        # that was asked. Measured on this host: two fully-stale checkouts,
+        # 175 commits behind a rewritten remote, every fetch dead at the
+        # runquota gate, both reported ``clean_at_locked_revision`` / ``noop``
+        # with exit 0.
+        #
+        # So the failure is recorded per repo and carried into the
+        # observation, where the planner turns it into a ``fetch_failed``
+        # refusal (exit 2). The other repos still converge — the
+        # partial-advance policy is unchanged — but no repo gets a verdict
+        # derived from data the fetch never delivered.
+        let diagnostic = "status=" & $outcome.status &
+          (if outcome.reason.len > 0: " reason=" & outcome.reason else: "") &
+          (if outcome.stderr.len > 0:
+             " stderr=" & outcome.stderr.strip() else: "")
+        if fetchRepoIdx.hasKey(a.id):
+          fetchFailureByPath[resolved.repos[fetchRepoIdx[a.id]].path] =
+            diagnostic
         stderr.writeLine("workspace sync: pre-classification fetch failed (" &
-          a.id & "): status=" & $outcome.status &
-          (if outcome.stderr.len > 0: " stderr=" & outcome.stderr else: ""))
+          a.id & "): " & diagnostic &
+          " — this repo will be REFUSED, not classified: its state against " &
+          "the remote is unknown")
       else:
         inc fetchOk
     if emitProgress:
@@ -36631,8 +36662,15 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     if forcePushes.hasKey(repo.path):
       for val in forcePushes[repo.path]:
         repoForcePushed.incl(val.getStr())
-    observations.add(
-      observeRepoForSync(identity, repoPath, repo, repoForcePushed))
+    var observation =
+      observeRepoForSync(identity, repoPath, repo, repoForcePushed)
+    # The fetch that should have refreshed this repo's remote-tracking refs
+    # did not run or did not succeed. Say so IN THE OBSERVATION, so the
+    # policy module refuses rather than reading the stale refs as fact.
+    if fetchFailureByPath.hasKey(repo.path):
+      observation.fetchFailed = true
+      observation.fetchDiagnostic = fetchFailureByPath[repo.path]
+    observations.add(observation)
 
   # Step 4: planner.
   let planned = planSync(resolved.repos, observations, args.rebaseOnForcePush)

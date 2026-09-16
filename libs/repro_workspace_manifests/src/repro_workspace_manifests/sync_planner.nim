@@ -58,6 +58,12 @@ type
     scDivergentFeatureBranch
     scMissingCheckout
     scForcePushRebase
+    scFetchFailed
+      ## The pre-classification fetch for this repo did not succeed, so
+      ## every remote-derived field in the observation describes the state
+      ## of the world at some UNKNOWN earlier time. No verdict may be
+      ## rendered from it -- least of all a reassuring one. See the guard
+      ## at the top of ``classifyRepoState``.
 
   SyncActionKind* = enum
     ## Discriminator for what the dispatcher should do for a given repo
@@ -128,6 +134,20 @@ type
     hasForcePushedCommits*: bool
     forcePushedBaseSha*: string
     attachableBranches*: seq[string]
+    fetchFailed*: bool
+      ## The dispatcher's pre-classification fetch for THIS repo did not
+      ## succeed. Every remote-derived field above
+      ## (``remoteBranchTip``, ``lockedRevisionTip``,
+      ## ``hasUnpublishedCommits``, ``hasForcePushedCommits``,
+      ## ``remoteHistoryDisjoint``) is then a reading of stale
+      ## remote-tracking refs, not of the remote. The planner refuses on
+      ## this flag rather than classifying: a checkout 175 commits behind a
+      ## rewritten remote reads EXACTLY like a checkout that is current, and
+      ## reporting the reassuring one of two indistinguishable states as
+      ## fact is how a dead workspace gets called clean.
+    fetchDiagnostic*: string
+      ## Why the fetch failed, verbatim from the dispatcher, so the refusal
+      ## names the real cause instead of the symptom.
 
   RepoSyncDecision* = object
     ## One repo's classification + chosen mutating action. The
@@ -172,6 +192,7 @@ proc syncCaseTag*(syncCase: SyncCase): string =
   of scDivergentFeatureBranch: "divergent_feature_branch"
   of scMissingCheckout: "missing_checkout"
   of scForcePushRebase: "force_push_rebase"
+  of scFetchFailed: "fetch_failed"
 
 proc syncActionTag*(action: SyncActionKind): string =
   ## Stable identifier for the planner's action enum, used as the JSON
@@ -267,6 +288,9 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   ## cases. The decision logic deliberately runs in a fixed priority
   ## order:
   ##
+  ## 0. ``fetch_failed``              (the pre-classification fetch for
+  ##                                    this repo did not succeed, so no
+  ##                                    remote-derived field can be trusted)
   ## 1. ``missing_checkout``           (the directory doesn't exist)
   ## 2. ``dirty``                      (working tree has uncommitted changes)
   ## 3. ``locally_unpublished``        (HEAD or its history has commits not
@@ -291,6 +315,33 @@ proc classifyRepoState*(resolved: ResolvedRepo;
     return
 
   result.observed = observation.headSha
+
+  # FIRST, ahead of every other arm, because it is the arm that says "I do
+  # not know". Each arm below reads at least one remote-derived field, and a
+  # failed fetch means those fields describe the remote as it was at some
+  # unknown earlier time -- possibly before a history rewrite. The arm this
+  # guard most directly displaces is ``clean_at_locked_revision``: a
+  # checkout whose stale ``origin/<branch>`` still equals its HEAD is
+  # indistinguishable from a current one, so without the guard the planner
+  # answered "clean at locked revision" for a checkout that was 175 commits
+  # dead. There is no safe way to classify unfetched data; the only honest
+  # verdict is a refusal that says the fetch is what failed.
+  if observation.fetchFailed:
+    result.syncCase = scFetchFailed
+    result.action = saNone
+    result.refusalReason =
+      "the pre-classification fetch for '" & resolved.path &
+      "' failed, so this checkout's state against the remote is UNKNOWN " &
+      "and no 'up to date' verdict can be given for it" &
+      (if observation.fetchDiagnostic.len > 0:
+         " (" & observation.fetchDiagnostic & ")"
+       else: "") &
+      "; refused -- restore access to '" & resolved.fetchUrl &
+      "' (auth / network / credentials), confirm with 'git -C " &
+      resolved.path & " fetch --all --prune', then re-run 'repro sync'"
+    result.message = "refusing to classify '" & resolved.path &
+      "' on unfetched data"
+    return
 
   if not observation.isClean:
     result.syncCase = scDirty
