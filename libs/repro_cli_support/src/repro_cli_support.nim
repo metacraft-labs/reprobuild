@@ -30317,7 +30317,70 @@ No projects have been initialized in this workspace yet.
 Run `repro workspace init` to initialize configured defaults, or `repro workspace init <project>` to add one.
 """.strip() & "\n"
 
+proc sidecarOneLiner(path: string): string =
+  ## The FIRST paragraph of a `repos/<repo>.md` sidecar, folded onto one line,
+  ## or "" when the file is absent or says nothing.
+  ##
+  ## The schema calls this a one-line description and most of them are. The
+  ## ones that are not are the problem: several sidecars in the metacraft
+  ## manifest repo were folded in from a `projects/<name>.md` when the
+  ## membership model retired their project, and several more are a single
+  ## sentence hard-wrapped across six or seven lines. Emitting either verbatim
+  ## into a ``- `path` - …`` bullet terminates the list at the first newline
+  ## and spills the remaining prose into the document body as though it were
+  ## the project's own text — which is what the generated index for this
+  ## workspace actually looked like.
+  ##
+  ## Folding rather than truncating at the first newline is the point: a
+  ## hard-wrapped sentence must survive whole. A leading `# Title` is dropped
+  ## because it names the repo the bullet already names.
+  if not fileExists(path):
+    return ""
+  var parts: seq[string]
+  for rawLine in readFile(path).splitLines():
+    let line = rawLine.strip()
+    if line.len == 0:
+      if parts.len > 0:
+        break
+      continue
+    if parts.len == 0 and line.startsWith("#"):
+      continue
+    parts.add(line)
+  parts.join(" ")
+
+proc activeMembershipManifestFile(manifestsDir, name: string): string =
+  ## The manifest that DEFINES an active-set entry, looked up on the SAME
+  ## ladder `resolveWorkspaceProjectShared` walks — project, then variant, then
+  ## repo-set — and "" when nothing defines it.
+  ##
+  ## Walking the same ladder is the point rather than a tidiness: an active set
+  ## entry is whatever `enable` accepted, and `enable` accepts any name
+  ## `definedProjectNames` reports, which includes repo-sets. A generator that
+  ## only knew `projects/` would print "the active manifest was not found on
+  ## disk" for an enabled repo-set that every other verb resolves fine.
+  for sub in ["projects", "variants", repoSetsDirName]:
+    let candidate = manifestsDir / sub / (name & ".toml")
+    if fileExists(candidate):
+      return candidate
+  ""
+
 proc writeGeneratedWorkspaceProjects(workspaceRoot: string) =
+  ## Regenerate ``<workspaceRoot>/workspace-projects.md`` — the index the
+  ## workspace's ``AGENTS.md`` / ``CLAUDE.md`` ``@import``s, so it is the first
+  ## thing an arriving agent reads.
+  ##
+  ## The content is derived from exactly two sources, and from no disk
+  ## evidence: the ACTIVE SET recorded in ``.repro/workspace.toml`` (what this
+  ## workspace is for), and the manifests that define those entries (what they
+  ## contain). Checkout state is deliberately NOT consulted — a project can be
+  ## enabled before its repos are cloned and a stale checkout can outlive a
+  ## disabled project, so a disk-derived index is wrong in both directions.
+  ##
+  ## Every failure it can survive, it survives: an unreadable workspace.toml
+  ## degrades to the placeholder, and a project whose manifest does not resolve
+  ## gets its diagnostic recorded under its own heading while the other
+  ## projects still render. The callers treat the whole write as best-effort on
+  ## top of that (`refreshWorkspaceProjectsIndexBestEffort`).
   let workspaceToml = workspaceTomlPath(workspaceRoot)
   var projectNames: seq[string] = @[]
   if fileExists(workspaceToml):
@@ -30335,18 +30398,24 @@ proc writeGeneratedWorkspaceProjects(workspaceRoot: string) =
         workspaceProjectsPlaceholderContent())
     return
 
+  # `manifestsRoot`, not the workspace root: a workspace that materialized its
+  # manifests under `.repro/manifests` (an `init --manifest-url` shared-cache
+  # symlink, or the git-checkout store backend) has no `projects/` beside its
+  # checkouts, and reading the root directly reported every enabled project as
+  # undefined there.
+  let manifestsDir = manifestsRoot(workspaceRoot)
   var output: seq[string] = @["# Active Workspace Projects"]
   for projectName in projectNames:
-    let projectFile = workspaceRoot / "projects" / (projectName & ".toml")
+    let projectFile = activeMembershipManifestFile(manifestsDir, projectName)
     output.add ""
     output.add "## " & projectName
 
-    if not fileExists(projectFile):
+    if projectFile.len == 0:
       output.add ""
       output.add "No project description is available; the active manifest was not found on disk."
       continue
 
-    let projectDescriptionFile = workspaceRoot / "projects" / (projectName & ".md")
+    let projectDescriptionFile = projectFile.changeFileExt("md")
     var projectDescription = ""
     if fileExists(projectDescriptionFile):
       projectDescription = readFile(projectDescriptionFile).strip()
@@ -30355,15 +30424,31 @@ proc writeGeneratedWorkspaceProjects(workspaceRoot: string) =
       output.add projectDescription
 
     try:
-      let resolved = resolveProject(projectFile)
+      # One resolver per kind, all three returning the same `ResolvedProject`
+      # — which is precisely the model's claim that "project" is a ROLE a
+      # membership manifest plays and not a kind of its own.
+      let resolved =
+        if projectFile.parentDir.lastPathPart == repoSetsDirName:
+          resolveRepoSet(projectFile)
+        elif projectFile.parentDir.lastPathPart == "variants":
+          resolveVariant(projectFile)
+        else:
+          resolveProject(projectFile)
       if resolved.repos.len > 0:
         output.add ""
         output.add "Repositories:"
         for repo in resolved.repos:
-          let repoDescFile = workspaceRoot / "repos" / (repo.name & ".md")
-          var repoDesc = ""
-          if fileExists(repoDescFile):
-            repoDesc = readFile(repoDescFile).strip()
+          # The sidecar lives beside the FRAGMENT, and the fragment's file name
+          # is not always `repo.name`: four fragments in the metacraft manifest
+          # repo declare a different name than their file (`sel4` → `seL4`,
+          # `codetracer-engine-godot` → `codetracer-godot`, …), and looking the
+          # sidecar up by `name` silently dropped their descriptions. The name
+          # is only the fallback, for a `ResolvedRepo` synthesized outside the
+          # resolver, which carries no `fragmentPath`.
+          let repoDescFile =
+            if repo.fragmentPath.len > 0: repo.fragmentPath.changeFileExt("md")
+            else: manifestsDir / "repos" / (repo.name & ".md")
+          let repoDesc = sidecarOneLiner(repoDescFile)
           if repoDesc.len > 0:
             output.add "- `" & repo.path & "` - " & repoDesc
           else:
@@ -30373,6 +30458,23 @@ proc writeGeneratedWorkspaceProjects(workspaceRoot: string) =
       output.add "Error resolving repositories: " & err.msg
 
   writeFile(workspaceRoot / "workspace-projects.md", output.join("\n") & "\n")
+
+proc refreshWorkspaceProjectsIndexBestEffort(workspaceRoot, verb: string) =
+  ## Rewrite the generated project index after a verb changed what it should
+  ## say, and never let that rewrite change the verb's outcome.
+  ##
+  ## Best-effort in the strict sense, and for the same reason
+  ## `refreshWorkspaceSiblingIgnoresBestEffort` is: the index is an ergonomic
+  ## convenience layered on top of the mutation that already succeeded, so an
+  ## unwritable workspace root must produce a diagnostic and not a failed
+  ## `enable` whose membership change is already recorded. Callers invoke it
+  ## AFTER the mutation lands, so the file can never describe a state the
+  ## workspace did not reach.
+  try:
+    writeGeneratedWorkspaceProjects(workspaceRoot)
+  except CatchableError as err:
+    stderr.writeLine(verb & ": could not generate workspace-projects.md: " &
+      err.msg)
 
 proc gitRunPlain(identity: GitToolIdentity;
                  args: openArray[string]): tuple[code: int; output: string]
@@ -30769,10 +30871,8 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
         # — surface a structured diagnostic on stderr and continue.
         stderr.writeLine(
           "workspace init: could not record active branch: " & e.msg)
-    try:
-      writeGeneratedWorkspaceProjects(args.workspaceRoot)
-    except CatchableError as err:
-      stderr.writeLine("workspace init: could not generate workspace-projects.md: " & err.msg)
+    refreshWorkspaceProjectsIndexBestEffort(args.workspaceRoot,
+      "workspace init")
     alignWorkspaceRemotes(args.workspaceRoot, resolved.repos, identity)
     refreshWorkspaceSiblingIgnoresBestEffort(args.workspaceRoot)
 proc writeWorkspaceInitReport(report: WorkspaceInitReport;
@@ -36965,10 +37065,8 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
       for entry in outcome.report.repos:
         branches.add(entry.branch)
       writePromptCache(outcome.report.workspaceRoot, "sync", branches)
-    try:
-      writeGeneratedWorkspaceProjects(parsed.workspaceRoot)
-    except CatchableError as err:
-      stderr.writeLine("workspace sync: could not generate workspace-projects.md: " & err.msg)
+    refreshWorkspaceProjectsIndexBestEffort(parsed.workspaceRoot,
+      "workspace sync")
     # A sync is exactly when checkouts appear (or a `--force-sync` removes
     # one), so the sibling set is refreshed here. Skipped under `--dry-run`
     # along with every other mutation.
@@ -37692,6 +37790,17 @@ proc runWorkspacePullCommand*(args: openArray[string]): int =
       branches.add(entry.trackingBranch)
     writePromptCache(outcome.report.workspaceRoot, "pull", branches)
   refreshWorkspaceSiblingIgnoresBestEffort(outcome.report.workspaceRoot)
+  # `pull` converges every repo onto its manifest-declared revision, and the
+  # MANIFEST REPO is one of those repos: a pull is the ordinary way a
+  # workspace acquires a project someone else defined, a repo someone else
+  # added, or a reworded `repos/<r>.md`. So the index this workspace hands to
+  # the next agent is exactly as stale as the manifests were a moment ago, and
+  # this is the point at which that stops being true. Unconditional (it costs
+  # two manifest reads and a file write) and not gated on the exit code: a
+  # partially converged workspace still converged its manifests, and an index
+  # describing the manifests now on disk is the correct index either way.
+  refreshWorkspaceProjectsIndexBestEffort(outcome.report.workspaceRoot,
+    "workspace pull")
   for line in renderPullTextLines(outcome.report):
     stdout.writeLine(line)
   outcome.report.exitCode
@@ -54980,6 +55089,14 @@ proc runSwitchCommand*(args: openArray[string]): int =
     for entry in report.repos:
       branches.add(entry.newBranch)
     writePromptCache(report.workspaceRoot, "switch", branches)
+  # The manifest repo is a participating repo, so switching the workspace onto
+  # another branch can move `projects/`, `repo-sets/` and `repos/` to a
+  # different revision — a branch on which a project declares different repos,
+  # or does not exist at all. The `-b` form above is deliberately NOT given
+  # this: it creates the branch from the current tip, so the manifests it
+  # lands on are byte-identical to the ones the index was just generated from.
+  refreshWorkspaceProjectsIndexBestEffort(report.workspaceRoot,
+    "repro switch")
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -57154,6 +57271,13 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     result.repos.add(BranchRepoEntry(
       outcome: "metadata_write_failed", diagnostic: err.msg))
     return
+  # The fork is a WORKSPACE ROOT, and the first thing anything arriving in it
+  # reads is the index its `AGENTS.md` / `CLAUDE.md` `@import`s. Without this
+  # the forked directory carries its parent's project set in
+  # `.repro/workspace.toml` and no index at all, so every agent entering the
+  # fork is told the workspace is uninitialized. Placed after the metadata
+  # writers because it reads what they just recorded.
+  refreshWorkspaceProjectsIndexBestEffort(parsed.forkPath, "repro branch")
   result.exitCode = 0
 
 ## ----------------------------------------------------------------------------
@@ -62283,6 +62407,15 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
   # would otherwise refresh. Refreshing here covers every exit; the sync path
   # refreshes again and the second pass is a no-op.
   refreshWorkspaceSiblingIgnoresBestEffort(workspaceRoot)
+  # Same placement, same reason. The active set the index documents is the one
+  # `writeWorkspaceProjects` just recorded, and this is the narrowest point
+  # that sits after that write and before EVERY exit below — `--no-sync`,
+  # nothing-missing, the unresolved-manifest return, and the delegated sync.
+  # Leaving it to the sync would let those three early returns record
+  # membership the index never learns about, which is the omission this
+  # closes.
+  refreshWorkspaceProjectsIndexBestEffort(workspaceRoot,
+    "workspace enable")
 
   # PS-3 — materialize what was just recorded. Only the repos the named
   # projects introduce are missing-checkout candidates; everything already on
@@ -63100,6 +63233,15 @@ proc runWorkspaceDisableCommand*(args: openArray[string]): int =
   # Removed checkouts must leave the ignore set, or the block keeps naming
   # directories that no longer exist.
   refreshWorkspaceSiblingIgnoresBestEffort(workspaceRoot)
+  # …and the index must stop documenting a project this workspace no longer
+  # carries. Every path that reaches here has already passed
+  # `writeWorkspaceProjects`, and every refusal above it returns without
+  # recording anything — so the index is written exactly when the active set
+  # changed. The removal loop's per-checkout refusals do not gate it: those
+  # are about one directory, while the index describes the ACTIVE SET, which
+  # did change.
+  refreshWorkspaceProjectsIndexBestEffort(workspaceRoot,
+    "workspace disable")
 
   stdout.writeLine("repro workspace disable: disabled " &
     actuallyLeaving.join(", ") & "; active set: " &
@@ -67499,6 +67641,18 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
       name & (if desc.len > 0: " (" & desc & ")" else: "") &
       (if templateName.len > 0: " from template " & templateName else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
+    # AFTER the commit, never before: `commitAndPushManifest` stages exactly
+    # the `paths` it was handed and commits without `-a`, and the index is
+    # gitignored besides — but regenerating on the far side of the commit is
+    # what makes that a property of the ORDER rather than of two other files
+    # staying the way they are today.
+    #
+    # Usually a no-op by construction: a definition this workspace has not
+    # enabled is not in the set the index documents. The case it is not is the
+    # one worth covering — an active-set entry whose manifest was missing
+    # renders as "the active manifest was not found on disk", and `sets add`
+    # is the verb that resolves it.
+    refreshWorkspaceProjectsIndexBestEffort(workspaceRoot, verb & " add")
     stdout.writeLine(verb & " add: " & name & " — " & res.diagnostic)
     if templateName.len > 0:
       # The reported line names the template AND where the choice came from, so
@@ -67615,6 +67769,13 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
          " (and " & $orphans.len & " orphaned repo fragment(s))"
        else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
+    # `remove` refuses an ENABLED name, so the definition that just vanished is
+    # one the index does not document and this is normally a no-op. It is here
+    # for the same reason as the `add` side: the index is derived from the
+    # manifests, every verb that edits them regenerates it, and a per-verb
+    # judgement about which edits "can" matter is exactly the reasoning that
+    # left the file stale in the first place.
+    refreshWorkspaceProjectsIndexBestEffort(workspaceRoot, verb & " remove")
     stdout.writeLine(verb & " remove: " & name & " — " & res.diagnostic)
     if orphans.len > 0:
       if pruneOrphans:
@@ -68146,6 +68307,12 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     let msg = "Add repo " & repo & " to " & projects.join(", ") &
       (if desc.len > 0: " (" & desc.strip().splitLines()[0] & ")" else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
+    # The load-bearing one of the four definition sites: `--project` defaults
+    # to this workspace's PRIMARY project, so the common invocation adds a repo
+    # to a set the index is documenting right now. Its `repos/<repo>.md` is the
+    # line the index prints, which is why `add` warns when `-m` was omitted.
+    refreshWorkspaceProjectsIndexBestEffort(workspaceRoot,
+      "repro workspace repos add")
     stdout.writeLine("repro workspace repos add: " & repo & " -> " &
       projects.join(", ") & " — path " & effectivePath & ", remote " &
       remoteNames.join(" ") & ", " &
@@ -68232,6 +68399,14 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         if paths.len > 0:
           discard commitAndPushManifest(identity, gitBin, manifestRoot,
             "Remove repo " & repo & " from " & droppedFrom.join(", "), paths)
+          # This exit is a REFUSAL of `--delete-fragment` that nonetheless
+          # committed the dropped edges, and those edges are what the index
+          # lists. Regenerating on the failure path is not an inconsistency
+          # with "only on success": the rule is that the file must never
+          # describe a state the workspace did not reach, and the state it
+          # reached here includes the dropped edges.
+          refreshWorkspaceProjectsIndexBestEffort(workspaceRoot,
+            "repro workspace repos remove")
         return 2
       if fileExists(fragmentAbs):
         removeFile(fragmentAbs)
@@ -68248,6 +68423,8 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
       (if droppedFrom.len > 0: " from " & droppedFrom.join(", ") else: "") &
       (if deleteFragment: " (fragment deleted)" else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
+    refreshWorkspaceProjectsIndexBestEffort(workspaceRoot,
+      "repro workspace repos remove")
     stdout.writeLine("repro workspace repos remove: " & repo & " — " &
       res.diagnostic)
     if not deleteFragment and droppedFrom.len > 0:
