@@ -1,10 +1,10 @@
 {
   "observedStructuralFacts": {
-    "graphOwnedHelperArtifacts": 22,
+    "graphOwnedHelperArtifacts": 24,
     "nimTestBinaries": 1615,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 578,
-    "staticallyDetectedRuntimeCompilerFlowTests": 101,
+    "staticallyDetectedRuntimeCompilerFlowTests": 100,
     "testEntries": 1626
   },
   "pureUnitConsolidationCandidates": [
@@ -1104,6 +1104,12 @@
         "source": "libs/ct_test_unittest_parallel/tests/fixtures/"
       },
       {
+        "actionId": "reprobuild.test_fixtures.exclusive_phase_probe",
+        "kind": "test-fixture",
+        "output": "build/test-fixtures/exclusive-phase/exclusive_phase_probe",
+        "source": "tests/fixtures/exclusive-phase/probe.nim"
+      },
+      {
         "actionId": "reprobuild.test_fixtures.inject64_helper",
         "kind": "test-fixture",
         "output": "dynamic",
@@ -1204,6 +1210,12 @@
         "kind": "test-helper",
         "output": "build/test-bin/repro_catalog_harvester",
         "source": "tools/catalog-harvester/repro_catalog_harvester.nim"
+      },
+      {
+        "actionId": "reprobuild.test_helpers.repro_test_runner",
+        "kind": "test-helper",
+        "output": "build/bin/repro_test_runner",
+        "source": "tools/test-runner/repro_test_runner.nim"
       },
       {
         "actionId": "reprobuild.test_helpers.repro_trampoline",
@@ -5289,26 +5301,6 @@
         }
       ],
       "source": "tests/integration/t_runner_cpu_progress_liveness.nim"
-    },
-    {
-      "class": "integration",
-      "matches": [
-        {
-          "assignedCommandVariable": "cmd",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "cmd"
-          ],
-          "line": 102,
-          "path": "tests/integration/t_runner_exclusive_phase_budget.nim",
-          "patterns": [
-            "nim-c"
-          ],
-          "snippet": "let cmd = \"nim c --hints:off --warnings:off \" &"
-        }
-      ],
-      "source": "tests/integration/t_runner_exclusive_phase_budget.nim"
     },
     {
       "class": "integration",
@@ -29512,13 +29504,15 @@
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_runner_exclusive_phase_budget.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
-      "staticallyDetectedRuntimeCompilerFlow": true,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {

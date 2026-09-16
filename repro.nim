@@ -189,6 +189,13 @@ const
     ## shared pure-unit binary as a typed input; see the loop below.
 
   testFixtureArtifacts*: seq[TestGraphArtifacts] = @[
+    TestGraphArtifacts(
+      source: "tests/integration/t_runner_exclusive_phase_budget.nim",
+      artifacts: @[
+        TestGraphArtifact(path: "build/bin/repro_test_runner",
+          actionId: "reprobuild.test_helpers.repro_test_runner"),
+        TestGraphArtifact(path: "build/test-fixtures/exclusive-phase/exclusive_phase_probe",
+          actionId: "reprobuild.test_fixtures.exclusive_phase_probe")]),
     # SHARED, and deliberately so. ``fixture_protocol_three_tests`` is one
     # artifact behind two tests (six cases); before M3 each case compiled a
     # private copy into its own scratch directory to avoid relinking a binary
@@ -2059,6 +2066,17 @@ package reprobuild:
       nimcache = "build/nimcache/m5_stub_repro_image",
       actionId = "reprobuild.test_helpers.m5_stub_repro_image"))
 
+    reprobuildTestHelpersActions.add(nim.c(
+      source = "tools/test-runner/repro_test_runner.nim",
+      binary = "build/bin/repro_test_runner",
+      defines = @["release"],
+      threadsOn = true,
+      paths = sourceOnlyNimPaths,
+      passL = testRuntimePassL,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro_test_runner",
+      actionId = "reprobuild.test_helpers.repro_test_runner"))
+
     discard collect("test-helpers", reprobuildTestHelpersActions)
 
     # Test-Fixtures-In-Build-Graph M2: the monitor-shim ``test-fixtures``
@@ -2089,6 +2107,14 @@ package reprobuild:
     # above. The shim is a host-native artifact (LD_PRELOAD / DYLD_INSERT
     # / IAT-patch DLL), so the host arm is the correct (and only) target.
     var reprobuildTestFixturesActions: seq[BuildActionDef] = @[]
+
+    reprobuildTestFixturesActions.add(nim.c(
+      source = "tests/fixtures/exclusive-phase/probe.nim",
+      binary = "build/test-fixtures/exclusive-phase/exclusive_phase_probe",
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/exclusive_phase_probe",
+      actionId = "reprobuild.test_fixtures.exclusive_phase_probe"))
 
     # B5: the two artifacts under ``build/lib`` that a RELEASE ships — the
     # monitor shim and the shared DSL runtime library. They live in

@@ -54,6 +54,7 @@
 ## test's behaviour is reproduced or asserted here.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
+from repro_test_support import graphArtifactPath, requireBinary
 
 const RepoRootMarker = "repro.nim"
 
@@ -76,43 +77,30 @@ proc findRepoRoot(): string =
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
 
-proc writeProbeFixture(path, stem, observedPath: string) =
-  ## A whole-binary test that records the one thing this test is about: the
-  ## build parallelism its environment grants a nested ``repro build``.
-  ##
-  ## It refuses ``--list-json`` (exit 3) so the runner classifies it as a
-  ## whole-binary case. That keeps the fixture free of the Tier-1 protocol,
-  ## which has nothing to do with the property under test — the exclusive
-  ## phase runs protocol-aware and whole-binary cases through the same env.
-  writeFile(path, """
-import std/[os, strutils]
-
-when isMainModule:
-  for i in 1 .. paramCount():
-    if paramStr(i) == "--list-json":
-      quit(3)
-  let f = open(""" & escape(observedPath) & """, fmAppend)
-  f.writeLine(""" & escape(stem) & """ & "=" &
-    getEnv("REPROBUILD_MAX_PARALLELISM", "unset"))
-  f.close()
-  quit(0)
-""")
-
-proc compileFixture(workRoot, source, binary: string): bool =
-  let cmd = "nim c --hints:off --warnings:off " &
-    "--nimcache:" & quoteShell(workRoot / "nimcache" /
-      splitFile(source).name) & " " &
-    "--out:" & quoteShell(binary) & " " &
-    quoteShell(source)
-  execCmd(cmd) == 0
+proc stageProbeFixtures(binDir: string) =
+  let probe = requireBinary(
+    graphArtifactPath(addFileExt("build/test-fixtures/exclusive-phase/exclusive_phase_probe", ExeExt)),
+    "reprobuild.test_fixtures.exclusive_phase_probe")
+  for stem in [ExclusiveStem, ParallelStem]:
+    copyFileWithPermissions(probe, binDir / addFileExt(stem, ExeExt))
 
 type RunFindings = object
+  exitCode: int
   stderrText: string
   observed: string
 
 proc runRunner(runner, binDir, workRoot, observedPath: string;
                exclusiveBudget: string): RunFindings =
   ## ``exclusiveBudget`` empty means "not set at all" — the operator-pin case.
+  let hadParallel = existsEnv("REPROBUILD_MAX_PARALLELISM")
+  let oldParallel = getEnv("REPROBUILD_MAX_PARALLELISM")
+  let hadExclusive = existsEnv("REPROBUILD_EXCLUSIVE_MAX_PARALLELISM")
+  let oldExclusive = getEnv("REPROBUILD_EXCLUSIVE_MAX_PARALLELISM")
+  defer:
+    if hadParallel: putEnv("REPROBUILD_MAX_PARALLELISM", oldParallel)
+    else: delEnv("REPROBUILD_MAX_PARALLELISM")
+    if hadExclusive: putEnv("REPROBUILD_EXCLUSIVE_MAX_PARALLELISM", oldExclusive)
+    else: delEnv("REPROBUILD_EXCLUSIVE_MAX_PARALLELISM")
   if fileExists(observedPath):
     removeFile(observedPath)
   let errPath = workRoot / "run.err"
@@ -128,9 +116,7 @@ proc runRunner(runner, binDir, workRoot, observedPath: string;
     putEnv("REPROBUILD_EXCLUSIVE_MAX_PARALLELISM", exclusiveBudget)
   else:
     delEnv("REPROBUILD_EXCLUSIVE_MAX_PARALLELISM")
-  discard execCmd("sh -c " & quoteShell(cmd))
-  delEnv("REPROBUILD_EXCLUSIVE_MAX_PARALLELISM")
-  delEnv("REPROBUILD_MAX_PARALLELISM")
+  result.exitCode = execCmd("sh -c " & quoteShell(cmd))
   result.stderrText = readFile(errPath)
   result.observed =
     if fileExists(observedPath): readFile(observedPath) else: ""
@@ -146,8 +132,9 @@ suite "t_runner_exclusive_phase_budget":
 
   setup:
     let repoRoot = findRepoRoot()
-    let runner = repoRoot / "build" / "bin" /
-      addFileExt("repro_test_runner", ExeExt)
+    let runner = requireBinary(repoRoot / "build" / "bin" /
+      addFileExt("repro_test_runner", ExeExt),
+      "reprobuild.test_helpers.repro_test_runner")
 
   test "the exclusive phase spends the undivided budget, the pool does not":
     check fileExists(runner)
@@ -157,22 +144,13 @@ suite "t_runner_exclusive_phase_budget":
     let workRoot = createTempDir("repro-exclusive-budget-", "")
     defer: removeDir(workRoot)
     let binDir = workRoot / "bin"
-    let srcDir = workRoot / "src"
     createDir(binDir)
-    createDir(srcDir)
     let observedPath = workRoot / "observed.txt"
-
-    for stem in [ExclusiveStem, ParallelStem]:
-      let src = srcDir / (stem & ".nim")
-      writeProbeFixture(src, stem, observedPath)
-      let ok = compileFixture(workRoot, src,
-        binDir / addFileExt(stem, ExeExt))
-      check ok
-      if not ok:
-        return
+    stageProbeFixtures(binDir)
 
     let findings = runRunner(runner, binDir, workRoot, observedPath,
       exclusiveBudget = "24")
+    check findings.exitCode == 0
 
     # The runner must actually have classified one case as exclusive. Without
     # this the two assertions below could both pass vacuously on a runner that
@@ -192,25 +170,16 @@ suite "t_runner_exclusive_phase_budget":
     let workRoot = createTempDir("repro-exclusive-pin-", "")
     defer: removeDir(workRoot)
     let binDir = workRoot / "bin"
-    let srcDir = workRoot / "src"
     createDir(binDir)
-    createDir(srcDir)
     let observedPath = workRoot / "observed.txt"
-
-    for stem in [ExclusiveStem, ParallelStem]:
-      let src = srcDir / (stem & ".nim")
-      writeProbeFixture(src, stem, observedPath)
-      let ok = compileFixture(workRoot, src,
-        binDir / addFileExt(stem, ExeExt))
-      check ok
-      if not ok:
-        return
+    stageProbeFixtures(binDir)
 
     # No REPROBUILD_EXCLUSIVE_MAX_PARALLELISM: this is what the runner sees
     # when run_tests.sh declined to derive one because the operator pinned
     # REPROBUILD_MAX_PARALLELISM by hand.
     let findings = runRunner(runner, binDir, workRoot, observedPath,
       exclusiveBudget = "")
+    check findings.exitCode == 0
 
     check "1 cases require exclusive execution" in findings.stderrText
     check parallelismFor(findings.observed, ExclusiveStem) == "3"
