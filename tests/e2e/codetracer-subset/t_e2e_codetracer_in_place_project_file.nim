@@ -845,6 +845,20 @@ proc copySelectedCodeTracerProject(codeTracerRoot, projectRoot: string) =
   createDir(projectRoot / "test-programs" / "c_sudoku_solver")
   copyCodeTracerReprobuildFiles(codeTracerRoot, projectRoot)
   createDir(projectRoot / "src")
+  # src/frontend reads two assets out of src/config AT COMPILE TIME --
+  # `config.nim` does `staticRead("../config/default_config.yaml")` and
+  # `ui/layout.nim` does `staticRead("../../config/default_layout.json")`.
+  # A `staticRead` is a source dependency that no import graph mentions, so
+  # a subset assembled by listing modules misses it and the compile stops at
+  # `cannot open file: ../config/default_config.yaml` rather than at anything
+  # resembling the real cause. The aggregate copier below already carries
+  # both; the selected one copies the same frontend tree and needs them for
+  # the same reason.
+  createDir(projectRoot / "src" / "config")
+  copyFile(codeTracerRoot / "src" / "config" / "default_layout.json",
+    projectRoot / "src" / "config" / "default_layout.json")
+  copyFile(codeTracerRoot / "src" / "config" / "default_config.yaml",
+    projectRoot / "src" / "config" / "default_config.yaml")
   copyFile(codeTracerRoot / "src" / "helpers.js", projectRoot / "helpers.js")
   copyFile(codeTracerRoot / "src" / "helpers.js",
     projectRoot / "src" / "helpers.js")
