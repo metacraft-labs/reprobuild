@@ -232,6 +232,46 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
       checkpoint(graphed.output)
       check graphed.code == 0
 
+  test "test_m9r9_prepare_only_materializes_source_python_build_dependency":
+    require fileExists(reproBinary)
+    let reproAbs = absolutePath(reproBinary)
+    let scratch = createTempDir("repro-python-source-dependency-", "")
+    defer: removeDir(scratch)
+    let catalogRoot = scratch / "catalog"
+    let producerRoot = catalogRoot / "python3"
+    let consumerRoot = scratch / "consumer"
+    let cacheRoot = scratch / "action-cache"
+    createDir(producerRoot)
+    createDir(consumerRoot)
+    createDir(cacheRoot)
+    writeFile(producerRoot / "repro.nim",
+      prepareOnlyProducerRepro.replace("ninja", "python3"))
+    writeFile(consumerRoot / "repro.nim",
+      prepareOnlyConsumerRepro.replace("ninja", "python3")
+        .replace("  uses:", "  buildDeps:"))
+
+    let savedSourceRoot = getEnv(FromSourceRootEnvVar)
+    let savedNoRunquota = getEnv("REPROBUILD_NO_RUNQUOTA")
+    putEnv(FromSourceRootEnvVar, catalogRoot)
+    putEnv("REPROBUILD_NO_RUNQUOTA", "1")
+    defer:
+      if savedSourceRoot.len > 0: putEnv(FromSourceRootEnvVar, savedSourceRoot)
+      else: delEnv(FromSourceRootEnvVar)
+      if savedNoRunquota.len > 0: putEnv("REPROBUILD_NO_RUNQUOTA", savedNoRunquota)
+      else: delEnv("REPROBUILD_NO_RUNQUOTA")
+
+    let producerArtifact = producerRoot / ".repro/output/python3/python3"
+    let consumerMarker = consumerRoot / "build/consumer-ran.txt"
+    check not fileExists(producerArtifact)
+    let prepared = run(q(reproAbs) & " build --prepare-only" &
+      " --daemon=off --tool-provisioning=from-source" &
+      " --progress=quiet --log=quiet --measure=none" &
+      " --action-cache-root=" & q(cacheRoot), consumerRoot)
+    checkpoint(prepared.output)
+    check prepared.code == 0
+    check fileExists(producerArtifact)
+    check not fileExists(consumerMarker)
+
   test "test_m9r9_graph_seeds_bootstrap_floor_in_fresh_process":
     if not fileExists(reproBinary):
       checkpoint("missing " & reproBinary & "; run `repro build` first")
@@ -587,23 +627,24 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
     check FromSourceMaxRecursionDepth <= 256
 
   test "test_m9r9_self_hosting_build_drivers_are_not_bootstrap_floor":
-    # Ninja and CMake now have source recipes that terminate on the seeded
-    # compiler/scripting floor. Pre-seeding either name silently bypasses
+    # Python, Ninja and CMake have source recipes that terminate on the seeded
+    # toolchain. Pre-seeding these names silently bypasses
     # those recipes and leaves later graph-only processes without artifacts.
     check "ninja" notin BootstrapCycleBreakTools
     check "cmake" notin BootstrapCycleBreakTools
     check "gcc" in BootstrapCycleBreakTools
-    check "python3" in BootstrapCycleBreakTools
+    check "python3" notin BootstrapCycleBreakTools
+    check "python" notin BootstrapCycleBreakTools
 
   test "test_m9r9_cache_substitution_precedes_bootstrap_cycle_break":
     let scratch = createTempDir("repro-m9r9-bootstrap-cache-", "")
     defer: removeDir(scratch)
-    makeRecipeFile(scratch, "python3")
+    makeRecipeFile(scratch, "gcc")
 
-    let useDef = syntheticUseDef("python3")
+    let useDef = syntheticUseDef("gcc")
     let outcome = tryResolveFromSourceTool(useDef, recipeRoot = scratch)
     check outcome.kind == rrNeedsBuild
-    check "python3" in BootstrapCycleBreakTools
+    check "gcc" in BootstrapCycleBreakTools
     check shouldTryFromSourceCacheSubstitution(outcome,
       cacheConfigured = true,
       prepareOnly = false,
@@ -619,7 +660,7 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
       prepareOnly = false,
       dryRun = true,
       forceRebuild = false)
-    discard makeRecipeArtefact(scratch, "python3", "python3")
+    discard makeRecipeArtefact(scratch, "gcc", "gcc")
     let present = tryResolveFromSourceTool(useDef, recipeRoot = scratch)
     require present.kind == rrResolved
     check shouldTryFromSourceCacheSubstitution(present,

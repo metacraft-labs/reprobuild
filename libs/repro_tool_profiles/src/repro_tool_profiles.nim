@@ -4317,11 +4317,11 @@ const BootstrapCycleBreakTools* = @[
   "libtool", "libtoolize",
   "m4",
   "perl",
-  # Scripting drivers without a self-hosting source realization remain on the
-  # bootstrap floor. Meson, Ninja, and CMake are deliberately absent: their
-  # source recipes terminate on the seeded compiler/scripting floor and
-  # publish complete install mirrors that can be auto-recursed.
-  "python3", "python", "pkg-config", "pkgconf",
+  # Python, Meson, Ninja, and CMake have source recipes that terminate on
+  # the seeded toolchain and publish complete install mirrors. Do not skip
+  # their construction merely because a bootstrap alternative exists.
+  # Actual dependency cycles still use the reactive cycle breaker.
+  "pkg-config", "pkgconf",
 ]
   ## Exported so tests + the dispatcher init code can audit + seed the
   ## list without re-declaring it.

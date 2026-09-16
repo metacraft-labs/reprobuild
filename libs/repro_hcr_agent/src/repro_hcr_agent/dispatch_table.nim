@@ -1,9 +1,11 @@
-import std/[os]
+import std/[os, strutils]
 
 const
   dispatchTableSourceDir = currentSourcePath().parentDir()
-  dispatchTableCSource = dispatchTableSourceDir / "../../c/repro_hcr_dispatch_table.c"
-  dispatchTableCHeaderDir = dispatchTableSourceDir / "../../c"
+  # Compile inputs are on the build host, even when the target is Windows.
+  dispatchTableCSource =
+    (dispatchTableSourceDir / "../../c/repro_hcr_dispatch_table.c").replace('\\', '/')
+  dispatchTableCHeaderDir = (dispatchTableSourceDir / "../../c").replace('\\', '/')
 
 {.passC: "-I" & dispatchTableCHeaderDir.}
 {.compile: dispatchTableCSource.}
