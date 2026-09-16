@@ -1527,7 +1527,7 @@
             "stylusPath",
             "stylusSourcePath"
           ],
-          "line": 1004,
+          "line": 973,
           "path": "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim",
           "patterns": [
             "gcc"
@@ -1559,7 +1559,7 @@
             "stylusPath",
             "stylusSourcePath"
           ],
-          "line": 1005,
+          "line": 974,
           "path": "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim",
           "patterns": [
             "clang"
@@ -1591,7 +1591,7 @@
             "stylusPath",
             "stylusSourcePath"
           ],
-          "line": 1015,
+          "line": 984,
           "path": "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim",
           "patterns": [
             "cc"
@@ -1623,7 +1623,7 @@
             "stylusPath",
             "stylusSourcePath"
           ],
-          "line": 1021,
+          "line": 990,
           "path": "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim",
           "patterns": [
             "cc"
