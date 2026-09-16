@@ -16005,7 +16005,7 @@
       "requiresReproBinary": false,
       "source": "recipes/packages/source/gdisk/test_gdisk_source.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
