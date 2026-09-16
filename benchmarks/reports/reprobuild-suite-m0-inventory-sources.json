@@ -2,7 +2,7 @@
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 22,
     "nimTestBinaries": 1613,
-    "pureUnitConsolidationGroups": 47,
+    "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 578,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
     "testEntries": 1624
@@ -851,7 +851,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 22,
+      "count": 21,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -861,7 +861,6 @@
       "sources": [
         "tests/unit/t_fribidi_dev_stub.nim",
         "tests/unit/t_m9r10b_synthesis_wiring.nim",
-        "tests/unit/t_m9r11_stub_provisioning_widening.nim",
         "tests/unit/t_m9r12_4_autotools_emits_fetch.nim",
         "tests/unit/t_m9r14c_5_autotools_stage_copy.nim",
         "tests/unit/t_m9r14d_7_meson_package_stage_copy.nim",
@@ -958,6 +957,22 @@
       "sources": [
         "tests/unit/t_install_mirror_tool_metadata.nim",
         "tests/unit/t_source_fetch_tool_metadata.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_m9r11_stub_provisioning_widening.nim",
+        "tests/unit/t_m9r12_sh_inline_exec_and_typed_tool_fallback.nim"
       ],
       "targetOs": "soAny"
     },
@@ -32793,13 +32808,15 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_dsl_stdlib",
-        "repro_project_dsl"
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_tool_profiles"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r11_stub_provisioning_widening.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
