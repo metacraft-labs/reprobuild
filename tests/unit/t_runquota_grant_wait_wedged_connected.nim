@@ -43,7 +43,7 @@
 ## with ``REPRO_WEDGED_STUB_SOCKET`` set) rather than a thread, so no Socket
 ## object or GC heap is shared across threads.
 
-import std/[os, osproc, strutils, times, unittest]
+import std/[os, osproc, strutils, tempfiles, times, unittest]
 
 import repro_runquota
 
@@ -125,17 +125,41 @@ proc waitForSocket(path: string): bool =
     sleep(10)
   false
 
+proc privateSocketPath(): string =
+  ## A rendezvous directory THIS process owns, because runquota refuses to
+  ## bind or connect through one it does not.
+  ##
+  ## These cases used to name ``/tmp/repro-wedged-rq-<pid>.sock`` directly.
+  ## ``/tmp`` is root-owned and ``1777`` on an ordinary host, and
+  ## ``requireTrustedEndpointDir`` refuses exactly that — "a rendezvous
+  ## point another user owns is a rendezvous point another user controls".
+  ## So the stub child died in ``bindEndpoint`` before it ever listened and
+  ## the parent then died in ``connect``: the wedged-daemon wiring under
+  ## test was never reached, in either direction.
+  ##
+  ## ``createTempDir`` gives a fresh directory under ``$TMPDIR`` owned by
+  ## this uid. The mode is then set EXPLICITLY: the rule requires exactly
+  ## ``0700`` and refuses anything it cannot see was created that way, and
+  ## Nim's ``createTempDir`` lands on ``0755`` here. Setting it rather than
+  ## assuming it is the same discipline the rule is asking for.
+  ##
+  ## The per-pid name is kept inside the directory so a crashed run leaves
+  ## an obvious trail.
+  let dir = createTempDir("repro-wedged-rq-", "")
+  setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
+  dir / ("rq-" & $getCurrentProcessId() & ".sock")
+
 suite "repro_runquota grant-wait — wedged-but-connected daemon (end-to-end)":
 
   test "bounded daemonStatus against a connected-but-silent daemon raises within bound":
-    let socketPath = "/tmp/repro-wedged-rq-" &
-      $getCurrentProcessId() & ".sock"
+    let socketPath = privateSocketPath()
     removeFile(socketPath)
     let stub = startStub(socketPath)
     defer:
       stub.terminate()
       discard stub.waitForExit()
       removeFile(socketPath)
+      removeDir(socketPath.parentDir)
     check waitForSocket(socketPath)
 
     var client = connect(unixEndpoint(socketPath))
@@ -166,14 +190,14 @@ suite "repro_runquota grant-wait — wedged-but-connected daemon (end-to-end)":
     client.close()
 
   test "awaitGrant path with the REAL probe raises within the deadline (no hang)":
-    let socketPath = "/tmp/repro-wedged-rq2-" &
-      $getCurrentProcessId() & ".sock"
+    let socketPath = privateSocketPath()
     removeFile(socketPath)
     let stub = startStub(socketPath)
     defer:
       stub.terminate()
       discard stub.waitForExit()
       removeFile(socketPath)
+      removeDir(socketPath.parentDir)
     check waitForSocket(socketPath)
 
     var client = connect(unixEndpoint(socketPath))

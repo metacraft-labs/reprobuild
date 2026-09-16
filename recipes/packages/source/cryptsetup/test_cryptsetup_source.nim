@@ -31,7 +31,13 @@ suite "cryptsetupSource — from-source recipe smoke test":
     check spec.extractStrip == 1
 
   test "build dependencies cover source runtime libraries":
-    check registeredNativeBuildDeps("cryptsetupSource") == @[
+    # AUTHORED, not the full row: reprobuild's fetch and install-mirror
+    # emitters append the commands their generated scripts run (``sh``,
+    # ``curl``, ``tar``, ``patchelf``, …) to every ``fetch:``-bearing
+    # recipe. That set is pinned by ``t_source_fetch_tool_metadata`` /
+    # ``t_install_mirror_tool_metadata``; what this case states is what
+    # the RECIPE declared, so it reads the authored accessor.
+    check registeredAuthoredNativeBuildDeps("cryptsetupSource") == @[
       "autoconf", "automake", "libtool", "m4", "make", "gcc >=11",
       "pkg-config", "gettext",
     ]

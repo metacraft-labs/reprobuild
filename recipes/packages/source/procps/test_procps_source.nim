@@ -54,7 +54,13 @@ const ExpectedConfigureFlags = @[
 suite "procpsSource — from-source recipe smoke test":
 
   test "build dependencies cover autoreconf and top's terminal UI":
-    check registeredNativeBuildDeps("procpsSource") == @[
+    # AUTHORED, not the full row: reprobuild's fetch and install-mirror
+    # emitters append the commands their generated scripts run (``sh``,
+    # ``curl``, ``tar``, ``patchelf``, …) to every ``fetch:``-bearing
+    # recipe. That set is pinned by ``t_source_fetch_tool_metadata`` /
+    # ``t_install_mirror_tool_metadata``; what this case states is what
+    # the RECIPE declared, so it reads the authored accessor.
+    check registeredAuthoredNativeBuildDeps("procpsSource") == @[
       "autoconf", "automake", "libtool", "m4", "make", "gcc >=11",
       "pkg-config",
     ]
