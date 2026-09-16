@@ -241,6 +241,12 @@ type
     sha256*: string
     archiveType*: string
     executablePath*: string
+    executableAlias*: string
+      ## Second name the realized executable is also exposed under. See
+      ## ``TarballProvisioningDef.executableAlias`` for why this exists:
+      ## an upstream that ships a triple-suffixed binary cannot otherwise be
+      ## invoked by the name its consumers use, because a realized prefix
+      ## goes on PATH as a directory and the program's name is the file's.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string
@@ -468,7 +474,7 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 15'u16
+  EnvelopeVersion = 16'u16
     ## v15 (current): retains dependency roles on InterfaceToolUse. Older
     ##                payloads decode with the legacy empty/target role.
     ## v14: retains package runtime dependencies in
@@ -857,6 +863,8 @@ proc writeTarballProvisioning(outp: var seq[byte];
   outp.writeString(provisioning.sha256)
   outp.writeString(provisioning.archiveType)
   outp.writeString(provisioning.executablePath)
+  if version >= 16'u16:
+    outp.writeString(provisioning.executableAlias)
   outp.writeU32Le(uint32(max(provisioning.stripComponents, 0)))
   outp.writeString(provisioning.packageId)
   outp.writeString(provisioning.lockIdentity)
@@ -874,6 +882,8 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
   result.sha256 = readString(bytes, pos)
   result.archiveType = readString(bytes, pos)
   result.executablePath = readString(bytes, pos)
+  if version >= 16'u16:
+    result.executableAlias = readString(bytes, pos)
   result.stripComponents = int(readU32Le(bytes, pos))
   result.packageId = readString(bytes, pos)
   result.lockIdentity = readString(bytes, pos)
@@ -1433,6 +1443,7 @@ proc toInterfaceTarballProvisioning(packageName: string;
     sha256: provisioning.sha256,
     archiveType: provisioning.archiveType,
     executablePath: provisioning.executablePath,
+    executableAlias: provisioning.executableAlias,
     stripComponents: provisioning.stripComponents,
     packageId: provisioning.packageId,
     lockIdentity: provisioning.lockIdentity,

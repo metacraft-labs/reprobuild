@@ -3618,6 +3618,7 @@ proc provisioningContributionLiteral(
       if j > 0: result.add(", ")
       result.add(mirror)
     result.add("], sha256: " & codeOrEmpty(provisioning.sha256) &
+      ", executableAlias: " & codeOrEmpty(provisioning.executableAlias) &
       ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
       ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
       ", stripComponents: " & $provisioning.stripComponents &

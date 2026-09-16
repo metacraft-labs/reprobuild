@@ -1380,6 +1380,13 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
     let archiveTypeValue = namedValue(node[i], "archiveType")
     if not archiveTypeValue.isNil:
       result.archiveType = exprCode(archiveTypeValue)
+    # Optional second name for the realized executable. When present the
+    # realize step places a copy beside the declared one under this name,
+    # which is how an upstream that ships a triple-suffixed binary gets
+    # invoked by the plain name its consumers use.
+    let executableAliasValue = namedValue(node[i], "executableAlias")
+    if not executableAliasValue.isNil:
+      result.executableAlias = exprCode(executableAliasValue)
     let executablePathValue = namedValue(node[i], "executablePath")
     if not executablePathValue.isNil:
       executablePathNode = executablePathValue
@@ -2481,7 +2488,8 @@ proc packageLiteral(pkg: PackageDef): string =
         result.add(", ")
       result.add(mirror)
     result.add("], sha256: " & codeOrEmpty(provisioning.sha256) &
-      ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
+      ", executableAlias: " & codeOrEmpty(provisioning.executableAlias) &
+    ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
       ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
       ", stripComponents: " & $provisioning.stripComponents &
       ", packageId: " & codeOrEmpty(provisioning.packageId) &

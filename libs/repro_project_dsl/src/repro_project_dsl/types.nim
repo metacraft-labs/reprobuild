@@ -321,6 +321,22 @@ type
     sha256*: string
     archiveType*: string
     executablePath*: string
+    executableAlias*: string
+      ## Optional second name for the realized executable.
+      ##
+      ## Some upstreams ship a binary named after its target triple —
+      ## ``codex-x86_64-pc-windows-msvc.exe`` — while every consumer invokes
+      ## it as ``codex``. The realized prefix goes on PATH as a directory, so
+      ## the program's name on PATH is the file's own name and the two do not
+      ## meet. Before this, the only way to close that gap was a hand-written
+      ## shim outside the store, which is precisely the out-of-band
+      ## provisioning a package is supposed to remove.
+      ##
+      ## When set, realize places a copy beside the declared executable under
+      ## this name. A copy rather than a symlink because the store must stay
+      ## valid for users without the Windows privilege to create one, and
+      ## because a relative symlink does not survive the archive-extraction
+      ## boundary on every host.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string

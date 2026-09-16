@@ -283,6 +283,9 @@ type
     sha256*: string
     archiveType*: string
     declaredExecutablePath*: string
+    declaredExecutableAlias*: string
+      ## Optional second name the realized executable is exposed under. See
+      ## ``TarballProvisioningDef.executableAlias``.
     stripComponents*: int
     lockIdentity*: string
 
@@ -1884,6 +1887,7 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
     archiveType: if selected.archiveType.len >
     0: selected.archiveType else: "tar.gz",
     declaredExecutablePath: selected.executablePath,
+    declaredExecutableAlias: selected.executableAlias,
     stripComponents: selected.stripComponents,
     lockIdentity: contributorLockIdentity(selected.contributor,
       if selected.lockIdentity.len > 0:
@@ -2681,11 +2685,34 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
   try:
     extractTarballArchive(downloaded.path, tempPrefix, plan.archiveType,
       plan.stripComponents, plan.declaredExecutablePath)
-    if executableInStorePath(tempPrefix, plan.declaredExecutablePath,
-        rejectSymlinks = true).len == 0:
+    let extractedExecutable = executableInStorePath(tempPrefix,
+      plan.declaredExecutablePath, rejectSymlinks = true)
+    if extractedExecutable.len == 0:
       raise newException(OSError,
         "tool-resolution failed: extracted tarball lacks executable " &
         plan.declaredExecutablePath)
+    # Optional alias. Some upstreams ship a binary named for its target
+    # triple (``codex-x86_64-pc-windows-msvc.exe``) while every consumer
+    # invokes it as ``codex``; a realized prefix goes on PATH as a DIRECTORY,
+    # so the program's name there is the file's own and the two never meet.
+    # Placing the copy inside the prefix keeps that reconciliation in the
+    # content-addressed store instead of a hand-written shim beside it.
+    #
+    # A copy rather than a symlink: creating one on Windows needs a privilege
+    # not every developer has, and the store must not depend on it.
+    #
+    # Done BEFORE the receipt is written and before the move into place, so
+    # the alias is part of the sealed prefix rather than an edit to a
+    # published one.
+    if plan.declaredExecutableAlias.len > 0:
+      let aliasPath = extractedExecutable.parentDir /
+        plan.declaredExecutableAlias
+      if not fileExists(extendedPath(aliasPath)):
+        copyFile(extendedPath(extractedExecutable), extendedPath(aliasPath))
+        when not defined(windows):
+          # Preserve the execute bit the copy does not carry on POSIX.
+          setFilePermissions(extendedPath(aliasPath),
+            getFilePermissions(extendedPath(extractedExecutable)))
     writeTarballReceipt(tempPrefix, plan, downloaded.selectedUrl)
     createDir(extendedPath(prefix.parentDir))
     try:
