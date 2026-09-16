@@ -24,8 +24,15 @@ const
   # fixed 100-second per-action timeout, which the Windows lane could not
   # sustain. The contract below is unchanged; only where the file is read from
   # has moved, and it is now resolved from the sibling checkout.
+  #
+  # It has since moved once more, WITHIN that repo. The composite action's two
+  # per-OS inline `run:` blocks were collapsed into one `bash` step that execs
+  # `provision-reprobuild-siblings.sh`, so `action.yml` no longer contains a
+  # single `git ... submodule update` line — reading the contract from it now
+  # asserts nothing at all. Name the script that actually carries the pinned
+  # command instead.
   CodeTracerProvisionAction =
-    "reprobuild-provision/action.yml"
+    "reprobuild-provision/provision-reprobuild-siblings.sh"
   CodeTracerRequiredNimGitlinks = [
     (
       path: "libs/nim-serialization",
@@ -421,18 +428,49 @@ proc requireSuccess(command: repro_test_support.CmdSpec;
                     cwd = getCurrentDir()): string =
   repro_test_support.requireSuccess(command, cwd)
 
+const
+  CommandPrefix =
+    "git -C \"${WS}/codetracer\" submodule update"
+  ExactCommand = CommandPrefix &
+    " --init --depth 1 --recursive -- \\"
+  # In `provision-reprobuild-siblings.sh` the pinned command is the CONDITION
+  # of a shell `if`, so the script can report a failure with a named
+  # diagnostic instead of dying on `set -e`. That shape, and only that shape,
+  # adds two tokens the old inline-`run:` spelling did not have: a leading
+  # `if ! ` on the command line, and a `; then` closing the last continued
+  # entry.
+  #
+  # These two strippers exist so the parser sees the same tokens it always
+  # saw. They are deliberately EXACT and deliberately narrow — one fixed
+  # prefix, one fixed suffix, both re-stripped for whitespace — because every
+  # assertion below is a byte comparison against `ExactCommand` or a
+  # character-class check on an entry. Anything looser (a `contains`, a regex,
+  # a "skip leading shell noise" loop) would let a mutated command through the
+  # gate this parser exists to be, which is the one thing that must not
+  # happen: the five mutation oracles in
+  # `requireCodeTracerNimGitlinkProvisioningContract` are what prove it did
+  # not, and they are run against the real file on every pass.
+  ShellConditionPrefix = "if ! "
+  ShellConditionSuffix = "; then"
+
+proc withoutShellCondition(line: string): string =
+  if line.startsWith(ShellConditionPrefix):
+    line[ShellConditionPrefix.len .. ^1].strip()
+  else:
+    line
+
+proc withoutShellThen(entry: string): string =
+  if entry.endsWith(ShellConditionSuffix):
+    entry[0 ..< entry.len - ShellConditionSuffix.len].strip()
+  else:
+    entry
+
 proc provisionedCodeTracerNimGitlinks(actionText, actionPath: string):
     seq[string] =
-  const
-    CommandPrefix =
-      "git -C \"${WS}/codetracer\" submodule update"
-    ExactCommand = CommandPrefix &
-      " --init --depth 1 --recursive -- \\"
-
   let lines = actionText.splitLines()
   var blockStarts: seq[int]
   for index, rawLine in lines:
-    let line = rawLine.strip()
+    let line = rawLine.strip().withoutShellCondition()
     if line.startsWith(CommandPrefix):
       if line != ExactCommand:
         raise newException(MissingTestFixtureError,
@@ -456,7 +494,8 @@ proc provisionedCodeTracerNimGitlinks(actionText, actionPath: string):
 
     let hasContinuation = line.endsWith("\\")
     let entry =
-      (if hasContinuation: line[0 ..< line.high] else: line).strip()
+      if hasContinuation: line[0 ..< line.high].strip()
+      else: line.strip().withoutShellThen()
     var validEntry = entry.startsWith("libs/") and entry.len > "libs/".len
     for character in entry:
       if character notin {'a'..'z', 'A'..'Z', '0'..'9', '/', '_', '-', '.'}:

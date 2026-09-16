@@ -111,5 +111,28 @@ nim-shm-gset=c646982b354cb5b1fa8734f94b951a660419d75c
 # `main` retired in the org branch-rename sweep; mainline is now `dev`.
 repo-workspaces=dev
 
+# The shared-actions repo, declared here as an ordinary sibling because
+# `tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim`
+# READS A FILE OUT OF IT: `reprobuild-provision/provision-reprobuild-siblings.sh`
+# is the oracle for the CodeTracer Nim-gitlink provisioning contract, and
+# `repro_test_support.requireMetacraftGithubActionsRoot` raises rather than
+# skipping when the checkout is absent — per the suite's no-silent-skip rule,
+# a missing prerequisite fails loudly and names itself.
+#
+# `uses: metacraft-labs/metacraft-github-actions/...@dev` does NOT satisfy that
+# read. GitHub materialises a composite action under the runner's private
+# `_actions/` tree, not adjacent to the checkout, so a job that references ten
+# of these actions still has no sibling directory for the test to open.
+#
+# Until now the only thing that produced one was a bespoke `clone-repo` step in
+# `ci.yml`, which covered exactly the one job that step was written into and
+# nothing else — no other CI job, and no developer workspace. That is the gap
+# these three cases reported: a workspace built from reprobuild's project set
+# alone never gets this repo, and the cases fail on every local run. Declaring
+# it here puts the prerequisite in the blessed clone-list that
+# `docs/repository-requirements.md` designates for exactly this purpose,
+# as data rather than as one workflow's inline step.
+metacraft-github-actions=dev
+
 
 
