@@ -32586,7 +32586,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_hcr_agent_protocol.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 24,
+      "staticCaseCount": 27,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

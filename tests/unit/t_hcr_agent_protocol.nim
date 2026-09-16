@@ -186,6 +186,98 @@ suite "HCR agent protocol":
     check session.activePatchId == "patch-0001"
     check session.lifecycleEvents == @["hcr/patchApplied"]
 
+  test "a session serves more than one patch, and tells them apart":
+    ## H5 — the live-edit loop's protocol precondition.
+    ##
+    ## This used to be impossible from the coordinator side:
+    ## `observePatchRequest` required `hssNegotiated`, so a second direct patch
+    ## on one connection raised "patch request is invalid in HCR session state
+    ## hssPatchFinished". Both of the other two layers had already lifted the
+    ## limit — GDH-M4 gave the agent a frame loop that runs until the peer
+    ## closes, and the Linux provider's per-site bookkeeping bumps
+    ## `site->generation` rather than refusing a window it already owns — so
+    ## the only component with no re-patch machinery was vetoing the two that
+    ## had it. The flame cannot be edited as you type without this.
+    var session = initHcrAgentSession(SupportProfile)
+    session.observeAgentProtocolMessage(hmdAgentToCoordinator, agentHello())
+    session.observeAgentProtocolMessage(
+      hmdCoordinatorToAgent, coordinatorHelloAck())
+
+    for generation in 1 .. 3:
+      var request = patchRequestMessage()
+      request.patchRequest.patchId = "patch-000" & $generation
+      session.observeAgentProtocolMessage(hmdCoordinatorToAgent, request)
+      check session.state == hssPatchRequested
+      session.observeAgentProtocolMessage(
+        hmdAgentToCoordinator,
+        lifecycleMessage("patch-000" & $generation, "hcr/patchApplied"))
+      var applied = patchAppliedMessage()
+      applied.patchApplied.patchId = "patch-000" & $generation
+      applied.patchApplied.symbolGeneration = uint64(generation)
+      session.observeAgentProtocolMessage(hmdAgentToCoordinator, applied)
+      check session.state == hssPatchFinished
+
+    check session.patchesRequested == 3
+    check session.seenPatchIds == @["patch-0001", "patch-0002", "patch-0003"]
+    # The lifecycle events are the CURRENT patch's, not an accumulation. A
+    # session whose event list grew across patches would let a later patch
+    # satisfy `observePatchApplied`'s "hcr/patchApplied was seen" precondition
+    # with an event belonging to an earlier one.
+    check session.lifecycleEvents == @["hcr/patchApplied"]
+
+  test "a session refuses a reused patchId":
+    ## `seenReloadIds`' rule, one protocol over. Two patches sharing an id are
+    ## indistinguishable in the agent's report and in the recorded
+    ## `evCodePatch`, so a second patch that never landed is indistinguishable
+    ## from one that did.
+    var session = initHcrAgentSession(SupportProfile)
+    session.observeAgentProtocolMessage(hmdAgentToCoordinator, agentHello())
+    session.observeAgentProtocolMessage(
+      hmdCoordinatorToAgent, coordinatorHelloAck())
+    session.observeAgentProtocolMessage(
+      hmdCoordinatorToAgent, patchRequestMessage())
+    session.observeAgentProtocolMessage(
+      hmdAgentToCoordinator,
+      lifecycleMessage("patch-0001", "hcr/patchApplied"))
+    session.observeAgentProtocolMessage(
+      hmdAgentToCoordinator, patchAppliedMessage())
+    check session.state == hssPatchFinished
+
+    expect ValueError:
+      session.observeAgentProtocolMessage(
+        hmdCoordinatorToAgent, patchRequestMessage())
+
+  test "a REFUSED patch does not end the session":
+    ## The edit-as-you-type property: typing a value the product declines must
+    ## leave the flame still patchable. The agent does not close the socket on
+    ## a `patchFailed`, so the coordinator must not treat one as terminal
+    ## either.
+    var session = initHcrAgentSession(SupportProfile)
+    session.observeAgentProtocolMessage(hmdAgentToCoordinator, agentHello())
+    session.observeAgentProtocolMessage(
+      hmdCoordinatorToAgent, coordinatorHelloAck())
+    session.observeAgentProtocolMessage(
+      hmdCoordinatorToAgent, patchRequestMessage())
+    session.observeAgentProtocolMessage(
+      hmdAgentToCoordinator,
+      HcrAgentMessage(
+        schemaId: HcrAgentProtocolSchemaId,
+        transportScope: HcrAgentTransportScope,
+        protocolVersion: HcrAgentProtocolVersion,
+        messageId: "msg-patch-failed",
+        kind: hmkPatchFailed,
+        patchFailed: HcrPatchFailed(
+          patchId: "patch-0001",
+          stage: "applyDirectPatchRequest",
+          message: "direct patch refused: quiescence-failed")))
+    check session.state == hssFailed
+
+    var second = patchRequestMessage()
+    second.patchRequest.patchId = "patch-0002"
+    session.observeAgentProtocolMessage(hmdCoordinatorToAgent, second)
+    check session.state == hssPatchRequested
+    check session.patchesRequested == 2
+
   test "session rejects patch requests before capability negotiation":
     var session = initHcrAgentSession(SupportProfile)
 

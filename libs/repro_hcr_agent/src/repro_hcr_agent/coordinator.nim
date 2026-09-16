@@ -157,13 +157,36 @@ proc deliverPatchRequest*(client: var HcrCoordinatorClient;
 
   client.delivery()
 
-proc deliverPatchRequest*(client: var HcrCoordinatorClient;
-                          connection: HcrAgentSocketConnection;
-                          request: HcrPatchRequest):
-                          HcrCoordinatorDelivery =
+proc completeHandshake*(client: var HcrCoordinatorClient;
+                        connection: HcrAgentSocketConnection) =
+  ## Receive the agent's `hello` and answer it, leaving the session
+  ## `hssNegotiated` and the connection OPEN.
+  ##
+  ## Split out of `deliverPatchRequest` so a caller that means to publish more
+  ## than one patch over one connection does the handshake once. It is the
+  ## same two messages in the same order; `deliverPatchRequest` is written in
+  ## terms of it rather than beside it, so there is no second handshake path to
+  ## drift out of step with this one.
   discard client.receiveAgentMessage(connection)
   client.sendCoordinatorMessage(
     connection, client.coordinatorHelloAckMessage())
+
+proc requestPatchOnOpenSession*(client: var HcrCoordinatorClient;
+                                connection: HcrAgentSocketConnection;
+                                request: HcrPatchRequest):
+                                HcrCoordinatorDelivery =
+  ## Publish one patch on an already-negotiated session and wait for its
+  ## verdict. Callable repeatedly: the session state machine admits a patch
+  ## request from `hssNegotiated`, `hssPatchFinished` and `hssFailed`.
+  ##
+  ## THE PREVIOUS VERDICT IS CLEARED FIRST, and that is not tidiness. Both
+  ## verdict fields are `Option`s that only ever get assigned, so a second
+  ## patch that was REFUSED would otherwise return a delivery still carrying
+  ## the first patch's `patchApplied` — a caller reading "applied" for a patch
+  ## the agent declined, which is the silent-self-pass shape in its purest
+  ## form. The one-shot path never noticed because it could only ever hold one.
+  client.patchApplied = none(HcrPatchApplied)
+  client.patchFailed = none(HcrPatchFailed)
   client.sendCoordinatorMessage(
     connection, client.coordinatorPatchRequestMessage(request))
 
@@ -171,6 +194,13 @@ proc deliverPatchRequest*(client: var HcrCoordinatorClient;
     discard client.receiveAgentMessage(connection)
 
   client.delivery()
+
+proc deliverPatchRequest*(client: var HcrCoordinatorClient;
+                          connection: HcrAgentSocketConnection;
+                          request: HcrPatchRequest):
+                          HcrCoordinatorDelivery =
+  client.completeHandshake(connection)
+  client.requestPatchOnOpenSession(connection, request)
 
 when defined(windows):
   proc receiveAgentMessage*(client: var HcrCoordinatorClient;

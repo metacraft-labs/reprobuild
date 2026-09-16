@@ -30,6 +30,19 @@ type
       ## SECOND reload that reuses the first one's id is exactly the shape
       ## GDH-G8 exists to catch — so the reuse is refused here rather than
       ## left for a gate to remember to check.
+    seenPatchIds*: seq[string]
+      ## Every `patchId` this session has requested. The direct-patch twin of
+      ## `seenReloadIds`, and it exists for the same reason: a session that
+      ## serves more than one patch must be able to tell them apart, and a
+      ## second request reusing the first's id makes every downstream
+      ## artifact that keys on it — the agent's own report, the recorded
+      ## `evCodePatch`, a gate reading either — ambiguous in a way that looks
+      ## exactly like a correct second patch.
+    patchesRequested*: int
+      ## How many patch requests this session has sent. A gate that wants to
+      ## show a SECOND patch was served must be able to read the count rather
+      ## than infer it from the last verdict, which is identical after one
+      ## patch and after five.
 
 proc initHcrAgentSession*(supportProfile: string): HcrAgentSession =
   HcrAgentSession(
@@ -113,7 +126,29 @@ proc observePatchRequest(session: var HcrAgentSession;
                          direction: HcrMessageDirection;
                          request: HcrPatchRequest) =
   direction.requireDirection(hmdCoordinatorToAgent, "patch request")
-  session.requireState(hssNegotiated, "patch request")
+  # A SESSION SERVES MORE THAN ONE PATCH.
+  #
+  # This used to require `hssNegotiated` and nothing else, which made a second
+  # direct patch on one connection impossible from the coordinator side —
+  # `patch request is invalid in HCR session state hssPatchFinished`. Both of
+  # the other two layers had already lifted that limit and this one had not:
+  # GDH-M4 replaced the agent's one-frame session with a loop that dispatches
+  # frames until the peer closes, and the Linux provider's per-site
+  # bookkeeping (`repro_hcr_linux_x86_64.h`, design §4.5) exists precisely so
+  # a window this provider already published into is an admissible pre-state,
+  # bumping `site->generation` instead of refusing. So the observable effect of
+  # this line was that the only component with no re-patch machinery of its own
+  # vetoed the two that had it.
+  #
+  # `hssFailed` is in the set deliberately. A refused patch is an ANSWER, not
+  # the end of a conversation — the agent does not close the socket on one —
+  # and an edit-as-you-type loop in which one rejected value ends the session
+  # would be a worse tool than one that never accepted the rejected value at
+  # all. Typing `rise_speeed`, being told which knobs exist, and fixing it must
+  # leave the flame still patchable.
+  if session.state notin {hssNegotiated, hssPatchFinished, hssFailed}:
+    raise newException(ValueError,
+      "patch request is invalid in HCR session state " & $session.state)
   if request.supportProfile != session.supportProfile:
     raise newException(ValueError,
       "patch request support profile mismatch: expected " &
@@ -122,7 +157,19 @@ proc observePatchRequest(session: var HcrAgentSession;
     raise newException(ValueError, "only direct HCR patch requests are accepted")
   if request.changedFunctions.len == 0:
     raise newException(ValueError, "patch request has no changed functions")
-  session.requirePatchId(request.patchId, "patch request")
+  if request.patchId.len == 0:
+    raise newException(ValueError, "patch request has empty patch id")
+  # Unique per session, for `seenReloadIds`' reason one protocol over. Two
+  # patches sharing an id are indistinguishable in the agent's report and in
+  # the recorded code-version boundary, and "indistinguishable" is how a
+  # second patch that never landed reads as one that did.
+  if session.seenPatchIds.containsValue(request.patchId):
+    raise newException(ValueError,
+      "patch request reuses patchId " & request.patchId &
+        "; a session that serves more than one patch must be able to tell " &
+        "them apart")
+  session.seenPatchIds.add request.patchId
+  session.patchesRequested.inc
   session.activePatchId = request.patchId
   session.lifecycleEvents.setLen(0)
   session.state = hssPatchRequested
