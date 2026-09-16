@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "repro_hcr_dispatch_table.h"
+
 #if defined(_WIN32) && defined(REPRO_HCR_AGENT_BUILD_DLL)
 #define REPRO_HCR_AGENT_API __declspec(dllexport)
 #else

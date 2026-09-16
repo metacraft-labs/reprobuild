@@ -1,5 +1,6 @@
 import repro_hcr_agent/coordinator
 import repro_hcr_agent/debug_unwind
+import repro_hcr_agent/dispatch_table
 import repro_hcr_agent/endpoint
 import repro_hcr_agent/ipc
 import repro_hcr_agent/json_view
@@ -14,6 +15,7 @@ import repro_hcr_linker
 
 export coordinator
 export debug_unwind
+export dispatch_table
 export endpoint
 export ipc
 export json_view

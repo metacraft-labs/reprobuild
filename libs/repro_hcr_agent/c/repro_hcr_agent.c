@@ -80,6 +80,7 @@
  * Linux arm and adds nothing but the digest on the others.
  */
 #include "repro_hcr_sha256.h"
+#include "repro_hcr_dispatch_table.c"
 
 #include <poll.h>
 
