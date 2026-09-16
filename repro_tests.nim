@@ -13608,6 +13608,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_hcr_dispatch_c_smoke.nim",
+    binary: "build/test-bin/t_hcr_dispatch_c_smoke",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_hcr_watch_inference.nim",
     binary: "build/test-bin/t_hcr_watch_inference",
     defines: @[],
