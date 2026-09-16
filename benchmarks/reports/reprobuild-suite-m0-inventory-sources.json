@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1626,
+    "nimTestBinaries": 1627,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 579,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1637
+    "testEntries": 1638
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1073,7 +1073,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 757,
+      "integration": 758,
       "platform/destructive": 115,
       "pure unit": 579,
       "unclassified": 174
@@ -1224,9 +1224,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1626,
+    "nimTestBinaryCount": 1627,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1637
+    "testEntryCount": 1638
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -32175,6 +32175,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_workspace_sync_jobs_network_pool_bounds_concurrency.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_workspace_sync_never_advises_pushing_onto_a_rewritten_remote",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_workspace_sync_never_advises_pushing_onto_a_rewritten_remote.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

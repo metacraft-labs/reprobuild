@@ -35817,8 +35817,20 @@ proc observeRepoForSync(identity: GitToolIdentity;
       result.hasUnpublishedCommits = ancestorRes.code != 0
 
   if result.currentBranch.len > 0 and forcePushedSHAs.len > 0:
+    # Which commits on HEAD are not published anywhere. This used to be
+    # ``<remote>/<current branch>..HEAD``, which requires the branch to HAVE
+    # a remote counterpart: on a local-only feature branch the ref does not
+    # resolve, ``git log`` exits non-zero, and every recorded force-pushed
+    # SHA went unmatched — the one question that would have saved the
+    # operator was not asked. ``HEAD --not --remotes`` asks it against ALL
+    # remote-tracking refs, so it answers for a branch with a counterpart
+    # and for one without.
     let remoteRef = "refs/remotes/" & rName & "/" & result.currentBranch
-    let logRes = gitRunPlain(identity, ["-C", repoPath, "log", "--format=%H", remoteRef & "..HEAD"])
+    var logRes = gitRunPlain(identity, ["-C", repoPath, "log", "--format=%H",
+      remoteRef & "..HEAD"])
+    if logRes.code != 0:
+      logRes = gitRunPlain(identity, ["-C", repoPath, "log", "--format=%H",
+        "HEAD", "--not", "--remotes"])
     if logRes.code == 0:
       for rawSha in logRes.output.strip().splitLines():
         let sha = rawSha.strip()
@@ -35826,6 +35838,39 @@ proc observeRepoForSync(identity: GitToolIdentity;
           result.hasForcePushedCommits = true
           result.forcePushedBaseSha = sha
           break
+
+  # Force-push detection that needs NO recorded history at all.
+  #
+  # ``forcePushedSHAs`` comes from ``.repro/records``, which a workspace only
+  # has if it happened to be running a sync across the rewrite. The workspace
+  # this was measured on had none, and every recorder repo whose remote had
+  # been rewritten still had to be diagnosed. The signal that survives is
+  # ancestry: if HEAD and the remote's trunk tip share NO merge base, the
+  # history this checkout sits on is not a part of the remote's history at
+  # all. Ten of the eleven rewritten repos were exactly that shape.
+  #
+  # Asked against the TRUNK (the repo's declared branch, else the manifest
+  # revision when that names a branch) rather than ``<remote>/<current
+  # branch>``, because the whole point is to cover the branch that HAS no
+  # remote counterpart. A merge-base against a ref that does not exist is not
+  # an answer; against the trunk it is.
+  if result.headSha.len > 0:
+    let trunkName =
+      if resolved.branch.len > 0: resolved.branch
+      elif resolved.revision.len > 0 and not looksLikeSha(resolved.revision):
+        resolved.revision
+      else: ""
+    if trunkName.len > 0:
+      let trunkRef = "refs/remotes/" & rName & "/" & trunkName
+      let trunkTip = revParse(identity, repoPath, trunkRef)
+      if trunkTip.len > 0 and trunkTip != result.headSha:
+        let mb = gitRunPlain(identity,
+          ["-C", repoPath, "merge-base", result.headSha, trunkTip])
+        # Exit 1 with empty output is git's "these histories are unrelated".
+        # Any other non-zero (a bad object, a corrupt repo) is NOT that, and
+        # must not be read as a rewrite — so require the empty-output form.
+        if mb.code != 0 and mb.output.strip().len == 0:
+          result.remoteHistoryDisjoint = true
 
 # ---- RA-5c: parallel fetch / checkout phases ------------------------------
 #

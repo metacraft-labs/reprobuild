@@ -148,6 +148,16 @@ type
     fetchDiagnostic*: string
       ## Why the fetch failed, verbatim from the dispatcher, so the refusal
       ## names the real cause instead of the symptom.
+    remoteHistoryDisjoint*: bool
+      ## HEAD shares NO history with the remote: the merge-base of HEAD and
+      ## the remote's trunk tip is empty. On a branch with a remote
+      ## counterpart that counterpart answers the force-push question
+      ## directly; on a LOCAL-ONLY branch there is no counterpart to compare
+      ## against, and this is the signal that the history the branch was cut
+      ## from no longer exists upstream -- i.e. the remote was rewritten
+      ## under it. Without this, such a branch fell through to
+      ## ``locally_unpublished``, whose remedy is "push", which republishes
+      ## the dead history.
 
   RepoSyncDecision* = object
     ## One repo's classification + chosen mutating action. The
@@ -281,6 +291,26 @@ proc chooseAttachBranch*(resolved: ResolvedRepo;
     if candidate < result:
       result = candidate
 
+proc gitRemoteFor(resolved: ResolvedRepo): string =
+  ## The GIT remote name a refusal should NAME in its remedy command — the
+  ## name the operator will type, not the manifest's ``[[remote]]`` key.
+  ## Same mapping ``gitRemoteNameFor`` performs in the dispatcher,
+  ## duplicated rather than imported because this module is pure policy and
+  ## must not depend on the CLI layer.
+  for r in resolved.remotes:
+    if r.projectRemote == resolved.projectRemote and r.localName.len > 0:
+      return r.localName
+  if resolved.projectRemote.len > 0: resolved.projectRemote else: "origin"
+
+proc trunkNameFor(resolved: ResolvedRepo): string =
+  ## The branch a rewritten repo's work should be rebased ONTO: the repo's
+  ## declared tracking branch, else its manifest revision when that names a
+  ## branch rather than a commit.
+  if resolved.branch.len > 0: resolved.branch
+  elif resolved.revision.len > 0 and not looksLikeSha(resolved.revision):
+    resolved.revision
+  else: "<trunk>"
+
 proc classifyRepoState*(resolved: ResolvedRepo;
                         observation: RepoSyncObservation;
                         rebaseOnForcePush: bool = true): RepoSyncDecision =
@@ -357,18 +387,78 @@ proc classifyRepoState*(resolved: ResolvedRepo;
     result.message = "refusing to sync dirty checkout at '" & resolved.path & "'"
     return
 
-  if observation.hasForcePushedCommits:
+  if observation.hasForcePushedCommits or observation.remoteHistoryDisjoint:
     result.syncCase = scForcePushRebase
+    # The automatic replay is only sound when BOTH of its inputs exist.
+    # ``executeForcePushRebase`` does ``git reset --hard
+    # <remote>/<branch>`` and then cherry-picks ``<base>..HEAD``, so
+    # without a remote counterpart for the current branch there is nothing
+    # to reset ONTO, and without a concrete base there is no range to
+    # replay. A branch that has neither is exactly the branch this whole
+    # arm used to be unable to see.
+    let canAutoRebase =
+      rebaseOnForcePush and
+      observation.remoteBranchTip.len > 0 and
+      observation.forcePushedBaseSha.len > 0
+    if canAutoRebase:
+      result.action = saForcePushRebase
+      result.forcePushedBaseSha = observation.forcePushedBaseSha
+      result.message = "cherry-picking locally authored commits on top of force-pushed branch at '" & resolved.path & "'"
+      return
+    result.action = saNone
+    if observation.remoteHistoryDisjoint:
+      # THE post-rewrite case, and the reason this arm exists at all.
+      #
+      # A local branch with no ``<remote>/<branch>`` counterpart could not
+      # have the force-push question asked of it — the probe ran ``git log
+      # <remote>/<branch>..HEAD``, which does not resolve — so it fell
+      # through to ``locally_unpublished``, whose remedy is "run git push
+      # then repro sync". Post-rewrite that instruction republishes the
+      # history the rewrite removed: the single worst thing an operator
+      # could be told to do, said in the tool's own voice.
+      #
+      # What is said instead names the situation, forbids the push
+      # explicitly, and points at the two remedies that do not destroy
+      # anything.
+      result.refusalReason =
+        "'" & resolved.path & "' shares no history with its remote: the " &
+        "upstream was rewritten and this checkout still carries the old " &
+        "history. Refused — do NOT push, that republishes the removed " &
+        "history. Rebase the work you own onto the new history " &
+        "('git -C " & resolved.path & " fetch --all --prune' then " &
+        "'git -C " & resolved.path & " rebase --onto " &
+        gitRemoteFor(resolved) & "/" & trunkNameFor(resolved) &
+        " <your branch point> " &
+        (if observation.currentBranch.len > 0: observation.currentBranch
+         else: "HEAD") &
+        "'), or discard it with 'repro sync --force-sync'"
+      result.message = "refusing to sync '" & resolved.path &
+        "': its history is disjoint from the rewritten remote"
+      return
     if not rebaseOnForcePush:
-      result.action = saNone
       result.refusalReason = "remote branch was force-pushed; refused — " &
         "run 'repro sync --rebase-on-force-push' to rebase your local commits " &
         "on the new history, or 'repro sync --force-sync' to discard local changes"
       result.message = "refusing to sync force-pushed checkout at '" & resolved.path & "'"
-    else:
-      result.action = saForcePushRebase
-      result.forcePushedBaseSha = observation.forcePushedBaseSha
-      result.message = "cherry-picking locally authored commits on top of force-pushed branch at '" & resolved.path & "'"
+      return
+    # Force-pushed, the operator wants the rebase, and one of its two
+    # inputs is missing. Say WHICH, rather than scheduling an action whose
+    # only possible outcome is a failure the operator has to decode.
+    result.refusalReason =
+      "remote branch was force-pushed, but this checkout cannot be rebased " &
+      "automatically: " &
+      (if observation.remoteBranchTip.len == 0:
+         "branch '" & (if observation.currentBranch.len > 0:
+           observation.currentBranch else: "HEAD") &
+           "' has no counterpart on remote '" & gitRemoteFor(resolved) &
+           "' to replay onto"
+       else: "no superseded base commit was recorded to replay from") &
+      ". Refused — do NOT push before checking whether the remote history " &
+      "was rewritten; rebase manually onto '" & gitRemoteFor(resolved) &
+      "/" & trunkNameFor(resolved) & "', or run 'repro sync --force-sync' " &
+      "to discard local changes"
+    result.message = "refusing to sync force-pushed checkout at '" &
+      resolved.path & "': nothing to rebase onto"
     return
 
   # Locally-unpublished commits beat the fast-forward / divergence
@@ -381,10 +471,22 @@ proc classifyRepoState*(resolved: ResolvedRepo;
     # Principle 2: name the offending checkout AND the command that resolves
     # it. Publishing (push) the local commits, then re-running sync, makes
     # the workspace reproducible without surprising the operator.
+    # The remedy is deliberately NOT an unconditional "push". This text is
+    # read at exactly the moment a force-push may have happened, and a bare
+    # ``git push`` of a branch whose base the remote no longer has is how
+    # the removed history gets republished. ``remoteHistoryDisjoint``
+    # already diverts the proven-rewritten case to the force-push arm above;
+    # what is left here is the case nobody can prove either way, so the text
+    # says what to CHECK before publishing, and names the non-push remedy.
     result.refusalReason =
       "local commits are not present on any remote-tracking branch; refused — " &
-      "run 'git -C " & resolved.path & " push' then 'repro sync' (or 'git -C " &
-      resolved.path & " pull --rebase' to integrate upstream first)"
+      "first confirm the remote history was not rewritten under you " &
+      "('git -C " & resolved.path & " fetch --all --prune' then 'git -C " &
+      resolved.path & " log --oneline @{u}..HEAD'). If it is intact, publish " &
+      "with 'git -C " & resolved.path & " push' then re-run 'repro sync'. If " &
+      "it was rewritten, do NOT push — that republishes the removed history; " &
+      "rebase onto the new history ('git -C " & resolved.path &
+      " pull --rebase') or run 'repro sync --rebase-on-force-push'"
     result.message = "refusing to sync unpublished checkout at '" & resolved.path & "'"
     return
 
