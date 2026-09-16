@@ -6543,6 +6543,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/cmake-path-hermeticity/t_cmake_actions_declare_their_path.nim",
+    binary: "build/test-bin/t_cmake_actions_declare_their_path",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/codetracer-subset/t_e2e_codetracer_build_subset_without_tup.nim",
     binary: "build/test-bin/t_e2e_codetracer_build_subset_without_tup",
     defines: @[],

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1616,
+    "nimTestBinaries": 1617,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 578,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1627
+    "testEntries": 1628
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1073,7 +1073,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 749,
+      "integration": 750,
       "platform/destructive": 115,
       "pure unit": 578,
       "unclassified": 173
@@ -1224,9 +1224,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1616,
+    "nimTestBinaryCount": 1617,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1627
+    "testEntryCount": 1628
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8291,7 +8291,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cmake_trycompile/tests/test_envelope_v3.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -19005,6 +19005,24 @@
       "source": "tests/e2e/cmake-develop/t_e2e_repro_develop_cmake.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cmake_actions_declare_their_path",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/cmake-path-hermeticity/t_cmake_actions_declare_their_path.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -34605,7 +34623,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 20,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

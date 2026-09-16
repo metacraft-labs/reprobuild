@@ -57,7 +57,7 @@ import repro_core
 
 const
   TryCompileMetadataMagic* = "RBCT"
-  TryCompileMetadataVersion* = 3'u16
+  TryCompileMetadataVersion* = 4'u16
   ## v1: single target (legacy, TryCompile probes only).
   ## v2: multi-target with optional default + all aggregator (Tier 2c
   ##     — main CMake-generated projects). v1 readers should reject v2;
@@ -68,6 +68,21 @@ const
   ##     (the cross-config target shape would be invisible otherwise and
   ##     the slow path is the silent fallback); v3 readers MUST accept
   ##     v2 metadata and default the new fields to empty.
+  ## v4: extends v3 with ``actionEnv`` — the ``KEY=VALUE`` entries EVERY
+  ##     action in the envelope declares. Today that is exactly one
+  ##     entry, the DECLARED ``PATH`` the CMake generator composes from
+  ##     the toolchain it resolved (see ``ReprobuildDeclaredActionPath``
+  ##     in ``cmGlobalReprobuildGenerator.cxx``). Before v4 every
+  ##     CMake-generated action named ``PATH`` in its passthrough set and
+  ##     ran on the developer's login ``PATH`` — measured on the zlib
+  ##     benchmark as ``PATH: 0 hermetic, 37 inherited``, i.e. two
+  ##     developers recorded different inputs and computed different
+  ##     cache keys for the same compile. A v4 envelope with an EMPTY
+  ##     ``actionEnv`` is the opted-out shape (``REPROBUILD_CMAKE_
+  ##     INHERIT_PATH``) and reproduces v3 behaviour exactly.
+  ##     v3 readers MUST reject v4; v4 readers MUST accept v1..v3 and
+  ##     default ``actionEnv`` to empty, which is what makes an envelope
+  ##     written by an older generator keep working unchanged.
   ## Stable identity of the direct provider binary. Goes into the
   ## engine's ``providerArtifactId`` for every TryCompile, so every
   ## project on the same ``repro`` release shares an action cache key
@@ -153,6 +168,13 @@ type
     ## v3-only: the configs CMake selects when no explicit
     ## ``:Config`` suffix is requested (``CMAKE_DEFAULT_CONFIGS``).
     defaultConfigs*: seq[string]
+    ## v4-only: ``KEY=VALUE`` environment entries that EVERY action in
+    ## this envelope declares. Applied uniformly by the direct provider
+    ## (``apps/repro-cmake-trycompile-provider``) rather than per action,
+    ## because the claim is about the project's whole edge set. Empty on
+    ## v1..v3 envelopes and on v4 envelopes whose project opted out of
+    ## the declared ``PATH``.
+    actionEnv*: seq[string]
     ## v1 compatibility fields. Decoder fills these on v1 envelopes and
     ## encoder writes them only when ``targets`` is empty (so v1 readers
     ## still get a usable single-target view).
@@ -249,6 +271,11 @@ proc encodeTryCompileMetadata*(meta: TryCompileMetadata): seq[byte] =
     payload.writeString(target.baseName)
     payload.writeStringSeq(target.childTargets)
   payload.writeStringSeq(meta.defaultConfigs)
+  # v4 trailer: the env every action declares. Written unconditionally
+  # for the same reason the v3 trailer is — a v3 reader rejects a v4
+  # envelope outright, so there is no reader that could be confused by
+  # an always-present (possibly empty) field.
+  payload.writeStringSeq(meta.actionEnv)
 
   result = @[]
   for ch in TryCompileMetadataMagic:
@@ -265,7 +292,7 @@ proc decodeTryCompileMetadata*(bytes: openArray[byte]): TryCompileMetadata =
       raiseMetadata("unknown trycompile.rbsz magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version != 1'u16 and version != 2'u16 and version != 3'u16:
+  if version < 1'u16 or version > TryCompileMetadataVersion:
     raiseMetadata("unsupported trycompile.rbsz version: " & $version)
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -315,6 +342,12 @@ proc decodeTryCompileMetadata*(bytes: openArray[byte]): TryCompileMetadata =
         result.crossConfigTargets[i].childTargets =
           readStringSeq(bytes, pos)
       result.defaultConfigs = readStringSeq(bytes, pos)
+    if version >= 4'u16:
+      # v4 trailer: the declared env. A v1..v3 envelope leaves this
+      # empty, which is the pre-v4 behaviour byte for byte: the actions
+      # declare no `PATH`, `actionPathDecision` takes its inherited
+      # branch, and the census counts them as `inherited (passthrough)`.
+      result.actionEnv = readStringSeq(bytes, pos)
     # Maintain v1 compatibility view: expose the first target through the
     # legacy single-target fields so older code paths still see something.
     if result.targets.len > 0:

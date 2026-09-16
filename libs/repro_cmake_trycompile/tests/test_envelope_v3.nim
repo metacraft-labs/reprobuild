@@ -1,11 +1,25 @@
-## Schema v3 envelope round-trip + v2 backward-compat tests for
-## ``trycompile.rbsz``.
+## Envelope round-trip + backward-compat tests for ``trycompile.rbsz``.
 ##
-## v3 extends v2 with cross-config descriptors so the direct provider can
+## The filename records the version this file was INTRODUCED at, not the
+## version it pins — the schema keeps moving and renaming the file on
+## every bump would churn the test registry for nothing. What it pins is
+## the CURRENT version and every older one the decoder must still read.
+##
+## v3 extended v2 with cross-config descriptors so the direct provider can
 ## consume multi-config CMake builds (CMAKE_CROSS_CONFIGS /
-## CMAKE_DEFAULT_CONFIGS) without falling back to ``reprobuild.nim``. v2
-## readers must reject v3 (and the decoder under test accepts v2 → v3
-## envelopes, treating the new fields as empty when absent).
+## CMAKE_DEFAULT_CONFIGS) without falling back to ``reprobuild.nim``.
+##
+## v4 extends v3 with ``actionEnv``: the environment every action in the
+## envelope declares, which today carries the DECLARED ``PATH`` the CMake
+## generator composes from the toolchain it resolved. Before it, every
+## CMake-generated action inherited the developer's login ``PATH`` and
+## said so via passthrough, so the same compile recorded different inputs
+## and computed a key that did not mention the toolchain it used.
+##
+## The compatibility direction is asymmetric in both versions: a reader
+## must REJECT a newer envelope (a field it cannot see would silently
+## disappear, and the fallback to the slow path is silent too) and must
+## ACCEPT an older one, defaulting the new fields to empty.
 
 import std/[unittest]
 
@@ -85,12 +99,17 @@ suite "trycompile.rbsz v3 envelope":
           baseName: "",
           childTargets: @["all:Debug", "all:Release"]),
       ],
-      defaultConfigs: @["Debug", "Release"])
+      defaultConfigs: @["Debug", "Release"],
+      actionEnv: @["PATH=/toolchain/bin:/usr/bin"])
 
     let encoded = encodeTryCompileMetadata(meta)
-    # Envelope must declare v3 explicitly — that's the contract a v2
-    # reader keys off of when refusing to parse a v3 file.
-    check encoded[4] == byte(3)
+    # Envelope must declare its version explicitly — that's the contract
+    # an older reader keys off of when refusing to parse a newer file.
+    # Written as a LITERAL rather than as ``TryCompileMetadataVersion``:
+    # comparing the encoder's output against the encoder's own constant
+    # would agree with any bump, including one that forgot to teach the
+    # decoder about the new trailer.
+    check encoded[4] == byte(4)
     check encoded[5] == byte(0)
 
     let decoded = decodeTryCompileMetadata(encoded)
@@ -119,6 +138,12 @@ suite "trycompile.rbsz v3 envelope":
     check decoded.crossConfigTargets[3].name == "all"
     check decoded.crossConfigTargets[3].childTargets ==
       @["all:Debug", "all:Release"]
+    # v4: the declared action env survives the round trip. The direct
+    # provider applies it to every action it registers, so losing it here
+    # would silently put every CMake-generated edge back on the caller's
+    # ``$PATH`` with the build header still reporting the actions as
+    # declaring one.
+    check decoded.actionEnv == @["PATH=/toolchain/bin:/usr/bin"]
     check decoded.defaultConfigs == @["Debug", "Release"]
     # v1 compat view exposes the first target through the legacy fields.
     check decoded.targetName == "myTarget:Debug"
@@ -230,3 +255,26 @@ suite "trycompile.rbsz v3 envelope":
     check decoded.crossConfigs.len == 0
     check decoded.crossConfigTargets.len == 0
     check decoded.defaultConfigs.len == 0
+    # Same contract for the v4 field. An envelope written by a generator
+    # that predates the declared ``PATH`` must keep working and must
+    # produce the pre-v4 behaviour exactly: no declaration, so
+    # ``actionPathDecision`` takes its inherited branch. The alternative —
+    # inventing a default here — would put a PATH nobody declared into
+    # every action's cache key.
+    check decoded.actionEnv.len == 0
+
+  test "a reader rejects an envelope from a NEWER generator":
+    ## The asymmetry that keeps a schema bump from degrading silently.
+    ## A trailer this reader cannot see would not raise; it would leave
+    ## the field empty, and an empty ``actionEnv`` is a VALID shape (it
+    ## is what opting out produces). So the version gate is the only
+    ## thing standing between "the generator declared a PATH" and "every
+    ## action quietly inherited one" — there is no downstream symptom
+    ## that would distinguish them.
+    var envelope: seq[byte] = @[]
+    for ch in TryCompileMetadataMagic:
+      envelope.add(byte(ord(ch)))
+    envelope.writeU16Le(TryCompileMetadataVersion + 1'u16)
+    envelope.writeU32Le(0'u32)
+    expect TryCompileMetadataError:
+      discard decodeTryCompileMetadata(envelope)
