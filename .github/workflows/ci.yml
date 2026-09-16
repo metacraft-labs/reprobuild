@@ -211,6 +211,10 @@ jobs:
         shell: pwsh
         run: ./scripts/check_windows_python_provisioning.ps1
 
+      - name: Verify Windows LLVM provisioning
+        shell: pwsh
+        run: ./scripts/check_windows_llvm_provisioning.ps1
+
       - name: Measure Windows HCR linked-image publication geometry
         shell: pwsh
         run: |

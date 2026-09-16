@@ -67,8 +67,8 @@
 #   themselves -- see the nim/gcc note above)
 #
 # Knobs specific to reprobuild:
-#   $env:WINDOWS_DIY_HCR_TESTS = "1" also provision pinned Python for the
-#       Windows HCR test drivers. This does not install pip or change any
+#   $env:WINDOWS_DIY_HCR_TESTS = "1" also provision pinned Python and LLVM for
+#       the Windows HCR test drivers. This does not install pip or change any
 #       machine-wide settings; normal compiler-only bootstrap is unchanged.
 #   $env:WINDOWS_DIY_SKIP_CLINGO = "1" skip the clingo step. Note that
 #       every `repro` binary built afterwards will abort at startup with
@@ -207,6 +207,12 @@ if ($env:WINDOWS_DIY_HCR_TESTS -eq "1") {
     $pythonDir = Ensure-Python -Root $installRoot -Arch (Get-WindowsArch) -Toolchain $reproToolchain
     Add-PathEntry -Dir $pythonDir
     $env:REPRO_WINDOWS_PYTHON_DIR = $pythonDir
+    . (Join-Path $scriptDir "windows\ensure-llvm.ps1")
+    $llvmDir = Ensure-Llvm -Root $installRoot -Arch (Get-WindowsArch) -Toolchain $reproToolchain
+    Add-PathEntry -Dir (Join-Path $llvmDir "bin")
+    $env:REPRO_WINDOWS_LLVM_DIR = $llvmDir
+    & (Join-Path $pythonDir "python.exe") (Join-Path $scriptDir "scripts/check_windows_hcr_environment.py")
+    if ($LASTEXITCODE -ne 0) { throw "The optional Windows HCR environment is missing prerequisites; see the diagnostic above." }
 }
 
 # --- 2. Sibling repo discovery -----------------------------------------------
