@@ -72,6 +72,10 @@ echo "Working directory: $WORK_DIR"
 echo "[1/4] Building and executing real C agent test driver..."
 
 cat << 'EOF' > "$WORK_DIR/test_c_agent_booleans.c"
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -117,6 +121,21 @@ int main(int argc, char **argv) {
       force_hardcode_true = true;
     }
   }
+
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  /* This fixture is deliberately compiled without a patchable-entry table. */
+  if (__start___patchable_function_entries != NULL ||
+      __stop___patchable_function_entries != NULL) {
+    fprintf(stderr, "ERROR: fixture unexpectedly has patchable-entry bounds!\n");
+    return 1;
+  }
+  int supports_direct = repro_hcr_agent_host_supports_direct_patch();
+  if (supports_direct != 0 && supports_direct != 1) {
+    fprintf(stderr, "ERROR: capability probe returned a non-boolean result!\n");
+    return 1;
+  }
+  printf("  [OK] Real capability probe handles absent patchable-entry bounds.\n");
+#endif
 
   c_test_case_t cases[] = {
     {"Direct trampoline path (sharedLibraryPositivePath=0)", 0, false},
