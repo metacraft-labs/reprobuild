@@ -1519,6 +1519,7 @@ tests/unit/t_hcr_agent_ipc.nim	nim	4
 tests/unit/t_hcr_agent_process_target.nim	nim	2
 tests/unit/t_hcr_agent_protocol.nim	nim	28
 tests/unit/t_hcr_agent_runtime.nim	nim	4
+tests/unit/t_hcr_dispatch_c_smoke.nim	nim	1
 tests/unit/t_hcr_watch_inference.nim	nim	1
 tests/unit/t_host_system_tools.nim	nim	6
 tests/unit/t_infra_apply_lock_hung_owner.nim	nim	5
@@ -1608,7 +1609,7 @@ tests/unit/t_m9r82_action_cache_cas_migration.nim	nim	8
 tests/unit/t_m9r83_install_mirror_action_shapes.nim	nim	8
 tests/unit/t_m9r83_install_mirror_publish.nim	nim	7
 tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
-tests/unit/t_m9r9_auto_recurse.nim	nim	19
+tests/unit/t_m9r9_auto_recurse.nim	nim	20
 tests/unit/t_measurement_axes.nim	nim	14
 tests/unit/t_nix_propagated_store_paths.nim	nim	5
 tests/unit/t_provider_compile_cache_entry_is_content_addressed.nim	nim	7
