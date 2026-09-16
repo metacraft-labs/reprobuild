@@ -26782,7 +26782,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
