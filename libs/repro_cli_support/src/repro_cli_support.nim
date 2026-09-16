@@ -1044,16 +1044,21 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
     # every name selector contributes its closure on top.
     result.extraNameSelectors.add(firstNameSelector)
 
-proc scopedWorktreeRoot(modulePath, explicitWorkRoot: string): string =
-  let workRoot = configuredWorkRoot(explicitWorkRoot)
-  if workRoot.len == 0:
+proc scopedWorktreeRootFor(modulePath, resolvedWorkRoot: string): string =
+  ## The worktree root for ``modulePath`` under an ALREADY-RESOLVED work root.
+  ##
+  ## Split out of ``scopedWorktreeRoot`` for Dependency-Attribution MAC-2: the
+  ## daemon-parent prewarm has to name the same directory a hosted build will
+  ## name, and it must do so WITHOUT consulting the parent process's own
+  ## ``$REPROBUILD_WORK_ROOT`` or its current directory — both belong to the
+  ## daemon, not to the request. It resolves the work root from the request and
+  ## calls this. The naming rule itself stays in ONE place so the two callers
+  ## cannot drift; a prewarm that named a different directory would warm
+  ## entries no build ever looks up.
+  if resolvedWorkRoot.len == 0:
     return ""
-  let base =
-    if workRoot.isAbsolute:
-      os.normalizedPath(workRoot)
-    else:
-      os.normalizedPath(absolutePath(workRoot))
-  let projectRoot = os.normalizedPath(parentDir(absolutePath(modulePath)))
+  let base = os.normalizedPath(resolvedWorkRoot)
+  let projectRoot = os.normalizedPath(parentDir(modulePath))
   let (_, tail) = splitPath(projectRoot)
   let hash = digestHex(blake3DomainDigest(projectRoot.bytesOf(),
     hdMetadataEnvelope))
@@ -1078,9 +1083,29 @@ proc scopedWorktreeRoot(modulePath, explicitWorkRoot: string): string =
       combined
   base / "worktrees" / segment
 
+proc scopedWorktreeRoot(modulePath, explicitWorkRoot: string): string =
+  let workRoot = configuredWorkRoot(explicitWorkRoot)
+  if workRoot.len == 0:
+    return ""
+  let base =
+    if workRoot.isAbsolute: workRoot
+    else: absolutePath(workRoot)
+  scopedWorktreeRootFor(absolutePath(modulePath), base)
+
 proc outputDirForTarget(target: ParsedBuildTarget;
     explicitWorkRoot = ""): string =
   let scopedRoot = scopedWorktreeRoot(target.modulePath, explicitWorkRoot)
+  if scopedRoot.len > 0:
+    return scopedRoot / "build" / target.outputName
+  parentDir(target.modulePath) / ".repro" / "build" / target.outputName
+
+proc outputDirForTargetIn(target: ParsedBuildTarget;
+    resolvedWorkRoot: string): string =
+  ## ``outputDirForTarget`` with the work root already resolved and
+  ## ``target.modulePath`` already absolute — the ambient-free form MAC-2's
+  ## daemon-parent prewarm needs. ``resolvedWorkRoot`` empty means "no
+  ## worktree scope", NOT "look it up in the environment".
+  let scopedRoot = scopedWorktreeRootFor(target.modulePath, resolvedWorkRoot)
   if scopedRoot.len > 0:
     return scopedRoot / "build" / target.outputName
   parentDir(target.modulePath) / ".repro" / "build" / target.outputName
@@ -1466,6 +1491,22 @@ type
     passthrough*: seq[string]
     class*: ActionPathClass
 
+proc joinPathDirs(head, tail: string): string =
+  ## Concatenate two `PathSep`-separated directory lists, dropping
+  ## duplicates and preserving first-occurrence order.
+  ##
+  ## Order is priority order: `head` wins. Deduplication is not
+  ## cosmetic — a repeated directory is a repeated SEARCH, and the
+  ## per-no-op cost this whole change is about was measured in exactly
+  ## those units (one dead `PATH` entry, ~14 ms of negative `lstat` on
+  ## an autofs mount, recorded as an observed input of five link edges).
+  var dirs: seq[string] = @[]
+  for source in [head, tail]:
+    for dir in source.split(PathSep):
+      if dir.len > 0 and dirs.find(dir) < 0:
+        dirs.add(dir)
+  dirs.join($PathSep)
+
 proc actionInheritedPathValue(actionPathPrefix: string): string =
   ## THE ONE AMBIENT READ, isolated in its own proc so the ban on
   ## `getEnv` inside `actionPathEntry` stays checkable by source scan
@@ -1494,7 +1535,8 @@ proc actionInheritedPathValue(actionPathPrefix: string): string =
   else: actionPathPrefix & $PathSep & hostPath
 
 proc actionPathDecision*(actionPathPrefix: string;
-                         edgeDeclaresTools: bool): ActionPathDecision =
+                         edgeDeclaresTools: bool;
+                         declaredPath = ""): ActionPathDecision =
   ## THE SINGLE PLACE AN ACTION'S `PATH` IS DECIDED. Every lowering site
   ## goes through here; `t_declared_env_is_in_the_cache_key.nim` case 10
   ## enforces that structurally, because the previous arrangement — the
@@ -1509,6 +1551,47 @@ proc actionPathDecision*(actionPathPrefix: string;
   ## directories those tools resolved into, and that value is keyed. An
   ## edge that names nothing has stated nothing to compose from, so it
   ## inherits — and says so, by declaring `PATH` passthrough.
+  ##
+  ## ## `declaredPath` — the SECOND way to name what an edge runs
+  ##
+  ## `toolIdentityRefs` is Reprobuild's own vocabulary and it only works
+  ## for tools the SOLVED GRAPH resolved. An upstream build system that
+  ## resolved its own toolchain has the same knowledge in a different
+  ## vocabulary, and no way to spell it here. That gap is not
+  ## hypothetical: EVERY action the CMake Reprobuild generator emits is
+  ## an `inlineExecCall` with an absolute argv[0], no `uses:` ref and
+  ## therefore an empty prefix — so every one of them took the inherited
+  ## branch below. MEASURED on the zlib benchmark, from this proc's own
+  ## census line in the build header:
+  ##
+  ##   PATH: 0 hermetic (keyed by value), 37 inherited (passthrough), 0 EMPTY
+  ##
+  ## 37 of 37. Two developers with different login `PATH`s therefore
+  ## recorded different input sets and computed different cache keys for
+  ## the same compile of the same source — the one property the product
+  ## exists to provide. It also cost: `clang` probes every `PATH` entry
+  ## looking for its linker driver `arm64-apple-darwin-ld`, one dead
+  ## entry (`/home/zahary/.pixi/bin`, under macOS's autofs `/home` map)
+  ## was ~14 ms per no-op, and the miss was RECORDED as an input of
+  ## `link-zlib`, `link-example`, `link-minigzip`, `link-zlibstatic` and
+  ## `symlink-zlib`. Ninja pays none of that: it records the files it
+  ## USED, not the ones it searched.
+  ##
+  ## So a lowering site may pass a `PATH` the GRAPH declared — read off
+  ## `BuildActionDef.env`, i.e. written by the recipe or by the upstream
+  ## generator — and that is treated as exactly the same kind of claim
+  ## as a `toolIdentityRefs` declaration: hermetic, no passthrough, keyed
+  ## BY VALUE. The two compose, prefix first, because an edge may have
+  ## both (a `uses:` tool AND a generator-declared toolchain) and the
+  ## graph-resolved directory must keep priority.
+  ##
+  ## WHAT THIS IS NOT: a merge with the host's `PATH`. A declared value
+  ## REPLACES. A tool the declaration omits is not found, and the spawn
+  ## fails with a diagnosable error rather than silently binding to
+  ## whatever the developer's shell offered — which is the same
+  ## fail-loud contract the `toolIdentityRefs` branch has. Falling back
+  ## to the ambient value on a miss would reintroduce precisely the
+  ## unkeyed channel this closes.
   ##
   ## This boundary is the same one `toolPathPrefix` already uses for the
   ## composition itself, so there is one notion of "what this edge
@@ -1550,6 +1633,18 @@ proc actionPathDecision*(actionPathPrefix: string;
   ## For those the host `$PATH` is once again an unkeyed input — the
   ## pre-existing hole, restored deliberately and now counted, not the
   ## empty `PATH` that replaced it.
+  # The graph's own `PATH` declaration is checked FIRST and does not
+  # consult `edgeDeclaresTools`: it IS a declaration, of the same kind
+  # and with the same consequences. Checking it second would make an
+  # edge that declares both compose in the wrong order; checking it
+  # under `edgeDeclaresTools` would make a CMake edge — which can never
+  # have a `uses:` ref — unable to declare anything at all, which is the
+  # defect.
+  if declaredPath.len > 0:
+    return ActionPathDecision(
+      env: @[actionPathEntry(joinPathDirs(actionPathPrefix, declaredPath))],
+      passthrough: @[],
+      class: apcHermetic)
   if edgeDeclaresTools and actionPathPrefix.len > 0:
     return ActionPathDecision(
       env: @[actionPathEntry(actionPathPrefix)],
@@ -1594,6 +1689,49 @@ proc actionPathDecision*(actionPathPrefix: string;
     env: @[actionPathEntry(actionInheritedPathValue(actionPathPrefix))],
     passthrough: @["PATH"],
     class: apcInherited)
+
+proc splitDeclaredPathEnv(env: openArray[(string, string)]):
+    tuple[path: string; rest: seq[string]] =
+  ## Split a graph-declared `PATH` out of an action's `env` so it can be
+  ## routed through `actionPathDecision` instead of being appended after
+  ## it.
+  ##
+  ## APPENDING IT WOULD BE THE BUG, and it is a QUIET one. The lowering
+  ## sites used to copy every `payload.env` pair into the action verbatim,
+  ## AFTER the decision's own entries. An edge that declared `PATH`
+  ## therefore ended up carrying both a `PATH=<value>` entry and `PATH` in
+  ## `envPassthrough`, which are contradictory claims about the same
+  ## variable.
+  ##
+  ## MEASURED, by building this arrangement deliberately and running the
+  ## CMake hermeticity suite against it
+  ## (`tests/e2e/cmake-path-hermeticity/`): the SPAWN honours the
+  ## declaration — `launchChildEnv`'s passthrough block skips any name the
+  ## action already declares, so the child really does run on the declared
+  ## `PATH` — and every behavioural assertion stayed green. What breaks is
+  ## the action's recorded IDENTITY. `classifyActionPath` reports
+  ## `apdInherited`, because passthrough wins in the classifier; the build
+  ## header's census counts the edge in the inherited column; and
+  ## `actionEnvironmentKeyText` renders the NAME and deliberately omits the
+  ## VALUE, so the toolchain the action actually used is absent from its
+  ## key. An action that runs hermetically while its key says it inherited
+  ## is worse than one that plainly inherits: the cache will serve one
+  ## toolchain's output under a key that never mentioned a toolchain.
+  ##
+  ## Name comparison is case-insensitive and last-write-wins, matching
+  ## `prependPathDirsToArgvEnv`'s collapse, so this proc and the spawn
+  ## agree on which entry is "the" `PATH`.
+  ##
+  ## AN EMPTY DECLARED VALUE IS NOT A DECLARATION. `("PATH", "")` returns
+  ## an empty `path` and is dropped from `rest`, so the decision falls
+  ## through to its inherited branch rather than emitting `PATH=`. That
+  ## value is the `apdEmpty` defect class — an action that runs with no
+  ## `PATH` at all — and this is one more place it cannot be produced.
+  for entry in env:
+    if cmpIgnoreCase(entry[0], "PATH") == 0:
+      result.path = entry[1]
+    else:
+      result.rest.add(entry[0] & "=" & entry[1])
 
 proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
                                   publicCliPath: string): BuildAction =
@@ -2783,13 +2921,20 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # the action really runs with. `actionPathDecision` makes the emit
     # decision instead, and cannot produce that value.
     var inlineEnv: seq[string] = @[]
+    # THE SITE THE CMAKE GENERATOR REACHES. Every edge the Reprobuild
+    # CMake generator emits is an `inlineExecCall`, so this is where a
+    # generator-declared `PATH` has to be honoured or the declaration is
+    # decorative. See `splitDeclaredPathEnv` for why it cannot simply be
+    # copied into `inlineEnv` alongside the decision's own entries.
+    let inlineDeclaredEnv = splitDeclaredPathEnv(payload.env)
     let inlinePath = actionPathDecision(actionPathPrefix,
+      declaredPath = inlineDeclaredEnv.path,
       edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
     var inlineEnvPassthrough = inlinePath.passthrough
     for entry in inlinePath.env:
       inlineEnv.add(entry)
-    for entry in payload.env:
-      inlineEnv.add(entry[0] & "=" & entry[1])
+    for entry in inlineDeclaredEnv.rest:
+      inlineEnv.add(entry)
     return repro_build_engine.action(
       payload.id,
       argv,
@@ -3068,16 +3213,29 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # site above for what the launcher's overlay actually does with an
     # emitted `PATH=`, and `actionPathDecision` itself for why declaring
     # a ref, not a non-empty prefix, is what selects the hermetic branch.
+    let unittestDeclaredEnv = splitDeclaredPathEnv(payload.env)
     let unittestPath = actionPathDecision(actionPathPrefix,
+      declaredPath = unittestDeclaredEnv.path,
       edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
     var mergedEnvPassthrough = unittestPath.passthrough
     for entry in unittestPath.env:
       mergedEnv.add(entry)
     # MR10: per-edge env-var injections from the typed-tool wrapper's
-    # ``extraEnv`` parameter. Appended after ``PATH`` so a recipe that
-    # explicitly sets ``PATH`` via ``extraEnv`` overrides the prefix.
-    for entry in payload.env:
-      mergedEnv.add(entry[0] & "=" & entry[1])
+    # ``extraEnv`` parameter.
+    #
+    # ``PATH`` IS NOT ONE OF THEM ANY MORE. The comment that used to
+    # stand here said these were "appended after ``PATH`` so a recipe
+    # that explicitly sets ``PATH`` via ``extraEnv`` overrides the
+    # prefix". The override half was true at SPAWN time and false
+    # everywhere else: the inherited branch had already named ``PATH``
+    # passthrough, so the edge claimed to inherit while running on the
+    # recipe's value, the census counted it as inherited, and
+    # ``actionEnvironmentKeyText`` rendered the name without the value.
+    # ``splitDeclaredPathEnv`` routes it into the decision instead, where
+    # one answer covers the spawn, the classification and the key. See
+    # that proc for the measurement.
+    for entry in unittestDeclaredEnv.rest:
+      mergedEnv.add(entry)
     return repro_build_engine.action(
       payload.id,
       argv,
@@ -3167,16 +3325,19 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   # measured defect landed on. `actionPathDecision` owns the emit
   # decision; see the inline-exec site above for what the launcher's
   # overlay actually does with an emitted `PATH=`.
+  let typedDeclaredEnv = splitDeclaredPathEnv(payload.env)
   let typedToolPath = actionPathDecision(actionPathPrefix,
+    declaredPath = typedDeclaredEnv.path,
     edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
   var mergedEnvPassthrough = typedToolPath.passthrough
   for entry in typedToolPath.env:
     mergedEnv.add(entry)
   # MR10: per-edge env-var injections from the typed-tool wrapper's
-  # ``extraEnv`` parameter. Appended after ``PATH`` so a recipe that
-  # explicitly sets ``PATH`` via ``extraEnv`` overrides the prefix.
-  for entry in payload.env:
-    mergedEnv.add(entry[0] & "=" & entry[1])
+  # ``extraEnv`` parameter. ``PATH`` is routed through the decision
+  # above instead of appended here — see the nim-unittest site for what
+  # appending it actually did.
+  for entry in typedDeclaredEnv.rest:
+    mergedEnv.add(entry)
   result = repro_build_engine.action(
     payload.id,
     invocationArgv,
@@ -4094,6 +4255,7 @@ type
     mtimeNs: int64
 
   WarmToolIdentity = ref object
+    populatedByPid: int
     key: string
     identityPath: string
     inspectionPath: string
@@ -4102,12 +4264,14 @@ type
     identity: PathOnlyBuildIdentity
 
   WarmProviderSnapshot = ref object
+    populatedByPid: int
     providerArtifactId: string
     snapshotPath: string
     snapshotEvidence: DurableFileEvidence
     snapshot: ProviderGraphSnapshot
 
   WarmLoweredGraph = ref object
+    populatedByPid: int
     cachePath: string
     modulePath: string
     projectRoot: string
@@ -4121,6 +4285,30 @@ type
 var warmToolIdentities = initTable[string, WarmToolIdentity]()
 var warmProviderSnapshots = initTable[string, WarmProviderSnapshot]()
 var warmLoweredGraphs = initTable[string, WarmLoweredGraph]()
+
+type
+  WarmBuildCacheCounters* = object
+    ## Dependency-Attribution MAC-2 — how often the three warm tables above
+    ## MISSED and had to go to disk.
+    ##
+    ## These exist so a test can assert that a daemon-parent prewarm was
+    ## actually consumed, rather than asserting that a build produced the
+    ## right answer — which it does either way, by design. "The bytes match"
+    ## cannot distinguish a warm hit from a cold read; a counter that did not
+    ## move can. Same lesson as MAC-1's routing witness.
+    loweredGraphDiskReads*: int
+    providerSnapshotDiskReads*: int
+    toolIdentityResolves*: int
+    inheritedWarmHits*: int
+      ## Warm-table hits served from an entry this process did NOT populate —
+      ## i.e. one inherited across a fork from the daemon parent. This is the
+      ## MAC-2 witness, and it is the one fact that distinguishes a prewarmed
+      ## worker from a cold one that produced the same bytes. It is recorded
+      ## in the daemon LOG rather than on any output stream, so the two arms
+      ## of the parity comparison stay byte-identical.
+
+var warmBuildCacheCounters*: WarmBuildCacheCounters
+  ## Read by tests; never read by any decision.
 
 # DSL-port M9.R.9 — auto-recurse guards for from-source provisioning.
 # When ``--tool-provisioning=from-source`` is active, the dispatcher
@@ -4279,12 +4467,52 @@ var producerSourceBindings*: Table[string, ResolvedPackageBinding] =
   ## Exported for the SC-4 integration test to observe the fold.
 
 proc attachProducerAuxRefs*(actions: var seq[BuildAction]) =
-  ## Resolve library aux channels only for the producer refs already carried by
-  ## each action. Selecting a producer for one target must not change unrelated
-  ## action identities or expose search paths those actions did not request.
-  ## String-based shell actions register library refs explicitly; typed
-  ## producer calls register the same refs while lowering.
-  discard actions
+  ## Resolve library aux channels for the producer refs each action carries,
+  ## PLUS the Nim library-source channel a Nim compile cannot name for itself.
+  ##
+  ## Selecting a producer for one target must not change unrelated action
+  ## identities or expose search paths those actions did not request, so a
+  ## C/C++ library producer is attached only where the recipe named it:
+  ## string-based ``shell(...)`` actions register those refs explicitly
+  ## (``appendRegisteredActionToolIdentityRefs``).
+  ##
+  ## Cross-Repo-Source-Consumption §4.2a (SC-11) is the one channel that cannot
+  ## work that way. The consuming edge is a typed ``nim.c(...)`` whose refs are
+  ## its OWN tools (``nim``, the C compiler) — by construction it never names
+  ## the sibling Nim ``library`` whose module it ``import``s, and the recipe
+  ## author has no ``nim.c`` parameter with which to name it. The spec's whole
+  ## SC-11 surface is a bare ``uses: "<nim lib>"`` on the package plus an
+  ## ordinary ``import`` (§4.2a, "the default makes every existing Nim-library
+  ## producer work unchanged"). So every producer this build materialized WITH
+  ## A NIM SOURCE ROOT (``nimPathDirs``) is attached to every action here; the
+  ## engine's per-ref resolver then fires and ``applyNimPathArgs`` puts the
+  ## sibling's ``src/`` on that action's ``nim c --path:``.
+  ##
+  ## This only ever BROADENS a Nim compile's module search path — it adds no
+  ## ``PATH`` entry (a pure-Nim-source producer materializes no ``bin`` dir) —
+  ## and it is a no-op unless this build actually materialized a Nim-source
+  ## producer, so a build consuming none keeps every action byte-identical.
+  if producerMaterializedAuxPaths.len == 0:
+    return
+  var nimSourceSelectors: seq[string] = @[]
+  for selector, aux in producerMaterializedAuxPaths.pairs:
+    if selector.len > 0 and aux.nimPathDirs.len > 0:
+      nimSourceSelectors.add(selector)
+  if nimSourceSelectors.len == 0:
+    return
+  nimSourceSelectors.sort()
+  for action in actions.mitems:
+    for selector in nimSourceSelectors:
+      if selector in action.toolIdentityRefs:
+        continue
+      action.toolIdentityRefs.add(selector)
+      # Keep ``toolIdentityRefKinds`` in sync when the action carries an
+      # explicit per-ref kind array (else it would silently fall back to the
+      # ``dkBuild`` default for every ref). ``dkBuild`` is the legacy ``uses:``
+      # kind — the HOST-platform cache key that collapses to ``"native"`` on a
+      # native build (``repro_build_engine.nim`` ``kindForRef``).
+      if action.toolIdentityRefKinds.len > 0:
+        action.toolIdentityRefKinds.add(dkBuild)
 
 proc foldProducerActionHashes*(actions: var seq[BuildAction]) =
   ## SC-2 (§4.2 point 3): after the consumer graph is lowered, fold each
@@ -4987,6 +5215,7 @@ proc loweredGraphCachePath(outDir, selectedActionId: string): string =
 proc readFreshLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
                                 pathEnv, cacheKey: string):
     Option[tuple[actions: seq[BuildAction]; pools: seq[BuildPool]]] =
+  inc warmBuildCacheCounters.loweredGraphDiskReads
   if not fileExists(extendedPath(path)):
     return none(tuple[actions: seq[BuildAction]; pools: seq[BuildPool]])
   try:
@@ -5011,12 +5240,15 @@ proc warmReadFreshLoweredGraphCache(path, modulePath, projectRoot,
         warm.selectedActionId == selectedActionId and
         warm.pathEnv == pathEnv and warm.cacheKey == cacheKey and
         evidenceFresh(path, warm.cacheEvidence):
+      if warm.populatedByPid != getCurrentProcessId():
+        inc warmBuildCacheCounters.inheritedWarmHits
       return some((actions: warm.actions, pools: warm.pools))
   result = readFreshLoweredGraphCache(path, modulePath, projectRoot,
     selectedActionId, pathEnv, cacheKey)
   if result.isSome:
     let lowered = result.get()
-    warmLoweredGraphs[tableKey] = WarmLoweredGraph(cachePath: path,
+    warmLoweredGraphs[tableKey] = WarmLoweredGraph(
+      populatedByPid: getCurrentProcessId(), cachePath: path,
       modulePath: modulePath, projectRoot: projectRoot,
       selectedActionId: selectedActionId, pathEnv: pathEnv,
       cacheKey: cacheKey, cacheEvidence: durableFileEvidence(path),
@@ -5036,7 +5268,8 @@ proc writeLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
     actions: lowered.actions,
     pools: lowered.pools)
   writeFile(extendedPath(path), fromBytes(encodeLoweredGraphCache(record)))
-  warmLoweredGraphs[path & "\0" & cacheKey] = WarmLoweredGraph(cachePath: path,
+  warmLoweredGraphs[path & "\0" & cacheKey] = WarmLoweredGraph(
+    populatedByPid: getCurrentProcessId(), cachePath: path,
     modulePath: modulePath, projectRoot: projectRoot,
     selectedActionId: selectedActionId, pathEnv: pathEnv, cacheKey: cacheKey,
     cacheEvidence: durableFileEvidence(path), actions: lowered.actions,
@@ -5848,14 +6081,18 @@ proc pathModeResolutionSignature(artifact: ProjectInterfaceArtifact;
   ## folded into the key separately below.
   var payload = ""
   payload.addCacheField("path-resolution.v1")
+  var uses: seq[InterfaceToolUse] = @[]
   for useDef in artifact.projectInterface.toolUses:
     if useDef.packageSelector.len > 0 and
         (producerMaterializedBinDirs.hasKey(useDef.packageSelector) or
          producerMaterializedAuxPaths.hasKey(useDef.packageSelector)):
       continue
+    uses.add(useDef)
+  let signatures = pathOnlyResolutionSignatures(uses, pathValue)
+  for index, useDef in uses:
     payload.addCacheField(useDef.packageSelector)
     payload.addCacheField(useDef.executableName)
-    payload.addCacheField(pathOnlyResolutionSignature(useDef, pathValue))
+    payload.addCacheField(signatures[index])
   payload
 
 proc toolIdentityCacheKey*(artifact: ProjectInterfaceArtifact;
@@ -6040,6 +6277,7 @@ proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
 proc readFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
                                    providerBinaryPath: string):
     Option[ProviderGraphSnapshot] =
+  inc warmBuildCacheCounters.providerSnapshotDiskReads
   if not fileExists(extendedPath(providerSnapshotPath(storeRoot))):
     return none(ProviderGraphSnapshot)
   try:
@@ -6065,11 +6303,14 @@ proc warmReadFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
         warm.snapshot.providerArtifactId == providerArtifactId and
         providerSnapshotBinaryFresh(warm.snapshot, providerBinaryPath) and
         providerSnapshotInputsFresh(warm.snapshot):
+      if warm.populatedByPid != getCurrentProcessId():
+        inc warmBuildCacheCounters.inheritedWarmHits
       return some(warm.snapshot)
   result = readFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
     providerBinaryPath)
   if result.isSome:
     warmProviderSnapshots[key] = WarmProviderSnapshot(
+      populatedByPid: getCurrentProcessId(),
       providerArtifactId: providerArtifactId,
       snapshotPath: path,
       snapshotEvidence: durableFileEvidence(path),
@@ -6236,13 +6477,289 @@ proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
         evidenceFresh(warm.identityPath, warm.identityEvidence) and
         evidenceFresh(stableKeyPath, warm.keyEvidence) and
         warm.identity.toolIdentityRealizationsUsable():
+      if warm.populatedByPid != getCurrentProcessId():
+        inc warmBuildCacheCounters.inheritedWarmHits
       return (identity: warm.identity, identityPath: warm.identityPath,
         inspectionPath: warm.inspectionPath)
+  inc warmBuildCacheCounters.toolIdentityResolves
   result = resolveAndWriteIdentity(artifact, outDir, mode)
-  warmToolIdentities[tableKey] = WarmToolIdentity(key: key,
+  warmToolIdentities[tableKey] = WarmToolIdentity(
+    populatedByPid: getCurrentProcessId(), key: key,
     identityPath: result.identityPath, inspectionPath: result.inspectionPath,
     identityEvidence: durableFileEvidence(result.identityPath),
     keyEvidence: durableFileEvidence(stableKeyPath), identity: result.identity)
+
+# ---------------------------------------------------------------------------
+# Dependency-Attribution MAC-2 — the daemon-parent prewarm.
+#
+# WHAT THIS IS. The user daemon forks a fresh worker per build request, so
+# every worker starts with the three warm tables above EMPTY and re-reads the
+# same three persisted files the previous worker read. Populating those tables
+# in the PARENT, before the fork, hands them to every subsequent worker by
+# copy-on-write at zero copy cost.
+#
+# WHAT IT IS NOT, AND WHY. An earlier prewarmer ran the whole of
+# `prepareBuildGraphInspection` -- interface extract, provider compile,
+# provider-graph refresh, tool resolution, lowering. It was disabled (see
+# `runtime.handleBuildRequest`) because it duplicated the authoritative
+# executor's work, ran before any terminal event reached the client, and could
+# outlive an attached client's disconnect; on CMake-generated projects that
+# showed up as detached workers holding multi-GB RSS after the client was gone.
+#
+# NONE OF THAT CAN RECUR HERE, because this pass has no COMPUTE path at all:
+#
+#   * It never calls the build engine, never compiles a provider, never
+#     invokes a provider binary, never spawns a process, and never opens the
+#     content store or the action cache -- so nothing is duplicated, and the
+#     two handle classes that must NOT be inherited across a fork (descriptors
+#     share a file offset with every sibling; an inherited advisory lock can be
+#     released by any child) are never opened in the parent to begin with.
+#   * It only DECODES files another build already wrote. If a file is absent,
+#     partial or unreadable, it warms nothing and the worker does exactly what
+#     it does today.
+#   * It runs in the long-lived parent, not in a detached worker, so there is
+#     no process that can outlive a disconnect. Its RSS cost is one project's
+#     lowered graph -- which every worker was already holding a private copy
+#     of, so sharing one copy-on-write copy is a reduction, not an addition.
+#     `prewarmDaemonParentBuildCaches` keeps exactly ONE project warm, so a
+#     daemon serving many projects does not accumulate.
+#
+# WHY IT CANNOT CHANGE A DECISION. Each table is consulted through the
+# `warm*` reader above, and every one of those re-validates before returning:
+# the lowered graph against `modulePath / projectRoot / selectedActionId /
+# pathEnv / cacheKey` AND the cache file's current stat identity; the provider
+# snapshot against `providerArtifactId`, the provider binary, and every
+# evaluation input's digest; the tool identity against the cache key, the
+# interface fingerprint, and two stat identities. The value this pass inserts
+# is produced by decoding the same bytes the cold reader would have decoded,
+# so the only difference a warmed entry can make is that a file whose stat
+# identity is unchanged is not read twice. A stale entry is not consulted; it
+# is re-read.
+#
+# WHY IT TOUCHES NO PROCESS-GLOBAL STATE. The disabled prewarmer mutated the
+# working directory and the environment with restore-after. That is safe in a
+# forked worker and racy in a shared parent, which is the hazard that made
+# reviving it non-trivial. This pass resolves the hazard by construction: it
+# calls neither `setCurrentDir` nor `putEnv` nor
+# `setActionCacheRootOverride`. Every path is derived by explicit joining
+# against the REQUEST's working directory, and every table key comes from the
+# on-disk record's own self-describing fields rather than from ambient state.
+# `t_daemon_parent_prewarm` asserts the cwd and the whole environment are
+# byte-identical across a prewarm.
+
+type
+  DaemonParentPrewarmReport* = object
+    outDir*: string
+    loweredGraphs*: int
+    providerSnapshots*: int
+    toolIdentities*: int
+    reused*: bool
+      ## True when the previous prewarm's entries were all still fresh and
+      ## nothing had to be re-decoded. This is the steady state: after the
+      ## first warm, a prewarm costs a handful of `stat` calls.
+
+  PrewarmStamp = tuple[path: string; evidence: DurableFileEvidence]
+
+var prewarmedOutDir = ""
+var prewarmStamps: seq[PrewarmStamp] = @[]
+
+proc prewarmStampsStillFresh(): bool =
+  if prewarmStamps.len == 0:
+    return false
+  for stamp in prewarmStamps:
+    if not evidenceFresh(stamp.path, stamp.evidence):
+      return false
+  true
+
+proc forgetWarmBuildCaches*() =
+  ## Drop every warm table entry. Exported for the daemon parent, which keeps
+  ## one project warm at a time, and for tests that need a cold start.
+  warmToolIdentities.clear()
+  warmProviderSnapshots.clear()
+  warmLoweredGraphs.clear()
+  prewarmStamps.setLen(0)
+  prewarmedOutDir = ""
+
+proc prewarmLoweredGraphsFrom(outDir: string; stamps: var seq[PrewarmStamp]):
+    int =
+  ## Decode every persisted lowered-graph cache record under ``outDir`` and
+  ## insert it under the key the record itself describes.
+  ##
+  ## The record carries `modulePath`, `projectRoot`, `selectedActionId`,
+  ## `pathEnv` and `cacheKey`, so no key has to be re-derived here — which is
+  ## what makes this pass independent of the parent's environment. A record
+  ## whose fields do not match what a build computes simply is not looked up.
+  let dir = outDir / "lowered-graph-cache"
+  if not dirExists(extendedPath(dir)):
+    return 0
+  for kind, path in walkDir(dir):
+    if kind != pcFile or not path.endsWith(".rbbg"):
+      continue
+    try:
+      let record = decodeLoweredGraphCache(toBytes(readFile(extendedPath(path))))
+      let evidence = durableFileEvidence(path)
+      if not evidence.exists:
+        continue
+      warmLoweredGraphs[path & "\0" & record.cacheKey] = WarmLoweredGraph(
+        populatedByPid: getCurrentProcessId(),
+        cachePath: path,
+        modulePath: record.modulePath,
+        projectRoot: record.projectRoot,
+        selectedActionId: record.selectedActionId,
+        pathEnv: record.pathEnv,
+        cacheKey: record.cacheKey,
+        cacheEvidence: evidence,
+        actions: record.actions,
+        pools: record.pools)
+      stamps.add((path: path, evidence: evidence))
+      inc result
+    except CatchableError:
+      # A record written by a newer codec, or one being rewritten by the
+      # worker that was just forked, decodes to nothing. Warming nothing is
+      # the pre-MAC-2 behaviour, so there is no failure to report.
+      discard
+
+proc prewarmProviderSnapshotsFrom(outDir: string;
+                                  stamps: var seq[PrewarmStamp]): int =
+  ## Decode the provider-graph snapshot of every variant store under
+  ## ``outDir/provider-graph`` and key each one by the `providerArtifactId`
+  ## the snapshot itself carries.
+  ##
+  ## Enumerating the variant directories instead of computing
+  ## `providerGraphStoreRoot` is deliberate: that helper reads `$REPRO_VARIANTS`
+  ## from the process environment, which in the parent is the DAEMON's, not the
+  ## request's.
+  let base = outDir / "provider-graph"
+  if not dirExists(extendedPath(base)):
+    return 0
+  var stores = @[base]
+  for kind, path in walkDir(base):
+    if kind == pcDir and extractFilename(path).startsWith("variants-"):
+      stores.add(path)
+  for store in stores:
+    let path = providerSnapshotPath(store)
+    if not fileExists(extendedPath(path)):
+      continue
+    try:
+      let snapshot = loadProviderGraphSnapshot(store)
+      if snapshot.providerArtifactId.len == 0:
+        continue
+      let evidence = durableFileEvidence(path)
+      if not evidence.exists:
+        continue
+      warmProviderSnapshots[store & "\0" & snapshot.providerArtifactId] =
+        WarmProviderSnapshot(
+          populatedByPid: getCurrentProcessId(),
+          providerArtifactId: snapshot.providerArtifactId,
+          snapshotPath: path,
+          snapshotEvidence: evidence,
+          snapshot: snapshot)
+      stamps.add((path: path, evidence: evidence))
+      inc result
+    except CatchableError:
+      discard
+
+proc prewarmToolIdentitiesFrom(outDir: string;
+                               stamps: var seq[PrewarmStamp]): int =
+  ## Re-populate `warmToolIdentities` from the `<mode>.current-key` stamps a
+  ## previous build wrote next to the identity files.
+  ##
+  ## The key is READ rather than recomputed. `toolIdentityCacheKey` folds in
+  ## `$PATH`, and the parent's `$PATH` is the daemon's. Reading the stamp gives
+  ## the key the last build actually used; a request whose `$PATH` differs
+  ## computes a different key, misses, and resolves as it does today.
+  let dir = outDir / "tool-identity-cache"
+  if not dirExists(extendedPath(dir)):
+    return 0
+  for mode in [tpmPathOnly, tpmNix, tpmTarball, tpmScoop, tpmFromSource]:
+    let stableKeyPath = dir / (mode.modeName & ".current-key")
+    if not fileExists(extendedPath(stableKeyPath)):
+      continue
+    let paths = identityPaths(outDir, mode)
+    if not fileExists(extendedPath(paths.identityPath)):
+      continue
+    try:
+      let key = readFile(extendedPath(stableKeyPath)).strip()
+      if key.len == 0:
+        continue
+      let keyEvidence = durableFileEvidence(stableKeyPath)
+      let identityEvidence = durableFileEvidence(paths.identityPath)
+      if not keyEvidence.exists or not identityEvidence.exists:
+        continue
+      let identity = readPathOnlyBuildIdentity(paths.identityPath)
+      warmToolIdentities[outDir & "\0" & mode.modeName & "\0" & key] =
+        WarmToolIdentity(
+          populatedByPid: getCurrentProcessId(),
+          key: key,
+          identityPath: paths.identityPath,
+          inspectionPath: paths.inspectionPath,
+          identityEvidence: identityEvidence,
+          keyEvidence: keyEvidence,
+          identity: identity)
+      stamps.add((path: stableKeyPath, evidence: keyEvidence))
+      stamps.add((path: paths.identityPath, evidence: identityEvidence))
+      inc result
+    except CatchableError:
+      discard
+
+proc prewarmDaemonParentCaches*(outDir: string): DaemonParentPrewarmReport =
+  ## Warm the three in-memory build caches for ONE project output directory.
+  ##
+  ## Idempotent and self-limiting: when the files warmed by the previous call
+  ## are all still stat-identical the tables are left alone and `reused` is
+  ## set, which costs one `stat` per warmed file. Switching projects drops the
+  ## previous project's entries, so a long-lived daemon holds one project's
+  ## graph rather than every project it has ever served.
+  result.outDir = outDir
+  if outDir.len == 0:
+    return
+  if prewarmedOutDir == outDir and prewarmStampsStillFresh():
+    result.reused = true
+    return
+  if prewarmedOutDir != outDir:
+    forgetWarmBuildCaches()
+  var stamps: seq[PrewarmStamp] = @[]
+  result.loweredGraphs = prewarmLoweredGraphsFrom(outDir, stamps)
+  result.providerSnapshots = prewarmProviderSnapshotsFrom(outDir, stamps)
+  result.toolIdentities = prewarmToolIdentitiesFrom(outDir, stamps)
+  prewarmStamps = stamps
+  prewarmedOutDir = if stamps.len > 0: outDir else: ""
+
+when defined(reproDaemonParentPrewarmTest):
+  ## Seams for ``t_daemon_parent_prewarm``. The warm tables and the cache
+  ## writer are module-private, and the properties under test — "the read was
+  ## served from warm state", "a changed file is re-read" — are not observable
+  ## from the outside at all. They are compiled in only for that test so no
+  ## shipped image carries a way to write a cache record without a build.
+  proc loweredGraphCachePathForTest*(outDir, selectedActionId: string): string =
+    loweredGraphCachePath(outDir, selectedActionId)
+
+  proc writeLoweredGraphCacheFileForTest*(path, modulePath, projectRoot,
+                                          selectedActionId, pathEnv,
+                                          cacheKey: string;
+                                          actions: seq[BuildAction]) =
+    ## Write ONLY the file. `writeLoweredGraphCache` also inserts into
+    ## `warmLoweredGraphs`, which would make the staleness case impossible to
+    ## set up: the property under test is what happens when the table holds a
+    ## decode of bytes the file no longer has.
+    createDir(extendedPath(parentDir(path)))
+    let record = LoweredGraphCacheRecord(
+      modulePath: modulePath,
+      projectRoot: projectRoot,
+      selectedActionId: selectedActionId,
+      pathEnv: pathEnv,
+      cacheKey: cacheKey,
+      actions: actions,
+      pools: @[])
+    writeFile(extendedPath(path), fromBytes(encodeLoweredGraphCache(record)))
+
+  proc readLoweredGraphForTest*(path, modulePath, projectRoot,
+                                selectedActionId, pathEnv, cacheKey: string):
+      Option[tuple[actions: seq[BuildAction]; pools: seq[BuildPool]]] =
+    warmReadFreshLoweredGraphCache(path, modulePath, projectRoot,
+      selectedActionId, pathEnv, cacheKey)
+
+  proc warmLoweredGraphCountForTest*(): int = warmLoweredGraphs.len
 
 proc shouldEnterBuildPipeline*(mode: ToolProvisioningMode): bool =
   ## M9.R.8 Part 1 — extracted predicate for the build-pipeline dispatch
@@ -6611,21 +7128,7 @@ proc stablePublicCliPath(): string =
 var runningImageIsReproCliFlag = false
   ## Set by ``markRunningImageAsReproCli`` — see ``runningImageIsReproCli``.
 
-when defined(reproImageIdentityTest):
-  proc resetRunningImageReproCliMarkForTest*() =
-    ## Undo ``markRunningImageAsReproCli`` — compiled ONLY under
-    ## ``-d:reproImageIdentityTest``, which one test turns on for itself
-    ## through its own ``.nim.cfg``.
-    ##
-    ## It is gated rather than exported outright because the mark is what
-    ## permits self-spawning: a test binary that set it and left it set would
-    ## be a test binary the engine is willing to re-execute with an internal
-    ## verb, which is the unbounded self-exec chain this whole predicate
-    ## exists to prevent. So the regression test restores the refusal in a
-    ## ``finally``, and no ordinary build has a way to clear the mark at all.
-    runningImageIsReproCliFlag = false
-
-proc markRunningImageAsReproCli*() =
+proc markRunningImageAsReproCli() =
   ## Record that the process this code is running in IS the `repro` CLI: the
   ## image that dispatches ``internal io monitor``,
   ## ``__repro-extract-interface`` and ``__repro-compile-provider``.
@@ -6634,7 +7137,49 @@ proc markRunningImageAsReproCli*() =
   ## which `apps/repro/repro.nim` does as a LITERAL in its own source
   ## (``quit runThinApp("repro")``). That literal is the CLI's own statement
   ## about what it is; the filename it happens to be invoked under is not.
+  ##
+  ## NOT EXPORTED, and that is the point. This is the DANGEROUS direction:
+  ## setting the mark is what makes the engine willing to re-execute the
+  ## running image with an internal verb, so an exported setter lets any
+  ## module that links the engine be accepted as `repro` without ever having
+  ## reached ``runThinApp("repro")`` — which is exactly the embedded test
+  ## binary the refusal exists to stop, granting itself the permission by
+  ## calling one proc. ``runThinApp`` is in THIS module, so the export bought
+  ## nothing but that hole. The counterpart clear
+  ## (``resetRunningImageReproCliMarkForTest``) was already gated behind
+  ## ``-d:reproImageIdentityTest`` for the weaker version of the same reason;
+  ## the set is gated below under the same define, so the pair is symmetric
+  ## and NO ordinary build can either set or clear the mark off the real
+  ## dispatch path.
   runningImageIsReproCliFlag = true
+
+when defined(reproImageIdentityTest):
+  ## The test-only handles on the mark, both compiled ONLY under
+  ## ``-d:reproImageIdentityTest``, which one test turns on for itself
+  ## through its own ``.nim.cfg``.
+  ##
+  ## Two directions, one reason. The mark is what permits self-spawning: an
+  ## image that can SET it is an image the engine will re-execute with an
+  ## internal verb without that image ever having declared itself through
+  ## ``runThinApp("repro")``, and an image that can CLEAR it and leaves it
+  ## clear is fine — but one that sets it and leaves it set is the unbounded
+  ## self-exec chain this whole predicate exists to prevent. So the
+  ## regression test that must observe the refusal in BOTH directions gets
+  ## both handles here and restores the refusal in a ``finally``, and no
+  ## ordinary build has a way to reach either.
+
+  proc markRunningImageAsReproCliForTest*() =
+    ## Set the mark without going through ``runThinApp``. The only caller is
+    ## the image-identity regression test, which has to observe the accept
+    ## side of the predicate from a binary that is not named `repro` and
+    ## cannot dispatch the real CLI to get there.
+    markRunningImageAsReproCli()
+
+  proc resetRunningImageReproCliMarkForTest*() =
+    ## Undo ``markRunningImageAsReproCliForTest`` — called from the test's
+    ## ``finally`` so the refusal is restored and the rest of the process is
+    ## as safe as it was before the case ran.
+    runningImageIsReproCliFlag = false
 
 proc runningImageIsReproCli(): bool =
   ## Does the running image implement the internal verbs?
@@ -9616,13 +10161,24 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # selector (host / nix / tarball / scoop / corpus-recipe) is untouched, so a
   # build that consumes no cross-repo producer is byte-identical to today.
   if not materializedOnly and result.projectRoot.len > 0:
-    # Producer materialization follows the selected action closure. Both typed
-    # calls and library-consuming actions carry their dependencies through
-    # ``toolIdentityRefs``; ``scopedToolArtifact`` retains only those refs.
-    # Package-wide ``uses:`` declarations remain available while compiling the
-    # provider and its public interface, but must not materialize producers for
-    # an unrelated target.
-    for useDef in buildArtifact.projectInterface.toolUses:
+    # Producer discovery must inspect the full package-level ``uses:`` set,
+    # not the focused tool-provisioning subset in ``buildArtifact``. Library
+    # producers are deliberately not present on an action's ``toolIdentityRefs``
+    # yet: this pass materializes their aux channels first, and only then does
+    # ``attachProducerAuxRefs`` add them to the selected consumer actions. If
+    # we scope them out here, the later attachment has no producer to attach
+    # and a Nim library's ``nimPathDirs`` silently disappears. Ordinary host /
+    # catalog tools still resolve from ``buildArtifact`` below, so focused
+    # builds remain lightweight.
+    #
+    # Cross-Repo-Source-Consumption §4.2a (SC-11) is what this guard protects:
+    # the consumer's edge is a typed ``nim.c(...)`` whose refs are its own
+    # tools (``nim``), never the sibling Nim ``library`` it ``import``s. A
+    # scoped loop here never resolves ``uses: "<nim lib>"`` at all, so the
+    # producer is neither fetched nor spliced and the consumer's compile fails
+    # with ``cannot open file: <module>`` — the exact pre-SC-11 failure the
+    # milestone's integration test pins.
+    for useDef in artifact.projectInterface.toolUses:
       let selector = useDef.packageSelector
       if selector.len == 0:
         continue
@@ -16579,25 +17135,23 @@ const
     "NIX_PROFILES"
   ]
 
-proc daemonCarriedEnvironment*(): seq[string] =
-  ## Snapshot the user-facing CLI environment for the daemon-hosted build/watch
-  ## executor. Direct builds evaluate providers and resolve action
-  ## ``envPassthrough`` values against this environment; daemon builds must be
-  ## byte-for-byte equivalent even when a project declares an arbitrary name
-  ## that reprobuild could not know in advance.
-  ##
-  ## The request worker installs this snapshot only for the duration of one
-  ## session and restores its prior environment afterwards. The build engine
-  ## still filters each action down to its declared passthrough set. The wire
-  ## sanitizer removes the test runner's private ownership marker before any
-  ## request is encoded.
-  var seen = initHashSet[string]()
-  for key, value in envPairs():
-    if key.len == 0 or seen.contains(key):
-      continue
-    seen.incl(key)
-    result.add(key & "=" & value)
-  result = sanitizeUserDaemonRequestEnvironment(result)
+# ``daemonCarriedEnvironment`` used to live here. It now lives in
+# ``repro_daemon_core/protocol`` and reaches this module through the
+# ``import repro_daemon_core`` at the top of the file.
+#
+# WHY IT MOVED (Dependency-Attribution MAC-1). The thin ``repro-client``
+# (``apps/repro-client``) composes the SAME ``UserDaemonBuildRequest`` this
+# module composes, and the request's environment is an INPUT to every action
+# fingerprint and cache key the daemon-hosted build then computes. Two
+# snapshots of "the user-facing environment" that agree today and drift
+# tomorrow would make the two clients produce different cache decisions for
+# the same command — silently, and only for whichever client the user
+# happened to run. One definition, in the lowest library both clients link,
+# removes the possibility rather than testing for it.
+#
+# It cannot live in this module: ``repro_cli_support`` is the build engine and
+# the DSL runtime, and linking it is exactly what the thin client exists not
+# to do.
 
 const DaemonRequestAuthoritativeEnvPrefixes* = ["REPROBUILD_", "REPRO_"]
   ## Reprobuild's own control namespace, over which a build REQUEST is
@@ -19064,11 +19618,34 @@ type
     ## backend ``LockStore`` that holds their locked revisions, so a MIXED
     ## workspace routes different repo-sets (MO-4) to different sources, all
     ## feeding ONE object.
+    ##
+    ## ``commitKeyed`` / ``keyedOnly`` carry W7 (CLI/develop.md §"Which record,
+    ## for a commit-addressed backend") DOWN INTO the populator. They are the
+    ## caller's ALREADY-COMPLETED read of a commit-addressed backend's key
+    ## record: ``commitKeyed`` is that record's ``path -> revision`` body, and
+    ## ``keyedOnly`` says the record is the backend's ENTIRE contribution, so a
+    ## path the body does not name has no other answer in this store.
+    ##
+    ## Without them the populator had no way to know either fact and ran
+    ## ``lockedShaFromStore`` — ``latestLockShas(project)`` plus
+    ## ``latestLock(project, repo)``, two ``git log --first-parent`` history
+    ## queries over the record store — once per repo, for a value W7 then
+    ## required the caller to discard. That is the same rule stated twice: once
+    ## as a filter over results the reader had already paid for, and once (here)
+    ## as a reason not to read. Only the second spelling is free, and a rule
+    ## enforced in one place cannot disagree with itself.
+    ##
+    ## Both default to "absent" (empty table / ``false``), which is exactly the
+    ## pre-existing behaviour, so every source that does not set them — the
+    ## committed-lock kind, and every ``resolveWorkspaceLockedDeps`` caller —
+    ## is unaffected.
     kind*: LockSourceKind
     workspaceRoot*: string
     projectName*: string
     repos*: seq[ResolvedRepo]
     store*: LockStore
+    commitKeyed*: Table[string, string]
+    keyedOnly*: bool
 
   LockedIntegrityCause* = enum
     ## WHY a locked entry failed verification. "the content changed" and "the
@@ -28153,137 +28730,161 @@ proc runPrivilegedBrokerMode(args: openArray[string]): int =
     stderr.writeLine("repro --privileged-broker: error: " & err.msg)
     return 7
 
-proc prewarmBuildFileMetadata(info: BuildGraphInspection) =
-  if info.actions.len == 0:
-    return
-  var cache = openActionCache(currentActionCacheRoot() / "action-cache")
-  var metadataCache = initFileMetadataCache()
-  var probes: seq[HotMetadataProbe] = @[]
-  for action in info.actions:
-    if action.cacheable and action.dynamicDepsFile.len == 0:
-      probes.add(HotMetadataProbe(
-        weakFingerprint: action.weakFingerprint,
-        policy: action.actionCachePolicy))
-  if probes.len == 0:
-    return
-  let scan = cache.scanHotIndexMetadataInputsUnchanged(probes,
-    addr metadataCache)
-  if scan.status != hmssUnavailable:
-    return
+const DaemonParentPrewarmEnv* = "REPROBUILD_DAEMON_PARENT_PREWARM"
+  ## Dependency-Attribution MAC-2 — set to ``0`` in the DAEMON's own
+  ## environment to turn the parent prewarm off.
+  ##
+  ## It exists so the two arms can be measured and compared on ONE binary,
+  ## which removes "a different image" as an explanation for any difference
+  ## found. It is read in the daemon parent only, at dispatch time, and it
+  ## reaches nothing that enters an action fingerprint — the arms are required
+  ## to produce byte-identical output, and
+  ## ``t_daemon_parent_prewarm_is_decision_neutral`` asserts exactly that.
+  ## Contrast ``#230``: the hazard there was a start-time environment that
+  ## silently changed what a build DID. This one can only change how long it
+  ## takes.
 
-  var records: seq[ActionResultRecord] = @[]
-  for action in info.actions:
-    if not action.cacheable or action.dynamicDepsFile.len > 0:
-      continue
-    let record = cache.lookupHotMetadataRecord(action.weakFingerprint,
-      action.actionCachePolicy)
-    if record.isSome:
-      records.add(record.get())
-  if records.len > 0:
-    discard hotMetadataRecordInputsUnchanged(records, addr metadataCache)
+proc daemonParentPrewarmEnabled*(): bool =
+  getEnv(DaemonParentPrewarmEnv, "1") != "0"
 
-proc prewarmBuildCommand(args: openArray[string]; publicCliPath: string) =
+proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
+                                   workingDir: string;
+                                   requestEnvironment: openArray[string]):
+    string =
+  ## The build output directory a hosted ``repro build`` will use, computed
+  ## from the REQUEST alone.
+  ##
+  ## Nothing here consults the calling process's current directory or its
+  ## environment: the target is absolutized against ``workingDir`` and the work
+  ## root comes from ``--work-root`` or from the request's own
+  ## ``REPROBUILD_WORK_ROOT``. That is the whole reason this is not simply
+  ## ``outputDirForTarget`` — in the daemon parent the ambient answers belong
+  ## to the daemon and would name a directory no build looks at.
+  ##
+  ## Returns "" when there is nothing to warm (a forced rebuild, or a target
+  ## that does not resolve to a project file). A wrong answer here cannot make
+  ## a build decide differently — every warm-table key embeds the full path, so
+  ## entries under the wrong directory are never looked up — but it would make
+  ## the pass useless, so it is derived rather than guessed.
   var target = ""
-  var mode = tpmUnspecified
   var workRoot = ""
-  var targetWasOmitted = true
   var forceRefresh = false
-  var prepareOnly = false
   var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
-      mode = parseToolProvisioning(valueFromFlag(args, i,
-        "--tool-provisioning"))
-    elif arg == "--work-root" or arg.startsWith("--work-root="):
-      workRoot = valueFromFlag(args, i, "--work-root")
-    elif arg == "--action-cache-root" or arg.startsWith("--action-cache-root="):
-      setActionCacheRootOverride(valueFromFlag(args, i,
-        "--action-cache-root"))
+  while i < rawArgs.len:
+    let arg = rawArgs[i]
+    if arg == "--work-root" or arg.startsWith("--work-root="):
+      workRoot = valueFromFlag(rawArgs, i, "--work-root")
     elif arg == "--force-rebuild" or arg == "--rebuild" or arg == "--dry-run":
       forceRefresh = true
-    elif arg in ["--daemon", "--progress", "--progress-bars",
-        "--write-diagnostics", "--show", "--measure", "--write-report",
-        "--log", "--write-benchmark", "--write-stats", "--monitor-hosting",
-        "--evidence"]:
-      discard valueFromFlag(args, i, arg)
-    elif arg == "--no-write-report":
-      discard
-    elif arg.startsWith("--daemon=") or arg.startsWith("--progress=") or
-        arg.startsWith("--progress-bars=") or
-        arg.startsWith("--write-diagnostics=") or
-        arg.startsWith("--show=") or arg.startsWith("--measure=") or
-        arg.startsWith("--write-report=") or
-        arg.startsWith("--log=") or arg.startsWith("--write-benchmark=") or
-        arg.startsWith("--write-stats=") or
-        arg.startsWith("--monitor-hosting=") or
-        arg.startsWith("--evidence=") or
-        arg.startsWith("--stats-groups="):
-      discard
-    elif arg == "--prepare-only":
-      prepareOnly = true
-    elif arg in ["-v", "--verbose", "-vv", "--very-verbose",
-        "--skip-cmake-regeneration", "--no-runquota", "--runquota"]:
-      discard
+    elif arg in ["--tool-provisioning", "--action-cache-root", "--daemon",
+        "--progress", "--progress-bars", "--write-diagnostics", "--show",
+        "--measure", "--write-report", "--log", "--write-benchmark",
+        "--write-stats", "--monitor-hosting", "--evidence"]:
+      discard valueFromFlag(rawArgs, i, arg)
     elif not arg.startsWith("-") and target.len == 0:
+      # THE FIRST POSITIONAL IS THE TARGET, with no `build` verb to skip.
+      # ``rawArgs`` is whatever ``runBuildCommand`` was handed, and every
+      # route into it strips the verb first — the dispatcher passes
+      # ``args[1 .. ^1]``, and the three internal callers compose their own
+      # argument vectors without one. Skipping a literal "build" here would
+      # therefore skip a real target: ``repro build build``, in a directory
+      # holding a ``build/`` project, would warm the caches of ``.``
+      # instead. Harmless (a wrongly-named directory warms entries no build
+      # looks up, because every warm-table key embeds the full path) but
+      # wrong, and it would have made the unit case feed an argument vector
+      # the daemon never produces.
       target = arg
-      targetWasOmitted = false
     inc i
-  if forceRefresh or prepareOnly:
-    return
+  if forceRefresh:
+    # A forced rebuild ignores all three caches, so warming them would be
+    # work with no consumer.
+    return ""
   if target.len == 0:
     target = "."
-  let info = prepareBuildGraphInspection(target, mode, publicCliPath,
-    selectDefaultAction = targetWasOmitted, workRoot = workRoot,
-    forceRefresh = false)
-  prewarmBuildFileMetadata(info)
+  if workRoot.len == 0:
+    for entry in requestEnvironment:
+      let eq = entry.find('=')
+      if eq > 0 and entry[0 ..< eq] == "REPROBUILD_WORK_ROOT":
+        workRoot = entry[eq + 1 .. ^1]
+        break
+  if workRoot.len > 0 and not workRoot.isAbsolute:
+    if workingDir.len == 0:
+      return ""
+    workRoot = absolutePath(workRoot, workingDir)
+  let parts = splitTarget(target)
+  var base = parts.base
+  if base.len == 0:
+    base = "."
+  if not base.isAbsolute:
+    if workingDir.len == 0:
+      return ""
+    base = absolutePath(base, workingDir)
+  let absoluteTarget =
+    if parts.fragment.len > 0: base & "#" & parts.fragment else: base
+  try:
+    var parsed = parseBuildTarget(absoluteTarget)
+    if not parsed.modulePath.isAbsolute:
+      return ""
+    if not fileExists(extendedPath(parsed.modulePath)):
+      return ""
+    outputDirForTargetIn(parsed, workRoot)
+  except CatchableError:
+    ""
 
-proc installUserDaemonBuildPrewarmer() =
-  setUserDaemonBuildPrewarmer(proc(request: UserDaemonBuildRequest) =
-    let previousCwd = getCurrentDir()
-    var previousEnv: seq[tuple[key: string; value: string; present: bool]] = @[]
-    proc setRestorableEnv(key, value: string) =
-      previousEnv.add((key: key, value: getEnv(key), present: existsEnv(key)))
-      putEnv(key, value)
-    try:
-      # Defense in depth for direct/in-process callers that bypass protocol
-      # serialization. Never install the runner-private ownership marker in
-      # the build prewarmer's live environment.
-      # Same funnel as the build and watch executors, so a re-enabled
-      # prewarm cannot reintroduce the overlay hole they no longer have.
-      previousEnv.add(applyDaemonRequestEnvironment(
-        sanitizeUserDaemonRequestEnvironment(request.environment)))
-      # Prewarm is a daemon-internal cache-warming pass, not user-scheduled
-      # work, so it must NOT contend for RunQuota leases. Forcing the documented
-      # full-bypass switch makes the nested provider-compile `runBuild` here run
-      # its actions as plain children instead of through the inline-RunQuota
-      # lease/exec path. That path, driven from inside the detached daemon
-      # worker, could deadlock: the worker launched a leased compile, the child
-      # exited, but the worker never reaped it / never sent LeaseFinished, so the
-      # lease stayed `running`, runquotad's connection worker blocked reading the
-      # next request, and the attached client blocked reading the build response.
-      # Bypassing here both avoids that hang and keeps the prewarm cheap; the
-      # subsequent real build reuses the provider-compile artifact this pass
-      # writes, so build output and scheduling are unaffected.
-      setRestorableEnv("REPROBUILD_NO_RUNQUOTA", "1")
-      let providerSession =
-        if request.runId.len > 0:
-          "daemon-build-" & request.runId
-        else:
-          "daemon-build-pid-" & $getCurrentProcessId()
-      setRestorableEnv(ProviderNimcacheSessionEnv, providerSession)
-      if request.workingDir.len > 0:
-        setCurrentDir(request.workingDir)
-      let cliPath =
-        if request.publicCliPath.len > 0: request.publicCliPath
-        else: stablePublicCliPath()
-      prewarmBuildCommand(request.rawArgs, cliPath)
-    finally:
-      try:
-        setCurrentDir(previousCwd)
-      except CatchableError:
-        discard
-      restoreDaemonRequestEnvironment(previousEnv))
+proc prewarmDaemonParentBuildCaches*(request: UserDaemonBuildRequest): string =
+  ## The daemon parent's per-request prewarm. Returns a log line, or "" when
+  ## nothing was done. Never raises: a prewarm that fails must leave the build
+  ## exactly as it would have been without one.
+  if not daemonParentPrewarmEnabled():
+    return ""
+  try:
+    let outDir = daemonPrewarmTargetOutputDir(request.rawArgs,
+      request.workingDir, request.environment)
+    if outDir.len == 0:
+      return ""
+    let report = prewarmDaemonParentCaches(outDir)
+    if report.reused:
+      return "parent prewarm reused outDir=" & outDir
+    if report.loweredGraphs + report.providerSnapshots +
+        report.toolIdentities == 0:
+      return ""
+    "parent prewarm warmed outDir=" & outDir &
+      " loweredGraphs=" & $report.loweredGraphs &
+      " providerSnapshots=" & $report.providerSnapshots &
+      " toolIdentities=" & $report.toolIdentities
+  except CatchableError:
+    ""
+
+proc installUserDaemonParentPrewarmer() =
+  ## Dependency-Attribution MAC-2 — register the DAEMON-PARENT prewarm.
+  ##
+  ## WHAT THIS REPLACED. The hook was previously handed a closure that ran
+  ## `prepareBuildGraphInspection` plus a file-metadata sweep: interface
+  ## extract, provider compile, provider-graph refresh, tool resolution,
+  ## lowering, and an `openActionCache` hot-index scan. It was never called,
+  ## and the three reasons recorded at its disabled call site were that it
+  ## duplicated the executor's provider inspection, that it ran before any
+  ## terminal event reached the client, and that it could outlive an attached
+  ## client's disconnect. On top of those it mutated the process working
+  ## directory and environment with restore-after, which is safe in a forked
+  ## worker and RACY in the shared parent this hook now runs in.
+  ##
+  ## The closure below has none of those properties; see the block comment on
+  ## `prewarmDaemonParentCaches` for the point-by-point account. In particular
+  ## it opens NEITHER the content store NOR the action cache, which is what the
+  ## old file-metadata sweep did — those hold descriptors and advisory locks,
+  ## an inherited descriptor shares its file offset with every sibling worker,
+  ## and an inherited lock can be released by any child. They stay per-worker,
+  ## where they cost about 1.2 ms and are correct.
+  ##
+  ## The file-metadata cache is named in the milestone as inheritable, and it
+  ## is — but there is no process-global one to warm: `prewarmBuildFileMetadata`
+  ## built a LOCAL `FileMetadataCache` and dropped it on return, so its only
+  ## lasting effect was on the OS page cache, and reaching it required the
+  ## action-cache handle above. Warming it in the parent would mean making it
+  ## process-global first, which is a separate change.
+  setUserDaemonParentPrewarmer(proc(request: UserDaemonBuildRequest): string =
+    prewarmDaemonParentBuildCaches(request))
 
 proc installUserDaemonBuildExecutor() =
   setUserDaemonBuildExecutor(proc(request: UserDaemonBuildRequest;
@@ -28301,6 +28902,42 @@ proc installUserDaemonBuildExecutor() =
       # overlay let through and what it cost.
       previousEnv.add(applyDaemonRequestEnvironment(
         sanitizeUserDaemonRequestEnvironment(request.environment)))
+      # RE-SEED THE EMBEDDED SOURCE ROOTS AFTER THE REQUEST IS INSTALLED, so
+      # a hosted build does not depend on WHICH CLIENT sent it.
+      #
+      # `runThinAppDispatch` runs this before any subcommand routing, so a
+      # request composed by the full `repro` already carries whatever the
+      # seeding produced and this call is a no-op on that path (it only ever
+      # fills a name that is currently unset). The thin `repro-client`
+      # (`apps/repro-client`, MAC-1) has no prologue of its own -- seeding
+      # would mean linking `repro_interface_artifacts` for its compile-time
+      # constants, which is the engine dependency it exists not to have.
+      #
+      # This is not cosmetic. Measured before the call was added: outside a
+      # dev shell, where the `*_SRC` names are unset, the same `repro build`
+      # of the same project produced provider-compile cache keys
+      # e1fef85b... through the full client and b7f03810... through the thin
+      # one -- a cache MISS where there should have been a hit, from a
+      # difference in the caller rather than in the build. Inside the dev
+      # shell, where the names are already set and the seeding is inert for
+      # both, the two clients' stdout and stderr were byte-identical.
+      #
+      # Placed after `applyDaemonRequestEnvironment` so a value the REQUEST
+      # carries still wins: the seeding fills unset names only, and the
+      # restore list above already covers anything the request displaced.
+      #
+      # A name this call fills for the FIRST time is NOT added to that restore
+      # list, so it outlives the session in the worker. That is deliberate and
+      # it is why it is safe: the value seeded is a compile-time constant of
+      # the daemon's own image, so every session would seed the same string.
+      # A leak can only carry one session's value into another when the
+      # sessions could disagree, and here they cannot. Two of these names
+      # (`REPRO_TEST_ADAPTERS_SRC`, `REPRO_CT_TEST_RUNNER_SRC`) do fall under
+      # `DaemonRequestAuthoritativeEnvPrefixes`, so a request that omits them
+      # has them unset by `applyDaemonRequestEnvironment` and then re-seeded
+      # here to that same constant -- which is the point: it is the value a
+      # DIRECT build through the full CLI's prologue would have used too.
+      ensureBuiltSourcePackageEnvironment()
       previousEnv.add((key: ProviderNimcacheSessionEnv,
         value: getEnv(ProviderNimcacheSessionEnv),
         present: existsEnv(ProviderNimcacheSessionEnv)))
@@ -28325,6 +28962,18 @@ proc installUserDaemonBuildExecutor() =
         emit(eventKind, message, false, 0, "info", payloadJson)
       proc buildCancelRequested(): bool =
         cancelCheck != nil and cancelCheck()
+      let inheritedBefore = warmBuildCacheCounters.inheritedWarmHits
+      defer:
+        # Dependency-Attribution MAC-2 witness. How many warm-table reads this
+        # worker served from entries populated by ANOTHER process — which, in
+        # a forked daemon worker, can only be the parent's prewarm. Nothing
+        # reads this but the daemon log and the test that gates the milestone;
+        # a build decides identically whether it is zero or not.
+        let inherited =
+          warmBuildCacheCounters.inheritedWarmHits - inheritedBefore
+        setUserDaemonWorkerNote("inheritedWarmHits=" & $inherited &
+          " loweredGraphDiskReads=" &
+          $warmBuildCacheCounters.loweredGraphDiskReads)
       try:
         result = runBuildCommand(request.rawArgs, cliPath,
           forceDirect = true,
@@ -28378,6 +29027,10 @@ proc installUserDaemonWatchExecutor() =
       # request's authority over reprobuild's own namespace.
       previousEnv.add(applyDaemonRequestEnvironment(
         sanitizeUserDaemonRequestEnvironment(request.environment)))
+      # Same re-seed as the build executor, for the reason its comment gives:
+      # a hole closed for builds and left open for watch cycles reappears on
+      # the next `repro watch` that spawns the same actions.
+      ensureBuiltSourcePackageEnvironment()
       if request.workingDir.len > 0:
         setCurrentDir(request.workingDir)
       let cliPath =
@@ -29748,7 +30401,70 @@ No projects have been initialized in this workspace yet.
 Run `repro workspace init` to initialize configured defaults, or `repro workspace init <project>` to add one.
 """.strip() & "\n"
 
+proc sidecarOneLiner(path: string): string =
+  ## The FIRST paragraph of a `repos/<repo>.md` sidecar, folded onto one line,
+  ## or "" when the file is absent or says nothing.
+  ##
+  ## The schema calls this a one-line description and most of them are. The
+  ## ones that are not are the problem: several sidecars in the metacraft
+  ## manifest repo were folded in from a `projects/<name>.md` when the
+  ## membership model retired their project, and several more are a single
+  ## sentence hard-wrapped across six or seven lines. Emitting either verbatim
+  ## into a ``- `path` - …`` bullet terminates the list at the first newline
+  ## and spills the remaining prose into the document body as though it were
+  ## the project's own text — which is what the generated index for this
+  ## workspace actually looked like.
+  ##
+  ## Folding rather than truncating at the first newline is the point: a
+  ## hard-wrapped sentence must survive whole. A leading `# Title` is dropped
+  ## because it names the repo the bullet already names.
+  if not fileExists(path):
+    return ""
+  var parts: seq[string]
+  for rawLine in readFile(path).splitLines():
+    let line = rawLine.strip()
+    if line.len == 0:
+      if parts.len > 0:
+        break
+      continue
+    if parts.len == 0 and line.startsWith("#"):
+      continue
+    parts.add(line)
+  parts.join(" ")
+
+proc activeMembershipManifestFile(manifestsDir, name: string): string =
+  ## The manifest that DEFINES an active-set entry, looked up on the SAME
+  ## ladder `resolveWorkspaceProjectShared` walks — project, then variant, then
+  ## repo-set — and "" when nothing defines it.
+  ##
+  ## Walking the same ladder is the point rather than a tidiness: an active set
+  ## entry is whatever `enable` accepted, and `enable` accepts any name
+  ## `definedProjectNames` reports, which includes repo-sets. A generator that
+  ## only knew `projects/` would print "the active manifest was not found on
+  ## disk" for an enabled repo-set that every other verb resolves fine.
+  for sub in ["projects", "variants", repoSetsDirName]:
+    let candidate = manifestsDir / sub / (name & ".toml")
+    if fileExists(candidate):
+      return candidate
+  ""
+
 proc writeGeneratedWorkspaceProjects(workspaceRoot: string) =
+  ## Regenerate ``<workspaceRoot>/workspace-projects.md`` — the index the
+  ## workspace's ``AGENTS.md`` / ``CLAUDE.md`` ``@import``s, so it is the first
+  ## thing an arriving agent reads.
+  ##
+  ## The content is derived from exactly two sources, and from no disk
+  ## evidence: the ACTIVE SET recorded in ``.repro/workspace.toml`` (what this
+  ## workspace is for), and the manifests that define those entries (what they
+  ## contain). Checkout state is deliberately NOT consulted — a project can be
+  ## enabled before its repos are cloned and a stale checkout can outlive a
+  ## disabled project, so a disk-derived index is wrong in both directions.
+  ##
+  ## Every failure it can survive, it survives: an unreadable workspace.toml
+  ## degrades to the placeholder, and a project whose manifest does not resolve
+  ## gets its diagnostic recorded under its own heading while the other
+  ## projects still render. The callers treat the whole write as best-effort on
+  ## top of that (`refreshWorkspaceProjectsIndexBestEffort`).
   let workspaceToml = workspaceTomlPath(workspaceRoot)
   var projectNames: seq[string] = @[]
   if fileExists(workspaceToml):
@@ -29766,18 +30482,24 @@ proc writeGeneratedWorkspaceProjects(workspaceRoot: string) =
         workspaceProjectsPlaceholderContent())
     return
 
+  # `manifestsRoot`, not the workspace root: a workspace that materialized its
+  # manifests under `.repro/manifests` (an `init --manifest-url` shared-cache
+  # symlink, or the git-checkout store backend) has no `projects/` beside its
+  # checkouts, and reading the root directly reported every enabled project as
+  # undefined there.
+  let manifestsDir = manifestsRoot(workspaceRoot)
   var output: seq[string] = @["# Active Workspace Projects"]
   for projectName in projectNames:
-    let projectFile = workspaceRoot / "projects" / (projectName & ".toml")
+    let projectFile = activeMembershipManifestFile(manifestsDir, projectName)
     output.add ""
     output.add "## " & projectName
 
-    if not fileExists(projectFile):
+    if projectFile.len == 0:
       output.add ""
       output.add "No project description is available; the active manifest was not found on disk."
       continue
 
-    let projectDescriptionFile = workspaceRoot / "projects" / (projectName & ".md")
+    let projectDescriptionFile = projectFile.changeFileExt("md")
     var projectDescription = ""
     if fileExists(projectDescriptionFile):
       projectDescription = readFile(projectDescriptionFile).strip()
@@ -29786,15 +30508,31 @@ proc writeGeneratedWorkspaceProjects(workspaceRoot: string) =
       output.add projectDescription
 
     try:
-      let resolved = resolveProject(projectFile)
+      # One resolver per kind, all three returning the same `ResolvedProject`
+      # — which is precisely the model's claim that "project" is a ROLE a
+      # membership manifest plays and not a kind of its own.
+      let resolved =
+        if projectFile.parentDir.lastPathPart == repoSetsDirName:
+          resolveRepoSet(projectFile)
+        elif projectFile.parentDir.lastPathPart == "variants":
+          resolveVariant(projectFile)
+        else:
+          resolveProject(projectFile)
       if resolved.repos.len > 0:
         output.add ""
         output.add "Repositories:"
         for repo in resolved.repos:
-          let repoDescFile = workspaceRoot / "repos" / (repo.name & ".md")
-          var repoDesc = ""
-          if fileExists(repoDescFile):
-            repoDesc = readFile(repoDescFile).strip()
+          # The sidecar lives beside the FRAGMENT, and the fragment's file name
+          # is not always `repo.name`: four fragments in the metacraft manifest
+          # repo declare a different name than their file (`sel4` → `seL4`,
+          # `codetracer-engine-godot` → `codetracer-godot`, …), and looking the
+          # sidecar up by `name` silently dropped their descriptions. The name
+          # is only the fallback, for a `ResolvedRepo` synthesized outside the
+          # resolver, which carries no `fragmentPath`.
+          let repoDescFile =
+            if repo.fragmentPath.len > 0: repo.fragmentPath.changeFileExt("md")
+            else: manifestsDir / "repos" / (repo.name & ".md")
+          let repoDesc = sidecarOneLiner(repoDescFile)
           if repoDesc.len > 0:
             output.add "- `" & repo.path & "` - " & repoDesc
           else:
@@ -29804,6 +30542,23 @@ proc writeGeneratedWorkspaceProjects(workspaceRoot: string) =
       output.add "Error resolving repositories: " & err.msg
 
   writeFile(workspaceRoot / "workspace-projects.md", output.join("\n") & "\n")
+
+proc refreshWorkspaceProjectsIndexBestEffort(workspaceRoot, verb: string) =
+  ## Rewrite the generated project index after a verb changed what it should
+  ## say, and never let that rewrite change the verb's outcome.
+  ##
+  ## Best-effort in the strict sense, and for the same reason
+  ## `refreshWorkspaceSiblingIgnoresBestEffort` is: the index is an ergonomic
+  ## convenience layered on top of the mutation that already succeeded, so an
+  ## unwritable workspace root must produce a diagnostic and not a failed
+  ## `enable` whose membership change is already recorded. Callers invoke it
+  ## AFTER the mutation lands, so the file can never describe a state the
+  ## workspace did not reach.
+  try:
+    writeGeneratedWorkspaceProjects(workspaceRoot)
+  except CatchableError as err:
+    stderr.writeLine(verb & ": could not generate workspace-projects.md: " &
+      err.msg)
 
 proc gitRunPlain(identity: GitToolIdentity;
                  args: openArray[string]): tuple[code: int; output: string]
@@ -30200,10 +30955,8 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
         # — surface a structured diagnostic on stderr and continue.
         stderr.writeLine(
           "workspace init: could not record active branch: " & e.msg)
-    try:
-      writeGeneratedWorkspaceProjects(args.workspaceRoot)
-    except CatchableError as err:
-      stderr.writeLine("workspace init: could not generate workspace-projects.md: " & err.msg)
+    refreshWorkspaceProjectsIndexBestEffort(args.workspaceRoot,
+      "workspace init")
     alignWorkspaceRemotes(args.workspaceRoot, resolved.repos, identity)
     refreshWorkspaceSiblingIgnoresBestEffort(args.workspaceRoot)
 proc writeWorkspaceInitReport(report: WorkspaceInitReport;
@@ -33543,8 +34296,37 @@ proc lockedDepFromStoreRepo(source: LockSource; repo: ResolvedRepo): LockedDep =
   ## IS the integrity), tagged self-describingly. This is the SAME per-dep shape
   ## the committed-lock source produces from the lock's content, so the two
   ## populate one uniform model.
-  var rev = lockedShaFromStore(
-    source.store, source.projectName, repo.name, repo.path)
+  ##
+  ## W7 — when the caller supplied a commit-addressed backend's KEY RECORD
+  ## (``source.commitKeyed`` / ``source.keyedOnly``), that record decides this
+  ## repo and the per-repo history read is not performed at all. The three arms
+  ## are the same three ``composeDevelopLockSet``'s per-dep fold applies to the
+  ## populated result, moved to the only place that can act on them before the
+  ## cost is paid:
+  ##
+  ##   * the key record NAMES this path — it is the answer, and a project-wide
+  ##     or subtree-latest read could only disagree with it (that disagreement
+  ##     IS the branch-tip fallback the spec forbids);
+  ##   * ``keyedOnly`` and the key record is silent about this path — "a backend
+  ##     that yields no record for the resolved key contributes nothing", so
+  ##     there is no answer to go looking for;
+  ##   * otherwise — no key resolved, or not a commit-addressed backend — the
+  ##     ordinary project read, unchanged.
+  ##
+  ## The ``keyedOnly`` arm deliberately excludes an EVIDENCE-ONLY repo. Such a
+  ## repo joins the lock set to be NAMED (DS-4) rather than to be pinned, so it
+  ## is not subject to the "contributes nothing" outcome and must keep whatever
+  ## revision the ordinary read gives it: this proc's job for it is unchanged.
+  var rev = ""
+  var decided = false
+  if source.commitKeyed.len > 0 and source.commitKeyed.hasKey(repo.path):
+    rev = source.commitKeyed[repo.path]
+    decided = true
+  elif source.keyedOnly and not isEvidenceOnlyRepo(repo):
+    decided = true
+  if not decided:
+    rev = lockedShaFromStore(
+      source.store, source.projectName, repo.name, repo.path)
   if rev.len == 0: rev = repo.revision
   var integrity = ""
   if looksLikeSha(rev):
@@ -34444,9 +35226,14 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       else: lskManifestRepo
     var backendLd: LockedDependencies
     try:
+      # W7 — the key record travels WITH the source. The populator applies the
+      # same three arms the per-dep fold below applies, which is what stops it
+      # running ``lockedShaFromStore`` (two ``git log`` history queries over the
+      # record store) once per repo for an answer this rule then discards.
       backendLd = populateLockedDeps(LockSource(kind: srcKind,
         workspaceRoot: root, projectName: resolved.projectName,
-        repos: repos, store: store))
+        repos: repos, store: store,
+        commitKeyed: commitKeyed, keyedOnly: keyedOnly))
     except CatchableError as err:
       result.refusals.add(tierLbl & " lock backend (kind=" & kind &
         " location=" & location & ") failed while reading its records: " &
@@ -34503,6 +35290,16 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
       # resolved, the key's record is the ONLY record that may answer. An empty
       # answer here is the spec's "contributes nothing", and the ``noRecord``
       # entry below is its "and says so".
+      #
+      # These three arms are also carried INTO the populator (``LockSource``'s
+      # ``commitKeyed`` / ``keyedOnly``), which is what stops the two keyed arms
+      # from running ``lockedShaFromStore`` — two ``git log`` history queries
+      # per repo — for an answer they discard. Kept here as well because this is
+      # where the answer is USED and where ``noRecord`` is reported: the
+      # populator cannot distinguish "the backend held no record" from "the
+      # backend held a record that is not an exact revision", and the
+      # manifest-advisory fallback above is exactly why that distinction must
+      # be made from the store's own answer rather than from ``d``.
       let backendRev =
         if commitKeyed.hasKey(d.path): commitKeyed[d.path]
         elif keyedOnly: ""
@@ -36352,10 +37149,8 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
       for entry in outcome.report.repos:
         branches.add(entry.branch)
       writePromptCache(outcome.report.workspaceRoot, "sync", branches)
-    try:
-      writeGeneratedWorkspaceProjects(parsed.workspaceRoot)
-    except CatchableError as err:
-      stderr.writeLine("workspace sync: could not generate workspace-projects.md: " & err.msg)
+    refreshWorkspaceProjectsIndexBestEffort(parsed.workspaceRoot,
+      "workspace sync")
     # A sync is exactly when checkouts appear (or a `--force-sync` removes
     # one), so the sibling set is refreshed here. Skipped under `--dry-run`
     # along with every other mutation.
@@ -37079,6 +37874,17 @@ proc runWorkspacePullCommand*(args: openArray[string]): int =
       branches.add(entry.trackingBranch)
     writePromptCache(outcome.report.workspaceRoot, "pull", branches)
   refreshWorkspaceSiblingIgnoresBestEffort(outcome.report.workspaceRoot)
+  # `pull` converges every repo onto its manifest-declared revision, and the
+  # MANIFEST REPO is one of those repos: a pull is the ordinary way a
+  # workspace acquires a project someone else defined, a repo someone else
+  # added, or a reworded `repos/<r>.md`. So the index this workspace hands to
+  # the next agent is exactly as stale as the manifests were a moment ago, and
+  # this is the point at which that stops being true. Unconditional (it costs
+  # two manifest reads and a file write) and not gated on the exit code: a
+  # partially converged workspace still converged its manifests, and an index
+  # describing the manifests now on disk is the correct index either way.
+  refreshWorkspaceProjectsIndexBestEffort(outcome.report.workspaceRoot,
+    "workspace pull")
   for line in renderPullTextLines(outcome.report):
     stdout.writeLine(line)
   outcome.report.exitCode
@@ -38403,6 +39209,64 @@ type EffectivePrePushHookKind = enum
   ephReproIncompatible
   ephThirdParty
 
+const
+  # The two anchors around the one machine-local value a managed hook body
+  # carries. Kept beside the reader rather than inside it so the coupling to
+  # `vcsManagedHookBody`'s escape-hatch block is visible from both ends.
+  ManagedHookAuthorEchoPrefix =
+    "      echo \"repro hooks:        REPROBUILD_REPRO="
+  ManagedHookAuthorEchoSuffix = " git push\" >&2"
+
+proc managedHookAuthorBin(body: string): string =
+  ## The `repro` path an installed managed hook advertises in its escape
+  ## hatch, or "" when the hook carries none.
+  for line in body.splitLines():
+    if line.startsWith(ManagedHookAuthorEchoPrefix) and
+        line.endsWith(ManagedHookAuthorEchoSuffix) and
+        line.len > ManagedHookAuthorEchoPrefix.len +
+          ManagedHookAuthorEchoSuffix.len:
+      return line[ManagedHookAuthorEchoPrefix.len ..
+        ^(ManagedHookAuthorEchoSuffix.len + 1)]
+  ""
+
+proc managedHookBodyIsCurrent(hookName, body: string): bool =
+  ## "Does this build generate the hook body in front of me?" — the question
+  ## `managedHookContract` was introduced to answer, asked here about the body
+  ## itself.
+  ##
+  ## A byte-exact comparison against `vcsManagedHookContent` cannot answer it,
+  ## because that rendering bakes in `getAppFilename()`: the path of the binary
+  ## doing the asking. Two builds that generate the identical hook then
+  ## disagree whenever they are INVOKED FROM DIFFERENT PATHS — a `repro` in the
+  ## build tree and the same `repro` in the Nix profile, or any in-process
+  ## caller of `publishWorkspaceLock` that is not itself the binary that ran
+  ## `hooks ensure`. The push is refused as "hooks are old or partially
+  ## upgraded", which is not true of them, and the refusal is unreachable by
+  ## any amount of upgrading because nothing about the hook is behind.
+  ##
+  ## That path is deliberately NOT part of the hook's identity. The contract
+  ## token digests `vcsManagedHookBody(hookName, "", "")` — empty token, empty
+  ## author — because, as `vcsManagedHookBody` puts it, "the contract must
+  ## identify the BODY, not the filesystem it was written from". The only
+  ## thing the author path feeds is an optional escape-hatch `echo`, which
+  ## changes no behaviour of the hook and gates itself on `[ -x ... ]`.
+  ##
+  ## So: accept the body when it is what this build renders for the author it
+  ## ADVERTISES. The re-render is byte-exact, so the extracted path only
+  ## proposes a candidate and cannot widen what is accepted — a body that
+  ## differs anywhere else still fails.
+  ##
+  ## Drift detection in `ensureVcsHookDetailed` stays byte-exact on purpose:
+  ## `ensure` SHOULD re-anchor a hook whose baked path no longer names a
+  ## binary that exists, which is what keeps the escape hatch runnable. This
+  ## is the authorization question, not the freshness one.
+  if body == vcsManagedHookContent(hookName):
+    return true
+  let author = managedHookAuthorBin(body)
+  if author.len == 0:
+    return false
+  body == vcsManagedHookBody(hookName, managedHookContract(hookName), author)
+
 proc effectivePrePushHook(identity: GitToolIdentity; repoRoot: string):
     tuple[kind: EffectivePrePushHookKind; hookPath: string;
           diagnostic: string] =
@@ -38425,7 +39289,7 @@ proc effectivePrePushHook(identity: GitToolIdentity; repoRoot: string):
   # require the complete canonical dispatcher/body pair and executable files;
   # a marker-only or partially refreshed bundle is incompatible, never v2.
   if dispatcher == vcsDispatcherContent("pre-push") and
-      managedContent == vcsManagedHookContent("pre-push") and
+      managedHookBodyIsCurrent("pre-push", managedContent) and
       executableFile(path) and executableFile(managed):
     return (ephReproV2, path, "")
   if recognizesRepro:
@@ -39026,6 +39890,65 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
          advanced.oid]).code != 0:
       result.diagnostic = "remote moved non-fast-forward during lock publication"
       return
+
+    # INVARIANT 14 (push-hook-publication-protocol.md) — IMMUTABILITY BINDS
+    # PUBLISHED RECORDS, AND THIS IS THE LAST PLACE IT CAN BE CHECKED.
+    #
+    # The push was rejected because the remote moved, and the remote may have
+    # moved ONTO one of the very keys this operation is publishing. Until this
+    # fetch nobody could know that: at the tip we could see, our record was an
+    # honest ADDITION, so the writer's coordinate comparison, the staging
+    # check's ``A``-only rule and the ahead-chain verifier all passed on facts
+    # that were true when they ran. The collision exists only in the bytes we
+    # have just fetched.
+    #
+    # A lock store in this fleet (2026-09-16) is what happens without
+    # this check: 261 insertions / 175 deletions over
+    # ``locks/codetracer/codetracer/3168f9ec....toml``, a record published six
+    # days earlier and amended since, destroying the amendment and moving every
+    # sibling pin backwards onto the publishing workspace's feature branches —
+    # reported as ``OK``. Its reflog names the mechanism exactly: ``commit``,
+    # then ``rebase (start): checkout origin/latest``, then ``rebase (pick)``.
+    #
+    # WHY NOT LEAVE THIS TO THE REBASE. Replaying "add X" onto a tree that
+    # already holds X with other bytes is an add/add conflict, so today the
+    # rebase does fail and the additions-only verifier would refuse the ``M``
+    # afterwards even if it did not. Both are real, and both are ACCIDENTS OF
+    # HOW GIT MERGES rather than statements about lock records: a strategy
+    # option, a ``rerere`` resolution, or a merge driver in the operator's
+    # configuration resolves an add/add without asking, and the first guard is
+    # gone silently. This one compares BLOB OBJECT IDS — a hash over the exact
+    # bytes — so it is decided by the records themselves, and it says what the
+    # condition IS instead of reporting it as a merge failure.
+    #
+    # An IDENTICAL blob is not a violation and is deliberately not refused
+    # here: another publisher (or a retry of this one) filed the same record,
+    # the rebase drops the replayed commit as already applied, and the loop
+    # settles on its own.
+    for item in operationExpected:
+      let remoteBlob = gitRunPlain(identity,
+        ["-C", repoRoot, "rev-parse", "--verify", "--quiet",
+         advanced.oid & ":" & item.relPath])
+      if remoteBlob.code != 0 or remoteBlob.output.strip().len == 0:
+        continue
+      let localBlob = gitRunPlain(identity,
+        ["-C", repoRoot, "rev-parse", "--verify", "--quiet",
+         "HEAD:" & item.relPath])
+      if localBlob.code != 0 or localBlob.output.strip().len == 0:
+        continue
+      if remoteBlob.output.strip().toLowerAscii() !=
+          localBlob.output.strip().toLowerAscii():
+        result.diagnostic =
+          "a DIFFERENT lock record is already published at '" & item.relPath &
+          "' on " & target.display & " (published blob " &
+          remoteBlob.output.strip() & ", this operation generated " &
+          localBlob.output.strip() & "); published records are immutable and " &
+          "this one is not rewritten. Two sources disagree about the " &
+          "workspace state at that commit — bring this store up to date " &
+          "('git -C " & repoRoot & " pull --ff-only') and re-read the " &
+          "published record before deciding which answer is right"
+        return
+
     let rebased = rebaseVerifiedLockChain(identity, repoRoot, base,
       advanced.oid, operationExpected)
     if not rebased.ok:
@@ -54309,6 +55232,14 @@ proc runSwitchCommand*(args: openArray[string]): int =
     for entry in report.repos:
       branches.add(entry.newBranch)
     writePromptCache(report.workspaceRoot, "switch", branches)
+  # The manifest repo is a participating repo, so switching the workspace onto
+  # another branch can move `projects/`, `repo-sets/` and `repos/` to a
+  # different revision — a branch on which a project declares different repos,
+  # or does not exist at all. The `-b` form above is deliberately NOT given
+  # this: it creates the branch from the current tip, so the manifests it
+  # lands on are byte-identical to the ones the index was just generated from.
+  refreshWorkspaceProjectsIndexBestEffort(report.workspaceRoot,
+    "repro switch")
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -56483,6 +57414,13 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     result.repos.add(BranchRepoEntry(
       outcome: "metadata_write_failed", diagnostic: err.msg))
     return
+  # The fork is a WORKSPACE ROOT, and the first thing anything arriving in it
+  # reads is the index its `AGENTS.md` / `CLAUDE.md` `@import`s. Without this
+  # the forked directory carries its parent's project set in
+  # `.repro/workspace.toml` and no index at all, so every agent entering the
+  # fork is told the workspace is uninitialized. Placed after the metadata
+  # writers because it reads what they just recorded.
+  refreshWorkspaceProjectsIndexBestEffort(parsed.forkPath, "repro branch")
   result.exitCode = 0
 
 ## ----------------------------------------------------------------------------
@@ -61612,6 +62550,15 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
   # would otherwise refresh. Refreshing here covers every exit; the sync path
   # refreshes again and the second pass is a no-op.
   refreshWorkspaceSiblingIgnoresBestEffort(workspaceRoot)
+  # Same placement, same reason. The active set the index documents is the one
+  # `writeWorkspaceProjects` just recorded, and this is the narrowest point
+  # that sits after that write and before EVERY exit below — `--no-sync`,
+  # nothing-missing, the unresolved-manifest return, and the delegated sync.
+  # Leaving it to the sync would let those three early returns record
+  # membership the index never learns about, which is the omission this
+  # closes.
+  refreshWorkspaceProjectsIndexBestEffort(workspaceRoot,
+    "workspace enable")
 
   # PS-3 — materialize what was just recorded. Only the repos the named
   # projects introduce are missing-checkout candidates; everything already on
@@ -62429,6 +63376,15 @@ proc runWorkspaceDisableCommand*(args: openArray[string]): int =
   # Removed checkouts must leave the ignore set, or the block keeps naming
   # directories that no longer exist.
   refreshWorkspaceSiblingIgnoresBestEffort(workspaceRoot)
+  # …and the index must stop documenting a project this workspace no longer
+  # carries. Every path that reaches here has already passed
+  # `writeWorkspaceProjects`, and every refusal above it returns without
+  # recording anything — so the index is written exactly when the active set
+  # changed. The removal loop's per-checkout refusals do not gate it: those
+  # are about one directory, while the index describes the ACTIVE SET, which
+  # did change.
+  refreshWorkspaceProjectsIndexBestEffort(workspaceRoot,
+    "workspace disable")
 
   stdout.writeLine("repro workspace disable: disabled " &
     actuallyLeaving.join(", ") & "; active set: " &
@@ -63146,6 +64102,134 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
       rev: head.output.strip()))
   result.sort(proc (a, b: FlakeOverrideBinding): int = cmp(a.input, b.input))
 
+proc flakeLocalDirOfOverrideRef*(rf: string): string =
+  ## The local directory a ``--override-input`` reference names, or "" when it
+  ## names something that is not a working tree on this machine.
+  ##
+  ## TWO spellings denote a local directory and both must be recognised, for
+  ## the reason ``dev_shell_override_path_pairs_from_args`` records in
+  ## ``scripts/lib/dev_shell_overrides.sh``: ``path:`` was the only spelling
+  ## emitted until ``flakeSiblingOverrideRef`` began naming git checkouts as
+  ## git trees, and a matcher that knows only the old one does not fail — it
+  ## matches nothing and reports "no overrides", which is the silent-green
+  ## answer this whole campaign exists to remove.
+  ##
+  ##   path:/abs/dir
+  ##   git+file:///abs/dir[?submodules=1]
+  ##
+  ## Anything else (``github:``, ``git+https:``, a store path) is a remote or
+  ## already-content-addressed input. It is a legitimate override and it is NOT
+  ## a sibling substitution, so it has no working tree to stand ahead of or
+  ## behind a pin.
+  if rf.startsWith("path:"):
+    return rf["path:".len .. ^1]
+  if rf.startsWith("git+file://"):
+    var dir = rf["git+file://".len .. ^1]
+    let q = dir.find('?')
+    if q >= 0: dir = dir[0 ..< q]
+    return dir
+  ""
+
+proc flakeBindingsFromAppliedArgs*(args: openArray[string];
+    identity: GitToolIdentity;
+    report: var seq[string]): seq[FlakeOverrideBinding] =
+  ## The substitution set an ALREADY-APPLIED override argument vector performed
+  ## — read off the arguments themselves, never derived.
+  ##
+  ## ## This is not a second derivation of the override set
+  ##
+  ## NF-3's central rule is that there is ONE resolution of "which inputs are
+  ## substituted" (``flakeDevelopSelectionOf`` + ``flakeBindInputsToCheckouts``)
+  ## and that a second, cheaper derivation of the same question is forbidden,
+  ## because the one that was tried disagreed with the exact answer in BOTH
+  ## directions and made the pre-push gate fail open.
+  ##
+  ## This procedure derives NOTHING. It is handed the argument vector that was
+  ## actually spliced into ``use flake`` and reads the substitutions out of it.
+  ## The vector IS the ground truth about what nix was told to build: whatever
+  ## produced it — NF-1's binder, the legacy direnv plugin, or a hand-written
+  ## ``.env`` — is the thing whose answer this reports on. Two derivations can
+  ## disagree about what a shell builds; a derivation and the shell's own
+  ## applied arguments cannot, because the second is not an opinion.
+  ##
+  ## ## Why it exists at all, rather than everything going through the binder
+  ##
+  ## §3.2 requires the behind-pin report to reach the developer AT SHELL ENTRY,
+  ## and NF-3's own measurements record why it does not today: the only route to
+  ## it is ``repro flake override-args``, whose cost is dominated by
+  ## ``repro develop --list --all`` at ~226 s on this workspace, and that cost
+  ## is the recorded blocker on migrating this repository's ``.envrc`` off the
+  ## six ``NIX_FLAKE_OVERRIDE_*`` variables. So the report the spec mandates is
+  ## implemented, correct, and unreachable from the shell that needs it.
+  ##
+  ## Reporting over the APPLIED vector costs a handful of `git` calls per
+  ## substituted sibling and needs no develop-set resolution at all, so shell
+  ## entry can afford it TODAY — and for the ``.envrc`` this repository actually
+  ## runs it is the only answer that is even correct, because that ``.envrc``
+  ## does not use Reprobuild's derivation. Reporting on the binder's answer
+  ## while the plugin supplied a different one would be the two-derivations
+  ## error with the halves swapped.
+  ##
+  ## ## Substituted-but-unobservable is LOUD, and is not a binding
+  ##
+  ## ``FlakeOverrideBinding.rev`` is documented as never empty: the binder
+  ## refuses to substitute a checkout whose ``HEAD`` cannot be read, so
+  ## "substituted" implies "observable" by construction. Here the substitution
+  ## has ALREADY happened and that invariant cannot be enforced backwards — so
+  ## it is preserved by not manufacturing a binding, and the situation is named
+  ## in ``report`` instead. §3.3 describes exactly this state: the environment
+  ## is unreproducible by construction, because the pins are not the inputs.
+  var i = 0
+  while i < args.len:
+    if args[i] != "--override-input" or i + 2 >= args.len:
+      # Not a triple we act on. Advance ONE word rather than three: a stride of
+      # three is correct only for a vector that is nothing but triples, and it
+      # mis-aligns on every other shape instead of skipping it.
+      inc i
+      continue
+    let
+      input = args[i + 1]
+      rf = args[i + 2]
+    i += 3
+    let dir = flakeLocalDirOfOverrideRef(rf)
+    if dir.len == 0:
+      # A remote or content-addressed override. Stated rather than dropped —
+      # "there is no local tree here" and "we did not look" must not look alike.
+      report.add("not a sibling substitution: flake input '" & input &
+        "' is overridden to " & rf &
+        ", which names no working tree on this machine, so it has no HEAD " &
+        "to stand ahead of or behind a pin.")
+      continue
+    if not dirExists(extendedPath(dir)):
+      report.add("SUBSTITUTED but ABSENT: flake input '" & input &
+        "' is overridden to " & dir &
+        ", which does not exist. nix cannot evaluate that input at all; this " &
+        "is a broken override, not a drifted one.")
+      continue
+    if not flakeSiblingIsGitCheckout(dir):
+      report.add("SUBSTITUTED but UNOBSERVABLE: flake input '" & input &
+        "' is overridden to " & dir &
+        ", which is not a git checkout, so nothing can name the revision " &
+        "your shell is building. flake.lock still pins something else and " &
+        "there is no way to say whether they agree.")
+      continue
+    let head = gitRunPlain(identity, ["-C", dir, "rev-parse", "HEAD"])
+    if head.code != 0 or head.output.strip().len == 0:
+      report.add("SUBSTITUTED but UNOBSERVABLE: flake input '" & input &
+        "' is overridden to " & dir & ", whose HEAD could not be read (" &
+        head.output.strip() & "), so nothing can name the revision your " &
+        "shell is building. Remedy: repair that checkout (`git -C " & dir &
+        " rev-parse HEAD` shows the error).")
+      continue
+    # The repo NAME is the checkout's directory name. In the derived path it
+    # comes from the workspace membership; here there is no membership to ask,
+    # and the directory name is what the workspace convention makes it anyway.
+    # `lastPathPart` ignores a trailing separator, so `path:../io-mon/` and
+    # `path:../io-mon` name the same repo.
+    result.add(FlakeOverrideBinding(input: input, repo: lastPathPart(dir),
+      path: dir, rev: head.output.strip()))
+  result.sort(proc (a, b: FlakeOverrideBinding): int = cmp(a.input, b.input))
+
 # ---------------------------------------------------------------------------
 # NF-3 — ONE override-state report, read by every consumer.
 #
@@ -63226,6 +64310,25 @@ type
     aheadBy*: int         ## commits in HEAD that the pin does not have
     behindBy*: int        ## commits in the pin that HEAD does not have
     detail*: string       ## why an unknown/unpinned row is what it is
+    unpublished*: bool
+      ## ``siblingRev`` was NOT shown to be obtainable from a remote — the
+      ## SECOND axis of this row, orthogonal to ``relation``. A sibling can be
+      ## ahead of its pin (so §3.1 says record it) and simultaneously carry a
+      ## revision that exists only in this checkout (so it must not be
+      ## recorded), which is why this is its own field rather than another
+      ## ``FlakePinRelation`` member.
+      ##
+      ## Defaults to ``false``, so a row nobody asked the publication question
+      ## about behaves exactly as it did before the question existed. Only
+      ## ``flakeAnnotatePublication`` sets it.
+    publicationDetail*: string
+      ## Why ``unpublished`` is set, in the words the notice prints. It
+      ## distinguishes the two ways the answer comes out negative — reachable
+      ## from no remote-tracking ref, versus a probe that could not run — which
+      ## a bare boolean would flatten into one message that is true of only one
+      ## of them.
+    pushRemote*: string   ## the remote the publishing command names
+    pushBranch*: string   ## the branch the publishing command names
 
   FlakeOverrideState* = object
     ## The §5 report. ``ok`` and ``examined`` are separate on purpose: NF-1's
@@ -63404,6 +64507,193 @@ proc flakeClassifyPin(identity: GitToolIdentity;
     return (relation: fprBehind, aheadBy: 0, behindBy: onlyPin, detail: "")
   (relation: fprDiverged, aheadBy: onlyHead, behindBy: onlyPin, detail: "")
 
+proc flakePushTarget(identity: GitToolIdentity;
+    dir, headRev: string): tuple[remote, branch: string] =
+  ## Which remote, and which branch on it, a publishing `git push` from this
+  ## checkout should name — so the command the notice prints is one line that
+  ## runs, rather than a shape the operator has to fill in.
+  ##
+  ## The remote is the one the current branch tracks, falling back to `origin`
+  ## and then to whatever remote the checkout does have. When it has NONE the
+  ## name `origin` is still printed: the command then fails with git's own
+  ## "'origin' does not appear to be a git repository", which is a true and
+  ## specific account of the situation, and is strictly better than printing no
+  ## command at all. (A sibling of a repro workspace always has an origin — it
+  ## was cloned from one — so this arm exists for completeness rather than for
+  ## a shape anyone runs.)
+  ##
+  ## A DETACHED HEAD names no branch, and detached siblings are ordinary here:
+  ## `repro branch ../<name>` produces linked worktrees, and `repro ws pull`
+  ## checks out pinned revisions. What makes a revision obtainable is
+  ## reachability from SOME ref on the remote, not from a particular one, so the
+  ## fallback publishes to a deterministic name derived from the revision
+  ## itself: re-running the command is then idempotent, and the branch it
+  ## creates says what it is for.
+  var branch = ""
+  let sym = gitRunPlain(identity,
+    ["-C", dir, "symbolic-ref", "--quiet", "--short", "HEAD"])
+  if sym.code == 0: branch = sym.output.strip()
+  var remote = ""
+  if branch.len > 0:
+    let cfg = gitRunPlain(identity,
+      ["-C", dir, "config", "--get", "branch." & branch & ".remote"])
+    if cfg.code == 0: remote = cfg.output.strip()
+  if remote.len == 0 or remote == ".":
+    var names: seq[string]
+    let listed = gitRunPlain(identity, ["-C", dir, "remote"])
+    if listed.code == 0:
+      for line in listed.output.splitLines():
+        let n = line.strip()
+        if n.len > 0: names.add(n)
+    remote =
+      if "origin" in names: "origin"
+      elif names.len > 0: names[0]
+      else: "origin"
+  if branch.len == 0:
+    branch = "repro/published/" & shortRev(headRev)
+  (remote: remote, branch: branch)
+
+proc flakeClassifyPublication(identity: GitToolIdentity;
+    dir, headRev: string):
+    tuple[unpublished: bool; detail, remote, branch: string] =
+  ## Is ``headRev`` obtainable by anybody but this checkout?
+  ##
+  ## ## The defect this answers, measured 2026-09-13 in this workspace
+  ##
+  ## `repro flake refresh-lock` recorded `runquota-src` at
+  ## `18f64e103c19453b939882c9190c7c180934bb3d` — a commit that existed only in
+  ## the local checkout and had never been pushed. `flake.lock` then named
+  ## content nobody else can obtain, and nix answered
+  ##
+  ##     error: unable to download
+  ##     'https://api.github.com/repos/metacraft-labs/runquota/tarball/18f64e10…':
+  ##     HTTP error 404
+  ##
+  ## which nix-direnv turned into a FALLBACK to the previous environment rather
+  ## than a failure — so the developer kept working in a stale shell while the
+  ## lock claimed something else. `codetracer` and `codetracer-native-recorder`
+  ## were in the same state in the same moment, so it is systemic.
+  ##
+  ## Workspace-And-Develop-Mode.md §"Reproducibility And `repro check`" already
+  ## covers it: a develop-mode dependency that is "dirty **or only locally
+  ## committed**" is not properly lockable for other people yet. NF-2 honoured
+  ## the dirty half and two of the unclassifiable ones; this is the fourth
+  ## member of that family, in the same shape.
+  ##
+  ## ## HOW STRONGLY this is checked, and why it stops there
+  ##
+  ## LOCAL REMOTE-TRACKING REFS ONLY. One `git rev-list --max-count=1 <rev>
+  ## --not --remotes`: empty output means every ancestor of the revision,
+  ## including the revision, is reachable from something under `refs/remotes/`;
+  ## any output names a commit that is not, and the walk stops at the first one.
+  ## NO NETWORK IS CONSULTED, ever, on any path.
+  ##
+  ## The alternative — `git ls-remote` — is rejected on both cost and
+  ## behaviour. This runs on the pre-commit path, where "the sibling I just
+  ## committed is not pushed yet" is the COMMON state rather than the rare one,
+  ## so the remote would be dialled on a large fraction of commits; a commit
+  ## that blocks on network reachability is a commit that fails on a train, and
+  ## a hook that does that is a hook people uninstall.
+  ##
+  ## The two ways a local-only answer can be wrong are NOT symmetric, and that
+  ## is what makes the cheap check the right one:
+  ##
+  ##   * we say PUBLISHED when it is not — only possible if a remote-tracking
+  ##     ref names a commit the remote has since lost (a force-push or a branch
+  ##     deletion). A tracking ref is only ever written by an operation that
+  ##     observed the remote holding that value, so this requires the remote to
+  ##     have gone BACKWARDS. Rare, and a different failure.
+  ##   * we say LOCAL-ONLY when it is not — the ordinary staleness case: the
+  ##     revision was published from some other clone and this one has not
+  ##     fetched. Cost: one refresh skipped, one loud notice, and a `flake.lock`
+  ##     still naming a pin that IS obtainable. Nothing wrong is written and no
+  ##     operation is refused, so the wrong answer costs a re-run — which is why
+  ##     the notice names a `git fetch` as its alternative remedy.
+  ##
+  ## The cheap check errs in the direction that leaves the lock correct. A
+  ## network check would cost every commit to remove an error whose cost is a
+  ## warning.
+  ##
+  ## ## What counts as "a remote"
+  ##
+  ## Everything under `refs/remotes/`. In this workspace the shared bare cache
+  ## is attached as an `objects/info/alternates` entry rather than as a git
+  ## remote, so cache-only objects — which nix cannot fetch either — do not
+  ## count as published. That is the required behaviour, and it is a property of
+  ## how the cache is wired rather than of a rule spelled here; a cache attached
+  ## as a REMOTE would be read as publication, wrongly.
+  if headRev.len == 0:
+    # Nothing was observed to publish. `flakeClassifyPin` already reports this
+    # as `unknown` and it is already not recordable; saying it twice, in a
+    # second vocabulary, would only make the notice contradict itself.
+    return
+  let target = flakePushTarget(identity, dir, headRev)
+  result.remote = target.remote
+  result.branch = target.branch
+  let unreachable = gitRunPlain(identity,
+    ["-C", dir, "rev-list", "--max-count=1", headRev, "--not", "--remotes"])
+  if unreachable.code != 0:
+    # The probe itself failed, so publication is UNPROVEN — and unproven is not
+    # "published". The same rule `fprUnfetched` follows: a pin that cannot be
+    # established must not be filed. Worded as its own sentence so the notice
+    # does not assert the stronger claim (`exists only here`) that the probe
+    # never established.
+    result.unpublished = true
+    # The quoted probe is spelled with `-C <dir>` so that it, like every other
+    # backticked chunk this campaign emits, is a command line the operator can
+    # paste and run unchanged from wherever the message was printed.
+    result.detail = "could not be shown to exist anywhere but this checkout " &
+      "— `git -C " & dir & " rev-list --max-count=1 " & headRev &
+      " --not --remotes` failed (" & unreachable.output.strip() & ")"
+    return
+  if unreachable.output.strip().len == 0:
+    return
+  result.unpublished = true
+  result.detail = "exists ONLY in this local checkout: " & shortRev(headRev) &
+    " is reachable from no remote-tracking ref under refs/remotes/ in " & dir &
+    ", so a pin naming it would name content nobody else can obtain"
+
+proc flakeAnnotatePublication*(state: var FlakeOverrideState;
+    identity: GitToolIdentity) =
+  ## Ask the publication question of every row that has a revision to publish.
+  ##
+  ## Opt-in, and deliberately NOT asked by `flakeOverrideStateReport` itself.
+  ## That report is computed on every directory entry (`repro flake
+  ## override-args` drives `.envrc`), and this adds one `git rev-list` per
+  ## substituted input. The two places that need the answer — the refresh, which
+  ## decides what to WRITE, and the pre-push gate, which decides what to
+  ## PUBLISH — are both rare and both already resolve the develop set, so they
+  ## pay it and the hot path does not.
+  ##
+  ## ## Asked of AHEAD and DIVERGED rows, and of no others
+  ##
+  ## Those two are exactly the relations under which a refresh writes a NEW
+  ## revision taken from the sibling's `HEAD` — the only writes a pin can be
+  ## made unobtainable by. Restricting the question to them is what keeps every
+  ## consumer downstream unambiguous: an annotated row is always one that WOULD
+  ## have been recorded, so `row.unpublished` never has to be weighed against a
+  ## relation that had already declined.
+  ##
+  ##   * AT — the pin already names this revision, so the rewrite is a no-op and
+  ##     the file is not opened at all. Withholding a write of nothing would
+  ##     print a warning on every commit and change no byte. (A pin that is
+  ##     itself unobtainable is a real problem, but it is the LOCK's problem and
+  ##     the pre-push publication stage's to raise, not this refresh's.)
+  ##   * BEHIND — `HEAD` is an ancestor of the pin, so if the pin is reachable
+  ##     from a remote ref then so is `HEAD`, by construction. A behind row can
+  ##     only be unpublished when the PIN is, which is the already-broken lock
+  ##     above. It is also already not recordable, and its remedy — move the
+  ##     checkout up to the pin — is the right first move regardless.
+  ##   * UNFETCHED / UNKNOWN / UNPINNED — never recorded, so there is no write
+  ##     to withhold and no second reason worth printing.
+  for row in state.rows.mitems:
+    if row.relation notin {fprAhead, fprDiverged}: continue
+    let verdict = flakeClassifyPublication(identity, row.path, row.siblingRev)
+    row.unpublished = verdict.unpublished
+    row.publicationDetail = verdict.detail
+    row.pushRemote = verdict.remote
+    row.pushBranch = verdict.branch
+
 proc flakeOverrideStateReport*(flakeRoot: string;
     bindings: openArray[FlakeOverrideBinding];
     identity: GitToolIdentity;
@@ -63572,45 +64862,83 @@ proc flakeRowIsRecordable*(row: FlakeOverrideStateRow): bool =
   ##     result and a failure must not look alike, applied to a pin.
   ##   * UNPINNED — nothing to write; the rewriter says so per input.
   ##
+  ##   * UNPUBLISHED — **no**, whatever the relation says. This is the second
+  ##     axis (``row.unpublished``), and it OVERRULES the first: an ahead
+  ##     sibling whose HEAD has never left this machine is exactly the §3.1 case
+  ##     the relation blesses and exactly the revision a pin must not name.
+  ##     Workspace-And-Develop-Mode.md §"Reproducibility And `repro check`" puts
+  ##     "dirty **or only locally committed**" in one clause for this reason:
+  ##     both describe build state that is not lockable for other people yet.
+  ##     Measured 2026-09-13 — see `flakeClassifyPublication` — the refresh
+  ##     recorded three siblings' unpushed HEADs and nix answered HTTP 404 while
+  ##     nix-direnv fell back to the previous shell.
+  ##
   ## Withholding is per INPUT and never per refresh: a workspace normally has
   ## siblings drifting in different directions at once, and one behind-pin
   ## sibling must not suppress the recording of an unrelated ahead one.
-  row.relation notin {fprBehind, fprUnfetched, fprUnknown}
+  row.relation notin {fprBehind, fprUnfetched, fprUnknown} and
+    not row.unpublished
 
-proc flakeReconcileCommand(row: FlakeOverrideStateRow;
-    flakeRoot, workspaceRoot: string): string =
-  ## The ONE command that reconciles ONE row — a single command line, spelled
-  ## so it runs unchanged from anywhere, including from the directory the
-  ## message is printed in. §"the named command must RUN where the message is
-  ## printed", rule 2: "spell out the location flag", because
-  ## `repro flake refresh-lock` resolves a bare invocation against the current
-  ## directory.
+proc flakeRefreshLockCommand(flakeRoot, workspaceRoot: string): string =
+  ## The refresh, spelled with BOTH location flags so it runs unchanged from
+  ## wherever the message quoting it was printed — `repro flake refresh-lock`
+  ## resolves a bare invocation against the current directory.
+  "repro flake refresh-lock --flake=" & flakeRoot &
+    " --workspace-root=" & workspaceRoot
+
+proc flakeReconcileCommands(row: FlakeOverrideStateRow;
+    flakeRoot, workspaceRoot: string): seq[string] =
+  ## Every command that reconciles ONE row, in the order they must be run.
   ##
-  ## SINGLE is a hard requirement, not a preference. This string is emitted
-  ## inside backticks for the operator to copy, so anything that is not a
-  ## runnable command line — a parenthesised aside, an "or", a second command
-  ## glued on — becomes `bash: syntax error near unexpected token '('` in the
-  ## hands of the person the message was written for. The alternative remedy a
-  ## BEHIND row also has is returned separately by
-  ## ``flakeReconcileAlternative`` and quoted in its own backticks.
+  ## THE single generator. Both the withheld notice NF-2 prints and the refusal
+  ## NF-3's pre-push gate prints are built from this list, so the two halves of
+  ## the campaign cannot grow different opinions about what fixes a row — a
+  ## defect this file has already produced once, when the refresh recorded what
+  ## the gate then refused.
+  ##
+  ## Each element is a SINGLE command line, and that is a hard requirement
+  ## rather than a preference. These strings are emitted inside backticks for
+  ## the operator to copy, so anything that is not a runnable command line — a
+  ## parenthesised aside, an "or", a second command glued on — becomes
+  ## `bash: syntax error near unexpected token '('` in the hands of the person
+  ## the message was written for. Multiple commands are multiple ELEMENTS, each
+  ## quoted on its own.
+  if row.unpublished:
+    # The revision has to EXIST for other people before a pin may name it, so
+    # the publishing push comes first; the refresh that then records it comes
+    # second, because after the push the row is recordable and one more refresh
+    # is all that is missing. Both are named because either alone leaves the
+    # operator with a lock that still does not describe the build.
+    return @["git -C " & row.path & " push " & row.pushRemote & " " &
+               row.siblingRev & ":refs/heads/" & row.pushBranch,
+             flakeRefreshLockCommand(flakeRoot, workspaceRoot)]
   case row.relation
   of fprBehind:
     # The checkout is the stale half, so the FIRST remedy moves the checkout,
     # not the lock.
-    "git -C " & row.path & " merge --ff-only " & row.pinnedRev
+    @["git -C " & row.path & " merge --ff-only " & row.pinnedRev]
   of fprUnfetched:
     # Nothing can be reconciled before anything can be CONCLUDED, and the one
     # thing missing is the object. This is the only remedy in this proc that
     # answers a question rather than closing a gap, and it is first for that
     # reason: after it, the row classifies and its real remedy is knowable.
-    "git -C " & row.path & " fetch --all"
+    @["git -C " & row.path & " fetch --all"]
   else:
-    "repro flake refresh-lock --flake=" & flakeRoot &
-      " --workspace-root=" & workspaceRoot
+    @[flakeRefreshLockCommand(flakeRoot, workspaceRoot)]
+
+proc flakeReconcileCommand(row: FlakeOverrideStateRow;
+    flakeRoot, workspaceRoot: string): string =
+  ## The FIRST command that reconciles ONE row. Kept as its own name because
+  ## most renderings quote exactly one, and it is by construction
+  ## ``flakeReconcileCommands``'s head rather than a second derivation of it.
+  flakeReconcileCommands(row, flakeRoot, workspaceRoot)[0]
 
 proc flakeReconcileAlternative(row: FlakeOverrideStateRow;
     flakeRoot, workspaceRoot: string): string =
-  ## The SECOND runnable command a BEHIND row has, and only a behind row.
+  ## The runnable command a row has BESIDE the ones that reconcile it — the
+  ## one that is an alternative rather than a step. Two kinds of row have one
+  ## (BEHIND and UNPUBLISHED); every other kind returns the empty string.
+  ##
   ## Recording a downgrade stays available because deliberately testing an
   ## older dependency is legitimate (§3.2) — it is named second because a
   ## checkout behind its pin almost always means the checkout is stale.
@@ -63622,7 +64950,18 @@ proc flakeReconcileAlternative(row: FlakeOverrideStateRow;
   ## naming the bare form would print a command that exits 0 and changes
   ## nothing, which is the failure mode §"the named command must RUN where the
   ## message is printed" exists to forbid, in its quietest form.
-  if row.relation == fprBehind:
+  ##
+  ## An UNPUBLISHED row has a second command too, and it is a different kind of
+  ## thing: the publication check reads only local remote-tracking refs (see
+  ## `flakeClassifyPublication`), so the one way its answer can be wrong is that
+  ## the revision WAS published from another clone and this one has not fetched
+  ## since. `git fetch` is the command that settles that, and naming it is what
+  ## keeps the cheap check honest — the operator is told both what was concluded
+  ## and how to disprove it. It is second because the common case by far is that
+  ## the commit really has never left this machine.
+  if row.unpublished:
+    "git -C " & row.path & " fetch " & row.pushRemote
+  elif row.relation == fprBehind:
     "repro flake refresh-lock --flake=" & flakeRoot &
       " --workspace-root=" & workspaceRoot & " --record-downgrade"
   else:
@@ -63931,6 +65270,39 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
 # the integrity they carried is not silently downgraded: it is DEFERRED to the
 # `rev`, which is itself a content hash of the tree git will hand nix.
 #
+# ## …and why some `rev`s are not moved at all
+#
+# That whole argument is about the node's `locked` half. A node states the
+# revision TWICE: `locked.rev` is what the evaluation builds, and `original`
+# mirrors the flake-ref as WRITTEN IN `flake.nix` — carrying a `rev` of its own
+# only when the author pinned the input explicitly (`?rev=` / `github:o/r/<sha>`)
+# instead of floating it on a branch.
+#
+# Nix never reconciles the two. `src/libflake/flake.cc` reuses an existing lock
+# entry on `oldLock->originalRef.canonicalize() == input.ref->canonicalize()`
+# alone — `original` against `flake.nix`, with `locked` checked against
+# neither. Measured on this host with nix 2.32.8, two local git revisions
+# differing in one file:
+#
+#   * `original.rev` = R1 (agreeing with `flake.nix`), `locked.rev` rewritten
+#     to R2 → `nix eval` returns R2's content. No warning, no error, lock left
+#     byte-identical. The pin the author WROTE is inert. This is treatment (i)
+#     again, one level up: not a stale `narHash` under a fresh `rev`, but a
+#     stale `flake.nix` under a fresh lock — and "a pin that reads correct and
+#     builds something else" was the reason (i) was rejected;
+#   * moving `original.rev` to R2 as well → nix finds the lock disagreeing with
+#     `flake.nix`, REVERTS the node to R1 and rewrites `flake.lock`. The
+#     refresh is undone AND the no-churn property is lost.
+#
+# Editing `flake.nix` is the only treatment that makes such a node coherent,
+# and §13.2 does not put it in this refresh's hands. So a rev-pinned input's
+# pin is DECLINED — left exactly as it was, `narHash` included, since a node
+# that did not move has nothing to recompute — through the same `withheld`
+# channel as every other §3.2 decision, naming the file to edit.
+# `t_a_flake_pinned_input_is_not_moved_behind_the_flakes_back` pins both the
+# decline and its boundary: once `flake.nix` names the observed revision, the
+# refresh agrees with the flake and files it.
+#
 # ## Why the edit is surgical rather than a parse/serialize round trip
 #
 # `flake.lock` is nix's file, not ours. Reserializing it would reorder keys,
@@ -64102,11 +65474,46 @@ type
     text*: string           ## the refreshed document (== the input when not changed)
     rewrites*: seq[FlakeLockRewrite]
     notices*: seq[string]   ## inputs this refresh could NOT pin, and why
+    declined*: seq[string]
+      ## One sentence per input whose pin this refresh REFUSED to move because
+      ## `flake.nix` states that input's revision itself. Separate from
+      ## `notices` for the same reason `FlakeLockRefreshOutcome.withheld` is:
+      ## these are decisions, not remarks, and the caller promotes them into
+      ## `withheld` so they are warned about on stderr and named in the
+      ## outcome's own diagnostic. See `flakeDeclinedPinNotice`.
     failed*: bool           ## the document itself could not be read as a lock
     diagnostic*: string
 
+proc flakeDeclinedPinNotice(input, node, declaredRev, observedRev,
+    flakeRoot: string): string =
+  ## The announcement for ONE input whose pin `flake.nix` states itself.
+  ##
+  ## NOTE for anyone editing this string: backticks are reserved for RUNNABLE
+  ## command lines — `backtickedCommands` lifts every one of them out and the
+  ## cases run what it finds — and the remedy here is a FILE EDIT, not a
+  ## command. So it carries no backticks at all rather than handing the
+  ## operator something that is not runnable.
+  let flakeFile =
+    if flakeRoot.len > 0: flakeRoot / "flake.nix" else: "the flake's flake.nix"
+  "flake.lock NOT refreshed for input '" & input & "': " & flakeFile &
+    " pins this input BY REVISION, so its lock node '" & node &
+    "' states that revision in original.rev (" & declaredRev &
+    ") as well as in locked.rev, and the observed checkout is at " &
+    observedRev & ". Moving locked.rev alone would make the evaluation build " &
+    observedRev & " while " & flakeFile & " still reads as a pin on " &
+    declaredRev & " — measured with nix 2.32.8: no warning, no error, the " &
+    "flake's own pin simply inert. Moving original.rev with it is worse: nix " &
+    "then finds the lock disagrees with the flake, REVERTS the node to " &
+    declaredRev & " and rewrites flake.lock on the next evaluation. Neither " &
+    "is this refresh's to choose, so the pin was LEFT ALONE, with its " &
+    "narHash intact. This is a warning, not an error: nothing was written " &
+    "and no operation was refused. To record " & observedRev &
+    ", change the rev= in this input's url in " & flakeFile &
+    "; nix will then re-lock the input and compute its narHash itself."
+
 proc refreshFlakeLockText*(lockText: string;
-    revisions: openArray[tuple[input, rev: string]]): FlakeLockRefresh =
+    revisions: openArray[tuple[input, rev: string]];
+    flakeRoot = ""): FlakeLockRefresh =
   ## Rewrite the `locked` node of each named input to the given revision,
   ## leaving EVERY other byte of the document untouched. An input whose pin
   ## already names that revision produces no rewrite at all — that is what
@@ -64204,6 +65611,57 @@ proc refreshFlakeLockText*(lockText: string;
     if oldRevText == newRevText:
       # THE common case, and the reason most commits do not touch the file.
       continue
+
+    # The node's OTHER statement of "which revision". `original` mirrors the
+    # flake-ref as it is written in `flake.nix`; it carries a `rev` only when
+    # the author pinned the input explicitly (`?rev=` / `github:o/r/<sha>`,
+    # which nix hoists into its own attribute) rather than floating it on a
+    # branch. A floating input has no `rev` here at all, and that is the
+    # majority case this refresh was built for.
+    #
+    # Where it IS present and names something other than the revision about to
+    # be filed, the move is declined. Measured on this host with nix 2.32.8,
+    # against two local git revisions differing in one file's content:
+    #
+    #   * `original.rev` = R1 (matching flake.nix), `locked.rev` rewritten to
+    #     R2: `nix eval` returned R2's content, with NO warning, NO error, and
+    #     the lock left byte-identical. `src/libflake/flake.cc` reuses a lock
+    #     entry on `oldLock->originalRef.canonicalize() == input.ref` alone —
+    #     `locked` is never checked against `original` — so the explicit pin
+    #     the author wrote in flake.nix is simply INERT. That is the very
+    #     failure this refresh exists to remove, one level up: treatment (i)
+    #     above is rejected because it yields "a pin that reads correct and
+    #     builds something else", and this is flake.nix reading correct and
+    #     building something else;
+    #   * moving `original.rev` to R2 as well — the obvious "make the node
+    #     agree with itself" repair — is worse, not better: nix then finds the
+    #     lock disagrees with flake.nix, REVERTS the whole node to R1 and
+    #     rewrites flake.lock. The refresh is undone and the no-churn property
+    #     goes with it.
+    #
+    # The remaining option, editing `flake.nix`, is not this refresh's: §13.2
+    # confines it to "SIBLING PINNING records WHAT IS CHECKED OUT", over the
+    # lock file. So the pin is left alone — narHash included, because a node
+    # that did not move has nothing to recompute — and the decision is said
+    # out loud with the file to edit.
+    #
+    # An `original.rev` that ALREADY names the observed revision is the author
+    # having moved the pin: there the refresh agrees with the flake instead of
+    # contradicting it, and filing it makes the node coherent rather than less
+    # so, so it proceeds.
+    let originalIdx = jsonMemberIndex(lockedMembers, "original")
+    if originalIdx >= 0:
+      let originalFields = jsonObjectMembers(lockText,
+        lockedMembers[originalIdx].valueStart)
+      let originalRevIdx = jsonMemberIndex(originalFields, "rev")
+      if originalRevIdx >= 0:
+        let declaredRev = lockText[originalFields[originalRevIdx].valueStart ..<
+          originalFields[originalRevIdx].valueEnd].strip(chars = {'"'})
+        if declaredRev != entry.rev:
+          result.declined.add(flakeDeclinedPinNotice(entry.input, nodeKey,
+            declaredRev, entry.rev, flakeRoot))
+          continue
+
     var dropped: seq[string]
     for key in flakeLockRevisionDerivedKeys:
       if jsonMemberIndex(fields, key) >= 0: dropped.add(key)
@@ -64327,9 +65785,10 @@ proc flakeWithheldNotice(row: FlakeOverrideStateRow;
   ## The §3.2 announcement for ONE input whose pin the refresh declined to move.
   ##
   ## Naming the sibling, the DISTANCE and the reconciling command is the rule
-  ## verbatim, and the commands come from `flakeReconcileCommand` /
-  ## `flakeReconcileAlternative` — the same two the pre-push refusal prints —
-  ## rather than from a second generator here. There was very nearly one: the
+  ## verbatim, and the commands come from `flakeReconcileCommands` /
+  ## `flakeReconcileAlternative` — the same generators the pre-push refusal
+  ## prints from — rather than from a second one here. There was very nearly
+  ## one: the
   ## first behind-pin remedy in this file quoted a command and a parenthesised
   ## alternative inside ONE pair of backticks, which pastes as `bash: syntax
   ## error near unexpected token '('`. Reusing the fixed generators means that
@@ -64341,6 +65800,29 @@ proc flakeWithheldNotice(row: FlakeOverrideStateRow;
   ## dispatching), and the commands are spelled so they run unchanged there.
   result = "flake.lock NOT refreshed for input '" & row.input & "': " &
     flakeRowSentence(row) & ". "
+  if row.unpublished:
+    # The fourth member of the "not properly lockable for other people yet"
+    # family, and the one whose absence was measured: a pin naming a revision
+    # only this machine has produces `HTTP error 404` from nix, which
+    # nix-direnv turns into a SILENT fallback to the previous dev shell.
+    let cmds = flakeReconcileCommands(row, flakeRoot, workspaceRoot)
+    # NOTE for anyone editing this string: backticks are reserved for RUNNABLE
+    # command lines. `backtickedCommands` lifts every one of them out and the
+    # cases run what it finds, so quoting an error message or an aside in them
+    # hands the operator something that is not a command.
+    result.add("Its HEAD " & row.publicationDetail &
+      ". Recording it would file a pin nix cannot resolve for anybody else — " &
+      "the measured symptom is HTTP error 404 from the forge, which " &
+      "nix-direnv reports by falling back to the PREVIOUS dev shell rather " &
+      "than by failing — so the pin was LEFT ALONE. This is a warning, not " &
+      "an error: nothing was written and no operation was refused. From " &
+      flakeRoot & " run: `" & cmds.join("` then `") &
+      "` — or, if you believe this revision is already published and only " &
+      "this checkout has not seen it, `" &
+      flakeReconcileAlternative(row, flakeRoot, workspaceRoot) &
+      "` first, since publication is judged from local remote-tracking refs " &
+      "alone and never over the network.")
+    return
   case row.relation
   of fprBehind:
     result.add("Recording this checkout's HEAD would file a DOWNGRADE nobody " &
@@ -64497,18 +65979,31 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   # The classification is `flakeOverrideStateReport`'s — the same derivation the
   # ambient §3.2 report and the pre-push gate use — over the SAME lock bytes
   # this call is about to rewrite.
-  let state = flakeOverrideStateReport(flakeRoot, bound, identity, lockText)
+  var state = flakeOverrideStateReport(flakeRoot, bound, identity, lockText)
   if not state.ok:
     result.tag = "refused-unreadable-lock"
     result.diagnostic = state.refusals.join("; ")
     result.exitCode = 2
     return
+  # (3b) …and against the OTHER axis: is the revision obtainable by anybody but
+  # this checkout? A pin is a promise that the named content can be fetched, and
+  # a revision that has never been pushed cannot honour it. Same shape as every
+  # other skip: per input, lock left alone, commit unaffected, said loudly.
+  # Asked HERE rather than inside the report because the report also runs on
+  # every directory entry; see `flakeAnnotatePublication`.
+  flakeAnnotatePublication(state, identity)
 
   var revisions: seq[tuple[input, rev: string]]
   for row in state.rows:
     # ``row.siblingRev`` is the revision the BINDER observed, in the pass that
     # decided this input is substituted at all — so the pin filed here and the
     # revision the dev shell was given cannot be two different answers.
+    #
+    # `--record-downgrade` is unaffected by the publication axis, and does not
+    # need to be guarded against it: a BEHIND row's `HEAD` is an ancestor of the
+    # pin, so it is reachable from a remote whenever the pin is, and
+    # `flakeAnnotatePublication` does not ask the question there for exactly
+    # that reason.
     let permitted = flakeRowIsRecordable(row) or
       (recordDowngrade and row.relation == fprBehind)
     if permitted:
@@ -64523,13 +66018,23 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   for w in result.withheld:
     stderr.writeLine(label & ": WARNING: " & w)
 
-  let refreshed = refreshFlakeLockText(lockText, revisions)
+  let refreshed = refreshFlakeLockText(lockText, revisions, flakeRoot)
   for n in refreshed.notices: result.notices.add(n)
   if refreshed.failed:
     result.tag = "refused-unreadable-lock"
     result.diagnostic = refreshed.diagnostic
     result.exitCode = 2
     return
+  # A pin `flake.nix` states BY REVISION is withheld for the same reason as
+  # every other §3.2 decision, and travels the same channel: into `withheld`,
+  # so it reaches the tag, the diagnostic and the log, and onto stderr, so a
+  # developer watching a commit scroll past sees it. It is discovered inside
+  # the rewrite rather than during row classification because the fact that
+  # decides it — the node's `original.rev` — lives in the lock, not in the
+  # sibling's git state the classifier reads.
+  for d in refreshed.declined:
+    result.withheld.add(d)
+    stderr.writeLine(label & ": WARNING: " & d)
   result.rewrites = refreshed.rewrites
   if not refreshed.changed:
     # §13.3: "most commits do not move a sibling, so most commits do not touch
@@ -64971,6 +66476,16 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
     result.summary = "flake.lock could not be verified: " &
       state.refusals.join("; ")
     return
+  # The publication axis, asked here for the SAME reason NF-2's refresh asks it
+  # (`flakeAnnotatePublication`) and to keep the two halves consistent: a
+  # sibling NF-2 declined to record must not be described here as ordinary
+  # drift whose remedy is a refresh, because that refresh would decline again
+  # and the operator would loop on a command that cannot work. With the
+  # annotation, an unpublished offender's remedy names the push FIRST and the
+  # refresh second — the sequence that actually clears it. This gate already
+  # resolves the develop set, a minutes-scale query, so one `git rev-list` per
+  # substituted input is not a cost worth avoiding here.
+  flakeAnnotatePublication(state, identity)
   let c = flakeStateCounts(state)
   result.examined = state.examined
   result.substituted = state.rows.len
@@ -64994,7 +66509,10 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
       " node=" & row.node & " pinned=" & row.pinnedRev &
       " sibling=" & row.siblingRev &
       " relation=" & flakePinRelationTag(row.relation) &
-      " ahead=" & $row.aheadBy & " behind=" & $row.behindBy)
+      " ahead=" & $row.aheadBy & " behind=" & $row.behindBy &
+      # Appended only when TRUE, so the evidence of every row that was already
+      # describable stays byte-for-byte what it was.
+      (if row.unpublished: " unpublished=true" else: ""))
   result.evidence = "lock=" & state.lockPath & " " & evidence.join("; ")
   result.summary = "flake.lock disagrees with the workspace siblings: " &
     sentences.join("; ")
@@ -65013,10 +66531,17 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   # correctly and produces `bash: syntax error near unexpected token '('` when
   # the person it was written for pastes it, which is the same class of failure
   # as printing a command that must be run somewhere else.
+  #
+  # EVERY command a row needs, not only its first: an UNPUBLISHED offender is
+  # cleared by a push AND a refresh, and naming only the push would leave the
+  # lock still stale while naming only the refresh would name a command that
+  # declines (NF-2 will not record an unpublished revision). That is the
+  # "remedy that cannot work" this gate and that refresh are kept consistent
+  # about.
   var remedies: seq[string]
   for row in offenders:
-    let cmd = flakeReconcileCommand(row, flakeRoot, workspaceRoot)
-    if cmd notin remedies: remedies.add(cmd)
+    for cmd in flakeReconcileCommands(row, flakeRoot, workspaceRoot):
+      if cmd notin remedies: remedies.add(cmd)
   result.remediation = sentences.join("; ") &
     " — flake.lock is an IN-TREE committed lock, so this gate verifies it " &
     "and never writes it. From " & flakeRoot & " run: `" &
@@ -65026,16 +66551,26 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
 proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
   ## CONSUMER 2 — ``repro flake override-status [--all|--only=LIST|
   ## --except=LIST|--tier=LIST| …every other `repro develop` set-form selector]
-  ## [--flake=DIR] [--workspace-root=PATH] [--strip-suffix=LIST] [--json]``.
+  ## [--flake=DIR] [--workspace-root=PATH] [--strip-suffix=LIST] [--json]``,
+  ## or ``repro flake override-status --applied [--flake=DIR] [--json] --
+  ## <override argument vector>``.
   ##
   ## The §3.2 report on its own, for anyone who wants it without the override
-  ## arguments — CI, a script, `--json`. SHELL ENTRY DOES NOT NEED IT: `.envrc`
-  ## is NF-1's single line, and `repro flake override-args` prints this very
-  ## report on stderr from the bindings it just emitted, so the develop set is
-  ## resolved ONCE per directory entry rather than once per consumer:
+  ## arguments — CI, a script, `--json`. An `.envrc` that has MIGRATED does not
+  ## need it: it is NF-1's single line, and `repro flake override-args` prints
+  ## this very report on stderr from the bindings it just emitted, so the
+  ## develop set is resolved ONCE per directory entry rather than once per
+  ## consumer:
   ##
   ##     _fo_args="$(repro flake override-args --all)" || exit 1
   ##     eval "use flake '.?submodules=1' $_fo_args"
+  ##
+  ## An `.envrc` that has NOT migrated is the case `--applied` serves, and this
+  ## repository's own is one of them — NF-3's measurements record
+  ## `repro develop --list --all` at ~226 s here and name it as the blocker on
+  ## the migration. Until that is solved, the line above is unaffordable and
+  ## the §3.2 report the spec requires at shell entry is reachable only through
+  ## `--applied`, over whatever vector the shell did use.
   ##
   ## The SELECTION is `repro develop`'s, in full (§5's fourth bullet, and §2's
   ## "AUTO is all-or-nothing while `repro develop` selects a set"). A verb that
@@ -65062,12 +66597,32 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
   ## Exit 0 for every observation, INCLUDING behind. Exit 2 only when the
   ## report could not be produced at all — an empty report and a failed one
   ## must not look alike (NF-1's rule).
+  ##
+  ## ## ``--applied -- <override argument vector>``: the same report, over the
+  ## ## substitutions a shell ACTUALLY performed
+  ##
+  ## In this mode the substitution set is not resolved from the develop set at
+  ## all; it is READ OFF the ``--override-input`` triples supplied after
+  ## ``--`` — the very vector the caller spliced into ``use flake``. See
+  ## ``flakeBindingsFromAppliedArgs`` for why that is not the forbidden second
+  ## derivation (it derives nothing) and why it exists (the develop-set
+  ## resolution costs ~226 s on this workspace, which is the recorded blocker
+  ## on this repository's ``.envrc`` ever reaching the §3.2 report at all).
+  ##
+  ##     eval "repro flake override-status --applied -- $_fo_args"
+  ##
+  ## Every develop-set selector is REFUSED here rather than ignored: there is
+  ## no selection to make, and a ``--only=`` that silently did nothing would be
+  ## §5's inert knob in the one command whose subject is inert knobs.
   var
     flakeDir = ""
     stripSpec = ""
     stripGiven = false
     asJson = false
     explicitRoot = ""
+    applied = false
+    appliedArgs: seq[string]
+    selectors: seq[string]
     passthrough: seq[string]
     toolProvisioning = tpmPathOnly
       ## Seeded, not left ``tpmUnspecified`` — see the same note on
@@ -65077,8 +66632,16 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
     i = 0
   while i < args.len:
     let arg = args[i]
+    if arg == "--":
+      # Everything after the separator is the applied vector, verbatim —
+      # including words that look like flags of this command, because they are
+      # nix's arguments and not ours.
+      appliedArgs = @(args[i + 1 .. ^1])
+      break
     if arg == "--flake" or arg.startsWith("--flake="):
       flakeDir = valueFromFlag(args, i, "--flake")
+    elif arg == "--applied":
+      applied = true
     elif arg == "--strip-suffix" or arg.startsWith("--strip-suffix="):
       stripSpec = valueFromFlag(args, i, "--strip-suffix")
       stripGiven = true
@@ -65096,6 +66659,7 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
       # the composer verbatim. This is the ONE line that makes `--only=` and
       # `--except=` mean here what they mean there.
       passthrough.add(arg)
+      selectors.add(arg)
     inc i
 
   let flakeRoot =
@@ -65116,6 +66680,29 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
       "differently on purpose: a report that cannot tell those apart is the " &
       "silent green shell this command exists to remove.")
     2
+
+  if applied and stripGiven:
+    refusals.add("`--applied` was given together with `--strip-suffix`. " &
+      "The suffix convention maps a flake INPUT NAME to a repo name so the " &
+      "binder can find a checkout; `--applied` is told the checkout " &
+      "directly, so the option decides nothing here and accepting it would " &
+      "be an inert knob.")
+    return refuse()
+  if applied and selectors.len > 0:
+    refusals.add("`--applied` was given together with the develop-set " &
+      "selector(s) " & selectors.join(" ") & ". They are contradictory: " &
+      "`--applied` reports on the substitutions a shell ALREADY performed, " &
+      "read off the argument vector after `--`, and there is no selection " &
+      "left to make. Accepting the selector and ignoring it would be the " &
+      "inert knob this campaign exists to remove. Drop `--applied` to report " &
+      "on a selected develop set, or drop the selector(s).")
+    return refuse()
+  if (not applied) and appliedArgs.len > 0:
+    refusals.add("an argument vector was supplied after `--`, but " &
+      "`--applied` was not given, so nothing would read it. Re-run as " &
+      "`repro flake override-status --applied -- " & appliedArgs.join(" ") &
+      "`.")
+    return refuse()
 
   var identity: GitToolIdentity
   try:
@@ -65189,27 +66776,74 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
         "a sibling")
     return 0
 
-  let declared = flakeDeclaredInputsAt(flakeRoot)
-  if not declared.ok:
-    for r in declared.refusals: refusals.add(r)
-    return refuse()
+  var bindings: seq[FlakeOverrideBinding]
+  if applied:
+    # NOT a derivation. The caller hands over the argument vector its shell
+    # spliced into `use flake`, and the substitutions are read out of it. The
+    # flake's declared-input scan is deliberately NOT consulted: an
+    # `--override-input` naming an input the flake does not declare is nix's
+    # error to report, not a reason for this report to disagree with the
+    # command line it was shown. `flakeOverrideStateReport` already classifies
+    # such a row as `unpinned` with its reason.
+    bindings = flakeBindingsFromAppliedArgs(appliedArgs, identity, notices)
+    if bindings.len == 0 and appliedArgs.len == 0:
+      # An EMPTY vector is a legitimate answer ("this shell overrode nothing")
+      # and must not be reported as a failure — but it also must not be
+      # reported as "nothing has drifted", because nothing was substituted to
+      # drift. Said in those words, once.
+      notices.add("the applied argument vector was EMPTY: this shell " &
+        "substituted no sibling at all, so every input is built from its " &
+        "flake.lock pin. That is not the same statement as 'nothing has " &
+        "drifted' — there was nothing to drift.")
+  else:
+    let declared = flakeDeclaredInputsAt(flakeRoot)
+    if not declared.ok:
+      for r in declared.refusals: refusals.add(r)
+      return refuse()
 
-  # THE override set: `repro develop`'s composed selection, bound by NF-1's
-  # binder. One derivation, the same one `repro flake override-args` emits and
-  # the same one the pre-push gate verifies, so no two of them can disagree
-  # about which inputs the dev shell is actually building from.
-  let selection = flakeDevelopSelectionOf(passthrough, explicitRoot)
-  if not selection.ok:
-    for r in selection.refusals: refusals.add(r)
-    return refuse()
-  for n in selection.notices: notices.add(n)
-  let bindings = flakeBindInputsToCheckouts(declared.names,
-    selection.checkoutOf, suffixes, identity, notices)
+    # THE override set: `repro develop`'s composed selection, bound by NF-1's
+    # binder. One derivation, the same one `repro flake override-args` emits and
+    # the same one the pre-push gate verifies, so no two of them can disagree
+    # about which inputs the dev shell is actually building from.
+    let selection = flakeDevelopSelectionOf(passthrough, explicitRoot)
+    if not selection.ok:
+      for r in selection.refusals: refusals.add(r)
+      return refuse()
+    for n in selection.notices: notices.add(n)
+    bindings = flakeBindInputsToCheckouts(declared.names,
+      selection.checkoutOf, suffixes, identity, notices)
 
-  let state = flakeOverrideStateReport(flakeRoot, bindings, identity)
+  var state = flakeOverrideStateReport(flakeRoot, bindings, identity)
   if not state.ok:
     for r in state.refusals: refusals.add(r)
     return refuse()
+  # The publication axis, for the `recordable` field below.
+  #
+  # `flakeRowIsRecordable` is the ONE predicate the refresh, the pre-push gate
+  # and this report all answer through, precisely so that no two of them can
+  # give different answers about the same row. It reads `row.unpublished`,
+  # which only `flakeAnnotatePublication` ever sets — so a consumer that skips
+  # the annotation does not get a cheaper answer, it gets a WRONG one: an ahead
+  # sibling whose HEAD has never been pushed was reported `"recordable": true`
+  # while the refresh withheld the write, the two halves disagreeing about the
+  # same row in the same workspace in the same second. That field is the
+  # machine-readable surface, so a script gating on it was told the pin would
+  # move and it did not.
+  #
+  # `flakeOverrideStateReport` still does not ask the question itself, and that
+  # is still right: it also backs `repro flake override-args`, which `.envrc`
+  # runs on every directory entry.
+  #
+  # THIS verb pays for it on both of its paths. On the derived path it has
+  # already resolved the develop set, so one `git rev-list` per substituted
+  # input is not a cost worth being wrong for. On the `--applied` path — which
+  # an unmigrated `.envrc` DOES run at shell entry — the annotation is three
+  # local `git` calls per substituted sibling and consults no network on any
+  # branch (see `flakeClassifyPublication`), so shell entry can afford the
+  # correct answer here too. The alternative was to skip it and report
+  # `recordable: true` for a revision the refresh would withhold, which is the
+  # exact disagreement the note above records.
+  flakeAnnotatePublication(state, identity)
 
   if asJson:
     var rows = newJArray()
@@ -65736,16 +67370,21 @@ type
   ProjectEdgeStyle = enum
     ## Which membership spelling a PROJECT manifest already uses. A project is
     ## the one file kind that can be authored either way: `includes` (fragment
-    ## PATHS — the original spelling, still the one
-    ## `reprobuild-specs/Workspace-Manifests.md` §"`projects/<project>.toml`"
-    ## documents) or `member_sets`/`member_repos` (NAMES — the membership
-    ## model's two namespaces, which a converted manifest carries).
+    ## PATHS — the DEPRECATED original spelling, superseded by the membership
+    ## model) or `member_sets`/`member_repos` (NAMES — the model's two
+    ## namespaces, which every converted manifest carries).
     ##
     ## The authoring verbs read the style off the FILE rather than assuming
-    ## one. Writing the model's spelling into an `includes`-only manifest does
-    ## not convert it — the fresh array lands next to an `includes` array the
-    ## reader still honours, so the operator is left with one project declaring
-    ## its repos in two places, and `repos remove` can only find half of them.
+    ## one, and that is about not converting a file behind the operator's back
+    ## — NOT about the two spellings being equals. Writing the model's spelling
+    ## into an `includes`-only manifest does not convert it: the fresh array
+    ## lands next to an `includes` array the reader still honours, so the
+    ## operator is left with one project declaring its repos in two places, and
+    ## the `includes` half goes stale.
+    ##
+    ## A file that uses NEITHER spelling has nothing to preserve, so it is not
+    ## a style question at all — it is authored on the model. See `pesNone` at
+    ## the `repos add` site.
     pesNone      ## declares neither array (a freshly scaffolded project)
     pesIncludes  ## declares `includes` and no membership array
     pesMembers   ## declares `member_sets` and/or `member_repos`
@@ -66145,6 +67784,18 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
       name & (if desc.len > 0: " (" & desc & ")" else: "") &
       (if templateName.len > 0: " from template " & templateName else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
+    # AFTER the commit, never before: `commitAndPushManifest` stages exactly
+    # the `paths` it was handed and commits without `-a`, and the index is
+    # gitignored besides — but regenerating on the far side of the commit is
+    # what makes that a property of the ORDER rather than of two other files
+    # staying the way they are today.
+    #
+    # Usually a no-op by construction: a definition this workspace has not
+    # enabled is not in the set the index documents. The case it is not is the
+    # one worth covering — an active-set entry whose manifest was missing
+    # renders as "the active manifest was not found on disk", and `sets add`
+    # is the verb that resolves it.
+    refreshWorkspaceProjectsIndexBestEffort(workspaceRoot, verb & " add")
     stdout.writeLine(verb & " add: " & name & " — " & res.diagnostic)
     if templateName.len > 0:
       # The reported line names the template AND where the choice came from, so
@@ -66201,7 +67852,26 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     try:
       case target.kind
       of mkProject:
-        referencedFragments = readProjectManifest(target.abs).includes
+        # BOTH spellings. A project declares its repos as fragment PATHS under
+        # the deprecated `includes` or as NAMES under `member_repos`, and a
+        # converted project — which every project manifest in the metacraft
+        # manifest repo now is — carries only the latter. Reading `includes`
+        # alone reported a converted project as referencing NOTHING, so
+        # `--prune-orphan-repos` pruned nothing and the operator was told the
+        # removal left no orphans while the fragments it alone declared were
+        # still on disk.
+        let projectManifest = readProjectManifest(target.abs)
+        referencedFragments = projectManifest.includes
+        # `member_repos` only, for the same reason as the repo-set branch
+        # below: a `member_sets` entry names a SET, which has no fragment to
+        # orphan even when a repo happens to share its name. The existence
+        # check is what keeps a stale member name from naming a file that was
+        # never there.
+        for member in projectManifest.member_repos:
+          let memberRel = "repos/" & member & ".toml"
+          if memberRel notin referencedFragments and
+              fileExists(manifestRoot / memberRel):
+            referencedFragments.add(memberRel)
       of mkRepoSet:
         # `member_repos` only: an entry under `member_sets` names a set, and a
         # set has no fragment to orphan even when a repo shares its name.
@@ -66242,6 +67912,13 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
          " (and " & $orphans.len & " orphaned repo fragment(s))"
        else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
+    # `remove` refuses an ENABLED name, so the definition that just vanished is
+    # one the index does not document and this is normally a no-op. It is here
+    # for the same reason as the `add` side: the index is derived from the
+    # manifests, every verb that edits them regenerates it, and a per-verb
+    # judgement about which edits "can" matter is exactly the reasoning that
+    # left the file stale in the first place.
+    refreshWorkspaceProjectsIndexBestEffort(workspaceRoot, verb & " remove")
     stdout.writeLine(verb & " remove: " & name & " — " & res.diagnostic)
     if orphans.len > 0:
       if pruneOrphans:
@@ -66681,14 +68358,18 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         # (`repos/<repo>.toml`), wires its remote + `includes` edge into the
         # project manifest, commits, and pushes").
         #
-        # WHICH spelling the edge takes is read off the project FILE, because
-        # a project is the one file kind that can be authored either way:
-        # `includes` (fragment PATHS, the spelling Workspace-Manifests.md
-        # §"`projects/<project>.toml`" documents) or `member_repos` (NAMES,
-        # the membership model's spelling, which the converted manifests in
-        # the metacraft workspace carry). Both resolve — `resolveProject`
+        # WHICH spelling the edge takes is read off the project FILE, but
+        # only for a file that ALREADY uses one. A project is the one file
+        # kind that can be authored either way: `includes` (fragment PATHS,
+        # the deprecated original) or `member_repos` (NAMES, the membership
+        # model's spelling, which every project manifest in the metacraft
+        # manifest repo now carries). Both still resolve — `resolveProject`
         # expands `member_*` after `includes` — so a manifest may sit in
-        # either state, and the verb must add to the array that is THERE.
+        # either state, and the verb must add to the array that is THERE
+        # rather than convert the file as a side effect of adding one repo.
+        #
+        # A file that uses NEITHER is not a style question: it is authored on
+        # the model. See the `pesNone` arm below.
         #
         # Writing `member_repos` unconditionally is what this branch used to
         # do, and against an `includes`-only project it appended a SECOND,
@@ -66705,22 +68386,38 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         # entirely. Neither spelling is right for both shapes; the file's own
         # is.
         case projectEdgeStyle(target.abs)
-        of pesIncludes, pesNone:
+        of pesIncludes:
+          # An `includes`-only project keeps being authored in `includes`.
           # Located by key, never positionally, for the reason above.
           #
-          # `pesNone` — a project scaffolded by `projects add` with no
-          # `--template`, which carries neither array — is authored as an
-          # `includes` edge: that is the shape
-          # `reprobuild-specs/Workspace-Manifests.md`
-          # §"`projects/<project>.toml`" documents for a project manifest,
-          # and the one `projectsIncludingFragment` — hence `repos remove`
-          # and `--delete-fragment` — can see. A project that a template DID
-          # seed carries both membership arrays and is `pesMembers` below.
+          # This branch exists only to avoid CONVERTING a file as a side
+          # effect of adding one repo. `includes` is deprecated and nothing
+          # new is authored into it (see `pesNone` below); a manifest that
+          # still carries it is edited in place until someone converts it
+          # deliberately.
           discard editSetMember(target.abs, includesKey, fragmentRel,
             add = true)
-        of pesMembers:
+        of pesNone, pesMembers:
           # Same rule as the repo-set branch above: the membership key is read
           # off what the name resolves to, and the array is located BY ITS KEY.
+          #
+          # `pesNone` — a project scaffolded by `projects add` with no
+          # `--template`, which carries neither array — is authored HERE, on
+          # the membership model's spelling, not on `includes`. `includes` is
+          # the superseded mechanism: all 12 project manifests in the metacraft
+          # manifest repo carry `member_sets`/`member_repos` and none carries
+          # an `includes` array, so authoring a new project onto `includes`
+          # would create, on every `projects add`, the one shape a conversion
+          # exists to remove.
+          #
+          # There is no array for `editSetMember` to find in a freshly
+          # scaffolded file, so it takes its new-array fallback — which
+          # inserts ahead of the FIRST table header, because a bare
+          # `member_repos = [ … ]` written after `[project]` is
+          # TOML-bound to that table and the strict decode then rejects
+          # `project.member_repos`. That placement is the same one
+          # `projectManifestStub` documents, and a `pesNone` project is
+          # precisely the file that reaches it.
           let memberKey = membershipKeyFor(manifestRoot, repo)
           if memberKey != memberReposKey:
             stderr.writeLine("repro workspace repos add: '" & repo &
@@ -66753,6 +68450,12 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     let msg = "Add repo " & repo & " to " & projects.join(", ") &
       (if desc.len > 0: " (" & desc.strip().splitLines()[0] & ")" else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
+    # The load-bearing one of the four definition sites: `--project` defaults
+    # to this workspace's PRIMARY project, so the common invocation adds a repo
+    # to a set the index is documenting right now. Its `repos/<repo>.md` is the
+    # line the index prints, which is why `add` warns when `-m` was omitted.
+    refreshWorkspaceProjectsIndexBestEffort(workspaceRoot,
+      "repro workspace repos add")
     stdout.writeLine("repro workspace repos add: " & repo & " -> " &
       projects.join(", ") & " — path " & effectivePath & ", remote " &
       remoteNames.join(" ") & ", " &
@@ -66839,6 +68542,14 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         if paths.len > 0:
           discard commitAndPushManifest(identity, gitBin, manifestRoot,
             "Remove repo " & repo & " from " & droppedFrom.join(", "), paths)
+          # This exit is a REFUSAL of `--delete-fragment` that nonetheless
+          # committed the dropped edges, and those edges are what the index
+          # lists. Regenerating on the failure path is not an inconsistency
+          # with "only on success": the rule is that the file must never
+          # describe a state the workspace did not reach, and the state it
+          # reached here includes the dropped edges.
+          refreshWorkspaceProjectsIndexBestEffort(workspaceRoot,
+            "repro workspace repos remove")
         return 2
       if fileExists(fragmentAbs):
         removeFile(fragmentAbs)
@@ -66855,6 +68566,8 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
       (if droppedFrom.len > 0: " from " & droppedFrom.join(", ") else: "") &
       (if deleteFragment: " (fragment deleted)" else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
+    refreshWorkspaceProjectsIndexBestEffort(workspaceRoot,
+      "repro workspace repos remove")
     stdout.writeLine("repro workspace repos remove: " & repo & " — " &
       res.diagnostic)
     if not deleteFragment and droppedFrom.len > 0:
@@ -66932,7 +68645,7 @@ proc runThinAppDispatch(programName: string): int =
   if programName == "reprostored":
     return runReprostoredCommand(args)
   if programName == "repro-daemon":
-    installUserDaemonBuildPrewarmer()
+    installUserDaemonParentPrewarmer()
     installUserDaemonBuildExecutor()
     installUserDaemonWatchExecutor()
     return runUserDaemonCommand(args)
@@ -68130,7 +69843,7 @@ proc runThinAppDispatch(programName: string): int =
     # `daemon` subcommand (status / start / stop / restart / logs / sessions)
     # is a client control command.
     if daemonArgs.len > 0 and daemonArgs[0] == "serve":
-      installUserDaemonBuildPrewarmer()
+      installUserDaemonParentPrewarmer()
       installUserDaemonBuildExecutor()
       installUserDaemonWatchExecutor()
       return runUserDaemonCommand(daemonArgs[1 .. ^1])
