@@ -2735,6 +2735,21 @@ proc selectedUrlFromReceipt(prefix: string): string =
   except CatchableError:
     result = "existing"
 
+proc flushStoreDiagnostics() =
+  ## Push a store diagnostic out of the buffer immediately.
+  ##
+  ## These lines report steps that take minutes — a multi-gigabyte download,
+  ## a cache substitution, a publish — and they are the only account of what
+  ## a long-running realize is doing. stderr is block-buffered whenever it is
+  ## a pipe or a file rather than a console, so without this they accumulate
+  ## and arrive all at once at exit, or not at all if the realize is
+  ## interrupted. An operator watching a slow realize needs them as they
+  ## happen, which is the entire reason they are written.
+  try:
+    flushFile(stderr)
+  except IOError, OSError:
+    discard
+
 proc toolCacheIdentity(plan: TarballAcquisitionPlan;
                        packageName, version: string): CacheEntryIdentity =
   ## The shared-cache identity of a realized tool prefix.
@@ -2847,6 +2862,7 @@ proc substituteToolPrefix(plan: TarballAcquisitionPlan;
   if result:
     stderr.writeLine("repro cache: substituted " & packageName & "@" &
       version & " from the shared cache (no download)")
+    flushStoreDiagnostics()
 
 proc publishToolPrefix(plan: TarballAcquisitionPlan;
                        packageName, version, prefix: string) =
@@ -2889,14 +2905,17 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
       # shared cache" should not have to infer the answer from silence.
       stderr.writeLine("repro cache: published " & packageName & "@" &
         version & " (" & request.entryKeyHex & ")")
+      flushStoreDiagnostics()
     if not outcome.ok and outcome.error.len > 0:
       # Reported, not raised. Knowing a publish did not happen is useful;
       # failing the realization over it would be absurd.
       stderr.writeLine("repro cache: warning: publishing " & packageName &
         " to " & request.endpoint & " failed: " & outcome.error)
+      flushStoreDiagnostics()
   except CatchableError as err:
     stderr.writeLine("repro cache: warning: publishing " & packageName &
       " skipped: " & err.msg)
+    flushStoreDiagnostics()
 
 proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
                               writerMode = "direct"):

@@ -216,6 +216,15 @@ proc reportGrantHeartbeat*(label, statsId: string; waitedMs: int) =
   try:
     stderr.writeLine "runquota.waiting " & id &
       " still waiting for a RunQuota grant waitedMs=" & $waitedMs
+    # Flushed, not merely written. The whole point of this line is that a
+    # queued candidate is "never a silent hang" — and stderr is block-
+    # buffered whenever it is a pipe or a file rather than a console, which
+    # is every CI log, every `2>&1 | tee`, and every agent harness. Without
+    # the flush the heartbeats sit in a 4 KiB buffer and a build that is
+    # legitimately queued behind an exhausted pool looks exactly like a
+    # wedged one; if the wait is then killed, the buffer is discarded and
+    # the evidence never existed.
+    flushFile(stderr)
   except IOError, OSError:
     discard
 
@@ -347,6 +356,7 @@ proc reportDenialRetry(label, statsId, diagnostic: string;
   try:
     stderr.writeLine "runquota.denied " & id & " attempt=" & $attempt &
       " backoffMs=" & $backoffMs & " reason=" & diagnostic
+    flushFile(stderr)
   except IOError, OSError:
     discard
 
@@ -387,6 +397,21 @@ proc reportGrantedAfterRetry(label, statsId: string; attempts: int) =
   except IOError, OSError:
     discard
 
+proc reportQueuedReason(label, statsId, reason: string) =
+  ## Emit the daemon's stated reason for queueing a candidate, once.
+  ##
+  ## Flushed for the same reason the heartbeat is: this line exists to keep
+  ## a long wait from looking like a hang, and stderr is block-buffered
+  ## whenever it is not a console.
+  if reason.len == 0:
+    return
+  let id = if statsId.len > 0: statsId else: label
+  try:
+    stderr.writeLine "runquota.queued " & id & " reason=" & reason
+    flushFile(stderr)
+  except IOError, OSError:
+    discard
+
 proc waitForQueuedGrant(session: var RunQuotaSession;
                         request: ResourceRequest): RunQuotaLease =
   const CandidateId = 1'u64
@@ -412,6 +437,17 @@ proc waitForQueuedGrant(session: var RunQuotaSession;
         return decision.lease
       if decision.lease.active and decision.queued:
         sawQueued = true
+        # Say WHY, once, at the moment the daemon queues us.
+        #
+        # The heartbeat below reports that we are still waiting; it cannot
+        # report what we are waiting FOR, because by then the decision that
+        # carried the reason is gone. And the reason is the whole difference
+        # between "queued behind another build, this will clear" and
+        # "queued on host memory pressure, and nothing I do to this build
+        # will change that" -- the second looked exactly like a wedged
+        # daemon, for as long as an operator was willing to wait.
+        reportQueuedReason(request.label, request.commandStatsId,
+          decision.diagnostic.diagnosticText())
       else:
         denied = true
         denialMessage = decision.diagnostic.diagnosticText()
