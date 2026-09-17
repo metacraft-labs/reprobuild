@@ -21,3 +21,13 @@ Reprobuild models the workspace as a directed acyclic graph (DAG) of type-checke
 - `repro build [target]` — compile and materialize build targets.
 - `repro test [target]` — execute tests with dynamic dependency rebuilding.
 - `repro develop` — toggle develop mode to resolve dependencies to local checkouts.
+
+## Using It Well
+
+[Idiomatic Reprobuild](../../user-guide/idiomatic-reprobuild.md) covers
+the patterns that are not transferable from Bazel or Make: edge
+granularity, why declared inputs are a hint rather than the input set,
+blessing a non-deterministic tool, when `cacheable = false` is the
+honest answer, and (§10) why a prerequisite built by a shell script is
+worse than uncached — it cannot be invalidated, downstream edges cannot
+depend on it, and its monitor evidence attaches to the wrong action.

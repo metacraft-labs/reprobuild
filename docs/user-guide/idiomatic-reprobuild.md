@@ -29,6 +29,7 @@ repo in this workspace, so you can open them.
 7. [☐ Environment facts and capability probes](#7-facts)
 8. [Adopt non-destructively](#8-adoption)
 9. [Measure honestly](#9-measuring)
+10. [Work done outside the graph is invisible to it](#10-outside)
 
 ---
 
@@ -976,6 +977,76 @@ test were actually present.
   change reaches.
 - `repro build --measure=cache-evidence` and `--write-report` — the
   evidence behind a cache decision, which is what §5 says to assert on.
+
+---
+
+## <a name="10-outside"></a>10. Work done outside the graph is invisible to it
+
+A prerequisite built by a shell script — a helper binary, a vendored
+fork, a code generator — looks like ordinary engineering and is the
+single most expensive mistake in this list, because nothing reports it.
+The build stays green. The artifact is simply outside the system.
+
+### What you actually lose
+
+Not "caching", which is the obvious answer and the least of it:
+
+1. **The artifact cannot be invalidated.** No edge produces it, so no
+   input change reaches it. It is stale until someone deletes it by hand.
+2. **Downstream edges cannot depend on it.** They can only depend on
+   *edges*. So the thing they really consume is absent from their own
+   input closure, and their cache keys are wrong — not merely
+   pessimistic, wrong in the direction that serves stale output.
+3. **Its evidence has no owner.** This is the reprobuild-specific part
+   and the reason the wrapper in this repo was deleted. `repro.nim`
+   records it (the B5 comment above `reprobuild.apps.*`):
+
+   > inside the wrapper every compile ran as an unowned child under the
+   > io-mon shim, whereas an edge is monitored in its own right and its
+   > evidence belongs to it.
+
+   The monitor still *sees* those reads. They just attach to whatever
+   coarse action wrapped the script, so they key that action instead of
+   the compile that performed them.
+
+### The tell
+
+**A prerequisite script that decides for itself whether to rebuild.**
+Staleness is the build system's judgement; a script re-implementing it
+is re-implementing the part with all the bugs in it. This repo has the
+scar: `scripts/build_reprobuild_cmake_prereq.sh` used to `exit 0`
+whenever `build/bin/cmake` existed, so no change to the fork ever
+rebuilt it. Its header now documents that defect, and the script
+delegates staleness to the underlying build tool instead of guessing.
+
+If you are writing `if [ -x "$out" ]; then exit 0; fi`, stop — that is
+an edge.
+
+### The legitimate exception, and how to mark it
+
+**Bootstrap.** You cannot run the graph without `repro`, so something
+outside the graph must build `repro` first. That is real and this repo
+has it: `scripts/build_apps.sh` (`nim c` at `:598` and `:660`) behind
+`just bootstrap`.
+
+The exception is *narrow*: it covers the engine itself, not everything
+convenient to build beside it. Everything else that script once produced
+now has an edge, and `.#release` — not the script — is what the release
+workflow builds.
+
+### How the migration was actually done
+
+Worth copying, because the obvious approach (delete the script, add the
+edges, fix the fallout) strands every consumer at once:
+
+- **B1** added the real edges *alongside* the existing
+  `shell(command = "bash scripts/build_apps.sh", …)` wrapper, so both
+  paths produced the same artifacts and consumers cut over one at a time.
+- **B5** deleted the wrapper once nothing depended on it, including the
+  last three `apps/entrypoints.txt` rows that had no edge and existed
+  only inside it.
+
+Two commits, no flag day, and at every point the tree built.
 
 ---
 

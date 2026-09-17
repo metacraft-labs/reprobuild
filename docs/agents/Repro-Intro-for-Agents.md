@@ -20,6 +20,11 @@ waiver actually gets made); and "fixes" that improve a monitor evidence
 grade without improving the evidence. Each trap is cited to the guard
 that stops it.
 
+## Working In A Reprobuild Repo
+
+- **[Idiomatic Reprobuild](../user-guide/idiomatic-reprobuild.md)**: how to use it *well*, and the mistakes that look exactly like correct use. §10 covers the most expensive one — building a prerequisite in a shell script instead of declaring an edge, which costs invalidation and evidence ownership, not just caching.
+- **[Test History and Timings](Test-History-And-Timings.md)**: durations, peak RSS, and how a process died live in the host-wide RunQuota observation store — the only durable record. Read this *before* concluding anything from an empty timing query: when the host is unprovisioned, capture is off and queries return empty rather than failing.
+
 ## Replaced Systems
 
 - **[Build Systems (Bazel, Buck2, BuildXL, Tup)](Replaces/How-Repro-Replaces-Build-Systems-Like-Bazel-Buck2-BuildXL-and-Tup.md)**: Models the workspace as a type-checked DAG. Enforces hermetic builds using a user-space filesystem monitor shim (`librepro_monitor_shim`) and uses a shared-memory action cache daemon for sub-millisecond cache checks.
