@@ -42,11 +42,20 @@ executed process, carrying:
 | `termination` | `exited` / `signalled` / `timeout` / `oom_killed` / `refused` — **the daemon knows**, so never infer OOM or timeout from an exit status |
 | `exit_status`, `attempt`, `retry_of` | retries are linked, not conflated |
 | `peak_rss_bytes`, `max_processes` | memory pressure and fan-out |
-| `cpu_user_millis`, `cpu_sys_millis` | CPU time vs wall time — the gap is contention or I/O wait |
-| `io_read_bytes`, `io_write_bytes`, `major_page_faults` | is it slow, or is it thrashing? |
+| `major_page_faults` | is it slow, or is it thrashing? |
 | `capture_completeness` | `complete` / `sampled` / `degraded` |
 
-Rows are **immutable after write** — a trigger aborts any `update`.
+> **`cpu_user_millis`, `cpu_sys_millis`, `io_read_bytes` and
+> `io_write_bytes` exist in the schema but nothing ever writes them.**
+> Both of the daemon's insert paths pass `none(int64)` unconditionally
+> and no code anywhere computes a value, so they are NULL on every row
+> ever recorded. **"Is it slow because of CPU, I/O, or waiting?" is not
+> answerable from this store at any layer**, and no flag changes that.
+> Do not plan a measurement around them.
+
+Rows are **immutable after write** — a trigger aborts any `update`. Note
+that the trigger guards `update` ONLY: `delete` succeeds, so retention
+can prune.
 
 ## Two rules for reading it honestly
 
@@ -68,8 +77,20 @@ In `runquota_observation_store/query.nim`:
 - `estimateFor` / `estimateForAt` — the expected cost of a stats key,
   which is what adaptive timeouts consume.
 
-The DB is ordinary SQLite; ad-hoc `select` is fine for investigation.
-Prefer the typed API for anything that lands in a test or a report.
+**Do not open the database file.** `runquotad` is the only sanctioned
+reader, and an inspection gate
+(`runquota/tests/unit/t_observation_store_reader_boundary.nim`) fails any
+client that does. This is not bureaucracy: a direct read *works*, is
+faster, and returns real rows — while silently skipping everything the
+daemon applies on the way out, namely uid scoping from peer credentials,
+hardware qualification, and the unknown-versus-zero distinction. The gate
+discovers its source set by walking `libs/` and `apps/`, so it catches a
+violation in a module that does not exist yet.
+
+Go through the daemon. A CLI query surface is in progress; until it
+lands, the typed reads in `runquota_observation_store/query.nim`
+(`queryRanking`, `queryExecutions`, `estimateFor`) are what the daemon
+itself uses.
 
 ## Provisioning (needs root, once per host)
 
