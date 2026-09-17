@@ -2580,8 +2580,37 @@ when defined(macosx) or defined(linux):
       check projectText.contains("excludePrefixes = @[\"dist\"]")
       check projectText.contains("frontend-webpack-dist")
       check projectText.contains("frontend-public-dist")
-      check projectText.contains("shell(")
-      check not projectText.contains("sh(")
+      # "The recipe calls ``shell`` and never raw ``sh``" is a statement
+      # about CODE, so it is asked of code. `contains("sh(")` asked it of
+      # raw text and failed this case against a file that calls ``sh``
+      # nowhere: the substring matched ``hash()`` inside the comment
+      # explaining why the Nim cache key is an inlined FNV-1a rather than
+      # ``std/hashes``.
+      #
+      # Two holes, either enough alone. No left identifier boundary, so
+      # every name ending in "sh" answered for it -- `hash(`, `push(`,
+      # `flush(`, `refresh(`. And no notion of what is code, so comments
+      # and string literals spoke for the recipe: this file's raw text
+      # holds the whole identifier ``sh`` on 25 lines -- ``.sh`` script
+      # names, ``"sh >=1"`` among the tool requirements, and three
+      # comments that describe the ``sh -c`` formulation this very
+      # migration REMOVED -- while its code holds it on none. Adding a
+      # boundary without stripping would still fail on those three.
+      #
+      # `containsNimIdentifier` over `nimSourceCodeOnly` closes both, and
+      # is stricter than a repaired paren probe besides: it also sees the
+      # paren-less spellings of a Nim call (`sh "cp a b"`, `obj.sh arg`)
+      # and a bare alias (`let f = sh`), which no `"sh("` needle reaches.
+      let projectCode = nimSourceCodeOnly(projectText)
+      # Pinned both ways, because a green predicate proves nothing on its
+      # own: a genuine call site must still redden this pair.
+      check nimSourceCodeOnly("  sh(\"mkdir -p out\")\n").
+        containsNimIdentifier("sh")
+      check not nimSourceCodeOnly(
+        "  # ...and ``hash()`` offers no stability guarantee\n").
+        containsNimIdentifier("sh")
+      check projectCode.containsNimIdentifier("shell")
+      check not projectCode.containsNimIdentifier("sh")
       check not projectText.contains("buildAction(\"frontend-public-resource")
 
       let tempRoot = createTempDir("repro-m51-codetracer-stdlib-fs", "")
