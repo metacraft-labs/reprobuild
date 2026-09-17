@@ -13653,6 +13653,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_from_source_cargo_recognition.nim",
+    binary: "build/test-bin/t_from_source_cargo_recognition",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_from_source_realization_platform.nim",
     binary: "build/test-bin/t_from_source_realization_platform",
     defines: @[],

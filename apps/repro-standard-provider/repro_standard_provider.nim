@@ -43,6 +43,7 @@ import repro_standard_provider/conventions/from_source_cmake as from_source_cmak
 import repro_standard_provider/conventions/from_source_autotools as from_source_autotools_convention
 import repro_standard_provider/conventions/from_source_make as from_source_make_convention
 import repro_standard_provider/conventions/from_source_custom as from_source_custom_convention
+import repro_standard_provider/conventions/from_source_cargo as from_source_cargo_convention
 import repro_standard_provider/conventions/java_maven as java_maven_convention
 import repro_standard_provider/conventions/kotlin_gradle as kotlin_gradle_convention
 import repro_standard_provider/conventions/csharp_dotnet as csharp_dotnet_convention
@@ -176,6 +177,14 @@ when defined(reproProviderMode):
   # c-cpp-make ``recognize`` separately rejects projects with Autotools
   # artefacts so the order is defensive in either direction.
   addDefaultConvention(nim_convention.nimConvention())
+  # from_source_cargo BEFORE the in-tree rust convention: a recipe that
+  # FETCHES its source is this one's, and the in-tree convention expects a
+  # workspace already on disk. Its recognise rejects when a root
+  # ``Cargo.toml`` is present -- which a from-source recipe never has, since
+  # its ``Cargo.toml`` arrives inside the fetched tarball -- so the order is
+  # defensive in either direction.
+  addDefaultConvention(
+    from_source_cargo_convention.fromSourceCargoConvention())
   addDefaultConvention(rust_convention.rustConvention())
   addDefaultConvention(go_convention.goConvention())
   addDefaultConvention(python_convention.pythonConvention())
