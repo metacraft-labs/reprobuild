@@ -2422,8 +2422,23 @@ proc runCommand(command: openArray[string];
           if windowsPowerShell.len > 0:
             windowsPowerShell
           else:
-            raise newException(OSError,
-              "pwsh/powershell required for long Windows command")
+            # PATH lookup is not the last word here, because PATH is exactly
+            # what cannot be trusted on this branch. We are here BECAUSE the
+            # command is too long for cmd.exe -- and a process that reached
+            # us through cmd.exe has already had its PATH truncated at 8191
+            # characters, which on a host with a long PATH silently removes
+            # whatever sits at the end of it. Windows PowerShell has a fixed
+            # location under %SystemRoot%, so look there before giving up on
+            # an interpreter the machine certainly has.
+            let systemRoot = getEnv("SystemRoot", r"C:\Windows")
+            let fallback = systemRoot /
+              r"System32\WindowsPowerShell\v1.0\powershell.exe"
+            if fileExists(extendedPath(fallback)):
+              fallback
+            else:
+              raise newException(OSError,
+                "pwsh/powershell required for long Windows command; " &
+                "neither is on PATH and " & fallback & " does not exist")
       withSpawnWorkingDir:
         process = startProcess(powerShellExe,
           args = @[
