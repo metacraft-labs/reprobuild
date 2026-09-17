@@ -13527,6 +13527,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_cargo_lock_vendor_plan.nim",
+    binary: "build/test-bin/t_cargo_lock_vendor_plan",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_cmake_direct_tool_identity.nim",
     binary: "build/test-bin/t_cmake_direct_tool_identity",
     defines: @[],

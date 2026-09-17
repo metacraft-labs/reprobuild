@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1643,
-    "pureUnitConsolidationGroups": 49,
-    "pureUnitTests": 583,
+    "nimTestBinaries": 1644,
+    "pureUnitConsolidationGroups": 50,
+    "pureUnitTests": 584,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1654
+    "testEntries": 1655
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -840,6 +840,19 @@
       "count": 2,
       "defines": [],
       "dependencyShape": [
+        "repro_core"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_cargo_lock_vendor_plan.nim",
+        "tests/unit/t_version.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
         "repro_interface_artifacts",
         "repro_tool_profiles"
       ],
@@ -1089,7 +1102,7 @@
       "graph-fixture": 12,
       "integration": 770,
       "platform/destructive": 115,
-      "pure unit": 583,
+      "pure unit": 584,
       "unclassified": 174
     },
     "graphOwnedTestArtifacts": [
@@ -1238,9 +1251,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1643,
+    "nimTestBinaryCount": 1644,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1654
+    "testEntryCount": 1655
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -32662,6 +32675,23 @@
       "source": "tests/unit/t_capabilities.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cargo_lock_vendor_plan",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_cargo_lock_vendor_plan.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
