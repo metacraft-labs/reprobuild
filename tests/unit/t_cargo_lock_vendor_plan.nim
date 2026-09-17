@@ -178,3 +178,55 @@ checksum = "0000000000000000000000000000000000000000000000000000000000000000"
     let json = cargoChecksumJson(plan[0])
     check json.contains("\"package\":\"" & plan[0].sha256 & "\"")
     check json.contains("\"files\":{}")
+
+  test "a plan round-trips through its committed manifest":
+    # The manifest is what a recipe commits, because the lockfile it came
+    # from does not exist at graph-emission time — it arrives with the
+    # source the fetch action has not run yet. Pinning the closure beside
+    # the recipe is what makes it reviewable and diffable rather than
+    # invisible until a build is already running.
+    let plan = vendorPlan(parseCargoLock(MinimalLock))
+    let restored = parseVendorManifest(renderVendorManifest(plan))
+    check restored.len == plan.len
+    for i in 0 ..< plan.len:
+      check restored[i].url == plan[i].url
+      check restored[i].sha256 == plan[i].sha256
+      check restored[i].directoryName == plan[i].directoryName
+      # Name and version are recovered from the directory name rather
+      # than carried as their own columns: two spellings of the same fact
+      # can disagree, and the directory name is what the fetch step and
+      # cargo both use.
+      check restored[i].name == plan[i].name
+      check restored[i].version == plan[i].version
+
+  test "the manifest is a shell-readable table":
+    let plan = vendorPlan(parseCargoLock(MinimalLock))
+    let lines = renderVendorManifest(plan).strip().splitLines()
+    check lines[0] == VendorManifestHeader
+    # Three tab-separated fields per line, because the consumer is a
+    # `while IFS=<tab> read -r url sha dir` loop and not a parser.
+    for line in lines[1 .. ^1]:
+      check line.split('\t').len == 3
+
+  test "a manifest without the version header is refused":
+    let plan = vendorPlan(parseCargoLock(MinimalLock))
+    let headerless = renderVendorManifest(plan).replace(
+      VendorManifestHeader & "\n", "")
+    expect CargoLockError:
+      discard parseVendorManifest(headerless)
+
+  test "a truncated manifest line is refused rather than skipped":
+    # A skipped line is a crate that goes missing, and a build missing one
+    # dependency fails inside cargo rather than here.
+    let plan = vendorPlan(parseCargoLock(MinimalLock))
+    let broken = renderVendorManifest(plan).replace(
+      "\tansi_term-0.12.1", "")
+    expect CargoLockError:
+      discard parseVendorManifest(broken)
+
+  test "a manifest url outside crates.io is refused":
+    let plan = vendorPlan(parseCargoLock(MinimalLock))
+    let elsewhere = renderVendorManifest(plan).replace(
+      "https://static.crates.io/crates/", "https://example.invalid/")
+    expect CargoLockError:
+      discard parseVendorManifest(elsewhere)

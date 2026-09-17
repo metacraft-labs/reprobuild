@@ -357,3 +357,100 @@ proc cargoVendorConfig*(vendorDir: string): string =
   result.add("replace-with = \"vendored-sources\"\n\n")
   result.add("[source.vendored-sources]\n")
   result.add("directory = \"" & normalized & "\"\n")
+
+# ---------------------------------------------------------------------------
+# The pinned manifest.
+# ---------------------------------------------------------------------------
+#
+# A vendor plan has to be readable at GRAPH-EMISSION time, and the
+# `Cargo.lock` it comes from does not exist then: the lockfile arrives with
+# the source, which the fetch action has not run yet. Resolving that by
+# parsing the lockfile at build time would mean the dependency closure — the
+# single largest input to the build — is invisible to review, to diffing,
+# and to the action fingerprint until the build is already running.
+#
+# So the closure is pinned beside the recipe as a manifest, generated once
+# from an upstream lockfile and committed. It is a tab-separated table
+# because that is the shape a three-line shell loop can consume without a
+# parser, and the fetch step that consumes it is a shell loop:
+#
+#     while IFS="\t" read -r url sha dir; do ... done < manifest
+#
+# One line per crate, sorted, with a header carrying the format version.
+# Refreshing it is a deliberate, reviewable act, and the diff is exactly the
+# set of dependencies that moved.
+
+const
+  VendorManifestHeader* = "# repro cargo vendor manifest v1"
+    ## First line of every manifest. Version-tagged so a reader that meets
+    ## a manifest it cannot interpret says so instead of skipping lines it
+    ## does not recognise — the same refusal posture as the lockfile
+    ## reader, for the same reason.
+
+proc renderVendorManifest*(plan: openArray[VendorEntry]): string =
+  ## Serialise a plan to its committed form.
+  ##
+  ## Columns are url, sha256, directory name. The directory name is
+  ## carried rather than recomputed so the file says, in full, what the
+  ## fetch step will create — a reader of the diff does not have to know
+  ## the `<name>-<version>` convention to see what moved.
+  result = VendorManifestHeader & "\n"
+  for entry in plan:
+    result.add(entry.url & "\t" & entry.sha256 & "\t" &
+      entry.directoryName & "\n")
+
+proc parseVendorManifest*(text: string): seq[VendorEntry] =
+  ## Read a committed manifest back.
+  ##
+  ## Strict, and for the same reason the lockfile reader is: a line this
+  ## does not understand is a crate that would go missing, and a build
+  ## missing one dependency fails inside cargo rather than here.
+  var sawHeader = false
+  var lineNo = 0
+  for rawLine in text.splitLines():
+    inc lineNo
+    let line = rawLine.strip()
+    if line.len == 0:
+      continue
+    if not sawHeader:
+      if line != VendorManifestHeader:
+        raise newException(CargoLockError,
+          "cargo vendor manifest line " & $lineNo & ": expected the header " &
+          "'" & VendorManifestHeader & "', got: " & line)
+      sawHeader = true
+      continue
+    if line.startsWith("#"):
+      continue
+    let fields = line.split('\t')
+    if fields.len != 3:
+      raise newException(CargoLockError,
+        "cargo vendor manifest line " & $lineNo & ": expected 3 " &
+        "tab-separated fields, got " & $fields.len)
+    let entry = VendorEntry(
+      url: fields[0],
+      sha256: fields[1],
+      directoryName: fields[2])
+    if not entry.url.startsWith(CratesIoDownloadBase):
+      raise newException(CargoLockError,
+        "cargo vendor manifest line " & $lineNo & ": url is not a " &
+        "crates.io download: " & entry.url)
+    if entry.sha256.len != 64:
+      raise newException(CargoLockError,
+        "cargo vendor manifest line " & $lineNo & ": sha256 is not 64 hex " &
+        "characters: " & entry.sha256)
+    # `name` and `version` are recovered from the directory name rather
+    # than carried as their own columns: two spellings of the same fact
+    # can disagree, and the directory name is the one the fetch step and
+    # cargo both use.
+    let dash = entry.directoryName.rfind('-')
+    if dash <= 0 or dash == entry.directoryName.len - 1:
+      raise newException(CargoLockError,
+        "cargo vendor manifest line " & $lineNo & ": directory name is " &
+        "not <name>-<version>: " & entry.directoryName)
+    var restored = entry
+    restored.name = entry.directoryName[0 ..< dash]
+    restored.version = entry.directoryName[dash + 1 .. ^1]
+    result.add(restored)
+  if not sawHeader:
+    raise newException(CargoLockError,
+      "cargo vendor manifest: no header line")

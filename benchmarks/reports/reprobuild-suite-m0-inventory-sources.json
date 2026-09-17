@@ -32691,7 +32691,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_cargo_lock_vendor_plan.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
