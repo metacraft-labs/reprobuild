@@ -13655,7 +13655,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_from_source_cargo_recognition.nim",
     binary: "build/test-bin/t_from_source_cargo_recognition",
-    defines: @[],
+    defines: @["reproProviderMode"],
     requiresReproBinary: false,
     extraPassC: @[],
     extraPassL: @[],

@@ -40,7 +40,7 @@ libs/repro_binary_cache_client/tests/t_a3_p6_closure_walk_r4.nim	nim	1
 libs/repro_binary_cache_client/tests/t_a4_p2_sentinel_wait.nim	nim	2
 libs/repro_binary_cache_client/tests/t_client_cli_prefix_substitute.nim	nim	1
 libs/repro_binary_cache_client/tests/t_r1_caches_config.nim	nim	10
-libs/repro_binary_cache_client/tests/t_r1_client_trust.nim	nim	3
+libs/repro_binary_cache_client/tests/t_r1_client_trust.nim	nim	5
 libs/repro_binary_cache_client/tests/test_auto_credentials.nim	nim	9
 libs/repro_binary_cache_client/tests/test_publish_in_process.nim	nim	9
 libs/repro_binary_cache_server/tests/t_a2_p1_manifest_roundtrip.nim	nim	7
@@ -1511,7 +1511,7 @@ tests/unit/t_bootstrap_nim_monitoring.nim	nim	3
 tests/unit/t_cached_source_dependency_closure.nim	nim	11
 tests/unit/t_capabilities.nim	nim	2
 tests/unit/t_cargo_lock_vendor_plan.nim	nim	19
-tests/unit/t_cargo_vendor_action.nim	nim	9
+tests/unit/t_cargo_vendor_action.nim	nim	10
 tests/unit/t_cmake_direct_tool_identity.nim	nim	5
 tests/unit/t_config_nims_lib_resolution.nim	nim	7
 tests/unit/t_configure_build_tree_cleanup.nim	nim	12

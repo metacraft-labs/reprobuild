@@ -3,7 +3,7 @@
     "graphOwnedHelperArtifacts": 24,
     "nimTestBinaries": 1646,
     "pureUnitConsolidationGroups": 50,
-    "pureUnitTests": 586,
+    "pureUnitTests": 585,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
     "testEntries": 1657
   },
@@ -1102,8 +1102,8 @@
       "graph-fixture": 12,
       "integration": 770,
       "platform/destructive": 115,
-      "pure unit": 586,
-      "unclassified": 174
+      "pure unit": 585,
+      "unclassified": 175
     },
     "graphOwnedTestArtifacts": [
       {
@@ -6518,7 +6518,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_binary_cache_client/tests/t_r1_client_trust.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32697,8 +32697,8 @@
     },
     {
       "binary": "build/test-bin/t_cargo_vendor_action",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -32710,7 +32710,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_cargo_vendor_action.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32936,7 +32936,9 @@
       "binary": "build/test-bin/t_from_source_cargo_recognition",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
-      "defines": [],
+      "defines": [
+        "reproProviderMode"
+      ],
       "language": "nim",
       "localDependencyShape": [
         "repro_project_dsl",
