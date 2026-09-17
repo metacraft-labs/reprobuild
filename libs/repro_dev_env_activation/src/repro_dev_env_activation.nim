@@ -231,7 +231,21 @@ proc renderDevEnvArtifact*(artifact: DevEnvArtifact; artifactPath = "";
       format)
 
 proc baseEnvironment(): StringTableRef =
-  result = newStringTable(modeCaseSensitive)
+  # Case-INSENSITIVE on Windows, where environment variable names are.
+  #
+  # With a case-sensitive table the ambient `Path` and an op naming `PATH`
+  # become two separate entries, and the child receives a block containing
+  # both. A shell that does its own linear lookup (bash) finds the one it
+  # wants and appears to work; `cmd.exe` does not, so a dev-env TASK could
+  # fail to see tools that a dev-env EXEC in the same environment resolved
+  # perfectly — the two surfaces disagreeing about the same activation.
+  #
+  # POSIX environment names ARE case-sensitive, so the distinction is kept
+  # there rather than normalised away globally.
+  when defined(windows):
+    result = newStringTable(modeCaseInsensitive)
+  else:
+    result = newStringTable(modeCaseSensitive)
   for key, value in envPairs():
     result[key] = value
 
@@ -290,7 +304,7 @@ proc executableCandidate(dir, name, workingDirectory: string): string =
         return withExe
   ""
 
-proc resolveFromActivatedPath(command: string; env: StringTableRef;
+proc resolveFromActivatedPath*(command: string; env: StringTableRef;
                               workingDirectory: string): string =
   if command.len == 0 or command.containsPathSeparator():
     return command

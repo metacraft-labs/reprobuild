@@ -12696,23 +12696,51 @@ proc devEnvToolShellOps*(edge: DevEnvEdgeResult;
   ## cross-repo producer pins, and for the same reason: an activation that
   ## fails closed on one unprovisionable tool takes away the shell the
   ## developer needs in order to fix it.
-  if edge.interfacePath.len == 0 or
-      not fileExists(extendedPath(edge.interfacePath)):
+  # The edge records where it wrote the interface artifact. Fall back to the
+  # deterministic location under the selection's own outDir when it does not:
+  # `repro run` reaches this through a different edge-construction path than
+  # `repro exec`, and an empty field there meant the whole tool set silently
+  # contributed nothing — an activation that looks identical to a working one
+  # and provisions none of what the recipe declared. Silence was the actual
+  # defect; the diagnostic below is the other half of the fix.
+  var interfacePath = edge.interfacePath
+  if interfacePath.len == 0:
+    interfacePath = selection.outDir / "project-interface.rbsz"
+  if not fileExists(extendedPath(interfacePath)):
+    stderr.writeLine("repro dev-env: warning: no project interface at " &
+      interfacePath & "; the activated shell will resolve tools from the " &
+      "ambient PATH instead of the packages this recipe declares.")
     return
   var interfaceArtifact: ProjectInterfaceArtifact
   try:
-    interfaceArtifact = readInterfaceArtifact(edge.interfacePath)
+    interfaceArtifact = readInterfaceArtifact(interfacePath)
   except CatchableError as err:
     stderr.writeLine("repro dev-env: warning: could not read the project " &
-      "interface at " & edge.interfacePath & " (" & err.msg &
+      "interface at " & interfacePath & " (" & err.msg &
       "); the activated shell will resolve tools from the ambient PATH.")
     return
   if interfaceArtifact.projectInterface.toolUses.len == 0:
+    # Nothing declared is a legitimate state, not a failure: a recipe with no
+    # `uses:` has no toolchain to provide.
     return
 
   let mode = effectiveToolProvisioning(
     resolveToolProvisioningWithEnv(tpmUnspecified), interfaceArtifact)
-  if mode in {tpmUnspecified, tpmPathOnly}:
+  if mode == tpmPathOnly:
+    # Path-mode's whole contract is "resolve against the caller's PATH", so
+    # there is nothing to prepend.
+    return
+  if mode == tpmUnspecified:
+    # Declared packages and no mode to realize them with. Silence here reads
+    # as a working environment that quietly provisions none of what the
+    # recipe declares, which is the failure this whole surface exists to
+    # remove — so it is reported rather than assumed harmless.
+    stderr.writeLine("repro dev-env: warning: " &
+      $interfaceArtifact.projectInterface.toolUses.len &
+      " package(s) are declared in uses: but no tool provisioning mode is " &
+      "resolved, so none of them will be on PATH. Set " &
+      "`defaultToolProvisioning` in the recipe, or pass " &
+      "--tool-provisioning=, or set REPRO_TOOL_PROVISIONING.")
     return
 
   let storeRoot = resolveStoreRoot() / "tool-store"
@@ -12820,9 +12848,30 @@ proc runTaskCommand(artifact: DevEnvArtifact; artifactPath: string;
         task.command
     let activation = activatedEnvironment(artifact, artifactPath,
       defaultWorkingDirectory, extraOps, preOps)
-    let cmdExe = getEnv("COMSPEC", "cmd.exe")
-    var process = startProcess(cmdExe,
-      args = @["/c", shellLine],
+    # Prefer a `bash` from the ACTIVATED PATH over cmd.exe.
+    #
+    # cmd.exe truncates its environment's PATH at 8191 characters when it
+    # initialises. A dev env that provisions a few dozen packages passes that
+    # easily — this project's was 8489 — and the entries past the cut simply
+    # vanish, so a task reports `'<tool>' is not recognized` for a tool that
+    # `repro exec` in the very same environment resolves correctly. Two
+    # surfaces disagreeing about one activation, with no error from the
+    # truncation itself.
+    #
+    # bash has no such limit, and it is already the shell every dev-env task
+    # in practice is written for. cmd.exe remains the fallback for a host
+    # that genuinely has no bash, where a short PATH will work as before.
+    let bashExe = resolveFromActivatedPath("bash", activation.env,
+      activation.workingDirectory)
+    let useBash = bashExe.len > 0 and fileExists(extendedPath(bashExe))
+    let shellExe =
+      if useBash: bashExe
+      else: getEnv("COMSPEC", "cmd.exe")
+    let shellArgs =
+      if useBash: @["-c", shellLine]
+      else: @["/c", shellLine]
+    var process = startProcess(shellExe,
+      args = shellArgs,
       env = activation.env,
       workingDir = activation.workingDirectory,
       options = {poUsePath, poParentStreams})
