@@ -75,17 +75,6 @@ proc executeSubstituteAction*(ctx: ClientContext;
   result.ok = false
   result.skipped = false
 
-  # Hot path: already substituted previously.
-  let existing = clientIdx.lookup(request.entryKeyHex)
-  if existing.found:
-    let casPath = ctx.store.casPath(existing.entry.payloadHash)
-    if fileExists(casPath):
-      result.ok = true
-      result.skipped = true
-      result.casPath = casPath
-      result.wallclockMillis = int64(epochTime() * 1000.0 - startMs)
-      return
-
   # Fetch + verify manifest.
   let manifest =
     try:
@@ -109,6 +98,19 @@ proc executeSubstituteAction*(ctx: ClientContext;
     result.reason = "manifest has no payloads"
     result.wallclockMillis = int64(epochTime() * 1000.0 - startMs)
     return
+
+  # The local index is a payload location, not authority for the current
+  # manifest's trust or compatibility. Reuse only after both checks above.
+  let existing = clientIdx.lookup(request.entryKeyHex)
+  if existing.found and manifest.payloads.len == 1 and
+      existing.entry.payloadHash == manifest.payloads[0].digest:
+    let casPath = ctx.store.casPath(existing.entry.payloadHash)
+    if fileExists(casPath):
+      result.ok = true
+      result.skipped = true
+      result.casPath = casPath
+      result.wallclockMillis = int64(epochTime() * 1000.0 - startMs)
+      return
 
   # v1 materialises the FIRST payload (the prefix archive). Manifests
   # with multiple payloads (a prefix archive + a launcher, say)

@@ -91,6 +91,21 @@ suite "cargo vendor action":
     check cargoVendorManifestPath(root) in act.inputs
     check fetchStamp in act.inputs
 
+  test "shell resolution is deferred to the declared tool identity":
+    let root = withRecipeRoot(SampleManifest)
+    defer: removeDir(root)
+    let plan = readVendorManifest(root)
+    let withHostPath = emitCargoVendorAction(root, "justSource", plan, "", "")
+    let hadPath = existsEnv("PATH")
+    let originalPath = getEnv("PATH")
+    defer:
+      if hadPath: putEnv("PATH", originalPath)
+      else: delEnv("PATH")
+    putEnv("PATH", "")
+    let withoutHostPath = emitCargoVendorAction(root, "justSource", plan, "", "")
+    check "sh" in withoutHostPath.toolIdentityRefs
+    check withoutHostPath.call.arguments == withHostPath.call.arguments
+
   proc scriptOf(act: BuildActionDef): string =
     ## The shell body out of the action's encoded argv.
     ##

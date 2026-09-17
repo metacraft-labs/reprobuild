@@ -153,14 +153,6 @@ proc emitCargoVendorAction*(projectRoot, packageName: string;
   proc q(value: string): string =
     value.replace("\\", "/").replace("\"", "\\\"")
 
-  let shExe = findExe("sh")
-  if shExe.len == 0:
-    raise newException(CargoLockError,
-      "from-source-cargo: the vendor step needs a POSIX shell and none " &
-      "was found on PATH. Unlike the source fetch, this step has no " &
-      "single-command fallback — it is a loop over " & $plan.len &
-      " crates.")
-
   # A literal tab, bound once. Writing it inline would put a raw tab in the
   # emitted script where no reader could see it, and `IFS` is the one place
   # in this loop where the difference between a tab and a space decides
@@ -210,7 +202,7 @@ proc emitCargoVendorAction*(projectRoot, packageName: string;
 
   result = buildAction(
     id = cargoVendorActionId(packageName),
-    call = inlineExecCall(@[shExe, "-c", script], projectRoot),
+    call = inlineExecCall(@["sh", "-c", script], projectRoot),
     deps = if fetchActionId.len > 0: @[fetchActionId] else: @[],
     inputs = if fetchStamp.len > 0: @[fetchStamp, manifest] else: @[manifest],
     outputs = @[stamp],

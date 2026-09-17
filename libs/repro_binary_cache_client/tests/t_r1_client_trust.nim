@@ -25,7 +25,7 @@
 ## The config parser is exercised separately in
 ## ``t_r1_caches_config.nim`` (pure, no server).
 
-import std/[os, osproc, net, random, strutils, unittest]
+import std/[os, osproc, net, random, strutils, tempfiles, unittest]
 
 import ../src/repro_binary_cache_client
 import ../../repro_binary_cache_server/src/repro_binary_cache_server/types
@@ -64,7 +64,8 @@ proc localPlatform(): PlatformTriple =
 
 proc publishMember(state: BinaryCacheServerState;
                    kp: peerAuth.PeerKeypair;
-                   name: string; seed: int):
+                   name: string; seed: int;
+                   relocation = rpOptional):
                     tuple[entryKeyHex: string; payloadBytes: seq[byte]] =
   ## Builds + SIGNS a single-payload manifest with the supplied keypair
   ## and stores it (manifest + payload) into the server. ``storeManifest``
@@ -93,7 +94,7 @@ proc publishMember(state: BinaryCacheServerState;
     formatVersion: BinaryCacheFormatVersion,
     entryKey: ek, payloads: @[payload],
     realizedPrefixDigest: rp, depReferences: @[],
-    relocationPolicy: rpOptional, createdAtUnix: 1)
+    relocationPolicy: relocation, createdAtUnix: 1)
   signManifest(kp, m)
   discard storeManifest(state, m)
   discard storePayload(state, payloadBytes)
@@ -107,6 +108,126 @@ proc anyMaterialised(res: InProcessOutcome): bool =
   return false
 
 suite "R1 — client trust + default-untrusted substitution":
+
+  test "a trusted manifest must match the requested entry key":
+    let root = createTempDir("cache-manifest-request-", "")
+    defer: removeDir(root)
+    let serverRoot = root / "server"
+    let clientRoot = root / "consumer"
+    createDir(serverRoot)
+    createDir(clientRoot)
+    var state = openBinaryCacheServer(serverRoot)
+    let entry = publishMember(state, state.producerKeypair, "actual", 19)
+    let publicKey = state.producerKeypair.publicKey
+    let requested = repeat('f', 64)
+    require requested != entry.entryKeyHex
+    # A mirror can serve valid signed bytes at the wrong URL without being
+    # able to forge the producer's signature. No existing entry is replaced.
+    let wrongPath = manifestPathFor(state, requested)
+    createDir(parentDir(wrongPath))
+    copyFile(manifestPathFor(state, entry.entryKeyHex), wrongPath)
+    close(state)
+    let port = pickPort()
+    let server = startServer(serverRoot, port)
+    defer:
+      server.terminate()
+      discard server.waitForExit()
+      server.close()
+    require waitForListener(port)
+    let endpoints = @[SubstituteEndpoint(
+      baseUrl: "http://127.0.0.1:" & $port,
+      trustedSigners: @[publicKey], enforceTrust: true)]
+    let wrong = substituteInProcess(requested, clientRoot, endpoints)
+    check not wrong.ok
+    check wrong.plan.len == 0
+    check not anyMaterialised(wrong)
+    check "entry key" in wrong.reason
+    let correct = substituteInProcess(entry.entryKeyHex, clientRoot, endpoints)
+    check correct.ok
+    check anyMaterialised(correct)
+
+  test "a trusted signature cannot authorize unsupported relocation":
+    for policy in [rpRequired, rpForbidden]:
+      let root = createTempDir("cache-relocation-policy-", "")
+      defer: removeDir(root)
+      let serverRoot = root / "server"
+      let clientRoot = root / "consumer"
+      createDir(serverRoot)
+      createDir(clientRoot)
+      let port = pickPort()
+      var state = openBinaryCacheServer(serverRoot)
+      let keypair = state.producerKeypair
+      let entry = publishMember(state, keypair, "relocation", 17,
+        relocation = policy)
+      let publicKey = keypair.publicKey
+      close(state)
+      let server = startServer(serverRoot, port)
+      defer:
+        server.terminate()
+        discard server.waitForExit()
+        server.close()
+      require waitForListener(port)
+      let endpoints = @[SubstituteEndpoint(
+        baseUrl: "http://127.0.0.1:" & $port,
+        trustedSigners: @[publicKey], enforceTrust: true)]
+      let outcome = substituteInProcess(entry.entryKeyHex, clientRoot, endpoints)
+      check not outcome.ok
+      check outcome.plan.len == 0
+      check not anyMaterialised(outcome)
+
+      # Another mirror serves an independently signed, compatible manifest
+      # for the same identity. Neither its policy nor its trust is inherited
+      # from the first mirror's in-memory manifest or the local payload index.
+      let portableRoot = root / "portable"
+      createDir(portableRoot)
+      var portableState = openBinaryCacheServer(portableRoot)
+      let portableEntry = publishMember(portableState, keypair, "relocation", 17)
+      close(portableState)
+      require portableEntry.entryKeyHex == entry.entryKeyHex
+      var portablePort = pickPort()
+      while portablePort == port:
+        portablePort = pickPort()
+      let portableServer = startServer(portableRoot, portablePort)
+      defer:
+        portableServer.terminate()
+        discard portableServer.waitForExit()
+        portableServer.close()
+      require waitForListener(portablePort)
+      let portableEndpoint = SubstituteEndpoint(
+        baseUrl: "http://127.0.0.1:" & $portablePort,
+        trustedSigners: @[publicKey], enforceTrust: true)
+      let accepted = substituteInProcess(entry.entryKeyHex, clientRoot,
+        @[portableEndpoint])
+      require accepted.ok
+      require anyMaterialised(accepted)
+
+      let warm = substituteInProcess(entry.entryKeyHex, clientRoot, endpoints)
+      check not warm.ok
+      check not anyMaterialised(warm)
+      let fallback = substituteInProcess(entry.entryKeyHex, clientRoot,
+        @[endpoints[0], portableEndpoint])
+      check fallback.ok
+      if fallback.ok:
+        require fallback.plan.len == 1
+        check fallback.plan[0].sourceEndpoint.baseUrl == portableEndpoint.baseUrl
+
+      let ctx = newClientContext(defaultConfig(clientRoot, @[portableEndpoint]))
+      defer: ctx.close()
+      let pool = newHttpPool()
+      defer: pool.close()
+      discard fetchAndVerifyManifest(ctx, pool, portableEndpoint, entry.entryKeyHex)
+      var revoked = portableEndpoint
+      revoked.trustedSigners = @[]
+      expect ClosureWalkError:
+        discard fetchAndVerifyManifest(ctx, pool, revoked, entry.entryKeyHex)
+      let otherMirror = fetchAndVerifyManifest(ctx, pool, endpoints[0], entry.entryKeyHex)
+      check otherMirror.relocationPolicy == policy
+
+      let direct = executeSubstituteAction(ctx, pool,
+        SubstituteRequest(entryKeyHex: entry.entryKeyHex, endpoint: endpoints[0]),
+        openClientIndex(clientRoot))
+      check not direct.ok
+      check "relocation" in direct.reason.toLowerAscii()
 
   test "untrusted signing key is REJECTED; trusted key is ACCEPTED":
     randomize()
