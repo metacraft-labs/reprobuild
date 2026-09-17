@@ -6771,6 +6771,16 @@ proc shortenStoreBinDir*(binDir, storeRoot: string): string =
     except CatchableError:
       return binDir
     if not dirExists(extendedPath(link)):
+      # A junction whose target has been garbage-collected still occupies the
+      # name: ``dirExists`` reports false through it, but ``mklink`` refuses
+      # to create over it. Clearing it first is what lets the same slot be
+      # re-established after a store GC instead of falling back to the long
+      # path forever. Failure to remove is not an error — the create below
+      # will fail too, and the fallback is the same.
+      try:
+        removeDir(extendedPath(link))
+      except CatchableError:
+        discard
       # ``mklink /J`` rather than an FSCTL_SET_REPARSE_POINT of our own: a
       # junction needs no privilege, cmd.exe is always present, and this
       # command line is short enough that the truncation this whole proc
