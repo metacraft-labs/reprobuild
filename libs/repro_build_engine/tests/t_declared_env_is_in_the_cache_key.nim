@@ -834,3 +834,140 @@ suite "the environment key rendering is canonical and host-independent":
     # Malformed entries carry no environment and must not become key
     # material by accident.
     check actionEnvironmentKeyText(["no-equals-sign", "=novalue"], []) == ""
+
+  test "13. every census arm counts every PATH class, in its own column":
+    # STRUCTURAL, and shaped like case 10 for the same reason: the thing
+    # that must not come back is a SHAPE, not a value.
+    #
+    # `classifyActionPath` returns four values. Both censuses over it —
+    # the engine's own (`repro_build_engine`, feeding the build header)
+    # and `repro graph --view=env` (`repro_cli_support`) — spelled the
+    # fourth arm `of apdAbsent: discard`. An action that declares no
+    # `PATH` at all therefore landed in NO column, and a graph made
+    # entirely of them printed `N hermetic (keyed by value), 0 inherited,
+    # 0 EMPTY` — a clean bill of health over the worst state an edge can
+    # be in, because the launcher's `getEnv("PATH")` fallback hands such
+    # an action the ambient `$PATH` with nothing in the key recording it.
+    #
+    # Three rules, and the third is the one the behavioural cases cannot
+    # express:
+    #
+    #   (a) every arm of every `case classifyActionPath(...)` must name
+    #       all four enum values — Nim already requires exhaustiveness,
+    #       so this is really a guard that the scan FOUND the case
+    #       statements at all;
+    #   (b) no arm may be `discard`, which is how exhaustiveness was
+    #       satisfied while the value was thrown away; and
+    #   (c) the four arms must increment four DISTINCT counters. This is
+    #       the anti-folding rule. `apdAbsent` folded into
+    #       `inheritedPathActions` satisfies (a) and (b) and still
+    #       destroys the distinction the column exists to draw:
+    #       `apdInherited` names `PATH` in `envPassthrough`, so the key
+    #       records that the dependency EXISTS (name keyed, value not);
+    #       `apdAbsent` records nothing whatsoever. One column for both
+    #       reports a keyed dependency where there is none.
+    #
+    # And the two arms must agree with each other. The enum's own
+    # docstring says the classifier is shared "so the build header and
+    # the graph instrument can never disagree about the same graph"; a
+    # change that taught one census about a class and not the other would
+    # reintroduce exactly that disagreement, so the two counter sets are
+    # compared rather than checked independently.
+    let engineSource = currentSourcePath().parentDir.parentDir / "src" /
+      "repro_build_engine.nim"
+    let cliSource = currentSourcePath().parentDir.parentDir.parentDir /
+      "repro_cli_support" / "src" / "repro_cli_support.nim"
+    check fileExists(engineSource)
+    check fileExists(cliSource)
+
+    const PathClasses = ["apdHermetic", "apdInherited", "apdAbsent", "apdEmpty"]
+
+    proc censusArms(path: string): seq[(string, string)] =
+      ## The `of apdX: <body>` arms of every `case classifyActionPath(...)`
+      ## in `path`, as (enum value, body) pairs. Comment lines are skipped
+      ## so the surrounding rationale — which names all four values at
+      ## length — cannot satisfy the scan on its own.
+      let lines = readFile(path).splitLines()
+      var i = 0
+      while i < lines.len:
+        let stripped = lines[i].strip()
+        if stripped.startsWith("case classifyActionPath("):
+          var j = i + 1
+          while j < lines.len:
+            let arm = lines[j].strip()
+            if arm.startsWith("#"):
+              inc j
+              continue
+            if not arm.startsWith("of apd"):
+              break
+            let colon = arm.find(':')
+            check colon > 0
+            result.add((arm[3 ..< colon].strip(), arm[colon + 1 .. ^1].strip()))
+            inc j
+          i = j
+        else:
+          inc i
+
+    proc counterOf(body: string): string =
+      ## The field name an arm increments, read out of `inc <expr>.<field>`.
+      ## Fail-closed: an arm this cannot read is not a passing arm, and it
+      ## returns a value that is unique per arm so the distinctness rule
+      ## below cannot be satisfied by two unreadable arms either.
+      check body.startsWith("inc ")
+      if not body.startsWith("inc "):
+        return "<unreadable:" & body & ">"
+      let expr = body[4 .. ^1].strip()
+      let dot = expr.rfind('.')
+      check dot > 0
+      if dot <= 0:
+        return "<unreadable:" & body & ">"
+      expr[dot + 1 .. ^1]
+
+    var perSource: seq[seq[string]] = @[]
+    for source in [engineSource, cliSource]:
+      let arms = censusArms(source)
+      checkpoint(source.extractFilename & " census arms: " & $arms)
+      # (a) — and the scan is non-vacuous: a rename of `classifyActionPath`
+      # or a reshaped `case` leaves this at zero and fails here rather
+      # than passing silently.
+      check arms.len == PathClasses.len
+      var counters: seq[string] = @[]
+      var seen: seq[string] = @[]
+      for arm in arms:
+        let value = arm[0]
+        let body = arm[1]
+        check value in PathClasses
+        check value notin seen
+        seen.add(value)
+        # (b)
+        checkpoint(source.extractFilename & " arm " & value & " -> " & body)
+        check body != "discard"
+        check not body.startsWith("discard")
+        counters.add(counterOf(body))
+      # (c) — four arms, four different columns.
+      checkpoint(source.extractFilename & " counters: " & $counters)
+      check counters.len == PathClasses.len
+      check counters.deduplicate().len == PathClasses.len
+      # Ordered by enum value so the two sources are comparable below.
+      var byClass: seq[string] = @[]
+      for wanted in PathClasses:
+        for i in 0 ..< arms.len:
+          if arms[i][0] == wanted:
+            byClass.add(counters[i])
+      check byClass.len == PathClasses.len
+      perSource.add(byClass)
+
+    # The two censuses must route the same class into the same column.
+    checkpoint("engine columns: " & $perSource[0])
+    checkpoint("cli columns:    " & $perSource[1])
+    check perSource[0] == perSource[1]
+
+    # And the absent class must NOT be the inherited column. Named
+    # explicitly rather than left to the distinctness rule above, because
+    # this is the specific fold the fix exists to forbid and a future
+    # refactor that collapsed some OTHER pair would otherwise read as the
+    # same failure.
+    let absentAt = PathClasses.find("apdAbsent")
+    let inheritedAt = PathClasses.find("apdInherited")
+    check perSource[0][absentAt] != perSource[0][inheritedAt]
+    check perSource[0][absentAt].len > 0

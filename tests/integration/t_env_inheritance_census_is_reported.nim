@@ -237,8 +237,8 @@ suite "the undeclared-environment population is measured":
     check other.contains("11 hermetic")
     check other.contains("89 inherited")
 
-    # A non-zero empty count is the one thing on this line that is
-    # reported as a defect rather than as a fact.
+    # A non-zero empty count is reported as a defect rather than as a
+    # fact.
     let broken = environmentInheritanceHeaderLine(
       EnvironmentInheritanceCensus(
         totalActions: 2753, declaringActions: 2753,
@@ -247,6 +247,103 @@ suite "the undeclared-environment population is measured":
     check broken.contains("1372 EMPTY")
     check broken.contains("DEFECT")
     check broken != clean
+
+  test "the header line reports ABSENT, and does not read milder than EMPTY":
+    # THE FOURTH COLUMN. `classifyActionPath` has four cases and this
+    # line reported three; both census arms spelled the fourth
+    # `of apdAbsent: discard`. An action declaring no `PATH` at all was
+    # in no column, so the line below — over a graph where EVERY edge is
+    # in that state — used to read
+    #
+    #   PATH: 0 hermetic (keyed by value), 0 inherited (passthrough), 0 EMPTY
+    #
+    # which is a clean bill of health for the worst thing an edge can do.
+    let absent = environmentInheritanceHeaderLine(
+      EnvironmentInheritanceCensus(
+        totalActions: 41, declaringActions: 41, absentPathActions: 41))
+    checkpoint("absent: " & absent)
+    check absent.contains("41 ABSENT")
+    check absent.contains("DEFECT")
+
+    # The count is the census's, not a constant, and the column does not
+    # borrow another column's number.
+    let fewer = environmentInheritanceHeaderLine(
+      EnvironmentInheritanceCensus(
+        totalActions: 41, declaringActions: 41,
+        hermeticPathActions: 33, absentPathActions: 8))
+    checkpoint("fewer: " & fewer)
+    check fewer != absent
+    check fewer.contains("8 ABSENT")
+    check fewer.contains("33 hermetic")
+    # And NOT folded into `inherited`, which is the specific mistake the
+    # column exists to prevent. `apdInherited` names PATH in the
+    # passthrough set, so the key records that the dependency exists;
+    # `apdAbsent` records nothing. One number for both would report a
+    # keyed dependency where there is none.
+    check fewer.contains("0 inherited")
+
+    # A clean census must still say nothing about a defect, or the
+    # flagging above is unfalsifiable.
+    let clean = environmentInheritanceHeaderLine(
+      EnvironmentInheritanceCensus(
+        totalActions: 41, declaringActions: 41,
+        hermeticPathActions: 41))
+    checkpoint("clean: " & clean)
+    check clean.contains("0 ABSENT")
+    check not clean.contains("DEFECT")
+
+    # NOT MILDER THAN THE EMPTY DEFECT. An absent `PATH` is the more
+    # dangerous of the two — `PATH=` makes the child search nothing and
+    # fail where a tool is missing, an absent `PATH` makes it search the
+    # developer's whole machine and succeed differently per machine — so
+    # the line may not present it in gentler terms. Measured against the
+    # empty-PATH diagnostic rather than against a fixed adjective list,
+    # because the comparison is the property.
+    let emptyOnly = environmentInheritanceHeaderLine(
+      EnvironmentInheritanceCensus(
+        totalActions: 41, declaringActions: 41, emptyPathActions: 41))
+    checkpoint("emptyOnly: " & emptyOnly)
+    let absentDiagnostic = absent[absent.find("<- DEFECT") .. ^1]
+    let emptyDiagnostic = emptyOnly[emptyOnly.find("<- DEFECT") .. ^1]
+    checkpoint("absent diagnostic: " & absentDiagnostic)
+    checkpoint("empty diagnostic:  " & emptyDiagnostic)
+    check absentDiagnostic.len >= emptyDiagnostic.len
+
+    # It must say WHAT IS WRONG and WHAT TO DO, not merely that a number
+    # is non-zero. The unkeyed-inheritance claim and the two-developers
+    # consequence are the whole argument for why this is a defect; a
+    # diagnostic that dropped them would leave a reader with a count and
+    # no reason to act on it.
+    for fragment in ["cache key", "different behaviour",
+                     "actionPathDecision"]:
+      checkpoint("absent diagnostic fragment: " & fragment)
+      check absentDiagnostic.contains(fragment)
+
+    # Both defects present: both are stated, neither hides the other.
+    let bothBad = environmentInheritanceHeaderLine(
+      EnvironmentInheritanceCensus(
+        totalActions: 41, declaringActions: 41,
+        absentPathActions: 20, emptyPathActions: 21))
+    checkpoint("bothBad: " & bothBad)
+    check bothBad.contains("20 ABSENT")
+    check bothBad.contains("21 EMPTY")
+    check bothBad.count("DEFECT") == 2
+
+    # AND THE ABSENT ONE IS STATED FIRST. The emission order is a deliberate
+    # decision -- absent is the defect that silently changes what a build DOES
+    # between two machines, empty is the one that fails loudly on the machine
+    # it is on -- and without this assertion it was the one claim in this
+    # change that nothing held: swapping the two `if` blocks left every case
+    # in this file and in
+    # `tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim`
+    # green. A reader who skims one diagnostic reads the first one, so
+    # "which is first" is the whole value of having ordered them.
+    let absentAt = bothBad.find("ABSENT on")
+    let emptyAt = bothBad.find("run with no PATH at all")
+    checkpoint("absent diagnostic at " & $absentAt & ", empty at " & $emptyAt)
+    check absentAt > 0
+    check emptyAt > 0
+    check absentAt < emptyAt
 
   test "the census classifies a real graph's PATH declarations":
     # The counters, taken over a real `runBuild` rather than constructed
@@ -273,8 +370,17 @@ suite "the undeclared-environment population is measured":
           envPassthrough = passthrough,
           governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
-      # Counts chosen distinct so no permutation of the three reads as
+      # Counts chosen distinct so no permutation of the four reads as
       # the identity, the same non-vacuity rule the case above uses.
+      # Sized 3 hermetic / 2 inherited / 1 empty / 4 absent.
+      #
+      # THE ABSENT EDGES ARE THE POINT OF THIS FIXTURE NOW. Both censuses
+      # spelled that arm `of apdAbsent: discard`, so an action declaring
+      # no `PATH` at all was counted in NO column and the header could
+      # read `3 hermetic, 2 inherited, 0 EMPTY` over a graph where four
+      # edges take the launcher's `getEnv("PATH")` fallback with nothing
+      # in their key recording it. This fixture previously had exactly
+      # ONE such edge (`silent`) and asserted it was invisible.
       let g = graph([
         edge("hermetic1", env = ["PATH=/tool/bin"]),
         edge("hermetic2", env = ["PATH=/tool/bin:/other/bin"]),
@@ -283,7 +389,14 @@ suite "the undeclared-environment population is measured":
              passthrough = ["PATH"]),
         edge("inherited2", passthrough = ["PATH"]),
         edge("empty1", env = ["PATH="]),
-        edge("silent", env = ["FOO=1"])])
+        # Four shapes that all classify `apdAbsent`: a variable that is
+        # not PATH, a passthrough name that is not PATH, both at once,
+        # and nothing at all.
+        edge("silent", env = ["FOO=1"]),
+        edge("silent2", passthrough = ["REPRO_TEST_OTHER_VAR"]),
+        edge("silent3", env = ["FOO=1"],
+             passthrough = ["REPRO_TEST_OTHER_VAR"]),
+        edge("silent4")])
 
       var config = defaultBuildEngineConfig(root / "cache")
       config.bypassRunQuota = true
@@ -291,12 +404,24 @@ suite "the undeclared-environment population is measured":
       let census = runBuild(g, config).environmentInheritance
       checkpoint("PATH census: hermetic=" & $census.hermeticPathActions &
         " inherited=" & $census.inheritedPathActions &
+        " absent=" & $census.absentPathActions &
         " empty=" & $census.emptyPathActions)
+      # THE OTHER THREE ARE ASSERTED ALONGSIDE THE NEW ONE ON PURPOSE. A
+      # case that only checked `absentPathActions == 4` would also pass
+      # with the absent arm wired into `inheritedPathActions` and the
+      # inherited arm into the absent one — the counter would be non-zero
+      # for the wrong reason. Pinning all four at four different values
+      # leaves no permutation that reads as the identity.
       check census.hermeticPathActions == 3
       check census.inheritedPathActions == 2
       check census.emptyPathActions == 1
-      # `silent` declares a variable but says nothing about PATH, so it
-      # is in none of the three.
+      check census.absentPathActions == 4
+      # Every process action lands in EXACTLY ONE column. This used to be
+      # `== totalActions - 1`, with the `- 1` standing for the one edge
+      # the census threw away; a graph of absent edges could satisfy the
+      # old form while every one of them went uncounted.
       check census.hermeticPathActions + census.inheritedPathActions +
-        census.emptyPathActions == census.totalActions - 1
+        census.absentPathActions + census.emptyPathActions ==
+        census.totalActions
+      check census.totalActions == 10
 

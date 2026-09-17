@@ -6720,7 +6720,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 12,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -24967,7 +24967,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_env_inheritance_census_is_reported.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
