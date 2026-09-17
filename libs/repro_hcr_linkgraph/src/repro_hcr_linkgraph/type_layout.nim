@@ -154,6 +154,8 @@ proc parseDwarfInt(s: string): int64 =
   var clean = s.strip()
   if clean.startsWith("(") and clean.endsWith(")"):
     clean = clean[1 .. ^2].strip()
+  if clean.startsWith("<") and clean.endsWith(">"):
+    clean = clean[1 .. ^2].strip()
   if clean.startsWith("DW_OP_plus_uconst"):
     clean = clean["DW_OP_plus_uconst".len .. ^1].strip()
   elif clean.startsWith("DW_OP_constu"):
@@ -172,6 +174,14 @@ proc parseDwarfInt(s: string): int64 =
 
 proc unquote(s: string): string =
   var clean = s.strip()
+  # GNU dumpers prefix resolved strings with their storage/index annotation.
+  # Strip that annotation, not colons that belong to a C++ qualified name.
+  if clean.startsWith("(indexed string:") or
+      clean.startsWith("(indirect string, offset:") or
+      clean.startsWith("(indirect line string, offset:"):
+    let annotationEnd = clean.find("):")
+    if annotationEnd >= 0:
+      clean = clean[annotationEnd + 2 .. ^1].strip()
   let q1 = clean.find('"')
   if q1 >= 0:
     let q2 = clean.find('"', q1 + 1)
