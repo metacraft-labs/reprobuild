@@ -204,6 +204,23 @@ when defined(windows):
     ## First-callers (under ``msvcDevEnvLock``) materialise the env diff.
     ## The cache flag is set unconditionally — even on failure — so the
     ## next caller doesn't re-probe a host that lacks VS Build Tools.
+    ##
+    ## An inherited activation is honoured before anything is probed. When
+    ## this process already runs inside a VsDevCmd-activated environment —
+    ## which it does whenever an activation NESTS, as it does for a `just`
+    ## recipe whose shell re-enters `repro exec` — the diff to apply is
+    ## empty, because the environment the child inherits already carries it.
+    ##
+    ## That is not only an optimisation. Re-running the activation from
+    ## inside one costs a `cmd.exe /D /C` with the full inherited
+    ## environment, and cmd.exe truncates that block at 8191 characters: on
+    ## a host with a long PATH the nested probe lost `ProgramFiles(x86)`,
+    ## reported `'vswhere.exe' is not recognized` and `The input line is too
+    ## long`, and left the caller without the toolchain it was already
+    ## standing in.
+    if getEnv("VCToolsInstallDir").len > 0 and getEnv("VSINSTALLDIR").len > 0:
+      return MsvcDevEnv(available: true)
+
     let vswhere = locateVsWhere()
     if vswhere.len == 0:
       warnOnce("MSVC dev-env activation skipped: vswhere.exe not found " &

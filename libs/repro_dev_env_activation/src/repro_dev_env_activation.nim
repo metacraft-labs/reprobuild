@@ -249,6 +249,25 @@ proc baseEnvironment(): StringTableRef =
   for key, value in envPairs():
     result[key] = value
 
+proc pathListContains(list, entry, sep: string): bool =
+  ## Whether ``entry`` is already an element of the ``sep``-separated
+  ## ``list``.
+  ##
+  ## Element-wise, not substring: ``C:/store/p/ab/bin`` is a substring of
+  ## ``C:/store/p/abc/bin`` and is not the same entry. Case-insensitive on
+  ## Windows, where the filesystem is, so the same directory reached under a
+  ## different spelling still counts as present.
+  if entry.len == 0:
+    return false
+  for element in list.split(sep):
+    when defined(windows):
+      if cmpIgnoreCase(element, entry) == 0:
+        return true
+    else:
+      if element == entry:
+        return true
+  false
+
 proc applyOp(env: StringTableRef; op: DevEnvShellOp;
              workingDirectory: var string) =
   requireEnvName(op.name)
@@ -261,11 +280,36 @@ proc applyOp(env: StringTableRef; op: DevEnvShellOp;
   of deskPrependPath:
     let current = env.getOrDefault(op.name)
     env[op.name] =
-      if current.len > 0: op.value & sep & current else: op.value
+      if current.len == 0:
+        op.value
+      elif current.pathListContains(op.value, sep):
+        # Already there: leave the list alone.
+        #
+        # Activation has to be idempotent because activations NEST. A `just`
+        # recipe whose shell is `repro exec -- bash` re-enters the
+        # environment it is already inside, and before this each re-entry
+        # prepended the same thirty-five entries again. Two levels is 3.6 KB
+        # of duplicate PATH, which on Windows is enough to cross cmd.exe's
+        # 8191-character limit on its own: the observed failure was
+        # `VsDevCmd.bat` reporting "The input line is too long" and `tsc` not
+        # being recognised, inside a build that works perfectly when run one
+        # level down.
+        #
+        # Skipping rather than moving to the front: the entry is already in
+        # the list because this same environment put it there, so its
+        # position is the one this environment chose.
+        current
+      else:
+        op.value & sep & current
   of deskAppendPath:
     let current = env.getOrDefault(op.name)
     env[op.name] =
-      if current.len > 0: current & sep & op.value else: op.value
+      if current.len == 0:
+        op.value
+      elif current.pathListContains(op.value, sep):
+        current
+      else:
+        current & sep & op.value
   of deskSetWorkingDirectory:
     if op.value.len > 0:
       workingDirectory = op.value
