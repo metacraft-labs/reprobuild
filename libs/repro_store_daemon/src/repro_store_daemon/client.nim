@@ -138,6 +138,8 @@ proc requestFromTarballUse*(useDef: InterfaceToolUse; storeRoot, holderId,
     tarballMirrors: plan.mirrors,
     tarballSha256: plan.sha256,
     archiveType: plan.archiveType,
+    executableAlias: plan.declaredExecutableAlias,
+    prunePaths: plan.declaredPrunePaths,
     stripComponents: plan.stripComponents)
 
 proc realizeExternalViaDaemon(req: StoreDaemonExternalRealizeRequest;

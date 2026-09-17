@@ -320,6 +320,8 @@ proc useDefForTarball(req: StoreDaemonExternalRealizeRequest): InterfaceToolUse 
     sha256: req.tarballSha256,
     archiveType: req.archiveType,
     executablePath: req.declaredExecutablePath,
+    executableAlias: req.executableAlias,
+    prunePaths: req.prunePaths,
     stripComponents: req.stripComponents,
     packageId: req.packageId,
     lockIdentity: req.lockIdentity,

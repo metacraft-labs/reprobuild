@@ -14,6 +14,7 @@ import repro_binary_cache_client/caches_config
 import repro_binary_cache_client/http_pool
 import repro_binary_cache_client/manifest_codec
 import repro_binary_cache_client/decompress
+import repro_binary_cache_client/compress
 import repro_binary_cache_client/compat_check
 import repro_binary_cache_client/index
 import repro_binary_cache_client/payload_sink
@@ -29,6 +30,7 @@ export caches_config
 export http_pool
 export manifest_codec
 export decompress
+export compress
 export compat_check
 export index
 export payload_sink

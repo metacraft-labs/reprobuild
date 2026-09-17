@@ -14616,6 +14616,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_tarball_prune_paths.nim",
+    binary: "build/test-bin/t_tarball_prune_paths",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_test_execute_edge_receives_a_usable_path.nim",
     binary: "build/test-bin/t_test_execute_edge_receives_a_usable_path",
     defines: @[],

@@ -36,6 +36,10 @@ import ./scheduler_executor
 import ./closure_walk
 import ./index
 import ./cache_key
+import ./compress
+import ./decompress
+
+import repro_core/paths
 
 import ../../../repro_binary_cache_server/src/repro_binary_cache_server/types as bcsTypes
 import ../../../repro_binary_cache_server/src/repro_binary_cache_server/manifest_codec as serverCodec
@@ -155,7 +159,17 @@ proc normaliseSep(p: string): string =
 
 proc collectPrefixEntries(current, relativeBase: string;
                           entries: var seq[ArchiveEntry]) =
-  for component, path in walkDir(current, skipSpecial = true):
+  # Extended-length form throughout the walk. A published prefix is an
+  # upstream tree, and upstream trees on Windows routinely run past
+  # MAX_PATH -- PostgreSQL's bundled pgAdmin nests SQL templates twelve
+  # directories deep. Without this, ``walkDir`` stops at the first such
+  # directory and the archive is silently short, or the size probe below
+  # fails with "the system cannot find the path specified" and the publish
+  # is skipped for a reason that says nothing about path length.
+  #
+  # ``extendedPath`` is idempotent on an already-extended path, so the
+  # recursion below re-applying it costs nothing.
+  for component, path in walkDir(extendedPath(current), skipSpecial = true):
     let name = extractFilename(path)
     let relativePath =
       if relativeBase.len == 0: name else: relativeBase / name
@@ -219,9 +233,9 @@ proc archiveEntryPayloadSize(plan: PrefixArchivePlan;
                              entry: ArchiveEntry): int64 =
   let path = archiveEntryPath(plan, entry)
   case entry.kind
-  of aekFile: getFileSize(path)
+  of aekFile: getFileSize(extendedPath(path))
   of aekDirectory: 0
-  of aekSymlink: int64(expandSymlink(path).len)
+  of aekSymlink: int64(expandSymlink(extendedPath(path)).len)
 
 proc planPrefixArchive(prefix: string): PrefixArchivePlan =
   result.root = absolutePath(prefix)
@@ -264,6 +278,28 @@ proc writeArchiveString(writer: var ArchiveFileWriter; data: string) =
   if data.len > 0:
     writer.writeArchiveBytes(unsafeAddr data[0], data.len)
 
+proc hashFileBlake3(path: string): bcsTypes.Blake3Hash =
+  ## BLAKE3 of a file's bytes, read in fixed-size chunks.
+  ##
+  ## The publish path needs this only for a COMPRESSED payload: the plain
+  ## archive is hashed as it is written, but the compressor writes its output
+  ## through libzstd where no hasher is in the loop. Streaming here keeps a
+  ## multi-gigabyte payload out of memory, which is the whole reason the
+  ## archive was written to a file rather than a buffer in the first place.
+  var hasher = initHasher()
+  defer: hasher.close()
+  var f = open(path, fmRead)
+  defer: close(f)
+  var buffer = newSeq[byte](ArchiveCopyBufferBytes)
+  while true:
+    let read = f.readBuffer(addr buffer[0], buffer.len)
+    if read <= 0:
+      break
+    hasher.update(addr buffer[0], read)
+  let digest = hasher.finalize()
+  for i in 0 ..< 32:
+    result[i] = digest[i]
+
 proc writeArchiveFile(plan: PrefixArchivePlan; output: File): Blake3Digest =
   var writer = ArchiveFileWriter(output: output, hasher: initHasher())
   defer: writer.hasher.close()
@@ -276,14 +312,15 @@ proc writeArchiveFile(plan: PrefixArchivePlan; output: File): Blake3Digest =
     writer.writeArchiveString(entry.path)
     writer.writeArchiveString($char(ord(entry.kind)))
     let mode =
-      if entry.kind == aekSymlink: 0'u32 else: fileModeOctal(path)
+      if entry.kind == aekSymlink: 0'u32
+      else: fileModeOctal(extendedPath(path))
     writer.writeArchiveString(littleEndianBytes(uint64(mode), 4))
     let payloadSize = archiveEntryPayloadSize(plan, entry)
     writer.writeArchiveString(littleEndianBytes(uint64(payloadSize), 8))
     case entry.kind
     of aekFile:
       var input: File
-      if not open(input, path, fmRead):
+      if not open(input, extendedPath(path), fmRead):
         raise newException(IOError, "cannot open rbcarc input: " & path)
       try:
         var buffer = newString(ArchiveCopyBufferBytes)
@@ -297,7 +334,7 @@ proc writeArchiveFile(plan: PrefixArchivePlan; output: File): Blake3Digest =
     of aekDirectory:
       discard
     of aekSymlink:
-      writer.writeArchiveString(expandSymlink(path))
+      writer.writeArchiveString(expandSymlink(extendedPath(path)))
   if writer.bytesWritten != plan.size:
     raise newException(IOError,
       "rbcarc size changed while archiving: expected " & $plan.size &
@@ -315,7 +352,7 @@ proc packPrefix*(prefix: string): seq[byte] =
   writeU32LE(result, ArchiveVersion)
   writeU32LE(result, uint32(entries.len))
   for entry in entries:
-    let absPath = prefix / entry.path
+    let absPath = extendedPath(prefix / entry.path)
     let mode =
       if entry.kind == aekSymlink: 0'u32 else: fileModeOctal(absPath)
     let pathBytes = entry.path
@@ -376,12 +413,47 @@ proc readU64LE(buf: openArray[byte]; pos: var int): uint64 =
     result = result or (uint64(buf[pos]) shl uint64(shift))
     inc pos
 
+proc extractPrefixRaw(archive: openArray[byte]; outDir: string)
+
 proc extractPrefix*(archive: openArray[byte]; outDir: string) =
   ## Extract an ``rbcarc-v1`` or ``rbcarc-v2`` archive into ``outDir``.
   ## v2 preserves regular files, directory entries, and symbolic links;
   ## v1 remains accepted so already-published cache entries keep working.
-  ## Raises
-  ## ``IOError`` on a malformed / truncated archive.
+  ## Raises ``IOError`` on a malformed / truncated archive.
+  ##
+  ## A zstd-compressed archive is decompressed first. The CAS stores each
+  ## payload exactly as its producer signed it, so a blob read back carries
+  ## no manifest to say which codec produced it -- but ``rbcarc`` begins with
+  ## ``RBCA`` and a zstd frame with its own magic, so the two never collide.
+  ## Sniffing here rather than at each call site means every consumer of a
+  ## substituted prefix -- the tool store, the provider-compile cache, the
+  ## build-action apply path, the CLI -- handles compressed entries without
+  ## knowing they exist.
+  if isZstdFrame(archive):
+    var plain: seq[byte] = @[]
+    let decomp =
+      try:
+        newDecompressor(ckZstd)
+      except DecompressUnavailable as e:
+        raise newException(IOError,
+          "rbcarc is zstd-compressed but this host cannot decompress it: " &
+          e.msg)
+    defer: decomp.close()
+    let sink: ChunkSink = proc(data: openArray[byte]) =
+      if data.len > 0:
+        let at = plain.len
+        plain.setLen(at + data.len)
+        copyMem(addr plain[at], unsafeAddr data[0], data.len)
+    try:
+      decomp.feed(archive, sink)
+      decomp.finish(sink)
+    except DecompressError as e:
+      raise newException(IOError, "rbcarc zstd decode failed: " & e.msg)
+    extractPrefixRaw(plain, outDir)
+    return
+  extractPrefixRaw(archive, outDir)
+
+proc extractPrefixRaw(archive: openArray[byte]; outDir: string) =
   if archive.len < 4 + 4 + 4:
     raise newException(IOError, "rbcarc too short: " & $archive.len)
   for i in 0 ..< 4:
@@ -392,7 +464,7 @@ proc extractPrefix*(archive: openArray[byte]; outDir: string) =
   if ver notin {ArchiveVersionV1, ArchiveVersion}:
     raise newException(IOError, "rbcarc version mismatch: got " & $ver)
   let count = readU32LE(archive, pos)
-  createDir(outDir)
+  createDir(extendedPath(outDir))
   var directoryModes: seq[(string, uint32)] = @[]
   for _ in 0 ..< count:
     let pathLen = int(readU32LE(archive, pos))
@@ -423,21 +495,23 @@ proc extractPrefix*(archive: openArray[byte]; outDir: string) =
       raise newException(IOError,
         "rbcarc truncated reading file body for " & rel)
     let absOut = outDir / rel
-    createDir(parentDir(absOut))
+    # Same MAX_PATH argument as the walk on the publish side: a tree deep
+    # enough to archive is deep enough to fail to restore.
+    createDir(extendedPath(parentDir(absOut)))
     var data = newString(int(size))
     for i in 0 ..< int(size):
       data[i] = char(archive[pos + i])
     inc pos, int(size)
     case entryKind
     of aekFile:
-      writeFile(absOut, data)
+      writeFile(extendedPath(absOut), data)
       when not defined(windows):
         setFilePermissions(absOut, modeFilePermissions(mode))
     of aekDirectory:
       if data.len != 0:
         raise newException(IOError,
           "rbcarc directory entry has a non-empty payload: " & rel)
-      createDir(absOut)
+      createDir(extendedPath(absOut))
       directoryModes.add((absOut, mode))
     of aekSymlink:
       if data.len == 0:
@@ -588,21 +662,25 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
       DefaultMaxPublishArchiveBytes
     else:
       min(req.maxArchiveBytes, DefaultMaxPublishArchiveBytes)
-  if archivePlan.size > maxArchiveBytes:
-    result.error = "publish skipped: prefix archive is " &
-      $archivePlan.size & " bytes, exceeding the " & $maxArchiveBytes &
-      "-byte /publish payload limit"
-    return
+  # NOTE: the limit is checked against the bytes actually UPLOADED, below,
+  # not against ``archivePlan.size``. Those differ once the payload is
+  # compressed, and checking the uncompressed size here is what kept every
+  # prefix over 1 GiB out of the cache even when its compressed form would
+  # have fit comfortably.
 
   var archiveFile: File
   var archivePath = ""
   var archiveOpen = false
+  var compressedPath = ""
   defer:
     if archiveOpen:
       try: close(archiveFile)
       except CatchableError: discard
     if archivePath.len > 0 and fileExists(archivePath):
       try: removeFile(archivePath)
+      except CatchableError: discard
+    if compressedPath.len > 0 and fileExists(compressedPath):
+      try: removeFile(compressedPath)
       except CatchableError: discard
   var rawDigest: Blake3Digest
   try:
@@ -616,9 +694,50 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
   except CatchableError as e:
     result.error = "publish: cannot create prefix archive: " & e.msg
     return
+
+  # Compress the archive when this host can, and upload whichever form is
+  # smaller. Compression is opportunistic on both counts: a host without
+  # libzstd publishes the plain archive (the payload declares its own codec,
+  # so consumers are unaffected), and an already-compressed prefix whose
+  # zstd form came out no smaller is published plain rather than paying a
+  # decompression step for nothing.
+  var uploadPath = archivePath
+  var uploadCompression = bcsTypes.ckNone
+  var uploadSize = archivePlan.size
   var payloadDigest: bcsTypes.Blake3Hash
   for i in 0 ..< 32:
     payloadDigest[i] = rawDigest[i]
+
+  if getEnv("REPRO_PUBLISH_NO_COMPRESSION").len == 0 and
+      supportsCompressor(bcsTypes.ckZstd):
+    try:
+      let candidate = archivePath & ".zst"
+      let compressedSize = compressFileToFile(archivePath, candidate,
+        bcsTypes.ckZstd)
+      compressedPath = candidate
+      if compressedSize > 0 and compressedSize < archivePlan.size:
+        uploadPath = candidate
+        uploadCompression = bcsTypes.ckZstd
+        uploadSize = compressedSize
+        # The manifest's ``digest`` is over the bytes as transferred and
+        # stored -- the compressed ones -- because that is what the CAS
+        # holds and what the consumer can verify without first trusting
+        # the codec. See ``payload_sink``'s hash check.
+        payloadDigest = hashFileBlake3(candidate)
+    except CatchableError:
+      # Any compression failure is a soft one: fall through with the plain
+      # archive rather than losing the entry entirely.
+      discard
+
+  if uploadSize > maxArchiveBytes:
+    result.error = "publish skipped: prefix archive is " &
+      $uploadSize & " bytes" &
+      (if uploadCompression == bcsTypes.ckZstd:
+         " compressed (" & $archivePlan.size & " uncompressed)"
+       else: "") &
+      ", exceeding the " & $maxArchiveBytes &
+      "-byte /publish payload limit"
+    return
   # Realized prefix digest: re-use the payload hash as v1 placeholder.
   var realizedDigest: bcsTypes.Blake3Hash = payloadDigest
 
@@ -631,11 +750,12 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
 
   let payloadObj = bcsTypes.PayloadObject(
     kind: bcsTypes.pkPrefixArchive,
-    compression: bcsTypes.ckNone,
-    declaredSize: uint64(archivePlan.size),
+    compression: uploadCompression,
+    declaredSize: uint64(uploadSize),
     uncompressedSize: uint64(archivePlan.size),
     digest: payloadDigest,
-    name: "prefix.rbcarc")
+    name: if uploadCompression == bcsTypes.ckZstd: "prefix.rbcarc.zst"
+          else: "prefix.rbcarc")
   var manifest = bcsTypes.BinaryCacheManifest(
     formatVersion: bcsTypes.BinaryCacheFormatVersion,
     entryKey: derivedKey,
@@ -652,7 +772,7 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
     manifestContent[i] = char(value)
   let multipart = newMultipartData()
   multipart.add("manifest", manifestContent)
-  discard multipart.addFiles({"payload": archivePath})
+  discard multipart.addFiles({"payload": uploadPath})
   let baseUrl =
     if req.endpoint.len > 0: req.endpoint
     else: "http://localhost:7878"
@@ -668,6 +788,18 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
     if not openSslInitialized:
       discard SSL_library_init()
       openSslInitialized = true
+  # Socket timeout for the upload. The old 60 s was sized for the small
+  # build-action outputs this path originally carried; a toolchain prefix is
+  # three orders of magnitude larger, and a stall partway through a
+  # multi-hundred-megabyte POST surfaced as an opaque gateway error rather
+  # than as a timeout. Overridable so an operator on a slow link can raise it
+  # without a rebuild.
+  let publishTimeoutMs =
+    try:
+      max(parseInt(getEnv("REPRO_BINARY_CACHE_PUBLISH_TIMEOUT_MS", "600000")),
+        1000)
+    except ValueError:
+      600_000
   let client =
     when defined(ssl):
       if baseUrl.toLowerAscii().startsWith("https://"):
@@ -678,11 +810,11 @@ proc publishInProcess*(req: PublishInProcessRequest): PublishInProcessResult =
           if insecure: newContext(verifyMode = CVerifyNone)
           elif caFile.len > 0: newContext(verifyMode = CVerifyPeer, caFile = caFile)
           else: newContext(verifyMode = CVerifyPeer)
-        newHttpClient(timeout = 60_000, sslContext = ctx)
+        newHttpClient(timeout = publishTimeoutMs, sslContext = ctx)
       else:
-        newHttpClient(timeout = 60_000, sslContext = nil)
+        newHttpClient(timeout = publishTimeoutMs, sslContext = nil)
     else:
-      newHttpClient(timeout = 60_000)
+      newHttpClient(timeout = publishTimeoutMs)
   defer: client.close()
   try:
     let resp = client.request(url, HttpPost, multipart = multipart)

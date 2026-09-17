@@ -337,6 +337,27 @@ type
       ## valid for users without the Windows privilege to create one, and
       ## because a relative symlink does not survive the archive-extraction
       ## boundary on every host.
+    prunePaths*: seq[string]
+      ## Prefix-relative paths deleted after extraction, before sealing.
+      ##
+      ## Several upstreams ship one archive that serves audiences a *build*
+      ## environment does not have. The PostgreSQL Windows distribution
+      ## carries a 671 MB pgAdmin GUI beside a 72 MB ``bin``; the LLVM
+      ## release carries a debugger, an interpreter and a bugpoint reducer
+      ## beside the compiler. Realizing those wholesale costs store space on
+      ## every machine and, once a prefix passes the cache's request-body
+      ## limit, costs the package its place in the shared cache entirely —
+      ## so the one artifact other machines most want to install quickly is
+      ## the one they must build for themselves.
+      ##
+      ## Each entry is a path relative to the prefix root, matched literally
+      ## (no globbing) so a declaration says exactly what it drops; a path
+      ## that is not present is not an error, because upstream layouts move
+      ## between versions and a stale entry should not break a realize.
+      ##
+      ## Pruning is part of the prefix's identity: two hosts that prune
+      ## differently hold different bytes and must not share a cache entry.
+      ## ``toolCacheIdentity`` therefore keys on this list.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string

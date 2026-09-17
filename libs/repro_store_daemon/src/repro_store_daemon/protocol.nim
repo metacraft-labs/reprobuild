@@ -8,7 +8,12 @@ when defined(posix):
   import std/posix
 
 const
-  StoreDaemonProtocolVersion* = 1'u16
+  StoreDaemonProtocolVersion* = 2'u16
+    ## v2: the external-realize body carries ``executableAlias`` and
+    ## ``prunePaths``. The bump is what makes the change safe: the frame is
+    ## positional, so a v1 peer reading a v2 body would not fail — it would
+    ## read the alias string as ``stripComponents`` and realize a different
+    ## prefix. The handshake rejects the mismatch instead.
   StoreDaemonProfileDev* = "development-store"
   StoreDaemonCapabilities* = "realize,register_root,query,gc,status"
   FrameMagic = "RBSD"
@@ -80,6 +85,18 @@ type
     tarballMirrors*: seq[string]
     tarballSha256*: string
     archiveType*: string
+    executableAlias*: string
+      ## Second name the realized executable is exposed under.
+    prunePaths*: seq[string]
+      ## Prefix-relative paths realize drops after extraction.
+      ##
+      ## Both of these travel with the request for the same reason every
+      ## other field does: the daemon rebuilds the provisioning from this
+      ## message alone (``useDefForTarball``), so a field that does not
+      ## cross the socket does not exist on the realizing side. Dropping
+      ## either does not fail — it produces a DIFFERENT prefix under a
+      ## different cache key than the same realize performed in-process,
+      ## which is the one way this path can go wrong silently.
     stripComponents*: int
 
 proc bytesOf(text: string): seq[byte] =
@@ -261,6 +278,8 @@ proc externalRealizeBody*(req: StoreDaemonExternalRealizeRequest): seq[byte] =
   result.writeStringSeq(req.tarballMirrors)
   result.writeString(req.tarballSha256)
   result.writeString(req.archiveType)
+  result.writeString(req.executableAlias)
+  result.writeStringSeq(req.prunePaths)
   result.writeU32Le(uint32(max(req.stripComponents, 0)))
 
 proc parseExternalRealizeBody*(body: openArray[byte]):
@@ -284,6 +303,8 @@ proc parseExternalRealizeBody*(body: openArray[byte]):
   result.tarballMirrors = body.readStringSeq(pos)
   result.tarballSha256 = body.readString(pos)
   result.archiveType = body.readString(pos)
+  result.executableAlias = body.readString(pos)
+  result.prunePaths = body.readStringSeq(pos)
   result.stripComponents = int(body.readU32Le(pos))
 
 proc releaseRootBody*(holderId, rootId: string): seq[byte] =

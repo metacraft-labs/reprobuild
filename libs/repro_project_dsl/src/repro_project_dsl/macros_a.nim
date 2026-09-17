@@ -1373,6 +1373,13 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
     let mirrorValue = namedValue(node[i], "mirror")
     if not mirrorValue.isNil:
       result.mirrors.add(exprCode(mirrorValue))
+    # Repeatable, like ``mirror``: one ``prune = "<path>"`` per path dropped
+    # from the extracted prefix. Repetition rather than a list literal keeps
+    # the grammar uniform with every other named argument here, and keeps
+    # each dropped path on its own line where a comment can justify it.
+    let pruneValue = namedValue(node[i], "prune")
+    if not pruneValue.isNil:
+      result.prunePaths.add(exprCode(pruneValue))
     let sha256Value = namedValue(node[i], "sha256")
     if not sha256Value.isNil:
       sha256Node = sha256Value
@@ -2487,6 +2494,11 @@ proc packageLiteral(pkg: PackageDef): string =
       if mirrorIndex > 0:
         result.add(", ")
       result.add(mirror)
+    result.add("], prunePaths: @[")
+    for pruneIndex, prunePath in provisioning.prunePaths:
+      if pruneIndex > 0:
+        result.add(", ")
+      result.add(prunePath)
     result.add("], sha256: " & codeOrEmpty(provisioning.sha256) &
       ", executableAlias: " & codeOrEmpty(provisioning.executableAlias) &
     ", archiveType: " & codeOrEmpty(provisioning.archiveType) &

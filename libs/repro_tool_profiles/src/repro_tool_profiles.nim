@@ -295,6 +295,9 @@ type
     declaredExecutableAlias*: string
       ## Optional second name the realized executable is exposed under. See
       ## ``TarballProvisioningDef.executableAlias``.
+    declaredPrunePaths*: seq[string]
+      ## Prefix-relative paths deleted after extraction. See
+      ## ``TarballProvisioningDef.prunePaths``.
     stripComponents*: int
     lockIdentity*: string
 
@@ -1897,6 +1900,7 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
     0: selected.archiveType else: "tar.gz",
     declaredExecutablePath: selected.executablePath,
     declaredExecutableAlias: selected.executableAlias,
+    declaredPrunePaths: selected.prunePaths,
     stripComponents: selected.stripComponents,
     lockIdentity: contributorLockIdentity(selected.contributor,
       if selected.lockIdentity.len > 0:
@@ -2715,6 +2719,7 @@ proc writeTarballReceipt(prefix: string; plan: TarballAcquisitionPlan;
     "sha256": plan.sha256,
     "archiveType": plan.archiveType,
     "stripComponents": plan.stripComponents,
+    "prunePaths": plan.declaredPrunePaths,
     "declaredExecutablePath": plan.declaredExecutablePath,
     "lockIdentity": plan.lockIdentity,
     "realizationBoundary": prefix
@@ -2758,6 +2763,16 @@ proc toolCacheIdentity(plan: TarballAcquisitionPlan;
   result.addOption("archiveType", plan.archiveType)
   result.addOption("executablePath", plan.declaredExecutablePath)
   result.addOption("executableAlias", plan.declaredExecutableAlias)
+  # Pruning changes the prefix's bytes, so it must change its key. A host
+  # that prunes nothing and a host that drops a 671 MB GUI produce different
+  # realizations of the same archive and must not serve each other.
+  #
+  # Recorded only when non-empty, so introducing the field does not move
+  # the key of every package that prunes nothing. An unconditional option
+  # would have invalidated every entry already in the shared cache the day
+  # this landed, for packages whose bytes did not change at all.
+  if plan.declaredPrunePaths.len > 0:
+    result.addOption("prunePaths", plan.declaredPrunePaths.join("\n"))
   result.addOption("stripComponents", $plan.stripComponents)
 
 proc substituteToolPrefix(plan: TarballAcquisitionPlan;
@@ -2926,6 +2941,35 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
   try:
     extractTarballArchive(downloaded.path, tempPrefix, plan.archiveType,
       plan.stripComponents, plan.declaredExecutablePath)
+    # Declared prunes, applied to the temporary prefix before anything is
+    # sealed — so the dropped bytes never appear under the store path, never
+    # reach the receipt, and never reach the archive the publish step packs.
+    #
+    # A missing path is not an error: upstream layouts move between versions
+    # and a stale entry should cost a version bump, not a broken realize. A
+    # prune that removes the declared executable IS an error, and the check
+    # immediately below is what reports it.
+    for prunePath in plan.declaredPrunePaths:
+      if prunePath.len == 0 or prunePath.isAbsolute or
+          prunePath.contains(".."):
+        raise newException(OSError,
+          "tool-resolution failed: prune path must be a relative path " &
+          "inside the prefix: " & prunePath)
+      let target = tempPrefix / prunePath
+      if dirExists(extendedPath(target)):
+        removeDir(extendedPath(target))
+      elif fileExists(extendedPath(target)):
+        removeFile(extendedPath(target))
+      # Confirm rather than assume. A prune that quietly does nothing is the
+      # worst outcome available here: the prefix is sealed and published at
+      # its full size under a key that CLAIMS the content was pruned, so
+      # every consumer that substitutes it gets bytes the declaration says
+      # are absent. Nim's ``removeDir`` can return without having emptied a
+      # tree it could not fully traverse, so the post-condition is checked.
+      if dirExists(extendedPath(target)) or fileExists(extendedPath(target)):
+        raise newException(OSError,
+          "tool-resolution failed: prune path could not be removed: " &
+          target)
     let extractedExecutable = executableInStorePath(tempPrefix,
       plan.declaredExecutablePath, rejectSymlinks = true)
     if extractedExecutable.len == 0:

@@ -3617,6 +3617,10 @@ proc provisioningContributionLiteral(
     for j, mirror in provisioning.mirrors:
       if j > 0: result.add(", ")
       result.add(mirror)
+    result.add("], prunePaths: @[")
+    for j, prunePath in provisioning.prunePaths:
+      if j > 0: result.add(", ")
+      result.add(prunePath)
     result.add("], sha256: " & codeOrEmpty(provisioning.sha256) &
       ", executableAlias: " & codeOrEmpty(provisioning.executableAlias) &
       ", archiveType: " & codeOrEmpty(provisioning.archiveType) &

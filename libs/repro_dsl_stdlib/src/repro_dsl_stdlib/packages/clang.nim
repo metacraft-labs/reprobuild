@@ -29,10 +29,81 @@ package clang:
     #
     # Digests are the `LLVM_SHA256_*` values Agent Harbor's toolchain pin
     # file already carried, harvested independently of this catalog.
+    #
+    # What the prunes drop, and why each group is safe to drop. The Windows
+    # release is 3.9 GB unpacked, of which `bin` alone is 3.2 GB: LLVM ships
+    # one statically linked ~50-100 MB executable per tool, so tools nobody
+    # here invokes are not free. The keep-set is "compile, link, and inspect
+    # object files"; what goes is everything serving a different trade.
+    #
+    #   * The debugger (`lldb*`, `liblldb.dll`). 161 MB. The one reference to
+    #     lldb in the consuming tree is a macOS-only backtrace fallback in
+    #     agentharborfs-e2e-tests, which never runs against this Windows
+    #     prefix.
+    #   * The macOS cross tools (`ld64.lld`, `dsymutil`, `llvm-libtool-
+    #     darwin`, `llvm-lipo`, `llvm-otool`, `llvm-readtapi`,
+    #     `clang-installapi`). 203 MB. This entry is the x86_64-windows
+    #     slice; Mach-O output is not one of its jobs.
+    #   * LLVM's own development tools (`bugpoint`, `llvm-reduce`,
+    #     `llvm-stress`, `llvm-exegesis`, `llvm-c-test`,
+    #     `verify-uselistorder`, `reduce-chunk-list`). 214 MB. These exist to
+    #     debug LLVM itself, not to build with it.
+    #   * The interpreter / JIT surface (`clang-repl`, `lli`, `llvm-jitlink`,
+    #     `llvm-rtdyld`). 160 MB.
+    #   * The clang-tools refactoring suite (`clang-change-namespace`,
+    #     `clang-move`, `clang-refactor`, `clang-reorder-fields`,
+    #     `clang-include-fixer`, `clang-include-cleaner`, `clang-doc`,
+    #     `clang-query`, `modularize`, `pp-trace`, `find-all-symbols`,
+    #     `c-index-test`, `clang-check`). 434 MB. Nothing in the tree invokes
+    #     any of them; `clang-format`, `clang-tidy`, `clangd` and
+    #     `clang-scan-deps` — the ones an editor or a build does reach for —
+    #     all stay.
+    #
+    # The compiler drivers, the lld linkers, libclang/LLVM-C/LTO, the
+    # binutils-equivalent `llvm-*` tools and the whole of `lib/` and
+    # `include/` are untouched, so `clang-cl` still compiles aws-lc-sys and
+    # `llvm-ar` and friends are still where a build script expects them.
     tarball url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.7/clang+llvm-21.1.7-x86_64-pc-windows-msvc.tar.xz",
       sha256 = "70a2b73f2f14f787557f90abf380e7170b54e97b893218999144de5284b4f8f8",
       archiveType = "tar.xz",
       stripComponents = 1,
+      prune = "bin/lldb.exe",
+      prune = "bin/lldb-dap.exe",
+      prune = "bin/lldb-instr.exe",
+      prune = "bin/lldb-server.exe",
+      prune = "bin/lldb-argdumper.exe",
+      prune = "bin/liblldb.dll",
+      prune = "bin/ld64.lld.exe",
+      prune = "bin/dsymutil.exe",
+      prune = "bin/llvm-libtool-darwin.exe",
+      prune = "bin/llvm-lipo.exe",
+      prune = "bin/llvm-otool.exe",
+      prune = "bin/llvm-readtapi.exe",
+      prune = "bin/clang-installapi.exe",
+      prune = "bin/bugpoint.exe",
+      prune = "bin/llvm-reduce.exe",
+      prune = "bin/llvm-stress.exe",
+      prune = "bin/llvm-exegesis.exe",
+      prune = "bin/llvm-c-test.exe",
+      prune = "bin/verify-uselistorder.exe",
+      prune = "bin/reduce-chunk-list.exe",
+      prune = "bin/clang-repl.exe",
+      prune = "bin/lli.exe",
+      prune = "bin/llvm-jitlink.exe",
+      prune = "bin/llvm-rtdyld.exe",
+      prune = "bin/clang-change-namespace.exe",
+      prune = "bin/clang-move.exe",
+      prune = "bin/clang-refactor.exe",
+      prune = "bin/clang-reorder-fields.exe",
+      prune = "bin/clang-include-fixer.exe",
+      prune = "bin/clang-include-cleaner.exe",
+      prune = "bin/clang-doc.exe",
+      prune = "bin/clang-query.exe",
+      prune = "bin/modularize.exe",
+      prune = "bin/pp-trace.exe",
+      prune = "bin/find-all-symbols.exe",
+      prune = "bin/c-index-test.exe",
+      prune = "bin/clang-check.exe",
       executablePath = "bin/clang.exe",
       packageId = "llvm@21.1.7",
       cpu = "x86_64",
@@ -42,6 +113,43 @@ package clang:
       sha256 = "e0054932e7ca46ad5f06c66a0d7405e3ed0d5c7dd47be0d8d172cfcb99f8a03f",
       archiveType = "tar.xz",
       stripComponents = 1,
+      prune = "bin/lldb.exe",
+      prune = "bin/lldb-dap.exe",
+      prune = "bin/lldb-instr.exe",
+      prune = "bin/lldb-server.exe",
+      prune = "bin/lldb-argdumper.exe",
+      prune = "bin/liblldb.dll",
+      prune = "bin/ld64.lld.exe",
+      prune = "bin/dsymutil.exe",
+      prune = "bin/llvm-libtool-darwin.exe",
+      prune = "bin/llvm-lipo.exe",
+      prune = "bin/llvm-otool.exe",
+      prune = "bin/llvm-readtapi.exe",
+      prune = "bin/clang-installapi.exe",
+      prune = "bin/bugpoint.exe",
+      prune = "bin/llvm-reduce.exe",
+      prune = "bin/llvm-stress.exe",
+      prune = "bin/llvm-exegesis.exe",
+      prune = "bin/llvm-c-test.exe",
+      prune = "bin/verify-uselistorder.exe",
+      prune = "bin/reduce-chunk-list.exe",
+      prune = "bin/clang-repl.exe",
+      prune = "bin/lli.exe",
+      prune = "bin/llvm-jitlink.exe",
+      prune = "bin/llvm-rtdyld.exe",
+      prune = "bin/clang-change-namespace.exe",
+      prune = "bin/clang-move.exe",
+      prune = "bin/clang-refactor.exe",
+      prune = "bin/clang-reorder-fields.exe",
+      prune = "bin/clang-include-fixer.exe",
+      prune = "bin/clang-include-cleaner.exe",
+      prune = "bin/clang-doc.exe",
+      prune = "bin/clang-query.exe",
+      prune = "bin/modularize.exe",
+      prune = "bin/pp-trace.exe",
+      prune = "bin/find-all-symbols.exe",
+      prune = "bin/c-index-test.exe",
+      prune = "bin/clang-check.exe",
       executablePath = "bin/clang.exe",
       packageId = "llvm@21.1.7",
       cpu = "aarch64",

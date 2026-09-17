@@ -218,11 +218,20 @@ suite "M9.L.4-refactor Step A — publishInProcess library API":
     check res.error.contains("prefix path does not exist")
 
   test "oversized archive is rejected before allocation or HTTP":
+    # The payload is RANDOM, not a run of zeros. The limit is now weighed
+    # against the bytes actually uploaded, and 4 KiB of zeros compresses to a
+    # few dozen bytes — which is the point of compressing, but would make
+    # this gate pass for the wrong reason and stop testing the rejection at
+    # all. Random bytes are incompressible, so the archive stays oversized
+    # whether or not this host can load libzstd.
     let prefixDir = getTempDir() / ("pub_in_proc_oversized_" & $rand(999_999))
     createDir(prefixDir)
     defer:
       try: removeDir(prefixDir) except CatchableError: discard
-    writeFile(prefixDir / "payload.bin", newString(4096))
+    var incompressible = newString(4096)
+    for i in 0 ..< incompressible.len:
+      incompressible[i] = char(rand(255))
+    writeFile(prefixDir / "payload.bin", incompressible)
 
     let identity = stubIdentity(rev = "oversized-prefix")
     let req = PublishInProcessRequest(
@@ -237,6 +246,121 @@ suite "M9.L.4-refactor Step A — publishInProcess library API":
     check res.statusCode == 0
     check res.bytesUploaded == 0
     check res.error.contains("exceeding the 1024-byte /publish payload limit")
+
+  test "a compressible prefix over the raw limit publishes compressed":
+    # The behaviour the compressor exists for. Before it, the limit was
+    # checked against the UNCOMPRESSED archive, so a prefix whose compressed
+    # form fits comfortably was refused outright — which is exactly the
+    # situation of every toolchain big enough to be worth caching.
+    #
+    # Skipped rather than failed where libzstd is unavailable: publishing
+    # uncompressed is a supported outcome, and a host without the codec is
+    # not a broken host.
+    if not supportsCompressor(ckZstd):
+      skip()
+    else:
+      let port = pickPort()
+      let serverRoot = getTempDir() / ("pub_in_proc_zsrv_" & $rand(999_999))
+      let prefixDir = getTempDir() / ("pub_in_proc_zpfx_" & $rand(999_999))
+      removeDir(serverRoot); removeDir(prefixDir)
+      createDir(serverRoot); createDir(prefixDir)
+      defer:
+        try: removeDir(serverRoot) except CatchableError: discard
+        try: removeDir(prefixDir) except CatchableError: discard
+
+      # 4 MiB of highly compressible content: well over the 1 MiB cap below
+      # raw, far under it compressed.
+      writeFile(prefixDir / "payload.bin", repeat("compressible-", 322_122))
+
+      let srvProc = startServer(serverRoot, port)
+      defer:
+        try:
+          if srvProc.running(): srvProc.terminate()
+          srvProc.close()
+        except CatchableError: discard
+      check waitForListener(srvProc, port)
+
+      let baseUrl = "http://127.0.0.1:" & $port
+      let kp = peerAuth.generateKeypair()
+      let identity = stubIdentity(rev = "compressed-publish")
+      let derivedHex = deriveCacheEntryKeyHex(identity)
+      let res = publishInProcess(PublishInProcessRequest(
+        entryKeyHex: derivedHex,
+        prefixDir: prefixDir,
+        identity: identity,
+        endpoint: baseUrl,
+        keypair: kp,
+        maxArchiveBytes: 1024 * 1024))
+      if not res.ok:
+        echo "compressed publish failed: status=", res.statusCode,
+          " err=", res.error
+      check res.ok
+      check res.bytesUploaded > 0
+      # Uploaded well under the raw size: proof the cap was applied to the
+      # compressed form rather than merely being raised.
+      check res.bytesUploaded < 1024 * 1024
+
+      let pool = newHttpPool()
+      defer: pool.close()
+      let cfg = defaultConfig(
+        getTempDir() / ("pub_in_proc_zcli_" & $rand(999_999)), @[
+          SubstituteEndpoint(
+            baseUrl: baseUrl,
+            trustedSigners: @[kp.publicKey],
+            priority: 30)])
+      let ctx = newClientContext(cfg)
+      defer: ctx.close()
+      let fetched = fetchAndVerifyManifest(ctx, pool, cfg.endpoints[0],
+        derivedHex)
+      check serverCodec.verifyManifest(fetched)
+      check fetched.payloads.len == 1
+      # The manifest must DECLARE the codec: a consumer has only the
+      # manifest to tell it how to read the bytes.
+      check fetched.payloads[0].compression == ckZstd
+      check fetched.payloads[0].declaredSize < fetched.payloads[0].uncompressedSize
+      check fetched.payloads[0].uncompressedSize > 1024'u64 * 1024
+
+  test "extractPrefix reads a zstd-compressed archive transparently":
+    # The consumer half of the same contract. The CAS stores the payload
+    # exactly as the producer signed it, so a substituted blob arrives
+    # compressed with no manifest attached; every call site that unpacks one
+    # relies on extractPrefix sniffing the frame rather than being told.
+    if not supportsCompressor(ckZstd):
+      skip()
+    else:
+      let sourceDir = getTempDir() / ("extract_zstd_src_" & $rand(999_999))
+      let outDir = getTempDir() / ("extract_zstd_out_" & $rand(999_999))
+      removeDir(sourceDir); removeDir(outDir)
+      createDir(sourceDir / "bin")
+      defer:
+        try: removeDir(sourceDir) except CatchableError: discard
+        try: removeDir(outDir) except CatchableError: discard
+      writeFile(sourceDir / "bin" / "tool", repeat("payload-", 100_000))
+      writeFile(sourceDir / "readme.txt", "hello\nworld\n")
+
+      let plain = packPrefix(sourceDir)
+      let rawPath = getTempDir() / ("extract_zstd_" & $rand(999_999) & ".rbcarc")
+      let zstPath = rawPath & ".zst"
+      defer:
+        try: removeFile(rawPath) except CatchableError: discard
+        try: removeFile(zstPath) except CatchableError: discard
+      var rawText = newString(plain.len)
+      for i, b in plain:
+        rawText[i] = char(b)
+      writeFile(rawPath, rawText)
+      let compressedSize = compressFileToFile(rawPath, zstPath, ckZstd)
+      check compressedSize > 0
+      check compressedSize < plain.len
+
+      let compressedText = readFile(zstPath)
+      var compressedBytes = newSeq[byte](compressedText.len)
+      for i, ch in compressedText:
+        compressedBytes[i] = byte(ch)
+      check isZstdFrame(compressedBytes)
+
+      extractPrefix(compressedBytes, outDir)
+      check readFile(outDir / "readme.txt") == "hello\nworld\n"
+      check readFile(outDir / "bin" / "tool") == repeat("payload-", 100_000)
 
   test "multi-file directory round-trip + signature verifies":
     let port = pickPort()

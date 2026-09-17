@@ -247,6 +247,12 @@ type
       ## an upstream that ships a triple-suffixed binary cannot otherwise be
       ## invoked by the name its consumers use, because a realized prefix
       ## goes on PATH as a directory and the program's name is the file's.
+    prunePaths*: seq[string]
+      ## Prefix-relative paths realize deletes after extraction. See
+      ## ``TarballProvisioningDef.prunePaths``: an upstream archive that
+      ## bundles a GUI or a debugger alongside the compiler costs store
+      ## space on every consumer and can push the prefix past the shared
+      ## cache's publish limit, at which point nobody gets it quickly.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string
@@ -474,9 +480,14 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 16'u16
-    ## v15 (current): retains dependency roles on InterfaceToolUse. Older
-    ##                payloads decode with the legacy empty/target role.
+  EnvelopeVersion = 17'u16
+    ## v17 (current): retains ``prunePaths`` on tarball provisioning — the
+    ##                prefix-relative paths realize drops after extraction.
+    ##                v16 payloads decode with an empty list, which is the
+    ##                pre-pruning behaviour of keeping the archive whole.
+    ## v16: retains ``executableAlias`` on tarball provisioning.
+    ## v15: retains dependency roles on InterfaceToolUse. Older
+    ##      payloads decode with the legacy empty/target role.
     ## v14: retains package runtime dependencies in
     ##                ``ProjectInterface.runtimeToolUses``. The block follows
     ##                ``toolUses`` and precedes provisioning contributions.
@@ -865,6 +876,8 @@ proc writeTarballProvisioning(outp: var seq[byte];
   outp.writeString(provisioning.executablePath)
   if version >= 16'u16:
     outp.writeString(provisioning.executableAlias)
+  if version >= 17'u16:
+    outp.writeStringSeq(provisioning.prunePaths)
   outp.writeU32Le(uint32(max(provisioning.stripComponents, 0)))
   outp.writeString(provisioning.packageId)
   outp.writeString(provisioning.lockIdentity)
@@ -884,6 +897,8 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
   result.executablePath = readString(bytes, pos)
   if version >= 16'u16:
     result.executableAlias = readString(bytes, pos)
+  if version >= 17'u16:
+    result.prunePaths = readStringSeq(bytes, pos)
   result.stripComponents = int(readU32Le(bytes, pos))
   result.packageId = readString(bytes, pos)
   result.lockIdentity = readString(bytes, pos)
@@ -1444,6 +1459,7 @@ proc toInterfaceTarballProvisioning(packageName: string;
     archiveType: provisioning.archiveType,
     executablePath: provisioning.executablePath,
     executableAlias: provisioning.executableAlias,
+    prunePaths: provisioning.prunePaths,
     stripComponents: provisioning.stripComponents,
     packageId: provisioning.packageId,
     lockIdentity: provisioning.lockIdentity,
@@ -2192,9 +2208,23 @@ proc emitProvisioningContributionRegistrations(code: var string;
       for j, mirror in provisioning.mirrors:
         if j > 0: code.add(", ")
         code.add(escForCode(mirror))
+      code.add("], prunePaths: @[")
+      for j, prunePath in provisioning.prunePaths:
+        if j > 0: code.add(", ")
+        code.add(escForCode(prunePath))
+      # ``executableAlias`` and ``prunePaths`` are emitted here for the same
+      # reason every other field is: this stub is the ONLY description of a
+      # contributed provisioning that a consuming compilation sees. A field
+      # missing here does not fail to compile — it silently reconstructs a
+      # DIFFERENT provisioning than the contributor declared, which for
+      # ``prunePaths`` also moves the cache key and for ``executableAlias``
+      # loses the only name the tool is invocable under. Both were absent
+      # until this emitter was audited against ``macros_a.packageLiteral``
+      # and ``macros_b``'s contribution emitter; the three must stay in step.
       code.add("], sha256: " & escForCode(provisioning.sha256) &
         ", archiveType: " & escForCode(provisioning.archiveType) &
         ", executablePath: " & escForCode(provisioning.executablePath) &
+        ", executableAlias: " & escForCode(provisioning.executableAlias) &
         ", stripComponents: " & $provisioning.stripComponents &
         ", packageId: " & escForCode(provisioning.packageId) &
         ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
