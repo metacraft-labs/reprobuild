@@ -785,6 +785,9 @@ tests/e2e/hcr-linux-threads/t_integration_hcr_linux_signal_blocked_thread_refuse
 tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_rolls_back_published_sites.nim	nim	5
 tests/e2e/hcr-linux-txn/t_integration_hcr_linux_prepare_failure_leaves_process_byte_identical.nim	nim	4
 tests/e2e/hcr-linux-txn/t_integration_hcr_linux_repeated_patch_of_same_function.nim	nim	5
+tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_backtrace_through_patched_function.nim	nim	2
+tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_jit_symfile_accepted_by_gdb.nim	nim	2
+tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_register_frame_abi_detection.nim	nim	2
 tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim	nim	1
 tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim	nim	1
 tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim	nim	1

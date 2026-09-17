@@ -266,6 +266,24 @@ REPRO_HCR_AGENT_API int repro_hcr_agent_last_publication_tier(void);
  * deliberately distinct from 0. */
 REPRO_HCR_AGENT_API int repro_hcr_agent_last_on_stack_threads(void);
 
+/* HLX-M5 / HLX-OQ-4: which `__register_frame` calling convention this process's
+ * unwinder was MEASURED to want — "single-fde", "whole-section", or
+ * "undetermined" before the first registration. libgcc accepts both; LLVM
+ * libunwind accepts only a single FDE and rejects a section start with "FDE is
+ * really a CIE". Exposed because guessing wrong corrupts every backtrace
+ * silently, and a gate that can only see "registration succeeded" cannot
+ * distinguish a correct choice from a lucky one.
+ *
+ * `probe_attempts` counts registrations that ran the verification;
+ * `fallback_attempts` counts the ones where the first convention did not
+ * answer and the other was tried. Linux x86_64 only: the macOS and Windows
+ * arms have no `__register_frame` ABI question to answer. */
+REPRO_HCR_AGENT_API const char *repro_hcr_agent_register_frame_convention(void);
+REPRO_HCR_AGENT_API unsigned long long
+repro_hcr_agent_register_frame_probe_attempts(void);
+REPRO_HCR_AGENT_API unsigned long long
+repro_hcr_agent_register_frame_fallback_attempts(void);
+
 /* HX-D-3: Registration and unregistration of dynamic unwind metadata and JIT debug objects
  * (design §1.2, §5.4, §5.6). */
 typedef struct repro_hcr_jit_registration_evidence {

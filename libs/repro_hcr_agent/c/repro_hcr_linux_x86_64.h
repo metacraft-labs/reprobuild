@@ -1481,10 +1481,13 @@ typedef struct repro_hcr_lx_prepared_site {
   int body_retained;
   /* Set by the agent AFTER a successful commit, when it has registered a GDB
    * JIT symfile or a dynamic `.eh_frame` section for this site's body.
-   * Rollback hands them back to the deregistration hooks below. On Linux both
-   * registrations still refuse (HLX-M5 owns them), so these stay 0 in
-   * production today and the unregistration path is exercised only by whatever
-   * lands registration. */
+   * Rollback hands them back to the deregistration hooks below.
+   *
+   * HLX-M5 made this reachable. Until it landed, both Linux registration
+   * functions returned -1, so no site ever recorded an address and the
+   * unregistration half of rollback — wired by HLX-M3 — could not run. They
+   * are written by `repro_hcr_lx_txn_record_registration` after the commit,
+   * and a site that carries no registration still legitimately holds 0. */
   uint64_t jit_entry_address;
   uint64_t eh_frame_payload_address;
   int refusal;
@@ -1511,8 +1514,11 @@ typedef struct repro_hcr_lx_transaction {
  * the agent translation unit (`repro_hcr_agent.c`) and this header is also
  * included by the test probe, which does not link them — so rollback reaches
  * them through pointers the agent installs rather than by name. NULL means
- * "nothing was ever registered through this transaction", which is the state
- * on Linux until HLX-M5.
+ * "nothing was ever registered through this transaction".
+ *
+ * HLX-M5 filled them in: the hooks are `repro_hcr_lxu_unregister_jit_symfile`
+ * and `repro_hcr_lxu_unregister_eh_frame` from `repro_hcr_linux_unwind.h`, and
+ * the per-site fields below stop being zero because registration now succeeds.
  */
 static int (*repro_hcr_lx_unregister_jit_hook)(uint64_t) = NULL;
 static int (*repro_hcr_lx_unregister_eh_frame_hook)(uint64_t) = NULL;
@@ -1538,6 +1544,45 @@ static int repro_hcr_lx_fail_patch_page_alloc = 0;
 static int repro_hcr_lx_commit_fault_site = -1;
 
 static repro_hcr_lx_transaction repro_hcr_lx_last_txn;
+
+/*
+ * HLX-M5 — how a registration reaches the site that rollback will undo.
+ *
+ * The registration happens in the caller (the agent, or the gate fixture that
+ * stands in for it) AFTER the commit, because a symfile and an FDE must name
+ * the LIVE patch address and there is no live address until the body is
+ * published. The site is found BY that address rather than by index, so a
+ * transaction that published several bodies attributes each registration to
+ * the right one.
+ *
+ * Returns 1 when a site took the addresses and 0 when no published site has
+ * that dispatch address. The 0 is a caller error, not a benign no-op — a
+ * registration nobody recorded is a registration rollback cannot undo — so the
+ * gate that drives this asserts the 1 rather than ignoring the result.
+ */
+static int repro_hcr_lx_txn_record_registration(uint64_t dispatch_address,
+                                                uint64_t jit_entry_address,
+                                                uint64_t eh_frame_address) {
+  repro_hcr_lx_transaction *txn = &repro_hcr_lx_last_txn;
+  int i;
+  if (dispatch_address == 0) {
+    return 0;
+  }
+  for (i = 0; i < txn->site_count; ++i) {
+    repro_hcr_lx_prepared_site *ps = &txn->sites[i];
+    if (!ps->published || ps->dispatch_address != dispatch_address) {
+      continue;
+    }
+    if (jit_entry_address != 0) {
+      ps->jit_entry_address = jit_entry_address;
+    }
+    if (eh_frame_address != 0) {
+      ps->eh_frame_payload_address = eh_frame_address;
+    }
+    return 1;
+  }
+  return 0;
+}
 
 static void repro_hcr_lx_txn_reset(repro_hcr_lx_transaction *txn) {
   if (txn == NULL) {

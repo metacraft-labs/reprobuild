@@ -1479,6 +1479,25 @@
             # fallback for hosts with no prefix at all; it is not a substitute
             # for naming the clingo this shell actually provides.
             CLINGO_PREFIX = pkgs.clingo;
+            # LLVM's libunwind, beside the libgcc that the C toolchain already
+            # supplies — the SECOND unwinder the HLX-OQ-4 gate needs.
+            #
+            # `__register_frame` exists in both and they disagree about its
+            # argument (measured 2026-09-17: libgcc accepts both a whole
+            # `.eh_frame` and a bare FDE; LLVM libunwind accepts only the FDE
+            # and refuses a section start with "FDE is really a CIE"). Proving
+            # the provider's runtime detection therefore needs a process linked
+            # EACH way, and `tests/e2e/hcr-linux-unwind/` builds both from this
+            # prefix.
+            #
+            # It is a named prefix rather than an entry in `packages` below on
+            # purpose, and the reason is not style. Adding it to `packages`
+            # would put its `dev` output on NIX_CFLAGS_COMPILE, and that output
+            # ships its own `unwind.h` — which would then be `-isystem`'d ahead
+            # of GCC's for EVERY compile in this shell. One gate's link input is
+            # not worth changing what the whole shell's `#include <unwind.h>`
+            # resolves to. Same contract as SQLITE_PREFIX / CLINGO_PREFIX above.
+            REPRO_HCR_LLVM_LIBUNWIND = pkgs.llvmPackages.libunwind;
             packages = [
               runquotaTools
               # ``ct-test`` — CodeTracer's cross-language test driver. On PATH
@@ -1594,6 +1613,25 @@
               pkgs.pcre
               pkgs.ninja
               pkgs.clang
+              # Real debuggers. These are test INPUTS for the HCR Linux
+              # provider's unwinding/debugger gates
+              # (tests/e2e/hcr-linux-unwind/), not developer convenience — and
+              # before this line neither existed on any developer host, in this
+              # flake, or in CI.
+              #
+              # The provider registers a relocated `.eh_frame` with the process
+              # unwinder and an ELF `ET_REL` symfile with the GDB JIT
+              # interface. The only way to show that either worked is to ask a
+              # real debugger for a backtrace through a patched function and
+              # read what it says. `allowed_mocks: none` on all three gates, so
+              # a harness that greps a fabricated backtrace would prove
+              # nothing, and a harness that skips on a missing debugger is a
+              # silent self-pass. Both debuggers are listed because they read
+              # the SAME registrations through different code: GDB parses the
+              # JIT symfile itself and is the strict one about a malformed ELF,
+              # while LLDB reaches it through its JITLoaderGDB plugin.
+              pkgs.gdb
+              pkgs.lldb
               pkgs.curl
               pkgs.libblake3
               pkgs.openssl

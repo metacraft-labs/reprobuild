@@ -63,6 +63,12 @@
 #include "repro_hcr_mcr_bridge.h"
 #include "repro_hcr_linux_x86_64.h"
 #include "repro_hcr_linux_elf_symbols.h"
+/* HLX-M5. Must follow `repro_hcr_linux_x86_64.h`: the retained `.eh_frame`
+ * copy is placed with that header's `repro_hcr_lx_map_patch_page_near`, for the
+ * arithmetic reason the unwind header's PLACEMENT note gives. This is also the
+ * translation unit that owns `__jit_debug_descriptor` and
+ * `__jit_debug_register_code` on Linux (design §8.3). */
+#include "repro_hcr_linux_unwind.h"
 #ifndef MAP_ANONYMOUS
 #define MAP_ANONYMOUS MAP_ANON
 #endif
@@ -1030,16 +1036,20 @@ int repro_hcr_unregister_jit_debug_object(uint64_t entry_address) {
 }
 #elif defined(REPRO_HCR_TARGET_LINUX_X86_64)
 /*
- * Unwinding and debugger integration on Linux/ELF is HLX-M5, not HLX-M0.
+ * HLX-M5 — unwinding and debugger integration on Linux/ELF.
  *
- * The Mach-O path above cannot be translated: it rebases `section_64.addr` and
- * applies `ARM64_RELOC_UNSIGNED`, whereas ELF needs an `ET_REL` symfile with
- * `.text` `sh_addr` set to the live patch address and `R_X86_64_64` applied to
- * `.debug_*`, plus a relocated compiler-generated `.eh_frame` registered
- * through `__register_frame` (whose libgcc-vs-LLVM-libunwind ABI split is
- * `HLX-OQ-4`). Returning -1 here means a Linux patch request that carries a
- * debug-object or unwind-metadata payload fails loudly rather than silently
- * registering nothing.
+ * The Mach-O path above is not translated; it is replaced. That arm rebases
+ * `section_64.addr`, applies `ARM64_RELOC_UNSIGNED`, and patches a hardcoded
+ * 64-byte `.eh_frame` template at fixed offsets 0x1c/0x24. The ELF arm rebases
+ * an `ET_REL` symfile's section addresses, applies `R_X86_64_64` (and the other
+ * relocation types the compiler emits into `.debug_*`), and relocates the
+ * COMPILER-GENERATED `.eh_frame`'s FDE `initial_location` — no template, at
+ * offsets found by walking the CIE rather than assumed. The mechanics live in
+ * `repro_hcr_linux_unwind.h`; what follows is the agent's evidence surface over
+ * them, and the bookkeeping that lets rollback undo what was registered.
+ *
+ * `HLX-OQ-4` (the libgcc versus LLVM libunwind `__register_frame` ABI) is
+ * resolved there by probe-and-verify, not by identifying the library.
  */
 int repro_hcr_register_jit_debug_object(
     const uint8_t *bytes,
@@ -1047,12 +1057,51 @@ int repro_hcr_register_jit_debug_object(
     uint64_t code_address,
     const char *symbol_name,
     repro_hcr_jit_registration_evidence *out) {
-  (void)bytes;
-  (void)size;
-  (void)code_address;
-  (void)symbol_name;
-  (void)out;
-  return -1;
+  repro_hcr_lxu_symfile_evidence symfile;
+  uint64_t entry_address = 0;
+  int rc;
+
+  if (bytes == NULL || size == 0 || out == NULL) {
+    return -1;
+  }
+  memset(out, 0, sizeof(*out));
+  rc = repro_hcr_lxu_register_jit_symfile(bytes, size, code_address,
+                                          symbol_name, &entry_address,
+                                          &symfile);
+  if (rc != REPRO_HCR_LXU_OK) {
+    return rc;
+  }
+
+  out->descriptor_address = (uint64_t)(uintptr_t)&__jit_debug_descriptor;
+  out->descriptor_version = __jit_debug_descriptor.version;
+  out->action_flag = __jit_debug_descriptor.action_flag;
+  out->relevant_entry_address =
+      (uint64_t)(uintptr_t)__jit_debug_descriptor.relevant_entry;
+  out->first_entry_address =
+      (uint64_t)(uintptr_t)__jit_debug_descriptor.first_entry;
+  out->entry_address = entry_address;
+  {
+    const struct repro_hcr_lxu_jit_code_entry *entry =
+        (const struct repro_hcr_lxu_jit_code_entry *)(uintptr_t)entry_address;
+    out->entry_next_address = (uint64_t)(uintptr_t)entry->next_entry;
+    out->entry_prev_address = (uint64_t)(uintptr_t)entry->prev_entry;
+    out->symfile_address = (uint64_t)(uintptr_t)entry->symfile_addr;
+    out->symfile_size = entry->symfile_size;
+    out->retained_debug_object_address = out->symfile_address;
+    out->retained_debug_object_size = entry->symfile_size;
+  }
+  out->register_hook_call_count = repro_hcr_lxu_jit_register_calls;
+  out->rebased_section_ordinal = symfile.text_section_index;
+  out->rebased_section_address = symfile.text_section_address;
+  out->rebased_symbol_value = symfile.symbol_value;
+  out->applied_relocations = symfile.applied_relocations;
+  out->success = 1;
+
+  /* Hand the entry to the transaction so rollback can take it back out of the
+   * descriptor list (design §11). A registration nobody recorded is one
+   * rollback cannot undo. */
+  (void)repro_hcr_lx_txn_record_registration(code_address, entry_address, 0);
+  return 0;
 }
 
 int repro_hcr_register_dynamic_eh_frame(
@@ -1061,23 +1110,53 @@ int repro_hcr_register_dynamic_eh_frame(
     uint64_t code_address,
     uint64_t code_size,
     repro_hcr_unwind_registration_evidence *out) {
-  (void)bytes;
-  (void)size;
-  (void)code_address;
-  (void)code_size;
-  (void)out;
-  return -1;
+  uint64_t payload_address = 0;
+  uint32_t fde_count = 0;
+  int convention = REPRO_HCR_LXU_CONVENTION_UNKNOWN;
+  int rc;
+
+  if (bytes == NULL || size == 0 || out == NULL) {
+    return -1;
+  }
+  memset(out, 0, sizeof(*out));
+  rc = repro_hcr_lxu_register_eh_frame(bytes, size, code_address, code_size,
+                                       &payload_address, &fde_count,
+                                       &convention);
+  if (rc != REPRO_HCR_LXU_OK) {
+    return rc;
+  }
+
+  out->payload_address = payload_address;
+  out->payload_size = size;
+  out->code_address = code_address;
+  out->code_size = code_size;
+  /*
+   * `api` keeps the macOS arm's vocabulary so one reader serves both: 1 was
+   * `__unw_add_dynamic_eh_frame_section` and 2 was `__register_frame`. On
+   * Linux the first branch is REMOVED (design §8.2 deliverable), so this is
+   * always 2 — and the interesting question, which ARGUMENT that function
+   * wanted, is reported by `patched_range`'s companion below rather than
+   * conflated into this field.
+   */
+  out->api = 2;
+  out->called = 1;
+  out->patched_pc_relative = (int64_t)code_address - (int64_t)payload_address;
+  out->patched_range = code_size;
+  (void)fde_count;
+  (void)convention;
+
+  (void)repro_hcr_lx_txn_record_registration(code_address, 0, payload_address);
+  return 0;
 }
 
 int repro_hcr_unregister_dynamic_eh_frame(uint64_t payload_address) {
-  (void)payload_address;
-  return -1;
+  return repro_hcr_lxu_unregister_eh_frame(payload_address);
 }
 
 int repro_hcr_unregister_jit_debug_object(uint64_t entry_address) {
-  (void)entry_address;
-  return -1;
+  return repro_hcr_lxu_unregister_jit_symfile(entry_address);
 }
+
 #else
 int repro_hcr_register_jit_debug_object(
     const uint8_t *bytes,
@@ -1581,15 +1660,15 @@ static void *repro_hcr_apply_direct_patch(void *entry,
    * unit and the transaction lives in a header the test probe also includes,
    * so the two are joined by pointers installed here rather than by name.
    *
-   * On Linux BOTH registrations currently refuse (`return -1`; HLX-M5 owns
-   * ELF symfiles and `.eh_frame`), so nothing ever records an address for a
-   * site and these hooks are never called in production today. That is stated
-   * rather than hidden: the mechanism is in place and the per-site fields
-   * (`jit_entry_address`, `eh_frame_payload_address`) are where HLX-M5 writes
-   * what it registered. Until then this deliverable is wired, not exercised.
+   * HLX-M5 made this REACHABLE. Both registrations now succeed on Linux and
+   * `repro_hcr_lx_txn_record_registration` writes the per-site fields
+   * (`jit_entry_address`, `eh_frame_payload_address`), so a rollback after a
+   * registered patch actually calls back through here. The hooks are the
+   * unwind header's own functions rather than agent wrappers around them:
+   * one owner per behaviour, so there is no second copy to drift.
    */
-  repro_hcr_lx_unregister_jit_hook = repro_hcr_unregister_jit_debug_object;
-  repro_hcr_lx_unregister_eh_frame_hook = repro_hcr_unregister_dynamic_eh_frame;
+  repro_hcr_lx_unregister_jit_hook = repro_hcr_lxu_unregister_jit_symfile;
+  repro_hcr_lx_unregister_eh_frame_hook = repro_hcr_lxu_unregister_eh_frame;
 
   patch_page = repro_hcr_lx_apply_direct_patch_at(entry_address, sled_address,
                                                   patch_bytes, patch_len);
@@ -3333,9 +3412,29 @@ static void repro_hcr_handle_patch_frame(repro_hcr_agent_thread_args *args,
   /* An empty `bytesHex` means the coordinator sent no debug/unwind payload at
    * all, which is not a registration failure. The Apple arm's behaviour is
    * deliberately left untouched: HLX-M0 must not change any macOS outcome, and
-   * every macOS gate sends real payloads. HLX-M5 lands ELF `.eh_frame` and GDB
-   * JIT registration, at which point a non-empty payload starts succeeding here
-   * instead of failing. */
+   * every macOS gate sends real payloads.
+   *
+   * HLX-M5 landed ELF `.eh_frame` and GDB JIT registration, so a NON-empty
+   * payload now succeeds here instead of failing.
+   *
+   * CORRECTED 2026-09-17 REVIEW. An earlier draft of this comment said "no
+   * Linux coordinator path sends these two fields yet". That is wrong, and the
+   * accurate split matters because it says which production path is untested:
+   *
+   *   - `scripts/hcr_patch_driver.nim` (:444-451, :542-549) sends BOTH fields
+   *     EMPTY under `HcrLinuxX86_64DirectSupportProfile`. That is the driver
+   *     the flame/Godot demo and the CodeTracer front end use, so those patches
+   *     do take this normalisation.
+   *   - `repro watch --hcr` and `repro hcr coordinate`
+   *     (`repro_cli_support.nim:24949-24957`, `:29029-29037`) send both fields
+   *     NON-EMPTY on Linux — `CodetracerHcrSupportProfile` is host-derived
+   *     (`:24383-24391`) and `hcrUnwindMetadataFor` has a real ELF branch
+   *     (`:24454-24469`). Neither call site carries a platform guard.
+   *
+   * What IS absent is gate coverage: no gate drives a non-empty payload through
+   * this frame. Every `tests/e2e/hcr-linux-*` socket gate passes `[]` for both,
+   * and the HLX-M5 gates reach the same registration functions through a second
+   * caller (`tests/e2e/hcr-linux-unwind/`, argv-driven), not over the socket. */
   if (debug_hex != NULL && debug_hex[0] == '\0') {
     free(debug_hex);
     debug_hex = NULL;
@@ -3550,6 +3649,41 @@ int repro_hcr_agent_last_on_stack_threads(void) {
   return (int)repro_hcr_lx_on_stack_threads;
 #else
   return -1;
+#endif
+}
+
+/*
+ * HLX-M5 / HLX-OQ-4. Which `__register_frame` convention this process's
+ * unwinder was measured to want, and the two counters behind that measurement,
+ * exported so a gate can assert WHICH convention answered rather than only
+ * that registration succeeded. Picking the wrong one silently is the whole
+ * hazard `HLX-OQ-4` names, and a gate that can only see "it worked" cannot
+ * tell a correct choice from a lucky one.
+ *
+ * "undetermined" on the non-Linux arms is the honest answer, not a default:
+ * neither has a `__register_frame` ABI question to answer.
+ */
+const char *repro_hcr_agent_register_frame_convention(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return repro_hcr_lxu_convention_name(repro_hcr_lxu_convention);
+#else
+  return "undetermined";
+#endif
+}
+
+unsigned long long repro_hcr_agent_register_frame_probe_attempts(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return (unsigned long long)repro_hcr_lxu_probe_attempts;
+#else
+  return 0ull;
+#endif
+}
+
+unsigned long long repro_hcr_agent_register_frame_fallback_attempts(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return (unsigned long long)repro_hcr_lxu_fallback_attempts;
+#else
+  return 0ull;
 #endif
 }
 

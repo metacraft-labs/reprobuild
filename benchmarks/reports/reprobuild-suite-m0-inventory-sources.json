@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1640,
+    "nimTestBinaries": 1643,
     "pureUnitConsolidationGroups": 49,
     "pureUnitTests": 583,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1651
+    "testEntries": 1654
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1087,7 +1087,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 767,
+      "integration": 770,
       "platform/destructive": 115,
       "pure unit": 583,
       "unclassified": 174
@@ -1238,9 +1238,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1640,
+    "nimTestBinaryCount": 1643,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1651
+    "testEntryCount": 1654
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -19938,6 +19938,51 @@
       "source": "tests/e2e/hcr-linux-txn/t_integration_hcr_linux_repeated_patch_of_same_function.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_hcr_linux_backtrace_through_patched_function",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_backtrace_through_patched_function.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_jit_symfile_accepted_by_gdb",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_jit_symfile_accepted_by_gdb.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_register_frame_abi_detection",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_register_frame_abi_detection.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

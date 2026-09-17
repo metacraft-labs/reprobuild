@@ -67,6 +67,47 @@ type
     payloadDigest*: string
     payloadHexPrefix*: string
 
+# HLX-M5, design §8.3 — THE DUPLICATE-SYMBOL RESOLUTION, RECORDED WHERE IT IS
+# ENFORCED.
+#
+# Two translation units used to emit `__jit_debug_descriptor` and
+# `__jit_debug_register_code`: `repro_hcr_agent.c` (under
+# `REPRO_HCR_TARGET_APPLE_ARM64`, and as of HLX-M5 under
+# `REPRO_HCR_TARGET_LINUX_X86_64` too, from `repro_hcr_linux_unwind.h`), and
+# this module's `{.emit.}` block below. Linking the C and Nim agents into one
+# binary then produces duplicate symbols, and the debugger — which looks both
+# up BY NAME — has two answers where the protocol allows one.
+#
+# The Linux port picks ONE owner and it is the C agent, since that is what is
+# linked into real targets. The enforcement is the guard on the next line: the
+# emit block stays macOS-arm64-only and is deliberately NOT widened. On Linux
+# this module contributes no symbol at all, so a Nim binary that links
+# `repro_hcr_agent.c` has exactly one descriptor.
+#
+# `integration_hcr_linux_jit_symfile_accepted_by_gdb` measures that, and
+# `-d:reproHcrFalsifyDuplicateJitOwner` below is the falsifier that puts the
+# second definition back so the measurement can be shown to discriminate.
+
+when defined(reproHcrFalsifyDuplicateJitOwner):
+  ## FALSIFIER ARM (HLX-M5). Re-introduces the second definition of the two GDB
+  ## JIT symbols from the Nim side — the exact defect design §8.3 names. A
+  ## binary that links this module AND `repro_hcr_agent.c` must then FAIL TO
+  ## LINK with "multiple definition of `__jit_debug_descriptor`". Nothing
+  ## outside the gate defines this.
+  {.emit: """
+#include <stdint.h>
+struct repro_hcr_nim_jit_descriptor {
+  uint32_t version;
+  uint32_t action_flag;
+  void *relevant_entry;
+  void *first_entry;
+};
+__attribute__((used, visibility("default")))
+struct repro_hcr_nim_jit_descriptor __jit_debug_descriptor = {1, 0, 0, 0};
+__attribute__((noinline, used, visibility("default")))
+void __jit_debug_register_code(void) { }
+""".}
+
 when defined(macosx) and defined(arm64):
   {.emit: """
 #include <stdint.h>
@@ -641,7 +682,15 @@ proc registerJitDebugObject*(bytes: openArray[byte]; codeAddress: uint64;
       success: c.success != 0
     )
   else:
-    raise newException(ValueError, "JIT debug registration currently requires macOS arm64")
+    when defined(linux) and defined(amd64):
+      # HLX-M5 landed this on Linux, but in the C agent, which owns
+      # `__jit_debug_descriptor` there (design §8.3). Reaching it from Nim is
+      # HLX-M8's binding work; saying so is more useful than "unsupported".
+      raise newException(ValueError,
+        "JIT debug registration on linux-x86_64 is owned by the C agent: call " &
+        "repro_hcr_register_jit_debug_object (repro_hcr_agent.c)")
+    else:
+      raise newException(ValueError, "JIT debug registration currently requires macOS arm64")
 
 proc registerDynamicEhFrame*(bytes: openArray[byte]; codeAddress: uint64;
                              codeSize: uint64): UnwindRegistrationEvidence =
@@ -672,7 +721,12 @@ proc registerDynamicEhFrame*(bytes: openArray[byte]; codeAddress: uint64;
       payloadHexPrefix: hexPrefix(bytes, 32)
     )
   else:
-    raise newException(ValueError, "dynamic .eh_frame registration currently requires macOS arm64")
+    when defined(linux) and defined(amd64):
+      raise newException(ValueError,
+        "dynamic .eh_frame registration on linux-x86_64 is owned by the C agent: " &
+        "call repro_hcr_register_dynamic_eh_frame (repro_hcr_agent.c)")
+    else:
+      raise newException(ValueError, "dynamic .eh_frame registration currently requires macOS arm64")
 
 proc unregisterJitDebugObject*(entryAddress: uint64): bool =
   ## HX-D-3: Unregister a JIT debug object from the GDB/LLDB descriptor.

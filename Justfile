@@ -893,6 +893,45 @@ integration_hcr_linux_island_exhaustion_refuses:
         tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim \
         2>&1 | tee test-logs/integration_hcr_linux_island_exhaustion_refuses.log
 
+# HLX-M5 — a backtrace through a patched function is correct, under REAL GDB
+# and REAL LLDB and through the process's own unwinder. The negative control is
+# the same patch with registration disabled; the positive control is the
+# unpatched chain. `gdb` and `lldb` come from this repo's dev shell (flake.nix);
+# a missing one FAILS the gate rather than skipping it.
+e2e_hcr_linux_backtrace_through_patched_function:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_hcr_linux_backtrace_through_patched_function \
+        --out:build/test-bin/e2e_hcr_linux_backtrace_through_patched_function \
+        tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_backtrace_through_patched_function.nim \
+        2>&1 | tee test-logs/e2e_hcr_linux_backtrace_through_patched_function.log
+
+# HLX-M5 / HLX-OQ-4 — the `__register_frame` ABI is MEASURED, not guessed. Six
+# real binaries: {libgcc, LLVM libunwind} x {healthy, whole-section-first,
+# no-verify}. LLVM's libunwind comes from REPRO_HCR_LLVM_LIBUNWIND (flake.nix).
+integration_hcr_linux_register_frame_abi_detection:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_register_frame_abi_detection \
+        --out:build/test-bin/integration_hcr_linux_register_frame_abi_detection \
+        tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_register_frame_abi_detection.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_register_frame_abi_detection.log
+
+# HLX-M5 — real GDB accepts the ELF ET_REL symfile and resolves source lines
+# inside the patched body; rollback unregisters it; and the C agent is the ONE
+# owner of `__jit_debug_descriptor` (proved by linking, falsified by putting
+# the second definition back and watching the link refuse).
+integration_hcr_linux_jit_symfile_accepted_by_gdb:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_jit_symfile_accepted_by_gdb \
+        --out:build/test-bin/integration_hcr_linux_jit_symfile_accepted_by_gdb \
+        tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_jit_symfile_accepted_by_gdb.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_jit_symfile_accepted_by_gdb.log
+
 # GDH-M4 — a session serves more than one reload.
 # Campaign: codetracer-specs/Planned-Features/
 #           GDScript-Hot-Reload-Multi-Version-Sources.milestones.org
