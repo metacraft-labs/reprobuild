@@ -92,3 +92,79 @@ run offline in milliseconds.
   With the image on a virtio block device — including with an explicit
   `bootindex=0` — the boot manager selected a "UEFI Non-Block Boot
   Device" and never reached it.
+
+---
+
+# Taking one machine's evidence about sealed state
+
+`take-sealed-state-evidence.sh` is the sibling of the script above. That
+one asks a guest what it measured; this one asks whether a secret its
+TPM is holding can still be recovered after the machine is power cycled,
+after its boot entry is replaced, and after its boot entry is **altered**.
+
+One run is **one machine across five power cycles**. The software TPM's
+state directory, the UEFI variable store and two LUKS2 block devices
+persist across all five; only the image on the EFI system partition
+changes.
+
+| cycle | image | what the guest does |
+|---|---|---|
+| `enroll` | generation A | create two LUKS2 volumes with a key from the kernel's RNG, write a marker into each, seal the key under the register the stub measured the image into |
+| `reboot` | generation A | recover the key, open both volumes |
+| `reseal` | generation A | recover the key, then re-seal it under the register value generation B **will** produce, computed from B's image bytes |
+| `switch` | generation B | recover the key from the new object; the old object must refuse |
+| `tamper` | generation A with one character of kernel command line altered | both objects must refuse, and the volumes must stay locked |
+
+It brings home, per cycle, `out/report-<cycle>.txt` (a flat `key=value`
+record), the TCG event log that boot's firmware wrote, and — once each —
+the sealed objects' public areas, their `TPM2B_NAME`s and the policy
+digests the TPM's own trial sessions computed. Those are what
+`sealed_state_vectors.nim` pins and what `t_seal_survives_reboot`,
+`t_reseal_on_generation_switch` and `t_tampered_uki_fails_unseal` read.
+
+## PIN THE PUBLIC AREA WITH THE NAME
+
+Same discipline as the attestation key above, arriving at a different
+structure. A sealed object's name is `nameAlg ‖ SHA-256(TPMT_PUBLIC)`, so
+the two artifacts check each other and a typo in either is caught by the
+other. A public area pinned alone is a byte string nothing contradicts.
+
+**Nothing secret is brought home.** The volume key existed only inside
+the guest and inside the sealed objects, which are ciphertext under a
+parent the TPM destroyed with the guest. The markers are plaintext
+32-byte values written to the front of each opened volume so a later
+cycle can prove it opened the same volume; they are useless without the
+key. The sealed objects' private areas are not pinned at all.
+
+## The negative control, and why it has to be a real boot
+
+`SEAL_RECOVERY_FALLBACK=1` enrols a second key slot holding a well-known
+recovery key and has the guest fall back to it whenever the TPM refuses.
+That is the failure mode the third gate exists to detect — a machine that
+says "no" and opens the disk anyway — and running it produces evidence in
+which the unseal failed with the *same* TPM status and the volumes opened
+regardless. The gate feeds both reports to the same two predicates: the
+refusal check must still be TRUE, and the locked check must be FALSE.
+
+Without that capture, "it refused" and "it stayed locked" could be the
+same check wearing two names, and nothing would show it. **Never use that
+flag for a capture meant to represent correct behaviour.**
+
+## The cycle is chosen outside the measurement
+
+The guest's `init` is identical in every cycle and reads which cycle it
+is from the shared directory. The kernel command line and the initramfs
+are both inside the launch measurement, so an init that branched on
+either would move the very value the experiment holds fixed.
+
+## Two more wiring facts, on top of the three above
+
+* **The EFI system partition must stay on SATA, so the encrypted volumes
+  are virtio.** Same firmware constraint as above, from the other side.
+* **`cbc` must be loaded before `dm-crypt`.** `dm-crypt` depends on
+  `encrypted-keys`, which registers a `cbc(aes)` transform at init time
+  and gives up if the template is not there yet. The symptom is
+  `dm_crypt: Unknown symbol key_type_encrypted` followed by
+  `crypt: unknown target type` — which reads like a missing `dm-crypt`
+  module and is not one. There is no `modprobe` in this initramfs, so the
+  order in `modules/load.order` is the only thing deciding it.

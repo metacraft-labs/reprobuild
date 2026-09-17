@@ -401,3 +401,61 @@ suite "attested-image measurement manifest":
     for (phase, expected) in SystemdMeasurePhases:
       vectorPcr = extendPcr(vectorPcr, sha256Hex(phase))
       check vectorPcr == expected
+
+  test "t_pcr11_policy_digest_is_a_function_of_the_image":
+    # The composition an unattended generation switch rests on: image
+    # bytes in, the policy a TPM will require before it releases a
+    # launch-bound secret out, with nothing having booted in between.
+    #
+    # The two halves are anchored separately and elsewhere. The register
+    # this image measures to is corroborated by systemd-measure in the
+    # case above; the policy digest `launchPolicyDigest` computes from a
+    # register is corroborated by a real TPM's own trial session in the
+    # sealing gates. What is anchored HERE is the joint between them —
+    # that the policy is taken over the register THIS IMAGE measures to,
+    # and not over a constant. It needs its own case because the joint is
+    # one line, and a one-line proc that no case calls is a claim rather
+    # than a behaviour.
+    let vectorImage = syntheticUki(@[
+      (".sbat", VectorSbat),
+      (".uname", VectorUname),
+      (".osrel", VectorOsRel),
+      (".initrd", VectorInitrd),
+      (".cmdline", VectorCmdline),
+      (".linux", VectorLinux)])
+
+    # (a) The composition is those two steps and nothing else.
+    let policy = launchPolicyDigestForImage(vectorImage)
+    check policy == launchPolicyDigest(measureUkiPcr11(vectorImage).pcr11)
+    check policy.len == PcrDigestSize
+
+    # (b) It is a function OF THE IMAGE. One character of kernel command
+    #     line moves the register, and moving the register must move the
+    #     policy: a calculator that ignored its argument would satisfy
+    #     (a) and (c) and be worthless.
+    let movedCmdline = VectorCmdline[0 ..< VectorCmdline.len - 1] & "x"
+    # Same length, one character — so the difference is confined to the
+    # `.cmdline` section's CONTENT and is not a difference in its size.
+    check movedCmdline.len == VectorCmdline.len
+    check movedCmdline != VectorCmdline
+    let moved = syntheticUki(@[
+      (".sbat", VectorSbat),
+      (".uname", VectorUname),
+      (".osrel", VectorOsRel),
+      (".initrd", VectorInitrd),
+      (".cmdline", movedCmdline),
+      (".linux", VectorLinux)])
+    check measureUkiPcr11(moved).pcr11 != measureUkiPcr11(vectorImage).pcr11
+    check launchPolicyDigestForImage(moved) != policy
+
+    # (c) And a PURE function of it, which is the property the whole
+    #     arrangement rests on: the same bytes give the same policy, so a
+    #     running generation can seal for one that has never run.
+    check launchPolicyDigestForImage(vectorImage) == policy
+
+    # (d) An image a stub would not measure yields no policy at all,
+    #     rather than a plausible one. A policy computed from an image
+    #     with no measured sections would be a stable 32 bytes that no
+    #     machine could ever satisfy.
+    expect MeasurementError:
+      discard launchPolicyDigestForImage(syntheticUki(@[(".text", "x")]))

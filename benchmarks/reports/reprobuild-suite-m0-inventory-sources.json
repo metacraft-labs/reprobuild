@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1631,
+    "nimTestBinaries": 1634,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 581,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1642
+    "testEntries": 1645
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1074,7 +1074,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 760,
+      "integration": 763,
       "platform/destructive": 115,
       "pure unit": 581,
       "unclassified": 174
@@ -1225,9 +1225,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1631,
+    "nimTestBinaryCount": 1634,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1642
+    "testEntryCount": 1645
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -22841,7 +22841,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_attested_image_manifest.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -29350,6 +29350,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_reseal_on_generation_switch",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_reseal_on_generation_switch.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_rp1_provider_compile_edge_materializes",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -29851,6 +29868,23 @@
       "source": "tests/integration/t_sc_uses_import_resolves_workspace_project_schema.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_seal_survives_reboot",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_seal_survives_reboot.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30427,6 +30461,23 @@
       "source": "tests/integration/t_tampered_uki_detected.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tampered_uki_fails_unseal",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tampered_uki_fails_unseal.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

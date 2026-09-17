@@ -950,7 +950,7 @@ tests/integration/t_an_unresolvable_membership_is_not_read_as_no_overrides.nim	n
 tests/integration/t_apply_if_binds_config_by_workspace_path.nim	nim	1
 tests/integration/t_arm_outside_declared_platforms_is_a_lint_error.nim	nim	1
 tests/integration/t_attestation_report.nim	nim	3
-tests/integration/t_attested_image_manifest.nim	nim	3
+tests/integration/t_attested_image_manifest.nim	nim	4
 tests/integration/t_autotools_configure_cache.nim	nim	1
 tests/integration/t_b0_develop_mode_uses_local_source.nim	nim	1
 tests/integration/t_b0_repro_build_runquota_daemon.nim	nim	1
@@ -1322,6 +1322,7 @@ tests/integration/t_repro_test_runner_reporting_contract.nim	nim	0
 tests/integration/t_repro_test_runner_suiteless_case_round_trip.nim	nim	0
 tests/integration/t_reproos_source_bridge_inventory.nim	nim	1
 tests/integration/t_required_features_are_a_subset_of_host_features.nim	nim	1
+tests/integration/t_reseal_on_generation_switch.nim	nim	4
 tests/integration/t_rp1_provider_compile_edge_materializes.nim	nim	1
 tests/integration/t_rp2_provider_session_invoke.nim	nim	3
 tests/integration/t_rp3_bind_deps_and_sharing.nim	nim	3
@@ -1348,6 +1349,7 @@ tests/integration/t_sc_producer_exports_typed_cli_contract_across_workspace.nim	
 tests/integration/t_sc_producer_source_change_invalidates_consumer.nim	nim	1
 tests/integration/t_sc_typed_cross_project_consumption_both_modes.nim	nim	1
 tests/integration/t_sc_uses_import_resolves_workspace_project_schema.nim	nim	1
+tests/integration/t_seal_survives_reboot.nim	nim	6
 tests/integration/t_selectors_narrow_the_override_state_report.nim	nim	1
 tests/integration/t_shared_clone_alternates_skip_redownload.nim	nim	1
 tests/integration/t_shared_clone_cache_repacks_and_bounds_growth.nim	nim	2
@@ -1382,6 +1384,7 @@ tests/integration/t_sync_resumes_after_interruption_and_force_sync_overwrites_di
 tests/integration/t_sync_scoped_to_named_project_touches_only_that_project.nim	nim	1
 tests/integration/t_sync_skips_fetch_when_locked_sha_already_present.nim	nim	1
 tests/integration/t_tampered_uki_detected.nim	nim	5
+tests/integration/t_tampered_uki_fails_unseal.nim	nim	6
 tests/integration/t_target_triple_drives_the_microarch_host_target.nim	nim	10
 tests/integration/t_targets_are_sorted_and_deduplicated_in_the_signed_payload.nim	nim	1
 tests/integration/t_team_backend_routed_lock_reads_back_and_is_idempotent.nim	nim	1

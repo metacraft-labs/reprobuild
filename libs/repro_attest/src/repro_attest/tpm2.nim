@@ -574,6 +574,17 @@ proc pcrSelection*(bank: TpmAlgId; indices: openArray[int]): TpmlPcrSelection =
   result = TpmlPcrSelection(
     selections: @[TpmsPcrSelection(hashAlg: bank, select: bitmap)])
 
+proc tpmDigest*(alg: TpmAlgId; data: string): string =
+  ## The raw digest bytes under a TPM algorithm identifier.
+  ##
+  ## Exported because the sealing policy above this module has to hash
+  ## exactly what a TPM hashes, under the algorithm the structure itself
+  ## names. A caller that reached for `nimcrypto` directly would be
+  ## deciding the algorithm in a second place, and the whole point of
+  ## carrying `TpmAlgId` through these structures is that nothing gets
+  ## to decide it twice.
+  digestOf(alg, data)
+
 proc readPcrSelection(r: var Tpm2Reader): TpmlPcrSelection =
   let count = r.readU32("pcrSelect.count")
   if count > uint32(MaxPcrBanks):
@@ -616,6 +627,21 @@ proc writePcrSelection(w: var Tpm2Writer; sel: TpmlPcrSelection) =
         "between " & $PcrSelectMin & " and " & $PcrSelectMax)
     w.writeU8(uint8(s.select.len))
     w.writeBytes(s.select)
+
+proc serializePcrSelection*(sel: TpmlPcrSelection): string =
+  ## A `TPML_PCR_SELECTION` on the wire, on its own.
+  ##
+  ## Inside an attestation structure this shape is written by
+  ## `serializeAttest`; a sealing policy has to write the SAME shape
+  ## outside one, because the digest a TPM computes for `TPM2_PolicyPCR`
+  ## covers the marshalled selection. Both go through the single
+  ## `writePcrSelection` above rather than through two spellings of the
+  ## same layout — a second spelling that packed `sizeofSelect`
+  ## differently would produce a policy digest that no TPM ever agrees
+  ## with, and the disagreement would surface only on hardware.
+  var w = initTpm2Writer("TPML_PCR_SELECTION")
+  w.writePcrSelection(sel)
+  w.bytes
 
 # ---------------------------------------------------------------------
 # TPMS_ATTEST

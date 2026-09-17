@@ -11844,6 +11844,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_reseal_on_generation_switch.nim",
+    binary: "build/test-bin/t_reseal_on_generation_switch",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_rp1_provider_compile_edge_materializes.nim",
     binary: "build/test-bin/t_rp1_provider_compile_edge_materializes",
     defines: @[],
@@ -12071,6 +12080,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_sc_uses_import_resolves_workspace_project_schema.nim",
     binary: "build/test-bin/t_sc_uses_import_resolves_workspace_project_schema",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_seal_survives_reboot.nim",
+    binary: "build/test-bin/t_seal_survives_reboot",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -12377,6 +12395,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_tampered_uki_detected.nim",
     binary: "build/test-bin/t_tampered_uki_detected",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_tampered_uki_fails_unseal.nim",
+    binary: "build/test-bin/t_tampered_uki_fails_unseal",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
