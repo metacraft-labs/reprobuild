@@ -20,8 +20,11 @@ written.
 > **The trap:** the query API returns an **empty sequence** when capture
 > is off — it does not raise. So a query against an unprovisioned host
 > answers "no slow tests" rather than "no data", and that answer looks
-> exactly like a healthy result. *Check capture is on before concluding
-> anything from an empty or thin result set.*
+> exactly like a healthy result.
+>
+> **`runquota stats` closes this trap, which is why you should use it.**
+> Every verb reports a `status`, and the exit code separates the kinds:
+> **0** rows, **3** no answer, **4** no working instrument.
 
 Two more things that produce a silently empty store:
 
@@ -67,15 +70,51 @@ can prune.
    on hosts with different CPU counts or memory is not the same
    measurement. Do not aggregate across profiles to get a bigger sample.
 
-## Query surface
+## Asking: `runquota stats`
 
-In `runquota_observation_store/query.nim`:
+Three verbs. All take `--json`.
 
-- `queryRanking` — costliest stats keys, ranked within a profile. This
-  is the slow-test question.
-- `queryExecutions` — individual executions matching a row query.
-- `estimateFor` / `estimateForAt` — the expected cost of a stats key,
-  which is what adaptive timeouts consume.
+| Verb | Question |
+|---|---|
+| `runquota stats capture` | is capture on, which store, what the daemon counted |
+| `runquota stats top [KEY]` | which is costliest — total, count, max, ranked within a profile |
+| `runquota stats export [KEY]` | **one JSON object per execution, every recorded column** |
+
+Flags: `--limit N`, `--all-users`, `--all-profiles`, `--json`.
+
+**`export` is the interface; everything else is `jq`.** A row carries
+every column above plus the `runs` and `host_profiles` context that makes
+it readable alone — tool, workspace, git commit, CPU model, core count.
+So percentiles, before-and-after, grade filtering and whatever you need
+next are `jq` over NDJSON, not a query language anyone has to learn:
+
+```sh
+# costliest keys
+runquota stats export | jq -s 'group_by(.command_stats_id)
+  | map({k:.[0].command_stats_id, n:length, total:(map(.duration_millis)|add)})
+  | sort_by(-.total)'
+# p50/p90 for one key — the shape a total hides
+runquota stats export KEY | jq -s '[.[].duration_millis] | sort
+  | {n:length, min:.[0], p50:.[(length*0.5|floor)], p90:.[(length*0.9|floor)], max:.[-1]}'
+# OOM vs timeout vs real failure — never inferred from exit status
+runquota stats export | jq -s 'group_by(.termination)
+  | map({(.[0].termination): length}) | add'
+```
+
+`export` writes NDJSON to **stdout** and its status to **stderr**, so the
+pipe above is safe: nothing but JSON objects ever reaches stdout, on any
+path including refusals and errors.
+
+**Read the `status`, not the row count.** `ok` · `no-data` ·
+`unknown-key` · `no-rows-in-scope` · `capture-off` ·
+`daemon-unreachable` · `denied`, with exit codes 0 / 3 / 4 as above.
+`no-rows-in-scope` means the rows exist but your scope or profile
+filtered them out — widen with `--all-users` / `--all-profiles`; it is
+*not* `unknown-key`.
+
+A row is ~1.4 KB and a response must fit one 1 MiB frame, so `--limit`
+defaults to 250 and is **refused** above 600 rather than clamped. There
+is no time cursor: `export` gives the newest N.
 
 **Do not open the database file.** `runquotad` is the only sanctioned
 reader, and an inspection gate
@@ -87,10 +126,9 @@ hardware qualification, and the unknown-versus-zero distinction. The gate
 discovers its source set by walking `libs/` and `apps/`, so it catches a
 violation in a module that does not exist yet.
 
-Go through the daemon. A CLI query surface is in progress; until it
-lands, the typed reads in `runquota_observation_store/query.nim`
-(`queryRanking`, `queryExecutions`, `estimateFor`) are what the daemon
-itself uses.
+The typed reads in `runquota_observation_store/query.nim` are what the
+daemon itself uses — relevant when changing RunQuota, not when asking it
+questions.
 
 ## Provisioning (needs root, once per host)
 
