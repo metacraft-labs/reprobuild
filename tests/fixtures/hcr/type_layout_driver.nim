@@ -15,11 +15,9 @@
 # - Real C compiler (clang) toolchain generating native Mach-O / ELF fixtures
 # - Real type layout differential analysis and refusal classifier
 #
-# Allowed mocks: none
-# Justification: Every use of mock objects in tests must be explicitly justified in the
-# header comment of the test implementation file. We prefer strong integration tests that
-# mock as little as possible and run against real filesystem, compiler, binary, and
-# lifecycle execution boundaries. Mocks used: ZERO.
+# Allowed mocks: arm 5 uses canned dumper executables to make candidate
+# disagreement deterministic. All layout compatibility arms use real compiler
+# objects and the installed DWARF tools; the pure parser fixtures live separately.
 #
 # Asserts:
 # 1. Anti-vacuity: Type parser extracts exact member offsets (0, 4, 8) and member counts.
@@ -191,6 +189,9 @@ proc main() =
       if layout.members.len != 3:
         stderr.writeLine("ERROR: Vector3D member count expected 3, got " & $layout.members.len)
         quit(1)
+      if layout.members.mapIt(it.typeName) != @["int", "int", "double"]:
+        fail("Vector3D expected member types int, int, double, got " &
+          $layout.members.mapIt(it.typeName))
       if layout.members[0].name != "x" or layout.members[0].offsetBytes != 0:
         stderr.writeLine("ERROR: Vector3D.x expected offset 0, got " & $layout.members[0].offsetBytes)
         quit(1)

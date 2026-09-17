@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1630,
+    "nimTestBinaries": 1631,
     "pureUnitConsolidationGroups": 48,
-    "pureUnitTests": 580,
+    "pureUnitTests": 581,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1641
+    "testEntries": 1642
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1076,7 +1076,7 @@
       "graph-fixture": 12,
       "integration": 760,
       "platform/destructive": 115,
-      "pure unit": 580,
+      "pure unit": 581,
       "unclassified": 174
     },
     "graphOwnedTestArtifacts": [
@@ -1225,9 +1225,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1630,
+    "nimTestBinaryCount": 1631,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1641
+    "testEntryCount": 1642
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -32849,6 +32849,23 @@
       "source": "tests/unit/t_hcr_dispatch_c_smoke.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_hcr_gnu_dwarf_attributes",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_linkgraph"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_hcr_gnu_dwarf_attributes.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

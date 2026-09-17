@@ -1520,6 +1520,7 @@ tests/unit/t_hcr_agent_process_target.nim	nim	2
 tests/unit/t_hcr_agent_protocol.nim	nim	28
 tests/unit/t_hcr_agent_runtime.nim	nim	4
 tests/unit/t_hcr_dispatch_c_smoke.nim	nim	1
+tests/unit/t_hcr_gnu_dwarf_attributes.nim	nim	6
 tests/unit/t_hcr_watch_inference.nim	nim	1
 tests/unit/t_host_system_tools.nim	nim	6
 tests/unit/t_infra_apply_lock_hung_owner.nim	nim	5

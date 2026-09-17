@@ -16,11 +16,9 @@
 # - Real C compiler (clang) toolchain generating native Mach-O / ELF fixtures
 # - Real type layout differential analysis and refusal classifier
 #
-# Allowed mocks: none
-# Justification: Every use of mock objects in tests must be explicitly justified in the
-# header comment of the test implementation file. We prefer strong integration tests that
-# mock as little as possible and run against real filesystem, compiler, binary, and
-# lifecycle execution boundaries. Mocks used: ZERO.
+# Allowed mocks: arm 5 uses canned dumper executables to make candidate
+# disagreement deterministic. All layout compatibility arms use real compiler
+# objects and the installed DWARF tools.
 #
 # Asserts:
 # 1. Anti-vacuity: Type parser extracts exact member offsets (0, 4, 8) and member counts.
