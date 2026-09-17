@@ -6666,6 +6666,139 @@ proc jsonAction(identity: ToolActionIdentity): JsonNode =
     "actionFingerprint": digestHex(identity.actionFingerprint)
   }
 
+# ---------------------------------------------------------------------------
+# Short PATH entries for realized store prefixes (Windows).
+# ---------------------------------------------------------------------------
+
+const PathFarmDirName = "p"
+  ## One letter, deliberately. Every character of this name is paid once per
+  ## PATH entry, and the whole point of the farm is to spend fewer of them.
+
+proc storePrefixSplit(binDir, storeRoot: string):
+    tuple[ok: bool; prefixRoot, relative: string] =
+  ## Split a realized bin directory into the sealed prefix root it belongs to
+  ## and the part below it, or report that it is not a store path at all.
+  ##
+  ## The layout is ``<storeRoot>/prefixes/<package>/<version>-<hash>/...``
+  ## (see ``unifiedPrefixPath``), so the prefix root is exactly two segments
+  ## past ``prefixes/``. Anything shallower is not a realization and is left
+  ## alone; so is anything outside the store, which is most of PATH.
+  result = (ok: false, prefixRoot: "", relative: "")
+  let prefixesRoot = os.normalizedPath(storeRoot / "prefixes")
+  let normalizedBin = os.normalizedPath(binDir)
+  var head = prefixesRoot
+  var tail = normalizedBin
+  when defined(windows):
+    head = head.toLowerAscii()
+    tail = tail.toLowerAscii()
+  if not tail.startsWith(head & DirSep) and
+      not tail.startsWith(head & AltSep):
+    return
+  let remainder = normalizedBin[prefixesRoot.len + 1 .. ^1]
+  let segments = remainder.replace(AltSep, DirSep).split(DirSep)
+  if segments.len < 2:
+    return
+  result.prefixRoot = prefixesRoot / segments[0] / segments[1]
+  # An empty remainder is the ordinary case, not an edge one: an upstream
+  # that ships a single flat executable puts it AT the prefix root, so the
+  # PATH entry is the root and there is nothing below it. Those are also the
+  # longest entries, since nothing follows the 33-character version-hash
+  # segment — skipping them would leave most of the length in place.
+  result.relative =
+    if segments.len > 2: segments[2 .. ^1].join($DirSep) else: ""
+  result.ok = true
+
+proc shortenStoreBinDir*(binDir, storeRoot: string): string =
+  ## Route a realized bin directory through a short directory junction.
+  ##
+  ## ## Why
+  ##
+  ## cmd.exe truncates the environment block it hands a child at 8191
+  ## characters, cutting from the END of PATH, and says nothing. A dev
+  ## environment that provisions thirty-five packages contributes thirty-five
+  ## entries of the form
+  ##
+  ##   C:\Users\<user>\AppData\Local\repro\store\tool-store\prefixes\node\<32 hex>\bin
+  ##
+  ## — about 105 characters each, 3.6 KB in total. On a workstation whose own
+  ## PATH is already 4.9 KB across 95 entries, that is what pushes the total
+  ## past the limit, and every tool launched through an npm ``.cmd`` shim or
+  ## any other cmd.exe-mediated launcher then fails to find things that are
+  ## demonstrably on PATH: ``node is not recognized``, ``tsc is not
+  ## recognized``, ``pwsh/powershell required`` on a machine with two
+  ## PowerShells. Measured: trimming the same PATH to 5959 characters made a
+  ## yarn build that had failed for an hour succeed unchanged.
+  ##
+  ## ## Why a junction rather than a merged bin directory
+  ##
+  ## The obvious shape — one directory holding a link per executable — is the
+  ## wrong one. clang locates its resource headers relative to its own
+  ## executable, node its bundled modules, python its prefix; a merged bin
+  ## puts every one of them next to strangers and a directory that is not
+  ## their prefix. A junction onto the PREFIX ROOT keeps the whole tree
+  ## intact behind a short name, so ``<link>/bin/clang.exe`` still finds
+  ## ``<link>/lib/clang/...`` — the same directory it always did, reached by
+  ## a shorter path.
+  ##
+  ## ## Failure is never fatal
+  ##
+  ## Every failure path returns ``binDir`` unchanged: a non-store path, a
+  ## junction that cannot be created (no privilege is needed for one, but a
+  ## filesystem may still refuse), or a link through which the bin directory
+  ## is not visible. The worst outcome is the PATH we had before.
+  when not defined(windows):
+    binDir
+  else:
+    if binDir.len == 0 or storeRoot.len == 0:
+      return binDir
+    let split = storePrefixSplit(binDir, storeRoot)
+    if not split.ok:
+      return binDir
+    # The slot name is derived from the target, so it is stable across runs
+    # and across processes: two activations of the same prefix produce the
+    # same PATH, which is what makes an activated environment comparable to
+    # itself. Eight hex characters over a store that holds hundreds of
+    # prefixes is not a collision risk worth more name length.
+    let slot = blake3.toHex(blake3.digest(
+      split.prefixRoot.toLowerAscii().replace(AltSep, DirSep)))[0 .. 7]
+    let farmRoot = storeRoot / PathFarmDirName
+    let link = farmRoot / slot
+    let shortened = if split.relative.len > 0: link / split.relative else: link
+    if dirExists(extendedPath(shortened)):
+      return shortened
+    try:
+      createDir(extendedPath(farmRoot))
+    except CatchableError:
+      return binDir
+    if not dirExists(extendedPath(link)):
+      # ``mklink /J`` rather than an FSCTL_SET_REPARSE_POINT of our own: a
+      # junction needs no privilege, cmd.exe is always present, and this
+      # command line is short enough that the truncation this whole proc
+      # exists to avoid cannot reach it.
+      try:
+        let made = uncontrolledExecCmdEx("cmd /c mklink /J " &
+          quoteShell(link) & " " & quoteShell(split.prefixRoot))
+        if made.exitCode != 0:
+          return binDir
+      except CatchableError:
+        return binDir
+    # Only adopt the shortened path once the directory is visible THROUGH
+    # the link with its contents intact. A `mklink` that quietly produced an
+    # ordinary empty directory would otherwise remove every tool in this
+    # prefix from PATH — a silent, total regression of the thing PATH is
+    # for. Checking that the directory exists is not enough for exactly that
+    # reason; the first entry has to come back too.
+    if not dirExists(extendedPath(shortened)):
+      return binDir
+    var sawEntry = false
+    try:
+      for _ in walkDir(extendedPath(shortened)):
+        sawEntry = true
+        break
+    except CatchableError:
+      return binDir
+    if sawEntry: shortened else: binDir
+
 proc inspectionJson*(identity: PathOnlyBuildIdentity): string =
   var profiles = newJArray()
   for profile in identity.profiles:

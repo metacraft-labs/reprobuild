@@ -14598,6 +14598,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_store_path_farm.nim",
+    binary: "build/test-bin/t_store_path_farm",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_substituted_edge_does_not_go_stale.nim",
     binary: "build/test-bin/t_substituted_edge_does_not_go_stale",
     defines: @[],

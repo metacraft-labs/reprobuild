@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1635,
-    "pureUnitConsolidationGroups": 48,
-    "pureUnitTests": 581,
+    "nimTestBinaries": 1636,
+    "pureUnitConsolidationGroups": 49,
+    "pureUnitTests": 582,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1646
+    "testEntries": 1647
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1044,6 +1044,19 @@
       "count": 2,
       "defines": [],
       "dependencyShape": [
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_nix_propagated_store_paths.nim",
+        "tests/unit/t_store_path_farm.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
         "repro_core",
         "repro_hash",
         "repro_interface_artifacts"
@@ -1076,7 +1089,7 @@
       "graph-fixture": 12,
       "integration": 764,
       "platform/destructive": 115,
-      "pure unit": 581,
+      "pure unit": 582,
       "unclassified": 174
     },
     "graphOwnedTestArtifacts": [
@@ -1225,9 +1238,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1635,
+    "nimTestBinaryCount": 1636,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1646
+    "testEntryCount": 1647
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -34815,6 +34828,23 @@
       "source": "tests/unit/t_stale_artifact_names_what_changed.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_store_path_farm",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_store_path_farm.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

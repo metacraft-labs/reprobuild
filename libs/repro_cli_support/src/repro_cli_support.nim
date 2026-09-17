@@ -11224,17 +11224,32 @@ proc watchPathsFromOutcome(outcome: BuildCommandOutcome): seq[string] =
 proc flushStdout() =
   stdout.flushFile()
 
-proc binDirsForDevelop(identity: PathOnlyBuildIdentity): seq[string] =
+proc binDirsForDevelop(identity: PathOnlyBuildIdentity;
+                       storeRoot = ""): seq[string] =
+  ## The PATH entries an activation contributes, shortest form first.
+  ##
+  ## ``shortenStoreBinDir`` routes each realized prefix through a short
+  ## directory junction on Windows and is the identity everywhere else. It
+  ## belongs here rather than at the call sites because there are two of them
+  ## — ``repro develop`` and the dev-env artifact path — and a PATH that is
+  ## short through one and long through the other is the kind of difference
+  ## that only shows up as a tool "not recognized" three layers down.
+  let root =
+    if storeRoot.len > 0: storeRoot
+    else: resolveStoreRoot() / "tool-store"
+  proc contribute(binDir: string; acc: var seq[string]) =
+    if binDir.len == 0 or not dirExists(extendedPath(binDir)):
+      return
+    let entry = shortenStoreBinDir(binDir, root)
+    if not acc.contains(entry):
+      acc.add(entry)
   for profile in identity.profiles:
     if profile.installMethod == "nix":
       for storePath in profile.realizedStorePaths:
-        let binDir = storePath / "bin"
-        if dirExists(extendedPath(binDir)) and not result.contains(binDir):
-          result.add(binDir)
+        contribute(storePath / "bin", result)
     else:
       for binDir in profile.pathSearchList:
-        if binDir.len > 0 and dirExists(extendedPath(binDir)) and not result.contains(binDir):
-          result.add(binDir)
+        contribute(binDir, result)
 
 proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
                              identity: PathOnlyBuildIdentity;
@@ -12800,7 +12815,8 @@ proc devEnvToolShellOps*(edge: DevEnvEdgeResult;
   var binDirs: seq[string] = @[]
   try:
     binDirs = binDirsForDevelop(resolveAndWriteIdentity(interfaceArtifact,
-      selection.outDir, mode, storeRootOverride = storeRoot).identity)
+      selection.outDir, mode, storeRootOverride = storeRoot).identity,
+      storeRoot = storeRoot)
   except CatchableError as batchErr:
     # The batch resolve is all-or-nothing: one package the catalog cannot
     # realize on this platform takes down every OTHER tool's PATH entry with
@@ -12819,7 +12835,7 @@ proc devEnvToolShellOps*(edge: DevEnvEdgeResult;
       single.projectInterface.toolUses = @[useDef]
       try:
         for dir in binDirsForDevelop(toolBuildIdentity(single, mode,
-            storeRoot = storeRoot)):
+            storeRoot = storeRoot), storeRoot = storeRoot):
           if dir notin binDirs:
             binDirs.add(dir)
       except CatchableError as toolErr:

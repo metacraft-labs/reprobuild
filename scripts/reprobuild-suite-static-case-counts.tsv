@@ -1629,6 +1629,7 @@ tests/unit/t_same_project_fragment_selectors.nim	nim	10
 tests/unit/t_shared_mime_info_dev_stub.nim	nim	1
 tests/unit/t_source_fetch_tool_metadata.nim	nim	7
 tests/unit/t_stale_artifact_names_what_changed.nim	nim	5
+tests/unit/t_store_path_farm.nim	nim	4
 tests/unit/t_substituted_edge_does_not_go_stale.nim	nim	4
 tests/unit/t_substituted_provider_compile_is_verified.nim	nim	7
 tests/unit/t_tarball_prune_paths.nim	nim	3
