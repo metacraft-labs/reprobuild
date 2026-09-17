@@ -61,6 +61,30 @@
 ## trips) and the marker file is never written (assertion 3 trips). Reverting
 ## the edit restores green.
 ##
+## Declared tools: every tool either package's build actions actually INVOKE is
+## named in that package's ``uses:`` block AND appended to the invoking action's
+## ``toolIdentityRefs`` — ``mkdir`` / ``cc`` / ``cp`` for the producer edge,
+## ``mkdir`` for the consumer's ``base`` edge, ``mkdir`` + ``cc`` (alongside the
+## ``libprod`` producer ref) for the consumer's ``consume`` edge. This mirrors
+## the sibling SC-2 fixture
+## (``t_sc_executable_producer_edge_spliced_and_on_path.nim``).
+##
+## It is NOT decoration. An action that carries tool-identity refs runs with a
+## PATH composed from the resolved refs, not with the developer's; ``consume``
+## already carried ``["libprod"]`` — a library producer contributing no bin dir —
+## so its ``mkdir`` resolved against nothing and the edge died with
+## ``mkdir: command not found`` (exit 127). It had only ever worked by
+## inheriting a host PATH that happened to carry ``mkdir``. The fix is to
+## declare what the fixture runs, never to re-widen the action environment.
+##
+## ``printf`` is deliberately NOT declared: it is a POSIX shell BUILT-IN (the
+## ``sh`` this fixture declares is bash, where ``type printf`` reports
+## ``shell builtin``), so it needs no PATH entry. ``./build/consume`` is
+## likewise not declared: it is an explicit relative path into the action's own
+## declared outputs, not a bare-name PATH lookup. What it DOES need is the
+## producer's realized library dir on ``LD_LIBRARY_PATH``, which is the SC-3
+## aux-channel splice this case exists to measure.
+##
 ## Skip rule: ``cc`` or ``sh`` missing on PATH, or ``./build/bin/repro`` unbuilt,
 ## or a non-ELF host (the ``.so`` layout assumed here is Linux; on macOS the
 ## same channels carry ``.dylib`` but the test's hard-coded ``.so`` basename
@@ -112,12 +136,15 @@ package libprod:
 
   uses:
     "sh"
+    "mkdir"
+    "cc"
+    "cp"
 
   library scprodlib:
     kind: shared
 
   build:
-    discard shell(
+    let buildLib = shell(
       command = "mkdir -p build/lib build/include && " &
         "cc -shared -fPIC -o build/lib/libscprodlib.so greeting.c && " &
         "cp greeting.h build/include/greeting.h",
@@ -125,6 +152,7 @@ package libprod:
       extraInputs = @["greeting.c", "greeting.h"],
       extraOutputs = @["build/lib/libscprodlib.so", "build/include/greeting.h"],
       cacheable = false)
+    appendRegisteredActionToolIdentityRefs(buildLib.id, ["mkdir", "cc", "cp"])
 """
 
 # The consuming program. #include-s the sibling header (found only via CPATH)
@@ -161,6 +189,8 @@ package consumer:
 
   uses:
     "sh"
+    "mkdir"
+    "cc"
     "libprod"
 
   build:
@@ -168,6 +198,7 @@ package consumer:
       command = "mkdir -p build && printf 'base\n' > build/base.txt",
       actionId = "consumer.build.base",
       extraOutputs = @["build/base.txt"])
+    appendRegisteredActionToolIdentityRefs(base.id, ["mkdir"])
     let consume = shell(
       command = "mkdir -p build && " &
         "cc -o build/consume main.c -lscprodlib && " &
@@ -176,7 +207,7 @@ package consumer:
       deps = @[base.id],
       extraInputs = @["main.c"],
       extraOutputs = @["build/consume", "build/consumed.txt"],
-      cacheable = false).withToolIdentities(["libprod"])
+      cacheable = false).withToolIdentities(["libprod", "mkdir", "cc"])
     discard target("base", [base])
     discard target("consume", [base, consume])
 """
