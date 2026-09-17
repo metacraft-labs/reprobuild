@@ -1516,6 +1516,7 @@ tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	5
 tests/unit/t_da1i_evidence_help_names_the_hazard.nim	nim	9
 tests/unit/t_daemon_request_working_directory.nim	nim	4
 tests/unit/t_declared_package_deps_from_recipe.nim	nim	6
+tests/unit/t_dev_env_path_ops.nim	nim	8
 tests/unit/t_every_tool_profile_is_sealed.nim	nim	6
 tests/unit/t_fribidi_dev_stub.nim	nim	1
 tests/unit/t_from_source_realization_platform.nim	nim	2

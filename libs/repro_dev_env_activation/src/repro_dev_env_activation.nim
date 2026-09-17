@@ -249,27 +249,36 @@ proc baseEnvironment(): StringTableRef =
   for key, value in envPairs():
     result[key] = value
 
-proc pathListContains(list, entry, sep: string): bool =
-  ## Whether ``entry`` is already an element of the ``sep``-separated
-  ## ``list``.
+proc samePathEntry(a, b: string): bool =
+  ## Element equality for a PATH list.
   ##
   ## Element-wise, not substring: ``C:/store/p/ab/bin`` is a substring of
   ## ``C:/store/p/abc/bin`` and is not the same entry. Case-insensitive on
   ## Windows, where the filesystem is, so the same directory reached under a
-  ## different spelling still counts as present.
-  if entry.len == 0:
-    return false
-  for element in list.split(sep):
-    when defined(windows):
-      if cmpIgnoreCase(element, entry) == 0:
-        return true
-    else:
-      if element == entry:
-        return true
-  false
+  ## different spelling still counts as the same entry.
+  when defined(windows):
+    cmpIgnoreCase(a, b) == 0
+  else:
+    a == b
 
-proc applyOp(env: StringTableRef; op: DevEnvShellOp;
-             workingDirectory: var string) =
+proc withoutPathEntry(list, entry, sep: string): string =
+  ## ``list`` with every occurrence of ``entry`` removed.
+  var kept: seq[string] = @[]
+  for element in list.split(sep):
+    if not samePathEntry(element, entry):
+      kept.add(element)
+  kept.join(sep)
+
+proc applyShellOp*(env: StringTableRef; op: DevEnvShellOp;
+                   workingDirectory: var string) =
+  ## Apply one activation op to ``env``.
+  ##
+  ## Exported so the PATH-ordering semantics can be asserted directly. They
+  ## are not obvious from either side: prepending has to MOVE rather than add
+  ## (activations nest, and duplicates cross cmd.exe's environment-block
+  ## limit) and has to move rather than skip (a recipe prepends precisely to
+  ## reorder). Testing that through a whole activation would exercise the
+  ## artifact reader far more than the rule.
   requireEnvName(op.name)
   let sep = if op.separator.len > 0: op.separator else: $PathSep
   case op.kind
@@ -278,38 +287,42 @@ proc applyOp(env: StringTableRef; op: DevEnvShellOp;
   of deskUnsetEnv:
     env.del(op.name)
   of deskPrependPath:
+    # MOVE to the front, rather than add: drop any existing occurrence and
+    # put the entry first.
+    #
+    # Both halves matter. Adding unconditionally is not idempotent, and
+    # activations NEST — a `just` recipe whose shell is `repro exec -- bash`
+    # re-enters the environment it is already inside, and each re-entry
+    # added the same thirty-five entries again. Two levels is 3.6 KB of
+    # duplicate PATH, which on Windows is enough to cross cmd.exe's
+    # 8191-character truncation on its own.
+    #
+    # But SKIPPING an entry that is already present is wrong for the
+    # opposite reason, and it is the subtler bug: a recipe prepends
+    # precisely to change ORDER. Agent Harbor's MSVC contribution puts the
+    # Visual Studio toolset ahead of msys's `usr/bin`, because Git for
+    # Windows ships a POSIX `link` there and rustc's linker step otherwise
+    # dies with `/usr/bin/link: extra operand '...rcgu.o'` — a coreutils
+    # usage error from a program that is not a linker. On a host that
+    # already carries Visual Studio somewhere in its ambient PATH, "already
+    # present, leave it alone" turned that contribution into a no-op and
+    # brought the failure back.
     let current = env.getOrDefault(op.name)
     env[op.name] =
       if current.len == 0:
         op.value
-      elif current.pathListContains(op.value, sep):
-        # Already there: leave the list alone.
-        #
-        # Activation has to be idempotent because activations NEST. A `just`
-        # recipe whose shell is `repro exec -- bash` re-enters the
-        # environment it is already inside, and before this each re-entry
-        # prepended the same thirty-five entries again. Two levels is 3.6 KB
-        # of duplicate PATH, which on Windows is enough to cross cmd.exe's
-        # 8191-character limit on its own: the observed failure was
-        # `VsDevCmd.bat` reporting "The input line is too long" and `tsc` not
-        # being recognised, inside a build that works perfectly when run one
-        # level down.
-        #
-        # Skipping rather than moving to the front: the entry is already in
-        # the list because this same environment put it there, so its
-        # position is the one this environment chose.
-        current
       else:
-        op.value & sep & current
+        let rest = current.withoutPathEntry(op.value, sep)
+        if rest.len == 0: op.value else: op.value & sep & rest
   of deskAppendPath:
+    # The mirror: move to the end, for the same two reasons.
     let current = env.getOrDefault(op.name)
     env[op.name] =
       if current.len == 0:
         op.value
-      elif current.pathListContains(op.value, sep):
-        current
       else:
-        current & sep & op.value
+        let rest = current.withoutPathEntry(op.value, sep)
+        if rest.len == 0: op.value else: rest & sep & op.value
   of deskSetWorkingDirectory:
     if op.value.len > 0:
       workingDirectory = op.value
@@ -327,7 +340,7 @@ proc activatedEnvironment*(artifact: DevEnvArtifact; artifactPath = "";
     else:
       artifact.projectRoot
   for op in activationOps(artifact, artifactPath, extraOps, preOps):
-    result.env.applyOp(op, result.workingDirectory)
+    result.env.applyShellOp(op, result.workingDirectory)
 
 proc containsPathSeparator(value: string): bool =
   value.contains(DirSep) or value.contains(AltSep)
