@@ -10162,27 +10162,46 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # selector (host / nix / tarball / scoop / corpus-recipe) is untouched, so a
   # build that consumes no cross-repo producer is byte-identical to today.
   if not materializedOnly and result.projectRoot.len > 0:
-    # Producer discovery must inspect the full package-level ``uses:`` set,
-    # not the focused tool-provisioning subset in ``buildArtifact``. Library
-    # producers are deliberately not present on an action's ``toolIdentityRefs``
-    # yet: this pass materializes their aux channels first, and only then does
-    # ``attachProducerAuxRefs`` add them to the selected consumer actions. If
-    # we scope them out here, the later attachment has no producer to attach
-    # and a Nim library's ``nimPathDirs`` silently disappears. Ordinary host /
-    # catalog tools still resolve from ``buildArtifact`` below, so focused
-    # builds remain lightweight.
+    # Producer DISCOVERY walks the full package-level ``uses:`` set; producer
+    # ADMISSION stays scoped to the selected action closure, with exactly one
+    # narrow exception. These are two separate decisions and the code keeps
+    # them separate on purpose.
     #
-    # Cross-Repo-Source-Consumption §4.2a (SC-11) is what this guard protects:
-    # the consumer's edge is a typed ``nim.c(...)`` whose refs are its own
-    # tools (``nim``), never the sibling Nim ``library`` it ``import``s. A
-    # scoped loop here never resolves ``uses: "<nim lib>"`` at all, so the
-    # producer is neither fetched nor spliced and the consumer's compile fails
-    # with ``cannot open file: <module>`` — the exact pre-SC-11 failure the
-    # milestone's integration test pins.
+    # Why DISCOVERY has to be wide (Cross-Repo-Source-Consumption §4.2a,
+    # SC-11): the consuming edge is a typed ``nim.c(...)`` whose
+    # ``toolIdentityRefs`` are its OWN tools (``nim``, the C compiler). By
+    # construction it never names the sibling Nim ``library`` whose module it
+    # ``import``s — ``nim.c`` has no parameter with which to name it, and
+    # §4.2a's whole surface is a bare ``uses: "<nim lib>"`` plus an ordinary
+    # ``import``. ``selectedToolIdentitySelectors`` therefore cannot see the
+    # selector and ``scopedToolArtifact`` drops its ``uses:`` entry, so a loop
+    # over ``buildArtifact`` never resolves ``uses: "<nim lib>"`` at all: the
+    # producer is neither fetched nor spliced, ``nimPathDirs`` never reaches
+    # ``attachProducerAuxRefs``, and the consumer's compile dies with
+    # ``cannot open file: <module>`` — the pre-SC-11 failure SC-11's
+    # integration test pins.
+    #
+    # Why ADMISSION has to stay narrow (§4.2, SC-2 + SC-3): selecting a
+    # producer for ONE target must not build another target's producer, and
+    # must not move an unrelated action's identity. So a selector the selected
+    # closure did NOT name is admitted only at the narrowest point where the
+    # §4.2a channel lives — see the ``selectorInSelectedClosure`` gate below,
+    # which fires after the producer's interface is known and admits only a
+    # producer that exports NO compiled artifact at all (a pure-Nim-source
+    # ``library``). Everything else out of closure is left exactly where the
+    # scoped loop left it: unfetched-into-a-build, unbuilt, unspliced. This is
+    # the same narrowing ``attachProducerAuxRefs`` applies on the other side of
+    # this channel (it attaches only producers with a non-empty
+    # ``nimPathDirs``).
+    var selectedClosureSelectors = initHashSet[string]()
+    for useDef in buildArtifact.projectInterface.toolUses:
+      if useDef.packageSelector.len > 0:
+        selectedClosureSelectors.incl(useDef.packageSelector)
     for useDef in artifact.projectInterface.toolUses:
       let selector = useDef.packageSelector
       if selector.len == 0:
         continue
+      let selectorInSelectedClosure = selector in selectedClosureSelectors
       if producerMaterializedBinDirs.hasKey(selector) or
           producerMaterializedAuxPaths.hasKey(selector):
         continue  # already built + spliced in this session (dedup)
@@ -10334,6 +10353,40 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
               # ``build/lib``.
               needsProducerBuild = true
               break
+        # THE NARROWING (§4.2a admission gate; see the loop header).
+        #
+        # ``needsProducerBuild`` is now exactly "this producer exports a
+        # compiled artifact", so its NEGATION is exactly the pure-Nim-source
+        # library §4.2a is about — the one producer shape whose splice adds a
+        # ``nim c --path:`` entry and nothing else (no ``bin`` dir, so no
+        # ``PATH`` entry). ``producerExportsNimSourceRoot`` is the positive
+        # half of the same statement: a package-level ``uses:`` naming a
+        # producer that exports NEITHER a compiled artifact NOR an importable
+        # Nim source root has no §4.2a channel to offer, and admitting it would
+        # only reach ``recordProducerMaterialization``'s refusal.
+        #
+        # A selector the selected closure DID name keeps every bit of its
+        # behaviour: the gate is inert for it.
+        var producerExportsNimSourceRoot = false
+        for lib in producerArtifact.projectInterface.publicLibraries:
+          if lib.name.len == 0:
+            continue
+          let exported =
+            if lib.exportedPath.len > 0: lib.exportedPath else: "src"
+          if dirExists(extendedPath(producerRootAbs / exported)):
+            producerExportsNimSourceRoot = true
+            break
+        if not selectorInSelectedClosure and
+            (needsProducerBuild or not producerExportsNimSourceRoot):
+          # Out of closure and not the Nim library-source channel: this is the
+          # SC-2 / SC-3 scoping contract. Building it here is what made
+          # ``repro build base`` materialize an unrelated target's producer
+          # binary; splicing it here is what moved unrelated action identities.
+          logSummary("cross-repo producer: \"" & selector &
+            "\" is declared at package level but not named by the selected " &
+            "action closure, and exports a compiled artifact rather than a " &
+            "Nim source root — not building or splicing it for this target.")
+          continue
         if needsProducerBuild:
           let producerOutcome = executeBuildTarget(producerProjectFile,
             effectiveMode, publicCliPath,
