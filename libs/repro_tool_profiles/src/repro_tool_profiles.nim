@@ -2277,6 +2277,24 @@ proc mergeRustInstallerComponents(destination: string) =
       raise newException(OSError,
         "tool-resolution failed: rust-installer components file lists " &
         "invalid component name: " & component)
+    # Documentation components are DROPPED rather than merged.
+    #
+    # `rust-docs` and `rust-docs-json-preview` are 630 MB of the ~1.6 GB
+    # distribution, and a tool prefix exists to compile code: nothing
+    # resolves a doc page out of `<prefix>/share/doc` at build time. Carrying
+    # them cost real things rather than mere disk — `rustc`, `cargo`,
+    # `clippy` and `rustfmt` each merge their own copy of the same archive,
+    # so one Rust toolchain spent ~2.5 GB of store on documentation, and the
+    # resulting 1.69 GB prefix exceeded the binary cache's 1 GiB request-body
+    # limit, which made the single most valuable package in the catalog the
+    # one that could not be published or substituted.
+    #
+    # Dropped at the MERGE rather than at extraction because the archive is
+    # shared: the same download serves every one of those four packages, and
+    # the component layout is what says which files are documentation.
+    if component == "rust-docs" or component.startsWith("rust-docs-"):
+      removeDir(extendedPath(destination / component))
+      continue
     let componentDir = destination / component
     if not dirExists(extendedPath(componentDir)):
       continue
