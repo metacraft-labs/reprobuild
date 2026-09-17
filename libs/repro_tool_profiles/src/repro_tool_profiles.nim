@@ -17,6 +17,15 @@ import repro_dsl_stdlib/nixpkgs_pin
 import repro_hash
 import repro_interface_artifacts
 import repro_local_store
+# Binary-cache substitution for realized tool prefixes. Adding these imports
+# is what closes the gap where a package realized by URL+digest never
+# consulted the shared cache at all — see `substituteToolPrefix` below.
+import repro_binary_cache_client/cache_key
+import repro_binary_cache_client/types as bcClientTypes
+import repro_peer_cache/auth as peerAuth
+import repro_binary_cache_client/caches_config
+import repro_binary_cache_client/in_process as bcInProcess
+import repro_binary_cache_server/types as bcTypes
 import repro_project_dsl/install_mirror_resolver
 # repro_local_store provides the M56 unified store. Every adapter
 # (Nix / tarball / Scoop) calls `registerInUnifiedStore` after laying
@@ -2703,6 +2712,159 @@ proc selectedUrlFromReceipt(prefix: string): string =
   except CatchableError:
     result = "existing"
 
+proc toolCacheIdentity(plan: TarballAcquisitionPlan;
+                       packageName, version: string): CacheEntryIdentity =
+  ## The shared-cache identity of a realized tool prefix.
+  ##
+  ## Keyed on the things that actually determine the prefix's bytes: the
+  ## package, its version, the host platform, and — as options — the upstream
+  ## artifact digest plus the declared layout (executable path, alias, strip
+  ## depth, archive type). Two hosts that would download the same archive and
+  ## unpack it the same way derive the same key, which is the whole point;
+  ## change any of them and the key moves, so a prefix is never served for a
+  ## layout it was not built with.
+  ##
+  ## The URL is deliberately NOT part of the key. A mirror serving identical
+  ## bytes should hit the same entry — the digest is the identity, the URL is
+  ## only where it was fetched from.
+  let platform = bcTypes.PlatformTriple(
+    cpu: hostCpuToken(),
+    os: hostOsToken(),
+    abi: "",
+    libcVariant: "",
+    microarch: "")
+  let toolchain = bcTypes.ToolchainIdentity(name: "tarball-realize")
+  result = newCacheEntryIdentity(packageName, version, platform, toolchain,
+    "repro-tool-profiles-v1")
+  result.addOption("sha256", normalizedSha256(plan.sha256))
+  result.addOption("archiveType", plan.archiveType)
+  result.addOption("executablePath", plan.declaredExecutablePath)
+  result.addOption("executableAlias", plan.declaredExecutableAlias)
+  result.addOption("stripComponents", $plan.stripComponents)
+
+proc substituteToolPrefix(plan: TarballAcquisitionPlan;
+                          packageName, version, prefix, storeRoot: string):
+    bool =
+  ## Try the shared binary cache before downloading from upstream.
+  ##
+  ## Before this existed, a direct-download package was ALWAYS fetched from
+  ## its upstream URL: the realize path had no CAS lookup and no substitution
+  ## step, so a prefix was never read from — nor written to — the shared
+  ## cache. Publishing a toolchain so other machines install it quickly had
+  ## no mechanism behind it, because the cache only ever held build-ACTION
+  ## outputs, a different population entirely.
+  ##
+  ## Soft-fail on every path. A cache that is unreachable, unconfigured, or
+  ## simply does not have this entry must cost nothing but the lookup — the
+  ## upstream download still follows.
+  if getEnv("REPRO_CACHE_DISABLE").len > 0:
+    return false
+  var endpoints: seq[SubstituteEndpoint] = @[]
+  try:
+    endpoints = loadEndpoints()
+  except CatchableError:
+    return false
+  if endpoints.len == 0:
+    return false
+  let keyHex = deriveCacheEntryKeyHex(toolCacheIdentity(plan, packageName,
+    version))
+  try:
+    let outcome = bcInProcess.substituteInProcess(keyHex, storeRoot, endpoints)
+    if not outcome.ok or outcome.outcomes.len == 0:
+      return false
+    # `substituteInProcess` populates the CAS; it does not lay down a prefix.
+    # The root entry's blob IS the packed prefix archive the publish path
+    # produced, so unpacking it here is what turns a cache hit into a
+    # realization. Missing this step is not a visible failure — the cache
+    # reports a hit, nothing lands on disk, and the caller silently falls
+    # through to downloading from upstream every single time.
+    let rootOutcome = outcome.outcomes[^1]
+    if rootOutcome.casPath.len == 0 or
+        not fileExists(extendedPath(rootOutcome.casPath)):
+      return false
+    let archiveText = readFile(extendedPath(rootOutcome.casPath))
+    var archiveBytes = newSeq[byte](archiveText.len)
+    for i, ch in archiveText:
+      archiveBytes[i] = byte(ch)
+    # Unpack into a temporary sibling and move into place, so an interrupted
+    # extraction never leaves a half-populated prefix that the next run would
+    # accept as complete.
+    let staging = prefix & ".cache-staging"
+    removeDir(extendedPath(staging))
+    createDir(extendedPath(staging))
+    try:
+      bcInProcess.extractPrefix(archiveBytes, staging)
+      if executableInStorePath(staging, plan.declaredExecutablePath,
+          rejectSymlinks = true).len == 0:
+        removeDir(extendedPath(staging))
+        return false
+      createDir(extendedPath(prefix.parentDir))
+      moveDir(extendedPath(staging), extendedPath(prefix))
+    except CatchableError:
+      removeDir(extendedPath(staging))
+      return false
+  except CatchableError:
+    return false
+  # A hit is only a hit if the declared executable is actually there.
+  # Verifying the member this package promises is what stops a partial or
+  # mismatched entry from being accepted as a realization.
+  result = dirExists(extendedPath(prefix)) and
+    executableInStorePath(prefix, plan.declaredExecutablePath,
+      rejectSymlinks = true).len > 0
+  if result:
+    stderr.writeLine("repro cache: substituted " & packageName & "@" &
+      version & " from the shared cache (no download)")
+
+proc publishToolPrefix(plan: TarballAcquisitionPlan;
+                       packageName, version, prefix: string) =
+  ## Publish a freshly realized prefix so the next machine substitutes it.
+  ##
+  ## Calls ``publishInProcess`` directly rather than going through the
+  ## engine's ``mkBinaryCachePublisher`` closure: that type lives in
+  ## ``repro_build_engine``, which sits ABOVE this module, and importing it
+  ## here would invert the layering for the sake of one call.
+  ##
+  ## Soft-fail on every path, matching the engine hook's own policy. A
+  ## developer without publish credentials must still get a working
+  ## toolchain — an unpublished prefix costs the next person a download; a
+  ## realize that failed because a cache was unreachable costs them the day.
+  ##
+  ## Publishing requires credentials to be configured. Their absence is the
+  ## ordinary case for most developers and is silent by design; it is not an
+  ## error and must not read like one.
+  if getEnv("REPRO_CACHE_DISABLE").len > 0:
+    return
+  let keyPath = getEnv("REPRO_BINARY_CACHE_KEY_PATH", "")
+  let certPath = getEnv("REPRO_BINARY_CACHE_CERT_PATH", "")
+  if keyPath.len == 0 or certPath.len == 0:
+    return
+  try:
+    let keypair = peerAuth.loadOrGenerateKeypair(certPath, keyPath)
+    let identity = toolCacheIdentity(plan, packageName, version)
+    let request = bcInProcess.PublishInProcessRequest(
+      entryKeyHex: deriveCacheEntryKeyHex(identity),
+      prefixDir: prefix,
+      identity: identity,
+      endpoint: getEnv("REPRO_BINARY_CACHE_URL", ""),
+      keypair: keypair)
+    if request.endpoint.len == 0:
+      return
+    let outcome = bcInProcess.publishInProcess(request)
+    if outcome.ok:
+      # Said out loud. A publish is the step that makes this prefix cheap for
+      # everyone else, and an operator asking "did my toolchain reach the
+      # shared cache" should not have to infer the answer from silence.
+      stderr.writeLine("repro cache: published " & packageName & "@" &
+        version & " (" & request.entryKeyHex & ")")
+    if not outcome.ok and outcome.error.len > 0:
+      # Reported, not raised. Knowing a publish did not happen is useful;
+      # failing the realization over it would be absurd.
+      stderr.writeLine("repro cache: warning: publishing " & packageName &
+        " to " & request.endpoint & " failed: " & outcome.error)
+  except CatchableError as err:
+    stderr.writeLine("repro cache: warning: publishing " & packageName &
+      " skipped: " & err.msg)
+
 proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
                               writerMode = "direct"):
     tuple[prefix: string; archivePath: string; selectedUrl: string] =
@@ -2726,6 +2888,15 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
       raise newException(OSError,
         "tool-resolution failed: existing tarball realization lacks " &
         plan.declaredExecutablePath & ": " & prefix)
+    return (prefix: prefix, archivePath: "",
+        selectedUrl: selectedUrlFromReceipt(prefix))
+
+  # Shared cache before upstream. A hit means another machine already
+  # realized this exact prefix and we can skip the download and the unpack
+  # entirely; a miss costs one lookup. This is the step whose absence meant
+  # nothing a dev env provisioned was ever cache-substitutable.
+  if substituteToolPrefix(plan, packageName, resolvedVersion, prefix,
+      storeRoot):
     return (prefix: prefix, archivePath: "",
         selectedUrl: selectedUrlFromReceipt(prefix))
 
@@ -2779,6 +2950,10 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
       raise newException(OSError,
         "tool-resolution failed: materialized tarball lacks executable " &
         plan.declaredExecutablePath)
+    # Publish so the NEXT machine substitutes instead of downloading. Soft
+    # fail: a developer without publish credentials still has a working
+    # toolchain, they just did not contribute this one.
+    publishToolPrefix(plan, packageName, resolvedVersion, prefix)
     # Register in the unified M56 index and seal the typed binary
     # `.repro-receipt` envelope (the JSON receipt already written by
     # writeTarballReceipt is adapter-specific provenance and stays
