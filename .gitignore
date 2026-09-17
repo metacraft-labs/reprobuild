@@ -183,3 +183,10 @@ macro_sourcemap_*.json
 # `repro-binary-cache` spills at ~37KB of arguments — blocks EVERY push in the
 # tree until someone notices a stray file and deletes it.
 *_linkerArgs.txt
+
+# Local, per-developer environment consumed by `.envrc`
+# (`dotenv_if_exists .env` + `watch_file .env`). It holds machine-specific
+# overrides such as REPROBUILD_REPRO, so it must never be committed: the
+# `.envrc` invites creating it, and without this line following that
+# invitation stages one developer's absolute paths.
+.env
