@@ -1511,6 +1511,7 @@ tests/unit/t_bootstrap_nim_monitoring.nim	nim	3
 tests/unit/t_cached_source_dependency_closure.nim	nim	11
 tests/unit/t_capabilities.nim	nim	2
 tests/unit/t_cargo_lock_vendor_plan.nim	nim	19
+tests/unit/t_cargo_vendor_action.nim	nim	9
 tests/unit/t_cmake_direct_tool_identity.nim	nim	5
 tests/unit/t_config_nims_lib_resolution.nim	nim	7
 tests/unit/t_configure_build_tree_cleanup.nim	nim	12
