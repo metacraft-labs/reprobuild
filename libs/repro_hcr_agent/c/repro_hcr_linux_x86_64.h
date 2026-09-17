@@ -38,6 +38,18 @@
 #ifndef REPRO_HCR_LINUX_X86_64_H
 #define REPRO_HCR_LINUX_X86_64_H
 
+/* HLX-M8 split `repro_hcr_lx_apply_direct_patch_at` into a prepare half and a
+ * commit half. The agent now calls the two halves directly, so the composed
+ * convenience is reached only by the test probe shim — a different translation
+ * unit including the same header. Marking it explicitly is what keeps the
+ * agent's own build warning-free without deleting a function the probe needs.
+ */
+#if defined(__GNUC__)
+#define REPRO_HCR_LX_MAYBE_UNUSED __attribute__((unused))
+#else
+#define REPRO_HCR_LX_MAYBE_UNUSED
+#endif
+
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -2401,7 +2413,29 @@ static int repro_hcr_lx_txn_commit(repro_hcr_lx_transaction *txn) {
  * Returns the live patch-body address, or NULL with `repro_hcr_lx_last_report`
  * carrying a named refusal.
  */
-static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
+/*
+ * HLX-M8 split the body of `repro_hcr_lx_apply_direct_patch_at` in two without
+ * changing it, because the application ABI needs the boundary NAMED.
+ *
+ * `Patch-Loading-Lifecycle.md` §3.1 puts four things in a fixed order, and two
+ * of them are on opposite sides of this line:
+ *
+ *   Phase F (16-20) — load and resolve.  For Direct Patch Injection §3.2
+ *     replaces it with the in-memory link, which is exactly what
+ *     `repro_hcr_lx_txn_prepare` does: allocate the provider-owned body page,
+ *     copy the bytes, choose near body or island, plan the branch.  It writes
+ *     NOTHING to target text, so a failure here is recoverable — and §3.3
+ *     step 38 says the agent must still run the after-reload callbacks.
+ *   Phase G (21-27) — trampoline installation.  `repro_hcr_lx_txn_commit`, the
+ *     one naturally aligned 8-byte store per site.  This is where new code
+ *     becomes live.
+ *
+ * An application's before-reload callback runs BETWEEN the caller's own
+ * pre-flight and Phase F, so the agent needs to be able to stop there.  The
+ * composition below is byte-for-byte the previous function, so the probe shim
+ * and every HLX-M0/M2/M3/M5 gate that calls it sees no change at all.
+ */
+static int repro_hcr_lx_prepare_direct_patch_at(uint64_t entry_address,
                                                 uint64_t sled_address,
                                                 const uint8_t *patch_bytes,
                                                 size_t patch_len) {
@@ -2412,15 +2446,30 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
   if (repro_hcr_lx_txn_add(txn, entry_address, sled_address, patch_bytes,
                            patch_len) != REPRO_HCR_LX_OK) {
     repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
-    return NULL;
+    return REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
   }
-  if (repro_hcr_lx_txn_prepare(txn) != REPRO_HCR_LX_OK) {
-    return NULL;
-  }
+  return repro_hcr_lx_txn_prepare(txn);
+}
+
+/* Phase G.  Returns the live patch-body address, or NULL with
+ * `repro_hcr_lx_last_report` carrying a named refusal. */
+static void *repro_hcr_lx_commit_direct_patch(void) {
+  repro_hcr_lx_transaction *txn = &repro_hcr_lx_last_txn;
   if (repro_hcr_lx_txn_commit(txn) != REPRO_HCR_LX_OK) {
     return NULL;
   }
   return (void *)(uintptr_t)txn->sites[0].dispatch_address;
+}
+
+REPRO_HCR_LX_MAYBE_UNUSED static void *repro_hcr_lx_apply_direct_patch_at(
+    uint64_t entry_address, uint64_t sled_address, const uint8_t *patch_bytes,
+    size_t patch_len) {
+  if (repro_hcr_lx_prepare_direct_patch_at(entry_address, sled_address,
+                                           patch_bytes,
+                                           patch_len) != REPRO_HCR_LX_OK) {
+    return NULL;
+  }
+  return repro_hcr_lx_commit_direct_patch();
 }
 
 #endif /* REPRO_HCR_LINUX_X86_64_H */

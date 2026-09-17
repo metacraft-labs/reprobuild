@@ -47,8 +47,16 @@ proc directPatchRequest*(patchId, supportProfile: string;
                          directPatchBytes, debugObjectBytes,
                          unwindMetadataBytes: openArray[byte];
                          sourceGenerationMap:
-                           openArray[HcrSourceGenerationEntry]):
+                           openArray[HcrSourceGenerationEntry];
+                         changedFiles: openArray[string] = [];
+                         changedTypes:
+                           openArray[HcrTypeLayoutChange] = []):
                          HcrPatchRequest =
+  ## HLX-M8 added the last two parameters, with defaults, because every
+  ## existing caller describes a patch that changes no layouts and names no
+  ## source file. They are what reaches the application: `changedFiles` is the
+  ## set `rb_hcr_file_changed` answers over once the reload is APPLIED, and
+  ## `changedTypes` is the set HCR-Overview §7.4's acceptance rule runs on.
   HcrPatchRequest(
     schemaId: HcrPatchRequestSchemaId,
     patchId: patchId,
@@ -59,7 +67,9 @@ proc directPatchRequest*(patchId, supportProfile: string;
     directPatchPayload: payload(directPatchBytes),
     debugObjectPayload: payload(debugObjectBytes),
     unwindMetadataPayload: payload(unwindMetadataBytes),
-    sourceGenerationMap: @sourceGenerationMap)
+    sourceGenerationMap: @sourceGenerationMap,
+    changedFiles: @changedFiles,
+    changedTypes: @changedTypes)
 
 proc coordinatorHelloAckMessage*(client: var HcrCoordinatorClient):
     HcrAgentMessage =

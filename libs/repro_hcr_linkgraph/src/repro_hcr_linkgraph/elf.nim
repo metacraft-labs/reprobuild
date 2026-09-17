@@ -646,6 +646,39 @@ proc parseElfX86_64Object*(path: string; facts: var ElfObjectFacts): LinkGraph =
         reason: "section " & section.name &
           " is SHF_TLS; thread-local storage is not part of the HLX-M1 profile")
 
+  # HLX-M8, design §9: "The provider therefore refuses patches that introduce
+  # new TLS variables."
+  #
+  # The distinction the rule turns on is DEFINED versus REFERENCED, and it is
+  # exactly `st_shndx`. A patch object that *references* an existing
+  # thread-local carries an UNDEFINED `STT_TLS` symbol — fine: under
+  # global-dynamic it resolves through `__tls_get_addr`, and under initial-exec
+  # it resolves to an offset the running module already assigned. A patch
+  # object that *defines* one puts it in `.tdata`/`.tbss` and the symbol is
+  # DEFINED — and there is nowhere to put it, because initial-exec and
+  # local-exec offsets come out of the module's `PT_TLS` at link time and a
+  # running process cannot extend that.
+  #
+  # This is deliberately narrower than the pre-existing `elf-tls-section` fact
+  # below, which is `usFallbackRequired` for ANY `SHF_TLS` section and was
+  # written for HLX-M1's profile. That fact is left alone: it says "this object
+  # has thread-local data at all", which is true and is information. This one
+  # says "this object would need a TLS slot that cannot be allocated", which is
+  # a refusal.
+  for detail in facts.symbolDetails:
+    if detail.symbolType == SttTls and detail.sectionIndex != ShnUndef:
+      result.unsupportedFeatures.add UnsupportedFeatureFact(
+        feature: "elf-new-tls-variable",
+        severity: usReject,
+        sectionId: -1,
+        relocationId: -1,
+        reason: "symbol \"" & result.symbols[detail.symbolIndex].name &
+          "\" is a DEFINED STT_TLS symbol, so this patch introduces a new " &
+          "thread-local variable; initial-exec and local-exec offsets are " &
+          "assigned at link time from the module's PT_TLS and a running " &
+          "process has no room to extend it (Linux-ELF-Provider.md §9). A " &
+          "patch that only REFERENCES existing thread-locals is accepted")
+
   for detail in facts.symbolDetails:
     if detail.symbolType == SttGnuIfunc:
       result.unsupportedFeatures.add UnsupportedFeatureFact(

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1648,
+    "nimTestBinaries": 1652,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 585,
-    "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1659
+    "staticallyDetectedRuntimeCompilerFlowTests": 101,
+    "testEntries": 1663
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1100,7 +1100,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 772,
+      "integration": 776,
       "platform/destructive": 115,
       "pure unit": 585,
       "unclassified": 175
@@ -1251,9 +1251,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1648,
+    "nimTestBinaryCount": 1652,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1659
+    "testEntryCount": 1663
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1949,6 +1949,31 @@
         }
       ],
       "source": "tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "args",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "args",
+            "fallbackProbe",
+            "libPath",
+            "outDir",
+            "probe",
+            "repoRoot"
+          ],
+          "line": 82,
+          "path": "tests/e2e/hcr-linux-rbhcr/t_e2e_hcr_linux_isonim_shim_against_real_agent.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "var args = @[\"nim\", \"c\", \"--verbosity:0\", \"--hints:off\","
+        }
+      ],
+      "source": "tests/e2e/hcr-linux-rbhcr/t_e2e_hcr_linux_isonim_shim_against_real_agent.nim"
     },
     {
       "class": "integration",
@@ -3811,7 +3836,7 @@
             "objPath",
             "repoRoot"
           ],
-          "line": 266,
+          "line": 274,
           "path": "tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim",
           "patterns": [
             "gcc"
@@ -3829,7 +3854,7 @@
             "objPath",
             "repoRoot"
           ],
-          "line": 268,
+          "line": 276,
           "path": "tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim",
           "patterns": [
             "clang"
@@ -3851,6 +3876,8 @@
             "comdatSource",
             "patchableArgs",
             "repoRoot",
+            "tlsRefObject",
+            "tlsRefSource",
             "xindexObject",
             "xindexSource"
           ],
@@ -3870,10 +3897,33 @@
             "comdatSource",
             "patchableArgs",
             "repoRoot",
+            "tlsRefObject",
+            "tlsRefSource",
             "xindexObject",
             "xindexSource"
           ],
-          "line": 327,
+          "line": 346,
+          "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "discard runSuccess(shellCommand([\"gcc\", \"-O2\", \"-fPIC\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "comdatObject",
+            "comdatSource",
+            "patchableArgs",
+            "repoRoot",
+            "tlsRefObject",
+            "tlsRefSource",
+            "xindexObject",
+            "xindexSource"
+          ],
+          "line": 371,
           "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
           "patterns": [
             "g++"
@@ -3889,10 +3939,12 @@
             "comdatSource",
             "patchableArgs",
             "repoRoot",
+            "tlsRefObject",
+            "tlsRefSource",
             "xindexObject",
             "xindexSource"
           ],
-          "line": 356,
+          "line": 408,
           "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
           "patterns": [
             "gcc"
@@ -3908,10 +3960,12 @@
             "comdatSource",
             "patchableArgs",
             "repoRoot",
+            "tlsRefObject",
+            "tlsRefSource",
             "xindexObject",
             "xindexSource"
           ],
-          "line": 384,
+          "line": 436,
           "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
           "patterns": [
             "gcc"
@@ -3927,10 +3981,12 @@
             "comdatSource",
             "patchableArgs",
             "repoRoot",
+            "tlsRefObject",
+            "tlsRefSource",
             "xindexObject",
             "xindexSource"
           ],
-          "line": 452,
+          "line": 504,
           "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
           "patterns": [
             "gcc"
@@ -19812,6 +19868,75 @@
       "sourceSuiteCount": 2,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_hcr_linux_isonim_shim_against_real_agent",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-rbhcr/t_e2e_hcr_linux_isonim_shim_against_real_agent.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_late_load_failure_still_reaches_after_reload",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_late_load_failure_still_reaches_after_reload.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_managed_type_layout_change_lifecycle",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_managed_type_layout_change_lifecycle.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_rejected_patch_never_fires_before_reload",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_rejected_patch_never_fires_before_reload.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {

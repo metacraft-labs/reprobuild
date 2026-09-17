@@ -68,7 +68,28 @@ case "$TARGET_OS" in
   linux|linux*)
     LIB_NAME="librepro_hcr_agent.so"
     CC_DEFAULT="gcc"
-    SHARED_FLAGS="-shared -fPIC"
+    # HLX-M8, 2026-09-18. `--build-id` is not cosmetic here and was missing.
+    # `HCR/Linux-ELF-Provider.md` §7.3 makes build-id verification MANDATORY:
+    # the provider reads symbols out of each loaded object's file on disk and
+    # must prove that file still describes the bytes in memory. An object with
+    # no `.note.gnu.build-id` is REFUSED — and once this library is linked into
+    # a target (which is exactly what HLX-M8 enables, and what IsoNim does),
+    # the agent's own shared object is one of the objects it scans.
+    #
+    # CORRECTED 2026-09-18 IN REVIEW. An earlier version of this comment said
+    # the missing flag made "the first patch into such a process refused
+    # `elf-build-id-absent`". That was measured again with the flag removed and
+    # it does NOT happen: `repro_hcr_elf_note_object_refusal` records the
+    # refusal per object and the scan CONTINUES, so a symbol that resolves out
+    # of an object which does have a build-id still patches. The shim gate is
+    # green with a `.so` carrying no `.note.gnu.build-id` (verified by
+    # `readelf -n`). What the missing flag really costs is narrower and still
+    # worth the flag: no symbol can ever be resolved out of this library, and
+    # the library joins the unnameable-refusal set the scanner's own header
+    # warns about. `patchableLinkFlags` has carried `--build-id=sha1` since
+    # HLX-M1; the canonical shared library should not be the one artifact that
+    # does not.
+    SHARED_FLAGS="-shared -fPIC -Wl,--build-id=sha1"
     EXTRA_LIBS="-lpthread"
     DEFINES=""
     ;;

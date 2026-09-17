@@ -776,6 +776,10 @@ tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim	nim	2
 tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim	nim	2
 tests/e2e/hcr-linux-far/t_e2e_hcr_linux_far_target_island_patch.nim	nim	2
 tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim	nim	2
+tests/e2e/hcr-linux-rbhcr/t_e2e_hcr_linux_isonim_shim_against_real_agent.nim	nim	2
+tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_late_load_failure_still_reaches_after_reload.nim	nim	2
+tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_managed_type_layout_change_lifecycle.nim	nim	2
+tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_rejected_patch_never_fires_before_reload.nim	nim	2
 tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim	nim	2
 tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim	nim	3
 tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_quiescence_handshake_and_release.nim	nim	2

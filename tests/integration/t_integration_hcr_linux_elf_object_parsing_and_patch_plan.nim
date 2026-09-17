@@ -314,6 +314,50 @@ when defined(linux) and defined(amd64):
       check allReasons.contains("thread-local")
       check gen2.hasFeature("elf-tls-section")
       check gen2.featureReason("elf-tls-section").contains("SHF_TLS")
+
+      # -------------------------------------------------------------------
+      # HLX-M8, design §9: "the provider refuses patches that introduce NEW
+      # TLS variables"; patches that only REFERENCE existing thread-locals are
+      # accepted. The line is `st_shndx`, and the two halves are measured
+      # against each other so the refusal cannot degenerate into "any TLS is
+      # refused" — which is the thing §9 explicitly does not say.
+      #
+      # gen1/gen2 define `static __thread int hcr_lx_obj_thread_local_slot`.
+      # That is a DEFINED STT_TLS symbol and there is nowhere to put it in a
+      # running process, so it is a hard reject.
+      # -------------------------------------------------------------------
+      check gen2.hasFeature("elf-new-tls-variable")
+      check gen2.featureReason("elf-new-tls-variable").contains(
+        "hcr_lx_obj_thread_local_slot")
+      check gen2.featureReason("elf-new-tls-variable").contains("PT_TLS")
+      var sawTlsReject = false
+      for feature in gen2.unsupportedFeatures:
+        if feature.feature == "elf-new-tls-variable":
+          check feature.severity == usReject
+          sawTlsReject = true
+      check sawTlsReject
+
+      # The counterpart: an object that only references an `extern __thread`
+      # variable. Real GCC output, same analyzer, and it must NOT carry the
+      # refusal.
+      let tlsRefSource = fixtureDir / "hcr_lx_obj_tls_reference.c"
+      requireFixture(tlsRefSource)
+      let tlsRefObject = workDir / "tls_reference.o"
+      discard runSuccess(shellCommand(["gcc", "-O2", "-fPIC",
+        "-ffunction-sections", "-c", tlsRefSource, "-o", tlsRefObject]),
+        repoRoot)
+      var tlsRefFacts: ElfObjectFacts
+      let tlsRef = parseElfX86_64Object(tlsRefObject, tlsRefFacts)
+      # It really does use TLS — otherwise the negative below would be about
+      # an object with no TLS in it at all, which proves nothing.
+      var sawTlsRelocation = false
+      for relocation in tlsRef.relocations:
+        if relocation.kindName in ["R_X86_64_TLSGD", "R_X86_64_GOTTPOFF",
+                                   "R_X86_64_TPOFF32", "R_X86_64_TLSLD",
+                                   "R_X86_64_DTPOFF32"]:
+          sawTlsRelocation = true
+      check sawTlsRelocation
+      check not tlsRef.hasFeature("elf-new-tls-variable")
       check gen2.hasFeature("debug-info-registration")
       check gen2.hasFeature("unwind-registration")
 
@@ -350,8 +394,16 @@ when defined(linux) and defined(amd64):
       # `SHF_LINK_ORDER`: how `__patchable_function_entries` survives
       # `--gc-sections`. Built with the real patchable profile flags.
       # -------------------------------------------------------------------
+      # UPDATED 2026-09-18 (HLX-M8). The profile grew a third flag:
+      # `-ftls-model=global-dynamic`, which `HCR/Linux-ELF-Provider.md` §9
+      # asks patchable TUs to prefer so that a patch body referencing an
+      # EXISTING thread-local resolves through `__tls_get_addr` instead of a
+      # link-time-baked offset. The equality is kept rather than relaxed to a
+      # `contains`: this assertion exists so a silent change to the profile
+      # fails a gate, and turning it into a subset check would retire that.
       check PatchableFlags == @["-fpatchable-function-entry=16,0",
-                                "-falign-functions=16"]
+                                "-falign-functions=16",
+                                "-ftls-model=global-dynamic"]
       let patchableObject = workDir / "patchable.o"
       var patchableArgs = @["gcc", "-O2", "-fPIC", "-ffunction-sections"]
       patchableArgs.add PatchableFlags

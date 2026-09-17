@@ -2690,6 +2690,26 @@ proc patchableCompileFlags*(tool: ReproHcr; entryBytes = 0;
       patchableFunctionEntryFlag(tool, nopCount, entryOffset),
       functionAlignmentFlag(tool, alignment)
     ]
+    when defined(linux):
+      ## HLX-M8, ``HCR/Linux-ELF-Provider.md`` §9. TLS is the hard case: a
+      ## patch body that references a *new* thread-local cannot get a slot,
+      ## because initial-exec and local-exec offsets are assigned at link time
+      ## out of the module's ``PT_TLS`` and a running process has no room to
+      ## extend it. The provider therefore REFUSES patches that introduce new
+      ## TLS variables (``elf-new-tls-variable``, raised by the ELF analyzer).
+      ##
+      ## What this flag changes is the other half — which *existing* TLS
+      ## variables a patch may reference. Under global-dynamic every access
+      ## goes through ``__tls_get_addr`` with a relocation the in-memory linker
+      ## can resolve at patch time; under initial-exec or local-exec the offset
+      ## is baked in, and a patch compiled against one module layout is
+      ## silently wrong against another. §9: "the patchable build profile
+      ## should prefer ``-ftls-model=global-dynamic`` for patchable TUs to
+      ## widen what is accepted."
+      ##
+      ## Linux-only: the model names are an ELF TLS concept. Mach-O and PE use
+      ## different mechanisms and GCC/Clang reject the flag's premise there.
+      result.add "-ftls-model=global-dynamic"
 
 proc patchableLinkFlags*(tool: ReproHcr; segmentName = "__HCR";
                          buildIdStyle = "sha1"): seq[string] {.dynOrStatic.} =
