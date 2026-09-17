@@ -1106,6 +1106,8 @@ tests/integration/t_hooks_ensure_installs_a_managed_pre_commit_hook.nim	nim	1
 tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	nim	18
 tests/integration/t_hooks_noop_outside_initialized_workspace.nim	nim	1
 tests/integration/t_host_binary_format_is_proven_before_execution.nim	nim	7
+tests/integration/t_hpke_rejects_wrong_recipient.nim	nim	12
+tests/integration/t_hpke_rfc9180_vectors.nim	nim	8
 tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim	nim	3
 tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim	nim	6
 tests/integration/t_install_mirror_atomic_patching.nim	nim	7

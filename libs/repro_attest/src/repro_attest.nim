@@ -33,6 +33,13 @@
 ##     releases a secret bound to a launch measurement, computed from
 ##     the image's bytes, plus the reader for the sealed object that
 ##     carries it.
+##   * ``repro_attest/hpke`` — RFC 9180 hybrid public key encryption,
+##     which is how a secret gets to the machine an attestation just
+##     established the identity of. It is the one submodule this module
+##     does NOT re-export, and deliberately: it links BearSSL, and
+##     ``repro_attest`` is compiled into recipe accessor contexts that
+##     are staged without a ``nim-bearssl`` on the path. Import
+##     ``repro_attest/hpke`` directly.
 ##   * ``repro_attest/tpm2_backend`` — the measured-boot backend: the
 ##     ``reproos.tpm2-evidence.v1`` composite that carries a quote, its
 ##     signature and the TCG event log as one blob, and the driver that
