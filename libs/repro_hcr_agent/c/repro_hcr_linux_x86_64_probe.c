@@ -650,4 +650,195 @@ int repro_hcr_lx_probe_unmap(void *address, size_t length) {
 
 size_t repro_hcr_lx_probe_page_size(void) { return repro_hcr_lx_page_size(); }
 
+
+/* ---------------------------------------------------------------------------
+ * HLX-M3 — the prepare / commit / rollback transaction, re-exported.
+ *
+ * Every function below forwards to the production implementation in
+ * `repro_hcr_linux_x86_64.h`. Nothing here reimplements a phase, and the two
+ * levers are the same shape as HLX-M2's `force_far_patch_body`: they remove a
+ * resource or fail a syscall, and the production code refuses on its own.
+ * ------------------------------------------------------------------------- */
+
+void repro_hcr_lx_probe_txn_reset(void) {
+  repro_hcr_lx_txn_reset(&repro_hcr_lx_last_txn);
+}
+
+int repro_hcr_lx_probe_txn_add(unsigned long long entry_address,
+                               unsigned long long sled_address,
+                               const unsigned char *patch_bytes,
+                               size_t patch_len) {
+  return repro_hcr_lx_txn_add(&repro_hcr_lx_last_txn, (uint64_t)entry_address,
+                              (uint64_t)sled_address,
+                              (const uint8_t *)patch_bytes, patch_len);
+}
+
+int repro_hcr_lx_probe_txn_prepare(void) {
+  return repro_hcr_lx_txn_prepare(&repro_hcr_lx_last_txn);
+}
+
+int repro_hcr_lx_probe_txn_commit(void) {
+  return repro_hcr_lx_txn_commit(&repro_hcr_lx_last_txn);
+}
+
+int repro_hcr_lx_probe_txn_rollback(void) {
+  return repro_hcr_lx_txn_rollback(&repro_hcr_lx_last_txn);
+}
+
+int repro_hcr_lx_probe_txn_site_count(void) {
+  return repro_hcr_lx_last_txn.site_count;
+}
+
+int repro_hcr_lx_probe_txn_prepare_complete(void) {
+  return repro_hcr_lx_last_txn.prepare_complete;
+}
+
+int repro_hcr_lx_probe_txn_commit_complete(void) {
+  return repro_hcr_lx_last_txn.commit_complete;
+}
+
+int repro_hcr_lx_probe_txn_rolled_back(void) {
+  return repro_hcr_lx_last_txn.rolled_back;
+}
+
+int repro_hcr_lx_probe_txn_published_count(void) {
+  return repro_hcr_lx_last_txn.published_count;
+}
+
+int repro_hcr_lx_probe_txn_restored_count(void) {
+  return repro_hcr_lx_last_txn.restored_count;
+}
+
+int repro_hcr_lx_probe_txn_retained_body_count(void) {
+  return repro_hcr_lx_last_txn.retained_body_count;
+}
+
+int repro_hcr_lx_probe_txn_freed_body_count(void) {
+  return repro_hcr_lx_last_txn.freed_body_count;
+}
+
+int repro_hcr_lx_probe_txn_released_claim_count(void) {
+  return repro_hcr_lx_last_txn.released_claim_count;
+}
+
+int repro_hcr_lx_probe_txn_unregister_attempts(void) {
+  return repro_hcr_lx_last_txn.unregister_attempts;
+}
+
+int repro_hcr_lx_probe_txn_refusal(void) {
+  return repro_hcr_lx_last_txn.refusal;
+}
+
+int repro_hcr_lx_probe_txn_failed_site(void) {
+  return repro_hcr_lx_last_txn.failed_site;
+}
+
+static repro_hcr_lx_prepared_site *repro_hcr_lx_probe_txn_site(int index) {
+  if (index < 0 || index >= repro_hcr_lx_last_txn.site_count) {
+    return NULL;
+  }
+  return &repro_hcr_lx_last_txn.sites[index];
+}
+
+unsigned long long repro_hcr_lx_probe_txn_window_address(int index) {
+  repro_hcr_lx_prepared_site *ps = repro_hcr_lx_probe_txn_site(index);
+  return ps == NULL ? 0ull : (unsigned long long)ps->window_address;
+}
+
+unsigned long long repro_hcr_lx_probe_txn_original_word(int index) {
+  repro_hcr_lx_prepared_site *ps = repro_hcr_lx_probe_txn_site(index);
+  return ps == NULL ? 0ull : (unsigned long long)ps->original_word;
+}
+
+unsigned long long repro_hcr_lx_probe_txn_previous_word(int index) {
+  repro_hcr_lx_prepared_site *ps = repro_hcr_lx_probe_txn_site(index);
+  return ps == NULL ? 0ull : (unsigned long long)ps->previous_word;
+}
+
+unsigned long long repro_hcr_lx_probe_txn_published_word(int index) {
+  repro_hcr_lx_prepared_site *ps = repro_hcr_lx_probe_txn_site(index);
+  return ps == NULL ? 0ull : (unsigned long long)ps->published_word;
+}
+
+unsigned long long repro_hcr_lx_probe_txn_dispatch_address(int index) {
+  repro_hcr_lx_prepared_site *ps = repro_hcr_lx_probe_txn_site(index);
+  return ps == NULL ? 0ull : (unsigned long long)ps->dispatch_address;
+}
+
+int repro_hcr_lx_probe_txn_site_published(int index) {
+  repro_hcr_lx_prepared_site *ps = repro_hcr_lx_probe_txn_site(index);
+  return ps == NULL ? -1 : ps->published;
+}
+
+int repro_hcr_lx_probe_txn_site_restored(int index) {
+  repro_hcr_lx_prepared_site *ps = repro_hcr_lx_probe_txn_site(index);
+  return ps == NULL ? -1 : ps->restored;
+}
+
+int repro_hcr_lx_probe_txn_site_prepared(int index) {
+  repro_hcr_lx_prepared_site *ps = repro_hcr_lx_probe_txn_site(index);
+  return ps == NULL ? -1 : ps->prepared;
+}
+
+int repro_hcr_lx_probe_txn_site_refusal(int index) {
+  repro_hcr_lx_prepared_site *ps = repro_hcr_lx_probe_txn_site(index);
+  return ps == NULL ? -1 : ps->refusal;
+}
+
+/* Levers. The agent sets neither. */
+void repro_hcr_lx_probe_set_fail_patch_page_alloc(int value) {
+  repro_hcr_lx_fail_patch_page_alloc = value;
+}
+
+void repro_hcr_lx_probe_set_commit_fault_site(int index) {
+  repro_hcr_lx_commit_fault_site = index;
+}
+
+/* Retention evidence, so a gate can assert `oldCodeRetained` is measured. */
+int repro_hcr_lx_probe_last_old_code_retained(void) {
+  return repro_hcr_lx_last_report.old_code_retained;
+}
+
+int repro_hcr_lx_probe_last_retained_region_count(void) {
+  return repro_hcr_lx_last_report.retained_region_count;
+}
+
+unsigned long long repro_hcr_lx_probe_last_previous_word(void) {
+  return (unsigned long long)repro_hcr_lx_last_report.previous_word;
+}
+
+int repro_hcr_lx_probe_last_prepare_complete(void) {
+  return repro_hcr_lx_last_report.prepare_complete;
+}
+
+int repro_hcr_lx_probe_last_commit_complete(void) {
+  return repro_hcr_lx_last_report.commit_complete;
+}
+
+/* Whether the site table still owns `entry_address`, and at which generation.
+ * Rollback retires the slot, so "is there a live site" is the observable that
+ * distinguishes a rolled-back function from a patched one WITHOUT reading the
+ * window — which the gates read separately, as bytes. */
+int repro_hcr_lx_probe_site_is_live(unsigned long long entry_address) {
+  return repro_hcr_lx_find_site((uint64_t)entry_address) != NULL;
+}
+
+unsigned long long repro_hcr_lx_probe_site_generation(
+    unsigned long long entry_address) {
+  repro_hcr_lx_site *site = repro_hcr_lx_find_site((uint64_t)entry_address);
+  return site == NULL ? 0ull : (unsigned long long)site->generation;
+}
+
+unsigned long long repro_hcr_lx_probe_site_original_word(
+    unsigned long long entry_address) {
+  repro_hcr_lx_site *site = repro_hcr_lx_find_site((uint64_t)entry_address);
+  return site == NULL ? 0ull : (unsigned long long)site->original_word;
+}
+
+unsigned int repro_hcr_lx_probe_site_retained_body_count(
+    unsigned long long entry_address) {
+  repro_hcr_lx_site *site = repro_hcr_lx_find_site((uint64_t)entry_address);
+  return site == NULL ? 0u : (unsigned int)site->retained_body_count;
+}
+
 #endif /* __linux__ && __x86_64__ */

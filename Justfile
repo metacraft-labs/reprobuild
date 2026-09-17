@@ -857,6 +857,33 @@ e2e_hcr_linux_far_target_island_patch:
 
 # HLX-M2 — an exhausted +/-2 GiB region refuses by name and never widens the
 # published store to a 13- or 14-byte in-text write.
+integration_hcr_linux_prepare_failure_leaves_process_byte_identical:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_prepare_failure_leaves_process_byte_identical \
+        --out:build/test-bin/integration_hcr_linux_prepare_failure_leaves_process_byte_identical \
+        tests/e2e/hcr-linux-txn/t_integration_hcr_linux_prepare_failure_leaves_process_byte_identical.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_prepare_failure_leaves_process_byte_identical.log
+
+integration_hcr_linux_repeated_patch_of_same_function:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_repeated_patch_of_same_function \
+        --out:build/test-bin/integration_hcr_linux_repeated_patch_of_same_function \
+        tests/e2e/hcr-linux-txn/t_integration_hcr_linux_repeated_patch_of_same_function.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_repeated_patch_of_same_function.log
+
+integration_hcr_linux_commit_failure_rolls_back_published_sites:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_commit_failure_rolls_back_published_sites \
+        --out:build/test-bin/integration_hcr_linux_commit_failure_rolls_back_published_sites \
+        tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_rolls_back_published_sites.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_commit_failure_rolls_back_published_sites.log
+
 integration_hcr_linux_island_exhaustion_refuses:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \

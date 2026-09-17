@@ -1166,7 +1166,77 @@ static uint32_t repro_hcr_branch_word(uint64_t source, uint64_t destination) {
   return 0x14000000u | ((uint32_t)words & 0x03ffffffu);
 }
 
+/* ---------------------------------------------------------------------------
+ * HLX-M3 — retention evidence for the Apple arm (design §11.1 defect 1).
+ *
+ * `"oldCodeRetained":true` was a hardcoded literal in
+ * `repro_hcr_patch_applied_json`, and the design document's objection to it was
+ * precise: this arm saved no original bytes anywhere, so the field asserted an
+ * invariant instead of observing one. Since `session.nim:197` REJECTS a
+ * `false`, the literal was the only reason the handshake completed.
+ *
+ * The fix is not to print `false` — the old code genuinely is retained on this
+ * arm, because the original body is in-place text that is never freed and the
+ * patch page is never unmapped once published. What was missing was the
+ * RECORD. These two statics are it: the original 32-bit instruction at the
+ * entry, saved before the branch is stored, and the retained patch page. The
+ * reporting path now computes the field from them, the same shape the Nim
+ * runtime uses at `runtime.nim:126` (`retainedRegionAddresses.len > 0`).
+ *
+ * Unverified on macOS by this milestone's author: HLX-M3's gates run on Linux
+ * x86_64. The change is additive — nothing existing reads these — and the
+ * reported value for a successful patch is the same `true` the literal
+ * produced, so no macOS outcome changes unless the save itself fails, which is
+ * exactly when the old literal was lying.
+ * ------------------------------------------------------------------------- */
 
+#define REPRO_HCR_APPLE_MAX_RETAINED 128
+
+typedef struct repro_hcr_apple_retained_site {
+  int used;
+  uint64_t entry_address;
+  uint32_t original_word;   /* the rollback target, saved before the store */
+  uint64_t patch_page;
+  uint64_t patch_page_len;
+} repro_hcr_apple_retained_site;
+
+static repro_hcr_apple_retained_site
+    repro_hcr_apple_retained[REPRO_HCR_APPLE_MAX_RETAINED];
+static int repro_hcr_apple_retained_count = 0;
+/* Retention observed for the MOST RECENT publication, which is what the
+ * response is about. A cumulative count would report `true` for a patch that
+ * retained nothing as long as an earlier one had. */
+static int repro_hcr_apple_last_retained = 0;
+/* HLX-M3 defect 2: set when both protection restores failed and the target's
+ * text page was therefore left writable. Recorded rather than reported as a
+ * total failure, because by then the trampoline is live. */
+static int repro_hcr_apple_text_left_writable = 0;
+
+static int repro_hcr_apple_retain(uint64_t entry_address,
+                                  uint32_t original_word,
+                                  void *patch_page, size_t patch_page_len) {
+  int i;
+  for (i = 0; i < repro_hcr_apple_retained_count; ++i) {
+    if (repro_hcr_apple_retained[i].used &&
+        repro_hcr_apple_retained[i].entry_address == entry_address) {
+      /* Re-patch: the ORIGINAL word stays the original (design §4.5), only the
+       * newest body is recorded. The superseded page is not unmapped. */
+      repro_hcr_apple_retained[i].patch_page = (uint64_t)(uintptr_t)patch_page;
+      repro_hcr_apple_retained[i].patch_page_len = (uint64_t)patch_page_len;
+      return 1;
+    }
+  }
+  if (repro_hcr_apple_retained_count >= REPRO_HCR_APPLE_MAX_RETAINED) {
+    return 0;
+  }
+  i = repro_hcr_apple_retained_count++;
+  repro_hcr_apple_retained[i].used = 1;
+  repro_hcr_apple_retained[i].entry_address = entry_address;
+  repro_hcr_apple_retained[i].original_word = original_word;
+  repro_hcr_apple_retained[i].patch_page = (uint64_t)(uintptr_t)patch_page;
+  repro_hcr_apple_retained[i].patch_page_len = (uint64_t)patch_page_len;
+  return 1;
+}
 
 static void *repro_hcr_apply_direct_patch(void *entry, const uint8_t *patch_bytes,
                                           size_t patch_len) {
@@ -1253,6 +1323,19 @@ static void *repro_hcr_apply_direct_patch(void *entry, const uint8_t *patch_byte
                     thread_count * sizeof(thread_act_t));
     }
     mach_port_deallocate(mach_task_self(), self_thread);
+    /*
+     * HLX-M3, design §11.1 defect 3 — KEEP THIS `munmap`.
+     *
+     * This return happens BEFORE any write, so it is a clean abort and not a
+     * partial patch; the defect was that the patch page mapped and protected
+     * above was never released, leaking a page per refused patch. It was fixed
+     * by `ed4046f5b` before HLX-M3 opened, which is why the milestone's
+     * deliverable is ticked as verified-already-fixed rather than re-fixed.
+     * The comment is here so a future rewrite of this cleanup block does not
+     * silently drop it again: every pre-store return on this arm must unmap
+     * the page, and every post-store return must NOT (a live trampoline points
+     * into it).
+     */
     munmap(patch_page, page_size);
     return NULL;
   }
@@ -1262,6 +1345,13 @@ static void *repro_hcr_apply_direct_patch(void *entry, const uint8_t *patch_byte
    */
   const char *suppress_store_env = getenv("REPRO_HCR_SUPPRESS_PUBLICATION_STORE");
   int suppress_store = (suppress_store_env != NULL && strcmp(suppress_store_env, "1") == 0);
+  /* HLX-M3, design §11.2: read and save the original aligned word BEFORE the
+   * store. This is the whole of what rollback needs, and its absence is what
+   * made `oldCodeRetained` a literal on this arm. */
+  uint32_t original_word = *(volatile uint32_t *)entry;
+  repro_hcr_apple_last_retained =
+      repro_hcr_apple_retain((uint64_t)(uintptr_t)entry, original_word,
+                             patch_page, page_size);
   if (!suppress_store) {
     *(volatile uint32_t *)entry = branch;
   }
@@ -1299,9 +1389,36 @@ static void *repro_hcr_apply_direct_patch(void *entry, const uint8_t *patch_byte
   }
   mach_port_deallocate(mach_task_self(), self_thread);
 
+  /*
+   * HLX-M3, design §11.1 defect 2.
+   *
+   * This read `if (!restored) { return NULL; }`, and NULL is reported to the
+   * coordinator as total failure ("direct patch branch installation failed").
+   * But the branch above is ALREADY LIVE by the time control gets here: the
+   * caller was told the reload had failed for a process that was in fact
+   * running patched code — the mirror image of the defect this whole milestone
+   * is about. The honest report is success plus a recorded degradation, which
+   * is what the Linux arm has always done with `text_left_writable`.
+   *
+   * The second half of the defect is that this path is reached ONLY when both
+   * the `mprotect(RX)` and the `vm_protect(RX)` restore failed, which also
+   * leaves the target's text page WRITABLE. Both restores are retried here,
+   * now that the other threads have been resumed and whatever transient
+   * condition refused them (a Mach region split mid-operation is the observed
+   * one) has had a chance to clear. If they still refuse, the page is left
+   * writable and that fact is RECORDED rather than converted into a false
+   * failure report.
+   */
   if (!restored) {
-    return NULL;
+    if (mprotect(page_ptr, page_size, PROT_READ | PROT_EXEC) == 0) {
+      restored = 1;
+    } else if (vm_protect(mach_task_self(), (vm_address_t)page,
+                          (vm_size_t)page_size, FALSE,
+                          VM_PROT_READ | VM_PROT_EXECUTE) == KERN_SUCCESS) {
+      restored = 1;
+    }
   }
+  repro_hcr_apple_text_left_writable = restored ? 0 : 1;
 
   repro_hcr_notify_did_patch(entry, patch_page, patch_len);
   return patch_page;
@@ -1457,6 +1574,22 @@ static void *repro_hcr_apply_direct_patch(void *entry,
   } else {
     repro_hcr_lx_on_stack_threads = -1;
   }
+
+  /*
+   * HLX-M3 (design §11.2): rollback has to "unregister JIT symfiles and
+   * `.eh_frame` sections". The registration functions live in this translation
+   * unit and the transaction lives in a header the test probe also includes,
+   * so the two are joined by pointers installed here rather than by name.
+   *
+   * On Linux BOTH registrations currently refuse (`return -1`; HLX-M5 owns
+   * ELF symfiles and `.eh_frame`), so nothing ever records an address for a
+   * site and these hooks are never called in production today. That is stated
+   * rather than hidden: the mechanism is in place and the per-site fields
+   * (`jit_entry_address`, `eh_frame_payload_address`) are where HLX-M5 writes
+   * what it registered. Until then this deliverable is wired, not exercised.
+   */
+  repro_hcr_lx_unregister_jit_hook = repro_hcr_unregister_jit_debug_object;
+  repro_hcr_lx_unregister_eh_frame_hook = repro_hcr_unregister_dynamic_eh_frame;
 
   patch_page = repro_hcr_lx_apply_direct_patch_at(entry_address, sled_address,
                                                   patch_bytes, patch_len);
@@ -2162,6 +2295,58 @@ static unsigned long long repro_hcr_symbol_generation(void) {
 #endif
 }
 
+/*
+ * HLX-M3, design §11.1 defect 1 — `oldCodeRetained`, COMPUTED.
+ *
+ * The format string below read `"oldCodeRetained":true` as a literal. The C
+ * agent saved no original bytes anywhere, so the field asserted the invariant
+ * instead of observing it, and because `session.nim:197` rejects a `false` the
+ * literal was the only reason the handshake completed — the invariant was
+ * unverified, not satisfied. It was the second of four constants found
+ * masquerading as observations in this one reporting path.
+ *
+ * Both arms now report what actually happened, in the same shape the Nim
+ * runtime uses at `runtime.nim:126` (`retainedRegionAddresses.len > 0`):
+ *
+ *   - Linux reads `repro_hcr_lx_last_report.old_code_retained`, which the
+ *     transaction sets from the site table's saved ORIGINAL aligned word plus
+ *     one retained body per generation (§4.5 retains superseded bodies);
+ *   - macOS reads the per-publication retention record added above.
+ *
+ * A `false` reaching the wire is a real protocol violation for a direct
+ * profile and is meant to fail the handshake. That is the point: the check
+ * exists to catch a provider that cannot restore the old code, and until now
+ * nothing could ever trip it.
+ */
+/*
+ * The two Apple-arm observations, exported for whichever gate next runs on
+ * macOS. Neither is read by the agent, and neither is reachable from a Linux
+ * build: they exist so the defect-2 repair (the target's text page was left
+ * writable, and that is now RECORDED instead of being reported as a total
+ * failure) and the defect-1 repair (retention is observed) are assertable
+ * rather than merely readable. HLX-M3's own gates run on Linux x86_64 and do
+ * not touch them.
+ */
+#if defined(REPRO_HCR_TARGET_APPLE_ARM64)
+int repro_hcr_agent_last_text_left_writable_for_tests(void) {
+  return repro_hcr_apple_text_left_writable;
+}
+
+int repro_hcr_agent_retained_site_count_for_tests(void) {
+  return repro_hcr_apple_retained_count;
+}
+#endif
+
+static int repro_hcr_old_code_retained(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return repro_hcr_lx_last_report.old_code_retained;
+#elif defined(REPRO_HCR_TARGET_APPLE_ARM64)
+  return repro_hcr_apple_last_retained;
+#else
+  return 0;
+#endif
+}
+
 static int repro_hcr_shared_library_positive_path = 0;
 
 static int repro_hcr_get_shared_library_positive_path(void) {
@@ -2213,13 +2398,16 @@ static char *repro_hcr_patch_applied_json(const char *patch_id,
            "c-agent-does-not-parse-source-generation-map\","
            "\"entryAddress\":\"0x%llx\","
            "\"dispatchAddress\":\"0x%llx\","
-           "\"oldCodeRetained\":true,\"sharedLibraryPositivePath\":%s%s}}",
+           /* HLX-M3: an observation, not a literal. See
+            * `repro_hcr_old_code_retained` above. */
+           "\"oldCodeRetained\":%s,\"sharedLibraryPositivePath\":%s%s}}",
            REPRO_HCR_PROTOCOL_SCHEMA, REPRO_HCR_TRANSPORT_SCOPE, patch_id,
            changed_function, repro_hcr_symbol_generation(),
            debug_digest == NULL ? "" : debug_digest,
            unwind_digest == NULL ? "" : unwind_digest,
            (unsigned long long)(uintptr_t)entry,
            (unsigned long long)(uintptr_t)dispatch_entry,
+           repro_hcr_old_code_retained() ? "true" : "false",
            shared_library_positive_path ? "true" : "false",
            repro_hcr_code_patch_json_fragment());
   return json;
@@ -2255,13 +2443,51 @@ static const char *repro_hcr_skipped_functions_fragment(
    * words — "refuse the function with a named diagnostic and report it in
    * `skippedFunctions`; never widen the store".
    */
+  /*
+   * HLX-M3, design §11.3. "Map failures onto the existing protocol error codes
+   * and `skippedFunctions` rather than inventing new ones."
+   *
+   * The dividing line is whose property the refusal is, and it is the same
+   * line §11.3 draws: a PER-FUNCTION refusal is reported in
+   * `skippedFunctions`; a whole-patch or host-level refusal rides on
+   * `patchFailed`'s message alone. No new code, no new field and no new reason
+   * string is introduced — every `reason` below is a name
+   * `repro_hcr_lx_refusal_name` already produced.
+   *
+   * Per-function (this function, in this process, right now):
+   *   absent-sled, non-nop-sled, short-sled, misaligned-entry,
+   *   sled-window-not-instruction-boundary, entry-modified-externally,
+   *   patch-body-out-of-rel32-range, island-unplaceable, claimed-by-recorder,
+   *   site-table-full.
+   *
+   * NOT per-function, and deliberately left off this list because reporting
+   * them as a skipped FUNCTION would suggest the next function might fare
+   * better: unsupported-host, sync-core-unavailable, quiescence-failed,
+   * text-protection-failed, patch-memory-unavailable,
+   * patch-memory-protection-failed, invalid-argument.
+   *
+   * `entry-modified-externally` is the §4.5 addition and is the one a reload
+   * workflow actually meets: the window this provider published into was
+   * changed behind its back, so the function is skipped rather than
+   * overwritten, and the rest of the patch is unaffected.
+   */
   int refusal = repro_hcr_lx_last_report.refusal;
   const char *reason;
-  if (refusal == REPRO_HCR_LX_REFUSED_CLAIMED_BY_RECORDER ||
-      refusal == REPRO_HCR_LX_REFUSED_ISLAND_UNPLACEABLE) {
-    reason = repro_hcr_lx_refusal_name(refusal);
-  } else {
-    return "";
+  switch (refusal) {
+    case REPRO_HCR_LX_REFUSED_CLAIMED_BY_RECORDER:
+    case REPRO_HCR_LX_REFUSED_ISLAND_UNPLACEABLE:
+    case REPRO_HCR_LX_REFUSED_ABSENT_SLED:
+    case REPRO_HCR_LX_REFUSED_NON_NOP_SLED:
+    case REPRO_HCR_LX_REFUSED_SHORT_SLED:
+    case REPRO_HCR_LX_REFUSED_MISALIGNED_ENTRY:
+    case REPRO_HCR_LX_REFUSED_WINDOW_NOT_INSTRUCTION_BOUNDARY:
+    case REPRO_HCR_LX_REFUSED_ENTRY_MODIFIED_EXTERNALLY:
+    case REPRO_HCR_LX_REFUSED_TARGET_OUT_OF_RANGE:
+    case REPRO_HCR_LX_REFUSED_SITE_TABLE_FULL:
+      reason = repro_hcr_lx_refusal_name(refusal);
+      break;
+    default:
+      return "";
   }
   snprintf(buffer, sizeof(buffer),
            ",\"skippedFunctions\":[{\"function\":\"%s\","

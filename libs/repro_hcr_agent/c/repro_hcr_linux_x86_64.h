@@ -685,6 +685,14 @@ typedef struct repro_hcr_lx_site {
                             * previous generation (design §4.5) */
   uint64_t published_word;
   uint64_t generation;
+  /* HLX-M3, design §11.2/§4.5. `original_word_saved` is the flag behind
+   * `oldCodeRetained`: the site table is holding this window's pre-patch word
+   * and can restore it. `retained_body_count` counts the patch bodies this
+   * site has accumulated — one per generation, superseded ones included,
+   * because §4.5 retains them rather than freeing them. Together they are the
+   * provider's `retainedRegionAddresses`. */
+  int original_word_saved;
+  uint32_t retained_body_count;
   /* HLX-M7 §10.1: the claim on this window is taken once, at the FIRST
    * publication, and RETAINED across re-patch generations. Re-claiming on
    * generation 2 would be refused by our own live claim, and releasing between
@@ -1366,54 +1374,505 @@ typedef struct repro_hcr_lx_patch_report {
   int trampoline_kind;
   uint64_t island_address;
   int64_t body_displacement;
+  /* HLX-M3, design §11.2. The transaction evidence for the most recent
+   * publication attempt.
+   *
+   * `old_code_retained` is an OBSERVATION, not the literal the C agent's
+   * reporting path printed until this milestone: it is true when the site
+   * table holds this window's ORIGINAL aligned word AND at least one
+   * provider-owned region is still mapped for it, which is the same shape the
+   * Nim runtime computes at `runtime.nim:127`
+   * (`retainedRegionAddresses.len > 0`). `retained_region_count` is that
+   * length — 1 for the saved original word plus one per superseded patch body
+   * retained across generations (§4.5).
+   *
+   * `previous_word` is the window's pre-state at PREPARE time, which for a
+   * re-patch is the previous generation's published word and is NOT the
+   * rollback target; `original_word` above always is (§4.5). */
+  int old_code_retained;
+  int retained_region_count;
+  uint64_t previous_word;
+  int prepare_complete;
+  int commit_complete;
+  int rolled_back;
+  int published_sites;
+  int restored_sites;
 } repro_hcr_lx_patch_report;
 
 static repro_hcr_lx_patch_report repro_hcr_lx_last_report;
 
 static const uint8_t repro_hcr_lx_endbr64[4] = {0xf3, 0x0f, 0x1e, 0xfa};
 
-/*
- * Apply a direct entry patch at `entry_address`, publishing inside the sled
- * that starts at `sled_address`.
+/* ---------------------------------------------------------------------------
+ * HLX-M3 — the prepare / commit split, and rollback (design §11.2, §4.5).
  *
- * `sled_address` is a parameter rather than a lookup so that HLX-M1's real
- * symbol/ELF pipeline can supply it, and so the HLX-M0 gates can drive the
- * exact production code path against a sled they constructed from real
- * compiler output. `repro_hcr_apply_direct_patch` in the agent supplies it from
- * the runtime-mapped `__patchable_function_entries` section.
+ * THE PHASE BOUNDARY IS THE FIRST BYTE WRITTEN TO TARGET TEXT, and here it is
+ * a line in this file rather than a convention. Everything
+ * `repro_hcr_lx_txn_prepare` does is provider-owned memory, the cross-patcher
+ * claim map, and READS of the target: symbols are resolved and disambiguated
+ * upstream, build-ids verified upstream, every sled validated, every page and
+ * island allocated, every patch body written and protected, every encoding
+ * computed, and every site's ORIGINAL aligned word saved. The only write into
+ * live text is the single aligned 8-byte store in `repro_hcr_lx_txn_commit`.
+ * A prepare failure therefore leaves the target byte-identical BY
+ * CONSTRUCTION, not by cleanup — which is what makes IsoNim's "never blank the
+ * surface" guarantee hold, because `before_reload` is not invoked until
+ * prepare has fully succeeded.
  *
- * Returns the live patch-body address, or NULL with `repro_hcr_lx_last_report`
- * carrying a named refusal.
- */
-static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
-                                                uint64_t sled_address,
-                                                const uint8_t *patch_bytes,
-                                                size_t patch_len) {
-  const repro_hcr_lx_capabilities *caps;
-  size_t page_size;
+ * WHAT THE PER-FUNCTION GUARANTEE IS, AND WHAT IT IS NOT. Each commit store is
+ * one naturally-aligned 8-byte store holding a 5-byte `E9 rel32`, and each is
+ * individually reversible from the word prepare saved. That is the whole of
+ * the tier-1 guarantee, and it is narrower than it sounds:
+ *
+ *   - it makes each publication atomic and individually UNDOABLE;
+ *   - it does NOT make concurrent execution safe. Measured in HLX-M4 and
+ *     reproduced independently, bare tier-1 publication into a twelve-thread
+ *     process killed 18 to 21 of 24 processes, with 4.6%-8.6% of parked PCs
+ *     standing inside the very eight bytes being published. No aligned store
+ *     and no rollback addresses that;
+ *   - it does NOT give SET-WIDE atomicity. Under tier 1 a thread may already
+ *     have executed function A's new body by the time function B's commit
+ *     fails and the set is rolled back. Rollback restores every published
+ *     site; it cannot un-execute. Callers that cannot tolerate that must have
+ *     quiescence, which is HLX-M4's `repro_hcr_lx_quiesce_begin` and is NOT
+ *     claimed by this milestone.
+ *
+ * ROLLBACK IS NOT "FREE EVERYTHING". Bodies that were never published are
+ * provider-private and are unmapped. Bodies that WERE published are retained,
+ * because under tier 1 a thread may be executing inside one, and §4.5 and §6.1
+ * both forbid freeing code a PC may be standing in. Islands come from a bump
+ * allocator and are never reclaimed at all, for the same reason. The claim on
+ * a rolled-back window IS released (§4.5: retained across generations,
+ * released on rollback or shutdown).
+ * ------------------------------------------------------------------------- */
+
+#define REPRO_HCR_LX_MAX_TXN_SITES 16
+
+typedef struct repro_hcr_lx_prepared_site {
+  /* the request */
+  uint64_t entry_address;
+  uint64_t sled_address;
+  const uint8_t *patch_bytes;
+  size_t patch_len;
+
+  /* prepare outputs — every one of these is computed without writing to the
+   * target */
   repro_hcr_lx_sled_plan plan;
-  repro_hcr_lx_site *site;
-  int fresh_site = 0;
-  uint64_t original_word = 0;
   uint64_t window_address;
-  uint8_t *patch_page;
-  size_t body_prefix = 0;
-  size_t body_len;
-  uint64_t dispatch_address;
-  uint8_t jmp_bytes[REPRO_HCR_LX_JMP_REL32_BYTES];
+  uint64_t original_word;   /* §4.5: the rollback target, ALWAYS the original */
+  uint64_t previous_word;   /* the window's pre-state at prepare time         */
   uint64_t published_word;
+  uint64_t dispatch_address;
+  uint64_t island_address;
+  int trampoline_kind;
+  int64_t body_displacement;
+  uint8_t *patch_page;
+  size_t patch_page_len;
   uint64_t span_start;
   uint64_t span_end;
-  int encode_rc;
+  repro_hcr_lx_site *site;
+  int fresh_site;
   int claimed_here;
-  int transient_protection;
+  int prepared;
+
+  /* commit / rollback state */
+  int published;
+  int restored;
+  int body_retained;
+  /* Set by the agent AFTER a successful commit, when it has registered a GDB
+   * JIT symfile or a dynamic `.eh_frame` section for this site's body.
+   * Rollback hands them back to the deregistration hooks below. On Linux both
+   * registrations still refuse (HLX-M5 owns them), so these stay 0 in
+   * production today and the unregistration path is exercised only by whatever
+   * lands registration. */
+  uint64_t jit_entry_address;
+  uint64_t eh_frame_payload_address;
+  int refusal;
+} repro_hcr_lx_prepared_site;
+
+typedef struct repro_hcr_lx_transaction {
+  int site_count;
+  int prepare_complete;
+  int commit_complete;
+  int rolled_back;
+  int published_count;
+  int restored_count;
+  int retained_body_count;
+  int freed_body_count;
+  int released_claim_count;
+  int unregister_attempts;
+  int refusal;
+  int failed_site;   /* index of the site that refused, -1 when none */
+  repro_hcr_lx_prepared_site sites[REPRO_HCR_LX_MAX_TXN_SITES];
+} repro_hcr_lx_transaction;
+
+/*
+ * Deregistration hooks. The debugger/unwinder registration functions live in
+ * the agent translation unit (`repro_hcr_agent.c`) and this header is also
+ * included by the test probe, which does not link them — so rollback reaches
+ * them through pointers the agent installs rather than by name. NULL means
+ * "nothing was ever registered through this transaction", which is the state
+ * on Linux until HLX-M5.
+ */
+static int (*repro_hcr_lx_unregister_jit_hook)(uint64_t) = NULL;
+static int (*repro_hcr_lx_unregister_eh_frame_hook)(uint64_t) = NULL;
+
+/*
+ * Test-only levers, in the same spirit as `repro_hcr_lx_force_far_patch_body`
+ * and `repro_hcr_lx_pretend_sync_core_unavailable`: the agent sets neither.
+ *
+ * `repro_hcr_lx_fail_patch_page_alloc` makes the body allocator come back
+ * empty, which is the `patch-memory-unavailable` prepare failure a process
+ * whose address space is exhausted would hit. It does not bypass the refusal
+ * logic; it removes the page, and the production code refuses on its own.
+ *
+ * `repro_hcr_lx_commit_fault_site` names the site index at which the commit's
+ * text-protection transient must fail. It is applied AS A SYSCALL RESULT —
+ * `-EACCES`, exactly what a kernel that refuses the transition returns — so
+ * the code path taken is the production failure path and not a shortcut around
+ * it. There is no other way to make `mprotect` fail on the k-th site of a set
+ * on demand, and a commit-failure gate that cannot choose k cannot show that N
+ * of M published sites were restored.
+ */
+static int repro_hcr_lx_fail_patch_page_alloc = 0;
+static int repro_hcr_lx_commit_fault_site = -1;
+
+static repro_hcr_lx_transaction repro_hcr_lx_last_txn;
+
+static void repro_hcr_lx_txn_reset(repro_hcr_lx_transaction *txn) {
+  if (txn == NULL) {
+    return;
+  }
+  memset(txn, 0, sizeof(*txn));
+  txn->failed_site = -1;
+}
+
+/*
+ * Record one function in the set. Pure bookkeeping: nothing is validated, read
+ * or allocated until `prepare`.
+ */
+static int repro_hcr_lx_txn_add(repro_hcr_lx_transaction *txn,
+                                uint64_t entry_address, uint64_t sled_address,
+                                const uint8_t *patch_bytes, size_t patch_len) {
+  repro_hcr_lx_prepared_site *ps;
+  if (txn == NULL) {
+    return REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
+  }
+  if (txn->site_count >= REPRO_HCR_LX_MAX_TXN_SITES) {
+    return REPRO_HCR_LX_REFUSED_SITE_TABLE_FULL;
+  }
+  ps = &txn->sites[txn->site_count];
+  memset(ps, 0, sizeof(*ps));
+  ps->entry_address = entry_address;
+  ps->sled_address = sled_address;
+  ps->patch_bytes = patch_bytes;
+  ps->patch_len = patch_len;
+  ps->refusal = REPRO_HCR_LX_OK;
+  txn->site_count += 1;
+  return REPRO_HCR_LX_OK;
+}
+
+/*
+ * Undo one prepared site. Only ever called for a site that has NOT been
+ * published, so the patch page is still provider-private and unmapping it
+ * cannot strand a PC.
+ */
+static void repro_hcr_lx_txn_discard_prepared(repro_hcr_lx_transaction *txn,
+                                              repro_hcr_lx_prepared_site *ps) {
+  if (ps->patch_page != NULL) {
+    repro_hcr_lx_unmap(ps->patch_page, ps->patch_page_len);
+    ps->patch_page = NULL;
+    txn->freed_body_count += 1;
+  }
+  if (ps->fresh_site && ps->site != NULL) {
+    ps->site->used = 0;
+    ps->site = NULL;
+  }
+  /* §10.1: a window this transaction claimed and did not publish into must be
+   * left as unclaimed as it was found, or the next patcher — or the next
+   * reload — is refused bytes nobody is using. */
+  if (ps->claimed_here) {
+    if (ct_claimed_guest_text_release != NULL) {
+      ct_claimed_guest_text_release((uintptr_t)ps->window_address);
+      txn->released_claim_count += 1;
+    }
+    /* The report must say the claim is gone, not merely that it was taken:
+     * `claim_held` is what the arbitration gate reads to distinguish a
+     * released claim from a leaked one. */
+    repro_hcr_lx_last_report.claim_held = 0;
+  }
+  ps->claimed_here = 0;
+  ps->prepared = 0;
+}
+
+/*
+ * Prepare ONE site. Touches no target memory: it reads the window and the
+ * sled, and everything it writes is provider-owned.
+ *
+ * `repro_hcr_lx_last_report` is filled as it goes, so a refusal carries the
+ * partial facts (which sled, which window) the caller needs to report the
+ * function as skipped rather than as a mystery. For a multi-function set the
+ * report therefore describes the site that refused, or the last site prepared.
+ */
+static int repro_hcr_lx_txn_prepare_site(repro_hcr_lx_transaction *txn,
+                                         repro_hcr_lx_prepared_site *ps) {
+  size_t page_size = repro_hcr_lx_page_size();
+  size_t body_prefix = 0;
+  size_t body_len;
+  uint8_t jmp_bytes[REPRO_HCR_LX_JMP_REL32_BYTES];
   repro_hcr_lx_trampoline_choice choice;
+  int encode_rc;
 
   memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
 
-  if (entry_address == 0 || patch_bytes == NULL || patch_len == 0) {
-    repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
-    return NULL;
+  if (ps->entry_address == 0 || ps->patch_bytes == NULL || ps->patch_len == 0) {
+    ps->refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
+    repro_hcr_lx_last_report.refusal = ps->refusal;
+    return ps->refusal;
+  }
+
+  ps->site = repro_hcr_lx_find_site(ps->entry_address);
+  if (ps->site != NULL) {
+    /* Re-patch (design §4.5). The window's admissible pre-states are exactly
+     * two: an all-NOP window, or a window this provider itself published and
+     * still owns. This is the second; `repro_hcr_lx_plan_sled` below is the
+     * first. A window matching NEITHER — because the application or another
+     * patcher changed it — is refused `entry-modified-externally` and is never
+     * overwritten. Without this branch the provider would work exactly once. */
+    uint64_t current_word;
+    ps->window_address = ps->site->window_address;
+    memcpy(&current_word, (const void *)(uintptr_t)ps->window_address,
+           sizeof(current_word));
+    if (current_word != ps->site->published_word) {
+      ps->refusal = REPRO_HCR_LX_REFUSED_ENTRY_MODIFIED_EXTERNALLY;
+      repro_hcr_lx_last_report.refusal = ps->refusal;
+      repro_hcr_lx_last_report.window_address = ps->window_address;
+      ps->site = NULL;
+      return ps->refusal;
+    }
+    memset(&ps->plan, 0, sizeof(ps->plan));
+    ps->plan.sled_address = ps->site->sled_address;
+    ps->plan.sled_end = ps->site->sled_end;
+    ps->plan.sled_length =
+        (uint32_t)(ps->site->sled_end - ps->site->sled_address);
+    ps->plan.window_address = ps->window_address;
+    ps->plan.window_offset =
+        (uint32_t)(ps->window_address - ps->site->sled_address);
+    ps->plan.refusal = REPRO_HCR_LX_OK;
+    /* §4.5: rollback restores the ORIGINAL, not generation N-1. */
+    ps->original_word = ps->site->original_word;
+    ps->previous_word = current_word;
+  } else {
+    if (ps->sled_address == 0) {
+      ps->refusal = REPRO_HCR_LX_REFUSED_ABSENT_SLED;
+      repro_hcr_lx_last_report.refusal = ps->refusal;
+      return ps->refusal;
+    }
+    if (repro_hcr_lx_plan_sled((const uint8_t *)(uintptr_t)ps->sled_address,
+                               REPRO_HCR_LX_MAX_SLED_SCAN, ps->sled_address,
+                               &ps->plan) != REPRO_HCR_LX_OK) {
+      ps->refusal = ps->plan.refusal;
+      repro_hcr_lx_last_report.refusal = ps->plan.refusal;
+      repro_hcr_lx_last_report.sled_address = ps->plan.sled_address;
+      repro_hcr_lx_last_report.sled_end = ps->plan.sled_end;
+      repro_hcr_lx_last_report.sled_length = ps->plan.sled_length;
+      return ps->refusal;
+    }
+    ps->window_address = ps->plan.window_address;
+    /* §11.2: read and save the original aligned word BEFORE anything can
+     * change it. This is the only thing rollback needs. */
+    memcpy(&ps->original_word, (const void *)(uintptr_t)ps->window_address,
+           sizeof(ps->original_word));
+    ps->previous_word = ps->original_word;
+    ps->fresh_site = 1;
+  }
+  repro_hcr_lx_last_report.sled_address = ps->plan.sled_address;
+  repro_hcr_lx_last_report.sled_end = ps->plan.sled_end;
+  repro_hcr_lx_last_report.sled_length = ps->plan.sled_length;
+  repro_hcr_lx_last_report.window_address = ps->window_address;
+  repro_hcr_lx_last_report.window_offset = ps->plan.window_offset;
+  repro_hcr_lx_last_report.original_word = ps->original_word;
+  repro_hcr_lx_last_report.previous_word = ps->previous_word;
+
+  /* -------------------------------------------------------------------------
+   * ARBITRATION (design §10.1). Claim the published window BEFORE anything
+   * that could write to it.
+   *
+   * MCR's patchers claim through the same map, so a `-2` here means the
+   * recorder already owns bytes this provider was about to store into. The
+   * refusal is NAMED (`claimed-by-recorder`) and carries the holder out, so
+   * the agent reports it as a skipped function rather than a mystery.
+   *
+   * `ct_claimed_guest_text_claim` is weak: when `libct_interpose` is not in the
+   * process it is NULL, which means there is no other patcher of this text and
+   * therefore no claim to conflict with.
+   *
+   * The claim is taken only for a FRESH site. A re-patch is publishing into a
+   * window this provider already owns; re-claiming would be refused by its own
+   * live claim (§4.5).
+   * ---------------------------------------------------------------------- */
+  if (ps->fresh_site && ct_claimed_guest_text_claim != NULL) {
+    unsigned holder = 0;
+    int claim_rc = ct_claimed_guest_text_claim(
+        (uintptr_t)ps->window_address, (size_t)REPRO_HCR_LX_WINDOW_BYTES,
+        REPRO_HCR_CGT_OWNER_REPRO_HCR, &holder);
+    if (claim_rc == -2) {
+      repro_hcr_lx_last_report.claim_holder = holder;
+      ps->refusal = REPRO_HCR_LX_REFUSED_CLAIMED_BY_RECORDER;
+      repro_hcr_lx_last_report.refusal = ps->refusal;
+      return ps->refusal;
+    }
+    if (claim_rc != 0) {
+      /* -1 is a degenerate range, which cannot happen for an 8-byte window at
+       * a non-wrapping address; treat it as an argument error rather than
+       * proceeding unclaimed. */
+      ps->refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
+      repro_hcr_lx_last_report.refusal = ps->refusal;
+      return ps->refusal;
+    }
+    ps->claimed_here = 1;
+    repro_hcr_lx_last_report.claim_held = 1;
+  } else if (!ps->fresh_site) {
+    repro_hcr_lx_last_report.claim_held = ps->site->claimed;
+  }
+
+  /* The patch body is provider-owned memory no other thread can reach until
+   * the publishing store makes it reachable. */
+  if (ps->patch_len < sizeof(repro_hcr_lx_endbr64) ||
+      memcmp(ps->patch_bytes, repro_hcr_lx_endbr64,
+             sizeof(repro_hcr_lx_endbr64)) != 0) {
+    body_prefix = sizeof(repro_hcr_lx_endbr64);
+  }
+  body_len = body_prefix + ps->patch_len;
+  if (body_len > page_size) {
+    repro_hcr_lx_txn_discard_prepared(txn, ps);
+    ps->refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
+    repro_hcr_lx_last_report.refusal = ps->refusal;
+    return ps->refusal;
+  }
+
+  /*
+   * HLX-M2: the body no longer HAS to be near. Near is still preferred,
+   * because a directly reachable body means one fewer indirection on every
+   * call into the patched function; but a body that lands outside `rel32`
+   * reach is a supported case, reached through a 14-byte island.
+   *
+   * Order matters: the near probe runs first so nothing about the existing,
+   * measured behaviour of a normal patch changes.
+   */
+  if (repro_hcr_lx_fail_patch_page_alloc) {
+    ps->patch_page = NULL;
+  } else if (repro_hcr_lx_force_far_patch_body) {
+    ps->patch_page = (uint8_t *)repro_hcr_lx_map_patch_page_far(
+        ps->window_address, page_size);
+  } else {
+    ps->patch_page = (uint8_t *)repro_hcr_lx_map_patch_page_near(
+        ps->window_address, page_size);
+    if (ps->patch_page == NULL) {
+      ps->patch_page = (uint8_t *)repro_hcr_lx_map_anonymous(
+          NULL, page_size, REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
+          0);
+    }
+  }
+  if (ps->patch_page == NULL) {
+    repro_hcr_lx_txn_discard_prepared(txn, ps);
+    ps->refusal = REPRO_HCR_LX_REFUSED_NO_PATCH_MEMORY;
+    repro_hcr_lx_last_report.refusal = ps->refusal;
+    return ps->refusal;
+  }
+  ps->patch_page_len = page_size;
+
+  /* Design §4.2: an island-reachable body is entered through
+   * `jmp [rip+disp32]` and so must begin with `endbr64` on an IBT-enforcing
+   * process. Emitting the landing pad unconditionally costs four bytes and
+   * makes every body island-ready. */
+  if (body_prefix != 0) {
+    memcpy(ps->patch_page, repro_hcr_lx_endbr64, sizeof(repro_hcr_lx_endbr64));
+  }
+  memcpy(ps->patch_page + body_prefix, ps->patch_bytes, ps->patch_len);
+  if (repro_hcr_lx_raw_mprotect((uint64_t)(uintptr_t)ps->patch_page, page_size,
+                                REPRO_HCR_LX_PROT_READ |
+                                    REPRO_HCR_LX_PROT_EXEC) != 0) {
+    repro_hcr_lx_txn_discard_prepared(txn, ps);
+    ps->refusal = REPRO_HCR_LX_REFUSED_PATCH_MEMORY_PROTECTION_FAILED;
+    repro_hcr_lx_last_report.refusal = ps->refusal;
+    return ps->refusal;
+  }
+  ps->dispatch_address = (uint64_t)(uintptr_t)ps->patch_page;
+
+  /*
+   * HLX-M2 — trampoline selection. One call, and it is the ONLY place that
+   * decides what the published `rel32` points at. Everything it can return is
+   * publishable in one aligned 8-byte store; the 13- and 14-byte in-text forms
+   * of `Trampoline-Mechanics.md` §1.2/§1.3 are not reachable from here at any
+   * sled length.
+   */
+  repro_hcr_lx_select_trampoline(ps->window_address, ps->dispatch_address,
+                                 &choice);
+  ps->trampoline_kind = choice.kind;
+  ps->island_address = choice.island_address;
+  ps->body_displacement = choice.body_displacement;
+  repro_hcr_lx_last_report.trampoline_kind = choice.kind;
+  repro_hcr_lx_last_report.island_address = choice.island_address;
+  repro_hcr_lx_last_report.body_displacement = choice.body_displacement;
+  if (choice.refusal != REPRO_HCR_LX_OK) {
+    repro_hcr_lx_txn_discard_prepared(txn, ps);
+    ps->refusal = choice.refusal;
+    repro_hcr_lx_last_report.refusal = ps->refusal;
+    return ps->refusal;
+  }
+
+  encode_rc = repro_hcr_lx_encode_jmp_rel32(ps->window_address,
+                                            choice.jump_target, jmp_bytes);
+  if (encode_rc != REPRO_HCR_LX_OK) {
+    repro_hcr_lx_txn_discard_prepared(txn, ps);
+    ps->refusal = encode_rc;
+    repro_hcr_lx_last_report.refusal = ps->refusal;
+    return ps->refusal;
+  }
+  ps->published_word = repro_hcr_lx_published_word(jmp_bytes);
+
+  if (ps->fresh_site) {
+    ps->site = repro_hcr_lx_claim_site(ps->entry_address);
+    if (ps->site == NULL) {
+      repro_hcr_lx_txn_discard_prepared(txn, ps);
+      ps->refusal = REPRO_HCR_LX_REFUSED_SITE_TABLE_FULL;
+      repro_hcr_lx_last_report.refusal = ps->refusal;
+      return ps->refusal;
+    }
+    ps->site->sled_address = ps->plan.sled_address;
+    ps->site->sled_end = ps->plan.sled_end;
+    ps->site->window_address = ps->window_address;
+    ps->site->original_word = ps->original_word;
+    ps->site->original_word_saved = 1;
+  }
+
+  ps->span_start = repro_hcr_lx_page_start(ps->window_address, page_size);
+  ps->span_end =
+      repro_hcr_lx_page_start(
+          ps->window_address + REPRO_HCR_LX_WINDOW_BYTES - 1, page_size) +
+      (uint64_t)page_size;
+
+  ps->prepared = 1;
+  ps->refusal = REPRO_HCR_LX_OK;
+  repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_OK;
+  repro_hcr_lx_last_report.dispatch_address = ps->dispatch_address;
+  return REPRO_HCR_LX_OK;
+}
+
+/*
+ * Prepare the whole set. Either every site is prepared, or none is left
+ * prepared and every provider-owned artefact taken along the way is released.
+ *
+ * Nothing in the target changed either way — that is the point of the phase,
+ * and it is why the unwind below is simple enough to be obviously correct.
+ */
+static int repro_hcr_lx_txn_prepare(repro_hcr_lx_transaction *txn) {
+  const repro_hcr_lx_capabilities *caps;
+  int i;
+
+  if (txn == NULL || txn->site_count == 0) {
+    return REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
   }
 
   caps = repro_hcr_lx_capability_report();
@@ -1422,17 +1881,14 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
      * restore, which would leave the target's text permanently non-executable.
      * The provider probed this at agent start and refuses here rather than
      * discovering it after the point of no return. */
-    repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_UNSUPPORTED_HOST;
-    return NULL;
+    memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
+    txn->refusal = REPRO_HCR_LX_REFUSED_UNSUPPORTED_HOST;
+    repro_hcr_lx_last_report.refusal = txn->refusal;
+    return txn->refusal;
   }
 
   /*
    * HLX-OQ-3, resolved in HLX-M4: **always quiesce; refuse if we cannot.**
-   *
-   * The two candidates the design left open were (a) refuse to patch without
-   * quiescence and (b) always quiesce, "where the signal delivery is itself a
-   * context-synchronizing event on every thread". (b) is adopted, with (a) as
-   * its floor, and the two compose into one rule checked here:
    *
    *   publish only if SYNC_CORE is available, OR quiescence is held.
    *
@@ -1440,360 +1896,151 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
    * has entered the kernel to take the `SIGRTMIN+n` and will return through
    * `IRET` (x86_64) or `ERET` (aarch64), both of which are architecturally
    * context-synchronizing — so the pipeline half of §4.4 is discharged by the
-   * handshake itself, for exactly the set of threads that matters. A thread
-   * created after the handshake cannot have prefetched the old bytes.
+   * handshake itself, for exactly the set of threads that matters.
    *
-   * Why the floor is a refusal and not "publish anyway". Before this milestone
-   * the code recorded `membarrier_result = -1` and stored regardless, which is
-   * the case Intel SDM §8.1.3/§9.3 leaves undefined, reported as success. The
-   * refusal is named and reaches the coordinator; it is never a silent no-op.
-   *
-   * Checked HERE, before the claim and before any mapping, so the refusal costs
-   * nothing and cannot leave state behind.
+   * Checked HERE, in prepare, before the claim and before any mapping, so the
+   * refusal costs nothing and cannot leave state behind.
    */
   if (!repro_hcr_lx_sync_core_available() && !repro_hcr_lx_quiesce_is_held()) {
-    repro_hcr_lx_last_report.refusal =
-        REPRO_HCR_LX_REFUSED_SYNC_CORE_UNAVAILABLE;
-    return NULL;
+    memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
+    txn->refusal = REPRO_HCR_LX_REFUSED_SYNC_CORE_UNAVAILABLE;
+    repro_hcr_lx_last_report.refusal = txn->refusal;
+    return txn->refusal;
   }
 
-  page_size = repro_hcr_lx_page_size();
-
-  site = repro_hcr_lx_find_site(entry_address);
-  if (site != NULL) {
-    /* Re-patch (design §4.5): the admissible pre-state is the word this
-     * provider itself published, not an all-NOP window. Without this branch the
-     * provider would refuse every reload after the first and would work exactly
-     * once. */
-    uint64_t current_word;
-    window_address = site->window_address;
-    memcpy(&current_word, (const void *)(uintptr_t)window_address,
-           sizeof(current_word));
-    if (current_word != site->published_word) {
-      repro_hcr_lx_last_report.refusal =
-          REPRO_HCR_LX_REFUSED_ENTRY_MODIFIED_EXTERNALLY;
-      repro_hcr_lx_last_report.window_address = window_address;
-      return NULL;
+  for (i = 0; i < txn->site_count; ++i) {
+    int rc = repro_hcr_lx_txn_prepare_site(txn, &txn->sites[i]);
+    if (rc != REPRO_HCR_LX_OK) {
+      int j;
+      txn->refusal = rc;
+      txn->failed_site = i;
+#if defined(REPRO_HCR_HLX_M3_FALSIFY_PARTIAL_SET_COMMIT)
+      /*
+       * FALSIFIER ARM (HLX-M3). Removes the all-or-nothing property of prepare
+       * and NOTHING else: the sites that DID prepare are kept and committed,
+       * which is `Patch-Loading-Lifecycle.md` §3.3 item 39's "partially applied
+       * patches are permitted" — the behaviour §11.2 supersedes for a
+       * transactional set.
+       *
+       * What it proves is that the prepare-failure gate is measuring the
+       * provider and not itself. Under this arm the multi-function arm of
+       * `integration_hcr_linux_prepare_failure_leaves_process_byte_identical`
+       * MUST go red: the healthy function's window is published even though a
+       * later function in the same set refused. The agent never defines it.
+       */
+      if (i > 0) {
+        txn->site_count = i;
+        txn->prepare_complete = 1;
+        txn->refusal = REPRO_HCR_LX_OK;
+        repro_hcr_lx_last_report.prepare_complete = 1;
+        return REPRO_HCR_LX_OK;
+      }
+#endif
+      /* Unwind in reverse, for symmetry with commit's rollback order. Nothing
+       * here has touched target text, so the order is a discipline rather than
+       * a correctness requirement — but a rollback that is ordered in one
+       * phase and unordered in the other is how the two drift apart. */
+      for (j = i - 1; j >= 0; --j) {
+        repro_hcr_lx_txn_discard_prepared(txn, &txn->sites[j]);
+      }
+      repro_hcr_lx_last_report.prepare_complete = 0;
+      return rc;
     }
-    memset(&plan, 0, sizeof(plan));
-    plan.sled_address = site->sled_address;
-    plan.sled_end = site->sled_end;
-    plan.sled_length = (uint32_t)(site->sled_end - site->sled_address);
-    plan.window_address = window_address;
-    plan.window_offset = (uint32_t)(window_address - site->sled_address);
-    plan.refusal = REPRO_HCR_LX_OK;
-    original_word = site->original_word;
-  } else {
-    if (sled_address == 0) {
-      repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_ABSENT_SLED;
-      return NULL;
-    }
-    if (repro_hcr_lx_plan_sled((const uint8_t *)(uintptr_t)sled_address,
-                               REPRO_HCR_LX_MAX_SLED_SCAN, sled_address,
-                               &plan) != REPRO_HCR_LX_OK) {
-      repro_hcr_lx_last_report.refusal = plan.refusal;
-      repro_hcr_lx_last_report.sled_address = plan.sled_address;
-      repro_hcr_lx_last_report.sled_end = plan.sled_end;
-      repro_hcr_lx_last_report.sled_length = plan.sled_length;
-      return NULL;
-    }
-    window_address = plan.window_address;
-    memcpy(&original_word, (const void *)(uintptr_t)window_address,
-           sizeof(original_word));
-    fresh_site = 1;
-  }
-  repro_hcr_lx_last_report.sled_address = plan.sled_address;
-  repro_hcr_lx_last_report.sled_end = plan.sled_end;
-  repro_hcr_lx_last_report.sled_length = plan.sled_length;
-  repro_hcr_lx_last_report.window_address = window_address;
-  repro_hcr_lx_last_report.window_offset = plan.window_offset;
-  repro_hcr_lx_last_report.original_word = original_word;
-
-  /* -------------------------------------------------------------------------
-   * ARBITRATION (design §10.1). Claim the published window BEFORE anything
-   * that could write to it.
-   *
-   * MCR's patchers claim through the same map, so a `-2` here means the
-   * recorder already owns bytes this provider was about to store into — the
-   * one situation in which publishing anyway reproduces task #422 in reverse.
-   * The refusal is NAMED (`claimed-by-recorder`) and carries the holder out, so
-   * the agent reports it as a skipped function rather than a mystery.
-   *
-   * `ct_claimed_guest_text_claim` is weak: when `libct_interpose` is not in the
-   * process it is NULL, which means there is no other patcher of this text and
-   * therefore no claim to conflict with. That is not the "silent skip" the
-   * map's rule forbids — the rule is about refusing to write over bytes ANOTHER
-   * PATCHER holds, and with no other patcher present there are none.
-   *
-   * The claim is taken only for a FRESH site. A re-patch is publishing into a
-   * window this provider already owns; re-claiming would be refused by its own
-   * live claim (§4.5).
-   * ---------------------------------------------------------------------- */
-  claimed_here = 0;
-  if (fresh_site && ct_claimed_guest_text_claim != NULL) {
-    unsigned holder = 0;
-    int claim_rc = ct_claimed_guest_text_claim(
-        (uintptr_t)window_address, (size_t)REPRO_HCR_LX_WINDOW_BYTES,
-        REPRO_HCR_CGT_OWNER_REPRO_HCR, &holder);
-    if (claim_rc == -2) {
-      repro_hcr_lx_last_report.claim_holder = holder;
-      repro_hcr_lx_last_report.refusal =
-          REPRO_HCR_LX_REFUSED_CLAIMED_BY_RECORDER;
-      return NULL;
-    }
-    if (claim_rc != 0) {
-      /* -1 is a degenerate range, which cannot happen for an 8-byte window at
-       * a non-wrapping address; treat it as an argument error rather than
-       * proceeding unclaimed. */
-      repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
-      return NULL;
-    }
-    claimed_here = 1;
-    repro_hcr_lx_last_report.claim_held = 1;
-  } else if (!fresh_site) {
-    repro_hcr_lx_last_report.claim_held = site->claimed;
   }
 
-  /* The patch body is provider-owned memory no other thread can reach until the
-   * publishing store makes it reachable. */
-  if (patch_len < sizeof(repro_hcr_lx_endbr64) ||
-      memcmp(patch_bytes, repro_hcr_lx_endbr64,
-             sizeof(repro_hcr_lx_endbr64)) != 0) {
-    body_prefix = sizeof(repro_hcr_lx_endbr64);
-  }
-  body_len = body_prefix + patch_len;
-  if (body_len > page_size) {
-  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
-   * the publishing store is reversible without touching target text, so a
-   * failure must leave the window as unclaimed as it found it — otherwise the
-   * next patcher (or the next reload) is refused bytes nobody is using. */
-  if (claimed_here && ct_claimed_guest_text_release != NULL) {
-    ct_claimed_guest_text_release((uintptr_t)window_address);
-    claimed_here = 0;
-    repro_hcr_lx_last_report.claim_held = 0;
-  }
-    repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
-    return NULL;
-  }
+  txn->prepare_complete = 1;
+  txn->refusal = REPRO_HCR_LX_OK;
+  repro_hcr_lx_last_report.prepare_complete = 1;
+  return REPRO_HCR_LX_OK;
+}
+
+/*
+ * Publish one prepared site: the transient, the single aligned store, the
+ * tier-2 IP adjustment, the protection restore and the `SYNC_CORE` event.
+ *
+ * `fault_now` is the test lever's decision for THIS site, evaluated by the
+ * caller. It is applied as the RESULT of the transient `mprotect`, so the
+ * branch taken below is the production failure branch.
+ */
+static int repro_hcr_lx_txn_publish_site(repro_hcr_lx_transaction *txn,
+                                         repro_hcr_lx_prepared_site *ps,
+                                         int fault_now) {
+  const repro_hcr_lx_capabilities *caps = repro_hcr_lx_capability_report();
+  int transient_protection;
+  long protect_rc;
 
   /*
-   * HLX-M2: the body no longer HAS to be near. Near is still preferred, because
-   * a directly reachable body means one fewer indirection on every call into
-   * the patched function; but a body that lands outside `rel32` reach is now a
-   * supported case rather than a refusal, and is reached through an island.
-   *
-   * Order matters: the near probe runs first so nothing about the existing,
-   * measured behaviour of a normal patch changes. Only when it comes back NULL
-   * — a genuinely exhausted +/-2 GiB region — does the body go anywhere the
-   * kernel will put it.
-   */
-  if (repro_hcr_lx_force_far_patch_body) {
-    patch_page =
-        (uint8_t *)repro_hcr_lx_map_patch_page_far(window_address, page_size);
-  } else {
-    patch_page =
-        (uint8_t *)repro_hcr_lx_map_patch_page_near(window_address, page_size);
-    if (patch_page == NULL) {
-      patch_page = (uint8_t *)repro_hcr_lx_map_anonymous(
-          NULL, page_size,
-          REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE, 0);
-    }
-  }
-  if (patch_page == NULL) {
-  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
-   * the publishing store is reversible without touching target text, so a
-   * failure must leave the window as unclaimed as it found it — otherwise the
-   * next patcher (or the next reload) is refused bytes nobody is using. */
-  if (claimed_here && ct_claimed_guest_text_release != NULL) {
-    ct_claimed_guest_text_release((uintptr_t)window_address);
-    claimed_here = 0;
-    repro_hcr_lx_last_report.claim_held = 0;
-  }
-    repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_NO_PATCH_MEMORY;
-    return NULL;
-  }
-  /* Design §4.2: an island-reachable body is entered through `jmp [rip+disp32]`
-   * and so must begin with `endbr64` on an IBT-enforcing process. HLX-M0 has no
-   * islands yet, but emitting the landing pad unconditionally costs four bytes
-   * and makes every body HLX-M2-ready. */
-  if (body_prefix != 0) {
-    memcpy(patch_page, repro_hcr_lx_endbr64, sizeof(repro_hcr_lx_endbr64));
-  }
-  memcpy(patch_page + body_prefix, patch_bytes, patch_len);
-  if (repro_hcr_lx_raw_mprotect((uint64_t)(uintptr_t)patch_page, page_size,
-                                REPRO_HCR_LX_PROT_READ |
-                                    REPRO_HCR_LX_PROT_EXEC) != 0) {
-    repro_hcr_lx_unmap(patch_page, page_size);
-  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
-   * the publishing store is reversible without touching target text, so a
-   * failure must leave the window as unclaimed as it found it — otherwise the
-   * next patcher (or the next reload) is refused bytes nobody is using. */
-  if (claimed_here && ct_claimed_guest_text_release != NULL) {
-    ct_claimed_guest_text_release((uintptr_t)window_address);
-    claimed_here = 0;
-    repro_hcr_lx_last_report.claim_held = 0;
-  }
-    repro_hcr_lx_last_report.refusal =
-        REPRO_HCR_LX_REFUSED_PATCH_MEMORY_PROTECTION_FAILED;
-    return NULL;
-  }
-  dispatch_address = (uint64_t)(uintptr_t)patch_page;
-
-  /*
-   * HLX-M2 — trampoline selection. One call, and it is the ONLY place that
-   * decides what the published `rel32` points at. Everything it can return is
-   * publishable in one aligned 8-byte store; the 13- and 14-byte in-text forms
-   * of `Trampoline-Mechanics.md` §1.2/§1.3 are not reachable from here at any
-   * sled length, which is the property §6's amended ladder now states.
-   */
-  repro_hcr_lx_select_trampoline(window_address, dispatch_address, &choice);
-  repro_hcr_lx_last_report.trampoline_kind = choice.kind;
-  repro_hcr_lx_last_report.island_address = choice.island_address;
-  repro_hcr_lx_last_report.body_displacement = choice.body_displacement;
-  if (choice.refusal != REPRO_HCR_LX_OK) {
-    repro_hcr_lx_unmap(patch_page, page_size);
-  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
-   * the publishing store is reversible without touching target text, so a
-   * failure must leave the window as unclaimed as it found it — otherwise the
-   * next patcher (or the next reload) is refused bytes nobody is using. */
-  if (claimed_here && ct_claimed_guest_text_release != NULL) {
-    ct_claimed_guest_text_release((uintptr_t)window_address);
-    claimed_here = 0;
-    repro_hcr_lx_last_report.claim_held = 0;
-  }
-    repro_hcr_lx_last_report.refusal = choice.refusal;
-    return NULL;
-  }
-
-  encode_rc = repro_hcr_lx_encode_jmp_rel32(window_address, choice.jump_target,
-                                            jmp_bytes);
-  if (encode_rc != REPRO_HCR_LX_OK) {
-    repro_hcr_lx_unmap(patch_page, page_size);
-  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
-   * the publishing store is reversible without touching target text, so a
-   * failure must leave the window as unclaimed as it found it — otherwise the
-   * next patcher (or the next reload) is refused bytes nobody is using. */
-  if (claimed_here && ct_claimed_guest_text_release != NULL) {
-    ct_claimed_guest_text_release((uintptr_t)window_address);
-    claimed_here = 0;
-    repro_hcr_lx_last_report.claim_held = 0;
-  }
-    repro_hcr_lx_last_report.refusal = encode_rc;
-    return NULL;
-  }
-  published_word = repro_hcr_lx_published_word(jmp_bytes);
-
-  if (fresh_site) {
-    site = repro_hcr_lx_claim_site(entry_address);
-    if (site == NULL) {
-      repro_hcr_lx_unmap(patch_page, page_size);
-  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
-   * the publishing store is reversible without touching target text, so a
-   * failure must leave the window as unclaimed as it found it — otherwise the
-   * next patcher (or the next reload) is refused bytes nobody is using. */
-  if (claimed_here && ct_claimed_guest_text_release != NULL) {
-    ct_claimed_guest_text_release((uintptr_t)window_address);
-    claimed_here = 0;
-    repro_hcr_lx_last_report.claim_held = 0;
-  }
-      repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_SITE_TABLE_FULL;
-      return NULL;
-    }
-    site->sled_address = plan.sled_address;
-    site->sled_end = plan.sled_end;
-    site->window_address = window_address;
-    site->original_word = original_word;
-  }
-
-  span_start = repro_hcr_lx_page_start(window_address, page_size);
-  span_end = repro_hcr_lx_page_start(
-                 window_address + REPRO_HCR_LX_WINDOW_BYTES - 1, page_size) +
-             (uint64_t)page_size;
-
-  /*
-   * Everything above this line is reversible without touching target memory.
-   * Below it, exactly one store lands in live text.
-   *
    * THE TRANSIENT KEEPS `PROT_EXEC` WHEN THE HOST ALLOWS IT, and HLX-M4 found
    * that the hard way. `mprotect(RW)` over a live text page removes the NX
    * clearance for the WHOLE PAGE, not for the eight bytes being written, so
    * every thread whose PC is anywhere in those 4 KiB faults on its next
-   * instruction fetch. Against a hot multithreaded target that is a far more
-   * likely killer than the in-window hazard §6.1 point 4 describes, and it is
-   * invisible to a single-threaded gate. Retaining `PROT_EXEC` across the store
-   * removes it entirely.
-   *
-   * `text_left_writable` is not the relevant risk here: the restore below puts
-   * the page back to RX, and the window is 8-byte aligned so the store itself
-   * is unaffected by the protection bits beyond being permitted at all.
+   * instruction fetch.
    */
   transient_protection = REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE;
   if (caps->text_rwx_transition) {
     transient_protection |= REPRO_HCR_LX_PROT_EXEC;
   }
   repro_hcr_lx_last_report.transient_kept_exec = caps->text_rwx_transition;
-  if (repro_hcr_lx_raw_mprotect(span_start, (size_t)(span_end - span_start),
-                                transient_protection) != 0) {
-    repro_hcr_lx_unmap(patch_page, page_size);
-    if (fresh_site) {
-      site->used = 0;
-    }
-  /* HLX-M7 §10.1: HCR releases its claim on rollback. Everything from here to
-   * the publishing store is reversible without touching target text, so a
-   * failure must leave the window as unclaimed as it found it — otherwise the
-   * next patcher (or the next reload) is refused bytes nobody is using. */
-  if (claimed_here && ct_claimed_guest_text_release != NULL) {
-    ct_claimed_guest_text_release((uintptr_t)window_address);
-    claimed_here = 0;
-    repro_hcr_lx_last_report.claim_held = 0;
+
+  if (fault_now) {
+    /* -EACCES: exactly what a kernel refusing the transition returns. The
+     * syscall is NOT issued, so the target's protection is untouched and this
+     * site is as unpublished as if the kernel had said no. */
+    protect_rc = -13;
+  } else {
+    protect_rc = repro_hcr_lx_raw_mprotect(
+        ps->span_start, (size_t)(ps->span_end - ps->span_start),
+        transient_protection);
   }
-    repro_hcr_lx_last_report.refusal =
-        REPRO_HCR_LX_REFUSED_TEXT_PROTECTION_FAILED;
-    return NULL;
+  if (protect_rc != 0) {
+    ps->refusal = REPRO_HCR_LX_REFUSED_TEXT_PROTECTION_FAILED;
+    repro_hcr_lx_last_report.refusal = ps->refusal;
+    return ps->refusal;
   }
 
   /*
    * PUBLICATION.
    *
    * Safety argument, stated here rather than left implicit as it is on macOS.
-   * It has two halves and both are required (design §4.2, §4.4):
+   * It has two halves and both are required (design §4.2, §4.4), and a third
+   * point neither half covers:
    *
    *   1. `window_address` is 8-byte aligned and this is an ordinary aligned
    *      8-byte store, so it is single-copy atomic on x86_64. Any thread reads
-   *      either the whole previous word (all NOPs, or the previous generation's
-   *      jump) or the whole new `E9 rel32 90 90 90`. There is no third
-   *      byte-level state, and in particular no partially written jump through
-   *      an address composed of NOP bytes.
+   *      either the whole previous word (all NOPs, or the previous
+   *      generation's jump) or the whole new `E9 rel32 90 90 90`. There is no
+   *      third byte-level state, and in particular no partially written jump
+   *      through an address composed of NOP bytes. HLX-M3 adds the consequence
+   *      this milestone needs: because the store is atomic and the word it
+   *      replaced was SAVED, the publication is individually REVERSIBLE — one
+   *      store undoes it exactly.
    *
    *   2. Atomicity of the bytes is not visibility to a core that has already
    *      fetched the old ones. Intel SDM Vol 3 §8.1.3 / §9.3 ("Handling Self-
    *      and Cross-Modifying Code") requires the *executing* processor to
-   *      perform a serializing operation; a coherent instruction cache does not
-   *      discharge that, and the `mprotect` TLB shootdown is not a guaranteed
-   *      substitute (Linux may skip the remote IPI entirely when `mm_cpumask`
-   *      names one CPU). The `MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE` below
-   *      forces a context-synchronizing event on every core running this
-   *      process.
+   *      perform a serializing operation; a coherent instruction cache does
+   *      not discharge that, and the `mprotect` TLB shootdown is not a
+   *      guaranteed substitute (Linux may skip the remote IPI entirely when
+   *      `mm_cpumask` names one CPU). The
+   *      `MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE` below forces a
+   *      context-synchronizing event on every core running this process.
    *
    *   3. A thread whose PC is INSIDE the window is the hazard neither half
    *      addresses, and it is real: the sled is executable instructions, so an
    *      interrupt can leave a thread at window byte 1..7, and on resume it
    *      executes the tail of this very `E9 rel32` as though it were an
-   *      instruction (design §6.1 point 4). Half 1 does not help — the bytes
-   *      are unambiguous and still wrong for that resume point — and neither
-   *      does half 2. Only tier 2 can fix it, by reading the parked PC out of
-   *      a `ucontext_t` and nudging it past the window, which is what the
-   *      `repro_hcr_lx_quiesce_adjust_window` call below does. Tier 1 has no
-   *      such capability, which is why HLX-M4 resolves `HLX-OQ-2` by requiring
-   *      tier 2 for any target with more than one thread.
-   *
-   * HLX-M0 was single threaded, so halves 2 and 3 could not be exercised there;
-   * HLX-M4 owns them, owns the `HLX-OQ-3` fallback checked above, and owns the
-   * measurement behind the tier rule.
+   *      instruction (design §6.1 point 4). Only tier 2 can fix it, by reading
+   *      the parked PC out of a `ucontext_t` and nudging it past the window.
+   *      REVERSIBILITY DOES NOT HELP HERE EITHER: rolling the store back
+   *      cannot un-execute what a thread already decoded. That is why HLX-M3
+   *      claims per-function atomicity and explicitly does not claim safety
+   *      under concurrent execution.
    */
-  *(volatile uint64_t *)(uintptr_t)window_address = published_word;
+  *(volatile uint64_t *)(uintptr_t)ps->window_address = ps->published_word;
   __atomic_signal_fence(__ATOMIC_SEQ_CST);
   repro_hcr_lx_publication_count += 1;
+  ps->published = 1;
+  txn->published_count += 1;
 
   /*
    * Tier-2 IP adjustment (§6.2 step 6), applied while every thread is still
@@ -1804,7 +2051,8 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
    * is a no-op — which is the hazard, not an oversight.
    */
   if (repro_hcr_lx_quiesce_is_held()) {
-    uint64_t window_end = window_address + (uint64_t)REPRO_HCR_LX_WINDOW_BYTES;
+    uint64_t window_end =
+        ps->window_address + (uint64_t)REPRO_HCR_LX_WINDOW_BYTES;
     /*
      * Where to nudge to. `Trampoline-Mechanics.md:196` and §6.2 step 6 say
      * "forward to the first real instruction", which preserves §6.1 point 3 —
@@ -1817,22 +2065,17 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
      * "leave the PC alone". Resuming at the window's first byte executes the
      * freshly published `E9 rel32` — a complete, valid instruction at a
      * boundary the provider itself chose — so the thread takes the new body.
-     * That is a different semantic (this entry gets the new version) and it is
-     * always safe; leaving the PC alone is the one option that is not.
      */
-    uint64_t resume_target = window_address;
+    uint64_t resume_target = ps->window_address;
     /*
      * Decide it from the window's ORIGINAL bytes, not from live memory: by the
      * time this runs the store has already landed, so reading the window back
      * would decode our own `E9` and conclude — wrongly, every time — that
-     * `window_end` is not a boundary. `original_word` is the saved pre-state
-     * (§11.2), and because the window always STARTS at a boundary, its eight
-     * original bytes decoding into whole NOP instructions is exactly the
-     * condition for `window_end` to be one too.
+     * `window_end` is not a boundary.
      */
     uint8_t original_bytes[REPRO_HCR_LX_WINDOW_BYTES];
     size_t consumed = 0;
-    memcpy(original_bytes, &original_word, sizeof(original_bytes));
+    memcpy(original_bytes, &ps->original_word, sizeof(original_bytes));
     while (consumed < REPRO_HCR_LX_WINDOW_BYTES) {
       size_t len = repro_hcr_lx_nop_length(
           original_bytes + consumed, REPRO_HCR_LX_WINDOW_BYTES - consumed);
@@ -1841,24 +2084,24 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
       }
       consumed += len;
     }
-    if (consumed == REPRO_HCR_LX_WINDOW_BYTES &&
-        window_end < plan.sled_end) {
+    if (consumed == REPRO_HCR_LX_WINDOW_BYTES && window_end < ps->plan.sled_end) {
       resume_target = window_end;
     }
     repro_hcr_lx_last_report.resume_target = resume_target;
     repro_hcr_lx_last_report.ip_adjustments =
-        repro_hcr_lx_quiesce_adjust_window(window_address, window_end,
+        repro_hcr_lx_quiesce_adjust_window(ps->window_address, window_end,
                                            resume_target);
     repro_hcr_lx_last_report.quiesced = 1;
   }
 
-  if (repro_hcr_lx_raw_mprotect(span_start, (size_t)(span_end - span_start),
+  if (repro_hcr_lx_raw_mprotect(ps->span_start,
+                                (size_t)(ps->span_end - ps->span_start),
                                 REPRO_HCR_LX_PROT_READ |
                                     REPRO_HCR_LX_PROT_EXEC) != 0) {
     /* The trampoline is already live, so reporting total failure here would
-     * repeat the defect the Apple arm has at its post-store `return NULL`. The
-     * honest report is success plus a recorded flag; the capability probe at
-     * agent start exists so this path is unreachable on a supported host. */
+     * repeat the defect the Apple arm carried at its post-store `return NULL`.
+     * The honest report is success plus a recorded flag; the capability probe
+     * at agent start exists so this path is unreachable on a supported host. */
     repro_hcr_lx_caps.text_left_writable = 1;
     repro_hcr_lx_last_report.text_left_writable = 1;
   }
@@ -1867,28 +2110,272 @@ static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
    * only way a gate can distinguish "the event was issued and returned 0" from
    * "this branch was never reached", which look identical in a report whose
    * `membarrier_result` field starts life as 0. */
-  if (repro_hcr_lx_sync_core_available() && !repro_hcr_lx_sync_core_suppressed) {
+  if (repro_hcr_lx_sync_core_available() &&
+      !repro_hcr_lx_sync_core_suppressed) {
     repro_hcr_lx_last_report.membarrier_result = repro_hcr_lx_raw_membarrier(
         REPRO_HCR_LX_MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE, 0);
     repro_hcr_lx_membarrier_issued_count += 1;
   } else {
-    /* Reachable only under quiescence (the refusal above is the other case),
-     * where the handshake's own kernel entry/exit is the context-synchronizing
-     * event, or under the test lever that removes half 2 deliberately. */
+    /* Reachable only under quiescence (the refusal in prepare is the other
+     * case), where the handshake's own kernel entry/exit is the
+     * context-synchronizing event, or under the test lever that removes half 2
+     * deliberately. */
     repro_hcr_lx_last_report.membarrier_result = -1;
   }
 
-  site->published_word = published_word;
-  site->generation += 1;
-  if (claimed_here) {
-    site->claimed = 1;
+  ps->site->published_word = ps->published_word;
+  ps->site->generation += 1;
+  /* §4.5: every generation's body is retained, superseded ones included. This
+   * count IS the provider's retained-region evidence, and it is what
+   * `oldCodeRetained` is computed from instead of being asserted. */
+  ps->site->retained_body_count += 1;
+  ps->body_retained = 1;
+  txn->retained_body_count += 1;
+  if (ps->claimed_here) {
+    ps->site->claimed = 1;
   }
-  repro_hcr_lx_last_report.claim_held = site->claimed;
-  repro_hcr_lx_last_report.published_word = published_word;
-  repro_hcr_lx_last_report.dispatch_address = dispatch_address;
-  repro_hcr_lx_last_report.generation = site->generation;
+  repro_hcr_lx_last_report.claim_held = ps->site->claimed;
+  repro_hcr_lx_last_report.published_word = ps->published_word;
+  repro_hcr_lx_last_report.dispatch_address = ps->dispatch_address;
+  repro_hcr_lx_last_report.generation = ps->site->generation;
+  repro_hcr_lx_last_report.retained_region_count =
+      (ps->site->original_word_saved ? 1 : 0) +
+      (int)ps->site->retained_body_count;
+  repro_hcr_lx_last_report.old_code_retained =
+      repro_hcr_lx_last_report.retained_region_count > 0;
   repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_OK;
-  return patch_page;
+  return REPRO_HCR_LX_OK;
+}
+
+/*
+ * Restore one published site to its ORIGINAL saved word (§4.5: the original,
+ * never the previous generation, so a rolled-back site returns to unpatched
+ * code rather than to an older patch whose body may since have been superseded).
+ *
+ * One aligned 8-byte store, same rule as publication. Never widened.
+ */
+static int repro_hcr_lx_txn_restore_site(repro_hcr_lx_transaction *txn,
+                                         repro_hcr_lx_prepared_site *ps) {
+  const repro_hcr_lx_capabilities *caps = repro_hcr_lx_capability_report();
+  int transient_protection =
+      REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE;
+  if (caps->text_rwx_transition) {
+    transient_protection |= REPRO_HCR_LX_PROT_EXEC;
+  }
+  if (repro_hcr_lx_raw_mprotect(ps->span_start,
+                                (size_t)(ps->span_end - ps->span_start),
+                                transient_protection) != 0) {
+    /* Nothing else can be done for this site: the window keeps the published
+     * word. It is recorded rather than swallowed — a rollback that reports
+     * success for a site it could not restore is the failure mode this whole
+     * milestone exists to remove. */
+    return REPRO_HCR_LX_REFUSED_TEXT_PROTECTION_FAILED;
+  }
+#if defined(REPRO_HCR_HLX_M3_FALSIFY_ROLLBACK_TO_PREVIOUS_GENERATION)
+  /*
+   * FALSIFIER ARM (HLX-M3). Restores the PREVIOUS GENERATION's word instead of
+   * the original, which is precisely what design §4.5 forbids: "rollback always
+   * restores the original saved word, not the previous generation's, so a
+   * rolled-back site returns to unpatched code rather than to an older patch".
+   *
+   * For a first-generation site the two words are equal, so this arm is
+   * INVISIBLE until a function has been patched at least twice — which is why
+   * the re-patch gate is the one that has to carry it. Under this arm the
+   * "rollback after generation 3 restores the ORIGINAL bytes" assertion MUST go
+   * red and the victim MUST return generation 2's value. The agent never
+   * defines it.
+   */
+  *(volatile uint64_t *)(uintptr_t)ps->window_address = ps->previous_word;
+#else
+  *(volatile uint64_t *)(uintptr_t)ps->window_address = ps->original_word;
+#endif
+  __atomic_signal_fence(__ATOMIC_SEQ_CST);
+  if (repro_hcr_lx_raw_mprotect(ps->span_start,
+                                (size_t)(ps->span_end - ps->span_start),
+                                REPRO_HCR_LX_PROT_READ |
+                                    REPRO_HCR_LX_PROT_EXEC) != 0) {
+    repro_hcr_lx_caps.text_left_writable = 1;
+    repro_hcr_lx_last_report.text_left_writable = 1;
+  }
+  /* The restore is cross-modifying code exactly as the publication was (§4.4),
+   * so it needs the same serializing event. */
+  if (repro_hcr_lx_sync_core_available() &&
+      !repro_hcr_lx_sync_core_suppressed) {
+    (void)repro_hcr_lx_raw_membarrier(
+        REPRO_HCR_LX_MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE, 0);
+    repro_hcr_lx_membarrier_issued_count += 1;
+  }
+  ps->restored = 1;
+  txn->restored_count += 1;
+  return REPRO_HCR_LX_OK;
+}
+
+/*
+ * Roll the transaction back. Safe to call after a prepare failure (nothing is
+ * published, so it degenerates to releasing provider memory and claims), after
+ * a partial commit, or after a complete commit that the caller decided to
+ * abandon.
+ *
+ * Order: published sites are restored in REVERSE publication order, then
+ * registrations are undone, then claims are released, then unpublished bodies
+ * are unmapped. Published bodies and every island are RETAINED — see the
+ * header comment.
+ */
+static int repro_hcr_lx_txn_rollback(repro_hcr_lx_transaction *txn) {
+  int i;
+  int rc = REPRO_HCR_LX_OK;
+  if (txn == NULL) {
+    return REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
+  }
+  for (i = txn->site_count - 1; i >= 0; --i) {
+    repro_hcr_lx_prepared_site *ps = &txn->sites[i];
+    if (!ps->published) {
+      continue;
+    }
+    if (repro_hcr_lx_txn_restore_site(txn, ps) != REPRO_HCR_LX_OK) {
+      rc = REPRO_HCR_LX_REFUSED_TEXT_PROTECTION_FAILED;
+    }
+  }
+  for (i = txn->site_count - 1; i >= 0; --i) {
+    repro_hcr_lx_prepared_site *ps = &txn->sites[i];
+    if (ps->jit_entry_address != 0) {
+      txn->unregister_attempts += 1;
+      if (repro_hcr_lx_unregister_jit_hook != NULL) {
+        (void)repro_hcr_lx_unregister_jit_hook(ps->jit_entry_address);
+      }
+      ps->jit_entry_address = 0;
+    }
+    if (ps->eh_frame_payload_address != 0) {
+      txn->unregister_attempts += 1;
+      if (repro_hcr_lx_unregister_eh_frame_hook != NULL) {
+        (void)repro_hcr_lx_unregister_eh_frame_hook(
+            ps->eh_frame_payload_address);
+      }
+      ps->eh_frame_payload_address = 0;
+    }
+    if (ps->published) {
+      /* The window is back to its original bytes, so the site is unpatched
+       * again: retire the slot and release the claim (§4.5 releases the claim
+       * on rollback). The patch page is NOT unmapped — a thread may have
+       * entered it before the restore landed, and under tier 1 there is no way
+       * to prove otherwise. */
+      /*
+       * The claim belongs to the SITE, not to this transaction: §4.5 takes it
+       * once at the first publication and RETAINS it across generations, so by
+       * generation N the transaction that is rolling back did not take it and
+       * `claimed_here` is 0. Releasing only what this transaction claimed
+       * would therefore leak the claim on every re-patch rollback — measured,
+       * and it is why the condition is the site's flag and not the
+       * transaction's.
+       */
+      int site_claimed = (ps->site != NULL && ps->site->claimed);
+      if (ps->site != NULL) {
+        ps->site->used = 0;
+        ps->site = NULL;
+      }
+      if ((ps->claimed_here || site_claimed) &&
+          ct_claimed_guest_text_release != NULL) {
+        ct_claimed_guest_text_release((uintptr_t)ps->window_address);
+        txn->released_claim_count += 1;
+      }
+      ps->claimed_here = 0;
+      ps->patch_page = NULL;   /* retained, deliberately leaked (§4.5/§6.1) */
+    } else if (ps->prepared) {
+      repro_hcr_lx_txn_discard_prepared(txn, ps);
+    }
+  }
+  txn->rolled_back = 1;
+  repro_hcr_lx_last_report.rolled_back = 1;
+  repro_hcr_lx_last_report.restored_sites = txn->restored_count;
+  return rc;
+}
+
+/*
+ * Commit: a sequence of single atomic stores, each individually reversible
+ * from its saved word. A failure at site k restores sites 0..k-1 in reverse
+ * and leaves the target running the code it was running before.
+ */
+static int repro_hcr_lx_txn_commit(repro_hcr_lx_transaction *txn) {
+  int i;
+  if (txn == NULL || !txn->prepare_complete) {
+    return REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
+  }
+  for (i = 0; i < txn->site_count; ++i) {
+    int fault_now = (repro_hcr_lx_commit_fault_site == i);
+    int rc = repro_hcr_lx_txn_publish_site(txn, &txn->sites[i], fault_now);
+    if (rc != REPRO_HCR_LX_OK) {
+      txn->refusal = rc;
+      txn->failed_site = i;
+#if defined(REPRO_HCR_HLX_M3_FALSIFY_NO_ROLLBACK_ON_COMMIT_FAILURE)
+      /*
+       * FALSIFIER ARM (HLX-M3). Removes the rollback and nothing else, which is
+       * exactly the pre-milestone state design §11.1 describes: "an
+       * eight-operation commit sequence with no undo path; a failure
+       * mid-sequence ... leaves the target in whatever partial state it
+       * reached."
+       *
+       * Under this arm the commit-failure gate MUST go red: the N sites already
+       * published stay published, their functions return the NEW values, and
+       * their windows do not match the pre-transaction snapshot. The agent
+       * never defines it.
+       */
+      repro_hcr_lx_last_report.refusal = rc;
+      repro_hcr_lx_last_report.commit_complete = 0;
+      return rc;
+#endif
+      (void)repro_hcr_lx_txn_rollback(txn);
+      repro_hcr_lx_last_report.refusal = rc;
+      repro_hcr_lx_last_report.commit_complete = 0;
+      repro_hcr_lx_last_report.published_sites = 0;
+      return rc;
+    }
+  }
+  txn->commit_complete = 1;
+  repro_hcr_lx_last_report.commit_complete = 1;
+  repro_hcr_lx_last_report.published_sites = txn->published_count;
+  repro_hcr_lx_last_report.prepare_complete = 1;
+  return REPRO_HCR_LX_OK;
+}
+
+/*
+ * Apply a direct entry patch at `entry_address`, publishing inside the sled
+ * that starts at `sled_address`.
+ *
+ * `sled_address` is a parameter rather than a lookup so that HLX-M1's real
+ * symbol/ELF pipeline can supply it, and so the HLX-M0 gates can drive the
+ * exact production code path against a sled they constructed from real
+ * compiler output. `repro_hcr_apply_direct_patch` in the agent supplies it
+ * from the runtime-mapped `__patchable_function_entries` section.
+ *
+ * Since HLX-M3 this is the one-function case of the transaction above — the
+ * same prepare, the same commit, the same rollback — rather than a second
+ * implementation of them. Its observable behaviour is unchanged: the same
+ * refusals in the same order, the same report fields, and the live body
+ * address or NULL.
+ *
+ * Returns the live patch-body address, or NULL with `repro_hcr_lx_last_report`
+ * carrying a named refusal.
+ */
+static void *repro_hcr_lx_apply_direct_patch_at(uint64_t entry_address,
+                                                uint64_t sled_address,
+                                                const uint8_t *patch_bytes,
+                                                size_t patch_len) {
+  repro_hcr_lx_transaction *txn = &repro_hcr_lx_last_txn;
+
+  repro_hcr_lx_txn_reset(txn);
+  memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
+  if (repro_hcr_lx_txn_add(txn, entry_address, sled_address, patch_bytes,
+                           patch_len) != REPRO_HCR_LX_OK) {
+    repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
+    return NULL;
+  }
+  if (repro_hcr_lx_txn_prepare(txn) != REPRO_HCR_LX_OK) {
+    return NULL;
+  }
+  if (repro_hcr_lx_txn_commit(txn) != REPRO_HCR_LX_OK) {
+    return NULL;
+  }
+  return (void *)(uintptr_t)txn->sites[0].dispatch_address;
 }
 
 #endif /* REPRO_HCR_LINUX_X86_64_H */
