@@ -20,7 +20,7 @@ import std/[os, strutils, tempfiles, unittest]
 
 import repro_core/cargo_lock
 import repro_project_dsl
-import repro_standard_provider/conventions/cargo_vendor_action
+import repro_project_dsl/cargo_vendor
 
 const SampleManifest = """# repro cargo vendor manifest v1
 https://static.crates.io/crates/ansi_term/ansi_term-0.12.1.crate	d52a9bb7ec0cf484c551830a7ce27bd20d67eac647e1befb56b0be4ee39a55d2	ansi_term-0.12.1

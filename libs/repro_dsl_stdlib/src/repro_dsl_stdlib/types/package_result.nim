@@ -92,6 +92,29 @@ type
     destdir*: string
     components*: Table[string, string]
 
+  CargoPackageResult* = object
+    ## Returned by ``cargo_package(...)``. Same three roles as its
+    ## siblings, with one difference worth naming: ``buildEdge`` is the
+    ## VENDOR step rather than a configure step.
+    ##
+    ## Cargo has no configure phase — but a from-source cargo recipe does
+    ## have a preparation phase that must complete before a compile can
+    ## start offline, and that is the one that materialises the locked
+    ## dependency closure. Putting it in the ``buildEdge`` slot is what
+    ## makes the ordering explicit to every consumer that walks these
+    ## three edges, instead of leaving the compile to depend on a stamp
+    ## nothing in the result mentions.
+    buildEdge*: BuildActionDef
+      ## The vendored-closure step: crates on disk plus the
+      ## ``.cargo/config.toml`` that points cargo at them.
+    compileEdge*: BuildActionDef
+      ## ``cargo build --locked --offline``.
+    installEdge*: BuildActionDef
+      ## ``cargo install --root <destdir>/usr``, which lands binaries at
+      ## the ``usr/bin`` the standard component layout already expects.
+    destdir*: string
+    components*: Table[string, string]
+
   AutotoolsPackageResult* = object
     ## Returned by ``autotools_package(...)``. ``configureEdge`` is the
     ## ``./configure`` invocation; ``compileEdge`` is ``make``.
@@ -319,6 +342,51 @@ proc installTreeMirror*(r: CmakePackageResult) =
   ## executable or library slice, such as module and header collections.
   emitInstallTreeMirror(r.installEdge, "", r.destdir,
     currentOwningPackage(), "cmake")
+
+# ---------------------------------------------------------------------------
+# Slicing methods — CargoPackageResult
+# ---------------------------------------------------------------------------
+
+proc executable*(r: CargoPackageResult; name: string): Executable =
+  ## Stage the named binary and mirror the install tree, exactly as the
+  ## cmake and meson slices do.
+  ##
+  ## The from-source resolver looks for a recipe's artefacts under
+  ## ``<recipeRoot>/.repro/output/<name>/``; a slice that returned a bare
+  ## ``Executable`` without emitting the glue would compile and install
+  ## successfully and still leave the binary invisible to every consumer.
+  emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "executable", name)
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "cargo")
+  newExecutable(
+    install = r.installEdge,
+    executableName = name,
+    installPrefix = componentPath(r.components, "runtime"))
+
+proc library*(r: CargoPackageResult; name: string): Library =
+  ## For a crate that ships a cdylib or staticlib.
+  ##
+  ## ``cargo install`` does not place libraries, so a recipe reaching for
+  ## this is one whose ``build:`` block stages them itself; the slice still
+  ## emits the same glue so the resolver can find what was staged.
+  emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "library", name)
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "cargo")
+  newLibrary(
+    install = r.installEdge,
+    installPrefix = componentPath(r.components, "library"))
+
+proc files*(r: CargoPackageResult; name: string): BuildActionDef =
+  discard componentPath(r.components, name)
+  r.installEdge
+
+proc installTreeMirror*(r: CargoPackageResult) =
+  ## For a cargo package with no executable or library slice — a crate
+  ## installed for its data or its completions alone.
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "cargo")
 
 # ---------------------------------------------------------------------------
 # Stage-copy emission (M9.R.14c.5)

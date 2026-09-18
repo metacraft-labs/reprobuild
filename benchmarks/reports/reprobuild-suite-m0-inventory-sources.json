@@ -32862,8 +32862,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_core",
-        "repro_project_dsl",
-        "repro_standard_provider"
+        "repro_project_dsl"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,

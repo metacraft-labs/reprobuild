@@ -44,7 +44,7 @@
 ## A package with NO `source` key is the local workspace member itself and
 ## is correctly absent from the plan — it is the thing being built.
 
-import std/[algorithm, strutils, tables]
+import std/[algorithm, os, strutils, tables]
 
 type
   CargoLockError* = object of CatchableError
@@ -454,3 +454,62 @@ proc parseVendorManifest*(text: string): seq[VendorEntry] =
   if not sawHeader:
     raise newException(CargoLockError,
       "cargo vendor manifest: no header line")
+
+# ---------------------------------------------------------------------------
+# On-disk layout.
+# ---------------------------------------------------------------------------
+#
+# These live here, in the lowest module of the cargo stack, because three
+# layers need to agree on them and two of them cannot see each other: the
+# CONVENTION (in `repro_standard_provider`) emits the action that creates
+# the vendor tree, and a `build:`-block CONSTRUCTOR (in `repro_dsl_stdlib`,
+# a layer below the provider) has to point cargo at the same tree and order
+# itself after the same stamp. A constant duplicated across that boundary is
+# a constant that drifts, and the symptom would be a build that vendors into
+# one directory and compiles against another.
+
+const
+  CargoVendorManifestName* = "cargo-vendor.manifest"
+    ## The committed manifest, beside the recipe's `repro.nim`.
+
+  CargoVendorSubdir* = ".repro/cargo-vendor"
+    ## Scratch root for the unpacked tree and the download cache. Under
+    ## `.repro/` so `repro clean` takes it with everything else.
+
+proc cargoVendorManifestPath*(projectRoot: string): string =
+  projectRoot / CargoVendorManifestName
+
+proc cargoVendorRoot*(projectRoot: string): string =
+  projectRoot / CargoVendorSubdir
+
+proc cargoVendorDir*(projectRoot: string): string =
+  ## The unpacked crates — the directory `.cargo/config.toml` points at.
+  cargoVendorRoot(projectRoot) / "vendor"
+
+proc cargoVendorCacheDir*(projectRoot: string): string =
+  ## The downloaded `.crate` files.
+  ##
+  ## Separate from the unpacked tree so a re-run that wipes the vendor
+  ## directory does not re-download a closure the machine already has. Keyed
+  ## by crate directory name, which carries the version, so two versions of
+  ## one crate never collide.
+  cargoVendorRoot(projectRoot) / "crates"
+
+proc cargoVendorStampPath*(projectRoot: string): string =
+  ## The vendor action's output, and what a compile step orders itself
+  ## after.
+  cargoVendorRoot(projectRoot) / "vendor.stamp"
+
+proc cargoExtractedSourceDir*(projectRoot: string): string =
+  ## Where the source tarball is extracted.
+  ##
+  ## Matches `fetch_action`'s default of `src` rather than reading the
+  ## recipe's `extractedRoot`: a recipe that moves it has to tell both
+  ## sides, and neither side can read the other's opinion from here.
+  projectRoot / "src"
+
+proc cargoConfigDir*(projectRoot: string): string =
+  ## `.cargo/` beside the EXTRACTED SOURCE, not beside the recipe: cargo
+  ## searches upward from the manifest directory it is building, and the
+  ## recipe root is not on that path.
+  cargoExtractedSourceDir(projectRoot) / ".cargo"

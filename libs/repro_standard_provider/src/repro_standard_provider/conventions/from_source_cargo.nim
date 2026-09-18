@@ -69,9 +69,9 @@ import repro_core
 import repro_core/cargo_lock
 import repro_provider_runtime
 import repro_project_dsl
+import repro_project_dsl/cargo_vendor
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/fetch_action
-import repro_standard_provider/conventions/cargo_vendor_action
 import repro_standard_provider/conventions/from_source_identity
 
 const
