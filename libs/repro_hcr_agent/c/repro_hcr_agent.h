@@ -443,6 +443,49 @@ REPRO_HCR_AGENT_API const char *repro_hcr_rb_last_rejection(void);
 REPRO_HCR_AGENT_API const char *repro_hcr_rb_last_unmanaged_types(void);
 REPRO_HCR_AGENT_API unsigned long repro_hcr_rb_apply_reload_calls(void);
 
+/*
+ * HLX-M8 — evidence surface for the REGISTRIES, as distinct from the lifecycle.
+ *
+ * Why these exist, given the seven above. Everything the seven report is a
+ * by-product of a reload actually running, and a reload needs a coordinator
+ * connection, a resolvable symbol and a platform patch path. The registration
+ * semantics of § 13.2 and § 13.3 need none of that — they are settled the
+ * instant `rb_hcr_before_reload` returns — and they are the part of this ABI
+ * that is IDENTICAL on every host, because `rb_hcr_before_reload`,
+ * `rb_hcr_after_reload`, their two removal functions and the two managed-type
+ * functions carry no platform conditional at all.
+ *
+ * Until these accessors existed, the only way to observe any of it was to count
+ * callbacks during a dispatch, which made "registration is idempotent on the
+ * (callback, user_data) PAIR", "removal matches on BOTH fields", "registration
+ * order is dispatch order", "the managed-type registry stores the caller's
+ * pointer rather than a copy" and "past the capacity the entry is dropped
+ * silently" unobservable except on a host that can apply a patch. That is why
+ * the only assertion any shipped gate made about them was a single
+ * `fired == 1`.
+ *
+ * Read-only, like the seven above: each returns a field the production
+ * registration functions wrote, nothing here allocates, and no agent code
+ * branches on any of them. Out-of-range indices answer 0/NULL rather than
+ * reading past the array.
+ */
+REPRO_HCR_AGENT_API size_t repro_hcr_rb_before_callback_count(void);
+REPRO_HCR_AGENT_API size_t repro_hcr_rb_after_callback_count(void);
+REPRO_HCR_AGENT_API RbHcrReloadCallback
+repro_hcr_rb_before_callback_at(size_t index);
+REPRO_HCR_AGENT_API void *repro_hcr_rb_before_user_data_at(size_t index);
+REPRO_HCR_AGENT_API RbHcrReloadCallback
+repro_hcr_rb_after_callback_at(size_t index);
+REPRO_HCR_AGENT_API void *repro_hcr_rb_after_user_data_at(size_t index);
+REPRO_HCR_AGENT_API size_t repro_hcr_rb_managed_type_count(void);
+/*
+ * The POINTER the caller passed to `rb_hcr_register_managed_type`, not a copy
+ * of the text. § 13.2's registry deliberately does not copy (see the comment on
+ * `rb_hcr_managed_types` in repro_hcr_agent.c), and returning the stored
+ * pointer is what lets a gate assert that by identity instead of by spelling.
+ */
+REPRO_HCR_AGENT_API const char *repro_hcr_rb_managed_type_at(size_t index);
+
 #ifdef __cplusplus
 }
 #endif

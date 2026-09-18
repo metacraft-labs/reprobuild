@@ -3628,6 +3628,60 @@ unsigned long repro_hcr_rb_apply_reload_calls(void) {
   return rb_hcr_apply_calls;
 }
 
+/*
+ * Registry evidence — the half of § 13 that has no platform in it.
+ *
+ * Declared and motivated in repro_hcr_agent.h next to the seven lifecycle
+ * readers. Reads only; the out-of-range answers are 0/NULL so a gate that
+ * walks past `*_count()` gets a value rather than a fault.
+ */
+size_t repro_hcr_rb_before_callback_count(void) {
+  return rb_hcr_before_callback_count;
+}
+
+size_t repro_hcr_rb_after_callback_count(void) {
+  return rb_hcr_after_callback_count;
+}
+
+RbHcrReloadCallback repro_hcr_rb_before_callback_at(size_t index) {
+  if (index >= rb_hcr_before_callback_count) {
+    return NULL;
+  }
+  return rb_hcr_before_callbacks[index].callback;
+}
+
+void *repro_hcr_rb_before_user_data_at(size_t index) {
+  if (index >= rb_hcr_before_callback_count) {
+    return NULL;
+  }
+  return rb_hcr_before_callbacks[index].user_data;
+}
+
+RbHcrReloadCallback repro_hcr_rb_after_callback_at(size_t index) {
+  if (index >= rb_hcr_after_callback_count) {
+    return NULL;
+  }
+  return rb_hcr_after_callbacks[index].callback;
+}
+
+void *repro_hcr_rb_after_user_data_at(size_t index) {
+  if (index >= rb_hcr_after_callback_count) {
+    return NULL;
+  }
+  return rb_hcr_after_callbacks[index].user_data;
+}
+
+size_t repro_hcr_rb_managed_type_count(void) {
+  return rb_hcr_managed_type_count;
+}
+
+const char *repro_hcr_rb_managed_type_at(size_t index) {
+  if (index >= rb_hcr_managed_type_count) {
+    return NULL;
+  }
+  return rb_hcr_managed_types[index];
+}
+
 /* -------------------------------------------------------------------------
  * § 3.4 — synchronized vs automatic mode.
  *

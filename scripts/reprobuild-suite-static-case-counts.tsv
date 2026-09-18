@@ -420,6 +420,7 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_service_description.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_executable_ref.nim	nim	1
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_expression_setters.nim	nim	4
 libs/repro_project_dsl/tests/dsl_port/t_dsl_shell_action.nim	nim	8
+libs/repro_project_dsl/tests/dsl_port/t_dsl_tool_provisioning_staged.nim	nim	9
 libs/repro_project_dsl/tests/dsl_port/t_dsl_validate.nim	nim	3
 libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_uses.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_expression_values.nim	nim	7
@@ -792,6 +793,7 @@ tests/e2e/hcr-linux-txn/t_integration_hcr_linux_repeated_patch_of_same_function.
 tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_backtrace_through_patched_function.nim	nim	2
 tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_jit_symfile_accepted_by_gdb.nim	nim	2
 tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_register_frame_abi_detection.nim	nim	2
+tests/e2e/hcr-portable-rbhcr/t_hcr_rb_application_abi_contract.nim	nim	6
 tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim	nim	1
 tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim	nim	1
 tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim	nim	1
@@ -1649,6 +1651,7 @@ tests/unit/t_stale_artifact_names_what_changed.nim	nim	5
 tests/unit/t_store_path_farm.nim	nim	4
 tests/unit/t_substituted_edge_does_not_go_stale.nim	nim	4
 tests/unit/t_substituted_provider_compile_is_verified.nim	nim	7
+tests/unit/t_tarball_non_redistributable.nim	nim	4
 tests/unit/t_tarball_prune_paths.nim	nim	3
 tests/unit/t_test_execute_edge_receives_a_usable_path.nim	nim	3
 tests/unit/t_test_execution_extension_is_framework_neutral.nim	nim	10

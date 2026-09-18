@@ -3726,6 +3726,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_tool_provisioning_staged.nim",
+    binary: "build/test-bin/t_dsl_tool_provisioning_staged",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_validate.nim",
     binary: "build/test-bin/t_dsl_validate",
     defines: @[],
@@ -7067,6 +7076,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_register_frame_abi_detection.nim",
     binary: "build/test-bin/t_integration_hcr_linux_register_frame_abi_detection",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/hcr-portable-rbhcr/t_hcr_rb_application_abi_contract.nim",
+    binary: "build/test-bin/t_hcr_rb_application_abi_contract",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -14771,6 +14789,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_substituted_provider_compile_is_verified.nim",
     binary: "build/test-bin/t_substituted_provider_compile_is_verified",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_tarball_non_redistributable.nim",
+    binary: "build/test-bin/t_tarball_non_redistributable",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

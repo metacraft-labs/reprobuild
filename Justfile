@@ -921,6 +921,21 @@ e2e_hcr_linux_isonim_shim_against_real_agent:
         tests/e2e/hcr-linux-rbhcr/t_e2e_hcr_linux_isonim_shim_against_real_agent.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_isonim_shim_against_real_agent.log
 
+# HLX-M8 — the platform-neutral half of the same ABI. Unlike the four targets
+# above this one carries no `when defined(linux)` arm: it compiles the
+# production agent translation unit into the test binary, spawns that binary as
+# its own target over the real agent socket, and asserts only what
+# HCR-Overview.md §13 and Patch-Loading-Lifecycle.md §3.1/§3.3/§3.4 say on every
+# host. It is the coverage the macOS arm inherits.
+hcr_rb_application_abi_contract:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/hcr_rb_application_abi_contract \
+        --out:build/test-bin/hcr_rb_application_abi_contract \
+        tests/e2e/hcr-portable-rbhcr/t_hcr_rb_application_abi_contract.nim \
+        2>&1 | tee test-logs/hcr_rb_application_abi_contract.log
+
 integration_hcr_linux_island_exhaustion_refuses:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
