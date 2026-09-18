@@ -5800,7 +5800,7 @@
             "projectRoot",
             "sourcePath"
           ],
-          "line": 34,
+          "line": 35,
           "path": "tests/unit/t_hcr_watch_inference.nim",
           "patterns": [
             "cc"
@@ -33563,7 +33563,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_hcr_agent"
+        "repro_hcr_agent",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
@@ -33650,7 +33651,8 @@
       "localDependencyShape": [
         "repro_cli_support",
         "repro_hcr_agent",
-        "repro_hcr_linkgraph"
+        "repro_hcr_linkgraph",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,

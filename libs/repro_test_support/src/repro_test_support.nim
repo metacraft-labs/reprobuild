@@ -1394,3 +1394,49 @@ proc shellSourceCommentsBlanked*(src: string): string =
     else:
       atWordStart = false
       inc i
+
+# ---------------------------------------------------------------------------
+# HX-S-10 — a skip that NAMES the host that does cover it.
+#
+# Two reprobuild gates -- `t_hcr_agent_process_target` and
+# `t_hcr_watch_inference` -- fell through to a bare `skip()` off-platform. Each
+# printed `[SKIPPED]`, reported 0 OK / 0 FAILED and exited 0, which anything
+# keying on exit status reads as a pass. That is the family
+# `codetracer-specs/Testing/Silent-Self-Pass-Audit-2026-08-23.md` exists to
+# inventory, and HX-S-8 already settled the vocabulary for it, so this reuses
+# that contract rather than inventing a second one:
+#
+#     UNSUPPORTED: <gate> requires <platform> (got <os> <arch>);
+#     covered by <platform> CI on <runner-label>.
+#
+# One function, three call sites, because the LANE greps for this shape and a
+# paraphrase at one site would silently stop satisfying it
+# (Verification-Harness-Traps.md Sec. 30).
+#
+# WHY IT DOES NOT ALSO EXIT NON-ZERO, AND WHO HAS TO CHANGE
+#
+# HX-S-10's second deliverable offers two ways to stop a skip reading as green
+# -- "either the runner refuses a zero-case result, or the skip path exits
+# non-zero" -- and asks which was chosen, because the two differ in who has to
+# change. THE RUNNER WAS CHOSEN. `scripts/run_hcr_lane.sh` refuses a zero-case
+# result, refuses any `[SKIPPED]` the lane manifest did not declare, and
+# refuses a declared skip that is not accompanied by this diagnostic.
+#
+# The alternative -- exiting non-zero here -- would redden `just test` on Linux
+# for two gates that are legitimately macOS-arm64-only, i.e. it would move the
+# cost onto every contributor running the whole suite in exchange for an
+# honesty the lane already supplies. The declaration that they do not run on
+# Linux lives in `scripts/hcr-lane-manifest.tsv`, is checked against the tree on
+# every `just lint`, and is checked against a real run by the lane. So the
+# change fell on the runner, and these sites owe only the NAME.
+proc announceHcrUnsupportedHost*(gate, requiresPlatform, coveringLane: string) =
+  ## Print the loud-unsupported diagnostic for a gate (or a single case) that
+  ## cannot run on this host. Call it immediately before `skip()`.
+  ##
+  ## `coveringLane` must name a real lane -- "macOS arm64 CI on eph-macos-arm64"
+  ## -- because "unsupported here" without "covered there" is how coverage goes
+  ## missing rather than being relocated.
+  stderr.writeLine(
+    "UNSUPPORTED: " & gate & " requires " & requiresPlatform &
+    " (got " & hostOS & " " & hostCPU & "); covered by " & coveringLane & ".")
+  stderr.flushFile()

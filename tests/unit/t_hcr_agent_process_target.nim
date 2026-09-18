@@ -1,6 +1,7 @@
 import std/[options, os, tables, unittest]
 
 import repro_hcr_agent
+import repro_test_support
 
 const
   SupportProfile = "macos-arm64-direct-hcr-in-codetracer-v1"
@@ -96,5 +97,15 @@ when defined(macosx) and defined(arm64):
 
 else:
   suite "HCR process target runtime":
-    test "process target runtime is macOS arm64-only":
+    # HX-S-10: this used to be a bare `skip()`. It printed `[SKIPPED]`,
+    # reported 0 OK / 0 FAILED and exited 0, so every runner that keys on exit
+    # status has read it as a pass for its whole life. It is still a skip -- the
+    # runtime really is macOS-arm64 only -- but it now NAMES the lane that does
+    # cover it, and `scripts/hcr-lane-manifest.tsv` declares this gate
+    # `unsupported` on the Linux and Windows lanes so the census accounts for it
+    # instead of silently counting it as a pass.
+    test "process target runtime is covered by the macOS arm64 lane, not this host":
+      announceHcrUnsupportedHost(
+        "t_hcr_agent_process_target", "macOS arm64",
+        "macOS arm64 CI on eph-macos-arm64")
       skip()

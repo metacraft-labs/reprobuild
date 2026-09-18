@@ -1,6 +1,7 @@
 import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_cli_support
+import repro_test_support
 import repro_hcr_agent/debug_unwind
 import repro_hcr_linkgraph
 
@@ -110,4 +111,12 @@ suite "HCR watch inference":
       check registration.rebasedSectionOrdinal > 0
       check registration.rebasedSectionAddress == 0x100000000'u64
     else:
+      # HX-S-10: was a bare `skip()` -- `[SKIPPED]`, 0 OK / 0 FAILED, exit 0,
+      # which reads as green to anything checking only the exit status. The
+      # inference path under test is macOS-arm64 only; the skip now names the
+      # lane that covers it, and the lane manifest declares this gate
+      # `unsupported` on Linux and Windows.
+      announceHcrUnsupportedHost(
+        "t_hcr_watch_inference", "macOS arm64",
+        "macOS arm64 CI on eph-macos-arm64")
       skip()
