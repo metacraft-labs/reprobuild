@@ -89,6 +89,11 @@ proc patchPlanJson*(plan: PatchPlanEvidence): JsonNode =
   result["changedFunctions"] = %plan.changedFunctions
   result["requiredTargetSymbols"] = %plan.requiredTargetSymbols
   result["unsupportedFallbackReasons"] = %plan.unsupportedFallbackReasons
+  # HLX-M8: a refusal has to be visible on the wire, not only in the shape of
+  # the arrays above. A reader that only counted `changedFunctions` could not
+  # tell "nothing changed" from "this object is refused".
+  result["refused"] = newJBool(plan.refused)
+  result["refusalReasons"] = %plan.refusalReasons
   result["mutatesTarget"] = newJBool(plan.mutatesTarget)
   result["targetMutationOperations"] = newJInt(plan.targetMutationOperations)
   result["sharedLibraryPositivePath"] = newJBool(plan.sharedLibraryPositivePath)

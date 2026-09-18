@@ -3906,7 +3906,7 @@
             "xindexObject",
             "xindexSource"
           ],
-          "line": 346,
+          "line": 413,
           "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
           "patterns": [
             "gcc"
@@ -3927,7 +3927,7 @@
             "xindexObject",
             "xindexSource"
           ],
-          "line": 371,
+          "line": 438,
           "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
           "patterns": [
             "g++"
@@ -3948,7 +3948,7 @@
             "xindexObject",
             "xindexSource"
           ],
-          "line": 408,
+          "line": 475,
           "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
           "patterns": [
             "gcc"
@@ -3969,7 +3969,7 @@
             "xindexObject",
             "xindexSource"
           ],
-          "line": 436,
+          "line": 503,
           "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
           "patterns": [
             "gcc"
@@ -3990,7 +3990,7 @@
             "xindexObject",
             "xindexSource"
           ],
-          "line": 504,
+          "line": 571,
           "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
           "patterns": [
             "gcc"

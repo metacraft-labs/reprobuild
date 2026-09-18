@@ -157,7 +157,21 @@ type
     plannedSectionBytes*: seq[PlannedSectionBytes]
     relocationDecisions*: seq[RelocationDecision]
     requiredTargetSymbols*: seq[string]
+    ## Reasons raised at `usFallbackRequired`. These say "this object has
+    ## something the direct profile does not handle, fall back" — a plan is
+    ## still emitted alongside them.
     unsupportedFallbackReasons*: seq[string]
+    ## HLX-M8, 2026-09-18. `usReject` used to be a LABEL: the planner tested
+    ## `severity in {usFallbackRequired, usReject}` and did the same one thing
+    ## for both, so a rejected object still produced a fully populated,
+    ## actionable plan and the two severities were indistinguishable
+    ## downstream. They are now separated at the only place that can separate
+    ## them. When `refused` is true the plan is EMPTY — no `changedFunctions`,
+    ## no `plannedSectionBytes`, no `relocationDecisions`, no
+    ## `requiredTargetSymbols` — and `refusalReasons` names every `usReject`
+    ## feature that caused it.
+    refused*: bool
+    refusalReasons*: seq[string]
     mutatesTarget*: bool
     targetMutationOperations*: int
     sharedLibraryPositivePath*: bool

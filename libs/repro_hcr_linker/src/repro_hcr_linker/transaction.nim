@@ -1,3 +1,5 @@
+import std/strutils
+
 import repro_hcr_linkgraph
 import repro_hcr_linker/types
 import repro_hcr_linker/trampoline
@@ -43,6 +45,15 @@ proc patchTransactionFromPlan*(plan: PatchPlanEvidence; functionName: string;
                                nopSledBytes: uint32): PatchTransaction =
   if plan.sharedLibraryPositivePath:
     raise newException(ValueError, "shared-library patch plans cannot drive direct M27 transactions")
+  # HLX-M8: a refused plan is empty, so without this the diagnostic below would
+  # be "patch plan has no planned bytes for X" — the same message an unchanged
+  # function produces. Two different causes graded on one diagnostic is trap §20
+  # of `codetracer-specs/Testing/Verification-Harness-Traps.md`; the refusal
+  # names itself instead.
+  if plan.refused:
+    raise newException(ValueError,
+      "patch plan was refused and cannot drive a transaction: " &
+      plan.refusalReasons.join("; "))
   for section in plan.plannedSectionBytes:
     if section.functionName == functionName:
       if section.bytes.len == 0:

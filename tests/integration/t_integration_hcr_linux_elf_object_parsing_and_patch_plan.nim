@@ -289,14 +289,84 @@ when defined(linux) and defined(amd64):
       check plan.mutatesTarget == false
       check plan.targetMutationOperations == 0
 
-      check "hcr_lx_obj_changed_leaf" in plan.changedFunctions
-      check "hcr_lx_obj_calls_external" in plan.changedFunctions
-      check "hcr_lx_obj_unchanged_leaf" notin plan.changedFunctions
+      # -------------------------------------------------------------------
+      # HLX-M8, 2026-09-18: `usReject` REFUSES.
+      #
+      # `gen2.c` defines `static __thread int hcr_lx_obj_thread_local_slot`,
+      # which is a DEFINED `STT_TLS` symbol and therefore
+      # `elf-new-tls-variable` at `usReject`. Until this date the planner read
+      #   `if feature.severity in {usFallbackRequired, usReject}:`
+      # with one body, so this object produced a fully populated plan — three
+      # changed functions, real planned bytes, bound target symbols — and the
+      # severity was a label on a reason string. The refusal is now the
+      # ABSENCE of a plan.
+      # -------------------------------------------------------------------
+      check plan.refused
+      checkpoint("refusalReasons: " & plan.refusalReasons.join(" | "))
+      check plan.refusalReasons.anyIt(it.startsWith("elf-new-tls-variable: "))
+      check plan.refusalReasons.anyIt(it.contains("hcr_lx_obj_thread_local_slot"))
+      # Nothing actionable survives a refusal.
+      check plan.changedFunctions.len == 0
+      check plan.plannedSectionBytes.len == 0
+      check plan.relocationDecisions.len == 0
+      check plan.requiredTargetSymbols.len == 0
+      # …and it says so on the wire, where a reader that only counted
+      # `changedFunctions` could not tell a refusal from "nothing changed".
+      let refusedJson = patchPlanJson(plan)
+      check refusedJson["refused"].getBool()
+      check refusedJson["refusalReasons"].len == plan.refusalReasons.len
+      check refusedJson["changedFunctions"].len == 0
+
+      # Unsupported features are still REPORTED, not dropped — a caller told
+      # "no" has to be told why, and the fallback-grade findings alongside the
+      # refusal are part of that.
+      check plan.unsupportedFallbackReasons.len > 0
+      let allReasons = plan.unsupportedFallbackReasons.join(" | ")
+      checkpoint("unsupportedFallbackReasons: " & allReasons)
+      check allReasons.contains("thread-local")
+      check gen2.hasFeature("elf-tls-section")
+      check gen2.featureReason("elf-tls-section").contains("SHF_TLS")
+      # The refusal reasons and the fallback reasons are disjoint sets, which
+      # is the whole point of separating them: before this change every
+      # `usReject` reason was in `unsupportedFallbackReasons` too.
+      for reason in plan.refusalReasons:
+        check reason notin plan.unsupportedFallbackReasons
+
+      # -------------------------------------------------------------------
+      # The control arm, and it is a SEVERITY-ONLY A/B.
+      #
+      # Same two objects, same bytes, same snapshot, same analyzer output —
+      # the single difference is that `elf-new-tls-variable` is carried at
+      # `usFallbackRequired` instead of `usReject`. If the planner still
+      # treated the two severities alike (the defect), this plan and the one
+      # above would be identical and the arm above could not be attributed to
+      # severity at all. A control that differs in more than one thing is a
+      # control that explains nothing; this one differs in exactly one enum.
+      #
+      # It also carries the plan-CONTENT assertions this gate has always made,
+      # so nothing that was proved before the refusal landed is now unproved.
+      # -------------------------------------------------------------------
+      var gen2Downgraded = gen2
+      var downgradedCount = 0
+      for i in 0 ..< gen2Downgraded.unsupportedFeatures.len:
+        if gen2Downgraded.unsupportedFeatures[i].severity == usReject:
+          gen2Downgraded.unsupportedFeatures[i].severity = usFallbackRequired
+          downgradedCount += 1
+      # Anti-vacuity: if nothing was downgraded the two arms are the same run.
+      check downgradedCount > 0
+      let fallbackPlan = patchPlan(gen1, gen2Downgraded, snapshot)
+      check not fallbackPlan.refused
+      check fallbackPlan.refusalReasons.len == 0
+
+      check "hcr_lx_obj_changed_leaf" in fallbackPlan.changedFunctions
+      check "hcr_lx_obj_calls_external" in fallbackPlan.changedFunctions
+      check "hcr_lx_obj_unchanged_leaf" notin fallbackPlan.changedFunctions
 
       # Real bytes for every changed function, taken from the section the
       # symbol is defined in.
-      check plan.plannedSectionBytes.len == plan.changedFunctions.len
-      for planned in plan.plannedSectionBytes:
+      check fallbackPlan.plannedSectionBytes.len ==
+        fallbackPlan.changedFunctions.len
+      for planned in fallbackPlan.plannedSectionBytes:
         checkpoint("planned " & planned.functionName & " in " &
           planned.sectionName)
         check planned.byteCount > 0'u64
@@ -304,16 +374,13 @@ when defined(linux) and defined(amd64):
         check planned.rawDigest.startsWith("blake3-256:")
         check planned.sectionName.startsWith(".text")
 
-      check "hcr_lx_obj_external" in plan.requiredTargetSymbols
-
-      # Unsupported features are REPORTED, not dropped. This is the assertion
-      # the milestone's description turns on.
-      check plan.unsupportedFallbackReasons.len > 0
-      let allReasons = plan.unsupportedFallbackReasons.join(" | ")
-      checkpoint("unsupportedFallbackReasons: " & allReasons)
-      check allReasons.contains("thread-local")
-      check gen2.hasFeature("elf-tls-section")
-      check gen2.featureReason("elf-tls-section").contains("SHF_TLS")
+      check "hcr_lx_obj_external" in fallbackPlan.requiredTargetSymbols
+      check fallbackPlan.relocationDecisions.len > 0
+      # The downgraded feature is now a fallback reason rather than a refusal,
+      # and it is the SAME text — so the two arms differ in where the reason
+      # lands, not in whether it was found.
+      check fallbackPlan.unsupportedFallbackReasons.anyIt(
+        it.startsWith("elf-new-tls-variable: "))
 
       # -------------------------------------------------------------------
       # HLX-M8, design §9: "the provider refuses patches that introduce NEW
@@ -514,12 +581,25 @@ when defined(linux) and defined(amd64):
         "changedBody": $diff.diffByName("hcr_lx_obj_changed_leaf").kind,
         "changedSignature": $diff.diffByName("hcr_lx_obj_calls_external").kind
       }
+      # Both arms are recorded, because the interesting artifact of this gate
+      # is now the DIFFERENCE between them: one enum value apart, one refused
+      # and one planned.
       evidence["plan"] = %*{
         "supportProfile": plan.supportProfile,
+        "refused": plan.refused,
+        "refusalReasons": plan.refusalReasons,
         "changedFunctions": plan.changedFunctions,
         "requiredTargetSymbols": plan.requiredTargetSymbols,
         "unsupportedFallbackReasons": plan.unsupportedFallbackReasons,
         "relocationDecisions": plan.relocationDecisions.len
+      }
+      evidence["planWithRejectDowngradedToFallback"] = %*{
+        "downgradedFeatures": downgradedCount,
+        "refused": fallbackPlan.refused,
+        "changedFunctions": fallbackPlan.changedFunctions,
+        "requiredTargetSymbols": fallbackPlan.requiredTargetSymbols,
+        "unsupportedFallbackReasons": fallbackPlan.unsupportedFallbackReasons,
+        "relocationDecisions": fallbackPlan.relocationDecisions.len
       }
       evidence["comdat"] = %*{
         "groupsFromReader": comdatFacts.comdatGroupCount,

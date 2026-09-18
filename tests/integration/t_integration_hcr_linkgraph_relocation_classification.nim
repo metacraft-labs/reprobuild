@@ -237,6 +237,15 @@ when defined(macosx):
         it.reason.contains("absent"))
 
       let plan = patchPlan(oldGraph, newGraph, snapshot)
+      # HLX-M8, 2026-09-18: `usReject` now refuses, and a refused plan is
+      # EMPTY. `macho.nim` raises exactly one `usReject` fact,
+      # `mach-o-scattered-relocation`, which arm64 objects do not carry — so
+      # this stays false and every assertion below stays meaningful. It is
+      # asserted rather than assumed: if a fixture ever did produce a scattered
+      # relocation, the gate should say so instead of failing three lines down
+      # on an empty `changedFunctions`.
+      checkpoint("refusalReasons: " & plan.refusalReasons.join(" | "))
+      check not plan.refused
       check plan.schemaId == "reprobuild.hcr.patch-plan-evidence.v1"
       check plan.supportProfile == "m26-macho64-arm64-object-facts"
       check plan.targetSnapshotId == "m26-deterministic-target"
