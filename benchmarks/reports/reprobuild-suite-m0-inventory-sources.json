@@ -25012,7 +25012,7 @@
       "targetOs": "soAny"
     },
     {
-      "binary": "build/test-bin/t_develop_root_lock_outranks_a_per_repo_lock",
+      "binary": "build/test-bin/t_develop_repo_own_lock_outranks_the_root_lock",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
@@ -25023,7 +25023,7 @@
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
-      "source": "tests/integration/t_develop_root_lock_outranks_a_per_repo_lock.nim",
+      "source": "tests/integration/t_develop_repo_own_lock_outranks_the_root_lock.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
