@@ -84,3 +84,33 @@ must also prove relocation stability and identical lookup/publication keys.
 Reusing an import scanner, provider graph ID or entry-file digest alone does
 not meet this requirement. This guard is containment, not that completed
 identity-resolution work.
+
+### What has landed so far
+
+`solvedSourceCacheEntryIdentity` (libs/repro_project_dsl/.../source_cache_identity.nim)
+is the canonical constructor. It binds the transitive local source closure of the
+entry project file — `import` / `from ... import` / `include`, plus declared local
+non-Nim inputs — together with the solved options, the resolved dependency
+instances, the target triple and the actual toolchain. The closure digest is taken
+over project-relative paths and content digests, so relocation alone does not move
+it. Any unavailable input keeps the `repro.identity.pending` marker.
+
+The import scan is not yet a complete resolver, and the gap is silent rather than
+fail-closed. It resolves a spec only against the importing file's own directory,
+so a module reached through a `--path` search root (`config.nims`, a nimble
+`srcDir`), an `include` whose spec already carries an extension, a
+package-directory import (`pkg` -> `pkg/pkg.nim`), and any `staticRead`/`slurp`
+input are all omitted from the closure while a digest is still produced. Only an
+explicitly relative `./x` / `../x` that fails to resolve counts as missing
+evidence. For projects that use a search path the #171 aliasing class therefore
+survives for those inputs; `repro_interface_artifacts.discoverNimSources` and
+`macros_a.producerSourceStamp` already resolve search roots and are where this
+should be consolidated.
+
+`sourceCacheEntryIdentity`, the four-argument legacy constructor every production
+call site still uses, supplies none of the solved inputs and therefore remains
+pending by construction; its `providerRevision` is now the source-closure digest
+rather than the entry-file digest, which fixes the Reprobuild #171 aliasing of that
+diagnostic field but does not by itself make anything publishable. Wiring the
+solved instance through the provider/engine call sites, producer evidence and the
+relocated-runtime acceptance are still open.

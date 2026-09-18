@@ -73,9 +73,10 @@ import repro_project_dsl/source_cache_identity
 import repro_binary_cache_client/cache_key
 import repro_binary_cache_server/types as bcs_types
 proc providerRevisionHex*(projectRoot: string): string =
-  ## BLAKE3 of the recipe file bytes, truncated to 32 hex chars. Empty
-  ## when the recipe file can't be read. This is diagnostic metadata,
-  ## not a complete source/provider identity for publication.
+  ## BLAKE3 of the entry recipe's local source closure, truncated to 32
+  ## hex chars. Empty when the closure cannot be resolved. This is
+  ## diagnostic metadata, not a complete source/provider identity for
+  ## publication.
   sourceProviderRevisionHex(projectRoot)
 
 proc m9L4PlatformTriple*(): bcs_types.PlatformTriple =
@@ -128,8 +129,9 @@ proc computeCacheEntryIdentity*(projectRoot, packageName,
   ## package identity is bound; entry-file bytes alone cannot authorize it.
   ##
   ## Inputs:
-  ##   * ``projectRoot`` — path to the recipe directory; used to read
-  ##     the recipe file bytes for the BLAKE3 ``providerRevision``.
+  ##   * ``projectRoot`` — path to the recipe directory; used to
+  ##     resolve the recipe's local source closure for the BLAKE3
+  ##     ``providerRevision``.
   ##   * ``packageName`` — the recipe header (``package <name>:``); also
   ##     the M9.H ``registeredFetchSpec`` / M9.K
   ##     ``registeredVersions`` registry key.
