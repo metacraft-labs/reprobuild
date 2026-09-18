@@ -32493,6 +32493,114 @@ proc gitRunPlain(identity: GitToolIdentity;
       env = scrubbedGitRepositoryEnv())
     (code: res.exitCode, output: res.output)
 
+proc gitRunPlainQuery(identity: GitToolIdentity;
+                      args: openArray[string]):
+    tuple[code: int; output: string; diagnostic: string] =
+  ## Invoke git for an answer that will be PARSED.
+  ##
+  ## ``gitRunPlain`` above merges git's stderr into its stdout
+  ## (``poStdErrToStdOut``). For a caller that only tests the exit code, or
+  ## that reads the merged text precisely BECAUSE it wants git's diagnostic,
+  ## that is the right shape and it keeps it. For a caller that parses git's
+  ## ANSWER it is not: a benign diagnostic then arrives indistinguishable
+  ## from the answer.
+  ##
+  ## Measured, not hypothetical. A repo carrying a stale split commit-graph
+  ## chain — a derived cache git writes and prunes on its own — makes every
+  ## command in it print ``warning: unable to find all commit-graph files`` on
+  ## stderr while still exiting 0 and still printing the right answer on
+  ## stdout. ``git status --porcelain`` in such a repo prints ZERO stdout
+  ## lines and that one stderr line, so every "clean is an empty porcelain
+  ## stream" probe in this file read a PRISTINE tree as dirty: the `repro
+  ## push` preflight refused with "commit or stash changes in <repo>" naming
+  ## a repo with nothing to commit, `observeWorktreeState` refused to issue a
+  ## certificate, and the post-commit lock writer skipped the workspace lock
+  ## reporting a "dirty sibling" that was clean.
+  ##
+  ## ``output`` is stdout ALONE. ``diagnostic`` is the merged, trimmed text —
+  ## what ``gitRunPlain``'s ``output`` would have held — so a caller reporting
+  ## a FAILURE still surfaces git's message, which lives on stderr.
+  ##
+  ## Both streams are drained CONCURRENTLY. Reading one to EOF and only then
+  ## the other deadlocks the moment the unread pipe fills, and git's stderr is
+  ## unbounded in principle (per-ref fetch lines, per-object lfs lines).
+  when defined(windows):
+    # Structured argv and a PeekNamedPipe drain, for the same reason
+    # ``gitRunPlain`` uses one: Nim 2.2's ``readAll`` stops at the first short
+    # pipe read on Windows, so a blocking read of either stream would also
+    # truncate. Two handles now, drained in the same pass.
+    let process = startProcess(identity.binaryPath, args = @args,
+      env = scrubbedGitRepositoryEnv(), options = {poUsePath})
+    defer: process.close()
+    const PollSleepMs = 2
+    let handles = [Handle(process.outputHandle), Handle(process.errorHandle)]
+    var sinks: array[2, string]
+    var buf {.noinit.}: array[16384, char]
+    while true:
+      var moved = false
+      for i in 0 .. 1:
+        var bytesAvail: int32 = 0
+        let peeked = peekNamedPipe(handles[i],
+          lpTotalBytesAvail = addr bytesAvail)
+        if peeked and bytesAvail > 0:
+          var bytesRead: int32 = 0
+          let toRead = min(int(bytesAvail), buf.len).int32
+          let ok = winlean.readFile(handles[i], addr buf[0], toRead,
+            addr bytesRead, nil)
+          if ok != 0 and bytesRead > 0:
+            let previousLen = sinks[i].len
+            sinks[i].setLen(previousLen + bytesRead)
+            copyMem(addr sinks[i][previousLen], addr buf[0], bytesRead)
+            moved = true
+      # Only consult the exit code once BOTH pipes are momentarily empty, so
+      # everything the child buffered before exiting is still collected.
+      if moved: continue
+      result.code = process.peekExitCode()
+      if result.code != -1: break
+      sleep(PollSleepMs)
+    result.output = sinks[0]
+    result.diagnostic = (sinks[1] & sinks[0]).strip()
+  else:
+    # POSIX ``execCmdEx`` implies ``poEvalCommand``, so the command runs
+    # through ``/bin/sh`` and the SHELL can put stderr in a file. One pipe, no
+    # interleaving, no deadlock, and the same subprocess shape as
+    # ``gitRunPlain``.
+    var cmd = quoteShell(identity.binaryPath)
+    for arg in args:
+      cmd.add(" ")
+      cmd.add(quoteShell(arg))
+    var errPath = ""
+    try:
+      let created = createTempFile("repro-gitq-", ".stderr")
+      created.cfile.close()
+      errPath = created.path
+    except CatchableError, Defect:
+      errPath = ""
+    if errPath.len > 0:
+      cmd.add(" 2>" & quoteShell(errPath))
+    # Without the redirect the child's stderr would be an unread pipe that can
+    # fill and hang it, so fall back to the MERGED stream instead — degraded
+    # (the caller sees diagnostics in ``output``, exactly ``gitRunPlain``'s
+    # behaviour) but never hung.
+    let options =
+      if errPath.len > 0: {poUsePath}
+      else: {poUsePath, poStdErrToStdOut}
+    let res = execCmdEx(cmd, options = options,
+      env = scrubbedGitRepositoryEnv())
+    result.code = res.exitCode
+    result.output = res.output
+    var errText = ""
+    if errPath.len > 0:
+      try:
+        errText = readFile(errPath)
+      except CatchableError:
+        discard
+      try:
+        removeFile(errPath)
+      except CatchableError:
+        discard
+    result.diagnostic = (errText & res.output).strip()
+
 template withDrivenOperationContext*(body: untyped) =
   ## Invariant 15 — mark every git child spawned inside ``body`` as a step of
   ## an operation Reprobuild drives itself, so the BOOKKEEPING hooks
@@ -37652,12 +37760,17 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
       observations.add(obs)
       continue
     obs.exists = true
-    let branchRes = gitRunPlain(identity,
+    let branchRes = gitRunPlainQuery(identity,
       ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
     if branchRes.code == 0:
       obs.currentBranch = branchRes.output.strip()
     obs.headSha = revParse(identity, repoAbs, "HEAD")
-    obs.isClean = gitRunPlain(identity,
+    # ``gitRunPlainQuery``: emptiness of the PORCELAIN stream is the whole
+    # answer, and the merged stream is not it. A sibling carrying a stale
+    # split commit-graph chain prints a warning on stderr and nothing on
+    # stdout, which merged read as one dirty line and made this gatherer
+    # report a pristine sibling as dirty.
+    obs.isClean = gitRunPlainQuery(identity,
       ["-C", repoAbs, "status", "--porcelain"]).output.strip().len == 0
     if obs.mainlineBranch.len > 0:
       obs.mainlineTip = revParse(identity, repoAbs,
@@ -38121,9 +38234,10 @@ proc resolveWorkspacePullProject(parsed: WorkspacePullArgs): ResolvedProject =
 
 proc uncommittedChangesBlocker(identity: GitToolIdentity;
                                repoDir: string): seq[string] =
-  let status = gitRunPlain(identity, ["-C", repoDir, "status", "--porcelain"])
+  let status = gitRunPlainQuery(identity,
+    ["-C", repoDir, "status", "--porcelain"])
   if status.code != 0:
-    return @["could not read git status: " & status.output.strip()]
+    return @["could not read git status: " & status.diagnostic]
   let body = status.output.strip()
   if body.len > 0:
     return @[$body.splitLines().len & " uncommitted change(s)"]
@@ -39766,7 +39880,7 @@ proc gitPorcelainEntries(identity: GitToolIdentity;
   ## Parse ``git status --porcelain=v1`` lines into (XY, path) pairs.
   ## Renames (``R  old -> new``) surface the destination path, which is
   ## what the dirty-outside-``locks/`` guard cares about.
-  let res = gitRunPlain(identity,
+  let res = gitRunPlainQuery(identity,
     ["-C", repoRoot, "status", "--porcelain=v1", "--untracked-files=all"])
   if res.code != 0:
     return
@@ -50441,14 +50555,18 @@ proc preflightPushRepo(identity: GitToolIdentity; workspaceRoot: string;
   if not hook.ok:
     return (false, PushPreflightRepo(), "hook-preflight", hook.diagnostic,
       getAppFilename() & " hooks ensure --vcs " & repoAbs)
-  let head = gitRunPlain(identity,
+  let head = gitRunPlainQuery(identity,
     ["-C", repoAbs, "rev-parse", "--verify", "HEAD^{commit}"])
   if head.code != 0 or head.output.strip().len == 0:
     return (false, PushPreflightRepo(), "state-preflight",
       "HEAD does not resolve to a commit in " & repo.path,
       "repair the checkout and retry 'repro push'")
   result.observed.headSha = head.output.strip().toLowerAscii()
-  let clean = gitRunPlain(identity,
+  # ``gitRunPlainQuery``: "clean" here is "the porcelain stream was empty",
+  # and a benign git diagnostic on stderr is not a porcelain line. Merged,
+  # one `warning: unable to find all commit-graph files` was enough to refuse
+  # the push naming a repo with nothing to commit.
+  let clean = gitRunPlainQuery(identity,
     ["--no-optional-locks", "-C", repoAbs, "status", "--porcelain=v1"])
   if clean.code != 0 or clean.output.strip().len > 0:
     let reason =
@@ -50512,7 +50630,7 @@ proc revalidatePushRepo(identity: GitToolIdentity; workspaceRoot: string;
       head.output.strip().toLowerAscii() != expected.headSha:
     return (false, "HEAD changed after preflight in " & repo.path,
       "review the new commit and retry 'repro push'")
-  let branch = gitRunPlain(identity,
+  let branch = gitRunPlainQuery(identity,
     ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
   let currentBranch =
     if branch.code == 0: branch.output.strip()
@@ -50520,12 +50638,12 @@ proc revalidatePushRepo(identity: GitToolIdentity; workspaceRoot: string;
   if currentBranch != expected.branch:
     return (false, "branch changed after preflight in " & repo.path,
       "restore the intended branch and retry 'repro push'")
-  let clean = gitRunPlain(identity,
+  let clean = gitRunPlainQuery(identity,
     ["--no-optional-locks", "-C", repoAbs, "status", "--porcelain=v1"])
   if clean.code != 0 or clean.output.strip().len > 0:
     return (false, "working tree changed after preflight in " & repo.path,
       "commit or stash changes and retry 'repro push'")
-  let locations = gitRunPlain(identity,
+  let locations = gitRunPlainQuery(identity,
     ["-C", repoAbs, "remote", "get-url", "--push", "--all",
      expected.remoteName])
   var locationDigests: seq[string]
@@ -58683,12 +58801,12 @@ proc observeWorktreeState*(identity: GitToolIdentity; repoRoot: string):
   ## ``--untracked-files=all`` rather than the default: a directory of
   ## untracked files reports as one entry under ``normal``, and "one entry"
   ## versus "none" is exactly the distinction being measured.
-  let res = gitRunPlain(identity,
+  let res = gitRunPlainQuery(identity,
     ["-C", repoRoot, "status", "--porcelain=v1", "--untracked-files=all"])
   if res.code != 0:
     return (ok: false, clean: false, untracked: false,
       diagnostic: "git status --porcelain failed (" & $res.code & "): " &
-        res.output.strip())
+        res.diagnostic)
   result = (ok: true, clean: true, untracked: false, diagnostic: "")
   for rawLine in res.output.splitLines():
     if rawLine.len < 3: continue

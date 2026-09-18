@@ -9036,6 +9036,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim",
+    binary: "build/test-bin/t_worktree_state_reads_stdout_not_git_diagnostics",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_cli_repro_lock_explain.nim",
     binary: "build/test-bin/t_cli_repro_lock_explain",
     defines: @[],
