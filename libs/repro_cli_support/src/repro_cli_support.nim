@@ -3760,6 +3760,142 @@ proc shouldTryFromSourceCacheSubstitution*(
   outcome.kind in {rrResolved, rrNeedsBuild} and cacheConfigured and
     not prepareOnly and not dryRun and not forceRebuild
 
+type
+  DirectTargetAliases* = object
+    ## The public name each action is LOWERED, KEYED AND REPORTED under.
+    ##
+    ## An edge's generated id (``nim-c-0ecd68db4a1df678``) is not a name a
+    ## user can read or type, so a project's ``target("name", handle)``
+    ## renames it. That rename is not cosmetic: the id is mixed into the
+    ## action's weak fingerprint (``weakFingerprintFor`` in
+    ## ``repro_build_engine``), so it is part of the cache key. A rename
+    ## that could resolve two ways would give one edge two cache
+    ## identities, and the resolution has to be a pure function of the
+    ## recipe — not of the selector, not of hash-table iteration order.
+    ##
+    ## That is what the refusal this type replaces was protecting. The
+    ## previous code raised
+    ##
+    ##     action <id> has multiple direct target aliases: ct and ct-binary
+    ##
+    ## the moment two single-action names landed on one edge, because it
+    ## had no rule for choosing between them and its table walk
+    ## (``for target in targets.values``) would otherwise have picked one
+    ## arbitrarily.
+    ##
+    ## ONE ACTION, ONE CANONICAL NAME IS PRESERVED HERE — not relaxed.
+    ## That invariant matters beyond the cache key: a per-edge nickname
+    ## that also names the edge's scratch / nimcache directory needs each
+    ## edge to have exactly one of them. What changes is only HOW the
+    ## single answer is produced. Before: raise here, and — at the second
+    ## site that computed the same map, in the build-report path — take
+    ## whichever row the fragment walk reached last. That is two answers
+    ## to one question, one of them an accident of ordering. After: one
+    ## rule, one implementation, one answer, computed from the recipe
+    ## alone.
+    ##
+    ## THE DIRECTION THAT IS A SAFETY PROPERTY IS A DIFFERENT CHECK AND
+    ## IS UNTOUCHED. Two EDGES sharing one name is what would give two
+    ## edges one identity and one scratch directory, and that is refused
+    ## earlier — in the provider, at registration, naming both edges:
+    ##
+    ##     repro project provider: error: duplicate implicit target name
+    ##     'app-binary' within package 'aliasPkg': first registered for
+    ##     action 'build-app'; re-registered for action 'build-other'
+    ##
+    ## which is ``Named-Targets.milestones.org`` §M1's re-emission rule.
+    ## Measured against this build, not inferred. The refusal removed
+    ## below caught the OPPOSITE shape — many names, one edge — which
+    ## cannot make two edges collide on anything.
+    ##
+    ## Refusing made the ambiguity loud, but it also made a
+    ## legitimate recipe unbuildable, and the specs do not support it:
+    ## ``Named-Targets.milestones.org`` §M1 constrains only the NAME side
+    ## ("re-emission of the same name within one package is a build-time
+    ## error") and explicitly allows the other direction — "an edge with
+    ## multiple ``targetNames`` produces one entry per name, all pointing
+    ## at the same edge", "the collision within one edge is allowed; the
+    ## duplicate name still resolves to a single edge so selection is
+    ## unambiguous". ``Standard-Provider-Implementation.milestones.org``
+    ## records the refusal twice as an engine limitation being worked
+    ## around rather than a contract being honoured.
+    ##
+    ## So: keep the single-valued key, drop the refusal, and decide by
+    ## RANK (see ``directAliasRank``). Precedence, not rejection.
+    byAction*: Table[string, string]
+    rankByAction*: Table[string, int]
+
+proc directAliasRank(target: BuildTargetDef): int =
+  ## Lower binds tighter. ``target("name", handle)`` RENAMES the edge —
+  ## that is the whole of what the call means, and both the DSL reference
+  ## (``Package-Model.md`` §"Explicit Names and Aggregates": "rename an
+  ## edge whose implicit name collides with something more useful") and
+  ## CodeTracer's own recipe say so at the call site: "``ct-binary`` keeps
+  ## a handle on the compile alone ... and is the id the build progress
+  ## line shows for that action".
+  ##
+  ## ``aggregate("name", ...)`` does not rename anything; it "creates a
+  ## grouping handle whose selected closure is the union of its members"
+  ## (``Package-Model.md`` §"Targets and aggregates";
+  ## ``Glossary.md`` §"Aggregate target": "primarily a selection and
+  ## grouping construct"). A one-member aggregate is a set of one, not a
+  ## second name for its member — it only LOOKS like a rename because the
+  ## payload shape is identical, which is why ``btkTarget`` exists.
+  ##
+  ## Naming it a fallback rather than excluding it is deliberate: a
+  ## project whose only public handle on an edge is a one-member
+  ## aggregate kept that name before this change, and keeps it after.
+  ## Nothing that loads today changes id.
+  case target.kind
+  of btkTarget: 0
+  of btkAggregate: 1
+  of btkCollection: high(int)
+
+proc considerDirectAlias*(aliases: var DirectTargetAliases;
+                          target: BuildTargetDef) =
+  ## Fold one build-target row into the alias map.
+  ##
+  ## Only a row naming exactly one action and no nested targets can be a
+  ## rename; anything else is a grouping and leaves its members' ids
+  ## alone. ``collect(...)`` never renames: a collection names a set by
+  ## construction (``Build-Graph-Collections.md``), so it is excluded
+  ## even in the one-member case — unchanged from before.
+  ##
+  ## Ties within one rank are broken by lexicographic order on the name.
+  ## Arbitrary, but TOTAL and independent of table iteration order, which
+  ## is the property the cache key needs.
+  ##
+  ## OPEN: two plain ``target`` calls on one edge is the shape that
+  ## reaches that tie, and it is a shape the tree wants — the standard
+  ## provider's milestones defer per-member aliases (``default`` beside
+  ## ``libfoo`` on one action) precisely because the linker used to
+  ## reject them. They build now, and the pick is deterministic, but it
+  ## is made SILENTLY: an author who wrote two renames cannot tell from
+  ## the build which one became the edge's name. That is tolerable while
+  ## the name is a display/cache concern. It stops being tolerable if a
+  ## per-edge nickname also names the edge's on-disk scratch directory,
+  ## because then the author is choosing a directory without being told
+  ## which. Whoever lands that design should decide whether two renames
+  ## on one edge is an authoring error to refuse (with a diagnostic
+  ## naming both call sites, which the payload's ``sourceFile`` /
+  ## ``sourceLine`` fields already carry) or a precedence to state out
+  ## loud. Do not read the lexicographic rule as a decision on that; it
+  ## is the smallest total order that removes the nondeterminism.
+  if target.actions.len != 1 or target.targets.len != 0:
+    return
+  if target.kind == btkCollection:
+    return
+  let actionId = target.actions[0]
+  let rank = directAliasRank(target)
+  if aliases.byAction.hasKey(actionId):
+    let bestRank = aliases.rankByAction[actionId]
+    if rank > bestRank:
+      return
+    if rank == bestRank and target.name >= aliases.byAction[actionId]:
+      return
+  aliases.byAction[actionId] = target.name
+  aliases.rankByAction[actionId] = rank
+
 proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
                             identity: PathOnlyBuildIdentity;
                             projectRoot: string;
@@ -3806,20 +3942,12 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
   let inferredActions = inferDeclaredActionDeps(declaredActions, projectRoot)
   for i in 0 ..< actionNodes.len:
     actionNodes[i].payload = inferredActions[i]
-  var aliasForAction = initTable[string, string]()
+  var aliases = DirectTargetAliases(
+    byAction: initTable[string, string](),
+    rankByAction: initTable[string, int]())
   for target in targets.values:
-    # A collection names a set; it does not rename its sole member. Treating
-    # one-member collections as aliases makes an action that also has a public
-    # target appear to have two conflicting names.
-    if target.kind == btkAggregate and target.actions.len == 1 and
-        target.targets.len == 0:
-      let actionId = target.actions[0]
-      if aliasForAction.hasKey(actionId) and aliasForAction[actionId] !=
-          target.name:
-        raise newException(ValueError,
-          "action " & actionId & " has multiple direct target aliases: " &
-            aliasForAction[actionId] & " and " & target.name)
-      aliasForAction[actionId] = target.name
+    considerDirectAlias(aliases, target)
+  let aliasForAction = aliases.byAction
 
   proc publicPayload(action: BuildActionDef): BuildActionDef =
     result = action
@@ -10836,7 +10964,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # M2 dispatch would have raised a typed exception for unresolvable
     # name selectors before reaching here).
     var targetResolutions: seq[TargetResolutionRecord] = @[]
-    var publicActionAliases = initTable[string, string]()
+    # The SAME rule the lowering pass applies, via the same helper.
+    # These two sites had drifted apart: lowering raised on a second
+    # direct name while this one silently took the last row it walked, so
+    # on any recipe carrying both shapes the id the engine keyed an action
+    # under and the id this code forwarded arguments to could disagree.
+    # One implementation, one answer.
+    var publicAliases = DirectTargetAliases(
+      byAction: initTable[string, string](),
+      rankByAction: initTable[string, int]())
     block computeTargetResolutions:
       let exportTable = aggregateTargetExportTable(refresh.snapshot)
       var actionIds: seq[string] = @[]
@@ -10860,9 +10996,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             let targetDef = decodeBuildTargetPayload(toBytes(node.payload))
             if not seenExplicit.containsOrIncl(targetDef.name):
               explicitTargets.add(targetDef.name)
-            if targetDef.kind == btkAggregate and
-                targetDef.actions.len == 1 and targetDef.targets.len == 0:
-              publicActionAliases[targetDef.actions[0]] = targetDef.name
+            considerDirectAlias(publicAliases, targetDef)
             if targetDef.kind == btkCollection:
               if collectionMembers.hasKey(targetDef.name):
                 for a in targetDef.actions:
@@ -10888,8 +11022,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if forwardedActionArgs.len > 0 and targetResolutions.len == 1 and
         targetResolutions[0].kind == trkResolved:
       forwardedActionId = targetResolutions[0].actionId
-      if publicActionAliases.hasKey(forwardedActionId):
-        forwardedActionId = publicActionAliases[forwardedActionId]
+      if publicAliases.byAction.hasKey(forwardedActionId):
+        forwardedActionId = publicAliases.byAction[forwardedActionId]
 
     let graphCacheKey = loweredGraphCacheKey(buildArtifact, effectiveMode,
       providerArtifactId, refresh.persistedSnapshotPath, pathEnv,

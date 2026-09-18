@@ -1409,8 +1409,42 @@ proc reportActionWithDeclaredOutput(report: JsonNode; output: string): JsonNode 
   newJNull()
 
 proc assertAction(report: JsonNode; id, status: string; launched: bool) =
+  ## THE FAILURE MUST NAME THE ACTION IT WAS ABOUT.
+  ##
+  ## Every case below calls this helper more than once per build report,
+  ## with a different `id` each time. `check` reports the SOURCE TEXT of
+  ## the failing expression plus the operand values, and the source text
+  ## here is `action{"status"}.getStr() == status` on one fixed line — so
+  ## two calls that differ only in `id` produce byte-identical failure
+  ## output. Measured on the `frontend-public-ui-js` case: the changed
+  ## build failed with `asUpToDate` against an expected `asSucceeded` and
+  ## the log did not say WHICH of the two asserted actions it was, which
+  ## is exactly the information needed to tell a product defect (the
+  ## action that was edited did not rerun) from a wrong expectation (the
+  ## downstream copy was correctly cut off because its input came back
+  ## byte-identical). A triage that cannot start is worse than a red case.
+  ##
+  ## Checkpoints are buffered by `unittest` and flushed only when a check
+  ## in the same test fails, so this costs nothing on the green path.
   let action = reportAction(report, id)
   check action.kind != JNull
+  if action.kind != JNull:
+    checkpoint("action " & id & " expected status=" & status &
+      " launched=" & $launched & "; observed status=" &
+      action{"status"}.getStr() & " launched=" &
+      $action{"launched"}.getBool() & " cacheDecision=" &
+      action{"cacheDecision"}.getStr() & " reason=" &
+      action{"reason"}.getStr())
+    if action{"status"}.getStr() != status or
+        action{"launched"}.getBool() != launched:
+      checkpoint("action " & id & " diagnostics=" &
+        $action{"evidence"}{"diagnostics"})
+  else:
+    var present: seq[string] = @[]
+    for item in report{"actions"}:
+      present.add(item{"id"}.getStr())
+    checkpoint("action " & id & " is absent from the report; present: " &
+      present.join(", "))
   check action{"status"}.getStr() == status
   check action{"launched"}.getBool() == launched
 
@@ -1752,6 +1786,30 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "frontend-ui-js")
       assertActionCacheEffective(secondReport, "frontend-public-ui-js")
 
+      # THE EDIT BELOW IS AN INPUT OF THE COMPILE, NOT OF THE COPY.
+      #
+      # `frontend-public-ui-js` is `fs.copyFile(source = ui.js, output =
+      # public/ui.js)`. Its only input is the compile's output, so what it
+      # does on a rebuild is decided by whether those BYTES moved — not by
+      # whether the compile ran. A trailing Nim comment does not reach
+      # jsgen's output, so the compile re-emits byte-identical JS and the
+      # copy has nothing to do. That cutoff is the property the engine is
+      # supposed to have; the expectation this replaces ("the copy
+      # relaunches too") asked it to copy a file onto itself.
+      #
+      # Measured on this case against the unpatched engine, third build:
+      #
+      #   frontend-ui-js        asSucceeded  launched=true   cdMiss
+      #   frontend-public-ui-js asUpToDate   launched=false  cdHit
+      #                         reason=outputs-present
+      #
+      # Both halves are asserted, and the second is asserted with its
+      # REASON pinned rather than relaxed: the byte-identity check is what
+      # licenses the cutoff. Were the compile to emit different JS and the
+      # copy still sit out, `check ... == uiJsBeforeEdit` goes red. An
+      # assertion that passed either way would be worse than the one it
+      # replaces.
+      let uiJsBeforeEdit = readFile(buildDebug(projectRoot, "ui.js"))
       let importedInput = projectRoot / "src" / "frontend" / "ui" /
         "calltrace.nim"
       writeFile(importedInput, readFile(importedInput) &
@@ -1763,7 +1821,10 @@ when defined(macosx) or defined(linux):
       check not changed.contains("action: c-sudoku-object-tup")
       let changedReport = parseFile(valueAfter(changed, "buildReport:"))
       assertAction(changedReport, "frontend-ui-js", "asSucceeded", true)
-      assertAction(changedReport, "frontend-public-ui-js", "asSucceeded", true)
+      check readFile(buildDebug(projectRoot, "ui.js")) == uiJsBeforeEdit
+      assertActionCacheEffective(changedReport, "frontend-public-ui-js")
+      check readFile(buildDebug(projectRoot, "public/ui.js")) ==
+        readFile(buildDebug(projectRoot, "ui.js"))
       check reportAction(changedReport, "frontend-index-js").kind == JNull
       check reportAction(changedReport, "frontend-server-index-js").kind ==
         JNull
@@ -1850,6 +1911,11 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "frontend-subwindow-js")
       assertActionCacheEffective(secondReport, "frontend-src-subwindow-js")
 
+      # Same compile/copy split as the `frontend-public-ui-js` case above;
+      # see the comment there for why the copy is expected NOT to relaunch
+      # and why the byte-identity check has to accompany that expectation.
+      let subwindowJsBeforeEdit =
+        readFile(buildDebug(projectRoot, "subwindow.js"))
       let importedInput = projectRoot / "src" / "frontend" / "paths.nim"
       writeFile(importedInput, readFile(importedInput) &
         "\n# reprobuild m34 selected frontend edit\n")
@@ -1861,8 +1927,11 @@ when defined(macosx) or defined(linux):
       check not changed.contains("action: c-sudoku-object-tup")
       let changedReport = parseFile(valueAfter(changed, "buildReport:"))
       assertAction(changedReport, "frontend-subwindow-js", "asSucceeded", true)
-      assertAction(changedReport, "frontend-src-subwindow-js", "asSucceeded",
-        true)
+      check readFile(buildDebug(projectRoot, "subwindow.js")) ==
+        subwindowJsBeforeEdit
+      assertActionCacheEffective(changedReport, "frontend-src-subwindow-js")
+      check readFile(buildDebug(projectRoot, "src/subwindow.js")) ==
+        readFile(buildDebug(projectRoot, "subwindow.js"))
       check reportAction(changedReport, "frontend-ui-js").kind == JNull
       check reportAction(changedReport, "frontend-index-js").kind == JNull
       check reportAction(changedReport, "frontend-server-index-js").kind ==
@@ -1953,6 +2022,10 @@ when defined(macosx) or defined(linux):
       assertActionCacheEffective(secondReport, "frontend-index-js")
       assertActionCacheEffective(secondReport, "frontend-src-index-js")
 
+      # Same compile/copy split as the `frontend-public-ui-js` case above;
+      # see the comment there for why the copy is expected NOT to relaunch
+      # and why the byte-identity check has to accompany that expectation.
+      let indexJsBeforeEdit = readFile(buildDebug(projectRoot, "index.js"))
       let importedInput = projectRoot / "src" / "frontend" / "index" /
         "window.nim"
       writeFile(importedInput, readFile(importedInput) &
@@ -1965,7 +2038,10 @@ when defined(macosx) or defined(linux):
       check not changed.contains("action: c-sudoku-object-tup")
       let changedReport = parseFile(valueAfter(changed, "buildReport:"))
       assertAction(changedReport, "frontend-index-js", "asSucceeded", true)
-      assertAction(changedReport, "frontend-src-index-js", "asSucceeded", true)
+      check readFile(buildDebug(projectRoot, "index.js")) == indexJsBeforeEdit
+      assertActionCacheEffective(changedReport, "frontend-src-index-js")
+      check readFile(buildDebug(projectRoot, "src/index.js")) ==
+        readFile(buildDebug(projectRoot, "index.js"))
       check reportAction(changedReport, "frontend-ui-js").kind == JNull
       check reportAction(changedReport, "frontend-subwindow-js").kind == JNull
       check reportAction(changedReport, "frontend-server-index-js").kind ==
@@ -2132,9 +2208,35 @@ when defined(macosx) or defined(linux):
       let selectedTarget = projectRoot & "#ct"
       let first = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
+      # `ct` IS THE SELECTOR; `ct-binary` IS THE EDGE'S NAME.
+      #
+      # The pinned recipe declares both against the same compile:
+      #
+      #   target("ct-binary", ct)
+      #   aggregate("ct", actions = @[ct], targets = ctStartupAssets)
+      #
+      # and says at that call site that "`ct-binary` ... is the id the
+      # build progress line shows for that action". `ct` names the set the
+      # product ships — the binary plus the startup assets `ct` reads out
+      # of `<prefix>/config/` — and a set name does not rename its member.
+      #
+      # This case's subset copies `src/ct` but not `src/config`, so
+      # `ctStartupAssets` is empty here and the aggregate degenerates to
+      # one member; that is why the closure is a single action. It does
+      # NOT make the aggregate a second name for that action.
+      #
+      # That is a MEASURED claim, not a reading of the code. Drive the
+      # same pair through the UNPATCHED engine with the aggregate carrying
+      # a second member, so it never degenerates — the fixture shape in
+      # `tests/e2e/local-build-engine/t_e2e_repro_build_named_target.nim`
+      # — and `repro build <aggregate>` already reports the edge under the
+      # `target()` name. The id an edge is keyed and reported under must
+      # not flip because two data files happened to be present.
       check first.contains("selectedTarget: ct")
       check first.contains("scheduler: actions=1")
-      check first.contains("action: ct status=asSucceeded launched=true")
+      check first.contains(
+        "action: ct-binary status=asSucceeded launched=true")
+      check not first.contains("action: ct status=")
       check not first.contains("action: db-backend-record")
       check not first.contains("action: frontend-ui-js")
       check not first.contains("action: frontend-index-js")
@@ -2158,8 +2260,10 @@ when defined(macosx) or defined(linux):
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
       check firstReport{"actions"}.len == 1
-      assertAction(firstReport, "ct", "asSucceeded", true)
-      let nativeAction = reportAction(firstReport, "ct")
+      assertAction(firstReport, "ct-binary", "asSucceeded", true)
+      # The aggregate's name is not an action id.
+      check reportAction(firstReport, "ct").kind == JNull
+      let nativeAction = reportAction(firstReport, "ct-binary")
       check nativeAction{"dependencyPolicyKind"}.getStr() ==
         "dgAutomaticMonitor"
       check hasMonitorEvidence(nativeAction)
@@ -2174,9 +2278,10 @@ when defined(macosx) or defined(linux):
 
       let second = build(reproBin, selectedTarget, repoRoot, pathValue,
         nativeEnv)
-      check second.contains("action: ct status=asUpToDate launched=false")
+      check second.contains(
+        "action: ct-binary status=asUpToDate launched=false")
       let secondReport = parseFile(valueAfter(second, "buildReport:"))
-      assertActionCacheEffective(secondReport, "ct")
+      assertActionCacheEffective(secondReport, "ct-binary")
 
       let nativeInput = projectRoot / "src" / "ct" / "codetracer.nim"
       writeFile(nativeInput, readFile(nativeInput) &
@@ -2188,7 +2293,7 @@ when defined(macosx) or defined(linux):
       check not changed.contains("action: frontend-index-js")
       check not changed.contains("action: c-sudoku-object-tup")
       let changedReport = parseFile(valueAfter(changed, "buildReport:"))
-      assertAction(changedReport, "ct", "asSucceeded", true)
+      assertAction(changedReport, "ct-binary", "asSucceeded", true)
 
     test "selected codetracer aggregate builds implemented app slice":
       let repoRoot = getCurrentDir()

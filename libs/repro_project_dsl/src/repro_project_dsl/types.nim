@@ -1038,6 +1038,16 @@ type
     ## rows carry the right ``kind`` discriminator end-to-end.
     btkAggregate     ## ad-hoc ``aggregate("...", ...)`` grouping
     btkCollection    ## ``collect("...", ...)`` graph collection
+    btkTarget        ## plain ``target("name", handle)`` registration.
+      ## Added so the two call shapes that produce the SAME payload
+      ## shape — one action, no nested targets — stay distinguishable.
+      ## Before this value existed, ``target("ct-binary", ct)`` and a
+      ## degenerate ``aggregate("ct", actions = @[ct], targets = @[])``
+      ## decoded identically, so the graph linker could not tell a
+      ## RENAME from a one-member GROUPING and refused the pair outright
+      ## ("action ... has multiple direct target aliases"). Appended
+      ## rather than inserted: the payload ``kind`` byte is positional,
+      ## and v1/v2 payloads still have to decode as ``btkAggregate`` (0).
 
   BuildTargetDef* = object
     name*: string

@@ -26,8 +26,11 @@
 ##      a ``btkCollection`` ``BuildTargetDef`` writes a
 ##      ``tekCollection`` export-table row; a ``btkAggregate`` with
 ##      multiple action handles writes a ``tekAggregate`` row; a
-##      plain ``target "name", action`` (one handle, no nested
-##      targets, default ``btkAggregate``) writes ``tekExplicit``.
+##      ``btkTarget`` row and a decoded one-handle ``btkAggregate`` row
+##      both write ``tekExplicit``.
+##   6. ``target "name", action`` stamps ``btkTarget``, so a RENAME stays
+##      distinguishable from a one-member GROUPING even though the two
+##      produce the same ``actions`` / ``targets`` shape.
 
 import std/unittest
 
@@ -121,22 +124,36 @@ suite "Spec-Implementation M5: collect / aggregate registry split":
       kind: btkAggregate)
     registerExplicitTargetExport(aggregateTarget, "mypkg")
 
-    # btkAggregate with a single action / no nested targets — the
-    # zero-value of the discriminator for plain ``target "name", action``
-    # — is still treated as ``tekExplicit`` so the on-disk row shape
-    # matches the M0 / M1 record convention.
+    # btkAggregate with a single action / no nested targets is still
+    # treated as ``tekExplicit``. This is now the DECODED-PAYLOAD path
+    # rather than the registration path: ``BuildTargetKind`` zero-defaults
+    # to ``btkAggregate``, so a v1 / v2 build-target payload written
+    # before the ``kind`` byte existed arrives here indistinguishable from
+    # a fresh ``aggregate`` call, and the shape test is what keeps its row
+    # kind stable across a replay.
     let explicitTarget = BuildTargetDef(
       name: "release",
       actions: @["act-4"],
       kind: btkAggregate)
     registerExplicitTargetExport(explicitTarget, "mypkg")
 
+    # btkTarget → tekExplicit. Freshly registered ``target "name", action``
+    # rows carry their own discriminator, so the classification no longer
+    # depends on a shape that ``aggregate("name", actions = @[one])``
+    # produces identically.
+    let stampedTarget = BuildTargetDef(
+      name: "ship",
+      actions: @["act-5"],
+      kind: btkTarget)
+    registerExplicitTargetExport(stampedTarget, "mypkg")
+
     let table = registeredTargetExports()
-    check table.entries.len == 3
+    check table.entries.len == 4
 
     var sawCollection = false
     var sawAggregate = false
     var sawExplicit = false
+    var sawStamped = false
     for entry in table.entries:
       case entry.name
       of "test":
@@ -148,7 +165,40 @@ suite "Spec-Implementation M5: collect / aggregate registry split":
       of "release":
         check entry.kind == tekExplicit
         sawExplicit = true
+      of "ship":
+        check entry.kind == tekExplicit
+        sawStamped = true
       else: discard
     check sawCollection
     check sawAggregate
     check sawExplicit
+    check sawStamped
+
+  test "target stamps btkTarget, distinct from a one-member grouping":
+    ## The two call shapes used to produce byte-identical payloads: one
+    ## action, no nested targets, ``kind`` at its zero value. A consumer
+    ## that has to tell a RENAME from a GROUPING — the graph linker, which
+    ## mixes the chosen public name into the action's cache key — could
+    ## not, so a recipe carrying both (CodeTracer's
+    ## ``target("ct-binary", ct)`` beside
+    ## ``aggregate("ct", actions = @[ct], targets = ctStartupAssets)``,
+    ## whose startup assets are conditional and may be absent) was refused
+    ## outright. The discriminator is what makes the pair decidable.
+    let action = buildAction("act-1", publicCliCall("p", "t", "", "e1", @[]))
+
+    let renamed = target("ct-binary", action)
+    let grouped = aggregate("ct", actions = @[action])
+
+    check renamed.kind == btkTarget
+    check grouped.kind == btkAggregate
+
+    # Same shape, different meaning — which is exactly why the shape
+    # cannot be the discriminator.
+    check renamed.actions == grouped.actions
+    check renamed.targets.len == 0
+    check grouped.targets.len == 0
+
+    # Both still land in the legacy registry; the split is on ``kind``,
+    # not on where the row is stored.
+    check registeredAggregates().len == 2
+    check registeredCollections().len == 0
