@@ -30,6 +30,7 @@ repo in this workspace, so you can open them.
 8. [Adopt non-destructively](#8-adoption)
 9. [Measure honestly](#9-measuring)
 10. [Work done outside the graph is invisible to it](#10-outside)
+11. [☐ Tool-owned caches — where the tool's own cache goes](#11-toolcaches)
 
 ---
 
@@ -1050,6 +1051,95 @@ Two commits, no flag day, and at every point the tree built.
 
 ---
 
+## <a name="11-toolcaches"></a>11. ☐ Tool-owned caches — where the tool's own cache goes
+
+Some tools bring a cache of their own: `nim --nimcache`, `cargo`'s
+target dir, `ccache`, `GOCACHE`, a CMake build directory. It is neither
+an input nor an output — the tool writes it, reads it back next time,
+and goes faster for finding it.
+
+Where you point it is not a detail, for a reason particular to
+reprobuild: **the path lands in the command line, and the command line
+reaches the cache key.** A typed-tool edge's id is derived from the
+declared call shape, flag values included
+(`repro_project_dsl/runtime_core.nim:3943-3977`), and the engine's
+default weak fingerprint is derived from that id
+(`repro_build_engine.nim:2408`). Move the cache, move the key.
+
+### The rule
+
+**Put it somewhere stable, inside the project.** The conventions
+already do this and you should copy them rather than invent:
+
+```nim
+# repro_standard_provider/conventions/nim.nim:669-670
+# one nimcache per entry point, under the project
+proc nimcachePathFor(projectRoot, entry: string): string =
+  scratchPathFor(projectRoot, entry) / "nimcache"
+```
+
+`ScratchDirName` is `.repro/build`, declared identically in 38 modules
+under `libs/`. CMake gets `-B <root>/.repro/build/cmake`
+(`c_cpp_cmake.nim:311`); rust gets `<root>/.repro/build/<crate>/deps`
+(`rust.nim:802`); autotools gets `<scratch>/_build`
+(`c_cpp_autotools.nim:518`).
+
+### The tell
+
+**A cache path containing a pid, a timestamp, or a fresh temp dir.**
+That is a directory the tool will never find again. Every invocation
+is cold, and — because the path is in the key — the engine's own action
+cache misses too, for a reason that has nothing to do with what the
+edge computes.
+
+The scar is in this repo. The provider nimcache key
+(`repro_interface_artifacts.nim:4419-4424`) mixes in
+`"session=" & providerNimcacheSessionToken()`, the root `repro`
+process's pid. It is there for a real reason — concurrent sessions
+populating one nimcache hit `ENOTEMPTY` inside Nim's incremental
+cleanup and the compile *aborts* — but the cost is that every `repro`
+invocation starts with an empty nimcache and leaves the old one behind
+in `$TMPDIR` forever. The same key also mixes in a BLAKE3 over the
+content of every reprobuild library source, so editing any of them does
+it again.
+
+### The other tell: keying scratch on a fingerprint
+
+It looks principled and it is the same bug. `repro_profile_compile`
+puts its nimcache at `profile-cache/nimcache/<digestHex>`
+(`sources.nim:289`) where the digest is the edge's content identity. So
+**every source edit produces a fresh empty directory** — which defeats
+the entire purpose of an incremental cache, since the thing it exists
+to accelerate is precisely the recompile after an edit.
+
+A tool cache should be keyed on the edge's *identity*, never on its
+*contents*.
+
+### Sharing versus isolating
+
+The last decision is scope, and it goes opposite ways for two kinds of
+cache:
+
+| Kind | Examples | Scope |
+| --- | --- | --- |
+| Content-keyed | `--nimcache`, `ccache`, `GOCACHE` | Share as widely as concurrency allows — entries are named by their own input hash, so unrelated edges *help* each other |
+| Position-keyed | cargo target dir, CMake build dir, `tsBuildInfoFile` | One per edge — entries are named by position, so two edges silently overwrite each other |
+
+Getting this backwards is not a tuning mistake. Splitting the shared
+provider nimcache per edge would turn one cold compile plus 83 warm
+ones into 84 cold ones — the docstring at
+`repro_interface_artifacts.nim:4413-4422` exists to stop exactly that.
+And pointing two edges at one cargo target dir corrupts both.
+
+### ☐ What is missing
+
+There is no DSL vocabulary for any of this. Every convention picks its
+own path by hand, correctly but independently, and nothing collects the
+directories when an edge's identity changes. The design is drafted in
+`reprobuild-specs/Tool-Owned-Caches.md`; nothing of it ships yet.
+
+---
+
 ## What is not settled
 
 | Topic | Status | Note |
@@ -1059,6 +1149,8 @@ Two commits, no flag day, and at every point the tree built.
 | A spec for entropy blessings (§4) | ☐ Missing | No spec document exists. The source comments are the authority; the diagnostics no longer cite a file that does not exist. |
 | `Build-Graph-Collections.md` status header (§3) | ⚠ Stale | Says "not yet implemented"; `collect` and the exclude rule ship. |
 | `mesKnownScopeLoss` comments (§5) | ✓ Fixed | Both comments now say what the code does: Level 1 publishes and narrows, Level 2 withholds and disables session-wide. |
+| Tool-owned cache placement (§11) | ☐ Not implemented | No DSL vocabulary; conventions each pick a path by hand. Draft: `reprobuild-specs/Tool-Owned-Caches.md`. |
+| Provider nimcache session token (§11) | ⚠ Known cost | Correct against `ENOTEMPTY`, but every `repro` run starts cold and leaks a tree into `$TMPDIR`. Needs a lock on a stable path instead. |
 | `--progress=quiet` vs runquota output (§9) | ✓ Reconciled | `reprobuild-specs/CLI/build.md` §"The one thing `quiet` does not silence" now states the heartbeat as a deliberate exception, and says why: `Interactive-UX-And-Progress.md` Principle 1 outranks "disable all progress output" for a wait the build cannot bound. The spec was the thing that was wrong. |
 
 ## Related documentation
