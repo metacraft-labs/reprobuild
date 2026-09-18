@@ -274,7 +274,7 @@ libs/repro_interface_artifacts/tests/t_rp1_provider_artifact_edge_identity.nim	n
 libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim	nim	9
 libs/repro_interface_artifacts/tests/t_runtime_tool_uses_codec.nim	nim	3
 libs/repro_interface_artifacts/tests/t_windows_dynlib_staging.nim	nim	4
-libs/repro_interface_artifacts/tests/t_windows_long_command_script.nim	nim	2
+libs/repro_interface_artifacts/tests/t_windows_long_command_script.nim	nim	4
 libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim	nim	6
 libs/repro_launch_plan/tests/t_codec_smoke.nim	nim	12
 libs/repro_local_store/tests/t_a4_p4_eviction.nim	nim	4

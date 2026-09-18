@@ -10923,7 +10923,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_windows_long_command_script.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
