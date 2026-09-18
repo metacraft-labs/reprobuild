@@ -10856,6 +10856,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_binary_cache_client",
         "repro_interface_artifacts",
         "repro_project_dsl"
       ],
@@ -10863,7 +10864,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/test_contribution_fingerprint_invalidation_boundaries.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 11,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

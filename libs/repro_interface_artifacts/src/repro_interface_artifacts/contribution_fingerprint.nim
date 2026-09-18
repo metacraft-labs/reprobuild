@@ -109,6 +109,42 @@
 ## uses, and the base case plays the same role ``leafDepIdentityHex``
 ## does there.
 ##
+## ## What "unresolved" means, and why it is visible
+##
+## A dependency the resolver does not bind is NOT an error: its leaf
+## identity is complete in declaration space, so composition continues
+## and a usable hex comes out. But that hex binds the dependency's
+## declared COORDINATE and nothing else, so two catalogs differing only
+## in that dependency's realization metadata land on the same value.
+##
+## That is a property of declaration space and this module does not
+## pretend to fix it. What it does is refuse to let the difference be
+## invisible, and it does so in the two places where invisibility was
+## measured:
+##
+##   1. ``contributionFingerprint`` has NO default resolver. The obvious
+##      call used to be the aliasing one -- ``noContributionResolver``
+##      was the default argument, so a caller reached the
+##      coordinate-only path without naming it or knowing it existed.
+##      The resolver is now a required parameter: composing in
+##      declaration space only is a legitimate choice that has to be
+##      spelled at the call site, where review can see it. A compile
+##      error is a better gate than a runtime refusal here precisely
+##      because there is no third behaviour to fall back on.
+##   2. The result carries ``unresolvedDependencies`` -- every
+##      coordinate in the closure that folded in as a leaf, sorted,
+##      de-duplicated and accumulated TRANSITIVELY, because a
+##      leaf-padded child makes its parent leaf-padded too.
+##      ``isResolved`` answers "is there a usable hex" and was true
+##      either way; ``dependenciesFullyResolved`` is the predicate a
+##      lock writer must gate on.
+##
+## A contribution that declares NO dependencies is fully bound and is
+## not penalised: an empty dependency set is complete evidence -- the
+## same distinction ``source_cache_identity`` draws with
+## ``optionsSolved`` / ``dependenciesResolved`` / ``searchRootsKnown``,
+## whose precedent this follows.
+##
 ## ## Cycles
 ##
 ## ``visited`` is a stack of ``<target package>\0<contributor>`` keys.
@@ -116,9 +152,64 @@
 ## LEAF identity instead of being recursed into, exactly as
 ## ``foreignPackageIdentityRec`` does; the stack is popped after each
 ## contribution's dependency loop so sibling branches see a clean trail.
+## A cycle-broken edge is reported in ``unresolvedDependencies`` for the
+## same reason an unbindable one is: at that edge the payload carries a
+## coordinate and nothing else.
 ## A ``MaxContributionDepth`` guard additionally bounds a resolver that
 ## manufactures unboundedly many distinct coordinates (which ``visited``
 ## alone cannot catch), and it REFUSES rather than truncating.
+##
+## ## Memoisation, and what makes it sound
+##
+## ``MaxContributionDepth`` bounds DEPTH, not WORK. Without a memo a
+## two-edge-per-level diamond re-composed every shared sub-graph once
+## per path: measured on this tree, 428 ms at depth 12, 6.9 s at 16,
+## 27.7 s at 18 and 112.7 s at 20 -- doubling per level, so a legal
+## 40-level graph did not terminate in practice and the depth bound was
+## a promise the composer could not keep. The same graphs now compose in
+## about a millisecond, on the same hexes to the byte.
+##
+## The memo is per CALL and is keyed on the full dependency coordinate
+## (package, contributor, normalised target interface fingerprint) --
+## the thing the resolver is a function of, and deliberately not the
+## 2-part ``visited`` key, which two dependencies pinned to different
+## interface revisions share.
+##
+## Two conditions make reuse sound, and dropping either one is a false
+## accept rather than a slowdown:
+##
+##   * a sub-graph whose value depended on the TRAVERSAL CONTEXT rather
+##     than on the graph -- some edge inside it folded a leaf because
+##     the coordinate was already on ``visited``, or refused on the
+##     depth bound -- is never stored. See
+##     ``ComposeOutcome.contextDependent`` for why propagating that one
+##     flag upward covers every sub-graph that could disagree. Dropping
+##     it makes the fingerprint depend on the order the root declared
+##     its dependencies in, which the canonical encoding exists to
+##     prevent;
+##   * a stored sub-graph records the deepest RELATIVE OFFSET at which
+##     some node inside it still OWNS a surviving dependency edge, and
+##     is reused only where that node would still be allowed to own one
+##     at the new position: ``depth + 1 + edgeDepth <
+##     MaxContributionDepth``. Dropping the condition serves a sub-graph
+##     memoised near the root to a call site near the bound and silently
+##     skips the refusal it owes there.
+##
+##     The quantity is edge OWNERSHIP and not recursion HEIGHT, and the
+##     difference was a measured false accept rather than a refinement.
+##     The depth check runs per EDGE and BEFORE the resolver is
+##     consulted, so a node whose dependency the resolver answers
+##     ``none`` for still owes the check — while recursing through
+##     nothing, and so adding nothing to a height. A height-keyed guard
+##     therefore admitted, at exactly ``depth + 1 + height ==
+##     MaxContributionDepth``, a sub-graph a fresh composition REFUSES,
+##     and the verdict flipped with the order the root declared its two
+##     dependencies in. Conversely a sub-graph whose deepest node
+##     declares no dependencies at all owes no check there and is legal
+##     one level below any height bound, so keying on the height would
+##     also have stopped reusing it. ``edgeDepth`` is exact in both
+##     directions: it is ``-1`` for a sub-graph with no surviving edge
+##     anywhere, which is then always reusable.
 ##
 ## ## Fail closed
 ##
@@ -131,7 +222,15 @@
 ##
 ## Required, and refused when absent or malformed:
 ##
-##   * contributor id, target package name, provider identity;
+##   * contributor id and target package name;
+##   * a provider identity that is 64 hex characters after
+##     normalisation. It is a CONTENT identity of the provider
+##     implementation -- the same class of value as the target interface
+##     fingerprint, and held to the same contract, which it was not
+##     before: a placeholder satisfied "required, non-empty" and still
+##     produced a hex. A value carrying ``repro.identity.pending`` is
+##     refused under that name, because "not computed yet" is a
+##     different diagnosis from "malformed";
 ##   * a target interface fingerprint that is 64 hex characters after
 ##     normalisation (an unpinned or develop-bound contribution refuses);
 ##   * at least one realization;
@@ -145,6 +244,10 @@
 ##   * a resolved dependency that itself refuses propagates its refusal
 ##     upward rather than being silently downgraded to its leaf.
 ##
+## An UNRESOLVED dependency is not on that list and is not a refusal --
+## see "What 'unresolved' means" above. It is a marked, usable identity,
+## and marking it is what keeps the two states apart.
+##
 ## ## What this module does NOT do
 ##
 ## It does not serialize anything into a lock (M7 deliverable 2, which
@@ -152,7 +255,7 @@
 ## contribution (deliverable 3). It computes an identity; storing and
 ## choosing are other deliverables.
 
-import std/[algorithm, options, sequtils, strutils]
+import std/[algorithm, options, sequtils, strutils, tables]
 
 import repro_hash
 
@@ -174,6 +277,16 @@ const
     ## Recursion bound. ``visited`` already terminates every cycle; this
     ## bounds a resolver that manufactures unboundedly many distinct
     ## coordinates. Exceeding it REFUSES.
+
+  PendingContributionIdentityMarker* = "repro.identity.pending"
+    ## The marker this codebase stamps on an identity that has NOT been
+    ## computed yet — ``cache_key.PendingCacheIdentityOptionKey``, spelled
+    ## here as a literal because ``repro_interface_artifacts`` does not
+    ## depend on ``repro_binary_cache_client`` and must not grow the
+    ## dependency for one string. A ``providerIdentity`` carrying it is
+    ## refused BY NAME rather than merely as a malformed digest: "not
+    ## computed yet" and "malformed" are different diagnoses, and a lock
+    ## writer needs to tell them apart.
 
 type
   ContributionDependencyRef* = object
@@ -219,25 +332,79 @@ type
   ContributionFingerprint* = object
     ## ``hex`` is non-empty exactly when ``refusals`` is empty. There is
     ## no third state and no partial fingerprint.
+    ##
+    ## ``unresolvedDependencies`` is the SECOND axis, and it is not a
+    ## refusal: a leaf-folded dependency yields a perfectly well-formed
+    ## identity in declaration space. It is the record of which
+    ## dependencies that identity binds only by COORDINATE, so a consumer
+    ## can tell a fully-bound fingerprint from a leaf-padded one — see
+    ## ``dependenciesFullyResolved``.
     hex*: string
     refusals*: seq[string]
+    unresolvedDependencies*: seq[ContributionDependencyRef]
+      ## Every dependency coordinate in this fingerprint's closure that
+      ## folded in as a coordinate-only LEAF rather than as a composed
+      ## sub-fingerprint — because the resolver returned ``none``, or
+      ## because the edge closed a cycle. Sorted by coordinate and
+      ## de-duplicated, and accumulated transitively: a leaf-padded
+      ## dependency two levels down makes the root leaf-padded too,
+      ## because the root's payload contains that child's hex.
+      ##
+      ## Empty on a contribution that declares no dependencies at all:
+      ## an empty dependency set is complete evidence, not missing
+      ## evidence. Same distinction ``source_cache_identity`` draws with
+      ## ``dependenciesResolved``.
 
   ContributionResolver* = proc (dep: ContributionDependencyRef):
     Option[ContributionIdentity] {.gcsafe.}
     ## Caller-supplied map from a declared dependency coordinate to that
     ## dependency's own contribution identity. Returning ``none`` is not
     ## an error: the composer then folds in the dependency's LEAF
-    ## identity, which is complete in declaration space. Mirrors
+    ## identity, which is complete in declaration space, and records the
+    ## coordinate in ``unresolvedDependencies``. Mirrors
     ## ``foreign_common.ForeignDepResolver``.
+    ##
+    ## Assumed to be a FUNCTION of the coordinate for the duration of one
+    ## ``contributionFingerprint`` call: the composer memoises on the
+    ## coordinate, so a resolver that answers differently for the same
+    ## coordinate within one call gets whichever answer was asked for
+    ## first. (Between calls it may answer differently; the memo is
+    ## per-call.)
 
 proc noContributionResolver*(dep: ContributionDependencyRef):
     Option[ContributionIdentity] {.gcsafe.} =
-  ## Default resolver: every dependency folds in as its leaf coordinate.
+  ## The EXPLICIT leaf-only resolver: every dependency folds in as its
+  ## declared coordinate.
+  ##
+  ## This is no longer a default argument of ``contributionFingerprint``,
+  ## and that is deliberate. As a default it made the obvious call —
+  ## ``contributionFingerprint(identity)`` — the aliasing path: two
+  ## catalogs differing only in a dependency's realization metadata
+  ## fingerprinted identically, and nothing in the call said so. A
+  ## caller that genuinely wants declaration-space-only composition names
+  ## this proc, and the name is then visible at the call site and in
+  ## review.
   none(ContributionIdentity)
 
 proc isResolved*(fp: ContributionFingerprint): bool =
   ## True iff a usable 64-hex fingerprint was produced.
+  ##
+  ## It says NOTHING about whether the dependency closure was bound: a
+  ## fingerprint every one of whose dependencies folded in as a leaf is
+  ## still a resolved fingerprint. ``dependenciesFullyResolved`` is the
+  ## question a lock writer has to ask.
   fp.refusals.len == 0 and fp.hex.len == 64
+
+proc dependenciesFullyResolved*(fp: ContributionFingerprint): bool =
+  ## True iff a usable fingerprint was produced AND every dependency in
+  ## its closure was bound through the resolver rather than folded in as
+  ## a coordinate-only leaf.
+  ##
+  ## This is the predicate M7 deliverable 2 must gate lock serialization
+  ## on. ``isResolved`` alone is not it: an unresolved dependency binds
+  ## only its declared coordinate, so two catalogs differing only in that
+  ## dependency's realization metadata still land on the same hex.
+  fp.isResolved and fp.unresolvedDependencies.len == 0
 
 proc refusalReason*(fp: ContributionFingerprint): string =
   ## The refusals joined for a diagnostic. Empty on a resolved value.
@@ -302,6 +469,13 @@ proc normalizedFingerprint*(value: string): string =
     if result.startsWith(prefix):
       return result[prefix.len .. ^1]
 
+proc contributionCoordinate*(dep: ContributionDependencyRef): string =
+  ## The stable spelling of a declared dependency coordinate — the tuple
+  ## the leaf identity binds — for diagnostics, de-duplication and
+  ## ordering. Not a digest, and not an input of any payload.
+  dep.targetPackage & "@" & dep.contributor & "#" &
+    normalizedFingerprint(dep.targetInterfaceFingerprint)
+
 proc isHex(value: string; width: int): bool =
   if value.len != width:
     return false
@@ -309,6 +483,15 @@ proc isHex(value: string; width: int): bool =
     if ch notin {'0'..'9', 'a'..'f', 'A'..'F'}:
       return false
   true
+
+proc isPendingIdentity*(value: string): bool =
+  ## True when ``value`` carries the codebase's "identity not computed
+  ## yet" stamp. Matched case-insensitively and as a SUBSTRING, because
+  ## the marker is used both bare and as ``<marker>:<detail>``, and
+  ## because a value that merely mentions it is not a content identity
+  ## either. Over-matching here costs a false refusal, which is the safe
+  ## direction.
+  value.toLowerAscii().contains(PendingContributionIdentityMarker)
 
 proc isDigestField(value: string): bool =
   ## A well-formed integrity digest: 64 hex characters, or the SRI
@@ -405,7 +588,10 @@ proc leafContributionIdentityHex*(dep: ContributionDependencyRef): string =
   ## It binds the declared coordinate, NOT the dependency's realized
   ## output: two catalogs differing only in an unresolved dependency's
   ## realization metadata land on the same leaf. Supplying a
-  ## ``ContributionResolver`` binds that difference.
+  ## ``ContributionResolver`` binds that difference; every coordinate
+  ## that folds in here instead is reported in
+  ## ``ContributionFingerprint.unresolvedDependencies``, so the alias is
+  ## detectable rather than silent.
   var payload = ContributionLeafMagic
   payload.putStr(dep.targetPackage)
   payload.putStr(dep.contributor)
@@ -419,12 +605,82 @@ proc dependencyKey(targetPackage, contributor: string): string =
 # The composer
 # ---------------------------------------------------------------------------
 
+type
+  ComposeOutcome = object
+    ## What one ``composeContribution`` call produced, plus the two facts
+    ## the MEMO needs and the public result does not carry.
+    fp: ContributionFingerprint
+    edgeDepth: int
+      ## The deepest offset, RELATIVE to this sub-graph's own node, at
+      ## which some node still owns a surviving dependency edge — an
+      ## edge that passed coordinate validation and therefore reached
+      ## the depth check. ``0`` when this node itself owns one and
+      ## nothing below it is deeper; ``-1`` when no node in the
+      ## sub-graph owns one at all.
+      ##
+      ## This, and not the recursion height, is what the depth bound is
+      ## about. A node at depth ``d`` may own an edge iff
+      ## ``d < MaxContributionDepth``; nothing else about a node is
+      ## depth-checked. So a sub-graph computed at depth ``d`` composes
+      ## identically at depth ``d2`` iff
+      ## ``d2 + edgeDepth < MaxContributionDepth``, which makes the memo
+      ## guard exact in both directions:
+      ##
+      ##   * an edge the resolver answers ``none`` for recurses through
+      ##     nothing, so it raises no height — but it is still an edge
+      ##     its owner is checked for. Keying on the height admitted
+      ##     such a sub-graph one level past the bound, which is a hex
+      ##     where a fresh composition refuses. That is a false accept,
+      ##     the one failure this module may not have, and it was
+      ##     observable as the fingerprint depending on the order the
+      ##     root declared its dependencies in;
+      ##   * a node that declares NO dependencies owes no check, so a
+      ##     sub-graph ending in one is legal a level deeper than its
+      ##     height suggests. Keying on the height would have stopped
+      ##     reusing it for nothing.
+    contextDependent: bool
+      ## True when this sub-graph's VALUE depended on the traversal
+      ## context rather than on the graph alone: some edge inside it
+      ## folded a leaf because the coordinate was already on the
+      ## ``visited`` stack, or refused because the depth bound was
+      ## reached. Such a value is correct where it was computed and
+      ## WRONG anywhere else, so it is never memoised.
+      ##
+      ## Why propagating this one flag upward is sufficient. Suppose a
+      ## memoised sub-graph ``S`` were reused on a path ``P2`` and
+      ## disagreed with a fresh composition there. The disagreement must
+      ## come from an edge ``u -> v`` inside ``S`` where ``v`` is an
+      ## ancestor on ``P2`` but was not on the stack when ``S`` was
+      ## computed on ``P1``. Then ``v`` reaches ``u`` (through ``P2``:
+      ## ``v`` -> ... -> ``S`` -> ... -> ``u``) and ``u`` reaches ``v``,
+      ## so the graph has a cycle through ``u`` and ``v``. On ``P1`` that
+      ## same cycle was walked from ``u`` into ``v`` and onward, and
+      ## whatever it closed on was already on ``P1``'s stack — a
+      ## ``visited`` hit, which sets this flag and stops ``S`` being
+      ## memoised at all. So every sub-graph that could disagree is
+      ## exactly a sub-graph this flag excludes.
+
+  ContributionMemo = Table[string, ComposeOutcome]
+    ## Per-CALL memo, keyed on the full dependency coordinate the
+    ## resolver is a function of (package, contributor, normalised target
+    ## interface fingerprint) — never on the 2-part ``visited`` key,
+    ## which two dependencies pinned to different interface revisions
+    ## share.
+    ##
+    ## Per-call and not global: a resolver may legitimately answer
+    ## differently between calls (a catalog is edited, a different
+    ## snapshot is selected), and a process-lifetime cache would serve
+    ## the first call's graph forever.
+
 proc composeContribution(identity: ContributionIdentity;
                          resolver: ContributionResolver;
                          visited: var seq[string];
-                         depth: int): ContributionFingerprint =
+                         memo: var ContributionMemo;
+                         depth: int): ComposeOutcome =
   let c = identity.contribution
   var refusals: seq[string] = @[]
+  var edgeDepth = -1
+  var contextDependent = false
 
   if c.contributor.strip().len == 0:
     refusals.add("contributor id")
@@ -440,8 +696,20 @@ proc composeContribution(identity: ContributionIdentity;
   let targetFingerprint = normalizedFingerprint(c.targetInterfaceFingerprint)
   if not isHex(targetFingerprint, 64):
     refusals.add("target interface fingerprint")
+  # The provider identity is a CONTENT identity of the provider
+  # implementation — the same class of value as the target interface
+  # fingerprint directly above, and held to the same shape contract. A
+  # required input with no shape check is a required input a placeholder
+  # satisfies.
+  let providerIdentity = normalizedFingerprint(identity.providerIdentity)
   if identity.providerIdentity.strip().len == 0:
     refusals.add("provider identity")
+  elif isPendingIdentity(identity.providerIdentity):
+    refusals.add("provider identity (stamped " &
+      PendingContributionIdentityMarker & ": the provider's content " &
+      "identity has not been computed yet)")
+  elif not isHex(providerIdentity, 64):
+    refusals.add("provider identity (not a 64-hex content identity)")
 
   var realizations: seq[string] = @[]
 
@@ -487,6 +755,7 @@ proc composeContribution(identity: ContributionIdentity;
   # the duration of the loop, so a dependency that points back at it is a
   # cycle and folds in as its leaf.
   var depHexes: seq[string] = @[]
+  var unresolved: seq[ContributionDependencyRef] = @[]
   let myKey = dependencyKey(c.targetPackage, c.contributor)
   visited.add(myKey)
   for dep in identity.dependencies:
@@ -504,39 +773,112 @@ proc composeContribution(identity: ContributionIdentity;
     if depKey in visited:
       # Cycle: fold the leaf in and do NOT recurse. Mirrors
       # ``foreignPackageIdentityRec``'s visited handling.
+      #
+      # Recorded as UNBOUND for the same reason an unresolvable
+      # dependency is: at this edge the payload carries the coordinate
+      # and nothing else. The cycle member's own realization metadata is
+      # bound at the level that is composing it, but a caller holding
+      # only this fingerprint cannot know that, and deliverable 2 must
+      # treat both shapes alike.
       depHexes.add(leafContributionIdentityHex(dep))
+      unresolved.add(dep)
+      contextDependent = true
       continue
+    # From here the edge SURVIVES: it is a real dependency edge this node
+    # owns, and owning one is precisely what the depth bound checks. It
+    # counts towards ``edgeDepth`` whether or not the resolver goes on to
+    # bind it — the check below runs first, and a leaf-folded edge is
+    # checked exactly like a recursed one.
+    edgeDepth = max(edgeDepth, 0)
     if depth >= MaxContributionDepth:
       refusals.add("dependency " & dep.targetPackage &
         ": contribution dependency depth exceeds " & $MaxContributionDepth)
+      contextDependent = true
       continue
-    let resolved =
-      if resolver.isNil: none(ContributionIdentity) else: resolver(dep)
-    if resolved.isNone:
-      depHexes.add(leafContributionIdentityHex(dep))
-      continue
-    let sub = composeContribution(resolved.get, resolver, visited, depth + 1)
-    if sub.isResolved:
-      depHexes.add(sub.hex)
-    else:
-      # Fail closed: a resolved dependency that cannot be fingerprinted is
-      # missing evidence, not an invitation to fall back to its leaf.
-      for r in sub.refusals:
-        refusals.add("dependency " & dep.targetPackage & ": " & r)
+
+    # Fold one composed dependency into this contribution.
+    template absorb(subFp: ContributionFingerprint) =
+      if subFp.isResolved:
+        depHexes.add(subFp.hex)
+        # Transitive: the root's payload contains this child's hex, so a
+        # coordinate the CHILD bound only as a leaf is one the root binds
+        # only as a leaf too.
+        for u in subFp.unresolvedDependencies:
+          unresolved.add(u)
+      else:
+        # Fail closed: a resolved dependency that cannot be fingerprinted
+        # is missing evidence, not an invitation to fall back to its leaf.
+        for r in subFp.refusals:
+          refusals.add("dependency " & dep.targetPackage & ": " & r)
+
+    let memoKey = contributionCoordinate(dep)
+    var served = false
+    if memoKey in memo:
+      let cached = memo[memoKey]
+      # Reuse only where the bound still holds AT THIS DEPTH: the
+      # deepest edge-owning node inside the cached sub-graph sits
+      # ``cached.edgeDepth`` levels below the child node, which is at
+      # ``depth + 1``, and a node may own an edge only strictly inside
+      # ``MaxContributionDepth``. ``cached.edgeDepth == -1`` (no
+      # surviving edge anywhere in the sub-graph) makes this the
+      # tautology ``depth < MaxContributionDepth``, already guaranteed
+      # above — such a sub-graph is depth-independent and always
+      # reusable.
+      if depth + 1 + cached.edgeDepth < MaxContributionDepth:
+        edgeDepth = max(edgeDepth, 1 + cached.edgeDepth)
+        absorb(cached.fp)
+        served = true
+    if not served:
+      let resolved =
+        if resolver.isNil: none(ContributionIdentity) else: resolver(dep)
+      if resolved.isNone:
+        # Declaration space is complete here, so this is not a refusal —
+        # but the payload now binds this dependency's COORDINATE only,
+        # and that fact travels with the result.
+        depHexes.add(leafContributionIdentityHex(dep))
+        unresolved.add(dep)
+        continue
+      let sub = composeContribution(resolved.get, resolver, visited, memo,
+        depth + 1)
+      edgeDepth = max(edgeDepth, 1 + sub.edgeDepth)
+      if sub.contextDependent:
+        contextDependent = true
+      else:
+        memo[memoKey] = sub
+      absorb(sub.fp)
   if visited.len > 0:
     visited.setLen(visited.len - 1)
 
+  # Canonical order for the unbound set: sorted by coordinate and
+  # de-duplicated, so the report is a function of the graph rather than
+  # of the traversal order that discovered it.
+  var unboundKeyed: seq[(string, ContributionDependencyRef)] = @[]
+  for dep in unresolved:
+    unboundKeyed.add((contributionCoordinate(dep), dep))
+  unboundKeyed.sort(proc (a, b: (string, ContributionDependencyRef)): int =
+    cmp(a[0], b[0]))
+  var unbound: seq[ContributionDependencyRef] = @[]
+  var lastKey = ""
+  for i, entry in unboundKeyed:
+    if i > 0 and entry[0] == lastKey:
+      continue
+    lastKey = entry[0]
+    unbound.add(entry[1])
+  result.edgeDepth = edgeDepth
+  result.contextDependent = contextDependent
+  result.fp.unresolvedDependencies = unbound
+
   if refusals.len > 0:
     refusals.sort(cmp)
-    result.refusals = refusals.deduplicate(isSorted = true)
-    result.hex = ""
+    result.fp.refusals = refusals.deduplicate(isSorted = true)
+    result.fp.hex = ""
     return
 
   var payload = ContributionFingerprintMagic
   payload.putStr(c.contributor)
   payload.putStr(c.targetPackage)
   payload.putStr(targetFingerprint)
-  payload.putStr(identity.providerIdentity)
+  payload.putStr(providerIdentity)
   realizations.sort(cmp)
   payload.putU32Le(uint32(realizations.len))
   for blob in realizations:
@@ -547,18 +889,23 @@ proc composeContribution(identity: ContributionIdentity;
   for hex in depHexes:
     payload.putStr(hex)
 
-  result.hex = hexOfDigest(payload)
-  result.refusals = @[]
+  result.fp.hex = hexOfDigest(payload)
+  result.fp.refusals = @[]
 
 proc contributionFingerprint*(identity: ContributionIdentity;
-                              resolver: ContributionResolver =
-                                noContributionResolver):
+                              resolver: ContributionResolver):
     ContributionFingerprint =
   ## THE contribution fingerprint. See the module docstring for the
   ## inputs, the canonicalisation, the base case and the refusal rules.
+  ##
+  ## ``resolver`` is REQUIRED and has no default. Pass
+  ## ``noContributionResolver`` to compose in declaration space only,
+  ## which is a legitimate choice with a documented consequence —
+  ## see that proc, and ``dependenciesFullyResolved``.
   ##
   ## Never raises: an incomplete contribution comes back with an empty
   ## ``hex`` and a sorted, de-duplicated ``refusals`` list naming exactly
   ## what was missing.
   var visited: seq[string] = @[]
-  composeContribution(identity, resolver, visited, 0)
+  var memo: ContributionMemo = initTable[string, ComposeOutcome]()
+  composeContribution(identity, resolver, visited, memo, 0).fp
