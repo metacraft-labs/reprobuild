@@ -1254,7 +1254,10 @@ proc registerInUnifiedStore*(storeRoot, packageName, version, adapter,
                             extra: openArray[string];
                             absoluteRealizedPath: string;
                             exportedExecutables: openArray[string] = [];
-                            writerMode = "direct"):
+                            writerMode = "direct";
+                            declaredExecutableAlias = "";
+                            declaredLauncher = "";
+                            declaredPrunePaths: openArray[string] = []):
     tuple[prefixId: PrefixIdBytes; inserted: bool] =
   ## Records the materialized prefix in the unified store and seals the
   ## binary `.repro-receipt` envelope at its root.
@@ -1271,6 +1274,12 @@ proc registerInUnifiedStore*(storeRoot, packageName, version, adapter,
     realizedPath: rel,
     declaredExecutablePath: declaredExecutablePath,
     exportedExecutables: @exportedExecutables,
+    # The realize inputs that change the sealed bytes; see the field docs
+    # on ``RealizationReceipt``. Defaulted empty so every adapter that
+    # writes none of them keeps producing the receipt it produced before.
+    declaredExecutableAlias: declaredExecutableAlias,
+    declaredLauncher: declaredLauncher,
+    declaredPrunePaths: @declaredPrunePaths,
     lockIdentity: lockIdentity,
     provenanceUrl: provenanceUrl,
     provenanceChecksum: provenanceChecksum,
@@ -2866,6 +2875,94 @@ proc toolCacheIdentity(plan: TarballAcquisitionPlan;
     result.addOption("launcher", plan.declaredLauncher)
   result.addOption("stripComponents", $plan.stripComponents)
 
+proc cloneSiblingRealization(plan: TarballAcquisitionPlan;
+                             tempPrefix, storeRoot: string): bool =
+  ## Hardlink a prefix another package realized from the SAME declaration,
+  ## instead of extracting the same archive a second time.
+  ##
+  ## The case that pays for this is a distribution whose parts are separate
+  ## public interfaces. ``rustc``, ``cargo``, ``clippy`` and ``rustfmt`` are
+  ## four packages over ONE archive: identical url, sha256, archiveType and
+  ## strip, differing only in ``executablePath`` — which selects a VIEW of
+  ## the prefix and changes none of its bytes. Realizing them independently
+  ## costs four extractions and, measured on Windows at Rust 1.92, 3.84 GB
+  ## of store for 0.96 GB of distinct content.
+  ##
+  ## **Keyed on a DECLARATION, not on a digest collision.** The four declare
+  ## a byte-identical ``lockIdentity`` per platform, which is the recipe
+  ## author saying these are one realization; two packages that merely
+  ## happened to share an archive would not share that string.
+  ##
+  ## **And on every input that changes the sealed bytes.** A prefix is not a
+  ## pure function of its archive: realize also copies the declared program
+  ## under ``executableAlias``, writes a launcher pair for ``launcher``, and
+  ## drops ``prunePaths``. A clone that ignored those would carry an alias
+  ## the cloning package never declared, so the same prefix id would hold
+  ## different bytes on two machines and whichever published first would
+  ## decide what everyone substitutes. Receipt v3 records all three for
+  ## exactly this comparison; a v1/v2 receipt decodes them empty and
+  ## therefore only ever matches a plan that declares none — which is the
+  ## safe direction, because "empty" and "unknown" are the same bytes.
+  ##
+  ## **Every uncertainty extracts instead.** Missing receipt, mismatched
+  ## field, unreadable candidate, a link the filesystem will not make, or a
+  ## result whose declared executable does not resolve — each moves on. The
+  ## failure mode of this optimisation is that it does nothing.
+  if plan.lockIdentity.len == 0:
+    # No declaration to key on. Matching on the checksum alone would clone
+    # between packages whose authors never said they were the same thing.
+    return false
+  let prefixesRoot = storeRoot / "prefixes"
+  if not dirExists(extendedPath(prefixesRoot)):
+    return false
+  let wantChecksum = normalizedSha256(plan.sha256)
+  for packageDir in walkDirs(prefixesRoot / "*"):
+    for candidate in walkDirs(packageDir / "*"):
+      let receiptPath = candidate / ".repro-receipt"
+      if not fileExists(extendedPath(receiptPath)):
+        continue
+      var receipt: RealizationReceipt
+      try:
+        receipt = readReceiptFile(receiptPath)
+      except CatchableError:
+        continue
+      if receipt.adapter != "tarball" or
+          receipt.lockIdentity != plan.lockIdentity or
+          normalizedSha256(receipt.provenanceChecksum) != wantChecksum:
+        continue
+      if receipt.declaredExecutableAlias != plan.declaredExecutableAlias or
+          receipt.declaredLauncher != plan.declaredLauncher or
+          receipt.declaredPrunePaths != @(plan.declaredPrunePaths):
+        continue
+      # The sibling must already carry what THIS package declares. If it
+      # does not, the two disagree about the extraction whatever their lock
+      # identity claims, and the disagreement is the interesting fact.
+      if executableInStorePath(candidate, plan.declaredExecutablePath,
+          rejectSymlinks = true).len == 0:
+        continue
+      var report: MaterializeReport
+      try:
+        materializeDirectory(candidate, tempPrefix, report)
+      except CatchableError:
+        if dirExists(extendedPath(tempPrefix)):
+          try: removeDir(extendedPath(tempPrefix))
+          except CatchableError: discard
+        continue
+      # The clone carries the sibling's receipt. Drop it: the caller seals
+      # this package's own, and a prefix holding somebody else's provenance
+      # is worse than one holding none.
+      let clonedReceipt = tempPrefix / ".repro-receipt"
+      if fileExists(extendedPath(clonedReceipt)):
+        try: removeFile(extendedPath(clonedReceipt))
+        except CatchableError: discard
+      if executableInStorePath(tempPrefix, plan.declaredExecutablePath,
+          rejectSymlinks = true).len == 0:
+        try: removeDir(extendedPath(tempPrefix))
+        except CatchableError: discard
+        continue
+      return true
+  false
+
 proc substituteToolPrefix(plan: TarballAcquisitionPlan;
                           packageName, version, prefix, storeRoot: string):
     bool =
@@ -3038,14 +3135,29 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
     return (prefix: prefix, archivePath: "",
         selectedUrl: selectedUrlFromReceipt(prefix))
 
-  let downloaded = verifiedDownload(plan, storeRoot)
   let tempPrefix = tmpRoot / ("extract." & $getCurrentProcessId() & "." &
     $getTime().toUnix & "." & plan.sha256[0 .. 15])
   if dirExists(extendedPath(tempPrefix)):
     removeDir(extendedPath(tempPrefix))
+  # A sibling package may already hold these exact bytes. Tried after the
+  # shared cache and before the network, because it is cheaper than both:
+  # no request at all, and on a filesystem with hardlinks no new bytes.
+  #
+  # The clone lands in the SAME staging directory an extraction would, so
+  # everything downstream — prunes, alias, launcher, receipt, the move into
+  # place, registration and publish — runs unchanged over it. The prune loop
+  # and the alias write are both idempotent (a missing prune path is not an
+  # error, an existing alias is not overwritten), and the clone only matched
+  # a sibling that declared the same ones, so they are no-ops here rather
+  # than special cases.
+  let cloned = cloneSiblingRealization(plan, tempPrefix, storeRoot)
+  let downloaded =
+    if cloned: (path: "", selectedUrl: plan.url)
+    else: verifiedDownload(plan, storeRoot)
   try:
-    extractTarballArchive(downloaded.path, tempPrefix, plan.archiveType,
-      plan.stripComponents, plan.declaredExecutablePath)
+    if not cloned:
+      extractTarballArchive(downloaded.path, tempPrefix, plan.archiveType,
+        plan.stripComponents, plan.declaredExecutablePath)
     # Declared prunes, applied to the temporary prefix before anything is
     # sealed — so the dropped bytes never appear under the store path, never
     # reach the receipt, and never reach the archive the publish step packs.
@@ -3160,7 +3272,10 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
       resolvedVersion, "tarball", plan.lockIdentity,
       plan.declaredExecutablePath, plan.url, plan.sha256, "directory",
       [plan.archiveType, $plan.stripComponents], prefix,
-      [plan.declaredExecutablePath], writerMode = writerMode)
+      [plan.declaredExecutablePath], writerMode = writerMode,
+      declaredExecutableAlias = plan.declaredExecutableAlias,
+      declaredLauncher = plan.declaredLauncher,
+      declaredPrunePaths = plan.declaredPrunePaths)
     (prefix: prefix, archivePath: downloaded.path,
       selectedUrl: downloaded.selectedUrl)
   except CatchableError:

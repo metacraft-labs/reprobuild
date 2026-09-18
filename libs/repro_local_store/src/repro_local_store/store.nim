@@ -105,6 +105,26 @@ type
     lockIdentity*: string
     provenanceUrl*: string
     provenanceChecksum*: string
+    declaredExecutableAlias*: string
+      ## The second name realize copied the declared program under, if any.
+      ##
+      ## One of three v3 fields recording REALIZE INPUTS THAT CHANGE THE
+      ## SEALED BYTES. A prefix is not a pure function of the archive it
+      ## came from: before sealing, realize copies the declared program
+      ## under ``executableAlias``, writes a launcher pair for
+      ## ``launcher``, and deletes ``prunePaths``. Two packages over one
+      ## archive that declare these differently hold DIFFERENT bytes.
+      ##
+      ## They are recorded so a reader can ask a prefix whether its tree is
+      ## the one a fresh extraction of a given declaration would produce —
+      ## a question the rest of the receipt cannot answer, and the one a
+      ## sibling-prefix clone has to answer before it may link anything.
+    declaredLauncher*: string
+      ## The interpreter realize wrote a launcher pair for, if any. See
+      ## ``declaredExecutableAlias``.
+    declaredPrunePaths*: seq[string]
+      ## The prefix-relative paths realize deleted after extraction. See
+      ## ``declaredExecutableAlias``.
     materializationMechanism*: string  ## "hardlink" | "reflink" | "copy" |
                                        ## "directory" (debug hint only)
     createdAtUnix*: int64
@@ -261,7 +281,7 @@ const
   StoreSchemaVersion* = 1
   ReceiptFileName* = ".repro-receipt"
   ReceiptMagic* = "RPRC"                ## envelope magic
-  ReceiptFormatVersion* = 2'u16
+  ReceiptFormatVersion* = 3'u16
     ## v2: Recipe-Val M8 — appends ``outputName: string`` and a
     ## length-prefixed (name, relativePath) sibling-output map after
     ## the v1 ``writerMode`` field. v1 receipts decode with both
@@ -382,6 +402,20 @@ proc encodeReceipt*(rec: RealizationReceipt): seq[byte] =
   for key in siblingKeys:
     body.writeString(key)
     body.writeString(rec.outputPrefixes[key])
+  # v3 trailing fields: the realize inputs that CHANGE THE SEALED BYTES but
+  # are not derivable from the archive. A prefix is not a pure function of
+  # its download — realize also copies the declared program under
+  # ``executableAlias``, writes a launcher pair for ``launcher``, and drops
+  # ``prunePaths`` — so a reader that wants to know whether this tree is the
+  # one a fresh extraction would produce has to be told. Without them a
+  # sibling-prefix clone cannot be made safe: it would copy an alias the
+  # cloning package never declared, and two machines would hold different
+  # bytes under one prefix id.
+  body.writeString(rec.declaredExecutableAlias)
+  body.writeString(rec.declaredLauncher)
+  body.writeU32Le(uint32(rec.declaredPrunePaths.len))
+  for prunePath in rec.declaredPrunePaths:
+    body.writeString(prunePath)
 
   result.add(byte(ord(ReceiptMagic[0])))
   result.add(byte(ord(ReceiptMagic[1])))
@@ -402,7 +436,7 @@ proc decodeReceipt*(buf: openArray[byte]): RealizationReceipt =
       raise newException(EReceiptCorrupt, "unknown receipt magic")
   var pos = 4
   let version = readU16Le(buf, pos)
-  if version notin {1'u16, ReceiptFormatVersion}:
+  if version notin {1'u16, 2'u16, ReceiptFormatVersion}:
     raise newException(EReceiptCorrupt,
       "unsupported receipt format version: " & $version)
   let bodyLen = int(readU32Le(buf, pos))
@@ -447,6 +481,17 @@ proc decodeReceipt*(buf: openArray[byte]): RealizationReceipt =
       let key = readString(buf, pos)
       let value = readString(buf, pos)
       result.outputPrefixes[key] = value
+  if version >= 3'u16:
+    # v1 and v2 receipts decode with all three empty. That is the SAFE
+    # direction for the consumer these exist for: a clone keyed on them
+    # refuses to match an older receipt rather than assuming it declared
+    # nothing, because "empty" and "unknown" are the same bytes here.
+    result.declaredExecutableAlias = readString(buf, pos)
+    result.declaredLauncher = readString(buf, pos)
+    let pruneCount = int(readU32Le(buf, pos))
+    result.declaredPrunePaths = newSeq[string](pruneCount)
+    for i in 0 ..< pruneCount:
+      result.declaredPrunePaths[i] = readString(buf, pos)
   if pos != bodyEnd:
     raise newException(EReceiptCorrupt, "trailing receipt bytes")
 
