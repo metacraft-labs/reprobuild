@@ -2106,7 +2106,7 @@ proc validateTarEntries(archivePath, archiveType: string) =
     of "tar":
       @["-tf", tarOperand(archivePath)]
     of "zip", "7z", "7z.exe", "raw", "conda", "tar.zst", "tzst",
-        "pkg.tar.zst":
+        "pkg.tar.zst", "msi":
       # Formats this pre-flight listing does not inspect. For the archive
       # types host `tar` cannot read directly, listing would need the same
       # decompression the extraction arm performs, which is work done twice
@@ -2683,6 +2683,48 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
         "tool-resolution failed: 7z extraction failed for " & archivePath &
         "\n" & res.output)
     flattenStripComponents(destination, stripComponents)
+  of "msi":
+    # A Windows Installer database, extracted by an ADMINISTRATIVE INSTALL
+    # rather than by an archive tool.
+    #
+    # `msiexec /a <msi> /qn TARGETDIR=<dir>` lays the payload out at its
+    # logical install hierarchy and needs no elevation: it writes files and
+    # nothing else. That is the distinction that makes an MSI packageable at
+    # all — a normal `/i` install registers services, writes the registry
+    # and may load a driver, none of which belongs in a content-addressed
+    # prefix.
+    #
+    # What it CANNOT do is the other half of some MSIs. WinFsp is the
+    # motivating case: the administrative install yields the headers, the
+    # import libraries and the user-mode tools — everything needed to BUILD
+    # against it — while the kernel-mode filesystem driver still requires
+    # the signed machine-wide install. A package covers the first half and
+    # must declare the second as a requirement rather than pretend to it.
+    when not defined(windows):
+      raise newException(OSError,
+        "tool-resolution failed: archiveType=msi needs msiexec, which " &
+        "exists only on Windows; this archive cannot be realized on " &
+        "this host")
+    else:
+      createDir(extendedPath(destination))
+      # msiexec parses its own command line and wants native separators; it
+      # also refuses a relative TARGETDIR.
+      let nativeArchive = absolutePath(archivePath).replace('/', '\\')
+      let nativeDest = absolutePath(destination).replace('/', '\\')
+      let res = execCmdEx("msiexec.exe /a " & quoteShell(nativeArchive) &
+        " /qn TARGETDIR=" & quoteShell(nativeDest))
+      if res.exitCode != 0:
+        raise newException(OSError,
+          "tool-resolution failed: msiexec /a exited " & $res.exitCode &
+          " for " & archivePath & "\n" & res.output)
+      # An administrative install copies the .msi itself beside the payload.
+      # Dropping it keeps the prefix to the files a consumer asked for, and
+      # keeps the realized bytes from carrying a second copy of an archive
+      # the store already holds.
+      let strayMsi = destination / extractFilename(archivePath)
+      if fileExists(extendedPath(strayMsi)):
+        removeFile(extendedPath(strayMsi))
+      flattenStripComponents(destination, stripComponents)
   of "raw":
     # `raw` payloads are the executable themselves (e.g. iden3/circom's
     # `circom-windows-amd64.exe` or argotorg/solidity's `solc-windows.exe`).
