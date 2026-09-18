@@ -2421,6 +2421,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/test_catalog_composition_is_order_independent.nim",
+    binary: "build/test-bin/test_catalog_composition_is_order_independent",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/test_contribution_fingerprint_invalidation_boundaries.nim",
     binary: "build/test-bin/test_contribution_fingerprint_invalidation_boundaries",
     defines: @[],

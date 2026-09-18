@@ -273,6 +273,12 @@ const
     ## the full identity of a contribution that happens to declare the
     ## same coordinate.
 
+  ContributionRecordMagic* = "reprobuild.contribution-record.v1"
+    ## Domain magic of the ARTIFACT-READABLE contribution record digest —
+    ## ``interfaceContributionRecordDigest``. Distinct from both magics
+    ## above so a record digest can never be mistaken for, or collide
+    ## with, a full contribution fingerprint or a dependency leaf.
+
   MaxContributionDepth* = 64
     ## Recursion bound. ``visited`` already terminates every cycle; this
     ## bounds a resolver that manufactures unboundedly many distinct
@@ -574,6 +580,46 @@ proc encodeFromSource(p: FromSourceRealization): string =
     ("packageId", p.packageId),
     ("lockIdentity", p.lockIdentity)]))
   result.add(encodeFields(p.recipeInputs))
+
+proc interfaceContributionRecordDigest*(
+    contribution: InterfaceProvisioningContribution): string =
+  ## The canonical digest of the ARTIFACT-READABLE part of one contribution
+  ## record — everything the artifact's ``provisioningContributions``
+  ## section carries, and nothing else.
+  ##
+  ## This is NOT the contribution fingerprint and must never be substituted
+  ## for one. ``contributionFingerprint`` additionally binds the provider
+  ## identity and the declared dependency closure, neither of which an
+  ## interface artifact carries; this digest binds only what a consumer can
+  ## read out of an imported catalog **without running the provider**, which
+  ## is exactly the constraint M6 deliverable 2 places on discovery. Catalog
+  ## composition (M6 deliverable 3) is therefore keyed on this value, and a
+  ## lock (M7 deliverable 2) must be keyed on the full fingerprint.
+  ##
+  ## It reuses the same canonical realization encoders as the fingerprint —
+  ## sorted field maps, realization blobs sorted by their encoded bytes — so
+  ## the two identities cannot drift in what they consider a realization
+  ## change. ``location`` is excluded for the reason the module docstring
+  ## gives: a source location is a diagnostic, and moving a declaration down
+  ## a file is not a realization change.
+  var payload = ContributionRecordMagic
+  payload.putStr(contribution.targetPackage)
+  payload.putStr(normalizedFingerprint(
+    contribution.targetInterfaceFingerprint))
+  payload.putStr(contribution.contributor)
+  payload.putStr(if contribution.developInterface: "1" else: "0")
+  var blobs: seq[string] = @[]
+  for realization in contribution.nixProvisioning:
+    blobs.add(encodeNix(realization))
+  for realization in contribution.tarballProvisioning:
+    blobs.add(encodeTarball(realization))
+  for realization in contribution.scoopProvisioning:
+    blobs.add(encodeScoop(realization))
+  blobs.sort(cmp)
+  payload.putU32Le(uint32(blobs.len))
+  for blob in blobs:
+    payload.putStr(blob)
+  hexOfDigest(payload)
 
 # ---------------------------------------------------------------------------
 # The base case
