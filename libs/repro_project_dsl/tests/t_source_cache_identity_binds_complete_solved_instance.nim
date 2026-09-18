@@ -51,6 +51,29 @@
 ## identity refuse" is the control that forbids the equally cheap wrong
 ## fix of refusing on everything that does not resolve locally, which
 ## would make every identity permanently PENDING.
+##
+## The same pairing governs the cases added for the command-line
+## ``--path`` channel and the compile-time-read scan. "supplied search
+## roots do not make an external import refuse" and "a genuine
+## compile-time read is still caught" are the controls; "supplied search
+## roots do not leak absolute paths into the digest" is the relocation
+## control for an input that ARRIVES as an absolute path, and it is
+## needed because hashing the supplied root, or the absolute spelling of
+## what it reaches, would pass every "changes the identity" case while
+## breaking relocation.
+##
+## What this file does NOT prove, stated so the green result is not read
+## for more than it is: that a caller's ``effectiveSearchRoots`` is the
+## COMPLETE or correct root set of the real compile command (nothing
+## inside the identity can check that; the cases only fix what happens
+## when it is supplied and when it is not); that the compile-time-read
+## scan is a parse rather than a better-informed textual scan — a file
+## that shadows ``slurp`` and ALSO reaches ``system``'s through an
+## overload its declaration does not shadow is missed, and missed there
+## means aliased rather than refused, which ``ca7864d0`` was not; that any
+## real cache endpoint, upload or substitution works; and that any
+## production call site produces a keyable identity — every one of them
+## still uses the legacy constructor and is still refused.
 
 {.define: reproMaterializedCacheTest.}
 
@@ -92,6 +115,8 @@ proc solvedInstance(root: string): SolvedSourceInstance =
     packageName: "probe",
     packageVersion: "1.0",
     declaredSourceInputs: @["src/impl.c"],
+    effectiveSearchRoots: @[],
+    searchRootsKnown: true,
     selectedOptions: @[("featureX", "on")],
     optionsSolved: true,
     dependencyInstances: @[DepAlpha],
@@ -631,6 +656,309 @@ suite "test_source_cache_identity_binds_complete_solved_instance":
       "const name = \"data.txt\"\nconst blob = staticRead(name)\n")
     writeFile(computed / "data.txt", "data\n")
     failsClosed(bareInstance(computed))
+
+  # -------------------------------------------------------------------
+  # The command-line ``--path`` channel. A search root the compiler is
+  # given but no config file records is invisible to any scan of the
+  # tree, so a module reachable only through it used to be assumed
+  # external, dropped, and a digest produced over the rest: the #171
+  # aliasing class, surviving inside the fix for #171. Measured at
+  # ca7864d0 on exactly the tree the first case builds — closure digest
+  # 337050709747f16fc8c7531ad53184db82f172106ff4377fc5d0e42583179bc1 and
+  # cache key 2e5bde3c356780... identical across a change to
+  # ``internal/helper.nim``'s ``const implementation`` from 1 to 2.
+  #
+  # The effective search-root set is therefore a REQUIRED input of the
+  # solved instance: supplied, it resolves; unsupplied, the identity
+  # refuses instead of digesting.
+  # -------------------------------------------------------------------
+
+  test "a module reachable only through a supplied search root binds":
+    let root = createTempDir("m13-cmdline-path-", "")
+    defer: removeDir(root)
+    createDir(root)
+    # No config.nims, no nim.cfg, no .nimble: nothing on disk records
+    # ``internal`` as a search root. Only the compile command does.
+    writeFile(root / "repro.nim", "import helper\nconst entry = 1\n")
+    createDir(root / "internal")
+    writeFile(root / "internal" / "helper.nim",
+      "const implementation = 1\n")
+
+    var instance = bareInstance(root)
+    instance.effectiveSearchRoots = @[root / "internal"]
+    let closure = solvedSourceClosure(root, @[], instance.effectiveSearchRoots)
+    check closure.missing.len == 0
+    check "internal/helper.nim" in closure.files
+    let before = identityKeyOnEveryPath(instance)
+
+    writeFile(root / "internal" / "helper.nim",
+      "const implementation = 2\n")
+    check identityKeyOnEveryPath(instance) != before
+
+  test "an unsupplied search-root set fails closed":
+    # The other half of the same rule, and the one that makes it
+    # fail-CLOSED rather than merely fixable: when the effective compile
+    # command was never reconstructed, the scanner cannot know whether a
+    # bare spec is external or a module behind an unseen ``--path``, so
+    # it must refuse rather than key over the part it can see.
+    let root = createTempDir("m13-cmdline-path-unsupplied-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "repro.nim", "import helper\nconst entry = 1\n")
+    createDir(root / "internal")
+    writeFile(root / "internal" / "helper.nim",
+      "const implementation = 1\n")
+
+    var unsupplied = bareInstance(root)
+    unsupplied.searchRootsKnown = false
+    unsupplied.effectiveSearchRoots = @[]
+    failsClosed(unsupplied)
+    # ...and the refusal NAMES the missing evidence rather than failing
+    # anonymously, which is what makes it actionable at the call site.
+    check "effective compiler search roots" in
+      cacheEntryIdentityError(solvedSourceCacheEntryIdentity(unsupplied))
+    # A tree with nothing to miss refuses just the same: the input is
+    # missing evidence in its own right, not a conditional consequence.
+    let plain = createTempDir("m13-cmdline-path-plain-", "")
+    defer: removeDir(plain)
+    writeProject(plain)
+    var plainUnsupplied = solvedInstance(plain)
+    plainUnsupplied.searchRootsKnown = false
+    failsClosed(plainUnsupplied)
+
+  test "supplied search roots do not make an external import refuse":
+    # The no-false-refusal control for the new input. Supplying the
+    # effective roots must not turn "this spec resolves nowhere I was
+    # told about" into a refusal for specs Nim satisfies from the
+    # stdlib or a package, or every real compile command would be
+    # permanently unkeyable — as useless as aliasing.
+    let root = createTempDir("m13-supplied-external-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "repro.nim",
+      "import std/os\n" &
+      "import std/[strutils, tables]\n" &
+      "from std/sequtils import toSeq\n" &
+      "import pkg/somepackage\n" &
+      "import repro_project_dsl\n" &
+      "import ./local_helper\n" &
+      "const entry = 1\n")
+    writeFile(root / "local_helper.nim", "const helper = 1\n")
+    createDir(root / "lib")
+    writeFile(root / "lib" / "unrelated.nim", "const unrelated = 1\n")
+
+    var instance = bareInstance(root)
+    # A real supplied root that reaches NONE of the external imports.
+    instance.effectiveSearchRoots = @[root / "lib"]
+    let closure = solvedSourceClosure(root, @[], instance.effectiveSearchRoots)
+    check closure.missing.len == 0
+    check closure.files == @["local_helper.nim", "repro.nim"]
+    let before = identityKeyOnEveryPath(instance)
+    check before.len == 64
+    # A supplied root that does not exist is ignored, exactly as the
+    # compiler ignores it — not refused, not digested.
+    var absentRoot = bareInstance(root)
+    absentRoot.effectiveSearchRoots =
+      @[root / "lib", root / "no-such-directory"]
+    check identityKeyOnEveryPath(absentRoot) == before
+
+  test "supplied search roots do not leak absolute paths into the digest":
+    # The relocation control for the new input, and the reason it is
+    # needed: the roots arrive as ABSOLUTE paths from a compile command,
+    # and hashing them (or the absolute spelling of the files they
+    # reach) would pass every "changes the identity" case above while
+    # breaking relocation stability — the exact cheap wrong fix the
+    # original relocation control forbids.
+    let origin = createTempDir("m13-supplied-relocation-origin-", "")
+    defer: removeDir(origin)
+    let relocatedParent = createTempDir("m13-supplied-relocation-target-", "")
+    defer: removeDir(relocatedParent)
+    createDir(origin)
+    writeFile(origin / "repro.nim", "import helper\nconst entry = 1\n")
+    createDir(origin / "internal")
+    writeFile(origin / "internal" / "helper.nim",
+      "const implementation = 1\n")
+    let relocated = relocatedParent / "a-differently-named-deeper-root"
+    copyDir(origin, relocated)
+    check origin != relocated
+
+    var originInstance = bareInstance(origin)
+    originInstance.effectiveSearchRoots = @[absolutePath(origin / "internal")]
+    var relocatedInstance = bareInstance(relocated)
+    relocatedInstance.effectiveSearchRoots =
+      @[absolutePath(relocated / "internal")]
+    check originInstance.effectiveSearchRoots[0].isAbsolute
+    check relocatedInstance.effectiveSearchRoots[0] !=
+      originInstance.effectiveSearchRoots[0]
+    let originKey = identityKeyOnEveryPath(originInstance)
+    check identityKeyOnEveryPath(relocatedInstance) == originKey
+
+    # The same tree keyed with the root spelled RELATIVE to the project
+    # root produces the same key as the absolute spelling: the root is
+    # resolution evidence, never digest input.
+    var relativeSpelling = bareInstance(origin)
+    relativeSpelling.effectiveSearchRoots = @["internal"]
+    check identityKeyOnEveryPath(relativeSpelling) == originKey
+
+    # And nothing absolute reaches the bound file list either way.
+    let originFiles = solvedSourceClosure(origin, @[],
+      originInstance.effectiveSearchRoots).files
+    for rel in originFiles:
+      check not rel.isAbsolute
+      check ":" notin rel
+    check originFiles == solvedSourceClosure(relocated, @[],
+      relocatedInstance.effectiveSearchRoots).files
+    # Non-vacuity: the relocated copy is still bound to its own bytes.
+    writeFile(relocated / "internal" / "helper.nim",
+      "const implementation = 2\n")
+    check identityKeyOnEveryPath(relocatedInstance) != originKey
+
+  # -------------------------------------------------------------------
+  # The compile-time-read scan. It used to be a bare whole-identifier
+  # grep over masked source, which refused three shapes of CORRECT
+  # recipe — a permanently unkeyable project, which is as useless as an
+  # aliased one. Each case below was measured refusing at ca7864d0.
+  # -------------------------------------------------------------------
+
+  test "a recipe that defines its own slurp is not a compile-time read":
+    let root = createTempDir("m13-own-slurp-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "repro.nim",
+      "proc slurp(label: string): string = \"local:\" & label\n" &
+      "const banner = slurp(\"greeting\")\n" &
+      "const entry = 1\n")
+    # ``greeting`` is not a file and never was: at ca7864d0 this refused
+    # with ``compile-time file read slurp("greeting")``.
+    let closure = solvedSourceClosure(root)
+    check closure.missing.len == 0
+    check closure.files == @["repro.nim"]
+    let before = identityKeyOnEveryPath(bareInstance(root))
+    check before.len == 64
+    # Non-vacuity: the recipe is still bound to its own bytes.
+    writeFile(root / "repro.nim",
+      "proc slurp(label: string): string = \"local:\" & label\n" &
+      "const banner = slurp(\"greetings\")\n" &
+      "const entry = 1\n")
+    check identityKeyOnEveryPath(bareInstance(root)) != before
+
+    # The same for a ``let``/``var``/``const`` section declaration, in
+    # both its one-line and its indented-block form.
+    for declaration in ["const gorge = 3\n",
+                        "const\n  gorge = 3\n",
+                        "let gorge = 3\n",
+                        "var gorge* = 3\n"]:
+      let sectionRoot = createTempDir("m13-own-gorge-decl-", "")
+      defer: removeDir(sectionRoot)
+      createDir(sectionRoot)
+      writeFile(sectionRoot / "repro.nim",
+        declaration & "const entry = gorge\n")
+      check solvedSourceClosure(sectionRoot).missing.len == 0
+      check identityKeyOnEveryPath(bareInstance(sectionRoot)).len == 64
+
+  test "slurp or gorge inside a kept string literal is not evidence":
+    # The masking rule already covers comments. A KEPT single-line
+    # string literal is the other place the word can appear without Nim
+    # ever reading it as a call — and kept it must stay, because the
+    # ``staticRead`` argument and ``import "./x"`` live in one.
+    for text in ["const note = \"run slurp on the payload\"\n",
+                 "const note = \"gorge on the payload\"\n",
+                 "const note = \"staticExec is a word\"\n",
+                 "const note = \"gorgeEx and staticRead too\"\n"]:
+      let root = createTempDir("m13-literal-mention-", "")
+      defer: removeDir(root)
+      createDir(root)
+      writeFile(root / "repro.nim", text & "const entry = 1\n")
+      let closure = solvedSourceClosure(root)
+      check closure.missing.len == 0
+      check closure.files == @["repro.nim"]
+      check identityKeyOnEveryPath(bareInstance(root)).len == 64
+
+  test "a genuine compile-time read is still caught":
+    # The positive control for the two exclusions above. Without it they
+    # are indistinguishable from deleting the compile-time-read scan.
+    let unresolved = createTempDir("m13-real-read-", "")
+    defer: removeDir(unresolved)
+    createDir(unresolved)
+    writeFile(unresolved / "repro.nim",
+      "const blob = staticRead(\"absent.txt\")\nconst entry = 1\n")
+    failsClosed(bareInstance(unresolved))
+
+    # The exclusion is per-IDENTIFIER, not a blanket off-switch: a file
+    # that shadows ``slurp`` still refuses on its real ``gorge``.
+    let mixed = createTempDir("m13-real-read-mixed-", "")
+    defer: removeDir(mixed)
+    createDir(mixed)
+    writeFile(mixed / "repro.nim",
+      "proc slurp(label: string): string = label\n" &
+      "const banner = slurp(\"greeting\")\n" &
+      "const built = gorge(\"echo hi\")\n")
+    failsClosed(bareInstance(mixed))
+
+    # An EXPLICIT ``system.slurp`` is the stdlib one whatever the file
+    # shadows, so shadowing cannot be used to hide a real read.
+    let qualified = createTempDir("m13-real-read-qualified-", "")
+    defer: removeDir(qualified)
+    createDir(qualified)
+    writeFile(qualified / "repro.nim",
+      "proc slurp(label: string): string = label\n" &
+      "const blob = system.slurp(\"absent.txt\")\n")
+    failsClosed(bareInstance(qualified))
+
+    # ...and a real read that DOES resolve still binds its bytes.
+    let bound = createTempDir("m13-real-read-bound-", "")
+    defer: removeDir(bound)
+    createDir(bound)
+    writeFile(bound / "repro.nim",
+      "const blob = staticRead(\"payload.txt\")\nconst entry = 1\n")
+    writeFile(bound / "payload.txt", "payload 1\n")
+    check "payload.txt" in solvedSourceClosure(bound).files
+    let beforeRead = identityKeyOnEveryPath(bareInstance(bound))
+    writeFile(bound / "payload.txt", "payload 2\n")
+    check identityKeyOnEveryPath(bareInstance(bound)) != beforeRead
+
+  test "case-distinct modules bind as two entries on a case-sensitive fs":
+    # The Linux branch of the case-folding rule, proved by CONSEQUENCE
+    # rather than only by ``sourceClosurePathKey``'s inequality. An
+    # unconditional ``toLowerAscii`` dedup key collapses these two
+    # genuinely distinct files into ONE closure entry and leaves the
+    # digest unchanged when the dropped one is edited — the #171
+    # aliasing class, re-introduced by the visited set, on the build
+    # target.
+    when defined(windows):
+      # NTFS resolves both spellings to the same file, so the two-entry
+      # proof is not expressible here; the folding rule's Windows branch
+      # is asserted by "path de-duplication follows the filesystem's
+      # case rule" instead.
+      skip()
+    else:
+      let root = createTempDir("m13-case-distinct-", "")
+      defer: removeDir(root)
+      createDir(root)
+      writeFile(root / "CaseProbe.marker", "probe\n")
+      if fileExists(root / "caseprobe.marker"):
+        # A case-INSENSITIVE filesystem on a non-Windows host (an
+        # APFS/HFS+ default, a mounted NTFS volume). Skipping is honest:
+        # asserting two entries here would assert a filesystem fact that
+        # is false on this host.
+        skip()
+      else:
+        removeFile(root / "CaseProbe.marker")
+        writeFile(root / "repro.nim",
+          "import ./Helper\nimport ./helper\nconst entry = 1\n")
+        writeFile(root / "Helper.nim", "const upper = 1\n")
+        writeFile(root / "helper.nim", "const lower = 1\n")
+        let closure = solvedSourceClosure(root)
+        check closure.missing.len == 0
+        check closure.files == @["Helper.nim", "helper.nim", "repro.nim"]
+        let before = identityKeyOnEveryPath(bareInstance(root))
+        # The digest moves when EITHER file changes. One entry standing
+        # for both would leave one of these two checks green by luck.
+        writeFile(root / "Helper.nim", "const upper = 2\n")
+        let afterUpper = identityKeyOnEveryPath(bareInstance(root))
+        check afterUpper != before
+        writeFile(root / "helper.nim", "const lower = 2\n")
+        check identityKeyOnEveryPath(bareInstance(root)) != afterUpper
 
   test "the legacy unsolved constructor stays pending":
     # M13 keeps every production call site that cannot yet supply a

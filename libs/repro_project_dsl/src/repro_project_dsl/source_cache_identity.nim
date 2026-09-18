@@ -57,7 +57,22 @@
 ##     ``<root>/config.nims``, ``<root>/<entry>.nim.cfg`` or
 ##     ``<root>/<entry>.nims`` (``$projectDir`` / ``$projectPath`` /
 ##     ``$config`` expanded), restricted to roots that lie INSIDE the
-##     project root.
+##     project root;
+##   * every root in ``SolvedSourceInstance.effectiveSearchRoots`` — the
+##     ``--path`` set of the EFFECTIVE compile command, which the caller
+##     supplies because no scan of the tree can recover it. These are
+##     searched last, matching Nim's own order (config files before the
+##     command line), and are NOT restricted to the project root: a
+##     ``--path`` into a nimble dependency is legitimate, and a spec
+##     that resolves through one lands outside the project root and is
+##     then classified as external code. A supplied root that does not
+##     exist is ignored, as the compiler ignores it.
+##
+## The effective search-root set is a REQUIRED input, not an optional
+## hint: ``searchRootsKnown`` distinguishes "reconstructed, and it adds
+## nothing beyond what is on disk" from "never reconstructed", and the
+## identity REFUSES in the second case. See "The command-line --path
+## channel" below for why anything weaker aliases.
 ##
 ## At each root the spec is tried as the literal path (so
 ## ``include "frag.inc"`` and ``include "frag.nim"`` resolve — the old
@@ -106,19 +121,48 @@
 ## rather than digest whenever the spec could be project source, so an
 ## under-approximated closure is never turned into a key.
 ##
-## The residual, stated exactly because the argument above does NOT
-## cover it: rule 4 fires only on a search path this scanner can SEE and
-## cannot evaluate. A ``--path`` supplied on the command line, or
-## contributed by a nimble dependency, leaves no trace in any scanned
-## config file, so there is nothing to mark unknown; the spec resolves
-## for the compiler and is dropped here, and two implementations
-## differing only in that module alias onto one key. Measured: a tree
-## whose ``internal/helper.nim`` is reachable only through a
-## command-line ``--path`` keeps the same closure digest across a change
-## to that file. A ``config.nims`` that computes ``--path`` in a loop or
-## from an expression is the OTHER case — rule 4 does fire, and such a
-## project (reprobuild's own tree among them) refuses rather than
-## aliases.
+## ## The command-line ``--path`` channel
+##
+## Rule 4 fires only on a search path this scanner can SEE and cannot
+## evaluate. A ``--path`` supplied on the command line, or contributed
+## by a nimble dependency, leaves no trace in any scanned config file,
+## so there was nothing to mark unknown: the spec resolved for the
+## compiler, was dropped here, and a digest was still produced. Measured
+## at ca7864d0 on a tree whose ``internal/helper.nim`` is reachable only
+## that way — closure digest ``337050709747f16f…`` unchanged across a
+## change to ``const implementation`` from 1 to 2, two implementations
+## on one key.
+##
+## That is why ``effectiveSearchRoots`` / ``searchRootsKnown`` are
+## inputs of the solved instance rather than something the scanner tries
+## to guess. Supplied, those roots resolve and whatever they reach is
+## bound. NOT supplied, the identity refuses, naming the missing
+## evidence — the same treatment an unresolvable candidate-local module
+## already gets. There is no third behaviour in which a digest is
+## produced over an unknown search-root set.
+##
+## What that does NOT prove. It does not prove the caller's set is
+## COMPLETE or correct: a caller that reconstructs the compile command
+## wrongly, or claims ``searchRootsKnown`` without reconstructing it,
+## re-opens exactly this channel, and nothing here can detect that from
+## inside. It moves the obligation to the call site and makes the
+## default (unsupplied) refuse; it does not verify the supplied value.
+## Measured on the tree above: a TYPO'D root and a real but INCOMPLETE
+## root set both land back on digest ``337050709747f16f…`` and one key
+## across the 1 -> 2 change. The partial case DIGESTS rather than
+## refusing, because a bare unresolved spec with no on-disk evidence is
+## still classified external. Refusal is the default for an UNSUPPLIED
+## set, not a property of every incorrect one.
+## No production call site supplies one today — every one of them uses
+## the legacy 4-argument constructor and is therefore refused.
+##
+## A ``config.nims`` that computes ``--path`` in a loop or from an
+## expression is a DIFFERENT case and is unchanged: rule 4 fires, and
+## such a project (reprobuild's own tree among them) refuses rather than
+## aliases. Supplying effective roots does not lift that refusal,
+## because a seen-but-unevaluatable switch is evidence that the scanner
+## has an incomplete picture of the project's OWN configuration, which
+## the caller's command line does not answer.
 ##
 ## ## Commented-out and quoted imports
 ##
@@ -148,12 +192,40 @@
 ## ``staticExec`` run a command at compile time whose output cannot be
 ## bound at all, so their mere presence is missing evidence.
 ##
-## This is a textual whole-identifier scan, not a parse, and it
-## over-refuses in the fail-closed direction: a recipe that defines its
-## own ``slurp``, or that merely contains the word ``slurp`` or
-## ``gorge`` inside a KEPT single-line string literal, is refused. (A
-## mention inside a comment is masked and does not refuse.) That costs a
-## correct project its key rather than aliasing two; no test covers it.
+## This is still a textual scan rather than a parse, but it is no
+## longer a bare identifier grep, because a grep false-refused three
+## shapes of CORRECT recipe and a permanently unkeyable project is as
+## useless as an aliased one. Two exclusions apply, and both are
+## provable from the text rather than heuristic:
+##
+##   * an occurrence inside a KEPT single-line string literal is data,
+##     not a call. Detection runs over a copy in which those literals
+##     are blanked (``blankKeptStringLiterals``), with offsets
+##     preserved so the ``staticRead`` ARGUMENT can still be read from
+##     the unblanked text at the same position;
+##   * a file that DECLARES ``slurp`` / ``gorge`` / ``staticRead`` /
+##     ``gorgeEx`` / ``staticExec`` itself — as a routine, or in a
+##     ``let``/``var``/``const``/``type`` section in either its
+##     one-line or its indented-block form — shadows the stdlib symbol,
+##     so an unqualified occurrence in that file is ITS symbol.
+##
+## An explicit ``system.<fn>`` defeats both exclusions and is always
+## treated as the stdlib compile-time read, so shadowing cannot be used
+## to hide one.
+##
+## What that does NOT prove, and what the shadowing exclusion COSTS.
+## The scan is still not a parse. A file that declares its own ``slurp``
+## AND also calls ``system``'s unqualified through an overload the local
+## declaration does not shadow is missed, and being missed here means
+## ALIASED, not refused: measured on such a file, the bytes it reads are
+## absent from the closure and the key does not move when they change,
+## where ``ca7864d0``'s bare grep refused that same file. So this
+## exclusion is not a pure improvement — it trades three measured false
+## refusals for one narrow new aliasing shape, on the judgement that a
+## permanently unkeyable correct recipe is the more common and more
+## costly failure. A qualifier other than ``system`` (``mymod.slurp``)
+## is still treated as a real read, which is the fail-closed direction.
+## Neither shape is covered by a test.
 ##
 ## ## Case-sensitivity
 ##
@@ -184,7 +256,8 @@
 ## input is unavailable: no project file, an unreadable source file, an
 ## unresolved candidate-local import or include, an unbindable
 ## compile-time read, a declared source input that does not exist or
-## lives outside the project root, unsolved options, unresolved
+## lives outside the project root, an effective search-root set that was
+## never reconstructed, unsolved options, unresolved
 ## dependency instances, a malformed dependency key, an unpopulated
 ## target triple, or a toolchain with no name/version. The marker makes
 ## ``deriveCacheEntryKey`` refuse, so an incomplete identity can neither
@@ -243,6 +316,29 @@ type
       ## project root so relocation stays stable; an absolute path
       ## OUTSIDE the project root is missing evidence, because there is
       ## no relocation-stable spelling for it).
+    effectiveSearchRoots*: seq[string]
+      ## The search roots of the EFFECTIVE compile command — every
+      ## ``--path`` the compiler will actually be given, including the
+      ## ones that leave no trace in any file this scanner can read: a
+      ## ``--path`` on the command line, one contributed by a nimble
+      ## dependency, one injected by a wrapper. Absolute or
+      ## project-relative; a root that does not exist is ignored, as the
+      ## compiler ignores it. Roots OUTSIDE the project root are
+      ## accepted and are resolution evidence only: a spec that resolves
+      ## through one lands outside the project root and is therefore
+      ## external code, bound through ``dependencyInstances`` rather
+      ## than through this closure. The roots themselves never enter the
+      ## digest — only the project-relative spelling of the files they
+      ## reach does, which is what keeps relocation invariance when they
+      ## are supplied as absolute paths.
+    searchRootsKnown*: bool
+      ## As with ``optionsSolved``: distinguishes "the effective compile
+      ## command was reconstructed and contributes no roots beyond the
+      ## ones this scanner can read" from "it was never reconstructed".
+      ## Only the former can produce a key. Without it a module
+      ## reachable only through an unseen ``--path`` is silently dropped
+      ## and a digest is still produced, which is the Reprobuild #171
+      ## aliasing class: two implementations, one key.
     selectedOptions*: seq[(string, string)]
     optionsSolved*: bool
       ## Distinguishes "solved to the empty set" from "not solved yet".
@@ -580,17 +676,152 @@ proc identOccurrences(text, ident: string): seq[int] =
     if beforeOk and afterOk:
       result.add(idx)
 
+proc blankKeptStringLiterals(masked: string): string =
+  ## ``masked`` with the delimiters and CONTENT of every kept
+  ## single-line string / char literal replaced by spaces, and with the
+  ## length and every newline position preserved so an offset in the
+  ## result indexes the same character in ``masked``.
+  ##
+  ## Existence reason: the compile-time-read scan must not see the word
+  ## ``slurp`` inside ``echo "slurp the file"``. It cannot simply run on
+  ## a fully string-masked text either, because the ``staticRead``
+  ## ARGUMENT is a string literal — so occurrences are FOUND here and
+  ## their argument is then read from ``masked`` at the same offset.
+  result = newStringOfCap(masked.len)
+  var i = 0
+  let n = masked.len
+  template blank(ch: char) =
+    result.add(if ch == '\n': '\n' else: ' ')
+  while i < n:
+    let ch = masked[i]
+    if ch == '"':
+      let raw = i > 0 and masked[i - 1] in {'r', 'R'} and
+        (i < 2 or masked[i - 2] notin IdentChars)
+      blank(ch); inc i
+      while i < n and masked[i] != '\n':
+        if not raw and masked[i] == '\\' and i + 1 < n:
+          blank(masked[i]); blank(masked[i + 1]); i += 2
+          continue
+        if masked[i] == '"':
+          if raw and i + 1 < n and masked[i + 1] == '"':
+            blank(masked[i]); blank(masked[i + 1]); i += 2
+            continue
+          blank(masked[i]); inc i
+          break
+        blank(masked[i]); inc i
+      continue
+    if ch == '\'' and (i == 0 or masked[i - 1] notin IdentChars):
+      blank(ch); inc i
+      while i < n and masked[i] != '\n':
+        if masked[i] == '\\' and i + 1 < n:
+          blank(masked[i]); blank(masked[i + 1]); i += 2
+          continue
+        if masked[i] == '\'':
+          blank(masked[i]); inc i
+          break
+        blank(masked[i]); inc i
+      continue
+    result.add(ch); inc i
+
+proc leadingIndent(line: string): int =
+  while result < line.len and line[result] in {' ', '\t'}:
+    inc result
+
+proc startsWithIdent(text, ident: string): bool =
+  ## ``text`` begins with ``ident`` as a whole identifier, optionally
+  ## backtick-quoted and optionally carrying an export marker.
+  var rest = text
+  if rest.startsWith("`"):
+    if not rest.startsWith("`" & ident & "`"):
+      return false
+    rest = rest[ident.len + 2 .. ^1]
+  else:
+    if not rest.startsWith(ident):
+      return false
+    rest = rest[ident.len .. ^1]
+    if rest.len > 0 and rest[0] in IdentChars:
+      return false
+  rest = rest.strip(trailing = false)
+  rest.len == 0 or rest[0] in {'*', '(', '[', ':', '=', ',', '{'}
+
+proc declaresOwnSymbol(scanned, ident: string): bool =
+  ## True when THIS file declares ``ident`` itself — as a routine, or in
+  ## a ``let`` / ``var`` / ``const`` / ``type`` section in either its
+  ## one-line or its indented-block form.
+  ##
+  ## Why this is not a weakening. A file that declares its own ``slurp``
+  ## shadows ``system.slurp``; the identifier in that file is no longer
+  ## the stdlib compile-time read, so refusing on it binds nothing and
+  ## costs a correct recipe its key permanently. That is not failing
+  ## closed, it is failing ALWAYS — the same argument the masking rule
+  ## rests on. An EXPLICIT ``system.slurp`` is still the stdlib one and
+  ## is still treated as a compile-time read, shadowing or not.
+  ##
+  ## ``scanned`` must be ``blankKeptStringLiterals`` output, so the word
+  ## ``proc slurp`` inside a string literal declares nothing.
+  const RoutineKeywords = ["proc", "func", "template", "macro", "method",
+                           "iterator", "converter"]
+  const SectionKeywords = ["let", "var", "const", "type"]
+  var sectionIndent = -1
+  for rawLine in scanned.splitLines():
+    let indent = leadingIndent(rawLine)
+    let line = rawLine.strip()
+    if line.len == 0:
+      continue
+    if sectionIndent >= 0:
+      if indent > sectionIndent:
+        if startsWithIdent(line, ident):
+          return true
+        continue
+      sectionIndent = -1
+    for keyword in RoutineKeywords:
+      if line.startsWith(keyword & " ") and
+          startsWithIdent(line[keyword.len + 1 .. ^1].strip(), ident):
+        return true
+    for keyword in SectionKeywords:
+      if line == keyword:
+        sectionIndent = indent
+      elif line.startsWith(keyword & " ") and
+          startsWithIdent(line[keyword.len + 1 .. ^1].strip(), ident):
+        return true
+  false
+
+proc qualifierBefore(scanned: string; idx: int): string =
+  ## The module/expression qualifier of the identifier at ``idx``, i.e.
+  ## ``system`` for ``system.slurp``; ``""`` when unqualified.
+  if idx == 0 or scanned[idx - 1] != '.':
+    return ""
+  var start = idx - 1
+  while start > 0 and scanned[start - 1] in IdentChars:
+    dec start
+  scanned[start ..< idx - 1]
+
 proc compileTimeReadsOf(masked: string): seq[CompileTimeRead] =
   ## Every compile-time file read / command execution in MASKED source.
   ## These have no import syntax at all, so without this the bytes they
   ## fold into the build are invisible to the closure.
+  ##
+  ## Still a textual scan rather than a parse, but no longer a bare
+  ## identifier grep: occurrences inside kept string literals are data
+  ## rather than code, and a file that declares its own ``slurp`` /
+  ## ``gorge`` is using ITS symbol, not the stdlib's. Both exclusions
+  ## are provable from the text rather than heuristic, and each one
+  ## removes a way a CORRECT recipe became permanently unkeyable. An
+  ## explicit ``system.<fn>`` defeats both exclusions.
+  let scanned = blankKeptStringLiterals(masked)
   for fn in CompileTimeFileReaders:
-    for idx in identOccurrences(masked, fn):
+    let shadowed = declaresOwnSymbol(scanned, fn)
+    for idx in identOccurrences(scanned, fn):
+      if shadowed and qualifierBefore(scanned, idx) != "system":
+        continue
       let arg = stringLiteralAt(masked, idx + fn.len)
       result.add(CompileTimeRead(kind: ctFileRead, fn: fn,
         literal: arg.value, hasLiteral: arg.found))
   for fn in CompileTimeCommandRunners:
-    for idx in identOccurrences(masked, fn):
+    let shadowed = declaresOwnSymbol(scanned, fn)
+    for idx in identOccurrences(scanned, fn):
+      if shadowed and qualifierBefore(scanned, idx) != "system":
+        continue
       result.add(CompileTimeRead(kind: ctCommand, fn: fn))
 
 proc isExternalModuleSpec(spec: string): bool =
@@ -615,6 +846,33 @@ proc addSearchRoot(roots: var seq[string]; projectRoot, base, value: string) =
   if not dirExists(cacheIdentityExtendedPath(abs)):
     return
   if not projectRelative(projectRoot, abs).inside:
+    return
+  for existing in roots:
+    if pathKey(existing) == pathKey(abs):
+      return
+  roots.add(abs)
+
+proc addSuppliedSearchRoot(roots: var seq[string]; base, value: string) =
+  ## Record a search root the CALLER supplied from the effective compile
+  ## command. Two things differ from ``addSearchRoot``:
+  ##
+  ##   * it is NOT restricted to the project root. A ``--path`` into a
+  ##     nimble dependency or a sibling checkout is a legitimate
+  ##     effective root; a spec that resolves through one lands outside
+  ##     the project root and the closure walk then classifies it as
+  ##     external code (bound through ``dependencyInstances``) instead
+  ##     of digesting it. Refusing such a root would make every real
+  ##     compile command unkeyable;
+  ##   * a root that does not exist on disk is ignored rather than
+  ##     refused, because the compiler ignores it too.
+  ##
+  ## The root itself never enters the digest. Only the project-relative
+  ## spelling of the files it reaches does, so supplying absolute roots
+  ## cannot break relocation invariance.
+  if value.len == 0:
+    return
+  let abs = normSlash(if value.isAbsolute: value else: base / value)
+  if not dirExists(cacheIdentityExtendedPath(abs)):
     return
   for existing in roots:
     if pathKey(existing) == pathKey(abs):
@@ -702,6 +960,7 @@ proc parseNimbleSrcDir(nimbleText: string): string =
   ""
 
 proc collectSearchRoots(projectRoot, entryPath: string;
+                        suppliedSearchRoots: seq[string];
                         roots: var seq[string]; dynamic: var bool) =
   addSearchRoot(roots, projectRoot, projectRoot, projectRoot)
   var configNames = @["nim.cfg", "config.nims"]
@@ -739,6 +998,12 @@ proc collectSearchRoots(projectRoot, entryPath: string;
     let srcDir = parseNimbleSrcDir(text)
     if srcDir.len > 0:
       addSearchRoot(roots, projectRoot, projectRoot, srcDir)
+  # Last, because Nim processes its config files before the command
+  # line and ``resolveSpec`` walks the roots in order: a module present
+  # under both a config root and a supplied one resolves the way the
+  # compiler resolves it.
+  for supplied in suppliedSearchRoots:
+    addSuppliedSearchRoot(roots, projectRoot, supplied)
 
 # ---------------------------------------------------------------------------
 # Spec resolution
@@ -839,9 +1104,17 @@ proc collectDeclaredInput(projectRoot, declared: string;
   false
 
 proc solvedSourceClosure*(projectRoot: string;
-                          declaredSourceInputs: seq[string] = @[]):
+                          declaredSourceInputs: seq[string] = @[];
+                          effectiveSearchRoots: seq[string] = @[]):
     SourceClosure =
   ## Resolve the complete local source closure of ``projectRoot``.
+  ##
+  ## ``effectiveSearchRoots`` are the ``--path`` roots of the effective
+  ## compile command — the ones no config scan can see. Supplying them
+  ## is what closes the command-line ``--path`` aliasing channel; the
+  ## REFUSAL when they were never reconstructed lives in
+  ## ``sourceIdentity``, because this proc also backs the diagnostic
+  ## ``sourceProviderRevisionHex``, which has no instance to refuse on.
   ##
   ## Walks the entry project file's transitive ``import`` / ``from`` /
   ## ``include`` graph across every search root the project declares,
@@ -870,7 +1143,8 @@ proc solvedSourceClosure*(projectRoot: string;
 
   var searchRoots: seq[string] = @[]
   var dynamicSearchPath = false
-  collectSearchRoots(root, entryPath, searchRoots, dynamicSearchPath)
+  collectSearchRoots(root, entryPath, effectiveSearchRoots, searchRoots,
+    dynamicSearchPath)
 
   var contentByRel = initTable[string, string]()
   var queued = initHashSet[string]()
@@ -1023,11 +1297,20 @@ proc sourceIdentity(instance: SolvedSourceInstance;
   ## fully populated target triple, and a toolchain with both a name and
   ## a version.
   let closure = solvedSourceClosure(instance.projectRoot,
-    instance.declaredSourceInputs)
+    instance.declaredSourceInputs, instance.effectiveSearchRoots)
   var missing = closure.missing
 
   if instance.packageName.len == 0:
     missing.add("package name")
+  if not instance.searchRootsKnown:
+    # The effective compile command was never reconstructed, so a module
+    # reachable only through a ``--path`` this scanner cannot read is
+    # invisible AND unrefusable: it would be assumed external, dropped,
+    # and a digest produced over the rest. Refuse instead — the same
+    # treatment an unresolvable candidate-local module already gets.
+    missing.add("effective compiler search roots (the --path set of the " &
+      "compile command; a module reachable only through one leaves no " &
+      "trace in any config file this scanner can read)")
   if not instance.optionsSolved:
     missing.add("selected options")
   if not instance.dependenciesResolved:
@@ -1079,9 +1362,10 @@ proc sourceCacheEntryIdentity*(projectRoot, packageName, packageVersion,
   ## Legacy constructor for the call sites that cannot yet supply a
   ## solved instance. It binds the source closure (so the diagnostic
   ## ``providerRevision`` now moves with imported recipe code) but has
-  ## NO solved options, NO resolved dependency instances and NO detected
-  ## toolchain version, so the returned identity is always PENDING and
-  ## can neither authorize a substitute nor a publication. Use
+  ## NO effective search roots, NO solved options, NO resolved
+  ## dependency instances and NO detected toolchain version, so the
+  ## returned identity is always PENDING and can neither authorize a
+  ## substitute nor a publication. Use
   ## ``solvedSourceCacheEntryIdentity`` once those inputs are solved.
   ##
   ## Its ``providerRevision`` keeps the historical 32-hex width (the
@@ -1092,6 +1376,7 @@ proc sourceCacheEntryIdentity*(projectRoot, packageName, packageVersion,
     projectRoot: projectRoot,
     packageName: packageName,
     packageVersion: packageVersion,
+    searchRootsKnown: false,
     optionsSolved: false,
     dependenciesResolved: false,
     platform: publicInterfaceTriple(),
