@@ -12981,8 +12981,8 @@ proc emitDevEnvProducerNotices(pins: openArray[DevEnvProducerPin];
     except IOError:
       discard
 
-proc devEnvToolShellOps*(edge: DevEnvEdgeResult;
-                         selection: DevEnvCliSelection): seq[DevEnvShellOp] =
+proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
+                            selection: DevEnvCliSelection): seq[DevEnvShellOp] =
   ## The PATH contribution that makes a dev-env activation PROVIDE the
   ## toolchain its recipe declares, rather than merely name it.
   ##
@@ -13115,6 +13115,27 @@ proc devEnvToolShellOps*(edge: DevEnvEdgeResult;
     result.add(DevEnvShellOp(kind: deskPrependPath, name: "PATH",
       value: binDirs[i]))
   result.add(prefixOps)
+
+proc devEnvToolShellOps*(edge: DevEnvEdgeResult;
+                         selection: DevEnvCliSelection): seq[DevEnvShellOp] =
+  ## The edge-addressed entry point, for the arms that computed one.
+  devEnvToolShellOpsImpl(edge, selection)
+
+proc devEnvToolShellOpsAt*(interfacePathHint, outDir: string):
+    seq[DevEnvShellOp] =
+  ## The same ops, addressed by PATHS rather than by an edge.
+  ##
+  ## Split out so the two halves of a shell-hook activation compute the
+  ## SAME ops from the same on-disk state. ``repro dev-env export`` has an
+  ## edge; ``repro dev-env deactivate`` has only the artifact path it was
+  ## handed, and its tamper check re-derives the activation script from
+  ## on-disk state and re-hashes it. If the two arms could disagree about
+  ## the tool ops, every deactivation would report tampering — so they go
+  ## through one function, and the interface artifact sits beside the RBDE
+  ## artifact precisely so the path form is derivable.
+  devEnvToolShellOpsImpl(
+    DevEnvEdgeResult(interfacePath: interfacePathHint),
+    DevEnvCliSelection(outDir: outDir))
 
 proc devEnvProducerActivation(artifact: DevEnvArtifact; projectRoot: string;
                               appliesToPath = true): seq[DevEnvShellOp] =
@@ -14180,7 +14201,22 @@ proc runDevEnvExportCommand(args: openArray[string];
   discard devEnvProducerActivation(artifact, selection.projectRoot,
     appliesToPath = false)
 
-  var plan = devEnvArtifactToExportPlan(edge.artifactPath)
+  # The realized toolchain, emitted FIRST so the recipe's own ops land in
+  # front of it. That is the ordering ``activationOps`` already uses for
+  # ``repro exec`` / ``shell`` / ``run``, where these arrive as ``preOps``:
+  # a provisioned package is the DEFAULT the recipe asked for, so an
+  # explicit ``prependPath`` in the same recipe has to be able to sit
+  # ahead of it.
+  #
+  # Without this, the arm the SHELL HOOK composes emitted the recipe's
+  # `devEnv:` block and no store paths at all — an environment that looks
+  # activated, sets a compiler, and provides none of the toolchain it
+  # declares, with every tool resolving from the ambient PATH. That is the
+  # failure the whole provisioning system exists to remove, and it sat in
+  # the DEFAULT activation path while `repro exec` was correct.
+  var plan = shellOpsToExportPlan(
+    devEnvToolShellOpsAt(edge.interfacePath, selection.outDir))
+  plan.add(devEnvArtifactToExportPlan(edge.artifactPath))
   # M77 — emit the cache-key as the ``__REPRO_APPLIED`` marker. The
   # next prompt's fast path re-derives the same key from on-disk
   # inputs and compares; a match short-circuits without any build
@@ -14302,7 +14338,16 @@ proc runDevEnvDeactivateCommand(args: openArray[string]): int =
   # request a different shell's deactivation syntax, e.g. user-side
   # ``--shell=pwsh`` against a bash-activated manifest, and the hash
   # seal must compare against the activation-time shell).
-  var rederivedPlan = devEnvArtifactToExportPlan(artifactPath)
+  # Recomputed, not remembered: the seal's whole point is that it derives
+  # the script again from on-disk state. The tool ops are part of the
+  # emitted script now, so they have to be part of this re-derivation too
+  # — otherwise every deactivation of a correctly-activated shell would
+  # report tampering. Addressed by path because this arm has only the
+  # artifact it was handed; the interface artifact is its sibling.
+  var rederivedPlan = shellOpsToExportPlan(
+    devEnvToolShellOpsAt(parentDir(artifactPath) / "project-interface.rbsz",
+      parentDir(artifactPath)))
+  rederivedPlan.add(devEnvArtifactToExportPlan(artifactPath))
   rederivedPlan.appendReproActiveManifestMarker(parsed.manifestPath)
   rederivedPlan.appendReproAppliedMarker(manifest.artifact)
   let rederivedScript =
