@@ -13,6 +13,34 @@
 #define REPRO_HCR_AGENT_API
 #endif
 
+/*
+ * Platform selection.
+ *
+ * Historically this file carried five `#if defined(__APPLE__) &&
+ * defined(__aarch64__)` guards with an inert `#else`. HLX-M0 opens each of them
+ * into a three-way selection: the Apple arm64 arm (unchanged), a Linux x86_64
+ * arm, and the pre-existing fallback. `REPRO_HCR_TARGET_APPLE_ARM64` is defined
+ * exactly when the old condition held, so the Apple behaviour is preserved by
+ * construction.
+ *
+ * MOVED HERE FROM repro_hcr_agent.c ON 2026-09-18 (HLX-M3 residual). The block
+ * used to sit in the .c only, which meant a declaration in this header could
+ * not be guarded by the same condition its definition is guarded by without
+ * SPELLING THE CONDITION A SECOND TIME — and two copies of one predicate is
+ * exactly how a guard and the thing it guards drift apart
+ * (`codetracer-specs/Testing/Verification-Harness-Traps.md` §30). The .c
+ * includes this header before anything else, so moving the block changes
+ * nothing about which arm the .c compiles; it only makes the same macro
+ * visible to the declarations below and to every consumer of this header.
+ */
+#if defined(__APPLE__) && defined(__aarch64__)
+#define REPRO_HCR_TARGET_APPLE_ARM64 1
+#elif defined(__linux__) && defined(__x86_64__)
+#define REPRO_HCR_TARGET_LINUX_X86_64 1
+#elif (defined(_WIN32) || defined(_WIN64) || defined(__CYGWIN__)) && (defined(__x86_64__) || defined(_M_X64))
+#define REPRO_HCR_TARGET_WINDOWS_X86_64 1
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -485,6 +513,35 @@ REPRO_HCR_AGENT_API size_t repro_hcr_rb_managed_type_count(void);
  * pointer is what lets a gate assert that by identity instead of by spelling.
  */
 REPRO_HCR_AGENT_API const char *repro_hcr_rb_managed_type_at(size_t index);
+
+/*
+ * HLX-M3 — the two Apple-arm observations, 2026-09-18.
+ *
+ * `repro_hcr_agent.c` has defined these since HLX-M3 and declared them nowhere,
+ * so no translation unit but its own could call them and the two repairs they
+ * exist to expose were unobservable on the only platform that has them:
+ *
+ *   - `..._last_text_left_writable_for_tests()` is the defect-2 repair. A
+ *     publication that could not restore the target's text page protection now
+ *     RECORDS that the page was left writable instead of reporting a total
+ *     failure; this answers non-zero exactly when that happened.
+ *   - `..._retained_site_count_for_tests()` is the defect-1 repair. The
+ *     `oldCodeRetained` field on the wire used to be the literal `true`; the
+ *     macOS arm now reports a per-publication retention record, and this is the
+ *     count behind it.
+ *
+ * The guard is the same macro the definitions use — one predicate, defined once
+ * above, so a declaration cannot survive the arm that defines it being removed.
+ * On any other host these names are not declared and not defined, and a caller
+ * that reaches for them fails to compile rather than linking against nothing.
+ *
+ * Both are still UNVERIFIED: this repository's HLX-M3 gates run on Linux
+ * x86_64, where neither symbol exists. A macOS arm64 agent closes them.
+ */
+#if defined(REPRO_HCR_TARGET_APPLE_ARM64)
+REPRO_HCR_AGENT_API int repro_hcr_agent_last_text_left_writable_for_tests(void);
+REPRO_HCR_AGENT_API int repro_hcr_agent_retained_site_count_for_tests(void);
+#endif
 
 #ifdef __cplusplus
 }

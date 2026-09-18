@@ -30,22 +30,13 @@
 #include <unistd.h>
 
 /*
- * Platform selection.
- *
- * Historically this file carried five `#if defined(__APPLE__) &&
- * defined(__aarch64__)` guards with an inert `#else`. HLX-M0 opens each of them
- * into a three-way selection: the Apple arm64 arm (unchanged), a Linux x86_64
- * arm, and the pre-existing fallback. `REPRO_HCR_TARGET_APPLE_ARM64` is defined
- * exactly when the old condition held, so the Apple behaviour is preserved by
- * construction.
+ * Platform selection (`REPRO_HCR_TARGET_APPLE_ARM64`,
+ * `REPRO_HCR_TARGET_LINUX_X86_64`, `REPRO_HCR_TARGET_WINDOWS_X86_64`) now lives
+ * in `repro_hcr_agent.h`, included at the top of this file. It moved there on
+ * 2026-09-18 so that declarations in the header can be guarded by the SAME
+ * macro that guards their definitions here, rather than by a second copy of the
+ * predicate. Do not redefine the macros in this file.
  */
-#if defined(__APPLE__) && defined(__aarch64__)
-#define REPRO_HCR_TARGET_APPLE_ARM64 1
-#elif defined(__linux__) && defined(__x86_64__)
-#define REPRO_HCR_TARGET_LINUX_X86_64 1
-#elif (defined(_WIN32) || defined(_WIN64) || defined(__CYGWIN__)) && (defined(__x86_64__) || defined(_M_X64))
-#define REPRO_HCR_TARGET_WINDOWS_X86_64 1
-#endif
 
 #define REPRO_HCR_AGENT_CAPABILITY_UNSUPPORTED_CLANG_FCF_PROTECTION \
   "unsupported-target-clang-fcf-protection"
