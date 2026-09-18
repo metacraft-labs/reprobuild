@@ -1122,14 +1122,44 @@ cache:
 
 | Kind | Examples | Scope |
 | --- | --- | --- |
-| Content-keyed | `--nimcache`, `ccache`, `GOCACHE` | Share as widely as concurrency allows — entries are named by their own input hash, so unrelated edges *help* each other |
-| Position-keyed | cargo target dir, CMake build dir, `tsBuildInfoFile` | One per edge — entries are named by position, so two edges silently overwrite each other |
+| Content-keyed | `ccache`, `GOCACHE` | Share as widely as concurrency allows — entries are named by their own input hash, so unrelated edges *help* each other |
+| Position-keyed | `--nimcache`, cargo target dir, CMake build dir, `tsBuildInfoFile` | One per edge — entries are named by position, so two edges silently overwrite each other |
 
-Getting this backwards is not a tuning mistake. Splitting the shared
-provider nimcache per edge would turn one cold compile plus 83 warm
-ones into 84 cold ones — the docstring at
-`repro_interface_artifacts.nim:4413-4422` exists to stop exactly that.
-And pointing two edges at one cargo target dir corrupts both.
+Getting this backwards is not a tuning mistake, and the way to settle it
+is to *look in the directory*. A nimcache holds
+`@m@shome@s…@sfoo.nim.c` — the module's own path, mangled — next to a
+`<project>.json` manifest. Those are positions, not digests, which is
+why `defaultNimcacheDir` (`nim.nim:307`) gives each edge
+`build/nimcache/<output name>` rather than one shared directory. A
+`ccache` directory, by contrast, holds entries named by a hash of the
+preprocessed input, and two unrelated projects sharing one help each
+other.
+
+Two consequences, opposite ways round. Pointing two edges at one cargo
+target dir — or one nimcache — corrupts both. And splitting a genuinely
+content-keyed cache per edge multiplies the cold population by the edge
+count.
+
+The shared provider nimcache is the case that looks like a
+counterexample and is not. The 83 edges sharing it
+(`repro_interface_artifacts.nim:4413-4422`) are compiles of *the same
+sources under the same configuration* — one position, invoked many
+times. That is inside the rule, not an exception to it.
+
+### Sharing and safety are different questions
+
+A cache being safe to *share* does not make it safe to use
+*concurrently*. Entry names that cannot collide say nothing about the
+tool's housekeeping, which may prune or rewrite the directory wholesale.
+
+The scar again: two `repro` sessions populating one nimcache hit
+`ENOTEMPTY` inside nim's incremental cleanup and the compile **aborts**.
+That single hazard is why this repo carries *two* defences against it —
+the session token above, which isolates, and
+`acquireProviderNimcacheLock`
+(`repro_interface_artifacts.nim:4506`), which excludes. Ask the two
+questions separately: who may be given this directory, and may two
+processes hold it at once.
 
 ### ☐ Nicknames — and why you will almost never write one
 
