@@ -409,6 +409,39 @@ type
       ## Written before the prefix is sealed, so the launchers are part of
       ## the content-addressed tree rather than an edit to a published one —
       ## the same rule ``executableAlias`` follows, and for the same reason.
+    closureManifest*: string
+      ## Recipe-relative path to a committed manifest of ADDITIONAL archives
+      ## unpacked into this prefix, for a package whose entry point does not
+      ## run without its dependencies.
+      ##
+      ## The two npm agents a self-contained bundle does not cover:
+      ## ``@zed-industries/claude-code-acp`` is 174 KB with five runtime
+      ## dependencies, and ``@sourcegraph/amp`` is an 895-byte wrapper whose
+      ## ``bin`` points into ``node_modules/@ampcode/cli/bin/`` — a
+      ## platform-specific native binary reached through npm's
+      ## optional-dependency mechanism. Neither is a single tarball, and
+      ## neither should be a fetch-at-build-time step.
+      ##
+      ## **A file rather than entries in the recipe**, because the closure is
+      ## GENERATED from the same ``package-lock.json`` that already pins every
+      ## entry by integrity hash. Hand-transcribing it into a
+      ## ``provisioning:`` block would turn a machine-checkable artifact into
+      ## prose; committed beside the recipe it diffs like a lock file, which
+      ## is what makes a dependency change reviewable.
+      ##
+      ## Format: one entry per non-blank, non-``#`` line, whitespace
+      ## separated — ``<prefix-relative-path> <sha256> <url>``. The path is
+      ## where that archive's contents land, matching the layout the entry
+      ## point resolves against.
+      ##
+      ## **The limitation it inherits**, stated because it is why this is a
+      ## path and not bytes: like ``expressionFile``, the manifest is read
+      ## from the recipe's own directory at realize time, so a consumer that
+      ## receives this provisioning as a CONTRIBUTION through an interface
+      ## artifact does not get the file with it. A federated catalog
+      ## publishing a closure package must be checked out, not merely
+      ## pinned. Lifting that means moving the entries into the artifact,
+      ## which is a larger change to the provisioning schema than this field.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string

@@ -304,6 +304,14 @@ type
     declaredLauncher*: string
       ## Interpreter a script payload is run through. See
       ## ``TarballProvisioningDef.launcher``.
+    declaredClosureManifest*: string
+      ## Recipe-relative manifest of additional archives realize unpacks
+      ## into the prefix. See ``TarballProvisioningDef.closureManifest``.
+    closureManifestRoot*: string
+      ## Directory the manifest path is resolved against — the recipe's own
+      ## directory. Carried on the plan because the realizer is reached from
+      ## several entry points (in-process, the store daemon) and only the
+      ## resolver knows where the declaration came from.
     stripComponents*: int
     lockIdentity*: string
 
@@ -1937,6 +1945,10 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
     declaredPrunePaths: selected.prunePaths,
     declaredNonRedistributable: selected.nonRedistributable,
     declaredLauncher: selected.launcher,
+    declaredClosureManifest: selected.closureManifest,
+    closureManifestRoot:
+      if selected.location.file.len > 0: parentDir(selected.location.file)
+      else: "",
     stripComponents: selected.stripComponents,
     lockIdentity: contributorLockIdentity(selected.contributor,
       if selected.lockIdentity.len > 0:
@@ -2828,6 +2840,98 @@ proc flushStoreDiagnostics() =
   except IOError, OSError:
     discard
 
+type ClosureEntry = object
+  ## One archive the closure manifest names, and where it lands.
+  path: string    ## prefix-relative destination directory
+  sha256: string
+  url: string
+
+proc closureManifestPath(plan: TarballAcquisitionPlan): string =
+  if plan.declaredClosureManifest.len == 0:
+    return ""
+  if plan.declaredClosureManifest.isAbsolute:
+    return plan.declaredClosureManifest
+  if plan.closureManifestRoot.len == 0:
+    return plan.declaredClosureManifest
+  plan.closureManifestRoot / plan.declaredClosureManifest
+
+proc parseClosureManifest(path: string): seq[ClosureEntry] =
+  ## ``<prefix-relative-path> <sha256> <url>`` per line; ``#`` comments and
+  ## blank lines ignored.
+  ##
+  ## Deliberately a flat text format rather than JSON: it is GENERATED from
+  ## a lock file and read by a human reviewing a dependency change, and a
+  ## line-per-archive diff is what makes "one dependency moved" legible.
+  if not fileExists(extendedPath(path)):
+    raise newException(OSError,
+      "tool-resolution failed: closure manifest not found: " & path)
+  for rawLine in readFile(extendedPath(path)).splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    let parts = line.splitWhitespace()
+    if parts.len != 3:
+      raise newException(ValueError,
+        "tool-resolution failed: closure manifest line must be " &
+        "\"<path> <sha256> <url>\": " & path & ": " & line)
+    let entryPath = parts[0].replace('\\', '/')
+    if entryPath.len == 0 or entryPath.isAbsolute or
+        entryPath == ".." or entryPath.startsWith("../") or
+        entryPath.contains("/../"):
+      raise newException(ValueError,
+        "tool-resolution failed: closure entry path must be relative and " &
+        "inside the prefix: " & entryPath)
+    result.add(ClosureEntry(path: entryPath,
+      sha256: normalizedSha256(parts[1]), url: parts[2]))
+
+proc closureManifestDigest(plan: TarballAcquisitionPlan): string =
+  ## The manifest's CONTENT, canonicalised, as the cache-key contribution.
+  ##
+  ## Its path is a local detail — two checkouts hold it at different
+  ## absolute paths and realize the same prefix — so keying on the path
+  ## would split the cache for no reason. Keying on the parsed entries
+  ## rather than the raw bytes means a comment or a reordering does not
+  ## move the key either, which is what lets the generator reformat.
+  var canonical: seq[string] = @[]
+  for entry in parseClosureManifest(closureManifestPath(plan)):
+    canonical.add(entry.path & " " & entry.sha256 & " " & entry.url)
+  canonical.sort()
+  $blake3.digest(canonical.join("\n"))
+
+proc unpackClosure(plan: TarballAcquisitionPlan;
+                   destination, storeRoot: string) =
+  ## Unpack every archive the manifest names into its declared subdirectory.
+  ##
+  ## Runs against the STAGING prefix, before anything is sealed, so a
+  ## closure that fails half way leaves nothing under the store path — the
+  ## same rule pruning follows.
+  ##
+  ## Each entry goes through ``verifiedDownload``, so every archive is
+  ## checksum-verified and shares the store's download cache with every
+  ## other consumer of the same bytes. That is the whole reason this is a
+  ## manifest of pinned archives rather than a call to a package manager:
+  ## the fetch is content-addressed, cached, and offline after the first
+  ## time, and nothing resolves a version range at build time.
+  if plan.declaredClosureManifest.len == 0:
+    return
+  let manifestPath = closureManifestPath(plan)
+  for entry in parseClosureManifest(manifestPath):
+    var entryPlan = plan
+    entryPlan.url = entry.url
+    entryPlan.mirrors = @[]
+    entryPlan.sha256 = entry.sha256
+    # npm publishes every package as a `package/`-rooted gzip tarball.
+    entryPlan.archiveType = "tar.gz"
+    entryPlan.stripComponents = 1
+    entryPlan.declaredClosureManifest = ""
+    let downloaded = verifiedDownload(entryPlan, storeRoot)
+    let target = destination / entry.path
+    createDir(extendedPath(parentDir(target)))
+    if dirExists(extendedPath(target)):
+      removeDir(extendedPath(target))
+    extractTarballArchive(downloaded.path, target, entryPlan.archiveType,
+      entryPlan.stripComponents, "")
+
 proc toolCacheIdentity(plan: TarballAcquisitionPlan;
                        packageName, version: string): CacheEntryIdentity =
   ## The shared-cache identity of a realized tool prefix.
@@ -2873,6 +2977,14 @@ proc toolCacheIdentity(plan: TarballAcquisitionPlan;
   # launcher, invalidating shared-cache entries whose content did not change.
   if plan.declaredLauncher.len > 0:
     result.addOption("launcher", plan.declaredLauncher)
+  # The closure's archives ARE the prefix's bytes, as much as the root
+  # archive is. Two hosts resolving the same package against different
+  # manifests hold different trees and must not serve each other, so the
+  # manifest's CONTENT — not its path, which is a local detail — keys the
+  # entry. Conditional like the others, so a package with no closure keeps
+  # the key it already had.
+  if plan.declaredClosureManifest.len > 0:
+    result.addOption("closure", closureManifestDigest(plan))
   result.addOption("stripComponents", $plan.stripComponents)
 
 proc cloneSiblingRealization(plan: TarballAcquisitionPlan;
@@ -3168,6 +3280,14 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
     if not cloned:
       extractTarballArchive(downloaded.path, tempPrefix, plan.archiveType,
         plan.stripComponents, plan.declaredExecutablePath)
+      # The declared closure, unpacked into the same staging prefix. After
+      # the root archive because an entry lands UNDER it
+      # (``node_modules/...``), and before the prune/alias/launcher steps
+      # because those describe the finished tree. A clone skips this for
+      # the same reason it skips the extraction: the sibling it matched
+      # already carries the result, and the clone only matches a sibling
+      # whose closure keyed the same cache entry.
+      unpackClosure(plan, tempPrefix, storeRoot)
     # Declared prunes, applied to the temporary prefix before anything is
     # sealed — so the dropped bytes never appear under the store path, never
     # reach the receipt, and never reach the archive the publish step packs.

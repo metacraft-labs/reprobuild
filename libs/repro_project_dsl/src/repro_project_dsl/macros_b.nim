@@ -3634,6 +3634,7 @@ proc provisioningContributionLiteral(
       ", executableAlias: " & codeOrEmpty(provisioning.executableAlias) &
       ", nonRedistributable: " & $provisioning.nonRedistributable &
       ", launcher: " & codeOrEmpty(provisioning.launcher) &
+      ", closureManifest: " & codeOrEmpty(provisioning.closureManifest) &
       ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
       ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
       ", stripComponents: " & $provisioning.stripComponents &

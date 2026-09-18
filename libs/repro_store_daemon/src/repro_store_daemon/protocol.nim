@@ -8,7 +8,11 @@ when defined(posix):
   import std/posix
 
 const
-  StoreDaemonProtocolVersion* = 4'u16
+  StoreDaemonProtocolVersion* = 5'u16
+    ## v5: the external-realize body also carries ``closureManifest``. Same
+    ## reasoning as every bump below: a v4 peer reading a v5 body would read
+    ## the manifest string's length as ``stripComponents``.
+    ##
     ## v4: the external-realize body also carries ``launcher``. Same
     ## reasoning as every bump below: a v3 peer reading a v4 body would
     ## read the launcher string's length as ``stripComponents``.
@@ -101,6 +105,9 @@ type
       ## When true the daemon must realize but never publish this prefix.
     launcher*: string
       ## Interpreter a script payload is run through; empty for a program.
+    closureManifest*: string
+      ## Recipe-relative manifest of additional archives to unpack; empty
+      ## when the prefix is exactly one archive.
       ##
       ## Both of these travel with the request for the same reason every
       ## other field does: the daemon rebuilds the provisioning from this
@@ -294,6 +301,7 @@ proc externalRealizeBody*(req: StoreDaemonExternalRealizeRequest): seq[byte] =
   result.writeStringSeq(req.prunePaths)
   result.writeU32Le(if req.nonRedistributable: 1'u32 else: 0'u32)
   result.writeString(req.launcher)
+  result.writeString(req.closureManifest)
   result.writeU32Le(uint32(max(req.stripComponents, 0)))
 
 proc parseExternalRealizeBody*(body: openArray[byte]):
@@ -321,6 +329,7 @@ proc parseExternalRealizeBody*(body: openArray[byte]):
   result.prunePaths = body.readStringSeq(pos)
   result.nonRedistributable = body.readU32Le(pos) != 0'u32
   result.launcher = body.readString(pos)
+  result.closureManifest = body.readString(pos)
   result.stripComponents = int(body.readU32Le(pos))
 
 proc releaseRootBody*(holderId, rootId: string): seq[byte] =

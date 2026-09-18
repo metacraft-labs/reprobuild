@@ -1443,6 +1443,12 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
     let launcherValue = namedValue(node[i], "launcher")
     if not launcherValue.isNil:
       result.launcher = exprCode(launcherValue)
+    # ``closureManifest = "closures/<name>.manifest"`` names a committed
+    # list of additional archives to unpack into the prefix, for a package
+    # whose entry point does not run without its dependencies.
+    let closureManifestValue = namedValue(node[i], "closureManifest")
+    if not closureManifestValue.isNil:
+      result.closureManifest = exprCode(closureManifestValue)
     let sha256Value = namedValue(node[i], "sha256")
     if not sha256Value.isNil:
       sha256Node = sha256Value
@@ -2575,6 +2581,7 @@ proc packageLiteral(pkg: PackageDef): string =
       ", executableAlias: " & codeOrEmpty(provisioning.executableAlias) &
       ", nonRedistributable: " & $provisioning.nonRedistributable &
       ", launcher: " & codeOrEmpty(provisioning.launcher) &
+      ", closureManifest: " & codeOrEmpty(provisioning.closureManifest) &
     ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
       ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
       ", stripComponents: " & $provisioning.stripComponents &

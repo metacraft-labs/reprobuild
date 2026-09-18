@@ -263,6 +263,11 @@ type
       ## a SCRIPT. See ``TarballProvisioningDef.launcher``: an npm bundle is
       ## not a program, so realize writes a launcher pair beside it under
       ## ``executableAlias``'s name.
+    closureManifest*: string
+      ## Recipe-relative path to a manifest of additional archives realize
+      ## unpacks into the prefix. See
+      ## ``TarballProvisioningDef.closureManifest``: an entry point with
+      ## runtime dependencies is not one tarball.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string
@@ -490,8 +495,13 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 19'u16
-    ## v19 (current): retains ``launcher`` on tarball provisioning — the
+  EnvelopeVersion = 20'u16
+    ## v20 (current): retains ``closureManifest`` on tarball provisioning —
+    ##                the committed list of additional archives realize
+    ##                unpacks into the prefix. v19 payloads decode with it
+    ##                empty, which is the prior behaviour of a prefix being
+    ##                exactly one archive.
+    ## v19: retains ``launcher`` on tarball provisioning — the
     ##                interpreter realize runs a script payload through. v18
     ##                payloads decode with it empty, which is the prior
     ##                behaviour of treating every declared path as a program.
@@ -900,6 +910,8 @@ proc writeTarballProvisioning(outp: var seq[byte];
     outp.writeByte(if provisioning.nonRedistributable: 1'u8 else: 0'u8)
   if version >= 19'u16:
     outp.writeString(provisioning.launcher)
+  if version >= 20'u16:
+    outp.writeString(provisioning.closureManifest)
   outp.writeU32Le(uint32(max(provisioning.stripComponents, 0)))
   outp.writeString(provisioning.packageId)
   outp.writeString(provisioning.lockIdentity)
@@ -925,6 +937,8 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
     result.nonRedistributable = readByte(bytes, pos) != 0'u8
   if version >= 19'u16:
     result.launcher = readString(bytes, pos)
+  if version >= 20'u16:
+    result.closureManifest = readString(bytes, pos)
   result.stripComponents = int(readU32Le(bytes, pos))
   result.packageId = readString(bytes, pos)
   result.lockIdentity = readString(bytes, pos)
@@ -1488,6 +1502,7 @@ proc toInterfaceTarballProvisioning(packageName: string;
     prunePaths: provisioning.prunePaths,
     nonRedistributable: provisioning.nonRedistributable,
     launcher: provisioning.launcher,
+    closureManifest: provisioning.closureManifest,
     stripComponents: provisioning.stripComponents,
     packageId: provisioning.packageId,
     lockIdentity: provisioning.lockIdentity,
@@ -2258,6 +2273,7 @@ proc emitProvisioningContributionRegistrations(code: var string;
       code.add("], sha256: " & escForCode(provisioning.sha256) &
         ", nonRedistributable: " & $provisioning.nonRedistributable &
         ", launcher: " & escForCode(provisioning.launcher) &
+        ", closureManifest: " & escForCode(provisioning.closureManifest) &
         ", archiveType: " & escForCode(provisioning.archiveType) &
         ", executablePath: " & escForCode(provisioning.executablePath) &
         ", executableAlias: " & escForCode(provisioning.executableAlias) &
