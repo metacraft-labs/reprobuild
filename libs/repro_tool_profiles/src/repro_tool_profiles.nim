@@ -1154,8 +1154,14 @@ proc executableInStorePath(storePath, declaredExecutablePath: string;
   # declaration can name is a DLL, and a DLL is not something anyone spawns.
   # Its absence here made the package's realize depend on Windows reporting
   # execute permission for ordinary files rather than on a stated rule.
+  # M9.R.15q.5.11 — ``.bin`` and ``.onnx`` are MODEL WEIGHTS: a Whisper
+  # ``ggml-base.bin`` or a Piper voice's ``.onnx`` is a multi-megabyte blob
+  # that a runtime memory-maps and that nothing ever spawns. They arrive
+  # through ``archiveType = "raw"``, which copies a single downloaded file
+  # into the prefix under its declared name, so the declared path IS the
+  # payload and there is no program in the package to anchor on instead.
   let dataExts = [".pc", ".so", ".dll", ".a", ".h", ".hpp", ".cmake",
-    ".json", ".xml", ".txt", ".ids"]
+    ".json", ".xml", ".txt", ".ids", ".bin", ".onnx"]
   let lower = declaredExecutablePath.toLowerAscii
   var isDataDecl = false
   for ext in dataExts:
