@@ -5807,13 +5807,16 @@
             "cmd",
             "firstEntered",
             "firstStarted",
+            "module",
             "nimcache",
+            "outBin",
             "output",
             "runner",
+            "scratch",
             "secondEntered",
             "secondStarted"
           ],
-          "line": 237,
+          "line": 269,
           "path": "tests/unit/t_m9r13a_provider_compile_sharing.nim",
           "patterns": [
             "nim-variable-argv"
@@ -5827,7 +5830,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 339,
+          "line": 373,
           "path": "tests/unit/t_m9r13a_provider_compile_sharing.nim",
           "patterns": [
             "repro-compile-provider-binary"
@@ -5843,7 +5846,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 359,
+          "line": 394,
           "path": "tests/unit/t_m9r13a_provider_compile_sharing.nim",
           "patterns": [
             "repro-compile-provider-binary"
@@ -5859,7 +5862,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 365,
+          "line": 400,
           "path": "tests/unit/t_m9r13a_provider_compile_sharing.nim",
           "patterns": [
             "repro-compile-provider-binary"
@@ -10795,7 +10798,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -33907,7 +33910,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r13a_provider_compile_sharing.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 19,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
