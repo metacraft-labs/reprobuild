@@ -20,6 +20,8 @@ suite "Windows long command script planning":
       ],
       r"C:\Users\zahary\repro-runcommand-long.log")
 
+    check "$ErrorActionPreference = 'Continue'" in script
+    check "PSNativeCommandUseErrorActionPreference" in script
     check "$exe = 'C:\\tools\\nim\\bin\\nim.exe'" in script
     check "'c'," in script
     check "'--path:D:\\metacraft\\reprobuild\\libs\\repro_core\\src'," in script

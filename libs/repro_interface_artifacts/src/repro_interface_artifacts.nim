@@ -1302,7 +1302,7 @@ proc decodeProviderCompileArtifact*(bytes: openArray[
       raiseEnvelopeError(eeUnknownMagic, "unknown provider compile envelope magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version != EnvelopeVersion:
+  if version < 12'u16 or version > EnvelopeVersion:
     raiseEnvelopeError(eeUnsupportedVersion, "unsupported provider compile envelope version")
   let typeId = readU16Le(bytes, pos)
   if typeId != uint16(ord(iekProviderCompile) + 101):
@@ -2416,7 +2416,10 @@ proc powerShellRunCommandScript*(command: openArray[string];
   ## the child command through cmd.exe's ~8191-character command-line limit.
   if command.len == 0:
     raise newException(ValueError, "PowerShell command script requires argv")
-  result = "$ErrorActionPreference = 'Stop'\r\n"
+  result = "$ErrorActionPreference = 'Continue'\r\n"
+  result.add("if (Test-Path variable:global:PSNativeCommandUseErrorActionPreference) {\r\n")
+  result.add("  $global:PSNativeCommandUseErrorActionPreference = $false\r\n")
+  result.add("}\r\n")
   result.add("$exe = " & powerShellSingleQuote(command[0]) & "\r\n")
   result.add("$argv = @(\r\n")
   for i in 1 ..< command.len:
@@ -2425,9 +2428,16 @@ proc powerShellRunCommandScript*(command: openArray[string];
       result.add(",")
     result.add("\r\n")
   result.add(")\r\n")
-  result.add("& $exe @argv > " & powerShellSingleQuote(sinkPath) &
-    " 2>&1\r\n")
-  result.add("exit $LASTEXITCODE\r\n")
+  result.add("try {\r\n")
+  result.add("  & $exe @argv > " & powerShellSingleQuote(sinkPath) & " 2>&1\r\n")
+  result.add("  if ($null -eq $LASTEXITCODE) {\r\n")
+  result.add("    exit 1\r\n")
+  result.add("  }\r\n")
+  result.add("  exit $LASTEXITCODE\r\n")
+  result.add("} catch {\r\n")
+  result.add("  [System.IO.File]::AppendAllText(" & powerShellSingleQuote(sinkPath) & ", [Environment]::NewLine + $_.Exception.ToString() + [Environment]::NewLine)\r\n")
+  result.add("  exit 1\r\n")
+  result.add("}\r\n")
 
 proc runCommand(command: openArray[string];
     cwd = ""): ProviderCompileExecutionResult =
@@ -2466,30 +2476,35 @@ proc runCommand(command: openArray[string];
       writeFile(extendedPath(psScriptPath),
         powerShellRunCommandScript(command, sinkPath))
       let powerShellExe = block:
-        let pwsh = findExe("pwsh")
-        if pwsh.len > 0:
-          pwsh
+        # Prefer Windows PowerShell 5.1 (powershell.exe) over PowerShell 7
+        # (pwsh.exe). Windows PowerShell is a standard OS component on every
+        # Windows installation, starts with lower latency, avoids CFG fast-fail
+        # crash hazards (0xC0000409) under process instrumentation, and does
+        # not treat native-process stderr output as a terminating script error.
+        let windowsPowerShell = findExe("powershell")
+        if windowsPowerShell.len > 0:
+          windowsPowerShell
         else:
-          let windowsPowerShell = findExe("powershell")
-          if windowsPowerShell.len > 0:
-            windowsPowerShell
+          # PATH lookup is not the last word here, because PATH is exactly
+          # what cannot be trusted on this branch. We are here BECAUSE the
+          # command is too long for cmd.exe -- and a process that reached
+          # us through cmd.exe has already had its PATH truncated at 8191
+          # characters, which on a host with a long PATH silently removes
+          # whatever sits at the end of it. Windows PowerShell has a fixed
+          # location under %SystemRoot%, so look there before giving up on
+          # an interpreter the machine certainly has.
+          let systemRoot = getEnv("SystemRoot", r"C:\Windows")
+          let fallback = systemRoot /
+            r"System32\WindowsPowerShell\v1.0\powershell.exe"
+          if fileExists(extendedPath(fallback)):
+            fallback
           else:
-            # PATH lookup is not the last word here, because PATH is exactly
-            # what cannot be trusted on this branch. We are here BECAUSE the
-            # command is too long for cmd.exe -- and a process that reached
-            # us through cmd.exe has already had its PATH truncated at 8191
-            # characters, which on a host with a long PATH silently removes
-            # whatever sits at the end of it. Windows PowerShell has a fixed
-            # location under %SystemRoot%, so look there before giving up on
-            # an interpreter the machine certainly has.
-            let systemRoot = getEnv("SystemRoot", r"C:\Windows")
-            let fallback = systemRoot /
-              r"System32\WindowsPowerShell\v1.0\powershell.exe"
-            if fileExists(extendedPath(fallback)):
-              fallback
+            let pwsh = findExe("pwsh")
+            if pwsh.len > 0:
+              pwsh
             else:
               raise newException(OSError,
-                "pwsh/powershell required for long Windows command; " &
+                "powershell/pwsh required for long Windows command; " &
                 "neither is on PATH and " & fallback & " does not exist")
       withSpawnWorkingDir:
         process = startProcess(powerShellExe,
