@@ -1147,8 +1147,15 @@ proc executableInStorePath(storePath, declaredExecutablePath: string;
   # vendor-ID database). Recognise ``.ids`` as a data declaration so
   # the executable+permission check is skipped (the file is r--r--r--
   # in the nix store).
-  let dataExts = [".pc", ".so", ".a", ".h", ".hpp", ".cmake", ".json",
-    ".xml", ".txt", ".ids"]
+  # M9.R.15q.5.10 — ``.dll`` is the Windows sibling of ``.so`` and was
+  # missing from a list that already carried the POSIX one. The case that
+  # surfaced it: electron-builder's ``nsis-resources`` archive is a flat tree
+  # of plugin DLLs with no program in it at all, so the only anchor a
+  # declaration can name is a DLL, and a DLL is not something anyone spawns.
+  # Its absence here made the package's realize depend on Windows reporting
+  # execute permission for ordinary files rather than on a stated rule.
+  let dataExts = [".pc", ".so", ".dll", ".a", ".h", ".hpp", ".cmake",
+    ".json", ".xml", ".txt", ".ids"]
   let lower = declaredExecutablePath.toLowerAscii
   var isDataDecl = false
   for ext in dataExts:
