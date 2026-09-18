@@ -12,13 +12,13 @@ A *Tier-2 reprobuild-specific helper* that supplies the **list of
 macOS-specific binaries** the Phase-5 gates (M7-M11) need argv-traced
 when they execute inside a disposable macOS VM, and a thin Nim helper
 module that vm-harness (the Tier-1 generic argv-tracing-shim-installer
-primitive at `metacraft-labs/vm-harness`) consumes.
+primitive at `metacraft-labs/gosti`) consumes.
 
 The architectural split (per the M6 milestone block):
 
 | Tier | Where | Responsibility |
 |---|---|---|
-| **Tier 1** | `metacraft-labs/vm-harness` (the Nim library) | Generic argv-tracing-shim-installer primitive that knows how to wrap any named binary. Backend-agnostic. |
+| **Tier 1** | `metacraft-labs/gosti` (the Nim library) | Generic argv-tracing-shim-installer primitive that knows how to wrap any named binary. Backend-agnostic. |
 | **Tier 2** | `reprobuild/tools/macos-phase5-shims/` (this directory) | The macOS-specific binary list (`dscl`, `launchctl`, `defaults`, `systemsetup`, `scutil`, `brew`) and any per-binary post-processing the Phase-5 gates need. |
 | **Gate** | `reprobuild/tests/e2e/macos-phase5/t_e2e_*.nim` | The actual M7-M11 destructive-half scenarios that ASSERT the argv the driver shelled out is the expected one. |
 
