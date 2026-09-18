@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1649,
+    "nimTestBinaries": 1650,
     "pureUnitConsolidationGroups": 50,
-    "pureUnitTests": 586,
+    "pureUnitTests": 587,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1660
+    "testEntries": 1661
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1102,7 +1102,7 @@
       "graph-fixture": 12,
       "integration": 772,
       "platform/destructive": 115,
-      "pure unit": 586,
+      "pure unit": 587,
       "unclassified": 175
     },
     "graphOwnedTestArtifacts": [
@@ -1251,9 +1251,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1649,
+    "nimTestBinaryCount": 1650,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1660
+    "testEntryCount": 1661
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10846,6 +10846,24 @@
       "source": "libs/repro_interface_artifacts/tests/t_windows_long_command_script.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_contribution_fingerprint_invalidation_boundaries",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/test_contribution_fingerprint_invalidation_boundaries.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
