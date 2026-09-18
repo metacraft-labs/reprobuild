@@ -147,7 +147,19 @@ proc computeDevEnvEdgeCacheKey*(projectRoot, activity, lockSliceId,
     "lockSliceFile=" & lockSliceFilePart(projectRoot),
     "developOverrides=" & fileFingerprintPart(resolvedOverridesPath),
     envVarPart("REPRO_DEVELOP_OVERRIDES_FILE"),
-    envVarPart("REPRO_TOOL_PROVISIONING")
+    envVarPart("REPRO_TOOL_PROVISIONING"),
+    # WHERE the realized prefixes live, alongside WHICH provisioning mode
+    # produced them. Both change the PATH an activation emits, so both have
+    # to key it.
+    #
+    # Its absence was not theoretical. Pointing `REPRO_STORE_ROOT` at an
+    # empty directory — the obvious way to rehearse a clean install without
+    # a clean machine — appeared to do nothing at all: `resolveStoreRoot`
+    # honoured the variable, but the activation never re-ran, so the
+    # previous run's PATH entries were replayed and every tool still
+    # resolved out of the default store. Nothing reported a conflict,
+    # because from the key's point of view nothing had changed.
+    envVarPart("REPRO_STORE_ROOT")
   ]
   let digest = actionFingerprintDigest(parts.join("\n").textBytes())
   result = newStringOfCap(32)
