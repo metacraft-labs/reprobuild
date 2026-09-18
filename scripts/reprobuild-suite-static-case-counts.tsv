@@ -1526,6 +1526,7 @@ tests/unit/t_cached_source_dependency_closure.nim	nim	11
 tests/unit/t_capabilities.nim	nim	2
 tests/unit/t_cargo_lock_vendor_plan.nim	nim	19
 tests/unit/t_cargo_vendor_action.nim	nim	10
+tests/unit/t_closure_manifest.nim	nim	4
 tests/unit/t_cmake_direct_tool_identity.nim	nim	5
 tests/unit/t_config_nims_lib_resolution.nim	nim	7
 tests/unit/t_configure_build_tree_cleanup.nim	nim	12
@@ -1656,6 +1657,7 @@ tests/unit/t_rx_runquotad_forwards_custom_pools.nim	nim	5
 tests/unit/t_same_project_fragment_selectors.nim	nim	10
 tests/unit/t_script_launcher.nim	nim	3
 tests/unit/t_shared_mime_info_dev_stub.nim	nim	1
+tests/unit/t_sibling_prefix_clone.nim	nim	4
 tests/unit/t_source_fetch_tool_metadata.nim	nim	7
 tests/unit/t_stale_artifact_names_what_changed.nim	nim	5
 tests/unit/t_store_path_farm.nim	nim	4

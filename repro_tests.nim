@@ -13671,6 +13671,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_closure_manifest.nim",
+    binary: "build/test-bin/t_closure_manifest",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_cmake_direct_tool_identity.nim",
     binary: "build/test-bin/t_cmake_direct_tool_identity",
     defines: @[],
@@ -14834,6 +14843,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_shared_mime_info_dev_stub.nim",
     binary: "build/test-bin/t_shared_mime_info_dev_stub",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_sibling_prefix_clone.nim",
+    binary: "build/test-bin/t_sibling_prefix_clone",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

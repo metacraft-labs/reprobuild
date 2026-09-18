@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1667,
+    "nimTestBinaries": 1669,
     "pureUnitConsolidationGroups": 49,
     "pureUnitTests": 593,
     "staticallyDetectedRuntimeCompilerFlowTests": 101,
-    "testEntries": 1678
+    "testEntries": 1680
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1090,10 +1090,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 781,
+      "integration": 782,
       "platform/destructive": 115,
       "pure unit": 593,
-      "unclassified": 177
+      "unclassified": 178
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1241,9 +1241,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1667,
+    "nimTestBinaryCount": 1669,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1678
+    "testEntryCount": 1680
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -33001,6 +33001,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_closure_manifest",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_closure_manifest.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_cmake_direct_tool_identity",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -35346,6 +35365,26 @@
       "source": "tests/unit/t_shared_mime_info_dev_stub.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_sibling_prefix_clone",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_interface_artifacts",
+        "repro_local_store",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_sibling_prefix_clone.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
