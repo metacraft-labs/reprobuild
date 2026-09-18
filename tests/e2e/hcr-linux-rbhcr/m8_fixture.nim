@@ -30,7 +30,7 @@
 ## assertion from a vacuous one; that is the specific lesson NH-M2 recorded,
 ## where four gates passed under BOTH the correct and the incorrect ordering.
 
-import std/[json, os, osproc, streams, strtabs, strutils]
+import std/[json, monotimes, os, osproc, streams, strtabs, strutils, times]
 
 import repro_hcr_agent
 import repro_project_dsl
@@ -99,7 +99,8 @@ proc buildPatchBodies*(repoRoot: string): tuple[normal, oversize: seq[byte]] =
 ## falsifier defines. `outputName` must differ per define set or two builds
 ## overwrite each other and the gate measures the same binary twice.
 proc buildTarget*(repoRoot, outputName: string;
-                  defines: openArray[string] = []): string =
+                  defines: openArray[string] = [];
+                  source = "hcr_lx_m8_target.c"): string =
   let caseDir = m8CaseDir(repoRoot)
   let binDir = repoRoot / "build" / "test-bin"
   createDir(binDir)
@@ -121,7 +122,7 @@ proc buildTarget*(repoRoot, outputName: string;
   for define in defines:
     args.add define
   args.add ["-o", result,
-            caseDir / "hcr_lx_m8_target.c",
+            caseDir / source,
             repoRoot / "libs" / "repro_hcr_agent" / "c" / "repro_hcr_agent.c"]
   args = args & @linkFlags & @["-lpthread"]
   discard runOrFail(shellCommand(args), repoRoot)
@@ -186,6 +187,59 @@ proc runReload*(repoRoot, targetBin, socketName: string;
       result.targetOutput)
   doAssert result.targetJson["schemaId"].getStr() == schemaId,
     "target printed schemaId " & result.targetJson["schemaId"].getStr() &
+    ", expected " & schemaId
+
+type
+  M8TimedRun* = object
+    ## HLX-M8 residue, 2026-09-18. `runReload` above answers WHAT happened;
+    ## §3.4's threaded synchronized mode is a claim about WHEN, so this variant
+    ## also reports how long the coordinator was blocked on the wire between
+    ## sending the patch request and being answered. That interval is the only
+    ## place "the coordinator waits for the application" is observable from
+    ## outside the target.
+    run*: M8Run
+    coordinatorWaitMs*: int
+
+proc runReloadTimed*(repoRoot, targetBin, socketName: string;
+                     request: HcrPatchRequest;
+                     argv: openArray[string] = [];
+                     schemaId = "reprobuild.hcr.hlx-m8.linux-threaded-sync-target-result.v1"):
+                     M8TimedRun =
+  let workDir = m8WorkDir(repoRoot)
+  let socketPath = workDir / socketName
+  removeFile(socketPath)
+  var listener = listenHcrAgentUnixSocket(socketPath)
+  defer: listener.close()
+
+  var env = newStringTable()
+  for key, value in envPairs():
+    env[key] = value
+  env[ReproHcrAgentSocketEnv] = socketPath
+
+  let process = startProcess(targetBin, workingDir = repoRoot, args = @argv,
+    env = env, options = {poStdErrToStdOut})
+  var connection = acceptHcrAgentConnection(listener)
+  var client = initHcrCoordinatorClient(SupportProfile)
+  let started = getMonoTime()
+  result.run.delivery = client.deliverPatchRequest(connection, request)
+  result.coordinatorWaitMs =
+    int(inMilliseconds(getMonoTime() - started))
+  connection.close()
+
+  result.run.targetOutput = process.outputStream.readAll()
+  result.run.exitCode = process.waitForExit()
+  process.close()
+  if result.run.exitCode != 0:
+    raise newException(IOError,
+      "target exited " & $result.run.exitCode & ":\n" & result.run.targetOutput)
+  try:
+    result.run.targetJson = parseJson(result.run.targetOutput.strip())
+  except JsonParsingError as err:
+    raise newException(IOError,
+      "target printed unparsable JSON (" & err.msg & "):\n" &
+      result.run.targetOutput)
+  doAssert result.run.targetJson["schemaId"].getStr() == schemaId,
+    "target printed schemaId " & result.run.targetJson["schemaId"].getStr() &
     ", expected " & schemaId
 
 proc m8PatchRequest*(patchId: string; body: openArray[byte];

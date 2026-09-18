@@ -24581,6 +24581,14 @@ type
     objectSymbol*: string
     objectPath*: string
     sourcePath*: string
+    changedTypes*: seq[HcrTypeLayoutChange]
+      ## HLX-M8 residue, 2026-09-18: the §4.3 `changedTypes` deltas the CALLER
+      ## declares for this patch, read from the `--hcr-metadata` document.
+      ##
+      ## Watch does no type-layout diffing, so this is the only place the field
+      ## can honestly come from. It is optional and defaults to empty, which is
+      ## what every metadata document written before this said by omission.
+      ## Inference mode leaves it empty: there is nothing to infer it from.
 
   HcrWatchObjectBaseline* = object
     objectPath*: string
@@ -24815,6 +24823,14 @@ proc optionalJsonString(node: JsonNode; key: string): string =
   if node.kind == JObject and node.hasKey(key):
     result = node[key].getStr()
 
+proc requiredJsonInt(node: JsonNode; key, context: string): int =
+  if node.kind != JObject or not node.hasKey(key):
+    raise newException(ValueError, context & " missing required field " & key)
+  if node[key].kind != JInt:
+    raise newException(ValueError, context & " field " & key &
+      " must be an integer")
+  node[key].getInt()
+
 proc defaultObjectSymbol(functionName: string;
                          supportProfile = HostDefaultHcrSupportProfile): string =
   ## HLX-M1: keyed on a support profile rather than on `when defined(macosx)`,
@@ -24848,6 +24864,27 @@ proc readHcrWatchPatchMetadata(projectRoot, metadataPath: string):
     projectRoot, patch.requiredJsonString("object", "HCR patch metadata"))
   result.sourcePath = resolveProjectPath(
     projectRoot, patch.requiredJsonString("source", "HCR patch metadata"))
+  # Absent means "this patch changes no type layouts", which is what every
+  # metadata document written before this milestone says by omission. A
+  # present-but-malformed value is a DIFFERENT statement and is refused rather
+  # than read as empty — a half-read layout delta would silently turn an
+  # unmanaged type into an accepted one, which is exactly the acceptance rule
+  # HCR-Overview §7.4 exists to enforce. Same reasoning, same shape, as
+  # `parseTypeLayoutChanges` on the wire side.
+  if patch.hasKey("changedTypes"):
+    let changed = patch["changedTypes"]
+    if changed.kind != JArray:
+      raise newException(ValueError,
+        "HCR patch metadata: changedTypes must be an array")
+    for entry in changed:
+      if entry.kind != JObject:
+        raise newException(ValueError,
+          "HCR patch metadata: each changedTypes entry must be an object " &
+          "with typeName, oldSize and newSize")
+      result.changedTypes.add HcrTypeLayoutChange(
+        typeName: entry.requiredJsonString("typeName", "HCR patch metadata"),
+        oldSize: uint32(entry.requiredJsonInt("oldSize", "HCR patch metadata")),
+        newSize: uint32(entry.requiredJsonInt("newSize", "HCR patch metadata")))
 
 proc jsonStringSeqField(node: JsonNode; key: string): seq[string] =
   let values = node{key}
@@ -24951,19 +24988,35 @@ type
     ## ``hcr/patchFailed`` and falls back.
 
 proc inferHcrWatchPatch*(baselines: openArray[HcrWatchObjectBaseline];
-                         artifacts: string; cycle: int):
+                         artifacts: string; cycle: int;
+                         supportProfile = CodetracerHcrSupportProfile):
     HcrWatchInferredPatch =
+  ## HLX-M8 residue, 2026-09-18: made profile-conditional.
+  ##
+  ## This was the LAST unconditional `parseMachOArm64Object` on the watch path,
+  ## and it is the one the three `tests/e2e/hcr-watch/` gates named when they
+  ## guarded themselves `when defined(macosx) and defined(arm64)`. Every other
+  ## half had already been keyed on the negotiated profile — `objectFunctionBytes`
+  ## and `hcrUnwindMetadataFor` since HLX-M1, `defaultObjectSymbol` before that —
+  ## so on Linux the watch session got as far as inferring a baseline and then
+  ## refused the rebuilt ELF object with `expected little-endian Mach-O 64-bit
+  ## object`. The default stays host-derived, which reproduces the previous
+  ## answer exactly on macOS.
   type Candidate = object
     baseline: HcrWatchObjectBaseline
     objectSymbol: string
+
+  let isElf = hcrProfileIsElf(supportProfile)
+  proc parseForProfile(path: string): auto =
+    if isElf: parseElfX86_64Object(path) else: parseMachOArm64Object(path)
 
   var candidates: seq[Candidate]
   for baseline in baselines:
     if not fileExists(extendedPath(baseline.generation0Object)) or
         not fileExists(extendedPath(baseline.objectPath)):
       continue
-    let oldGraph = parseMachOArm64Object(baseline.generation0Object)
-    let newGraph = parseMachOArm64Object(baseline.objectPath)
+    let oldGraph = parseForProfile(baseline.generation0Object)
+    let newGraph = parseForProfile(baseline.objectPath)
     let diff = diffFunctions(oldGraph, newGraph)
     for entry in diff.functions:
       case entry.kind
@@ -24989,7 +25042,13 @@ proc inferHcrWatchPatch*(baselines: openArray[HcrWatchObjectBaseline];
         names.join(", "))
 
   let candidate = candidates[0]
-  let functionName = stripObjectSymbolPrefix(candidate.objectSymbol)
+  # ELF does not prefix C symbols with an underscore, so stripping one there
+  # would rename any function whose source name legitimately begins with `_`.
+  # `hcrObjectSymbolFor` is the inverse of this operation and has been
+  # profile-conditional since HLX-M1; this is the half that was not.
+  let functionName =
+    if isElf: candidate.objectSymbol
+    else: stripObjectSymbolPrefix(candidate.objectSymbol)
   let newObject = artifacts /
     (safePathSegment(functionName, "patch") & "-generation" &
       $(cycle - 1) & ".o")
@@ -25212,7 +25271,23 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
     debugObjectBytes = objectBytes,
     unwindMetadataBytes = hcrUnwindMetadataFor(
       CodetracerHcrSupportProfile, session.newObject),
-    sourceGenerationMap = [sourceGeneration])
+    sourceGenerationMap = [sourceGeneration],
+    # HLX-M8 residue, 2026-09-18. `changedFiles` and `changedTypes` reached the
+    # wire in HLX-M8 and NO producer ever filled them, so every patch this
+    # command has ever delivered told the application "no source file changed"
+    # — and `rb_hcr_file_changed` could not answer true for a watch-driven
+    # reload no matter what the application asked about. The watch session has
+    # the changed file in hand: it is the source the rebuild was triggered by
+    # and the one already reported in `sourceGenerationMap`.
+    #
+    # `changedTypes` stays caller-declared. Watch does no type-layout diffing,
+    # and HCR-Overview §7.4's acceptance rule runs on this set — inventing
+    # entries here would make the agent refuse patches nothing asked it to
+    # refuse. In metadata mode the caller declares them in the metadata
+    # document; in inference mode there is nothing to infer them from and the
+    # set is empty, which is the honest answer rather than a guess.
+    changedFiles = [session.metadata.sourcePath],
+    changedTypes = session.metadata.changedTypes)
   # Named-Targets M4 §3.4: emit ``hcr/patchCompiling`` for the SSE
   # consumer before the patch is sent to the agent. ``target`` is the
   # per-target label set on the config.
@@ -29193,6 +29268,18 @@ proc parseHcrPrepareObjectArgs(args: seq[string]): HcrPrepareObjectArgs =
         "unsupported HCR prepare-object flag: " & arg)
     index.inc
 
+proc objectFileIsElf(path: string): bool =
+  ## Decide by the file's own magic, not by the host. A coordinator can be
+  ## handed either object format on either host, and `prepare-object`'s whole
+  ## job is format-specific.
+  var header = newString(4)
+  var handle: File
+  if not handle.open(extendedPath(path), fmRead):
+    return false
+  defer: handle.close()
+  let read = handle.readBuffer(addr header[0], 4)
+  read == 4 and header[0] == '\x7F' and header[1 .. 3] == "ELF"
+
 proc runHcrPrepareObjectCommand(args: seq[string]): int =
   let parsed = parseHcrPrepareObjectArgs(args)
   requireHcrFile(parsed.input, "--input")
@@ -29203,7 +29290,31 @@ proc runHcrPrepareObjectCommand(args: seq[string]): int =
     raise newException(ValueError, "--function and --all-code are mutually exclusive")
   requireHcrArg(parsed.segmentName, "--segment")
   createDir(extendedPath(parentDir(parsed.output)))
-  if parsed.allCodeSections:
+  if objectFileIsElf(parsed.input):
+    # HLX-M8 residue, 2026-09-18. `prepare-object` rewrites Mach-O
+    # `section_64.segname` so the linker can give the patch's code its own
+    # `__HCR` segment and `-Wl,-segprot,__HCR,rwx,rwx` can raise that segment's
+    # MAXIMUM protection. Both halves are Mach concepts.
+    # `HCR/Linux-ELF-Provider.md` §5.1 says so in as many words: "The whole
+    # `__HCR` segment scheme that supports it ... and the `prepare-object` pass
+    # that rewrites Mach-O `section_64.segname` ... likewise has no ELF
+    # counterpart and is dropped. ELF sections carry no segment name."
+    #
+    # So on ELF the pass has no work to do — the Linux provider maps its own
+    # pages near the target's text and copies the body in, and never needs a
+    # segment the linker marked writable-and-executable. What it must NOT do is
+    # what it did until now: run the Mach-O parser over an ELF object and refuse
+    # `expected little-endian Mach-O 64-bit object`, which made
+    # `repro watch --hcr` unable to complete a single cycle on Linux — the build
+    # edge failed before any patch reached the wire.
+    #
+    # The edge is kept rather than elided so the graph shape is the same on both
+    # hosts and the output the watch session reads from is a real artifact.
+    copyFile(extendedPath(parsed.input), extendedPath(parsed.output))
+    echo "repro hcr prepare-object: output=" & parsed.output &
+      " objectFormat=elf passthrough=1 (no ELF counterpart to the Mach-O " &
+      "__HCR segment rewrite; see Linux-ELF-Provider.md section 5.1)"
+  elif parsed.allCodeSections:
     let count = rewriteMachOArm64CodeSectionSegments(
       parsed.input, parsed.output, parsed.segmentName)
     echo "repro hcr prepare-object: output=" & parsed.output &
@@ -29292,7 +29403,13 @@ proc runHcrCoordinateCommand(args: seq[string]): int =
     debugObjectBytes = objectBytes,
     unwindMetadataBytes = hcrUnwindMetadataFor(
       CodetracerHcrSupportProfile, newObject),
-    sourceGenerationMap = [sourceGeneration])
+    sourceGenerationMap = [sourceGeneration],
+    # HLX-M8 residue, 2026-09-18. Same reasoning as the watch session: this
+    # command knows exactly which source it drove an edit into, and sending an
+    # empty `changedFiles` told every application that nothing changed.
+    # `changedTypes` stays empty here because this command has no place for a
+    # caller to declare one.
+    changedFiles = [sourcePath])
   client.sendCoordinatorMessage(connection,
     client.coordinatorPatchRequestMessage(request))
   while client.session.state == hssPatchRequested:

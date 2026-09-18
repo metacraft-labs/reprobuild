@@ -428,11 +428,46 @@ int main(int argc, char **argv) {
    * breakpoint in `hcr_lx_m5_reached` is hit. */
   result = hcr_lx_m5_level3(hcr_lx_m5_reached_and_trace);
 
+  char register_frame_object[128];
+  char register_frame_symbol[128];
+  register_frame_object[0] = '\0';
+  register_frame_symbol[0] = '\0';
+
   if (options.rollback) {
     rollback_rc = repro_hcr_lx_txn_rollback(&repro_hcr_lx_last_txn);
     unregister_attempts = repro_hcr_lx_last_txn.unregister_attempts;
     fde_found_after_rollback =
         repro_hcr_lxu_fde_found(hcr_lx_m5_patch_body_address);
+  }
+
+  /* HLX-OQ-4's REJECTED candidate, measured rather than argued.
+   *
+   * `dladdr` was the cheapest way to decide which unwinder is in the process:
+   * ask which shared object `__register_frame` lives in. The design rejected it
+   * partly because it CANNOT SEE A STATICALLY LINKED UNWINDER, and until this
+   * date that was an argument rather than a measurement — both arms of the
+   * detection gate linked their unwinder dynamically.
+   *
+   * These two fields are what makes it a measurement. With a dynamically linked
+   * unwinder `dladdr` names `libgcc_s.so.1` or `libunwind.so.1` and a
+   * library-identifying detection would work. With the unwinder linked
+   * statically the same call names THE MAIN EXECUTABLE — the same answer for
+   * both toolchains — so there is nothing left to tell them apart, which is
+   * exactly the world probe-and-verify was chosen for. */
+  {
+    Dl_info rf_info;
+    if (__register_frame != NULL &&
+        dladdr((void *)(uintptr_t)__register_frame, &rf_info) != 0) {
+      if (rf_info.dli_fname != NULL) {
+        const char *slash = strrchr(rf_info.dli_fname, '/');
+        snprintf(register_frame_object, sizeof(register_frame_object), "%s",
+                 slash != NULL ? slash + 1 : rf_info.dli_fname);
+      }
+      if (rf_info.dli_sname != NULL) {
+        snprintf(register_frame_symbol, sizeof(register_frame_symbol), "%s",
+                 rf_info.dli_sname);
+      }
+    }
   }
 
   printf(
@@ -454,7 +489,11 @@ int main(int argc, char **argv) {
       "\"recordedEhFrameOnSite\":%d,\"recordedJitOnSite\":%d,"
       "\"unwindTraceFrames\":%d,\"unwindCrossesPatch\":%s,"
       "\"rolledBack\":%d,\"rollbackRc\":%d,\"unregisterAttempts\":%d,"
-      "\"fdeFoundAfterRollback\":%d,\"unwindTrace\":",
+      "\"fdeFoundAfterRollback\":%d,"
+      "\"registerFrameAvailable\":%s,"
+      "\"dladdrRegisterFrameObject\":\"%s\","
+      "\"dladdrRegisterFrameSymbol\":\"%s\","
+      "\"unwindTrace\":",
       options.mode, result, hcr_lx_m5_reached_count,
       (unsigned long long)entry_address, (unsigned long long)sled_address,
       (unsigned long long)hcr_lx_m5_patch_body_address,
@@ -478,7 +517,9 @@ int main(int argc, char **argv) {
       symfile.retired_relocation_sections, symfile.allocated_sections,
       recorded_eh, recorded_jit, hcr_lx_m5_last_trace.count,
       hcr_lx_m5_trace_crosses_patch() ? "true" : "false", options.rollback,
-      rollback_rc, unregister_attempts, fde_found_after_rollback);
+      rollback_rc, unregister_attempts, fde_found_after_rollback,
+      (__register_frame != NULL) ? "true" : "false",
+      register_frame_object, register_frame_symbol);
   hcr_lx_m5_print_trace_json();
   printf("}\n");
   fflush(stdout);

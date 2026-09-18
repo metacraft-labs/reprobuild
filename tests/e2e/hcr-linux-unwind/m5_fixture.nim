@@ -60,7 +60,20 @@ type
     ## Which unwinder the fixture binary is linked against. This is the
     ## HLX-OQ-4 axis: `__register_frame` exists in both and they disagree about
     ## its argument.
-    uwLibgcc, uwLlvmLibunwind
+    ##
+    ## ADDED 2026-09-18 — the two STATIC arms. HLX-M5 left HLX-OQ-4's static
+    ## case unmeasured and said so: both arms linked their unwinder
+    ## dynamically, and `dladdr` was rejected partly BECAUSE it cannot see a
+    ## statically linked unwinder, so that advantage of probe-and-verify was
+    ## argued rather than measured. These two arms are the measurement.
+    ##
+    ## A weak undefined reference does NOT pull an archive member, so
+    ## `-static-libgcc` alone would leave the provider's weak
+    ## `__register_frame` NULL and the arm would measure
+    ## `unwind-register-frame-unavailable` rather than a convention. Both
+    ## static arms therefore link `-Wl,-u,__register_frame`, which makes the
+    ## symbol strongly undefined and pulls the archive member that defines it.
+    uwLibgcc, uwLlvmLibunwind, uwLibgccStatic, uwLlvmLibunwindStatic
 
   Payloads* = object
     objectPath*: string   ## the whole `ET_REL`, i.e. the JIT symfile input
@@ -191,6 +204,33 @@ proc buildFixture*(repoRoot, outputName: string; unwinder = uwLibgcc;
     args = args & @[
       "-nodefaultlibs", "-L" & prefix / "lib",
       "-Wl,-rpath," & prefix / "lib", "-lunwind", "-lc", "-lgcc"]
+  of uwLibgccStatic:
+    # `-static-libgcc` makes GCC resolve the unwinder out of `libgcc_eh.a`
+    # instead of `libgcc_s.so.1`, and `-u __register_frame` is what pulls that
+    # archive member in against a weak reference. The result has NO unwinder
+    # in its `DT_NEEDED` list at all.
+    # `_Unwind_Backtrace` is weak-undefined in this fixture too, so it needs the
+    # same treatment for the same reason. MEASURED 2026-09-18: without
+    # `-u _Unwind_Backtrace` the binary links with `_Unwind_Backtrace` and
+    # `_Unwind_GetIP` WEAK AND UNRESOLVED (`nm -D --undefined-only`), nothing
+    # defines them at run time, and the in-process walk reports zero frames in
+    # the UNPATCHED control as well as in the patched arm — an arm that would
+    # have measured the link rather than the provider.
+    args = args & @["-static-libgcc", "-Wl,-u,__register_frame",
+                    "-Wl,-u,_Unwind_Backtrace"]
+  of uwLlvmLibunwindStatic:
+    let prefix = getEnv("REPRO_HCR_LLVM_LIBUNWIND")
+    doAssert prefix.len > 0,
+      "REPRO_HCR_LLVM_LIBUNWIND is not set. This gate needs LLVM's libunwind " &
+      "to build HLX-OQ-4's static arms; reprobuild's dev shell exports it " &
+      "(flake.nix). Run the gate from `direnv exec . ...` inside reprobuild/."
+    doAssert fileExists(prefix / "lib" / "libunwind.a"),
+      "REPRO_HCR_LLVM_LIBUNWIND=" & prefix & " has no lib/libunwind.a, so " &
+      "HLX-OQ-4's statically linked libunwind arm cannot be built here"
+    args = args & @[
+      "-nodefaultlibs", "-Wl,-u,__register_frame",
+      "-Wl,-u,_Unwind_Backtrace",
+      prefix / "lib" / "libunwind.a", "-lc", "-lgcc", "-lpthread"]
   discard runOrFail(shellCommand(args), repoRoot)
 
 ## Which unwinder the built binary actually bound to, read out of the LINKED

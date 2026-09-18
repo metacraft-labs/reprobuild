@@ -2567,3 +2567,19 @@ integration_hcr_linux_on_stack_function_reported_skipped:
         --out:build/test-bin/integration_hcr_linux_on_stack_function_reported_skipped \
         tests/e2e/hcr-linux-threads/t_integration_hcr_linux_on_stack_function_reported_skipped.nim \
         2>&1 | tee test-logs/integration_hcr_linux_on_stack_function_reported_skipped.log
+
+# HLX-M8 residue — §3.4's THREADED synchronized mode. Every other HLX-M8 target
+# services the agent from `main` with the polling entry point; this one starts
+# the agent on its own detached thread, keeps four worker threads calling the
+# patched function throughout, and applies the reload from the application's
+# loop. Two arms one argv flag apart: synchronized (the coordinator is blocked
+# for the whole park) and automatic (it is not, and the callbacks run on the
+# agent's thread).
+integration_hcr_linux_threaded_synchronized_reload:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_threaded_synchronized_reload \
+        --out:build/test-bin/integration_hcr_linux_threaded_synchronized_reload \
+        tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_threaded_synchronized_reload.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_threaded_synchronized_reload.log

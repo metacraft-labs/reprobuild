@@ -429,6 +429,90 @@ REPRO_HCR_AGENT_API bool rb_hcr_file_changed(const char *file_path);
 REPRO_HCR_AGENT_API bool rb_hcr_type_changed(const char *type_name);
 
 /*
+ * 13.5 Padded Allocation — ADDED 2026-09-18 (HLX-M8 residue).
+ *
+ * These are the three functions of HCR-Overview.md § 13.5 that HLX-M8 did not
+ * bind; IsoNim binds ten of § 13's thirteen and the remaining three had no
+ * owner named anywhere.
+ *
+ * WHAT IS IMPLEMENTED IS THE ALLOCATOR, AND THAT IS ALL § 13.5 SPECIFIES.
+ * `rb_hcr_padded_alloc` hands back `current_size` usable bytes with `padding`
+ * zero-initialised bytes reserved after them; `rb_hcr_padded_capacity` answers
+ * `current_size + padding` for a live padded allocation and 0 for anything
+ * else; `rb_hcr_padded_free` releases one and ignores a pointer it did not
+ * hand out.
+ *
+ * WHAT IS NOT IMPLEMENTED, because the API as specified cannot express it:
+ * § 7.5's "if a type's layout grows within the padding budget, the agent can
+ * update the type metadata in place without requiring a full save/restore
+ * cycle". That is the whole reason these functions exist, and NOTHING IN THIS
+ * SIGNATURE SET CARRIES A TYPE IDENTITY. Given a reload whose `changedTypes`
+ * says `physics::RigidBody` grew 24 -> 40, the agent has no way to find the
+ * `RigidBody` allocations, because `rb_hcr_padded_alloc` was never told which
+ * type any allocation holds — and § 7.4's acceptance rule is keyed on managed
+ * TYPE NAMES, which is a different registry from this one. So the reload path
+ * does not consult these allocations today and no `rb_hcr_padded_*` call
+ * changes any reload's outcome. Raised as an open question against § 13.5
+ * rather than closed by inventing a fourth parameter: `RbHcrReloadInfo` and
+ * this signature set are an ABI owned by HCR-Overview § 13, and a type
+ * argument chosen unilaterally by the Linux provider is one the macOS and
+ * Windows providers would have to reverse-engineer.
+ *
+ * Two contract details § 13.5 leaves to the implementation, decided here and
+ * stated so a second provider can match rather than guess:
+ *
+ *   - `alignment == 0` means "the platform's default", `2 * sizeof(void *)`,
+ *     which is what malloc already guarantees. A non-zero `alignment` that is
+ *     not a power of two is refused with NULL.
+ *   - a request whose `current_size + padding` is ZERO is refused with NULL.
+ *     § 13.5 reserves a capacity of 0 for "ptr was not allocated with
+ *     rb_hcr_padded_alloc", so an allocation of zero total capacity is one the
+ *     query function could not distinguish from a foreign pointer.
+ *
+ * Only the padding is zero-initialised, as § 13.5 says; the usable region is
+ * uninitialised, like malloc's.
+ */
+REPRO_HCR_AGENT_API void *rb_hcr_padded_alloc(size_t current_size,
+                                              size_t padding,
+                                              size_t alignment);
+REPRO_HCR_AGENT_API void rb_hcr_padded_free(void *ptr);
+REPRO_HCR_AGENT_API size_t rb_hcr_padded_capacity(const void *ptr);
+
+/*
+ * Observation surface for the padded allocator, matching the existing
+ * `repro_hcr_rb_last_*` pattern: a read of state the allocator already keeps.
+ * Nothing in the agent branches on it. It exists so a gate can assert that a
+ * free REMOVED the record rather than merely returned — a leak and a correct
+ * release are otherwise indistinguishable from outside.
+ */
+REPRO_HCR_AGENT_API size_t repro_hcr_rb_padded_live_count(void);
+
+/*
+ * HLX-M5 residue, 2026-09-18 — what the last reload's debugger/unwinder
+ * registration actually did.
+ *
+ * `repro watch --hcr` and `repro hcr coordinate` have sent non-empty
+ * `debugObjectPayload` and `unwindMetadataPayload` on Linux since HLX-M5
+ * landed, and nothing in the process could observe the result: both evidence
+ * structs were filled in and discarded, so a gate could assert that bytes
+ * arrived and nothing more. These read state the production registration path
+ * produced; no agent code branches on any of them.
+ *
+ * `repro_hcr_rb_last_fde_found` is the one that matters: it is
+ * `_Unwind_Find_FDE` asked about the LIVE dispatch address immediately after
+ * registration, i.e. the unwinder's own answer rather than a byte count. It is
+ * 0 on hosts other than Linux x86_64, where the lookup is not implemented.
+ */
+REPRO_HCR_AGENT_API size_t repro_hcr_rb_last_debug_object_bytes(void);
+REPRO_HCR_AGENT_API size_t repro_hcr_rb_last_unwind_metadata_bytes(void);
+REPRO_HCR_AGENT_API int repro_hcr_rb_last_jit_registered(void);
+REPRO_HCR_AGENT_API int repro_hcr_rb_last_eh_frame_registered(void);
+REPRO_HCR_AGENT_API uint64_t repro_hcr_rb_last_jit_first_entry(void);
+REPRO_HCR_AGENT_API uint64_t repro_hcr_rb_last_jit_register_hook_calls(void);
+REPRO_HCR_AGENT_API uint64_t repro_hcr_rb_last_dispatch_address(void);
+REPRO_HCR_AGENT_API int repro_hcr_rb_last_fde_found(void);
+
+/*
  * HLX-M8 — synchronized mode (Patch-Loading-Lifecycle.md § 3.4).
  *
  * Automatic is the default: the agent runs the whole lifecycle itself as soon

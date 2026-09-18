@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1670,
+    "nimTestBinaries": 1671,
     "pureUnitConsolidationGroups": 49,
     "pureUnitTests": 593,
     "staticallyDetectedRuntimeCompilerFlowTests": 101,
-    "testEntries": 1681
+    "testEntries": 1682
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1090,8 +1090,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 783,
-      "platform/destructive": 115,
+      "integration": 786,
+      "platform/destructive": 113,
       "pure unit": 593,
       "unclassified": 178
     },
@@ -1241,9 +1241,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1670,
+    "nimTestBinaryCount": 1671,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1681
+    "testEntryCount": 1682
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2115,7 +2115,7 @@
             "socketPath",
             "sourcePath"
           ],
-          "line": 111,
+          "line": 137,
           "path": "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim",
           "patterns": [
             "gcc"
@@ -2140,7 +2140,7 @@
             "socketPath",
             "sourcePath"
           ],
-          "line": 114,
+          "line": 140,
           "path": "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim",
           "patterns": [
             "cc"
@@ -2151,7 +2151,7 @@
       "source": "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim"
     },
     {
-      "class": "platform/destructive",
+      "class": "integration",
       "matches": [
         {
           "assignedCommandVariable": "gccPath",
@@ -2167,13 +2167,13 @@
             "metadataB",
             "monitorTools",
             "pathValue",
-            "repoRoot",
+            "projectRoot",
             "reproBin",
             "socketA",
             "socketB",
             "sourcePath"
           ],
-          "line": 167,
+          "line": 176,
           "path": "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim",
           "patterns": [
             "gcc"
@@ -2194,13 +2194,13 @@
             "metadataB",
             "monitorTools",
             "pathValue",
-            "repoRoot",
+            "projectRoot",
             "reproBin",
             "socketA",
             "socketB",
             "sourcePath"
           ],
-          "line": 170,
+          "line": 179,
           "path": "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim",
           "patterns": [
             "cc"
@@ -2211,7 +2211,7 @@
       "source": "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim"
     },
     {
-      "class": "platform/destructive",
+      "class": "integration",
       "matches": [
         {
           "assignedCommandVariable": "gccPath",
@@ -2227,13 +2227,13 @@
             "metadataB",
             "monitorTools",
             "pathValue",
-            "repoRoot",
+            "projectRoot",
             "reproBin",
             "socketA",
             "socketB",
             "sourcePath"
           ],
-          "line": 156,
+          "line": 165,
           "path": "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim",
           "patterns": [
             "gcc"
@@ -2254,13 +2254,13 @@
             "metadataB",
             "monitorTools",
             "pathValue",
-            "repoRoot",
+            "projectRoot",
             "reproBin",
             "socketA",
             "socketB",
             "sourcePath"
           ],
-          "line": 159,
+          "line": 168,
           "path": "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim",
           "patterns": [
             "cc"
@@ -20000,6 +20000,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_integration_hcr_linux_threaded_synchronized_reload",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_threaded_synchronized_reload.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_hcr_linux_shared_library_sled_patch",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -20197,7 +20214,7 @@
       "requiresReproBinary": false,
       "source": "tests/e2e/hcr-portable-rbhcr/t_hcr_rb_application_abi_contract.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -20222,8 +20239,8 @@
     },
     {
       "binary": "build/test-bin/t_e2e_repro_watch_hcr_multi_target_independent_patches",
-      "class": "platform/destructive",
-      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -20237,12 +20254,12 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": true,
-      "targetOs": "soMacosArm64"
+      "targetOs": "soAny"
     },
     {
       "binary": "build/test-bin/t_e2e_repro_watch_hcr_one_target_agent_inject_failure",
-      "class": "platform/destructive",
-      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -20256,7 +20273,7 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": true,
-      "targetOs": "soMacosArm64"
+      "targetOs": "soAny"
     },
     {
       "binary": "build/test-bin/t_e2e_repro_home_add_remove_immediate",

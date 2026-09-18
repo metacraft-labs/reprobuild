@@ -887,6 +887,117 @@ when ReproHcrApplicationAbiAvailable:
         "schemaId": "reprobuild.hcr.hlx-m8.portable-snapshot.v1",
         "run": s})
 
+    test "§13.5 padded allocation answers for its own pointers and no others":
+      # ADDED 2026-09-18. The three `rb_hcr_padded_*` functions were the last
+      # three of §13's thirteen and had no owner named anywhere. Like the rest
+      # of this gate they carry no platform conditional, so they belong here
+      # rather than in the Linux vehicle.
+      #
+      # READ THE HEADER BLOCK over the declarations in `repro_hcr_agent.h`
+      # before reading this case: what is implemented is the ALLOCATOR, which
+      # is all §13.5 specifies, and §7.5's "grow the type in place inside the
+      # padding budget" is NOT reachable from this signature set because it
+      # carries no type identity. This case asserts the allocator and says
+      # nothing about the reload path, because the allocator is what exists.
+      require int(reproHcrRbPaddedLiveCount()) == 0
+
+      # ---- capacity is current_size + padding, and the registry is live ----
+      let block1 = rbHcrPaddedAlloc(csize_t(24), csize_t(40), csize_t(0))
+      check block1 != nil
+      check int(rbHcrPaddedCapacity(block1)) == 64
+      check int(reproHcrRbPaddedLiveCount()) == 1
+
+      # ---- §13.5: "Returns 0 if ptr was not allocated with
+      # rb_hcr_padded_alloc". Asserted against THREE pointers this allocator
+      # never handed out — a stack address, a heap address from a different
+      # allocator, and an address one byte INSIDE a live padded allocation.
+      # The third is the one that discriminates: a query that answered by
+      # looking at the containing block rather than by pointer identity would
+      # pass the first two and fail this.
+      var stackProbe: array[8, byte]
+      let foreignHeap = alloc(64)
+      check int(rbHcrPaddedCapacity(addr stackProbe[0])) == 0
+      check int(rbHcrPaddedCapacity(foreignHeap)) == 0
+      check int(rbHcrPaddedCapacity(cast[pointer](cast[uint](block1) + 1))) == 0
+
+      # A pointer it did not hand out must be IGNORED, not freed. If it were
+      # freed, the write below would be into released memory and the live
+      # count would have moved.
+      rbHcrPaddedFree(foreignHeap)
+      check int(reproHcrRbPaddedLiveCount()) == 1
+      cast[ptr byte](foreignHeap)[] = 0xA5'u8
+      check cast[ptr byte](foreignHeap)[] == 0xA5'u8
+      dealloc(foreignHeap)
+
+      # ---- alignment: honoured when asked, refused when nonsensical --------
+      let aligned = rbHcrPaddedAlloc(csize_t(8), csize_t(8), csize_t(64))
+      check aligned != nil
+      check (cast[uint](aligned) and 63'u) == 0'u
+      rbHcrPaddedFree(aligned)
+      # Not a power of two: refused rather than rounded, so a caller learns.
+      check rbHcrPaddedAlloc(csize_t(8), csize_t(8), csize_t(24)) == nil
+      # A SMALL non-power-of-two is the case that discriminates, and it is the
+      # reason the explicit check exists rather than being left to
+      # `posix_memalign`. 24 above is refused by `posix_memalign` anyway (not a
+      # power of two), so deleting the check leaves that line green — measured.
+      # 3 is not: without the check it is rounded up to `sizeof(void *)` by the
+      # `effective < sizeof(void *)` clamp and the allocation SUCCEEDS, handing
+      # the caller a pointer aligned to something it never asked for.
+      check rbHcrPaddedAlloc(csize_t(8), csize_t(8), csize_t(3)) == nil
+      # Zero total capacity is unrepresentable — §13.5 reserves a capacity of 0
+      # for "not a padded allocation" — so it is refused.
+      check rbHcrPaddedAlloc(csize_t(0), csize_t(0), csize_t(0)) == nil
+      # `current_size + padding` overflowing is refused rather than wrapped.
+      check rbHcrPaddedAlloc(high(csize_t), csize_t(2), csize_t(0)) == nil
+
+      # ---- free REMOVES the record; it does not merely release the memory --
+      rbHcrPaddedFree(block1)
+      check int(reproHcrRbPaddedLiveCount()) == 0
+      check int(rbHcrPaddedCapacity(block1)) == 0
+
+      # ---- §13.5: "The padding bytes are zero-initialized." ---------------
+      # Measured against RECYCLED memory, which is the only world where the
+      # claim can fail: a fresh mapping is zero because the kernel zeroes it,
+      # so an allocator that never memset anything would still pass a test on
+      # a first allocation. Here the same block is dirtied with 0xA5, freed,
+      # and requested again; without the memset the padding comes back 0xA5.
+      const Usable = 32
+      const Padding = 32
+      var recycled = false
+      var paddingClean = false
+      var attempt = 0
+      while attempt < 8 and not recycled:
+        let dirty = rbHcrPaddedAlloc(csize_t(Usable), csize_t(Padding),
+                                     csize_t(0))
+        require dirty != nil
+        for i in 0 ..< Usable + Padding:
+          cast[ptr UncheckedArray[byte]](dirty)[i] = 0xA5'u8
+        rbHcrPaddedFree(dirty)
+        let again = rbHcrPaddedAlloc(csize_t(Usable), csize_t(Padding),
+                                     csize_t(0))
+        require again != nil
+        if again == dirty:
+          recycled = true
+          paddingClean = true
+          for i in Usable ..< Usable + Padding:
+            if cast[ptr UncheckedArray[byte]](again)[i] != 0'u8:
+              paddingClean = false
+        rbHcrPaddedFree(again)
+        attempt.inc
+      # Loud, not skipped. If the host's malloc never returned the same chunk
+      # the assertion below would be about a fresh mapping and would hold for
+      # free, which is exactly the vacuity this loop exists to prevent.
+      require recycled == true
+      check paddingClean == true
+      check int(reproHcrRbPaddedLiveCount()) == 0
+
+      writeInspection("hcr_rb_application_abi_contract_padded", %*{
+        "schemaId": "reprobuild.hcr.hlx-m8.portable-padded.v1",
+        "capacityOfTwentyFourPlusForty": 64,
+        "recycleAttemptsUsed": attempt,
+        "recycledBlockObserved": recycled,
+        "paddingZeroOnRecycledBlock": paddingClean})
+
 else:
   suite "hcr_rb_application_abi_contract":
     test "the rb_hcr_* application ABI must exist on this host":

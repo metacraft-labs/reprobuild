@@ -3585,6 +3585,20 @@ static char rb_hcr_last_rejection[RB_HCR_DIAGNOSTIC_CAPACITY];
 static char rb_hcr_last_unmanaged[RB_HCR_DIAGNOSTIC_CAPACITY];
 static unsigned long rb_hcr_apply_calls = 0;
 
+/* HLX-M5 residue observation surface — see the registration block in
+ * `rb_hcr_run_lifecycle` for why these exist. Every one is a read of state the
+ * production registration path just produced. No agent code branches on any of
+ * them. */
+static size_t rb_hcr_last_debug_object_bytes = 0;
+static size_t rb_hcr_last_unwind_metadata_bytes = 0;
+static int rb_hcr_last_jit_registered = 0;
+static int rb_hcr_last_eh_frame_registered = 0;
+static uint64_t rb_hcr_last_jit_first_entry = 0;
+static uint64_t rb_hcr_last_jit_register_hook_calls = 0;
+static uint64_t rb_hcr_last_dispatch_address = 0;
+static int rb_hcr_last_fde_found = 0;
+
+
 static void rb_hcr_trace_reset(void) {
   rb_hcr_trace[0] = '\0';
   rb_hcr_trace_len = 0;
@@ -4217,11 +4231,29 @@ static void rb_hcr_run_lifecycle(rb_hcr_reload_request *req) {
    * wire, but the code IS live and the layouts DID change, so the after-reload
    * callbacks below still receive the FULL changed_types — this is not step 38,
    * and telling the application "nothing to migrate" would be false. */
+  /* HLX-M5 residue, 2026-09-18. Everything the two registrations learn used to
+   * be written into a local `..._evidence` struct and dropped on the floor, so
+   * the ONLY way a process could tell a registration from a no-op was to go
+   * looking with a debugger. The statics below are read-only observations of
+   * what the production path just did — nothing branches on them — and they are
+   * what lets a socket-driven gate assert that a non-empty payload crossing the
+   * wire ends with the UNWINDER ANSWERING for the patched body, rather than
+   * with a byte count having arrived. */
+  rb_hcr_last_debug_object_bytes = 0;
+  rb_hcr_last_unwind_metadata_bytes = 0;
+  rb_hcr_last_jit_registered = 0;
+  rb_hcr_last_eh_frame_registered = 0;
+  rb_hcr_last_jit_first_entry = 0;
+  rb_hcr_last_jit_register_hook_calls = 0;
+  rb_hcr_last_dispatch_address = (uint64_t)(uintptr_t)dispatch_entry;
+  rb_hcr_last_fde_found = 0;
+
   if (req->debug_hex != NULL) {
     repro_hcr_jit_registration_evidence jit_evidence;
     const char *debug_symbol = req->changed_function != NULL
                                    ? req->changed_function
                                    : req->target_symbol;
+    memset(&jit_evidence, 0, sizeof(jit_evidence));
     debug_bytes = repro_hcr_bytes_from_hex(req->debug_hex, &debug_len);
     if (debug_bytes == NULL || debug_len == 0 ||
         repro_hcr_register_jit_debug_object(
@@ -4230,10 +4262,16 @@ static void rb_hcr_run_lifecycle(rb_hcr_reload_request *req) {
             &jit_evidence) != 0) {
       ok = 0;
       failure_message = "JIT debug object registration failed";
+    } else {
+      rb_hcr_last_debug_object_bytes = (size_t)debug_len;
+      rb_hcr_last_jit_registered = 1;
+      rb_hcr_last_jit_first_entry = jit_evidence.first_entry_address;
+      rb_hcr_last_jit_register_hook_calls = jit_evidence.register_hook_call_count;
     }
   }
   if (ok && req->unwind_hex != NULL) {
     repro_hcr_unwind_registration_evidence unwind_evidence;
+    memset(&unwind_evidence, 0, sizeof(unwind_evidence));
     unwind_bytes = repro_hcr_bytes_from_hex(req->unwind_hex, &unwind_len);
     if (unwind_bytes == NULL || unwind_len == 0 ||
         repro_hcr_register_dynamic_eh_frame(
@@ -4242,8 +4280,18 @@ static void rb_hcr_run_lifecycle(rb_hcr_reload_request *req) {
             &unwind_evidence) != 0) {
       ok = 0;
       failure_message = "dynamic unwind registration failed";
+    } else {
+      rb_hcr_last_unwind_metadata_bytes = (size_t)unwind_len;
+      rb_hcr_last_eh_frame_registered = 1;
     }
   }
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  /* The unwinder's own answer, asked of the LIVE dispatch address the patch was
+   * published at. This is the observation HLX-M5 made in process and no gate
+   * could make over the wire. */
+  rb_hcr_last_fde_found =
+      repro_hcr_lxu_fde_found((uint64_t)(uintptr_t)dispatch_entry) ? 1 : 0;
+#endif
 
   /* ---- Phase H (28-29) ------------------------------------------------- */
   rb_hcr_trace_add("after");
@@ -4956,6 +5004,201 @@ bool rb_hcr_type_changed(const char *type_name) {
     }
   }
   return false;
+}
+
+/* =========================================================================
+ * 13.5 Padded Allocation
+ *
+ * See the block comment above the declarations in repro_hcr_agent.h for what
+ * this does and does not implement, and for the two contract details § 13.5
+ * leaves open.
+ *
+ * WHY A REGISTRY AND NOT A HEADER IN FRONT OF THE POINTER. § 13.5 requires
+ * `rb_hcr_padded_capacity` to return 0 "if ptr was not allocated with
+ * rb_hcr_padded_alloc". A magic word stored just below the returned pointer
+ * could not answer that: reading below an arbitrary foreign pointer is
+ * undefined and, for a pointer into a fresh mapping, can fault. A pointer set
+ * the allocator owns makes the query TOTAL — every pointer in the world gets
+ * an answer, and only the ones this allocator handed out get a non-zero one.
+ * The same set is what lets `rb_hcr_padded_free` refuse to call `free` on a
+ * pointer it did not allocate.
+ *
+ * Chained buckets rather than a fixed array, because a fixed ceiling on an
+ * ALLOCATOR is a different kind of limit from a fixed ceiling on a callback
+ * registry: the application controls how many objects it creates.
+ * ========================================================================= */
+
+#define RB_HCR_PADDED_BUCKETS 1024u
+#define RB_HCR_PADDED_DEFAULT_ALIGNMENT (2u * sizeof(void *))
+
+typedef struct rb_hcr_padded_record {
+  struct rb_hcr_padded_record *next;
+  void *pointer;
+  size_t capacity;
+} rb_hcr_padded_record;
+
+static rb_hcr_padded_record *rb_hcr_padded_buckets[RB_HCR_PADDED_BUCKETS];
+static size_t rb_hcr_padded_live = 0;
+static pthread_mutex_t rb_hcr_padded_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static size_t rb_hcr_padded_bucket_of(const void *pointer) {
+  /* Allocations are at least `2 * sizeof(void *)` apart, so the low bits carry
+   * no information; shifting them out is what keeps the buckets from
+   * degenerating into one chain. */
+  uintptr_t value = (uintptr_t)pointer;
+  return (size_t)((value >> 4) % (uintptr_t)RB_HCR_PADDED_BUCKETS);
+}
+
+static int rb_hcr_padded_alignment_ok(size_t alignment) {
+  return alignment != 0 && (alignment & (alignment - 1u)) == 0;
+}
+
+void *rb_hcr_padded_alloc(size_t current_size, size_t padding,
+                          size_t alignment) {
+  size_t total;
+  size_t effective;
+  void *block = NULL;
+  rb_hcr_padded_record *record;
+  size_t bucket;
+
+  if (padding > SIZE_MAX - current_size) {
+    return NULL;
+  }
+  total = current_size + padding;
+  if (total == 0) {
+    /* § 13.5 reserves capacity 0 for "not a padded allocation". */
+    return NULL;
+  }
+
+  effective = (alignment == 0) ? RB_HCR_PADDED_DEFAULT_ALIGNMENT : alignment;
+  if (!rb_hcr_padded_alignment_ok(effective)) {
+    return NULL;
+  }
+  /* posix_memalign requires a multiple of sizeof(void *). Rounding UP never
+   * violates the caller's request, which is a MINIMUM alignment. */
+  if (effective < sizeof(void *)) {
+    effective = sizeof(void *);
+  }
+
+  record = (rb_hcr_padded_record *)calloc(1, sizeof(*record));
+  if (record == NULL) {
+    return NULL;
+  }
+  if (posix_memalign(&block, effective, total) != 0 || block == NULL) {
+    free(record);
+    return NULL;
+  }
+  /* § 13.5: "The padding bytes are zero-initialized." The usable region is
+   * NOT zeroed — that is malloc's contract and § 13.5 does not extend it. */
+  if (padding > 0) {
+    memset((char *)block + current_size, 0, padding);
+  }
+
+  record->pointer = block;
+  record->capacity = total;
+  bucket = rb_hcr_padded_bucket_of(block);
+  pthread_mutex_lock(&rb_hcr_padded_mutex);
+  record->next = rb_hcr_padded_buckets[bucket];
+  rb_hcr_padded_buckets[bucket] = record;
+  rb_hcr_padded_live++;
+  pthread_mutex_unlock(&rb_hcr_padded_mutex);
+  return block;
+}
+
+size_t rb_hcr_padded_capacity(const void *ptr) {
+  size_t bucket;
+  rb_hcr_padded_record *cursor;
+  size_t answer = 0;
+
+  if (ptr == NULL) {
+    return 0;
+  }
+  bucket = rb_hcr_padded_bucket_of(ptr);
+  pthread_mutex_lock(&rb_hcr_padded_mutex);
+  for (cursor = rb_hcr_padded_buckets[bucket]; cursor != NULL;
+       cursor = cursor->next) {
+    if (cursor->pointer == ptr) {
+      answer = cursor->capacity;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&rb_hcr_padded_mutex);
+  return answer;
+}
+
+void rb_hcr_padded_free(void *ptr) {
+  size_t bucket;
+  rb_hcr_padded_record *cursor;
+  rb_hcr_padded_record *previous = NULL;
+  rb_hcr_padded_record *detached = NULL;
+
+  if (ptr == NULL) {
+    return;
+  }
+  bucket = rb_hcr_padded_bucket_of(ptr);
+  pthread_mutex_lock(&rb_hcr_padded_mutex);
+  for (cursor = rb_hcr_padded_buckets[bucket]; cursor != NULL;
+       cursor = cursor->next) {
+    if (cursor->pointer == ptr) {
+      if (previous == NULL) {
+        rb_hcr_padded_buckets[bucket] = cursor->next;
+      } else {
+        previous->next = cursor->next;
+      }
+      detached = cursor;
+      rb_hcr_padded_live--;
+      break;
+    }
+    previous = cursor;
+  }
+  pthread_mutex_unlock(&rb_hcr_padded_mutex);
+
+  /* A pointer this allocator did not hand out is IGNORED rather than passed to
+   * `free`. § 13.5 says this function frees "memory allocated with
+   * rb_hcr_padded_alloc"; calling `free` on anything else would turn a caller
+   * mistake into heap corruption, and the query function already answers 0 for
+   * exactly these pointers. */
+  if (detached == NULL) {
+    return;
+  }
+  free(detached->pointer);
+  free(detached);
+}
+
+size_t repro_hcr_rb_last_debug_object_bytes(void) {
+  return rb_hcr_last_debug_object_bytes;
+}
+
+size_t repro_hcr_rb_last_unwind_metadata_bytes(void) {
+  return rb_hcr_last_unwind_metadata_bytes;
+}
+
+int repro_hcr_rb_last_jit_registered(void) { return rb_hcr_last_jit_registered; }
+
+int repro_hcr_rb_last_eh_frame_registered(void) {
+  return rb_hcr_last_eh_frame_registered;
+}
+
+uint64_t repro_hcr_rb_last_jit_first_entry(void) {
+  return rb_hcr_last_jit_first_entry;
+}
+
+uint64_t repro_hcr_rb_last_jit_register_hook_calls(void) {
+  return rb_hcr_last_jit_register_hook_calls;
+}
+
+uint64_t repro_hcr_rb_last_dispatch_address(void) {
+  return rb_hcr_last_dispatch_address;
+}
+
+int repro_hcr_rb_last_fde_found(void) { return rb_hcr_last_fde_found; }
+
+size_t repro_hcr_rb_padded_live_count(void) {
+  size_t answer;
+  pthread_mutex_lock(&rb_hcr_padded_mutex);
+  answer = rb_hcr_padded_live;
+  pthread_mutex_unlock(&rb_hcr_padded_mutex);
+  return answer;
 }
 
 /*

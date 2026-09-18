@@ -12,17 +12,20 @@
 ##      source edit on ``src/b.c`` triggers a successful patch delivery
 ##      with ``target: "b"`` on the ``hcr/patchApplied`` SSE event.
 ##
-## Platform gate: this test exercises the M4 per-target failure
-## isolation lifecycle. The "b continues to receive patches" assertion
-## requires the macOS-arm64 Mach-O patch-extraction primitives
-## (``parseMachOArm64Object``, ``objectFunctionBytes``,
-## ``minimalAarch64EhFrameTemplate``), so the test is gated the same
-## way the existing ``t_e2e_hcr_watch_inference`` and
-## ``t_hcr_agent_process_target`` tests gate. The failure-isolation
-## logic itself (the per-session try/except in
-## ``runWatchCommand.runDirectWatch``) is platform-independent — the
-## gating reflects the cross-platform reach of the existing HCR test
-## scaffolding rather than the M4 surface added in this milestone.
+## Platform gate, CORRECTED 2026-09-18 (HLX-M8 residue). This used to read
+## ``when defined(macosx) and defined(arm64)`` on the grounds that the
+## patch-extraction primitives are "macOS-arm64 Mach-O". That was true when it
+## was written and is not true now: ``objectFunctionBytes``,
+## ``hcrUnwindMetadataFor`` and ``inferHcrWatchPatch`` all parse according to
+## the NEGOTIATED SUPPORT PROFILE, and the Linux arm of each is real. The one
+## thing that genuinely was macOS-only — ``repro hcr prepare-object``, which ran
+## the Mach-O parser over whatever it was handed — now recognises an ELF input
+## and passes it through, because ``Linux-ELF-Provider.md`` §5.1 says the
+## ``__HCR`` segment rewrite "has no ELF counterpart and is dropped".
+##
+## The test runs on Linux x86_64 and macOS arm64. The failure-isolation logic
+## it is actually about (the per-session try/except in
+## ``runWatchCommand.runDirectWatch``) never had a platform in it.
 
 import std/[monotimes, os, osproc, sequtils, strutils, tempfiles, times, unittest]
 
@@ -30,7 +33,9 @@ import repro_hcr_agent
 from repro_test_support import requireBinary, monitorShimPath
 
 const
-  SupportProfile = "macos-arm64-direct-hcr-in-codetracer-v1"
+  SupportProfile = defaultDirectSupportProfile()
+    ## Host-derived. The session rejects a profile mismatch during negotiation,
+    ## so the pinned macOS string could not have been used anywhere else.
 
   GccProxySource = r"""
 #include <fcntl.h>
@@ -151,16 +156,22 @@ proc compileRepro(repoRoot: string): string =
     "reprobuild.apps.repro")
 
 proc prepareGccProxy(tempRoot: string): string =
-  let binDir = tempRoot / "bin"
-  let sourcePath = binDir / "gcc-proxy.c"
-  let gccPath = binDir / "gcc"
-  createDir(binDir)
-  writeFile(sourcePath, GccProxySource)
-  requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
-  binDir & $PathSep & getEnv("PATH")
+  ## macOS only: ``/usr/bin/gcc`` is SIP-protected so ``DYLD_INSERT_LIBRARIES``
+  ## never reaches it and the io-monitor shim cannot observe its reads. On Linux
+  ## ``LD_PRELOAD`` reaches the real compiler and no proxy is installed.
+  when defined(macosx):
+    let binDir = tempRoot / "bin"
+    let sourcePath = binDir / "gcc-proxy.c"
+    let gccPath = binDir / "gcc"
+    createDir(binDir)
+    writeFile(sourcePath, GccProxySource)
+    requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
+    binDir & $PathSep & getEnv("PATH")
+  else:
+    discard tempRoot
+    getEnv("PATH")
 
-when defined(macosx):
-  proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[shim: string] =
+proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[shim: string] =
     discard tempRoot
     # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
     # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling one
@@ -239,7 +250,8 @@ proc writeMetadataJson(path, functionName, objectPath, sourcePath: string) =
 
 suite "t_e2e_repro_watch_hcr_one_target_agent_inject_failure":
   test "t_e2e_repro_watch_hcr_one_target_agent_inject_failure":
-    when defined(macosx) and defined(arm64):
+    when (defined(macosx) and defined(arm64)) or
+         (defined(linux) and defined(amd64)):
       let repoRoot = getCurrentDir()
       let reproBin = compileRepro(repoRoot)
       let tempRoot = createTempDir("repro-hcr-m4-inject-fail", "")
@@ -285,9 +297,12 @@ suite "t_e2e_repro_watch_hcr_one_target_agent_inject_failure":
         "--hcr-target=a:" & socketA & ":" & artifactsA & ":" & metadataA,
         "--hcr-target=b:" & socketB & ":" & artifactsB & ":" & metadataB
       ]) & " > " & q(logPath) & " 2>&1"
+      # The selectors are the bare names ``a`` and ``b``; run from the
+      # repository root they resolve against reprobuild's OWN ``repro.nim`` and
+      # the command dies with ``unknown_target``. Measured on Linux 2026-09-18.
       let process = startProcess("/bin/sh",
         args = ["-c", command],
-        workingDir = repoRoot,
+        workingDir = projectRoot,
         options = {poUsePath})
       defer:
         if process.running():
@@ -299,9 +314,11 @@ suite "t_e2e_repro_watch_hcr_one_target_agent_inject_failure":
       # stdout log. The failure isolation block in
       # ``runWatchCommand.runDirectWatch`` emits this exactly once per
       # failing target.
+      # Cold, the baseline cycle compiles a project provider from scratch;
+      # measured in minutes on Linux x86_64, not in the 30 s this defaulted to.
       waitForLogContains(logPath,
         "repro watch: hcr patch failed target=a",
-        "target A injection failure")
+        "target A injection failure", timeoutMs = 600_000)
 
       # B's baseline still proceeds even though A failed — the per-
       # target loop continues past A's exception. B's session waits
@@ -324,7 +341,16 @@ suite "t_e2e_repro_watch_hcr_one_target_agent_inject_failure":
       # short-circuited; no further HCR activity on socket A.
       writeFile(sourceB, BSourceNew)
 
-      let requestB = agentB.readAgentMessage()
+      # Loud, with the transcript in hand: an EOF here says only that the
+      # producer stopped, and the watch log is the only place that says why.
+      let requestB =
+        try:
+          agentB.readAgentMessage()
+        except CatchableError as err:
+          raise newException(IOError,
+            "no patch request arrived on target b (" & err.msg &
+            ").\n--- repro watch log ---\n" &
+            (if fileExists(logPath): readFile(logPath) else: "<no log>"))
       check requestB.kind == hmkPatchRequest
       check requestB.patchRequest.changedFunctions == @["patchable_value_b"]
       check requestB.patchRequest.targetSymbols == @["patchable_value_b"]

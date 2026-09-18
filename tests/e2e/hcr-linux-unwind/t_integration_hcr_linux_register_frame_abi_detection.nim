@@ -56,6 +56,23 @@
 ##   healthy                fallback 0, FDE ok  fallback 0, FDE ok
 ##   whole-section-first    fallback 0, FDE ok  fallback 1, FDE ok
 ##   no-verify              fallback 0, FDE ok  fallback 0, FDE NOT FOUND
+##
+## THE STATIC ARMS, added 2026-09-18. HLX-M5 landed with HLX-OQ-4's static case
+## explicitly unmeasured. Two more link shapes now cover it — `-static-libgcc`
+## and LLVM `libunwind.a`, both with `-Wl,-u,__register_frame` and
+## `-Wl,-u,_Unwind_Backtrace` because a WEAK UNDEFINED reference does not pull
+## an archive member — and neither binary has any unwinder in its `DT_NEEDED`
+## list:
+##
+##   build \ link           libgcc.a            libunwind.a
+##   healthy                fallback 0, FDE ok  fallback 0, FDE ok
+##   whole-section-first    fallback 0, FDE ok  fallback 1, FDE ok
+##
+## i.e. the SAME disagreement, with nothing dynamic to identify. And the
+## rejected candidate is measured failing: `dladdr(__register_frame)` names
+## `libgcc_s.so.1` / `libunwind.so.1` in the dynamic arms and THE MAIN
+## EXECUTABLE in both static ones, so a library-identifying detection has
+## nothing to decide on exactly where the two conventions still differ.
 
 import std/[json, os, strutils, times, unittest]
 
@@ -181,20 +198,143 @@ when defined(linux) and defined(amd64):
       ck "the patched body still ran, so the corruption is unwinding-only",
         libunwindBlindRun["result"].getInt() == PatchedResult
 
+      # ====================================================================
+      # THE STATICALLY LINKED ARMS — ADDED 2026-09-18.
+      #
+      # HLX-M5 landed with HLX-OQ-4's static case explicitly NOT MEASURED, and
+      # said so in this gate's own evidence: "Both arms link their unwinder
+      # dynamically. `dladdr` was rejected partly because it cannot see a
+      # static unwinder, so that advantage of probe-and-verify is argued rather
+      # than measured." These four builds are the measurement.
+      #
+      # They matter because the static case is the one the rejected candidate
+      # cannot answer AT ALL, not merely the one it answers badly.
+      # ====================================================================
+      let libgccStatic = buildFixture(repoRoot, "m5_abi_static_gcc",
+        uwLibgccStatic)
+      let libunwindStatic = buildFixture(repoRoot, "m5_abi_static_llvm",
+        uwLlvmLibunwindStatic)
+      let libgccStaticWhole = buildFixture(repoRoot,
+        "m5_abi_static_gcc_whole", uwLibgccStatic,
+        ["REPRO_HCR_HLX_M5_FALSIFY_WHOLE_SECTION_FIRST"])
+      let libunwindStaticWhole = buildFixture(repoRoot,
+        "m5_abi_static_llvm_whole", uwLlvmLibunwindStatic,
+        ["REPRO_HCR_HLX_M5_FALSIFY_WHOLE_SECTION_FIRST"])
+
+      # There is NO unwinder in either binary's DT_NEEDED list. That is the
+      # premise of everything below; without it these would just be two more
+      # dynamic arms under different names.
+      ck "the static libgcc arm links no unwinder shared object at all",
+        linkedUnwinderSonames(repoRoot, libgccStatic).len == 0
+      ck "the static libunwind arm links no unwinder shared object at all",
+        linkedUnwinderSonames(repoRoot, libunwindStatic).len == 0
+
+      let libgccStaticRun = runArm(libgccStatic, "registered", payloads)
+      let libunwindStaticRun = runArm(libunwindStatic, "registered", payloads)
+
+      for (name, run) in [("libgcc-static", libgccStaticRun),
+                          ("libunwind-static", libunwindStaticRun)]:
+        # A NULL `__register_frame` is refused by name, and that refusal would
+        # look like a green arm to every assertion below if it were not checked
+        # first: a weak undefined reference does not pull an archive member, so
+        # this is the exact way a static arm silently measures nothing.
+        ck name & ": __register_frame really is present in the process",
+          run["registerFrameAvailable"].getBool()
+        ck name & ": the registration succeeded by name",
+          run["ehFrameRefusal"].getStr() == "ok"
+        ck name & ": the detection still picks the per-FDE convention",
+          run["registerFrameConvention"].getStr() == "single-fde"
+        ck name & ": the probe ran once and needed no fallback",
+          run["probeAttempts"].getInt() == 1 and
+            run["fallbackAttempts"].getInt() == 0
+        ck name & ": no FDE covered the body BEFORE registration",
+          not run["fdeFoundBeforeRegistration"].getBool()
+        ck name & ": the statically linked unwinder FINDS the FDE",
+          run["fdeFoundAfterRegistration"].getBool()
+        ck name & ": the runtime walk crossed the patch body",
+          run["unwindCrossesPatch"].getBool()
+        ck name & ": the patched body actually ran",
+          run["result"].getInt() == PatchedResult
+
+      # ---- the falsifier, run against the static arms ---------------------
+      # This is the load-bearing pair. With no shared object to identify, the
+      # two toolchains must STILL disagree about the whole-section argument,
+      # and the probe must still rescue the one that refuses it.
+      let libgccStaticWholeRun =
+        runArm(libgccStaticWhole, "registered", payloads)
+      let libunwindStaticWholeRun =
+        runArm(libunwindStaticWhole, "registered", payloads)
+
+      ck "static libgcc accepts a whole-section registration (no fallback)",
+        libgccStaticWholeRun["fallbackAttempts"].getInt() == 0
+      ck "static libgcc's whole-section registration IS found",
+        libgccStaticWholeRun["fdeFoundAfterRegistration"].getBool()
+      ck "static LLVM libunwind REFUSES it, so the probe falls back",
+        libunwindStaticWholeRun["fallbackAttempts"].getInt() == 1
+      ck "the fallback rescues the static libunwind arm too",
+        libunwindStaticWholeRun["registerFrameConvention"].getStr() ==
+          "single-fde"
+      ck "and its FDE is found after the fallback",
+        libunwindStaticWholeRun["fdeFoundAfterRegistration"].getBool()
+      ck "the two STATIC arms disagree exactly as the dynamic pair does",
+        libgccStaticWholeRun["fallbackAttempts"].getInt() !=
+          libunwindStaticWholeRun["fallbackAttempts"].getInt()
+
+      # ---- WHY `dladdr` WAS REJECTED, measured rather than argued ---------
+      # Each arm asks `dladdr` which object defines `__register_frame`. With a
+      # dynamically linked unwinder the answers are different shared objects,
+      # so a library-identifying detection would work. With the unwinder linked
+      # statically both answers are THE ARM'S OWN EXECUTABLE — different file
+      # names, but the same fact, "it is in the main program" — so there is
+      # nothing left to tell libgcc from LLVM libunwind. That is the case
+      # probe-and-verify exists for, and it is now a measurement.
+      ck "dladdr names libgcc_s for the dynamic libgcc arm",
+        libgccRun["dladdrRegisterFrameObject"].getStr().contains("libgcc_s")
+      ck "dladdr names LLVM libunwind for the dynamic libunwind arm",
+        libunwindRun["dladdrRegisterFrameObject"].getStr().contains("libunwind.so")
+      ck "the two DYNAMIC answers differ, which is what made dladdr plausible",
+        libgccRun["dladdrRegisterFrameObject"].getStr() !=
+          libunwindRun["dladdrRegisterFrameObject"].getStr()
+      ck "dladdr names the MAIN EXECUTABLE for the static libgcc arm",
+        libgccStaticRun["dladdrRegisterFrameObject"].getStr() ==
+          extractFilename(libgccStatic)
+      ck "dladdr names the MAIN EXECUTABLE for the static libunwind arm",
+        libunwindStaticRun["dladdrRegisterFrameObject"].getStr() ==
+          extractFilename(libunwindStatic)
+      # The binaries are named `m5_abi_static_gcc` / `m5_abi_static_llvm` and
+      # NOT `..._libgcc_static`: the first spelling contains the literal
+      # `libgcc_s` as a substring, so this very assertion failed against its own
+      # fixture's file name the first time it was run. Left as a comment because
+      # the assertion is worth keeping and the trap is worth naming.
+      ck "so neither static answer names an unwinder at all",
+        (not libgccStaticRun["dladdrRegisterFrameObject"].getStr()
+             .contains("libgcc_s")) and
+        (not libunwindStaticRun["dladdrRegisterFrameObject"].getStr()
+             .contains("libunwind.so"))
+
       let elapsed = epochTime() - started
-      ck "the gate did real work (six links, six runs)", elapsed > 1.0
+      ck "the gate did real work (ten links, ten runs)", elapsed > 1.0
 
       writeEvidence(repoRoot, gate, %*{
         "elapsedSeconds": elapsed,
-        "sonames": %*{"libgcc": %libgccSonames, "libunwind": %libunwindSonames},
+        "sonames": %*{
+          "libgcc": %libgccSonames,
+          "libunwind": %libunwindSonames,
+          "libgccStatic": %linkedUnwinderSonames(repoRoot, libgccStatic),
+          "libunwindStatic": %linkedUnwinderSonames(repoRoot, libunwindStatic)},
         "healthy": %*{"libgcc": libgccRun, "libunwind": libunwindRun},
         "wholeSectionFirst": %*{
           "libgcc": libgccWholeRun, "libunwind": libunwindWholeRun},
         "noVerify": %*{
-          "libgcc": libgccBlindRun, "libunwind": libunwindBlindRun}
+          "libgcc": libgccBlindRun, "libunwind": libunwindBlindRun},
+        "staticHealthy": %*{
+          "libgcc": libgccStaticRun, "libunwind": libunwindStaticRun},
+        "staticWholeSectionFirst": %*{
+          "libgcc": libgccStaticWholeRun,
+          "libunwind": libunwindStaticWholeRun}
       })
 
-      expectCount(asserted, 39)
+      expectCount(asserted, 69)
 
 else:
   suite "integration_hcr_linux_register_frame_abi_detection":

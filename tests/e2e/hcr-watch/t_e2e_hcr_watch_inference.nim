@@ -1,10 +1,29 @@
+## HLX-M8 residue, 2026-09-18: this gate used to be guarded
+## `when defined(macosx) and defined(arm64)` IN ITS ENTIRETY, and the reason
+## recorded in its sibling gates was "the HCR watch patch-extraction primitives
+## are Mach-O". That premise is obsolete. `objectFunctionBytes` and
+## `hcrUnwindMetadataFor` have been profile-conditional since HLX-M1 and parse
+## ELF when the negotiated profile is the Linux one, and `defaultObjectSymbol`
+## has been host-derived for as long. Nothing left in the body was macOS-
+## specific except the gcc proxy, which exists only because SIP strips
+## `DYLD_INSERT_LIBRARIES` from `/usr/bin/gcc` and so the io-monitor shim cannot
+## observe the compiler's reads on that host. Linux has no such restriction:
+## `LD_PRELOAD` reaches the real compiler, so the proxy is macOS-only rather
+## than the test being macOS-only.
+##
+## The gate therefore runs on Linux x86_64 and macOS arm64, and it is the only
+## place `repro watch --hcr`'s PRODUCTION wire is driven on Linux at all.
+
 import std/[monotimes, os, osproc, sequtils, strutils, tempfiles, times, unittest]
 
 import repro_hcr_agent
 from repro_test_support import requireBinary, monitorShimPath
 
 const
-  SupportProfile = "macos-arm64-direct-hcr-in-codetracer-v1"
+  SupportProfile = defaultDirectSupportProfile()
+    ## Host-derived, not pinned to the macOS string. The session rejects a
+    ## profile mismatch during negotiation, so a hard-coded macOS profile is
+    ## exactly what made this gate unrunnable anywhere else.
 
   GccProxySource = r"""
 #include <fcntl.h>
@@ -106,23 +125,35 @@ proc compileRepro(repoRoot: string): string =
     "reprobuild.apps.repro")
 
 proc prepareGccProxy(tempRoot: string): string =
-  let binDir = tempRoot / "bin"
-  let sourcePath = binDir / "gcc-proxy.c"
-  let gccPath = binDir / "gcc"
-  createDir(binDir)
-  writeFile(sourcePath, GccProxySource)
-  requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
-  binDir & $PathSep & getEnv("PATH")
-
-when defined(macosx):
-  proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[shim: string] =
+  ## macOS only. `/usr/bin/gcc` is SIP-protected, so `DYLD_INSERT_LIBRARIES` is
+  ## stripped before it starts and the io-monitor shim never sees its reads.
+  ## The proxy is an ordinary binary, so the shim DOES attach to it, and it
+  ## performs the reads the dependency scan needs before handing off. On Linux
+  ## `LD_PRELOAD` reaches the real compiler and no proxy is needed; installing
+  ## one there would be a fixture that hides the mechanism under test.
+  when defined(macosx):
+    let binDir = tempRoot / "bin"
+    let sourcePath = binDir / "gcc-proxy.c"
+    let gccPath = binDir / "gcc"
+    createDir(binDir)
+    writeFile(sourcePath, GccProxySource)
+    requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
+    binDir & $PathSep & getEnv("PATH")
+  else:
     discard tempRoot
-    # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
-    # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling one
-    # per test. The host-native single-arch shim is correct: the test process is
-    # host-arch, so the former universal (lipo) build is unnecessary.
-    result.shim = requireBinary(monitorShimPath(repoRoot),
-      "reprobuild.test_fixtures.monitor_shim")
+    getEnv("PATH")
+
+proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[shim: string] =
+  discard tempRoot
+  # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
+  # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling one
+  # per test. The host-native single-arch shim is correct: the test process is
+  # host-arch, so the former universal (lipo) build is unnecessary.
+  # ``monitorShimPath`` has always named the host artefact
+  # (``librepro_monitor_shim.so`` on Linux); only this proc's ``when
+  # defined(macosx)`` guard kept the Linux one out of reach.
+  result.shim = requireBinary(monitorShimPath(repoRoot),
+    "reprobuild.test_fixtures.monitor_shim")
 
 proc waitForLogContains(logPath, needle, context: string; timeoutMs = 30_000) =
   let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
@@ -185,7 +216,8 @@ proc patchApplied(request: HcrPatchRequest): HcrAgentMessage =
 
 suite "HCR watch inference E2E":
   test "repro watch infers HCR patch metadata without fixture JSON":
-    when defined(macosx) and defined(arm64):
+    when (defined(macosx) and defined(arm64)) or
+         (defined(linux) and defined(amd64)):
       let repoRoot = getCurrentDir()
       let reproBin = compileRepro(repoRoot)
       let tempRoot = createTempDir("repro-hcr-watch-e2e", "")
@@ -226,8 +258,14 @@ suite "HCR watch inference E2E":
           process.terminate()
         process.close()
 
+      # The baseline cycle compiles the project provider from scratch when the
+      # shared action cache has never seen this project shape. Measured cold on
+      # Linux x86_64 that is minutes, not seconds; the 30 s default this used to
+      # take was a warm-cache number and it is the only reason the first Linux
+      # run of this gate reported "timed out waiting for HCR baseline" while the
+      # same command completed fine by hand.
       waitForLogContains(logPath, "repro watch: hcr waiting for agent socket=",
-        "HCR baseline")
+        "HCR baseline", timeoutMs = 600_000)
       var agent = connectHcrAgentUnixSocket(socketPath)
       defer: agent.close()
       discard agent.writeAgentMessage(agentHello())
@@ -238,7 +276,19 @@ suite "HCR watch inference E2E":
         "watch subscription")
       writeFile(sourcePath, NewSource)
 
-      let request = agent.readAgentMessage()
+      # Loud, with the transcript in hand. When the watch process dies before it
+      # sends a patch this read fails with "unexpected EOF while reading HCR
+      # agent IPC header", which names the socket and says nothing at all about
+      # WHY the producer stopped. The watch log is the only place that answer
+      # exists, so it travels with the failure.
+      let request =
+        try:
+          agent.readAgentMessage()
+        except CatchableError as err:
+          raise newException(IOError,
+            "no patch request arrived from `repro watch --hcr` (" & err.msg &
+            ").\n--- repro watch log ---\n" &
+            (if fileExists(logPath): readFile(logPath) else: "<no log>"))
       check request.kind == hmkPatchRequest
       check request.patchRequest.changedFunctions == @["patchable_value"]
       check request.patchRequest.targetSymbols == @["patchable_value"]
@@ -246,6 +296,21 @@ suite "HCR watch inference E2E":
       check request.patchRequest.debugObjectPayload.bytes.len > 0
       check request.patchRequest.sourceGenerationMap.len == 1
       check request.patchRequest.sourceGenerationMap[0].sourcePath == sourcePath
+      # HLX-M8 residue: `changedFiles` is what `rb_hcr_file_changed` answers
+      # over once the reload is applied. Until 2026-09-18 this command sent it
+      # EMPTY on every host, so a watch-driven reload told every application
+      # that no source file had changed. Asserted here as a NON-EMPTY list
+      # naming the file the watcher actually observed being edited — an
+      # assertion an empty payload cannot satisfy, which is the failure this
+      # gate exists to make impossible.
+      check request.patchRequest.changedFiles == @[sourcePath]
+      # Inference mode has nothing to infer layout deltas from, and the empty
+      # answer is asserted rather than left unstated: a non-empty
+      # `changedTypes` here would be invented, and §7.4's acceptance rule runs
+      # on this set. The metadata-mode arm of
+      # `t_e2e_repro_watch_hcr_multi_target_independent_patches` is where a
+      # NON-EMPTY `changedTypes` crosses this wire.
+      check request.patchRequest.changedTypes.len == 0
 
       discard agent.writeAgentMessage(
         lifecycle(request.patchRequest.patchId, "hcr/patchApplying", 1))
@@ -260,7 +325,32 @@ suite "HCR watch inference E2E":
       check exitCode == 0
       check log.contains("repro watch: hcr baseline inferred objects=1")
       check log.contains("repro watch: hcr inferred changed function=patchable_value")
-      check log.contains("repro hcr prepare-object: output=build/patchable.o")
       check not log.contains("--hcr-metadata")
+
+      # The `hcr.prepareObject` edge ran, asserted on its ARTIFACT rather than
+      # on its log line. Action stdout is not forwarded into the watch log on
+      # Linux — measured, `repro build patchable-object` prints none of the
+      # subprocess's output — so the log assertion this used to make could only
+      # ever be host-specific. The artifact is the thing the watch session then
+      # reads its patch bytes out of, so asserting it is the stronger claim.
+      let preparedObject = projectRoot / "build" / "patchable.o"
+      let rawObject = projectRoot / "build" / "patchable.raw.o"
+      check fileExists(preparedObject)
+      when defined(linux):
+        # HLX-M8 residue, 2026-09-18. `Linux-ELF-Provider.md` §5.1: the Mach-O
+        # `__HCR` segment rewrite "has no ELF counterpart and is dropped", so
+        # the ELF arm of `prepare-object` is a passthrough and the prepared
+        # object must be byte-identical to the compiler's output. Before this
+        # change the edge ran the Mach-O parser over an ELF object and FAILED
+        # the build (`expected little-endian Mach-O 64-bit object`), so no
+        # Linux watch cycle could reach the agent wire at all.
+        check readFile(preparedObject) == readFile(rawObject)
+      else:
+        # The macOS arm rewrites `section_64.segname`, so the two objects are
+        # the same size and NOT the same bytes. Asserting the inequality keeps
+        # the passthrough assertion above from being copied onto a host where
+        # it would be wrong.
+        check readFile(preparedObject) != readFile(rawObject)
+        check log.contains("repro hcr prepare-object: output=build/patchable.o")
     else:
       skip()

@@ -784,6 +784,7 @@ tests/e2e/hcr-linux-rbhcr/t_e2e_hcr_linux_isonim_shim_against_real_agent.nim	nim
 tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_late_load_failure_still_reaches_after_reload.nim	nim	2
 tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_managed_type_layout_change_lifecycle.nim	nim	2
 tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_rejected_patch_never_fires_before_reload.nim	nim	2
+tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_threaded_synchronized_reload.nim	nim	2
 tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim	nim	2
 tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim	nim	3
 tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_quiescence_handshake_and_release.nim	nim	2
@@ -796,7 +797,7 @@ tests/e2e/hcr-linux-txn/t_integration_hcr_linux_repeated_patch_of_same_function.
 tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_backtrace_through_patched_function.nim	nim	2
 tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_jit_symfile_accepted_by_gdb.nim	nim	2
 tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_register_frame_abi_detection.nim	nim	2
-tests/e2e/hcr-portable-rbhcr/t_hcr_rb_application_abi_contract.nim	nim	6
+tests/e2e/hcr-portable-rbhcr/t_hcr_rb_application_abi_contract.nim	nim	7
 tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim	nim	1
 tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim	nim	1
 tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim	nim	1

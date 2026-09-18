@@ -133,6 +133,20 @@ when ReproHcrApplicationAbiAvailable:
   proc rbHcrTypeChanged*(typeName: cstring): bool
     {.importc: "rb_hcr_type_changed", header: ReproHcrAgentHeader, cdecl.}
 
+  # ---- §13.5 padded allocation -----------------------------------------
+  # Added 2026-09-18. The last three of §13's thirteen; HLX-M8 bound the ten
+  # above. See the block comment over the declarations in `repro_hcr_agent.h`
+  # for what §13.5 specifies and for the §7.5 behaviour this signature set
+  # cannot express.
+  proc rbHcrPaddedAlloc*(currentSize, padding, alignment: csize_t): pointer
+    {.importc: "rb_hcr_padded_alloc", header: ReproHcrAgentHeader, cdecl.}
+  proc rbHcrPaddedFree*(p: pointer)
+    {.importc: "rb_hcr_padded_free", header: ReproHcrAgentHeader, cdecl.}
+  proc rbHcrPaddedCapacity*(p: pointer): csize_t
+    {.importc: "rb_hcr_padded_capacity", header: ReproHcrAgentHeader, cdecl.}
+  proc reproHcrRbPaddedLiveCount*(): csize_t
+    {.importc: "repro_hcr_rb_padded_live_count", header: ReproHcrAgentHeader, cdecl.}
+
   # ---- §3.4 synchronized mode ------------------------------------------
   proc reproHcrAgentSetSynchronizedMode*(enabled: cint)
     {.importc: "repro_hcr_agent_set_synchronized_mode", header: ReproHcrAgentHeader, cdecl.}

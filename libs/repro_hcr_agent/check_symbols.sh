@@ -52,6 +52,11 @@ EXPECTED_SYMBOLS=(
   "rb_hcr_remove_after_reload"
   "rb_hcr_file_changed"
   "rb_hcr_type_changed"
+  # 3 rb_hcr_padded_* functions — HCR-Overview.md § 13.5, added 2026-09-18.
+  # These are the last three of § 13's thirteen; HLX-M8 bound the ten above.
+  "rb_hcr_padded_alloc"
+  "rb_hcr_padded_free"
+  "rb_hcr_padded_capacity"
 )
 
 NM_OUTPUT="$(nm -gU "$LIB_PATH" 2>/dev/null || nm -g "$LIB_PATH")"

@@ -37,7 +37,10 @@ import repro_hcr_agent
 from repro_test_support import requireBinary, monitorShimPath
 
 const
-  SupportProfile = "macos-arm64-direct-hcr-in-codetracer-v1"
+  SupportProfile = defaultDirectSupportProfile()
+    ## Host-derived. The pinned macOS string was one of the two things that
+    ## made this gate unrunnable off that host; the session rejects a profile
+    ## mismatch during negotiation.
 
   GccProxySource = r"""
 #include <fcntl.h>
@@ -162,23 +165,31 @@ proc compileRepro(repoRoot: string): string =
     "reprobuild.apps.repro")
 
 proc prepareGccProxy(tempRoot: string): string =
-  let binDir = tempRoot / "bin"
-  let sourcePath = binDir / "gcc-proxy.c"
-  let gccPath = binDir / "gcc"
-  createDir(binDir)
-  writeFile(sourcePath, GccProxySource)
-  requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
-  binDir & $PathSep & getEnv("PATH")
-
-when defined(macosx):
-  proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[shim: string] =
+  ## macOS only. ``/usr/bin/gcc`` is SIP-protected, so ``DYLD_INSERT_LIBRARIES``
+  ## is stripped before it starts and the io-monitor shim never observes its
+  ## reads; the proxy is an ordinary binary the shim DOES attach to. Linux has
+  ## no such restriction — ``LD_PRELOAD`` reaches the real compiler — so no
+  ## proxy is installed there.
+  when defined(macosx):
+    let binDir = tempRoot / "bin"
+    let sourcePath = binDir / "gcc-proxy.c"
+    let gccPath = binDir / "gcc"
+    createDir(binDir)
+    writeFile(sourcePath, GccProxySource)
+    requireSuccess(shellCommand(["cc", sourcePath, "-o", gccPath]))
+    binDir & $PathSep & getEnv("PATH")
+  else:
     discard tempRoot
-    # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
-    # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling one
-    # per test. The host-native single-arch shim is correct: the test process is
-    # host-arch, so the former universal (lipo) build is unnecessary.
-    result.shim = requireBinary(monitorShimPath(repoRoot),
-      "reprobuild.test_fixtures.monitor_shim")
+    getEnv("PATH")
+
+proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[shim: string] =
+  discard tempRoot
+  # Test-Fixtures-In-Build-Graph M2: assert the graph-built monitor shim
+  # (edge ``reprobuild.test_fixtures.monitor_shim``) instead of compiling one
+  # per test. The host-native single-arch shim is correct: the test process is
+  # host-arch, so the former universal (lipo) build is unnecessary.
+  result.shim = requireBinary(monitorShimPath(repoRoot),
+    "reprobuild.test_fixtures.monitor_shim")
 
 proc waitForLogContains(logPath, needle, context: string; timeoutMs = 30_000) =
   let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
@@ -239,18 +250,28 @@ proc patchApplied(request: HcrPatchRequest; suffix: string): HcrAgentMessage =
       oldCodeRetained: true,
       sharedLibraryPositivePath: false))
 
-proc writeMetadataJson(path, functionName, objectPath, sourcePath: string) =
+proc writeMetadataJson(path, functionName, objectPath, sourcePath: string;
+                       changedTypesJson = "") =
+  ## HLX-M8 residue, 2026-09-18: the metadata document gained an optional
+  ## ``changedTypes`` array. It is the ONLY production surface on which a
+  ## caller can declare a §4.3 layout delta to ``repro watch --hcr`` — watch
+  ## does no type-layout diffing of its own — and HCR-Overview §7.4's
+  ## acceptance rule runs on exactly this set once it reaches the agent.
   createDir(parentDir(path))
   writeFile(path,
     "{\n" &
     "  \"function\": \"" & functionName & "\",\n" &
     "  \"object\": \"" & objectPath & "\",\n" &
+    (if changedTypesJson.len > 0:
+       "  \"changedTypes\": " & changedTypesJson & ",\n"
+     else: "") &
     "  \"source\": \"" & sourcePath & "\"\n" &
     "}\n")
 
 suite "t_e2e_repro_watch_hcr_multi_target_independent_patches":
   test "t_e2e_repro_watch_hcr_multi_target_independent_patches":
-    when defined(macosx) and defined(arm64):
+    when (defined(macosx) and defined(arm64)) or
+         (defined(linux) and defined(amd64)):
       let repoRoot = getCurrentDir()
       let reproBin = compileRepro(repoRoot)
       let tempRoot = createTempDir("repro-hcr-m4-multi", "")
@@ -273,7 +294,14 @@ suite "t_e2e_repro_watch_hcr_multi_target_independent_patches":
       writeFile(projectRoot / "reprobuild.nim", ProjectFile)
       writeFile(sourceA, ASourceOld)
       writeFile(sourceB, BSourceOnly)
-      writeMetadataJson(metadataA, "patchable_value_a", "build/a.o", "src/a.c")
+      # A's metadata declares a REAL layout delta. This is the only arm in the
+      # repository that puts a non-empty ``changedTypes`` on
+      # ``repro watch --hcr``'s production wire; every other gate for these
+      # fields drives the agent in process.
+      writeMetadataJson(metadataA, "patchable_value_a", "build/a.o", "src/a.c",
+        changedTypesJson =
+          "[{\"typeName\": \"HcrWatchProbeState\", " &
+          "\"oldSize\": 24, \"newSize\": 40}]")
       writeMetadataJson(metadataB, "patchable_value_b", "build/b.o", "src/b.c")
 
       let command = shellCommand([
@@ -288,9 +316,15 @@ suite "t_e2e_repro_watch_hcr_multi_target_independent_patches":
         "--hcr-target=a:" & socketA & ":" & artifactsA & ":" & metadataA,
         "--hcr-target=b:" & socketB & ":" & artifactsB & ":" & metadataB
       ]) & " > " & q(logPath) & " 2>&1"
+      # The selectors are the BARE target names ``a`` and ``b`` — that spelling
+      # is what ``--hcr-target=a:...`` has to match — so the command has to run
+      # inside the fixture project. Run from the repository root it resolves
+      # ``a`` against reprobuild's OWN ``repro.nim`` and dies with
+      # ``unknown_target: no build target matches 'a'`` before the HCR session
+      # is ever created. Measured on Linux x86_64 2026-09-18.
       let process = startProcess("/bin/sh",
         args = ["-c", command],
-        workingDir = repoRoot,
+        workingDir = projectRoot,
         options = {poUsePath})
       defer:
         if process.running():
@@ -298,23 +332,31 @@ suite "t_e2e_repro_watch_hcr_multi_target_independent_patches":
         process.close()
 
       # Both targets advertise "waiting for agent socket=" with their
-      # respective target=<name> suffix (M4 ``targetLogSuffix``).
+      # respective target=<name> suffix (M4 ``targetLogSuffix``), but they do
+      # NOT advertise them concurrently: the per-target baseline loop blocks in
+      # ``accept`` on A's socket before it ever creates B's. Waiting for both
+      # lines before connecting either one therefore deadlocks — measured on
+      # Linux x86_64 2026-09-18, where B's line never appeared and the gate
+      # timed out on a producer that was waiting for the gate.
+      #
+      # Cold, the baseline cycle also compiles a project provider from scratch;
+      # measured in minutes here, not in the 30 s this defaulted to.
       waitForLogContains(logPath,
         "repro watch: hcr waiting for agent socket=" & socketA &
-          " target=a", "agent A baseline")
-      waitForLogContains(logPath,
-        "repro watch: hcr waiting for agent socket=" & socketB &
-          " target=b", "agent B baseline")
-
+          " target=a", "agent A baseline", timeoutMs = 600_000)
       var agentA = connectHcrAgentUnixSocket(socketA)
       defer: agentA.close()
+      discard agentA.writeAgentMessage(agentHello("a"))
+      let ackA = agentA.readAgentMessage()
+      check ackA.kind == hmkHelloAck
+
+      waitForLogContains(logPath,
+        "repro watch: hcr waiting for agent socket=" & socketB &
+          " target=b", "agent B baseline", timeoutMs = 600_000)
       var agentB = connectHcrAgentUnixSocket(socketB)
       defer: agentB.close()
-      discard agentA.writeAgentMessage(agentHello("a"))
       discard agentB.writeAgentMessage(agentHello("b"))
-      let ackA = agentA.readAgentMessage()
       let ackB = agentB.readAgentMessage()
-      check ackA.kind == hmkHelloAck
       check ackB.kind == hmkHelloAck
 
       waitForLogContains(logPath, "repro watch: watching paths=",
@@ -327,13 +369,34 @@ suite "t_e2e_repro_watch_hcr_multi_target_independent_patches":
       # per-target lifecycle silently skips B.
       writeFile(sourceA, ASourceNew)
 
-      let requestA = agentA.readAgentMessage()
+      # Loud, with the transcript in hand: an EOF here says only that the
+      # producer stopped, and the watch log is the only place that says why.
+      let requestA =
+        try:
+          agentA.readAgentMessage()
+        except CatchableError as err:
+          raise newException(IOError,
+            "no patch request arrived on target a (" & err.msg &
+            ").\n--- repro watch log ---\n" &
+            (if fileExists(logPath): readFile(logPath) else: "<no log>"))
       check requestA.kind == hmkPatchRequest
       check requestA.patchRequest.changedFunctions == @["patchable_value_a"]
       check requestA.patchRequest.targetSymbols == @["patchable_value_a"]
       check requestA.patchRequest.directPatchPayload.bytes.len > 0
       check requestA.patchRequest.sourceGenerationMap.len == 1
       check requestA.patchRequest.sourceGenerationMap[0].sourcePath == sourceA
+      # HLX-M8 residue, 2026-09-18 — both fields, NON-EMPTY, over the real
+      # ``repro watch --hcr`` wire. Until this date no gate on any platform
+      # drove either one through this command, and the command itself filled
+      # neither: it sent ``changedFiles: []`` while holding the edited file in
+      # ``session.metadata.sourcePath``, so ``rb_hcr_file_changed`` could not
+      # answer true for any watch-driven reload.
+      check requestA.patchRequest.changedFiles == @[sourceA]
+      check requestA.patchRequest.changedTypes.len == 1
+      check requestA.patchRequest.changedTypes[0].typeName ==
+        "HcrWatchProbeState"
+      check requestA.patchRequest.changedTypes[0].oldSize == 24'u32
+      check requestA.patchRequest.changedTypes[0].newSize == 40'u32
 
       discard agentA.writeAgentMessage(
         lifecycle(requestA.patchRequest.patchId, "hcr/patchApplying",
@@ -349,11 +412,14 @@ suite "t_e2e_repro_watch_hcr_multi_target_independent_patches":
         checkpoint(log)
       check exitCode == 0
 
-      # Both targets ran a baseline.
-      check log.contains("repro watch: hcr baseline captured object=" &
-        "build/a.o target=a")
-      check log.contains("repro watch: hcr baseline captured object=" &
-        "build/b.o target=b")
+      # Both targets ran a baseline. The object path in this line is whatever
+      # the build report recorded — relative on macOS, absolute on Linux (
+      # measured: `object=/tmp/.../project/build/a.o`) — so the assertion is on
+      # the object's identity and the target it was attributed to, which is
+      # what this gate is about, and not on the path's shape.
+      check log.contains("repro watch: hcr baseline captured object=")
+      check log.contains("build/a.o target=a")
+      check log.contains("build/b.o target=b")
       # A delivered a patch.
       check log.contains("repro watch: hcr patch applied patchId=" &
         "repro-watch-hcr-patch-0001 target=a")

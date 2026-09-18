@@ -181,9 +181,9 @@ LIB_SIZE="$(wc -c < "$HOST_LIB" | tr -d ' ')"
 echo "  [OK] Built artifact exists: $HOST_LIB (size: $LIB_SIZE bytes)"
 
 # -----------------------------------------------------------------------------
-# 3. Symbol resolution via nm (Anti-vacuity check for all 25 symbols)
+# 3. Symbol resolution via nm (Anti-vacuity check for all 28 symbols)
 # -----------------------------------------------------------------------------
-echo "[3/5] Verifying all 25 required exported symbols via nm..."
+echo "[3/5] Verifying all 28 required exported symbols via nm..."
 
 REQUIRED_SYMBOLS=(
   # 15 repro_hcr_agent_* symbols (daemon/coordinator API)
@@ -213,6 +213,11 @@ REQUIRED_SYMBOLS=(
   "rb_hcr_remove_after_reload"
   "rb_hcr_file_changed"
   "rb_hcr_type_changed"
+  # 3 rb_hcr_padded_* symbols (HCR-Overview.md section 13.5), added 2026-09-18.
+  # These complete section 13's thirteen; the ten above are the set IsoNim binds.
+  "rb_hcr_padded_alloc"
+  "rb_hcr_padded_free"
+  "rb_hcr_padded_capacity"
 )
 
 NM_OUT="$(nm -gU "$HOST_LIB" 2>/dev/null || nm -g "$HOST_LIB")"
