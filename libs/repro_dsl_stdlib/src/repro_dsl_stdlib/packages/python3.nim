@@ -66,6 +66,20 @@ package python3:
       sha256 = "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3",
       archiveType = "zip",
       executablePath = "python.exe",
+      # The embeddable distribution ships ``python.exe`` and nothing named
+      # ``python3``, while the DSL package name, every recipe that declares
+      # it and every script that invokes it say ``python3`` — the POSIX
+      # command name the Linux and macOS entries below get for free from
+      # ``python/bin/python3``.
+      #
+      # Without the alias a realized prefix contributes ``python.exe`` to
+      # PATH and ``python3`` resolves to whatever the HOST has. Measured
+      # against a clean store: the dev env realized this package and
+      # ``command -v python3`` still answered out of the user's Scoop
+      # shims — precisely the out-of-band resolution a declared toolchain
+      # exists to remove, and invisible in practice because the wrong
+      # python usually works.
+      executableAlias = "python3.exe",
       packageId = "python@3.12.10",
       cpu = "x86_64",
       os = "windows",
