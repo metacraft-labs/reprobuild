@@ -3665,6 +3665,7 @@ proc provisioningContributionLiteral(
     result.add("], sha256: " & codeOrEmpty(provisioning.sha256) &
       ", executableAlias: " & codeOrEmpty(provisioning.executableAlias) &
       ", nonRedistributable: " & $provisioning.nonRedistributable &
+      ", launcher: " & codeOrEmpty(provisioning.launcher) &
       ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
       ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
       ", stripComponents: " & $provisioning.stripComponents &

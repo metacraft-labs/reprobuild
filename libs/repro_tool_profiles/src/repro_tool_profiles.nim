@@ -301,6 +301,9 @@ type
     declaredNonRedistributable*: bool
       ## Realize, but never PUBLISH. See
       ## ``TarballProvisioningDef.nonRedistributable``.
+    declaredLauncher*: string
+      ## Interpreter a script payload is run through. See
+      ## ``TarballProvisioningDef.launcher``.
     stripComponents*: int
     lockIdentity*: string
 
@@ -1160,8 +1163,14 @@ proc executableInStorePath(storePath, declaredExecutablePath: string;
   # through ``archiveType = "raw"``, which copies a single downloaded file
   # into the prefix under its declared name, so the declared path IS the
   # payload and there is no program in the package to anchor on instead.
+  # M9.R.15q.5.12 — ``.js``/``.mjs``/``.cjs`` are SCRIPTS, and a script is
+  # the case ``launcher`` exists for: the declared path is the payload an
+  # interpreter runs, never a program the OS execs, so it carries no execute
+  # bit on any host. The launcher pair realize writes beside it is what ends
+  # up being invoked.
   let dataExts = [".pc", ".so", ".dll", ".a", ".h", ".hpp", ".cmake",
-    ".json", ".xml", ".txt", ".ids", ".bin", ".onnx"]
+    ".json", ".xml", ".txt", ".ids", ".bin", ".onnx",
+    ".js", ".mjs", ".cjs"]
   let lower = declaredExecutablePath.toLowerAscii
   var isDataDecl = false
   for ext in dataExts:
@@ -1918,6 +1927,7 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
     declaredExecutableAlias: selected.executableAlias,
     declaredPrunePaths: selected.prunePaths,
     declaredNonRedistributable: selected.nonRedistributable,
+    declaredLauncher: selected.launcher,
     stripComponents: selected.stripComponents,
     lockIdentity: contributorLockIdentity(selected.contributor,
       if selected.lockIdentity.len > 0:
@@ -2847,6 +2857,13 @@ proc toolCacheIdentity(plan: TarballAcquisitionPlan;
   # this landed, for packages whose bytes did not change at all.
   if plan.declaredPrunePaths.len > 0:
     result.addOption("prunePaths", plan.declaredPrunePaths.join("\n"))
+  # A launcher WRITES FILES into the prefix, so it changes the bytes and has
+  # to change the key — the same argument as pruning, in the other
+  # direction. Conditional for the same reason too: recording it
+  # unconditionally would move the key of every package that has no
+  # launcher, invalidating shared-cache entries whose content did not change.
+  if plan.declaredLauncher.len > 0:
+    result.addOption("launcher", plan.declaredLauncher)
   result.addOption("stripComponents", $plan.stripComponents)
 
 proc substituteToolPrefix(plan: TarballAcquisitionPlan;
@@ -3080,7 +3097,38 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
     if plan.declaredExecutableAlias.len > 0:
       let aliasPath = extractedExecutable.parentDir /
         plan.declaredExecutableAlias
-      if not fileExists(extendedPath(aliasPath)):
+      if plan.declaredLauncher.len > 0:
+        # A SCRIPT payload. Copying it under a second name would produce a
+        # second file the OS still cannot execute, so the alias becomes a
+        # LAUNCHER PAIR instead — the same thing npm generates beside a
+        # bundle, and for the same reason.
+        #
+        # The target is referenced by its own file name, not by an absolute
+        # path: both launchers `cd` nowhere and resolve the script beside
+        # themselves, so the prefix stays relocatable and content-addressed
+        # rather than baking in the store path it happened to be realized
+        # at. The interpreter is resolved from PATH, because it is itself a
+        # declared package and the consuming activation decides which one.
+        let scriptName = extractFilename(extractedExecutable)
+        if not fileExists(extendedPath(aliasPath)):
+          # POSIX launcher. `exec` so signals and the exit status belong to
+          # the interpreter rather than to a shell that outlives it.
+          writeFile(extendedPath(aliasPath),
+            "#!/bin/sh\n" &
+            "exec " & plan.declaredLauncher & " \"$(dirname \"$0\")/" &
+            scriptName & "\" \"$@\"\n")
+          when not defined(windows):
+            setFilePermissions(extendedPath(aliasPath),
+              {fpUserRead, fpUserWrite, fpUserExec,
+               fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+        let cmdPath = aliasPath & ".cmd"
+        if not fileExists(extendedPath(cmdPath)):
+          # Windows launcher. `%~dp0` is the batch file's own directory and
+          # carries a trailing separator. `%*` forwards arguments unparsed.
+          writeFile(extendedPath(cmdPath),
+            "@echo off\r\n" &
+            plan.declaredLauncher & " \"%~dp0" & scriptName & "\" %*\r\n")
+      elif not fileExists(extendedPath(aliasPath)):
         copyFile(extendedPath(extractedExecutable), extendedPath(aliasPath))
         when not defined(windows):
           # Preserve the execute bit the copy does not carry on POSIX.

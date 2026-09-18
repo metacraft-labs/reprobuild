@@ -1404,6 +1404,12 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
     let nonRedistributableValue = namedValue(node[i], "nonRedistributable")
     if not nonRedistributableValue.isNil:
       result.nonRedistributable = boolLiteral(nonRedistributableValue, false)
+    # ``launcher = "node"`` says the declared payload is a SCRIPT and names
+    # the interpreter that runs it. Paired with ``executableAlias``, which
+    # supplies the name the generated launcher takes.
+    let launcherValue = namedValue(node[i], "launcher")
+    if not launcherValue.isNil:
+      result.launcher = exprCode(launcherValue)
     let sha256Value = namedValue(node[i], "sha256")
     if not sha256Value.isNil:
       sha256Node = sha256Value
@@ -2549,6 +2555,7 @@ proc packageLiteral(pkg: PackageDef): string =
     result.add("], sha256: " & codeOrEmpty(provisioning.sha256) &
       ", executableAlias: " & codeOrEmpty(provisioning.executableAlias) &
       ", nonRedistributable: " & $provisioning.nonRedistributable &
+      ", launcher: " & codeOrEmpty(provisioning.launcher) &
     ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
       ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
       ", stripComponents: " & $provisioning.stripComponents &

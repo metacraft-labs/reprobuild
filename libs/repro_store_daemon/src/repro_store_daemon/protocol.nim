@@ -8,7 +8,11 @@ when defined(posix):
   import std/posix
 
 const
-  StoreDaemonProtocolVersion* = 3'u16
+  StoreDaemonProtocolVersion* = 4'u16
+    ## v4: the external-realize body also carries ``launcher``. Same
+    ## reasoning as every bump below: a v3 peer reading a v4 body would
+    ## read the launcher string's length as ``stripComponents``.
+    ##
     ## v3: the external-realize body also carries ``nonRedistributable``.
     ## Same reasoning as the v2 bump below: a v2 peer reading a v3 body
     ## would read the flag byte as the first byte of ``stripComponents``.
@@ -95,6 +99,8 @@ type
       ## Prefix-relative paths realize drops after extraction.
     nonRedistributable*: bool
       ## When true the daemon must realize but never publish this prefix.
+    launcher*: string
+      ## Interpreter a script payload is run through; empty for a program.
       ##
       ## Both of these travel with the request for the same reason every
       ## other field does: the daemon rebuilds the provisioning from this
@@ -287,6 +293,7 @@ proc externalRealizeBody*(req: StoreDaemonExternalRealizeRequest): seq[byte] =
   result.writeString(req.executableAlias)
   result.writeStringSeq(req.prunePaths)
   result.writeU32Le(if req.nonRedistributable: 1'u32 else: 0'u32)
+  result.writeString(req.launcher)
   result.writeU32Le(uint32(max(req.stripComponents, 0)))
 
 proc parseExternalRealizeBody*(body: openArray[byte]):
@@ -313,6 +320,7 @@ proc parseExternalRealizeBody*(body: openArray[byte]):
   result.executableAlias = body.readString(pos)
   result.prunePaths = body.readStringSeq(pos)
   result.nonRedistributable = body.readU32Le(pos) != 0'u32
+  result.launcher = body.readString(pos)
   result.stripComponents = int(body.readU32Le(pos))
 
 proc releaseRootBody*(holderId, rootId: string): seq[byte] =
