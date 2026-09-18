@@ -1140,11 +1140,36 @@ target dir — or one nimcache — corrupts both. And splitting a genuinely
 content-keyed cache per edge multiplies the cold population by the edge
 count.
 
-The shared provider nimcache is the case that looks like a
-counterexample and is not. The 83 edges sharing it
-(`repro_interface_artifacts.nim:4413-4422`) are compiles of *the same
-sources under the same configuration* — one position, invoked many
-times. That is inside the rule, not an exception to it.
+The shared provider nimcache in this repo looks like a counterexample —
+it is defended in a docstring
+(`repro_interface_artifacts.nim:4413-4422`) as one cold compile plus 83
+warm ones. Measured, it is not a counterexample; it is the rule being
+violated and the damage being held back by a lock:
+
+- **The sharers are different positions.** Each recipe's own
+  `repro.nim` occupies the single slot `@mrepro.nim.c`, and each
+  recipe's link manifest occupies the single slot
+  `project-provider.json`, because Nim mangles relative to the *main
+  module's* directory (`compiler/modulepaths.nim:101-102`) and names the
+  manifest from the output basename, which is invariant here. On this
+  machine's real `/tmp/repro-nimcache-provider/`: 402 key directories,
+  390 holding exactly one JSON, always that same name.
+- **The warmth it is defended for no longer exists.** Every provider and
+  extraction compile passes `--forceBuild:on`
+  (`repro_interface_artifacts.nim:4473`), which recompiles every object
+  unconditionally. Measured on a 17-object program: with the flag, 17/17
+  objects rebuilt; without it, 17/17 untouched. The flag landed
+  2026-09-14, in the commit that rewrote that very comment to say the
+  directory is "intermediate storage, not an authority for C-object
+  reuse."
+- **Isolating is faster, not slower.** Six concurrent compiles in the
+  engine's shape: shared-and-locked 65–155 s; isolated per edge 28–44 s,
+  while paying six cold compiles, because they run concurrently. Shared
+  and *un*locked corrupts — 4 of 18 compiles failed with one process's
+  object on another's link line.
+
+So the lock is not buying warmth. It is holding back a collision that
+correct scoping removes outright.
 
 ### Sharing and safety are different questions
 
