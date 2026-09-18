@@ -1071,7 +1071,7 @@ tests/integration/t_develop_refuses_inexact_revision_and_leaves_no_checkout.nim	
 tests/integration/t_develop_refuses_unreachable_team_backend.nim	nim	1
 tests/integration/t_develop_refuses_unreadable_backend_before_membership_degrades.nim	nim	1
 tests/integration/t_develop_refuses_unreadable_backend_of_any_kind.nim	nim	1
-tests/integration/t_develop_root_lock_outranks_a_per_repo_lock.nim	nim	1
+tests/integration/t_develop_repo_own_lock_outranks_the_root_lock.nim	nim	1
 tests/integration/t_develop_selectors_compose_in_fixed_order.nim	nim	1
 tests/integration/t_develop_set_is_union_of_all_backends.nim	nim	1
 tests/integration/t_develop_warns_and_names_omitted_personal_repos.nim	nim	1
@@ -1642,6 +1642,7 @@ tests/unit/t_m9r9_auto_recurse.nim	nim	20
 tests/unit/t_measurement_axes.nim	nim	14
 tests/unit/t_msi_archive_type.nim	nim	2
 tests/unit/t_nix_propagated_store_paths.nim	nim	5
+tests/unit/t_prefix_env_ops.nim	nim	4
 tests/unit/t_provider_compile_cache_entry_is_content_addressed.nim	nim	7
 tests/unit/t_provider_snapshot_binary_binding.nim	nim	3
 tests/unit/t_provider_startup_body_containment.nim	nim	14
@@ -1668,6 +1669,7 @@ tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim	nim	6
 tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim	nim	10
 tests/unit/t_unmonitorable_action_depfile_guards.nim	nim	13
 tests/unit/t_version.nim	nim	2
+tests/unit/t_voice_model_packages.nim	nim	5
 tests/unit/t_windows_system_hash_mode.nim	nim	2
 tests/unit/t_workspace_root_for_repo_managed_worktree.nim	nim	1
 tests/unit/test_build_report_attribution.py	python	12

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1663,
+    "nimTestBinaries": 1665,
     "pureUnitConsolidationGroups": 50,
-    "pureUnitTests": 590,
+    "pureUnitTests": 592,
     "staticallyDetectedRuntimeCompilerFlowTests": 101,
-    "testEntries": 1674
+    "testEntries": 1676
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -852,7 +852,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 22,
+      "count": 23,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -881,7 +881,8 @@
         "tests/unit/t_m9r4_library_api_exports.nim",
         "tests/unit/t_m9r6_convention_narrowing_default_synthesis.nim",
         "tests/unit/t_m9r79_constructors_compile.nim",
-        "tests/unit/t_shared_mime_info_dev_stub.nim"
+        "tests/unit/t_shared_mime_info_dev_stub.nim",
+        "tests/unit/t_voice_model_packages.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1105,7 +1106,7 @@
       "graph-fixture": 12,
       "integration": 780,
       "platform/destructive": 115,
-      "pure unit": 590,
+      "pure unit": 592,
       "unclassified": 177
     },
     "graphOwnedTestArtifacts": [
@@ -1254,9 +1255,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1663,
+    "nimTestBinaryCount": 1665,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1674
+    "testEntryCount": 1676
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -25011,7 +25012,7 @@
       "targetOs": "soAny"
     },
     {
-      "binary": "build/test-bin/t_develop_root_lock_outranks_a_per_repo_lock",
+      "binary": "build/test-bin/t_develop_repo_own_lock_outranks_the_root_lock",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
@@ -25022,7 +25023,7 @@
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
-      "source": "tests/integration/t_develop_root_lock_outranks_a_per_repo_lock.nim",
+      "source": "tests/integration/t_develop_repo_own_lock_outranks_the_root_lock.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -35105,6 +35106,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_prefix_env_ops",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_provider_runtime",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_prefix_env_ops.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_provider_compile_cache_entry_is_content_addressed",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -35573,6 +35593,24 @@
       "source": "tests/unit/t_version.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_voice_model_packages",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_voice_model_packages.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
