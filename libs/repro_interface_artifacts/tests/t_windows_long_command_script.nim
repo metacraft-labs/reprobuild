@@ -43,3 +43,20 @@ suite "Windows long command script planning":
     check "  ''," in script
     check "'--define:name=\"two words\"'," in script
     check "'owner''s path'" in script
+
+  when defined(windows):
+    test "runCommand on Windows captures merged stdout and stderr directly":
+      let res = runCommand(@["cmd.exe", "/c", "echo hello from test & echo stderr from test 1>&2"])
+      check res.exitCode == 0
+      check "hello from test" in res.output
+      check "stderr from test" in res.output
+
+    test "runCommand executes long command line without truncation":
+      var args = @["cmd.exe", "/c", "echo start"]
+      for i in 1..200:
+        args.add("arg" & $i)
+      args.add("& echo end")
+      let res = runCommand(args)
+      check res.exitCode == 0
+      check "start" in res.output
+      check "end" in res.output

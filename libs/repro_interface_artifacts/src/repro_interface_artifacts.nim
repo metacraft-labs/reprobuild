@@ -28,6 +28,54 @@ when defined(windows):
 
   proc providerLockGetLastError(): ProviderLockDword
     {.stdcall, dynlib: "kernel32", importc: "GetLastError".}
+
+  type
+    WinStartupInfoW {.importc: "STARTUPINFOW", header: "<windows.h>", bycopy.} = object
+      cb: ProviderLockDword
+      lpReserved: pointer
+      lpDesktop: pointer
+      lpTitle: pointer
+      dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags: ProviderLockDword
+      wShowWindow, cbReserved2: uint16
+      lpReserved2: pointer
+      hStdInput, hStdOutput, hStdError: ProviderLockHandle
+
+    WinProcessInformation {.importc: "PROCESS_INFORMATION", header: "<windows.h>", bycopy.} = object
+      hProcess, hThread: ProviderLockHandle
+      dwProcessId, dwThreadId: ProviderLockDword
+
+    WinSecurityAttributes {.importc: "SECURITY_ATTRIBUTES", header: "<windows.h>", bycopy.} = object
+      nLength: ProviderLockDword
+      lpSecurityDescriptor: pointer
+      bInheritHandle: int32
+
+  const
+    WinStartfUseStdHandles = 0x00000100'u32
+    WinCreateAlways = 2'u32
+    WinFileShareRead = 1'u32
+    WinFileShareWrite = 2'u32
+    WinWaitInfinite = 0xFFFFFFFF'u32
+    WinStdInputHandle = -10'i32
+
+  proc winGetStdHandle(nStdHandle: int32): ProviderLockHandle
+    {.stdcall, dynlib: "kernel32", importc: "GetStdHandle".}
+
+  proc winCreateProcessW(
+      lpApplicationName, lpCommandLine: pointer;
+      lpProcessAttributes, lpThreadAttributes: pointer;
+      bInheritHandles: int32;
+      dwCreationFlags: ProviderLockDword;
+      lpEnvironment: pointer;
+      lpCurrentDirectory: pointer;
+      lpStartupInfo: ptr WinStartupInfoW;
+      lpProcessInformation: ptr WinProcessInformation): int32
+    {.stdcall, dynlib: "kernel32", importc: "CreateProcessW".}
+
+  proc winWaitForSingleObject(hHandle: ProviderLockHandle; dwMilliseconds: ProviderLockDword): ProviderLockDword
+    {.stdcall, dynlib: "kernel32", importc: "WaitForSingleObject".}
+
+  proc winGetExitCodeProcess(hProcess: ProviderLockHandle; lpExitCode: ptr ProviderLockDword): int32
+    {.stdcall, dynlib: "kernel32", importc: "GetExitCodeProcess".}
 else:
   import std/posix
 
@@ -2439,7 +2487,7 @@ proc powerShellRunCommandScript*(command: openArray[string];
   result.add("  exit 1\r\n")
   result.add("}\r\n")
 
-proc runCommand(command: openArray[string];
+proc runCommand*(command: openArray[string];
     cwd = ""): ProviderCompileExecutionResult =
   if command.len == 0:
     raise newException(OSError, "runCommand requires a non-empty argv")
@@ -2449,92 +2497,70 @@ proc runCommand(command: openArray[string];
     # on Windows whenever the child (typically `nim c`) spawns a sub-process
     # (gcc) that inherits the pipe write handle: when `nim` exits but gcc
     # is still running, the pipe never EOFs and the parent's `readAll()`
-    # blocks forever. Materialising the redirection as a tiny .cmd script
-    # (rather than passing it inline through `cmd.exe /c`) sidesteps the
-    # cmd.exe outer-quote-stripping rule that otherwise mangles the `>`
-    # redirection when the assembled command line starts with a quoted
-    # absolute path.
+    # blocks forever.
+    # We spawn the process directly via CreateProcessW with an inheritable
+    # file handle for hStdOutput and hStdError:
+    # 1. Bypasses cmd.exe's ~8191 character limit (CreateProcessW handles up to 32767 chars).
+    # 2. Avoids spawning PowerShell or cmd.exe under process monitoring (io-mon),
+    #    preventing .NET CLR initialization crashes / access violations (0xC0000005)
+    #    and CFG fast-fail hazards (0xC0000409).
+    # 3. Ensures native UTF-8 output capture without PowerShell UTF-16 BOM or
+    #    null-byte corruption, and guarantees exact exit codes without
+    #    NativeCommandError interference.
     let sinkDir = getTempDir()
     createDir(extendedPath(sinkDir))
     let nonce = $getCurrentProcessId() & "-" &
       $int64(epochTime() * 1_000_000.0)
     let sinkPath = sinkDir / ("repro-runcommand-" & nonce & ".log")
-    let scriptPath = sinkDir / ("repro-runcommand-" & nonce & ".cmd")
-    let psScriptPath = sinkDir / ("repro-runcommand-" & nonce & ".ps1")
-    # cmd.exe truncates any single command line past ~8191 chars, so a
-    # large `nim c` invocation (60+ --path: entries) silently produces an
-    # empty sink and we report `command failed` with no stderr. Fall back
-    # to a PowerShell script when the assembled arg list would overflow:
-    # the pwsh.exe command line remains short, while the script invokes the
-    # real child with an argv array and file redirection. This keeps us out
-    # of unsupported Nim @-file semantics and preserves exact arguments.
-    let assembledLen = command.mapIt(cmdExeShellEscape(it)).join(" ").len +
-      cmdExeShellEscape(sinkPath).len + " > 2>&1\r\n@echo off\r\n".len
-    let usePowerShellScript = assembledLen > 6000
-    var process: Process
-    if usePowerShellScript:
-      writeFile(extendedPath(psScriptPath),
-        powerShellRunCommandScript(command, sinkPath))
-      let powerShellExe = block:
-        # Prefer Windows PowerShell 5.1 (powershell.exe) over PowerShell 7
-        # (pwsh.exe). Windows PowerShell is a standard OS component on every
-        # Windows installation, starts with lower latency, avoids CFG fast-fail
-        # crash hazards (0xC0000409) under process instrumentation, and does
-        # not treat native-process stderr output as a terminating script error.
-        let windowsPowerShell = findExe("powershell")
-        if windowsPowerShell.len > 0:
-          windowsPowerShell
-        else:
-          # PATH lookup is not the last word here, because PATH is exactly
-          # what cannot be trusted on this branch. We are here BECAUSE the
-          # command is too long for cmd.exe -- and a process that reached
-          # us through cmd.exe has already had its PATH truncated at 8191
-          # characters, which on a host with a long PATH silently removes
-          # whatever sits at the end of it. Windows PowerShell has a fixed
-          # location under %SystemRoot%, so look there before giving up on
-          # an interpreter the machine certainly has.
-          let systemRoot = getEnv("SystemRoot", r"C:\Windows")
-          let fallback = systemRoot /
-            r"System32\WindowsPowerShell\v1.0\powershell.exe"
-          if fileExists(extendedPath(fallback)):
-            fallback
-          else:
-            let pwsh = findExe("pwsh")
-            if pwsh.len > 0:
-              pwsh
-            else:
-              raise newException(OSError,
-                "powershell/pwsh required for long Windows command; " &
-                "neither is on PATH and " & fallback & " does not exist")
-      withSpawnWorkingDir:
-        process = startProcess(powerShellExe,
-          args = @[
-            "-NoLogo",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            psScriptPath],
-          workingDir = cwd, options = {poUsePath})
-    else:
-      let scriptBody = "@echo off\r\n" &
-        command.mapIt(cmdExeShellEscape(it)).join(" ") &
-        " > " & cmdExeShellEscape(sinkPath) & " 2>&1\r\n"
-      writeFile(extendedPath(scriptPath), scriptBody)
-      withSpawnWorkingDir:
-        process = startProcess("cmd.exe",
-          args = @["/c", scriptPath],
-          workingDir = cwd, options = {poUsePath})
-    let exitCode = process.waitForExit()
-    process.close()
-    try:
-      removeFile(extendedPath(scriptPath))
-    except CatchableError:
-      discard
-    try:
-      removeFile(extendedPath(psScriptPath))
-    except CatchableError:
-      discard
+
+    var sa = WinSecurityAttributes(
+      nLength: ProviderLockDword(sizeof(WinSecurityAttributes)),
+      lpSecurityDescriptor: nil,
+      bInheritHandle: 1)
+    let sinkW = newWideCString(extendedPath(sinkPath))
+    let sinkHandle = providerLockCreateFileW(sinkW, ProviderLockGenericWrite,
+      WinFileShareRead or WinFileShareWrite, addr sa, WinCreateAlways,
+      ProviderLockFileAttributeNormal, nil)
+    if sinkHandle == ProviderLockInvalidHandle or sinkHandle == nil:
+      raise newException(OSError, "failed to create sink file: " & sinkPath)
+
+    var si = WinStartupInfoW(
+      cb: ProviderLockDword(sizeof(WinStartupInfoW)),
+      dwFlags: WinStartfUseStdHandles,
+      hStdInput: winGetStdHandle(WinStdInputHandle),
+      hStdOutput: sinkHandle,
+      hStdError: sinkHandle)
+    var pi: WinProcessInformation
+
+    var commandLine = ""
+    for i, arg in command:
+      if i > 0:
+        commandLine.add(' ')
+      commandLine.add(quoteShellWindows(arg))
+
+    var cmdW = newWideCString(commandLine)
+    var cwdW = if cwd.len > 0: newWideCString(cwd) else: newWideCString("")
+    let pCmd = addr cmdW[0]
+    let pCwd = if cwd.len > 0: addr cwdW[0] else: nil
+    let created = winCreateProcessW(nil, pCmd, nil, nil, 1, 0,
+      nil, pCwd, addr si, addr pi)
+    discard providerLockCloseHandle(sinkHandle)
+
+    if created == 0:
+      let err = providerLockGetLastError()
+      try:
+        removeFile(extendedPath(sinkPath))
+      except CatchableError:
+        discard
+      raise newException(OSError, "CreateProcessW failed (" & $err & ") for: " & commandLine)
+
+    discard winWaitForSingleObject(pi.hProcess, WinWaitInfinite)
+    var rawExitCode: ProviderLockDword = 0
+    discard winGetExitCodeProcess(pi.hProcess, addr rawExitCode)
+    discard providerLockCloseHandle(pi.hThread)
+    discard providerLockCloseHandle(pi.hProcess)
+    let exitCode = int(cast[int32](rawExitCode))
+
     var output = ""
     if fileExists(extendedPath(sinkPath)):
       try:
