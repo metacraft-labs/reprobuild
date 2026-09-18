@@ -294,6 +294,24 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("for candidate in \"$rp\"/ld-linux-*.so.* \"$rp\"/ld-musl-*.so.*; do ")
   script.add("if [ -f \"$candidate\" ]; then m9r14f_runtime_loader=$candidate; break 2; fi; ")
   script.add("done; done; IFS=$OLD_IFS; ")
+  # PT_INTERP is the ONE field that cannot be made relative: the kernel
+  # resolves it before the process exists and performs no ``$ORIGIN``
+  # expansion. Whatever absolute path lands here is baked into a published
+  # artifact and has to be valid under every checkout that restores it.
+  #
+  # A dependency mirror's loader is routinely a SYMLINK into a
+  # content-addressed store, so the same loader has two names: one that is
+  # valid only under the producer's checkout, and one that is valid wherever
+  # the store is. Naming the file by the checkout-local alias is what turns a
+  # restored artifact into ``exit 127`` on a binary that is plainly there.
+  # Resolve the alias and prefer the store name when that is where it lands.
+  # The FILE is unchanged either way, so this selects a name, not a runtime.
+  script.add("if [ -n \"$m9r14f_runtime_loader\" ]; then ")
+  script.add("m9r14f_resolved_loader=$(readlink -f -- \"$m9r14f_runtime_loader\" 2>/dev/null || true); ")
+  script.add("case \"$m9r14f_resolved_loader\" in /nix/store/*|/repro/store/*) ")
+  script.add("if [ -f \"$m9r14f_resolved_loader\" ]; then ")
+  script.add("m9r14f_runtime_loader=$m9r14f_resolved_loader; fi;; ")
+  script.add("esac; fi; ")
   # LIBRARY_PATH carries declared link inputs, including libc directories that
   # the engine intentionally excludes from LD_LIBRARY_PATH. If no declared
   # mirror supplied a loader, retain only the runtime already selected by the

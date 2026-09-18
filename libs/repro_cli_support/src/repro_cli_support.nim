@@ -35,6 +35,10 @@ proc runIoMonitorCli(programName: string; args: seq[string]): int =
 
 import repro_provider_runtime
 import repro_project_dsl
+# Deliberately NOT re-exported through the ``repro_project_dsl`` umbrella:
+# that umbrella sits in the import closure of every profile compile, and this
+# module is only needed where a cached mirror is restored.
+import repro_project_dsl/install_mirror_relocation
 import repro_dsl_stdlib/configurables/variants as solver_variants
 # PMC-4: `repro lock validate` compares a lock's recorded
 # microarchitecture target against this host through the SAME primitive
@@ -3729,6 +3733,21 @@ proc substituteMaterializedBinaryCacheEntries*(g: BuildGraph):
     if rc == 0:
       removeMaterializedPath(prefix)
       moveDir(staged, prefix)
+      let relocation = relocateRestoredInstallMirror(prefix,
+        findExe("patchelf"),
+        proc (executable: string; args: seq[string]):
+            tuple[output: string, exitCode: int] =
+          execCmdEx(quoteShellCommand(@[executable] & args)))
+      if relocation.message.len > 0:
+        stderr.writeLine(relocation.message)
+      if not relocation.ok:
+        # A PARTIALLY relocated mirror is the worst of the three states: it
+        # runs far enough to look like it works. Withdraw it and let the
+        # caller fall back to building from source.
+        removeMaterializedPath(prefix)
+        item.stderr = relocation.message
+        result.results.add(item)
+        continue
       item.status = asCacheHit
       item.cacheDecision = cdHit
       item.reason = "materialized-binary-cache-substituted key=" & key

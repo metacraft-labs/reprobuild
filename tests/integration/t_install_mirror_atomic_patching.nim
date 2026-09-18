@@ -1,5 +1,6 @@
 import std/[dynlib, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 import repro_project_dsl/install_mirror_runtime
+import repro_project_dsl/install_mirror_relocation
 import repro_test_support
 
 when defined(linux):
@@ -286,6 +287,167 @@ when defined(linux):
       check normalized.exitCode != 0
       let originalPreserved = readFile(executable) == originalBytes
       check originalPreserved
+      check noPatchTemps(scratch)
+
+    test "a published mirror survives being restored under a DIFFERENT checkout":
+      ## The failure this reproduces was found by a full from-source image
+      ## build and by nothing cheaper: a cached binary whose ``PT_INTERP``
+      ## and ``DT_RUNPATH`` named the checkout it was BUILT under. Testing at
+      ## the producing path proves nothing, which is exactly how it survived
+      ## publication — so this test MOVES the whole recipes root before it
+      ## asks anything.
+      ##
+      ## NO MOCKS: a real gcc builds a real shared library and a real
+      ## executable, a real copy of this host's dynamic loader is placed in
+      ## the dependency mirror, and the executable is really run.
+      let scratch = createTempDir("repro-mirror-restore-", "")
+      defer: removeDir(scratch)
+      let fixtureEnv = cleanEnv()
+      let producer = scratch / "checkout-a" / "packages" / "source"
+      let mirrorOf = proc (root, package: string): string =
+        root / package / ".repro" / "output" / "install"
+      let depLib = mirrorOf(producer, "reprofixturedep") / "usr" / "lib"
+      let pkgBin = mirrorOf(producer, "reprofixtureapp") / "usr" / "bin"
+      createDir(depLib)
+      createDir(pkgBin)
+
+      let libSource = scratch / "dep.c"
+      writeFile(libSource, "int repro_fixture_answer(void) { return 7; }\n")
+      let libPath = depLib / "librepro_mirror_dep.so.1"
+      require runTool("gcc", @["-shared", "-fPIC",
+        "-Wl,-soname,librepro_mirror_dep.so.1", "-o", libPath, libSource],
+        fixtureEnv).exitCode == 0
+      let appSource = scratch / "app.c"
+      writeFile(appSource,
+        "extern int repro_fixture_answer(void);\n" &
+        "int main(void) { return repro_fixture_answer(); }\n")
+      let appPath = pkgBin / "repro-mirror-app"
+      require runTool("gcc", @["-o", appPath, appSource, libPath],
+        fixtureEnv).exitCode == 0
+
+      # Give the app a loader that lives inside the DEPENDENCY mirror, which
+      # is what a from-source libc produces and what makes PT_INTERP
+      # checkout-shaped in the first place.
+      let hostLoader = runTool("patchelf",
+        @["--print-interpreter", appPath], fixtureEnv)
+      require hostLoader.exitCode == 0
+      let loaderName = extractFilename(hostLoader.output.strip())
+      let mirrorLoader = depLib / loaderName
+      copyFileWithPermissions(expandFilename(hostLoader.output.strip()),
+        mirrorLoader)
+      require runTool("patchelf", @["--set-interpreter", mirrorLoader,
+        "--set-rpath", depLib, appPath], fixtureEnv).exitCode == 0
+      # At the producing path it works. This is the whole of the evidence
+      # publication ever had.
+      check runTool(appPath, @[], fixtureEnv).exitCode == 7
+
+      let consumer = scratch / "checkout-b" / "packages" / "source"
+      createDir(parentDir(consumer))
+      moveDir(producer, consumer)
+      let movedApp = mirrorOf(consumer, "reprofixtureapp") / "usr" / "bin" /
+        "repro-mirror-app"
+      let movedDepLib = mirrorOf(consumer, "reprofixturedep") / "usr" / "lib"
+      require fileExists(movedApp)
+      # Moved, it cannot start at all: the kernel resolves PT_INTERP before
+      # the process exists, so this is the ``exit 127`` on a file that is
+      # plainly there.
+      let beforeRepair = runTool("sh", @["-c",
+        quoteShell(movedApp) & "; echo exit=$?"], fixtureEnv)
+      checkpoint beforeRepair.output
+      check "exit=127" in beforeRepair.output
+
+      let audit = auditInstallMirrorRelocatability(
+        mirrorOf(consumer, "reprofixtureapp"), consumer)
+      check audit.elfCount == 1
+      var interpreterFindings = 0
+      var runPathFindings = 0
+      for finding in audit.findings:
+        check finding.verdict == rvRemappable
+        case finding.field
+        of rpfInterpreter:
+          inc interpreterFindings
+          check finding.remapped == movedDepLib / loaderName
+        of rpfRunPath:
+          inc runPathFindings
+          check finding.remapped == movedDepLib
+      # Each field is counted on its own: one of them is a hard refusal to
+      # start and the other is a library that goes missing halfway in, and a
+      # repair that fixed only one would still look green on a total.
+      check interpreterFindings == 1
+      check runPathFindings == 1
+
+      let patchRunner = proc (executable: string; args: seq[string]):
+          tuple[output: string, exitCode: int] =
+        runTool(executable, args, fixtureEnv)
+      let repaired = relocateInstallMirror(
+        mirrorOf(consumer, "reprofixtureapp"), consumer,
+        findExe("patchelf"), patchRunner)
+      checkpoint repaired.error
+      check repaired.ok
+      check repaired.patchedObjects == 1
+      check repaired.audit.findings.len == 0
+      check runTool(movedApp, @[], fixtureEnv).exitCode == 7
+      # Relocation is idempotent: a second pass over an already-local mirror
+      # finds nothing and rewrites nothing.
+      let second = relocateInstallMirror(
+        mirrorOf(consumer, "reprofixtureapp"), consumer,
+        findExe("patchelf"), patchRunner)
+      check second.ok
+      check second.patchedObjects == 0
+      check noPatchTemps(scratch)
+
+    test "a dependency loader reached through a store symlink is recorded by its store name":
+      ## PT_INTERP is the one field that cannot be made relative — the kernel
+      ## does no ``$ORIGIN`` expansion — so whichever absolute name is chosen
+      ## here is baked into a published artifact. A dependency mirror's
+      ## loader is routinely a symlink into a content-addressed store, and
+      ## the two names are NOT equally good: one is valid only under the
+      ## producing checkout.
+      let original = findExe("patchelf")
+      require original.len > 0
+      let fixtureEnv = cleanEnv()
+      let hostLoader = runTool(original, @["--print-interpreter", original],
+        fixtureEnv)
+      require hostLoader.exitCode == 0
+      let loaderPath = expandFilename(hostLoader.output.strip())
+      var storeName = ""
+      for storeRoot in ImmutableStoreRoots:
+        if loaderPath.startsWith(storeRoot): storeName = loaderPath
+      require storeName.len > 0
+      let scratch = createTempDir("repro-loader-alias-", "")
+      defer: removeDir(scratch)
+      let depLib = scratch / "dep" / ".repro" / "output" / "install" /
+        "usr" / "lib"
+      createDir(depLib)
+      # The alias: a checkout-local name for a file that lives in the store.
+      let alias = depLib / extractFilename(loaderPath)
+      createSymlink(loaderPath, alias)
+      let mirror = scratch / "usr"
+      let executable = mirror / "bin" / "sample"
+      createDir(parentDir(executable))
+      copyFileWithPermissions(original, executable)
+      setFilePermissions(executable, getFilePermissions(executable) +
+        {fpUserWrite})
+      # The dependency mirror is listed FIRST so the alias, not the store
+      # directory the real runtime also lives in, is what the loader scan
+      # selects. Otherwise both names would be produced by the same search
+      # and the test would pass whether or not the repair is present.
+      let priorRpath = runTool(original, @["--print-rpath", original],
+        fixtureEnv)
+      require priorRpath.exitCode == 0
+      var deps = @[depLib]
+      for path in priorRpath.output.strip().split(':'):
+        if path.isAbsolute and path notin deps: deps.add(path)
+      let normalized = runTool("sh", @["-ec",
+        m9r14fEmitRpathPatchScript(mirror, deps)], fixtureEnv)
+      checkpoint normalized.output
+      require normalized.exitCode == 0
+      let interpreter = runTool(original, @["--print-interpreter", executable],
+        fixtureEnv)
+      require interpreter.exitCode == 0
+      check interpreter.output.strip() == storeName
+      check interpreter.output.strip() != alias
+      check runTool(executable, @["--version"], fixtureEnv).exitCode == 0
       check noPatchTemps(scratch)
 
     test "loader normalization preserves symlinks and read-only permissions":

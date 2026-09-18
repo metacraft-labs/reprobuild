@@ -1121,7 +1121,7 @@ tests/integration/t_hpke_rejects_wrong_recipient.nim	nim	12
 tests/integration/t_hpke_rfc9180_vectors.nim	nim	8
 tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim	nim	3
 tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim	nim	6
-tests/integration/t_install_mirror_atomic_patching.nim	nim	7
+tests/integration/t_install_mirror_atomic_patching.nim	nim	9
 tests/integration/t_installed_engine_read_only_source_tree.nim	nim	2
 tests/integration/t_integration_build_engine_api_ready_queue.nim	nim	18
 tests/integration/t_integration_build_report_target_resolution_kind.nim	nim	5
@@ -1526,6 +1526,7 @@ tests/unit/t_cached_source_dependency_closure.nim	nim	11
 tests/unit/t_capabilities.nim	nim	2
 tests/unit/t_cargo_lock_vendor_plan.nim	nim	19
 tests/unit/t_cargo_vendor_action.nim	nim	10
+tests/unit/t_closure_manifest.nim	nim	4
 tests/unit/t_cmake_direct_tool_identity.nim	nim	5
 tests/unit/t_config_nims_lib_resolution.nim	nim	7
 tests/unit/t_configure_build_tree_cleanup.nim	nim	12
@@ -1554,6 +1555,7 @@ tests/unit/t_hcr_watch_inference.nim	nim	1
 tests/unit/t_host_system_tools.nim	nim	6
 tests/unit/t_infra_apply_lock_hung_owner.nim	nim	5
 tests/unit/t_install_mirror_optional_version.nim	nim	3
+tests/unit/t_install_mirror_relocation.nim	nim	20
 tests/unit/t_install_mirror_shell_tools.nim	nim	2
 tests/unit/t_install_mirror_tool_metadata.nim	nim	8
 tests/unit/t_library_stage_alias.nim	nim	3
@@ -1656,6 +1658,7 @@ tests/unit/t_rx_runquotad_forwards_custom_pools.nim	nim	5
 tests/unit/t_same_project_fragment_selectors.nim	nim	10
 tests/unit/t_script_launcher.nim	nim	3
 tests/unit/t_shared_mime_info_dev_stub.nim	nim	1
+tests/unit/t_sibling_prefix_clone.nim	nim	4
 tests/unit/t_source_fetch_tool_metadata.nim	nim	7
 tests/unit/t_stale_artifact_names_what_changed.nim	nim	5
 tests/unit/t_store_path_farm.nim	nim	4
