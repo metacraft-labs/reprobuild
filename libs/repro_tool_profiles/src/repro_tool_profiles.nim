@@ -3126,22 +3126,23 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
     return (prefix: prefix, archivePath: "",
         selectedUrl: selectedUrlFromReceipt(prefix))
 
-  # Shared cache before upstream. A hit means another machine already
-  # realized this exact prefix and we can skip the download and the unpack
-  # entirely; a miss costs one lookup. This is the step whose absence meant
-  # nothing a dev env provisioned was ever cache-substitutable.
-  if substituteToolPrefix(plan, packageName, resolvedVersion, prefix,
-      storeRoot):
-    return (prefix: prefix, archivePath: "",
-        selectedUrl: selectedUrlFromReceipt(prefix))
-
   let tempPrefix = tmpRoot / ("extract." & $getCurrentProcessId() & "." &
     $getTime().toUnix & "." & plan.sha256[0 .. 15])
   if dirExists(extendedPath(tempPrefix)):
     removeDir(extendedPath(tempPrefix))
-  # A sibling package may already hold these exact bytes. Tried after the
-  # shared cache and before the network, because it is cheaper than both:
-  # no request at all, and on a filesystem with hardlinks no new bytes.
+
+  # A sibling package may already hold these exact bytes. Tried BEFORE the
+  # shared cache, because a local hardlink is cheaper than a substitution:
+  # no request at all, and on a filesystem with hardlinks no new bytes,
+  # against a substitution that still transfers a whole prefix over the
+  # network.
+  #
+  # That ordering is what makes the saving reach a CLEAN machine. Each of
+  # the four packages over one Rust distribution publishes its own cache
+  # entry, so with the cache first, a fresh host substitutes four ~975 MB
+  # prefixes and the clone never fires. With the clone first it fetches one
+  # and hardlinks the rest — which is most of what a single shared cache
+  # entry would buy, without changing the cache key at all.
   #
   # The clone lands in the SAME staging directory an extraction would, so
   # everything downstream — prunes, alias, launcher, receipt, the move into
@@ -3151,6 +3152,15 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
   # a sibling that declared the same ones, so they are no-ops here rather
   # than special cases.
   let cloned = cloneSiblingRealization(plan, tempPrefix, storeRoot)
+
+  # Shared cache before upstream. A hit means another machine already
+  # realized this exact prefix and we can skip the download and the unpack
+  # entirely; a miss costs one lookup. This is the step whose absence meant
+  # nothing a dev env provisioned was ever cache-substitutable.
+  if not cloned and substituteToolPrefix(plan, packageName, resolvedVersion,
+      prefix, storeRoot):
+    return (prefix: prefix, archivePath: "",
+        selectedUrl: selectedUrlFromReceipt(prefix))
   let downloaded =
     if cloned: (path: "", selectedUrl: plan.url)
     else: verifiedDownload(plan, storeRoot)
