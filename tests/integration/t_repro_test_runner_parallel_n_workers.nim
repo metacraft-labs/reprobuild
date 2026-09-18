@@ -180,6 +180,15 @@ proc runExclusiveResourceCheck() =
   ## runner must execute them one at a time even when --threads=4. Use the exact
   ## production basenames that failed under nested compiler/loopback contention
   ## so this test protects the scheduling classification, not a toy alias.
+  ##
+  ## This list must stay in step with ``ExclusiveStems`` in
+  ## ``tools/test-runner/repro_test_runner.nim``: the assertions below demand
+  ## that EVERY fixture named here be serialized (``countOverlap == 1``), so a
+  ## stem left here after it was declassified turns this check red for a
+  ## scheduling decision that was made on purpose.
+  ## ``t_e2e_local_reprobuild_project_build`` was removed from both lists
+  ## together; the runner's ``ExclusiveStems`` docstring records why, and what
+  ## would justify restoring it.
   let repoRoot = findRepoRoot()
   let runner = repoRoot / "build" / "bin" /
     addFileExt("repro_test_runner", ExeExt)
@@ -208,7 +217,6 @@ proc runExclusiveResourceCheck() =
     "t_d1_pythonunittest_resolves_in_path_mode",
     "t_d2_cross_project_selector_recognised",
     "t_d5_collection_member_selector",
-    "t_e2e_local_reprobuild_project_build",
     "t_e2e_native_shell_hooks",
     "t_e2e_repro_dev_sessions",
     "t_e2e_shell_hook_noop_latency",
