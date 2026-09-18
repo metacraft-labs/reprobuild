@@ -2583,3 +2583,18 @@ integration_hcr_linux_threaded_synchronized_reload:
         --out:build/test-bin/integration_hcr_linux_threaded_synchronized_reload \
         tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_threaded_synchronized_reload.nim \
         2>&1 | tee test-logs/integration_hcr_linux_threaded_synchronized_reload.log
+
+# HLX-M5 residue — the registrations this milestone landed, driven through the
+# path production uses. `repro watch --hcr` sends the rebuilt object and its
+# `.eh_frame` as non-empty payloads over a real socket, and the target reports
+# whether `_Unwind_Find_FDE` can then answer for the patched body and whether a
+# debugger would find a symfile for it. Two further arms, one variable apart,
+# separate "the payloads did the registration" from "patching registers things".
+e2e_hcr_linux_registration_payloads_travel_over_the_production_wire:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_hcr_linux_registration_payloads_travel_over_the_production_wire \
+        --out:build/test-bin/e2e_hcr_linux_registration_payloads_travel_over_the_production_wire \
+        tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim \
+        2>&1 | tee test-logs/e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.log

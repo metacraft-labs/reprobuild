@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1671,
+    "nimTestBinaries": 1672,
     "pureUnitConsolidationGroups": 49,
     "pureUnitTests": 593,
-    "staticallyDetectedRuntimeCompilerFlowTests": 101,
-    "testEntries": 1682
+    "staticallyDetectedRuntimeCompilerFlowTests": 102,
+    "testEntries": 1683
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1090,7 +1090,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 786,
+      "integration": 787,
       "platform/destructive": 113,
       "pure unit": 593,
       "unclassified": 178
@@ -1241,9 +1241,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1671,
+    "nimTestBinaryCount": 1672,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1682
+    "testEntryCount": 1683
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2093,6 +2093,37 @@
         }
       ],
       "source": "tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "args",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "args",
+            "artifacts",
+            "command",
+            "env",
+            "logPath",
+            "projectRoot",
+            "repoRoot",
+            "reproBin",
+            "shim",
+            "socketPath",
+            "target",
+            "watch"
+          ],
+          "line": 170,
+          "path": "tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "var args = @[\"gcc\", \"-O2\", \"-g\"] & @compileFlags &"
+        }
+      ],
+      "source": "tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim"
     },
     {
       "class": "integration",
@@ -20169,6 +20200,26 @@
       "sourceSuiteCount": 2,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_hcr_agent",
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {

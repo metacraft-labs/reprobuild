@@ -7110,6 +7110,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim",
+    binary: "build/test-bin/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_threaded_synchronized_reload.nim",
     binary: "build/test-bin/t_integration_hcr_linux_threaded_synchronized_reload",
     defines: @[],

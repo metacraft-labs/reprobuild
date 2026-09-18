@@ -128,6 +128,18 @@ package gcc:
         flag standard is string,
           alias = "-std=",
           format = concat
+        # ADDED 2026-09-18 (HLX-M5 residue). `-gz=none` is not a style
+        # preference for a project that participates in hot code reloading: this
+        # toolchain emits `SHF_COMPRESSED` `.debug_*` BY DEFAULT, and the HCR
+        # agent refuses a compressed symfile by name
+        # (`debug-object-compressed-debug-section`) because applying a
+        # relocation into a zlib stream corrupts it silently. Measured: a
+        # `gcc(debug3 = true)` edge with no `-gz` produces an object whose
+        # `debugObjectPayload` the agent cannot register, so the JIT symfile
+        # registration fails for every `repro watch --hcr` patch on Linux.
+        flag debugCompression is string,
+          alias = "-gz=",
+          format = concat
         flag output is string,
           alias = "-o",
           role = output,

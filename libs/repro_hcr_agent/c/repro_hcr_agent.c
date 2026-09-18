@@ -3597,6 +3597,8 @@ static uint64_t rb_hcr_last_jit_first_entry = 0;
 static uint64_t rb_hcr_last_jit_register_hook_calls = 0;
 static uint64_t rb_hcr_last_dispatch_address = 0;
 static int rb_hcr_last_fde_found = 0;
+static int rb_hcr_last_jit_refusal = 0;
+static int rb_hcr_last_unwind_refusal = 0;
 
 
 static void rb_hcr_trace_reset(void) {
@@ -4247,6 +4249,8 @@ static void rb_hcr_run_lifecycle(rb_hcr_reload_request *req) {
   rb_hcr_last_jit_register_hook_calls = 0;
   rb_hcr_last_dispatch_address = (uint64_t)(uintptr_t)dispatch_entry;
   rb_hcr_last_fde_found = 0;
+  rb_hcr_last_jit_refusal = 0;
+  rb_hcr_last_unwind_refusal = 0;
 
   if (req->debug_hex != NULL) {
     repro_hcr_jit_registration_evidence jit_evidence;
@@ -4262,6 +4266,7 @@ static void rb_hcr_run_lifecycle(rb_hcr_reload_request *req) {
             &jit_evidence) != 0) {
       ok = 0;
       failure_message = "JIT debug object registration failed";
+      rb_hcr_last_jit_refusal = 1;
     } else {
       rb_hcr_last_debug_object_bytes = (size_t)debug_len;
       rb_hcr_last_jit_registered = 1;
@@ -4271,14 +4276,18 @@ static void rb_hcr_run_lifecycle(rb_hcr_reload_request *req) {
   }
   if (ok && req->unwind_hex != NULL) {
     repro_hcr_unwind_registration_evidence unwind_evidence;
+    int unwind_rc;
     memset(&unwind_evidence, 0, sizeof(unwind_evidence));
     unwind_bytes = repro_hcr_bytes_from_hex(req->unwind_hex, &unwind_len);
-    if (unwind_bytes == NULL || unwind_len == 0 ||
-        repro_hcr_register_dynamic_eh_frame(
-            unwind_bytes, (uint64_t)unwind_len,
-            (uint64_t)(uintptr_t)dispatch_entry, (uint64_t)patch_len,
-            &unwind_evidence) != 0) {
+    unwind_rc = (unwind_bytes == NULL || unwind_len == 0)
+                    ? -1
+                    : repro_hcr_register_dynamic_eh_frame(
+                          unwind_bytes, (uint64_t)unwind_len,
+                          (uint64_t)(uintptr_t)dispatch_entry,
+                          (uint64_t)patch_len, &unwind_evidence);
+    if (unwind_rc != 0) {
       ok = 0;
+      rb_hcr_last_unwind_refusal = unwind_rc;
       failure_message = "dynamic unwind registration failed";
     } else {
       rb_hcr_last_unwind_metadata_bytes = (size_t)unwind_len;
@@ -5192,6 +5201,16 @@ uint64_t repro_hcr_rb_last_dispatch_address(void) {
 }
 
 int repro_hcr_rb_last_fde_found(void) { return rb_hcr_last_fde_found; }
+
+const char *repro_hcr_rb_last_unwind_refusal(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return repro_hcr_lxu_refusal_name(rb_hcr_last_unwind_refusal);
+#else
+  return rb_hcr_last_unwind_refusal == 0 ? "ok" : "refused";
+#endif
+}
+
+int repro_hcr_rb_last_jit_refused(void) { return rb_hcr_last_jit_refusal; }
 
 size_t repro_hcr_rb_padded_live_count(void) {
   size_t answer;

@@ -511,6 +511,13 @@ REPRO_HCR_AGENT_API uint64_t repro_hcr_rb_last_jit_first_entry(void);
 REPRO_HCR_AGENT_API uint64_t repro_hcr_rb_last_jit_register_hook_calls(void);
 REPRO_HCR_AGENT_API uint64_t repro_hcr_rb_last_dispatch_address(void);
 REPRO_HCR_AGENT_API int repro_hcr_rb_last_fde_found(void);
+/* The NAMED refusal, not the generic wire message. `rb_hcr_run_lifecycle`
+ * reports both registration failures as "JIT debug object registration failed"
+ * / "dynamic unwind registration failed", which is the same sentence for a
+ * compressed debug section, an unsupported CIE augmentation and an unplaceable
+ * relocated FDE — three causes, one diagnostic. */
+REPRO_HCR_AGENT_API const char *repro_hcr_rb_last_unwind_refusal(void);
+REPRO_HCR_AGENT_API int repro_hcr_rb_last_jit_refused(void);
 
 /*
  * HLX-M8 — synchronized mode (Patch-Loading-Lifecycle.md § 3.4).
