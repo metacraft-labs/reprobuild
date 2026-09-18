@@ -144,6 +144,20 @@ decide() {
     return 0
   fi
 
+  # `build/bin/repro` is the THIN DAEMON CLIENT and it cannot serve anything on
+  # its own: everything it does not route it `execv`s `build/bin/reprobuild`
+  # for. A tree with only the thin client would pass every check below (right
+  # format, executable, newer than its sources -- it is the last entrypoint
+  # `build_apps.sh` links, so it is always the freshest) and then answer every
+  # invocation with "no reprobuild image to fall back to". The engine is
+  # checked for existence only: its freshness is covered by the mtime test
+  # below, since a source change that reaches the engine reaches the thin
+  # client's link too.
+  if [ ! -f "${root}/build/bin/reprobuild${suffix}" ]; then
+    printf 'bootstrap missing:%s\n' "build/bin/reprobuild${suffix}"
+    return 0
+  fi
+
   got="$(binary_format "${target}")"
   if [ "${got}" != "${want}" ]; then
     printf 'bootstrap wrong-format:%s is %s, this host builds %s\n' \

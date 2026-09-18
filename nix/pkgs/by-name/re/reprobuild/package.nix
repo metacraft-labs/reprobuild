@@ -393,44 +393,58 @@ stdenv.mkDerivation (finalAttrs: {
         --set-default REPRO_NIM_COMPILER ${nimFork}/bin/nim
     done
 
-    # Dependency-Attribution MAC-1 — name the full image for `repro-client`.
+    # Dependency-Attribution MAC-1 — make the thin client and the engine agree
+    # on ONE spelling of the engine image.
     #
-    # WHAT GOES WRONG WITHOUT THIS, and it is not cosmetic. `repro-client`
-    # resolves the full CLI by probing `<bin>/../libexec/reprobuild/repro`
-    # and then its own sibling `<bin>/repro`. In an unwrapped install
-    # (.deb/.rpm/tarball/~/.local/bin) the sibling IS the full image and the
-    # probe is exact. Here it is NOT: the loop above has just replaced
-    # `$out/bin/repro` with a wrapper SCRIPT and moved the real 22 MB image
-    # to `$out/bin/.repro-wrapped`.
+    # `$out/bin/repro` is the THIN DAEMON CLIENT and `$out/bin/reprobuild` is
+    # the full CLI (see `libs/repro_core/src/repro_core/cli_images.nim`). Both
+    # went through the `wrapProgram` loop above, so `$out/bin/reprobuild` is
+    # now a wrapper SCRIPT and the real 22 MB image is at
+    # `$out/bin/.reprobuild-wrapped`.
     #
-    # That matters because the path each client hands `startUserDaemon`
-    # is the path whose DIGEST is compared against the running daemon's
-    # (`expectedDaemonRunningDigestHex`). The full CLI passes
-    # `getAppFilename()`, i.e. `.repro-wrapped`. A `repro-client` that
-    # passed the wrapper script would compute a different digest, conclude
-    # the daemon is stale, and shut it down -- and the next `repro build`
-    # would conclude the same in reverse. Alternating the two commands
-    # would restart the daemon every time, which destroys precisely the
-    # warm daemon this binary exists to exploit.
+    # WHAT GOES WRONG IF THEY DISAGREE, and it is not cosmetic. The path each
+    # client hands `startUserDaemon` is the path whose DIGEST is compared
+    # against the running daemon's (`expectedDaemonRunningDigestHex`). The
+    # engine passes its own `getAppFilename()`, i.e. `.reprobuild-wrapped`.
+    # A thin client that passed the wrapper script would compute a different
+    # digest, conclude the daemon is stale, and shut it down -- and the next
+    # invocation of the engine would conclude the same in reverse. Alternating
+    # the two would restart the daemon every time, destroying precisely the
+    # warm daemon the thin client exists to exploit. The same path also
+    # decides where the Tier-2a/2b providers are looked for
+    # (`parentDir(publicCliPath)`), which fails SILENTLY.
     #
-    # Pointing the FIRST probe at the unwrapped image makes both clients
-    # name the same bytes, so the digests agree and no restart is
-    # triggered. `fileDigestHex` follows the symlink, so it is the image's
-    # digest and not the link's.
+    # `resolveFullCli` therefore probes `.reprobuild-wrapped` FIRST, which
+    # both names the same bytes the engine names and keeps `parentDir` at
+    # `$out/bin` where the provider binaries are. `.<name>-wrapped` is
+    # makeWrapper's own convention (nixpkgs `setup-hooks/make-wrapper.sh`:
+    # `hidden="$(dirname "$prog")/.$(basename "$prog")"-wrapped`) and is
+    # ASSERTED rather than assumed: if nixpkgs ever changes it, this fails the
+    # build here instead of shipping a package whose daemon restarts on every
+    # other invocation.
     #
-    # `.<name>-wrapped` is makeWrapper's own convention
-    # (nixpkgs `setup-hooks/make-wrapper.sh`: `hidden="$(dirname
-    # "$prog")/.$(basename "$prog")"-wrapped`). It is asserted rather than
-    # assumed: if nixpkgs ever changes it, this fails the build here
-    # instead of shipping a package whose daemon restarts on every other
-    # invocation.
-    test -e "$out/bin/.repro-wrapped" || {
-      echo "expected makeWrapper to leave the unwrapped repro image at" \
-           "$out/bin/.repro-wrapped; the hidden-name convention changed." >&2
-      exit 1
-    }
+    # The thin client is asserted too. It is wrapped like everything else in
+    # `$out/bin`, and that is load-bearing in the other direction: the engine
+    # it `execv`s is the UNWRAPPED image, which inherits its runtime variables
+    # from this process -- so if the thin client ever stopped being wrapped,
+    # every `--set-default` in `ReprobuildWrapperVariables` would be missing
+    # for every handed-over invocation, i.e. for every interactive build.
+    for hidden in .reprobuild-wrapped .repro-wrapped; do
+      test -e "$out/bin/$hidden" || {
+        echo "expected makeWrapper to leave an unwrapped image at" \
+             "$out/bin/$hidden; the hidden-name convention changed, or" \
+             "$out/bin/''${hidden#.} stopped being wrapped." >&2
+        exit 1
+      }
+    done
+    # The M5 self-host layout's bootstrap location, kept working: a launcher at
+    # `bin/repro` resolves its bootstrap at `<bin>/../libexec/reprobuild/`, and
+    # a bootstrap there is a PAIR -- the thin client plus the engine beside it,
+    # which is how the thin client's sibling probe finds its engine.
     mkdir -p "$out/libexec/reprobuild"
     ln -sfn "$out/bin/.repro-wrapped" "$out/libexec/reprobuild/repro"
+    ln -sfn "$out/bin/.reprobuild-wrapped" \
+      "$out/libexec/reprobuild/reprobuild"
   '';
 
   # Exposed so a consumer that has to compile against the SAME prefixes this

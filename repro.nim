@@ -733,8 +733,17 @@ package reprobuild:
   # standalone-io-monitor entry points (repro-controller, repro-worker,
   # repro-provider-host, repro-hcr-link); io-monitor logic is
   # now reached via `repro internal io monitor` / `repro debug io monitor`.
+  # The two user-facing images. `repro` is the THIN DAEMON CLIENT (the command
+  # a user types, built from `apps/repro-client/repro_client.nim`) and
+  # `reprobuild` is the FULL CLI / build engine (built from
+  # `apps/repro/repro.nim`). See
+  # `libs/repro_core/src/repro_core/cli_images.nim` for why the engine is not
+  # called `repro-daemon` or `repro-full`.
   executable repro:
     discard
+
+  executable reproEngine:
+    name: "reprobuild"
 
   executable reproPeerCacheTier2:
     name: "repro-peer-cache-tier2"
@@ -757,8 +766,6 @@ package reprobuild:
   executable attestationAgent:
     name: "attestation-agent"
 
-  executable reproClient:
-    name: "repro-client"
 
   # Bootstrap-And-Self-Build B2: test-helper executables.
   #
@@ -870,6 +877,19 @@ package reprobuild:
     const reproBinaryPath =
       when defined(windows): "build/bin/repro.exe"
       else: "build/bin/repro"
+
+    # BOTH halves of the CLI, and both are required rather than one.
+    #
+    # ``build/bin/repro`` is the thin daemon client. Everything it cannot serve
+    # it ``execv``s the engine for, so a test that spawns ``repro`` and finds no
+    # ``reprobuild`` beside it does not get a degraded build — it gets
+    # ``repro: no engine image to fall back to`` and nothing else. Declaring
+    # only the thin client would order the execute edge after a CLI that cannot
+    # run, which is the same class of silent under-declaration the comment
+    # above records for the Windows ``.exe`` suffix.
+    const reprobuildEngineBinaryPath =
+      when defined(windows): "build/bin/reprobuild.exe"
+      else: "build/bin/reprobuild"
 
     # OPT-IN TEST LAYERS, AND WHY THEY NEEDED A SECOND EDGE.
     #
@@ -1238,9 +1258,9 @@ package reprobuild:
       # ``requiredBinaries`` is the typed input slot the
       # ``ct_test_nim_unittest.run`` proc exposes (Bootstrap-And-Self-
       # Build B3 extension): when a TestSpec carries
-      # ``requiresReproBinary``, the engine-built
-      # single ``build/bin/repro`` CLI is recorded as an input on the execute
-      # edge. Without the
+      # ``requiresReproBinary``, BOTH engine-built CLI images —
+      # ``build/bin/repro`` (thin client) and ``build/bin/reprobuild`` —
+      # are recorded as inputs on the execute edge. Without the
       # flag the execute edge depends only on its own binary content —
       # keeping the action-cache fingerprint small for the 500+ tests
       # that do NOT spawn the CLI.
@@ -1256,6 +1276,7 @@ package reprobuild:
       var executeDeps: seq[string] = @[]
       if spec.requiresReproBinary:
         requiredBinaries.add(reproBinaryPath)
+        requiredBinaries.add(reprobuildEngineBinaryPath)
       if spec.source == M4ConsolidationVerificationTest:
         # Suite-Modernization M4: this one test consumes EVERY shared pure-unit
         # binary — it asks each for its ``--list-json`` catalog and then runs
@@ -1554,25 +1575,40 @@ package reprobuild:
     # collection the release workflow builds.
     var reprobuildAppsActions: seq[BuildActionDef] = @[]
 
+    # The FULL CLI / build engine. Named `reprobuild`, not `repro`: `repro`
+    # is the thin daemon client (the edge near the bottom of this collection),
+    # which is what a user types and what every packaging route puts on PATH.
+    # See `libs/repro_core/src/repro_core/cli_images.nim` for why the engine is
+    # not called `repro-daemon` or `repro-full`.
+    #
+    # The two must stay SIBLINGS in `build/bin`, and that is load-bearing
+    # twice over: `siblingTryCompileProviderPath` /
+    # `siblingStandardProviderPath` resolve the Tier-2a/2b providers from
+    # `parentDir(publicCliPath)` and degrade to per-project provider compile
+    # with NO error when they are absent, and the thin client's own fallback
+    # probe is `<its own dir>/reprobuild`. Moving the engine to `libexec`
+    # would have broken both silently, which is why this is a rename in place
+    # rather than a move.
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro/repro.nim",
-      binary = "build/bin/repro",
+      binary = "build/bin/reprobuild",
       defines = @["release", "reproVendoredHash", "ssl"],
       paths = ioMonNimPaths & sourceOnlyNimPaths,
       # ``-d:ssl`` makes ``nim.c`` append ``-lssl -lcrypto`` AND the ``-L``
       # that resolves them (M8). Nothing OpenSSL-shaped belongs in this list:
       # the reason this edge once carried one is that the search path was
       # threaded per-edge and reached only two of the five -- ``.#apps``, the
-      # collection that builds ``repro`` itself, could not link on Windows at
+      # collection that builds the engine itself, could not link on Windows at
       # all. Derivation in ``nim.c`` is what makes partial coverage
       # unexpressible.
       passL = reproRuntimePassL,
-      nimcache = "build/nimcache/repro",
-      # The public launcher sits on the prompt-time dev-env no-op path.
-      # Build it with the vendored portable hash backend so each no-op spawn
-      # does not load the system libblake3 -> TBB/C++ runtime closure.
+      nimcache = "build/nimcache/reprobuild",
+      # The engine still serves the prompt-time dev-env no-op path whenever the
+      # thin client hands over to it. Build it with the vendored portable hash
+      # backend so each no-op spawn does not load the system libblake3 -> TBB/
+      # C++ runtime closure.
       extraEnv = sourceOnlyEnv & @[("REPROBUILD_USE_SYSTEM_HASH_LIBS", "0")],
-      actionId = "reprobuild.apps.repro"))
+      actionId = "reprobuild.apps.reprobuild"))
 
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim",
@@ -1728,15 +1764,22 @@ package reprobuild:
       nimcache = "build/nimcache/attestation-agent",
       actionId = "reprobuild.apps.attestation-agent"))
 
-    # Dependency-Attribution MAC-1 — the thin daemon client. This edge is what
-    # puts ``repro-client`` into ``build/bin``, and therefore into every
+    # Dependency-Attribution MAC-1 — the thin daemon client, and since the
+    # thin-client-on-PATH rename the image that OWNS THE NAME ``repro``. This
+    # edge is what puts it into ``build/bin``, and therefore into every
     # packaging route: the Nix derivation, the ``.deb``/``.rpm``/pacman
     # packages, the release tarball and ``install-on-distributions.sh`` all
-    # copy ``build/bin/*`` wholesale, so the binary lands NEXT TO ``repro`` in
+    # copy ``build/bin/*`` wholesale, so it lands NEXT TO ``reprobuild`` in
     # whichever bin directory the install uses. That adjacency is not
     # incidental — it is what ``resolveFullCli``'s sibling probe resolves, so
-    # an installed ``repro-client`` finds its full image with no environment
+    # an installed ``repro`` finds its engine image with no environment
     # variable set by anyone.
+    #
+    # The actionId stays ``reprobuild.apps.repro`` because it names the OUTPUT
+    # basename, and roughly 200 integration tests quote that string in their
+    # ``requireBinary(build/bin/repro, "reprobuild.apps.repro")`` diagnostic.
+    # Keeping the id attached to the path it produces is what keeps those
+    # messages true.
     #
     # ``reproVendoredHash`` is carried over from the entrypoints row because
     # it is the one flag there with a MEASURED cost (0.83 ms of this binary's
@@ -1749,12 +1792,12 @@ package reprobuild:
     # two either way.
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-client/repro_client.nim",
-      binary = "build/bin/repro-client",
+      binary = "build/bin/repro",
       defines = @["release", "reproVendoredHash"],
       paths = sourceOnlyNimPaths,
       extraEnv = sourceOnlyEnv & @[("REPROBUILD_USE_SYSTEM_HASH_LIBS", "0")],
-      nimcache = "build/nimcache/repro-client",
-      actionId = "reprobuild.apps.repro-client"))
+      nimcache = "build/nimcache/repro",
+      actionId = "reprobuild.apps.repro"))
 
     let reprobuildNixDaemon = shell(
       command = "mkdir -p build/bin && " &

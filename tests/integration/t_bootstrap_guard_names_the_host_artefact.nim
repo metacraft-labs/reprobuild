@@ -93,6 +93,15 @@ proc foreignImage(): string =
 const
   HostBinName = "repro".addFileExt(ExeExt)
   ForeignBinName = when defined(windows): "repro" else: "repro.exe"
+  HostEngineBinName = "reprobuild".addFileExt(ExeExt)
+    ## The guard now names TWO host artefacts, because the CLI is two images:
+    ## `build/bin/repro` is the thin daemon client and `build/bin/reprobuild`
+    ## is the engine it hands everything it cannot route over to. A tree with
+    ## only the thin client passes every format/freshness clause -- the thin
+    ## client is the LAST entrypoint `build_apps.sh` links, so it is always the
+    ## freshest thing in `build/bin` -- and then answers every invocation with
+    ## "no reprobuild image to fall back to". The existence of the engine is
+    ## therefore part of "is this tree bootstrapped?".
 
 proc stage(path, bytes: string; executable: bool) =
   createDir(path.parentDir())
@@ -128,6 +137,13 @@ proc newFixtureRoot(slug: string): string =
   writeFile(result / "apps" / "entrypoints.txt", "repro\n")
   writeFile(result / "repro.nim", "# fixture\n")
   createDir(result / "build" / "bin")
+
+proc stageHostPair(root: string; secondsAgo = -1) =
+  ## Both host artefacts, so a case that is about FORMAT or FRESHNESS is not
+  ## silently answered by the engine-existence clause instead.
+  stage(root / "build" / "bin" / HostEngineBinName, hostImage(), true)
+  if secondsAgo >= 0:
+    touchAt(root / "build" / "bin" / HostEngineBinName, secondsAgo)
 
 proc ageSources(root: string; secondsAgo: int) =
   touchAt(root / "apps" / "entrypoints.txt", secondsAgo)
@@ -207,6 +223,7 @@ suite "W15 bootstrap guard":
     let root = newFixtureRoot("wrong-format")
     defer: removeDirEventually(root)
     ageSources(root, 600)
+    stageHostPair(root)
     stage(root / "build" / "bin" / HostBinName, foreignImage(), true)
     let decision = decisionFor(root)
     checkpoint("decision = " & decision)
@@ -223,6 +240,7 @@ suite "W15 bootstrap guard":
     # host artefact oldest, then the source, then the foreign artefact
     stage(root / "build" / "bin" / HostBinName, hostImage(), true)
     touchAt(root / "build" / "bin" / HostBinName, 900)
+    stageHostPair(root, 900)
     ageSources(root, 600)
     stage(root / "build" / "bin" / ForeignBinName, hostImage(), true)
     touchAt(root / "build" / "bin" / ForeignBinName, 60)
@@ -244,6 +262,7 @@ suite "W15 bootstrap guard":
     ageSources(root, 600)
     stage(root / "build" / "bin" / HostBinName, hostImage(), true)
     touchAt(root / "build" / "bin" / HostBinName, 60)
+    stageHostPair(root, 60)
     let before = decisionFor(root)
     checkpoint("without the other platform's artefact: " & before)
     check before.startsWith("skip")
@@ -254,6 +273,28 @@ suite "W15 bootstrap guard":
     checkpoint("with the other platform's artefact: " & after)
     check after.startsWith("skip")
     check after == before
+
+  test "a thin client with no engine beside it is not a bootstrapped tree":
+    ## THE SECOND HOST ARTEFACT, and why its absence cannot be left to the
+    ## clauses above. `build/bin/repro` is the thin daemon client; it routes a
+    ## quiet non-terminal `repro build` to the daemon and `execv`s
+    ## `build/bin/reprobuild` for everything else, which is every other verb
+    ## and every interactive build. This fixture is the shape that fools a
+    ## guard which names only `repro`: the thin client is present, of the host
+    ## format, executable, and NEWER than every source — so format, exec and
+    ## freshness all say "skip" — and the tree still cannot run a single
+    ## command. Deleting the engine clause from `scripts/bootstrap_guard.sh`
+    ## turns this case green-to-red in one line.
+    let root = newFixtureRoot("engine-missing")
+    defer: removeDirEventually(root)
+    ageSources(root, 600)
+    stage(root / "build" / "bin" / HostBinName, hostImage(), true)
+    touchAt(root / "build" / "bin" / HostBinName, 60)
+    let decision = decisionFor(root)
+    checkpoint("decision = " & decision)
+    check decision.startsWith("bootstrap")
+    check "missing:" in decision
+    check HostEngineBinName in decision
 
   test "a missing artefact still bootstraps":
     let root = newFixtureRoot("empty")

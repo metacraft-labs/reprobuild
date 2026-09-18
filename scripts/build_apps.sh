@@ -543,7 +543,7 @@ if ! runtime_passl_for_libraries \
     /opt/homebrew/opt/zstd \
     /usr/local/opt/zstd \
     > "${repro_runtime_passl_out}"; then
-  echo "error: computing the runtime library search path for 'repro' failed." >&2
+  echo "error: computing the runtime library search path for 'reprobuild' failed." >&2
   echo "       Linking without it would produce a binary whose libclingo /" >&2
   echo "       libzstd dlopen resolves only inside this dev shell." >&2
   exit 2
@@ -588,7 +588,14 @@ while read -r name path extra_flags; do
   done
   runtime_passl=()
   case "${name}" in
-    repro)
+    # The ENGINE, not the thin client on `repro`. This is the binary whose
+    # `repro_solver` / cache paths dlopen libclingo and libzstd by leaf name,
+    # so it is the one that needs the runtime search path baked into its
+    # RPATH. Naming the wrong entrypoint here does not fail the build: it
+    # produces an engine whose dlopen resolves only inside this dev shell and
+    # fails on the user's machine, which is the same defect the
+    # `runtime_passl_for_libraries` failure above refuses to ship.
+    reprobuild)
       runtime_passl=(${repro_runtime_passl[@]+"${repro_runtime_passl[@]}"})
       ;;
   esac

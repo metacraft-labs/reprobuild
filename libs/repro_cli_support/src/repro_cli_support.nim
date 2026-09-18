@@ -15,6 +15,7 @@ import repro_core
 # and at two in `git_actions.nim`, and a repo-wide re-export would put
 # `fsContainment` in the namespace of every module that touches `repro_core`.
 import repro_core/path_identity
+import repro_core/cli_images
 import repro_build_engine
 import repro_cmake_trycompile
 import repro_dev_env_activation
@@ -7371,13 +7372,34 @@ proc runningImageIsReproCli(): bool =
   ## never narrow, so it cannot regress a caller that relies on it) for images
   ## that reach the engine without going through ``runThinApp``.
   ##
+  ## THIS IS WHAT MADE THE ENGINE RENAMEABLE. The engine image now installs as
+  ## ``reprobuild`` (``repro`` on `PATH` is the thin daemon client), and it
+  ## needed no change here: it declares itself with the literal ``"repro"`` in
+  ## `apps/repro/repro.nim`, so the FIRST arm answers yes whatever the file is
+  ## called. Had this still been a filename test, the rename would have broken
+  ## provider compile LOUDLY (``providerCompileBuildAction`` raises "no `repro`
+  ## image to spawn it with") and interface extraction SILENTLY (it falls back
+  ## in-process).
+  ##
+  ## ``reprobuild`` IS DELIBERATELY *NOT* ADDED to the filename arm, and the
+  ## restraint is the point. The arm exists only for images that reach the
+  ## engine WITHOUT going through ``runThinApp``, and the real engine always
+  ## goes through it — so adding the new name would buy nothing and would
+  ## widen the fork-bomb hole by exactly one filename: an engine-linked binary
+  ## that is not the CLI (`repro-standard-provider`,
+  ## `repro-cmake-trycompile-provider`, any test binary) would be granted
+  ## self-spawn permission by being *called* ``reprobuild``. The arm keeps
+  ## the LEGACY name because a bootstrap tree still has a real engine there
+  ## (`tools/multi-distro-harness/bootstrap-*.sh` compile one straight to
+  ## ``<dir>/bin/repro``, with no thin client beside it).
+  ##
   ## What still says NO — and is the whole reason this predicate exists — is
   ## the embedded caller: a TEST BINARY that links the engine in-process never
-  ## calls ``runThinApp("repro")`` and is not named `repro`, so it is still
+  ## calls ``runThinApp("repro")`` and is not named ``repro``, so it is still
   ## refused, and the unbounded self-exec chain that refusal prevents stays
   ## prevented.
   runningImageIsReproCliFlag or
-    extractFilename(getAppFilename()) == addFileExt("repro", ExeExt)
+    extractFilename(getAppFilename()) == reproLegacyEngineExeName()
 
 proc spawnableWithInternalVerb(candidate: string): bool =
   ## May ``candidate`` be spawned with an internal selector — ``internal io
@@ -7454,11 +7476,17 @@ proc selfSpawnIoMonitorPath*(publicCliPath = ""): string =
   ""
 
 proc internalReproHelperCliPath(publicCliPath: string): string =
-  ## Path used for monitored internal helper actions. Since the single-`repro`
-  ## consolidation the running ``repro`` image IS the full CLI (no thin wrapper,
-  ## no ``repro-full`` companion), so a real ``repro`` process self-spawns its
-  ## current image. Embedded/test callers (whose ``getAppFilename`` is a test
-  ## binary) fall back to the explicit ``publicCliPath`` they pass in.
+  ## Path used for monitored internal helper actions. The running engine image
+  ## implements every internal verb itself, so an engine process self-spawns
+  ## its current image whatever file that image is installed as (``reprobuild``
+  ## in an ordinary install, ``.reprobuild-wrapped`` under Nix, ``bin/repro``
+  ## in a bootstrap tree). Embedded/test callers (whose ``getAppFilename`` is a
+  ## test binary) fall back to the explicit ``publicCliPath`` they pass in.
+  ##
+  ## The thin daemon client never reaches here: it does not link the engine. It
+  ## reaches the engine by ``execv`` or by a daemon request whose
+  ## ``publicCliPath`` names the engine, and in both cases the process running
+  ## this code is the engine.
   ##
   ## Returns "" when neither is available, and that empty string is the whole
   ## point of this proc: the ONLY images that may be spawned with a `__repro-*`
@@ -7492,6 +7520,16 @@ proc siblingTryCompileProviderPath(publicCliPath: string): string =
   ## the repro CLI by ``scripts/build_apps.sh``. Empty string means the
   ## direct provider is unavailable on this install — callers must fall
   ## back to per-project provider compile.
+  ##
+  ## ``parentDir(publicCliPath)`` IS A LAYOUT CONSTRAINT, and a silent one: an
+  ## engine image whose directory does not also hold the providers degrades
+  ## every build to per-project provider compile with no error at all. That is
+  ## why the thin-client rename renames the engine IN PLACE (``bin/repro`` ->
+  ## ``bin/reprobuild``, providers untouched beside it) instead of moving it
+  ## to ``libexec``, and why ``resolveFullCli`` in
+  ## `apps/repro-client/repro_client.nim` resolves the engine's own
+  ## ``getAppFilename()`` spelling rather than any other path to the same
+  ## bytes.
   let candidate = parentDir(publicCliPath) /
     addFileExt("repro-cmake-trycompile-provider", ExeExt)
   if fileExists(extendedPath(candidate)):

@@ -203,15 +203,48 @@ suite "Bootstrap-And-Self-Build B1: repro build apps collection":
     check "chmod +x build/bin/reprobuild-nix-daemon" in buildScript
 
   test "graph-built repro retains the entrypoint HTTPS capability":
+    ## THE ROW IS FOUND BY ITS SOURCE, NOT BY ITS OUTPUT NAME, and that is the
+    ## whole correction here. This case used to take the first row of
+    ## `apps/entrypoints.txt` whose first word was `repro`, which was the
+    ## engine for as long as the engine was installed under that name. It is
+    ## not any more: `repro` is the thin daemon client
+    ## (`apps/repro-client/repro_client.nim`, `--opt:size
+    ## --define:reproVendoredHash`) and the engine is `reprobuild`
+    ## (`apps/repro/repro.nim`, `--define:ssl`). The old scan therefore moved
+    ## silently onto the thin client's row and asserted an HTTPS capability
+    ## about a binary that links no OpenSSL and needs none — a red that says
+    ## "the engine lost -d:ssl" while the engine still has it.
+    ##
+    ## The HTTPS capability belongs to whichever image embeds the cache-consumer
+    ## paths, and that image is identified by the SOURCE FILE it is built from.
+    ## An output name can be handed to another binary; `apps/repro/repro.nim`
+    ## cannot.
     let repoRoot = findRepoRoot()
     let entrypoints = readFile(repoRoot / "apps" / "entrypoints.txt")
-    var reproEntrypoint = ""
+    const engineSource = "apps/repro/repro.nim"
+    var engineEntrypoint = ""
+    var thinEntrypoint = ""
     for raw in entrypoints.splitLines:
       let line = raw.strip()
-      if line.startsWith("repro "):
-        reproEntrypoint = line
-        break
-    check reproEntrypoint.contains("--define:ssl")
+      if line.startsWith("#") or line.len == 0:
+        continue
+      let fields = line.splitWhitespace()
+      if fields.len < 2:
+        continue
+      if fields[1] == engineSource:
+        engineEntrypoint = line
+      elif fields[1] == "apps/repro-client/repro_client.nim":
+        thinEntrypoint = line
+    # The row exists at all. Without this the assertion below is satisfied by
+    # an empty string never matching, i.e. by the row having disappeared.
+    check engineEntrypoint.len > 0
+    check engineEntrypoint.contains("--define:ssl")
+    # And it is the ENGINE's row, named `reprobuild`, not the thin client's.
+    # Pinned so a future rename cannot quietly move the assertion above onto
+    # some other image the way the last one did.
+    check engineEntrypoint.splitWhitespace()[0] == "reprobuild"
+    check thinEntrypoint.len > 0
+    check thinEntrypoint.splitWhitespace()[0] == "repro"
 
     let projectText = readFile(repoRoot / "repro.nim")
     let usesStart = projectText.find("  uses:")

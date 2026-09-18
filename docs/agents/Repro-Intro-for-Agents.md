@@ -6,6 +6,35 @@ Reprobuild is a unified build, dependency, environment, and workspace tool.
 
 Reprobuild models the workspace as a directed acyclic graph (DAG) of type-checked actions defined in the **`repro.nim`** DSL. Sibling repositories declared in **`repro-workspace.toml`** are routed dynamically using **`repro develop`** (develop-mode). Build hermeticity is enforced using the **`librepro_monitor_shim`** user-space filesystem interceptor, and execution is cached locally through a per-edge disk store fronted by a host-wide **shared-memory grow-only index** that every engine inserts into directly. Package toolchains are concretized using a **`clingo`** solver, and background services are orchestrated using **`servicePlaceholder`** declarations.
 
+## `repro` Is Two Binaries
+
+`repro` on `PATH` is a ~520 KB **thin daemon client**
+(`apps/repro-client/repro_client.nim`). It hands a routable `repro build` to
+the already-running per-user daemon and `execv`s the ~17 MB **engine**,
+installed beside it as **`reprobuild`** (`apps/repro/repro.nim`), for
+everything else — every other verb, and every build it cannot route.
+
+Practical consequences when you are working in this repo:
+
+- `just build` / `scripts/build_apps.sh` produce **both** `build/bin/repro`
+  and `build/bin/reprobuild`. A tree with only one of them is not a working
+  tree; `scripts/bootstrap_guard.sh` checks for both.
+- Keep them **siblings**. `siblingTryCompileProviderPath` /
+  `siblingStandardProviderPath` resolve the Tier-2a/2b provider binaries from
+  `parentDir(publicCliPath)` and degrade to per-project provider compile with
+  **no error** if they are not there.
+- The engine still *declares* itself `repro` (`runThinApp("repro")`), so its
+  usage text, its diagnostics and its permission to self-spawn internal verbs
+  are all independent of the filename. Do not "fix" code that looks for a file
+  named `repro` by making the engine's identity depend on its name again — see
+  `runningImageIsReproCli`.
+- Routing is deliberately narrow: `build` only, progress explicitly quiet,
+  stderr not a terminal, no `--daemon`/`REPRO_DAEMON`, none of
+  `ClientHandledFlags`. Anything else hands over and pays ~1–3 ms extra. An
+  interactive `repro build` always hands over.
+- `libs/repro_core/src/repro_core/cli_images.nim` holds the two names and the
+  rationale for them.
+
 ## Before You Edit a `repro.nim`
 
 Read **[Idiomatic Reprobuild](../user-guide/idiomatic-reprobuild.md)**.

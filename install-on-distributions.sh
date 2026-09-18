@@ -69,12 +69,18 @@ copy_tree_files() {
 ensure_local_build() {
   local root="$1"
 
-  if [ -x "$root/build/bin/repro" ]; then
+  # BOTH images, not just `repro`. `build/bin/repro` is the thin daemon client
+  # and `build/bin/reprobuild` is the full CLI it hands over to; a tree with
+  # only the first one installs a `repro` that answers every non-routable
+  # invocation with "no reprobuild image to fall back to". Skipping the
+  # rebuild on the strength of the thin client alone is how that tree would
+  # get installed.
+  if [ -x "$root/build/bin/repro" ] && [ -x "$root/build/bin/reprobuild" ]; then
     return 0
   fi
 
   if ! have_command just; then
-    eprint_error "local install needs an existing build/bin/repro or 'just' on PATH"
+    eprint_error "local install needs an existing build/bin/repro plus build/bin/reprobuild, or 'just' on PATH"
   fi
 
   eprint_note "Building ${PRODUCT} from local checkout"

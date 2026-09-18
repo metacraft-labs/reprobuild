@@ -27,6 +27,22 @@ build:
 # t_bootstrap_guard_names_the_host_artefact.nim drives the script against
 # staged fixture trees, so a guard that silently does nothing is a red
 # case rather than a quiet full rebuild (or a quiet skipped one).
+#
+# THE CLI IS TWO IMAGES, AND THE GUARD NAMES BOTH. This is the note the
+# per-recipe comments below refer back to. `build/bin/repro` is the THIN
+# DAEMON CLIENT (`apps/repro-client/repro_client.nim`): it hands a routable
+# quiet non-terminal `repro build` to the per-user daemon and `execv`s
+# `build/bin/reprobuild` — the ENGINE, `apps/repro/repro.nim` — for
+# everything else. So a tree carrying only `build/bin/repro` passes every
+# format/freshness clause (the thin client is the LAST entrypoint
+# `build_apps.sh` links, hence always the freshest thing in `build/bin`) and
+# then answers every invocation with "no reprobuild image to fall back to".
+# `scripts/bootstrap_guard.sh` therefore also requires the engine to exist.
+#
+# The consequence for any recipe that compiles the CLI itself rather than
+# calling this one: it must build BOTH, or it leaves the other image at
+# whatever the last recipe or `build_apps.sh` run happened to leave behind.
+# See `libs/repro_core/src/repro_core/cli_images.nim` for the two names.
 bootstrap:
     @decision="$(bash ./scripts/bootstrap_guard.sh decide .)"; \
     case "${decision}" in \
@@ -1361,12 +1377,22 @@ integration_intent_layer_config_section:
 
 e2e_repro_home_intent_commands:
     mkdir -p test-logs build/bin build/test-bin build/nimcache
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_intent_commands.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_repro_home_intent_commands.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_repro_home_intent_commands.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/e2e_repro_home_intent_commands \
@@ -1376,12 +1402,22 @@ e2e_repro_home_intent_commands:
 
 integration_pointer_envelope_and_history_enumeration:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_pointer_envelope_and_history_enumeration.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/integration_pointer_envelope_and_history_enumeration.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/integration_pointer_envelope_and_history_enumeration.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/integration_pointer_envelope_and_history_enumeration \
@@ -1415,12 +1451,22 @@ integration_apply_lock_serializes:
 
 integration_remote_apply_activation_bundle_phase_a:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_remote_apply_activation_bundle_phase_a.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/integration_remote_apply_activation_bundle_phase_a.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/integration_remote_apply_activation_bundle_phase_a.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/integration_remote_apply_activation_bundle_phase_a \
@@ -1430,12 +1476,22 @@ integration_remote_apply_activation_bundle_phase_a:
 
 integration_remote_apply_cross_host_evaluation_phase_b:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_remote_apply_cross_host_evaluation_phase_b.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/integration_remote_apply_cross_host_evaluation_phase_b.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/integration_remote_apply_cross_host_evaluation_phase_b.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/integration_remote_apply_cross_host_evaluation_phase_b \
@@ -1445,12 +1501,22 @@ integration_remote_apply_cross_host_evaluation_phase_b:
 
 integration_remote_apply_ssh_transfer_phase_c:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_remote_apply_ssh_transfer_phase_c.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/integration_remote_apply_ssh_transfer_phase_c.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/integration_remote_apply_ssh_transfer_phase_c.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/integration_remote_apply_ssh_transfer_phase_c \
@@ -1460,12 +1526,22 @@ integration_remote_apply_ssh_transfer_phase_c:
 
 integration_remote_apply_remote_activation_phase_d:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_remote_apply_remote_activation_phase_d.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/integration_remote_apply_remote_activation_phase_d.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/integration_remote_apply_remote_activation_phase_d.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/integration_remote_apply_remote_activation_phase_d \
@@ -1475,12 +1551,22 @@ integration_remote_apply_remote_activation_phase_d:
 
 e2e_remote_apply_home_profile_phase_e:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_remote_apply_home_profile_phase_e.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_remote_apply_home_profile_phase_e.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_remote_apply_home_profile_phase_e.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/e2e_remote_apply_home_profile_phase_e \
@@ -1490,12 +1576,22 @@ e2e_remote_apply_home_profile_phase_e:
 
 e2e_repro_home_apply_fresh_install:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_apply_fresh_install.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_repro_home_apply_fresh_install.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_repro_home_apply_fresh_install.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/e2e_repro_home_apply_fresh_install \
@@ -1505,12 +1601,22 @@ e2e_repro_home_apply_fresh_install:
 
 e2e_repro_home_apply_noop:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_apply_noop.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_repro_home_apply_noop.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_repro_home_apply_noop.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/e2e_repro_home_apply_noop \
@@ -1520,12 +1626,22 @@ e2e_repro_home_apply_noop:
 
 e2e_repro_home_apply_partial_recovery:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_apply_partial_recovery.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_repro_home_apply_partial_recovery.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_repro_home_apply_partial_recovery.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/e2e_repro_home_apply_partial_recovery \
@@ -1535,12 +1651,22 @@ e2e_repro_home_apply_partial_recovery:
 
 e2e_repro_home_add_remove_immediate:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_add_remove_immediate.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_repro_home_add_remove_immediate.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_repro_home_add_remove_immediate.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/e2e_repro_home_add_remove_immediate \
@@ -1550,12 +1676,22 @@ e2e_repro_home_add_remove_immediate:
 
 e2e_stow_auto_discovery_and_materialization:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_stow_auto_discovery_and_materialization.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_stow_auto_discovery_and_materialization.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_stow_auto_discovery_and_materialization.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/e2e_stow_auto_discovery_and_materialization \
@@ -1565,12 +1701,22 @@ e2e_stow_auto_discovery_and_materialization:
 
 e2e_stow_suppression_and_warnings:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_stow_suppression_and_warnings.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_stow_suppression_and_warnings.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_stow_suppression_and_warnings.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/e2e_stow_suppression_and_warnings \
@@ -1580,12 +1726,22 @@ e2e_stow_suppression_and_warnings:
 
 e2e_repro_home_rollback_round_trip:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_rollback_round_trip.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_repro_home_rollback_round_trip.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_repro_home_rollback_round_trip.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/e2e_repro_home_rollback_round_trip \
@@ -1595,12 +1751,22 @@ e2e_repro_home_rollback_round_trip:
 
 e2e_repro_home_rollback_user_edit_protection:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_rollback_user_edit_protection.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_repro_home_rollback_user_edit_protection.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_repro_home_rollback_user_edit_protection.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/e2e_repro_home_rollback_user_edit_protection \
@@ -1610,12 +1776,22 @@ e2e_repro_home_rollback_user_edit_protection:
 
 e2e_repro_home_set_triggers_focused_rebuild:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_home_set_triggers_focused_rebuild.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_repro_home_set_triggers_focused_rebuild.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_repro_home_set_triggers_focused_rebuild.build.log
     nim c -r \
         --threads:on \
         --nimcache:build/nimcache/e2e_repro_home_set_triggers_focused_rebuild \
@@ -1625,12 +1801,22 @@ e2e_repro_home_set_triggers_focused_rebuild:
 
 e2e_home_resource_lifecycle_create_update_destroy:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_home_resource_lifecycle_create_update_destroy.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_home_resource_lifecycle_create_update_destroy.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_home_resource_lifecycle_create_update_destroy.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1642,12 +1828,22 @@ e2e_home_resource_lifecycle_create_update_destroy:
 
 e2e_home_registry_typed_value_kinds:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_home_registry_typed_value_kinds.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_home_registry_typed_value_kinds.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_home_registry_typed_value_kinds.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1659,12 +1855,22 @@ e2e_home_registry_typed_value_kinds:
 
 e2e_home_resource_rollback_preserves_unrelated:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_home_resource_rollback_preserves_unrelated.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_home_resource_rollback_preserves_unrelated.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_home_resource_rollback_preserves_unrelated.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1676,12 +1882,22 @@ e2e_home_resource_rollback_preserves_unrelated:
 
 e2e_macos_user_default_restart_target:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_macos_user_default_restart_target.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_macos_user_default_restart_target.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_macos_user_default_restart_target.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1693,12 +1909,22 @@ e2e_macos_user_default_restart_target:
 
 integration_resource_move:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_resource_move.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/integration_resource_move.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/integration_resource_move.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1710,12 +1936,22 @@ integration_resource_move:
 
 integration_prevent_destroy:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_prevent_destroy.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/integration_prevent_destroy.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/integration_prevent_destroy.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1727,12 +1963,22 @@ integration_prevent_destroy:
 
 e2e_dotfiles_replacement_on_real_host:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_dotfiles_replacement_on_real_host.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_dotfiles_replacement_on_real_host.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_dotfiles_replacement_on_real_host.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1744,12 +1990,22 @@ e2e_dotfiles_replacement_on_real_host:
 
 integration_production_package_catalog:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_production_package_catalog.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/integration_production_package_catalog.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/integration_production_package_catalog.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1761,12 +2017,22 @@ integration_production_package_catalog:
 
 e2e_apply_plan_dry_run:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_apply_plan_dry_run.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_apply_plan_dry_run.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_apply_plan_dry_run.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1778,12 +2044,22 @@ e2e_apply_plan_dry_run:
 
 integration_stow_non_destructive_over_existing:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_stow_non_destructive_over_existing.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/integration_stow_non_destructive_over_existing.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/integration_stow_non_destructive_over_existing.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1795,12 +2071,22 @@ integration_stow_non_destructive_over_existing:
 
 integration_stow_gnu_package_layout:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_stow_gnu_package_layout.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/integration_stow_gnu_package_layout.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/integration_stow_gnu_package_layout.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1834,12 +2120,22 @@ integration_scoop_probe_gui_and_timeout:
 
 integration_stow_byte_identical_target_is_cache_hit:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_stow_byte_identical_target_is_cache_hit.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/integration_stow_byte_identical_target_is_cache_hit.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/integration_stow_byte_identical_target_is_cache_hit.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1869,12 +2165,22 @@ integration_scoop_installed_version_survives_bucket_drift:
 
 e2e_profile_declared_resources_apply:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_profile_declared_resources_apply.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_profile_declared_resources_apply.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_profile_declared_resources_apply.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1886,12 +2192,22 @@ e2e_profile_declared_resources_apply:
 
 integration_shell_integration_replan_idempotent:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_shell_integration_replan_idempotent.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/integration_shell_integration_replan_idempotent.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/integration_shell_integration_replan_idempotent.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1903,12 +2219,22 @@ integration_shell_integration_replan_idempotent:
 
 integration_plan_classifier_bucket_drift_is_cache_hit:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_plan_classifier_bucket_drift_is_cache_hit.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/integration_plan_classifier_bucket_drift_is_cache_hit.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/integration_plan_classifier_bucket_drift_is_cache_hit.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1920,12 +2246,22 @@ integration_plan_classifier_bucket_drift_is_cache_hit:
 
 integration_privileged_broker_single_prompt:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/integration_privileged_broker_single_prompt.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/integration_privileged_broker_single_prompt.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/integration_privileged_broker_single_prompt.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1937,12 +2273,22 @@ integration_privileged_broker_single_prompt:
 
 e2e_windows_registry_system_scope:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_windows_registry_system_scope.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_windows_registry_system_scope.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_windows_registry_system_scope.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1954,12 +2300,22 @@ e2e_windows_registry_system_scope:
 
 e2e_repro_infra_plan_apply_convergent:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_infra_plan_apply_convergent.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_repro_infra_plan_apply_convergent.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_repro_infra_plan_apply_convergent.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1971,12 +2327,22 @@ e2e_repro_infra_plan_apply_convergent:
 
 e2e_windows_optional_feature_and_capability:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_windows_optional_feature_and_capability.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_windows_optional_feature_and_capability.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_windows_optional_feature_and_capability.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -1988,12 +2354,22 @@ e2e_windows_optional_feature_and_capability:
 
 e2e_repro_system_command_family:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_system_command_family.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_repro_system_command_family.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_repro_system_command_family.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -2005,12 +2381,22 @@ e2e_repro_system_command_family:
 
 e2e_windows_vs_installer:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_windows_vs_installer.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_windows_vs_installer.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_windows_vs_installer.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \
@@ -2022,12 +2408,22 @@ e2e_windows_vs_installer:
 
 e2e_repro_infra_passwd_user_safe_destroy:
     mkdir -p test-logs build/bin build/test-bin build/nimcache build/test-tmp
+    # BOTH CLI images (see the note on `bootstrap` above): `repro` is the
+    # thin daemon client a test drives and `reprobuild` is the engine it
+    # hands over to. Building only one leaves the other at whatever the
+    # last recipe or `build_apps.sh` run left behind.
+    nim c \
+        --hints:off \
+        --nimcache:build/nimcache/reprobuild \
+        --out:build/bin/reprobuild \
+        apps/repro/repro.nim \
+        2>&1 | tee test-logs/e2e_repro_infra_passwd_user_safe_destroy.build.log
     nim c \
         --hints:off \
         --nimcache:build/nimcache/repro \
         --out:build/bin/repro \
-        apps/repro/repro.nim \
-        2>&1 | tee test-logs/e2e_repro_infra_passwd_user_safe_destroy.build.log
+        apps/repro-client/repro_client.nim \
+        2>&1 | tee -a test-logs/e2e_repro_infra_passwd_user_safe_destroy.build.log
     nim c -r \
         --threads:on \
         --warning:UnusedImport:off \

@@ -987,7 +987,7 @@ tests/integration/t_b5_repro_test_replaces_run_tests_sh.nim	nim	2
 tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	nim	5
 tests/integration/t_behind_pin_is_never_silent.nim	nim	1
 tests/integration/t_behind_pin_warns_and_does_not_fail.nim	nim	1
-tests/integration/t_bootstrap_guard_names_the_host_artefact.nim	nim	8
+tests/integration/t_bootstrap_guard_names_the_host_artefact.nim	nim	9
 tests/integration/t_branch_fork_clones_root_submodules.nim	nim	1
 tests/integration/t_branch_fork_inherits_project_set.nim	nim	3
 tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	nim	16
@@ -1410,10 +1410,10 @@ tests/integration/t_team_repo_record_only_no_checkout.nim	nim	1
 tests/integration/t_test_certificate_conformance_vectors.nim	nim	1
 tests/integration/t_test_edge_migration_covers_all_test_files.nim	nim	1
 tests/integration/t_test_execute_edge_declares_repro_binary_reached_via_helper.nim	nim	4
-tests/integration/t_the_resolving_launcher_execs_the_pinned_image.nim	nim	12
+tests/integration/t_the_resolving_launcher_execs_the_pinned_image.nim	nim	13
 tests/integration/t_the_status_report_does_not_call_an_unpublished_row_recordable.nim	nim	1
 tests/integration/t_the_unpushed_skip_names_the_push_that_would_make_it_lockable.nim	nim	1
-tests/integration/t_thin_daemon_client.nim	nim	7
+tests/integration/t_thin_daemon_client.nim	nim	9
 tests/integration/t_ti1_interface_artifact_edge.nim	nim	4
 tests/integration/t_ti2_separate_module_producer.nim	nim	2
 tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim	nim	1
@@ -1653,6 +1653,7 @@ tests/unit/t_runquota_grant_wait_wedged_connected.nim	nim	2
 tests/unit/t_rx_consumer_own_pool_forwarded_despite_unresolved_sibling.nim	nim	4
 tests/unit/t_rx_runquotad_forwards_custom_pools.nim	nim	5
 tests/unit/t_same_project_fragment_selectors.nim	nim	10
+tests/unit/t_script_launcher.nim	nim	3
 tests/unit/t_shared_mime_info_dev_stub.nim	nim	1
 tests/unit/t_source_fetch_tool_metadata.nim	nim	7
 tests/unit/t_stale_artifact_names_what_changed.nim	nim	5

@@ -53,8 +53,9 @@
 ##     REACHABILITY gate, and the one that makes the milestone's saving
 ##     something a user can obtain rather than a property of a binary nobody
 ##     runs. Every packaging route this repository has copies ``build/bin/*``
-##     wholesale, so an install puts ``repro-client`` in the same bin
-##     directory as ``repro``; this case reproduces exactly that adjacency and
+##     wholesale, so an install puts the thin client at ``bin/repro`` in the
+##     same directory as ``bin/reprobuild``; this case reproduces exactly
+##     that adjacency and
 ##     asserts a build is SERVED through it with ``REPRO_FULL_CLI`` and
 ##     ``REPRO_PUBLIC_CLI_PATH`` both unset. Deleting the sibling arm of
 ##     ``resolveFullCli`` reddens it — verified, not assumed.
@@ -72,16 +73,28 @@
 
 import std/[os, osproc, strtabs, strutils, tempfiles, unittest]
 
+# Imported HERE rather than beside the pty helpers below, because
+# ``runCaptured``'s ``drainPty`` arm needs ``fcntl``/``read`` and Nim makes a
+# module's symbols visible only after the ``import`` that brings them in.
+when defined(posix):
+  import std/posix as ptyPosix
+
+import repro_core/cli_images
 import repro_test_support
 
 proc repoRoot(): string =
   getCurrentDir()
 
 proc fullCliBin(): string =
-  repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
+  ## The ENGINE image. Named ``reprobuild`` since the thin-client-on-PATH
+  ## rename; ``build/bin/repro`` is the thin client below.
+  repoRoot() / "build" / "bin" / reprobuildEngineExeName()
 
 proc thinCliBin(): string =
-  repoRoot() / "build" / "bin" / addFileExt("repro-client", ExeExt)
+  ## The THIN CLIENT, which now owns the name ``repro``. Every case in this
+  ## suite that names ``build/bin/repro`` is therefore naming the thin client,
+  ## which is the point of the rename: it is what a user runs.
+  repoRoot() / "build" / "bin" / reproThinClientExeName()
 
 proc fixtureSource(): string =
   repoRoot() / "tests" / "fixtures" / "local-daemons-control-plane" /
@@ -107,11 +120,15 @@ type
     code: int
     output: string
     errors: string
+    ptyText: string
+      ## Everything read from the pty master while the child ran; empty
+      ## unless ``drainPty`` was supplied. See ``runCaptured``.
 
 proc runCaptured(exe: string; args: openArray[string]; cwd: string;
                  env: openArray[(string, string)] = [];
                  unset: openArray[string] = [];
-                 stderrTo = ""): CapturedRun =
+                 stderrTo = "";
+                 drainPty: cint = -1): CapturedRun =
   ## Run ``exe`` with stdout and stderr captured SEPARATELY (``runShell``
   ## merges them, and this suite has to compare the two streams
   ## independently) and with the ability to REMOVE names from the child
@@ -122,6 +139,28 @@ proc runCaptured(exe: string; args: openArray[string]; cwd: string;
   ## make the child's ``isatty(2)`` answer true. ``result.errors`` is then
   ## empty, because there is no file to read back.
   ##
+  ## ``drainPty`` IS NOT A CONVENIENCE; IT IS WHAT KEEPS A PTY CASE FROM
+  ## DEADLOCKING, and it was added because one did. A pty is a fixed-size
+  ## kernel buffer — a few kilobytes on macOS, not the 64 KB one might read
+  ## into ``newString(64 * 1024)`` — and a writer that fills it BLOCKS. So a
+  ## case that runs a real build with stderr on a pty slave and reads the
+  ## master only AFTER ``waitForExit`` returns has arranged for the child to
+  ## wait for the parent and the parent to wait for the child: the engine's
+  ## progress renderer redraws once per action state change, a cold build
+  ## emits far more than the buffer holds, and the run never ends. Measured
+  ## here, not theorised: the daemon log recorded ``build request finished
+  ## exitCode=0`` and the client process was still alive eight minutes later,
+  ## with the artifact already on disk. Two abandoned processes from earlier
+  ## runs of the same case were found wedged the same way, one of them for
+  ## thirteen hours, and no run of this suite had ever printed a result for
+  ## that case.
+  ##
+  ## Pass the master fd and this proc drains it WHILE the child runs, into
+  ## ``result.ptyText``. The loop is in the parent and single-threaded — no
+  ## fork, no thread, no shared buffer — because ``osproc`` already exposes
+  ## the two pieces it needs: ``running`` (a non-blocking reap) and
+  ## ``peekExitCode``. Do not "simplify" this back into ``waitForExit`` plus
+  ## one read at the end.
   ## The redirection is done by an ``exec``-ing ``/bin/sh``, so the status
   ## this proc returns is the status of ``exe`` and not of a shell that ran
   ## it — the same trap as reading a build's exit code through a pipe.
@@ -142,7 +181,40 @@ proc runCaptured(exe: string; args: openArray[string]; cwd: string;
   let process = startProcess("/bin/sh", workingDir = cwd, args = shArgs,
     env = envTable, options = {})
   defer: process.close()
-  result.code = process.waitForExit()
+  if drainPty < 0:
+    result.code = process.waitForExit()
+  else:
+    when defined(posix):
+      let flags = ptyPosix.fcntl(drainPty, ptyPosix.F_GETFL, 0)
+      discard ptyPosix.fcntl(drainPty, ptyPosix.F_SETFL,
+        flags or ptyPosix.O_NONBLOCK)
+      var chunk = newString(8192)
+      var drained = ""
+      # A TEMPLATE, not a proc: a closure over ``result`` (or over ``drained``)
+      # is refused as a memory-safety violation by the compiler, and the
+      # alternative — duplicating the read loop twice below — is the shape
+      # that loses the final pump when someone edits one copy.
+      #
+      # Every byte currently readable. A non-blocking master answers EAGAIN
+      # while the child is between writes and EIO once the last slave writer
+      # has gone; both are ``got <= 0`` and neither is a reason to stop,
+      # because only ``process.running`` decides that.
+      template pumpNow() =
+        while true:
+          let got = ptyPosix.read(drainPty, addr chunk[0], chunk.len)
+          if got <= 0:
+            break
+          drained.add(chunk[0 ..< got])
+      while process.running:
+        pumpNow()
+        sleep(2)
+      # The child is gone; take what it wrote between the last pump and its
+      # exit. Bounded: nothing can be added after the writer is dead.
+      pumpNow()
+      result.ptyText = drained
+      result.code = process.peekExitCode()
+    else:
+      result.code = process.waitForExit()
   result.output = if fileExists(outPath): readFile(outPath) else: ""
   result.errors =
     if stderrTo.len == 0 and fileExists(errPath): readFile(errPath) else: ""
@@ -223,16 +295,15 @@ when defined(posix):
   ## ``shouldRouteToDaemon`` reads on that arm, and nothing but a terminal
   ## device makes it answer true — not a pipe, not a file, not an environment
   ## variable. These four are POSIX and live in ``<stdlib.h>``; Nim's
-  ## ``std/posix`` does not declare them.
-  import std/posix as ptyPosix
-
+  ## ``std/posix`` does not declare them. (``std/posix`` itself is imported
+  ## with the other imports at the top of the file; see the note there.)
   proc posix_openpt(oflag: cint): cint
     {.importc: "posix_openpt", header: "<stdlib.h>".}
   proc grantpt(fd: cint): cint {.importc: "grantpt", header: "<stdlib.h>".}
   proc unlockpt(fd: cint): cint {.importc: "unlockpt", header: "<stdlib.h>".}
   proc ptsname(fd: cint): cstring {.importc: "ptsname", header: "<stdlib.h>".}
 
-  proc openPtySlavePath(): tuple[master: cint, slave: string] =
+  proc openPtySlavePath(): tuple[master: cint; slave: string] =
     ## Returns the master fd — which the CALLER must keep open for the slave
     ## to stay usable — and the filesystem path of its slave side, which a
     ## shell redirection can open.
@@ -302,7 +373,7 @@ suite "MAC-1 thin daemon client":
       # WHAT THIS IS FOR. MAC-1's saving is only real if something a user
       # actually runs reaches the thin client. Nothing sets `REPRO_FULL_CLI`
       # outside this suite, and nothing is going to: what makes an installed
-      # `repro-client` work is that every packaging route — the Nix
+      # an installed thin client work is that every packaging route — the Nix
       # derivation's `installPhase`, the .deb/.rpm/pacman payloads, the
       # release tarball, `install-on-distributions.sh` — copies
       # `build/bin/*` WHOLESALE, so the thin client lands in the same bin
@@ -313,11 +384,17 @@ suite "MAC-1 thin daemon client":
       # files are installed, not that this binary can still name its full
       # image once they are.
       #
-      # THE LAYOUT IS BUILT, NOT MOCKED. `repro-client` is COPIED (a real
-      # file, so `getAppFilename()` is inside the install dir and
-      # `thinClientDir()` answers with it) and `repro` is SYMLINKED (22 MB;
-      # the probe only needs `fileExists`, and every digest the daemon
-      # handshake takes follows the link to the same bytes).
+      # THE LAYOUT IS BUILT, NOT MOCKED. The thin client is COPIED to
+      # `<bin>/repro` (a real file, so `getAppFilename()` is inside the
+      # install dir and `thinClientDir()` answers with it) and the engine is
+      # SYMLINKED to `<bin>/reprobuild` (17 MB; the probe only needs
+      # `fileExists`, and every digest the daemon handshake takes follows the
+      # link to the same bytes).
+      #
+      # THIS IS THE CASE THE RENAME EXISTS FOR. Before it, the installed thin
+      # client was `repro-client` and the caller had to type that name; now
+      # the file at `repro` IS the thin client, so the invocation below is
+      # literally what a user types.
       let tempRoot = createTempDir("repro-mac1-install", "")
       let endpoint = daemonSocketEndpoint("mac1-install")
       defer:
@@ -328,16 +405,16 @@ suite "MAC-1 thin daemon client":
 
       let installBin = tempRoot / "bin"
       createDir(installBin)
-      let installedThin = installBin / addFileExt("repro-client", ExeExt)
+      let installedThin = installBin / reproThinClientExeName()
       copyFile(thinCliBin(), installedThin)
       setFilePermissions(installedThin,
         {fpUserRead, fpUserWrite, fpUserExec})
-      createSymlink(fullCliBin(), installBin / addFileExt("repro", ExeExt))
+      createSymlink(fullCliBin(), installBin / reprobuildEngineExeName())
 
       let project = freshProject(tempRoot)
       # NOTE WHAT IS NOT IN THIS ENVIRONMENT: neither `REPRO_FULL_CLI` nor
       # `REPRO_PUBLIC_CLI_PATH`. If `resolveFullCli` cannot name the full
-      # image from the layout alone, `handOver` reports "no full repro image
+      # image from the layout alone, `handOver` reports "no reprobuild image
       # to fall back to" and exits 127 — so a broken probe cannot be
       # mistaken for a working one here.
       let run = runCaptured(installedThin, buildArgs(project, tempRoot),
@@ -349,7 +426,7 @@ suite "MAC-1 thin daemon client":
       checkpoint("stdout:\n" & run.output)
       checkpoint("stderr:\n" & run.errors)
       check run.code == 0
-      check not run.errors.contains("no full repro image to fall back to")
+      check not run.errors.contains("image to fall back to")
       check fileExists(project / "dist" / "copied.txt")
 
       # ...and it was SERVED, not quietly handed over. Same discriminator as
@@ -428,7 +505,8 @@ suite "MAC-1 thin daemon client":
         newSeq[(string, string)]()),
       ("--progress-bars", @["build", ".", "--progress-bars=ascii"],
         newSeq[(string, string)]()),
-      ("--progress with a non-quiet value", @["build", ".", "--progress=bar-line"],
+      ("--progress with a non-quiet value", @["build", ".",
+          "--progress=bar-line"],
         newSeq[(string, string)]()),
       ("progress not configured quiet anywhere", @["build", "."],
         @[("REPROBUILD_PROGRESS", "")])
@@ -561,6 +639,195 @@ suite "MAC-1 thin daemon client":
       let fileRuntime = runWith("file", "")
       checkpoint("file arm: runtime dir must exist: " & fileRuntime)
       check dirExists(fileRuntime)
+
+  when isNixSupported:
+    test "integration_thin_client_names_the_engine_the_way_the_engine_names_itself":
+      # THE NIX LAYOUT, AND THE DIGEST THAT HAS TO AGREE ACROSS IT.
+      #
+      # `wrapProgram` replaces `$out/bin/reprobuild` with a shell SCRIPT and
+      # moves the real image to `$out/bin/.reprobuild-wrapped`. The engine's
+      # own `getAppFilename()` is therefore the hidden name, and the path each
+      # client hands `startUserDaemon` is the path whose digest is compared
+      # against the running daemon's (`expectedDaemonRunningDigestHex`). A
+      # thin client that named the WRAPPER SCRIPT would compute a different
+      # digest, conclude the daemon is stale and shut it down -- and the next
+      # engine invocation would conclude the same in reverse, restarting the
+      # daemon on every alternation and destroying the warm daemon the thin
+      # client exists to exploit. The same path also decides where the
+      # Tier-2a/2b providers are looked for (`parentDir(publicCliPath)`), and
+      # that failure is silent.
+      #
+      # WHAT MAKES THIS FAIL: deleting the hidden-image arm of
+      # `resolveFullCli`. The thin client then resolves the sibling
+      # `reprobuild` -- the wrapper script -- and the daemon log below
+      # records `restarting outdated daemon`. Verified, not assumed.
+      #
+      # THE LAYOUT IS REAL, NOT MOCKED: a real wrapper script (the same
+      # `exec "$hidden" "$@"` shape makeWrapper emits), a real hidden image,
+      # a real daemon on a real socket, and both clients building the same
+      # real project.
+      let tempRoot = createTempDir("repro-mac1-wrapped", "")
+      let endpoint = daemonSocketEndpoint("mac1-wrapped")
+      defer:
+        stopDaemon(tempRoot, endpoint)
+        removeDirEventually(tempRoot)
+      createDir(tempRoot / "state")
+      createDir(tempRoot / "store")
+
+      let installBin = tempRoot / "bin"
+      createDir(installBin)
+      # The hidden image IS the engine (symlinked: the probe needs
+      # `fileExists` and every digest follows the link to the same bytes).
+      # Spelled as ONE basename rather than `installBin / "." & ...`: `/` binds
+      # tighter than `&`, and `joinPath`'s handling of a lone "." is not
+      # something this case should depend on.
+      let hidden = installBin / ("." & ReprobuildEngineName & "-wrapped")
+      createSymlink(fullCliBin(), hidden)
+      # ...and the public name is a wrapper script over it, as makeWrapper
+      # leaves it. Note it is EXECUTABLE and it WORKS: an arm that resolved it
+      # would still build successfully, which is exactly why byte equality
+      # cannot be the discriminator here.
+      let wrapper = installBin / reprobuildEngineExeName()
+      writeFile(wrapper, "#!/bin/sh\nexec \"" & hidden & "\" \"$@\"\n")
+      setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+      let installedThin = installBin / reproThinClientExeName()
+      copyFile(thinCliBin(), installedThin)
+      setFilePermissions(installedThin, {fpUserRead, fpUserWrite, fpUserExec})
+
+      let project = freshProject(tempRoot)
+      let noOverrides = ["REPRO_FULL_CLI", "REPRO_PUBLIC_CLI_PATH"]
+      let baseEnv = @[
+        ("REPRO_DAEMON_ENDPOINT", endpoint),
+        ("REPRO_DAEMON_STATE_DIR", tempRoot / "state"),
+        ("REPROBUILD_STORE_ROOT", tempRoot / "store")]
+
+      # The ENGINE builds first, through its own wrapper, so the daemon is
+      # started from the image the engine names for itself.
+      let viaEngine = runCaptured(wrapper, buildArgs(project, tempRoot),
+        tempRoot, baseEnv, unset = noOverrides)
+      checkpoint("engine stdout:\n" & viaEngine.output)
+      checkpoint("engine stderr:\n" & viaEngine.errors)
+      check viaEngine.code == 0
+
+      # Then the THIN CLIENT, against the daemon the engine left running.
+      let viaThin = runCaptured(installedThin, buildArgs(project, tempRoot),
+        tempRoot, baseEnv, unset = noOverrides)
+      checkpoint("thin stdout:\n" & viaThin.output)
+      checkpoint("thin stderr:\n" & viaThin.errors)
+      check viaThin.code == 0
+      check not viaThin.errors.contains("image to fall back to")
+
+      # BOTH ran, and the second one was SERVED rather than handed over: two
+      # build sessions, recorded against different project roots (same
+      # discriminator as the parity case).
+      let roots = daemonBuildSessionProjectRoots(tempRoot, endpoint)
+      checkpoint("daemon build sessions: " & roots.join(" | "))
+      check roots.len == 2
+
+      # THE ASSERTION THIS CASE EXISTS FOR. The daemon logs one line and only
+      # one when a client decides the running image is stale. Its absence is
+      # the proof that both clients digested the same bytes.
+      let logPath = tempRoot / "state" / "logs" / "repro-daemon.log"
+      let logText = if fileExists(logPath): readFile(logPath) else: ""
+      checkpoint("daemon log:\n" & logText)
+      check not logText.contains("restarting outdated daemon")
+
+  when isNixSupported and defined(posix):
+    test "integration_thin_client_interactive_terminal_build_still_builds":
+      # THE FALLBACK HAS TO BE CORRECT, NOT MERELY DIFFERENT.
+      #
+      # `integration_thin_client_keeps_a_terminal_build_on_the_full_client`
+      # proves an interactive build is REFUSED by the routing gate, using a
+      # stub as the hand-over target. That says nothing about whether the
+      # invocation a user actually types then works -- and since the
+      # thin-client rename, `repro build` typed at a terminal is the single
+      # most common invocation there is. It reaches the engine only through
+      # `handOver`, so this case runs it against the REAL engine on a REAL
+      # pty and asserts the build happens.
+      #
+      # PROGRESS IS ASSERTED TOO, because the whole reason the gate refuses
+      # this shape is that the engine renders progress client-side when stderr
+      # is a terminal. If the fallback produced a correct artifact and no
+      # progress, the gate would be refusing for a reason that no longer
+      # holds.
+      #
+      # WHAT MAKES THIS FAIL: breaking `handOver` (e.g. resolving an engine
+      # path that does not exist) reddens the artifact check with exit 127.
+      let tempRoot = createTempDir("repro-mac1-interactive", "")
+      defer: removeDirEventually(tempRoot)
+      createDir(tempRoot / "state")
+      createDir(tempRoot / "store")
+      let project = freshProject(tempRoot)
+
+      # `--progress` is NOT quiet here: this is the interactive shape, the one
+      # a user types.
+      #
+      # NOTE WHAT IS *NOT* HERE: `--daemon=off`. It was in an earlier draft,
+      # and removing it was right -- `--daemon` is in `ClientHandledFlags`, so
+      # it forced the hand-over on its own and put a THIRD reason in front of
+      # the shape under test.
+      #
+      # WHAT THIS CASE DOES *NOT* PIN, stated because an earlier version of
+      # this comment claimed it did. Two INDEPENDENT sufficient conditions
+      # still keep this invocation off the thin path: the terminal on fd 2,
+      # and `REPROBUILD_PROGRESS` not being explicitly quiet. Either alone
+      # makes `shouldRouteToDaemon` return false, so deleting
+      # `stderrIsTerminal()` from that gate leaves this case GREEN -- measured
+      # by running this exact argv and environment with fd 2 on a plain file,
+      # which is observationally identical to deleting the arm, and getting
+      # the hand-over anyway. This case therefore pins the FALLBACK (a real
+      # engine, a real pty, a real artifact, real progress bytes) and nothing
+      # about the gate.
+      #
+      # The gate's TTY arm is pinned by
+      # `integration_thin_client_keeps_a_terminal_build_on_the_full_client`
+      # above, which is the case built for it: `--progress=quiet` makes fd 2
+      # the ONLY remaining condition, and it runs both arms -- pty and plain
+      # file -- so neither "refuse everything" nor "route everything" survives
+      # it. Do not add a progress-mode change here to make this case
+      # mutation-sensitive too; it would stop being the shape a user types,
+      # which is the only thing it exists to exercise.
+      var args = @[
+        "build", project,
+        "--tool-provisioning=path",
+        "--work-root=" & tempRoot / "work",
+        "--action-cache-root=" & tempRoot / "ac",
+        "--log=summary",
+        "--no-runquota"]
+
+      let (master, slavePath) = openPtySlavePath()
+      var run: CapturedRun
+      try:
+        run = runCaptured(thinCliBin(), args, tempRoot,
+          @[("REPRO_FULL_CLI", fullCliBin()),
+            ("REPRO_DAEMON_STATE_DIR", tempRoot / "state"),
+            ("REPROBUILD_STORE_ROOT", tempRoot / "store"),
+            ("REPROBUILD_PROGRESS", ""),
+            ("TERM", "xterm-256color")],
+          stderrTo = slavePath, drainPty = master)
+        # The pty is drained WHILE the build runs, by ``runCaptured``. It has
+        # to be: this case's ``--action-cache-root`` is a fresh directory
+        # inside ``tempRoot``, so every run is a COLD build with a provider
+        # compile in it, and the engine's progress renderer emits far more
+        # than a macOS pty buffer holds. Reading the master after
+        # ``waitForExit`` — which is what this case did when it was written —
+        # deadlocks: the engine blocks writing progress and the test blocks
+        # waiting for the engine. See ``runCaptured``'s ``drainPty`` note.
+        let buf = run.ptyText
+        let ptyBytes = buf.len
+        checkpoint("pty stderr (" & $ptyBytes & " bytes):\n" & buf)
+        check run.code == 0
+        # It BUILT. This is the assertion the stub-based TTY case cannot make.
+        check fileExists(project / "dist" / "copied.txt")
+        check readFile(project / "dist" / "copied.txt") ==
+          "direct-mode fixture\n"
+        # And it RENDERED. The engine's terminal renderer writes an ANSI
+        # line-clear per progress update when stderr is a tty; a silent run
+        # would mean the gate is protecting a behaviour that no longer exists.
+        check ptyBytes > 0
+        check buf.contains("\27[")
+      finally:
+        discard ptyPosix.close(master)
 
   test "integration_thin_client_does_not_link_the_build_engine":
     # The milestone's whole premise. `repro` is ~16 MB with ~12,000

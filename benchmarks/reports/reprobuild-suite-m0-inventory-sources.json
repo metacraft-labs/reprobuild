@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1665,
-    "pureUnitConsolidationGroups": 50,
+    "nimTestBinaries": 1666,
+    "pureUnitConsolidationGroups": 49,
     "pureUnitTests": 592,
     "staticallyDetectedRuntimeCompilerFlowTests": 101,
-    "testEntries": 1676
+    "testEntries": 1677
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -497,21 +497,6 @@
         "libs/repro_resources/tests/t_l3_reaper.nim",
         "libs/repro_resources/tests/t_resource_provider_lane.nim",
         "libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 2,
-      "defines": [],
-      "dependencyShape": [
-        "repro_local_store",
-        "repro_lock",
-        "repro_selfhost"
-      ],
-      "owner": "libs/repro_selfhost",
-      "sources": [
-        "libs/repro_selfhost/tests/t_removing_the_pin_makes_the_version_collectable.nim",
-        "libs/repro_selfhost/tests/t_the_pin_lives_in_the_lock.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1104,7 +1089,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 780,
+      "integration": 781,
       "platform/destructive": 115,
       "pure unit": 592,
       "unclassified": 177
@@ -1255,9 +1240,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1665,
+    "nimTestBinaryCount": 1666,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1676
+    "testEntryCount": 1677
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -14419,6 +14404,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_local_store",
         "repro_lock",
         "repro_selfhost"
@@ -23532,7 +23518,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_bootstrap_guard_names_the_host_artefact.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30999,7 +30985,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_the_resolving_launcher_execs_the_pinned_image.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 12,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31040,13 +31026,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_thin_daemon_client.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -35304,6 +35291,25 @@
       "source": "tests/unit/t_same_project_fragment_selectors.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_script_launcher",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_script_launcher.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

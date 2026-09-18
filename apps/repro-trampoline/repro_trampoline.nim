@@ -10,6 +10,35 @@
 ##   3. exec ``<prefix>/bin/repro`` with the caller's argv unchanged,
 ##      provisioning the prefix first if it is not resident.
 ##
+## WHERE THIS SITS RELATIVE TO THE THIN DAEMON CLIENT. Since the
+## thin-client-on-PATH rename there are three claimants on the name ``repro``:
+## this launcher (version selection), `apps/repro-client` (daemon dispatch),
+## and the engine (`apps/repro`, now installed as ``reprobuild``). They
+## compose, in exactly one order:
+##
+##   PATH/repro (THIS: which reprobuild?)
+##     -> <prefix>/bin/repro (thin client: daemon or engine?)
+##       -> <prefix>/bin/reprobuild  |  that version's daemon
+##
+## Version selection is OUTERMOST and that is forced rather than preferred. A
+## thin client placed outside this launcher would hand the build to whatever
+## daemon happens to be resident — an engine of unknown version — and so would
+## silently defeat the pin, which is the same failure ``spsTampered`` below
+## refuses to produce ("every version-selection bug this milestone exists to
+## prevent looks exactly like a quiet fallback"). Inside it, the prefix's own
+## ``bin/repro`` is the thin client for THAT version and its own
+## ``bin/reprobuild`` is that version's engine, so the daemon is spawned from
+## the pinned image and the pin holds.
+##
+## ``bin/repro`` staying the prefix's entry point is not a choice either:
+## ``selfDeclaredExecutablePath`` folds it into the realization hash, so
+## renaming it would re-address every prefix and invalidate every existing
+## pin. The pinned entry point is therefore the thin client, and this launcher
+## names the engine separately through ``REPRO_PUBLIC_CLI_PATH`` — one
+## variable, read by the thin client as the engine to defer to and by the
+## engine as its own self-spawn path, so the two cannot derive different
+## answers.
+##
 ## It reads NO file of its own. There is no ``.reprobuild-version``, no
 ## ``.tool-versions``, no launcher-private section of any config file; delete
 ## every file in a project except ``repro.lock`` and the answer does not
@@ -49,6 +78,7 @@ import std/[os, osproc, streams, strutils]
 # the reprobuild this launcher has not started yet. `git grep
 # uncontrolled` is the audit surface.
 import repro_core/ambient_execution
+import repro_core/cli_images
 
 import repro_selfhost
 
@@ -59,26 +89,37 @@ const
   DebugEnvVar = "REPRO_SELFHOST_DEBUG"
   BootstrapSiblingDir = "reprobuild"
     ## Fallback location, relative to the launcher: `<bin>/../libexec/
-    ## reprobuild/repro`. A DIRECTORY rather than a different filename,
-    ## because the bootstrap image has to be NAMED `repro` and the launcher
-    ## already owns that name on `PATH`.
+    ## reprobuild/repro`. A DIRECTORY rather than a different filename, and the
+    ## reason has CHANGED -- read this before simplifying it away.
     ##
-    ## Why the name matters, measured rather than assumed. `repro` schedules
-    ## its interface-extraction and provider-compile edges by self-spawning
-    ## its own image with an internal verb, and
-    ## `internalReproHelperCliPath` accepts only an image actually called
-    ## `repro` (or an explicitly supplied `REPRO_PUBLIC_CLI_PATH`). A
-    ## bootstrap installed as `repro-bootstrap.exe` therefore answers
+    ## IT USED TO BE A NAME CONSTRAINT. `repro` schedules its
+    ## interface-extraction and provider-compile edges by self-spawning its own
+    ## image with an internal verb, and `internalReproHelperCliPath` once
+    ## accepted only an image whose FILENAME was `repro`. A bootstrap installed
+    ## as `repro-bootstrap.exe` therefore answered
     ##
     ##   repro build: error: cannot schedule the provider-compile edge for
     ##   <recipe>: no `repro` image to spawn it with. The running image is
     ##   ...(dir)/repro-bootstrap.exe and no public CLI path was supplied.
     ##
-    ## -- which was observed on this host during M5, and is the same root
-    ## cause as N36 (a wrapped package whose real image is `.repro-wrapped`
-    ## silently loses its io-monitor driver). Renaming the bootstrap is not a
-    ## workaround for that defect; it is the layout the defect forces, and
-    ## naming it here is what stops the next installer from rediscovering it.
+    ## -- observed on this host during M5, and the same root cause as N36 (a
+    ## wrapped package whose real image is `.repro-wrapped` silently losing its
+    ## io-monitor driver).
+    ##
+    ## THAT CONSTRAINT IS GONE. N36 replaced the filename test with the image's
+    ## own DECLARATION (`runThinApp("repro")` as a literal in
+    ## `apps/repro/repro.nim`); see `runningImageIsReproCli` and
+    ## `libs/repro_cli_support/tests/
+    ## t_image_identity_is_declared_not_filename.nim`. An engine image works
+    ## under any filename now, which is what made `reprobuild` possible at
+    ## all.
+    ##
+    ## THE DIRECTORY IS STILL RIGHT, for a plainer reason: a bootstrap install
+    ## is a PAIR (`repro` the thin client and `reprobuild` beside it, which
+    ## is how the thin client's sibling probe finds its engine), this launcher
+    ## owns `bin/repro` on `PATH`, and a pair has to be moved as a directory.
+    ## Do not "fix" this by renaming the bootstrap file: splitting the pair is
+    ## what breaks it.
 
   ExitResolutionFailed = 70
   ExitNoBootstrap = 71
@@ -242,14 +283,15 @@ when isMainModule:
         (parentDir(parentDir(getAppFilename())) / "libexec" /
          BootstrapSiblingDir / addFileExt("repro", ExeExt)))
     if not provision(bootstrap, pin.version, pin.platform, root):
-      var why = ""
-      if extractFilename(bootstrap) != addFileExt("repro", ExeExt):
-        why = " NOTE: the bootstrap at " & bootstrap & " is not named " &
-          addFileExt("repro", ExeExt) & ", and a reprobuild that is not " &
-          "named `repro` cannot self-spawn its internal verbs, so it " &
-          "cannot schedule an interface-extraction or provider-compile " &
-          "edge. Install the bootstrap under the name `repro` in a " &
-          "directory of its own, or set REPRO_PUBLIC_CLI_PATH."
+      # The note that used to live here -- "a reprobuild not named `repro`
+      # cannot self-spawn its internal verbs, install it under the name
+      # `repro`" -- has been DELETED rather than reworded. It stopped being
+      # true when N36 made the self-spawn permission come from the image's own
+      # declaration instead of its filename (see `BootstrapSiblingDir` above),
+      # and a remedy that no longer works is worse than no remedy: it sends
+      # whoever hits a provisioning failure to rename a file that was never
+      # the cause.
+      let why = ""
       fail(ExitResolutionFailed,
         pin.lockPath & " pins " & SelfPackageName & " " & pin.version &
         " (store address " & pin.storeHash & ") and it could not be " &
@@ -276,10 +318,80 @@ when isMainModule:
       note("held " & held.output.strip())
 
   putEnv(ResolvedEnvVar, prefixIdHex(selfPrefixId(pin)))
-  # N36 — an image spawned with an internal verb must be named `repro`, and
-  # the engine only accepts one it has been told about. The resolved prefix's
-  # image IS named `repro`, so naming it here gives the pinned reprobuild a
-  # working io-monitor driver instead of leaving it to `getAppFilename()`.
-  putEnv("REPRO_PUBLIC_CLI_PATH", exe)
+  # NAME THE ENGINE OF THE VERSION WE JUST SELECTED, explicitly.
+  #
+  # `exe` is the prefix's `bin/repro`, which since the thin-client rename is
+  # the THIN DAEMON CLIENT. `REPRO_PUBLIC_CLI_PATH` is read by TWO different
+  # programs -- the thin client resolves its engine from it, and the engine
+  # uses it as its own self-spawn path for `internal io monitor` /
+  # `__repro-extract-interface` / `__repro-compile-provider` -- so it has to
+  # name the ENGINE, not the entry point. Pointing it at the thin client would
+  # have the engine try to self-spawn a binary that implements none of those
+  # verbs.
+  #
+  # Setting it at all (rather than leaving both to `getAppFilename()`) is the
+  # N36 lesson: the engine accepts a self-spawn target it has been TOLD about,
+  # and telling it here is what gives the pinned reprobuild a working
+  # io-monitor driver.
+  #
+  # MISSING ENGINE IS A REFUSAL, NOT A FALLBACK.
+  #
+  # An earlier draft fell back to `exe` (the prefix's `bin/repro`) when the
+  # prefix had no `reprobuild` beside it, on the theory that a pre-rename
+  # prefix is a supported layout. That is deleted, and the owner's reason is
+  # the deciding one: reprobuild is in heavy development, so running an OLD
+  # image is typically a MISTAKE rather than a configuration anyone chose. A
+  # silent fallback turns a wrong-version run into something nobody can see --
+  # the build succeeds, with the wrong engine, and nothing says so. A refusal
+  # turns it into a diagnosable error, which is the same trade `spsTampered`
+  # above already makes for a tampered pin.
+  #
+  # WHAT THIS DECIDES ON, since "probe for a file" would be inferring what is
+  # already declared. Nothing available here DECLARES the layout, and that is a
+  # fact about the data rather than an excuse:
+  #
+  #   * `SelfPin` carries `state`, `projectRoot`, `lockPath`, `version`,
+  #     `platform`, `storeHash`, `integrity`, `detail` -- no layout field. A
+  #     bare version string cannot answer "does this prefix ship two images?".
+  #   * A version THRESHOLD would have to be invented. The two-image layout is
+  #     unreleased, so there is no released version number to compare against;
+  #     writing one down now would be an unverified constant of exactly the
+  #     kind this launcher already deleted one of.
+  #   * The prefix does not describe itself either: `repro self install`
+  #     materializes a whole source tree (`materializeViaHardlinkOrCopy`) and
+  #     writes no manifest of its contents, and `selfDeclaredExecutablePath`
+  #     names only `bin/repro`.
+  #
+  # So the predicate is NOT "which layout is this?" -- there is only one
+  # supported layout, for every version this launcher will hand over to. It is
+  # "is the contract satisfied?", and the probe is the anomaly detector for a
+  # contract violation rather than a branch between two ways of being right.
+  # `repro self install` refuses at install time for the same reason and in the
+  # same terms (see `repro_selfhost/install.nim`), so a prefix produced by the
+  # normal path CANNOT lack this file -- which is what makes reaching the
+  # refusal below evidence of something genuinely wrong rather than of a
+  # configuration the reader was expected to have.
+  let prefixEngine = prefix / "bin" / reprobuildEngineExeName()
+  if not fileExists(prefixEngine):
+    fail(ExitResolutionFailed,
+      pin.lockPath & " pins " & SelfPackageName & " " & pin.version &
+      ", which resolved to " & prefix & ", but that prefix has no " &
+      reprobuildEngineExeName() & " beside its bin/" & selfExecutableName() &
+      ". bin/" & selfExecutableName() & " is the thin daemon client and it " &
+      "cannot build on its own; bin/" & reprobuildEngineExeName() &
+      " is the engine it hands every other invocation to. `repro self " &
+      "install` refuses to create a prefix without it, so this one predates " &
+      "that check or has been modified. To repair it: delete " & prefix &
+      " and re-install that version from a tree that has both images, with `" &
+      ReproThinClientName & " self install --from=<dir> --version=" &
+      pin.version & " --platform=" & pin.platform & "` (--from and --version " &
+      "are both required). Or repin " & pin.lockPath &
+      " to a version whose prefix carries both images.")
+  # `REPRO_PUBLIC_CLI_PATH` is read by TWO different programs -- the thin
+  # client resolves its engine from it, and the engine uses it as its own
+  # self-spawn path -- so one variable keeps the two from deriving different
+  # answers. It names the ENGINE, never `exe`.
+  putEnv("REPRO_PUBLIC_CLI_PATH", prefixEngine)
+  note("engine " & prefixEngine)
   note("exec " & exe)
   quit(runChild(exe, passthrough))
