@@ -3822,9 +3822,31 @@ macro package*(name: untyped; body: untyped): untyped =
   ## therefore still holds the author's original nodes and can point
   ## ``error(msg, node)`` at the right line — the diagnostics regression
   ## usually assumed to be the price of staging is not one.
+  var provisioningExpr: NimNode = bindSym"NoToolProvisioning"
+  var seenProvisioning = false
   var declaredExpr: NimNode = bindSym"NoPlatformConstraints"
   var seenPlatforms = false
   for stmt in body:
+    # `defaultToolProvisioning <expr>` gets the same treatment as `platforms`
+    # below: wrap the ONE sub-expression in the scope that binds the mode
+    # vocabulary and let the compiler evaluate it. Stage 2 then receives a
+    # value and never has to ask what the author wrote.
+    #
+    # This is what makes a computed mode work --
+    # `defaultToolProvisioning(when defined(windows): tarball else: nix)` --
+    # with no branch-selection logic here. A macro that tried to read the
+    # `when` itself would be re-implementing a Nim evaluator, which is the
+    # anti-pattern `DSL-Macro-Authoring-Guide.md` was written about: the
+    # understood grammar is always a subset of Nim's, and the gap is silent.
+    if stmt.kind in {nnkCall, nnkCommand} and stmt.len == 2 and
+       (stmt[0].eqIdent("defaultToolProvisioning") or
+        stmt[0].eqIdent("toolProvisioning")):
+      if seenProvisioning:
+        error("defaultToolProvisioning: may be declared only once per package",
+          stmt)
+      seenProvisioning = true
+      provisioningExpr = newCall(bindSym"withToolProvisioningVocabulary",
+        stmt[1])
     # `platforms[windows]` — no space — is `nnkBracketExpr`, array indexing,
     # not a call. Nothing downstream matches it, so without this it would
     # reach the partition as ordinary user code and fail as "undeclared
@@ -3844,10 +3866,12 @@ macro package*(name: untyped; body: untyped): untyped =
   # `ident`, not `bindSym`: stage 2 is declared BELOW this macro (it is the
   # bulk of the file and reads better after the entry point), and `bindSym`
   # resolves in the definition scope, where the name does not exist yet.
-  return newCall(ident("packageImpl"), name, declaredExpr, body)
+  return newCall(ident("packageImpl"), name, declaredExpr, provisioningExpr,
+    body)
 
 macro packageImpl*(name: untyped;
                    resolvedPlatforms: static seq[PlatformConstraintDef];
+                   resolvedToolProvisioning: static string;
                    body: untyped): untyped =
   ## Top-level package declaration — STAGE 2.
   ##
@@ -3901,7 +3925,8 @@ macro packageImpl*(name: untyped;
   ##    ``let <name> = declareVariant[T](...)`` plus a trailing
   ##    ``finalizeVariants()`` call.
   let (sectionStmts, preservedStmts) = partitionPackageBody(body)
-  let pkg = parsePackageDef(name, body, resolvedPlatforms)
+  let pkg = parsePackageDef(name, body, resolvedPlatforms,
+    resolvedToolProvisioning)
   let packageName = pkg.packageName
   # ── DSL-port M2: emit ``config:`` scalar registrations + ``versions:``
   # entries. The two emitters operate on the M1 ``sectionStmts``

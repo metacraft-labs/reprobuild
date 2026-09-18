@@ -984,6 +984,25 @@ proc compileTimeDefineValue(name: string): bool =
     result = false
 
 proc compileTimeConditionValue(node: NimNode): bool =
+  ## LEGACY. Do not add callers. This is a partial reimplementation of the
+  ## compiler's constant folder, kept because `collectUsesGated` resolves
+  ## `when` inside a `uses:` block with it and predates the staging technique.
+  ##
+  ## It models `true`/`false`, `defined()`, `not`, `and`, `or` and parentheses.
+  ## Everything else in Nim's condition grammar -- `const` comparisons,
+  ## `declared()`, `compiles()`, a call to a `func`, a condition behind a
+  ## template -- returns `false` here. The return type cannot distinguish that
+  ## from a condition that genuinely evaluated false, so an unmodelled
+  ## condition does not raise or warn: it silently selects the other branch.
+  ## Inside `uses:` that means a tool requirement is silently dropped.
+  ##
+  ## If you are here because a form needs to vary by host, the answer is NOT to
+  ## extend this or to add a decidability guard around it. Stage the form and
+  ## let the compiler evaluate the expression -- `defaultToolProvisioning` in
+  ## this file is the worked example, and `withToolProvisioningVocabulary` in
+  ## `runtime_core.nim` is the whole of what it needed. See "Never write an
+  ## evaluator for Nim inside a macro" in `DSL-Macro-Authoring-Guide.md`
+  ## (reprobuild-specs).
   case node.kind
   of nnkIdent:
     case identText(node).normalize
@@ -2106,7 +2125,8 @@ proc lintArmsAgainstDeclaredPlatforms(body: NimNode; pkg: PackageDef) =
         discard
 
 proc parsePackageDef(name: NimNode; body: NimNode;
-                     resolvedPlatforms: seq[PlatformConstraintDef] = @[]):
+                     resolvedPlatforms: seq[PlatformConstraintDef] = @[];
+                     resolvedToolProvisioning: string = ""):
     PackageDef =
   ## ``resolvedPlatforms`` carries the values stage 1 of the ``package`` macro
   ## already had the compiler evaluate. It is consulted only for the canonical
@@ -2138,21 +2158,29 @@ proc parsePackageDef(name: NimNode; body: NimNode;
     elif calleeName(stmt).normalize == "library":
       result.libraries.add(parseLibrary(result.packageName, stmt))
     elif calleeName(stmt).normalize in ["defaulttoolprovisioning", "toolprovisioning"]:
+      # The VALUE arrives in ``resolvedToolProvisioning``: stage 1 wrapped
+      # this statement's argument in ``withToolProvisioningVocabulary`` and
+      # the compiler evaluated it. Nothing here reads ``stmt[1]`` -- which is
+      # the point, because the argument may be any Nim expression that yields
+      # one of the modes, including a ``when`` chosen per host.
+      #
+      # The statement is still walked (stage 1 left it in the body) so the
+      # arity check and the refusal below can point ``error`` at the author's
+      # own line rather than at a synthesized node.
       if stmt.len != 2:
-        error("defaultToolProvisioning expects exactly one string literal", stmt)
-      let provisioning = requireStrLit(stmt[1], "defaultToolProvisioning")
-      # M9.R.8 — accept ``from-source`` (the CLI canonical spelling)
-      # alongside the four pre-existing modes so a recipe can opt in
-      # to from-source provisioning declaratively without depending on
-      # the CLI flag / env var. The CLI-side ``parseToolProvisioning``
-      # also accepts ``fromSource`` and ``source`` aliases; the DSL
-      # validator pins the canonical hyphenated form for consistency
-      # with the existing ``defaultToolProvisioning "path"`` /
-      # ``defaultToolProvisioning "nix"`` precedent in production
-      # recipes.
-      if provisioning.normalize notin ["path", "nix", "tarball", "scoop", "from-source"]:
-        error("defaultToolProvisioning must be one of: path, nix, tarball, scoop, from-source", stmt[1])
-      result.defaultToolProvisioning = provisioning
+        error("defaultToolProvisioning expects exactly one argument: a mode " &
+          "(path, nix, tarball, scoop, fromSource) or any expression " &
+          "yielding one", stmt)
+      # M9.R.8 — ``from-source`` is the CLI's canonical spelling and the one
+      # the model carries; the vocabulary spells it ``fromSource`` because a
+      # hyphen cannot appear in a Nim identifier. Both reach here as the same
+      # string.
+      if resolvedToolProvisioning.normalize notin
+          ["path", "nix", "tarball", "scoop", "from-source"]:
+        error("defaultToolProvisioning must be one of: path, nix, tarball, " &
+          "scoop, fromSource; got \"" & resolvedToolProvisioning & "\"",
+          stmt[1])
+      result.defaultToolProvisioning = resolvedToolProvisioning
     elif calleeName(stmt).normalize == "lockfile":
       # §4.3's package-level rung: "A **package-level** `lockFile` remains
       # available as a default that artifacts inherit and may override."

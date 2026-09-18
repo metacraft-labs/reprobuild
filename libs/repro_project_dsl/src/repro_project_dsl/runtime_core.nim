@@ -600,6 +600,45 @@ template withPlatformVocabulary*(body: untyped): untyped =
       x86 {.inject, used.} = PlatformConstraint(cpu: "x86", os: "any")
     body
 
+template withToolProvisioningVocabulary*(body: untyped): untyped =
+  ## Evaluate `body` in a scope where the tool-provisioning vocabulary is
+  ## bound, so `defaultToolProvisioning <expr>` is an ordinary Nim expression.
+  ##
+  ## Same technique and the same reasons as `withPlatformVocabulary` above: the
+  ## modes are `const`s the author's code refers to, so `tarbal` is an
+  ## undeclared-identifier error from the compiler rather than a string that
+  ## reaches a macro and gets rejected -- or worse, does not.
+  ##
+  ## What this buys beyond a tidier spelling is that the MODE CAN BE COMPUTED.
+  ## Nim evaluates the expression before stage 2 ever sees it, so
+  ##
+  ##     defaultToolProvisioning(when defined(windows): tarball else: nix)
+  ##
+  ## works with no second code path -- the macro receives "tarball" or "nix"
+  ## and cannot tell how the author arrived at it. A recipe no longer has to
+  ## pick one mode for every host it runs on.
+  ##
+  ## The values are plain strings rather than a distinct type so that the
+  ## pre-existing literal form, `defaultToolProvisioning "path"`, keeps
+  ## working unchanged: both spellings bind the same `static string`.
+  ##
+  ## Nothing reachable from here may `raise` -- see the note below on
+  ## `tryConstExpr` swallowing exceptions under a `static` parameter. These are
+  ## bare consts with no helper call precisely so there is nothing that could.
+  block:
+    const
+      path {.inject, used.} = "path"
+      nix {.inject, used.} = "nix"
+      tarball {.inject, used.} = "tarball"
+      scoop {.inject, used.} = "scoop"
+      fromSource {.inject, used.} = "from-source"
+    body
+
+const NoToolProvisioning* = ""
+  ## Stage-1 default for a package that declares no `defaultToolProvisioning`.
+  ## Distinct from every valid mode, so stage 2 can tell "not declared" from
+  ## "declared as something" without a second flag.
+
 const
   PlatformAxisConflict* = "!conflict:"
     ## Marks an axis narrowed to two incompatible values (`x86_64 * aarch64`).
