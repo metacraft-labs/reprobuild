@@ -8,6 +8,7 @@ import ./constructors/meson_package
 import ./constructors/cmake_package
 import ./constructors/autotools_package
 import ./constructors/cargo_package
+import ./constructors/go_package
 
 # DSL-port M9.R.10a — pull the system-tool stdlib package set into
 # ``registeredPackages()`` for every recipe that imports
@@ -34,5 +35,6 @@ export meson_package
 export cmake_package
 export autotools_package
 export cargo_package
+export go_package
 export system_tools
 export kf6_qt6_modules

@@ -1531,6 +1531,7 @@ tests/unit/t_dev_env_path_ops.nim	nim	8
 tests/unit/t_every_tool_profile_is_sealed.nim	nim	6
 tests/unit/t_fribidi_dev_stub.nim	nim	1
 tests/unit/t_from_source_cargo_recognition.nim	nim	8
+tests/unit/t_from_source_go_recognition.nim	nim	8
 tests/unit/t_from_source_realization_platform.nim	nim	2
 tests/unit/t_hcr_agent_coordinator.nim	nim	1
 tests/unit/t_hcr_agent_endpoint.nim	nim	6

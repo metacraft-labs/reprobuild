@@ -115,6 +115,33 @@ type
     destdir*: string
     components*: Table[string, string]
 
+  GoPackageResult* = object
+    ## Returned by ``go_package(...)``. Same three roles as its siblings,
+    ## and the same reading of ``buildEdge`` as ``CargoPackageResult``:
+    ## the preparation step a from-source build cannot start offline
+    ## without.
+    ##
+    ## For Go that step is ``go mod download`` into a scratch module cache.
+    ## Where the cargo shape pins its closure in a committed manifest this
+    ## repository can read, Go's ``go.sum`` carries ``h1:`` dirhashes —
+    ## SHA-256 over a sorted file listing, not over the module archive — so
+    ## verifying them outside the toolchain would mean reimplementing Go's
+    ## ``dirhash``. Letting ``go`` verify against the ``go.sum`` inside the
+    ## fetched source is the same guarantee reached through the tool that
+    ## defines it, and the asymmetry is recorded rather than papered over.
+    buildEdge*: BuildActionDef
+      ## ``go mod download`` — the module cache, verified against
+      ## ``go.sum``.
+    compileEdge*: BuildActionDef
+      ## ``go build`` with the proxy off.
+    installEdge*: BuildActionDef
+      ## The same ``go build``: its ``-o`` writes straight into the staged
+      ## tree, so there is no separate install step to model. Both fields
+      ## name one action rather than inventing a second that would only
+      ## copy a file onto itself.
+    destdir*: string
+    components*: Table[string, string]
+
   AutotoolsPackageResult* = object
     ## Returned by ``autotools_package(...)``. ``configureEdge`` is the
     ## ``./configure`` invocation; ``compileEdge`` is ``make``.
@@ -387,6 +414,30 @@ proc installTreeMirror*(r: CargoPackageResult) =
   ## installed for its data or its completions alone.
   emitInstallTreeMirror(r.installEdge, "", r.destdir,
     currentOwningPackage(), "cargo")
+
+# ---------------------------------------------------------------------------
+# Slicing methods — GoPackageResult
+# ---------------------------------------------------------------------------
+
+proc executable*(r: GoPackageResult; name: string): Executable =
+  ## Stage the named binary and mirror the install tree, as every other
+  ## multi-artifact result does.
+  emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "executable", name)
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "go")
+  newExecutable(
+    install = r.installEdge,
+    executableName = name,
+    installPrefix = componentPath(r.components, "runtime"))
+
+proc files*(r: GoPackageResult; name: string): BuildActionDef =
+  discard componentPath(r.components, name)
+  r.installEdge
+
+proc installTreeMirror*(r: GoPackageResult) =
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "go")
 
 # ---------------------------------------------------------------------------
 # Stage-copy emission (M9.R.14c.5)
