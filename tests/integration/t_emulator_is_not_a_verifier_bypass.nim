@@ -701,6 +701,49 @@ suite "the evidence emulator is not a verifier bypass":
     check ecdsaSigValueDer(newSeq[byte](0), s32).len == 0
     check ecdsaSigValueDer(r32, newSeq[byte](0)).len == 0
 
+  test "the short-form SEQUENCE length is GUARANTEED by the scalar bound":
+    ## `ecdsaSigValueDer` writes its SEQUENCE length in DER's short form
+    ## unconditionally. It used to carry a `body.len > 127` branch beside
+    ## that, which nothing could reach — the scalar bound three lines above
+    ## caps the body at 70 — and which carried a comment saying as much.
+    ## The branch is gone; this is what replaces it, and it is strictly
+    ## more use than the branch was: the branch would have returned an
+    ## empty result, indistinguishable from "that is not a signature", for
+    ## a signature that is fine and an encoder that is not.
+    ##
+    ## The inequality is asserted from the bound, not from a second copy
+    ## of the number it guards. Widen `MaxEcdsaScalarLen` and this fails
+    ## by name; a check comparing the constant with itself would not.
+    check WorstCaseSigValueBodyLen <= DerShortFormLengthCeiling
+    check MaxEcdsaScalarLen == 32
+    # Both sides of the inequality are pinned to what they are supposed to
+    # be. Without this the inequality could be kept true by moving the
+    # CEILING, which is a fact about X.690 and not a knob — and an
+    # inequality whose both sides are free to move is satisfied by any
+    # edit that moves them together.
+    check DerShortFormLengthCeiling == 127
+
+    ## And the arithmetic is measured against the encoder rather than
+    ## trusted: the widest body the bound admits, built for real. Both
+    ## scalars are 32 bytes with the top bit set, so each INTEGER takes
+    ## its `0x00` pad and the body is at its maximum.
+    var rMax = newSeq[byte](MaxEcdsaScalarLen)
+    var sMax = newSeq[byte](MaxEcdsaScalarLen)
+    for i in 0 ..< MaxEcdsaScalarLen:
+      rMax[i] = 0xff'u8
+      sMax[i] = 0xff'u8
+    let widest = ecdsaSigValueDer(rMax, sMax)
+    check widest.len > 0
+    check widest[0] == 0x30'u8
+    # The length byte is a LENGTH and not a long-form indicator: its top
+    # bit is clear. That is the property the deleted branch was standing
+    # in for, and it is the one that breaks first if the bound moves.
+    check (widest[1] and 0x80'u8) == 0'u8
+    check int(widest[1]) == widest.len - 2
+    check int(widest[1]) <= DerShortFormLengthCeiling
+    # 2 * (tag + len + pad + 32) = 70, which is the worst case, reached.
+    check int(widest[1]) == WorstCaseSigValueBodyLen
+
   test "the emulator is in no product binary and names no verifier symbol":
     ## Two directions of one claim, both read off the source tree.
     ##

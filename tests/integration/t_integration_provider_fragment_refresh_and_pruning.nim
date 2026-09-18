@@ -85,7 +85,12 @@ proc writeFixtureProvider(path: string) =
     "  GraphEntryPointInvocationSpec(\n" &
     "    entryPointId: MemberEntryPoint,\n" &
     "    entryPointBodyHash: MemberBodyHash,\n" &
-    "    arguments: dir / member,\n" &
+    # A provider is a separate process and its response is decoded from
+    # bytes, so a child spec with NO project root is something the engine
+    # can be handed however well-behaved its own callers are. This define
+    # is what gives the engine's per-plan refusal a reachable input.
+    "    arguments: (when defined(childWithoutArguments): \"\" " &
+      "else: dir / member),\n" &
     "    namespace: namespace,\n" &
     "    stableName: \"member:\" & member)\n\n" &
     "proc rootFragment(request: ProviderGraphRequest): GraphFragment =\n" &
@@ -451,3 +456,85 @@ suite "integration_provider_fragment_refresh_and_pruning":
         discard refresh(providerV2, ArtifactV2, store = badStore)
       check readFile(providerSnapshotPath(badStore)) == "corrupt-store"
       check nonEmptyLines(countsPath).len == 0
+
+    test "a CHILD plan with no project root is refused, naming the child":
+      ## The per-plan refusal in `executePlan`, given the input it lacked.
+      ##
+      ## `refreshProviderGraph` already refuses a refresh whose ROOT
+      ## arguments are empty, and until now that was the only thing any
+      ## gate reached: removing the per-plan check left every case green,
+      ## which is the recurring shape in this repository's refusals — a
+      ## rule with no reachable input.
+      ##
+      ## It does have one. Plans are not all derived from the config: a
+      ## child plan's arguments come out of the PROVIDER's response, which
+      ## is a separate process' bytes, and stored-fragment plans come off
+      ## disk. So the engine can be handed an empty root for a child while
+      ## the root it was configured with is perfectly good — and an empty
+      ## root that travels on reaches a recipe and surfaces as whatever
+      ## that recipe's first path resolution happens to raise, naming
+      ## neither the invocation nor the package.
+      ##
+      ## The fixture below is exactly that: a provider whose root fragment
+      ## declares children with no arguments. The root plan is fine, so
+      ## the refusal cannot be the configured-root one, and the assertion
+      ## on the entry-point NAME is what makes that measurable rather
+      ## than assumed.
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-child-no-root", "")
+      defer: removeDir(tempRoot)
+      let fixtureSourceDir = repoRoot / "build" / "provider-fixtures" /
+        splitPath(tempRoot).tail
+      createDir(fixtureSourceDir)
+      defer:
+        if dirExists(fixtureSourceDir):
+          removeDir(fixtureSourceDir)
+
+      let srcDir = tempRoot / "src"
+      let binDir = tempRoot / "bin"
+      let storeRoot = tempRoot / "store"
+      createDir(srcDir)
+      createDir(binDir)
+      createDir(storeRoot)
+      writeFile(srcDir / "a.txt", "alpha\n")
+
+      let providerSource = fixtureSourceDir / "fixture_provider.nim"
+      writeFixtureProvider(providerSource)
+
+      proc refreshWith(providerPath: string): ProviderRefreshReport =
+        refreshProviderGraph(RefreshConfig(
+          storeRoot: storeRoot,
+          providerBinaryPath: providerPath,
+          providerArtifactId: ArtifactV1,
+          rootEntryPointId: RootEntryPoint,
+          rootArguments: srcDir,      # the ROOT's root is fine.
+          namespace: "workspace",
+          lockSliceId: "lock-v1",
+          activity: "build",
+          providerWorkingDir: repoRoot))
+
+      # The control first: the same fixture, same root, children with real
+      # arguments — accepted. Without this the case below is satisfied by
+      # a refresh that refuses everything.
+      let healthy = compileProvider(providerSource, binDir / "provider-ok",
+        tempRoot / "nimcache-ok")
+      let ok = refreshWith(healthy)
+      check ok.snapshot.fragments.len == 2
+      check ok.invoked.len == 2
+
+      let defective = compileProvider(providerSource,
+        binDir / "provider-child-no-root", tempRoot / "nimcache-child",
+        defines = ["childWithoutArguments"])
+      var raised = ""
+      try:
+        discard refreshWith(defective)
+      except CatchableError as err:
+        raised = err.msg
+      checkpoint("refusal: " & raised)
+      check raised.len > 0
+      check "no project root" in raised
+      # The CHILD, not the root. The configured root was non-empty, so a
+      # message naming the root entry point would mean the refusal came
+      # from the other call site and this fixture proved nothing.
+      check MemberEntryPoint in raised
+      check RootEntryPoint notin raised

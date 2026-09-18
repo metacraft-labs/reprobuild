@@ -379,6 +379,44 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   # it is in this pass. Bodies previously had to infer it from an empty
   # ``activeProviderProjectRoot()``, which conflates the pass with a
   # planning fault that must stay fatal.
+  #
+  # ``Defect`` IS contained here, alongside ``CatchableError``, and that is
+  # a decision rather than an oversight in either direction:
+  #
+  #   * A body running with no project root fails at index, slice and
+  #     range operations at least as often as it raises -- ``path[0]`` on
+  #     an empty string, ``splitPath`` results indexed blind. Those are
+  #     ``Defect``s in Nim. Containing only ``CatchableError`` would leave
+  #     the LIKELIEST failure of exactly the pass this exists to survive
+  #     uncontained, and uncontained means the operator gets "provider
+  #     exited with code 1" for every target in the project -- the symptom
+  #     the containment was written to remove.
+  #   * The usual argument against catching a ``Defect`` -- that the
+  #     process' invariants are broken and continuing is unsound -- does
+  #     not distinguish the two cases here. Whatever a half-run body
+  #     leaves behind, it leaves behind identically when it raises a
+  #     ``CatchableError`` half-way, and that has been contained since this
+  #     block was written. The ``finally`` below restores the pass depth,
+  #     the owning-package override and the target-export registry on both
+  #     paths, and the pass' one durable effect -- the shell/fetch
+  #     registry -- is rebuilt per package by the real invocation.
+  #   * The containment is scoped to the STARTUP pass only. The same body
+  #     invoked for real is not wrapped, so a ``Defect`` during planning
+  #     stays fatal, which is where "the invariants are broken" is the
+  #     right response.
+  #   * It follows the boundary this repository already draws the same way:
+  #     ``repro_resources/library_abi.nim``'s ``withState`` catches
+  #     ``CatchableError`` and ``Defect`` and reports the second with a
+  #     ``defect:`` prefix. The prefix is kept here so a reader of the
+  #     failure log can tell which kind of failure a package had.
+  #
+  # What CANNOT be contained, and is not claimed to be: a ``quit`` in a
+  # startup body. ``quit`` raises nothing -- it runs exit handlers and
+  # ends the process -- so no handler anywhere can intercept it, and a
+  # recipe that calls it still takes every target in the project down.
+  # That is a property of ``quit``, not a gap in this block; the remedy is
+  # that a recipe must raise rather than quit, which the gate asserts by
+  # showing the raise IS contained.
   let providerModeInitCall =
     if buildBody.len > 0:
       quote do:
@@ -392,6 +430,9 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
             except CatchableError as reproStartupBodyError:
               noteProviderStartupBodyFailure(
                 `pkgNameLit`, reproStartupBodyError.msg)
+            except Defect as reproStartupBodyDefect:
+              noteProviderStartupBodyFailure(
+                `pkgNameLit`, "defect: " & reproStartupBodyDefect.msg)
             finally:
               endProviderStartupBody()
               clearCurrentOwningPackageOverride()

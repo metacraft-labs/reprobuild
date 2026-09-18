@@ -131,6 +131,35 @@ const
   OidTcgPlatformCertificate* = "2.23.133.8.2"
   OidTcgAikCertificate* = "2.23.133.8.3"
 
+  MaxEcdsaScalarLen* = 32
+    ## A P-256 scalar. ``ecdsaSigValueDer`` refuses anything wider rather
+    ## than truncating it: a truncated scalar still verifies against
+    ## *something*, and that something is a signature nobody made. A
+    ## ``TPMT_SIGNATURE`` may carry a 128-byte ECC parameter, so wider
+    ## values do arrive through the codec intact.
+
+  DerShortFormLengthCeiling* = 127
+    ## The largest length DER writes in the short form. 128 and above need
+    ## the long form, which ``ecdsaSigValueDer`` does not implement.
+
+  WorstCaseSigValueBodyLen* =
+    2 * (2 + 1 + MaxEcdsaScalarLen)
+    ## The longest ``ECDSA-Sig-Value`` body the scalar bound admits: two
+    ## INTEGERs, each a tag byte, a length byte, a possible ``0x00`` pad
+    ## and the scalar itself.
+    ##
+    ## Exported because it is the load-bearing half of a rule that has no
+    ## other expression in the code: ``ecdsaSigValueDer`` writes its
+    ## SEQUENCE length in the short form unconditionally, and that is
+    ## correct only while this stays at or under
+    ## ``DerShortFormLengthCeiling``. 60 is the largest scalar width that
+    ## still fits (body 126); ``MaxEcdsaScalarLen = 61`` is already the
+    ## first failing value (body 128), at which the length byte silently
+    ## becomes a long-form INDICATOR instead of a length, producing DER
+    ## that is not the signature it was handed.
+    ## The gate asserts the inequality, so the widening edit fails loudly
+    ## rather than the encoder failing quietly.
+
   MaxCertificateBytes* = 16_384
   MaxCrlBytes* = 262_144
   MaxExtensions* = 32
@@ -168,8 +197,9 @@ type
 proc fail(msg: string) {.noreturn.} =
   raise newException(X509Error, msg)
 
-proc readTlv(buf: openArray[byte]; pos: var int; what: string): DerNode =
-  ## One TLV, in DER and not in BER.
+proc readTlv(buf: openArray[byte]; pos: var int; what: string;
+             limit: int): DerNode =
+  ## One TLV, in DER and not in BER, read inside an explicit parent bound.
   ##
   ## The two refusals worth naming: the indefinite form (``0x80``) has no
   ## place in DER at all, and a long form that could have been short —
@@ -177,12 +207,29 @@ proc readTlv(buf: openArray[byte]; pos: var int; what: string): DerNode =
   ## same certificate. Two spellings of one certificate is two serial
   ## numbers for one revocation check, so both are refused here rather
   ## than normalised away.
+  ##
+  ## ``limit`` is the index one past the end of the structure this TLV
+  ## sits INSIDE — the parent's ``fin``, or ``buf.len`` at the top level.
+  ## It is a required parameter rather than one defaulting to ``buf.len``
+  ## on purpose: a default is a rule the call sites can silently decline
+  ## to apply, and a bound applied at some nesting levels and not others
+  ## is not a bound. Without it a nested TLV is bounded only by the whole
+  ## certificate, so an extension that declares a length reaching past the
+  ## end of the extensions SEQUENCE is READ rather than refused, and every
+  ## sibling after it is skipped while the parse still reports success.
+  ## Nothing is forged by that today — the bytes are inside the signed TBS
+  ## — but a reader that skips half a certificate's constraints and calls
+  ## it a complete parse is not the strict reader this module claims to be.
   if pos >= buf.len:
     fail(what & ": the encoding ends where a tag was expected")
+  if pos >= limit:
+    fail(what & ": the enclosing structure ends where a tag was expected")
   result.tag = buf[pos]
   inc pos
   if pos >= buf.len:
     fail(what & ": the encoding ends where a length was expected")
+  if pos >= limit:
+    fail(what & ": the enclosing structure ends where a length was expected")
   let first = buf[pos]
   inc pos
   if first == 0x80'u8:
@@ -196,6 +243,22 @@ proc readTlv(buf: openArray[byte]; pos: var int; what: string): DerNode =
         " bytes; this reader reads at most four")
     if pos + n > buf.len:
       fail(what & ": the encoding ends inside a long-form length")
+    if pos + n > limit:
+      # The parent bound has to reach the length's CONTINUATION bytes, not
+      # only its tag, its first length byte and its content end. Bounded by
+      # ``buf.len`` alone, a TLV whose continuation bytes lie past its
+      # parent's end reads the NEXT structure's bytes as its own length —
+      # and then reports on them. Measured on a truncated extension: a
+      # trailing ``0x04 0x82`` produced "declares 12303 content bytes", and
+      # ``0x04 0x81`` produced "the length 48 is written in the long form,
+      # and DER requires the short one". Both numbers are the following
+      # extension's bytes, and the second accuses this extension of a
+      # minimal-encoding violation it did not commit. Nothing is forged by
+      # it — the content-end checks below still refuse — but a reader that
+      # misnames which rule was broken is not the strict reader this module
+      # claims to be, and a misdiagnosis is what the whole parent bound
+      # exists to prevent.
+      fail(what & ": the enclosing structure ends inside a long-form length")
     var value = 0
     for i in 0 ..< n:
       value = (value shl 8) or int(buf[pos + i])
@@ -211,6 +274,11 @@ proc readTlv(buf: openArray[byte]; pos: var int; what: string): DerNode =
     fail(what & ": declares " & $result.contentLen &
       " content bytes and only " & $(buf.len - result.contentStart) &
       " remain")
+  if result.contentStart + result.contentLen > limit:
+    fail(what & ": declares " & $result.contentLen &
+      " content bytes, which reach " &
+      $(result.contentStart + result.contentLen - limit) &
+      " bytes past the end of the structure that contains it")
   result.fin = result.contentStart + result.contentLen
   pos = result.fin
 
@@ -318,23 +386,23 @@ proc commonNameOf(buf: openArray[byte]; dnStart, dnEnd: int): string =
   ## a name compares the DER Name bytes, because two distinct Names can
   ## share a CN.
   var pos = dnStart
-  let outer = readTlv(buf, pos, "Name")
+  let outer = readTlv(buf, pos, "Name", dnEnd)
   if outer.tag != TagSequence: return ""
   var rdnPos = outer.contentStart
   while rdnPos < outer.fin and rdnPos < dnEnd:
-    let rdn = readTlv(buf, rdnPos, "RelativeDistinguishedName")
+    let rdn = readTlv(buf, rdnPos, "RelativeDistinguishedName", outer.fin)
     if rdn.tag != TagSet: continue
     var atvPos = rdn.contentStart
     while atvPos < rdn.fin:
-      let atv = readTlv(buf, atvPos, "AttributeTypeAndValue")
+      let atv = readTlv(buf, atvPos, "AttributeTypeAndValue", rdn.fin)
       if atv.tag != TagSequence: continue
       var p = atv.contentStart
-      let oidNode = readTlv(buf, p, "attribute type")
+      let oidNode = readTlv(buf, p, "attribute type", atv.fin)
       if oidNode.tag != TagOid: continue
       if oidToString(buf, oidNode, "attribute type") != OidCommonName:
         continue
       if p >= atv.fin: continue
-      let valueNode = readTlv(buf, p, "attribute value")
+      let valueNode = readTlv(buf, p, "attribute value", atv.fin)
       if valueNode.tag notin {TagUtf8String, TagPrintableString}: continue
       var s = ""
       for i in 0 ..< valueNode.contentLen:
@@ -346,7 +414,7 @@ proc readAlgorithmEcdsaSha256(buf: openArray[byte]; node: DerNode;
                               what: string) =
   expectTag(node, TagSequence, what)
   var p = node.contentStart
-  let oidNode = readTlv(buf, p, what & " algorithm")
+  let oidNode = readTlv(buf, p, what & " algorithm", node.fin)
   expectTag(oidNode, TagOid, what & " algorithm")
   let oid = oidToString(buf, oidNode, what & " algorithm")
   if oid != OidEcdsaWithSha256:
@@ -371,24 +439,24 @@ proc readSpki(buf: openArray[byte]; node: DerNode;
               key: var array[P256PointLen, byte]) =
   expectTag(node, TagSequence, "SubjectPublicKeyInfo")
   var p = node.contentStart
-  let algNode = readTlv(buf, p, "SubjectPublicKeyInfo algorithm")
+  let algNode = readTlv(buf, p, "SubjectPublicKeyInfo algorithm", node.fin)
   expectTag(algNode, TagSequence, "SubjectPublicKeyInfo algorithm")
   var ap = algNode.contentStart
-  let algOidNode = readTlv(buf, ap, "public key algorithm")
+  let algOidNode = readTlv(buf, ap, "public key algorithm", algNode.fin)
   let algOid = oidToString(buf, algOidNode, "public key algorithm")
   if algOid != OidEcPublicKey:
     fail("SubjectPublicKeyInfo: the key algorithm is " & algOid &
       " and this build reads only id-ecPublicKey (" & OidEcPublicKey & ")")
   if ap >= algNode.fin:
     fail("SubjectPublicKeyInfo: id-ecPublicKey with no named curve")
-  let curveNode = readTlv(buf, ap, "named curve")
+  let curveNode = readTlv(buf, ap, "named curve", algNode.fin)
   let curveOid = oidToString(buf, curveNode, "named curve")
   if curveOid != OidPrime256v1:
     fail("SubjectPublicKeyInfo: the named curve is " & curveOid &
       " and this build reads only prime256v1 (" & OidPrime256v1 & ")")
   if ap != algNode.fin:
     fail("SubjectPublicKeyInfo: bytes follow the named curve")
-  let bitNode = readTlv(buf, p, "subjectPublicKey")
+  let bitNode = readTlv(buf, p, "subjectPublicKey", node.fin)
   expectTag(bitNode, TagBitString, "subjectPublicKey")
   if bitNode.contentLen != P256PointLen + 1:
     fail("SubjectPublicKeyInfo: the public key is " &
@@ -409,17 +477,17 @@ proc readExtensions(buf: openArray[byte]; node: DerNode;
   ## The ``[3] EXPLICIT Extensions`` block, recorded rather than judged.
   expectTag(node, TagContext3, "extensions")
   var p = node.contentStart
-  let listNode = readTlv(buf, p, "extensions")
+  let listNode = readTlv(buf, p, "extensions", node.fin)
   expectTag(listNode, TagSequence, "extensions")
   if p != node.fin:
     fail("extensions: bytes follow the extension list")
   var seen: seq[string] = @[]
   var extPos = listNode.contentStart
   while extPos < listNode.fin:
-    let extNode = readTlv(buf, extPos, "extension")
+    let extNode = readTlv(buf, extPos, "extension", listNode.fin)
     expectTag(extNode, TagSequence, "extension")
     var q = extNode.contentStart
-    let oidNode = readTlv(buf, q, "extension identifier")
+    let oidNode = readTlv(buf, q, "extension identifier", extNode.fin)
     expectTag(oidNode, TagOid, "extension identifier")
     var ext = X509Extension(oid: oidToString(buf, oidNode,
       "extension identifier"))
@@ -431,7 +499,7 @@ proc readExtensions(buf: openArray[byte]; node: DerNode;
     if cert.extensions.len >= MaxExtensions:
       fail("extensions: more than " & $MaxExtensions & " are carried")
     if q < extNode.fin and buf[q] == TagBoolean:
-      let critNode = readTlv(buf, q, "extension criticality")
+      let critNode = readTlv(buf, q, "extension criticality", extNode.fin)
       if critNode.contentLen != 1:
         fail("extensions: the criticality of " & ext.oid & " is not one byte")
       let raw = buf[critNode.contentStart]
@@ -439,7 +507,7 @@ proc readExtensions(buf: openArray[byte]; node: DerNode;
         fail("extensions: the criticality of " & ext.oid & " is 0x" &
           toHex(int(raw), 2) & "; DER writes TRUE as 0xFF and omits FALSE")
       ext.critical = true
-    let valueNode = readTlv(buf, q, "extension value")
+    let valueNode = readTlv(buf, q, "extension value", extNode.fin)
     expectTag(valueNode, TagOctetString, "extension value")
     if q != extNode.fin:
       fail("extensions: bytes follow the value of " & ext.oid)
@@ -450,19 +518,19 @@ proc readExtensions(buf: openArray[byte]; node: DerNode;
     if ext.oid == OidBasicConstraints:
       cert.hasBasicConstraints = true
       var p2 = 0
-      let bc = readTlv(ext.value, p2, "basicConstraints")
+      let bc = readTlv(ext.value, p2, "basicConstraints", ext.value.len)
       expectTag(bc, TagSequence, "basicConstraints")
       if bc.contentLen > 0:
         var q2 = bc.contentStart
         if ext.value[q2] == TagBoolean:
-          let b = readTlv(ext.value, q2, "basicConstraints cA")
+          let b = readTlv(ext.value, q2, "basicConstraints cA", bc.fin)
           if b.contentLen != 1:
             fail("basicConstraints: cA is not one byte")
           cert.isCa = ext.value[b.contentStart] != 0
     elif ext.oid == OidKeyUsage:
       cert.hasKeyUsage = true
       var p2 = 0
-      let ku = readTlv(ext.value, p2, "keyUsage")
+      let ku = readTlv(ext.value, p2, "keyUsage", ext.value.len)
       expectTag(ku, TagBitString, "keyUsage")
       if ku.contentLen < 1:
         fail("keyUsage: an empty BIT STRING")
@@ -478,20 +546,20 @@ proc readExtensions(buf: openArray[byte]; node: DerNode;
     elif ext.oid == OidExtKeyUsage:
       cert.hasExtKeyUsage = true
       var p2 = 0
-      let eku = readTlv(ext.value, p2, "extKeyUsage")
+      let eku = readTlv(ext.value, p2, "extKeyUsage", ext.value.len)
       expectTag(eku, TagSequence, "extKeyUsage")
       var q2 = eku.contentStart
       while q2 < eku.fin:
-        let o = readTlv(ext.value, q2, "extKeyUsage purpose")
+        let o = readTlv(ext.value, q2, "extKeyUsage purpose", eku.fin)
         expectTag(o, TagOid, "extKeyUsage purpose")
         cert.extKeyUsage.add oidToString(ext.value, o, "extKeyUsage purpose")
     elif ext.oid == OidSubjectAltName:
       var p2 = 0
-      let san = readTlv(ext.value, p2, "subjectAltName")
+      let san = readTlv(ext.value, p2, "subjectAltName", ext.value.len)
       expectTag(san, TagSequence, "subjectAltName")
       var q2 = san.contentStart
       while q2 < san.fin:
-        let g = readTlv(ext.value, q2, "GeneralName")
+        let g = readTlv(ext.value, q2, "GeneralName", san.fin)
         if g.tag == TagSanDnsName or g.tag == TagIa5String:
           var s = ""
           for i in 0 ..< g.contentLen:
@@ -507,28 +575,28 @@ proc parseCertificate*(der: openArray[byte]): X509Cert =
       $MaxCertificateBytes & " are read")
   result.der = slice(der, 0, der.len)
   var pos = 0
-  let outer = readTlv(der, pos, "certificate")
+  let outer = readTlv(der, pos, "certificate", der.len)
   expectTag(outer, TagSequence, "certificate")
   if pos != der.len:
     fail("certificate: " & $(der.len - pos) &
       " bytes follow the outer SEQUENCE")
   var p = outer.contentStart
   let tbsStart = p
-  let tbsNode = readTlv(der, p, "tbsCertificate")
+  let tbsNode = readTlv(der, p, "tbsCertificate", outer.fin)
   expectTag(tbsNode, TagSequence, "tbsCertificate")
   result.tbs = slice(der, tbsStart, tbsNode.fin)
-  let algNode = readTlv(der, p, "certificate")
+  let algNode = readTlv(der, p, "certificate", outer.fin)
   readAlgorithmEcdsaSha256(der, algNode, "certificate")
-  let sigNode = readTlv(der, p, "certificate")
+  let sigNode = readTlv(der, p, "certificate", outer.fin)
   result.signature = readSignatureBits(der, sigNode, "certificate")
   if p != outer.fin:
     fail("certificate: bytes follow the signature")
 
   var t = tbsNode.contentStart
   if t < tbsNode.fin and der[t] == TagContext0:
-    let vNode = readTlv(der, t, "version")
+    let vNode = readTlv(der, t, "version", tbsNode.fin)
     var vp = vNode.contentStart
-    let vInt = readTlv(der, vp, "version")
+    let vInt = readTlv(der, vp, "version", vNode.fin)
     expectTag(vInt, TagInteger, "version")
     if vInt.contentLen != 1 or der[vInt.contentStart] != 2'u8:
       fail("tbsCertificate: the version is not v3; an extension block " &
@@ -539,7 +607,7 @@ proc parseCertificate*(der: openArray[byte]): X509Cert =
   else:
     fail("tbsCertificate: no version is present, so this is a v1 " &
       "certificate; this build reads v3 only")
-  let serialNode = readTlv(der, t, "serialNumber")
+  let serialNode = readTlv(der, t, "serialNumber", tbsNode.fin)
   expectTag(serialNode, TagInteger, "serialNumber")
   if serialNode.contentLen == 0 or serialNode.contentLen > 20:
     fail("tbsCertificate: the serial number is " & $serialNode.contentLen &
@@ -548,19 +616,19 @@ proc parseCertificate*(der: openArray[byte]): X509Cert =
   for i in 0 ..< serialNode.contentLen:
     result.serialHex.add toHex(int(der[serialNode.contentStart + i]), 2)
   result.serialHex = result.serialHex.toLowerAscii
-  let innerAlgNode = readTlv(der, t, "tbsCertificate")
+  let innerAlgNode = readTlv(der, t, "tbsCertificate", tbsNode.fin)
   readAlgorithmEcdsaSha256(der, innerAlgNode, "tbsCertificate")
   let issuerStart = t
-  let issuerNode = readTlv(der, t, "issuer")
+  let issuerNode = readTlv(der, t, "issuer", tbsNode.fin)
   expectTag(issuerNode, TagSequence, "issuer")
   result.issuerDn = slice(der, issuerStart, issuerNode.fin)
   result.issuerCn = commonNameOf(der, issuerStart, issuerNode.fin)
-  let validityNode = readTlv(der, t, "validity")
+  let validityNode = readTlv(der, t, "validity", tbsNode.fin)
   expectTag(validityNode, TagSequence, "validity")
   var vp2 = validityNode.contentStart
-  let nbNode = readTlv(der, vp2, "notBefore")
+  let nbNode = readTlv(der, vp2, "notBefore", validityNode.fin)
   result.notBefore = parseDerTime(der, nbNode, "notBefore")
-  let naNode = readTlv(der, vp2, "notAfter")
+  let naNode = readTlv(der, vp2, "notAfter", validityNode.fin)
   result.notAfter = parseDerTime(der, naNode, "notAfter")
   if vp2 != validityNode.fin:
     fail("validity: bytes follow notAfter")
@@ -568,17 +636,17 @@ proc parseCertificate*(der: openArray[byte]): X509Cert =
     fail("validity: notAfter is not after notBefore, so this certificate " &
       "is valid at no instant at all")
   let subjectStart = t
-  let subjectNode = readTlv(der, t, "subject")
+  let subjectNode = readTlv(der, t, "subject", tbsNode.fin)
   expectTag(subjectNode, TagSequence, "subject")
   result.subjectDn = slice(der, subjectStart, subjectNode.fin)
   result.subjectCn = commonNameOf(der, subjectStart, subjectNode.fin)
-  let spkiNode = readTlv(der, t, "subjectPublicKeyInfo")
+  let spkiNode = readTlv(der, t, "subjectPublicKeyInfo", tbsNode.fin)
   readSpki(der, spkiNode, result.publicKey)
   if t >= tbsNode.fin:
     fail("tbsCertificate: a v3 certificate with no extension block; " &
       "every certificate in an attestation chain states what it may be " &
       "used for, and one that states nothing constrains nothing")
-  let extNode = readTlv(der, t, "extensions")
+  let extNode = readTlv(der, t, "extensions", tbsNode.fin)
   readExtensions(der, extNode, result)
   if t != tbsNode.fin:
     fail("tbsCertificate: " & $(tbsNode.fin - t) &
@@ -593,61 +661,61 @@ proc parseCrl*(der: openArray[byte]): X509Crl =
       " are read")
   result.der = slice(der, 0, der.len)
   var pos = 0
-  let outer = readTlv(der, pos, "revocation list")
+  let outer = readTlv(der, pos, "revocation list", der.len)
   expectTag(outer, TagSequence, "revocation list")
   if pos != der.len:
     fail("revocation list: bytes follow the outer SEQUENCE")
   var p = outer.contentStart
   let tbsStart = p
-  let tbsNode = readTlv(der, p, "tbsCertList")
+  let tbsNode = readTlv(der, p, "tbsCertList", outer.fin)
   expectTag(tbsNode, TagSequence, "tbsCertList")
   result.tbs = slice(der, tbsStart, tbsNode.fin)
-  let algNode = readTlv(der, p, "revocation list")
+  let algNode = readTlv(der, p, "revocation list", outer.fin)
   readAlgorithmEcdsaSha256(der, algNode, "revocation list")
-  let sigNode = readTlv(der, p, "revocation list")
+  let sigNode = readTlv(der, p, "revocation list", outer.fin)
   result.signature = readSignatureBits(der, sigNode, "revocation list")
   if p != outer.fin:
     fail("revocation list: bytes follow the signature")
 
   var t = tbsNode.contentStart
-  let vNode = readTlv(der, t, "tbsCertList version")
+  let vNode = readTlv(der, t, "tbsCertList version", tbsNode.fin)
   expectTag(vNode, TagInteger, "tbsCertList version")
   if vNode.contentLen != 1 or der[vNode.contentStart] != 1'u8:
     fail("tbsCertList: the version is not v2, and a v1 list carries no " &
       "extensions and no way to say which issuer it speaks for")
-  let innerAlg = readTlv(der, t, "tbsCertList")
+  let innerAlg = readTlv(der, t, "tbsCertList", tbsNode.fin)
   readAlgorithmEcdsaSha256(der, innerAlg, "tbsCertList")
   let issuerStart = t
-  let issuerNode = readTlv(der, t, "tbsCertList issuer")
+  let issuerNode = readTlv(der, t, "tbsCertList issuer", tbsNode.fin)
   expectTag(issuerNode, TagSequence, "tbsCertList issuer")
   result.issuerDn = slice(der, issuerStart, issuerNode.fin)
   result.issuerCn = commonNameOf(der, issuerStart, issuerNode.fin)
-  let thisNode = readTlv(der, t, "thisUpdate")
+  let thisNode = readTlv(der, t, "thisUpdate", tbsNode.fin)
   result.thisUpdate = parseDerTime(der, thisNode, "thisUpdate")
   if t < tbsNode.fin and der[t] in {TagUtcTime, TagGeneralizedTime}:
-    let nextNode = readTlv(der, t, "nextUpdate")
+    let nextNode = readTlv(der, t, "nextUpdate", tbsNode.fin)
     result.nextUpdate = parseDerTime(der, nextNode, "nextUpdate")
     result.hasNextUpdate = true
   if t < tbsNode.fin and der[t] == TagSequence:
-    let listNode = readTlv(der, t, "revokedCertificates")
+    let listNode = readTlv(der, t, "revokedCertificates", tbsNode.fin)
     var q = listNode.contentStart
     while q < listNode.fin:
-      let entry = readTlv(der, q, "revoked entry")
+      let entry = readTlv(der, q, "revoked entry", listNode.fin)
       expectTag(entry, TagSequence, "revoked entry")
       var e = entry.contentStart
-      let serialNode = readTlv(der, e, "revoked serialNumber")
+      let serialNode = readTlv(der, e, "revoked serialNumber", entry.fin)
       expectTag(serialNode, TagInteger, "revoked serialNumber")
       var hex = ""
       for i in 0 ..< serialNode.contentLen:
         hex.add toHex(int(der[serialNode.contentStart + i]), 2)
-      let dateNode = readTlv(der, e, "revocationDate")
+      let dateNode = readTlv(der, e, "revocationDate", entry.fin)
       if result.revoked.len >= MaxRevokedEntries:
         fail("revocation list: more than " & $MaxRevokedEntries & " entries")
       result.revoked.add X509RevokedEntry(
         serialHex: hex.toLowerAscii,
         revokedAt: parseDerTime(der, dateNode, "revocationDate"))
   if t < tbsNode.fin and der[t] == TagContext0:
-    discard readTlv(der, t, "crlExtensions")
+    discard readTlv(der, t, "crlExtensions", tbsNode.fin)
   if t != tbsNode.fin:
     fail("tbsCertList: " & $(tbsNode.fin - t) & " bytes follow the list")
 
@@ -732,17 +800,29 @@ proc ecdsaSigValueDer*(r, s: openArray[byte]): seq[byte] =
   ## Refuses a scalar wider than a P-256 one rather than truncating it:
   ## a truncated scalar still verifies against *something*, and that
   ## something would be a signature nobody made.
-  if r.len == 0 or s.len == 0 or r.len > 32 or s.len > 32:
+  ##
+  ## ## Why there is no long-form length branch here
+  ##
+  ## There was one, and it could not fire. ``MaxEcdsaScalarLen`` caps each
+  ## scalar, so the body is at most
+  ## ``DerShortFormLengthCeiling``-worth of bytes and the short form below
+  ## always fits — the branch was dead code carrying a comment saying so,
+  ## which is the shape this reader is being cleaned of rather than a
+  ## defence.
+  ##
+  ## It was kept "for the caller who one day widens the scalar bound", and
+  ## that caller is now served better. A runtime branch would have handed
+  ## them an empty result — indistinguishable from "this is not a
+  ## signature" — for a signature that is fine and an encoder that is not.
+  ## What replaces it is ``WorstCaseSigValueBodyLen``, an exported
+  ## arithmetic consequence of the bound, asserted against the DER ceiling
+  ## by a gate. Widen the bound and that assertion fails, by name, saying
+  ## which of the two rules the edit forgot.
+  if r.len == 0 or s.len == 0 or
+     r.len > MaxEcdsaScalarLen or s.len > MaxEcdsaScalarLen:
     return @[]
   var body = derUnsignedInteger(r)
   for b in derUnsignedInteger(s): body.add b
-  # NOTHING CAN REACH THIS TODAY and it is kept anyway. The bound above
-  # caps each scalar at 32 bytes, so the body is at most 2 * (2 + 33) =
-  # 70 and the short-form length below always fits. It is here for the
-  # caller that one day widens the scalar bound and does not think about
-  # the length encoding — which is a likelier edit than it sounds, since
-  # the two rules are three lines apart and only one of them is obvious.
-  if body.len > 127: return @[]
   result = @[0x30'u8, byte(body.len)]
   for b in body: result.add b
 

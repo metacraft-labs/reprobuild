@@ -4,6 +4,7 @@ import std/[json, os, osproc, strutils, tables, tempfiles, unittest]
 
 import repro_binary_cache_client/cache_key
 import repro_project_dsl/source_cache_identity
+import repro_provider_runtime
 
 const FixtureDir = currentSourcePath().parentDir.parentDir /
   "fixtures" / "l3-build-block-publish"
@@ -44,6 +45,40 @@ suite "provider-mode public-interface cache identity":
     for name in ["optedOutTool", "internalHelper"]:
       check not rows[name]["publish"].getBool()
       check rows[name]["keyHex"].getStr() == ""
+
+  test "the STARTUP pass tags nothing, and reports no failure for doing so":
+    ## `maybeTagPublicInterface` runs twice per provider binary: once
+    ## during the DSL's startup pass over every `build:` body, and again
+    ## for the real invocation. The first has no project root, and the
+    ## identity constructor refuses one — correctly, since an identity
+    ## derived from an absent root is a cache key that carries no recipe.
+    ##
+    ## There is no skip, and this comment used to say there was one. What
+    ## this case actually measures is that the startup pass never reaches
+    ## the identity constructor for a public-interface recipe, so the
+    ## refusal does not turn the pass into a reported package failure.
+    ##
+    ## The assertion has to be an ABSENCE for that reason: if the pass DID
+    ## reach the constructor, it would raise, the startup-pass containment
+    ## would catch it, and every assertion in the case above would still
+    ## hold — the runner would report a broken recipe and the gate would be
+    ## green anyway. What a contained failure leaves behind is a line, so
+    ## the line is what is asserted, paired with the positive control below
+    ## so the absence is an absence of failures rather than of output.
+    ##
+    ## There is nothing to tag during the pass in any event: the pass
+    ## registers nothing that survives, because `buildPackageFragment`
+    ## resets the action registry before the real invocation rebuilds it —
+    ## which is why the rows above are unaffected.
+    let root = createTempDir("nim-public-interface-startup-", "")
+    defer: removeDir(root)
+    let ran = execCmdEx(quoteShellCommand(@[compileRunner(root), FixtureDir]))
+    check ran.exitCode == 0
+    checkpoint(ran.output)
+    check ProviderStartupBodyFailurePrefix notin ran.output
+    # The negative control: the runner really did do its work, so the
+    # absence above is an absence of failures and not an absence of output.
+    check ran.output.contains("publicTool")
 
   test "implementation edits cannot alias under an unchanged entry recipe":
     let root = createTempDir("nim-implementation-identity-", "")
