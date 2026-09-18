@@ -351,14 +351,15 @@ proc executableCandidate(dir, name, workingDirectory: string): string =
       dir
     else:
       workingDirectory / dir
+  when defined(windows):
+    if splitFile(name).ext.len == 0:
+      for ext in [".exe", ".cmd", ".bat"]:
+        let withExt = base / addFileExt(name, ext)
+        if fileExists(withExt):
+          return withExt
   let direct = base / name
   if fileExists(direct):
     return direct
-  when defined(windows):
-    if splitFile(name).ext.len == 0:
-      let withExe = base / addFileExt(name, ExeExt)
-      if fileExists(withExe):
-        return withExe
   ""
 
 proc resolveFromActivatedPath*(command: string; env: StringTableRef;

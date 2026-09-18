@@ -24,7 +24,7 @@
 ## Moving satisfies both: applying an op twice yields the same list, and the
 ## entry ends up where the op said it should.
 
-import std/[strtabs, strutils, unittest]
+import std/[os, strtabs, strutils, unittest]
 
 import repro_provider_runtime/types
 import repro_dev_env_activation
@@ -88,3 +88,14 @@ suite "dev-env path ops":
       check apply("C:/VS/bin/HostX64/x64;b",
         prepend("P", "C:/VS/bin/Hostx64/x64")) ==
         "C:/VS/bin/Hostx64/x64;b"
+
+    test "resolveFromActivatedPath prefers Windows executable extensions over extensionless files":
+      let tmpDir = getTempDir() / "repro_test_exe_res_" & $getCurrentProcessId()
+      createDir(tmpDir)
+      defer: removeDir(tmpDir)
+      writeFile(tmpDir / "mytool", "#!/bin/sh\necho posix\n")
+      writeFile(tmpDir / "mytool.cmd", "@echo off\necho win\n")
+      let env = newStringTable(modeCaseInsensitive)
+      env["PATH"] = tmpDir
+      let resolved = resolveFromActivatedPath("mytool", env, "")
+      check resolved == (tmpDir / "mytool.cmd")

@@ -230,8 +230,13 @@
 ##     ``startUserDaemon``'s staleness restart exists to prevent. Narrowing it
 ##     properly means parsing those enums, which means linking the engine.
 
-import std/[json, os, posix, strutils, times]
+import std/[json, os, strutils, terminal, times]
+when defined(windows):
+  import std/osproc
+else:
+  import std/posix
 
+import repro_core/ambient_execution
 import repro_core/cli_images
 import repro_daemon_core
 
@@ -319,10 +324,14 @@ proc resolveFullCli(): string =
   ""
 
 proc handOver(fullCli: string; args: seq[string]) {.noreturn.} =
-  ## Replace this process with the engine image. ``execv`` rather than spawn:
-  ## the caller's pid, its terminal, its signal disposition and its exit
-  ## status must all belong to the process that does the work, and a wrapper
-  ## that waited would re-add the spawn cost this binary exists to remove.
+  ## Replace this process with the engine image. On POSIX, ``execv`` rather
+  ## than spawn: the caller's pid, its terminal, its signal disposition and
+  ## its exit status all belong to the process that does the work.
+  ##
+  ## On Windows there is no kernel ``execv`` — the C runtime's ``_execv``
+  ## creates a child process asynchronously and immediately calls ``exit(0)``,
+  ## which orphans the child and causes waiting callers (shells, CI runners)
+  ## to see premature 0 exit codes. On Windows we must spawn and wait.
   if fullCli.len == 0:
     stderr.writeLine("repro: no " & ReprobuildEngineName &
       " image to fall back to (set " & FullCliEnvVar & ", or install " &
@@ -330,14 +339,27 @@ proc handOver(fullCli: string; args: seq[string]) {.noreturn.} =
     quit(ExitExecFailed)
   stdout.flushFile()
   stderr.flushFile()
-  var argv = @[fullCli]
-  argv.add(args)
-  var cargs = allocCStringArray(argv)
-  discard execv(cstring(fullCli), cargs)
-  deallocCStringArray(cargs)
-  stderr.writeLine("repro: cannot exec " & fullCli & ": " &
-    $strerror(errno))
-  quit(ExitExecFailed)
+  when defined(windows):
+    var code = 1
+    try:
+      var p = uncontrolledStartProcess(fullCli, args = args, options = {poParentStreams})
+      try:
+        code = p.waitForExit()
+      finally:
+        p.close()
+    except CatchableError as err:
+      stderr.writeLine("repro: cannot spawn " & fullCli & ": " & err.msg)
+      quit(ExitExecFailed)
+    quit(code)
+  else:
+    var argv = @[fullCli]
+    argv.add(args)
+    var cargs = allocCStringArray(argv)
+    discard execv(cstring(fullCli), cargs)
+    deallocCStringArray(cargs)
+    stderr.writeLine("repro: cannot exec " & fullCli & ": " &
+      $strerror(errno))
+    quit(ExitExecFailed)
 
 proc flagMatches(arg, name: string): bool =
   ## ``--flag`` and ``--flag=value``. The space form ``--flag value`` is
@@ -378,7 +400,7 @@ proc progressEnvIsExplicitlyQuiet(): bool =
   isQuietValue(getEnv("REPROBUILD_PROGRESS", ""))
 
 proc stderrIsTerminal(): bool =
-  isatty(cint(2)) == 1
+  terminal.isatty(stderr)
 
 proc shouldRouteToDaemon(args: seq[string]): bool =
   ## ``args`` is the full argv after the program name.
