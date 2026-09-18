@@ -99,17 +99,13 @@ proc requireEnvName(name: string) =
 # RBDE artifact -> ExportPlan
 # ---------------------------------------------------------------------
 
-proc shellOpsToExportPlan*(ops: openArray[DevEnvShellOp]): ExportPlan =
-  ## Convert shell ops to export ops.
-  ##
-  ## Split out of ``devEnvArtifactToExportPlan`` so ops that are NOT in
-  ## the artifact can go through the identical conversion. The realized
-  ## toolchain is the case: it is computed from the project interface at
-  ## activation time rather than baked into the RBDE artifact, and the
-  ## export arm has to emit it through the same path the artifact's own
-  ## ops take, or the two would render differently.
+proc devEnvArtifactToExportPlan*(artifactPath: string): ExportPlan =
+  ## Read the RBDE artifact, convert every shellOp to an ExportOp.
+  ## The trailing ``opMarker`` for ``__REPRO_APPLIED`` is appended by
+  ## the dispatch arm (which knows the fingerprint), not here.
+  let artifact = readDevEnvArtifact(artifactPath)
   result = @[]
-  for op in ops:
+  for op in artifact.shellOps:
     let sep =
       if op.separator.len > 0: op.separator
       else: $PathSep
@@ -134,12 +130,6 @@ proc shellOpsToExportPlan*(ops: openArray[DevEnvShellOp]): ExportPlan =
 # ---------------------------------------------------------------------
 # Per-shell quoting helpers (pure)
 # ---------------------------------------------------------------------
-
-proc devEnvArtifactToExportPlan*(artifactPath: string): ExportPlan =
-  ## Read the RBDE artifact, convert every shellOp to an ExportOp.
-  ## The trailing ``opMarker`` for ``__REPRO_APPLIED`` is appended by
-  ## the dispatch arm (which knows the fingerprint), not here.
-  shellOpsToExportPlan(readDevEnvArtifact(artifactPath).shellOps)
 
 proc bashQuote(value: string): string =
   ## POSIX single-quote with the classic ``'\\''`` escape for embedded
