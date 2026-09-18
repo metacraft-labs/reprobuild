@@ -646,6 +646,39 @@ template withToolProvisioningVocabulary*(body: untyped): untyped =
       fromSource {.inject, used.} = "from-source"
     body
 
+func usesSelectorOf*(constraint: string): string =
+  ## First token of a dependency constraint ("git >=2" -> "git").
+  ##
+  ## TOTAL by construction -- no `raise`, no `doAssert`, empty input gives "".
+  ## It is reachable from a staged expression bound to a `static` parameter,
+  ## where an unhandled exception would be swallowed and the wrong value
+  ## accepted rather than failing the compile.
+  let parts = constraint.strip().splitWhitespace()
+  if parts.len == 0: "" else: parts[0]
+
+func packageUseEntry*(constraint: string; policyPath: seq[string];
+                      sourceFile: string; sourceLine: int;
+                      gateVariant, gateValue, depKind: string): PackageUseDef =
+  ## Build one dependency entry from a constraint known only at compile time.
+  ##
+  ## The lowering bakes literals directly, but an entry written as a `const`
+  ## or any other expression has no string for the macro to read -- the
+  ## compiler produces it. This is the seam where such an entry becomes a
+  ## record, and like the above it must stay total.
+  PackageUseDef(
+    rawConstraint: constraint,
+    packageSelector: usesSelectorOf(constraint),
+    executableName: usesSelectorOf(constraint),
+    policyPath: policyPath,
+    sourceFile: sourceFile,
+    sourceLine: sourceLine,
+    gateVariant: gateVariant,
+    gateValue: gateValue,
+    depKind: depKind)
+
+const NoPackageUses*: seq[PackageUseDef] = @[]
+  ## Stage-1 default for a package that declares no dependency block.
+
 const NoToolProvisioning* = ""
   ## Stage-1 default for a package that declares no `defaultToolProvisioning`.
   ## Distinct from every valid mode, so stage 2 can tell "not declared" from

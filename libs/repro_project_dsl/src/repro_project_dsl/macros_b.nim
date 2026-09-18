@@ -3822,6 +3822,40 @@ macro package*(name: untyped; body: untyped): untyped =
   ## therefore still holds the author's original nodes and can point
   ## ``error(msg, node)`` at the right line — the diagnostics regression
   ## usually assumed to be the price of staging is not one.
+  # Dependency blocks are lowered into ONE expression yielding every entry,
+  # tagged by `depKind` so stage 2 can route each back to its own list. The
+  # `when`s inside them ride along with their conditions untouched, so the
+  # compiler -- not this macro -- decides which entries a host contributes.
+  #
+  # One combined parameter rather than four: the four blocks differ only by
+  # the tag already on every entry, and a single list keeps the order they
+  # were written in, which the lists downstream rely on.
+  let usesAccum = genSym(nskVar, "reproAllUses")
+  let usesStmts = newNimNode(nnkStmtList)
+  usesStmts.add(nnkVarSection.newTree(nnkIdentDefs.newTree(
+    usesAccum,
+    nnkBracketExpr.newTree(bindSym"seq", bindSym"PackageUseDef"),
+    newCall(ident("@"), newNimNode(nnkBracket)))))
+  var sawUsesBlock = false
+  for stmt in body:
+    let head = calleeName(stmt).normalize
+    let depKind =
+      case head
+      of "uses", "builddeps": DepKindTarget
+      of "nativebuilddeps": DepKindNative
+      of "runtimedeps": DepKindRuntime
+      else: ""
+    if depKind.len == 0:
+      continue
+    for i in 1 ..< stmt.len:
+      sawUsesBlock = true
+      usesStmts.add(newCall(nnkDotExpr.newTree(usesAccum, ident("add")),
+        lowerUsesBlock(stmt[i], depKind)))
+  usesStmts.add(usesAccum)
+  var usesExpr: NimNode =
+    if sawUsesBlock: nnkBlockStmt.newTree(newEmptyNode(), usesStmts)
+    else: bindSym"NoPackageUses"
+
   var provisioningExpr: NimNode = bindSym"NoToolProvisioning"
   var seenProvisioning = false
   var declaredExpr: NimNode = bindSym"NoPlatformConstraints"
@@ -3867,11 +3901,12 @@ macro package*(name: untyped; body: untyped): untyped =
   # bulk of the file and reads better after the entry point), and `bindSym`
   # resolves in the definition scope, where the name does not exist yet.
   return newCall(ident("packageImpl"), name, declaredExpr, provisioningExpr,
-    body)
+    usesExpr, body)
 
 macro packageImpl*(name: untyped;
                    resolvedPlatforms: static seq[PlatformConstraintDef];
                    resolvedToolProvisioning: static string;
+                   resolvedUses: static seq[PackageUseDef];
                    body: untyped): untyped =
   ## Top-level package declaration — STAGE 2.
   ##
@@ -3926,7 +3961,7 @@ macro packageImpl*(name: untyped;
   ##    ``finalizeVariants()`` call.
   let (sectionStmts, preservedStmts) = partitionPackageBody(body)
   let pkg = parsePackageDef(name, body, resolvedPlatforms,
-    resolvedToolProvisioning)
+    resolvedToolProvisioning, resolvedUses)
   let packageName = pkg.packageName
   # ── DSL-port M2: emit ``config:`` scalar registrations + ``versions:``
   # entries. The two emitters operate on the M1 ``sectionStmts``
