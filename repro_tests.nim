@@ -13815,6 +13815,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_export_plan_carries_tool_ops.nim",
+    binary: "build/test-bin/t_export_plan_carries_tool_ops",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_fribidi_dev_stub.nim",
     binary: "build/test-bin/t_fribidi_dev_stub",
     defines: @[],

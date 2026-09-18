@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1674,
+    "nimTestBinaries": 1675,
     "pureUnitConsolidationGroups": 49,
-    "pureUnitTests": 594,
+    "pureUnitTests": 595,
     "staticallyDetectedRuntimeCompilerFlowTests": 102,
-    "testEntries": 1685
+    "testEntries": 1686
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1093,7 +1093,7 @@
       "graph-fixture": 12,
       "integration": 787,
       "platform/destructive": 113,
-      "pure unit": 594,
+      "pure unit": 595,
       "unclassified": 179
     },
     "graphOwnedTestArtifacts": [
@@ -1242,9 +1242,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1674,
+    "nimTestBinaryCount": 1675,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1685
+    "testEntryCount": 1686
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -33320,6 +33320,24 @@
       "source": "tests/unit/t_every_tool_profile_is_sealed.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_export_plan_carries_tool_ops",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_provider_runtime"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_export_plan_carries_tool_ops.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

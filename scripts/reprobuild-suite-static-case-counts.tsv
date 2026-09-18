@@ -1542,6 +1542,7 @@ tests/unit/t_dev_env_cache_key_store_root.nim	nim	4
 tests/unit/t_dev_env_path_ops.nim	nim	9
 tests/unit/t_electron_builder_binaries.nim	nim	5
 tests/unit/t_every_tool_profile_is_sealed.nim	nim	6
+tests/unit/t_export_plan_carries_tool_ops.nim	nim	4
 tests/unit/t_fribidi_dev_stub.nim	nim	1
 tests/unit/t_from_source_cargo_recognition.nim	nim	8
 tests/unit/t_from_source_go_recognition.nim	nim	8
