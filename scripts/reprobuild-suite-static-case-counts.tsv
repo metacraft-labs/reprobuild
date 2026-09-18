@@ -457,7 +457,7 @@ libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim	nim	6
 libs/repro_project_dsl/tests/t_multi_package_macro.nim	nim	5
 libs/repro_project_dsl/tests/t_source_cache_identity.nim	nim	2
-libs/repro_project_dsl/tests/t_source_cache_identity_binds_complete_solved_instance.nim	nim	31
+libs/repro_project_dsl/tests/t_source_cache_identity_binds_complete_solved_instance.nim	nim	35
 libs/repro_project_dsl/tests/t_tool_identity_ref_kind_codec.nim	nim	2
 libs/repro_project_dsl/tests/test_depends_on_macro.nim	nim	3
 libs/repro_project_dsl/tests/test_library_macro.nim	nim	12

@@ -62,18 +62,75 @@
 ## what it reaches, would pass every "changes the identity" case while
 ## breaking relocation.
 ##
+## Three cases exist because EARLIER ROUNDS OF THIS WORK opened
+## fail-opens and this file did not catch them, so each names the
+## measurement rather than the intention.
+##
+##   * "a shadowing declaration that cannot bind the call does not hide
+##     a read". ``18e3f3b0`` ignored every unqualified occurrence of
+##     ``slurp`` / ``gorge`` / ``staticRead`` in a file that declared
+##     the name. Measured on ``proc slurp(n: int)`` plus a real
+##     ``slurp("payload.txt")``: the payload was ABSENT from the closure
+##     and the key did NOT move when the payload changed, where
+##     ``ca7864d0`` refused the same file. That is the #171 defect
+##     re-created inside the fix for it. The exclusion is now decided
+##     per CALL against the file's own overloads, and the three shapes
+##     of correct recipe the previous round un-refused stay keyable
+##     because each is safe under the same rule — verified against nim
+##     2.2.8, not assumed.
+##   * "a declaration the compiler does not apply does not hide a read".
+##     The per-CALL rule still asked the wrong question of the FILE: it
+##     recorded every declaration of the name at any indentation and
+##     applied it to every occurrence, while the compiler applies one
+##     only where it is in scope, textually before the call, and in a
+##     live ``when`` branch. Four shapes were COMPILED AND RUN against
+##     the real compiler and all four print the payload — the
+##     declaration placed after the call, nested inside another
+##     routine's body, under ``when false:``, and under a
+##     ``when defined(...)`` that is never set — yet each produced a
+##     64-hex key that did not move with the payload. A declaration now
+##     excludes a call only at column 0 and before it; one at indent > 0
+##     leaves the overload set undecidable and REFUSES. The case also
+##     pins the two directions that must not follow from that: an
+##     indented NON-routine declaration still binds (measured: it reads
+##     the payload), and the top-level declaration-before-call shape is
+##     still excluded, so closing the hole did not just switch the
+##     exclusion off.
+##   * "a supplied search root that does not exist fails closed".
+##     ``18e3f3b0`` ignored a supplied root that was not on disk "as the
+##     compiler ignores it". Measured: a typo'd ``internl`` for
+##     ``internal`` dropped the module and produced ONE key across
+##     ``implementation`` 1 -> 2. The case also PINS the residual next
+##     to it — an existing but incomplete root set still aliases — so
+##     the documented open item is checked rather than asserted.
+##
 ## What this file does NOT prove, stated so the green result is not read
-## for more than it is: that a caller's ``effectiveSearchRoots`` is the
-## COMPLETE or correct root set of the real compile command (nothing
-## inside the identity can check that; the cases only fix what happens
-## when it is supplied and when it is not); that the compile-time-read
-## scan is a parse rather than a better-informed textual scan — a file
-## that shadows ``slurp`` and ALSO reaches ``system``'s through an
-## overload its declaration does not shadow is missed, and missed there
-## means aliased rather than refused, which ``ca7864d0`` was not; that any
-## real cache endpoint, upload or substitution works; and that any
-## production call site produces a keyable identity — every one of them
-## still uses the legacy constructor and is still refused.
+## for more than it is.
+##
+##   * That a caller's ``effectiveSearchRoots`` is the COMPLETE root set
+##     of the real compile command — only that a root it names must
+##     exist. A set of existing roots that misses a module still keys
+##     and still aliases, which a case above pins as the open residual.
+##     ``searchRootsKnown``, ``optionsSolved`` and the resolved
+##     dependency instances are the CALLER's assertions and are taken on
+##     trust; root existence is the only part checkable from inside.
+##   * That the compile-time-read scan is a parse. It is a
+##     better-informed textual scan that reads one declaration line at a
+##     time. Stated by DIRECTION, because "not a parse" does not say
+##     which way a gap fails: an imported overload is invisible, so a
+##     call it would capture is still treated as the stdlib read (it
+##     binds, or refuses — it never ignores); ``when`` is not evaluated,
+##     so a ROUTINE declaration under one refuses and a read or import
+##     inside one is bound whether or not the branch is live; but
+##     MACRO-GENERATED code is invisible and therefore ALIASES, which is
+##     the one gap that fails the dangerous way and is pinned as an
+##     explicit residual case rather than left as prose.
+##   * That any real cache endpoint, upload or substitution works.
+##   * That any production call site produces a keyable identity. Every
+##     one of them still uses the legacy four-argument constructor, is
+##     PENDING by construction, and can neither substitute nor publish.
+##     This suite proves a CAPABILITY, not a behaviour anything relies
+##     on today.
 
 {.define: reproMaterializedCacheTest.}
 
@@ -755,12 +812,14 @@ suite "test_source_cache_identity_binds_complete_solved_instance":
     check closure.files == @["local_helper.nim", "repro.nim"]
     let before = identityKeyOnEveryPath(instance)
     check before.len == 64
-    # A supplied root that does not exist is ignored, exactly as the
-    # compiler ignores it — not refused, not digested.
+    # A supplied root that does not EXIST is a wrong reconstruction of
+    # the compile command, not a harmless extra, and is refused rather
+    # than ignored — see "a supplied search root that does not exist
+    # fails closed" for what ignoring it aliased.
     var absentRoot = bareInstance(root)
     absentRoot.effectiveSearchRoots =
       @[root / "lib", root / "no-such-directory"]
-    check identityKeyOnEveryPath(absentRoot) == before
+    failsClosed(absentRoot)
 
   test "supplied search roots do not leak absolute paths into the digest":
     # The relocation control for the new input, and the reason it is
@@ -813,11 +872,74 @@ suite "test_source_cache_identity_binds_complete_solved_instance":
       "const implementation = 2\n")
     check identityKeyOnEveryPath(relocatedInstance) != originKey
 
+  test "a supplied search root that does not exist fails closed":
+    # A caller that ASSERTS "these are the effective compiler search
+    # roots" and names a directory that is not there has given
+    # demonstrably wrong evidence about the compile command. Measured at
+    # 18e3f3b0, where such a root was ignored "as the compiler ignores
+    # it": a typo'd ``internl`` for ``internal`` dropped the module and
+    # produced closure digest ``337050709747f16f…``, the SAME key across
+    # ``implementation`` 1 -> 2 — the #171 aliasing class, reached
+    # through the input that was added to close it.
+    let root = createTempDir("m13-supplied-absent-root-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "repro.nim", "import helper\nconst entry = 1\n")
+    createDir(root / "internal")
+    writeFile(root / "internal" / "helper.nim",
+      "const implementation = 1\n")
+
+    var typo = bareInstance(root)
+    typo.effectiveSearchRoots = @[root / "internl"]
+    failsClosed(typo)
+    # ...and the refusal NAMES the bad root, so the wrong evidence is
+    # actionable at the call site rather than anonymous.
+    check "internl" in cacheEntryIdentityError(
+      solvedSourceCacheEntryIdentity(typo))
+
+    # The correctly spelled root still keys and still binds what it
+    # reaches: the refusal is about the WRONG root, not about supplying
+    # roots at all.
+    var correct = bareInstance(root)
+    correct.effectiveSearchRoots = @[root / "internal"]
+    let before = identityKeyOnEveryPath(correct)
+    check before.len == 64
+    writeFile(root / "internal" / "helper.nim",
+      "const implementation = 2\n")
+    check identityKeyOnEveryPath(correct) != before
+
+    # The documented RESIDUAL, pinned so it cannot decay silently and so
+    # the docs' claim is checked rather than asserted: a root set whose
+    # every root EXISTS but which does not reach a module the project
+    # imports still KEYS, and still aliases across that module's change,
+    # because a bare unresolved spec with no on-disk evidence is
+    # classified external by the pre-existing rule. Refusing every such
+    # spec instead is what would make the real project roots unkeyable,
+    # so this stays open rather than being closed the cheap way.
+    let incomplete = createTempDir("m13-supplied-incomplete-root-", "")
+    defer: removeDir(incomplete)
+    createDir(incomplete)
+    writeFile(incomplete / "repro.nim", "import helper\nconst entry = 1\n")
+    createDir(incomplete / "internal")
+    writeFile(incomplete / "internal" / "helper.nim",
+      "const implementation = 1\n")
+    createDir(incomplete / "other")
+    var partial = bareInstance(incomplete)
+    partial.effectiveSearchRoots = @[incomplete / "other"]
+    let partialKey = identityKeyOnEveryPath(partial)
+    check partialKey.len == 64
+    writeFile(incomplete / "internal" / "helper.nim",
+      "const implementation = 2\n")
+    check identityKeyOnEveryPath(partial) == partialKey
+
   # -------------------------------------------------------------------
   # The compile-time-read scan. It used to be a bare whole-identifier
   # grep over masked source, which refused three shapes of CORRECT
   # recipe — a permanently unkeyable project, which is as useless as an
-  # aliased one. Each case below was measured refusing at ca7864d0.
+  # aliased one. Each of the first three cases below was measured
+  # refusing at ca7864d0. The two after them are the other direction:
+  # 18e3f3b0's cure for those refusals ignored the identifier per FILE,
+  # which ALIASED, and they pin the per-CALL rule that replaced it.
   # -------------------------------------------------------------------
 
   test "a recipe that defines its own slurp is not a compile-time read":
@@ -916,6 +1038,276 @@ suite "test_source_cache_identity_binds_complete_solved_instance":
     let beforeRead = identityKeyOnEveryPath(bareInstance(bound))
     writeFile(bound / "payload.txt", "payload 2\n")
     check identityKeyOnEveryPath(bareInstance(bound)) != beforeRead
+
+  test "a shadowing declaration that cannot bind the call does not hide a read":
+    # The fail-open the previous round's per-FILE exclusion opened, and
+    # the reason the exclusion is now decided per CALL. Measured against
+    # the real compiler (nim 2.2.8): a file declaring
+    # ``proc slurp(n: int)`` and calling ``slurp("payload.txt")``
+    # compiles to ``system.slurp`` and reads the file, because the local
+    # overload cannot accept a string. Skipping every unqualified
+    # occurrence in that file dropped the payload from the closure and
+    # left the key unmoved when the payload changed — an ALIAS, where
+    # ca7864d0's bare grep refused. Binding it is the better of the two
+    # safe answers, so that is what is pinned here.
+    let bound = createTempDir("m13-shadow-nonbinding-", "")
+    defer: removeDir(bound)
+    createDir(bound)
+    writeFile(bound / "repro.nim",
+      "proc slurp(n: int): string = \"local\"\n" &
+      "const blob = slurp(\"payload.txt\")\n" &
+      "const entry = 1\n")
+    writeFile(bound / "payload.txt", "payload 1\n")
+    let closure = solvedSourceClosure(bound)
+    check closure.missing.len == 0
+    check "payload.txt" in closure.files
+    let before = identityKeyOnEveryPath(bareInstance(bound))
+    writeFile(bound / "payload.txt", "payload 2\n")
+    check identityKeyOnEveryPath(bareInstance(bound)) != before
+
+    # The same file with CRLF line endings, which a recipe authored on
+    # Windows has. The declaration is located by BYTE OFFSET so that it
+    # is not mistaken for a use of the symbol, and a line walk that
+    # treats \r\n as one byte drifts and stops matching -- which would
+    # silently turn this file into a refusal or, worse, back into a
+    # skipped occurrence.
+    let crlf = createTempDir("m13-shadow-crlf-", "")
+    defer: removeDir(crlf)
+    createDir(crlf)
+    writeFile(crlf / "repro.nim",
+      # The declaration is deliberately NOT the first line: a byte
+      # counter that treats \r\n as one separator is still correct at
+      # offset zero, so a file whose declaration leads would pass a
+      # drifting walk by luck.
+      "const entry = 1\r\n" &
+      "proc slurp(n: int): string = \"local\"\r\n" &
+      "const blob = slurp(\"payload.txt\")\r\n")
+    writeFile(crlf / "payload.txt", "payload 1\r\n")
+    check "payload.txt" in solvedSourceClosure(crlf).files
+    let beforeCrlf = identityKeyOnEveryPath(bareInstance(crlf))
+    writeFile(crlf / "payload.txt", "payload 2\r\n")
+    check identityKeyOnEveryPath(bareInstance(crlf)) != beforeCrlf
+
+    # A non-routine declaration is the same story, and measured the same
+    # way: ``const gorge = 3`` does NOT stop ``gorge("echo hi")`` from
+    # reaching ``system.gorge``, so it cannot license ignoring the call.
+    let nonRoutine = createTempDir("m13-shadow-nonroutine-", "")
+    defer: removeDir(nonRoutine)
+    createDir(nonRoutine)
+    writeFile(nonRoutine / "repro.nim",
+      "const gorge = 3\n" &
+      "const built = gorge(\"echo hi\")\n")
+    failsClosed(bareInstance(nonRoutine))
+
+    # Where the overload set cannot be decided from the text the
+    # identity REFUSES rather than ignoring — an unrecognised parameter
+    # type is missing evidence, not permission...
+    let opaque = createTempDir("m13-shadow-opaque-", "")
+    defer: removeDir(opaque)
+    createDir(opaque)
+    writeFile(opaque / "repro.nim",
+      "type Payload = object\n" &
+      "proc slurp(p: Payload): string = \"local\"\n" &
+      "const blob = slurp(\"payload.txt\")\n")
+    writeFile(opaque / "payload.txt", "payload 1\n")
+    failsClosed(bareInstance(opaque))
+
+    # ...and so is an argument that is not a string literal, which
+    # neither binds nor rules the local overload out.
+    let computed = createTempDir("m13-shadow-computed-", "")
+    defer: removeDir(computed)
+    createDir(computed)
+    writeFile(computed / "repro.nim",
+      "proc slurp(n: int): string = \"local\"\n" &
+      "const name = \"payload.txt\"\n" &
+      "const blob = slurp(name)\n")
+    writeFile(computed / "payload.txt", "payload 1\n")
+    failsClosed(bareInstance(computed))
+
+  test "a declaration the compiler does not apply does not hide a read":
+    # The third fail-open this campaign's own rounds opened, closed here.
+    # The per-CALL rule above still asked the WRONG question of the file:
+    # ``localDeclarationsOf`` recorded every declaration of the name
+    # anywhere in the file at any indentation, and ``shadowVerdict``
+    # applied it to every occurrence. The compiler applies a declaration
+    # only where it is in SCOPE, TEXTUALLY BEFORE the call, and in a LIVE
+    # ``when`` branch. Each shape below was compiled and RUN against the
+    # real compiler (nim 2.2.8 on this host, nim 2.2.4 on the Linux one):
+    # every one of them PRINTS the payload, so every one is a genuine
+    # compile-time read. At =18e3f3b0= plus the previous round's working
+    # tree each produced a 64-hex key that did NOT move when the payload
+    # changed — the #171 alias, re-created for the third time inside the
+    # fix for it.
+    #
+    # ``bindsPayload`` pins WHICH of the two safe answers each shape gets
+    # rather than accepting either, so the rule cannot drift silently:
+    # only the out-of-order shape is decidable from the text (the
+    # declaration is at column 0, so the file's overload set is readable;
+    # it simply does not exist yet at the call). A declaration at indent
+    # > 0 — nested in a body, or under a ``when`` — leaves the overload
+    # set undecidable, and undecidable refuses.
+    const OutOfScopeShapes = [
+      # 1. The declaration comes AFTER the call. Nim resolves top-level
+      #    code in order, so the call is ``system.slurp``.
+      (source: "const blob = slurp(\"payload.txt\")\n" &
+               "proc slurp(label: string): string = \"local:\" & label\n" &
+               "const entry = 1\n",
+       bindsPayload: true),
+      # 2. The declaration is nested inside another routine's body and is
+      #    invisible at module scope.
+      (source: "proc outer() =\n" &
+               "  proc slurp(label: string): string = \"local:\" & label\n" &
+               "  discard slurp(\"x\")\n" &
+               "const blob = slurp(\"payload.txt\")\n",
+       bindsPayload: false),
+      # 3. The declaration is in a dead ``when`` branch and is never
+      #    compiled at all.
+      (source: "when false:\n" &
+               "  proc slurp(label: string): string = \"local:\" & label\n" &
+               "const blob = slurp(\"payload.txt\")\n",
+       bindsPayload: false),
+      # 4. The same through a ``defined`` this build never sets.
+      (source: "when defined(flagNeverSet):\n" &
+               "  proc slurp(label: string): string = \"local:\" & label\n" &
+               "const blob = slurp(\"payload.txt\")\n",
+       bindsPayload: false)]
+    for shape in OutOfScopeShapes:
+      let root = createTempDir("m13-shadow-outofscope-", "")
+      defer: removeDir(root)
+      createDir(root)
+      writeFile(root / "repro.nim", shape.source)
+      writeFile(root / "payload.txt", "payload 1\n")
+      if shape.bindsPayload:
+        let closure = solvedSourceClosure(root)
+        check closure.missing.len == 0
+        check "payload.txt" in closure.files
+        let before = identityKeyOnEveryPath(bareInstance(root))
+        check before.len == 64
+        # The assertion the fail-open failed: the key MOVES with the
+        # payload it reads.
+        writeFile(root / "payload.txt", "payload 2\n")
+        check identityKeyOnEveryPath(bareInstance(root)) != before
+      else:
+        check solvedSourceClosure(root).missing.len > 0
+        failsClosed(bareInstance(root))
+
+    # The refusing side is not a blanket "any indented declaration
+    # refuses the file": only a ROUTINE can join an overload set, so an
+    # indented non-routine declaration leaves the call decidable and the
+    # payload binds. Measured against nim 2.2.8: a file whose ``outer``
+    # body declares ``const slurp = 3`` still reads the payload at
+    # module scope, so refusing here would be a false refusal, not
+    # caution.
+    let nested = createTempDir("m13-shadow-nested-nonroutine-", "")
+    defer: removeDir(nested)
+    createDir(nested)
+    writeFile(nested / "repro.nim",
+      "proc outer() =\n" &
+      "  const slurp = 3\n" &
+      "  discard slurp\n" &
+      "const blob = slurp(\"payload.txt\")\n")
+    writeFile(nested / "payload.txt", "payload 1\n")
+    let nestedClosure = solvedSourceClosure(nested)
+    check nestedClosure.missing.len == 0
+    check "payload.txt" in nestedClosure.files
+    let nestedBefore = identityKeyOnEveryPath(bareInstance(nested))
+    writeFile(nested / "payload.txt", "payload 2\n")
+    check identityKeyOnEveryPath(bareInstance(nested)) != nestedBefore
+
+    # And the top-level declaration-before-call shape — the one the
+    # compiler DOES apply — is still excluded, so closing this did not
+    # simply turn the exclusion off.
+    let applied = createTempDir("m13-shadow-applied-", "")
+    defer: removeDir(applied)
+    createDir(applied)
+    writeFile(applied / "repro.nim",
+      "proc slurp(label: string): string = \"local:\" & label\n" &
+      "const banner = slurp(\"payload.txt\")\n" &
+      "const entry = 1\n")
+    writeFile(applied / "payload.txt", "payload 1\n")
+    let appliedClosure = solvedSourceClosure(applied)
+    check appliedClosure.missing.len == 0
+    check appliedClosure.files == @["repro.nim"]
+    check identityKeyOnEveryPath(bareInstance(applied)).len == 64
+
+    # The documented RESIDUAL that goes the OTHER way, pinned here so it
+    # cannot decay silently and so the docs' claim about it is checked
+    # rather than asserted. Every other gap in this not-a-parse scan
+    # over-approximates (it binds, or it refuses). MACRO-GENERATED code
+    # does not: a compile-time read that exists only after expansion
+    # leaves no text to scan, so it is not bound and the key does NOT
+    # move when what it reads changes. Closing this needs a real
+    # semantic pass, not a better scan, so it stays open and stays
+    # measured.
+    let generated = createTempDir("m13-macro-generated-read-", "")
+    defer: removeDir(generated)
+    createDir(generated)
+    writeFile(generated / "repro.nim",
+      "import std/macros\n" &
+      "macro readPayload(): untyped =\n" &
+      "  parseStmt(\"const blob = slurp(\\\"payload.txt\\\")\")\n" &
+      "readPayload()\n" &
+      "const entry = 1\n")
+    writeFile(generated / "payload.txt", "payload 1\n")
+    let generatedClosure = solvedSourceClosure(generated)
+    check generatedClosure.missing.len == 0
+    check "payload.txt" notin generatedClosure.files
+    let generatedKey = identityKeyOnEveryPath(bareInstance(generated))
+    check generatedKey.len == 64
+    writeFile(generated / "payload.txt", "payload 2\n")
+    check identityKeyOnEveryPath(bareInstance(generated)) == generatedKey
+
+  test "the shadowing controls still identify a real compile-time read":
+    # A declaration that exists only inside a KEPT string literal
+    # declares nothing, so the read below is the stdlib's.
+    let quoted = createTempDir("m13-shadow-quoted-decl-", "")
+    defer: removeDir(quoted)
+    createDir(quoted)
+    writeFile(quoted / "repro.nim",
+      "const note = \"proc slurp(label: string): string = label\"\n" &
+      "const blob = slurp(\"absent.txt\")\n")
+    failsClosed(bareInstance(quoted))
+
+    # A different identifier that merely starts with the same letters
+    # shadows nothing.
+    let prefixed = createTempDir("m13-shadow-prefix-", "")
+    defer: removeDir(prefixed)
+    createDir(prefixed)
+    writeFile(prefixed / "repro.nim",
+      "proc slurpish(label: string): string = label\n" &
+      "const blob = slurp(\"absent.txt\")\n")
+    failsClosed(bareInstance(prefixed))
+
+    # A qualifier other than ``system`` names a symbol this scanner
+    # cannot see at all, so shadowing must not turn it into silence: the
+    # occurrence is treated as a compile-time read whatever the file
+    # declares. What that costs is measured rather than described — a
+    # foreign qualifier is NOT "missing evidence" by itself. When its
+    # argument is a literal that resolves, the payload BINDS and the key
+    # moves with it (an over-approximation, which is the safe direction);
+    # it is missing evidence only when the argument does not resolve.
+    let foreign = createTempDir("m13-shadow-foreign-qualifier-", "")
+    defer: removeDir(foreign)
+    createDir(foreign)
+    writeFile(foreign / "repro.nim",
+      "proc slurp(label: string): string = label\n" &
+      "const blob = mymod.slurp(\"absent.txt\")\n")
+    failsClosed(bareInstance(foreign))
+
+    let foreignBound = createTempDir("m13-shadow-foreign-bound-", "")
+    defer: removeDir(foreignBound)
+    createDir(foreignBound)
+    writeFile(foreignBound / "repro.nim",
+      "proc slurp(label: string): string = label\n" &
+      "const blob = mymod.slurp(\"payload.txt\")\n")
+    writeFile(foreignBound / "payload.txt", "payload 1\n")
+    let foreignClosure = solvedSourceClosure(foreignBound)
+    check foreignClosure.missing.len == 0
+    check "payload.txt" in foreignClosure.files
+    let foreignBefore = identityKeyOnEveryPath(bareInstance(foreignBound))
+    check foreignBefore.len == 64
+    writeFile(foreignBound / "payload.txt", "payload 2\n")
+    check identityKeyOnEveryPath(bareInstance(foreignBound)) != foreignBefore
 
   test "case-distinct modules bind as two entries on a case-sensitive fs":
     # The Linux branch of the case-folding rule, proved by CONSEQUENCE

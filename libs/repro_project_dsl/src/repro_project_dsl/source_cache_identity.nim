@@ -65,8 +65,8 @@
 ##     command line), and are NOT restricted to the project root: a
 ##     ``--path`` into a nimble dependency is legitimate, and a spec
 ##     that resolves through one lands outside the project root and is
-##     then classified as external code. A supplied root that does not
-##     exist is ignored, as the compiler ignores it.
+##     then classified as external code. A supplied root that does NOT
+##     EXIST refuses: see "A supplied root that does not exist" below.
 ##
 ## The effective search-root set is a REQUIRED input, not an optional
 ## hint: ``searchRootsKnown`` distinguishes "reconstructed, and it adds
@@ -141,20 +141,37 @@
 ## already gets. There is no third behaviour in which a digest is
 ## produced over an unknown search-root set.
 ##
-## What that does NOT prove. It does not prove the caller's set is
-## COMPLETE or correct: a caller that reconstructs the compile command
-## wrongly, or claims ``searchRootsKnown`` without reconstructing it,
-## re-opens exactly this channel, and nothing here can detect that from
-## inside. It moves the obligation to the call site and makes the
-## default (unsupplied) refuse; it does not verify the supplied value.
-## Measured on the tree above: a TYPO'D root and a real but INCOMPLETE
-## root set both land back on digest ``337050709747f16f…`` and one key
-## across the 1 -> 2 change. The partial case DIGESTS rather than
-## refusing, because a bare unresolved spec with no on-disk evidence is
-## still classified external. Refusal is the default for an UNSUPPLIED
-## set, not a property of every incorrect one.
-## No production call site supplies one today — every one of them uses
-## the legacy 4-argument constructor and is therefore refused.
+## A supplied root that does not exist. A caller that ASSERTS
+## ``searchRootsKnown`` and then names a directory that is not on disk
+## has reconstructed the compile command wrongly, and its claim is
+## checkable in exactly this one respect — so it is checked, and the
+## identity refuses naming the bad root. Measured at ``18e3f3b0``,
+## where such a root was ignored "as the compiler ignores it": a typo'd
+## ``internl`` for ``internal`` silently dropped the module it was meant
+## to reach and landed back on closure digest ``337050709747f16f…``,
+## one key across the ``implementation`` 1 -> 2 change. The compiler
+## ignoring an absent ``-p`` is not a reason for the IDENTITY to ignore
+## it: the compiler is not being asked whether the root set is the one
+## the recipe was built with.
+##
+## What that still does NOT prove, and the residual it leaves. It does
+## not prove the caller's set is COMPLETE: a root set whose every root
+## EXISTS but which does not reach a module the project imports still
+## produces a digest, and still aliases across that module's change,
+## because a bare unresolved spec with no on-disk evidence is classified
+## external by the rule above. Measured on the same tree: the incomplete
+## (but existing) root set lands on digest ``337050709747f16f…`` and one
+## key across 1 -> 2, exactly as before. That is left OPEN deliberately.
+## Closing it the obvious way — refusing every bare spec that resolves
+## nowhere — is the change that would make all 336 real project roots in
+## this repository permanently unkeyable, which is the same uselessness
+## as aliasing; nothing available from inside this module distinguishes
+## "a module the caller forgot to tell me about" from "the stdlib".
+## ``t_source_cache_identity_binds_complete_solved_instance`` pins the
+## residual as a case so it cannot decay into a claim.
+##
+## No production call site supplies effective roots today — every one of
+## them uses the legacy 4-argument constructor and is therefore refused.
 ##
 ## A ``config.nims`` that computes ``--path`` in a loop or from an
 ## expression is a DIFFERENT case and is unchanged: rule 4 fires, and
@@ -195,7 +212,7 @@
 ## This is still a textual scan rather than a parse, but it is no
 ## longer a bare identifier grep, because a grep false-refused three
 ## shapes of CORRECT recipe and a permanently unkeyable project is as
-## useless as an aliased one. Two exclusions apply, and both are
+## useless as an aliased one. Three exclusions apply, and each is
 ## provable from the text rather than heuristic:
 ##
 ##   * an occurrence inside a KEPT single-line string literal is data,
@@ -203,29 +220,108 @@
 ##     are blanked (``blankKeptStringLiterals``), with offsets
 ##     preserved so the ``staticRead`` ARGUMENT can still be read from
 ##     the unblanked text at the same position;
-##   * a file that DECLARES ``slurp`` / ``gorge`` / ``staticRead`` /
-##     ``gorgeEx`` / ``staticExec`` itself — as a routine, or in a
-##     ``let``/``var``/``const``/``type`` section in either its
-##     one-line or its indented-block form — shadows the stdlib symbol,
-##     so an unqualified occurrence in that file is ITS symbol.
+##   * the DECLARATION of the name is not a use of it: the occurrence
+##     in ``proc slurp(...)`` is recorded by offset and skipped, so a
+##     file that defines the symbol does not refuse on its own header;
+##   * an unqualified CALL that this file's OWN routine declaration
+##     provably takes is that routine, not the stdlib's — where "this
+##     file's own declaration" means one the COMPILER would apply at
+##     that call: at module scope (column 0) and textually before it.
 ##
-## An explicit ``system.<fn>`` defeats both exclusions and is always
-## treated as the stdlib compile-time read, so shadowing cannot be used
-## to hide one.
+## That third rule is per CALL, not per file, and the difference is the
+## whole point. Measured against nim 2.2.8:
 ##
-## What that does NOT prove, and what the shadowing exclusion COSTS.
-## The scan is still not a parse. A file that declares its own ``slurp``
-## AND also calls ``system``'s unqualified through an overload the local
-## declaration does not shadow is missed, and being missed here means
-## ALIASED, not refused: measured on such a file, the bytes it reads are
-## absent from the closure and the key does not move when they change,
-## where ``ca7864d0``'s bare grep refused that same file. So this
-## exclusion is not a pure improvement — it trades three measured false
-## refusals for one narrow new aliasing shape, on the judgement that a
-## permanently unkeyable correct recipe is the more common and more
-## costly failure. A qualifier other than ``system`` (``mymod.slurp``)
-## is still treated as a real read, which is the fail-closed direction.
-## Neither shape is covered by a test.
+##   * ``proc slurp(label: string)`` + ``slurp("greeting")`` binds the
+##     LOCAL routine — the stdlib read never happens, so refusing on it
+##     costs a correct recipe its key for nothing;
+##   * ``proc slurp(n: int)`` + ``slurp("payload.txt")`` binds
+##     ``system.slurp`` and READS the file — the local overload cannot
+##     take a string, so it does not shadow this call at all;
+##   * ``const gorge = 3`` + ``gorge("echo hi")`` runs
+##     ``system.gorge``, and ``var slurp = 3`` + ``slurp("x")`` reads
+##     the file: a non-routine declaration is not overloadable and
+##     never captures a call, though it does own a BARE mention of the
+##     name (``const entry = gorge``), which reads nothing anyway.
+##
+## Scope and order are part of the same measurement, and a declaration
+## table that ignored them was the THIRD fail-open this deliverable
+## opened. Compiled and RUN under nim 2.2.8 (Windows) and nim 2.2.4
+## (Linux), every one of these DOES read the payload even though the
+## file declares ``proc slurp(label: string)``, because the compiler
+## never applies that declaration at that call:
+##
+##   * the declaration comes textually AFTER the call (top-level code
+##     is resolved in order, so the symbol does not exist there yet);
+##   * the declaration is nested inside another routine's BODY, so it
+##     is invisible at module scope;
+##   * the declaration is under ``when false:`` or under a
+##     ``when defined(...)`` the build never sets, so it is never
+##     compiled.
+##
+## So a declaration excludes a call only when it sits at column 0 and
+## before it. A declaration at indent > 0 is either nested or
+## ``when``-guarded; which of those it is, and whether the guard is
+## live, is not decidable from the text, so it yields the REFUSING
+## verdict rather than the ignoring one. A non-routine declaration is
+## exempt from that at any indentation, because it cannot join an
+## overload set at all: measured, an ``outer`` body declaring
+## ``const slurp = 3`` still reads the payload at module scope, so
+## refusing there would be a false refusal rather than caution.
+##
+## An earlier revision excluded every unqualified occurrence in a file
+## that declared the name, which is the second and third of those
+## measurements inverted. Its cost was measured and it was an ALIAS,
+## not a refusal: on ``proc slurp(n: int)`` plus a real
+## ``slurp("payload.txt")``, the payload was absent from the closure
+## and the key did not move when the payload changed — the #171 defect
+## itself, re-created inside the fix for it, where ``ca7864d0``'s bare
+## grep had refused. For a cache identity a false refusal is annoying
+## and a false accept is the defect, so the exclusion now has to prove
+## itself per call.
+##
+## Where the text does NOT decide the overload, the identity REFUSES
+## rather than ignoring: a call whose argument is not a string literal
+## (nothing rules the local overload in or out), a local parameter type
+## that is neither exactly ``string`` nor one of the scalars a string
+## literal provably cannot convert to (a generic parameter, an
+## ``untyped`` template parameter, a type reachable by ``converter`` —
+## any of these may or may not beat ``system``'s exact match), and a
+## parameter list that does not close on its own line. Each of those is
+## missing evidence and lands in ``missing`` like any other.
+##
+## A QUALIFIED occurrence is never excluded by shadowing at all.
+## ``system.<fn>`` is the stdlib compile-time read by construction, and
+## a foreign qualifier (``mymod.slurp``) names a symbol this scanner
+## cannot see — so shadowing cannot be used to hide either one. A
+## foreign qualifier is not "missing evidence" by itself, which an
+## earlier revision of this docstring said it was: measured,
+## ``mymod.slurp("payload.txt")`` with a literal that RESOLVES binds
+## the payload and the key moves with it, which is an
+## over-approximation and the safe direction. It is missing evidence
+## only when the argument does not resolve.
+##
+## What that still does NOT prove, stated by DIRECTION — "not a parse"
+## alone does not say which way each gap fails, and only one of them
+## fails the dangerous way:
+##
+##   * a routine whose signature spans lines is read one declaration
+##     line at a time and is undecidable, so it REFUSES;
+##   * an ``import``ed overload is invisible to this scanner, so a call
+##     that overload would capture is still treated as the stdlib read.
+##     That over-approximates: it binds the argument, or refuses when
+##     the argument does not resolve. It never ignores;
+##   * ``when`` is not evaluated. A ROUTINE declaration under one is
+##     indented, which is undecidable and refuses; a read or an import
+##     inside one is bound whether or not the branch is live, which
+##     over-approximates. Both are the safe direction;
+##   * MACRO-GENERATED code is the one gap that fails the other way,
+##     and it is an open residual rather than a caveat: a compile-time
+##     read or an import that exists only after expansion leaves no
+##     text for this scanner to see, is therefore not bound, and the
+##     key can ALIAS across a change to what it reads.
+##
+## Measured over all 336 project roots in this repository, the scope
+## and order rule costs zero new refusals and moves no closure digest.
 ##
 ## ## Case-sensitivity
 ##
@@ -255,9 +351,11 @@
 ## ``PendingCacheIdentityOptionKey`` is stamped whenever ANY required
 ## input is unavailable: no project file, an unreadable source file, an
 ## unresolved candidate-local import or include, an unbindable
-## compile-time read, a declared source input that does not exist or
-## lives outside the project root, an effective search-root set that was
-## never reconstructed, unsolved options, unresolved
+## compile-time read, a compile-time read this file's own declaration
+## neither provably takes nor provably declines, a declared source input
+## that does not exist or lives outside the project root, an effective
+## search-root set that was never reconstructed or that names a
+## directory which does not exist, unsolved options, unresolved
 ## dependency instances, a malformed dependency key, an unpopulated
 ## target triple, or a toolchain with no name/version. The marker makes
 ## ``deriveCacheEntryKey`` refuse, so an incomplete identity can neither
@@ -322,8 +420,9 @@ type
       ## ones that leave no trace in any file this scanner can read: a
       ## ``--path`` on the command line, one contributed by a nimble
       ## dependency, one injected by a wrapper. Absolute or
-      ## project-relative; a root that does not exist is ignored, as the
-      ## compiler ignores it. Roots OUTSIDE the project root are
+      ## project-relative; a root that does not exist is REFUSED when
+      ## ``searchRootsKnown`` is set, because the claim it forms part of
+      ## is then demonstrably wrong. Roots OUTSIDE the project root are
       ## accepted and are resolution evidence only: a spec that resolves
       ## through one lands outside the project root and is therefore
       ## external code, bound through ``dependencyInstances`` rather
@@ -514,7 +613,7 @@ type
     isInclude: bool
 
   CompileTimeReadKind = enum
-    ctFileRead, ctCommand
+    ctFileRead, ctCommand, ctAmbiguousShadow
 
   CompileTimeRead = object
     kind: CompileTimeReadKind
@@ -727,64 +826,369 @@ proc leadingIndent(line: string): int =
   while result < line.len and line[result] in {' ', '\t'}:
     inc result
 
-proc startsWithIdent(text, ident: string): bool =
-  ## ``text`` begins with ``ident`` as a whole identifier, optionally
-  ## backtick-quoted and optionally carrying an export marker.
-  var rest = text
-  if rest.startsWith("`"):
-    if not rest.startsWith("`" & ident & "`"):
-      return false
-    rest = rest[ident.len + 2 .. ^1]
-  else:
-    if not rest.startsWith(ident):
-      return false
-    rest = rest[ident.len .. ^1]
-    if rest.len > 0 and rest[0] in IdentChars:
-      return false
-  rest = rest.strip(trailing = false)
-  rest.len == 0 or rest[0] in {'*', '(', '[', ':', '=', ',', '{'}
+type
+  LocalDeclKind = enum
+    ldRoutine, ldValue
 
-proc declaresOwnSymbol(scanned, ident: string): bool =
-  ## True when THIS file declares ``ident`` itself — as a routine, or in
-  ## a ``let`` / ``var`` / ``const`` / ``type`` section in either its
-  ## one-line or its indented-block form.
-  ##
-  ## Why this is not a weakening. A file that declares its own ``slurp``
-  ## shadows ``system.slurp``; the identifier in that file is no longer
-  ## the stdlib compile-time read, so refusing on it binds nothing and
-  ## costs a correct recipe its key permanently. That is not failing
-  ## closed, it is failing ALWAYS — the same argument the masking rule
-  ## rests on. An EXPLICIT ``system.slurp`` is still the stdlib one and
-  ## is still treated as a compile-time read, shadowing or not.
+  LocalDecl = object
+    kind: LocalDeclKind
+    nameOffset: int
+      ## Offset of the declared name in ``scanned``, so the declaration
+      ## itself is never mistaken for a use of the symbol, and so a
+      ## declaration can be told apart from one that comes textually
+      ## AFTER a given call and therefore does not exist there yet.
+    indent: int
+      ## Leading indentation of the declaring line. Only a declaration
+      ## at column 0 is at module scope; anything deeper is nested in a
+      ## routine body or under a ``when`` branch this scanner cannot
+      ## evaluate, which makes the file's overload set undecidable.
+    params: string
+      ## Raw parameter-list text of a routine, without the enclosing
+      ## parentheses. Empty for a routine declared with no parameter
+      ## list and for ``ldValue``.
+    paramsKnown: bool
+      ## False when the parameter list could not be read in full (it
+      ## spans lines, or the group never closes) — the declaration is
+      ## then undecidable rather than empty.
+
+  ParamTypeClass = enum
+    ptString, ptNotString, ptUnknown
+
+  ArgFit = enum
+    afAccepts, afRejects, afUnknown
+
+  CallShape = object
+    isCall: bool
+    argCount: int
+    argCountKnown: bool
+
+proc routineNameEnd(line: string; start: int; ident: string): int =
+  ## Offset just past ``ident`` when ``line`` spells it as a whole
+  ## identifier at ``start`` (optionally backtick-quoted); -1 otherwise.
+  if line.len > start and line[start] == '`':
+    if line.continuesWith("`" & ident & "`", start):
+      return start + ident.len + 2
+    return -1
+  if not line.continuesWith(ident, start):
+    return -1
+  let after = start + ident.len
+  if after < line.len and line[after] in IdentChars:
+    return -1
+  after
+
+proc declaredNamePos(line: string; start: int; ident: string): int =
+  ## Offset of ``ident`` in ``line`` when the text at ``start`` declares
+  ## it — the same shape ``startsWithIdent`` recognises, but reported by
+  ## position so the declaration can be told apart from a use.
+  var i = start
+  while i < line.len and line[i] in {' ', '\t'}:
+    inc i
+  let after = routineNameEnd(line, i, ident)
+  if after < 0:
+    return -1
+  var j = after
+  while j < line.len and line[j] in {' ', '\t'}:
+    inc j
+  if j >= line.len or line[j] in {'*', '(', '[', ':', '=', ',', '{'}:
+    return i
+  -1
+
+proc routineParamsAt(line: string; nameEnd: int):
+    tuple[params: string, known: bool] =
+  ## The parameter-list text of a routine whose name ends at ``nameEnd``
+  ## on ``line``. ``known`` is false when a bracket group opens and does
+  ## not close on this line, which makes the declaration undecidable
+  ## rather than parameterless.
+  var i = nameEnd
+  while i < line.len and line[i] in {' ', '\t'}:
+    inc i
+  if i < line.len and line[i] == '*':
+    inc i
+    while i < line.len and line[i] in {' ', '\t'}:
+      inc i
+  if i < line.len and line[i] == '[':
+    var depth = 0
+    var closed = false
+    while i < line.len:
+      if line[i] == '[': inc depth
+      elif line[i] == ']':
+        dec depth
+        if depth == 0:
+          inc i
+          closed = true
+          break
+      inc i
+    if not closed:
+      return ("", false)
+    while i < line.len and line[i] in {' ', '\t'}:
+      inc i
+  if i >= line.len or line[i] != '(':
+    # ``proc slurp: string = ...`` / ``template slurp = ...``: a
+    # declaration with no parameter list at all, which IS decidable.
+    return ("", true)
+  var depth = 0
+  let start = i + 1
+  while i < line.len:
+    case line[i]
+    of '(', '[', '{': inc depth
+    of ')', ']', '}':
+      dec depth
+      if depth == 0:
+        return (line[start ..< i], true)
+    else: discard
+    inc i
+  ("", false)
+
+proc localDeclarationsOf(scanned, ident: string): seq[LocalDecl] =
+  ## Every declaration of ``ident`` THIS file makes — routines, and
+  ## ``let`` / ``var`` / ``const`` / ``type`` entries in either their
+  ## one-line or their indented-block form.
   ##
   ## ``scanned`` must be ``blankKeptStringLiterals`` output, so the word
-  ## ``proc slurp`` inside a string literal declares nothing.
+  ## ``proc slurp`` inside a string literal declares nothing, and so the
+  ## recorded offsets index the same characters the occurrence scan
+  ## walks.
   const RoutineKeywords = ["proc", "func", "template", "macro", "method",
                            "iterator", "converter"]
   const SectionKeywords = ["let", "var", "const", "type"]
   var sectionIndent = -1
-  for rawLine in scanned.splitLines():
-    let indent = leadingIndent(rawLine)
-    let line = rawLine.strip()
-    if line.len == 0:
+  var lineStart = 0
+  # The lines are cut by hand rather than with ``splitLines`` because the
+  # recorded offsets must index ``scanned`` exactly: ``splitLines`` drops
+  # a ``\r\n`` pair as ONE separator, so a byte counter driven by it
+  # drifts by a byte on every CRLF line and the declaration offsets stop
+  # matching the occurrence offsets.
+  while lineStart <= scanned.len:
+    var scan = lineStart
+    while scan < scanned.len and scanned[scan] != '\n':
+      inc scan
+    var lineEnd = scan
+    if lineEnd > lineStart and scanned[lineEnd - 1] == '\r':
+      dec lineEnd
+    let rawLine = scanned[lineStart ..< lineEnd]
+    let nextStart = scan + 1
+    block processLine:
+      let indent = leadingIndent(rawLine)
+      let stripped = rawLine.strip()
+      if stripped.len == 0:
+        break processLine
+      if sectionIndent >= 0:
+        if indent > sectionIndent:
+          let pos = declaredNamePos(rawLine, indent, ident)
+          if pos >= 0:
+            result.add(LocalDecl(kind: ldValue, indent: indent,
+              nameOffset: lineStart + pos))
+          break processLine
+        sectionIndent = -1
+      for keyword in RoutineKeywords:
+        if rawLine.continuesWith(keyword & " ", indent):
+          let pos = declaredNamePos(rawLine, indent + keyword.len + 1, ident)
+          if pos >= 0:
+            let nameEnd = routineNameEnd(rawLine, pos, ident)
+            let parsed = routineParamsAt(rawLine, nameEnd)
+            result.add(LocalDecl(kind: ldRoutine, indent: indent,
+              nameOffset: lineStart + pos,
+              params: parsed.params, paramsKnown: parsed.known))
+      for keyword in SectionKeywords:
+        if stripped == keyword:
+          sectionIndent = indent
+        elif rawLine.continuesWith(keyword & " ", indent):
+          let pos = declaredNamePos(rawLine, indent + keyword.len + 1, ident)
+          if pos >= 0:
+            result.add(LocalDecl(kind: ldValue, indent: indent,
+              nameOffset: lineStart + pos))
+    if scan >= scanned.len:
+      break
+    lineStart = nextStart
+
+proc splitParamItems(params: string): seq[string] =
+  ## Split a parameter list on the separators Nim allows between
+  ## parameters (``,`` and ``;``), ignoring separators nested inside
+  ## brackets. Kept string literals are blanked in the text this runs
+  ## on, so a separator inside one cannot be seen.
+  var depth = 0
+  var current = ""
+  for ch in params:
+    case ch
+    of '[', '(', '{':
+      inc depth
+      current.add(ch)
+    of ']', ')', '}':
+      dec depth
+      current.add(ch)
+    of ',', ';':
+      if depth == 0:
+        result.add(current)
+        current = ""
+      else:
+        current.add(ch)
+    else: current.add(ch)
+  result.add(current)
+
+proc topLevelCharIndex(text: string; sep: char): int =
+  ## Offset of the first ``sep`` at bracket depth 0; -1 when there is
+  ## none.
+  var depth = 0
+  for i, ch in text:
+    case ch
+    of '[', '(', '{': inc depth
+    of ']', ')', '}': dec depth
+    else:
+      if ch == sep and depth == 0:
+        return i
+  -1
+
+proc routineParamInfo(params: string; known: bool):
+    tuple[ok: bool, minArity, maxArity: int, variadic: bool,
+          firstType: string] =
+  ## Arity and first-parameter type of a parameter list. ``ok`` is false
+  ## when the list cannot be read, which makes the declaration
+  ## undecidable rather than empty.
+  if not known:
+    return (false, 0, 0, false, "")
+  if params.strip().len == 0:
+    return (true, 0, 0, false, "")
+  var types: seq[string] = @[]
+  var defaulted: seq[bool] = @[]
+  var pendingNames = 0
+  for item in splitParamItems(params):
+    let text = item.strip()
+    if text.len == 0:
+      if pendingNames > 0:
+        return (false, 0, 0, false, "")
       continue
-    if sectionIndent >= 0:
-      if indent > sectionIndent:
-        if startsWithIdent(line, ident):
-          return true
-        continue
-      sectionIndent = -1
-    for keyword in RoutineKeywords:
-      if line.startsWith(keyword & " ") and
-          startsWithIdent(line[keyword.len + 1 .. ^1].strip(), ident):
-        return true
-    for keyword in SectionKeywords:
-      if line == keyword:
-        sectionIndent = indent
-      elif line.startsWith(keyword & " ") and
-          startsWithIdent(line[keyword.len + 1 .. ^1].strip(), ident):
-        return true
-  false
+    let colon = topLevelCharIndex(text, ':')
+    let eq = topLevelCharIndex(text, '=')
+    if colon < 0 and eq < 0:
+      # A bare name sharing the next group's type annotation.
+      inc pendingNames
+      continue
+    if colon < 0 or (eq >= 0 and eq < colon):
+      # ``name = default`` with the type inferred: undecidable here.
+      return (false, 0, 0, false, "")
+    let rest =
+      if eq > colon: text[colon + 1 ..< eq]
+      else: text[colon + 1 .. ^1]
+    let typeText = rest.strip()
+    let withDefault = eq > colon
+    for _ in 0 .. pendingNames:
+      types.add(typeText)
+      defaulted.add(withDefault)
+    pendingNames = 0
+  if pendingNames > 0:
+    return (false, 0, 0, false, "")
+  var minArity = 0
+  var variadic = false
+  for i, t in types:
+    if t.startsWith("varargs"):
+      variadic = true
+    elif not defaulted[i]:
+      minArity = i + 1
+  (true, minArity, types.len, variadic,
+   if types.len > 0: types[0] else: "")
+
+proc classifyParamType(typeText: string): ParamTypeClass =
+  ## Can a STRING LITERAL be passed to a parameter of this type?
+  ##
+  ## Only an exact ``string`` is ``ptString``. Measured against nim
+  ## 2.2.8: a local ``proc slurp(label: string)`` wins the overload over
+  ## ``system.slurp`` and the call reads nothing, while a local
+  ## ``proc slurp(n: int)`` loses it and the call DOES read the file.
+  ## Every type that is neither exactly ``string`` nor one of the
+  ## scalars a string literal provably cannot convert to is
+  ## ``ptUnknown``, because a weaker match (a generic parameter, a type
+  ## reachable by ``converter``, an ``untyped`` template parameter) may
+  ## or may not beat ``system``'s exact one — and an undecided overload
+  ## must refuse rather than ignore.
+  const NotString = ["int", "int8", "int16", "int32", "int64", "uint",
+                     "uint8", "uint16", "uint32", "uint64", "float",
+                     "float32", "float64", "bool", "char", "byte",
+                     "Natural", "Positive", "pointer"]
+  var text = typeText.strip()
+  for prefix in ["sink ", "lent ", "var "]:
+    if text.startsWith(prefix):
+      text = text[prefix.len .. ^1].strip()
+  if text == "string":
+    return ptString
+  if text in NotString:
+    return ptNotString
+  ptUnknown
+
+proc routineFit(decl: LocalDecl; argCount: int;
+                firstArgIsStringLiteral: bool): ArgFit =
+  ## Can a call with ``argCount`` arguments bind to this declaration?
+  let info = routineParamInfo(decl.params, decl.paramsKnown)
+  if not info.ok:
+    return afUnknown
+  if argCount < info.minArity:
+    return afRejects
+  if argCount > info.maxArity and not info.variadic:
+    return afRejects
+  if argCount == 0:
+    return afAccepts
+  if not firstArgIsStringLiteral:
+    return afUnknown
+  case classifyParamType(info.firstType)
+  of ptString: afAccepts
+  of ptNotString: afRejects
+  of ptUnknown: afUnknown
+
+proc callShapeAt(scanned, masked: string; start: int): CallShape =
+  ## Whether the identifier ending at ``start`` is CALLED there, and
+  ## with how many arguments. ``scanned`` has kept string literals
+  ## blanked, so a bracket or comma inside one cannot be counted;
+  ## ``masked`` still carries them, so command syntax (``slurp "x"``)
+  ## stays detectable.
+  var i = start
+  while i < scanned.len and scanned[i] in {' ', '\t'}:
+    inc i
+  if i >= scanned.len or scanned[i] == '\n':
+    return CallShape(isCall: false, argCountKnown: true)
+  if scanned[i] == '(':
+    var depth = 0
+    var commas = 0
+    var body = 0
+    var j = i
+    while j < scanned.len:
+      case scanned[j]
+      of '(', '[', '{': inc depth
+      of ')', ']', '}':
+        dec depth
+        if depth == 0:
+          let count = if body == 0: 0 else: commas + 1
+          return CallShape(isCall: true, argCount: count, argCountKnown: true)
+      of ',':
+        if depth == 1: inc commas
+      else: discard
+      # Argument CONTENT is read from ``masked``: a string-literal
+      # argument is BLANKED in ``scanned``, so counting non-blank
+      # characters there would read ``slurp("x")`` as a nullary call
+      # and reject it against every one-parameter local overload.
+      if j > i and depth >= 1 and masked[j] notin Whitespace:
+        inc body
+      inc j
+    return CallShape(isCall: true, argCountKnown: false)
+  if masked[i] == '"' or
+      (masked[i] in {'r', 'R'} and i + 1 < masked.len and
+       masked[i + 1] == '"'):
+    # Command syntax: ``slurp "path"``. Arguments run comma-separated to
+    # the end of the line, and the literals are blanked in ``scanned``.
+    var commas = 0
+    var depth = 0
+    var j = i
+    while j < scanned.len and scanned[j] != '\n':
+      case scanned[j]
+      of '(', '[', '{': inc depth
+      of ')', ']', '}': dec depth
+      of ',':
+        if depth == 0: inc commas
+      else: discard
+      inc j
+    return CallShape(isCall: true, argCount: commas + 1, argCountKnown: true)
+  if scanned[i] in IdentChars or scanned[i] == '`':
+    # Command syntax with an argument that is not a literal.
+    return CallShape(isCall: true, argCountKnown: false)
+  CallShape(isCall: false, argCountKnown: true)
 
 proc qualifierBefore(scanned: string; idx: int): string =
   ## The module/expression qualifier of the identifier at ``idx``, i.e.
@@ -796,33 +1200,111 @@ proc qualifierBefore(scanned: string; idx: int): string =
     dec start
   scanned[start ..< idx - 1]
 
+proc shadowVerdict(decls: seq[LocalDecl]; scanned, masked: string;
+                   idx, identLen: int;
+                   firstArgIsStringLiteral: bool): ArgFit =
+  ## Does THIS file's own declaration capture THIS occurrence?
+  ##
+  ## ``afAccepts`` — yes: the occurrence is the local symbol and binds
+  ## nothing. ``afRejects`` — no local declaration can take this call,
+  ## so it reaches ``system``'s compile-time read. ``afUnknown`` — the
+  ## text does not decide it, which is missing evidence and refuses.
+  ##
+  ## The rule is per CALL, not per FILE, and that is the whole point.
+  ## A declaration counts against a call only where the COMPILER would
+  ## apply it: at module scope (column 0), textually BEFORE the call.
+  ## Measured against nim 2.2.8, every one of these READS the payload
+  ## even though the file declares ``proc slurp(label: string)``: the
+  ## declaration placed after the call, the declaration nested inside
+  ## another routine's body, the declaration under ``when false:``, and
+  ## the declaration under ``when defined(flagNeverSet):``. A per-file
+  ## declaration table applied to every occurrence ignored all four and
+  ## produced a key that did not move with the payload — an ALIAS.
+  ## Measured against nim 2.2.8: ``proc slurp(n: int)`` does NOT stop
+  ## ``slurp("payload.txt")`` compiling to ``system.slurp`` and reading
+  ## the file, and a non-routine declaration (``const gorge = 3``,
+  ## ``var slurp = 3``) does not stop a CALL reaching the stdlib symbol
+  ## at all. A per-file exclusion therefore dropped genuine
+  ## compile-time reads out of the closure and ALIASED — the one
+  ## failure this identity may not have.
+  let shape = callShapeAt(scanned, masked, idx + identLen)
+  if not shape.isCall:
+    # A bare mention is not a read. ``const entry = gorge`` names this
+    # file's own ``gorge`` (measured), and even where it named
+    # ``system``'s it would read nothing by itself.
+    return afAccepts
+  if not shape.argCountKnown:
+    return afUnknown
+  var verdict = afRejects
+  var undecidable = false
+  for decl in decls:
+    if decl.kind != ldRoutine:
+      # Not overloadable and never a call target: measured, a local
+      # ``const`` / ``var`` / ``let`` / ``type`` leaves ``system``'s
+      # routine reachable for a call — at module scope and from inside
+      # a nested body alike (measured: an ``outer`` body declaring
+      # ``const slurp = 3`` still reads the payload at module scope).
+      continue
+    if decl.nameOffset >= idx:
+      # Declared AFTER this call. Nim resolves in textual order, so the
+      # declaration does not exist yet here and the call is the
+      # stdlib's — measured, ``const blob = slurp("payload.txt")``
+      # followed by ``proc slurp(label: string)`` READS the file.
+      continue
+    if decl.indent > 0:
+      # Not at module scope. It is nested in another routine's body, or
+      # under a ``when`` branch whose liveness this scanner cannot
+      # evaluate. Measured, all three of those shapes leave
+      # ``system.slurp`` reachable at the module-scope call — but a
+      # LIVE ``when`` branch would not, and the text does not say which
+      # this is. The file's overload set is therefore undecidable, and
+      # undecidable REFUSES; it must not ignore.
+      undecidable = true
+      continue
+    case routineFit(decl, shape.argCount, firstArgIsStringLiteral)
+    of afAccepts: return afAccepts
+    of afUnknown: verdict = afUnknown
+    of afRejects: discard
+  if undecidable: afUnknown else: verdict
+
 proc compileTimeReadsOf(masked: string): seq[CompileTimeRead] =
   ## Every compile-time file read / command execution in MASKED source.
   ## These have no import syntax at all, so without this the bytes they
   ## fold into the build are invisible to the closure.
   ##
   ## Still a textual scan rather than a parse, but no longer a bare
-  ## identifier grep: occurrences inside kept string literals are data
-  ## rather than code, and a file that declares its own ``slurp`` /
-  ## ``gorge`` is using ITS symbol, not the stdlib's. Both exclusions
-  ## are provable from the text rather than heuristic, and each one
-  ## removes a way a CORRECT recipe became permanently unkeyable. An
-  ## explicit ``system.<fn>`` defeats both exclusions.
+  ## identifier grep: an occurrence inside a kept string literal is data
+  ## rather than code, a DECLARATION of the identifier is not a use of
+  ## it, and a call this file's OWN overload provably takes is that
+  ## overload rather than the stdlib's. What the text does not decide —
+  ## a call whose argument is not a literal, a local overload whose
+  ## parameter type this scanner does not recognise, a parameter list
+  ## that spans lines — is missing evidence and refuses. A QUALIFIED
+  ## occurrence (``system.slurp``, ``mymod.slurp``) is never excluded by
+  ## shadowing.
   let scanned = blankKeptStringLiterals(masked)
-  for fn in CompileTimeFileReaders:
-    let shadowed = declaresOwnSymbol(scanned, fn)
+  for fn in @CompileTimeFileReaders & @CompileTimeCommandRunners:
+    let isFileRead = fn in CompileTimeFileReaders
+    let decls = localDeclarationsOf(scanned, fn)
+    var declOffsets = initHashSet[int]()
+    for decl in decls:
+      declOffsets.incl(decl.nameOffset)
     for idx in identOccurrences(scanned, fn):
-      if shadowed and qualifierBefore(scanned, idx) != "system":
+      if idx in declOffsets:
         continue
       let arg = stringLiteralAt(masked, idx + fn.len)
-      result.add(CompileTimeRead(kind: ctFileRead, fn: fn,
-        literal: arg.value, hasLiteral: arg.found))
-  for fn in CompileTimeCommandRunners:
-    let shadowed = declaresOwnSymbol(scanned, fn)
-    for idx in identOccurrences(scanned, fn):
-      if shadowed and qualifierBefore(scanned, idx) != "system":
-        continue
-      result.add(CompileTimeRead(kind: ctCommand, fn: fn))
+      if decls.len > 0 and qualifierBefore(scanned, idx).len == 0:
+        case shadowVerdict(decls, scanned, masked, idx, fn.len, arg.found)
+        of afAccepts: continue
+        of afUnknown:
+          result.add(CompileTimeRead(kind: ctAmbiguousShadow, fn: fn))
+          continue
+        of afRejects: discard
+      if isFileRead:
+        result.add(CompileTimeRead(kind: ctFileRead, fn: fn,
+          literal: arg.value, hasLiteral: arg.found))
+      else:
+        result.add(CompileTimeRead(kind: ctCommand, fn: fn))
 
 proc isExternalModuleSpec(spec: string): bool =
   spec.len == 0 or spec == "system" or spec == "std" or spec == "pkg" or
@@ -863,8 +1345,11 @@ proc addSuppliedSearchRoot(roots: var seq[string]; base, value: string) =
   ##     external code (bound through ``dependencyInstances``) instead
   ##     of digesting it. Refusing such a root would make every real
   ##     compile command unkeyable;
-  ##   * a root that does not exist on disk is ignored rather than
-  ##     refused, because the compiler ignores it too.
+  ##   * a root that does not exist on disk contributes nothing HERE
+  ##     (there is nothing to search), but it is not thereby harmless:
+  ##     ``sourceIdentity`` REFUSES on it, because a caller asserting
+  ##     the effective root set and naming an absent directory has given
+  ##     demonstrably wrong evidence about the compile command.
   ##
   ## The root itself never enters the digest. Only the project-relative
   ## spelling of the files it reaches does, so supplying absolute roots
@@ -1194,6 +1679,15 @@ proc solvedSourceClosure*(projectRoot: string;
       of ctCommand:
         missing.add("compile-time command execution " & read.fn & "() in " &
           rel & " (its output cannot be bound)")
+      of ctAmbiguousShadow:
+        # This file declares its own ``read.fn`` AND calls the name in a
+        # shape the text does not resolve to one symbol or the other.
+        # Ignoring it would drop a real compile-time read when the call
+        # in fact reaches ``system``'s, which ALIASES; binding it would
+        # invent an input when it does not. Missing evidence, therefore.
+        missing.add("compile-time read " & read.fn & "() in " & rel &
+          " cannot be told apart from this file's own " & read.fn &
+          " declaration")
       of ctFileRead:
         if not read.hasLiteral:
           missing.add("compile-time file read " & read.fn &
@@ -1302,6 +1796,28 @@ proc sourceIdentity(instance: SolvedSourceInstance;
 
   if instance.packageName.len == 0:
     missing.add("package name")
+  if instance.searchRootsKnown:
+    # A caller that ASSERTS the effective root set and names a directory
+    # that is not there has reconstructed the compile command wrongly,
+    # and a wrong reconstruction re-opens the very channel this input
+    # closes: measured, a typo'd root silently dropped the module it was
+    # meant to reach and produced one key across two implementations.
+    # The claim is checkable in exactly this one respect, so it is
+    # checked.
+    let suppliedBase =
+      if instance.projectRoot.len == 0: ""
+      else:
+        try: normSlash(absolutePath(instance.projectRoot))
+        except CatchableError: normSlash(instance.projectRoot)
+    for supplied in instance.effectiveSearchRoots:
+      if supplied.strip().len == 0:
+        missing.add("supplied effective search root is empty")
+        continue
+      let abs = normSlash(
+        if supplied.isAbsolute: supplied else: suppliedBase / supplied)
+      if not dirExists(cacheIdentityExtendedPath(abs)):
+        missing.add("supplied effective search root does not exist: " &
+          supplied)
   if not instance.searchRootsKnown:
     # The effective compile command was never reconstructed, so a module
     # reachable only through a ``--path`` this scanner cannot read is
