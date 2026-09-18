@@ -57,7 +57,7 @@ suite "spec-example fixtures: simple-test-collection":
     requireSurface repro, "buildNimUnittest.build(",
                    "simple-test-collection/repro.nim"
 
-  test "registers the `test` build graph collection":
+  test "simple-test-collection registers the `test` build graph collection":
     requireSurface repro, "collect(\"test\", ",
                    "simple-test-collection/repro.nim"
 
@@ -87,7 +87,7 @@ suite "spec-example fixtures: variant-feature-flag":
     check "buildNimUnittest.build(" in repro
     check "source = \"tests/t_tls.nim\"" in repro
 
-  test "registers the `test` build graph collection":
+  test "variant-feature-flag registers the `test` build graph collection":
     requireSurface repro, "collect(\"test\", ",
                    "variant-feature-flag/repro.nim"
 

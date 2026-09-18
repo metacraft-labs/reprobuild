@@ -3207,4 +3207,4 @@ when defined(macosx) or defined(linux):
 else:
   suite "e2e_codetracer_in_place_project_file":
     test "CodeTracer automatic monitor project gate is skipped on this platform":
-      echo "SKIP: automatic monitor dependency gathering requires preload hooks"
+      echo "[platform N/A] automatic monitor dependency gathering requires preload hooks"

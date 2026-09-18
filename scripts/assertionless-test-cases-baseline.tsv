@@ -1,0 +1,99 @@
+# assertionless test cases -- the population `check_vacuous_test_cases.py`
+# finds with no assertion head it recognises.
+#
+# Regenerate with: python3 scripts/check_vacuous_test_cases.py --write-baseline
+# Then WRITE THE VERDICT for each new entry: it is a defect until argued
+# otherwise, and `genuinely-vacuous` is the verdict for "I have not looked".
+#
+# Format: <source>\t<case title>\t<verdict>\t<justification>
+# Line numbers are deliberately absent so an edit above a case does not
+# invalidate the baseline -- the same reason
+# scripts/shell-command-strings-baseline.txt omits them.
+#
+# The ratchet runs ONE WAY. A case that appears here and is not in the file is
+# refused by name. A row whose case has been repaired or deleted is dropped
+# from this file automatically by the next run, so improving the tree does not
+# also cost you a manual edit -- commit the result.
+#
+# Verdicts:
+#   asserts-in-callee  the assertions live in a proc/template this case calls; the justification names the callee
+#   genuinely-vacuous  runs code and asserts nothing; a defect, kept only until it is repaired or deleted
+#   local-helper       asserts through a project-local helper whose name this scanner cannot know; the justification names the helper
+#   platform-gate      a deliberate no-op on this platform, asserting nothing here by design
+#   smoke-only         the property is 'it did not raise'; the justification says whether raising is actually possible
+#
+# KNOWN BLIND SPOT, inherited and not fixed here: this lint counts cases with
+# NO assertion, so it cannot see a case whose assertions all sit inside a
+# runtime `if` that the host never takes. That is a different scan and is
+# recorded in Distribution-And-Packaging.milestones.org rather than papered
+# over here.
+libs/repro_binary_cache_server/tests/t_a2_p2_rest_surface.nim	publish + GET manifest + GET payload + cache-info round-trip	asserts-in-callee	runScenario (async proc, :112) checks /healthz, the cache-info envelope magic, 404/400/200 and the publish key echo
+libs/repro_binary_cache_server/tests/t_repro_binary_cache_https_publish_authz.nim	authorized-publish over HTTPS succeeds + substitutes byte-identical; unauthorized rejected 403 + not stored; TLS real; plain HTTP regression	asserts-in-callee	runScenario (proc, :158) doAsserts the server binary and checks the TLS/authz scenario
+libs/repro_build_engine/tests/t_inherited_environment_cache.nim	both whole-graph hot-cache paths track inherited changes	asserts-in-callee	inheritedTransitions (:78), run twice over skipEvidence in [false, true]
+libs/repro_build_engine/tests/t_inherited_environment_cache.nim	explicit passthrough retains its name-only cache policy	asserts-in-callee	checkRun (:58) then checkHit (:70), pinning the name-only passthrough policy
+libs/repro_build_engine/tests/t_inherited_environment_cache.nim	normal lookup tracks live inherited values, not unread variables	asserts-in-callee	inheritedTransitions (proc, :78) which calls checkRun/checkHit (procs, :58/:70)
+libs/repro_build_engine/tests/test_engine_worker_pool.nim	a worker fault fails its job, not the build	local-helper	checkOrEcho (:53) asserts the faulting job reports a ValueError, wrote no output, and left its neighbours untouched
+libs/repro_build_engine/tests/test_engine_worker_pool.nim	backpressure bounds the queue instead of dropping or growing	local-helper	checkOrEcho (:53) asserts deepest<=Limit and deepest>0 plus 12 outputs
+libs/repro_build_engine/tests/test_engine_worker_pool.nim	the pool drains on shutdown	local-helper	checkOrEcho (file-local template, :53) asserts pending==0 after shutdown, 24 output files present and correct, 24 error-free outcomes
+libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim	a pooled finish does not widen the grace window	local-helper	checkOrEcho asserts pooled/serial sample counts and the grace-window delay bound, with an explicit sensitivity control
+libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim	RunQuota helper builds consume their own capture for the same action ID	asserts-in-callee	overlap (:119) for the helper build
+libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim	inline RunQuota builds consume their own capture for the same action ID	asserts-in-callee	overlap (template, :119) checks exit codes, per-role read sets, disjointness and depfile presence
+libs/repro_dsl_stdlib/tests/t_ndem1_reproos_desktop.nim	validateDesktopConfig success: activeAtBoot in desktopKind	smoke-only	validateDesktopConfig x3 with no expect; raising IS possible and the next case (:139) proves it raises EConfigViolation for activeAtBoot outside desktopKind
+libs/repro_dsl_stdlib/tests/t_packaging_runtime_closure.nim	the refusal does not fire for a target that has no interpreter	smoke-only	win.validate() with architecture sparc64; raising IS possible and the preceding case (:388) proves the same input raises for a Linux target
+libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	POSIX mode-bit honouring and O_TMPFILE match the table	local-helper	expectFact (:152) on honoursPosixModeBits, untestedHere for hasOTmpfile
+libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	POSIX mode-bit storage matches the table	local-helper	expectFact (:152) on posixModeBits, set and read back
+libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	hardlinks to directories are refused where the table says so	local-helper	expectFact (file-local template, :152) on hardlinksToDirectories
+libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	one device is one link domain where the table says so	local-helper	expectFact (:152) on oneDeviceIsOneLinkDomain
+libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	path separators and the executable suffix match the table	local-helper	expectFact (:152) x3 on pathSeparator, pathListSeparator, executableSuffix
+libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	permission and attribute changes are per-inode where the table says so	local-helper	expectFact (:152) on metadataIsPerInode, chmod through the second name
+libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	sparse-file support matches the table	local-helper	expectFact (:152) on sparseFiles, allocation ratio or the OS capability report
+libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	symlink creation privilege is recorded against what this host does	local-helper	expectFact (:152) when the fact is definite, partiallyChecked otherwise; non-vacuity argued at :1609-1614
+libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	the linking and cloning APIs named by the OS table are the ones that run	local-helper	expectFact (:152) on hardlinkApi and reflinkApi, with untestedHere fallbacks
+libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	the maximum command line is declared but not driven here	local-helper	untestedHere (:172) only, whose own check is trivially true; load-bearing for the ledger-completeness gate at :1718, which reddens if this fact is absent. WEAKEST of the local-helper rows: it asserts nothing about the product
+libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim	case candidates use filesystem matching rather than assuming its rules	asserts-in-callee	checkBatch (proc, :19) asserts batch==individual resolution. WEAKEST of the asserts-in-callee rows: the case discards the return value, so nothing asserts what use("tool") resolves to; every sibling case in the file binds it
+tests/e2e/local-build-engine/t_e2e_repro_build_multiple_named_targets.nim	collection member closures execute in one scheduler pass	asserts-in-callee	checkMultiTargetBuild (:133) with collection-member selectors
+tests/e2e/local-build-engine/t_e2e_repro_build_multiple_named_targets.nim	named target closures execute in one scheduler pass	asserts-in-callee	checkMultiTargetBuild (proc, :133) asserts 3 actions in one report, all asSucceeded, build-delta absent
+tests/integration/t_cached_source_closure_preparation.nim	default work root	asserts-in-callee	verifyClosure (template, :148) which calls checkPrepared (proc, :114)
+tests/integration/t_cached_source_closure_preparation.nim	environment work root	asserts-in-callee	verifyClosure (:148) for the environment work root
+tests/integration/t_event_log_parser_rejects_malformed.nim	a PCR index outside the platform's registers is refused	local-helper	refuses (:66) for both log formats, message must name "outside the 24 registers"
+tests/integration/t_event_log_parser_rejects_malformed.nim	a Spec ID Event declaring more banks than a TPM has is refused	local-helper	refuses (:66), message must name the 16-bank algorithm bound
+tests/integration/t_event_log_parser_rejects_malformed.nim	a digest count above the bank bound is refused BY NAME	local-helper	refuses (:66), message must name the 16-bank bound
+tests/integration/t_event_log_parser_rejects_malformed.nim	a second Spec ID Event later in the log is refused	local-helper	refuses (:66), message must name "second Spec ID Event03"
+tests/integration/t_event_log_parser_rejects_malformed.nim	a truncation in the middle of a digest is refused	local-helper	refuses (:66), message must name "digests[0].digest needs"
+tests/integration/t_event_log_parser_rejects_malformed.nim	a truncation in the middle of the Spec ID header is refused by name	local-helper	refuses (:66), message must name "event[0].event needs"
+tests/integration/t_event_log_parser_rejects_malformed.nim	an empty log is refused rather than read as a boot that measured nothing	local-helper	refuses (file-local template, :66) asserts it raised TcgEventLogError and that the message names the rule
+tests/integration/t_event_log_parser_rejects_malformed.nim	an event payload above the ceiling is refused	local-helper	refuses (:66), message must name the payload ceiling
+tests/integration/t_event_log_parser_rejects_malformed.nim	an extend with a wrong-length digest or register is refused	local-helper	refuses (:66), message must name the register/digest length mismatch
+tests/integration/t_event_log_parser_rejects_malformed.nim	bytes appended after a complete log are refused	local-helper	refuses (:66), message must name "event[32].pcrIndex" / "event[15].pcrIndex"
+tests/integration/t_event_log_parser_rejects_malformed.nim	one bank appearing twice in one digest list is refused	local-helper	refuses (:66), message must name "appears twice in one digest list"
+tests/integration/t_event_log_parser_rejects_malformed.nim	replaying under an algorithm this codec cannot hash is refused	local-helper	refuses (:66), message must name "so the log cannot be folded under it"
+tests/integration/t_event_log_parser_rejects_malformed.nim	the reset value of a register outside the platform is refused	local-helper	refuses (:66) x2, message must name "outside the 24 registers"
+tests/integration/t_integration_scheduler_dependency_gathering_policies.nim	automatic and hybrid monitor policies use real io-monitor evidence	asserts-in-callee	requirePolicyCase (:268) / requireFailureNoPublish (:358), monitor-backed variants
+tests/integration/t_integration_scheduler_dependency_gathering_policies.nim	declared, recognized, and converted dependency evidence share cache invalidation	asserts-in-callee	requirePolicyCase (proc, :268) and requireFailureNoPublish (proc, :358)
+tests/integration/t_just_test_hot_cache_is_no_op_build.nim	second build of a single test target re-runs nothing	asserts-in-callee	runHotCacheCheck (proc, :128) asserts hot launched and misses are 0 for both edge kinds
+tests/integration/t_monitor_depfile_reader.nim	corrupt and truncated iomon files fail validation	local-helper	expectReaderError (:18) asserts the exact MonitorDepFileReaderErrorKind for 5 corruptions. NOTE it is a proc, so a failure prints [OK] and only sets the exit code
+tests/integration/t_repro_test_runner_aggregate_exit_code.nim	default mode: 1 failing of 20 -> exit 1, all 20 run	asserts-in-callee	runDefaultCase (proc, :133)
+tests/integration/t_repro_test_runner_aggregate_exit_code.nim	fail-fast mode: 1 failing of 20 -> exit 1, fewer than 20 run	asserts-in-callee	runFailFastCase (proc, :175) checks failed>=1 and total<NumFixtures
+tests/integration/t_repro_test_runner_parallel_n_workers.nim	resource-sensitive tests remain enabled and run exclusively	asserts-in-callee	runExclusiveResourceCheck (proc, :178) asserts the exclusive-window count and overlap==1; same early-return weakness as :271
+tests/integration/t_repro_test_runner_parallel_n_workers.nim	runner caps parallelism at --threads N	asserts-in-callee	runParallelCheck (proc, :103). KNOWN WEAKNESS: it early-returns when build/bin/repro_test_runner is absent, and because check sits in a proc the case then prints [OK] with an empty body
+tests/integration/t_spec_example_fixtures_present.nim	C source is present	asserts-in-callee	readFixture (:33) over selectable-toolchain/src/main.c
+tests/integration/t_spec_example_fixtures_present.nim	abstract cc.compile typed-tool call (Toolchain cross-cutting interface)	local-helper	requireSurface (:40) on the abstract cc.compile typed-tool call
+tests/integration/t_spec_example_fixtures_present.nim	both test sources and the server source are present	asserts-in-callee	readFixture (:33) x3 over server.nim, t_basic.nim, t_tls.nim
+tests/integration/t_spec_example_fixtures_present.nim	declares a package	local-helper	requireSurface (file-local template, :40) on "package simple_test_collection:"
+tests/integration/t_spec_example_fixtures_present.nim	declares a variant Configurable	local-helper	requireSurface (:40) on "enableTLS: variant bool = true"
+tests/integration/t_spec_example_fixtures_present.nim	declares an enum variant	local-helper	requireSurface (:40) on "compiler: variant string = gcc"
+tests/integration/t_spec_example_fixtures_present.nim	each fixture has its own README explaining what it exercises	asserts-in-callee	readFixture (:33) over each fixture's README.md
+tests/integration/t_spec_example_fixtures_present.nim	library and test sources are present	asserts-in-callee	readFixture (proc, :33) doAsserts fileExists, and doAssert raises, so the failure does reach the case
+tests/integration/t_spec_example_fixtures_present.nim	simple-test-collection registers the `test` build graph collection	local-helper	requireSurface (:40) on collect("test", in simple-test-collection
+tests/integration/t_spec_example_fixtures_present.nim	uses the buildNimUnittest typed-tool (M1 long-form shape)	local-helper	requireSurface (:40) on "buildNimUnittest.build("
+tests/integration/t_spec_example_fixtures_present.nim	variant-conditioned uses: arm	local-helper	requireSurface (:40) on the variant-conditioned uses arm
+tests/integration/t_spec_example_fixtures_present.nim	variant-driven uses: case expression	local-helper	requireSurface (:40) x3 on the case expression and its two of-branches
+tests/integration/t_spec_example_fixtures_present.nim	variant-feature-flag registers the `test` build graph collection	local-helper	requireSurface (:40) on collect("test", in variant-feature-flag
+tests/unit/t_install_mirror_optional_version.nim	DSL custom mirror declares only the metadata it emits	asserts-in-callee	checkMirrorVersions (:61) for the DSL custom mirror
+tests/unit/t_install_mirror_optional_version.nim	standard custom convention declares only the metadata it emits	asserts-in-callee	checkMirrorVersions (:61) for the standard custom convention
+tests/unit/t_install_mirror_optional_version.nim	typed mirror declares only the metadata it emits	asserts-in-callee	checkMirrorVersions (proc, :61) makes 7 checks over both version-absent and version-present
+tests/unit/t_m9r83_install_mirror_action_shapes.nim	custom libexec closure executes and rejects missing libraries	asserts-in-callee	verifyLibexecMirror (:44) propagated, custom
+tests/unit/t_m9r83_install_mirror_action_shapes.nim	custom libexec resolves provisioned runtime libraries	asserts-in-callee	verifyLibexecMirror (:44) custom, not propagated, taking the manifest/rpath else-arm at :149
+tests/unit/t_m9r83_install_mirror_action_shapes.nim	custom nested executables resolve their own relocatable libraries	asserts-in-callee	verifyLibexecMirror (:44) with custom and ownLibrary
+tests/unit/t_m9r83_install_mirror_action_shapes.nim	typed libexec closure executes and rejects missing libraries	asserts-in-callee	verifyLibexecMirror (:44) propagated, typed
+tests/unit/t_m9r83_install_mirror_action_shapes.nim	typed nested executables resolve their own relocatable libraries	asserts-in-callee	verifyLibexecMirror (proc, :44) requires exit 0, the binary present, rpath contents, and exit 75 with "UNRESOLVED NEEDED" on the rejection pass

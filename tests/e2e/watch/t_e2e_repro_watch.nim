@@ -1590,4 +1590,4 @@ when defined(macosx):
 else:
   suite "e2e_repro_watch":
     test "event-driven watch E2E is macOS kqueue-only in M31":
-      echo "SKIP: repro watch filesystem E2E currently requires macOS kqueue"
+      echo "[platform N/A] repro watch filesystem E2E currently requires macOS kqueue"

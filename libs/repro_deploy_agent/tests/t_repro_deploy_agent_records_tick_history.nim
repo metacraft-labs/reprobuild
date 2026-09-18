@@ -488,8 +488,27 @@ suite "deploy agent maps every tick onto a Windows event":
     # wrapped so a refused registration or a refused report cannot escape.
     # What is NOT covered here is the ReportEventW round trip itself; that
     # is verified on a real Windows host with `Get-WinEvent`.
+    #
+    # CORRECTED 2026-09-19. This case used to set the sink to "0" and then call
+    # `reportTickEvent` twice. With the sink OFF the proc returns at its first
+    # line, so the wrapped registration and the wrapped report — the only thing
+    # the case claims to cover — never ran at all. The body would have passed
+    # with `reportTickEvent`'s contents deleted or replaced by a `quit`. It now
+    # drives the ENABLED path, which is the one being claimed, and keeps the
+    # disabled path as a second configuration rather than as the only one.
     let saved = getEnv(TickEventLogEnvVar)
     defer: putEnv(TickEventLogEnvVar, saved)
-    putEnv(TickEventLogEnvVar, "0")
+
+    putEnv(TickEventLogEnvVar, "1")
+    check tickEventLogEnabled()
     reportTickEvent(tickStatusForRaise(Target, NimMissingError))
     reportTickEvent(TickStatusRecord(outcome: "aoFuture", exitCode: 7))
+    # Reaching this line is the property: with the sink ON, neither call
+    # escaped. The `check` above it is what stops a future change to
+    # `tickEventLogEnabled` from returning this case to the no-op it was,
+    # silently and while still printing [OK].
+    check tickEventLogEnabled()
+
+    putEnv(TickEventLogEnvVar, "0")
+    check not tickEventLogEnabled()
+    reportTickEvent(tickStatusForRaise(Target, NimMissingError))

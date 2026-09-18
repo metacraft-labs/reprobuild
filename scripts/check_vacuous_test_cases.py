@@ -30,14 +30,29 @@ it contains is trivially true -- ``check true``, ``require true``,
 fine: ``check true`` inside one arm of an ``if`` whose other arm checks
 something is a legitimate shape and is not reported.
 
-A case with NO assertion at all is a separate shape and is NOT a failure by
-default. ``--include-assertionless`` lists them, with the caveat that most of
-what it lists is not a defect: this repository has project-local assertion
-helpers (``requireSurface``, ``expectReaderError``, and per-file ``expect*``
+A case with NO assertion at all is a separate shape, and it is judged against
+a committed BASELINE rather than refused outright. Most of that population is
+not a defect: this repository has project-local assertion helpers
+(``requireSurface``, ``expectReaderError``, and per-file ``expect*``
 templates) whose names this scanner cannot know, so a case that asserts
-through one of them reads as assertionless here. Treat that list as a
-starting point for review, never as a verdict. It is counted on every run so
-the number is visible, and it is deliberately not a gate.
+through one of them reads as assertionless here. Refusing the shape outright
+would fight a legitimate pattern; leaving it uncounted let it grow.
+
+So ``scripts/assertionless-test-cases-baseline.tsv`` pins the set, one row per
+case, each with a verdict and a written reason. A case that ARRIVES is refused
+by name. A case that is repaired or deleted is dropped from the file by the
+next run, so the ratchet only moves one way and improving the tree costs no
+manual edit. ``--include-assertionless`` still lists the population and no
+longer decides the run.
+
+CHANGED 2026-09-19, and the reason is worth keeping. This paragraph used to end
+"it is counted on every run so the number is visible, and it is deliberately
+not a gate". The choice not to gate was right and is unchanged. What was wrong
+is the inference that followed from it: a number printed on every run was
+treated as a record, and it is not. The count went from 54 to 75 with nobody
+able to name one of the 21, because no run had anything to compare against.
+The three lints this one sits beside all carry a baseline for exactly this
+reason; this one now does too.
 
 KNOWN LIMIT: BRANCH-LOCAL FILLER
 ================================
@@ -68,13 +83,18 @@ USAGE
   scripts/check_vacuous_test_cases.py
       [--root DIR]                # repository root (default: this file's ..)
       [--paths A.nim B.nim ...]   # scan these instead of the whole corpus
-      [--include-assertionless]   # also report cases with no assertion
+      [--include-assertionless]   # also list cases with no assertion
       [--list-platform-gates]     # name the gates, not just count them
+      [--write-baseline]          # re-record the assertionless baseline,
+                                  # keeping every surviving row's verdict
 
 Exit codes:
-  0 -- no vacuous case.
-  1 -- at least one vacuous case; stderr names each ``file:line`` and the
-       case title.
+  0 -- no vacuous case, and the assertionless population matches its baseline
+       (or is a subset of it, in which case the baseline is rewritten).
+  1 -- at least one vacuous case, OR a new assertionless case, OR the baseline
+       does not parse, OR the corpus scan came back below its floor. stderr
+       names each one.
+  2 -- an unusable combination of flags.
 
 Wired in three places, mirroring the suite case-count gate it sits beside:
   - ``just lint`` (which CI's lint job runs);
@@ -133,6 +153,171 @@ TRIVIAL_ARGUMENTS = {"true", "1", "not false"}
 # The exemption is deliberately narrow: only this exact literal prefix earns
 # it, so bypassing the lint requires writing a marker a reviewer can see.
 PLATFORM_GATE_MARKER = "[platform N/A]"
+
+# ---------------------------------------------------------------------------
+# The assertionless-case baseline
+# ---------------------------------------------------------------------------
+#
+# ADDED 2026-09-19. Until now the assertionless population was COUNTED and not
+# gated, and the header above said so as a deliberate choice: this scanner
+# cannot know the repository's project-local assertion helpers, so a large part
+# of that count is not a defect and refusing it outright would fight a
+# legitimate pattern.
+#
+# What that reasoning missed is that "not a gate" and "not recorded" are
+# different things. The three lints this one sits beside --
+# ``check_ambient_execution.sh``, ``check_shell_command_strings.sh`` and
+# ``check_test_body_helper_compilation.py`` -- each carry a committed baseline,
+# so a population they cannot judge outright can still only SHRINK. This one
+# carried none, and the count grew from 54 to 75 with nobody able to say which
+# 21 arrived or when. A number printed on every run is not a record; the only
+# thing that makes it one is a file to diff it against.
+#
+# So: the set is pinned, with a written verdict per row, and the ratchet runs
+# one way. A case that arrives is refused BY NAME. A case that is repaired or
+# deleted is removed from the baseline automatically, because the improvement
+# should cost the person who made it nothing.
+#
+# KEYED BY (source, case title), NOT BY LINE NUMBER. Its sibling
+# ``shell-command-strings-baseline.txt`` learned this first and says so in its
+# own header: a line number is invalidated by any edit ABOVE the site, which
+# makes the baseline churn for reasons that have nothing to do with the
+# population it pins. A case title is stable under edits elsewhere in the file
+# and is what a reviewer reads anyway.
+ASSERTIONLESS_BASELINE = SCRIPT_DIR / "assertionless-test-cases-baseline.tsv"
+
+# Verdict vocabulary. Each says WHY a case with no recognised assertion is on
+# the list, and the two that mean "this is fine" have to name the mechanism
+# that makes it fine -- a verdict without a reason is a rubber stamp.
+ASSERTIONLESS_VERDICTS = {
+    "local-helper": (
+        "asserts through a project-local helper whose name this scanner "
+        "cannot know; the justification names the helper"
+    ),
+    "asserts-in-callee": (
+        "the assertions live in a proc/template this case calls; the "
+        "justification names the callee"
+    ),
+    "platform-gate": (
+        "a deliberate no-op on this platform, asserting nothing here by design"
+    ),
+    "smoke-only": (
+        "the property is 'it did not raise'; the justification says whether "
+        "raising is actually possible"
+    ),
+    "genuinely-vacuous": (
+        "runs code and asserts nothing; a defect, kept only until it is "
+        "repaired or deleted"
+    ),
+}
+
+BASELINE_HEADER = """\
+# assertionless test cases -- the population `check_vacuous_test_cases.py`
+# finds with no assertion head it recognises.
+#
+# Regenerate with: python3 scripts/check_vacuous_test_cases.py --write-baseline
+# Then WRITE THE VERDICT for each new entry: it is a defect until argued
+# otherwise, and `genuinely-vacuous` is the verdict for "I have not looked".
+#
+# Format: <source>\\t<case title>\\t<verdict>\\t<justification>
+# Line numbers are deliberately absent so an edit above a case does not
+# invalidate the baseline -- the same reason
+# scripts/shell-command-strings-baseline.txt omits them.
+#
+# The ratchet runs ONE WAY. A case that appears here and is not in the file is
+# refused by name. A row whose case has been repaired or deleted is dropped
+# from this file automatically by the next run, so improving the tree does not
+# also cost you a manual edit -- commit the result.
+#
+# Verdicts:
+%s#
+# KNOWN BLIND SPOT, inherited and not fixed here: this lint counts cases with
+# NO assertion, so it cannot see a case whose assertions all sit inside a
+# runtime `if` that the host never takes. That is a different scan and is
+# recorded in Distribution-And-Packaging.milestones.org rather than papered
+# over here.
+"""
+
+# Anti-vacuity floors for the corpus itself, asserted BEFORE the baseline is
+# compared against anything. A scan that parsed nothing finds zero
+# assertionless cases, and zero equals any baseline you like once the rows
+# have also been dropped as "repaired" -- so an empty scan would not merely
+# pass, it would ERASE the record on its way through. The numbers are the
+# 2026-09-18 census (9878 cases in 1716 sources) and are a floor, not a pin:
+# the suite grows, and a floor that tracked the exact count would be a second
+# baseline to maintain.
+CORPUS_CASE_FLOOR = 9878
+CORPUS_SOURCE_FLOOR = 1716
+
+
+def baseline_key(source: str, title: str) -> tuple[str, str]:
+    """The identity of an assertionless case: where it lives and what it is called."""
+    return (source, title)
+
+
+def read_assertionless_baseline(
+    path: pathlib.Path,
+) -> tuple[dict[tuple[str, str], tuple[str, str]], list[str]]:
+    """Parse the baseline into ``{(source, title): (verdict, justification)}``.
+
+    A malformed row is an ERROR, never a skipped line. A parser that shrugged
+    at a bad row would let the file be emptied by corruption and still report
+    "no new assertionless cases", which is the failure this baseline exists to
+    prevent, reached through the baseline itself.
+    """
+    rows: dict[tuple[str, str], tuple[str, str]] = {}
+    errors: list[str] = []
+    if not path.exists():
+        return rows, [
+            f"missing baseline: {path}. Regenerate with "
+            f"`scripts/check_vacuous_test_cases.py --write-baseline`, then write "
+            f"a verdict for every row."
+        ]
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 4:
+            errors.append(
+                f"{path.name}:{number}: expected 4 tab-separated fields "
+                f"(source, title, verdict, justification), got {len(fields)}"
+            )
+            continue
+        source, title, verdict, justification = (field.strip() for field in fields)
+        if verdict not in ASSERTIONLESS_VERDICTS:
+            errors.append(
+                f"{path.name}:{number}: unknown verdict `{verdict}`; expected one of "
+                f"{', '.join(sorted(ASSERTIONLESS_VERDICTS))}"
+            )
+        if not justification:
+            errors.append(
+                f"{path.name}:{number}: {source} :: {title} has no justification. "
+                f"A verdict without a reason is a rubber stamp; say which helper "
+                f"asserts, or say what is missing."
+            )
+        key = baseline_key(source, title)
+        if key in rows:
+            errors.append(
+                f"{path.name}:{number}: duplicate row for {source} :: {title}. "
+                f"Two cases in one file with the same title cannot be told apart "
+                f"by this baseline; rename one."
+            )
+        rows[key] = (verdict, justification)
+    return rows, errors
+
+
+def render_assertionless_baseline(
+    rows: dict[tuple[str, str], tuple[str, str]],
+) -> str:
+    verdict_lines = "".join(
+        f"#   {name:<18} {description}\n"
+        for name, description in sorted(ASSERTIONLESS_VERDICTS.items())
+    )
+    out = [BASELINE_HEADER % verdict_lines]
+    for (source, title) in sorted(rows):
+        verdict, justification = rows[(source, title)]
+        out.append(f"{source}\t{title}\t{verdict}\t{justification}\n")
+    return "".join(out)
 
 
 def name_key(value: str) -> str:
@@ -346,6 +531,172 @@ def declared_nim_sources(root: pathlib.Path) -> list[str]:
     return unique
 
 
+def run_assertionless_ratchet(
+    measured: dict[tuple[str, str], int],
+    collisions: list[str],
+    cases: int,
+    scanned: int,
+    write: bool,
+) -> bool:
+    """Compare the assertionless population against its baseline.
+
+    Returns ``True`` when the run must fail. The ratchet runs one way:
+
+    * a case the tree has and the baseline does not is REFUSED, by name --
+      "the count went up" would not say which, and this population grew by 21
+      with nobody able to name one of them;
+    * a baseline row whose case no longer appears has been repaired or
+      deleted, and the file is rewritten without it. Making an improvement
+      also cost a manual edit is how ratchets stop being maintained.
+
+    The two are not symmetric on purpose. When BOTH happen in one run the
+    rewrite is withheld and the run fails on the new case, because recording a
+    new baseline in the same breath as refusing one blesses the half of the
+    tree the refusal is about (Verification-Harness-Traps §32: run the needle
+    scan before re-recording the control digests, never after).
+    """
+    # ---- anti-vacuity, before anything is compared ----------------------
+    # Asserted first and unconditionally. A scan that parsed nothing finds
+    # zero assertionless cases; every baseline row then looks "repaired", and
+    # under the rewrite rule below an empty scan would not merely pass, it
+    # would ERASE the record on its way through. These floors are what stops
+    # that, so they must run before the comparison and not after it.
+    if cases < CORPUS_CASE_FLOOR or scanned < CORPUS_SOURCE_FLOOR:
+        print(
+            f"error: the corpus scan came back too small to trust: {cases} cases "
+            f"in {scanned} sources, against a floor of {CORPUS_CASE_FLOOR} cases "
+            f"in {CORPUS_SOURCE_FLOOR} sources (the 2026-09-18 census).\n"
+            f"       A scan this small finds few assertionless cases for reasons "
+            f"that have nothing to do with the tree, and would report the "
+            f"baseline's rows as repaired. Refusing rather than comparing.",
+            file=sys.stderr,
+        )
+        return True
+
+    # ---- the population must be countable before it can be pinned -------
+    # Two assertionless cases in one file under one title collapse to a single
+    # baseline row, so the census would report 75 while the file held 74 — the
+    # second one pinned by nothing. Refuse rather than pick one, and say which
+    # two, because the remedy is a rename and it is cheap.
+    if collisions:
+        print(
+            "error: two assertionless test cases share a file and a title, so the "
+            "baseline cannot tell them apart (nor can a test report):",
+            file=sys.stderr,
+        )
+        for message in collisions:
+            print(f"    {message}", file=sys.stderr)
+        print(
+            "       Rename one. A title is a case's name in every report this "
+            "suite prints; two cases answering to it is a defect on its own.",
+            file=sys.stderr,
+        )
+        return True
+
+    recorded, errors = read_assertionless_baseline(ASSERTIONLESS_BASELINE)
+
+    if errors and not write:
+        print("error: the assertionless baseline does not parse:", file=sys.stderr)
+        for message in errors:
+            print(f"    {message}", file=sys.stderr)
+        return True
+
+    if not recorded and not write:
+        print(
+            f"error: {ASSERTIONLESS_BASELINE.name} has no rows. An empty baseline "
+            f"makes every one of the {len(measured)} assertionless cases in the "
+            f"tree a new offender, which is not a useful diagnostic — regenerate "
+            f"it with --write-baseline and write the verdicts.",
+            file=sys.stderr,
+        )
+        return True
+
+    arrived = sorted(set(measured) - set(recorded))
+    departed = sorted(set(recorded) - set(measured))
+
+    if write:
+        # Keep the verdict and justification of every surviving row; a new row
+        # arrives with the verdict that means "nobody has looked at this yet".
+        rows: dict[tuple[str, str], tuple[str, str]] = {}
+        for key in measured:
+            if key in recorded:
+                rows[key] = recorded[key]
+            else:
+                rows[key] = (
+                    "genuinely-vacuous",
+                    "UNREVIEWED -- recorded by --write-baseline; read the case and "
+                    "replace this verdict",
+                )
+        ASSERTIONLESS_BASELINE.write_text(
+            render_assertionless_baseline(rows), encoding="utf-8", newline="\n"
+        )
+        unreviewed = [key for key in rows if key not in recorded]
+        print(
+            f"check_vacuous_test_cases: wrote {len(rows)} rows to "
+            f"{ASSERTIONLESS_BASELINE.name} "
+            f"({len(unreviewed)} new, {len(departed)} dropped)."
+        )
+        for source, title in sorted(unreviewed):
+            print(f"    NEEDS A VERDICT: {source} :: {title}")
+        return False
+
+    if arrived:
+        print(
+            "FAIL: test cases with no assertion this scanner can see, and no row",
+            file=sys.stderr,
+        )
+        print(
+            "      in the baseline. Each one is a defect until argued otherwise:",
+            file=sys.stderr,
+        )
+        print(
+            "      assert the property, or — if the case asserts through a local",
+            file=sys.stderr,
+        )
+        print(
+            "      helper — add a row naming that helper with",
+            file=sys.stderr,
+        )
+        print(
+            "      `scripts/check_vacuous_test_cases.py --write-baseline`.",
+            file=sys.stderr,
+        )
+        print("", file=sys.stderr)
+        for source, title in arrived:
+            print(f"  {source}:{measured[(source, title)]}: {title}", file=sys.stderr)
+        print("", file=sys.stderr)
+        print(f"      {len(arrived)} new assertionless case(s).", file=sys.stderr)
+        if departed:
+            print(
+                f"      ({len(departed)} baseline row(s) also no longer match; they "
+                f"are NOT dropped while this run is failing.)",
+                file=sys.stderr,
+            )
+        return True
+
+    if departed:
+        rows = {key: recorded[key] for key in measured}
+        ASSERTIONLESS_BASELINE.write_text(
+            render_assertionless_baseline(rows), encoding="utf-8", newline="\n"
+        )
+        print(
+            f"check_vacuous_test_cases: {len(departed)} baseline row(s) no longer "
+            f"match a case with no assertion — dropped from "
+            f"{ASSERTIONLESS_BASELINE.name}. COMMIT IT to lock the improvement in:"
+        )
+        for source, title in departed:
+            print(f"    {source} :: {title}")
+
+    outstanding = sum(
+        1 for key in measured if recorded.get(key, ("", ""))[0] == "genuinely-vacuous"
+    )
+    print(
+        f"check_vacuous_test_cases: {len(measured)} assertionless case(s), all "
+        f"baselined; {outstanding} still carry the `genuinely-vacuous` verdict."
+    )
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=None)
@@ -365,6 +716,14 @@ def main() -> int:
         default=None,
         help="scan these sources instead of every source in repro_tests.nim",
     )
+    parser.add_argument(
+        "--write-baseline",
+        action="store_true",
+        help=(
+            "rewrite the assertionless-case baseline from the current tree, "
+            "keeping the verdict and justification of every row that survives"
+        ),
+    )
     arguments = parser.parse_args()
 
     self_test()
@@ -379,6 +738,10 @@ def main() -> int:
 
     vacuous: list[str] = []
     assertionless: list[str] = []
+    # Keyed the way the baseline is keyed, so the two can be compared without
+    # a second notion of what identifies a case.
+    assertionless_keys: dict[tuple[str, str], int] = {}
+    assertionless_collisions: list[str] = []
     platform_gates: list[str] = []
     scanned = 0
     cases = 0
@@ -399,10 +762,21 @@ def main() -> int:
                 vacuous.append(f"{source}:{line}: {title}")
             elif assertions == 0:
                 assertionless.append(f"{source}:{line}: {title}")
+                key = baseline_key(source, title)
+                if key in assertionless_keys:
+                    # Two cases in one file under one title. The baseline
+                    # cannot tell them apart, and neither can a test report.
+                    # Collapsing them here would quietly pin one and leave the
+                    # other unpinned — the count would say 75 and the file
+                    # would hold 74, which is how a population stops being a
+                    # population. Recorded, and refused below.
+                    assertionless_collisions.append(
+                        f"{source}: {title!r} at lines "
+                        f"{assertionless_keys[key]} and {line}"
+                    )
+                assertionless_keys.setdefault(key, line)
 
     reported = list(vacuous)
-    if arguments.include_assertionless:
-        reported.extend(assertionless)
 
     # The census prints on every run, pass or fail. A platform gate is
     # legitimate but it is still coverage that did not run, and the point of
@@ -413,17 +787,57 @@ def main() -> int:
         f"{len(assertionless)} cases with no assertion at all."
     )
 
+    print(census)
+
+    # ---- the assertionless ratchet -------------------------------------
+    # Skipped entirely under --paths, which scans a subset by construction:
+    # comparing a subset against a whole-tree baseline would report every case
+    # outside the subset as repaired and silently delete it from the file.
+    baseline_failed = False
+    if arguments.paths:
+        if arguments.write_baseline:
+            print(
+                "error: --write-baseline scans the whole corpus; it cannot be "
+                "combined with --paths, which would record a subset as the "
+                "entire population.",
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            "check_vacuous_test_cases: --paths given; the assertionless "
+            "baseline is not compared (a subset is not the population)."
+        )
+    else:
+        baseline_failed = run_assertionless_ratchet(
+            assertionless_keys,
+            assertionless_collisions,
+            cases,
+            scanned,
+            write=arguments.write_baseline,
+        )
+        if arguments.write_baseline:
+            return 1 if baseline_failed else 0
+
+    if arguments.include_assertionless:
+        print("")
+        print("check_vacuous_test_cases: the assertionless population, in full.")
+        print("  Cases with no assertion head this scanner recognises. The")
+        print(f"  committed verdict for each is in {ASSERTIONLESS_BASELINE.name};")
+        print("  listing them does not decide the run, the ratchet above does.")
+        print("")
+        for entry in sorted(assertionless):
+            print(f"  {entry}")
+        print("")
+        print(f"  {len(assertionless)} case(s).")
+
     if not reported:
-        print(census)
         print(
             "check_vacuous_test_cases: no case asserts only `check true`."
         )
         if arguments.list_platform_gates:
             for entry in sorted(platform_gates):
                 print(f"  gate {entry}")
-        return 0
-
-    print(census)
+        return 1 if baseline_failed else 0
 
     print(
         "FAIL: test cases whose only assertion proves nothing.",

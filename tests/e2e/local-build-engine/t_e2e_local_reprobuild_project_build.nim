@@ -1062,7 +1062,7 @@ suite "e2e_local_reprobuild_project_build":
 
     else:
       test "automatic monitor project CLI E2E is skipped on this platform":
-        echo "SKIP: automatic monitor dependency gathering requires preload hooks"
+        echo "[platform N/A] automatic monitor dependency gathering requires preload hooks"
 
     test "public CLI lowers explicit make depfile policy and rejects incompatible monitor depfile":
       let repoRoot = getCurrentDir()
