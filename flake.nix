@@ -124,7 +124,17 @@
       # event-interest API and the scoped depfile format are all carried
       # forward. 3ec0223 is published on `dev` and is the revision the workspace
       # has actually been building and testing against.
-      url = "github:metacraft-labs/io-mon/3ec0223c8a64a3749746a4a2cf598a19309dc6ef";
+      #
+      # Bumped to 1c41ba8: `ci: name the shared modules repo by the name it has
+      # now`. ONE commit, and it changes no source at all — it retargets
+      # io-mon's own `nixos-modules` input from `metacraft-labs/nixos-modules`
+      # to `metacraft-labs/devops-modules`, the repo's current name, which is
+      # the url THIS flake already uses for that input. So the bump carries no
+      # behaviour with it; it makes the sibling and the pin agree again (they
+      # had drifted by exactly this commit) and makes io-mon name the shared
+      # modules repo the way the rest of the workspace does. 1c41ba8 is the tip
+      # of io-mon's `dev`.
+      url = "github:metacraft-labs/io-mon/1c41ba8ee9f012332ece9d3c0ca8ccab09ac1a3f";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -258,7 +268,13 @@
       #
       # 41ab1b9 is an ANCESTOR of 49006c3, so the explicit Windows child
       # environment (``6a53408``) this pin was chosen for is carried forward.
-      url = "github:metacraft-labs/nim-stackable-hooks/49006c311a9e0ae218e8a70cfa15c2f47286e8fd";
+      #
+      # Bumped to 203a3b8: the same `ci: name the shared modules repo by the
+      # name it has now` commit as io-mon's 1c41ba8 above, and the same
+      # reasoning — one commit, no source change, retargeting this repo's own
+      # `nixos-modules` input at `metacraft-labs/devops-modules`. 203a3b8 is
+      # the tip of nim-stackable-hooks' `dev`.
+      url = "github:metacraft-labs/nim-stackable-hooks/203a3b87366d321e2ea3f7f2126e88f28da48202";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
