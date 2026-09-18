@@ -11550,7 +11550,7 @@ proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
   # attributed. (It does not run the producer pre-pass either; that is
   # recorded in W2's DONE section as a separate, still-open gap, not something
   # this call site can fix.)
-  runActivatedCommand(artifact, "", command, canonicalProjectRoot)
+  return runActivatedCommand(artifact, "", command, canonicalProjectRoot)
 
 proc valueAfterFlag(args: openArray[string]; flag: string): string =
   var i = 0
@@ -13873,7 +13873,7 @@ proc runReproExecCommand(args: openArray[string];
   let toolOps = devEnvToolShellOps(edge, parsed.selection)
   let producerOps = devEnvProducerActivation(artifact,
     parsed.selection.projectRoot)
-  runActivatedCommand(artifact, edge.artifactPath, parsed.command,
+  return runActivatedCommand(artifact, edge.artifactPath, parsed.command,
     parsed.selection.projectRoot, producerOps, toolOps)
 
 proc defaultInteractiveShell(): string =
@@ -13908,7 +13908,7 @@ proc runReproShellCommand(args: openArray[string];
       parsed.shellPath
     else:
       defaultInteractiveShell()
-  spawnActivatedShell(artifact, edge.artifactPath, shellPath,
+  return spawnActivatedShell(artifact, edge.artifactPath, shellPath,
     parsed.selection.projectRoot, producerOps, toolOps)
 
 # M74 — ``repro dev-env export <shell>``.

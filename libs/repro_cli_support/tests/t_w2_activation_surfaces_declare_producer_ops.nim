@@ -466,3 +466,11 @@ suite "w2_activation_surfaces_declare_producer_ops":
       reasons.add(site.optOutReason)
     check reasons.contains("SYNTHESIZED")
     check reasons.contains("BUILD ACTION")
+
+  test "activation CLI surfaces return child exit codes":
+    let root = findRepoRoot()
+    let content = readFile(root / "libs" / "repro_cli_support" / "src" / "repro_cli_support.nim")
+    check content.contains("return runActivatedCommand(artifact, \"\", command, canonicalProjectRoot)")
+    check content.contains("return runActivatedCommand(artifact, edge.artifactPath, parsed.command,")
+    check content.contains("return spawnActivatedShell(artifact, edge.artifactPath, shellPath,")
+
