@@ -379,6 +379,36 @@ type
       ## still hold the same prefix and may still share an entry one of them
       ## legitimately published. What the flag governs is the direction of
       ## travel, not the content.
+    launcher*: string
+      ## The interpreter that runs ``executablePath``, when the declared
+      ## payload is a SCRIPT rather than a program.
+      ##
+      ## A realized prefix reaches PATH as a DIRECTORY, so a command's name
+      ## there is a file's own name and the file has to be executable by the
+      ## OS. That holds for a native binary and fails for everything npm
+      ## publishes: ``@google/gemini-cli`` ships ``bundle/gemini.js`` and
+      ## ``@qwen-code/qwen-code`` ships ``cli-entry.js``, and neither is a
+      ## program. npm's own answer is to generate a launcher pair beside the
+      ## bundle (``gemini`` plus ``gemini.cmd``), which is what this field
+      ## asks realize to do.
+      ##
+      ## Set it together with ``executableAlias``, which supplies the NAME
+      ## the launcher takes: ``executableAlias = "gemini"`` with
+      ## ``launcher = "node"`` writes ``gemini`` and ``gemini.cmd`` beside
+      ## ``bundle/gemini.js``, each invoking ``node`` on the bundle by a
+      ## path relative to the launcher's own directory. Without a launcher
+      ## an alias is a COPY of the declared file under a second name, which
+      ## is the existing behaviour and stays unchanged.
+      ##
+      ## The interpreter is resolved from the consuming action's PATH rather
+      ## than hard-coded to a store path, because the interpreter is itself
+      ## a declared package — a recipe that uses this must declare ``node``
+      ## as well, and the launcher then runs whichever ``node`` that
+      ## recipe's activation put in front.
+      ##
+      ## Written before the prefix is sealed, so the launchers are part of
+      ## the content-addressed tree rather than an edit to a published one —
+      ## the same rule ``executableAlias`` follows, and for the same reason.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string

@@ -240,6 +240,7 @@ proc patchPlan*(oldGraph, newGraph: LinkGraph;
   var changed = initHashSet[string]()
   var required = initHashSet[string]()
   var fallback = initHashSet[string]()
+  var refusals = initHashSet[string]()
 
   result.schemaId = "reprobuild.hcr.patch-plan-evidence.v1"
   # The Linux profile id is stated beside the M26 Mach-O one rather than
@@ -254,9 +255,38 @@ proc patchPlan*(oldGraph, newGraph: LinkGraph;
   result.targetMutationOperations = 0
   result.sharedLibraryPositivePath = false
 
+  # HLX-M8, 2026-09-18. This used to read
+  #   `if feature.severity in {usFallbackRequired, usReject}:`
+  # with one body, so the two severities were the same thing downstream and a
+  # `usReject` feature — `elf-new-tls-variable`, `elf-stt-gnu-ifunc`,
+  # `elf-mergeable-code-section`, the two link-graph field overflows,
+  # `mach-o-scattered-relocation` — still produced a complete, actionable plan.
+  # The analyzer's own vocabulary says `usReject` is a refusal, and this is the
+  # only place in the pipeline that can make it one.
+  #
+  # `usInfo` is deliberately still dropped here: it is neither a refusal nor a
+  # reason to fall back, and it was not collected before this change either.
   for feature in newGraph.unsupportedFeatures:
-    if feature.severity in {usFallbackRequired, usReject}:
+    case feature.severity
+    of usReject:
+      refusals.incl feature.feature & ": " & feature.reason
+    of usFallbackRequired:
       fallback.incl feature.feature & ": " & feature.reason
+    of usInfo:
+      discard
+
+  result.refused = refusals.len > 0
+  result.refusalReasons = toSeq(refusals)
+  result.refusalReasons.sort()
+
+  if result.refused:
+    # A refusal is the ABSENCE of a plan, not a plan carrying a complaint.
+    # Everything actionable stays empty; the reasons — both the refusals and
+    # any fallback-grade features found alongside them — are still reported,
+    # because a caller that is told "no" needs to be told why.
+    result.unsupportedFallbackReasons = toSeq(fallback)
+    result.unsupportedFallbackReasons.sort()
+    return
 
   for entry in diff.functions:
     if entry.kind == fckUnchanged:

@@ -258,6 +258,11 @@ type
       ## ``TarballProvisioningDef.nonRedistributable``: an archive a
       ## developer may download and run but not re-serve to others. Not part
       ## of the prefix identity -- the bytes are the same either way.
+    launcher*: string
+      ## The interpreter that runs ``executablePath``, for a payload that is
+      ## a SCRIPT. See ``TarballProvisioningDef.launcher``: an npm bundle is
+      ## not a program, so realize writes a launcher pair beside it under
+      ## ``executableAlias``'s name.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string
@@ -485,8 +490,12 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 18'u16
-    ## v18 (current): retains ``nonRedistributable`` on tarball provisioning
+  EnvelopeVersion = 19'u16
+    ## v19 (current): retains ``launcher`` on tarball provisioning — the
+    ##                interpreter realize runs a script payload through. v18
+    ##                payloads decode with it empty, which is the prior
+    ##                behaviour of treating every declared path as a program.
+    ## v18: retains ``nonRedistributable`` on tarball provisioning
     ##                — the entries a realize must never publish to a
     ##                shared cache. v17 payloads decode with it false, which
     ##                is the prior behaviour of publishing everything.
@@ -889,6 +898,8 @@ proc writeTarballProvisioning(outp: var seq[byte];
     outp.writeStringSeq(provisioning.prunePaths)
   if version >= 18'u16:
     outp.writeByte(if provisioning.nonRedistributable: 1'u8 else: 0'u8)
+  if version >= 19'u16:
+    outp.writeString(provisioning.launcher)
   outp.writeU32Le(uint32(max(provisioning.stripComponents, 0)))
   outp.writeString(provisioning.packageId)
   outp.writeString(provisioning.lockIdentity)
@@ -912,6 +923,8 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
     result.prunePaths = readStringSeq(bytes, pos)
   if version >= 18'u16:
     result.nonRedistributable = readByte(bytes, pos) != 0'u8
+  if version >= 19'u16:
+    result.launcher = readString(bytes, pos)
   result.stripComponents = int(readU32Le(bytes, pos))
   result.packageId = readString(bytes, pos)
   result.lockIdentity = readString(bytes, pos)
@@ -1474,6 +1487,7 @@ proc toInterfaceTarballProvisioning(packageName: string;
     executableAlias: provisioning.executableAlias,
     prunePaths: provisioning.prunePaths,
     nonRedistributable: provisioning.nonRedistributable,
+    launcher: provisioning.launcher,
     stripComponents: provisioning.stripComponents,
     packageId: provisioning.packageId,
     lockIdentity: provisioning.lockIdentity,
@@ -2226,20 +2240,24 @@ proc emitProvisioningContributionRegistrations(code: var string;
       for j, prunePath in provisioning.prunePaths:
         if j > 0: code.add(", ")
         code.add(escForCode(prunePath))
-      # ``executableAlias``, ``prunePaths`` and ``nonRedistributable`` are
-      # emitted here for the same reason every other field is: this stub is
+      # ``executableAlias``, ``prunePaths``, ``nonRedistributable`` and
+      # ``launcher`` are emitted here for the same reason every other field
+      # is: this stub is
       # the ONLY description of a contributed provisioning that a consuming
       # compilation sees. A field missing here does not fail to compile —
       # it silently reconstructs a DIFFERENT provisioning than the
       # contributor declared, which for ``prunePaths`` also moves the cache
       # key, for ``executableAlias`` loses the only name the tool is
-      # invocable under, and for ``nonRedistributable`` republishes a payload
-      # the contributor said must not be republished. The first two were
+      # invocable under, for ``nonRedistributable`` republishes a payload
+      # the contributor said must not be republished, and for ``launcher``
+      # yields a prefix whose declared command is a script nothing can
+      # execute. The first two were
       # absent until this emitter was audited against
       # ``macros_a.packageLiteral`` and ``macros_b``'s contribution emitter;
       # the three must stay in step.
       code.add("], sha256: " & escForCode(provisioning.sha256) &
         ", nonRedistributable: " & $provisioning.nonRedistributable &
+        ", launcher: " & escForCode(provisioning.launcher) &
         ", archiveType: " & escForCode(provisioning.archiveType) &
         ", executablePath: " & escForCode(provisioning.executablePath) &
         ", executableAlias: " & escForCode(provisioning.executableAlias) &

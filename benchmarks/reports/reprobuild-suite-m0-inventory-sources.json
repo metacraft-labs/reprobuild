@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1665,
+    "nimTestBinaries": 1666,
     "pureUnitConsolidationGroups": 49,
     "pureUnitTests": 592,
     "staticallyDetectedRuntimeCompilerFlowTests": 101,
-    "testEntries": 1676
+    "testEntries": 1677
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1089,7 +1089,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 780,
+      "integration": 781,
       "platform/destructive": 115,
       "pure unit": 592,
       "unclassified": 177
@@ -1240,9 +1240,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1665,
+    "nimTestBinaryCount": 1666,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1676
+    "testEntryCount": 1677
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3891,7 +3891,7 @@
             "xindexObject",
             "xindexSource"
           ],
-          "line": 346,
+          "line": 413,
           "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
           "patterns": [
             "gcc"
@@ -3912,7 +3912,7 @@
             "xindexObject",
             "xindexSource"
           ],
-          "line": 371,
+          "line": 438,
           "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
           "patterns": [
             "g++"
@@ -3933,7 +3933,7 @@
             "xindexObject",
             "xindexSource"
           ],
-          "line": 408,
+          "line": 475,
           "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
           "patterns": [
             "gcc"
@@ -3954,7 +3954,7 @@
             "xindexObject",
             "xindexSource"
           ],
-          "line": 436,
+          "line": 503,
           "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
           "patterns": [
             "gcc"
@@ -3975,7 +3975,7 @@
             "xindexObject",
             "xindexSource"
           ],
-          "line": 504,
+          "line": 571,
           "path": "tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim",
           "patterns": [
             "gcc"
@@ -35291,6 +35291,25 @@
       "source": "tests/unit/t_same_project_fragment_selectors.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_script_launcher",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_script_launcher.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

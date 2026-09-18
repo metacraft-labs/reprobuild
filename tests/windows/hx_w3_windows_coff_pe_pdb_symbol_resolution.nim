@@ -121,6 +121,12 @@ proc main() =
     pointerWidthBytes: 8,
     symbols: symbols)
   let plan = patchPlan(oldGraph, newGraph, snapshot)
+  # HLX-M8, 2026-09-18: `usReject` now refuses, and a refused plan is EMPTY.
+  # The COFF analyzer raises no `usReject` facts at all, so this holds by
+  # construction; it is asserted rather than assumed so that adding one later
+  # reddens here, naming the reason, instead of emptying the plan silently.
+  require(not plan.refused,
+          "COFF plan was refused: " & plan.refusalReasons.join("; "))
   require(plan.supportProfile == "hx-w3-coff-amd64-object-facts",
           "COFF plan did not identify the HX-W-3 support profile")
   require("hx_w3_rel32_4" in plan.changedFunctions,
