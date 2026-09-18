@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1672,
+    "nimTestBinaries": 1674,
     "pureUnitConsolidationGroups": 49,
-    "pureUnitTests": 593,
+    "pureUnitTests": 594,
     "staticallyDetectedRuntimeCompilerFlowTests": 102,
-    "testEntries": 1683
+    "testEntries": 1685
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -838,7 +838,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 23,
+      "count": 24,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -867,6 +867,7 @@
         "tests/unit/t_m9r4_library_api_exports.nim",
         "tests/unit/t_m9r6_convention_narrowing_default_synthesis.nim",
         "tests/unit/t_m9r79_constructors_compile.nim",
+        "tests/unit/t_python3_provides_its_own_name.nim",
         "tests/unit/t_shared_mime_info_dev_stub.nim",
         "tests/unit/t_voice_model_packages.nim"
       ],
@@ -1092,8 +1093,8 @@
       "graph-fixture": 12,
       "integration": 787,
       "platform/destructive": 113,
-      "pure unit": 593,
-      "unclassified": 178
+      "pure unit": 594,
+      "unclassified": 179
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1241,9 +1242,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1672,
+    "nimTestBinaryCount": 1674,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1683
+    "testEntryCount": 1685
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8251,7 +8252,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_w2_activation_surfaces_declare_producer_ops.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -33252,6 +33253,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_dev_env_cache_key_store_root",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dev_env_engine"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_dev_env_cache_key_store_root.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_dev_env_path_ops",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -35288,6 +35306,24 @@
       "source": "tests/unit/t_provider_startup_body_containment.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_python3_provides_its_own_name",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_python3_provides_its_own_name.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

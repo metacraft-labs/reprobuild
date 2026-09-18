@@ -69,10 +69,19 @@ const
   # specific linker hint (on Linux/gcc the flags are typically ignored
   # with a warning, so the fallback path is "emit unconditionally" —
   # the runtime guard sits in ``repro.nim``'s test-spec loop).
+  # UPDATED 2026-09-18 (HLX-M8 residue). The two `t_e2e_repro_watch_hcr_*`
+  # stems were REMOVED from this list. They were here because their bodies were
+  # guarded `when defined(macosx) and defined(arm64)`, and the list stamps
+  # `targetOs: soMacosArm64` — which, on top of the flags, said the tests only
+  # run there. Both now run on Linux x86_64 as well: their macOS-only guard
+  # rested on the patch extraction being Mach-O, which stopped being true when
+  # it became conditional on the negotiated support profile. Neither ever
+  # needed the two flags either — they drive a FAKE agent over the protocol and
+  # compile no patchable code of their own; the flags are the macOS agent-build
+  # flags, and `t_hcr_agent_process_target`, which does build an agent, is the
+  # one stem that still needs them.
   HcrTestStems = [
     "t_hcr_agent_process_target",
-    "t_e2e_repro_watch_hcr_multi_target_independent_patches",
-    "t_e2e_repro_watch_hcr_one_target_agent_inject_failure",
   ]
 
   HcrExtraPassC = "-fpatchable-function-entry=16,0"

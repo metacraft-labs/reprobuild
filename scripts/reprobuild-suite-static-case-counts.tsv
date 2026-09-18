@@ -128,7 +128,7 @@ libs/repro_cli_support/tests/t_partition_planner_reads_runquota_estimates.nim	ni
 libs/repro_cli_support/tests/t_phase_g_cli_wiring.nim	nim	6
 libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	6
 libs/repro_cli_support/tests/t_strategy_unknown_name_refused.nim	nim	8
-libs/repro_cli_support/tests/t_w2_activation_surfaces_declare_producer_ops.nim	nim	4
+libs/repro_cli_support/tests/t_w2_activation_surfaces_declare_producer_ops.nim	nim	5
 libs/repro_cli_support/tests/t_w2_dev_env_producer_pin_binding.nim	nim	9
 libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim	nim	3
 libs/repro_cli_support/tests/test_engine_publisher_wiring.nim	nim	5
@@ -1538,6 +1538,7 @@ tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	5
 tests/unit/t_da1i_evidence_help_names_the_hazard.nim	nim	9
 tests/unit/t_daemon_request_working_directory.nim	nim	4
 tests/unit/t_declared_package_deps_from_recipe.nim	nim	6
+tests/unit/t_dev_env_cache_key_store_root.nim	nim	4
 tests/unit/t_dev_env_path_ops.nim	nim	8
 tests/unit/t_electron_builder_binaries.nim	nim	5
 tests/unit/t_every_tool_profile_is_sealed.nim	nim	6
@@ -1651,6 +1652,7 @@ tests/unit/t_prefix_env_ops.nim	nim	4
 tests/unit/t_provider_compile_cache_entry_is_content_addressed.nim	nim	7
 tests/unit/t_provider_snapshot_binary_binding.nim	nim	3
 tests/unit/t_provider_startup_body_containment.nim	nim	14
+tests/unit/t_python3_provides_its_own_name.nim	nim	2
 tests/unit/t_run_consumes.nim	nim	6
 tests/unit/t_runquota_endpoint_paths.nim	nim	6
 tests/unit/t_runquota_grant_wait_unresponsive.nim	nim	11
