@@ -1131,12 +1131,34 @@ ones into 84 cold ones — the docstring at
 `repro_interface_artifacts.nim:4413-4422` exists to stop exactly that.
 And pointing two edges at one cargo target dir corrupts both.
 
-### ☐ What is missing
+### ☐ Nicknames — and why you will almost never write one
 
-There is no DSL vocabulary for any of this. Every convention picks its
-own path by hand, correctly but independently, and nothing collects the
-directories when an edge's identity changes. The design is drafted in
-`reprobuild-specs/Tool-Owned-Caches.md`; nothing of it ships yet.
+There is no DSL vocabulary for any of this yet. Every convention picks
+its own path by hand, correctly but independently, and nothing collects
+the directories when an edge's identity changes. The design is drafted
+in `reprobuild-specs/Tool-Owned-Caches.md`; nothing of it ships yet.
+When it does, one part of it is worth knowing in advance, because it is
+the part that invites a bad habit.
+
+A per-edge cache needs a stable name for the edge that owns it. **The
+default is the output the edge already declares** — `nim.c` designates
+its `output` flag in the tool definition, so an edge that writes
+`build/bin/repro` is named by that path and declares nothing. The
+output is a good name because the recipe author wrote it, it does not
+move when sources change, and two edges writing one path is already a
+graph error.
+
+The spec also allows an explicit `cacheNickname = "..."` on the edge
+call. **Reach for it in exactly one case: the edge's output path is
+computed per build** — per variant, per run, per output directory. Then
+the default names a different cache every time, the cache is never
+found again, and the nickname is what makes it stick.
+
+Everything else is the bad habit. A nickname on an edge whose output
+path is a fixed string in the recipe buys nothing and adds a second
+name to keep in sync. In particular, do not add one "in case the path
+moves later": a rename costs one cold build, and the guard against that
+costs a permanent naming obligation on every edge.
 
 ---
 
