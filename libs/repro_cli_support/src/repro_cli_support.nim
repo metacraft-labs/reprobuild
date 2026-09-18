@@ -11385,6 +11385,65 @@ proc binDirsForDevelop(identity: PathOnlyBuildIdentity;
       for binDir in profile.pathSearchList:
         contribute(binDir, result)
 
+proc prefixEnvVarName*(packageSelector: string): string =
+  ## ``electron-builder-nsis`` -> ``REPRO_PREFIX_ELECTRON_BUILDER_NSIS``.
+  ##
+  ## Everything outside ``[A-Za-z0-9]`` becomes ``_`` so that a selector
+  ## carrying a version (``winfsp@2.1.25156``) or a scope still yields a name
+  ## a POSIX shell and ``cmd.exe`` both accept.
+  result = "REPRO_PREFIX_"
+  for ch in packageSelector:
+    case ch
+    of 'a'..'z': result.add(char(ord(ch) - ord('a') + ord('A')))
+    of 'A'..'Z', '0'..'9': result.add(ch)
+    else: result.add('_')
+
+proc prefixEnvOpsForDevelop*(identity: PathOnlyBuildIdentity):
+    seq[DevEnvShellOp] =
+  ## Every realized package's PREFIX, by name, in the activated environment.
+  ##
+  ## PATH answers "which programs are available"; it does not answer "where
+  ## did package X land". Those are different questions, and for a package
+  ## whose payload is DATA rather than programs the second one is the only
+  ## one that has an answer at all. `electron-builder-nsis-resources` is
+  ## nothing but a plugin tree; `electron-builder-win-code-sign` is a
+  ## signing-tool bundle nested two directories below its prefix. Consumers
+  ## that must hand a path to a tool which does not read PATH — an
+  ## `ELECTRON_BUILDER_CACHE` layout, a `--prefix` flag, an include path —
+  ## previously had to search PATH for a file they knew the package
+  ## contained and then walk up a hard-coded number of levels. That encodes
+  ## the package's internal layout at the CALL SITE, where a repackaging
+  ## upstream breaks it silently.
+  ##
+  ## So the realization publishes what it already knows. Nix-mode uses the
+  ## first realized store path, which is the output the resolver selected;
+  ## every other mode uses `selectedStorePath`, the prefix the archive was
+  ## extracted into.
+  ##
+  ## Deliberately NOT shortened through the Windows junction that
+  ## `binDirsForDevelop` applies: that shortening exists to keep PATH under
+  ## cmd.exe's 8191-character limit, and a single variable is not competing
+  ## for that budget. A consumer reading this wants the real prefix.
+  var seen: seq[string] = @[]
+  for profile in identity.profiles:
+    if profile.packageSelector.len == 0:
+      continue
+    let prefix =
+      if profile.installMethod == "nix":
+        if profile.realizedStorePaths.len > 0: profile.realizedStorePaths[0]
+        else: ""
+      else:
+        profile.selectedStorePath
+    if prefix.len == 0 or not dirExists(extendedPath(prefix)):
+      continue
+    let name = prefixEnvVarName(profile.packageSelector)
+    if name in seen:
+      # Several executables from one package resolve to one prefix; the
+      # first wins and the rest are the same value.
+      continue
+    seen.add(name)
+    result.add(DevEnvShellOp(kind: deskSetEnv, name: name, value: prefix))
+
 proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
                              identity: PathOnlyBuildIdentity;
                              identityPath, inspectionPath,
@@ -11422,7 +11481,7 @@ proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
         value: interfacePath),
       DevEnvShellOp(kind: deskSetEnv, name: "REPRO_PROJECT_ROOT",
         value: canonicalProjectRoot)
-    ])
+    ] & prefixEnvOpsForDevelop(identity))
   # W2-no-producer-ops-and-no-report: this artifact is SYNTHESIZED right above
   # from ``binDirsForDevelop`` — it is ``repro develop``'s own PATH projection,
   # not a dev-env introspection artifact, and it carries no ``toolProfiles``.
@@ -12947,10 +13006,12 @@ proc devEnvToolShellOps*(edge: DevEnvEdgeResult;
 
   let storeRoot = resolveStoreRoot() / "tool-store"
   var binDirs: seq[string] = @[]
+  var prefixOps: seq[DevEnvShellOp] = @[]
   try:
-    binDirs = binDirsForDevelop(resolveAndWriteIdentity(interfaceArtifact,
-      selection.outDir, mode, storeRootOverride = storeRoot).identity,
-      storeRoot = storeRoot)
+    let identity = resolveAndWriteIdentity(interfaceArtifact,
+      selection.outDir, mode, storeRootOverride = storeRoot).identity
+    binDirs = binDirsForDevelop(identity, storeRoot = storeRoot)
+    prefixOps = prefixEnvOpsForDevelop(identity)
   except CatchableError as batchErr:
     # The batch resolve is all-or-nothing: one package the catalog cannot
     # realize on this platform takes down every OTHER tool's PATH entry with
@@ -12968,10 +13029,14 @@ proc devEnvToolShellOps*(edge: DevEnvEdgeResult;
       var single = interfaceArtifact
       single.projectInterface.toolUses = @[useDef]
       try:
-        for dir in binDirsForDevelop(toolBuildIdentity(single, mode,
-            storeRoot = storeRoot), storeRoot = storeRoot):
+        let singleIdentity = toolBuildIdentity(single, mode,
+          storeRoot = storeRoot)
+        for dir in binDirsForDevelop(singleIdentity, storeRoot = storeRoot):
           if dir notin binDirs:
             binDirs.add(dir)
+        for op in prefixEnvOpsForDevelop(singleIdentity):
+          if not prefixOps.anyIt(it.name == op.name):
+            prefixOps.add(op)
       except CatchableError as toolErr:
         failures.add(useDef.packageSelector & " (" & toolErr.msg & ")")
     if failures.len == 0:
@@ -12992,6 +13057,7 @@ proc devEnvToolShellOps*(edge: DevEnvEdgeResult;
   for i in countdown(binDirs.high, 0):
     result.add(DevEnvShellOp(kind: deskPrependPath, name: "PATH",
       value: binDirs[i]))
+  result.add(prefixOps)
 
 proc devEnvProducerActivation(artifact: DevEnvArtifact; projectRoot: string;
                               appliesToPath = true): seq[DevEnvShellOp] =
