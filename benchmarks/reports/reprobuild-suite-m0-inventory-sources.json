@@ -33283,7 +33283,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_dev_env_path_ops.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
