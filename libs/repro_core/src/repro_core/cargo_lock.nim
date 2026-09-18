@@ -346,14 +346,24 @@ proc cargoVendorConfig*(vendorDir: string): string =
   ## The `.cargo/config.toml` that points cargo at the vendored directory
   ## instead of the network.
   ##
-  ## Both crates.io spellings are replaced. Replacing only the one the
-  ## lockfile happened to name would leave the other live, and a build
-  ## that reaches the network for one crate is not an offline build — it
-  ## is an offline build with an intermittent failure.
+  ## `crates-io` is the only table to replace, and adding a second one for
+  ## the sparse-index URL is not belt-and-braces — it is an error.
+  ##
+  ## `crates-io` is a source NAME cargo knows intrinsically, and replacing
+  ## it covers crates.io whichever protocol a lockfile names. A table keyed
+  ## by URL is a source DEFINITION, and cargo refuses one with no location
+  ## of its own:
+  ##
+  ##     error: no source location specified for
+  ##     `source.sparse+https://index.crates.io/`, need `registry`,
+  ##     `local-registry`, `directory`, or `git` defined
+  ##
+  ## That is what a real offline build reported against the first version
+  ## of this function, whose comment claimed replacing one spelling would
+  ## leave the other live. It does not: there is one source, reached two
+  ## ways.
   let normalized = vendorDir.replace('\\', '/')
   result = "[source.crates-io]\n"
-  result.add("replace-with = \"vendored-sources\"\n\n")
-  result.add("[source.\"sparse+https://index.crates.io/\"]\n")
   result.add("replace-with = \"vendored-sources\"\n\n")
   result.add("[source.vendored-sources]\n")
   result.add("directory = \"" & normalized & "\"\n")

@@ -126,13 +126,15 @@ proc emitCargoVendorAction*(projectRoot, packageName: string;
   proc q(value: string): string =
     value.replace("\\", "/").replace("\"", "\\\"")
 
-  let shExe = findExe("sh")
-  if shExe.len == 0:
-    raise newException(CargoLockError,
-      "from-source-cargo: the vendor step needs a POSIX shell and none " &
-      "was found on PATH. Unlike the source fetch, this step has no " &
-      "single-command fallback — it is a loop over " & $plan.len &
-      " crates.")
+  # ``sh`` is emitted as a bare token, not as an absolute path found here.
+  # Tool resolution belongs to the engine, which satisfies the
+  # ``toolIdentityRefs`` below from the store, from the cache, or from a
+  # source build. Resolving it at emission time would make the action's
+  # argv depend on the PATH of whichever process happened to expand the
+  # graph, and would refuse to emit at all on a host that has not yet
+  # realized its shell — which is precisely the host this tier exists to
+  # serve.
+  discard plan.len
 
   # A literal tab, bound once. Written inline it would be a raw tab in the
   # emitted script where no reader could see it, and `IFS` is the one place
@@ -181,7 +183,7 @@ proc emitCargoVendorAction*(projectRoot, packageName: string;
     inputs.insert(fetchStamp, 0)
   buildAction(
     id = cargoVendorActionId(packageName),
-    call = inlineExecCall(@[shExe, "-c", script], projectRoot),
+    call = inlineExecCall(@["sh", "-c", script], projectRoot),
     deps = if fetchActionId.len > 0: @[fetchActionId] else: @[],
     inputs = inputs,
     outputs = @[stamp],

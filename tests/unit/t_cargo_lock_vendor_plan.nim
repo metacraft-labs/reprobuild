@@ -160,15 +160,22 @@ checksum = "0000000000000000000000000000000000000000000000000000000000000000"
     expect CargoLockError:
       discard vendorPlan(parseCargoLock(conflicting))
 
-  test "the emitted cargo config replaces both index spellings":
-    # Replacing only the spelling this lockfile happens to name leaves
-    # the other live, and a build that reaches the network for one crate
-    # is not an offline build — it is an offline build with an
-    # intermittent failure.
+  test "the emitted cargo config replaces crates-io and nothing else":
+    # `crates-io` is a source NAME cargo knows intrinsically, and
+    # replacing it covers crates.io whichever protocol a lockfile names.
+    # A second table keyed by the sparse-index URL is not belt-and-braces:
+    # a URL-keyed table is a source DEFINITION, and cargo refuses one with
+    # no location of its own —
+    #
+    #   error: no source location specified for
+    #   `source.sparse+https://index.crates.io/`
+    #
+    # which is what a real offline build reported against the first
+    # version of this function.
     let config = cargoVendorConfig("C:/work/vendor")
     check config.contains("[source.crates-io]")
-    check config.contains("[source.\"sparse+https://index.crates.io/\"]")
-    check config.count("replace-with = \"vendored-sources\"") == 2
+    check config.count("replace-with = \"vendored-sources\"") == 1
+    check not config.contains("sparse+https://index.crates.io/")
     # Forward slashes: cargo reads this as TOML, where a backslash is an
     # escape introducer.
     check config.contains("directory = \"C:/work/vendor\"")

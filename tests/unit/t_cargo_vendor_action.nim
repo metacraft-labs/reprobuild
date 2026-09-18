@@ -158,7 +158,7 @@ suite "cargo vendor action":
     check not script.contains("rm -rf \"" &
       cargoVendorCacheDir(root).replace('\\', '/') & "\"")
 
-  test "the emitted cargo config redirects both index spellings":
+  test "the emitted cargo config redirects crates-io":
     let root = withRecipeRoot(SampleManifest)
     defer:
       try: removeDir(root) except CatchableError: discard
@@ -166,8 +166,11 @@ suite "cargo vendor action":
     let script = scriptOf(emitCargoVendorAction(root, "justSource", plan,
       "", ""))
     check script.contains("[source.crates-io]")
-    check script.contains("sparse+https://index.crates.io/")
     check script.contains("vendored-sources")
+    # And NOT a second table keyed by the sparse-index URL: cargo refuses
+    # a URL-keyed source table with no location of its own, so writing one
+    # makes every build fail before it starts.
+    check not script.contains("sparse+https://index.crates.io/")
     # Written beside the extracted source, because cargo searches upward
     # from the manifest directory it is building and the recipe root is
     # not on that path.
