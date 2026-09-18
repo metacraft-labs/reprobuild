@@ -11,7 +11,7 @@
 ## This test asserts the codec's wire-format contract by emitting and
 ## decoding both versions directly through the public payload procs.
 
-import std/unittest
+import std/[strutils, unittest]
 
 import repro_project_dsl
 
@@ -198,3 +198,103 @@ suite "Spec-Implementation M5: target-export-table v2 schema":
     check aggDecoded.kind == btkAggregate
     check aggDecoded.name == "docs"
     check aggDecoded.sourceLine == 8
+
+  test "historical build-target payloads decode under the v5 decoder":
+    ## THE COMPATIBILITY CLAIM, EXERCISED RATHER THAN ASSERTED.
+    ##
+    ## ``btkTarget`` was APPENDED to ``BuildTargetKind`` rather than
+    ## inserted, because the payload's ``kind`` byte is positional: a
+    ## payload written before that value existed carries 0 for
+    ## ``btkAggregate`` and 1 for ``btkCollection``, and an inserted value
+    ## would have silently re-read every stored 1 as something else.
+    ##
+    ## The case above round-trips through the CURRENT encoder, so it
+    ## cannot see a regression of that kind — both sides would move
+    ## together. Its own comment promises that "v2 payloads (no ``kind``
+    ## byte) decode with the default ``btkAggregate`` value", and its body
+    ## never builds a v2 payload. These bytes are laid out by hand at each
+    ## historical version instead, so the decoder is asked the question a
+    ## stored snapshot would ask it.
+    proc u32le(value: int): seq[byte] =
+      for shift in [0, 8, 16, 24]:
+        result.add(byte((uint32(value) shr shift) and 0xff'u32))
+
+    proc str(value: string): seq[byte] =
+      result = u32le(value.len)
+      for ch in value:
+        result.add(byte(ord(ch)))
+
+    proc strSeq(values: openArray[string]): seq[byte] =
+      result = u32le(values.len)
+      for value in values:
+        result.add(str(value))
+
+    proc payload(version: int; kindByte: int; withExtensions: bool):
+        seq[byte] =
+      var body: seq[byte] = @[]
+      body.add(str("docs"))
+      body.add(strSeq(["act-1"]))
+      body.add(strSeq([]))
+      if version >= 2:
+        body.add(str("recipe.nim"))
+        body.add(u32le(11))
+      if version >= 3:
+        body.add(byte(kindByte))
+      if withExtensions:
+        body.add(u32le(0))
+      result = @[byte(ord('R')), byte(ord('B')), byte(ord('T')),
+                 byte(ord('P'))]
+      result.add(byte(version and 0xff))
+      result.add(byte((version shr 8) and 0xff))
+      result.add(u32le(body.len))
+      result.add(body)
+
+    # v1: no source location, no kind byte at all.
+    let v1 = decodeBuildTargetPayload(payload(1, 0, false))
+    check v1.name == "docs"
+    check v1.actions == @["act-1"]
+    check v1.kind == btkAggregate
+    check v1.sourceFile == ""
+    check v1.sourceLine == 0
+
+    # v2: source location, still no kind byte.
+    let v2 = decodeBuildTargetPayload(payload(2, 0, false))
+    check v2.kind == btkAggregate
+    check v2.sourceFile == "recipe.nim"
+    check v2.sourceLine == 11
+
+    # v3/v4: the stored byte still means what it meant when it was
+    # written. The ``1`` cases are the ones an inserted enum value would
+    # have broken.
+    check decodeBuildTargetPayload(payload(3, 0, false)).kind == btkAggregate
+    check decodeBuildTargetPayload(payload(3, 1, false)).kind == btkCollection
+    check decodeBuildTargetPayload(payload(4, 0, true)).kind == btkAggregate
+    check decodeBuildTargetPayload(payload(4, 1, true)).kind == btkCollection
+
+    # v5 is the version this tree writes, and 2 is the value it adds.
+    check decodeBuildTargetPayload(payload(5, 2, true)).kind == btkTarget
+    let encodedVersion = block:
+      let bytes = encodeBuildTargetPayload(BuildTargetDef(
+        name: "docs", actions: @["act-1"], kind: btkTarget))
+      int(bytes[4]) or (int(bytes[5]) shl 8)
+    check encodedVersion == 5
+
+    # A byte past the enum is refused rather than cast.
+    var badKindRaised = false
+    try:
+      discard decodeBuildTargetPayload(payload(5, 3, true))
+    except BuildActionPayloadError:
+      badKindRaised = true
+    check badKindRaised
+
+    # An engine built before this change takes THIS path on a payload a
+    # newer provider wrote — the version is rejected by name instead of
+    # the kind byte being reported as corrupt. Exercised here from the
+    # other side: a version this decoder does not know yet.
+    var futureVersionMessage = ""
+    try:
+      discard decodeBuildTargetPayload(payload(6, 2, true))
+    except BuildActionPayloadError:
+      futureVersionMessage = getCurrentExceptionMsg()
+    check futureVersionMessage.contains(
+      "unsupported build target payload version")

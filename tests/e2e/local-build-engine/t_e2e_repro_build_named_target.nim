@@ -78,6 +78,23 @@ proc writeM2Tool(binDir: string) =
     "cp \"$input\" \"$output\"\n" &
     "printf '%s\\n' \"$output\" >> \"$marker\"\n")
 
+proc writeM2ToolPackage(projectRoot: string) =
+  ## The typed-tool wrapper both fixture projects below import. Its
+  ## ``outputs output`` statement is what makes the engine record the
+  ## basename of the call's ``--output`` value as the edge's implicit
+  ## name.
+  createDir(projectRoot / "reprobuild" / "packages")
+  writeFile(projectRoot / "reprobuild" / "packages" / "m2_tool.nim",
+    "import repro_project_dsl\n\n" &
+    "defineCliInterface m2Tool, \"m2-tool\":\n" &
+    "  call:\n" &
+    "    flag input is string, alias = \"--input\",\n" &
+    "      role = input, required = true\n" &
+    "    flag output is string, alias = \"--output\",\n" &
+    "      role = output, required = true\n" &
+    "    flag marker is string, alias = \"--marker\", required = true\n" &
+    "    outputs output\n")
+
 proc writeNamedTargetProject(path: string) =
   ## The project defines a typed-tool wrapper carrying an
   ## ``outputs output`` statement so the engine records the basename of
@@ -85,15 +102,7 @@ proc writeNamedTargetProject(path: string) =
   ## ``build:`` body fires one call producing ``build/app``, whose
   ## implicit name becomes ``app``.
   let projectRoot = path.splitPath.head
-  createDir(projectRoot / "reprobuild" / "packages")
-  writeFile(projectRoot / "reprobuild" / "packages" / "m2_tool.nim",
-    "import repro_project_dsl\n\n" &
-    "defineCliInterface m2Tool, \"m2-tool\":\n" &
-    "  call:\n" &
-    "    flag input is string, alias = \"--input\", role = input, required = true\n" &
-    "    flag output is string, alias = \"--output\", role = output, required = true\n" &
-    "    flag marker is string, alias = \"--marker\", required = true\n" &
-    "    outputs output\n")
+  writeM2ToolPackage(projectRoot)
   writeFile(path,
     "import repro_project_dsl\n\n" &
     "package m2NamedPkg:\n" &
@@ -106,6 +115,37 @@ proc writeNamedTargetProject(path: string) =
     "      input = \"src/main.txt\",\n" &
     "      output = \"build/app\",\n" &
     "      marker = marker)\n")
+
+proc writeDualNameProject(path: string) =
+  ## A single edge carrying BOTH a plain ``target`` rename and an
+  ## ``aggregate`` that names it — the shape CodeTracer's recipe has
+  ## (`target("ct-binary", ct)` beside `aggregate("ct", actions = @[ct],
+  ## targets = ctStartupAssets)`) whenever the aggregate's other members
+  ## are conditional and turn out absent.
+  ##
+  ## The graph linker used to REFUSE this outright:
+  ##
+  ##   repro build: error: action build-app has multiple direct target
+  ##   aliases: app-binary and app-all
+  ##
+  ## and refused it at LOAD time, so no selector at all could be built in
+  ## a project that contained the pair.
+  let projectRoot = path.splitPath.head
+  writeM2ToolPackage(projectRoot)
+  writeFile(path,
+    "import repro_project_dsl\n\n" &
+    "package m2DualNamePkg:\n" &
+    "  usesImportPath \"reprobuild/packages\"\n" &
+    "  uses:\n" &
+    "    \"m2-tool >=1.0 <2.0\"\n\n" &
+    "  build:\n" &
+    "    let marker = \".repro/m2-runs.log\"\n" &
+    "    let app = m2Tool(actionId = \"build-app\",\n" &
+    "      input = \"src/main.txt\",\n" &
+    "      output = \"build/app\",\n" &
+    "      marker = marker)\n" &
+    "    target(\"app-binary\", app)\n" &
+    "    aggregate(\"app-all\", actions = @[app])\n")
 
 proc valueAfter(output, prefix: string): string =
   for line in output.splitLines:
@@ -218,4 +258,71 @@ suite "t_e2e_repro_build_named_target":
     check fileExists(projectRoot / "build" / "app")
     # Marker still has exactly one line — the tool was not relaunched
     # by the name-selector run.
+    check nonEmptyLines(projectRoot / ".repro" / "m2-runs.log").len == 1
+
+  test "one edge carries a target rename and an aggregate naming it":
+    ## An edge may have more than one public name. `Named-Targets.
+    ## milestones.org` §M1 constrains only the other direction ("an edge
+    ## with multiple `targetNames` produces one entry per name, all
+    ## pointing at the same edge ... the collision within one edge is
+    ## allowed; the duplicate name still resolves to a single edge so
+    ## selection is unambiguous"), and the graph linker's refusal of the
+    ## pair had no spec behind it.
+    ##
+    ## What the refusal WAS protecting is real and is asserted below: the
+    ## chosen name is mixed into the action's weak fingerprint, so it has
+    ## to be single-valued. Two names must therefore resolve to ONE public
+    ## id and ONE cache key, and not a key that depends on which name the
+    ## caller happened to type.
+    let repoRoot = getCurrentDir()
+    let tempRoot = createTempDir("repro-dual-name-target", "")
+    defer: removeDir(tempRoot)
+
+    var daemon = ensureRunQuotaDaemon(repoRoot)
+    defer:
+      daemon.process.terminate()
+      discard daemon.process.waitForExit()
+      daemon.process.close()
+      if pathExists(daemon.socket):
+        removeFile(daemon.socket)
+
+    let reproBin = reproBinary(repoRoot)
+
+    let binDir = tempRoot / "bin"
+    writeM2Tool(binDir)
+    let pathValue = binDir & $PathSep & getEnv("PATH")
+
+    let projectRoot = tempRoot / "project"
+    createDir(projectRoot / "src")
+    writeFile(projectRoot / "src" / "main.txt", "main v1\n")
+    writeDualNameProject(projectRoot / "reprobuild.nim")
+
+    # Select through the AGGREGATE. The aggregate resolves — it is a
+    # selector — but it does not rename the edge: `target` is the call
+    # that renames ("rename an edge whose implicit name collides with
+    # something more useful", Package-Model.md §"Explicit Names and
+    # Aggregates"), while an aggregate is "primarily a selection and
+    # grouping construct" (Glossary.md). A set of one is still a set.
+    let aggregateRun = runBuild(reproBin, repoRoot, pathValue, repoRoot,
+      [projectRoot & "#app-all"])
+    check aggregateRun.contains("selectedTarget: app-all")
+    check aggregateRun.contains("scheduler: actions=1")
+    check aggregateRun.contains(
+      "action: app-binary status=asSucceeded launched=true")
+    check not aggregateRun.contains("action: app-all status=")
+    check fileExists(projectRoot / "build" / "app")
+    check nonEmptyLines(projectRoot / ".repro" / "m2-runs.log").len == 1
+
+    # Select the SAME edge through the rename. A cache-effective result
+    # here is the single-valued-key assertion: had the two selectors
+    # produced different public ids, the weak fingerprints would differ
+    # and this run would be a miss that relaunched the tool and appended
+    # a second marker line.
+    let renameRun = runBuild(reproBin, repoRoot, pathValue, repoRoot,
+      [projectRoot & "#app-binary"])
+    check renameRun.contains("scheduler: actions=1")
+    check renameRun.contains(
+      "action: app-binary status=asCacheHit launched=false") or
+      renameRun.contains(
+      "action: app-binary status=asUpToDate launched=false")
     check nonEmptyLines(projectRoot / ".repro" / "m2-runs.log").len == 1

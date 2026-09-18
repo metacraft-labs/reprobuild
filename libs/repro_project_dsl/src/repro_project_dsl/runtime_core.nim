@@ -390,7 +390,19 @@ const
     ## with an empty ``targetNames`` list.
   BuildTargetPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')),
     byte(ord('P'))]
-  BuildTargetPayloadVersion = 4'u16
+  BuildTargetPayloadVersion = 5'u16
+    ## v5: adds ``btkTarget`` (2) to the ``kind`` byte's legal values so a
+    ## plain ``target("name", handle)`` rename stays distinguishable from a
+    ## one-member ``aggregate(...)`` grouping. The LAYOUT is unchanged from
+    ## v4 — only the byte's range grows — but the version is bumped anyway,
+    ## and the reason is a measured one: a provider compiled from this tree
+    ## writes ``kind = 2`` into a snapshot that an engine built before this
+    ## change then reads, and without the bump its decoder reports "invalid
+    ## build target kind in build target payload" — a message that describes
+    ## a corrupt payload rather than a newer one. With the bump the same
+    ## mismatch says "unsupported build target payload version", which names
+    ## what is actually wrong. v1..v4 payloads still decode unchanged.
+    ##
     ## v3: Spec-Implementation M5 — appends the ``kind`` byte distinguishing
     ## ``btkAggregate`` (0) from ``btkCollection`` (1) so the registry
     ## split is preserved when payloads round-trip through the engine
@@ -1904,14 +1916,16 @@ proc registerBuildTarget(target: BuildTargetDef): BuildTargetDef =
 
 proc target*(name: string; action: BuildActionDef): BuildTargetDef
     {.discardable, dynOrStatic.} =
-  registerBuildTarget(BuildTargetDef(name: name, actions: @[action.id]))
+  registerBuildTarget(BuildTargetDef(name: name, actions: @[action.id],
+    kind: btkTarget))
 
 proc target*(name: string; actions: openArray[BuildActionDef]): BuildTargetDef
     {.discardable, dynOrStatic.} =
   var actionRefs: seq[string] = @[]
   for action in actions:
     actionRefs.addUniqueValue(action.id)
-  registerBuildTarget(BuildTargetDef(name: name, actions: actionRefs))
+  registerBuildTarget(BuildTargetDef(name: name, actions: actionRefs,
+    kind: btkTarget))
 
 proc exportTarget*(name: string; action: BuildActionDef): BuildTargetDef
     {.discardable, dynOrStatic.} =
@@ -2237,22 +2251,22 @@ proc registerExplicitTargetExport*(target: BuildTargetDef;
   let handle =
     if target.actions.len > 0: target.actions[0] else: target.name
   # Spec-Implementation M5: select the export-row kind from the
-  # build-target's discriminator. A plain ``target "name", handle``
-  # registration leaves ``kind`` at its zero value (``btkAggregate``)
-  # AND carries exactly one action handle + no nested targets;
-  # ``aggregate("...", ...)`` and ``collect("...", ...)`` both carry
-  # the union shape but their ``kind`` byte distinguishes them.
+  # build-target's discriminator. ``target "name", handle`` now stamps
+  # ``btkTarget`` directly; ``aggregate("...", ...)`` and
+  # ``collect("...", ...)`` carry their own discriminators.
   let exportKind =
     case target.kind
     of btkCollection: tekCollection
+    of btkTarget: tekExplicit
     of btkAggregate:
-      # Distinguish a plain explicit ``target "name", action`` (one
-      # action, no nested targets) from a real ``aggregate("name",
-      # ...)`` call by checking the shape. The runtime never sees
-      # an explicit ``target`` registration with more than one
-      # action OR with any nested targets — only ``aggregate``
-      # produces the union shape. See ``target*`` / ``exportTarget*``
-      # constructors above.
+      # RETAINED FOR DECODED PAYLOADS, not for freshly registered ones.
+      # ``BuildTargetKind`` zero-defaults to ``btkAggregate``, so a v1 /
+      # v2 build-target payload — written before the ``kind`` byte
+      # existed — decodes as ``btkAggregate`` whether it came from
+      # ``target`` or from ``aggregate``. The shape test is what still
+      # classifies those correctly: only ``aggregate`` produces the
+      # union shape. M5's structural rule is preserved verbatim here so
+      # replaying an older snapshot keeps its previous row kinds.
       if target.actions.len > 1 or target.targets.len > 0: tekAggregate
       else: tekExplicit
   registerTargetExportEntry(TargetExportEntry(
@@ -3792,7 +3806,7 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrSt
       raisePayload("unknown build target payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version notin {1'u16, 2'u16, 3'u16, BuildTargetPayloadVersion}:
+  if version notin {1'u16, 2'u16, 3'u16, 4'u16, BuildTargetPayloadVersion}:
     raisePayload("unsupported build target payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -3809,7 +3823,7 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrSt
     # the backward-compat rule in Build-Graph-Collections.md
     # §"Persistence and the Target-Export Table".
     let kindByte = readByte(bytes, pos)
-    if kindByte > byte(ord(btkCollection)):
+    if kindByte > byte(ord(btkTarget)):
       raisePayload("invalid build target kind in build target payload")
     result.kind = BuildTargetKind(kindByte)
   if version >= 4'u16:
