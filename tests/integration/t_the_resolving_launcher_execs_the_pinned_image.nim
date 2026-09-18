@@ -38,6 +38,7 @@ import std/[algorithm, os, osproc, streams, strtabs, strutils, tables,
             tempfiles, unittest]
 
 import repro_lock
+import repro_core/cli_images
 import repro_selfhost
 import repro_selfhost/install as selfinstall
 
@@ -113,14 +114,27 @@ proc lockPinningNothing(platform: string): string =
     solutionToLock(sol, platform, "")))
 
 proc makeImageTree(dir, label, stub: string): string =
-  ## An image tree laid out the way a pin expects: `bin/repro[.exe]` plus
-  ## the `VERSION` file the stub reads to say which image it is.
+  ## An image tree laid out the way a pin expects: BOTH `bin/repro[.exe]` and
+  ## `bin/reprobuild[.exe]`, plus the `VERSION` file the stub reads to say
+  ## which image it is.
+  ##
+  ## BOTH, because the CLI is two images and a prefix carrying one of them is
+  ## not a runnable reprobuild: `bin/repro` is the thin daemon client and
+  ## `bin/reprobuild` is the engine it hands every non-routable invocation to.
+  ## `installSelfImage` refuses a tree without the engine and the launcher
+  ## refuses a resolved prefix without it, so a fixture that planted only the
+  ## thin client would be testing a layout the product does not produce.
+  ##
+  ## The same stub serves as both: what these cases observe is WHICH IMAGE TREE
+  ## was exec'd (the stub prints its `VERSION`), not which of the two binaries
+  ## inside it ran, and the launcher execs `bin/repro`.
   createDir(dir / "bin")
-  copyFile(stub, dir / "bin" / selfExecutableName())
-  when not defined(windows):
-    setFilePermissions(dir / "bin" / selfExecutableName(),
-      {fpUserRead, fpUserWrite, fpUserExec, fpGroupRead, fpGroupExec,
-       fpOthersRead, fpOthersExec})
+  for name in [selfExecutableName(), reprobuildEngineExeName()]:
+    copyFile(stub, dir / "bin" / name)
+    when not defined(windows):
+      setFilePermissions(dir / "bin" / name,
+        {fpUserRead, fpUserWrite, fpUserExec, fpGroupRead, fpGroupExec,
+         fpOthersRead, fpOthersExec})
   writeFile(dir / "VERSION", label & "\n")
   dir
 
@@ -359,6 +373,53 @@ suite "a pin the store cannot satisfy refuses instead of falling back":
     # look like success to every caller.
     check not r.stdoutText.contains(BootstrapLabel)
     check not r.stderrText.hasLine("repro " & BootstrapLabel)
+
+  test "a prefix with no engine beside bin/repro is refused, not fallen back on":
+    ## THE HARD FAILURE, and why it is a failure rather than a fallback.
+    ##
+    ## `bin/repro` in a resolved prefix is the THIN DAEMON CLIENT; the engine
+    ## it hands every non-routable invocation to is `bin/reprobuild` beside it.
+    ## An earlier draft fell back to `bin/repro` when the engine was absent, on
+    ## the theory that a pre-rename prefix is a supported layout. The owner
+    ## overruled it: reprobuild is in heavy development, so running an OLD
+    ## image is typically a MISTAKE, and a silent fallback turns a
+    ## wrong-version run into something nobody can see. The refusal makes it
+    ## diagnosable — the same trade `spsTampered` already makes.
+    ##
+    ## THE ANOMALY IS CONSTRUCTED BY MODIFYING A GOOD PREFIX, which is the only
+    ## honest way to reach it: `installSelfImage` now refuses a source tree
+    ## with no engine, so the normal path CANNOT produce this shape. Deleting
+    ## the engine out of a realized prefix is exactly what the launcher's
+    ## message says must have happened.
+    ##
+    ## WHAT MAKES THIS FAIL: restoring the `else: putEnv(..., exe)` arm in
+    ## `apps/repro-trampoline`. The launcher then execs the thin client with
+    ## `REPRO_PUBLIC_CLI_PATH` naming itself, exits 0, and prints the pinned
+    ## VERSION — so `r.code == ExitResolutionFailed` and the stdout clause
+    ## below both redden. Verified, not assumed.
+    let s = newScenario()
+    defer: removeDir(s.root)
+    let pin = selfPinFrom(s.projA)
+    check pin.state == spsPinned
+    let prefix = selfPrefixAbsolutePath(s.store, pin)
+    let engine = prefix / "bin" / reprobuildEngineExeName()
+    check fileExists(engine) # the normal path really did install it
+    removeFile(engine)
+
+    let r = s.run(s.projA)
+    checkpoint("rc=" & $r.code & "\nstdout=" & r.stdoutText &
+      "\nstderr=" & r.stderrText)
+    check r.code == ExitResolutionFailed
+    # It REFUSED rather than running something: a launch would have printed
+    # the pinned image's VERSION label on stdout.
+    check not r.stdoutText.contains(VersionA)
+    check not r.stdoutText.contains(BootstrapLabel)
+    # And the refusal is ACTIONABLE: it names the lock, the pinned version,
+    # the prefix, and what was expected there.
+    check r.stderrText.contains(s.projA / "repro.lock")
+    check r.stderrText.contains(VersionA)
+    check r.stderrText.contains(prefix)
+    check r.stderrText.contains(reprobuildEngineExeName())
 
   test "a hand-edited lock is refused as tampered, not as a missing prefix":
     ## The integrity check, through the binary. The edit is the one a user

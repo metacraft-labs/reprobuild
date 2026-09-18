@@ -22,12 +22,14 @@
 ## `repro_local_store` on a real temp directory, real `repro.lock` documents
 ## written by the real `repro_lock` writer, real `installSelfImage` /
 ## `attachPinRoot` / `prunePinRoots` / `Store.gc`. The reprobuild "images"
-## are directory trees with a `bin/repro` file in them: this suite never
-## executes one, so their CONTENT is irrelevant and inventing a build here
-## would test the Nim compiler rather than the store.
+## are directory trees with a `bin/repro` AND a `bin/reprobuild` file in them:
+## this suite never executes one, so their CONTENT is irrelevant and inventing
+## a build here would test the Nim compiler rather than the store. The two
+## NAMES are not irrelevant — see `makeImage`.
 
 import std/[os, strutils, tables, tempfiles, unittest]
 
+import repro_core/cli_images
 import repro_lock
 import repro_local_store
 import repro_selfhost
@@ -60,10 +62,21 @@ proc lockPinningNothing(): string =
   serializeLockedDependencies(ld)
 
 proc makeImage(dir, marker: string): string =
-  ## A minimal reprobuild image tree: `<dir>/bin/repro[.exe]` plus a file
-  ## whose bytes differ per version, so two images are genuinely two trees.
+  ## A minimal reprobuild image tree: BOTH `<dir>/bin/repro[.exe]` and
+  ## `<dir>/bin/reprobuild[.exe]`, plus a file whose bytes differ per version,
+  ## so two images are genuinely two trees.
+  ##
+  ## BOTH, because the CLI is two images and `installSelfImage` REFUSES a tree
+  ## carrying only one of them: `bin/repro` is the thin daemon client and
+  ## `bin/reprobuild` is the engine it hands every non-routable invocation to,
+  ## so a prefix with only the first realizes cleanly and then cannot run a
+  ## single command. A fixture planting only `bin/repro` therefore does not
+  ## test a tolerated layout — it makes this whole suite raise out of
+  ## `newScenario`, which is exactly what it did until this line named the
+  ## second image.
   createDir(dir / "bin")
-  writeFile(dir / "bin" / selfExecutableName(), "image " & marker & "\n")
+  for name in [selfExecutableName(), reprobuildEngineExeName()]:
+    writeFile(dir / "bin" / name, "image " & marker & " " & name & "\n")
   writeFile(dir / "VERSION", marker & "\n")
   dir
 

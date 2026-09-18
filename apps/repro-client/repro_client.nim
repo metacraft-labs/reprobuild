@@ -1,18 +1,37 @@
-## Dependency-Attribution MAC-1 — the thin daemon client.
+## Dependency-Attribution MAC-1 — the thin daemon client, and the image
+## installed on ``PATH`` AS ``repro``.
 ##
-## ``repro-client`` hands a ``repro build`` invocation to the already-running
-## per-user daemon and streams the result back. It does one other thing, and
-## only that: when it cannot serve the invocation itself it ``execv``s the
-## full ``repro`` image with the caller's argv unchanged, so the fallback is
-## the full CLI rather than a degraded imitation of it.
+## ``repro`` hands a ``repro build`` invocation to the already-running per-user
+## daemon and streams the result back. It does one other thing, and only that:
+## when it cannot serve the invocation itself it ``execv``s the ENGINE image
+## (``reprobuild``) with the caller's argv unchanged, so the fallback is the
+## full CLI rather than a degraded imitation of it.
+##
+## THIS BINARY USED TO BE CALLED ``repro-client`` AND WAS OPT-IN. That name is
+## retired. The saving below was real and measured from the day it was built,
+## and it reached nobody: the benchmark harness, every script, and every user
+## typing ``repro build`` got the engine image. An opt-in fast path nobody
+## types delivers zero, so the owner's call is to make it the default. The
+## name it took over from the engine is the whole content of that decision;
+## see `libs/repro_core/src/repro_core/cli_images.nim` for why the engine is
+## now ``reprobuild`` and not ``repro-daemon`` (a live name for the resident
+## server) or ``repro-full`` (a retired name with live refusals attached).
+##
+## WHAT THE DEFAULT COSTS WHEN IT CANNOT ROUTE, stated before the saving so
+## nobody reads the saving as unconditional. A non-routable invocation now pays
+## one extra image load and module init before the engine's own: this binary's,
+## measured at +2.0 ms (min) / +2.7 ms (median) on the zlib CMake benchmark
+## no-op against the engine invoked directly. That is the price of the name,
+## and it is paid by every interactive build, because an interactive build
+## cannot be routed (see the progress-rendering paragraph below).
 ##
 ## WHY THIS EXISTS, MEASURED.
 ##
 ## The decomposition of a warm CMake no-op on macOS puts 11.6 ms — three
 ## times Ninja's ENTIRE no-op rebuild — in front of any build logic: image
-## load, module initialisation and teardown. ``repro`` is a very large image
+## load, module initialisation and teardown. The engine is a very large image
 ## with ~12,000 dynamic-linker fixups against Ninja's 344 KB and 262, and
-## ``repro --version`` alone costs more than Ninja's whole no-op. No amount of
+## ``reprobuild --version`` alone costs more than Ninja's whole no-op. No amount of
 ## daemon-side warming reaches that cost, because the daemon answers the cost
 ## of BUILD WORK DONE REPEATEDLY while the client pays image load and teardown
 ## on EVERY invocation. Linking only ``repro_daemon_core`` is what makes this
@@ -23,8 +42,8 @@
 ## quoted in the milestone is that one):
 ##
 ##   | image        | bytes      | dyld fixups (bind + rebase) | dylibs |
-##   | repro        | 22,189,816 | 12,418 (274 + 12,144)       | 4      |
-##   | repro-client |    802,880 |    396 (134 + 262)          | 1      |
+##   | reprobuild | 22,189,816 | 12,418 (274 + 12,144)       | 4      |
+##   | repro        |    802,880 |    396 (134 + 262)          | 1      |
 ##
 ## Quote BOTH numbers or neither. "~130 fixups against ~12,000" compares this
 ## image's BIND count against the full image's TOTAL and reads as a 92x
@@ -111,64 +130,96 @@
 ## fails. Every other exit code is the daemon-hosted build's or the full
 ## image's.
 ##
-## HOW A USER REACHES IT, AND WHY IT IS NOT ``repro`` ITSELF.
+## HOW A USER REACHES IT: by typing ``repro``. Both images are members of
+## ``repro.nim``'s ``apps`` collection, so ``.#apps`` / ``.#release`` build
+## both, and every packaging route this repository has copies ``build/bin/*``
+## wholesale — the Nix derivation's ``installPhase``, the ``.deb``/``.rpm``/
+## pacman payloads, the release tarball, and ``install-on-distributions.sh``.
+## So an install puts ``repro`` and ``reprobuild`` in the SAME bin directory,
+## which is exactly what ``resolveFullCli``'s sibling probe resolves, with no
+## environment variable set by anyone.
 ##
-## This binary is a member of ``repro.nim``'s ``apps`` collection, so
-## ``.#apps`` / ``.#release`` build it, and every packaging route this
-## repository has copies ``build/bin/*`` wholesale — the Nix derivation's
-## ``installPhase``, the ``.deb``/``.rpm``/pacman payloads, the release
-## tarball, and ``install-on-distributions.sh``. So an install puts
-## ``repro-client`` in the SAME bin directory as ``repro``, which is exactly
-## what ``resolveFullCli``'s sibling probe resolves: an installed
-## ``repro-client`` finds its full image with no environment variable set by
-## anyone. Verified end to end in an install-shaped directory with
-## ``REPRO_FULL_CLI`` and ``REPRO_PUBLIC_CLI_PATH`` both unset.
+## THREE THINGS THAT PREVIOUSLY MADE THIS IMPOSSIBLE, AND WHAT EACH TURNED
+## OUT TO REQUIRE. This header used to argue the rename could not be done.
+## Two of the three arguments were about a defect that has since been fixed,
+## and the third was a design question rather than an obstacle.
 ##
-## Invoking it is therefore OPT-IN: ``repro-client build …`` where a script
-## would have written ``repro build …``. It is deliberately not installed AS
-## ``repro``, and the reason is structural rather than cautious:
+##   1. "The full image must be NAMED ``repro``, because
+##      ``internalReproHelperCliPath`` returns "" for any other basename."
+##      NO LONGER TRUE, and the fix predates this rename: N36 replaced the
+##      filename test with the image's own DECLARATION. The engine passes
+##      ``"repro"`` as a LITERAL in its own source (`apps/repro/repro.nim`:
+##      ``quit runThinApp("repro")``), ``runThinApp`` sets the mark, and
+##      ``runningImageIsReproCli`` reads the mark — so
+##      ``internalReproHelperCliPath`` returns ``getAppFilename()`` whatever
+##      the file is called. `libs/repro_cli_support/tests/
+##      t_image_identity_is_declared_not_filename.nim` is the standing proof,
+##      from a test binary called ``t_…``. The same literal is what
+##      ``renderUsage`` prints, so the engine's usage text and every ``repro
+##      …`` diagnostic still say ``repro`` too. Nothing had to learn a second
+##      name; the rename is a FILENAME change and only that.
+##   2. "Moving the engine breaks ``siblingTryCompileProviderPath`` /
+##      ``siblingStandardProviderPath`` (silent degradation to per-project
+##      provider compile) and the Nix ``wrapProgram`` loop that covers
+##      ``$out/bin/*`` only." BOTH STILL TRUE, and both are avoided by NOT
+##      MOVING ANYTHING. Because (1) removed the reason to relocate, the
+##      engine is renamed IN PLACE: it stays in ``bin`` next to the Tier-2a/2b
+##      provider binaries, and it stays inside the ``wrapProgram`` loop with
+##      all ~19 ``--set-default`` variables. The thin client is in ``bin``
+##      too, so it is wrapped as well and the engine it ``execv``s inherits
+##      that environment.
+##   3. "``bin/repro`` is already spoken for by ``apps/repro-trampoline``
+##      (M5 SELF-HOST)." A GENUINE THREE-WAY QUESTION, and it composes —
+##      see "LAYERING AGAINST THE TRAMPOLINE" below. Note also that the
+##      trampoline is not installed as anything today: it is absent from
+##      `apps/entrypoints.txt` and from ``repro.nim``'s ``apps`` collection,
+##      and is built only as the test helper ``build/test-bin/
+##      repro_trampoline``. The collision was between this binary and a
+##      DOCUMENTED INTENT, not between two installed files.
 ##
-##   * The full image must be NAMED ``repro``. ``internalReproHelperCliPath``
-##     returns "" for any other basename — its second candidate,
-##     ``publicCliPath``, is derived from ``getAppFilename()`` in an ordinary
-##     install and ``spawnableWithInternalVerb`` rejects a path identical to
-##     the running image, so there is nothing left to return. The two callers
-##     then diverge, and NEITHER outcome is acceptable: interface extraction
-##     silently falls back to in-process work, while provider compile does not
-##     fall back at all — ``providerCompileBuildAction`` RAISES "cannot
-##     schedule the provider-compile edge for <recipe>: no `repro` image to
-##     spawn it with". That hard error is not hypothetical; it is what M5
-##     observed for a bootstrap installed as ``repro-bootstrap.exe`` and is
-##     quoted verbatim in ``apps/repro-trampoline``. So "``repro`` is the thin
-##     client" necessarily means moving the full image to a DIFFERENT
-##     DIRECTORY, not renaming it.
-##   * Moving it breaks two things that resolve relative to it and fail
-##     SILENTLY: ``siblingTryCompileProviderPath`` /
-##     ``siblingStandardProviderPath`` look for the Tier-2a/2b provider
-##     binaries in ``parentDir(publicCliPath)`` and degrade to per-project
-##     provider compile when they are absent, and the Nix derivation's
-##     ``wrapProgram`` loop covers ``$out/bin/*`` only, so a full image in
-##     ``libexec`` would lose all ~19 ``--set-default`` runtime variables
-##     that ``runtime_contract.ReprobuildWrapperVariables`` contracts for.
-##   * ``bin/repro`` is already SPOKEN FOR by a different milestone.
-##     ``apps/repro-trampoline`` — M5 SELF-HOST — is documented as "installed
-##     on ``PATH`` under the name ``repro``", delegating to
-##     ``<bin>/../libexec/reprobuild/repro``. That binary decides WHICH
-##     ``repro`` runs, from the committed ``repro.lock``. A daemon fast-path
-##     client has to sit downstream of that decision, not upstream of it, so
-##     the two cannot both own the name.
+## LAYERING AGAINST THE TRAMPOLINE: VERSION SELECTION OUTSIDE, DAEMON
+## DISPATCH INSIDE.
 ##
-## The consequence is stated plainly: the beneficiaries are callers that
-## change ``repro build`` to ``repro-client build``, not every invocation on
-## the machine. ``resolveFullCli``'s ``libexec/reprobuild/repro`` probe is
-## kept because it is what makes this binary correct if it is ever placed
-## into the M5 layout.
+##   PATH/repro (trampoline: which reprobuild?)
+##     -> <selected prefix>/bin/repro (this binary: daemon or engine?)
+##       -> <selected prefix>/bin/reprobuild  |  that version's daemon
+##
+## The order is forced, not chosen. The trampoline's whole job is to decide
+## WHICH reprobuild runs before any reprobuild code runs, and its
+## ``spsTampered`` hard-fail exists because "every version-selection bug this
+## milestone exists to prevent looks exactly like a quiet fallback". A thin
+## client placed OUTSIDE it would dispatch to whatever daemon happens to be
+## resident — an engine of unknown version — and so would silently defeat the
+## pin in exactly that way. Inside it, the selected prefix's own ``bin/repro``
+## is this binary and its own ``bin/reprobuild`` is that version's engine, so
+## the daemon is spawned from the pinned image and the pin holds.
+##
+## The trampoline therefore names BOTH halves of the version it selected: it
+## runs the prefix's ``bin/repro`` and sets ``REPRO_PUBLIC_CLI_PATH`` to the
+## prefix's ``bin/reprobuild``. One variable, read by this binary as its
+## engine and by the engine as its own self-spawn path, which is what keeps
+## the two answers from being derived separately. The cost of the layering is
+## the trampoline's own process (it waits rather than ``execv``s, deliberately,
+## because Windows has no ``execv``) — a cost its own header already accepts,
+## and one that is now paid once on the outside rather than on the hot path.
 ##
 ## WHAT IS NOT DONE YET, so nobody reads a saving into a surface it lacks.
 ##
 ##   * INTERACTIVE TERMINAL BUILDS ARE STILL NOT SERVED, by construction —
-##     see the progress-rendering paragraph above. Widening that surface
-##     needs the renderer lifted into a library both clients can link.
+##     see the progress-rendering paragraph above. An interactive ``repro
+##     build`` therefore falls back, and pays the +2 ms handover. Widening
+##     that surface needs the renderer lifted into a library both clients can
+##     link. UNTIL THEN THE DEFAULT IS SLOWER FOR INTERACTIVE USE AND FASTER
+##     FOR SCRIPTED USE; that is the trade the rename makes.
+##   * THE BENCHMARK HARNESS DOES NOT ROUTE EITHER, as it stands.
+##     ``scripts/cmake_generator_competitiveness_bench.py``'s ``repro_env``
+##     sets ``REPROBUILD_LOG=quiet`` but NOT ``REPROBUILD_PROGRESS``, and the
+##     engine's default progress mode is ``bpmBarLine`` rather than quiet, so
+##     ``shouldRouteToDaemon`` refuses and the harness measures the engine
+##     plus this binary's handover. It is left alone on purpose: setting
+##     ``REPROBUILD_PROGRESS=quiet`` there would stop the harness measuring
+##     progress rendering and make its numbers incomparable with the
+##     historical series. Measure the routable surface explicitly instead.
 ##   * ``isProgressPayload`` SWALLOWS SLIGHTLY MORE than the full client's
 ##     ``tryRenderDaemonProgress`` does. That proc also requires the payload's
 ##     ``kind`` (and non-empty ``status``) to parse as the engine's enums, and
@@ -181,30 +232,68 @@
 
 import std/[json, os, posix, strutils, times]
 
+import repro_core/cli_images
 import repro_daemon_core
 
 const
   FullCliEnvVar = "REPRO_FULL_CLI"
-    ## Absolute path of the full ``repro`` image. Set by the packaging layer
-    ## and by the tests so the client never has to guess.
+    ## Absolute path of the engine image. Set by the tests so the client never
+    ## has to guess.
   PublicCliEnvVar = "REPRO_PUBLIC_CLI_PATH"
-    ## The same override ``stablePublicCliPath`` honours in the full image.
-    ## Honoured here first so a caller that redirects one client redirects
-    ## both.
+    ## The same override ``stablePublicCliPath`` honours in the engine, and
+    ## what the M5 trampoline sets to the pinned prefix's ``bin/reprobuild``.
+    ## Honoured here so one variable redirects both clients to the same bytes.
   BootstrapSiblingDir = "reprobuild"
-    ## ``<bin>/../libexec/reprobuild/repro`` — the layout
-    ## ``apps/repro-trampoline`` already documents. The full image has to be
-    ## NAMED ``repro``: the build engine schedules provider-compile and
-    ## interface-extraction edges by self-spawning its own image, and
-    ## ``internalReproHelperCliPath`` accepts only an image called ``repro``.
+    ## ``<bin>/../libexec/reprobuild/reprobuild`` — the layout
+    ## ``apps/repro-trampoline`` documents for a bootstrap engine that must sit
+    ## off ``PATH``. Kept as the LAST probe: it is what makes this binary
+    ## correct in the M5 layout, and nothing else resolves there.
+  MakeWrapperHiddenPrefix = "."
+  MakeWrapperHiddenSuffix = "-wrapped"
+    ## nixpkgs `setup-hooks/make-wrapper.sh`: ``hidden="$(dirname
+    ## "$prog")/.$(basename "$prog")"-wrapped``. See ``resolveFullCli``.
   ExitExecFailed = 127
 
 proc thinClientDir(): string =
   parentDir(getAppFilename())
 
 proc resolveFullCli(): string =
-  ## The full ``repro`` image this client defers to. Empty when none can be
-  ## named — the caller then has nothing to fall back to and says so.
+  ## The engine image this client defers to. Empty when none can be named —
+  ## the caller then has nothing to fall back to and says so.
+  ##
+  ## THE PATH MUST BE THE ONE THE ENGINE WOULD NAME FOR ITSELF, not merely a
+  ## path to the same bytes, and three separate mechanisms depend on that:
+  ##
+  ##   * DAEMON IDENTITY. The path handed to ``startUserDaemon`` is the path
+  ##     whose digest is compared against the running daemon's
+  ##     (``expectedDaemonRunningDigestHex``). The engine passes
+  ##     ``stablePublicCliPath()`` — i.e. its own ``getAppFilename()``. A
+  ##     client naming different bytes concludes the daemon is stale and shuts
+  ##     it down; the next invocation of the other client concludes the same in
+  ##     reverse, and alternating the two restarts the daemon every time,
+  ##     destroying the warm daemon this binary exists to exploit.
+  ##   * PROVIDER RESOLUTION. ``siblingTryCompileProviderPath`` /
+  ##     ``siblingStandardProviderPath`` resolve the Tier-2a/2b providers from
+  ##     ``parentDir(publicCliPath)`` and degrade to per-project provider
+  ##     compile — a large perf loss with NO error — when they are not there.
+  ##     The daemon re-parses this client's request with the ``publicCliPath``
+  ##     the request carries, so a path in the wrong directory degrades every
+  ##     routed build silently.
+  ##   * LOWERED-GRAPH IDENTITY. Provider commands are recorded with the paths
+  ##     that resolved them, so two spellings of the same image are two
+  ##     fingerprints and neither client hits the other's cache.
+  ##
+  ## Under Nix that path is NOT ``$out/bin/reprobuild``: ``wrapProgram`` has
+  ## replaced that with a shell script and moved the real image to
+  ## ``$out/bin/.reprobuild-wrapped``. The engine's own ``getAppFilename()``
+  ## is therefore the hidden name, so the hidden name is probed FIRST. Its
+  ## directory is still ``$out/bin``, so the providers are found and the env
+  ## the wrapper set for THIS process is inherited across the ``execv``.
+  ##
+  ## The convention is makeWrapper's own and is asserted, not assumed:
+  ## `nix/pkgs/by-name/re/reprobuild/package.nix` fails the build if the hidden
+  ## image is not there, so a nixpkgs change surfaces as a build failure rather
+  ## than as a daemon that restarts on every other invocation.
   let overridden = getEnv(FullCliEnvVar)
   if overridden.len > 0:
     return overridden
@@ -214,25 +303,30 @@ proc resolveFullCli(): string =
       if public.isAbsolute: normalizedPath(public)
       else: normalizedPath(getCurrentDir() / public)
   let dir = thinClientDir()
-  let libexec = parentDir(dir) / "libexec" / BootstrapSiblingDir /
-    addFileExt("repro", ExeExt)
-  if fileExists(libexec):
-    return libexec
-  let sibling = dir / addFileExt("repro", ExeExt)
-  # Guard against a layout in which this binary IS ``repro``: exec'ing
+  let engineName = reprobuildEngineExeName()
+  let hidden = dir /
+    (MakeWrapperHiddenPrefix & ReprobuildEngineName & MakeWrapperHiddenSuffix)
+  if fileExists(hidden):
+    return hidden
+  let sibling = dir / engineName
+  # Guard against a layout in which this binary IS the engine: exec'ing
   # ourselves is an infinite loop, not a fallback.
   if fileExists(sibling) and sibling != getAppFilename():
     return sibling
+  let libexec = parentDir(dir) / "libexec" / BootstrapSiblingDir / engineName
+  if fileExists(libexec):
+    return libexec
   ""
 
 proc handOver(fullCli: string; args: seq[string]) {.noreturn.} =
-  ## Replace this process with the full image. ``execv`` rather than spawn:
+  ## Replace this process with the engine image. ``execv`` rather than spawn:
   ## the caller's pid, its terminal, its signal disposition and its exit
   ## status must all belong to the process that does the work, and a wrapper
   ## that waited would re-add the spawn cost this binary exists to remove.
   if fullCli.len == 0:
-    stderr.writeLine("repro-client: no full repro image to fall back to " &
-      "(set " & FullCliEnvVar & ", or install repro next to this binary)")
+    stderr.writeLine("repro: no " & ReprobuildEngineName &
+      " image to fall back to (set " & FullCliEnvVar & ", or install " &
+      ReprobuildEngineName & " next to this binary)")
     quit(ExitExecFailed)
   stdout.flushFile()
   stderr.flushFile()
@@ -241,7 +335,7 @@ proc handOver(fullCli: string; args: seq[string]) {.noreturn.} =
   var cargs = allocCStringArray(argv)
   discard execv(cstring(fullCli), cargs)
   deallocCStringArray(cargs)
-  stderr.writeLine("repro-client: cannot exec " & fullCli & ": " &
+  stderr.writeLine("repro: cannot exec " & fullCli & ": " &
     $strerror(errno))
   quit(ExitExecFailed)
 
@@ -355,11 +449,12 @@ proc streamDaemonBuild(fullCli: string; args: seq[string]): int =
   ## fall back on its own: once the daemon has accepted the request the build
   ## is running, and a second attempt from the full image would run it twice.
   let config = defaultUserDaemonConfig(devMode = true)
-  # The same call the full client makes, from the same library: it spawns the
-  # daemon when absent and RESTARTS IT when its running image no longer
-  # matches the on-disk ``repro``. That staleness check is why this binary
-  # must hand ``startUserDaemon`` the FULL image's path and not its own — a
-  # daemon serving from a thin client image cannot execute builds at all.
+  # The same call the engine's own client makes, from the same library: it
+  # spawns the daemon when absent and RESTARTS IT when its running image no
+  # longer matches the on-disk engine. That staleness check is why this binary
+  # must hand ``startUserDaemon`` the ENGINE's path and not its own — a daemon
+  # serving from a thin client image cannot execute builds at all — and why
+  # ``resolveFullCli`` has to name the SAME path the engine names for itself.
   discard startUserDaemon(fullCli, config)
   let request = UserDaemonBuildRequest(
     runId: buildRunId(),

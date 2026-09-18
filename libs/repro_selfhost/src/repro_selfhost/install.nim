@@ -29,6 +29,7 @@
 
 import std/[os, strutils]
 
+import repro_core/cli_images
 import repro_local_store
 
 import ../repro_selfhost
@@ -81,7 +82,12 @@ proc installSelfImage*(storeRoot, version, platform, sourceDir: string):
   ## version ``version`` for ``platform``.
   ##
   ## ``sourceDir`` must already be laid out the way a pin expects to find it
-  ## — ``bin/repro`` plus whatever that image needs beside it. The check is
+  ## — ``bin/repro`` AND ``bin/reprobuild``, plus whatever those images need
+  ## beside them. Both, because they are two halves of one CLI: ``bin/repro``
+  ## is the thin daemon client and cannot build on its own, and
+  ## ``bin/reprobuild`` is the engine it hands every non-routable invocation
+  ## to. A tree with only the first realizes cleanly and then cannot run a
+  ## single command. The check is
   ## made HERE and refuses, rather than at exec time: a prefix that realizes
   ## cleanly and then cannot be executed is a store entry that satisfies
   ## every query and serves no invocation, and the pin that points at it
@@ -101,6 +107,26 @@ proc installSelfImage*(storeRoot, version, platform, sourceDir: string):
       " has no " & selfDeclaredExecutablePath() &
       "; a reprobuild image is the directory that CONTAINS bin/" &
       selfExecutableName() & ", not the binary itself")
+
+  # THE SECOND IMAGE, refused here for the reason stated above rather than at
+  # exec time. `apps/repro-trampoline` hard-fails when a resolved prefix has no
+  # engine beside its `bin/repro`; this is the check that makes reaching that
+  # failure evidence of a modified or pre-check prefix rather than of a routine
+  # configuration. Refusing in both places is deliberate: one of them is the
+  # only one a person can act on before the prefix exists.
+  let sourceEngine = sourceDir / "bin" / reprobuildEngineExeName()
+  if not fileExists(sourceEngine):
+    raise newException(ValueError,
+      "repro self install: the source tree at " & sourceDir &
+      " has bin/" & selfExecutableName() & " but no bin/" &
+      reprobuildEngineExeName() &
+      ". bin/" & selfExecutableName() & " is the thin daemon client; it " &
+      "routes a quiet non-terminal `repro build` to the daemon and execs " &
+      "bin/" & reprobuildEngineExeName() & " for everything else, so a " &
+      "prefix without it answers every other invocation with \"no " &
+      reprobuildEngineExeName() & " image to fall back to\". Build both " &
+      "(`just build` / `scripts/build_apps.sh` produce both) before " &
+      "installing this tree")
 
   result.version = version
   result.platform = platform

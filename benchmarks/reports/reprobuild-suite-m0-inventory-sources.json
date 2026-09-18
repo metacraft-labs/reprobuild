@@ -2,7 +2,7 @@
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
     "nimTestBinaries": 1643,
-    "pureUnitConsolidationGroups": 49,
+    "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 583,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
     "testEntries": 1654
@@ -495,21 +495,6 @@
         "libs/repro_resources/tests/t_l3_reaper.nim",
         "libs/repro_resources/tests/t_resource_provider_lane.nim",
         "libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 2,
-      "defines": [],
-      "dependencyShape": [
-        "repro_local_store",
-        "repro_lock",
-        "repro_selfhost"
-      ],
-      "owner": "libs/repro_selfhost",
-      "sources": [
-        "libs/repro_selfhost/tests/t_removing_the_pin_makes_the_version_collectable.nim",
-        "libs/repro_selfhost/tests/t_the_pin_lives_in_the_lock.nim"
       ],
       "targetOs": "soAny"
     },
@@ -14294,6 +14279,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_local_store",
         "repro_lock",
         "repro_selfhost"
@@ -23321,7 +23307,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_bootstrap_guard_names_the_host_artefact.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30721,7 +30707,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_the_resolving_launcher_execs_the_pinned_image.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 12,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30762,13 +30748,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_thin_daemon_client.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

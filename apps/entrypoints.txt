@@ -1,6 +1,15 @@
 # name path [extra-nim-flags...]
+#
+# TWO USER-FACING IMAGES, AND WHICH NAME EACH GETS. `repro` on PATH is the
+# THIN daemon client (last row); `reprobuild` is the full CLI. See
+# `libs/repro_core/src/repro_core/cli_images.nim` for the naming rationale and
+# `apps/repro-client/repro_client.nim` for the routing contract. The engine
+# keeps DECLARING itself `repro` (`runThinApp("repro")`), so its usage text,
+# its self-spawn permission and every `repro …` diagnostic are unchanged by
+# the file it is installed under.
+#
 # Windows-Runner-Binary-Cache-Deploy M7 (prereq a): --define:ssl so the main
-# `repro` binary links OpenSSL/TLS and its EMBEDDED cache-consumer paths can
+# engine binary links OpenSSL/TLS and its EMBEDDED cache-consumer paths can
 # speak https://. Without it, `repro infra apply`'s substitute path
 # (substituteInProcess → http_pool.parseTarget) RAISES on an https:// cache
 # URL ("https:// requires -d:ssl"), and the M5 `repro deploy-agent` manifest
@@ -9,7 +18,7 @@
 # honoring REPRO_BINARY_CACHE_CA_FILE / REPRO_BINARY_CACHE_TLS_INSECURE. Plain
 # http:// is unchanged. The reprobuild dev shell / nix build supplies the
 # OpenSSL `-L` via NIX_LDFLAGS.
-repro apps/repro/repro.nim --define:ssl --define:reproVendoredHash
+reprobuild apps/repro/repro.nim --define:ssl --define:reproVendoredHash
 # ReproOS-Generations-And-Foreign-Packages A2 / Windows-Runner-Binary-Cache-Deploy M1:
 # the long-lived binary-cache HTTP daemon. Serves GET /healthz, GET /cache-info,
 # GET /manifests/<hex>, GET /payloads/<hex>, POST /publish on 0.0.0.0:7878 by
@@ -63,11 +72,18 @@ repro-harvest-apt apps/repro-harvest-apt/repro_harvest_apt.nim --define:ssl --pa
 # transport nobody is meant to rely on (the binding, not the transport, is
 # what makes the evidence trustworthy).
 attestation-agent apps/attestation-agent/attestation_agent.nim
-# Dependency-Attribution MAC-1: the thin daemon client. Links ONLY
+# Dependency-Attribution MAC-1: the thin daemon client, and since the
+# thin-client-on-PATH rename THE `repro` A USER TYPES. Links ONLY
 # `repro_daemon_core` -- no build engine, no DSL runtime -- which is what
-# keeps it at 802,880 bytes / 396 dyld fixups against `repro`'s 22,189,816 /
-# 12,418 (debug images, macOS arm64; see the table in the module header), and
+# keeps it at 802,880 bytes / 396 dyld fixups against the engine's 22,189,816
+# / 12,418 (debug images, macOS arm64; see the table in the module header), and
 # therefore cheaper to start.
+#
+# It was previously built as `repro-client` and was OPT-IN: a caller had to
+# type a different command to get the fast path, and essentially nobody did,
+# so the measured saving reached nothing. That name is RETIRED rather than
+# kept as a second name for the same image -- one image, one name, for the
+# same reason the engine is not called `repro-daemon`.
 #
 # `--opt:size` because the saving being bought here is image size: the fixup
 # reduction is almost entirely REBASES, which scale with the image, not binds.
@@ -89,5 +105,5 @@ attestation-agent apps/attestation-agent/attestation_agent.nim
 # `repro.nim`'s `apps` collection, so `.#apps` / `.#release` build them and a
 # release image carries them. `--opt:size` is the one flag on this row with no
 # counterpart there: `nim.c` has no slot for it. See the comment on
-# `reprobuild.apps.repro-client` for why that is acceptable.
-repro-client apps/repro-client/repro_client.nim --opt:size --define:reproVendoredHash
+# `reprobuild.apps.repro` (the thin-client edge) for why that is acceptable.
+repro apps/repro-client/repro_client.nim --opt:size --define:reproVendoredHash

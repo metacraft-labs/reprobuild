@@ -266,12 +266,51 @@ while IFS=$' \t\r' read -r lib _; do
   require_file "libs/${lib}/src/${lib}.nim"
 done < libs/libraries.txt
 
+# EVERY ENTRYPOINT LIVES IN ITS OWN DIRECTORY UNDER `apps/`, and that is what
+# is checked -- derived from the SOURCE PATH, not from the output name.
+#
+# This used to be `require_dir "apps/${name}"`, i.e. it required the output
+# basename and the directory name to be the same word. That coupling stopped
+# holding when the thin daemon client took over the name `repro`: the engine is
+# built from `apps/repro/repro.nim` and installed as `reprobuild`, and the thin
+# client is built from `apps/repro-client/repro_client.nim` and installed as
+# `repro`. Under the old rule the first row demanded a directory `apps/reprobuild`
+# that does not exist, and -- worse, because it was silent -- the second row was
+# SATISFIED by `apps/repro`, a directory that holds a different image. A check
+# that fails on one true row and passes on one misleading row is not checking
+# the thing it names.
+#
+# The invariants that survive the decoupling are both kept, because dropping
+# them is what would make this loop vacuous:
+#
+#   * the source file exists, and
+#   * it sits directly in `apps/<dir>/`, one directory per entrypoint, so no
+#     two entrypoints share a source directory and none reaches outside `apps/`.
+#
+# The second clause is the one the old rule implied by accident. Without it,
+# `name path` could name any file anywhere and this loop would only be
+# asserting that the path exists.
+declare -a seen_app_dirs=()
 while IFS=$' \t\r' read -r name path _; do
   case "${name}" in
     ""|\#*) continue ;;
   esac
-  require_dir "apps/${name}"
   require_file "${path}"
+  app_dir="$(dirname "${path}")"
+  case "${app_dir}" in
+    apps/*/*|apps|apps/)
+      fail "entrypoint ${name} source ${path} must sit directly in apps/<dir>/" ;;
+    apps/*)
+      require_dir "${app_dir}" ;;
+    *)
+      fail "entrypoint ${name} source ${path} must live under apps/" ;;
+  esac
+  for prev in ${seen_app_dirs[@]+"${seen_app_dirs[@]}"}; do
+    if [ "${prev}" = "${app_dir}" ]; then
+      fail "two entrypoints share the source directory ${app_dir}; one directory per entrypoint"
+    fi
+  done
+  seen_app_dirs+=("${app_dir}")
 done < apps/entrypoints.txt
 
 for path in tests/unit tests/integration tests/compatibility tests/fixtures tests/e2e benchmarks/suites benchmarks/lib benchmarks/fixtures benchmarks/reports; do
