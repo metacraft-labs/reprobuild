@@ -1655,6 +1655,14 @@ proc applyCachePlatformTag*(idy: CacheEntryIdentity; tag: string):
   ## test surface go through the same code path — no drift between
   ## what gets published and what tests pin.
   result = idy
+  # ``selectedOptions`` is a ``TableRef``, so a plain object copy would
+  # SHARE it and ``addOption`` below would mutate the caller's identity
+  # in place. Copy the table: "return a copy" has to mean it, or
+  # deriving a key silently rewrites the action that was keyed.
+  result.selectedOptions = newTable[string, string]()
+  if not idy.selectedOptions.isNil:
+    for name, value in idy.selectedOptions:
+      result.selectedOptions[name] = value
   let foldedTag = if tag.len == 0: NativeTriple else: tag
   result.addOption(CachePlatformTagOptionKey, foldedTag)
 
@@ -12224,11 +12232,13 @@ proc publishMaterializedBinaryCacheEntries*(g: BuildGraph;
         (if prefix.len > 0: prefix else: "<empty>")
       result.results.add(item)
       continue
-    var identity = action.cacheEntryIdentity.get()
-    let platformTag =
-      if action.cachePlatformTag.len == 0: NativeTriple
-      else: action.cachePlatformTag
-    identity.addOption(CachePlatformTagOptionKey, platformTag)
+    # THE SHARED FOLD. This used to be an inline copy of
+    # ``applyCachePlatformTag``, so the identity actually handed to the
+    # publisher was built by different code from the one
+    # ``deriveActionCacheKeyHex`` keys and reports — and nothing
+    # compared the two.
+    let identity = applyCachePlatformTag(
+      action.cacheEntryIdentity.get(), action.cachePlatformTag)
     let request = BinaryCachePublishRequest(
       actionId: action.id,
       weakFingerprint: action.weakFingerprint,
@@ -12797,10 +12807,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           packageVersion = "",
           toolchainName = "intermediate",
           providerRevision = toHex(action.weakFingerprint.bytes))
-    let foldedTag =
-      if action.cachePlatformTag.len == 0: NativeTriple
-      else: action.cachePlatformTag
-    folded.addOption(CachePlatformTagOptionKey, foldedTag)
+    folded = applyCachePlatformTag(folded, action.cachePlatformTag)
     let req = BinaryCachePublishRequest(
       actionId: action.id,
       weakFingerprint: action.weakFingerprint,

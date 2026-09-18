@@ -16,9 +16,10 @@
 ##
 ##   * the **source closure** — the entry project file plus every local
 ##     Nim module reachable from it through ``import`` / ``from ...
-##     import`` / ``include``, transitively, plus every declared local
-##     non-Nim source input (SDK generator templates, ``.c`` sources,
-##     data files, directories);
+##     import`` / ``include``, transitively, plus every compile-time
+##     file read (``staticRead`` / ``slurp``) it performs, plus every
+##     declared local non-Nim source input (SDK generator templates,
+##     ``.c`` sources, data files, directories);
 ##   * the **selected options** actually solved for this instance;
 ##   * the **dependency instances** actually resolved for it (their
 ##     cache-entry-key hexes);
@@ -31,46 +32,159 @@
 ## The closure digest is computed over ``(project-relative path,
 ## BLAKE3 of the bytes)`` pairs, sorted by the relative path with
 ## separators normalised to ``/``. No absolute path ever enters the
-## digest, so moving the same tree to a different absolute location
-## yields a byte-identical identity. Hashing absolute paths would make
-## the identity trivially "change on every mutation" while also
-## changing on relocation — which is why the regression test pins
-## relocation stability as the non-vacuity control.
+## digest: ``projectRelative`` answers "is this file inside the project
+## root, and if so what is its relative spelling", and a file that is
+## NOT inside the root never reaches the digest at all — it is either an
+## external library (ignored) or missing evidence (refused). That closes
+## the cross-drive hole in the previous ``relativePath`` fallback, which
+## on Windows returns the ABSOLUTE path when the two paths sit on
+## different drives (it does not raise), so an absolute path could enter
+## the digest and break relocation stability silently. Hashing absolute
+## paths would make the identity trivially "change on every mutation"
+## while also changing on relocation — which is why the regression test
+## pins relocation stability as the non-vacuity control.
 ##
-## ## Known resolution limits of the import scan
+## ## How a module spec is resolved
 ##
-## The scanner resolves an import spec ONLY against the importing
-## file's own directory (plus ``.nim``). Nim resolves more than that,
-## and the following forms are therefore NOT bound, silently, with a
-## digest still produced over the rest:
+## Nim resolves an import against more than the importing file's own
+## directory, and the scanner now models the same set:
 ##
-##   * a module reachable only through a ``--path`` search root
-##     (``config.nims``, a nimble ``srcDir``, an ``--path:`` on the
-##     command line);
-##   * ``include "frag.nim"`` / ``include "frag.inc"`` — an include
-##     whose spec already carries an extension, since ``.nim`` is
-##     appended unconditionally;
-##   * a package-directory import (``import pkg`` resolving to
-##     ``pkg/pkg.nim``);
-##   * compile-time file reads (``staticRead`` / ``slurp`` /
-##     ``gorge``), which have no import syntax at all and must be
-##     declared through ``declaredSourceInputs``.
+##   * the importing file's own directory;
+##   * the project root;
+##   * the nimble ``srcDir`` declared by ``<root>/*.nimble``;
+##   * every ``--path:`` / ``switch("path", "...")`` search root with a
+##     STRING-LITERAL argument in ``<root>/nim.cfg``,
+##     ``<root>/config.nims``, ``<root>/<entry>.nim.cfg`` or
+##     ``<root>/<entry>.nims`` (``$projectDir`` / ``$projectPath`` /
+##     ``$config`` expanded), restricted to roots that lie INSIDE the
+##     project root.
 ##
-## Only an explicitly relative spec (``./x``, ``../x``) that fails to
-## resolve is treated as missing evidence. Everything else that fails
-## to resolve is assumed to be an external library. Until these are
-## closed, the closure is an under-approximation for projects that use
-## a search path, and the #171 aliasing class survives for those
-## inputs. ``repro_interface_artifacts.discoverNimSources`` and
-## ``macros_a.producerSourceStamp`` already resolve search roots and
-## are the obvious place to consolidate this onto.
+## At each root the spec is tried as the literal path (so
+## ``include "frag.inc"`` and ``include "frag.nim"`` resolve — the old
+## scanner appended ``.nim`` unconditionally and dropped both), then
+## with ``.nim``/``.nims`` appended, then as a package directory
+## (``import pkgdir`` → ``pkgdir/pkgdir.nim``).
+##
+## ## External library vs unresolvable local module
+##
+## This is the load-bearing rule, and it is stated as a rule rather than
+## a heuristic because both directions are safety-relevant: treating a
+## local module as external re-creates the #171 aliasing class, and
+## treating an external library as local makes every identity
+## permanently PENDING and therefore useless.
+##
+## A spec that FAILS to resolve under the roots above is **missing
+## evidence** (the identity refuses) when ANY of the following holds:
+##
+##   1. it is explicitly relative (``./x``, ``../x``) or absolute — it
+##      names a file by construction;
+##   2. it came from an ``include`` — Nim textually inlines the target,
+##      and an ``include`` of a library is not a thing recipes do;
+##   3. it carries a Nim source extension (``.nim``, ``.nims``,
+##      ``.inc``) — it names a file, not a package;
+##   4. the project declares search paths this scanner could not
+##      evaluate (a non-literal ``switch("path", expr)``, a computed
+##      ``--path``), so the search-root set itself is unknown and no
+##      spec can be ruled out;
+##   5. the spec's FIRST path segment matches an on-disk entry under one
+##      of the search roots (a directory, or a ``.nim``/``.nims`` file) —
+##      partial evidence that it points into this project.
+##
+## Otherwise it is an **external library** and is ignored. A spec
+## starting ``std/`` or ``pkg/``, and ``system``, are external by
+## Nim's own namespacing and short-circuit before any of the above.
+## So does a spec that RESOLVES to a file outside the project root
+## (a vendored sibling, an absolute import into another tree): it is
+## not project source, and the code it contributes is bound through
+## ``dependencyInstances`` instead.
+##
+## Why the negative direction is MOSTLY safe: a bare spec with no
+## on-disk evidence anywhere under the project's own search roots is
+## usually not a file this project ships, and Nim then satisfies it from
+## OUTSIDE the project (stdlib, a nimble package, a ``--path`` into
+## another tree). Why the positive direction is safe: rules 1-5 refuse
+## rather than digest whenever the spec could be project source, so an
+## under-approximated closure is never turned into a key.
+##
+## The residual, stated exactly because the argument above does NOT
+## cover it: rule 4 fires only on a search path this scanner can SEE and
+## cannot evaluate. A ``--path`` supplied on the command line, or
+## contributed by a nimble dependency, leaves no trace in any scanned
+## config file, so there is nothing to mark unknown; the spec resolves
+## for the compiler and is dropped here, and two implementations
+## differing only in that module alias onto one key. Measured: a tree
+## whose ``internal/helper.nim`` is reachable only through a
+## command-line ``--path`` keeps the same closure digest across a change
+## to that file. A ``config.nims`` that computes ``--path`` in a loop or
+## from an expression is the OTHER case — rule 4 does fire, and such a
+## project (reprobuild's own tree among them) refuses rather than
+## aliases.
+##
+## ## Commented-out and quoted imports
+##
+## The source text is masked before scanning: ``#`` line comments,
+## nestable ``#[ ]#`` / ``##[ ]##`` block comments and triple-quoted
+## string literals are blanked (newlines preserved). An ``import
+## ./ghost`` inside a block comment or a ``"""..."""`` literal is
+## therefore NOT seen.
+##
+## That is deliberately on the permissive side of fail-closed, and the
+## reason is that it is not a weakening at all: Nim does not read those
+## bytes, so they are provably not an input. Refusing on them is not
+## "failing closed", it is failing ALWAYS — a correct project with a
+## commented-out import would be permanently unkeyable, which is the
+## same uselessness as making everything PENDING. Masking moves the
+## scan CLOSER to what the compiler sees in both directions. Ordinary
+## single-line ``"..."`` literals are kept verbatim, because
+## ``import "./x"`` and the ``staticRead`` argument live in them.
+##
+## ## Compile-time reads
+##
+## ``staticRead`` / ``slurp`` with a string-literal argument are
+## resolved against the reading file's directory and then the project
+## root, and their bytes enter the closure. A non-literal argument, an
+## argument that does not resolve, or an argument resolving outside the
+## project root is missing evidence. ``gorge`` / ``gorgeEx`` /
+## ``staticExec`` run a command at compile time whose output cannot be
+## bound at all, so their mere presence is missing evidence.
+##
+## This is a textual whole-identifier scan, not a parse, and it
+## over-refuses in the fail-closed direction: a recipe that defines its
+## own ``slurp``, or that merely contains the word ``slurp`` or
+## ``gorge`` inside a KEPT single-line string literal, is refused. (A
+## mention inside a comment is masked and does not refuse.) That costs a
+## correct project its key rather than aliasing two; no test covers it.
+##
+## ## Case-sensitivity
+##
+## The de-duplication key for a visited path folds case ONLY on
+## Windows. Folding it unconditionally — as this scanner used to —
+## merges two genuinely distinct files on a case-sensitive filesystem,
+## which is Linux, which is the build target: that is exactly the
+## aliasing class #171 is about, re-introduced by the dedup table.
+##
+## ## Why this scanner is local rather than shared
+##
+## ``repro_interface_artifacts.discoverNimSources`` resolves search
+## roots and is the natural host for this logic, but
+## ``repro_interface_artifacts`` IMPORTS ``repro_project_dsl`` and this
+## module is part of ``repro_project_dsl`` — importing it back is a hard
+## library cycle. ``macros_a.producerSourceStamp`` is inside this
+## package but ``macros_a`` is included into ``repro_project_dsl.nim``,
+## which imports THIS module, so that direction is a cycle too (its own
+## docstring records the same constraint for the same reason).
+## ``repro_profile_compile/sources.nim`` has the ``(relative path,
+## blake3) -> digest`` pipeline, which is mirrored here, but its scanner
+## follows only ``import ./...`` and only the first module on a line, so
+## consolidating onto it would LOSE coverage.
 ##
 ## ## Fail-closed
 ##
 ## ``PendingCacheIdentityOptionKey`` is stamped whenever ANY required
 ## input is unavailable: no project file, an unreadable source file, an
-## explicitly relative ``import ./x`` that does not resolve, a declared
-## source input that does not exist, unsolved options, unresolved
+## unresolved candidate-local import or include, an unbindable
+## compile-time read, a declared source input that does not exist or
+## lives outside the project root, unsolved options, unresolved
 ## dependency instances, a malformed dependency key, an unpopulated
 ## target triple, or a toolchain with no name/version. The marker makes
 ## ``deriveCacheEntryKey`` refuse, so an incomplete identity can neither
@@ -126,7 +240,9 @@ type
       ## therefore cannot see: SDK/generator templates, ``.c``/``.rs``
       ## sources, data files, or whole directories. Project-relative
       ## paths (absolute paths are accepted and recorded relative to the
-      ## project root so relocation stays stable).
+      ## project root so relocation stays stable; an absolute path
+      ## OUTSIDE the project root is missing evidence, because there is
+      ## no relocation-stable spelling for it).
     selectedOptions*: seq[(string, string)]
     optionsSolved*: bool
       ## Distinguishes "solved to the empty set" from "not solved yet".
@@ -147,6 +263,14 @@ const
     ## truncate the closure digest the way the legacy entry-file digest
     ## was truncated.
 
+  NimSourceExts = [".nim", ".nims", ".inc"]
+
+  CompileTimeFileReaders = ["staticRead", "slurp"]
+    ## Compile-time file reads whose argument CAN be bound.
+
+  CompileTimeCommandRunners = ["gorgeEx", "gorge", "staticExec"]
+    ## Compile-time command executions whose output can NOT be bound.
+
 proc cacheIdentityExtendedPath*(path: string): string =
   when defined(windows):
     if path.len == 0 or path.startsWith("\\\\"):
@@ -157,26 +281,150 @@ proc cacheIdentityExtendedPath*(path: string): string =
     path
 
 # ---------------------------------------------------------------------------
+# Path identity
+# ---------------------------------------------------------------------------
+
+proc normSlash(path: string): string =
+  ## Normalised absolute-or-relative path with ``/`` separators and no
+  ## trailing separator. Never turns the empty string into ``"."``.
+  if path.len == 0:
+    return ""
+  result = os.normalizedPath(path).replace('\\', '/')
+  while result.len > 1 and result.endsWith("/"):
+    result.setLen(result.len - 1)
+
+proc foldPathCase(path: string): string =
+  ## Case folding is a PLATFORM fact here, not a convenience: NTFS
+  ## resolves two spellings to one file, ext4 does not.
+  when defined(windows):
+    path.toLowerAscii()
+  else:
+    path
+
+proc pathKey(path: string): string =
+  ## De-duplication identity of a filesystem path.
+  foldPathCase(normSlash(path))
+
+proc sourceClosurePathKey*(path: string): string =
+  ## The de-duplication identity of a path, exposed so the platform rule
+  ## itself is testable rather than only its consequences. Case folding
+  ## here is a PLATFORM fact: see ``foldPathCase``.
+  pathKey(path)
+
+proc projectRelative(root, path: string): tuple[inside: bool, rel: string] =
+  ## ``(true, <root-relative, '/'-separated spelling>)`` when ``path``
+  ## lies inside ``root``; ``(false, _)`` otherwise. Deliberately does
+  ## NOT use ``os.relativePath``: on Windows that returns the ABSOLUTE
+  ## path for a cross-drive pair instead of raising, which is how an
+  ## absolute path used to reach the digest.
+  let r = normSlash(root)
+  let p = normSlash(path)
+  if r.len == 0 or p.len == 0:
+    return (false, p)
+  let foldedR = foldPathCase(r)
+  let foldedP = foldPathCase(p)
+  if foldedP == foldedR:
+    return (true, extractFilename(p))
+  if foldedP.startsWith(foldedR & "/"):
+    return (true, p[r.len + 1 .. ^1])
+  (false, p)
+
+# ---------------------------------------------------------------------------
+# Source-text masking
+# ---------------------------------------------------------------------------
+
+proc maskNimNonCode(source: string): string =
+  ## Blank every region Nim's parser does NOT read as code: ``#`` line
+  ## comments, nestable ``#[ ]#`` / ``##[ ]##`` block comments and
+  ## triple-quoted string literals. Blanked characters become spaces;
+  ## newlines are preserved so line structure is unchanged.
+  ##
+  ## Ordinary single-line ``"..."`` (and ``r"..."``) literals and char
+  ## literals are KEPT verbatim — ``import "./x"`` and the
+  ## ``staticRead`` argument live in them.
+  result = newStringOfCap(source.len)
+  var i = 0
+  let n = source.len
+  template blank(ch: char) =
+    result.add(if ch == '\n': '\n' else: ' ')
+  while i < n:
+    let ch = source[i]
+    if ch == '#':
+      let blockComment =
+        (i + 1 < n and source[i + 1] == '[') or
+        (i + 2 < n and source[i + 1] == '#' and source[i + 2] == '[')
+      if blockComment:
+        var depth = 0
+        while i < n:
+          if source[i] == '#' and i + 1 < n and source[i + 1] == '[':
+            inc depth
+            blank(source[i]); blank(source[i + 1]); i += 2
+          elif source[i] == ']' and i + 1 < n and source[i + 1] == '#':
+            dec depth
+            blank(source[i]); blank(source[i + 1]); i += 2
+            if depth <= 0:
+              break
+          else:
+            blank(source[i]); inc i
+      else:
+        while i < n and source[i] != '\n':
+          blank(source[i]); inc i
+      continue
+    if ch == '"':
+      if i + 2 < n and source[i + 1] == '"' and source[i + 2] == '"':
+        blank('"'); blank('"'); blank('"'); i += 3
+        while i < n:
+          if source[i] == '"' and i + 2 < n and source[i + 1] == '"' and
+              source[i + 2] == '"':
+            blank('"'); blank('"'); blank('"'); i += 3
+            break
+          blank(source[i]); inc i
+        continue
+      let raw = i > 0 and source[i - 1] in {'r', 'R'} and
+        (i < 2 or source[i - 2] notin IdentChars)
+      result.add(ch); inc i
+      while i < n and source[i] != '\n':
+        if not raw and source[i] == '\\' and i + 1 < n:
+          result.add(source[i]); result.add(source[i + 1]); i += 2
+          continue
+        if source[i] == '"':
+          if raw and i + 1 < n and source[i + 1] == '"':
+            result.add(source[i]); result.add(source[i + 1]); i += 2
+            continue
+          result.add(source[i]); inc i
+          break
+        result.add(source[i]); inc i
+      continue
+    if ch == '\'' and (i == 0 or source[i - 1] notin IdentChars):
+      result.add(ch); inc i
+      while i < n and source[i] != '\n':
+        if source[i] == '\\' and i + 1 < n:
+          result.add(source[i]); result.add(source[i + 1]); i += 2
+          continue
+        if source[i] == '\'':
+          result.add(source[i]); inc i
+          break
+        result.add(source[i]); inc i
+      continue
+    result.add(ch); inc i
+
+# ---------------------------------------------------------------------------
 # Nim import scanning
 # ---------------------------------------------------------------------------
 
-proc stripLineComment(line: string): string =
-  ## Drop a trailing ``#`` comment, respecting ``"``/``'`` string
-  ## literals so a ``#`` inside a literal is not treated as a comment.
-  var inStr = false
-  var quoteCh = '\0'
-  for i, ch in line:
-    if inStr:
-      if ch == '\\':
-        continue
-      if ch == quoteCh:
-        inStr = false
-    elif ch == '"' or ch == '\'':
-      inStr = true
-      quoteCh = ch
-    elif ch == '#':
-      return line[0 ..< i]
-  line
+type
+  ImportRef = object
+    spec: string
+    isInclude: bool
+
+  CompileTimeReadKind = enum
+    ctFileRead, ctCommand
+
+  CompileTimeRead = object
+    kind: CompileTimeReadKind
+    fn: string
+    literal: string
+    hasLiteral: bool
 
 proc splitTopLevelCommas(text: string): seq[string] =
   ## Split on commas that are not nested inside ``[]``.
@@ -230,16 +478,18 @@ proc expandImportSpec(spec: string): seq[string] =
   if item.len > 0:
     result.add(item)
 
-proc importSpecsOf(source: string): seq[string] =
+proc importRefsOf(masked: string): seq[ImportRef] =
   ## Every module spec named by ``import`` / ``from ... import`` /
-  ## ``include`` statements in a Nim source file, including the
-  ## multi-line continuation forms.
+  ## ``include`` statements in MASKED Nim source, including the
+  ## multi-line continuation forms, tagged with whether the statement
+  ## was an ``include`` (which carries its own file extension and is
+  ## textually inlined by Nim).
   var pending = ""
   var pendingDepth = 0
   var inStatement = false
-  for rawLine in source.splitLines():
-    let line = stripLineComment(rawLine)
-    let trimmed = line.strip()
+  var isInclude = false
+  for rawLine in masked.splitLines():
+    let trimmed = rawLine.strip()
     if inStatement:
       if trimmed.len == 0:
         continue
@@ -249,12 +499,15 @@ proc importSpecsOf(source: string): seq[string] =
       var body = ""
       if trimmed == "import" or trimmed.startsWith("import "):
         body = trimmed[min(6, trimmed.len) .. ^1]
+        isInclude = false
       elif trimmed == "include" or trimmed.startsWith("include "):
         body = trimmed[min(7, trimmed.len) .. ^1]
+        isInclude = true
       elif trimmed.startsWith("from "):
         let rest = trimmed[5 .. ^1]
         let idx = rest.find(" import")
         body = if idx >= 0: rest[0 ..< idx] else: rest
+        isInclude = false
       else:
         continue
       pending = body.strip()
@@ -271,26 +524,292 @@ proc importSpecsOf(source: string): seq[string] =
       continue
     for item in splitTopLevelCommas(pending):
       for spec in expandImportSpec(item):
-        result.add(spec)
+        result.add(ImportRef(spec: spec, isInclude: isInclude))
     pending = ""
     pendingDepth = 0
     inStatement = false
 
+proc stringLiteralAt(text: string; start: int):
+    tuple[found: bool, value: string] =
+  ## Read the string literal that begins at the first non-``(``,
+  ## non-space character at or after ``start``. ``found`` is false when
+  ## the argument is not a single-line string literal (a ``const``, a
+  ## concatenation, an expression) — which is exactly the case the
+  ## caller must fail closed on.
+  var i = start
+  while i < text.len and text[i] in {' ', '\t', '('}:
+    inc i
+  var raw = false
+  if i + 1 < text.len and text[i] in {'r', 'R'} and text[i + 1] == '"':
+    raw = true
+    inc i
+  if i >= text.len or text[i] != '"':
+    return (false, "")
+  inc i
+  var value = ""
+  while i < text.len and text[i] != '\n':
+    if not raw and text[i] == '\\' and i + 1 < text.len:
+      case text[i + 1]
+      of '\\': value.add('\\')
+      of '"': value.add('"')
+      of 'n': value.add('\n')
+      of 't': value.add('\t')
+      else: value.add(text[i + 1])
+      i += 2
+      continue
+    if text[i] == '"':
+      if raw and i + 1 < text.len and text[i + 1] == '"':
+        value.add('"')
+        i += 2
+        continue
+      return (true, value)
+    value.add(text[i])
+    inc i
+  (false, "")
+
+proc identOccurrences(text, ident: string): seq[int] =
+  ## Offsets of ``ident`` occurring as a whole identifier.
+  var start = 0
+  while true:
+    let idx = text.find(ident, start)
+    if idx < 0:
+      break
+    start = idx + ident.len
+    let beforeOk = idx == 0 or text[idx - 1] notin IdentChars
+    let afterOk = start >= text.len or text[start] notin IdentChars
+    if beforeOk and afterOk:
+      result.add(idx)
+
+proc compileTimeReadsOf(masked: string): seq[CompileTimeRead] =
+  ## Every compile-time file read / command execution in MASKED source.
+  ## These have no import syntax at all, so without this the bytes they
+  ## fold into the build are invisible to the closure.
+  for fn in CompileTimeFileReaders:
+    for idx in identOccurrences(masked, fn):
+      let arg = stringLiteralAt(masked, idx + fn.len)
+      result.add(CompileTimeRead(kind: ctFileRead, fn: fn,
+        literal: arg.value, hasLiteral: arg.found))
+  for fn in CompileTimeCommandRunners:
+    for idx in identOccurrences(masked, fn):
+      result.add(CompileTimeRead(kind: ctCommand, fn: fn))
+
 proc isExternalModuleSpec(spec: string): bool =
-  spec.len == 0 or spec == "system" or
+  spec.len == 0 or spec == "system" or spec == "std" or spec == "pkg" or
     spec.startsWith("std/") or spec.startsWith("pkg/")
+
+proc hasNimSourceExt(spec: string): bool =
+  spec.splitFile().ext.toLowerAscii() in NimSourceExts
+
+# ---------------------------------------------------------------------------
+# Search roots
+# ---------------------------------------------------------------------------
+
+proc addSearchRoot(roots: var seq[string]; projectRoot, base, value: string) =
+  ## Record ``value`` (relative to ``base``) as a search root when it is
+  ## an existing directory INSIDE ``projectRoot``. A ``--path`` pointing
+  ## outside the project names external code, which is bound through
+  ## ``dependencyInstances``, not through this closure.
+  if value.len == 0:
+    return
+  let abs = normSlash(if value.isAbsolute: value else: base / value)
+  if not dirExists(cacheIdentityExtendedPath(abs)):
+    return
+  if not projectRelative(projectRoot, abs).inside:
+    return
+  for existing in roots:
+    if pathKey(existing) == pathKey(abs):
+      return
+  roots.add(abs)
+
+proc expandConfigValue(value, configDir: string): string =
+  result = value
+  for token in ["$projectDir", "$projectPath", "$config", "$projectdir",
+                "$projectpath"]:
+    result = result.replace(token, configDir)
+  result = result.replace('\\', '/')
+
+proc parseConfigPaths(configText, configDir, projectRoot: string;
+                      roots: var seq[string]; dynamic: var bool) =
+  ## Collect ``--path`` search roots declared by one config file.
+  ## ``dynamic`` is set when a path switch is present whose argument
+  ## this scanner cannot evaluate — the search-root set is then UNKNOWN
+  ## and every unresolved spec must be treated as possibly local.
+  for rawLine in configText.splitLines():
+    var line = rawLine
+    let hashIdx = line.find('#')
+    if hashIdx >= 0:
+      line = line[0 ..< hashIdx]
+    line = line.strip()
+    if line.len == 0:
+      continue
+    var arg = ""
+    var quotedOnly = false
+    var found = false
+    if line.startsWith("switch("):
+      var body = line[line.find('(') + 1 .. ^1]
+      let closeIdx = body.rfind(')')
+      if closeIdx >= 0:
+        body = body[0 ..< closeIdx]
+      let parts = splitTopLevelCommas(body)
+      if parts.len >= 2:
+        let key = parts[0].strip().strip(chars = {'"'})
+        if key == "path" or key == "p":
+          arg = parts[1].strip()
+          quotedOnly = true
+          found = true
+    else:
+      for prefix in ["--path", "--p", "-p", "path"]:
+        if line.startsWith(prefix) and line.len > prefix.len and
+            line[prefix.len] in {':', '='}:
+          arg = line[prefix.len + 1 .. ^1].strip()
+          found = true
+          break
+    if not found:
+      continue
+    var literal = ""
+    var isLiteral = false
+    if arg.len >= 2 and arg.startsWith("\"") and arg.endsWith("\""):
+      literal = arg[1 ..< arg.len - 1]
+      isLiteral = true
+    elif not quotedOnly and arg.len > 0 and '&' notin arg and
+        '(' notin arg and '"' notin arg:
+      literal = arg
+      isLiteral = true
+    if not isLiteral:
+      dynamic = true
+      continue
+    let expanded = expandConfigValue(literal, configDir)
+    if '$' in expanded or expanded.len == 0:
+      dynamic = true
+      continue
+    addSearchRoot(roots, projectRoot, configDir, expanded)
+
+proc parseNimbleSrcDir(nimbleText: string): string =
+  for rawLine in nimbleText.splitLines():
+    var line = rawLine
+    let hashIdx = line.find('#')
+    if hashIdx >= 0:
+      line = line[0 ..< hashIdx]
+    line = line.strip()
+    if not line.startsWith("srcDir"):
+      continue
+    let eq = line.find('=')
+    if eq < 0:
+      continue
+    let value = line[eq + 1 .. ^1].strip().strip(chars = {'"'})
+    if value.len > 0:
+      return value
+  ""
+
+proc collectSearchRoots(projectRoot, entryPath: string;
+                        roots: var seq[string]; dynamic: var bool) =
+  addSearchRoot(roots, projectRoot, projectRoot, projectRoot)
+  var configNames = @["nim.cfg", "config.nims"]
+  if entryPath.len > 0:
+    let stem = entryPath.splitFile().name
+    configNames.add(stem & ".nim.cfg")
+    configNames.add(stem & ".nims")
+  for name in configNames:
+    let path = projectRoot / name
+    if not fileExists(cacheIdentityExtendedPath(path)):
+      continue
+    var text = ""
+    try:
+      text = readFile(cacheIdentityExtendedPath(path))
+    except CatchableError:
+      # A config file we cannot read is a search-root set we cannot know.
+      dynamic = true
+      continue
+    parseConfigPaths(text, projectRoot, projectRoot, roots, dynamic)
+  var nimbleFiles: seq[string] = @[]
+  try:
+    for kind, child in walkDir(projectRoot):
+      if kind in {pcFile, pcLinkToFile} and child.toLowerAscii.endsWith(".nimble"):
+        nimbleFiles.add(child)
+  except CatchableError:
+    discard
+  nimbleFiles.sort(cmp)
+  for nimbleFile in nimbleFiles:
+    var text = ""
+    try:
+      text = readFile(cacheIdentityExtendedPath(nimbleFile))
+    except CatchableError:
+      dynamic = true
+      continue
+    let srcDir = parseNimbleSrcDir(text)
+    if srcDir.len > 0:
+      addSearchRoot(roots, projectRoot, projectRoot, srcDir)
+
+# ---------------------------------------------------------------------------
+# Spec resolution
+# ---------------------------------------------------------------------------
+
+proc specCandidates(base, spec: string; isInclude: bool): seq[string] =
+  let joined = normSlash(if spec.isAbsolute: spec else: base / spec)
+  if joined.len == 0:
+    return
+  # An ``include`` spec, and any spec carrying a Nim source extension,
+  # names a file literally. Appending ``.nim`` to it (as this scanner
+  # used to, unconditionally) drops it.
+  if hasNimSourceExt(spec) or (isInclude and spec.splitFile().ext.len > 0):
+    result.add(joined)
+  result.add(joined & ".nim")
+  result.add(joined & ".nims")
+  # Package-directory import: ``import pkgdir`` -> ``pkgdir/pkgdir.nim``.
+  let leaf = joined.lastPathPart
+  if leaf.len > 0:
+    result.add(joined & "/" & leaf & ".nim")
+
+proc resolveSpec(spec: string; isInclude: bool; fromDir: string;
+                 searchRoots: seq[string]): string =
+  var bases: seq[string] = @[]
+  if spec.isAbsolute:
+    bases.add("")
+  elif spec.startsWith("./") or spec.startsWith("../"):
+    bases.add(fromDir)
+  else:
+    bases.add(fromDir)
+    for root in searchRoots:
+      if pathKey(root) != pathKey(fromDir):
+        bases.add(root)
+  for base in bases:
+    for candidate in specCandidates(base, spec, isInclude):
+      if fileExists(cacheIdentityExtendedPath(candidate)):
+        return candidate
+  ""
+
+proc isCandidateLocalSpec(spec: string; isInclude: bool; fromDir: string;
+                          searchRoots: seq[string];
+                          dynamicSearchPath: bool): bool =
+  ## See the module docstring, "External library vs unresolvable local
+  ## module". True means "this could be project source" and therefore
+  ## must refuse rather than be dropped.
+  if spec.startsWith("./") or spec.startsWith("../") or spec.isAbsolute:
+    return true
+  if isInclude:
+    return true
+  if hasNimSourceExt(spec):
+    return true
+  if dynamicSearchPath:
+    return true
+  let firstSegment = spec.split('/')[0]
+  if firstSegment.len == 0:
+    return true
+  var bases = @[fromDir]
+  for root in searchRoots:
+    if pathKey(root) != pathKey(fromDir):
+      bases.add(root)
+  for base in bases:
+    if dirExists(cacheIdentityExtendedPath(base / firstSegment)):
+      return true
+    for ext in [".nim", ".nims"]:
+      if fileExists(cacheIdentityExtendedPath(base / firstSegment & ext)):
+        return true
+  false
 
 # ---------------------------------------------------------------------------
 # Closure walk
 # ---------------------------------------------------------------------------
-
-proc canonicalRelative(projectRoot, path: string): string =
-  var rel =
-    try: relativePath(path, projectRoot)
-    except CatchableError: path
-  if rel.len == 0:
-    rel = extractFilename(path)
-  rel.replace('\\', '/')
 
 proc readClosureFile(path: string; body: var string): bool =
   try:
@@ -304,15 +823,15 @@ proc collectDeclaredInput(projectRoot, declared: string;
   ## Expand one declared source input into concrete file paths. Returns
   ## false when the declared input does not exist (fail closed).
   let resolved =
-    if declared.isAbsolute: os.normalizedPath(declared)
-    else: os.normalizedPath(projectRoot / declared)
+    if declared.isAbsolute: normSlash(declared)
+    else: normSlash(projectRoot / declared)
   if fileExists(cacheIdentityExtendedPath(resolved)):
     paths.add(resolved)
     return true
-  if dirExists(resolved):
+  if dirExists(cacheIdentityExtendedPath(resolved)):
     var found: seq[string] = @[]
     for entry in walkDirRec(resolved, relative = false):
-      found.add(os.normalizedPath(entry))
+      found.add(normSlash(entry))
     found.sort(cmp)
     for entry in found:
       paths.add(entry)
@@ -325,22 +844,18 @@ proc solvedSourceClosure*(projectRoot: string;
   ## Resolve the complete local source closure of ``projectRoot``.
   ##
   ## Walks the entry project file's transitive ``import`` / ``from`` /
-  ## ``include`` graph, keeping every module that resolves to a real
-  ## file on disk, and adds every declared non-Nim source input. Any
-  ## unresolvable REQUIRED input lands in ``missing`` and suppresses the
-  ## digest, so callers fail closed rather than keying over partial data.
-  ##
-  ## Import specs that do not resolve to a local file are treated as
-  ## external library imports (``std/os``, ``repro_project_dsl``, a
-  ## nimble package) and ignored — EXCEPT explicitly relative specs
-  ## (``./x``, ``../x``), which name a local file by construction and so
-  ## count as missing evidence when they do not resolve.
+  ## ``include`` graph across every search root the project declares,
+  ## folds in every compile-time file read, and adds every declared
+  ## non-Nim source input. Any input that could be project source but
+  ## cannot be resolved lands in ``missing`` and suppresses the digest,
+  ## so callers fail closed rather than keying over partial data. See
+  ## the module docstring for the external-vs-local rule.
   var missing: seq[string] = @[]
   let root =
     if projectRoot.len == 0: ""
     else:
-      try: os.normalizedPath(absolutePath(projectRoot))
-      except CatchableError: projectRoot
+      try: normSlash(absolutePath(projectRoot))
+      except CatchableError: normSlash(projectRoot)
   if root.len == 0:
     missing.add("project root is empty")
     return SourceClosure(missing: missing)
@@ -353,36 +868,82 @@ proc solvedSourceClosure*(projectRoot: string;
   if missing.len == 0 and entryPath.len == 0:
     missing.add("project file in " & root)
 
+  var searchRoots: seq[string] = @[]
+  var dynamicSearchPath = false
+  collectSearchRoots(root, entryPath, searchRoots, dynamicSearchPath)
+
   var contentByRel = initTable[string, string]()
   var queued = initHashSet[string]()
-  var pending: seq[string] = @[]
+  var pending: seq[tuple[path: string, scan: bool]] = @[]
 
   if entryPath.len > 0:
-    let normalizedEntry = os.normalizedPath(absolutePath(entryPath))
-    pending.add(normalizedEntry)
-    queued.incl(normalizedEntry.toLowerAscii())
+    let normalizedEntry = normSlash(absolutePath(entryPath))
+    pending.add((normalizedEntry, true))
+    queued.incl(pathKey(normalizedEntry))
 
   while pending.len > 0:
     let current = pending.pop()
     var body = ""
-    if not readClosureFile(current, body):
-      missing.add("unreadable source file " & canonicalRelative(root, current))
+    let located = projectRelative(root, current.path)
+    if not located.inside:
+      missing.add("source file outside the project root " & current.path)
       continue
-    let rel = canonicalRelative(root, current)
+    let rel = located.rel
+    if not readClosureFile(current.path, body):
+      missing.add("unreadable source file " & rel)
+      continue
     contentByRel[rel] = blake3.toHex(blake3.digest(body))
-    let fromDir = parentDir(current)
-    for spec in importSpecsOf(body):
-      if isExternalModuleSpec(spec):
+    if not current.scan:
+      continue
+    let fromDir = normSlash(parentDir(current.path))
+    let masked = maskNimNonCode(body)
+    for reference in importRefsOf(masked):
+      if isExternalModuleSpec(reference.spec):
         continue
-      let explicitlyRelative = spec.startsWith("./") or spec.startsWith("../")
-      let candidate = os.normalizedPath(fromDir / (spec & ".nim"))
-      if fileExists(cacheIdentityExtendedPath(candidate)):
-        let key = candidate.toLowerAscii()
+      let resolved = resolveSpec(reference.spec, reference.isInclude,
+        fromDir, searchRoots)
+      if resolved.len > 0:
+        if not projectRelative(root, resolved).inside:
+          # Resolved, but not project source: an external library.
+          continue
+        let key = pathKey(resolved)
         if key notin queued:
           queued.incl(key)
-          pending.add(candidate)
-      elif explicitlyRelative:
-        missing.add("unresolved local import " & spec & " from " & rel)
+          pending.add((resolved, true))
+      elif isCandidateLocalSpec(reference.spec, reference.isInclude, fromDir,
+          searchRoots, dynamicSearchPath):
+        missing.add("unresolved local " &
+          (if reference.isInclude: "include " else: "import ") &
+          reference.spec & " from " & rel)
+    for read in compileTimeReadsOf(masked):
+      case read.kind
+      of ctCommand:
+        missing.add("compile-time command execution " & read.fn & "() in " &
+          rel & " (its output cannot be bound)")
+      of ctFileRead:
+        if not read.hasLiteral:
+          missing.add("compile-time file read " & read.fn &
+            "() with a non-literal path in " & rel)
+          continue
+        var resolvedRead = ""
+        for base in [fromDir, root]:
+          let candidate =
+            if read.literal.isAbsolute: normSlash(read.literal)
+            else: normSlash(base / read.literal)
+          if fileExists(cacheIdentityExtendedPath(candidate)):
+            resolvedRead = candidate
+            break
+        if resolvedRead.len == 0:
+          missing.add("compile-time file read " & read.fn & "(\"" &
+            read.literal & "\") from " & rel)
+        elif not projectRelative(root, resolvedRead).inside:
+          missing.add("compile-time file read outside the project root: " &
+            read.fn & "(\"" & read.literal & "\") from " & rel)
+        else:
+          let key = pathKey(resolvedRead)
+          if key notin queued:
+            queued.incl(key)
+            pending.add((resolvedRead, false))
 
   for declared in declaredSourceInputs:
     var expanded: seq[string] = @[]
@@ -390,12 +951,19 @@ proc solvedSourceClosure*(projectRoot: string;
       missing.add("declared source input " & declared)
       continue
     for path in expanded:
+      let located = projectRelative(root, path)
+      if not located.inside:
+        # No relocation-stable spelling exists for a path outside the
+        # project root, and an absolute path in the digest would break
+        # relocation invariance. Refuse instead.
+        missing.add("declared source input outside the project root " &
+          declared)
+        continue
       var body = ""
       if not readClosureFile(path, body):
-        missing.add("unreadable source input " & canonicalRelative(root, path))
+        missing.add("unreadable source input " & located.rel)
         continue
-      contentByRel[canonicalRelative(root, path)] =
-        blake3.toHex(blake3.digest(body))
+      contentByRel[located.rel] = blake3.toHex(blake3.digest(body))
 
   var rels: seq[string] = @[]
   for rel in contentByRel.keys:

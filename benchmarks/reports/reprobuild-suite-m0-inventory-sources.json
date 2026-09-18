@@ -14100,7 +14100,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_source_cache_identity_binds_complete_solved_instance.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 13,
+      "staticCaseCount": 23,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

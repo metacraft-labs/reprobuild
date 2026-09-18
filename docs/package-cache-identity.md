@@ -95,17 +95,69 @@ instances, the target triple and the actual toolchain. The closure digest is tak
 over project-relative paths and content digests, so relocation alone does not move
 it. Any unavailable input keeps the `repro.identity.pending` marker.
 
-The import scan is not yet a complete resolver, and the gap is silent rather than
-fail-closed. It resolves a spec only against the importing file's own directory,
-so a module reached through a `--path` search root (`config.nims`, a nimble
-`srcDir`), an `include` whose spec already carries an extension, a
-package-directory import (`pkg` -> `pkg/pkg.nim`), and any `staticRead`/`slurp`
-input are all omitted from the closure while a digest is still produced. Only an
-explicitly relative `./x` / `../x` that fails to resolve counts as missing
-evidence. For projects that use a search path the #171 aliasing class therefore
-survives for those inputs; `repro_interface_artifacts.discoverNimSources` and
-`macros_a.producerSourceStamp` already resolve search roots and are where this
-should be consolidated.
+The import scan resolves a spec against the importing file's own directory, the
+project root, the nimble `srcDir`, and every `--path` / `switch("path", "...")`
+search root with a string-literal argument declared in `nim.cfg`, `config.nims`,
+`<entry>.nim.cfg` or `<entry>.nims` that lies inside the project root. At each
+root it tries the literal spec first (so `include "frag.inc"` and
+`include "frag.nim"` resolve), then `.nim` / `.nims`, then the package-directory
+form (`pkgdir` -> `pkgdir/pkgdir.nim`). `staticRead` / `slurp` with a
+string-literal argument enter the closure; `gorge` / `gorgeEx` / `staticExec`, a
+compile-time read with a non-literal path, and a read resolving outside the
+project root are missing evidence. The visited-set key folds case only on
+Windows, so two case-distinct files no longer merge on a case-sensitive
+filesystem. Nothing outside the project root reaches the digest: a containment
+check replaces `os.relativePath`, whose Windows cross-drive behaviour is to
+return the absolute path rather than raise.
+
+**External library vs unresolvable local module.** A spec that fails to resolve
+is missing evidence — the identity refuses — when it is explicitly relative or
+absolute, when it came from an `include`, when it carries a Nim source extension,
+when the project declares a search path this scanner cannot evaluate (so the root
+set itself is unknown), or when its first path segment matches an on-disk
+directory or `.nim`/`.nims` file under one of the search roots. Otherwise it is an
+external library and is ignored, as are `std/*`, `pkg/*`, `system`, and any spec
+that resolves to a file outside the project root (that code is bound through the
+dependency instances instead). Comments and triple-quoted literals are masked
+before scanning, so a commented-out `import ./ghost` is neither bound nor refused:
+Nim does not read those bytes, and refusing on them would leave a correct project
+permanently unkeyable.
+
+**Residual.** A bare spec with no on-disk evidence under any modelled search root
+is still assumed external and dropped. The consequence splits in two, and the two
+halves are not the same defect.
+
+A `config.nims` that computes its `--path` in a loop or from an expression is
+*seen*: the switch is present but its argument is not a string literal, so the
+search-root set is marked unknown and every unresolved spec becomes missing
+evidence. Such a project REFUSES — permanently pending, no digest — rather than
+aliasing. Reprobuild's own tree is that shape, and taking it as a project root
+refuses (four `staticExec` calls plus eleven unresolved imports). That is
+fail-closed and useless for keying, not a cache hazard.
+
+The hazard is the channel that leaves no trace in a scanned config file at all:
+an `--path` supplied on the command line, a path contributed by a nimble
+dependency. The scanner has nothing to mark unknown, so the spec is assumed
+external, a digest is produced, and two implementations differing only in that
+module land on one key. Measured: a tree whose `internal/helper.nim` is reachable
+only through a command-line `--path` keeps the same closure digest when that
+file's `const implementation` changes from 1 to 2. For that shape the #171
+aliasing class survives.
+
+**A second residual, fail-closed and untested.** The `staticRead` / `slurp` /
+`gorge` / `gorgeEx` / `staticExec` detection is a textual whole-identifier scan
+over the masked source, not a parse. A recipe that defines its own `slurp`, or
+that merely contains the word `slurp` or `gorge` inside a kept single-line string
+literal, is therefore refused. (A mention inside a comment is correctly masked
+and does not refuse.) This costs a correct project its key rather than aliasing
+two projects, but it is a way a real recipe can become permanently unkeyable, and
+no test covers it.
+
+Consolidating onto `repro_interface_artifacts.discoverNimSources` or
+`macros_a.producerSourceStamp` is blocked by a hard import cycle in both
+directions: `repro_interface_artifacts` imports `repro_project_dsl`, of which
+this module is part, and `macros_a` is included into `repro_project_dsl.nim`,
+which imports this module.
 
 `sourceCacheEntryIdentity`, the four-argument legacy constructor every production
 call site still uses, supplies none of the solved inputs and therefore remains

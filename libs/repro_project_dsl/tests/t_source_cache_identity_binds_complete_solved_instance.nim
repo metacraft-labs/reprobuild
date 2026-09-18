@@ -17,24 +17,44 @@
 ##   * ``materializedCacheActionJsonForTest`` — graph inspection's
 ##     ``binaryCacheKey`` / ``binaryCacheIdentityError``.
 ##
-## The only argument passed as ``nil`` is the engine's
-## ``BinaryCachePublisher`` closure, which is a production parameter of
-## ``publishMaterializedBinaryCacheEntries`` and not a stand-in for a
-## collaborator: the key under test is already recorded on the result
-## before the publisher would be consulted, so the case reads the real
-## backfill key without contacting a cache endpoint. Likewise both
-## materialized paths are driven with an empty publish prefix, which is
-## the production early-return that reports the key without touching the
-## filesystem or the network.
+## Two arguments are supplied in-process rather than by production
+## wiring, and both are production PARAMETERS of the entry point under
+## test rather than stand-ins for a collaborator:
+##
+##   * ``nil`` as ``publishMaterializedBinaryCacheEntries``'s
+##     ``BinaryCachePublisher``. The key under test is already recorded
+##     on the result before the publisher would be consulted, so the
+##     case reads the real backfill key without contacting a cache
+##     endpoint. Both materialized paths are additionally driven with an
+##     empty publish prefix, which is the production early-return that
+##     reports the key without touching the filesystem or the network.
+##   * a RECORDING ``BinaryCachePublisher`` closure that captures the
+##     ``BinaryCachePublishRequest`` and returns ``ok``. This one is
+##     load-bearing and is the reason the four-path assertion is no
+##     longer inert. The publisher seam is the only place the identity
+##     the engine actually PUBLISHES becomes observable: reading the
+##     result's reason string (what this test used to do) reads a value
+##     re-derived by ``deriveActionCacheKeyHex``, so every "path" folded
+##     through the same helper and no two of them could ever disagree.
+##     Verification proved that inert by injecting a junk option into
+##     ``applyCachePlatformTag`` and watching all 13 cases stay green.
+##     The recorder is not a mock of the cache: it performs no cache
+##     behaviour, asserts nothing itself, and exists only so the real
+##     ``BinaryCachePublishRequest.identity`` can be compared against the
+##     lookup key. The same shape is used by
+##     ``repro_build_engine/tests/test_binary_cache_publisher_hook.nim``.
 ##
 ## Non-vacuity: "relocation alone does not change the identity" is the
-## control that forbids the cheap wrong fix of hashing absolute paths,
-## and "missing evidence fails closed" is the control that forbids
-## deleting the pending guard.
+## control that forbids the cheap wrong fix of hashing absolute paths;
+## "missing evidence fails closed" is the control that forbids deleting
+## the pending guard; and "a genuine external import does not make the
+## identity refuse" is the control that forbids the equally cheap wrong
+## fix of refusing on everything that does not resolve locally, which
+## would make every identity permanently PENDING.
 
 {.define: reproMaterializedCacheTest.}
 
-import std/[json, options, os, strutils, tempfiles, unittest]
+import std/[algorithm, json, options, os, strutils, tables, tempfiles, unittest]
 
 import repro_binary_cache_client/cache_key
 import repro_binary_cache_server/types as bcsTypes
@@ -82,6 +102,12 @@ proc solvedInstance(root: string): SolvedSourceInstance =
       name: "cmake", version: "3.29.2",
       hostLdSoAbi: "x86_64-linux-gnu", extraFingerprint: ""))
 
+proc bareInstance(root: string): SolvedSourceInstance =
+  ## Same solved instance, but with no declared non-Nim source inputs —
+  ## for the trees the resolution cases build, which have none.
+  result = solvedInstance(root)
+  result.declaredSourceInputs = @[]
+
 proc probeAction(root: string; identity: CacheEntryIdentity): BuildAction =
   ## A tagged public-interface action with no publish prefix: both
   ## materialized paths record the derived key and then return on the
@@ -93,6 +119,66 @@ proc probeAction(root: string; identity: CacheEntryIdentity): BuildAction =
     cwd: root,
     publishToBinaryCache: true,
     cacheEntryIdentity: some(identity))
+
+const MaterializedPrefixName = ".m13-materialized-prefix"
+
+proc publishProbeAction(root: string; identity: CacheEntryIdentity):
+    BuildAction =
+  ## The SAME tagged action, but materialized: a real declared output
+  ## that really exists on disk, so ``publishMaterializedBinaryCacheEntries``
+  ## walks all the way to the publisher hand-off instead of returning on
+  ## the empty-prefix arm. That hand-off is the only place the identity
+  ## the engine actually publishes becomes observable.
+  let prefix = root / MaterializedPrefixName
+  createDir(prefix)
+  writeFile(prefix / "artifact.txt", "materialized\n")
+  BuildAction(
+    governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+    kind: bakStamp,
+    id: "m13-source-package",
+    cwd: root,
+    publishToBinaryCache: true,
+    declaredOutputs: @[prefix],
+    outputs: @[prefix],
+    cacheEntryIdentity: some(identity))
+
+type
+  PublishRecorder = ref object
+    ## Capture for the recording publisher closure — see the file header.
+    requests: seq[BinaryCachePublishRequest]
+
+proc recordingPublisher(recorder: PublishRecorder): BinaryCachePublisher =
+  result = proc(req: BinaryCachePublishRequest):
+      BinaryCachePublishResult {.gcsafe, closure.} =
+    recorder.requests.add(req)
+    BinaryCachePublishResult(ok: true, statusCode: 200, error: "",
+      bytesUploaded: 0)
+
+proc publishedIdentityFor(root: string; identity: CacheEntryIdentity):
+    CacheEntryIdentity =
+  ## The identity ``publishMaterializedBinaryCacheEntries`` actually
+  ## hands the publisher. Raises via ``doAssert`` when the publisher was
+  ## never reached, so a silently skipped publish cannot pass as agreement.
+  let recorder = PublishRecorder(requests: @[])
+  let action = publishProbeAction(root, identity)
+  let run = publishMaterializedBinaryCacheEntries(
+    graph(@[action]), recordingPublisher(recorder))
+  doAssert run.results.len == 1, "publish path produced no result"
+  doAssert recorder.requests.len == 1,
+    "publisher was never reached: " & run.results[0].stderr
+  recorder.requests[0].identity
+
+proc optionNames(idy: CacheEntryIdentity): seq[string] =
+  if not idy.selectedOptions.isNil:
+    for name in idy.selectedOptions.keys:
+      result.add(name)
+  result.sort(cmp)
+
+proc expectedPublishedOptionNames(instance: SolvedSourceInstance): seq[string] =
+  for (name, _) in instance.selectedOptions:
+    result.add(name)
+  result.add(CachePlatformTagOptionKey)
+  result.sort(cmp)
 
 const
   LookupMarker = "materialized-binary-cache-substitute key="
@@ -135,6 +221,15 @@ template identityKeyOnEveryPath(instance: SolvedSourceInstance): string =
     check keyAfter(backfillRes.reason, BackfillMarker) == direct
     check inspected["binaryCacheIdentityError"].getStr() == ""
     check inspected["binaryCacheKey"].getStr() == direct
+    # The identity the PUBLISHER is actually handed — not a reason string
+    # re-derived by the same helper every other path already calls.
+    let published = publishedIdentityFor(instance.projectRoot, identity)
+    check deriveCacheEntryKeyHex(published) == direct
+    # ...and its option set is pinned exactly, so a junk option folded in
+    # by ``applyCachePlatformTag`` (which every path shares, and which a
+    # pure agreement assertion therefore cannot see) fails this case.
+    check optionNames(published) == expectedPublishedOptionNames(instance)
+    check published.selectedOptions[CachePlatformTagOptionKey] == NativeTriple
     direct
 
 template failsClosed(instance: SolvedSourceInstance) =
@@ -313,6 +408,229 @@ suite "test_source_cache_identity_binds_complete_solved_instance":
     let empty = createTempDir("m13-fail-closed-empty-", "")
     defer: removeDir(empty)
     failsClosed(solvedInstance(empty))
+
+  # -------------------------------------------------------------------
+  # Resolution gaps the first pass at #171 left open. Each of these was
+  # a module Nim compiles into the package that the closure scan did not
+  # see -- and, crucially, did not REFUSE over either: it produced a
+  # digest across the rest, so two implementations differing only in the
+  # invisible input shared one key. That is the #171 aliasing class
+  # surviving inside the fix for #171.
+  # -------------------------------------------------------------------
+
+  test "a module reachable only through a --path search root binds":
+    let root = createTempDir("m13-search-root-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "config.nims", "switch(\"path\", \"lib\")\n")
+    writeFile(root / "repro.nim", "import searchmod\nconst entry = 1\n")
+    createDir(root / "lib")
+    writeFile(root / "lib" / "searchmod.nim", "const searched = 1\n")
+    let before = identityKeyOnEveryPath(bareInstance(root))
+    check "lib/searchmod.nim" in solvedSourceClosure(root).files
+    writeFile(root / "lib" / "searchmod.nim", "const searched = 2\n")
+    check identityKeyOnEveryPath(bareInstance(root)) != before
+
+  test "an include carrying its own extension binds":
+    let root = createTempDir("m13-include-ext-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "repro.nim",
+      "include \"frag.inc\"\ninclude other.nim\nconst entry = 1\n")
+    writeFile(root / "frag.inc", "const fragment = 1\n")
+    writeFile(root / "other.nim", "const other = 1\n")
+    let before = identityKeyOnEveryPath(bareInstance(root))
+    check "frag.inc" in solvedSourceClosure(root).files
+    writeFile(root / "frag.inc", "const fragment = 2\n")
+    let afterInc = identityKeyOnEveryPath(bareInstance(root))
+    check afterInc != before
+    writeFile(root / "other.nim", "const other = 2\n")
+    check identityKeyOnEveryPath(bareInstance(root)) != afterInc
+
+  test "a package-directory import binds":
+    let root = createTempDir("m13-pkgdir-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "repro.nim", "import pkgdir\nconst entry = 1\n")
+    createDir(root / "pkgdir")
+    writeFile(root / "pkgdir" / "pkgdir.nim", "const inside = 1\n")
+    let before = identityKeyOnEveryPath(bareInstance(root))
+    check "pkgdir/pkgdir.nim" in solvedSourceClosure(root).files
+    writeFile(root / "pkgdir" / "pkgdir.nim", "const inside = 2\n")
+    check identityKeyOnEveryPath(bareInstance(root)) != before
+
+  test "a compile-time file read binds":
+    # ``staticRead`` / ``slurp`` have no import syntax at all, so the
+    # bytes they fold into the build were invisible to the closure, and
+    # no production call site populates ``declaredSourceInputs``.
+    let root = createTempDir("m13-static-read-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "repro.nim",
+      "const blob = staticRead(\"data/payload.txt\")\n" &
+      "import ./helper\n" &
+      "const entry = 1\n")
+    writeFile(root / "helper.nim", "const slurped = slurp \"note.txt\"\n")
+    createDir(root / "data")
+    writeFile(root / "data" / "payload.txt", "payload 1\n")
+    writeFile(root / "note.txt", "note 1\n")
+    let before = identityKeyOnEveryPath(bareInstance(root))
+    let files = solvedSourceClosure(root).files
+    check "data/payload.txt" in files
+    check "note.txt" in files
+    writeFile(root / "data" / "payload.txt", "payload 2\n")
+    let afterPayload = identityKeyOnEveryPath(bareInstance(root))
+    check afterPayload != before
+    writeFile(root / "note.txt", "note 2\n")
+    check identityKeyOnEveryPath(bareInstance(root)) != afterPayload
+
+  test "an unresolvable candidate local module fails closed":
+    # The rule: anything that COULD be project source and cannot be
+    # resolved is missing evidence, not an assumed external library.
+    let dirEvidence = createTempDir("m13-unresolved-dir-", "")
+    defer: removeDir(dirEvidence)
+    createDir(dirEvidence)
+    writeFile(dirEvidence / "repro.nim", "import internal/vanished\n")
+    createDir(dirEvidence / "internal")
+    writeFile(dirEvidence / "internal" / "present.nim", "const p = 1\n")
+    failsClosed(bareInstance(dirEvidence))
+
+    let includeEvidence = createTempDir("m13-unresolved-include-", "")
+    defer: removeDir(includeEvidence)
+    createDir(includeEvidence)
+    writeFile(includeEvidence / "repro.nim", "include \"absent.inc\"\n")
+    failsClosed(bareInstance(includeEvidence))
+
+    let extEvidence = createTempDir("m13-unresolved-ext-", "")
+    defer: removeDir(extEvidence)
+    createDir(extEvidence)
+    writeFile(extEvidence / "repro.nim", "import gone.nim\n")
+    failsClosed(bareInstance(extEvidence))
+
+    # A project whose search-root set cannot be evaluated: the scanner
+    # cannot rule ANY unresolved spec out, so it must refuse.
+    let dynamicPaths = createTempDir("m13-unresolved-dynamic-", "")
+    defer: removeDir(dynamicPaths)
+    createDir(dynamicPaths)
+    writeFile(dynamicPaths / "config.nims",
+      "import std/os\nswitch(\"path\", getEnv(\"SOMEWHERE\"))\n")
+    writeFile(dynamicPaths / "repro.nim", "import mystery\nconst e = 1\n")
+    failsClosed(bareInstance(dynamicPaths))
+
+  test "a genuine external import does not make the identity refuse":
+    # The control that forbids "refuse on everything unresolved". An
+    # identity that is permanently PENDING can neither substitute nor
+    # publish, so over-refusal is as useless as under-binding.
+    let root = createTempDir("m13-external-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "repro.nim",
+      "import std/os\n" &
+      "import std/[strutils, tables]\n" &
+      "from std/sequtils import toSeq\n" &
+      "import pkg/somepackage\n" &
+      "import repro_project_dsl\n" &
+      "import repro_binary_cache_client/cache_key\n" &
+      "import ./local_helper\n" &
+      "const entry = 1\n")
+    writeFile(root / "local_helper.nim", "const helper = 1\n")
+    let closure = solvedSourceClosure(root)
+    check closure.missing.len == 0
+    check closure.files == @["local_helper.nim", "repro.nim"]
+    let before = identityKeyOnEveryPath(bareInstance(root))
+    check before.len == 64
+    # ...and the local module next to the external ones is still bound.
+    writeFile(root / "local_helper.nim", "const helper = 2\n")
+    check identityKeyOnEveryPath(bareInstance(root)) != before
+
+  test "path de-duplication follows the filesystem's case rule":
+    # The visited-set key used to fold case unconditionally. On a
+    # case-SENSITIVE filesystem -- Linux, the build target -- that
+    # merges two genuinely distinct files into one closure entry, which
+    # is the same aliasing class #171 is about, re-introduced by the
+    # dedup table. The rule is a platform fact, not a convenience.
+    when defined(windows):
+      check sourceClosurePathKey("C:/tree/Module.nim") ==
+        sourceClosurePathKey("C:/tree/module.nim")
+    else:
+      check sourceClosurePathKey("/tree/Module.nim") !=
+        sourceClosurePathKey("/tree/module.nim")
+    # Reachable on either platform: one file reached under two spellings
+    # of the SAME path must be bound once, not twice.
+    let root = createTempDir("m13-case-dedup-", "")
+    defer: removeDir(root)
+    createDir(root)
+    createDir(root / "internal")
+    writeFile(root / "internal" / "helpers.nim", "const helper = 1\n")
+    when defined(windows):
+      writeFile(root / "repro.nim",
+        "import ./internal/helpers\nimport ./internal/Helpers\n")
+    else:
+      writeFile(root / "repro.nim", "import ./internal/helpers\n")
+    let closure = solvedSourceClosure(root)
+    check closure.missing.len == 0
+    check closure.files.len == 2
+
+  test "a source input outside the project root fails closed":
+    # ``relativePath`` does NOT raise for a cross-drive pair on Windows;
+    # it returns the ABSOLUTE path, which used to land straight in the
+    # digest and destroy relocation stability silently.
+    let root = createTempDir("m13-outside-root-", "")
+    defer: removeDir(root)
+    writeProject(root)
+    var outside = solvedInstance(root)
+    outside.declaredSourceInputs = @["src/impl.c", currentSourcePath()]
+    check not currentSourcePath().startsWith(root)
+    failsClosed(outside)
+    # No absolute path may appear in the bound closure of the good case.
+    for rel in solvedSourceClosure(root, @["src/impl.c"]).files:
+      check not rel.isAbsolute
+      check ":" notin rel
+
+  test "a commented-out or quoted import is not evidence":
+    # Bytes Nim does not read are provably not an input. Refusing on
+    # them is not failing closed, it is failing ALWAYS: a correct
+    # project would be permanently unkeyable.
+    let root = createTempDir("m13-masked-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "repro.nim",
+      "#[\n" &
+      "import ./ghost\n" &
+      "]#\n" &
+      "const doc = \"\"\"\n" &
+      "import ./phantom\n" &
+      "\"\"\"\n" &
+      "## import ./spectre\n" &
+      "import ./real\n" &
+      "const entry = 1\n")
+    writeFile(root / "real.nim", "const real = 1\n")
+    let closure = solvedSourceClosure(root)
+    check closure.missing.len == 0
+    check closure.files == @["real.nim", "repro.nim"]
+    check identityKeyOnEveryPath(bareInstance(root)).len == 64
+
+  test "compile-time command execution fails closed":
+    # ``gorge`` / ``staticExec`` fold the output of an arbitrary command
+    # into the build. There is nothing to bind, so there is no honest
+    # digest to produce.
+    for call in ["staticExec(\"echo hi\")", "gorge(\"echo hi\")",
+                 "gorgeEx(\"echo hi\")"]:
+      let root = createTempDir("m13-gorge-", "")
+      defer: removeDir(root)
+      createDir(root)
+      writeFile(root / "repro.nim", "const v = " & call & "\nconst e = 1\n")
+      failsClosed(bareInstance(root))
+
+    # A compile-time read whose path is not a literal cannot be bound
+    # either, and must not be silently skipped.
+    let computed = createTempDir("m13-computed-read-", "")
+    defer: removeDir(computed)
+    createDir(computed)
+    writeFile(computed / "repro.nim",
+      "const name = \"data.txt\"\nconst blob = staticRead(name)\n")
+    writeFile(computed / "data.txt", "data\n")
+    failsClosed(bareInstance(computed))
 
   test "the legacy unsolved constructor stays pending":
     # M13 keeps every production call site that cannot yet supply a
