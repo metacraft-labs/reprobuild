@@ -358,6 +358,27 @@ type
       ## Pruning is part of the prefix's identity: two hosts that prune
       ## differently hold different bytes and must not share a cache entry.
       ## ``toolCacheIdentity`` therefore keys on this list.
+    nonRedistributable*: bool
+      ## When true, a realized prefix of this entry is NEVER published to a
+      ## shared binary cache. It is still realized, still content-addressed,
+      ## still substitutable from a cache somebody else populated — it is
+      ## only this machine that must not upload it.
+      ##
+      ## The case that forces it: an upstream archive a developer is
+      ## licensed to download and run, but not to redistribute. Agent
+      ## Harbor's electron-builder MSI target consumes
+      ## ``winCodeSign-2.6.0``, which bundles Microsoft's ``signtool``; the
+      ## coding-agent catalog has several vendor-binary payloads in the same
+      ## position. Fetching one on a developer's behalf is ordinary;
+      ## re-serving it from a cache other people pull from is a different
+      ## act, and one nobody should perform by accident because they
+      ## happened to have publish credentials configured.
+      ##
+      ## Deliberately NOT part of the prefix identity. The realized bytes
+      ## are the same either way, so two hosts that disagree about this flag
+      ## still hold the same prefix and may still share an entry one of them
+      ## legitimately published. What the flag governs is the direction of
+      ## travel, not the content.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string

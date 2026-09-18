@@ -1380,6 +1380,14 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
     let pruneValue = namedValue(node[i], "prune")
     if not pruneValue.isNil:
       result.prunePaths.add(exprCode(pruneValue))
+    # ``nonRedistributable = true`` keeps a realized prefix out of the
+    # SHARED cache. Only the literal matters, which is why it goes through
+    # ``boolLiteral`` rather than ``exprCode``: a policy this one is not
+    # something a recipe should be able to compute, because the answer has
+    # to be readable in the recipe by whoever reviews the licence.
+    let nonRedistributableValue = namedValue(node[i], "nonRedistributable")
+    if not nonRedistributableValue.isNil:
+      result.nonRedistributable = boolLiteral(nonRedistributableValue, false)
     let sha256Value = namedValue(node[i], "sha256")
     if not sha256Value.isNil:
       sha256Node = sha256Value
@@ -2501,6 +2509,7 @@ proc packageLiteral(pkg: PackageDef): string =
       result.add(prunePath)
     result.add("], sha256: " & codeOrEmpty(provisioning.sha256) &
       ", executableAlias: " & codeOrEmpty(provisioning.executableAlias) &
+      ", nonRedistributable: " & $provisioning.nonRedistributable &
     ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
       ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
       ", stripComponents: " & $provisioning.stripComponents &

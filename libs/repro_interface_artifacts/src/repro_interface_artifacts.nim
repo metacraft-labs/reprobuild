@@ -253,6 +253,11 @@ type
       ## bundles a GUI or a debugger alongside the compiler costs store
       ## space on every consumer and can push the prefix past the shared
       ## cache's publish limit, at which point nobody gets it quickly.
+    nonRedistributable*: bool
+      ## Realize this entry, never PUBLISH it. See
+      ## ``TarballProvisioningDef.nonRedistributable``: an archive a
+      ## developer may download and run but not re-serve to others. Not part
+      ## of the prefix identity -- the bytes are the same either way.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string
@@ -480,8 +485,12 @@ type
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 17'u16
-    ## v17 (current): retains ``prunePaths`` on tarball provisioning — the
+  EnvelopeVersion = 18'u16
+    ## v18 (current): retains ``nonRedistributable`` on tarball provisioning
+    ##                — the entries a realize must never publish to a
+    ##                shared cache. v17 payloads decode with it false, which
+    ##                is the prior behaviour of publishing everything.
+    ## v17: retains ``prunePaths`` on tarball provisioning — the
     ##                prefix-relative paths realize drops after extraction.
     ##                v16 payloads decode with an empty list, which is the
     ##                pre-pruning behaviour of keeping the archive whole.
@@ -878,6 +887,8 @@ proc writeTarballProvisioning(outp: var seq[byte];
     outp.writeString(provisioning.executableAlias)
   if version >= 17'u16:
     outp.writeStringSeq(provisioning.prunePaths)
+  if version >= 18'u16:
+    outp.writeByte(if provisioning.nonRedistributable: 1'u8 else: 0'u8)
   outp.writeU32Le(uint32(max(provisioning.stripComponents, 0)))
   outp.writeString(provisioning.packageId)
   outp.writeString(provisioning.lockIdentity)
@@ -899,6 +910,8 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
     result.executableAlias = readString(bytes, pos)
   if version >= 17'u16:
     result.prunePaths = readStringSeq(bytes, pos)
+  if version >= 18'u16:
+    result.nonRedistributable = readByte(bytes, pos) != 0'u8
   result.stripComponents = int(readU32Le(bytes, pos))
   result.packageId = readString(bytes, pos)
   result.lockIdentity = readString(bytes, pos)
@@ -1460,6 +1473,7 @@ proc toInterfaceTarballProvisioning(packageName: string;
     executablePath: provisioning.executablePath,
     executableAlias: provisioning.executableAlias,
     prunePaths: provisioning.prunePaths,
+    nonRedistributable: provisioning.nonRedistributable,
     stripComponents: provisioning.stripComponents,
     packageId: provisioning.packageId,
     lockIdentity: provisioning.lockIdentity,
@@ -2212,16 +2226,20 @@ proc emitProvisioningContributionRegistrations(code: var string;
       for j, prunePath in provisioning.prunePaths:
         if j > 0: code.add(", ")
         code.add(escForCode(prunePath))
-      # ``executableAlias`` and ``prunePaths`` are emitted here for the same
-      # reason every other field is: this stub is the ONLY description of a
-      # contributed provisioning that a consuming compilation sees. A field
-      # missing here does not fail to compile — it silently reconstructs a
-      # DIFFERENT provisioning than the contributor declared, which for
-      # ``prunePaths`` also moves the cache key and for ``executableAlias``
-      # loses the only name the tool is invocable under. Both were absent
-      # until this emitter was audited against ``macros_a.packageLiteral``
-      # and ``macros_b``'s contribution emitter; the three must stay in step.
+      # ``executableAlias``, ``prunePaths`` and ``nonRedistributable`` are
+      # emitted here for the same reason every other field is: this stub is
+      # the ONLY description of a contributed provisioning that a consuming
+      # compilation sees. A field missing here does not fail to compile —
+      # it silently reconstructs a DIFFERENT provisioning than the
+      # contributor declared, which for ``prunePaths`` also moves the cache
+      # key, for ``executableAlias`` loses the only name the tool is
+      # invocable under, and for ``nonRedistributable`` republishes a payload
+      # the contributor said must not be republished. The first two were
+      # absent until this emitter was audited against
+      # ``macros_a.packageLiteral`` and ``macros_b``'s contribution emitter;
+      # the three must stay in step.
       code.add("], sha256: " & escForCode(provisioning.sha256) &
+        ", nonRedistributable: " & $provisioning.nonRedistributable &
         ", archiveType: " & escForCode(provisioning.archiveType) &
         ", executablePath: " & escForCode(provisioning.executablePath) &
         ", executableAlias: " & escForCode(provisioning.executableAlias) &

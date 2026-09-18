@@ -298,6 +298,9 @@ type
     declaredPrunePaths*: seq[string]
       ## Prefix-relative paths deleted after extraction. See
       ## ``TarballProvisioningDef.prunePaths``.
+    declaredNonRedistributable*: bool
+      ## Realize, but never PUBLISH. See
+      ## ``TarballProvisioningDef.nonRedistributable``.
     stripComponents*: int
     lockIdentity*: string
 
@@ -1901,6 +1904,7 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
     declaredExecutablePath: selected.executablePath,
     declaredExecutableAlias: selected.executableAlias,
     declaredPrunePaths: selected.prunePaths,
+    declaredNonRedistributable: selected.nonRedistributable,
     stripComponents: selected.stripComponents,
     lockIdentity: contributorLockIdentity(selected.contributor,
       if selected.lockIdentity.len > 0:
@@ -2882,6 +2886,16 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
   ## ordinary case for most developers and is silent by design; it is not an
   ## error and must not read like one.
   if getEnv("REPRO_CACHE_DISABLE").len > 0:
+    return
+  # The package said so. Realizing it is fine, substituting it from a cache
+  # somebody else populated is fine; what must not happen is THIS machine
+  # re-serving a payload its licence does not let it redistribute — and
+  # the trigger for that would be nothing more deliberate than a developer
+  # having publish credentials configured.
+  #
+  # Checked before the credential test rather than after, so the refusal is
+  # a property of the package rather than an accident of who is running.
+  if plan.declaredNonRedistributable:
     return
   let keyPath = getEnv("REPRO_BINARY_CACHE_KEY_PATH", "")
   let certPath = getEnv("REPRO_BINARY_CACHE_CERT_PATH", "")
