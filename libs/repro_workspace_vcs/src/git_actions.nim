@@ -1612,16 +1612,13 @@ proc executeForceReset(payload: GitVcsPayload;
 
 proc executeForcePushRebase(payload: GitVcsPayload;
                             cwd, receiptPath: string): ActionResult =
-  ## Cherry-pick locally authored commits since the force-pushed base Sha
-  ## onto the new remote tip.
+  ## Replay the commits the operator still OWNS on top of the new remote
+  ## tip: the ones whose change is not already present upstream.
   let target = absoluteRepoPath(payload, cwd)
   if not dirExists(target / ".git"):
     return failed("force-push-rebase-target-missing",
       "force-push-rebase target is not a git working tree: " & target)
-  if payload.baseSha.len == 0:
-    return failed("force-push-rebase-no-base-sha",
-      "force-push-rebase requires a force-pushed base SHA")
-  
+
   let cleanRes = workingTreeIsClean(payload, target)
   if not cleanRes.ok:
     return failed("force-push-rebase-status-probe-failed", cleanRes.diagnostic)
@@ -1629,25 +1626,76 @@ proc executeForcePushRebase(payload: GitVcsPayload;
     return failed("dirty",
       "git force-push-rebase refused: working tree is dirty at " & target)
 
-  # 1. Retrieve the list of commits in the range <baseSha>..HEAD in chronological order (oldest first)
-  let listRes = runGitQuery(payload,
-    ["-C", target, "log", "--format=%H", "--reverse", payload.baseSha & "..HEAD"])
-  if listRes.exitCode != 0:
-    return failed("force-push-rebase-log-failed",
-      "git log failed to find commits: " & listRes.diagnostic)
-  
-  let commitsToCherryPick = listRes.output.strip().splitLines()
-
-  # 2. Reset the branch to the remote tracking tip
   let rName = if payload.remoteName.len > 0: payload.remoteName else: "origin"
   let remoteRef = "refs/remotes/" & rName & "/" & payload.branchName
+
+  # 1. Select WHICH commits to replay, comparing against the new upstream by
+  #    PATCH ID rather than by SHA.
+  #
+  #    This used to be ``git log --reverse <baseSha>..HEAD`` — every commit in
+  #    the range, replayed unconditionally. After a real rewrite that set is
+  #    both wrong and doomed. A rewrite reshapes history (filter-repo, squash,
+  #    re-root) and RE-LANDS most of the local work upstream under new SHAs, so
+  #    the range is dominated by commits whose change is ALREADY on the new
+  #    tip. ``git cherry-pick`` of such a commit produces an empty commit and
+  #    exits non-zero ("The previous cherry-pick is now empty"), which the loop
+  #    below turns into an abort — so the recovery died on its FIRST commit and
+  #    never reached the work the operator actually still owns. Measured on the
+  #    workspace this was diagnosed in: ``codetracer-cairo-recorder`` was 210
+  #    commits "ahead" of its rewritten remote and exactly 3 of them were
+  #    patch-id-unique.
+  #
+  #    ``git cherry <upstream> <head> [<limit>]`` answers precisely that
+  #    question, and is the same patch-id equivalence ``git rebase`` applies
+  #    natively when it drops commits that already landed. ``+`` marks a commit
+  #    with no equivalent upstream (replay it); ``-`` marks one that is already
+  #    there (skip it). Output is oldest-first, which is the order a replay
+  #    needs. Merges are excluded by ``git cherry`` itself — a merge cannot be
+  #    cherry-picked without ``-m`` anyway, so the old range only ever carried
+  #    them as a guaranteed failure.
+  #
+  #    ``baseSha`` is now an OPTIONAL limit rather than a precondition. It
+  #    narrows the walk when a superseded base was recorded; without one the
+  #    comparison runs over the whole of HEAD, which is the only thing that can
+  #    be asked of a checkout whose history is disjoint from its remote — there
+  #    is no shared base to name. Patch-id equivalence, not the range bound, is
+  #    what keeps the replay set correct.
+  var cherryArgs = @["-C", target, "cherry", remoteRef, "HEAD"]
+  if payload.baseSha.len > 0:
+    cherryArgs.add(payload.baseSha)
+  # ``runGitQuery``, not ``runGit``: this output is PARSED line by line below,
+  # and ``runGit`` hands back stdout and stderr MERGED. One benign diagnostic
+  # on stderr — `warning: unable to rmdir`, a detached-HEAD advice — would be
+  # read here as a `+ <sha>` line and replayed as a commit. Any git invocation
+  # whose result is parsed rather than shown belongs on the split-stream API.
+  let listRes = runGitQuery(payload, cherryArgs)
+  if listRes.exitCode != 0:
+    return failed("force-push-rebase-log-failed",
+      "git cherry " & remoteRef & " HEAD" &
+        (if payload.baseSha.len > 0: " " & payload.baseSha else: "") &
+        " failed to select the commits to replay: " & listRes.diagnostic)
+
+  var commitsToCherryPick: seq[string]
+  var alreadyUpstream = 0
+  for rawLine in listRes.output.strip().splitLines():
+    let line = rawLine.strip()
+    if line.len < 2: continue
+    if line[0] == '-':
+      inc alreadyUpstream
+      continue
+    if line[0] != '+': continue
+    let sha = line[1 .. ^1].strip()
+    if sha.len > 0:
+      commitsToCherryPick.add(sha)
+
+  # 2. Reset the branch to the remote tracking tip
   let resetRes = runGit(payload,
     ["-C", target, "reset", "--hard", remoteRef])
   if resetRes.exitCode != 0:
     return failed("force-push-rebase-reset-failed",
       "git reset --hard " & remoteRef & " failed: " & resetRes.output.trimmed)
 
-  # 3. Cherry-pick each of the local commits in order
+  # 3. Cherry-pick each of the still-unique local commits, oldest first.
   for rawCommit in commitsToCherryPick:
     let commit = rawCommit.strip()
     if commit.len == 0: continue
@@ -1655,7 +1703,10 @@ proc executeForcePushRebase(payload: GitVcsPayload;
     if cpRes.exitCode != 0:
       discard runGit(payload, ["-C", target, "cherry-pick", "--abort"])
       return failed("cherry-pick-failed",
-        "git cherry-pick " & commit & " failed: " & cpRes.output.trimmed)
+        "git cherry-pick " & commit & " failed: " & cpRes.output.trimmed &
+          " (replaying " & $commitsToCherryPick.len &
+          " commit(s) whose change is not yet on " & remoteRef & "; " &
+          $alreadyUpstream & " already-landed commit(s) were skipped)")
 
   let headRes = resolveHeadSha(payload, target)
   if not headRes.ok:

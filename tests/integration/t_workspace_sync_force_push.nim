@@ -70,6 +70,34 @@ proc forcePushNewCommit(gitBin, originPath, workPath, baseSha: string;
   result = requireGit(q(gitBin) & " -C " & q(workPath) &
     " rev-parse HEAD").strip()
 
+proc forcePushRelandingOneLocalCommit(gitBin, originPath, workPath, baseSha,
+                                      clonePath, relandSha: string;
+                                      branch = "main"): string =
+  ## The rewrite shape a real one has: the upstream does NOT merely replace
+  ## the tip, it RE-LANDS part of the local work under a new SHA. Here the
+  ## seed is reset to ``baseSha``, grows its own commit, then cherry-picks
+  ## ``relandSha`` out of the workspace clone — so that commit exists upstream
+  ## with a different SHA and a byte-identical patch — and force-pushes.
+  ##
+  ## Why this matters: after such a rewrite most of what a checkout carries
+  ## "ahead" of its remote is already THERE, and replaying it is not merely
+  ## redundant, it is fatal — ``git cherry-pick`` of an already-applied commit
+  ## produces an empty commit and exits non-zero.
+  discard requireGit(q(gitBin) & " -C " & q(workPath) & " reset --hard " &
+    q(baseSha))
+  writeFile(workPath / "f1.txt", "F1 content\n")
+  discard requireGit(q(gitBin) & " -C " & q(workPath) & " add f1.txt")
+  discard requireGit(q(gitBin) & " -C " & q(workPath) &
+    " commit -m \"F1 force pushed commit\"")
+  discard requireGit(q(gitBin) & " -C " & q(workPath) & " fetch " &
+    q(clonePath) & " " & branch & ":refs/remotes/work/" & branch)
+  discard requireGit(q(gitBin) & " -C " & q(workPath) & " cherry-pick " &
+    q(relandSha))
+  discard requireGit(q(gitBin) & " -C " & q(workPath) &
+    " push --force origin " & branch)
+  result = requireGit(q(gitBin) & " -C " & q(workPath) &
+    " rev-parse HEAD").strip()
+
 proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " clone " & q(fileUrl(originPath)) & " " &
     q(targetPath))
@@ -239,3 +267,92 @@ suite "repro workspace sync (force-push rebase)":
     check entry2["syncCase"].getStr() == "clean_at_locked_revision"
     check entry2["action"].getStr() == "none"
     check entry2["executionStatus"].getStr() == "noop"
+
+  test "replays only the commits the rewrite did not already re-land":
+    ## The recovery must select the commits to replay BY PATCH ID, not by
+    ## taking the whole ``<baseSha>..HEAD`` range.
+    ##
+    ## A real rewrite reshapes history and re-lands most of the local work
+    ## upstream under new SHAs. The range then contains commits whose change
+    ## is already on the new tip, and ``git cherry-pick`` of such a commit
+    ## produces an EMPTY commit and exits non-zero ("The previous cherry-pick
+    ## is now empty"). The executor aborts on the first failure, so a range
+    ## replay dies on its first already-landed commit and never reaches the
+    ## work the operator still owns — the recovery fails precisely in the
+    ## situation it was built for. Calibrated against the workspace this was
+    ## measured in: ``codetracer-cairo-recorder`` was 210 commits "ahead" of
+    ## its rewritten remote and exactly 3 were patch-id-unique.
+    ##
+    ## Here C1 is re-landed upstream while C2 and C3 are not, so the correct
+    ## replay set is {C2, C3} — in that order — and the range {C1, C2, C3} is
+    ## both wrong and unrunnable.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      fail()
+
+    let fx = setupFixture(gitBin, "force-push-reland")
+    defer: removeDir(fx.scratch)
+
+    let libPath = fx.workspaceRoot / "lib"
+    cloneInto(gitBin, fx.libOrigin, libPath)
+    let c1 = appendLocalCommit(gitBin, libPath, "c1.txt", "local C1")
+    let c2 = appendLocalCommit(gitBin, libPath, "c2.txt", "local C2")
+    let c3 = appendLocalCommit(gitBin, libPath, "c3.txt", "local C3")
+
+    let newTip = forcePushRelandingOneLocalCommit(gitBin, fx.libOrigin,
+      fx.libSeedPath, fx.initialSha, libPath, c1)
+
+    # THE PREMISE, asserted rather than assumed. If C1 were not genuinely
+    # present upstream under a different SHA, this would be re-testing the
+    # easy case the test above already covers.
+    check newTip != c1
+    check newTip != c2
+    check newTip != c3
+    let upstreamSubjects = requireGit(q(gitBin) & " -C " & q(fx.libSeedPath) &
+      " log --format=%s " & q(fx.initialSha & "..HEAD"))
+    check "local C1" in upstreamSubjects
+    check "local C2" notin upstreamSubjects
+    check "local C3" notin upstreamSubjects
+
+    let res = invokeSync(fx)
+    if res.code != 0:
+      checkpoint("output: " & res.output)
+    check res.code == 0
+
+    let entry = onlyRepoEntry(readReport(fx))
+    check entry["syncCase"].getStr() == "force_push_rebase"
+    check entry["action"].getStr() == "force_push_rebase"
+    check entry["executionStatus"].getStr() == "succeeded"
+
+    # Exactly TWO commits were replayed — the ones the rewrite did not
+    # re-land — and they sit directly on the new remote tip, oldest first.
+    let replayed = requireGit(q(gitBin) & " -C " & q(libPath) &
+      " rev-list --count " & q(newTip & "..HEAD")).strip()
+    check replayed == "2"
+    check requireGit(q(gitBin) & " -C " & q(libPath) &
+      " rev-parse HEAD~2").strip() == newTip
+    # Order is asserted, not assumed: a selection that replays the unique
+    # commits newest-first still lands two commits on the right base.
+    check requireGit(q(gitBin) & " -C " & q(libPath) &
+      " log -1 --format=%s HEAD").strip() == "local C3"
+    check requireGit(q(gitBin) & " -C " & q(libPath) &
+      " log -1 --format=%s HEAD~1").strip() == "local C2"
+
+    # And the re-landed commit was NOT duplicated. Counting subjects catches
+    # the failure that an ancestry check cannot: a second "local C1" sitting
+    # on top of the upstream one would satisfy every SHA relation above.
+    let subjects = requireGit(q(gitBin) & " -C " & q(libPath) &
+      " log --format=%s").strip().splitLines()
+    var c1Count = 0
+    var c2Count = 0
+    var c3Count = 0
+    for line in subjects:
+      if line.strip() == "local C1": inc c1Count
+      if line.strip() == "local C2": inc c2Count
+      if line.strip() == "local C3": inc c3Count
+    check c1Count == 1
+    check c2Count == 1
+    check c3Count == 1
+    # Non-vacuity: the log was actually read, and carries the upstream
+    # history too (initial + F1 + re-landed C1 + C2 + C3).
+    check subjects.len == 5

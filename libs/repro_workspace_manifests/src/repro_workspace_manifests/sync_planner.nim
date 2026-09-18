@@ -389,13 +389,23 @@ proc classifyRepoState*(resolved: ResolvedRepo;
 
   if observation.hasForcePushedCommits or observation.remoteHistoryDisjoint:
     result.syncCase = scForcePushRebase
-    # The automatic replay is only sound when BOTH of its inputs exist.
-    # ``executeForcePushRebase`` does ``git reset --hard
-    # <remote>/<branch>`` and then cherry-picks ``<base>..HEAD``, so
-    # without a remote counterpart for the current branch there is nothing
-    # to reset ONTO, and without a concrete base there is no range to
-    # replay. A branch that has neither is exactly the branch this whole
-    # arm used to be unable to see.
+    # ``remoteBranchTip`` is a HARD requirement: ``executeForcePushRebase``
+    # does ``git reset --hard <remote>/<branch>``, so without a remote
+    # counterpart for the current branch there is nothing to reset ONTO.
+    #
+    # ``forcePushedBaseSha`` is a DELIBERATE RESTRAINT, not a limitation of
+    # the executor. The executor selects what to replay with ``git cherry``
+    # and treats the base as an optional walk limit, so it would run without
+    # one. The reason to require it anyway is what its absence MEANS. It is
+    # set only alongside ``hasForcePushedCommits``, by a sync that watched
+    # the remote ref move under it; when it is empty, the rewrite was
+    # inferred from ancestry alone, some time after the fact, and the
+    # operator has not been told about it yet. Auto-replaying there would
+    # turn the ancestry signal into an unprompted ``git reset --hard`` on a
+    # checkout that may carry hundreds of commits of disjoint history. The
+    # refusal below names the situation and two non-destructive remedies
+    # instead; ``--force-sync`` remains the explicit way to ask for the
+    # destructive one.
     let canAutoRebase =
       rebaseOnForcePush and
       observation.remoteBranchTip.len > 0 and
