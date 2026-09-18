@@ -143,6 +143,15 @@ proc collectBuildStatements(pkgBody: NimNode; packageName = ""): NimNode =
       for buildStmt in stmt[1]:
         result.add(buildStmt)
     elif calleeName(stmt).normalize == "executable":
+      # Same shape, and the same hazard, as the ``library`` arm below: a
+      # bare ``executable X`` command carries no body and so has only two
+      # children. The library arm grew this guard; this one did not, so a
+      # bare executable reached ``stmt[2]`` and aborted the macro with
+      # ``index 2 not in 0 .. 1``. A body-less executable has no
+      # per-artifact ``build:`` to collect by definition, so skipping is
+      # the whole fix.
+      if stmt.len < 3:
+        continue
       let exeBody = stmt[2]
       let member = artifactBuildBodyName(stmt[1])
       var artifactStmts = newStmtList()
@@ -379,44 +388,6 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   # it is in this pass. Bodies previously had to infer it from an empty
   # ``activeProviderProjectRoot()``, which conflates the pass with a
   # planning fault that must stay fatal.
-  #
-  # ``Defect`` IS contained here, alongside ``CatchableError``, and that is
-  # a decision rather than an oversight in either direction:
-  #
-  #   * A body running with no project root fails at index, slice and
-  #     range operations at least as often as it raises -- ``path[0]`` on
-  #     an empty string, ``splitPath`` results indexed blind. Those are
-  #     ``Defect``s in Nim. Containing only ``CatchableError`` would leave
-  #     the LIKELIEST failure of exactly the pass this exists to survive
-  #     uncontained, and uncontained means the operator gets "provider
-  #     exited with code 1" for every target in the project -- the symptom
-  #     the containment was written to remove.
-  #   * The usual argument against catching a ``Defect`` -- that the
-  #     process' invariants are broken and continuing is unsound -- does
-  #     not distinguish the two cases here. Whatever a half-run body
-  #     leaves behind, it leaves behind identically when it raises a
-  #     ``CatchableError`` half-way, and that has been contained since this
-  #     block was written. The ``finally`` below restores the pass depth,
-  #     the owning-package override and the target-export registry on both
-  #     paths, and the pass' one durable effect -- the shell/fetch
-  #     registry -- is rebuilt per package by the real invocation.
-  #   * The containment is scoped to the STARTUP pass only. The same body
-  #     invoked for real is not wrapped, so a ``Defect`` during planning
-  #     stays fatal, which is where "the invariants are broken" is the
-  #     right response.
-  #   * It follows the boundary this repository already draws the same way:
-  #     ``repro_resources/library_abi.nim``'s ``withState`` catches
-  #     ``CatchableError`` and ``Defect`` and reports the second with a
-  #     ``defect:`` prefix. The prefix is kept here so a reader of the
-  #     failure log can tell which kind of failure a package had.
-  #
-  # What CANNOT be contained, and is not claimed to be: a ``quit`` in a
-  # startup body. ``quit`` raises nothing -- it runs exit handlers and
-  # ends the process -- so no handler anywhere can intercept it, and a
-  # recipe that calls it still takes every target in the project down.
-  # That is a property of ``quit``, not a gap in this block; the remedy is
-  # that a recipe must raise rather than quit, which the gate asserts by
-  # showing the raise IS contained.
   let providerModeInitCall =
     if buildBody.len > 0:
       quote do:
@@ -430,9 +401,6 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
             except CatchableError as reproStartupBodyError:
               noteProviderStartupBodyFailure(
                 `pkgNameLit`, reproStartupBodyError.msg)
-            except Defect as reproStartupBodyDefect:
-              noteProviderStartupBodyFailure(
-                `pkgNameLit`, "defect: " & reproStartupBodyDefect.msg)
             finally:
               endProviderStartupBody()
               clearCurrentOwningPackageOverride()
@@ -3665,7 +3633,6 @@ proc provisioningContributionLiteral(
     result.add("], sha256: " & codeOrEmpty(provisioning.sha256) &
       ", executableAlias: " & codeOrEmpty(provisioning.executableAlias) &
       ", nonRedistributable: " & $provisioning.nonRedistributable &
-      ", launcher: " & codeOrEmpty(provisioning.launcher) &
       ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
       ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
       ", stripComponents: " & $provisioning.stripComponents &
@@ -3864,40 +3831,6 @@ macro package*(name: untyped; body: untyped): untyped =
   ## therefore still holds the author's original nodes and can point
   ## ``error(msg, node)`` at the right line — the diagnostics regression
   ## usually assumed to be the price of staging is not one.
-  # Dependency blocks are lowered into ONE expression yielding every entry,
-  # tagged by `depKind` so stage 2 can route each back to its own list. The
-  # `when`s inside them ride along with their conditions untouched, so the
-  # compiler -- not this macro -- decides which entries a host contributes.
-  #
-  # One combined parameter rather than four: the four blocks differ only by
-  # the tag already on every entry, and a single list keeps the order they
-  # were written in, which the lists downstream rely on.
-  let usesAccum = genSym(nskVar, "reproAllUses")
-  let usesStmts = newNimNode(nnkStmtList)
-  usesStmts.add(nnkVarSection.newTree(nnkIdentDefs.newTree(
-    usesAccum,
-    nnkBracketExpr.newTree(bindSym"seq", bindSym"PackageUseDef"),
-    newCall(ident("@"), newNimNode(nnkBracket)))))
-  var sawUsesBlock = false
-  for stmt in body:
-    let head = calleeName(stmt).normalize
-    let depKind =
-      case head
-      of "uses", "builddeps": DepKindTarget
-      of "nativebuilddeps": DepKindNative
-      of "runtimedeps": DepKindRuntime
-      else: ""
-    if depKind.len == 0:
-      continue
-    for i in 1 ..< stmt.len:
-      sawUsesBlock = true
-      usesStmts.add(newCall(nnkDotExpr.newTree(usesAccum, ident("add")),
-        lowerUsesBlock(stmt[i], depKind)))
-  usesStmts.add(usesAccum)
-  var usesExpr: NimNode =
-    if sawUsesBlock: nnkBlockStmt.newTree(newEmptyNode(), usesStmts)
-    else: bindSym"NoPackageUses"
-
   var provisioningExpr: NimNode = bindSym"NoToolProvisioning"
   var seenProvisioning = false
   var declaredExpr: NimNode = bindSym"NoPlatformConstraints"
@@ -3943,12 +3876,11 @@ macro package*(name: untyped; body: untyped): untyped =
   # bulk of the file and reads better after the entry point), and `bindSym`
   # resolves in the definition scope, where the name does not exist yet.
   return newCall(ident("packageImpl"), name, declaredExpr, provisioningExpr,
-    usesExpr, body)
+    body)
 
 macro packageImpl*(name: untyped;
                    resolvedPlatforms: static seq[PlatformConstraintDef];
                    resolvedToolProvisioning: static string;
-                   resolvedUses: static seq[PackageUseDef];
                    body: untyped): untyped =
   ## Top-level package declaration — STAGE 2.
   ##
@@ -4003,7 +3935,7 @@ macro packageImpl*(name: untyped;
   ##    ``finalizeVariants()`` call.
   let (sectionStmts, preservedStmts) = partitionPackageBody(body)
   let pkg = parsePackageDef(name, body, resolvedPlatforms,
-    resolvedToolProvisioning, resolvedUses)
+    resolvedToolProvisioning)
   let packageName = pkg.packageName
   # ── DSL-port M2: emit ``config:`` scalar registrations + ``versions:``
   # entries. The two emitters operate on the M1 ``sectionStmts``

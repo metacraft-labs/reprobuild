@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1666,
+    "nimTestBinaries": 1667,
     "pureUnitConsolidationGroups": 49,
-    "pureUnitTests": 592,
+    "pureUnitTests": 593,
     "staticallyDetectedRuntimeCompilerFlowTests": 101,
-    "testEntries": 1677
+    "testEntries": 1678
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -364,7 +364,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 41,
+      "count": 42,
       "defines": [],
       "dependencyShape": [
         "repro_project_dsl"
@@ -401,6 +401,7 @@
         "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_expression_values.nim",
         "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim",
         "libs/repro_project_dsl/tests/t_dependency_lists_are_not_merged_at_serialization.nim",
+        "libs/repro_project_dsl/tests/t_dsl_bare_executable_no_body.nim",
         "libs/repro_project_dsl/tests/t_dsl_outputs_forward_reference_error.nim",
         "libs/repro_project_dsl/tests/t_dsl_outputs_sibling_scope_invisible_error.nim",
         "libs/repro_project_dsl/tests/t_dsl_outputs_unknown_flag_error.nim",
@@ -1091,7 +1092,7 @@
       "graph-fixture": 12,
       "integration": 781,
       "platform/destructive": 115,
-      "pure unit": 592,
+      "pure unit": 593,
       "unclassified": 177
     },
     "graphOwnedTestArtifacts": [
@@ -1240,9 +1241,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1666,
+    "nimTestBinaryCount": 1667,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1677
+    "testEntryCount": 1678
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13593,6 +13594,23 @@
       "source": "libs/repro_project_dsl/tests/t_dependency_lists_are_not_merged_at_serialization.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dsl_bare_executable_no_body",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_dsl_bare_executable_no_body.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
