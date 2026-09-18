@@ -127,9 +127,42 @@ package cargo:
           depfiles = ["target/debug/deps/*.d", "target/release/deps/*.d"]
         boolFlag locked is bool, alias = "--locked"
         boolFlag release is bool, alias = "--release"
+        # ``--offline`` is what a from-source recipe's build is FOR: the
+        # dependency closure has already been vendored and the build must
+        # not reach the network, so a crate the vendor step missed has to
+        # fail here rather than be silently downloaded. Without the flag on
+        # this surface a recipe would be spelling it through a verbatim
+        # ``shell()``, which is exactly the hand-written acquisition the
+        # from-source tier exists to remove.
+        boolFlag offline is bool, alias = "--offline"
+        boolFlag noDefaultFeatures is bool, alias = "--no-default-features"
+        flag features is string, alias = "--features"
         flag manifestPath is string,
           alias = "--manifest-path",
           role = input
+        flag targetDir is string,
+          alias = "--target-dir"
+
+      subcmd "install":
+        ## The canonical way to land a built binary in an FHS-shaped tree:
+        ## ``cargo install --root <dir>`` writes ``<dir>/bin/<binary>``,
+        ## which is what the standard component layout already expects.
+        ## Hand-copying out of ``target/<profile>/`` would have to guess
+        ## which of the profile directory's many files are the package's
+        ## binaries — cargo knows, from the manifest.
+        ##
+        ## Sharing ``--target-dir`` with the build subcommand above is what
+        ## keeps this from being a second full compile: cargo reuses the
+        ## artefacts it already produced.
+        dependencyPolicy makeDepfile,
+          depfiles = ["target/debug/deps/*.d", "target/release/deps/*.d"]
+        boolFlag locked is bool, alias = "--locked"
+        boolFlag offline is bool, alias = "--offline"
+        boolFlag noTrack is bool, alias = "--no-track"
+        boolFlag noDefaultFeatures is bool, alias = "--no-default-features"
+        flag features is string, alias = "--features"
+        flag path is string, alias = "--path", role = input
+        flag root is string, alias = "--root"
         flag targetDir is string,
           alias = "--target-dir"
 

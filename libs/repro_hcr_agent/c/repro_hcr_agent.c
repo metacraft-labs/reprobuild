@@ -1582,19 +1582,62 @@ static uint32_t repro_hcr_lx_last_publication_tier = 0;
  * distinct value from 0 on purpose. */
 static int32_t repro_hcr_lx_on_stack_threads = -1;
 
-static void *repro_hcr_apply_direct_patch(void *entry,
+/*
+ * HLX-M8. The agent-level twin of the provider split just above it: one
+ * transaction, two named halves, so the rb_hcr_* lifecycle can run the
+ * application's before-reload callbacks between the caller's pre-flight and
+ * Phase F and still reach exactly the same code.
+ *
+ * `repro_hcr_apply_direct_patch` is now the composition of the two, so there is
+ * ONE implementation rather than a second copy for the ABI path to drift away
+ * from. Quiescence spans both halves exactly as it did before this split —
+ * moving it would have changed what every existing HLX-M4 gate measures, and
+ * suspending threads slightly earlier than step 21 is a superset of what
+ * Phase G requires, not a reordering of it.
+ */
+typedef struct repro_hcr_direct_patch_txn {
+  void *entry;
+  size_t patch_len;
+  int quiesced;
+  int prepared;
+} repro_hcr_direct_patch_txn;
+
+static int repro_hcr_prepare_direct_patch(repro_hcr_direct_patch_txn *txn,
+                                          void *entry,
+                                          const uint8_t *patch_bytes,
+                                          size_t patch_len);
+static void *repro_hcr_commit_direct_patch(repro_hcr_direct_patch_txn *txn);
+static void repro_hcr_abort_direct_patch(repro_hcr_direct_patch_txn *txn);
+
+REPRO_HCR_LX_MAYBE_UNUSED static void *repro_hcr_apply_direct_patch(
+    void *entry, const uint8_t *patch_bytes, size_t patch_len) {
+  repro_hcr_direct_patch_txn txn;
+  if (repro_hcr_prepare_direct_patch(&txn, entry, patch_bytes, patch_len) !=
+      REPRO_HCR_LX_OK) {
+    repro_hcr_abort_direct_patch(&txn);
+    return NULL;
+  }
+  return repro_hcr_commit_direct_patch(&txn);
+}
+
+static int repro_hcr_prepare_direct_patch(repro_hcr_direct_patch_txn *txn,
+                                          void *entry,
                                           const uint8_t *patch_bytes,
                                           size_t patch_len) {
   uint64_t entry_address;
   uint64_t sled_address;
-  void *patch_page;
   int32_t thread_count;
   int quiesced = 0;
+  int prepare_rc;
+
+  memset(txn, 0, sizeof(*txn));
+  txn->entry = entry;
+  txn->patch_len = patch_len;
 
   if (entry == NULL) {
     memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
     repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
-    return NULL;
+    return REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
   }
   entry_address = (uint64_t)(uintptr_t)entry;
   /*
@@ -1629,7 +1672,7 @@ static void *repro_hcr_apply_direct_patch(void *entry,
       memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
       repro_hcr_lx_last_report.refusal =
           REPRO_HCR_LX_REFUSED_QUIESCENCE_FAILED;
-      return NULL;
+      return REPRO_HCR_LX_REFUSED_QUIESCENCE_FAILED;
     }
     quiesced = 1;
     repro_hcr_lx_last_publication_tier = REPRO_HCR_PUBLICATION_TIER_QUIESCED;
@@ -1670,17 +1713,44 @@ static void *repro_hcr_apply_direct_patch(void *entry,
   repro_hcr_lx_unregister_jit_hook = repro_hcr_lxu_unregister_jit_symfile;
   repro_hcr_lx_unregister_eh_frame_hook = repro_hcr_lxu_unregister_eh_frame;
 
-  patch_page = repro_hcr_lx_apply_direct_patch_at(entry_address, sled_address,
-                                                  patch_bytes, patch_len);
-
-  if (quiesced) {
-    (void)repro_hcr_lx_quiesce_release();
+  /* Phase F (§3.2: the in-memory link). Provider-owned memory only; target
+   * text is untouched until the commit below. A refusal here is what §3.3
+   * step 38 is about. */
+  prepare_rc = repro_hcr_lx_prepare_direct_patch_at(entry_address, sled_address,
+                                                    patch_bytes, patch_len);
+  txn->quiesced = quiesced;
+  if (prepare_rc != REPRO_HCR_LX_OK) {
+    return prepare_rc;
   }
+  txn->prepared = 1;
+  return REPRO_HCR_LX_OK;
+}
 
+/* Phase G (steps 21-27). The first byte written to target text. */
+static void *repro_hcr_commit_direct_patch(repro_hcr_direct_patch_txn *txn) {
+  void *patch_page = NULL;
+  if (txn->prepared) {
+    patch_page = repro_hcr_lx_commit_direct_patch();
+  }
+  if (txn->quiesced) {
+    (void)repro_hcr_lx_quiesce_release();
+    txn->quiesced = 0;
+  }
   if (patch_page != NULL) {
-    repro_hcr_notify_did_patch(entry, patch_page, patch_len);
+    repro_hcr_notify_did_patch(txn->entry, patch_page, txn->patch_len);
   }
   return patch_page;
+}
+
+/* Release whatever the prepare half acquired without touching target text.
+ * `repro_hcr_lx_txn_prepare` has already discarded any site it prepared before
+ * the one that refused, so the only thing left to undo here is quiescence. */
+static void repro_hcr_abort_direct_patch(repro_hcr_direct_patch_txn *txn) {
+  if (txn->quiesced) {
+    (void)repro_hcr_lx_quiesce_release();
+    txn->quiesced = 0;
+  }
+  txn->prepared = 0;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1982,6 +2052,54 @@ static void *repro_hcr_apply_direct_patch(void *entry, const uint8_t *patch_byte
   (void)patch_bytes;
   (void)patch_len;
   return NULL;
+}
+#endif
+
+#if !defined(REPRO_HCR_TARGET_LINUX_X86_64)
+/*
+ * HLX-M8, off Linux/x86_64: the Phase F / Phase G boundary is NOT exposed.
+ *
+ * The Apple arm and the generic fallback still publish through a single
+ * `repro_hcr_apply_direct_patch` call, so there is no point at which the
+ * in-memory link has completed and target text is still untouched. The
+ * rb_hcr_* lifecycle therefore runs its Phases F and G together on these
+ * hosts, and a §3.3 step 38 late-load failure is indistinguishable from a
+ * Phase G failure here. That is stated rather than papered over: splitting
+ * the Mach-O publication path is a macOS-milestone deliverable, not this
+ * one's, and the campaign's rule is that no macOS outcome changes here.
+ */
+typedef struct repro_hcr_direct_patch_txn {
+  void *entry;
+  const uint8_t *patch_bytes;
+  size_t patch_len;
+  int prepared;
+} repro_hcr_direct_patch_txn;
+
+static int repro_hcr_prepare_direct_patch(repro_hcr_direct_patch_txn *txn,
+                                          void *entry,
+                                          const uint8_t *patch_bytes,
+                                          size_t patch_len) {
+  memset(txn, 0, sizeof(*txn));
+  txn->entry = entry;
+  txn->patch_bytes = patch_bytes;
+  txn->patch_len = patch_len;
+  if (entry == NULL || patch_bytes == NULL || patch_len == 0) {
+    return -1;
+  }
+  txn->prepared = 1;
+  return 0;
+}
+
+static void *repro_hcr_commit_direct_patch(repro_hcr_direct_patch_txn *txn) {
+  if (!txn->prepared) {
+    return NULL;
+  }
+  return repro_hcr_apply_direct_patch(txn->entry, txn->patch_bytes,
+                                      txn->patch_len);
+}
+
+static void repro_hcr_abort_direct_patch(repro_hcr_direct_patch_txn *txn) {
+  txn->prepared = 0;
 }
 #endif
 
@@ -2582,20 +2700,46 @@ static const char *repro_hcr_skipped_functions_fragment(
 #endif
 }
 
+/*
+ * DEFECT FOUND AND FIXED 2026-09-18 (HLX-M8), and it pre-dates this milestone.
+ *
+ * `repro_hcr_patch_failed_json` pasted `message` into the JSON document raw.
+ * Most refusal strings are plain text, but the ELF resolver's are not: it
+ * QUOTES the symbol it could not resolve (`"hcr_lx_m8_absent" is in none of
+ * the N object(s) parsed …`, `repro_hcr_linux_elf_symbols.h:1390-1452`), so an
+ * unresolvable-symbol refusal produced a `patchFailed` frame the coordinator
+ * could not parse. The coordinator then raised a JSON error instead of
+ * reporting a named refusal — a diagnostic destroyed by the thing it was
+ * diagnosing, and an agent whose ONLY way of saying "I could not find that
+ * symbol" was to corrupt the session.
+ *
+ * Nothing drove an unresolvable symbol over the socket until HLX-M8's
+ * `integration_hcr_linux_rejected_patch_never_fires_before_reload` gate did,
+ * which is why it survived. The escaper already existed for the source-reload
+ * fields; it was simply defined BELOW this function and therefore unreachable
+ * from it. Forward-declared rather than duplicated: one escaper, one
+ * behaviour. The escape is applied only to the free-text field; `patchId` is
+ * coordinator-supplied and constrained by the schema.
+ */
+static void repro_hcr_json_escape(const char *value, char *out,
+                                  size_t out_cap);
+
 static char *repro_hcr_patch_failed_json(const char *patch_id,
                                          const char *changed_function,
                                          const char *message) {
+  char escaped[2048];
   char *json = (char *)malloc(4096);
   if (json == NULL) {
     return NULL;
   }
+  repro_hcr_json_escape(message, escaped, sizeof(escaped));
   snprintf(json, 4096,
            "{\"schemaId\":\"%s\",\"transportScope\":\"%s\","
            "\"protocolVersion\":1,\"messageId\":\"agent-patch-failed-1\","
            "\"kind\":\"patchFailed\",\"patchFailed\":{\"patchId\":\"%s\","
            "\"stage\":\"applyDirectPatchRequest\",\"message\":\"%s\"%s}}",
            REPRO_HCR_PROTOCOL_SCHEMA, REPRO_HCR_TRANSPORT_SCOPE,
-           patch_id == NULL ? "" : patch_id, message,
+           patch_id == NULL ? "" : patch_id, escaped,
            repro_hcr_skipped_functions_fragment(changed_function));
   return json;
 }
@@ -3321,6 +3465,827 @@ cleanup:
   return rc;
 }
 
+/*
+ * ===========================================================================
+ * HLX-M8 — the rb_hcr_* application ABI, and the reload lifecycle behind it.
+ *
+ * Specified by:
+ *   - reprobuild-specs/HCR/HCR-Overview.md § 13 (the API), § 7.4 (the
+ *     layout-change acceptance rule).
+ *   - reprobuild-specs/HCR/Patch-Loading-Lifecycle.md § 3.1 (the NORMATIVE
+ *     phase order), § 3.2 (Direct Patch Injection keeps that structure),
+ *     § 3.3 step 38 (late load failure), § 3.4 (synchronized vs automatic).
+ *   - reprobuild-specs/HCR/Linux-ELF-Provider.md § 9 (TLS).
+ * Bound by IsoNim at isonim/src/isonim/native/hcr.nim, whose test double
+ * isonim/tests/helpers/hcr_stub.nim is the cross-repo shape contract.
+ *
+ * THE PHASE ORDER, which is the thing most worth getting right here.
+ * § 3.1 numbers the steps and says they "must execute in the specified order":
+ *
+ *   prepare (C/D)  parse, § 7.4 acceptance, symbol resolution, byte decode.
+ *                  Touches no target memory and fires no callback, so a
+ *                  refusal here leaves the process byte-identical. This is
+ *                  HLX-M8's "before_reload fires only after prepare has fully
+ *                  succeeded" — the IsoNim never-blank-the-surface contract.
+ *   latch          the introspection window opens (see OPEN-1 below).
+ *   Phase E 12-15  before_reload callbacks. OLD code is still the only code in
+ *                  the process; the application serializes and destroys.
+ *   Phase F 16-20  the load. Direct Patch Injection replaces it with the
+ *                  in-memory link (§ 3.2): allocate the body page, copy the
+ *                  bytes, plan the branch. Still no target write.
+ *   Phase G 21-27  trampolines. The single naturally aligned 8-byte store.
+ *                  NEW CODE BECOMES LIVE HERE.
+ *   Phase H 28-29  after_reload callbacks. New code is live; the application
+ *                  recreates and deserializes.
+ *
+ * This was contested: IsoNim's design doc had before_reload AFTER trampoline
+ * installation. It was adjudicated on 2026-09-17 in favour of the order above
+ * and IsoNim was re-shaped; Patch-Loading-Lifecycle.md is unamended. The
+ * ordering is not a convention that could have gone the other way — at Phase E
+ * nothing is loaded and no prologue is overwritten, so a before-reload callback
+ * physically cannot observe new code.
+ *
+ * OPEN-1 — WHEN THE INTROSPECTION WINDOW OPENS. § 13.6's own usage example
+ * calls rb_hcr_type_changed INSIDE a before-reload callback, so the answer set
+ * must already describe the incoming patch by Phase E; HLX-M8 says it must
+ * describe the APPLIED one. The only latch point at which both are true is the
+ * instant prepare succeeds — after the last point a patch can be refused
+ * outright, before the first before-callback. A patch refused in prepare never
+ * reaches the latch, so "requested" and "applied" stay distinct, which is the
+ * whole of HLX-M8's rb_hcr_file_changed deliverable. Same choice the IsoNim
+ * stub documents, arrived at from the same two sentences.
+ *
+ * OPEN-5 — WHAT STEP 38 CANNOT TELL THE APPLICATION. Step 38 obliges this
+ * agent to fire after_reload with ZERO changed_types when the load fails after
+ * before_reload has run. But zero changed_types is also what an ordinary patch
+ * with no layout change carries, RbHcrReloadInfo has no status field, and
+ * rb_hcr_file_changed is defined over the APPLIED reload so it answers "no"
+ * both for a failed load and for a file that was simply not in the patch. An
+ * application restricted to the ten PORTABLE rb_hcr_* functions therefore
+ * cannot distinguish "the patch failed, restore what you saved" from "the
+ * patch applied and changed no layouts". No discriminator is invented in that
+ * set: adding one is an ABI change owned by HCR-Overview § 13.3, and it is
+ * raised as an open question rather than answered in code.
+ *
+ * Stated precisely, because the difference matters to anyone reading this as a
+ * claim about the whole header: the repro_hcr_rb_* evidence functions below
+ * DO separate the two cases (repro_hcr_rb_last_code_swapped answers 0 for a
+ * failed load and 1 for an applied no-layout-change patch). They are this
+ * provider's own surface, not part of § 13's portable set and not bound by
+ * IsoNim, so they are not an answer to OPEN-5 — but "CANNOT distinguish" would
+ * be false about the header as shipped.
+ * ===========================================================================
+ */
+
+#define RB_HCR_MAX_CALLBACKS 64
+#define RB_HCR_MAX_MANAGED_TYPES 128
+#define RB_HCR_MAX_CHANGED_FILES 64
+#define RB_HCR_MAX_CHANGED_TYPES 64
+#define RB_HCR_TRACE_CAPACITY 512
+#define RB_HCR_DIAGNOSTIC_CAPACITY 1024
+
+typedef struct {
+  RbHcrReloadCallback callback;
+  void *user_data;
+} rb_hcr_callback_entry;
+
+typedef struct {
+  char *name;
+  uint32_t old_size;
+  uint32_t new_size;
+} rb_hcr_type_change_record;
+
+static rb_hcr_callback_entry rb_hcr_before_callbacks[RB_HCR_MAX_CALLBACKS];
+static size_t rb_hcr_before_callback_count = 0;
+
+static rb_hcr_callback_entry rb_hcr_after_callbacks[RB_HCR_MAX_CALLBACKS];
+static size_t rb_hcr_after_callback_count = 0;
+
+/* § 13.2: "the canonical type name as it appears in debug info". The registry
+ * stores the caller's `const char*` and does NOT copy it — matching the shipped
+ * baseline this replaced, and matching what the IsoNim stub records as pinned.
+ * Matching is exact strcmp; there is no glob (stub OPEN-2). */
+static const char *rb_hcr_managed_types[RB_HCR_MAX_MANAGED_TYPES];
+static size_t rb_hcr_managed_type_count = 0;
+
+/* The introspection window: what the most recent APPLIED reload listed.
+ * Owned copies, because the wire buffer they were parsed out of is freed when
+ * the frame is. */
+typedef struct {
+  char *files[RB_HCR_MAX_CHANGED_FILES];
+  size_t file_count;
+  char *types[RB_HCR_MAX_CHANGED_TYPES];
+  size_t type_count;
+} rb_hcr_applied_window;
+
+static rb_hcr_applied_window rb_hcr_applied;
+static rb_hcr_applied_window rb_hcr_applied_saved;
+
+/* Evidence surface. Every field below is a read of state the production
+ * lifecycle already recorded; nothing here is written by a test. The lifecycle
+ * trace is the same vocabulary the IsoNim stub emits, so the two repos'
+ * gates assert the same words. */
+static char rb_hcr_trace[RB_HCR_TRACE_CAPACITY];
+static size_t rb_hcr_trace_len = 0;
+static int rb_hcr_last_before_fired = 0;
+static int rb_hcr_last_after_fired = 0;
+static int rb_hcr_last_code_swapped = 0;
+static char rb_hcr_last_rejection[RB_HCR_DIAGNOSTIC_CAPACITY];
+static char rb_hcr_last_unmanaged[RB_HCR_DIAGNOSTIC_CAPACITY];
+static unsigned long rb_hcr_apply_calls = 0;
+
+static void rb_hcr_trace_reset(void) {
+  rb_hcr_trace[0] = '\0';
+  rb_hcr_trace_len = 0;
+}
+
+static void rb_hcr_trace_add(const char *phase) {
+  size_t need = strlen(phase);
+  if (rb_hcr_trace_len + need + 2 >= sizeof(rb_hcr_trace)) {
+    return;
+  }
+  if (rb_hcr_trace_len > 0) {
+    rb_hcr_trace[rb_hcr_trace_len++] = ',';
+  }
+  memcpy(rb_hcr_trace + rb_hcr_trace_len, phase, need);
+  rb_hcr_trace_len += need;
+  rb_hcr_trace[rb_hcr_trace_len] = '\0';
+}
+
+const char *repro_hcr_rb_lifecycle_trace(void) { return rb_hcr_trace; }
+int repro_hcr_rb_last_before_callbacks_fired(void) {
+  return rb_hcr_last_before_fired;
+}
+int repro_hcr_rb_last_after_callbacks_fired(void) {
+  return rb_hcr_last_after_fired;
+}
+int repro_hcr_rb_last_code_swapped(void) { return rb_hcr_last_code_swapped; }
+const char *repro_hcr_rb_last_rejection(void) { return rb_hcr_last_rejection; }
+const char *repro_hcr_rb_last_unmanaged_types(void) {
+  return rb_hcr_last_unmanaged;
+}
+unsigned long repro_hcr_rb_apply_reload_calls(void) {
+  return rb_hcr_apply_calls;
+}
+
+/*
+ * Registry evidence — the half of § 13 that has no platform in it.
+ *
+ * Declared and motivated in repro_hcr_agent.h next to the seven lifecycle
+ * readers. Reads only; the out-of-range answers are 0/NULL so a gate that
+ * walks past `*_count()` gets a value rather than a fault.
+ */
+size_t repro_hcr_rb_before_callback_count(void) {
+  return rb_hcr_before_callback_count;
+}
+
+size_t repro_hcr_rb_after_callback_count(void) {
+  return rb_hcr_after_callback_count;
+}
+
+RbHcrReloadCallback repro_hcr_rb_before_callback_at(size_t index) {
+  if (index >= rb_hcr_before_callback_count) {
+    return NULL;
+  }
+  return rb_hcr_before_callbacks[index].callback;
+}
+
+void *repro_hcr_rb_before_user_data_at(size_t index) {
+  if (index >= rb_hcr_before_callback_count) {
+    return NULL;
+  }
+  return rb_hcr_before_callbacks[index].user_data;
+}
+
+RbHcrReloadCallback repro_hcr_rb_after_callback_at(size_t index) {
+  if (index >= rb_hcr_after_callback_count) {
+    return NULL;
+  }
+  return rb_hcr_after_callbacks[index].callback;
+}
+
+void *repro_hcr_rb_after_user_data_at(size_t index) {
+  if (index >= rb_hcr_after_callback_count) {
+    return NULL;
+  }
+  return rb_hcr_after_callbacks[index].user_data;
+}
+
+size_t repro_hcr_rb_managed_type_count(void) {
+  return rb_hcr_managed_type_count;
+}
+
+const char *repro_hcr_rb_managed_type_at(size_t index) {
+  if (index >= rb_hcr_managed_type_count) {
+    return NULL;
+  }
+  return rb_hcr_managed_types[index];
+}
+
+/* -------------------------------------------------------------------------
+ * § 3.4 — synchronized vs automatic mode.
+ *
+ * Automatic is the default, and with no callbacks registered the lifecycle
+ * below is observationally identical to the pre-HLX-M8 agent: the same wire
+ * messages in the same order through the same publication path. In
+ * synchronized mode the frame handler parks the patch and answers nothing;
+ * rb_hcr_wants_reload() then answers true and the application's own thread
+ * runs every phase inside rb_hcr_apply_reload(), which is what an application
+ * with a frame loop needs — the callbacks must not run on the agent thread
+ * while the renderer is mid-frame.
+ * ---------------------------------------------------------------------- */
+static int rb_hcr_synchronized_mode = -1;
+
+static int rb_hcr_synchronized(void) {
+  if (rb_hcr_synchronized_mode < 0) {
+    const char *value = getenv("REPRO_HCR_SYNCHRONIZED");
+    rb_hcr_synchronized_mode =
+        (value != NULL && value[0] != '\0' && value[0] != '0') ? 1 : 0;
+  }
+  return rb_hcr_synchronized_mode;
+}
+
+void repro_hcr_agent_set_synchronized_mode(int enabled) {
+  rb_hcr_synchronized_mode = enabled ? 1 : 0;
+}
+
+int repro_hcr_agent_synchronized_mode(void) { return rb_hcr_synchronized(); }
+
+/* -------------------------------------------------------------------------
+ * The parsed patch request. Owns every string in it.
+ * ---------------------------------------------------------------------- */
+typedef struct {
+  int active;
+  int fd;
+  repro_hcr_agent_thread_args *args;
+  char *raw;
+  char *patch_id;
+  char *changed_function;
+  char *target_symbol;
+  char *patch_hex;
+  char *debug_hex;
+  char *unwind_hex;
+  char *debug_digest;
+  char *unwind_digest;
+  char *files[RB_HCR_MAX_CHANGED_FILES];
+  size_t file_count;
+  rb_hcr_type_change_record types[RB_HCR_MAX_CHANGED_TYPES];
+  size_t type_count;
+} rb_hcr_reload_request;
+
+static rb_hcr_reload_request rb_hcr_pending;
+
+static void rb_hcr_request_release(rb_hcr_reload_request *req) {
+  size_t i;
+  free(req->raw);
+  free(req->patch_id);
+  free(req->changed_function);
+  free(req->target_symbol);
+  free(req->patch_hex);
+  free(req->debug_hex);
+  free(req->unwind_hex);
+  free(req->debug_digest);
+  free(req->unwind_digest);
+  for (i = 0; i < req->file_count; ++i) {
+    free(req->files[i]);
+  }
+  for (i = 0; i < req->type_count; ++i) {
+    free(req->types[i].name);
+  }
+  memset(req, 0, sizeof(*req));
+}
+
+/* -------------------------------------------------------------------------
+ * JSON array readers. The agent's parser is a string scanner by design (no
+ * allocator-heavy JSON library in a process that may be mid-quiescence), so
+ * these follow the same shape as the single-value readers above.
+ * ---------------------------------------------------------------------- */
+static size_t repro_hcr_json_array_strings(const char *json, const char *key,
+                                           char **out, size_t max_out) {
+  const char *p = strstr(json, key);
+  size_t count = 0;
+  if (p == NULL) {
+    return 0;
+  }
+  p = strchr(p + strlen(key), '[');
+  if (p == NULL) {
+    return 0;
+  }
+  p++;
+  for (;;) {
+    const char *end;
+    p = repro_hcr_skip_ws(p);
+    if (*p == '\0' || *p == ']') {
+      break;
+    }
+    if (*p == ',') {
+      p++;
+      continue;
+    }
+    if (*p != '"') {
+      break;
+    }
+    p++;
+    end = p;
+    while (*end != '\0' && !(*end == '"' && (end == p || end[-1] != '\\'))) {
+      end++;
+    }
+    if (*end != '"') {
+      break;
+    }
+    if (count < max_out) {
+      char *value = repro_hcr_strdup_range(p, end);
+      if (value != NULL) {
+        out[count++] = value;
+      }
+    }
+    p = end + 1;
+  }
+  return count;
+}
+
+static uint32_t repro_hcr_json_u32_after(const char *json, const char *key) {
+  const char *p = strstr(json, key);
+  if (p == NULL) {
+    return 0;
+  }
+  p = strchr(p + strlen(key), ':');
+  if (p == NULL) {
+    return 0;
+  }
+  p = repro_hcr_skip_ws(p + 1);
+  return (uint32_t)strtoul(p, NULL, 10);
+}
+
+/* `changedTypes` is an array of flat objects, so a `{`..`}` walk is enough and
+ * no nesting has to be tracked. A malformed element ends the scan rather than
+ * being guessed at — a half-read layout delta is worse than none. */
+static size_t repro_hcr_json_array_type_changes(
+    const char *json, const char *key, rb_hcr_type_change_record *out,
+    size_t max_out) {
+  const char *p = strstr(json, key);
+  size_t count = 0;
+  if (p == NULL) {
+    return 0;
+  }
+  p = strchr(p + strlen(key), '[');
+  if (p == NULL) {
+    return 0;
+  }
+  p++;
+  for (;;) {
+    const char *close;
+    char *element;
+    char *name;
+    p = repro_hcr_skip_ws(p);
+    if (*p == '\0' || *p == ']') {
+      break;
+    }
+    if (*p == ',') {
+      p++;
+      continue;
+    }
+    if (*p != '{') {
+      break;
+    }
+    close = strchr(p, '}');
+    if (close == NULL) {
+      break;
+    }
+    element = repro_hcr_strdup_range(p, close + 1);
+    if (element == NULL) {
+      break;
+    }
+    name = repro_hcr_json_string_after(element, "\"typeName\"");
+    if (name != NULL && count < max_out) {
+      out[count].name = name;
+      out[count].old_size = repro_hcr_json_u32_after(element, "\"oldSize\"");
+      out[count].new_size = repro_hcr_json_u32_after(element, "\"newSize\"");
+      count++;
+    } else {
+      free(name);
+    }
+    free(element);
+    p = close + 1;
+  }
+  return count;
+}
+
+/* -------------------------------------------------------------------------
+ * The introspection window.
+ * ---------------------------------------------------------------------- */
+static void rb_hcr_window_clear(rb_hcr_applied_window *window) {
+  size_t i;
+  for (i = 0; i < window->file_count; ++i) {
+    free(window->files[i]);
+  }
+  for (i = 0; i < window->type_count; ++i) {
+    free(window->types[i]);
+  }
+  memset(window, 0, sizeof(*window));
+}
+
+/* Latch: the previous window is SAVED rather than dropped, because Phase F can
+ * still fail below and rb_hcr_file_changed is defined over the most recent
+ * APPLIED reload. A patch that dies at load was not applied, so it must not
+ * move the answer — and by then the before-callbacks have already run and may
+ * already have consulted it. § 3.3 step 38's "any introspection window latched
+ * before Phase E has to be rolled back". */
+static void rb_hcr_window_latch(const rb_hcr_reload_request *req) {
+  size_t i;
+  rb_hcr_window_clear(&rb_hcr_applied_saved);
+  rb_hcr_applied_saved = rb_hcr_applied;
+  memset(&rb_hcr_applied, 0, sizeof(rb_hcr_applied));
+  for (i = 0; i < req->file_count; ++i) {
+    char *copy = repro_hcr_strdup_range(req->files[i],
+                                        req->files[i] + strlen(req->files[i]));
+    if (copy != NULL) {
+      rb_hcr_applied.files[rb_hcr_applied.file_count++] = copy;
+    }
+  }
+  for (i = 0; i < req->type_count; ++i) {
+    const char *name = req->types[i].name;
+    char *copy = repro_hcr_strdup_range(name, name + strlen(name));
+    if (copy != NULL) {
+      rb_hcr_applied.types[rb_hcr_applied.type_count++] = copy;
+    }
+  }
+}
+
+static void rb_hcr_window_unlatch(void) {
+  rb_hcr_window_clear(&rb_hcr_applied);
+  rb_hcr_applied = rb_hcr_applied_saved;
+  memset(&rb_hcr_applied_saved, 0, sizeof(rb_hcr_applied_saved));
+}
+
+/* -------------------------------------------------------------------------
+ * Callback dispatch.
+ * ---------------------------------------------------------------------- */
+static int rb_hcr_fire(const rb_hcr_callback_entry *list, size_t count,
+                       const rb_hcr_reload_request *req,
+                       int include_changed_types) {
+  /* § 13.3: the agent owns this storage and the application must not retain
+   * pointers past the callback's return. Stack-local on purpose. */
+  const char *files[RB_HCR_MAX_CHANGED_FILES];
+  RbHcrTypeChange types[RB_HCR_MAX_CHANGED_TYPES];
+  rb_hcr_callback_entry snapshot[RB_HCR_MAX_CALLBACKS];
+  RbHcrReloadInfo info;
+  size_t i;
+  int fired = 0;
+
+  for (i = 0; i < req->file_count; ++i) {
+    files[i] = req->files[i];
+  }
+  if (include_changed_types) {
+    for (i = 0; i < req->type_count; ++i) {
+      types[i].type_name = req->types[i].name;
+      types[i].old_size = req->types[i].old_size;
+      types[i].new_size = req->types[i].new_size;
+    }
+  }
+
+  info.changed_files = req->file_count > 0 ? files : NULL;
+  info.changed_files_count = (uint32_t)req->file_count;
+  info.changed_types =
+      (include_changed_types && req->type_count > 0) ? types : NULL;
+  info.changed_types_count =
+      include_changed_types ? (uint32_t)req->type_count : 0u;
+
+  /* Iterate over a copy: a callback may register or remove callbacks, and the
+   * live array must not be re-read mid-dispatch. Registration order is the
+   * dispatch order (§ 13.3). */
+  memcpy(snapshot, list, count * sizeof(rb_hcr_callback_entry));
+  for (i = 0; i < count; ++i) {
+    if (snapshot[i].callback != NULL) {
+      snapshot[i].callback(&info, snapshot[i].user_data);
+      fired++;
+    }
+  }
+  return fired;
+}
+
+static int rb_hcr_is_managed(const char *type_name) {
+  size_t i;
+  if (type_name == NULL) {
+    return 0;
+  }
+  for (i = 0; i < rb_hcr_managed_type_count; ++i) {
+    if (rb_hcr_managed_types[i] != NULL &&
+        strcmp(rb_hcr_managed_types[i], type_name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* -------------------------------------------------------------------------
+ * The lifecycle itself.
+ * ---------------------------------------------------------------------- */
+static void rb_hcr_reject(rb_hcr_reload_request *req, const char *reason) {
+  snprintf(rb_hcr_last_rejection, sizeof(rb_hcr_last_rejection), "%s", reason);
+  rb_hcr_trace_add("reject");
+  repro_hcr_send_owned_json(
+      req->fd, repro_hcr_lifecycle_json(
+                   req->patch_id == NULL ? "" : req->patch_id,
+                   "hcr/patchFailed", 2));
+  repro_hcr_send_owned_json(
+      req->fd, repro_hcr_patch_failed_json(req->patch_id, req->changed_function,
+                                           reason));
+}
+
+static void rb_hcr_run_lifecycle(rb_hcr_reload_request *req) {
+  void *entry;
+  uint8_t *patch_bytes = NULL;
+  uint8_t *debug_bytes = NULL;
+  uint8_t *unwind_bytes = NULL;
+  size_t patch_len = 0;
+  size_t debug_len = 0;
+  size_t unwind_len = 0;
+  void *dispatch_entry = NULL;
+  repro_hcr_direct_patch_txn txn;
+  char failure_detail[832];
+  const char *failure_message = "C agent failed to apply direct patch";
+  int ok = 0;
+  size_t i;
+
+  rb_hcr_trace_reset();
+  rb_hcr_last_before_fired = 0;
+  rb_hcr_last_after_fired = 0;
+  rb_hcr_last_code_swapped = 0;
+  rb_hcr_last_rejection[0] = '\0';
+  rb_hcr_last_unmanaged[0] = '\0';
+  failure_detail[0] = '\0';
+
+  /* ---- prepare (Phases C/D). No target memory, no callback. ------------ */
+  rb_hcr_trace_add("prepare");
+
+  if (req->patch_id == NULL) {
+    rb_hcr_reject(req, "patch request is missing patchId");
+    return;
+  }
+  if (req->changed_function == NULL) {
+    rb_hcr_reject(req, "patch request is missing changed function");
+    return;
+  }
+  if (req->patch_hex == NULL) {
+    rb_hcr_reject(req, "patch request is missing direct patch bytes");
+    return;
+  }
+
+#if defined(REPRO_HCR_FALSIFY_LATCH_ON_REQUEST)
+  /* FALSIFIER BUILD ONLY. Latches the introspection window on the REQUESTED
+   * patch instead of the accepted one, which is the defect HLX-M8's
+   * rb_hcr_file_changed deliverable names: "conflating requested with applied
+   * tells a program to migrate state it does not have". A gate that asserts
+   * rb_hcr_file_changed answers false after a refused patch must go RED when
+   * this is defined, or it was asserting nothing. Never defined by any
+   * production or default test build. */
+  rb_hcr_window_latch(req);
+#endif
+
+  /* § 7.4 — the acceptance rule. "If all layout-changed types in a patch are
+   * managed, the patch is accepted; if any are unmanaged, the patch is
+   * rejected with IncompatibleChange listing the unmanaged types." Evaluated
+   * BEFORE anything else can fire, so a rejected patch leaves the process
+   * untouched — HLX-M8's never-blank-the-surface deliverable. */
+  {
+    size_t unmanaged = 0;
+    for (i = 0; i < req->type_count; ++i) {
+      if (!rb_hcr_is_managed(req->types[i].name)) {
+        size_t used = strlen(rb_hcr_last_unmanaged);
+        snprintf(rb_hcr_last_unmanaged + used,
+                 sizeof(rb_hcr_last_unmanaged) - used, "%s%s",
+                 unmanaged == 0 ? "" : ", ", req->types[i].name);
+        unmanaged++;
+      }
+    }
+    if (unmanaged > 0) {
+      char message[RB_HCR_DIAGNOSTIC_CAPACITY + 64];
+      snprintf(message, sizeof(message),
+               "IncompatibleChange: unmanaged layout-changed types: %s",
+               rb_hcr_last_unmanaged);
+      rb_hcr_reject(req, message);
+      return;
+    }
+  }
+
+  /* § 3.4 step 43: "The agent must reject automatic mode for patches with
+   * layout changes and log a diagnostic instructing the application to use
+   * synchronized mode." A layout migration runs application code in both
+   * callback sets; running it on the agent thread while the application is
+   * mid-frame is the hazard the rule exists for. */
+  if (req->type_count > 0 && !rb_hcr_synchronized()) {
+    rb_hcr_reject(req,
+                  "IncompatibleChange: patch carries layout changes but the "
+                  "agent is in automatic mode; the application must enable "
+                  "synchronized mode (REPRO_HCR_SYNCHRONIZED=1 or "
+                  "repro_hcr_agent_set_synchronized_mode) and drive "
+                  "rb_hcr_apply_reload");
+    return;
+  }
+
+  entry = repro_hcr_find_symbol(req->args, req->target_symbol,
+                                req->changed_function);
+  if (entry == NULL) {
+    const char *symbol_detail = repro_hcr_symbol_failure_detail();
+    if (symbol_detail != NULL && symbol_detail[0] != '\0' &&
+        strcmp(symbol_detail, "ok") != 0) {
+      snprintf(failure_detail, sizeof(failure_detail),
+               "symbol resolution refused: %s", symbol_detail);
+      rb_hcr_reject(req, failure_detail);
+    } else {
+      rb_hcr_reject(req, "target symbol was not found in process");
+    }
+    return;
+  }
+
+  patch_bytes = repro_hcr_bytes_from_hex(req->patch_hex, &patch_len);
+  if (patch_bytes == NULL) {
+    rb_hcr_reject(req, "direct patch bytes are not valid hex");
+    return;
+  }
+
+  /* Prepare has fully succeeded. From here the patch has been accepted and the
+   * lifecycle runs to completion; only Phases F and G can still fail, and both
+   * of those owe the application an after_reload. */
+  repro_hcr_send_owned_json(
+      req->fd, repro_hcr_lifecycle_json(req->patch_id, "hcr/patchApplying", 1));
+
+  /* ---- latch (OPEN-1) -------------------------------------------------- */
+  rb_hcr_window_latch(req);
+  rb_hcr_trace_add("latch");
+
+  /* ---- Phase E (12-15) ------------------------------------------------- */
+#if !defined(REPRO_HCR_FALSIFY_BEFORE_RELOAD_AFTER_SWAP)
+  rb_hcr_trace_add("before");
+  rb_hcr_last_before_fired =
+      rb_hcr_fire(rb_hcr_before_callbacks, rb_hcr_before_callback_count, req, 1);
+#endif
+
+  /* ---- Phase F (16-20): the in-memory link (§ 3.2) --------------------- */
+  rb_hcr_trace_add("load");
+  if (repro_hcr_prepare_direct_patch(&txn, entry, patch_bytes, patch_len) != 0) {
+    /* § 3.3 STEP 38. Before-reload has already fired, so the agent MUST still
+     * invoke after-reload — with ZERO changed_types — so the application can
+     * restore what it saved. No code was swapped, nothing is marked applied,
+     * and the window latched above is rolled back so rb_hcr_file_changed does
+     * not answer true for a reload that never happened. */
+    const char *detail = repro_hcr_direct_patch_failure_detail();
+    repro_hcr_abort_direct_patch(&txn);
+    rb_hcr_window_unlatch();
+    rb_hcr_trace_add("load-failed");
+#if !defined(REPRO_HCR_FALSIFY_SKIP_STEP38)
+    rb_hcr_trace_add("after");
+    rb_hcr_last_after_fired = rb_hcr_fire(rb_hcr_after_callbacks,
+                                          rb_hcr_after_callback_count, req, 0);
+#endif
+    if (detail != NULL && detail[0] != '\0') {
+      snprintf(failure_detail, sizeof(failure_detail),
+               "direct patch refused: %s", detail);
+      failure_message = failure_detail;
+    } else {
+      failure_message = "direct patch in-memory link failed";
+    }
+    snprintf(rb_hcr_last_rejection, sizeof(rb_hcr_last_rejection), "%s",
+             failure_message);
+    repro_hcr_send_owned_json(
+        req->fd,
+        repro_hcr_lifecycle_json(req->patch_id, "hcr/patchFailed", 2));
+    repro_hcr_send_owned_json(
+        req->fd, repro_hcr_patch_failed_json(req->patch_id,
+                                             req->changed_function,
+                                             failure_message));
+    free(patch_bytes);
+    return;
+  }
+
+  /* ---- Phase G (21-27): NEW CODE BECOMES LIVE -------------------------- */
+  dispatch_entry = repro_hcr_commit_direct_patch(&txn);
+  ok = dispatch_entry != NULL;
+  repro_hcr_set_shared_library_positive_path(0);
+  if (getenv("REPRO_HCR_TEST_SHARED_LIBRARY_POSITIVE_PATH") != NULL) {
+    repro_hcr_set_shared_library_positive_path(1);
+  }
+  if (!ok) {
+    /* The commit refused or rolled back. Target text is either untouched or
+     * restored (HLX-M3), but before_reload has fired, so the same obligation
+     * as step 38 applies: after_reload with zero changed_types. */
+    const char *detail = repro_hcr_direct_patch_failure_detail();
+    rb_hcr_window_unlatch();
+    rb_hcr_trace_add("commit-failed");
+    rb_hcr_trace_add("after");
+    rb_hcr_last_after_fired = rb_hcr_fire(rb_hcr_after_callbacks,
+                                          rb_hcr_after_callback_count, req, 0);
+    if (detail != NULL && detail[0] != '\0') {
+      snprintf(failure_detail, sizeof(failure_detail),
+               "direct patch refused: %s", detail);
+      failure_message = failure_detail;
+    } else {
+      failure_message = "direct patch branch installation failed";
+    }
+    snprintf(rb_hcr_last_rejection, sizeof(rb_hcr_last_rejection), "%s",
+             failure_message);
+    repro_hcr_send_owned_json(
+        req->fd,
+        repro_hcr_lifecycle_json(req->patch_id, "hcr/patchFailed", 2));
+    repro_hcr_send_owned_json(
+        req->fd, repro_hcr_patch_failed_json(req->patch_id,
+                                             req->changed_function,
+                                             failure_message));
+    free(patch_bytes);
+    return;
+  }
+  rb_hcr_last_code_swapped = 1;
+  rb_hcr_trace_add("trampolines");
+
+#if defined(REPRO_HCR_FALSIFY_BEFORE_RELOAD_AFTER_SWAP)
+  /* FALSIFIER BUILD ONLY. This is the ordering IsoNim's design doc asked for
+   * and Patch-Loading-Lifecycle.md § 3.1 forbids: before-reload fired AFTER
+   * trampoline installation, so the callback observes NEW code. Any gate whose
+   * before-callback asserts it still sees the OLD body must go RED here. It is
+   * a falsifier and not an option: the resolution of 2026-09-17 settled the
+   * order, and this exists only so the gate can prove it measures it. */
+  rb_hcr_trace_add("before");
+  rb_hcr_last_before_fired =
+      rb_hcr_fire(rb_hcr_before_callbacks, rb_hcr_before_callback_count, req, 1);
+#endif
+
+  /* HLX-M7 — record the code-version boundary while the words that changed are
+   * still in `repro_hcr_lx_last_report`, and BEFORE anything the new code can
+   * emit. The after-reload callbacks below run NEW code, so this must precede
+   * them or the recorded boundary lands in the wrong place. */
+  repro_hcr_notify_code_patch(req->patch_id, req->changed_function,
+                              req->target_symbol,
+                              req->args->support_profile, entry, patch_bytes,
+                              patch_len);
+
+  /* Phase I step 31 — debugger and unwinder registration. Kept here, between
+   * the commit and the after-reload callbacks, exactly where it was before
+   * HLX-M8: a debugger that stops inside an after-reload callback must already
+   * be able to attribute the patched frame. A failure here is reported on the
+   * wire, but the code IS live and the layouts DID change, so the after-reload
+   * callbacks below still receive the FULL changed_types — this is not step 38,
+   * and telling the application "nothing to migrate" would be false. */
+  if (req->debug_hex != NULL) {
+    repro_hcr_jit_registration_evidence jit_evidence;
+    const char *debug_symbol = req->changed_function != NULL
+                                   ? req->changed_function
+                                   : req->target_symbol;
+    debug_bytes = repro_hcr_bytes_from_hex(req->debug_hex, &debug_len);
+    if (debug_bytes == NULL || debug_len == 0 ||
+        repro_hcr_register_jit_debug_object(
+            debug_bytes, (uint64_t)debug_len,
+            (uint64_t)(uintptr_t)dispatch_entry, debug_symbol,
+            &jit_evidence) != 0) {
+      ok = 0;
+      failure_message = "JIT debug object registration failed";
+    }
+  }
+  if (ok && req->unwind_hex != NULL) {
+    repro_hcr_unwind_registration_evidence unwind_evidence;
+    unwind_bytes = repro_hcr_bytes_from_hex(req->unwind_hex, &unwind_len);
+    if (unwind_bytes == NULL || unwind_len == 0 ||
+        repro_hcr_register_dynamic_eh_frame(
+            unwind_bytes, (uint64_t)unwind_len,
+            (uint64_t)(uintptr_t)dispatch_entry, (uint64_t)patch_len,
+            &unwind_evidence) != 0) {
+      ok = 0;
+      failure_message = "dynamic unwind registration failed";
+    }
+  }
+
+  /* ---- Phase H (28-29) ------------------------------------------------- */
+  rb_hcr_trace_add("after");
+  rb_hcr_last_after_fired =
+      rb_hcr_fire(rb_hcr_after_callbacks, rb_hcr_after_callback_count, req, 1);
+
+  if (ok) {
+    repro_hcr_send_owned_json(
+        req->fd,
+        repro_hcr_lifecycle_json(req->patch_id, "hcr/patchApplied", 2));
+    repro_hcr_send_owned_json(
+        req->fd,
+        repro_hcr_patch_applied_json(req->patch_id, req->changed_function,
+                                     req->debug_digest, req->unwind_digest,
+                                     entry, dispatch_entry,
+                                     repro_hcr_get_shared_library_positive_path()));
+  } else {
+    snprintf(rb_hcr_last_rejection, sizeof(rb_hcr_last_rejection), "%s",
+             failure_message);
+    repro_hcr_send_owned_json(
+        req->fd,
+        repro_hcr_lifecycle_json(req->patch_id, "hcr/patchFailed", 2));
+    repro_hcr_send_owned_json(
+        req->fd, repro_hcr_patch_failed_json(req->patch_id,
+                                             req->changed_function,
+                                             failure_message));
+  }
+
+  free(patch_bytes);
+  free(debug_bytes);
+  free(unwind_bytes);
+}
+
 static void repro_hcr_handle_patch_frame(repro_hcr_agent_thread_args *args,
                                          int fd, char *patch);
 
@@ -3464,130 +4429,48 @@ static void repro_hcr_handle_patch_frame(repro_hcr_agent_thread_args *args,
   return;
 #endif
 
-  int ok = 0;
-  size_t patch_len = 0;
-  size_t debug_len = 0;
-  size_t unwind_len = 0;
-  uint8_t *patch_bytes = NULL;
-  uint8_t *debug_bytes = NULL;
-  uint8_t *unwind_bytes = NULL;
-  void *dispatch_entry = NULL;
-  void *entry = repro_hcr_find_symbol(args, target_symbol, changed_function);
-  char failure_detail[832];
-  const char *failure_message = "C agent failed to apply direct patch";
-  failure_detail[0] = '\0';
-  if (patch_id == NULL) {
-    failure_message = "patch request is missing patchId";
-  } else if (changed_function == NULL) {
-    failure_message = "patch request is missing changed function";
-  } else if (patch_hex == NULL) {
-    failure_message = "patch request is missing direct patch bytes";
-  } else if (entry == NULL) {
-    const char *symbol_detail = repro_hcr_symbol_failure_detail();
-    if (symbol_detail != NULL && symbol_detail[0] != '\0' &&
-        strcmp(symbol_detail, "ok") != 0) {
-      snprintf(failure_detail, sizeof(failure_detail),
-               "symbol resolution refused: %s", symbol_detail);
-      failure_message = failure_detail;
-    } else {
-      failure_message = "target symbol was not found in process";
+  /* HLX-M8: everything below builds a request and hands it to the lifecycle.
+   * The publication itself has not moved — `rb_hcr_run_lifecycle` reaches the
+   * same `repro_hcr_prepare_direct_patch` / `repro_hcr_commit_direct_patch`
+   * pair `repro_hcr_apply_direct_patch` composes, sends the same wire messages
+   * in the same order, and with no application callbacks registered and no
+   * `changedTypes` in the request it is observationally the agent that shipped
+   * before this milestone. What is new is that the application now gets its
+   * two callbacks, on the two sides of the code swap. */
+  rb_hcr_reload_request request;
+  memset(&request, 0, sizeof(request));
+  request.fd = fd;
+  request.args = args;
+  request.raw = patch;
+  request.patch_id = patch_id;
+  request.changed_function = changed_function;
+  request.target_symbol = target_symbol;
+  request.patch_hex = patch_hex;
+  request.debug_hex = debug_hex;
+  request.unwind_hex = unwind_hex;
+  request.debug_digest = debug_digest;
+  request.unwind_digest = unwind_digest;
+  request.file_count = repro_hcr_json_array_strings(
+      patch, "\"changedFiles\"", request.files, RB_HCR_MAX_CHANGED_FILES);
+  request.type_count = repro_hcr_json_array_type_changes(
+      patch, "\"changedTypes\"", request.types, RB_HCR_MAX_CHANGED_TYPES);
+
+  if (rb_hcr_synchronized()) {
+    /* § 3.4 step 41: Phase E blocks until `rb_hcr_apply_reload()` is called.
+     * The request is parked and NOTHING is answered on the wire yet — the
+     * coordinator is waiting for the outcome of a lifecycle the application
+     * has not run. A second patch arriving while one is parked replaces it,
+     * which is § 3.4's coalescing. */
+    if (rb_hcr_pending.active) {
+      rb_hcr_request_release(&rb_hcr_pending);
     }
-  }
-  if (patch_id != NULL && changed_function != NULL && patch_hex != NULL &&
-      entry != NULL) {
-    patch_bytes = repro_hcr_bytes_from_hex(patch_hex, &patch_len);
-    if (patch_bytes != NULL) {
-      repro_hcr_send_owned_json(fd,
-        repro_hcr_lifecycle_json(patch_id, "hcr/patchApplying", 1));
-      void *patch_entry = repro_hcr_apply_direct_patch(entry, patch_bytes,
-                                                       patch_len);
-      dispatch_entry = patch_entry;
-      ok = dispatch_entry != NULL;
-      /* Direct trampoline patch is not a shared library positive path. */
-      repro_hcr_set_shared_library_positive_path(0);
-      if (getenv("REPRO_HCR_TEST_SHARED_LIBRARY_POSITIVE_PATH") != NULL) {
-        repro_hcr_set_shared_library_positive_path(1);
-      }
-      if (ok) {
-        /* HLX-M7 — record the code-version boundary while the words that
-         * changed are still in `repro_hcr_lx_last_report`, and BEFORE the
-         * lifecycle/patchApplied messages go out, so the response can say
-         * whether the trace carries the event.  Nothing after the publishing
-         * store may run before this: every event the target emits from here on
-         * was produced by the NEW code, and an event recorded late would put
-         * the boundary in the wrong place. */
-        repro_hcr_notify_code_patch(patch_id, changed_function, target_symbol,
-                                    args->support_profile, entry, patch_bytes,
-                                    patch_len);
-      }
-      if (!ok) {
-        const char *detail = repro_hcr_direct_patch_failure_detail();
-        if (detail != NULL && detail[0] != '\0') {
-          snprintf(failure_detail, sizeof(failure_detail),
-                   "direct patch refused: %s", detail);
-          failure_message = failure_detail;
-        } else {
-          failure_message = "direct patch branch installation failed";
-        }
-      }
-      if (ok && debug_hex != NULL) {
-        debug_bytes = repro_hcr_bytes_from_hex(debug_hex, &debug_len);
-        repro_hcr_jit_registration_evidence jit_evidence;
-        const char *debug_symbol =
-             changed_function != NULL ? changed_function : target_symbol;
-        if (debug_bytes == NULL || debug_len == 0 ||
-            repro_hcr_register_jit_debug_object(
-              debug_bytes, (uint64_t)debug_len,
-              (uint64_t)(uintptr_t)dispatch_entry, debug_symbol,
-              &jit_evidence) != 0) {
-          ok = 0;
-          failure_message = "JIT debug object registration failed";
-        }
-      }
-      if (ok && unwind_hex != NULL) {
-        unwind_bytes = repro_hcr_bytes_from_hex(unwind_hex, &unwind_len);
-        repro_hcr_unwind_registration_evidence unwind_evidence;
-        if (unwind_bytes == NULL || unwind_len == 0 ||
-            repro_hcr_register_dynamic_eh_frame(
-              unwind_bytes, (uint64_t)unwind_len,
-              (uint64_t)(uintptr_t)dispatch_entry, (uint64_t)patch_len,
-              &unwind_evidence) != 0) {
-          ok = 0;
-          failure_message = "dynamic unwind registration failed";
-        }
-      }
-    } else {
-      failure_message = "direct patch bytes are not valid hex";
-    }
+    rb_hcr_pending = request;
+    rb_hcr_pending.active = 1;
+    return;
   }
 
-  if (ok) {
-    repro_hcr_send_owned_json(fd,
-      repro_hcr_lifecycle_json(patch_id, "hcr/patchApplied", 2));
-    repro_hcr_send_owned_json(fd,
-      repro_hcr_patch_applied_json(patch_id, changed_function, debug_digest,
-                                   unwind_digest, entry, dispatch_entry,
-                                   repro_hcr_get_shared_library_positive_path()));
-  } else {
-    repro_hcr_send_owned_json(fd,
-      repro_hcr_lifecycle_json(patch_id == NULL ? "" : patch_id,
-                               "hcr/patchFailed", 2));
-    repro_hcr_send_owned_json(fd,
-      repro_hcr_patch_failed_json(patch_id, changed_function, failure_message));
-  }
-
-  free(patch_bytes);
-  free(debug_bytes);
-  free(unwind_bytes);
-  free(patch_id);
-  free(changed_function);
-  free(target_symbol);
-  free(patch_hex);
-  free(debug_hex);
-  free(unwind_hex);
-  free(debug_digest);
-  free(unwind_digest);
-  free(patch);
+  rb_hcr_run_lifecycle(&request);
+  rb_hcr_request_release(&request);
   /* No `close(fd)` and no `repro_hcr_free_args` here any more: the connection
    * and the args outlive a single patch now, and freeing them would have been
    * the one-patch-per-process limit relocated rather than removed. */
@@ -3898,57 +4781,64 @@ int repro_hcr_agent_poll_nonblocking(void) {
  * Specified in reprobuild-specs/HCR/HCR-Overview.md § 13.
  * Bound by IsoNim (isonim/src/isonim/native/hcr.nim).
  *
- * NOTE (HX-S-0 / NH-M5):
- * These functions provide the baseline exported ABI for the canonical shared
- * library librepro_hcr_agent.
+ * HLX-M8 replaced the baseline bodies that used to live here. The registry,
+ * the phase order and the lifecycle are defined above, next to the patch-frame
+ * handler that drives them; the ten exported functions below are the thin
+ * application-facing surface over that state.
  *
- * Milestone HLX-M8 on Linux owns the dynamic ELF patch-delivery implementation,
- * live callback dispatch, and managed-type layout-change verification. Companion
- * platform milestones own the corresponding engines on macOS and Windows.
+ * What changed, and what deliberately did not:
  *
- * Safe baseline behavior:
- * - rb_hcr_wants_reload() returns false (no patch pending).
- * - rb_hcr_apply_reload() is a safe no-op.
- * - rb_hcr_file_changed() returns false (answers true iff the most recent applied
- *   reload listed the file in appliedFiles; coordinated with GDScript-Hot-Reload §4.5).
- * - rb_hcr_type_changed() returns false.
- * - registration and callback functions maintain a baseline in-process registry.
+ *   - rb_hcr_wants_reload() was `return false`. It now answers whether a patch
+ *     is parked waiting for the application (§ 13.1: non-blocking, false when
+ *     nothing is pending).
+ *   - rb_hcr_apply_reload() was a commented no-op. It now runs the whole
+ *     § 3.1 lifecycle on the CALLER's thread, which is the point of
+ *     synchronized mode: the callbacks must not run on the agent thread while
+ *     the application is mid-frame.
+ *   - rb_hcr_file_changed() / rb_hcr_type_changed() were `return false`. They
+ *     now answer over the most recent APPLIED reload — never the most recent
+ *     requested one. A patch refused in prepare never latches, and a patch
+ *     that dies at Phase F un-latches (§ 3.3 step 38), because conflating
+ *     requested with applied tells a program to migrate state it does not
+ *     have (GDScript-Hot-Reload-Multi-Version-Sources.md § 4.5).
+ *   - the four registration functions and the two managed-type functions keep
+ *     the baseline's exact semantics — idempotent on (callback, user_data),
+ *     removal matching on both fields, de-duplication by name, the pointer
+ *     stored rather than copied, and a silent drop past the capacities. Those
+ *     were not placeholders; they are what the IsoNim stub records as pinned
+ *     by the shipped implementation, so changing them would have broken a
+ *     contract rather than completed one.
  * ===========================================================================
  */
 
-#define RB_HCR_MAX_CALLBACKS 64
-#define RB_HCR_MAX_MANAGED_TYPES 128
-
-typedef struct {
-  RbHcrReloadCallback callback;
-  void *user_data;
-} rb_hcr_callback_entry;
-
-static rb_hcr_callback_entry rb_hcr_before_callbacks[RB_HCR_MAX_CALLBACKS];
-static size_t rb_hcr_before_callback_count = 0;
-
-static rb_hcr_callback_entry rb_hcr_after_callbacks[RB_HCR_MAX_CALLBACKS];
-static size_t rb_hcr_after_callback_count = 0;
-
-static const char *rb_hcr_managed_types[RB_HCR_MAX_MANAGED_TYPES];
-static size_t rb_hcr_managed_type_count = 0;
-
 bool rb_hcr_wants_reload(void) {
-  return false;
+  /* § 13.1: non-blocking. In automatic mode nothing is ever parked, so this
+   * answers false and an application that polls it simply never sees a patch
+   * it has to drive — which is correct, because the agent already drove it. */
+  return rb_hcr_pending.active != 0;
 }
 
 void rb_hcr_apply_reload(void) {
-  /*
-   * Baseline implementation: safe no-op.
-   * Full dynamic patch delivery is owned by HLX-M8 on Linux.
-   */
+  rb_hcr_apply_calls++;
+  if (!rb_hcr_pending.active) {
+    /* § 13.1 says this blocks until the reload completes; with nothing pending
+     * there is nothing to complete. The IsoNim stub calls the same case
+     * `no-patch-pending` and treats it as a no-op. */
+    rb_hcr_trace_reset();
+    rb_hcr_trace_add("reject:no-patch-pending");
+    return;
+  }
+  rb_hcr_pending.active = 0;
+  rb_hcr_run_lifecycle(&rb_hcr_pending);
+  rb_hcr_request_release(&rb_hcr_pending);
 }
 
 void rb_hcr_register_managed_type(const char *type_name) {
+  size_t i;
   if (type_name == NULL) {
     return;
   }
-  for (size_t i = 0; i < rb_hcr_managed_type_count; ++i) {
+  for (i = 0; i < rb_hcr_managed_type_count; ++i) {
     if (rb_hcr_managed_types[i] != NULL &&
         strcmp(rb_hcr_managed_types[i], type_name) == 0) {
       return;
@@ -3960,13 +4850,15 @@ void rb_hcr_register_managed_type(const char *type_name) {
 }
 
 void rb_hcr_unregister_managed_type(const char *type_name) {
+  size_t i;
+  size_t j;
   if (type_name == NULL) {
     return;
   }
-  for (size_t i = 0; i < rb_hcr_managed_type_count; ++i) {
+  for (i = 0; i < rb_hcr_managed_type_count; ++i) {
     if (rb_hcr_managed_types[i] != NULL &&
         strcmp(rb_hcr_managed_types[i], type_name) == 0) {
-      for (size_t j = i; j + 1 < rb_hcr_managed_type_count; ++j) {
+      for (j = i; j + 1 < rb_hcr_managed_type_count; ++j) {
         rb_hcr_managed_types[j] = rb_hcr_managed_types[j + 1];
       }
       rb_hcr_managed_type_count--;
@@ -3976,10 +4868,11 @@ void rb_hcr_unregister_managed_type(const char *type_name) {
 }
 
 void rb_hcr_before_reload(RbHcrReloadCallback callback, void *user_data) {
+  size_t i;
   if (callback == NULL) {
     return;
   }
-  for (size_t i = 0; i < rb_hcr_before_callback_count; ++i) {
+  for (i = 0; i < rb_hcr_before_callback_count; ++i) {
     if (rb_hcr_before_callbacks[i].callback == callback &&
         rb_hcr_before_callbacks[i].user_data == user_data) {
       return;
@@ -3993,10 +4886,11 @@ void rb_hcr_before_reload(RbHcrReloadCallback callback, void *user_data) {
 }
 
 void rb_hcr_after_reload(RbHcrReloadCallback callback, void *user_data) {
+  size_t i;
   if (callback == NULL) {
     return;
   }
-  for (size_t i = 0; i < rb_hcr_after_callback_count; ++i) {
+  for (i = 0; i < rb_hcr_after_callback_count; ++i) {
     if (rb_hcr_after_callbacks[i].callback == callback &&
         rb_hcr_after_callbacks[i].user_data == user_data) {
       return;
@@ -4010,13 +4904,15 @@ void rb_hcr_after_reload(RbHcrReloadCallback callback, void *user_data) {
 }
 
 void rb_hcr_remove_before_reload(RbHcrReloadCallback callback, void *user_data) {
+  size_t i;
+  size_t j;
   if (callback == NULL) {
     return;
   }
-  for (size_t i = 0; i < rb_hcr_before_callback_count; ++i) {
+  for (i = 0; i < rb_hcr_before_callback_count; ++i) {
     if (rb_hcr_before_callbacks[i].callback == callback &&
         rb_hcr_before_callbacks[i].user_data == user_data) {
-      for (size_t j = i; j + 1 < rb_hcr_before_callback_count; ++j) {
+      for (j = i; j + 1 < rb_hcr_before_callback_count; ++j) {
         rb_hcr_before_callbacks[j] = rb_hcr_before_callbacks[j + 1];
       }
       rb_hcr_before_callback_count--;
@@ -4026,13 +4922,15 @@ void rb_hcr_remove_before_reload(RbHcrReloadCallback callback, void *user_data) 
 }
 
 void rb_hcr_remove_after_reload(RbHcrReloadCallback callback, void *user_data) {
+  size_t i;
+  size_t j;
   if (callback == NULL) {
     return;
   }
-  for (size_t i = 0; i < rb_hcr_after_callback_count; ++i) {
+  for (i = 0; i < rb_hcr_after_callback_count; ++i) {
     if (rb_hcr_after_callbacks[i].callback == callback &&
         rb_hcr_after_callbacks[i].user_data == user_data) {
-      for (size_t j = i; j + 1 < rb_hcr_after_callback_count; ++j) {
+      for (j = i; j + 1 < rb_hcr_after_callback_count; ++j) {
         rb_hcr_after_callbacks[j] = rb_hcr_after_callbacks[j + 1];
       }
       rb_hcr_after_callback_count--;
@@ -4042,20 +4940,30 @@ void rb_hcr_remove_after_reload(RbHcrReloadCallback callback, void *user_data) {
 }
 
 bool rb_hcr_file_changed(const char *file_path) {
-  (void)file_path;
-  /*
-   * Coordinated with GDScript-Hot-Reload §4.5:
-   * Answers true iff the most recent APPLIED reload listed this file in appliedFiles.
-   * In baseline mode (no reloads applied), this answers false.
-   */
+  size_t i;
+  if (file_path == NULL) {
+    return false;
+  }
+  for (i = 0; i < rb_hcr_applied.file_count; ++i) {
+    if (rb_hcr_applied.files[i] != NULL &&
+        strcmp(rb_hcr_applied.files[i], file_path) == 0) {
+      return true;
+    }
+  }
   return false;
 }
 
 bool rb_hcr_type_changed(const char *type_name) {
-  (void)type_name;
-  /*
-   * Baseline mode: no reloads applied, answers false.
-   */
+  size_t i;
+  if (type_name == NULL) {
+    return false;
+  }
+  for (i = 0; i < rb_hcr_applied.type_count; ++i) {
+    if (rb_hcr_applied.types[i] != NULL &&
+        strcmp(rb_hcr_applied.types[i], type_name) == 0) {
+      return true;
+    }
+  }
   return false;
 }
 

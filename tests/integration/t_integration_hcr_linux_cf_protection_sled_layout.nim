@@ -174,8 +174,16 @@ when defined(linux) and defined(amd64):
       requireTool("clang")
       requireTool("objdump")
 
+      # UPDATED 2026-09-18 (HLX-M8). The profile grew a third flag:
+      # `-ftls-model=global-dynamic`, which `HCR/Linux-ELF-Provider.md` §9
+      # asks patchable TUs to prefer so that a patch body referencing an
+      # EXISTING thread-local resolves through `__tls_get_addr` instead of a
+      # link-time-baked offset. The equality is kept rather than relaxed to a
+      # `contains`: this assertion exists so a silent change to the profile
+      # fails a gate, and turning it into a subset check would retire that.
       check PatchableFlags == @["-fpatchable-function-entry=16,0",
-                                "-falign-functions=16"]
+                                "-falign-functions=16",
+                                "-ftls-model=global-dynamic"]
 
       let repoRoot = getCurrentDir()
       let workDir = repoRoot / "build" / "hcr-linux-cf-protection"

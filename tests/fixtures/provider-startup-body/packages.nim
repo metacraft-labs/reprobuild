@@ -22,9 +22,15 @@ const
     ## Distinctive enough that no other refusal in the tree can satisfy a
     ## substring check for it.
   StartupBodyShellCommand* = "echo provider-startup-body-fixture"
+  StartupBodyDefectSentinel* =
+    "provider startup body fixture: deliberate defect 9c4a"
+    ## The same distinctiveness requirement as the raise sentinel, and for
+    ## the same reason: two refusals that share a substring are one
+    ## measurement, not two.
 
 var
   startupBodyRefusesRuns* = 0
+  startupBodyDefectsRuns* = 0
   startupBodyRegistersRuns* = 0
   startupBodyActiveSeenByRefuses*: seq[bool] = @[]
   startupBodyRootSeenByRefuses*: seq[string] = @[]
@@ -38,6 +44,21 @@ package startupBodyRefuses:
     startupBodyActiveSeenByRefuses.add(providerStartupBodyActive())
     startupBodyRootSeenByRefuses.add(activeProviderProjectRoot())
     raise newException(ValueError, StartupBodyRaiseSentinel)
+
+package startupBodyRaisesDefect:
+  ## A body that fails the way a recipe running without a project root
+  ## most often actually fails: not with a raise, but by indexing a path
+  ## that is empty because the root it was built from is empty. In Nim
+  ## that is an ``IndexDefect``, not a ``CatchableError``, so a
+  ## containment written for the second alone does not cover it.
+  ##
+  ## Declared BEFORE ``startupBodyRegisters`` for the same reason the
+  ## raising package is: module initialisation is a sequence, so an
+  ## uncontained defect here would stop every declaration after it, and
+  ## the suite would report nothing rather than a failure.
+  build:
+    inc startupBodyDefectsRuns
+    raise newException(IndexDefect, StartupBodyDefectSentinel)
 
 package startupBodyRegisters:
   ## A body that CAN run without a request, and the reason the startup

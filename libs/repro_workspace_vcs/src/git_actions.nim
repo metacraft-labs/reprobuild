@@ -37,6 +37,10 @@
 ## fixtures can call ``installGitVcsExecutor(identity)`` explicitly.
 
 import std/[os, osproc, strutils]
+when defined(windows):
+  import std/winlean
+else:
+  import std/tempfiles
 
 import repro_build_engine
 import repro_core/codec
@@ -581,6 +585,18 @@ proc runGit(payload: GitVcsPayload; args: openArray[string];
   ## Invoke the identity-bound git binary with the requested arguments.
   ## We use ``execCmdEx`` to mirror M1's subprocess shape (no new
   ## third-party dependency, per the M2 hard constraint).
+  ##
+  ## ``output`` is the MERGED stream: ``execCmdEx`` implies
+  ## ``poStdErrToStdOut``, so git's diagnostics are interleaved with its
+  ## answer. That is what the MUTATING actions want — for ``clone`` and
+  ## ``fetch`` the stderr text IS the payload (the clone classifier reads
+  ## "Remote branch … not found in upstream" out of it, and the fetch
+  ## receipt is content-addressed on it) — so this proc keeps that shape.
+  ##
+  ## NEVER PARSE ``output``. Any command whose answer is read rather than
+  ## merely exit-code-tested must go through ``runGitQuery`` below, which
+  ## hands back stdout alone. A benign diagnostic on stderr is otherwise
+  ## indistinguishable from an answer: see the comment on ``runGitQuery``.
   var cmd = quoteShell(payload.binaryPath)
   for arg in args:
     cmd.add(" ")
@@ -589,22 +605,135 @@ proc runGit(payload: GitVcsPayload; args: openArray[string];
     env = scrubbedGitRepositoryEnv())
   (exitCode: res.exitCode, output: res.output)
 
+proc runGitSeparated(payload: GitVcsPayload; args: openArray[string];
+                     workingDir = ""):
+    tuple[exitCode: int; stdoutText, stderrText: string] =
+  ## Invoke git capturing stdout and stderr as SEPARATE strings.
+  ##
+  ## Both streams are drained CONCURRENTLY, and that is not a stylistic
+  ## choice. Reading one to EOF and only then the other deadlocks the
+  ## moment the unread pipe fills: measured on Windows, a child that writes
+  ## 60 KiB to stderr while stdout is still open never exits and the read
+  ## never returns. git's stderr is unbounded in principle (per-ref fetch
+  ## lines, per-object lfs lines), so the drain has to be interleaved.
+  when defined(windows):
+    # Structured argv, and a PeekNamedPipe drain: Nim 2.2's ``readAll``
+    # stops at the first short pipe read on Windows, so a blocking read of
+    # either stream would also truncate. Same technique the sync
+    # observation gatherer already uses for its single stream.
+    let process = startProcess(payload.binaryPath, workingDir = workingDir,
+      args = @args, env = scrubbedGitRepositoryEnv(),
+      options = {poUsePath})
+    defer: process.close()
+    const PollSleepMs = 2
+    let handles = [Handle(process.outputHandle), Handle(process.errorHandle)]
+    var sinks: array[2, string]
+    var buf {.noinit.}: array[16384, char]
+    while true:
+      var moved = false
+      for i in 0 .. 1:
+        var bytesAvail: int32 = 0
+        let peeked = peekNamedPipe(handles[i],
+          lpTotalBytesAvail = addr bytesAvail)
+        if peeked and bytesAvail > 0:
+          var bytesRead: int32 = 0
+          let toRead = min(int(bytesAvail), buf.len).int32
+          let ok = winlean.readFile(handles[i], addr buf[0], toRead,
+            addr bytesRead, nil)
+          if ok != 0 and bytesRead > 0:
+            let previousLen = sinks[i].len
+            sinks[i].setLen(previousLen + bytesRead)
+            copyMem(addr sinks[i][previousLen], addr buf[0], bytesRead)
+            moved = true
+      # Only consult the exit code once BOTH pipes are momentarily empty, so
+      # everything the child buffered before exiting is still collected.
+      if moved: continue
+      result.exitCode = process.peekExitCode()
+      if result.exitCode != -1: break
+      sleep(PollSleepMs)
+    result.stdoutText = sinks[0]
+    result.stderrText = sinks[1]
+  else:
+    # POSIX ``poEvalCommand`` runs the command through ``/bin/sh``, so the
+    # SHELL can put stderr in a file. One pipe, no interleaving, no
+    # deadlock, and the same ``execCmdEx`` subprocess shape as ``runGit``.
+    var cmd = quoteShell(payload.binaryPath)
+    for arg in args:
+      cmd.add(" ")
+      cmd.add(quoteShell(arg))
+    var errPath = ""
+    try:
+      let created = createTempFile("repro-git-", ".stderr")
+      created.cfile.close()
+      errPath = created.path
+    except CatchableError, Defect:
+      errPath = ""
+    if errPath.len > 0:
+      cmd.add(" 2>" & quoteShell(errPath))
+    # Without the redirect the child's stderr would be an unread pipe that
+    # can fill and hang it, so fall back to the MERGED stream instead —
+    # degraded (the caller sees diagnostics in ``stdoutText``, exactly
+    # today's behaviour) but never hung.
+    let options =
+      if errPath.len > 0: {poUsePath}
+      else: {poUsePath, poStdErrToStdOut}
+    let res = execCmdEx(cmd, options = options, workingDir = workingDir,
+      env = scrubbedGitRepositoryEnv())
+    result.exitCode = res.exitCode
+    result.stdoutText = res.output
+    if errPath.len > 0:
+      try:
+        result.stderrText = readFile(errPath)
+      except CatchableError:
+        discard
+      try:
+        removeFile(errPath)
+      except CatchableError:
+        discard
+
+proc runGitQuery(payload: GitVcsPayload; args: openArray[string];
+                 workingDir = ""):
+    tuple[exitCode: int; output: string; diagnostic: string] =
+  ## Invoke git for an answer that will be PARSED.
+  ##
+  ## ``output`` is stdout ALONE. With the merged stream a single benign
+  ## diagnostic silently corrupts every reader of it: ``warning: unable to
+  ## find all commit-graph files`` — emitted by ANY command that reads a
+  ## stale split commit-graph chain, a derived cache git writes itself —
+  ## makes ``status --porcelain`` report a pristine tree as DIRTY, makes
+  ## ``rev-parse HEAD`` yield a warning line in place of a SHA, and adds a
+  ## phantom entry to ``stash list``. The pre-push gate then refuses a push
+  ## naming a repo with nothing to commit.
+  ##
+  ## ``diagnostic`` is the merged, trimmed text — what ``runGit``'s
+  ## ``output`` would have held — so a caller reporting a FAILURE still
+  ## surfaces git's message, which lives on stderr.
+  let res = runGitSeparated(payload, args, workingDir)
+  (exitCode: res.exitCode, output: res.stdoutText,
+   diagnostic: (res.stderrText & res.stdoutText).strip())
+
 proc trimmed(value: string): string = value.strip()
 
 proc resolveHeadSha(payload: GitVcsPayload; repoPath: string): tuple[ok: bool; sha: string; diagnostic: string] =
-  let res = runGit(payload, ["-C", repoPath, "rev-parse", "HEAD"])
+  let res = runGitQuery(payload, ["-C", repoPath, "rev-parse", "HEAD"])
   if res.exitCode != 0:
     return (ok: false, sha: "",
       diagnostic: "git rev-parse HEAD failed (" & $res.exitCode & "): " &
-        res.output.trimmed)
+        res.diagnostic)
   (ok: true, sha: res.output.trimmed, diagnostic: "")
 
 proc workingTreeIsClean(payload: GitVcsPayload; repoPath: string): tuple[ok: bool; clean: bool; diagnostic: string] =
-  let res = runGit(payload, ["-C", repoPath, "status", "--porcelain"])
+  # ``runGitQuery``, not ``runGit``: emptiness of the PORCELAIN stream is the
+  # whole answer, and the merged stream is not it. A repo carrying a stale
+  # split commit-graph chain (a cache git writes and prunes itself) makes
+  # every git command print ``warning: unable to find all commit-graph
+  # files`` on stderr; merged into stdout that one line made a pristine tree
+  # read as dirty and the pre-push gate refuse the push.
+  let res = runGitQuery(payload, ["-C", repoPath, "status", "--porcelain"])
   if res.exitCode != 0:
     return (ok: false, clean: false,
       diagnostic: "git status --porcelain failed (" & $res.exitCode & "): " &
-        res.output.trimmed)
+        res.diagnostic)
   (ok: true, clean: res.output.strip.len == 0, diagnostic: "")
 
 proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string):
@@ -635,12 +764,12 @@ proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string):
   ## caller that hardcoded ``origin`` against such a worktree saw every commit
   ## as unpublished, including commits sitting on the remote's own default
   ## branch, and blocked pushes on that basis.
-  let lookup = runGit(payload,
+  let lookup = runGitQuery(payload,
     ["-C", repoPath, "branch", "-r", "--contains", "HEAD"])
   if lookup.exitCode != 0:
     return (ok: false, published: false, scopedRemote: remote,
       diagnostic: "git branch -r --contains HEAD failed (" &
-        $lookup.exitCode & "): " & lookup.output.trimmed)
+        $lookup.exitCode & "): " & lookup.diagnostic)
   # A named remote that this checkout does not actually have is a GUESS, not a
   # constraint. `gitRemoteNameFor` falls back to "origin" whenever the manifest
   # entry carries no remote name, so callers routinely arrive here asking about
@@ -652,7 +781,7 @@ proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string):
   # any remote-tracking branch rather than reporting a confident falsehood.
   var anyRemote = remote.len == 0
   if not anyRemote:
-    let remotes = runGit(payload, ["-C", repoPath, "remote"])
+    let remotes = runGitQuery(payload, ["-C", repoPath, "remote"])
     if remotes.exitCode == 0:
       var found = false
       for raw in remotes.output.splitLines:
@@ -1072,7 +1201,7 @@ proc resolveBranchSha(payload: GitVcsPayload; repoPath, branchName: string):
   ## a non-zero exit code when the ref does not exist — we treat that
   ## as the canonical "branch does not exist" signal rather than
   ## scraping the error text.
-  let res = runGit(payload,
+  let res = runGitQuery(payload,
     ["-C", repoPath, "rev-parse", "--verify", "--quiet",
      "refs/heads/" & branchName])
   if res.exitCode == 0:
@@ -1082,13 +1211,16 @@ proc resolveBranchSha(payload: GitVcsPayload; repoPath, branchName: string):
         diagnostic: "git rev-parse --verify returned empty stdout for refs/heads/" &
           branchName)
     return (exists: true, sha: sha, diagnostic: "")
-  # ``--quiet`` plus a missing ref → exit 1 with empty stdout. Any
-  # other non-zero exit indicates a genuine probe failure.
-  if res.output.strip().len == 0:
+  # ``--quiet`` plus a missing ref → exit 1 and SAYS NOTHING on either
+  # stream. Any other non-zero exit indicates a genuine probe failure, and
+  # what it says it says on STDERR - so this discriminator has to test the
+  # merged text, not stdout, or every real failure would be silently
+  # reclassified as "branch does not exist".
+  if res.diagnostic.len == 0:
     return (exists: false, sha: "", diagnostic: "")
   (exists: false, sha: "",
     diagnostic: "git rev-parse --verify failed (" & $res.exitCode & "): " &
-      res.output.trimmed)
+      res.diagnostic)
 
 proc executeBranchCreate(payload: GitVcsPayload;
                          cwd, receiptPath: string): ActionResult =
@@ -1190,7 +1322,7 @@ proc executeForkBranch(payload: GitVcsPayload;
     outcome = "already-at-sha"
     # Idempotent re-run: the branch is right, but HEAD may not be on it
     # yet (a run interrupted between create and checkout). Assert it.
-    let current = runGit(payload,
+    let current = runGitQuery(payload,
       ["-C", target, "symbolic-ref", "--short", "-q", "HEAD"])
     if current.exitCode != 0 or current.output.trimmed != payload.branchName:
       let sw = runGit(payload, ["-C", target, "checkout", payload.branchName])
@@ -1282,11 +1414,14 @@ proc executeRemoteBranchProbe(payload: GitVcsPayload;
   else:
     return failed("remote-branch-probe-no-source",
       "remote branch probe requires a checkout or remote URL")
-  let probe = runGit(payload, args)
+  # ``runGitQuery``: ``advertised`` is "stdout was non-empty", and it is
+  # written into a CACHEABLE receipt. A warning on stderr would record an
+  # absent branch as advertised.
+  let probe = runGitQuery(payload, args)
   if probe.exitCode != 0:
     return failed("remote-branch-probe-failed",
       "git ls-remote --heads failed for '" & source & "' (" &
-        $probe.exitCode & "): " & probe.output.trimmed)
+        $probe.exitCode & "): " & probe.diagnostic)
   let advertised = probe.output.strip().len > 0
   var receipt = RemoteBranchProbeReceiptHeader & "\n"
   receipt.add("kind\t" & WorkspaceVcsKind & "\n")
@@ -1495,11 +1630,11 @@ proc executeForcePushRebase(payload: GitVcsPayload;
       "git force-push-rebase refused: working tree is dirty at " & target)
 
   # 1. Retrieve the list of commits in the range <baseSha>..HEAD in chronological order (oldest first)
-  let listRes = runGit(payload,
+  let listRes = runGitQuery(payload,
     ["-C", target, "log", "--format=%H", "--reverse", payload.baseSha & "..HEAD"])
   if listRes.exitCode != 0:
     return failed("force-push-rebase-log-failed",
-      "git log failed to find commits: " & listRes.output.trimmed)
+      "git log failed to find commits: " & listRes.diagnostic)
   
   let commitsToCherryPick = listRes.output.strip().splitLines()
 
@@ -2025,7 +2160,8 @@ proc queryGitState*(query: GitQueryAction;
 
     # 2. File Status
     if query.queryFiles:
-      let statusRes = runGit(payload, ["-C", query.repoPath, "status", "--porcelain"])
+      let statusRes = runGitQuery(payload,
+        ["-C", query.repoPath, "status", "--porcelain"])
       if statusRes.exitCode == 0:
         isClean = true
         for rawLine in statusRes.output.splitLines():
@@ -2044,7 +2180,7 @@ proc queryGitState*(query: GitQueryAction;
           if query.queryFileDetails:
             fileDetails.add(FileStatusEntry(code: xy, path: path))
       else:
-        diagnostic.add("; git status failed: " & statusRes.output.trimmed)
+        diagnostic.add("; git status failed: " & statusRes.diagnostic)
     else:
       # If files aren't queried, fall back to simple clean check
       let cleanRes = workingTreeIsClean(payload, query.repoPath)
@@ -2063,7 +2199,8 @@ proc queryGitState*(query: GitQueryAction;
 
     # 4. Stashes
     if query.queryStashes:
-      let stashRes = runGit(payload, ["-C", query.repoPath, "stash", "list"])
+      let stashRes = runGitQuery(payload,
+        ["-C", query.repoPath, "stash", "list"])
       if stashRes.exitCode == 0:
         for line in stashRes.output.splitLines():
           if line.strip().len > 0:
@@ -2071,10 +2208,13 @@ proc queryGitState*(query: GitQueryAction;
 
     # 5. Ahead / Behind
     if query.queryAheadBehind:
-      let upstreamRes = runGit(payload, ["-C", query.repoPath, "rev-parse", "--abbrev-ref", "@{u}"])
+      let upstreamRes = runGitQuery(payload,
+        ["-C", query.repoPath, "rev-parse", "--abbrev-ref", "@{u}"])
       if upstreamRes.exitCode == 0:
         let upstream = upstreamRes.output.strip()
-        let revListRes = runGit(payload, ["-C", query.repoPath, "rev-list", "--count", "--left-right", upstream & "...HEAD"])
+        let revListRes = runGitQuery(payload,
+          ["-C", query.repoPath, "rev-list", "--count", "--left-right",
+           upstream & "...HEAD"])
         if revListRes.exitCode == 0:
           try:
             let parts = revListRes.output.strip().splitWhitespace()
@@ -2087,16 +2227,18 @@ proc queryGitState*(query: GitQueryAction;
     # 6. Unmerged Branches
     if query.queryUnmerged:
       let trunkBranch = if query.trunkBranch.len > 0: query.trunkBranch else: "main"
-      let unmergedRes = runGit(payload, ["-C", query.repoPath, "branch", "--no-merged", trunkBranch])
+      let unmergedRes = runGitQuery(payload,
+        ["-C", query.repoPath, "branch", "--no-merged", trunkBranch])
       if unmergedRes.exitCode == 0:
         for rawLine in unmergedRes.output.splitLines():
           var line = rawLine.strip()
           # Strip git's current-branch ("* ") / worktree ("+ ") markers.
           if line.startsWith("* ") or line.startsWith("+ "):
             line = line[2 .. ^1].strip()
-          # `git branch --no-merged` prints one branch name per line, but runGit
-          # merges stderr into stdout (execCmdEx), so a git diagnostic can land
-          # here — e.g. "warning: refname '<trunk>' is ambiguous." emitted when
+          # `git branch --no-merged` prints one branch name per line.
+          # ``runGitQuery`` keeps stderr out of this stream now, but the shape
+          # filter stays as defence in depth — e.g. "warning: refname
+          # '<trunk>' is ambiguous." emitted when
           # the trunk name resolves ambiguously (a repo whose branch is literally
           # named `heads/main` makes bare `main` ambiguous). A real branch name
           # contains no whitespace or ':' and never starts with '(' (the

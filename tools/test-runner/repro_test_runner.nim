@@ -186,16 +186,86 @@ const
   ## process and deliberately enforce a 30-second receive/throughput budget.
   ## Under nested compiler load the server thread can be starved for the entire
   ## budget even though the transfer completes in under a second when the test
-  ## owns the host. Likewise, the comprehensive local-build e2e case performs
-  ## many nested Nim compiler invocations; concurrent nested builds have been
-  ## observed to make Nim report SuccessX without materializing its requested
-  ## extractor binary. The native-shell gate performs the same nested provider
-  ## extraction for Bash, Zsh, and Fish and must own the host for the same
-  ## reason. Keep these resource-sensitive checks fully enabled but execute
-  ## them without competing test processes. The SC-7 capstone and SC-11
-  ## cross-repo library test also perform repeated nested interface extraction;
-  ## under contention Nim can report SuccessX without materializing the
-  ## requested extractor binary, so they require the same scheduling boundary.
+  ## owns the host. The native-shell gate performs nested provider extraction
+  ## for Bash, Zsh, and Fish; the SC-7 capstone and the SC-11 cross-repo
+  ## library test perform repeated nested interface extraction. Under
+  ## contention Nim was observed to report SuccessX without materializing the
+  ## requested extractor binary, so those three keep this scheduling boundary.
+  ## Keep these resource-sensitive checks fully enabled but execute them
+  ## without competing test processes.
+  ##
+  ## ``t_e2e_local_reprobuild_project_build`` IS DELIBERATELY ABSENT, and must
+  ## not be re-added from the paragraph above. It sat on this list from
+  ## 2026-07-21 (d6aa1a17b) for exactly that nested-extraction reason, and the
+  ## reason stopped being true a month later:
+  ##
+  ##   * The hazard was UNSERIALIZED CONCURRENT WRITERS into one shared Nim
+  ##     cache. ``2db8ee13c`` (2026-08-25) routed the extraction compile
+  ##     through ``runInterfaceCompilerCommand``, which takes an exclusive
+  ##     flock on ``<nimcache>.compile.lock`` for the duration of the compile;
+  ##     ``64f78e0a3`` had done the same for provider compiles three days
+  ##     earlier. The extractor binary itself has always been written into a
+  ##     per-invocation ``mkdtemp``, so only the intermediate cache was ever
+  ##     shared. The list entry outlived its cause and was never revisited.
+  ##
+  ## MEASURED BEFORE REMOVAL (2026-09-18, 32-core host, ambient load 62-169
+  ## from unrelated concurrent work; every figure below is a load-annotated
+  ## observation, not an estimate):
+  ##
+  ##   * THE LOCK IS LOAD-BEARING, shown by removing it rather than by
+  ##     narration. Six concurrent ``nim c`` runs in the engine's own compile
+  ##     shape (``--parallelBuild:3 --forceBuild:on``, one SHARED
+  ##     ``--nimcache``, per-invocation ``--out:.../extract_runner``, module
+  ##     basename ``extract_runner.nim`` as the engine generates it), twelve
+  ##     trials alternating between arms to cancel load drift:
+  ##       unserialized  7 of 36 compiles failed (3 of 6 trials), every one a
+  ##                     shared-cache clobber -- one process's ``@pjson.nim.c.o``
+  ##                     linked against another's ``@mextract_runner.nim.c.o``,
+  ##                     "undefined reference to nimRawDispose", "final link
+  ##                     failed"
+  ##       flock-wrapped  0 of 36, at 4.3x the wall time, which is the
+  ##                     serialization being visible rather than assumed
+  ##     So the lock is what makes a shared extraction cache survive
+  ##     concurrency. (The arms reproduced the corruption CLASS; they did not
+  ##     reproduce the specific exit-0-and-no-binary tail of it, which is the
+  ##     variant the guard names. Stated as a limit, not glossed.)
+  ##   * SHARING. With all 17 of this binary's cases co-scheduled, each case
+  ##     owns its own interface nimcache under its own temp project root: 16
+  ##     distinct ``.../nimcache-interface/<key>.compile.lock`` paths were
+  ##     observed held at the same instant, never one path twice. The
+  ##     checkout-level cache these cases might have shared was not written at
+  ##     all during the campaign. The locking is engaged in these runs (2029 of
+  ##     6612 samples found a lock HELD) and finds no cross-case collision to
+  ##     resolve -- belt and braces, not one or the other.
+  ##   * INSTRUMENT. The detector is the case's own result document, because
+  ##     these binaries print nothing on success and the engine's
+  ##     "compiler reported success but produced no binary" message travels in
+  ##     the result document, not on stdout -- a log grep would have been
+  ##     vacuous. Run against a nim wrapper that exits 0 without writing
+  ##     ``--out:...extract_runner``, 16 of the 17 cases turn FAIL with that
+  ##     message; the 17th ("uses import path is opt-in for imported package
+  ##     helpers") never asks for an extraction runner and so cannot be hit by
+  ##     this race at all.
+  ##   * BEHAVIOUR. 432 pooled executions, 0 failures and 0 guard hits. 407 of
+  ##     them at the pool's exact shape (8 concurrent cases, each with
+  ##     ``REPROBUILD_MAX_PARALLELISM=3``, i.e. the full budget of 24); 17 with
+  ##     all of this binary's cases co-scheduled at once, which is twice that
+  ##     contention. Every case ran 24-27 times. Rule of three puts the 95%
+  ##     upper bound at 0.69% per execution -- corroboration for the mechanism
+  ##     above, not a substitute for it.
+  ##   * COST. In the pool a case gets ``REPROBUILD_MAX_PARALLELISM`` 3 instead
+  ##     of the exclusive phase's 24. Break-even slowdown for the move is
+  ##     k=6.24; measured on this stem, alternated to control for load drift,
+  ##     k was about 1.0 -- these cases are bound by a sequence of extractions,
+  ##     not by compile width. The stem is 1.75h of a measured 8.67h suite
+  ##     (53% of a 3.29h exclusive phase that occupies 0.56% of the cases).
+  ##
+  ## PUT IT BACK ONLY IF one of those load-bearing facts stops holding: the
+  ## ``.compile.lock`` around the extraction compile is removed or bypassed,
+  ## the extractor stops being written to a per-invocation temp dir, the cases
+  ## start sharing one nimcache, or a suite run actually shows this stem
+  ## failing in the pool with the guard message above. "It is slow and it
+  ## compiles a lot" is not a reason; it was never the reason.
   ExclusiveStems = [
     "t_a2_5_p3_streaming_sink",
     "t_a2_5_p8_throughput_bench",
@@ -210,7 +280,6 @@ const
     "t_d1_pythonunittest_resolves_in_path_mode",
     "t_d2_cross_project_selector_recognised",
     "t_d5_collection_member_selector",
-    "t_e2e_local_reprobuild_project_build",
     "t_e2e_native_shell_hooks",
     "t_e2e_repro_dev_sessions",
     "t_e2e_shell_hook_noop_latency",

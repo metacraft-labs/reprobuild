@@ -983,46 +983,6 @@ proc compileTimeDefineValue(name: string): bool =
   else:
     result = false
 
-proc compileTimeConditionValue(node: NimNode): bool =
-  case node.kind
-  of nnkIdent:
-    case identText(node).normalize
-    of "true":
-      true
-    of "false":
-      false
-    else:
-      false
-  of nnkCall, nnkCommand:
-    let name = calleeName(node).normalize
-    if name == "defined" and node.len >= 2:
-      compileTimeDefineValue(identText(node[1]))
-    else:
-      false
-  of nnkPrefix:
-    if node.len == 2 and identText(node[0]).normalize == "not":
-      not compileTimeConditionValue(node[1])
-    else:
-      false
-  of nnkInfix:
-    if node.len == 3:
-      case identText(node[0]).normalize
-      of "and":
-        compileTimeConditionValue(node[1]) and compileTimeConditionValue(node[2])
-      of "or":
-        compileTimeConditionValue(node[1]) or compileTimeConditionValue(node[2])
-      else:
-        false
-    else:
-      false
-  of nnkPar:
-    if node.len == 1:
-      compileTimeConditionValue(node[0])
-    else:
-      false
-  else:
-    false
-
 proc variantSelectorName(expr: NimNode): string =
   ## Spec-Implementation M2d: recognise the ``<variant>.value`` form
   ## used by variant-conditioned ``uses:`` arms. Returns the variant
@@ -1059,76 +1019,132 @@ proc literalCaseLabel(label: NimNode): string =
   else:
     ""
 
-proc collectUsesGated(node: NimNode; policyPath: seq[string];
-                       gateVariant, gateValue: string;
-                       output: var seq[PackageUseDef]) =
-  ## Internal helper carrying the (gateVariant, gateValue) through the
-  ## recursion so nested ``case`` arms tag their leaves consistently.
+const
+  DepKindTarget* = "target"
+    ## ``uses:`` / ``buildDeps:`` — HOST-platform libraries the produced
+    ## binaries link against.
+  DepKindNative* = "native"
+    ## ``nativeBuildDeps:`` — BUILD-platform tools and code generators.
+  DepKindRuntime* = "runtime"
+    ## ``runtimeDeps:`` — HOST-platform tools/libraries needed at run time.
+
+proc usesEntryAddStmt(accum: NimNode; constraint: NimNode;
+                      policyPath: seq[string];
+                      gateVariant, gateValue, depKind: string): NimNode =
+  ## One ``<accum>.add(PackageUseDef(...))`` with every field a literal.
+  ##
+  ## Nothing here needs to run at the author's scope: the constraint is a
+  ## string literal, so the selector, the source location and the policy path
+  ## are all known while the macro is looking at the node. Baking them means
+  ## the lowered expression calls no function at all, which is what keeps it
+  ## total -- see the `tryConstExpr` note on `withPlatformVocabulary`, where a
+  ## `raise` from a staged expression would be swallowed rather than fail the
+  ## compile.
+  let loc = lineFile(constraint)
+  let selector = selectorFromConstraint(constraint.strVal)
+  var policyBracket = newNimNode(nnkBracket)
+  for segment in policyPath:
+    policyBracket.add(newLit(segment))
+  let ctor = nnkObjConstr.newTree(
+    bindSym"PackageUseDef",
+    nnkExprColonExpr.newTree(ident("rawConstraint"), newLit(constraint.strVal)),
+    nnkExprColonExpr.newTree(ident("packageSelector"), newLit(selector)),
+    nnkExprColonExpr.newTree(ident("executableName"), newLit(selector)),
+    nnkExprColonExpr.newTree(ident("policyPath"),
+      newCall(ident("@"), policyBracket)),
+    nnkExprColonExpr.newTree(ident("sourceFile"), newLit(loc.file)),
+    nnkExprColonExpr.newTree(ident("sourceLine"), newLit(loc.line)),
+    nnkExprColonExpr.newTree(ident("gateVariant"), newLit(gateVariant)),
+    nnkExprColonExpr.newTree(ident("gateValue"), newLit(gateValue)),
+    nnkExprColonExpr.newTree(ident("depKind"), newLit(depKind)))
+  newCall(nnkDotExpr.newTree(accum, ident("add")), ctor)
+
+proc lowerUsesBody(node: NimNode; accum: NimNode; policyPath: seq[string];
+                   gateVariant, gateValue, depKind: string; outStmts: NimNode)
+
+proc lowerUsesWhen(node: NimNode; accum: NimNode; policyPath: seq[string];
+                   gateVariant, gateValue, depKind: string): NimNode =
+  ## Rebuild the ``when`` with its CONDITIONS UNTOUCHED and each branch body
+  ## replaced by the statements that branch contributes.
+  ##
+  ## This is the whole point of the lowering. The condition is copied into
+  ## generated code and the compiler decides it, so every condition Nim can
+  ## evaluate works -- `const` comparisons, `declared()`, a call to a `func`,
+  ## anything added to the language later. The macro never asks what the
+  ## condition means, which is what it has no business doing.
+  result = newNimNode(nnkWhenStmt)
+  for branch in node:
+    case branch.kind
+    of nnkElifBranch, nnkElifExpr:
+      if branch.len >= 2:
+        let body = newNimNode(nnkStmtList)
+        lowerUsesBody(branch[1], accum, policyPath, gateVariant, gateValue,
+          depKind, body)
+        result.add(nnkElifBranch.newTree(branch[0], body))
+    of nnkElse, nnkElseExpr:
+      if branch.len >= 1:
+        let body = newNimNode(nnkStmtList)
+        lowerUsesBody(branch[0], accum, policyPath, gateVariant, gateValue,
+          depKind, body)
+        result.add(nnkElse.newTree(body))
+    else:
+      discard
+
+proc lowerUsesBody(node: NimNode; accum: NimNode; policyPath: seq[string];
+                   gateVariant, gateValue, depKind: string; outStmts: NimNode) =
+  ## Lower a dependency block into statements that append to ``accum``.
+  ##
+  ## Walks the block with one deliberate asymmetry between the two kinds of
+  ## conditional a dependency block can contain:
+  ##
+  ##   * ``when`` is a COMPILE-TIME question. It is emitted verbatim and the
+  ##     compiler answers it.
+  ##   * ``if <variant>.value`` / ``case <variant>.value`` are NOT questions
+  ##     for the compiler at all. Their arms are recorded as solver gates that
+  ##     `finalizeVariants()` resolves later, so both arms contribute entries,
+  ##     each tagged with the gate it came from. Emitting these as runtime
+  ##     `if`s would ask the wrong evaluator at the wrong time and lose the
+  ##     gate.
+  ##
+  ## Conflating the two is the mistake to avoid here: they look alike in the
+  ## source and mean opposite things.
   case node.kind
   of nnkStrLit..nnkTripleStrLit:
-    let loc = lineFile(node)
-    let selector = selectorFromConstraint(node.strVal)
-    output.add(PackageUseDef(
-      rawConstraint: node.strVal,
-      packageSelector: selector,
-      executableName: selector,
-      policyPath: policyPath,
-      sourceFile: loc.file,
-      sourceLine: loc.line,
-      gateVariant: gateVariant,
-      gateValue: gateValue))
+    outStmts.add(usesEntryAddStmt(accum, node, policyPath, gateVariant,
+      gateValue, depKind))
   of nnkStmtList:
     for child in node:
-      collectUsesGated(child, policyPath, gateVariant, gateValue, output)
+      lowerUsesBody(child, accum, policyPath, gateVariant, gateValue, depKind,
+        outStmts)
   of nnkWhenStmt:
-    for branch in node:
-      case branch.kind
-      of nnkElifBranch:
-        if branch.len >= 2 and compileTimeConditionValue(branch[0]):
-          collectUsesGated(branch[1], policyPath, gateVariant, gateValue,
-            output)
-          break
-      of nnkElse:
-        if branch.len >= 1:
-          collectUsesGated(branch[0], policyPath, gateVariant, gateValue,
-            output)
-          break
-      else:
-        discard
+    outStmts.add(lowerUsesWhen(node, accum, policyPath, gateVariant, gateValue,
+      depKind))
   of nnkCall, nnkCommand:
     let name = calleeName(node)
     if node.len > 0 and name.len > 0:
       for i in 1 ..< node.len:
         if node[i].kind == nnkStmtList:
-          collectUsesGated(node[i], policyPath & @[name], gateVariant,
-            gateValue, output)
+          lowerUsesBody(node[i], accum, policyPath & @[name], gateVariant,
+            gateValue, depKind, outStmts)
         else:
-          collectUsesGated(node[i], policyPath, gateVariant, gateValue,
-            output)
+          lowerUsesBody(node[i], accum, policyPath, gateVariant, gateValue,
+            depKind, outStmts)
   of nnkIfStmt, nnkIfExpr:
-    # Spec-Implementation M2d — variant-conditioned ``uses:`` arms.
-    # When the if's condition is ``<variant>.value`` we propagate the
-    # gate (variant, "true") onto the then-branch and (variant, "false")
-    # onto the else-branch so the solver gates the dependencies
-    # accordingly. Conditions we don't recognise as variant selectors
-    # fall back to the M1 union behaviour: every branch contributes its
-    # leaves UNGATED so the macro stays forward-compatible with
-    # non-variant predicates.
+    # A variant gate, NOT a compile-time branch: both arms contribute, each
+    # tagged with the variant value that selects it, and `finalizeVariants()`
+    # resolves it from the solver later. Recursion continues through
+    # `lowerUsesBody`, so a `when` written inside an arm is still emitted for
+    # the compiler rather than handed to an evaluator.
     var nestedGateVariant = ""
     var thenGateValue = ""
     var elseGateValue = ""
     block detectVariantGate:
-      # Only single-arm if's (``if v.value: ... else: ...``) are
-      # recognised; ``elif`` cascades fall back to the union form so
-      # we don't accidentally over-constrain a non-variant cascade.
       var elifCount = 0
       var hasElse = false
       for b in node:
         case b.kind
-        of nnkElifBranch, nnkElifExpr:
-          inc elifCount
-        of nnkElse, nnkElseExpr:
-          hasElse = true
+        of nnkElifBranch, nnkElifExpr: inc elifCount
+        of nnkElse, nnkElseExpr: hasElse = true
         else: discard
       if elifCount != 1: break detectVariantGate
       var cond: NimNode = nil
@@ -1148,29 +1164,25 @@ proc collectUsesGated(node: NimNode; policyPath: seq[string];
       of nnkElifBranch, nnkElifExpr:
         if branch.len >= 2:
           if nestedGateVariant.len > 0 and gateVariant.len == 0:
-            collectUsesGated(branch[^1], policyPath,
-              nestedGateVariant, thenGateValue, output)
+            lowerUsesBody(branch[^1], accum, policyPath, nestedGateVariant,
+              thenGateValue, depKind, outStmts)
           else:
-            # Inherit the existing gate (no nested override) for the
-            # union case OR when we already have an outer gate.
-            collectUsesGated(branch[^1], policyPath,
-              gateVariant, gateValue, output)
+            lowerUsesBody(branch[^1], accum, policyPath, gateVariant,
+              gateValue, depKind, outStmts)
       of nnkElse, nnkElseExpr:
         if branch.len >= 1:
           if nestedGateVariant.len > 0 and gateVariant.len == 0 and
               elseGateValue.len > 0:
-            collectUsesGated(branch[^1], policyPath,
-              nestedGateVariant, elseGateValue, output)
+            lowerUsesBody(branch[^1], accum, policyPath, nestedGateVariant,
+              elseGateValue, depKind, outStmts)
           else:
-            collectUsesGated(branch[^1], policyPath,
-              gateVariant, gateValue, output)
+            lowerUsesBody(branch[^1], accum, policyPath, gateVariant,
+              gateValue, depKind, outStmts)
       else:
         discard
   of nnkCaseStmt:
-    # Spec-Implementation M2d — ``case <variant>.value: of "gcc": ...``
-    # lowers each arm to a per-value gate. The case selector must be
-    # the ``<variant>.value`` form (or the bare variant ident); other
-    # selectors fall back to the M1 union behaviour.
+    # ``case <variant>.value: of "gcc": ...`` -- one gate per arm value, on
+    # the same reasoning as the `if` form above.
     var nestedGateVariant = ""
     if node.len >= 1 and gateVariant.len == 0:
       nestedGateVariant = variantSelectorName(node[0])
@@ -1180,54 +1192,58 @@ proc collectUsesGated(node: NimNode; policyPath: seq[string];
       of nnkOfBranch, nnkElifBranch:
         if branch.len >= 2:
           var armValue = ""
-          if nestedGateVariant.len > 0 and branch.kind == nnkOfBranch:
-            # The case-arm has a list of labels in branch[0 .. ^2] and
-            # the body at branch[^1]. We only set the gate when there
-            # is a SINGLE literal label; multi-label arms fall back to
-            # ungated union.
-            if branch.len == 2:
-              armValue = literalCaseLabel(branch[0])
+          if nestedGateVariant.len > 0 and branch.kind == nnkOfBranch and
+              branch.len == 2:
+            armValue = literalCaseLabel(branch[0])
           if armValue.len > 0:
-            collectUsesGated(branch[^1], policyPath,
-              nestedGateVariant, armValue, output)
+            lowerUsesBody(branch[^1], accum, policyPath, nestedGateVariant,
+              armValue, depKind, outStmts)
           else:
-            collectUsesGated(branch[^1], policyPath,
-              gateVariant, gateValue, output)
+            lowerUsesBody(branch[^1], accum, policyPath, gateVariant,
+              gateValue, depKind, outStmts)
       of nnkElse:
         if branch.len >= 1:
-          collectUsesGated(branch[^1], policyPath,
-            gateVariant, gateValue, output)
+          lowerUsesBody(branch[^1], accum, policyPath, gateVariant, gateValue,
+            depKind, outStmts)
       else:
         discard
-  else:
+  of nnkCommentStmt, nnkDiscardStmt, nnkEmpty:
     discard
+  else:
+    # An entry the macro cannot read as text: a `const`, or any other
+    # expression yielding the constraint. Hand it to `packageUseEntry` and let
+    # the compiler produce the string.
+    #
+    # The predecessor matched string literals only and let everything else
+    # fall through a silent `discard`, so a constraint named rather than
+    # spelled vanished from the floor exactly the way one behind an
+    # unmodelled `when` did. Same defect, second doorway.
+    let loc = lineFile(node)
+    var policyBracket = newNimNode(nnkBracket)
+    for segment in policyPath:
+      policyBracket.add(newLit(segment))
+    outStmts.add(newCall(nnkDotExpr.newTree(accum, ident("add")),
+      newCall(bindSym"packageUseEntry",
+        node,
+        newCall(ident("@"), policyBracket),
+        newLit(loc.file), newLit(loc.line),
+        newLit(gateVariant), newLit(gateValue), newLit(depKind))))
 
-const
-  DepKindTarget* = "target"
-    ## ``uses:`` / ``buildDeps:`` — HOST-platform libraries the produced
-    ## binaries link against.
-  DepKindNative* = "native"
-    ## ``nativeBuildDeps:`` — BUILD-platform tools and code generators.
-  DepKindRuntime* = "runtime"
-    ## ``runtimeDeps:`` — HOST-platform tools/libraries needed at run time.
-
-proc collectUses(node: NimNode; policyPath: seq[string];
-                 output: var seq[PackageUseDef];
-                 depKind = DepKindTarget) =
-  ## Named-Lock-Files NLF-M7 (§4.6): every entry is tagged with the list it
-  ## was written in, AFTER the recursive walk rather than through it.
+proc lowerUsesBlock*(node: NimNode; depKind: string): NimNode =
+  ## Lower one dependency block into an expression yielding its entries.
   ##
-  ## Tagging on the way out rather than threading a parameter down eleven
-  ## recursive call sites is deliberate: the tag is a property of the BLOCK
-  ## the walk was entered for, not of any node inside it, so a parameter
-  ## threaded through the recursion would be eleven places for a future arm
-  ## to forget it and one place for the tag to be silently wrong. §4.6's whole
-  ## finding is that this distinction gets erased somewhere downstream; not
-  ## adding eleven new places to erase it is the point.
-  let before = output.len
-  collectUsesGated(node, policyPath, "", "", output)
-  for i in before ..< output.len:
-    output[i].depKind = depKind
+  ## Shaped as a `block:` so it is an expression stage 1 can hand to the
+  ## compiler for a `static seq[PackageUseDef]` parameter, exactly as
+  ## `platforms` hands over its constraint list.
+  let accum = genSym(nskVar, "reproUses")
+  let body = newNimNode(nnkStmtList)
+  body.add(nnkVarSection.newTree(nnkIdentDefs.newTree(
+    accum,
+    nnkBracketExpr.newTree(bindSym"seq", bindSym"PackageUseDef"),
+    newCall(ident("@"), newNimNode(nnkBracket)))))
+  lowerUsesBody(node, accum, @[], "", "", depKind, body)
+  body.add(accum)
+  nnkBlockStmt.newTree(newEmptyNode(), body)
 
 proc parseNixPackageProvisioning(node: NimNode): NixPackageProvisioningDef =
   let loc = lineFile(node)
@@ -1380,6 +1396,14 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
     let pruneValue = namedValue(node[i], "prune")
     if not pruneValue.isNil:
       result.prunePaths.add(exprCode(pruneValue))
+    # ``nonRedistributable = true`` keeps a realized prefix out of the
+    # SHARED cache. Only the literal matters, which is why it goes through
+    # ``boolLiteral`` rather than ``exprCode``: a policy this one is not
+    # something a recipe should be able to compute, because the answer has
+    # to be readable in the recipe by whoever reviews the licence.
+    let nonRedistributableValue = namedValue(node[i], "nonRedistributable")
+    if not nonRedistributableValue.isNil:
+      result.nonRedistributable = boolLiteral(nonRedistributableValue, false)
     let sha256Value = namedValue(node[i], "sha256")
     if not sha256Value.isNil:
       sha256Node = sha256Value
@@ -2098,7 +2122,9 @@ proc lintArmsAgainstDeclaredPlatforms(body: NimNode; pkg: PackageDef) =
         discard
 
 proc parsePackageDef(name: NimNode; body: NimNode;
-                     resolvedPlatforms: seq[PlatformConstraintDef] = @[]):
+                     resolvedPlatforms: seq[PlatformConstraintDef] = @[];
+                     resolvedToolProvisioning: string = "";
+                     resolvedUses: seq[PackageUseDef] = @[]):
     PackageDef =
   ## ``resolvedPlatforms`` carries the values stage 1 of the ``package`` macro
   ## already had the compiler evaluate. It is consulted only for the canonical
@@ -2130,21 +2156,29 @@ proc parsePackageDef(name: NimNode; body: NimNode;
     elif calleeName(stmt).normalize == "library":
       result.libraries.add(parseLibrary(result.packageName, stmt))
     elif calleeName(stmt).normalize in ["defaulttoolprovisioning", "toolprovisioning"]:
+      # The VALUE arrives in ``resolvedToolProvisioning``: stage 1 wrapped
+      # this statement's argument in ``withToolProvisioningVocabulary`` and
+      # the compiler evaluated it. Nothing here reads ``stmt[1]`` -- which is
+      # the point, because the argument may be any Nim expression that yields
+      # one of the modes, including a ``when`` chosen per host.
+      #
+      # The statement is still walked (stage 1 left it in the body) so the
+      # arity check and the refusal below can point ``error`` at the author's
+      # own line rather than at a synthesized node.
       if stmt.len != 2:
-        error("defaultToolProvisioning expects exactly one string literal", stmt)
-      let provisioning = requireStrLit(stmt[1], "defaultToolProvisioning")
-      # M9.R.8 — accept ``from-source`` (the CLI canonical spelling)
-      # alongside the four pre-existing modes so a recipe can opt in
-      # to from-source provisioning declaratively without depending on
-      # the CLI flag / env var. The CLI-side ``parseToolProvisioning``
-      # also accepts ``fromSource`` and ``source`` aliases; the DSL
-      # validator pins the canonical hyphenated form for consistency
-      # with the existing ``defaultToolProvisioning "path"`` /
-      # ``defaultToolProvisioning "nix"`` precedent in production
-      # recipes.
-      if provisioning.normalize notin ["path", "nix", "tarball", "scoop", "from-source"]:
-        error("defaultToolProvisioning must be one of: path, nix, tarball, scoop, from-source", stmt[1])
-      result.defaultToolProvisioning = provisioning
+        error("defaultToolProvisioning expects exactly one argument: a mode " &
+          "(path, nix, tarball, scoop, fromSource) or any expression " &
+          "yielding one", stmt)
+      # M9.R.8 — ``from-source`` is the CLI's canonical spelling and the one
+      # the model carries; the vocabulary spells it ``fromSource`` because a
+      # hyphen cannot appear in a Nim identifier. Both reach here as the same
+      # string.
+      if resolvedToolProvisioning.normalize notin
+          ["path", "nix", "tarball", "scoop", "from-source"]:
+        error("defaultToolProvisioning must be one of: path, nix, tarball, " &
+          "scoop, fromSource; got \"" & resolvedToolProvisioning & "\"",
+          stmt[1])
+      result.defaultToolProvisioning = resolvedToolProvisioning
     elif calleeName(stmt).normalize == "lockfile":
       # §4.3's package-level rung: "A **package-level** `lockFile` remains
       # available as a default that artifacts inherit and may override."
@@ -2194,8 +2228,9 @@ proc parsePackageDef(name: NimNode; body: NimNode;
         packageName: sourcedPackage, source: provenance,
         sourceFile: psLoc.filename, sourceLine: psLoc.line))
     elif calleeName(stmt).normalize == "uses":
-      for i in 1 ..< stmt.len:
-        collectUses(stmt[i], @[], result.toolUses)
+      # Entries arrive in `resolvedUses`, routed below: stage 1 lowered this
+      # block into an expression and the compiler evaluated its `when`s.
+      discard
     elif calleeName(stmt).normalize == "builddeps":
       # DSL-port M9.R.1: ``buildDeps:`` is the canonical spelling of
       # the legacy ``uses:`` block. Both populate the SAME ``toolUses``
@@ -2204,8 +2239,7 @@ proc parsePackageDef(name: NimNode; body: NimNode;
       # recipe sweep will rename ``uses:`` -> ``buildDeps:`` across the
       # 84 from-source recipes; until then ``uses:`` keeps working
       # untouched.
-      for i in 1 ..< stmt.len:
-        collectUses(stmt[i], @[], result.toolUses)
+      discard
     elif calleeName(stmt).normalize == "nativebuilddeps":
       # DSL-port M9.R.1: ``nativeBuildDeps:`` carries BUILD-platform
       # tools the recipe needs to run the build (compilers, code
@@ -2213,15 +2247,13 @@ proc parsePackageDef(name: NimNode; body: NimNode;
       # ``uses:`` / ``buildDeps:``; stored in a separate slot on
       # ``PackageDef`` so it does NOT leak into ``toolUses`` (the
       # downstream solver / cross-project surface).
-      for i in 1 ..< stmt.len:
-        collectUses(stmt[i], @[], result.nativeBuildDeps, DepKindNative)
+      discard
     elif calleeName(stmt).normalize == "runtimedeps":
       # DSL-port M9.R.1: ``runtimeDeps:`` carries HOST-platform
       # tools/libraries consumers need at runtime or link time.
       # Parsed with the same minispec grammar as ``uses:`` /
       # ``buildDeps:``; stored in a separate slot on ``PackageDef``.
-      for i in 1 ..< stmt.len:
-        collectUses(stmt[i], @[], result.runtimeDeps, DepKindRuntime)
+      discard
     elif calleeName(stmt).normalize == "provisioning":
       if stmt.len < 2:
         error("provisioning expects a body", stmt)
@@ -2322,6 +2354,21 @@ proc parsePackageDef(name: NimNode; body: NimNode;
   # ``platforms:``. Runs after the section loop so it sees every arm
   # regardless of the order the author wrote the blocks in. Inert for the
   # ~262 stdlib entries that declare nothing.
+  # Route the compiler-evaluated dependency entries back to the list each was
+  # written in. `depKind` is the tag stage 1 put on every entry, and it is the
+  # only thing distinguishing the four blocks once they share one expression.
+  # `uses:` and `buildDeps:` intentionally land in the same list -- they are
+  # two spellings of one block, as the `buildDeps` arm above documents.
+  #
+  # This runs before the passes below, all of which read these lists.
+  for entry in resolvedUses:
+    case entry.depKind
+    of DepKindNative:
+      result.nativeBuildDeps.add(entry)
+    of DepKindRuntime:
+      result.runtimeDeps.add(entry)
+    else:
+      result.toolUses.add(entry)
   lintArmsAgainstDeclaredPlatforms(body, result)
   # DSL-port M9.R.15p.0.1 — after all user-declared deps are
   # collected, auto-inject the Qt6Gui transitive ``find_dependency``
@@ -2501,6 +2548,7 @@ proc packageLiteral(pkg: PackageDef): string =
       result.add(prunePath)
     result.add("], sha256: " & codeOrEmpty(provisioning.sha256) &
       ", executableAlias: " & codeOrEmpty(provisioning.executableAlias) &
+      ", nonRedistributable: " & $provisioning.nonRedistributable &
     ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
       ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
       ", stripComponents: " & $provisioning.stripComponents &

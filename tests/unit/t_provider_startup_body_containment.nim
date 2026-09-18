@@ -42,6 +42,16 @@
 ##      successful, so without this the report reaches no log at all.
 ##   9. An invocation with no project root is refused where it is
 ##      produced, by a message that names the entry point.
+##  10. A ``Defect`` is contained, recorded AS a defect and reported --
+##      and still aborts a body invoked for real. Containment covered
+##      ``CatchableError`` only, which left the likeliest failure of a
+##      rootless body (an index or range operation) uncovered.
+##
+## What is NOT covered, and cannot be: a ``quit`` in a startup body.
+## ``quit`` raises nothing, so no handler intercepts it and the provider
+## still dies. That is a property of ``quit`` rather than a gap here; the
+## contract a recipe has to meet is to raise, and cases 2 and 10 are what
+## show that raising is enough.
 
 import std/[os, strutils, unittest]
 
@@ -91,6 +101,7 @@ proc runSelf(role: string): string =
 # the order the runner happens to use.
 let
   snapshotRefusesRuns = fixture.startupBodyRefusesRuns
+  snapshotDefectsRuns = fixture.startupBodyDefectsRuns
   snapshotRegistersRuns = fixture.startupBodyRegistersRuns
   snapshotActiveSeen = fixture.startupBodyActiveSeenByRefuses
   snapshotRootSeen = fixture.startupBodyRootSeenByRefuses
@@ -117,10 +128,12 @@ suite "provider startup pass containment":
     # inconclusive rather than as a failure.
     check defined(reproProviderMode)
 
-  test "the startup pass ran both fixture bodies":
+  test "the startup pass ran every fixture body":
     check snapshotRefusesRuns == 1
+    check snapshotDefectsRuns == 1
     check snapshotRegistersRuns == 1
     check "startupBodyRefuses" in snapshotRanPackages
+    check "startupBodyRaisesDefect" in snapshotRanPackages
     check "startupBodyRegisters" in snapshotRanPackages
 
   test "a raising body does not abort module initialisation":
@@ -131,9 +144,49 @@ suite "provider startup pass containment":
     check snapshotActiveSeen.len == 1
 
   test "the contained failure is recorded, named and quoted":
-    check snapshotFailures.len == 1
+    check snapshotFailures.len == 2
     check snapshotFailures[0].startsWith("startupBodyRefuses: ")
     check fixture.StartupBodyRaiseSentinel in snapshotFailures[0]
+
+  test "a DEFECT in a startup body is contained too, and reported as one":
+    ## Containment used to cover ``CatchableError`` only. A body running
+    ## with no project root fails at index, slice and range operations at
+    ## least as often as it raises -- `path[0]` on a string that is empty
+    ## because the root it came from is empty -- and in Nim those are
+    ## ``Defect``s. So the likeliest failure of the very pass this exists
+    ## to survive was the one it did not cover, and the operator got
+    ## "provider exited with code 1" for every target in the project.
+    ##
+    ## That this case RUNS is the first half of the measurement: the
+    ## defect-raising fixture package is declared before the registering
+    ## one, so an uncontained defect stops module initialisation and
+    ## nothing in this file reports anything.
+    check snapshotDefectsRuns == 1
+    check "startupBodyRaisesDefect" in snapshotRanPackages
+    check snapshotFailures[1].startsWith("startupBodyRaisesDefect: ")
+    check fixture.StartupBodyDefectSentinel in snapshotFailures[1]
+    # Reported AS a defect. The two kinds of failure mean different
+    # things to whoever reads the log, and a record that flattens them
+    # tells the reader one fewer thing than it knows.
+    check "defect: " in snapshotFailures[1]
+    check "defect: " notin snapshotFailures[0]
+
+  test "a DEFECT still aborts a body invoked for REAL":
+    ## The containment is scoped to the startup pass, and this is what
+    ## keeps that from being a claim. Outside the pass a defect is not
+    ## caught by anything here: a recipe that cannot plan must fail the
+    ## plan, not yield an empty fragment.
+    let before = fixture.startupBodyDefectsRuns
+    expect IndexDefect:
+      buildStartupBodyRaisesDefectPackage()
+    check fixture.startupBodyDefectsRuns == before + 1
+
+  test "a real provider process reports a contained DEFECT as well":
+    ## Same reasoning as the raise: the record is not the report, and a
+    ## contained failure nobody is told about is a silently broken recipe.
+    let output = runSelf(ProviderRoleFlag)
+    check ProviderStartupBodyFailurePrefix & "startupBodyRaisesDefect: " &
+      "defect: " & fixture.StartupBodyDefectSentinel in output
 
   test "the pass continues past the failing package and still registers":
     check snapshotRegistersRuns == 1

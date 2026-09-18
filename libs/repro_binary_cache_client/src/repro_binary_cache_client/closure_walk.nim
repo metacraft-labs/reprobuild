@@ -10,8 +10,8 @@
 ##
 ## 1. Push the root entry-key on the work queue.
 ## 2. Pop entry-key K.
-## 3. If K is already in the local CAS index → emit no-op.
-## 4. Else fetch K's manifest, decode + verify.
+## 3. Fetch K's manifest, or use this endpoint's verified in-memory copy.
+## 4. Check its entry identity and the endpoint's current signer policy.
 ## 5. For each ``dep`` in the manifest's ``depReferences`` →
 ##    push the dep onto the queue (skip if visited).
 ## 6. Record (K, manifest) in the visit set.
@@ -79,27 +79,33 @@ proc fetchAndVerifyManifest*(ctx: ClientContext;
                              pool: HttpPool;
                              endpoint: SubstituteEndpoint;
                              entryKeyHex: string): BinaryCacheManifest =
-  if ctx.manifestCache.hasKey(entryKeyHex):
-    return ctx.manifestCache[entryKeyHex]
-  let bytes = fetchManifestRaw(pool, endpoint, entryKeyHex)
+  let cacheKey = (endpointUrl: endpoint.baseUrl, entryKeyHex: entryKeyHex)
   let m =
-    try:
-      manifest_codec.decodeAndVerify(bytes)
-    except ClientManifestError as e:
-      raise newException(ClosureWalkError,
-        "manifest " & entryKeyHex & " from " & endpoint.baseUrl &
-        ": " & e.msg)
+    if ctx.manifestCache.hasKey(cacheKey):
+      ctx.manifestCache[cacheKey]
+    else:
+      let bytes = fetchManifestRaw(pool, endpoint, entryKeyHex)
+      try:
+        manifest_codec.decodeAndVerify(bytes)
+      except ClientManifestError as e:
+        raise newException(ClosureWalkError,
+          "manifest " & entryKeyHex & " from " & endpoint.baseUrl &
+          ": " & e.msg)
+  if bcsKey.cacheEntryKeyHex(m.entryKey) != entryKeyHex.toLowerAscii():
+    raise newException(ClosureWalkError,
+      "manifest entry key does not match requested entry key " & entryKeyHex)
   # Default-untrusted trust-anchor gate: reject a manifest whose
   # (signature-verified) producer key is not trusted for this cache.
   # This fires BEFORE the closure is walked so an untrusted root never
   # even enumerates its dep graph, and the endpoint falls through to
-  # the next configured cache.
+  # the next configured cache. Recheck even a cached manifest: the current
+  # endpoint's trust configuration can differ from the preceding request.
   if not isTrustedSigner(endpoint, m):
     raise newException(ClosureWalkError,
       "manifest " & entryKeyHex & " from " & endpoint.baseUrl &
       ": producer key not trusted for this cache " &
       "(default-untrusted): rejected")
-  ctx.manifestCache[entryKeyHex] = m
+  ctx.manifestCache[cacheKey] = m
   return m
 
 proc planClosure*(ctx: ClientContext;

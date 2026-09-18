@@ -31,10 +31,9 @@
 ##      declared. Without it the failure is a ``SIGILL`` inside an unrelated
 ##      build with nothing pointing back at the substitution.
 ##
-##   4. **Relocation policy.** ``rpForbidden`` payloads require the
-##      producer's exact ``StoreDir`` (the ``CacheInfoRecord.storeDir``
-##      value). If our local store root differs, the substitute is
-##      bypass-only.
+##   4. **Relocation policy.** Required relocation is unsupported. A fixed
+##      producer realization root is not carried by the signed manifest.
+##      Both cases are refused until the client can satisfy their contracts.
 ##   5. **Compression codec.** A payload requesting ``ckZstd`` is
 ##      rejected if libzstd isn't available; ``ckXz`` is rejected
 ##      unconditionally in v1.
@@ -191,13 +190,14 @@ proc checkCompat*(manifest: BinaryCacheManifest;
     if not supportsCompression(payload.compression):
       return (false, "compression codec unavailable: " &
         $payload.compression & " for payload " & payload.name)
-  if manifest.relocationPolicy == rpForbidden:
-    # rpForbidden payloads pin to a specific StoreDir. We don't know
-    # the producer's storeDir at compat-check time (that's a
-    # CacheInfoRecord field; the client populates it via the
-    # endpoint cache-info probe). Best-effort: warn-only via the
-    # caller's reason string; the actual storeDir comparison runs
-    # at materialize time in ``payload_sink``.
+  case manifest.relocationPolicy
+  of rpRequired:
+    return (false, "relocation required by manifest but not supported by this client")
+  of rpForbidden:
+    # The cache server's storage directory is not proof of the prefix that
+    # the producer embedded in its payload. No later materializer checks it.
+    return (false, "relocation forbidden but producer realization root cannot be verified")
+  of rpOptional:
     discard
   if trustedSigners.len == 0:
     if enforceTrust:

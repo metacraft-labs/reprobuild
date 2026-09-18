@@ -185,11 +185,26 @@ package qt6QuickControls2Source:
         actionId = "qt6QuickControls2Source.publish_interface",
         after = @[stageAction])
       setRegisteredActionDeclaredOutputs(publishAction.id, @[selfMirrorRoot])
-      setRegisteredActionPublish(publishAction.id, true,
-        some(sourceCacheEntryIdentity(
-          activeProviderProjectRoot(),
-          "qt6QuickControls2Source",
-          "6.8.1",
-          "custom")))
+      # The project root has to be a real one before a binary-cache identity
+      # is derived from it. The DSL runs this body once at provider startup,
+      # before any request exists and so with no root, and an empty root is
+      # not a usable input: `sourceCacheEntryIdentity` now refuses it
+      # outright, so calling it unguarded here turns every startup pass that
+      # loads this recipe into a reported package failure. Derive the tag
+      # only when there is a root to derive it from. The startup pass
+      # registers nothing that survives anyway: `buildPackageFragment` resets
+      # the action registry before the real invocation rebuilds it.
+      #
+      # The same guard is on the federated copy of this recipe. Keep the two
+      # in step -- the in-tree tree is the one the resolver prefers when it
+      # exists, so a fix applied only to the other copy does not run here.
+      let providerRoot = activeProviderProjectRoot()
+      if providerRoot.len > 0:
+        setRegisteredActionPublish(publishAction.id, true,
+          some(sourceCacheEntryIdentity(
+            providerRoot,
+            "qt6QuickControls2Source",
+            "6.8.1",
+            "custom")))
     finally:
       clearCurrentOwningPackageOverride()

@@ -83,9 +83,9 @@ type
       ## directory layout the rest of reprobuild already manages.
     hashScratchPool*: seq[HashScratch]
       ## Pre-allocated buffers + hasher slots; populated lazily.
-    manifestCache*: Table[string, BinaryCacheManifest]
-      ## Hex(entry-key) -> decoded manifest. Avoids re-parsing inside a
-      ## closure walk that visits the same dep twice.
+    manifestCache*: Table[tuple[endpointUrl, entryKeyHex: string], BinaryCacheManifest]
+      ## Endpoint and entry key -> signature-verified manifest. Avoids
+      ## re-parsing repeated dependencies; current trust is checked on use.
     closed*: bool
 
   ClientError* = object of CatchableError
@@ -118,7 +118,7 @@ proc newClientContext*(config: ClientConfig): ClientContext =
     config: config,
     store: openStore(config.storeRoot),
     hashScratchPool: @[],
-    manifestCache: initTable[string, BinaryCacheManifest](),
+    manifestCache: initTable[tuple[endpointUrl, entryKeyHex: string], BinaryCacheManifest](),
     closed: false)
 
 proc close*(ctx: ClientContext) =

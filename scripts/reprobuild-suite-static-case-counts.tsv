@@ -40,7 +40,7 @@ libs/repro_binary_cache_client/tests/t_a3_p6_closure_walk_r4.nim	nim	1
 libs/repro_binary_cache_client/tests/t_a4_p2_sentinel_wait.nim	nim	2
 libs/repro_binary_cache_client/tests/t_client_cli_prefix_substitute.nim	nim	1
 libs/repro_binary_cache_client/tests/t_r1_caches_config.nim	nim	10
-libs/repro_binary_cache_client/tests/t_r1_client_trust.nim	nim	3
+libs/repro_binary_cache_client/tests/t_r1_client_trust.nim	nim	5
 libs/repro_binary_cache_client/tests/test_auto_credentials.nim	nim	9
 libs/repro_binary_cache_client/tests/test_publish_in_process.nim	nim	9
 libs/repro_binary_cache_server/tests/t_a2_p1_manifest_roundtrip.nim	nim	7
@@ -420,6 +420,8 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_service_description.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_executable_ref.nim	nim	1
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_expression_setters.nim	nim	4
 libs/repro_project_dsl/tests/dsl_port/t_dsl_shell_action.nim	nim	8
+libs/repro_project_dsl/tests/dsl_port/t_dsl_tool_provisioning_staged.nim	nim	9
+libs/repro_project_dsl/tests/dsl_port/t_dsl_uses_staged.nim	nim	16
 libs/repro_project_dsl/tests/dsl_port/t_dsl_validate.nim	nim	3
 libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_uses.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_expression_values.nim	nim	7
@@ -457,6 +459,7 @@ libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim	nim	6
 libs/repro_project_dsl/tests/t_multi_package_macro.nim	nim	5
 libs/repro_project_dsl/tests/t_source_cache_identity.nim	nim	2
+libs/repro_project_dsl/tests/t_source_cache_identity_refuses_an_empty_provider_revision.nim	nim	7
 libs/repro_project_dsl/tests/t_tool_identity_ref_kind_codec.nim	nim	2
 libs/repro_project_dsl/tests/test_depends_on_macro.nim	nim	3
 libs/repro_project_dsl/tests/test_library_macro.nim	nim	12
@@ -776,6 +779,10 @@ tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim	nim	2
 tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim	nim	2
 tests/e2e/hcr-linux-far/t_e2e_hcr_linux_far_target_island_patch.nim	nim	2
 tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim	nim	2
+tests/e2e/hcr-linux-rbhcr/t_e2e_hcr_linux_isonim_shim_against_real_agent.nim	nim	2
+tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_late_load_failure_still_reaches_after_reload.nim	nim	2
+tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_managed_type_layout_change_lifecycle.nim	nim	2
+tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_rejected_patch_never_fires_before_reload.nim	nim	2
 tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim	nim	2
 tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim	nim	3
 tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_quiescence_handshake_and_release.nim	nim	2
@@ -788,6 +795,7 @@ tests/e2e/hcr-linux-txn/t_integration_hcr_linux_repeated_patch_of_same_function.
 tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_backtrace_through_patched_function.nim	nim	2
 tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_jit_symfile_accepted_by_gdb.nim	nim	2
 tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_register_frame_abi_detection.nim	nim	2
+tests/e2e/hcr-portable-rbhcr/t_hcr_rb_application_abi_contract.nim	nim	6
 tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim	nim	1
 tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim	nim	1
 tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim	nim	1
@@ -818,7 +826,7 @@ tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim	nim	18
 tests/e2e/local-build-engine/t_e2e_m51_dsl_stdlib_file_ops.nim	nim	5
 tests/e2e/local-build-engine/t_e2e_provider_graph_tracks_binary.nim	nim	1
 tests/e2e/local-build-engine/t_e2e_repro_build_multiple_named_targets.nim	nim	2
-tests/e2e/local-build-engine/t_e2e_repro_build_named_target.nim	nim	1
+tests/e2e/local-build-engine/t_e2e_repro_build_named_target.nim	nim	2
 tests/e2e/local-build-engine/t_e2e_repro_run_lists_tasks_and_edges.nim	nim	3
 tests/e2e/local-build-engine/t_e2e_repro_run_named_run_edge.nim	nim	2
 tests/e2e/local-build-engine/t_e2e_repro_run_qualified_and_ambiguous.nim	nim	1
@@ -1001,6 +1009,7 @@ tests/integration/t_certificate_signature_verifies_against_registered_key.nim	ni
 tests/integration/t_certificates_travel_with_pushed_commit.nim	nim	1
 tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	nim	16
 tests/integration/t_ci_skips_targets_covered_by_valid_certificate_per_platform.nim	nim	1
+tests/integration/t_clean_probe_reads_stdout_not_git_diagnostics.nim	nim	4
 tests/integration/t_cli_repro_lock_explain.nim	nim	5
 tests/integration/t_clone_action_honors_partial_blobless_and_single_branch.nim	nim	2
 tests/integration/t_cmake_fresh_configure.nim	nim	1
@@ -1035,6 +1044,7 @@ tests/integration/t_declared_platforms_change_no_existing_resolution.nim	nim	1
 tests/integration/t_default_projects_auto_layer_on_fresh_workspace.nim	nim	3
 tests/integration/t_default_target_floor_is_conservative.nim	nim	7
 tests/integration/t_dependency_report_and_converter_paths.nim	nim	1
+tests/integration/t_der_nesting_is_bounded_by_the_parent.nim	nim	9
 tests/integration/t_derived_daemon_ipc_trust.nim	nim	10
 tests/integration/t_dev_env_allow.nim	nim	1
 tests/integration/t_dev_env_artifact.nim	nim	2
@@ -1074,7 +1084,7 @@ tests/integration/t_e2e_software_root_attestation_roundtrip.nim	nim	7
 tests/integration/t_e2e_variant_feature_flag_drops_tls.nim	nim	5
 tests/integration/t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable.nim	nim	1
 tests/integration/t_emitted_overrides_match_the_develop_set.nim	nim	1
-tests/integration/t_emulator_is_not_a_verifier_bypass.nim	nim	14
+tests/integration/t_emulator_is_not_a_verifier_bypass.nim	nim	15
 tests/integration/t_entrypoints.nim	nim	1
 tests/integration/t_enumerated_directory_evidence_producers.nim	nim	5
 tests/integration/t_env_inheritance_census_is_reported.nim	nim	5
@@ -1106,6 +1116,8 @@ tests/integration/t_hooks_ensure_installs_a_managed_pre_commit_hook.nim	nim	1
 tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	nim	18
 tests/integration/t_hooks_noop_outside_initialized_workspace.nim	nim	1
 tests/integration/t_host_binary_format_is_proven_before_execution.nim	nim	7
+tests/integration/t_hpke_rejects_wrong_recipient.nim	nim	12
+tests/integration/t_hpke_rfc9180_vectors.nim	nim	8
 tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim	nim	3
 tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim	nim	6
 tests/integration/t_install_mirror_atomic_patching.nim	nim	7
@@ -1113,7 +1125,7 @@ tests/integration/t_installed_engine_read_only_source_tree.nim	nim	2
 tests/integration/t_integration_build_engine_api_ready_queue.nim	nim	18
 tests/integration/t_integration_build_report_target_resolution_kind.nim	nim	5
 tests/integration/t_integration_cli_variant_flag_drives_solver.nim	nim	3
-tests/integration/t_integration_collection_distinct_from_aggregate.nim	nim	5
+tests/integration/t_integration_collection_distinct_from_aggregate.nim	nim	6
 tests/integration/t_integration_configurable_doc_comment_directives.nim	nim	8
 tests/integration/t_integration_configurable_persistent_lookup.nim	nim	4
 tests/integration/t_integration_configurable_staged_field_access.nim	nim	6
@@ -1137,13 +1149,13 @@ tests/integration/t_integration_hcr_reference_corpus_and_object_inputs.nim	nim	1
 tests/integration/t_integration_launch_plan_binding_strategies.nim	nim	21
 tests/integration/t_integration_local_store_gc.nim	nim	3
 tests/integration/t_integration_local_store_layout_and_atomic_writes.nim	nim	5
-tests/integration/t_integration_provider_fragment_refresh_and_pruning.nim	nim	1
+tests/integration/t_integration_provider_fragment_refresh_and_pruning.nim	nim	2
 tests/integration/t_integration_recipe_consumes_interface.nim	nim	4
 tests/integration/t_integration_reprobuild_sessions_share_runquota.nim	nim	1
 tests/integration/t_integration_scheduler_dependency_gathering_policies.nim	nim	5
 tests/integration/t_integration_solver_chosen_version.nim	nim	4
 tests/integration/t_integration_solver_resolves_variants.nim	nim	3
-tests/integration/t_integration_target_export_table_v2_schema.nim	nim	4
+tests/integration/t_integration_target_export_table_v2_schema.nim	nim	5
 tests/integration/t_integration_test_runner_adapter_registered.nim	nim	3
 tests/integration/t_integration_test_runner_interface.nim	nim	3
 tests/integration/t_integration_toolchain_interface.nim	nim	4
@@ -1159,7 +1171,7 @@ tests/integration/t_is_published_accepts_any_remote_name.nim	nim	1
 tests/integration/t_just_test_end_to_end_via_parallel_runner.nim	nim	1
 tests/integration/t_just_test_hot_cache_is_no_op_build.nim	nim	2
 tests/integration/t_just_test_via_ct_test_runner.nim	nim	1
-tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim	nim	2
+tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim	nim	3
 tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim	nim	1
 tests/integration/t_level_and_its_equivalent_feature_set_select_alike.nim	nim	1
 tests/integration/t_levelless_catalog_selection_is_unchanged.nim	nim	1
@@ -1502,6 +1514,7 @@ tests/integration/t_workspace_vcs_evidence_round_trips_through_build_report.nim	
 tests/integration/t_workspace_vcs_fetch_no_op_when_up_to_date.nim	nim	2
 tests/integration/t_workspace_vcs_hybrid_workspace_clone.nim	nim	1
 tests/integration/t_workspace_vcs_switch_preserves_dirty_state.nim	nim	3
+tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim	nim	4
 tests/integration/test_hax_m2_macho_lazy_symbol_and_vtable_interception.nim	nim	0
 tests/integration/test_hax_m3_cli_watcher_triggers_compilation_and_patch_push.nim	nim	0
 tests/test_dev_env_m9_policy.py	python	4
@@ -1510,6 +1523,8 @@ tests/unit/t_action_index_platform_arm.nim	nim	3
 tests/unit/t_bootstrap_nim_monitoring.nim	nim	3
 tests/unit/t_cached_source_dependency_closure.nim	nim	11
 tests/unit/t_capabilities.nim	nim	2
+tests/unit/t_cargo_lock_vendor_plan.nim	nim	19
+tests/unit/t_cargo_vendor_action.nim	nim	10
 tests/unit/t_cmake_direct_tool_identity.nim	nim	5
 tests/unit/t_config_nims_lib_resolution.nim	nim	7
 tests/unit/t_configure_build_tree_cleanup.nim	nim	12
@@ -1520,8 +1535,11 @@ tests/unit/t_da1i_evidence_help_names_the_hazard.nim	nim	9
 tests/unit/t_daemon_request_working_directory.nim	nim	4
 tests/unit/t_declared_package_deps_from_recipe.nim	nim	6
 tests/unit/t_dev_env_path_ops.nim	nim	8
+tests/unit/t_electron_builder_binaries.nim	nim	5
 tests/unit/t_every_tool_profile_is_sealed.nim	nim	6
 tests/unit/t_fribidi_dev_stub.nim	nim	1
+tests/unit/t_from_source_cargo_recognition.nim	nim	8
+tests/unit/t_from_source_go_recognition.nim	nim	8
 tests/unit/t_from_source_realization_platform.nim	nim	2
 tests/unit/t_hcr_agent_coordinator.nim	nim	1
 tests/unit/t_hcr_agent_endpoint.nim	nim	6
@@ -1622,10 +1640,12 @@ tests/unit/t_m9r83_install_mirror_publish.nim	nim	7
 tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
 tests/unit/t_m9r9_auto_recurse.nim	nim	20
 tests/unit/t_measurement_axes.nim	nim	14
+tests/unit/t_msi_archive_type.nim	nim	2
 tests/unit/t_nix_propagated_store_paths.nim	nim	5
+tests/unit/t_prefix_env_ops.nim	nim	4
 tests/unit/t_provider_compile_cache_entry_is_content_addressed.nim	nim	7
 tests/unit/t_provider_snapshot_binary_binding.nim	nim	3
-tests/unit/t_provider_startup_body_containment.nim	nim	11
+tests/unit/t_provider_startup_body_containment.nim	nim	14
 tests/unit/t_run_consumes.nim	nim	6
 tests/unit/t_runquota_endpoint_paths.nim	nim	6
 tests/unit/t_runquota_grant_wait_unresponsive.nim	nim	11
@@ -1639,6 +1659,7 @@ tests/unit/t_stale_artifact_names_what_changed.nim	nim	5
 tests/unit/t_store_path_farm.nim	nim	4
 tests/unit/t_substituted_edge_does_not_go_stale.nim	nim	4
 tests/unit/t_substituted_provider_compile_is_verified.nim	nim	7
+tests/unit/t_tarball_non_redistributable.nim	nim	4
 tests/unit/t_tarball_prune_paths.nim	nim	3
 tests/unit/t_test_execute_edge_receives_a_usable_path.nim	nim	3
 tests/unit/t_test_execution_extension_is_framework_neutral.nim	nim	10
@@ -1648,6 +1669,7 @@ tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim	nim	6
 tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim	nim	10
 tests/unit/t_unmonitorable_action_depfile_guards.nim	nim	13
 tests/unit/t_version.nim	nim	2
+tests/unit/t_voice_model_packages.nim	nim	5
 tests/unit/t_windows_system_hash_mode.nim	nim	2
 tests/unit/t_workspace_root_for_repo_managed_worktree.nim	nim	1
 tests/unit/test_build_report_attribution.py	python	12

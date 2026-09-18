@@ -3761,6 +3761,142 @@ proc shouldTryFromSourceCacheSubstitution*(
   outcome.kind in {rrResolved, rrNeedsBuild} and cacheConfigured and
     not prepareOnly and not dryRun and not forceRebuild
 
+type
+  DirectTargetAliases* = object
+    ## The public name each action is LOWERED, KEYED AND REPORTED under.
+    ##
+    ## An edge's generated id (``nim-c-0ecd68db4a1df678``) is not a name a
+    ## user can read or type, so a project's ``target("name", handle)``
+    ## renames it. That rename is not cosmetic: the id is mixed into the
+    ## action's weak fingerprint (``weakFingerprintFor`` in
+    ## ``repro_build_engine``), so it is part of the cache key. A rename
+    ## that could resolve two ways would give one edge two cache
+    ## identities, and the resolution has to be a pure function of the
+    ## recipe — not of the selector, not of hash-table iteration order.
+    ##
+    ## That is what the refusal this type replaces was protecting. The
+    ## previous code raised
+    ##
+    ##     action <id> has multiple direct target aliases: ct and ct-binary
+    ##
+    ## the moment two single-action names landed on one edge, because it
+    ## had no rule for choosing between them and its table walk
+    ## (``for target in targets.values``) would otherwise have picked one
+    ## arbitrarily.
+    ##
+    ## ONE ACTION, ONE CANONICAL NAME IS PRESERVED HERE — not relaxed.
+    ## That invariant matters beyond the cache key: a per-edge nickname
+    ## that also names the edge's scratch / nimcache directory needs each
+    ## edge to have exactly one of them. What changes is only HOW the
+    ## single answer is produced. Before: raise here, and — at the second
+    ## site that computed the same map, in the build-report path — take
+    ## whichever row the fragment walk reached last. That is two answers
+    ## to one question, one of them an accident of ordering. After: one
+    ## rule, one implementation, one answer, computed from the recipe
+    ## alone.
+    ##
+    ## THE DIRECTION THAT IS A SAFETY PROPERTY IS A DIFFERENT CHECK AND
+    ## IS UNTOUCHED. Two EDGES sharing one name is what would give two
+    ## edges one identity and one scratch directory, and that is refused
+    ## earlier — in the provider, at registration, naming both edges:
+    ##
+    ##     repro project provider: error: duplicate implicit target name
+    ##     'app-binary' within package 'aliasPkg': first registered for
+    ##     action 'build-app'; re-registered for action 'build-other'
+    ##
+    ## which is ``Named-Targets.milestones.org`` §M1's re-emission rule.
+    ## Measured against this build, not inferred. The refusal removed
+    ## below caught the OPPOSITE shape — many names, one edge — which
+    ## cannot make two edges collide on anything.
+    ##
+    ## Refusing made the ambiguity loud, but it also made a
+    ## legitimate recipe unbuildable, and the specs do not support it:
+    ## ``Named-Targets.milestones.org`` §M1 constrains only the NAME side
+    ## ("re-emission of the same name within one package is a build-time
+    ## error") and explicitly allows the other direction — "an edge with
+    ## multiple ``targetNames`` produces one entry per name, all pointing
+    ## at the same edge", "the collision within one edge is allowed; the
+    ## duplicate name still resolves to a single edge so selection is
+    ## unambiguous". ``Standard-Provider-Implementation.milestones.org``
+    ## records the refusal twice as an engine limitation being worked
+    ## around rather than a contract being honoured.
+    ##
+    ## So: keep the single-valued key, drop the refusal, and decide by
+    ## RANK (see ``directAliasRank``). Precedence, not rejection.
+    byAction*: Table[string, string]
+    rankByAction*: Table[string, int]
+
+proc directAliasRank(target: BuildTargetDef): int =
+  ## Lower binds tighter. ``target("name", handle)`` RENAMES the edge —
+  ## that is the whole of what the call means, and both the DSL reference
+  ## (``Package-Model.md`` §"Explicit Names and Aggregates": "rename an
+  ## edge whose implicit name collides with something more useful") and
+  ## CodeTracer's own recipe say so at the call site: "``ct-binary`` keeps
+  ## a handle on the compile alone ... and is the id the build progress
+  ## line shows for that action".
+  ##
+  ## ``aggregate("name", ...)`` does not rename anything; it "creates a
+  ## grouping handle whose selected closure is the union of its members"
+  ## (``Package-Model.md`` §"Targets and aggregates";
+  ## ``Glossary.md`` §"Aggregate target": "primarily a selection and
+  ## grouping construct"). A one-member aggregate is a set of one, not a
+  ## second name for its member — it only LOOKS like a rename because the
+  ## payload shape is identical, which is why ``btkTarget`` exists.
+  ##
+  ## Naming it a fallback rather than excluding it is deliberate: a
+  ## project whose only public handle on an edge is a one-member
+  ## aggregate kept that name before this change, and keeps it after.
+  ## Nothing that loads today changes id.
+  case target.kind
+  of btkTarget: 0
+  of btkAggregate: 1
+  of btkCollection: high(int)
+
+proc considerDirectAlias*(aliases: var DirectTargetAliases;
+                          target: BuildTargetDef) =
+  ## Fold one build-target row into the alias map.
+  ##
+  ## Only a row naming exactly one action and no nested targets can be a
+  ## rename; anything else is a grouping and leaves its members' ids
+  ## alone. ``collect(...)`` never renames: a collection names a set by
+  ## construction (``Build-Graph-Collections.md``), so it is excluded
+  ## even in the one-member case — unchanged from before.
+  ##
+  ## Ties within one rank are broken by lexicographic order on the name.
+  ## Arbitrary, but TOTAL and independent of table iteration order, which
+  ## is the property the cache key needs.
+  ##
+  ## OPEN: two plain ``target`` calls on one edge is the shape that
+  ## reaches that tie, and it is a shape the tree wants — the standard
+  ## provider's milestones defer per-member aliases (``default`` beside
+  ## ``libfoo`` on one action) precisely because the linker used to
+  ## reject them. They build now, and the pick is deterministic, but it
+  ## is made SILENTLY: an author who wrote two renames cannot tell from
+  ## the build which one became the edge's name. That is tolerable while
+  ## the name is a display/cache concern. It stops being tolerable if a
+  ## per-edge nickname also names the edge's on-disk scratch directory,
+  ## because then the author is choosing a directory without being told
+  ## which. Whoever lands that design should decide whether two renames
+  ## on one edge is an authoring error to refuse (with a diagnostic
+  ## naming both call sites, which the payload's ``sourceFile`` /
+  ## ``sourceLine`` fields already carry) or a precedence to state out
+  ## loud. Do not read the lexicographic rule as a decision on that; it
+  ## is the smallest total order that removes the nondeterminism.
+  if target.actions.len != 1 or target.targets.len != 0:
+    return
+  if target.kind == btkCollection:
+    return
+  let actionId = target.actions[0]
+  let rank = directAliasRank(target)
+  if aliases.byAction.hasKey(actionId):
+    let bestRank = aliases.rankByAction[actionId]
+    if rank > bestRank:
+      return
+    if rank == bestRank and target.name >= aliases.byAction[actionId]:
+      return
+  aliases.byAction[actionId] = target.name
+  aliases.rankByAction[actionId] = rank
+
 proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
                             identity: PathOnlyBuildIdentity;
                             projectRoot: string;
@@ -3807,20 +3943,12 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
   let inferredActions = inferDeclaredActionDeps(declaredActions, projectRoot)
   for i in 0 ..< actionNodes.len:
     actionNodes[i].payload = inferredActions[i]
-  var aliasForAction = initTable[string, string]()
+  var aliases = DirectTargetAliases(
+    byAction: initTable[string, string](),
+    rankByAction: initTable[string, int]())
   for target in targets.values:
-    # A collection names a set; it does not rename its sole member. Treating
-    # one-member collections as aliases makes an action that also has a public
-    # target appear to have two conflicting names.
-    if target.kind == btkAggregate and target.actions.len == 1 and
-        target.targets.len == 0:
-      let actionId = target.actions[0]
-      if aliasForAction.hasKey(actionId) and aliasForAction[actionId] !=
-          target.name:
-        raise newException(ValueError,
-          "action " & actionId & " has multiple direct target aliases: " &
-            aliasForAction[actionId] & " and " & target.name)
-      aliasForAction[actionId] = target.name
+    considerDirectAlias(aliases, target)
+  let aliasForAction = aliases.byAction
 
   proc publicPayload(action: BuildActionDef): BuildActionDef =
     result = action
@@ -10874,7 +11002,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # M2 dispatch would have raised a typed exception for unresolvable
     # name selectors before reaching here).
     var targetResolutions: seq[TargetResolutionRecord] = @[]
-    var publicActionAliases = initTable[string, string]()
+    # The SAME rule the lowering pass applies, via the same helper.
+    # These two sites had drifted apart: lowering raised on a second
+    # direct name while this one silently took the last row it walked, so
+    # on any recipe carrying both shapes the id the engine keyed an action
+    # under and the id this code forwarded arguments to could disagree.
+    # One implementation, one answer.
+    var publicAliases = DirectTargetAliases(
+      byAction: initTable[string, string](),
+      rankByAction: initTable[string, int]())
     block computeTargetResolutions:
       let exportTable = aggregateTargetExportTable(refresh.snapshot)
       var actionIds: seq[string] = @[]
@@ -10898,9 +11034,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             let targetDef = decodeBuildTargetPayload(toBytes(node.payload))
             if not seenExplicit.containsOrIncl(targetDef.name):
               explicitTargets.add(targetDef.name)
-            if targetDef.kind == btkAggregate and
-                targetDef.actions.len == 1 and targetDef.targets.len == 0:
-              publicActionAliases[targetDef.actions[0]] = targetDef.name
+            considerDirectAlias(publicAliases, targetDef)
             if targetDef.kind == btkCollection:
               if collectionMembers.hasKey(targetDef.name):
                 for a in targetDef.actions:
@@ -10926,8 +11060,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     if forwardedActionArgs.len > 0 and targetResolutions.len == 1 and
         targetResolutions[0].kind == trkResolved:
       forwardedActionId = targetResolutions[0].actionId
-      if publicActionAliases.hasKey(forwardedActionId):
-        forwardedActionId = publicActionAliases[forwardedActionId]
+      if publicAliases.byAction.hasKey(forwardedActionId):
+        forwardedActionId = publicAliases.byAction[forwardedActionId]
 
     let graphCacheKey = loweredGraphCacheKey(buildArtifact, effectiveMode,
       providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
@@ -11289,6 +11423,65 @@ proc binDirsForDevelop(identity: PathOnlyBuildIdentity;
       for binDir in profile.pathSearchList:
         contribute(binDir, result)
 
+proc prefixEnvVarName*(packageSelector: string): string =
+  ## ``electron-builder-nsis`` -> ``REPRO_PREFIX_ELECTRON_BUILDER_NSIS``.
+  ##
+  ## Everything outside ``[A-Za-z0-9]`` becomes ``_`` so that a selector
+  ## carrying a version (``winfsp@2.1.25156``) or a scope still yields a name
+  ## a POSIX shell and ``cmd.exe`` both accept.
+  result = "REPRO_PREFIX_"
+  for ch in packageSelector:
+    case ch
+    of 'a'..'z': result.add(char(ord(ch) - ord('a') + ord('A')))
+    of 'A'..'Z', '0'..'9': result.add(ch)
+    else: result.add('_')
+
+proc prefixEnvOpsForDevelop*(identity: PathOnlyBuildIdentity):
+    seq[DevEnvShellOp] =
+  ## Every realized package's PREFIX, by name, in the activated environment.
+  ##
+  ## PATH answers "which programs are available"; it does not answer "where
+  ## did package X land". Those are different questions, and for a package
+  ## whose payload is DATA rather than programs the second one is the only
+  ## one that has an answer at all. `electron-builder-nsis-resources` is
+  ## nothing but a plugin tree; `electron-builder-win-code-sign` is a
+  ## signing-tool bundle nested two directories below its prefix. Consumers
+  ## that must hand a path to a tool which does not read PATH — an
+  ## `ELECTRON_BUILDER_CACHE` layout, a `--prefix` flag, an include path —
+  ## previously had to search PATH for a file they knew the package
+  ## contained and then walk up a hard-coded number of levels. That encodes
+  ## the package's internal layout at the CALL SITE, where a repackaging
+  ## upstream breaks it silently.
+  ##
+  ## So the realization publishes what it already knows. Nix-mode uses the
+  ## first realized store path, which is the output the resolver selected;
+  ## every other mode uses `selectedStorePath`, the prefix the archive was
+  ## extracted into.
+  ##
+  ## Deliberately NOT shortened through the Windows junction that
+  ## `binDirsForDevelop` applies: that shortening exists to keep PATH under
+  ## cmd.exe's 8191-character limit, and a single variable is not competing
+  ## for that budget. A consumer reading this wants the real prefix.
+  var seen: seq[string] = @[]
+  for profile in identity.profiles:
+    if profile.packageSelector.len == 0:
+      continue
+    let prefix =
+      if profile.installMethod == "nix":
+        if profile.realizedStorePaths.len > 0: profile.realizedStorePaths[0]
+        else: ""
+      else:
+        profile.selectedStorePath
+    if prefix.len == 0 or not dirExists(extendedPath(prefix)):
+      continue
+    let name = prefixEnvVarName(profile.packageSelector)
+    if name in seen:
+      # Several executables from one package resolve to one prefix; the
+      # first wins and the rest are the same value.
+      continue
+    seen.add(name)
+    result.add(DevEnvShellOp(kind: deskSetEnv, name: name, value: prefix))
+
 proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
                              identity: PathOnlyBuildIdentity;
                              identityPath, inspectionPath,
@@ -11326,7 +11519,7 @@ proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
         value: interfacePath),
       DevEnvShellOp(kind: deskSetEnv, name: "REPRO_PROJECT_ROOT",
         value: canonicalProjectRoot)
-    ])
+    ] & prefixEnvOpsForDevelop(identity))
   # W2-no-producer-ops-and-no-report: this artifact is SYNTHESIZED right above
   # from ``binDirsForDevelop`` — it is ``repro develop``'s own PATH projection,
   # not a dev-env introspection artifact, and it carries no ``toolProfiles``.
@@ -12851,10 +13044,12 @@ proc devEnvToolShellOps*(edge: DevEnvEdgeResult;
 
   let storeRoot = resolveStoreRoot() / "tool-store"
   var binDirs: seq[string] = @[]
+  var prefixOps: seq[DevEnvShellOp] = @[]
   try:
-    binDirs = binDirsForDevelop(resolveAndWriteIdentity(interfaceArtifact,
-      selection.outDir, mode, storeRootOverride = storeRoot).identity,
-      storeRoot = storeRoot)
+    let identity = resolveAndWriteIdentity(interfaceArtifact,
+      selection.outDir, mode, storeRootOverride = storeRoot).identity
+    binDirs = binDirsForDevelop(identity, storeRoot = storeRoot)
+    prefixOps = prefixEnvOpsForDevelop(identity)
   except CatchableError as batchErr:
     # The batch resolve is all-or-nothing: one package the catalog cannot
     # realize on this platform takes down every OTHER tool's PATH entry with
@@ -12872,10 +13067,14 @@ proc devEnvToolShellOps*(edge: DevEnvEdgeResult;
       var single = interfaceArtifact
       single.projectInterface.toolUses = @[useDef]
       try:
-        for dir in binDirsForDevelop(toolBuildIdentity(single, mode,
-            storeRoot = storeRoot), storeRoot = storeRoot):
+        let singleIdentity = toolBuildIdentity(single, mode,
+          storeRoot = storeRoot)
+        for dir in binDirsForDevelop(singleIdentity, storeRoot = storeRoot):
           if dir notin binDirs:
             binDirs.add(dir)
+        for op in prefixEnvOpsForDevelop(singleIdentity):
+          if not prefixOps.anyIt(it.name == op.name):
+            prefixOps.add(op)
       except CatchableError as toolErr:
         failures.add(useDef.packageSelector & " (" & toolErr.msg & ")")
     if failures.len == 0:
@@ -12896,6 +13095,7 @@ proc devEnvToolShellOps*(edge: DevEnvEdgeResult;
   for i in countdown(binDirs.high, 0):
     result.add(DevEnvShellOp(kind: deskPrependPath, name: "PATH",
       value: binDirs[i]))
+  result.add(prefixOps)
 
 proc devEnvProducerActivation(artifact: DevEnvArtifact; projectRoot: string;
                               appliesToPath = true): seq[DevEnvShellOp] =
@@ -32331,6 +32531,114 @@ proc gitRunPlain(identity: GitToolIdentity;
       env = scrubbedGitRepositoryEnv())
     (code: res.exitCode, output: res.output)
 
+proc gitRunPlainQuery(identity: GitToolIdentity;
+                      args: openArray[string]):
+    tuple[code: int; output: string; diagnostic: string] =
+  ## Invoke git for an answer that will be PARSED.
+  ##
+  ## ``gitRunPlain`` above merges git's stderr into its stdout
+  ## (``poStdErrToStdOut``). For a caller that only tests the exit code, or
+  ## that reads the merged text precisely BECAUSE it wants git's diagnostic,
+  ## that is the right shape and it keeps it. For a caller that parses git's
+  ## ANSWER it is not: a benign diagnostic then arrives indistinguishable
+  ## from the answer.
+  ##
+  ## Measured, not hypothetical. A repo carrying a stale split commit-graph
+  ## chain — a derived cache git writes and prunes on its own — makes every
+  ## command in it print ``warning: unable to find all commit-graph files`` on
+  ## stderr while still exiting 0 and still printing the right answer on
+  ## stdout. ``git status --porcelain`` in such a repo prints ZERO stdout
+  ## lines and that one stderr line, so every "clean is an empty porcelain
+  ## stream" probe in this file read a PRISTINE tree as dirty: the `repro
+  ## push` preflight refused with "commit or stash changes in <repo>" naming
+  ## a repo with nothing to commit, `observeWorktreeState` refused to issue a
+  ## certificate, and the post-commit lock writer skipped the workspace lock
+  ## reporting a "dirty sibling" that was clean.
+  ##
+  ## ``output`` is stdout ALONE. ``diagnostic`` is the merged, trimmed text —
+  ## what ``gitRunPlain``'s ``output`` would have held — so a caller reporting
+  ## a FAILURE still surfaces git's message, which lives on stderr.
+  ##
+  ## Both streams are drained CONCURRENTLY. Reading one to EOF and only then
+  ## the other deadlocks the moment the unread pipe fills, and git's stderr is
+  ## unbounded in principle (per-ref fetch lines, per-object lfs lines).
+  when defined(windows):
+    # Structured argv and a PeekNamedPipe drain, for the same reason
+    # ``gitRunPlain`` uses one: Nim 2.2's ``readAll`` stops at the first short
+    # pipe read on Windows, so a blocking read of either stream would also
+    # truncate. Two handles now, drained in the same pass.
+    let process = startProcess(identity.binaryPath, args = @args,
+      env = scrubbedGitRepositoryEnv(), options = {poUsePath})
+    defer: process.close()
+    const PollSleepMs = 2
+    let handles = [Handle(process.outputHandle), Handle(process.errorHandle)]
+    var sinks: array[2, string]
+    var buf {.noinit.}: array[16384, char]
+    while true:
+      var moved = false
+      for i in 0 .. 1:
+        var bytesAvail: int32 = 0
+        let peeked = peekNamedPipe(handles[i],
+          lpTotalBytesAvail = addr bytesAvail)
+        if peeked and bytesAvail > 0:
+          var bytesRead: int32 = 0
+          let toRead = min(int(bytesAvail), buf.len).int32
+          let ok = winlean.readFile(handles[i], addr buf[0], toRead,
+            addr bytesRead, nil)
+          if ok != 0 and bytesRead > 0:
+            let previousLen = sinks[i].len
+            sinks[i].setLen(previousLen + bytesRead)
+            copyMem(addr sinks[i][previousLen], addr buf[0], bytesRead)
+            moved = true
+      # Only consult the exit code once BOTH pipes are momentarily empty, so
+      # everything the child buffered before exiting is still collected.
+      if moved: continue
+      result.code = process.peekExitCode()
+      if result.code != -1: break
+      sleep(PollSleepMs)
+    result.output = sinks[0]
+    result.diagnostic = (sinks[1] & sinks[0]).strip()
+  else:
+    # POSIX ``execCmdEx`` implies ``poEvalCommand``, so the command runs
+    # through ``/bin/sh`` and the SHELL can put stderr in a file. One pipe, no
+    # interleaving, no deadlock, and the same subprocess shape as
+    # ``gitRunPlain``.
+    var cmd = quoteShell(identity.binaryPath)
+    for arg in args:
+      cmd.add(" ")
+      cmd.add(quoteShell(arg))
+    var errPath = ""
+    try:
+      let created = createTempFile("repro-gitq-", ".stderr")
+      created.cfile.close()
+      errPath = created.path
+    except CatchableError, Defect:
+      errPath = ""
+    if errPath.len > 0:
+      cmd.add(" 2>" & quoteShell(errPath))
+    # Without the redirect the child's stderr would be an unread pipe that can
+    # fill and hang it, so fall back to the MERGED stream instead — degraded
+    # (the caller sees diagnostics in ``output``, exactly ``gitRunPlain``'s
+    # behaviour) but never hung.
+    let options =
+      if errPath.len > 0: {poUsePath}
+      else: {poUsePath, poStdErrToStdOut}
+    let res = execCmdEx(cmd, options = options,
+      env = scrubbedGitRepositoryEnv())
+    result.code = res.exitCode
+    result.output = res.output
+    var errText = ""
+    if errPath.len > 0:
+      try:
+        errText = readFile(errPath)
+      except CatchableError:
+        discard
+      try:
+        removeFile(errPath)
+      except CatchableError:
+        discard
+    result.diagnostic = (errText & res.output).strip()
+
 template withDrivenOperationContext*(body: untyped) =
   ## Invariant 15 — mark every git child spawned inside ``body`` as a step of
   ## an operation Reprobuild drives itself, so the BOOKKEEPING hooks
@@ -37490,12 +37798,17 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
       observations.add(obs)
       continue
     obs.exists = true
-    let branchRes = gitRunPlain(identity,
+    let branchRes = gitRunPlainQuery(identity,
       ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
     if branchRes.code == 0:
       obs.currentBranch = branchRes.output.strip()
     obs.headSha = revParse(identity, repoAbs, "HEAD")
-    obs.isClean = gitRunPlain(identity,
+    # ``gitRunPlainQuery``: emptiness of the PORCELAIN stream is the whole
+    # answer, and the merged stream is not it. A sibling carrying a stale
+    # split commit-graph chain prints a warning on stderr and nothing on
+    # stdout, which merged read as one dirty line and made this gatherer
+    # report a pristine sibling as dirty.
+    obs.isClean = gitRunPlainQuery(identity,
       ["-C", repoAbs, "status", "--porcelain"]).output.strip().len == 0
     if obs.mainlineBranch.len > 0:
       obs.mainlineTip = revParse(identity, repoAbs,
@@ -37959,9 +38272,10 @@ proc resolveWorkspacePullProject(parsed: WorkspacePullArgs): ResolvedProject =
 
 proc uncommittedChangesBlocker(identity: GitToolIdentity;
                                repoDir: string): seq[string] =
-  let status = gitRunPlain(identity, ["-C", repoDir, "status", "--porcelain"])
+  let status = gitRunPlainQuery(identity,
+    ["-C", repoDir, "status", "--porcelain"])
   if status.code != 0:
-    return @["could not read git status: " & status.output.strip()]
+    return @["could not read git status: " & status.diagnostic]
   let body = status.output.strip()
   if body.len > 0:
     return @[$body.splitLines().len & " uncommitted change(s)"]
@@ -39604,7 +39918,7 @@ proc gitPorcelainEntries(identity: GitToolIdentity;
   ## Parse ``git status --porcelain=v1`` lines into (XY, path) pairs.
   ## Renames (``R  old -> new``) surface the destination path, which is
   ## what the dirty-outside-``locks/`` guard cares about.
-  let res = gitRunPlain(identity,
+  let res = gitRunPlainQuery(identity,
     ["-C", repoRoot, "status", "--porcelain=v1", "--untracked-files=all"])
   if res.code != 0:
     return
@@ -50279,14 +50593,18 @@ proc preflightPushRepo(identity: GitToolIdentity; workspaceRoot: string;
   if not hook.ok:
     return (false, PushPreflightRepo(), "hook-preflight", hook.diagnostic,
       getAppFilename() & " hooks ensure --vcs " & repoAbs)
-  let head = gitRunPlain(identity,
+  let head = gitRunPlainQuery(identity,
     ["-C", repoAbs, "rev-parse", "--verify", "HEAD^{commit}"])
   if head.code != 0 or head.output.strip().len == 0:
     return (false, PushPreflightRepo(), "state-preflight",
       "HEAD does not resolve to a commit in " & repo.path,
       "repair the checkout and retry 'repro push'")
   result.observed.headSha = head.output.strip().toLowerAscii()
-  let clean = gitRunPlain(identity,
+  # ``gitRunPlainQuery``: "clean" here is "the porcelain stream was empty",
+  # and a benign git diagnostic on stderr is not a porcelain line. Merged,
+  # one `warning: unable to find all commit-graph files` was enough to refuse
+  # the push naming a repo with nothing to commit.
+  let clean = gitRunPlainQuery(identity,
     ["--no-optional-locks", "-C", repoAbs, "status", "--porcelain=v1"])
   if clean.code != 0 or clean.output.strip().len > 0:
     let reason =
@@ -50350,7 +50668,7 @@ proc revalidatePushRepo(identity: GitToolIdentity; workspaceRoot: string;
       head.output.strip().toLowerAscii() != expected.headSha:
     return (false, "HEAD changed after preflight in " & repo.path,
       "review the new commit and retry 'repro push'")
-  let branch = gitRunPlain(identity,
+  let branch = gitRunPlainQuery(identity,
     ["-C", repoAbs, "symbolic-ref", "--short", "-q", "HEAD"])
   let currentBranch =
     if branch.code == 0: branch.output.strip()
@@ -50358,12 +50676,12 @@ proc revalidatePushRepo(identity: GitToolIdentity; workspaceRoot: string;
   if currentBranch != expected.branch:
     return (false, "branch changed after preflight in " & repo.path,
       "restore the intended branch and retry 'repro push'")
-  let clean = gitRunPlain(identity,
+  let clean = gitRunPlainQuery(identity,
     ["--no-optional-locks", "-C", repoAbs, "status", "--porcelain=v1"])
   if clean.code != 0 or clean.output.strip().len > 0:
     return (false, "working tree changed after preflight in " & repo.path,
       "commit or stash changes and retry 'repro push'")
-  let locations = gitRunPlain(identity,
+  let locations = gitRunPlainQuery(identity,
     ["-C", repoAbs, "remote", "get-url", "--push", "--all",
      expected.remoteName])
   var locationDigests: seq[string]
@@ -58521,12 +58839,12 @@ proc observeWorktreeState*(identity: GitToolIdentity; repoRoot: string):
   ## ``--untracked-files=all`` rather than the default: a directory of
   ## untracked files reports as one entry under ``normal``, and "one entry"
   ## versus "none" is exactly the distinction being measured.
-  let res = gitRunPlain(identity,
+  let res = gitRunPlainQuery(identity,
     ["-C", repoRoot, "status", "--porcelain=v1", "--untracked-files=all"])
   if res.code != 0:
     return (ok: false, clean: false, untracked: false,
       diagnostic: "git status --porcelain failed (" & $res.code & "): " &
-        res.output.strip())
+        res.diagnostic)
   result = (ok: true, clean: true, untracked: false, diagnostic: "")
   for rawLine in res.output.splitLines():
     if rawLine.len < 3: continue

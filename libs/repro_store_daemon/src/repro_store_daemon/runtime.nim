@@ -322,6 +322,7 @@ proc useDefForTarball(req: StoreDaemonExternalRealizeRequest): InterfaceToolUse 
     executablePath: req.declaredExecutablePath,
     executableAlias: req.executableAlias,
     prunePaths: req.prunePaths,
+    nonRedistributable: req.nonRedistributable,
     stripComponents: req.stripComponents,
     packageId: req.packageId,
     lockIdentity: req.lockIdentity,

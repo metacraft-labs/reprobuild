@@ -8,7 +8,11 @@ when defined(posix):
   import std/posix
 
 const
-  StoreDaemonProtocolVersion* = 2'u16
+  StoreDaemonProtocolVersion* = 3'u16
+    ## v3: the external-realize body also carries ``nonRedistributable``.
+    ## Same reasoning as the v2 bump below: a v2 peer reading a v3 body
+    ## would read the flag byte as the first byte of ``stripComponents``.
+    ##
     ## v2: the external-realize body carries ``executableAlias`` and
     ## ``prunePaths``. The bump is what makes the change safe: the frame is
     ## positional, so a v1 peer reading a v2 body would not fail — it would
@@ -89,6 +93,8 @@ type
       ## Second name the realized executable is exposed under.
     prunePaths*: seq[string]
       ## Prefix-relative paths realize drops after extraction.
+    nonRedistributable*: bool
+      ## When true the daemon must realize but never publish this prefix.
       ##
       ## Both of these travel with the request for the same reason every
       ## other field does: the daemon rebuilds the provisioning from this
@@ -280,6 +286,7 @@ proc externalRealizeBody*(req: StoreDaemonExternalRealizeRequest): seq[byte] =
   result.writeString(req.archiveType)
   result.writeString(req.executableAlias)
   result.writeStringSeq(req.prunePaths)
+  result.writeU32Le(if req.nonRedistributable: 1'u32 else: 0'u32)
   result.writeU32Le(uint32(max(req.stripComponents, 0)))
 
 proc parseExternalRealizeBody*(body: openArray[byte]):
@@ -305,6 +312,7 @@ proc parseExternalRealizeBody*(body: openArray[byte]):
   result.archiveType = body.readString(pos)
   result.executableAlias = body.readString(pos)
   result.prunePaths = body.readStringSeq(pos)
+  result.nonRedistributable = body.readU32Le(pos) != 0'u32
   result.stripComponents = int(body.readU32Le(pos))
 
 proc releaseRootBody*(holderId, rootId: string): seq[byte] =

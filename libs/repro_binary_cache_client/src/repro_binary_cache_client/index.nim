@@ -26,8 +26,9 @@
 ## digest). A binary-cache substitute knows the ``entry-key`` first
 ## and only learns the realised-prefix digest after fetching the
 ## manifest; the client-side index gives us an O(1) entry-key ->
-## realised-prefix lookup so we can skip the manifest fetch
-## entirely on hot reruns.
+## realised-prefix lookup so we can skip payload downloads on hot reruns.
+## The current manifest must still pass signature, trust and compatibility
+## checks before an indexed payload is reused.
 
 import std/[os, strutils, tables, times]
 

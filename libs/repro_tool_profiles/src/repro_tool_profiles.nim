@@ -298,6 +298,9 @@ type
     declaredPrunePaths*: seq[string]
       ## Prefix-relative paths deleted after extraction. See
       ## ``TarballProvisioningDef.prunePaths``.
+    declaredNonRedistributable*: bool
+      ## Realize, but never PUBLISH. See
+      ## ``TarballProvisioningDef.nonRedistributable``.
     stripComponents*: int
     lockIdentity*: string
 
@@ -1144,8 +1147,21 @@ proc executableInStorePath(storePath, declaredExecutablePath: string;
   # vendor-ID database). Recognise ``.ids`` as a data declaration so
   # the executable+permission check is skipped (the file is r--r--r--
   # in the nix store).
-  let dataExts = [".pc", ".so", ".a", ".h", ".hpp", ".cmake", ".json",
-    ".xml", ".txt", ".ids"]
+  # M9.R.15q.5.10 — ``.dll`` is the Windows sibling of ``.so`` and was
+  # missing from a list that already carried the POSIX one. The case that
+  # surfaced it: electron-builder's ``nsis-resources`` archive is a flat tree
+  # of plugin DLLs with no program in it at all, so the only anchor a
+  # declaration can name is a DLL, and a DLL is not something anyone spawns.
+  # Its absence here made the package's realize depend on Windows reporting
+  # execute permission for ordinary files rather than on a stated rule.
+  # M9.R.15q.5.11 — ``.bin`` and ``.onnx`` are MODEL WEIGHTS: a Whisper
+  # ``ggml-base.bin`` or a Piper voice's ``.onnx`` is a multi-megabyte blob
+  # that a runtime memory-maps and that nothing ever spawns. They arrive
+  # through ``archiveType = "raw"``, which copies a single downloaded file
+  # into the prefix under its declared name, so the declared path IS the
+  # payload and there is no program in the package to anchor on instead.
+  let dataExts = [".pc", ".so", ".dll", ".a", ".h", ".hpp", ".cmake",
+    ".json", ".xml", ".txt", ".ids", ".bin", ".onnx"]
   let lower = declaredExecutablePath.toLowerAscii
   var isDataDecl = false
   for ext in dataExts:
@@ -1901,6 +1917,7 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
     declaredExecutablePath: selected.executablePath,
     declaredExecutableAlias: selected.executableAlias,
     declaredPrunePaths: selected.prunePaths,
+    declaredNonRedistributable: selected.nonRedistributable,
     stripComponents: selected.stripComponents,
     lockIdentity: contributorLockIdentity(selected.contributor,
       if selected.lockIdentity.len > 0:
@@ -2095,7 +2112,7 @@ proc validateTarEntries(archivePath, archiveType: string) =
     of "tar":
       @["-tf", tarOperand(archivePath)]
     of "zip", "7z", "7z.exe", "raw", "conda", "tar.zst", "tzst",
-        "pkg.tar.zst":
+        "pkg.tar.zst", "msi":
       # Formats this pre-flight listing does not inspect. For the archive
       # types host `tar` cannot read directly, listing would need the same
       # decompression the extraction arm performs, which is work done twice
@@ -2672,6 +2689,48 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
         "tool-resolution failed: 7z extraction failed for " & archivePath &
         "\n" & res.output)
     flattenStripComponents(destination, stripComponents)
+  of "msi":
+    # A Windows Installer database, extracted by an ADMINISTRATIVE INSTALL
+    # rather than by an archive tool.
+    #
+    # `msiexec /a <msi> /qn TARGETDIR=<dir>` lays the payload out at its
+    # logical install hierarchy and needs no elevation: it writes files and
+    # nothing else. That is the distinction that makes an MSI packageable at
+    # all — a normal `/i` install registers services, writes the registry
+    # and may load a driver, none of which belongs in a content-addressed
+    # prefix.
+    #
+    # What it CANNOT do is the other half of some MSIs. WinFsp is the
+    # motivating case: the administrative install yields the headers, the
+    # import libraries and the user-mode tools — everything needed to BUILD
+    # against it — while the kernel-mode filesystem driver still requires
+    # the signed machine-wide install. A package covers the first half and
+    # must declare the second as a requirement rather than pretend to it.
+    when not defined(windows):
+      raise newException(OSError,
+        "tool-resolution failed: archiveType=msi needs msiexec, which " &
+        "exists only on Windows; this archive cannot be realized on " &
+        "this host")
+    else:
+      createDir(extendedPath(destination))
+      # msiexec parses its own command line and wants native separators; it
+      # also refuses a relative TARGETDIR.
+      let nativeArchive = absolutePath(archivePath).replace('/', '\\')
+      let nativeDest = absolutePath(destination).replace('/', '\\')
+      let res = execCmdEx("msiexec.exe /a " & quoteShell(nativeArchive) &
+        " /qn TARGETDIR=" & quoteShell(nativeDest))
+      if res.exitCode != 0:
+        raise newException(OSError,
+          "tool-resolution failed: msiexec /a exited " & $res.exitCode &
+          " for " & archivePath & "\n" & res.output)
+      # An administrative install copies the .msi itself beside the payload.
+      # Dropping it keeps the prefix to the files a consumer asked for, and
+      # keeps the realized bytes from carrying a second copy of an archive
+      # the store already holds.
+      let strayMsi = destination / extractFilename(archivePath)
+      if fileExists(extendedPath(strayMsi)):
+        removeFile(extendedPath(strayMsi))
+      flattenStripComponents(destination, stripComponents)
   of "raw":
     # `raw` payloads are the executable themselves (e.g. iden3/circom's
     # `circom-windows-amd64.exe` or argotorg/solidity's `solc-windows.exe`).
@@ -2882,6 +2941,16 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
   ## ordinary case for most developers and is silent by design; it is not an
   ## error and must not read like one.
   if getEnv("REPRO_CACHE_DISABLE").len > 0:
+    return
+  # The package said so. Realizing it is fine, substituting it from a cache
+  # somebody else populated is fine; what must not happen is THIS machine
+  # re-serving a payload its licence does not let it redistribute — and
+  # the trigger for that would be nothing more deliberate than a developer
+  # having publish credentials configured.
+  #
+  # Checked before the credential test rather than after, so the refusal is
+  # a property of the package rather than an accident of who is running.
+  if plan.declaredNonRedistributable:
     return
   let keyPath = getEnv("REPRO_BINARY_CACHE_KEY_PATH", "")
   let certPath = getEnv("REPRO_BINARY_CACHE_CERT_PATH", "")

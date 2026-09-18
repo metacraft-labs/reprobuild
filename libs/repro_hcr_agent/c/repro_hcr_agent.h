@@ -342,12 +342,23 @@ REPRO_HCR_AGENT_API int repro_hcr_unregister_jit_debug_object(uint64_t entry_add
  * Bound by IsoNim (isonim/src/isonim/native/hcr.nim).
  *
  * NOTE (HX-S-0 / NH-M5):
- * These declarations provide the canonical C API for embedding applications.
- * Baseline implementations in repro_hcr_agent.c export these symbols with safe
- * default behavior (wants_reload = false, file_changed = false, type_changed = false).
- * Milestone HLX-M8 on Linux and companion platform milestones on macOS/Windows
- * provide full dynamic patch delivery, managed-type layout checking, and
- * live callback dispatch.
+ * These declarations are the canonical C API for embedding applications, and
+ * the canonical library and header names are `librepro_hcr_agent` and
+ * `repro_hcr_agent.h` — reconciled by CodeTracer NH-M5 on 2026-09-14, which is
+ * what IsoNim's `{.passL: "-lrepro_hcr_agent".}` and its ten
+ * `header: "repro_hcr_agent.h"` importc declarations now name.
+ *
+ * UPDATED 2026-09-18 (HLX-M8). This block used to say the implementations were
+ * "baseline" with "safe default behavior (wants_reload = false,
+ * file_changed = false, type_changed = false)". They are not baseline any more:
+ * repro_hcr_agent.c implements the full lifecycle of
+ * reprobuild-specs/HCR/Patch-Loading-Lifecycle.md §3.1 — prepare, Phase E
+ * before-reload, Phase F load, Phase G trampolines, Phase H after-reload — plus
+ * §3.3 step 38, §3.4 synchronized mode, HCR-Overview §7.4's layout-change
+ * acceptance rule, and `rb_hcr_file_changed` answering over the most recent
+ * APPLIED reload. The Phase F / Phase G boundary is exposed on Linux x86_64
+ * only; the macOS and Windows arms still publish through a single call and
+ * cannot distinguish a step-38 late load failure from a Phase G failure.
  * ===========================================================================
  */
 
@@ -388,6 +399,92 @@ REPRO_HCR_AGENT_API void rb_hcr_remove_after_reload(RbHcrReloadCallback callback
 /* 13.4 Module Introspection */
 REPRO_HCR_AGENT_API bool rb_hcr_file_changed(const char *file_path);
 REPRO_HCR_AGENT_API bool rb_hcr_type_changed(const char *type_name);
+
+/*
+ * HLX-M8 — synchronized mode (Patch-Loading-Lifecycle.md § 3.4).
+ *
+ * Automatic is the default: the agent runs the whole lifecycle itself as soon
+ * as a patch arrives, and `rb_hcr_wants_reload()` never answers true. In
+ * synchronized mode the agent parks the patch, `rb_hcr_wants_reload()` answers
+ * true, and every phase — including both callback sets — runs on the thread
+ * that calls `rb_hcr_apply_reload()`. An application with a frame loop wants
+ * synchronized mode: its callbacks destroy and recreate live objects and must
+ * not run on the agent's thread mid-frame.
+ *
+ * § 3.4 step 43 makes it mandatory for any patch carrying layout changes; such
+ * a patch is refused in automatic mode with a diagnostic saying so.
+ *
+ * Also settable with `REPRO_HCR_SYNCHRONIZED=1` in the environment, for
+ * targets that are not recompiled to call this.
+ */
+REPRO_HCR_AGENT_API void repro_hcr_agent_set_synchronized_mode(int enabled);
+REPRO_HCR_AGENT_API int repro_hcr_agent_synchronized_mode(void);
+
+/*
+ * HLX-M8 — evidence surface for the reload lifecycle.
+ *
+ * Every function below reads state the production lifecycle already recorded;
+ * none of them is a lever and nothing in the agent branches on them. The
+ * lifecycle trace uses the same vocabulary as IsoNim's stub agent
+ * (`isonim/tests/helpers/hcr_stub.nim`) so both repos' gates assert the same
+ * words: "prepare", "latch", "before", "load", "trampolines", "after", plus
+ * "reject", "load-failed" and "commit-failed".
+ *
+ * The trace is what makes the phase ORDER checkable rather than merely
+ * intended — "before" landing on the wrong side of "trampolines" is the exact
+ * defect that made the first version of the IsoNim stub wrong, and a gate that
+ * only counts callbacks cannot see it.
+ */
+REPRO_HCR_AGENT_API const char *repro_hcr_rb_lifecycle_trace(void);
+REPRO_HCR_AGENT_API int repro_hcr_rb_last_before_callbacks_fired(void);
+REPRO_HCR_AGENT_API int repro_hcr_rb_last_after_callbacks_fired(void);
+REPRO_HCR_AGENT_API int repro_hcr_rb_last_code_swapped(void);
+REPRO_HCR_AGENT_API const char *repro_hcr_rb_last_rejection(void);
+REPRO_HCR_AGENT_API const char *repro_hcr_rb_last_unmanaged_types(void);
+REPRO_HCR_AGENT_API unsigned long repro_hcr_rb_apply_reload_calls(void);
+
+/*
+ * HLX-M8 — evidence surface for the REGISTRIES, as distinct from the lifecycle.
+ *
+ * Why these exist, given the seven above. Everything the seven report is a
+ * by-product of a reload actually running, and a reload needs a coordinator
+ * connection, a resolvable symbol and a platform patch path. The registration
+ * semantics of § 13.2 and § 13.3 need none of that — they are settled the
+ * instant `rb_hcr_before_reload` returns — and they are the part of this ABI
+ * that is IDENTICAL on every host, because `rb_hcr_before_reload`,
+ * `rb_hcr_after_reload`, their two removal functions and the two managed-type
+ * functions carry no platform conditional at all.
+ *
+ * Until these accessors existed, the only way to observe any of it was to count
+ * callbacks during a dispatch, which made "registration is idempotent on the
+ * (callback, user_data) PAIR", "removal matches on BOTH fields", "registration
+ * order is dispatch order", "the managed-type registry stores the caller's
+ * pointer rather than a copy" and "past the capacity the entry is dropped
+ * silently" unobservable except on a host that can apply a patch. That is why
+ * the only assertion any shipped gate made about them was a single
+ * `fired == 1`.
+ *
+ * Read-only, like the seven above: each returns a field the production
+ * registration functions wrote, nothing here allocates, and no agent code
+ * branches on any of them. Out-of-range indices answer 0/NULL rather than
+ * reading past the array.
+ */
+REPRO_HCR_AGENT_API size_t repro_hcr_rb_before_callback_count(void);
+REPRO_HCR_AGENT_API size_t repro_hcr_rb_after_callback_count(void);
+REPRO_HCR_AGENT_API RbHcrReloadCallback
+repro_hcr_rb_before_callback_at(size_t index);
+REPRO_HCR_AGENT_API void *repro_hcr_rb_before_user_data_at(size_t index);
+REPRO_HCR_AGENT_API RbHcrReloadCallback
+repro_hcr_rb_after_callback_at(size_t index);
+REPRO_HCR_AGENT_API void *repro_hcr_rb_after_user_data_at(size_t index);
+REPRO_HCR_AGENT_API size_t repro_hcr_rb_managed_type_count(void);
+/*
+ * The POINTER the caller passed to `rb_hcr_register_managed_type`, not a copy
+ * of the text. § 13.2's registry deliberately does not copy (see the comment on
+ * `rb_hcr_managed_types` in repro_hcr_agent.c), and returning the stored
+ * pointer is what lets a gate assert that by identity instead of by spelling.
+ */
+REPRO_HCR_AGENT_API const char *repro_hcr_rb_managed_type_at(size_t index);
 
 #ifdef __cplusplus
 }

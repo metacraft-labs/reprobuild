@@ -310,6 +310,64 @@ const
 proc markerExt(): seq[byte] =
   extension(SoftwareRootMarkerTestOid, true, derUtf8(MarkerText))
 
+const
+  ExtensionOverrunTestOid* = "2.999.1.2"
+    ## A second OID from the same registration-free testing arc, for the
+    ## overrunning extension. Non-critical and unrecognised, so the reader
+    ## RECORDS it and acts on nothing — which is what keeps the fixture
+    ## about the length fields and not about what the extension says.
+
+  ExtensionOverrunText* = "an extension whose declared span reaches past " &
+    "the SEQUENCE that contains it"
+
+proc overrunningWrapper*(tag: byte; payload: seq[byte];
+                         overrun: int): seq[byte] =
+  ## A TLV that declares ``overrun`` more content bytes than it holds.
+  ## Used for the ``[3] EXPLICIT`` extensions wrapper, which is the LAST
+  ## element of the TBS: inflating it makes it reach past the TBS into the
+  ## signatureAlgorithm that follows.
+  result.add tag
+  result.add encodeLen(payload.len + overrun)
+  for b in payload: result.add b
+
+proc truncatedExtension*(oid: string; tail: seq[byte]): seq[byte] =
+  ## An extension SEQUENCE holding its OID and then exactly ``tail``.
+  ##
+  ## Two tails matter, and they are the two positions at which a reader
+  ## can walk off the end of a parent without any length field lying:
+  ##
+  ##   * ``@[]`` — the ``extnValue`` is missing outright, so the reader
+  ##     is asked for a TLV at the parent's very end and the TAG it would
+  ##     read belongs to the next extension;
+  ##   * ``@[0x04]`` — the ``extnValue``'s tag IS the parent's last byte,
+  ##     so its LENGTH byte belongs to the next extension.
+  ##
+  ## Both are well-formed as byte sequences; the extension SEQUENCE
+  ## declares exactly what it holds. Nothing overruns. What is wrong with
+  ## them is only visible to a reader that knows where the parent ends.
+  var inner = derOid(oid)
+  for b in tail: inner.add b
+  result.add 0x30'u8
+  result.add encodeLen(inner.len)
+  for b in inner: result.add b
+
+proc overrunningExtension*(oid: string; value: seq[byte];
+                           overrun: int): seq[byte] =
+  ## One extension whose TLV and whose ``extnValue`` OCTET STRING each
+  ## declare ``overrun`` bytes more than they hold.
+  ##
+  ## Both declarations stay in DER's minimal length form — the reader
+  ## refuses a non-minimal one, and a fixture refused for its length
+  ## ENCODING would never reach the bound this fixture is about.
+  let oidBytes = derOid(oid)
+  var inner = oidBytes
+  inner.add 0x04'u8
+  inner.add encodeLen(value.len + overrun)
+  for b in value: inner.add b
+  result.add 0x30'u8
+  result.add encodeLen(inner.len + overrun)
+  for b in inner: result.add b
+
 # ---------------------------------------------------------------------
 # Minting
 # ---------------------------------------------------------------------
@@ -330,6 +388,45 @@ type
       ## Emit the first extension twice. RFC 5280 §4.2 forbids it and the
       ## reader refuses it; without a way to MINT one, that refusal has no
       ## reachable input and nothing proves it fires.
+    extensionWrapperOverrunsTbsBy*: int
+      ## Give the ``[3] EXPLICIT`` extensions wrapper a declared length
+      ## this many bytes longer than it holds. Everything inside it stays
+      ## honest, so the only structure that overruns is the wrapper, and
+      ## the only thing that can catch it is the bound the TBS imposes on
+      ## its own children.
+    withTruncatedExtension*: bool
+      ## Prepend an extension that stops early — see ``truncatedExtension``.
+      ## It is PREPENDED so the bytes a reader would walk into belong to a
+      ## sibling extension INSIDE the same list, which is the sharpest
+      ## form of the defect: the reader stays inside the certificate, and
+      ## inside the extensions SEQUENCE, and is still reading a structure
+      ## that is not the one it is parsing.
+    truncatedExtensionTail*: seq[byte]
+    withOverrunTestExtension*: bool
+      ## Prepend an extra, unrecognised extension from the testing arc.
+      ## On its own this changes nothing a reader acts on; it exists so
+      ## ``firstExtensionOverrunsListBy`` has an honest twin to be compared
+      ## against.
+    firstExtensionOverrunsListBy*: int
+      ## With ``withOverrunTestExtension``: give that extension's own TLV —
+      ## and the ``extnValue`` OCTET
+      ## STRING inside it — each declare this many bytes MORE than the
+      ## extensions SEQUENCE that contains them has left.
+      ##
+      ## The two length fields move together on purpose. Inflating only the
+      ## extension's own length leaves the reader's ``bytes follow the value
+      ## of`` check to catch it, and a fixture caught by a neighbouring rule
+      ## proves nothing about the rule it was written for. With both
+      ## inflated the extension parses cleanly INSIDE ITS OWN DECLARED SPAN
+      ## and the only thing wrong with it is that the span reaches past its
+      ## parent — which is the whole defect: a reader that bounds a nested
+      ## TLV by the buffer rather than by its parent accepts this, and
+      ## silently drops every extension after it.
+      ##
+      ## The bytes the overrun reaches into are the signatureAlgorithm and
+      ## signature that follow the TBS inside the same certificate, so the
+      ## fixture stays a single well-formed DER file and the refusal cannot
+      ## be a buffer-overrun refusal in disguise.
 
   MintedCert* = object
     key*: TestKey
@@ -364,6 +461,25 @@ proc mintCert*(subjectKey, issuerKey: TestKey;
   var extBytes: seq[byte] = @[]
   for e in exts:
     for b in e: extBytes.add b
+  if opts.withTruncatedExtension:
+    extBytes = truncatedExtension(ExtensionOverrunTestOid,
+      opts.truncatedExtensionTail) & extBytes
+  if opts.withOverrunTestExtension:
+    # Prepended, so everything already in `extBytes` is what the overrun
+    # swallows first; `firstExtensionOverrunsListBy` is how far past the
+    # END of the list the declared span then reaches. At zero this is the
+    # honest twin, and the two certificates differ in nothing but the two
+    # length fields — which is what makes the defective one's refusal
+    # attributable to the overrun rather than to anything else about it.
+    var value: seq[byte] = @[]
+    for c in ExtensionOverrunText: value.add byte(c)
+    let overrun =
+      if opts.firstExtensionOverrunsListBy > 0:
+        extBytes.len + opts.firstExtensionOverrunsListBy
+      else:
+        0
+    let head = overrunningExtension(ExtensionOverrunTestOid, value, overrun)
+    extBytes = head & extBytes
   let tbs = derSeq(
     tlv(0xa0'u8, derSmallInt(2)),
     derInteger(opts.serial),
@@ -372,7 +488,11 @@ proc mintCert*(subjectKey, issuerKey: TestKey;
     derSeq(derUtcTime(opts.notBefore), derUtcTime(opts.notAfter)),
     subject,
     spkiOf(subjectKey),
-    tlv(0xa3'u8, tlv(0x30'u8, extBytes)))
+    (if opts.extensionWrapperOverrunsTbsBy > 0:
+       overrunningWrapper(0xa3'u8, tlv(0x30'u8, extBytes),
+                          opts.extensionWrapperOverrunsTbsBy)
+     else:
+       tlv(0xa3'u8, tlv(0x30'u8, extBytes))))
   let sig = signDer(issuerKey, tbs)
   let der = derSeq(tbs, algEcdsaSha256(), derBitString(sig))
   result.key = subjectKey

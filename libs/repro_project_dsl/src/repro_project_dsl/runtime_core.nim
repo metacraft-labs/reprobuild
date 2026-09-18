@@ -390,7 +390,19 @@ const
     ## with an empty ``targetNames`` list.
   BuildTargetPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('T')),
     byte(ord('P'))]
-  BuildTargetPayloadVersion = 4'u16
+  BuildTargetPayloadVersion = 5'u16
+    ## v5: adds ``btkTarget`` (2) to the ``kind`` byte's legal values so a
+    ## plain ``target("name", handle)`` rename stays distinguishable from a
+    ## one-member ``aggregate(...)`` grouping. The LAYOUT is unchanged from
+    ## v4 — only the byte's range grows — but the version is bumped anyway,
+    ## and the reason is a measured one: a provider compiled from this tree
+    ## writes ``kind = 2`` into a snapshot that an engine built before this
+    ## change then reads, and without the bump its decoder reports "invalid
+    ## build target kind in build target payload" — a message that describes
+    ## a corrupt payload rather than a newer one. With the bump the same
+    ## mismatch says "unsupported build target payload version", which names
+    ## what is actually wrong. v1..v4 payloads still decode unchanged.
+    ##
     ## v3: Spec-Implementation M5 — appends the ``kind`` byte distinguishing
     ## ``btkAggregate`` (0) from ``btkCollection`` (1) so the registry
     ## split is preserved when payloads round-trip through the engine
@@ -599,6 +611,78 @@ template withPlatformVocabulary*(body: untyped): untyped =
       aarch64 {.inject, used.} = PlatformConstraint(cpu: "aarch64", os: "any")
       x86 {.inject, used.} = PlatformConstraint(cpu: "x86", os: "any")
     body
+
+template withToolProvisioningVocabulary*(body: untyped): untyped =
+  ## Evaluate `body` in a scope where the tool-provisioning vocabulary is
+  ## bound, so `defaultToolProvisioning <expr>` is an ordinary Nim expression.
+  ##
+  ## Same technique and the same reasons as `withPlatformVocabulary` above: the
+  ## modes are `const`s the author's code refers to, so `tarbal` is an
+  ## undeclared-identifier error from the compiler rather than a string that
+  ## reaches a macro and gets rejected -- or worse, does not.
+  ##
+  ## What this buys beyond a tidier spelling is that the MODE CAN BE COMPUTED.
+  ## Nim evaluates the expression before stage 2 ever sees it, so
+  ##
+  ##     defaultToolProvisioning(when defined(windows): tarball else: nix)
+  ##
+  ## works with no second code path -- the macro receives "tarball" or "nix"
+  ## and cannot tell how the author arrived at it. A recipe no longer has to
+  ## pick one mode for every host it runs on.
+  ##
+  ## The values are plain strings rather than a distinct type so that the
+  ## pre-existing literal form, `defaultToolProvisioning "path"`, keeps
+  ## working unchanged: both spellings bind the same `static string`.
+  ##
+  ## Nothing reachable from here may `raise` -- see the note below on
+  ## `tryConstExpr` swallowing exceptions under a `static` parameter. These are
+  ## bare consts with no helper call precisely so there is nothing that could.
+  block:
+    const
+      path {.inject, used.} = "path"
+      nix {.inject, used.} = "nix"
+      tarball {.inject, used.} = "tarball"
+      scoop {.inject, used.} = "scoop"
+      fromSource {.inject, used.} = "from-source"
+    body
+
+func usesSelectorOf*(constraint: string): string =
+  ## First token of a dependency constraint ("git >=2" -> "git").
+  ##
+  ## TOTAL by construction -- no `raise`, no `doAssert`, empty input gives "".
+  ## It is reachable from a staged expression bound to a `static` parameter,
+  ## where an unhandled exception would be swallowed and the wrong value
+  ## accepted rather than failing the compile.
+  let parts = constraint.strip().splitWhitespace()
+  if parts.len == 0: "" else: parts[0]
+
+func packageUseEntry*(constraint: string; policyPath: seq[string];
+                      sourceFile: string; sourceLine: int;
+                      gateVariant, gateValue, depKind: string): PackageUseDef =
+  ## Build one dependency entry from a constraint known only at compile time.
+  ##
+  ## The lowering bakes literals directly, but an entry written as a `const`
+  ## or any other expression has no string for the macro to read -- the
+  ## compiler produces it. This is the seam where such an entry becomes a
+  ## record, and like the above it must stay total.
+  PackageUseDef(
+    rawConstraint: constraint,
+    packageSelector: usesSelectorOf(constraint),
+    executableName: usesSelectorOf(constraint),
+    policyPath: policyPath,
+    sourceFile: sourceFile,
+    sourceLine: sourceLine,
+    gateVariant: gateVariant,
+    gateValue: gateValue,
+    depKind: depKind)
+
+const NoPackageUses*: seq[PackageUseDef] = @[]
+  ## Stage-1 default for a package that declares no dependency block.
+
+const NoToolProvisioning* = ""
+  ## Stage-1 default for a package that declares no `defaultToolProvisioning`.
+  ## Distinct from every valid mode, so stage 2 can tell "not declared" from
+  ## "declared as something" without a second flag.
 
 const
   PlatformAxisConflict* = "!conflict:"
@@ -1865,14 +1949,16 @@ proc registerBuildTarget(target: BuildTargetDef): BuildTargetDef =
 
 proc target*(name: string; action: BuildActionDef): BuildTargetDef
     {.discardable, dynOrStatic.} =
-  registerBuildTarget(BuildTargetDef(name: name, actions: @[action.id]))
+  registerBuildTarget(BuildTargetDef(name: name, actions: @[action.id],
+    kind: btkTarget))
 
 proc target*(name: string; actions: openArray[BuildActionDef]): BuildTargetDef
     {.discardable, dynOrStatic.} =
   var actionRefs: seq[string] = @[]
   for action in actions:
     actionRefs.addUniqueValue(action.id)
-  registerBuildTarget(BuildTargetDef(name: name, actions: actionRefs))
+  registerBuildTarget(BuildTargetDef(name: name, actions: actionRefs,
+    kind: btkTarget))
 
 proc exportTarget*(name: string; action: BuildActionDef): BuildTargetDef
     {.discardable, dynOrStatic.} =
@@ -2198,22 +2284,22 @@ proc registerExplicitTargetExport*(target: BuildTargetDef;
   let handle =
     if target.actions.len > 0: target.actions[0] else: target.name
   # Spec-Implementation M5: select the export-row kind from the
-  # build-target's discriminator. A plain ``target "name", handle``
-  # registration leaves ``kind`` at its zero value (``btkAggregate``)
-  # AND carries exactly one action handle + no nested targets;
-  # ``aggregate("...", ...)`` and ``collect("...", ...)`` both carry
-  # the union shape but their ``kind`` byte distinguishes them.
+  # build-target's discriminator. ``target "name", handle`` now stamps
+  # ``btkTarget`` directly; ``aggregate("...", ...)`` and
+  # ``collect("...", ...)`` carry their own discriminators.
   let exportKind =
     case target.kind
     of btkCollection: tekCollection
+    of btkTarget: tekExplicit
     of btkAggregate:
-      # Distinguish a plain explicit ``target "name", action`` (one
-      # action, no nested targets) from a real ``aggregate("name",
-      # ...)`` call by checking the shape. The runtime never sees
-      # an explicit ``target`` registration with more than one
-      # action OR with any nested targets — only ``aggregate``
-      # produces the union shape. See ``target*`` / ``exportTarget*``
-      # constructors above.
+      # RETAINED FOR DECODED PAYLOADS, not for freshly registered ones.
+      # ``BuildTargetKind`` zero-defaults to ``btkAggregate``, so a v1 /
+      # v2 build-target payload — written before the ``kind`` byte
+      # existed — decodes as ``btkAggregate`` whether it came from
+      # ``target`` or from ``aggregate``. The shape test is what still
+      # classifies those correctly: only ``aggregate`` produces the
+      # union shape. M5's structural rule is preserved verbatim here so
+      # replaying an older snapshot keeps its previous row kinds.
       if target.actions.len > 1 or target.targets.len > 0: tekAggregate
       else: tekExplicit
   registerTargetExportEntry(TargetExportEntry(
@@ -2690,6 +2776,26 @@ proc patchableCompileFlags*(tool: ReproHcr; entryBytes = 0;
       patchableFunctionEntryFlag(tool, nopCount, entryOffset),
       functionAlignmentFlag(tool, alignment)
     ]
+    when defined(linux):
+      ## HLX-M8, ``HCR/Linux-ELF-Provider.md`` §9. TLS is the hard case: a
+      ## patch body that references a *new* thread-local cannot get a slot,
+      ## because initial-exec and local-exec offsets are assigned at link time
+      ## out of the module's ``PT_TLS`` and a running process has no room to
+      ## extend it. The provider therefore REFUSES patches that introduce new
+      ## TLS variables (``elf-new-tls-variable``, raised by the ELF analyzer).
+      ##
+      ## What this flag changes is the other half — which *existing* TLS
+      ## variables a patch may reference. Under global-dynamic every access
+      ## goes through ``__tls_get_addr`` with a relocation the in-memory linker
+      ## can resolve at patch time; under initial-exec or local-exec the offset
+      ## is baked in, and a patch compiled against one module layout is
+      ## silently wrong against another. §9: "the patchable build profile
+      ## should prefer ``-ftls-model=global-dynamic`` for patchable TUs to
+      ## widen what is accepted."
+      ##
+      ## Linux-only: the model names are an ELF TLS concept. Mach-O and PE use
+      ## different mechanisms and GCC/Clang reject the flag's premise there.
+      result.add "-ftls-model=global-dynamic"
 
 proc patchableLinkFlags*(tool: ReproHcr; segmentName = "__HCR";
                          buildIdStyle = "sha1"): seq[string] {.dynOrStatic.} =
@@ -3733,7 +3839,7 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrSt
       raisePayload("unknown build target payload magic")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version notin {1'u16, 2'u16, 3'u16, BuildTargetPayloadVersion}:
+  if version notin {1'u16, 2'u16, 3'u16, 4'u16, BuildTargetPayloadVersion}:
     raisePayload("unsupported build target payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -3750,7 +3856,7 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrSt
     # the backward-compat rule in Build-Graph-Collections.md
     # §"Persistence and the Target-Export Table".
     let kindByte = readByte(bytes, pos)
-    if kindByte > byte(ord(btkCollection)):
+    if kindByte > byte(ord(btkTarget)):
       raisePayload("invalid build target kind in build target payload")
     result.kind = BuildTargetKind(kindByte)
   if version >= 4'u16:

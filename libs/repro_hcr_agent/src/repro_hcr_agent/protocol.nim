@@ -119,6 +119,17 @@ type
     digest*: string
     bytes*: seq[byte]
 
+  HcrTypeLayoutChange* = object
+    ## HLX-M8. One entry of the patch's layout-change set — the wire form of
+    ## the C `RbHcrTypeChange` the agent hands to before/after-reload
+    ## callbacks (HCR-Overview §13.3), and the set HCR-Overview §7.4's
+    ## acceptance rule is evaluated over: accept when every layout-changed
+    ## type is managed, otherwise reject with `IncompatibleChange` listing the
+    ## unmanaged ones.
+    typeName*: string
+    oldSize*: uint32
+    newSize*: uint32
+
   HcrSourceGenerationEntry* = object
     sourcePath*: string
     generation*: uint32
@@ -207,6 +218,14 @@ type
     debugObjectPayload*: HcrProtocolPayload
     unwindMetadataPayload*: HcrProtocolPayload
     sourceGenerationMap*: seq[HcrSourceGenerationEntry]
+    changedFiles*: seq[string]
+      ## HLX-M8. The source files this patch carries, as the application sees
+      ## them. `rb_hcr_file_changed` answers over exactly this list — and only
+      ## once the reload has been APPLIED, never merely requested.
+    changedTypes*: seq[HcrTypeLayoutChange]
+      ## HLX-M8. The layout deltas Phase C computed (Patch-Loading-Lifecycle
+      ## §3.1 step 10). Empty for the overwhelming majority of patches; a
+      ## non-empty list makes synchronized mode mandatory (§3.4 step 43).
 
   HcrCodePatchEvent* = object
     ## HLX-M7 — what the agent did about the `CodePatchEvent` the protocol's
@@ -385,6 +404,13 @@ proc payloadJson(value: HcrProtocolPayload): JsonNode =
     "bytesHex": bytesHex(value.bytes)
   }
 
+proc typeLayoutChangeJson(entry: HcrTypeLayoutChange): JsonNode =
+  %*{
+    "typeName": entry.typeName,
+    "oldSize": entry.oldSize,
+    "newSize": entry.newSize
+  }
+
 proc sourceGenerationJson(entry: HcrSourceGenerationEntry): JsonNode =
   %*{
     "sourcePath": entry.sourcePath,
@@ -467,6 +493,11 @@ proc patchRequestJson*(request: HcrPatchRequest): JsonNode =
   for entry in request.sourceGenerationMap:
     generations.add sourceGenerationJson(entry)
   result["sourceGenerationMap"] = generations
+  result["changedFiles"] = stringArray(request.changedFiles)
+  var layoutChanges = newJArray()
+  for entry in request.changedTypes:
+    layoutChanges.add typeLayoutChangeJson(entry)
+  result["changedTypes"] = layoutChanges
 
 proc codePatchEventJson(value: HcrCodePatchEvent): JsonNode =
   %*{
@@ -601,6 +632,15 @@ proc stringSeq(node: JsonNode; field: string): seq[string] =
       raise newException(ValueError, "JSON array contains non-string: " & field)
     result.add value.getStr()
 
+proc optionalStringSeq(node: JsonNode; field: string): seq[string] =
+  ## HLX-M8. `changedFiles` did not exist on the wire before this milestone,
+  ## so a request that omits it is a valid older request and must parse as an
+  ## empty list rather than raise. A present-but-wrong value still raises —
+  ## absent and malformed are different statements.
+  if not node.hasKey(field):
+    return @[]
+  node.stringSeq(field)
+
 proc parsePayload(node: JsonNode; field: string): HcrProtocolPayload =
   let value = node.requireField(field)
   result.digest = value.requireStr("digest")
@@ -617,6 +657,22 @@ proc parseSourceGeneration(node: JsonNode): HcrSourceGenerationEntry =
     generation: uint32(node.requireInt("generation")),
     snapshotDigest: node.requireStr("snapshotDigest"),
     lineTableDigest: node.requireStr("lineTableDigest"))
+
+proc parseTypeLayoutChanges(node: JsonNode): seq[HcrTypeLayoutChange] =
+  ## Absent means "no layout deltas", which is what every pre-HLX-M8 patch
+  ## request on the wire says by omission. A present-but-malformed value is a
+  ## different statement and is refused rather than read as empty: a half-read
+  ## layout delta would silently turn an unmanaged type into an accepted one.
+  if not node.hasKey("changedTypes"):
+    return @[]
+  let values = node["changedTypes"]
+  if values.kind != JArray:
+    raise newException(ValueError, "changedTypes must be an array")
+  for value in values:
+    result.add HcrTypeLayoutChange(
+      typeName: value.requireStr("typeName"),
+      oldSize: uint32(value.requireInt("oldSize")),
+      newSize: uint32(value.requireInt("newSize")))
 
 proc parseSourceGenerationMap(node: JsonNode): seq[HcrSourceGenerationEntry] =
   let values = node.requireField("sourceGenerationMap")
@@ -642,7 +698,9 @@ proc parsePatchRequest*(node: JsonNode): HcrPatchRequest =
     directPatchPayload: node.parsePayload("directPatchPayload"),
     debugObjectPayload: node.parsePayload("debugObjectPayload"),
     unwindMetadataPayload: node.parsePayload("unwindMetadataPayload"),
-    sourceGenerationMap: node.parseSourceGenerationMap())
+    sourceGenerationMap: node.parseSourceGenerationMap(),
+    changedFiles: node.optionalStringSeq("changedFiles"),
+    changedTypes: node.parseTypeLayoutChanges())
   if result.schemaId.len == 0:
     result.schemaId = HcrPatchRequestSchemaId
 
