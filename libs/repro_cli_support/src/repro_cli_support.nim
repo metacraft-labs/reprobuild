@@ -29727,15 +29727,14 @@ proc installUserDaemonBuildExecutor() =
       # here to that same constant -- which is the point: it is the value a
       # DIRECT build through the full CLI's prologue would have used too.
       ensureBuiltSourcePackageEnvironment()
-      previousEnv.add((key: ProviderNimcacheSessionEnv,
-        value: getEnv(ProviderNimcacheSessionEnv),
-        present: existsEnv(ProviderNimcacheSessionEnv)))
-      let providerSession =
-        if request.runId.len > 0:
-          "daemon-build-" & request.runId
-        else:
-          "daemon-build-pid-" & $getCurrentProcessId()
-      putEnv(ProviderNimcacheSessionEnv, providerSession)
+      # No provider-nimcache session is derived from the run id. The daemon
+      # used to give each build its own nimcache scope so two sessions in one
+      # worker could not collide inside the single shared directory; the
+      # nimcache is position-keyed now, so distinct recipes are already
+      # disjoint and a per-run scope would only throw away the previous run's
+      # populated directory. Same-position concurrency is handled where the
+      # spec puts it, by exclusion on the directory itself
+      # (`acquireProviderNimcacheLock`).
       let cliPath =
         if request.publicCliPath.len > 0: request.publicCliPath
         else: stablePublicCliPath()
@@ -69807,17 +69806,14 @@ proc runThinAppDispatch(programName: string): int =
   # every nested interface/resource compiler boundary. Explicit caller
   # overrides remain authoritative; this only fills missing environment keys.
   ensureBuiltSourcePackageEnvironment()
-  # M9.R.13a — seed the provider-nimcache session token before any
-  # subcommand routing, so every nested subprocess spawned downstream
-  # (the build engine's per-recipe `__repro-compile-provider` helpers,
-  # the recursive `executeBuildTarget` calls auto-recurse fires for
-  # from-source recipes) inherits a stable per-`repro`-session token
-  # and lands in one shared provider nimcache. Without this seed each
-  # of the ~84 from-source recipes paid a full cold provider compile
-  # (~5 min on Windows) because every helper subprocess had a distinct
-  # pid -- the M9.R.12 pid-scoped key collapsed cross-recipe sharing.
-  # See `sharedProviderNimcacheKey` for the full rationale.
-  ensureProviderNimcacheSession()
+  # There is no provider-nimcache session token to seed. It existed so the
+  # ~84 from-source recipes of one `repro build` would meet in ONE shared
+  # nimcache while two concurrent `repro` sessions would not -- a scope that
+  # only made sense while all those recipes shared a directory at all. The
+  # nimcache is position-keyed now (see `positionKeyedNimcacheKey`), so each
+  # recipe owns its own directory and needs no session to separate it from
+  # its siblings, and a second invocation reuses the first's directory
+  # instead of starting cold under a fresh token.
   when defined(windows):
     let appDir = parentDir(getAppFilename())
     if appDir.len > 0:

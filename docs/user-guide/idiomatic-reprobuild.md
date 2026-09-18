@@ -1092,16 +1092,23 @@ is cold, and — because the path is in the key — the engine's own action
 cache misses too, for a reason that has nothing to do with what the
 edge computes.
 
-The scar is in this repo. The provider nimcache key
-(`repro_interface_artifacts.nim:4419-4424`) mixes in
+The scar was in this repo, and it is worth knowing in its healed form.
+The provider nimcache key used to mix in
 `"session=" & providerNimcacheSessionToken()`, the root `repro`
-process's pid. It is there for a real reason — concurrent sessions
+process's pid. It was there for a real reason — concurrent sessions
 populating one nimcache hit `ENOTEMPTY` inside Nim's incremental
-cleanup and the compile *aborts* — but the cost is that every `repro`
-invocation starts with an empty nimcache and leaves the old one behind
-in `$TMPDIR` forever. The same key also mixes in a BLAKE3 over the
-content of every reprobuild library source, so editing any of them does
+cleanup and the compile *aborts* — but the cost was that every `repro`
+invocation started with an empty nimcache and left the old one behind
+in `$TMPDIR` forever. The same key also mixed in a BLAKE3 over the
+content of every reprobuild library source, so editing any of them did
 it again.
+
+Both components are gone (`positionKeyedNimcacheKey`). The collision
+the session token was dodging came from sharing one directory between
+edges that are *different positions*; scoping the directory to the
+position removes the collision, so the token bought nothing and cost a
+cold start. The content digest was redundant with Nim's own per-module
+`.sha1`, which already invalidates a changed `.nim` inside the cache.
 
 ### The other tell: keying scratch on a fingerprint
 
@@ -1140,11 +1147,26 @@ target dir — or one nimcache — corrupts both. And splitting a genuinely
 content-keyed cache per edge multiplies the cold population by the edge
 count.
 
-The shared provider nimcache is the case that looks like a
-counterexample and is not. The 83 edges sharing it
-(`repro_interface_artifacts.nim:4413-4422`) are compiles of *the same
-sources under the same configuration* — one position, invoked many
-times. That is inside the rule, not an exception to it.
+The shared provider nimcache used to be cited here as the case that
+looks like a counterexample and is not — "one position, invoked many
+times". **That reading was wrong, and checking the directory is what
+showed it.** Nim mangles a module's entry name relative to the *main
+module's* directory and names the link manifest from the output
+basename, and both are invariant across reprobuild's recipes: every
+recipe's project definition is a file called `repro.nim`, and every
+provider links as `project-provider`. So each of the ~100 sharers
+claimed the single slot `@mrepro.nim.c`, and each claimed the single
+slot `project-provider.json`. On a real shared directory: 402 key dirs,
+390 holding exactly one link manifest, always that same name. Different
+positions, overwriting each other. It is now one directory per position
+(`positionKeyedNimcacheKey`).
+
+Isolating it also turned out to be *faster*, which is the part that
+settles the argument. Six concurrent compiles in the engine's shape:
+shared-and-locked 65/155/108 s, isolated-per-edge 32/28/44 s — about
+3.1x — while paying cold compiles, because they proceed concurrently
+instead of queueing. Shared-and-unlocked corrupts: 4 of 18 failed, one
+process's object turning up on another's link line.
 
 ### Sharing and safety are different questions
 
@@ -1154,12 +1176,15 @@ tool's housekeeping, which may prune or rewrite the directory wholesale.
 
 The scar again: two `repro` sessions populating one nimcache hit
 `ENOTEMPTY` inside nim's incremental cleanup and the compile **aborts**.
-That single hazard is why this repo carries *two* defences against it —
-the session token above, which isolates, and
-`acquireProviderNimcacheLock`
-(`repro_interface_artifacts.nim:4506`), which excludes. Ask the two
+This repo used to carry *two* defences against that one hazard — the
+session token, which isolated, and `acquireProviderNimcacheLock`, which
+excludes. Only the lock remains, and its scope is now the point: with
+the directory keyed per position, two *different* recipes take
+different lock paths and never wait on each other. What the lock still
+covers is the case position-keying cannot remove — two instances of the
+*same* edge, which land on one directory by design. Ask the two
 questions separately: who may be given this directory, and may two
-processes hold it at once.
+processes hold it at once. The answers were never the same answer.
 
 ### ☐ Nicknames — and why you will almost never write one
 

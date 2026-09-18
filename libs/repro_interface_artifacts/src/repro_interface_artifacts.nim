@@ -4376,7 +4376,10 @@ proc providerNimcacheKey(outputBinaryPath: string): string =
   fnvHex64([absolutePath(outputBinaryPath)])
 
 const
-  ProviderNimcacheSessionEnv* = "REPRO_PROVIDER_NIMCACHE_SESSION"
+  ProviderVariantEnv* = "REPRO_VARIANTS"
+    ## The active variant assignments (`--variant` / `--release` write this).
+    ## Read by `activeVariantSignature` as the VARIANT component of a
+    ## tool-owned cache's identity.
   ProviderParallelBuildEnv* = "REPRO_PROVIDER_PARALLEL_BUILD"
   ProviderParallelBuildMax* = 64
   ProviderCompilerEntropyJustification* =
@@ -4389,7 +4392,6 @@ const
     "REPRO_NIM_COMPILER",
     "REPRO_BOOTSTRAP_CC",
     "CC",
-    ProviderNimcacheSessionEnv,
     "REPRO_PROVIDER_NIMCACHE_MODE",
     ProviderParallelBuildEnv,
     "TMPDIR",
@@ -4402,91 +4404,119 @@ const
     ## only choose disposable nimcache/temp locations. Keying monitored cache
     ## evidence on their per-process values would make every new `repro`
     ## invocation miss an otherwise unchanged provider compile.
-  ## Environment variable carrying the per-`repro`-invocation nimcache
-  ## session token. The root `repro` process seeds this env var to its
-  ## own pid (see `ensureProviderNimcacheSession`) and every child
-  ## process spawned by the build engine -- in particular the per-recipe
-  ## `repro __repro-compile-provider` invocations that auto-recurse fires
-  ## for each from-source recipe -- inherits it through the engine's
-  ## `envTableFromArgvStyle` env copy. All children of one root `repro`
-  ## therefore land in the same shared provider nimcache and reuse Nim's
-  ## `.sha1` incremental compilation across recipes. Independent
-  ## concurrent `repro` sessions get distinct tokens (the env var is not
-  ## inherited from outside `repro` because no outside caller sets it),
-  ## so the M9.R.12 ENOTEMPTY concurrency-safety property is preserved.
 
-proc ensureProviderNimcacheSession*() =
-  ## Seed `REPRO_PROVIDER_NIMCACHE_SESSION` to the current process's pid
-  ## if (and only if) the env var is not already set. Called at the top
-  ## of `runThinApp` so every `repro` entry point participates; nested
-  ## `repro` subprocesses (the build engine's `__repro-compile-provider`
-  ## helpers, the recursive `executeBuildTarget` calls auto-recurse
-  ## triggers) inherit the parent's value and therefore share the
-  ## per-process provider nimcache key with their root invocation.
-  if getEnv(ProviderNimcacheSessionEnv).len == 0:
-    putEnv(ProviderNimcacheSessionEnv, "pid-" & $getCurrentProcessId())
-
-proc providerNimcacheSessionToken(): string =
-  ## Returns the session token to fold into the shared nimcache key.
-  ## Prefers the inherited `REPRO_PROVIDER_NIMCACHE_SESSION` so every
-  ## subprocess spawned by one root `repro` lands in the same shared
-  ## cache; falls back to the current pid for callers that did not go
-  ## through `ensureProviderNimcacheSession` (test fixtures, embedding
-  ## libraries that call into `providerCompileCommand` directly).
-  let inherited = getEnv(ProviderNimcacheSessionEnv)
-  if inherited.len > 0:
-    inherited
-  else:
-    "pid-" & $getCurrentProcessId()
-
-proc sharedProviderNimcacheKey*(workDir: string;
-                                hostFlags, libFlags: openArray[string]): string =
-  ## Toolchain-stable nimcache key shared across every provider compile that
-  ## targets the same Nim compiler + host C compiler + library set, anchored
-  ## at the same `workDir`. Provider compiles invoked from a single CMake
-  ## configure (the parent project plus every `try_compile`), and provider
-  ## compiles fired by auto-recurse for from-source recipes, all land in the
-  ## same nimcache so unchanged library modules are reused across them --
-  ## the dominant slice of each provider compile.
+proc activeVariantSignature*(): string =
+  ## Canonical (sorted, de-duplicated) form of the active variant
+  ## assignments from ``REPRO_VARIANTS``. This is the VARIANT component of
+  ## a tool-owned cache identity (Tool-Owned-Caches.md, "Identity").
   ##
-  ## Concurrent-process hazard: the key is session-scoped via
-  ## `REPRO_PROVIDER_NIMCACHE_SESSION` (see `providerNimcacheSessionToken`).
-  ## Multiple `repro` sessions (separate processes) can run provider/
-  ## interface compiles at the same time -- e.g. several concurrent
-  ## dev-env sessions sharing one project tree. Nim's incremental compiler
-  ## renames/removes temporary entries inside the nimcache while it
-  ## builds; if a sibling process is concurrently populating the *same*
-  ## directory, that cleanup hits `ENOTEMPTY` ("Directory not empty") and
-  ## the compile aborts. The session token gives each root `repro`
-  ## invocation its own nimcache directory, so concurrent sessions never
-  ## collide. Crucially -- and unlike the prior pid-scoped key -- every
-  ## subprocess spawned by ONE root `repro` (build-engine action helpers,
-  ## including the `__repro-compile-provider` invocations the build engine
-  ## emits for each per-recipe provider compile, plus recursive
-  ## `executeBuildTarget` calls auto-recurse fires for from-source recipes)
-  ## inherits the root's session token via the standard env-var inheritance
-  ## the engine's `envTableFromArgvStyle` performs, so all 84 from-source
-  ## recipes in one `repro build` cooperate on a single shared cache and
-  ## keep Nim's `.sha1` incremental benefit. M9.R.13a closed the per-pid
-  ## divergence that made each subprocess pay the full ~5 min provider
-  ## compile from scratch.
+  ## The spec asks for the variant to be "derived from the selections the
+  ## edge depends on, never from the whole solved set". Reprobuild has no
+  ## per-edge variant identity engine-side today -- ``WaveExpansion``
+  ## deliberately over-approximates -- so there is nothing narrower to read.
+  ## NAMED CHOICE: we take the coarsest sound thing available, the WHOLE
+  ## active assignment set, which over-approximates the per-edge selection.
+  ## Over-isolation costs one cold nimcache per variant set and nothing
+  ## else; under-isolation would let a ``buildType=release`` compile
+  ## overwrite a ``buildType=debug`` one in the same position slot. The
+  ## precedent is ``providerGraphStoreRoot``'s ``variants-<slug>``
+  ## directories, which isolate the provider-graph snapshot store on the
+  ## same value for the same reason.
+  let raw = getEnv(ProviderVariantEnv)
+  if raw.len == 0:
+    return ""
+  var parts: seq[string] = @[]
+  for item in raw.split(','):
+    let s = item.strip()
+    if s.len > 0 and s notin parts:
+      parts.add(s)
+  parts.sort()
+  parts.join(",")
+
+const
+  ProviderCacheName* = "nim.c/nimcache@provider"
+    ## DECLARED CACHE of the provider compile's ``--nimcache``.
+  InterfaceCacheName* = "nim.c/nimcache@interface"
+    ## DECLARED CACHE of the interface extractor's ``--nimcache``. A tool
+    ## declaring two caches has two identities and they never converge
+    ## (Tool-Owned-Caches.md, "Identity"), so the name is part of the key
+    ## rather than being left to the two callers' differing path roots.
+
+proc positionKeyedNimcacheKey*(declaredCache, producingProject,
+                               workDir: string;
+                               hostFlags, libFlags: openArray[string]): string =
+  ## POSITION-KEYED nimcache identity: producing project x declared cache x
+  ## variant (Tool-Owned-Caches.md, "Identity").
+  ##
+  ## WHY POSITION-KEYED, AND WHY THIS IS NOT A TUNING KNOB. Nim mangles a
+  ## module's nimcache entry name relative to the MAIN MODULE's directory,
+  ## and names the link manifest from the output basename. Both are
+  ## invariant across reprobuild's recipes: every recipe's own project
+  ## definition is a file called ``repro.nim``, so each one claims the
+  ## single slot ``@mrepro.nim.c``, and every provider links through the
+  ## single slot ``project-provider.json``. Measured on a real shared
+  ## directory: 402 key dirs, 390 holding exactly one link manifest, always
+  ## that same name. The sharers of the old single directory were therefore
+  ## DIFFERENT POSITIONS overwriting one another -- the definition of a
+  ## position-keyed cache, which the spec says MUST be isolated per edge.
+  ##
+  ## PRODUCING PROJECT is ``producingProject``: the recipe's ``repro.nim``
+  ## SOURCE path, not the provider binary compiled from it. The spec is
+  ## explicit that the binary is a build artefact whose location the engine
+  ## chooses and may change without the project changing, while the source
+  ## file is what a user edits, moves, and checks out twice. It is a
+  ## host-side fact known before any action runs, and it is NOT
+  ## canonicalised: two checkouts of one project are distinct producers and
+  ## must not share a position-keyed cache.
+  ##
+  ## NICKNAME is degenerate at M0 and therefore absent. The spec's nickname
+  ## exists to separate several edges that share one producing project; on
+  ## this path there is exactly one provider-compile edge and one
+  ## extraction edge per ``repro.nim``, and ``declaredCache`` already
+  ## separates those two. The ``CacheDir``/``cacheNickname`` declaration
+  ## surface is out of scope for M0.
+  ##
+  ## WHAT IS DELIBERATELY ABSENT:
+  ##
+  ## * No SESSION TOKEN. The old key mixed the root ``repro`` pid so that
+  ##   two concurrent sessions could not collide inside the one shared
+  ##   directory. Correct position scoping removes the collision it was
+  ##   dodging, and the token cost every invocation a cold start.
+  ## * No CONTENT. The old key mixed ``reproLibSourceFingerprint``, a
+  ##   digest of every reprobuild ``.nim``/``.nims``. The spec forbids it
+  ##   ("an identity that moves when a source file changes yields an empty
+  ##   directory on every rebuild, which is the condition the cache exists
+  ##   to prevent"), and it is not load-bearing here: Nim's own per-module
+  ##   ``.sha1`` already invalidates a changed ``.nim`` inside the cache,
+  ##   so the fingerprint's discriminating power is a strict SUBSET of the
+  ##   mechanism it was guarding. The real Nim soundness hole is the C
+  ##   HEADER closure, which this fingerprint never covered (it walks only
+  ##   ``.nim``/``.nims``) and which ``--forceBuild:on`` in
+  ##   ``boundedNimCompileCommand`` does cover. The artifact-level freshness
+  ##   guard that actually prevents harness<->binary skew is unchanged and
+  ##   lives elsewhere: ``interfaceExtractionContext`` still folds
+  ##   ``reproLibSourceFingerprint`` into ``interfaceExtractionFingerprint``.
+  ##
+  ## WHAT REMAINS: the toolchain and library set. A nimcache holds objects
+  ## produced by one Nim + one host C compiler against one ``--path`` set;
+  ## mixing them in one directory is unsound independently of position.
+  ## These are flag strings, not content, so they are stable across edits.
   ##
   ## SCOPE (Compiles-Are-Normal-Edges.md): this selects a SCRATCH DIRECTORY
-  ## for Nim's own incremental cache. It is NOT the cache key of any artifact.
-  ## Both compiles that use it -- the provider compile and the interface
-  ## extraction -- now run as monitored build edges, so what those compiles
+  ## for Nim's own incremental cache. It is NOT the cache key of any
+  ## artifact. Both compiles that use it -- the provider compile and the
+  ## interface extraction -- run as monitored build edges, so what they
   ## produce is addressed by the engine's action key over the observed argv,
-  ## inputs and reads. Nothing this function forgets to mention can cause a
-  ## stale artifact to be served; the worst case is a nimcache directory
-  ## shared more or less widely than optimal, which Nim's own content-hashed
-  ## reuse handles. Do not grow it back into an input enumeration.
-  var parts = @[nimCompilerPath(), absolutePath(workDir),
-                "session=" & providerNimcacheSessionToken()]
+  ## inputs and reads. Do not grow this into an input enumeration.
+  var parts = @[declaredCache,
+                "project=" & absolutePath(producingProject),
+                "variant=" & activeVariantSignature(),
+                nimCompilerPath(),
+                absolutePath(workDir)]
   for f in hostFlags:
     parts.add(f)
   for f in libFlags:
     parts.add(f)
-  parts.add(reproLibSourceFingerprint(workDir))
   fnvHex64(parts)
 
 proc providerNimcacheMode(): string =
@@ -4572,9 +4602,25 @@ proc acquireProviderFileLock(lockPath: string): ReproFileLock =
 
 proc acquireProviderNimcacheLock(command: openArray[string]):
     ReproFileLock =
-  ## Nim's incremental cache is reusable across provider recipes but is not
-  ## safe for concurrent writers. Serialize commands that carry the same
-  ## ``--nimcache`` path while leaving independent sessions fully parallel.
+  ## DELIBERATE RESIDUAL. Position-keying the nimcache removes the reason
+  ## DIFFERENT edges ever met in one directory, so this lock no longer
+  ## serialises recipe A against recipe B -- their lock PATHS now differ, and
+  ## that is where the measured ~3x concurrency win comes from.
+  ##
+  ## It is KEPT, not dropped, for the one case position-keying cannot remove:
+  ## two instances of the SAME edge. Two concurrent `repro` sessions building
+  ## the same recipe in the same checkout are the same position and land on
+  ## one directory by design -- that is the spec's stability guarantee, not a
+  ## defect. Nim's incremental backend renames and removes entries inside the
+  ## nimcache while it builds, so a sibling process populating the same
+  ## directory drives that cleanup into `ENOTEMPTY` and aborts the compile.
+  ## Tool-Owned-Caches.md, "Concurrency": where a cache is declared unsafe the
+  ## engine MUST hold exclusion for the duration of each use, and the
+  ## exclusion MUST cover exactly that directory. Nim's nimcache is the
+  ## spec's own `tccExclusive` example.
+  ##
+  ## The exclusion is scoped to the directory (`<nimcache>.compile.lock`) and
+  ## to nothing else -- not the edge, not the tool, not the build.
   acquireProviderFileLock(providerNimcachePath(command) & ".compile.lock")
 
 proc releaseProviderNimcacheLock(lock: var ReproFileLock) =
@@ -4840,20 +4886,23 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   let runnerBin = tempRoot / "extract_runner"
   let hostFlags = hostCCompilerFlags()
   let libFlags = reproLibPathFlags(workDir)
-  # Share the extractor nimcache across every interface extraction with the
-  # same toolchain + library set. The runner module itself (`extract_runner`)
-  # recompiles each time because it imports a project-specific module, but
-  # every standard library / repro library module is reused via Nim's
-  # `.sha1`-based incremental compilation -- the dominant slice of the
-  # compile cost. `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` falls back to
-  # the per-tempRoot nimcache that isolates each invocation.
+  # POSITION-KEYED (Tool-Owned-Caches.md): the extractor nimcache is keyed on
+  # the PRODUCING PROJECT -- this extraction's `modulePath`, the recipe's own
+  # `repro.nim` -- so two recipes extracted concurrently never write the same
+  # slot. They previously shared one directory, and the entries they collided
+  # on are named from the MAIN MODULE's directory: every recipe's definition
+  # is a file called `repro.nim`, so every one of them claimed `@mrepro.nim.c`
+  # and the extraction runners overwrote each other's generated C.
+  # The cost of isolating is a cold standard-library compile per recipe; the
+  # measurement that motivated this change says isolated concurrent compiles
+  # still finish ~3x faster than shared+locked ones, because they proceed at
+  # the same time instead of queueing behind one flock.
+  # `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` narrows further, to the
+  # per-tempRoot nimcache that isolates each INVOCATION (not each position).
   # Nim's `--nimcache:` directive is also subject to the MAX_PATH ceiling
   # because Nim's own mkdir does not use the \\?\ extended-length prefix.
-  # On Windows root the shared nimcache under the same short temp parent
-  # we use for the runner, keyed by toolchain+library set so independent
-  # extractions still share the bulk of the standard-library compile
-  # cost. `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` keeps each
-  # extraction's nimcache fully isolated.
+  # On Windows root the nimcache under the same short temp parent we use for
+  # the runner.
   # The engine's own binary and the consumer's root are handed to the recipe's
   # macro expansion. A macro that needs to resolve a declared dependency calls
   # back through `staticExec` (see `internal resolve-package`) rather than
@@ -4864,7 +4913,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   # These are ordinary elements of the compile's ARGV, which is the point:
   # when this compile runs as a monitored build edge the argv IS part of the
   # action key, so a define cannot be added without re-keying the edge. The
-  # hand-written `sharedProviderNimcacheKey` had no such property -- it never
+  # hand-written nimcache key has no such property -- it never
   # mentioned defines, which is how `-d:reproBin` was once introduced,
   # reached the command line, and still had no effect.
   let effectiveConsumerRoot =
@@ -4887,10 +4936,12 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     else:
       when defined(windows):
         tempParent / "nimcache-interface" /
-          sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
+          positionKeyedNimcacheKey(InterfaceCacheName, modulePath, workDir,
+            hostFlags, libFlags)
       else:
         buildScratchRoot(workDir, scratchDir) / "nimcache-interface" /
-          sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
+          positionKeyedNimcacheKey(InterfaceCacheName, modulePath, workDir,
+            hostFlags, libFlags)
   var command = boundedNimCompileCommand()
   command.add(interfaceDefines)
   command.add(@[
@@ -5427,35 +5478,36 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # so anchor it under the short scratch root that the interface extractor also
   # uses.
   #
-  # The key is shared across every provider compile that targets the same
-  # toolchain + library set *within one `repro` session*
-  # (default `REPRO_PROVIDER_NIMCACHE_MODE=shared`).
+  # POSITION-KEYED (Tool-Owned-Caches.md): the nimcache is keyed on this
+  # recipe's PRODUCING PROJECT -- `modulePath`, the `repro.nim` SOURCE, not
+  # `outputBinaryPath`, because the provider binary is a build artefact whose
+  # location the engine chooses and may change without the project changing.
+  # Recipes must NOT share one directory: Nim names a module's entry from the
+  # main module's directory and the link manifest from the output basename,
+  # and both are invariant here (every recipe's definition is `repro.nim`,
+  # every provider links as `project-provider`), so sharers were different
+  # POSITIONS overwriting each other's `@mrepro.nim.c` and
+  # `project-provider.json`.
   # This is intermediate storage, not an authority for C-object reuse:
   # boundedNimCompileCommand forces the backend because Nim's `.sha1`
   # check omits C headers. Complete monitored compile actions retain normal
   # engine caching. Safe per-object reuse needs equivalent dependency checks.
-  # Across `repro`
-  # sessions the key is additionally scoped by a per-session token
-  # (`REPRO_PROVIDER_NIMCACHE_SESSION`, see `sharedProviderNimcacheKey`)
-  # so concurrent independent `repro` sessions building from the same
-  # project tree never share a nimcache directory and never race Nim's
-  # incremental rename/rmdir cleanup into an `ENOTEMPTY` abort.
-  # `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` restores the legacy
-  # per-output isolation.
+  # `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` narrows the key further, to the
+  # output binary path.
   let hostFlags = hostCCompilerFlags()
   let libFlags = reproLibPathFlags(workDir)
   # The nimcache root stays independent of the per-recipe scratch/out tree
-  # to bound intermediate storage (auto-recurse has one scratchDir per recipe).
-  # Anchor
-  # it under a stable system-temp root on every platform; the full path
-  # is then `<temp>/repro-nimcache-provider/<sharedKey>` where the
-  # `sharedKey` already scopes by workDir + toolchain + library set +
-  # session token, so:
-  #   * recipes A and B of the same `repro` session/project share bounded
-  #     intermediate storage (different scratchDir, identical key);
-  #   * different projects / toolchains get different keys (no collision);
-  #   * concurrent independent sessions get different session tokens
-  #     (the M9.R.12 ENOTEMPTY-collision safety property).
+  # to bound intermediate storage (auto-recurse has one scratchDir per recipe)
+  # and so the SAME recipe rebuilt in a fresh scratch dir still finds its own
+  # populated directory -- the spec's stability guarantee. Anchor it under a
+  # stable system-temp root on every platform; the full path is then
+  # `<temp>/repro-nimcache-provider/<positionKey>`, where the key scopes by
+  # producing project + declared cache + variant + toolchain + library set,
+  # so:
+  #   * recipes A and B never collide, whether or not they run concurrently;
+  #   * different projects / toolchains / variants get different keys;
+  #   * a second `repro` invocation of the SAME recipe lands back on the
+  #     SAME directory, already populated (no session token re-keys it).
   # Using system-temp rather than the workDir also keeps this working
   # when workDir is a read-only immutable store path, and on Windows the
   # short temp root avoids the MAX_PATH overflow that nested CMake
@@ -5466,7 +5518,8 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
     if providerNimcacheMode() == "per-binary":
       nimcacheRoot / providerNimcacheKey(outputBinaryPath)
     else:
-      nimcacheRoot / sharedProviderNimcacheKey(workDir, hostFlags, libFlags)
+      nimcacheRoot / positionKeyedNimcacheKey(ProviderCacheName, modulePath,
+        workDir, hostFlags, libFlags)
   result = boundedNimCompileCommand()
   result.add(@[
     # Provider compiles are often nested inside latency-sensitive graph

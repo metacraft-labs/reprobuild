@@ -1,57 +1,71 @@
-## DSL-port M9.R.13a — provider-compile cache sharing across recipes.
+## Provider-compile nimcache scoping — M0 of Tool-Owned-Caches.md.
 ##
-## ## Context
+## ## Context: the contract this file used to pin, and why it inverted
 ##
-## Before M9.R.13a the wayland from-source smoke (and every multi-recipe
-## ``--tool-provisioning=from-source`` invocation) timed out hours-to-
-## days because each per-recipe provider compile took 5-10 min on
-## Windows. The dominant cost in each compile is the shared infrastruct-
-## ure -- the DSL umbrella + repro stdlib + standard provider, ~300k LOC
-## that is bit-identical across all 84 from-source recipes. The shape
-## SHOULD let Nim's ``.sha1``-based incremental compilation reuse those
-## ``.o`` files; in practice nothing was reused because each subprocess
-## had its own pid and the M9.R.12 ``sharedProviderNimcacheKey`` folded
-## ``getCurrentProcessId()`` into the cache key. Result: every recipe's
-## provider compile spawned ``repro __repro-compile-provider`` as a
-## fresh subprocess and that subprocess's distinct pid sent it to a
-## fresh nimcache directory -- 84 × full cold compile.
+## M9.R.13a made every provider compile of one ``repro`` invocation SHARE
+## a single nimcache directory, keyed by a session token in
+## ``$REPRO_PROVIDER_NIMCACHE_SESSION`` that the root process seeded and
+## every subprocess inherited. The goal was Nim's ``.sha1`` incremental
+## reuse across the ~84 from-source recipes; the ENOTEMPTY hazard of two
+## concurrent sessions in one directory was handled by giving each
+## session its own token, plus an flock on the directory.
 ##
-## ## What this milestone changed
+## **The premise was wrong.** The recipes sharing that directory are not
+## one position invoked many times; they are DIFFERENT POSITIONS. Nim
+## mangles a module's nimcache entry from the MAIN MODULE's directory and
+## names the link manifest from the output basename, and both are
+## invariant across reprobuild's recipes: every recipe's project
+## definition is a file called ``repro.nim``, and every provider links as
+## ``project-provider``. So each sharer claimed the one slot
+## ``@mrepro.nim.c``, and each claimed the one slot
+## ``project-provider.json``. Measured on a real shared directory: 402 key
+## dirs, 390 holding exactly one link manifest, always that same name.
+## Tool-Owned-Caches.md: a POSITION-KEYED cache MUST be isolated per edge.
 ##
-## The M9.R.13a fix replaces the pid in the cache key with a session
-## token sourced from ``$REPRO_PROVIDER_NIMCACHE_SESSION``. The root
-## ``repro`` process seeds the env var in ``runThinApp``; every nested
-## subprocess inherits it (the build engine's ``envTableFromArgvStyle``
-## copies parent ``envPairs()`` before layering action overrides) and
-## therefore ends up in the SAME shared nimcache. Independent concurrent
-## ``repro`` sessions get distinct tokens (the env var is not set in any
-## ambient environment outside of ``repro`` itself, so two parallel
-## sessions seed independent ``pid-`` values), so the M9.R.12
-## ENOTEMPTY-collision safety property is preserved unchanged.
+## Isolating is also FASTER, measured, which is what settles it. Six
+## concurrent compiles in the engine's shape: shared+locked 65/155/108 s;
+## isolated per edge 32/28/44 s (~3.1x) while paying cold compiles,
+## because they proceed concurrently rather than queueing behind one
+## flock. Shared+unlocked corrupts outright: 4 of 18 failed, one process's
+## object appearing on another's link line.
+##
+## ## What changed
+##
+## ``positionKeyedNimcacheKey`` keys the directory on producing project x
+## declared cache x variant. The session token is GONE (mechanism, env
+## var, and its ``runThinApp`` seeding): it existed only to dodge a
+## collision correct scoping eliminates, and it cost every invocation a
+## cold start. The reprobuild-lib CONTENT digest is GONE from this key
+## too -- see ``t_provider_nimcache_key_tracks_external_libs.nim`` for the
+## split and its falsification.
+##
+## ``acquireProviderNimcacheLock`` STAYS, deliberately. Position-keying
+## removes the reason two DIFFERENT edges ever met in one directory, so
+## the lock no longer serialises recipe A against recipe B. It still
+## covers the case position-keying cannot remove: two instances of the
+## SAME edge, which land on one directory by design (that is the spec's
+## stability guarantee). Nim's nimcache is the spec's own
+## ``tccExclusive`` example, and the spec requires exclusion scoped to
+## exactly the directory.
 ##
 ## ## What this test pins
 ##
-## The four-armed pin below covers the cache-sharing contract end-to-
-## end without driving a real recipe build (which is too slow for a
-## unit test):
+##   1. **Position keying** -- two recipes with different module paths get
+##      DIFFERENT ``--nimcache:`` directories from
+##      ``providerCompileCommand``, and the two declared caches of one
+##      recipe never converge. This is the corruption-avoidance property.
 ##
-##   1. **Hash inputs documented** -- ``sharedProviderNimcacheKey`` does
-##      not depend on modulePath or outputBinaryPath. Two distinct
-##      ``providerCompileCommand`` calls with different module paths
-##      but the same workDir + env emit identical ``--nimcache:``
-##      directories. This is the structural property that allows
-##      recipe A and recipe B to share a cache at all -- without it the
-##      env-var fix would not help.
+##   2. **Stability across invocations** -- the key contains no pid, no
+##      session, no timestamp, so a second ``repro`` process computes the
+##      SAME directory as the first and finds it populated. Pinned
+##      structurally (identical path across processes) because with
+##      ``--forceBuild:on`` still on the compile command there is no
+##      timing win to observe yet; that is gated on the separate Nim
+##      footprint fix, NOT on this change.
 ##
-##   2. **Env-var session token replaces pid** -- swapping the env var
-##      between two distinct values produces two distinct nimcache
-##      paths (proves session isolation). Clearing the env var falls
-##      back to the current pid (the legacy M9.R.12 behaviour the
-##      fallback preserves for callers that did not go through
-##      ``ensureProviderNimcacheSession``). Setting the env var to a
-##      fixed string locks the nimcache path to a value that does NOT
-##      contain the pid -- proves the session token, not the pid, drives
-##      the key.
+##   2b. **Variant isolation** -- ``$REPRO_VARIANTS`` moves the key, so a
+##      release build's objects cannot overwrite a debug build's in the
+##      same position slot.
 ##
 ##   3. **Compile-then-recompile is fast** -- a small synthetic Nim
 ##      module that pulls in the standard library (the same kind of
@@ -104,6 +118,7 @@ const
   ProviderLockPayloadFlag = "--provider-lock-payload"
   InterfaceCompilerLockRunnerFlag = "--interface-compiler-lock-runner"
   InterfaceLockRunnerFlag = "--interface-lock-runner"
+  NimcachePathRunnerFlag = "--nimcache-path-runner"
 
 if paramCount() >= 1 and paramStr(1) == ProviderLockPayloadFlag:
   writeFile(paramStr(2), "entered\n")
@@ -138,6 +153,21 @@ if paramCount() >= 1 and paramStr(1) == InterfaceCompilerLockRunnerFlag:
     stderr.write(execution.output)
   quit(execution.exitCode)
 
+if paramCount() >= 1 and paramStr(1) == NimcachePathRunnerFlag:
+  # Print the ``--nimcache:`` directory this process computes for the given
+  # (modulePath, outputBinaryPath, workDir). A SEPARATE PROCESS is the point:
+  # it is the only way to falsify a key that secretly folds in a pid.
+  let command = providerCompileCommand(
+    modulePath = paramStr(2),
+    outputBinaryPath = paramStr(3),
+    workDir = paramStr(4),
+    scratchDir = paramStr(4) / "fake-recipe" / "scratch")
+  for arg in command:
+    if arg.startsWith("--nimcache:"):
+      echo arg["--nimcache:".len .. ^1]
+      quit(0)
+  quit(1)
+
 if paramCount() >= 1 and paramStr(1) == InterfaceLockRunnerFlag:
   writeFile(paramStr(3), "started\n")
   var lock = acquireInterfaceArtifactLock(paramStr(2))
@@ -164,36 +194,38 @@ proc nimCacheArgOf(command: openArray[string]): string =
     "providerCompileCommand emitted no --nimcache: flag: " &
       command.join(" "))
 
-template withSessionEnvBlock*(value: string; body: untyped) =
-  ## Run ``body`` with ``REPRO_PROVIDER_NIMCACHE_SESSION=value`` and
-  ## restore the prior env around it (including the "unset" case --
-  ## ``delEnv`` for missing originals so we don't leak a synthetic
-  ## value into the rest of the suite). Templated so the body can
-  ## return any type (or nothing) -- callers that need the body's
-  ## value pin a ``let`` inside ``body`` to a captured variable.
-  let prior = getEnv(ProviderNimcacheSessionEnv)
-  let priorWasSet = existsEnv(ProviderNimcacheSessionEnv)
-  putEnv(ProviderNimcacheSessionEnv, value)
+template withVariantEnvBlock*(value: string; body: untyped) =
+  ## Run ``body`` with ``REPRO_VARIANTS=value`` and restore the prior env
+  ## around it (including the "unset" case -- ``delEnv`` for missing
+  ## originals so we don't leak a synthetic value into the rest of the
+  ## suite). Templated so the body can return any type (or nothing).
+  ##
+  ## This replaces the former ``withSessionEnvBlock``. The session token it
+  ## manipulated no longer exists; ``$REPRO_VARIANTS`` is the env var that
+  ## legitimately moves a tool-owned cache identity, because it names the
+  ## VARIANT the graph was produced under.
+  let prior = getEnv(ProviderVariantEnv)
+  let priorWasSet = existsEnv(ProviderVariantEnv)
+  putEnv(ProviderVariantEnv, value)
   try:
     body
   finally:
     if priorWasSet:
-      putEnv(ProviderNimcacheSessionEnv, prior)
+      putEnv(ProviderVariantEnv, prior)
     else:
-      delEnv(ProviderNimcacheSessionEnv)
+      delEnv(ProviderVariantEnv)
 
-template withSessionUnsetBlock*(body: untyped) =
-  ## Run ``body`` with ``REPRO_PROVIDER_NIMCACHE_SESSION`` unset (so
-  ## the fallback pid path fires). Restore the prior value afterwards.
-  let prior = getEnv(ProviderNimcacheSessionEnv)
-  let priorWasSet = existsEnv(ProviderNimcacheSessionEnv)
+template withVariantUnsetBlock*(body: untyped) =
+  ## Run ``body`` with ``REPRO_VARIANTS`` unset (the no-variant default).
+  let prior = getEnv(ProviderVariantEnv)
+  let priorWasSet = existsEnv(ProviderVariantEnv)
   if priorWasSet:
-    delEnv(ProviderNimcacheSessionEnv)
+    delEnv(ProviderVariantEnv)
   try:
     body
   finally:
     if priorWasSet:
-      putEnv(ProviderNimcacheSessionEnv, prior)
+      putEnv(ProviderVariantEnv, prior)
 
 proc writeSyntheticSource(path: string; uniqueProcName: string) =
   ## Write a tiny Nim source whose import graph is the standard library
@@ -320,7 +352,7 @@ suite "bootstrap compiler environment paths":
     else:
       skip()
 
-suite "M9.R.13a provider-compile cache sharing":
+suite "provider-compile nimcache is position-keyed (Tool-Owned-Caches M0)":
 
   test "provider recompilation observes a changed local C header":
     let scratch = createTempDir("repro-provider-header-change-", "")
@@ -332,17 +364,19 @@ suite "M9.R.13a provider-compile cache sharing":
 proc headerValue(): cint {.importc: "header_value", header: "\"value.h\"".}
 echo headerValue()
 """)
-    withSessionEnvBlock("header-change-" & $getCurrentProcessId()):
-      for value in [11, 23]:
-        writeFile(header, "static inline int header_value(void) { return " &
-          $value & "; }\n")
-        let compiled = compileProviderBinary(source, output,
-          default(ContentDigest), scratchDir = scratch,
-          useFreshnessCache = false)
-        check compiled.executionResult.exitCode == 0
-        let execution = execCmdEx(quoteShell(output))
-        check execution.exitCode == 0
-        check execution.output.strip == $value
+    # No session-token isolation wrapper is needed any more: the nimcache is
+    # keyed on the PRODUCING PROJECT, and ``source`` is this test's own
+    # ``createTempDir`` path, so this compile already owns its directory.
+    for value in [11, 23]:
+      writeFile(header, "static inline int header_value(void) { return " &
+        $value & "; }\n")
+      let compiled = compileProviderBinary(source, output,
+        default(ContentDigest), scratchDir = scratch,
+        useFreshnessCache = false)
+      check compiled.executionResult.exitCode == 0
+      let execution = execCmdEx(quoteShell(output))
+      check execution.exitCode == 0
+      check execution.output.strip == $value
 
   test "provider recompilation rejects a removed local C header":
     let scratch = createTempDir("repro-provider-header-remove-", "")
@@ -355,51 +389,72 @@ proc headerValue(): cint {.importc: "header_value", header: "\"value.h\"".}
 echo headerValue()
 """)
     writeFile(header, "static inline int header_value(void) { return 11; }\n")
-    withSessionEnvBlock("header-remove-" & $getCurrentProcessId()):
+    # Position-keyed on ``source`` (a per-test ``createTempDir``), so this
+    # compile owns its nimcache without any session-token wrapper.
+    discard compileProviderBinary(source, output,
+      default(ContentDigest), scratchDir = scratch,
+      useFreshnessCache = false)
+    check execCmdEx(quoteShell(output)).output.strip == "11"
+    removeFile(header)
+    expect OSError:
       discard compileProviderBinary(source, output,
         default(ContentDigest), scratchDir = scratch,
         useFreshnessCache = false)
-      check execCmdEx(quoteShell(output)).output.strip == "11"
-      removeFile(header)
-      expect OSError:
-        discard compileProviderBinary(source, output,
-          default(ContentDigest), scratchDir = scratch,
-          useFreshnessCache = false)
 
-  test "test_m9r13a_provider_compile_command_nimcache_independent_of_module_path":
-    ## Arm 1: ``providerCompileCommand``'s ``--nimcache:`` directory
-    ## does NOT depend on the recipe's modulePath or outputBinaryPath.
-    ## Two recipes (here: A under ``./fake-recipe-a/`` and B under
-    ## ``./fake-recipe-b/``) compile their providers into the SAME
-    ## nimcache when the workDir + env-derived session token + flags
-    ## match. This is the structural property that allows recipe B's
-    ## compile to reuse recipe A's ``.o`` files.
-    let scratch = getTempDir() / "repro-m9r13a-arm1"
+  test "test_m0_provider_compile_command_nimcache_is_keyed_on_module_path":
+    ## Arm 1 (INVERTED at M0). ``providerCompileCommand``'s ``--nimcache:``
+    ## directory IS a function of the recipe's modulePath -- the PRODUCING
+    ## PROJECT. Two recipes (A under ``./fake-recipe-a/``, B under
+    ## ``./fake-recipe-b/``) must be handed DIFFERENT directories even
+    ## though everything else about them matches.
+    ##
+    ## This arm previously asserted the exact opposite, that the two share
+    ## one directory so B could reuse A's ``.o`` files. That sharing is
+    ## what corrupts: both recipes' definitions are files called
+    ## ``repro.nim``, so in one directory both claim the single slot
+    ## ``@mrepro.nim.c``, and both providers claim the single link
+    ## manifest ``project-provider.json``.
+    let scratch = getTempDir() / "repro-m0-arm1"
     createDir(scratch)
     defer:
       try: removeDir(scratch)
       except CatchableError: discard
-    var nimcacheA, nimcacheB: string
-    withSessionEnvBlock("fixed-arm1-session"):
-      let cmdA = providerCompileCommand(
-        modulePath = scratch / "fake-recipe-a" / "repro.nim",
-        outputBinaryPath = scratch / "fake-recipe-a" / "out" / "provider-a",
-        workDir = scratch,
-        scratchDir = scratch / "fake-recipe-a" / "scratch")
-      let cmdB = providerCompileCommand(
-        modulePath = scratch / "fake-recipe-b" / "repro.nim",
-        outputBinaryPath = scratch / "fake-recipe-b" / "out" / "provider-b",
-        workDir = scratch,
-        scratchDir = scratch / "fake-recipe-b" / "scratch")
-      nimcacheA = nimCacheArgOf(cmdA)
-      nimcacheB = nimCacheArgOf(cmdB)
-    check nimcacheA == nimcacheB
-    # Sanity: the path is non-empty and contains the shared anchor.
+    let cmdA = providerCompileCommand(
+      modulePath = scratch / "fake-recipe-a" / "repro.nim",
+      outputBinaryPath = scratch / "fake-recipe-a" / "out" / "provider-a",
+      workDir = scratch,
+      scratchDir = scratch / "fake-recipe-a" / "scratch")
+    let cmdB = providerCompileCommand(
+      modulePath = scratch / "fake-recipe-b" / "repro.nim",
+      outputBinaryPath = scratch / "fake-recipe-b" / "out" / "provider-b",
+      workDir = scratch,
+      scratchDir = scratch / "fake-recipe-b" / "scratch")
+    let nimcacheA = nimCacheArgOf(cmdA)
+    let nimcacheB = nimCacheArgOf(cmdB)
+    if nimcacheA == nimcacheB:
+      checkpoint("both recipes share nimcache: " & nimcacheA)
+    check nimcacheA != nimcacheB
+    # Sanity: the paths are non-empty and sit under the shared anchor -- the
+    # ROOT is still common, only the per-position leaf differs.
     check nimcacheA.len > 0
+    check nimcacheB.len > 0
     when defined(windows):
       check nimcacheA.contains("repro-nimcache-provider")
+      check nimcacheB.contains("repro-nimcache-provider")
     else:
       check nimcacheA.contains("nimcache-provider")
+      check nimcacheB.contains("nimcache-provider")
+    check parentDir(nimcacheA) == parentDir(nimcacheB)
+
+    # The OUTPUT BINARY path must NOT move the key: it is a build artefact
+    # whose location the engine chooses and may change without the project
+    # changing. Only the SOURCE position counts.
+    let cmdARelocated = providerCompileCommand(
+      modulePath = scratch / "fake-recipe-a" / "repro.nim",
+      outputBinaryPath = scratch / "somewhere-else" / "provider-a",
+      workDir = scratch,
+      scratchDir = scratch / "fake-recipe-a" / "other-scratch")
+    check nimCacheArgOf(cmdARelocated) == nimcacheA
 
   test "test_provider_compile_command_serializes_nim_backend":
     ## Provider compile is already one build-engine action; the Nim command
@@ -458,7 +513,20 @@ echo headerValue()
     check command[1 .. 2] == @["c", "--parallelBuild:4"]
     check command[3] == "--forceBuild:on"
 
-  test "concurrent provider commands serialize a shared nimcache":
+  test "concurrent provider commands serialize ONE nimcache directory":
+    ## THE DELIBERATE RESIDUAL. Position-keying removed the reason two
+    ## DIFFERENT edges ever met in one directory; the arm below is the case
+    ## it cannot remove -- two instances of the SAME position, which land on
+    ## one directory by design. Both processes are handed the SAME
+    ## ``--nimcache`` path explicitly, so this pins exclusion, not scoping.
+    ##
+    ## The lock is kept because Nim's nimcache is unsafe for concurrent use
+    ## (its incremental backend renames and removes entries mid-build, and a
+    ## sibling populating the same directory drives that into ENOTEMPTY).
+    ## Tool-Owned-Caches.md requires exclusion for a cache declared unsafe,
+    ## scoped to exactly the directory. The companion arm
+    ## ``..._nimcache_is_keyed_on_module_path`` is what proves DIFFERENT
+    ## recipes no longer queue behind this lock at all.
     let scratch = getTempDir() /
       ("repro-provider-lock-" & $getCurrentProcessId())
     createDir(scratch)
@@ -489,6 +557,56 @@ echo headerValue()
     check second.waitForExit() == 0
     second.close()
     check fileExists(secondEntered)
+
+  test "concurrent provider commands on DIFFERENT nimcaches do not serialize":
+    ## The other half of the exclusion contract, and the one the measured
+    ## ~3x win rests on: exclusion is scoped to the DIRECTORY, never to the
+    ## tool or the build. Two compiles holding two different nimcache paths
+    ## -- which, after position-keying, is what two different recipes now
+    ## get -- must both be inside their critical sections at the same time.
+    ##
+    ## Falsifiable in the direction that matters: widen the lock's scope
+    ## beyond the directory (e.g. one global lock file) and the second
+    ## process cannot enter while the first sleeps, so ``secondEntered``
+    ## does not appear and this fails.
+    let scratch = getTempDir() /
+      ("repro-provider-nolock-" & $getCurrentProcessId())
+    createDir(scratch)
+    defer:
+      try: removeDir(scratch)
+      except CatchableError: discard
+    let firstStarted = scratch / "first-started"
+    let firstEntered = scratch / "first-entered"
+    let secondStarted = scratch / "second-started"
+    let secondEntered = scratch / "second-entered"
+    let runner = getAppFilename()
+
+    let first = startProcess(runner, args = @[
+      ProviderLockRunnerFlag, scratch / "nimcache-a",
+      firstStarted, firstEntered, "2000"], options = {poParentStreams})
+    check waitForFile(firstEntered, 5000)
+
+    let second = startProcess(runner, args = @[
+      ProviderLockRunnerFlag, scratch / "nimcache-b",
+      secondStarted, secondEntered, "0"], options = {poParentStreams})
+    check waitForFile(secondStarted, 5000)
+    # The load-bearing check: the second process enters its critical section
+    # WHILE the first is still sleeping inside its own. The first holds for
+    # 2000 ms, so a lock any wider than the directory would push the second's
+    # entry past that; we require it well inside, at 1000 ms.
+    let waitBegan = epochTime()
+    check waitForFile(secondEntered, 5000)
+    let enteredAfterMs = (epochTime() - waitBegan) * 1000.0
+    checkpoint("second entered after " &
+      enteredAfterMs.formatFloat(ffDecimal, 0) & " ms (first holds 2000 ms)")
+    check enteredAfterMs < 1000.0
+    # The first must still be inside its own critical section, i.e. the
+    # overlap was real and not an artefact of the first having finished.
+    check first.running
+    check first.waitForExit() == 0
+    first.close()
+    check second.waitForExit() == 0
+    second.close()
 
   test "concurrent interface compilers serialize a shared nimcache":
     let scratch = getTempDir() /
@@ -597,17 +715,54 @@ echo headerValue()
         else:
           delEnv("CC")
 
-  test "test_m9r13a_session_env_var_replaces_pid_in_cache_key":
-    ## Arm 2: the cache key is driven by
-    ## ``$REPRO_PROVIDER_NIMCACHE_SESSION``, NOT by the current pid.
-    ## Setting two distinct session tokens produces two distinct
-    ## nimcache paths (so independent ``repro`` sessions don't collide
-    ## on ENOTEMPTY); setting the SAME token from two notional
-    ## "different process IDs" produces the same path (we can't fake a
-    ## pid but we can prove the key contains the session token and not
-    ## the pid by setting a token whose string form pins the resulting
-    ## directory hash).
-    let scratch = getTempDir() / "repro-m9r13a-arm2"
+  test "test_m0_nimcache_key_is_stable_across_processes":
+    ## Arm 2 (REPLACES the session-token arm). The key contains no pid, no
+    ## session token, no timestamp and no temp-dir nonce, so a SECOND
+    ## ``repro`` process computes the SAME directory as the first and finds
+    ## it already populated -- the spec's stability guarantee, and the thing
+    ## the session token used to destroy on every invocation.
+    ##
+    ## Pinned by CROSS-PROCESS agreement, not by a repeated in-process call:
+    ## an in-process repeat would still pass if the key folded in the pid,
+    ## which is exactly the defect this arm exists to catch. We re-exec this
+    ## test binary and compare the child's answer with our own.
+    ##
+    ## NOTE ON TIMING: reuse here is STRUCTURAL only. ``--forceBuild:on`` is
+    ## still on ``boundedNimCompileCommand`` (it masks a real Nim footprint
+    ## bug that omits the C header closure), so the second compile does not
+    ## get faster yet. The timing win is gated on that separate compiler
+    ## fix, not on this change.
+    let scratch = getTempDir() / "repro-m0-arm2"
+    createDir(scratch)
+    defer:
+      try: removeDir(scratch)
+      except CatchableError: discard
+    let module = scratch / "fake-recipe" / "repro.nim"
+    let outBin = scratch / "fake-recipe" / "out" / "provider"
+    let ours = nimCacheArgOf(providerCompileCommand(modulePath = module,
+      outputBinaryPath = outBin, workDir = scratch,
+      scratchDir = scratch / "fake-recipe" / "scratch"))
+
+    let child = execCmdEx(quoteShell(getAppFilename()) & " " &
+      quoteShell(NimcachePathRunnerFlag) & " " & quoteShell(module) & " " &
+      quoteShell(outBin) & " " & quoteShell(scratch))
+    check child.exitCode == 0
+    let theirs = child.output.strip
+    if theirs != ours:
+      checkpoint("parent: " & ours)
+      checkpoint("child:  " & theirs)
+    check theirs == ours
+    # Guard against the check passing vacuously on an empty answer.
+    check ours.len > 0
+
+  test "test_m0_variant_isolates_the_nimcache":
+    ## Arm 2b (REPLACES the pid-fallback arm). VARIANT is a component of a
+    ## tool-owned cache's identity. Two different ``$REPRO_VARIANTS``
+    ## assignments over one producing project get two directories, so a
+    ## release build's objects cannot land in the slot a debug build owns.
+    ## Assignment ORDER must not matter -- the signature is canonicalised --
+    ## or an identical configuration spelled two ways would cold-start twice.
+    let scratch = getTempDir() / "repro-m0-arm2b"
     createDir(scratch)
     defer:
       try: removeDir(scratch)
@@ -618,29 +773,29 @@ echo headerValue()
       nimCacheArgOf(providerCompileCommand(modulePath = module,
         outputBinaryPath = outBin, workDir = scratch,
         scratchDir = scratch / "fake-recipe" / "scratch"))
-    var nimcacheTokenA, nimcacheTokenB, nimcacheTokenARepeat: string
-    withSessionEnvBlock("session-token-A"):
-      nimcacheTokenA = currentNimcache()
-    withSessionEnvBlock("session-token-B"):
-      nimcacheTokenB = currentNimcache()
-    # Distinct session tokens => distinct nimcache directories (the
-    # M9.R.12 ENOTEMPTY-collision safety property must hold).
-    check nimcacheTokenA != nimcacheTokenB
-    # Same session token => same nimcache (stability under repeated
-    # calls; this is the property auto-recurse depends on).
-    withSessionEnvBlock("session-token-A"):
-      nimcacheTokenARepeat = currentNimcache()
-    check nimcacheTokenA == nimcacheTokenARepeat
+    var none, debug, release, releaseReordered: string
+    withVariantUnsetBlock:
+      none = currentNimcache()
+    withVariantEnvBlock("buildType=debug"):
+      debug = currentNimcache()
+    withVariantEnvBlock("buildType=release,lto=on"):
+      release = currentNimcache()
+    withVariantEnvBlock("lto=on,buildType=release"):
+      releaseReordered = currentNimcache()
+    check none != debug
+    check debug != release
+    check none != release
+    # Canonicalisation: order does not perturb the identity.
+    check release == releaseReordered
 
-  test "test_m9r13a_session_env_var_unset_falls_back_to_pid":
-    ## Arm 2b: with the env var unset, the cache key uses the current
-    ## pid. This preserves the legacy M9.R.12 behaviour for callers
-    ## that did not go through ``ensureProviderNimcacheSession`` (test
-    ## fixtures, embedding libraries). The fallback is structural --
-    ## we prove it by setting the env var explicitly to the same value
-    ## the fallback would compute (``pid-<getCurrentProcessId()>``) and
-    ## checking that path equals the unset-fallback path.
-    let scratch = getTempDir() / "repro-m9r13a-arm2b"
+  test "test_m0_session_env_var_no_longer_exists":
+    ## Arm 2c (REPLACES the ``ensureProviderNimcacheSession`` arm). The
+    ## session mechanism is gone, root and branch. The strongest thing a
+    ## test can say about a removed mechanism without re-creating it is
+    ## that its env var is INERT: setting the name the old token used must
+    ## not move the nimcache directory any more. If someone reintroduces a
+    ## session component, this fails.
+    let scratch = getTempDir() / "repro-m0-arm2c"
     createDir(scratch)
     defer:
       try: removeDir(scratch)
@@ -651,38 +806,24 @@ echo headerValue()
       nimCacheArgOf(providerCompileCommand(modulePath = module,
         outputBinaryPath = outBin, workDir = scratch,
         scratchDir = scratch / "fake-recipe" / "scratch"))
-    let pidToken = "pid-" & $getCurrentProcessId()
-    var nimcacheUnset, nimcacheExplicit: string
-    withSessionUnsetBlock:
-      nimcacheUnset = currentNimcache()
-    withSessionEnvBlock(pidToken):
-      nimcacheExplicit = currentNimcache()
-    check nimcacheUnset == nimcacheExplicit
-
-  test "test_m9r13a_ensure_session_env_seeds_pid_when_unset":
-    ## Arm 2c: ``ensureProviderNimcacheSession`` seeds the env var iff
-    ## it is currently unset. This is the seed the root ``repro``
-    ## process performs at the top of ``runThinApp`` so every nested
-    ## subprocess inherits a stable token. We pin both directions:
-    ## unset => seeds; already-set => idempotent (does not overwrite).
-    let prior = getEnv(ProviderNimcacheSessionEnv)
-    let priorWasSet = existsEnv(ProviderNimcacheSessionEnv)
+    const LegacySessionEnv = "REPRO_PROVIDER_NIMCACHE_SESSION"
+    let prior = getEnv(LegacySessionEnv)
+    let priorWasSet = existsEnv(LegacySessionEnv)
     try:
-      delEnv(ProviderNimcacheSessionEnv)
-      check getEnv(ProviderNimcacheSessionEnv).len == 0
-      ensureProviderNimcacheSession()
-      let seeded = getEnv(ProviderNimcacheSessionEnv)
-      check seeded.len > 0
-      check seeded.startsWith("pid-")
-      # Idempotent: a second call MUST NOT overwrite.
-      putEnv(ProviderNimcacheSessionEnv, "custom-token")
-      ensureProviderNimcacheSession()
-      check getEnv(ProviderNimcacheSessionEnv) == "custom-token"
+      delEnv(LegacySessionEnv)
+      let withoutToken = currentNimcache()
+      putEnv(LegacySessionEnv, "some-session-token")
+      let withToken = currentNimcache()
+      check withToken == withoutToken
+      # Control: the instrument DOES discriminate when a real identity
+      # component moves, so the equality above is not vacuous.
+      withVariantEnvBlock("buildType=release"):
+        check currentNimcache() != withoutToken
     finally:
       if priorWasSet:
-        putEnv(ProviderNimcacheSessionEnv, prior)
+        putEnv(LegacySessionEnv, prior)
       else:
-        delEnv(ProviderNimcacheSessionEnv)
+        delEnv(LegacySessionEnv)
 
   test "test_m9r13a_warm_recompile_reuses_object_files_deterministically":
     ## Arm 3 (M9.R.13c.3 — DETERMINISTIC REFACTOR). The original arm 3
