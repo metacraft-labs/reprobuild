@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1679,
+    "nimTestBinaries": 1681,
     "pureUnitConsolidationGroups": 50,
-    "pureUnitTests": 597,
+    "pureUnitTests": 598,
     "staticallyDetectedRuntimeCompilerFlowTests": 102,
-    "testEntries": 1690
+    "testEntries": 1692
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1108,8 +1108,8 @@
       "graph-fixture": 12,
       "integration": 789,
       "platform/destructive": 113,
-      "pure unit": 597,
-      "unclassified": 179
+      "pure unit": 598,
+      "unclassified": 180
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1257,9 +1257,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1679,
+    "nimTestBinaryCount": 1681,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1690
+    "testEntryCount": 1692
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -33322,6 +33322,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_dev_env_cache_key_frame",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dev_env_engine",
+        "repro_hash"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_dev_env_cache_key_frame.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_dev_env_cache_key_store_root",
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
@@ -33499,6 +33517,23 @@
       "source": "tests/unit/t_from_source_realization_platform.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_hash_policy_frame_bytes",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hash"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_hash_policy_frame_bytes.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
