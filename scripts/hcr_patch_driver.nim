@@ -18,7 +18,21 @@
 ##
 ##   hcr_patch_driver --socket PATH --target-symbol NAME \
 ##       --patch-object FILE --patch-symbol NAME \
-##       [--patch-id ID] [--delay-ms N] [--json-out FILE] [--allow-relocations]
+##       [--patch-id ID] [--delay-ms N] [--json-out FILE] [--allow-relocations] \
+##       [--changed-file PATH]... [--changed-type NAME:OLD:NEW]...
+##
+## WHAT THE APPLICATION SEES, and why the last two flags exist. The patch
+## request carries two fields that never reach the code being replaced but do
+## reach the embedding program through HCR-Overview §13's ten `rb_hcr_*`
+## functions: `changedFiles` is the set `rb_hcr_file_changed` answers over once
+## the reload is APPLIED, and `changedTypes` is the set §7.4's acceptance rule
+## runs on and the payload the before/after-reload callbacks receive. This
+## driver used to send both empty on every request, so a target driven by it
+## could only ever observe `rb_hcr_file_changed` false and `changed_types` zero
+## — which makes "zero `changed_types` after a Phase F failure"
+## (`Patch-Loading-Lifecycle.md` §3.3 step 38) indistinguishable from the
+## driver simply never having sent any. Both default to empty, so every
+## existing invocation is byte-identical on the wire.
 ##
 ## The driver LISTENS on `--socket`; the target connects out to it because
 ## `REPRO_HCR_AGENT_SOCKET` names it. So the driver must be started first. It
@@ -72,6 +86,11 @@
 ##                        as `req-<n>.json.tmp` and RENAMED into place so the
 ##                        driver can never read a half-written request.
 ##                        Fields: patchObject, patchSymbol, patchId.
+##                        `--changed-file` / `--changed-type` are session-wide
+##                        rather than per-request: a live-edit loop re-sends
+##                        the same source file on every edit, and a per-request
+##                        override would be one more thing a client could get
+##                        wrong for no case that needs it.
 ##   DIR/res-<n>.json     the verdict for request n, written the same way.
 ##   DIR/stop             ends the session cleanly.
 ##   DIR/session.json     the whole session's summary, written at the end.
@@ -99,6 +118,7 @@ when defined(linux) and defined(amd64):
     stderr.writeLine("""usage: hcr_patch_driver --socket PATH --target-symbol NAME
                         --patch-object FILE --patch-symbol NAME
                         [--patch-id ID] [--json-out FILE] [--allow-relocations]
+                        [--changed-file PATH]... [--changed-type NAME:OLD:NEW]...
   when to publish (pick one):
                         [--delay-ms N]
                         [--wait-for FILE --marker STRING [--marker-timeout-ms N]]
@@ -106,8 +126,26 @@ when defined(linux) and defined(amd64):
        hcr_patch_driver --socket PATH --target-symbol NAME
                         --session --session-dir DIR
                         [--session-idle-timeout-ms N] [--json-out FILE]
+                        [--changed-file PATH]... [--changed-type NAME:OLD:NEW]...
                         [--wait-for FILE --marker STRING]""")
     quit(1)
+
+  proc parseChangedType(spec: string): HcrTypeLayoutChange =
+    ## `NAME:OLD:NEW` — the wire form of one `RbHcrTypeChange`.
+    ##
+    ## Refuses rather than defaults. A malformed spec that silently became
+    ## `("", 0, 0)` would still be a layout change on the wire, HCR-Overview
+    ## §7.4 would evaluate its acceptance rule over a type named "", and the
+    ## caller would be measuring a refusal it did not ask for.
+    let parts = spec.split(':')
+    if parts.len != 3 or parts[0].len == 0:
+      die("--changed-type wants NAME:OLD:NEW, got: " & spec)
+    try:
+      result = HcrTypeLayoutChange(typeName: parts[0],
+                                   oldSize: uint32(parseInt(parts[1])),
+                                   newSize: uint32(parseInt(parts[2])))
+    except ValueError:
+      die("--changed-type sizes must be integers, got: " & spec)
 
   proc hexOf(bytes: openArray[byte]): string =
     for b in bytes:
@@ -224,6 +262,8 @@ when defined(linux) and defined(amd64):
       sessionMode = false
       sessionDir = ""
       sessionIdleTimeoutMs = 120_000
+      changedFiles: seq[string] = @[]
+      changedTypes: seq[HcrTypeLayoutChange] = @[]
 
     var i = 1
     while i <= paramCount():
@@ -245,6 +285,8 @@ when defined(linux) and defined(amd64):
       of "--marker-timeout-ms": markerTimeoutMs = parseInt(nextValue())
       of "--json-out": jsonOut = nextValue()
       of "--allow-relocations": allowRelocations = true
+      of "--changed-file": changedFiles.add(nextValue())
+      of "--changed-type": changedTypes.add(parseChangedType(nextValue()))
       of "--session": sessionMode = true
       of "--session-dir": sessionDir = nextValue()
       of "--session-idle-timeout-ms": sessionIdleTimeoutMs = parseInt(nextValue())
@@ -449,7 +491,9 @@ when defined(linux) and defined(amd64):
               directPatchBytes = bytes,
               debugObjectBytes = [],
               unwindMetadataBytes = [],
-              sourceGenerationMap = []))
+              sourceGenerationMap = [],
+              changedFiles = changedFiles,
+              changedTypes = changedTypes))
         except CatchableError as exc:
           # The connection died mid-session. This is fatal for the session and
           # must be said in those words: there is no second dial-out, so no
@@ -547,7 +591,9 @@ when defined(linux) and defined(amd64):
       directPatchBytes = patchBytes,
       debugObjectBytes = [],
       unwindMetadataBytes = [],
-      sourceGenerationMap = [])
+      sourceGenerationMap = [],
+      changedFiles = changedFiles,
+      changedTypes = changedTypes)
     let sentAt = epochTime()
     let delivery = client.deliverPatchRequest(connection, request)
     let settledAt = epochTime()

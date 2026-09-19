@@ -8,6 +8,15 @@
 #
 # Usage:
 #   ./build_lib.sh [OUTPUT_DIR] [--target-os=darwin|linux|windows] [--print-name]
+#                  [--define=NAME]...
+#
+# `--define` exists for FALSIFIER builds: the agent carries three
+# `#ifdef`-guarded arms (`REPRO_HCR_FALSIFY_BEFORE_RELOAD_AFTER_SWAP`,
+# `REPRO_HCR_FALSIFY_SKIP_STEP38`, `REPRO_HCR_FALSIFY_LATCH_ON_REQUEST`) that
+# remove exactly one specified property, and a gate that can only ever build
+# the healthy agent cannot tell a passing assertion from a vacuous one. A build
+# with any define set is NOT copied to `build/lib`, because the canonical
+# artifact every other consumer links must never be one of these.
 
 set -euo pipefail
 
@@ -18,11 +27,15 @@ SRC_C="$C_DIR/repro_hcr_agent.c"
 TARGET_OS=""
 PRINT_NAME=0
 OUT_DIR=""
+EXTRA_DEFINES=()
 
 for arg in "$@"; do
   case "$arg" in
     --target-os=*)
       TARGET_OS="${arg#*=}"
+      ;;
+    --define=*)
+      EXTRA_DEFINES+=("-D${arg#*=}")
       ;;
     --print-name)
       PRINT_NAME=1
@@ -120,11 +133,12 @@ if ! command -v "$CC" >/dev/null 2>&1; then
   CC="cc"
 fi
 
-echo "[repro_hcr_agent] Compiling $LIB_NAME with $CC for $TARGET_OS..."
+echo "[repro_hcr_agent] Compiling $LIB_NAME with $CC for $TARGET_OS${EXTRA_DEFINES[*]+ (${EXTRA_DEFINES[*]})}..."
 # Compile shared library
 "$CC" -O2 -g -Wall -Wextra \
   $SHARED_FLAGS \
   $DEFINES \
+  ${EXTRA_DEFINES[@]+"${EXTRA_DEFINES[@]}"} \
   -I "$C_DIR" \
   "$SRC_C" \
   $EXTRA_LIBS \
@@ -132,8 +146,15 @@ echo "[repro_hcr_agent] Compiling $LIB_NAME with $CC for $TARGET_OS..."
 
 echo "[repro_hcr_agent] Successfully built: $OUT_PATH"
 
-# Also copy to build/lib for standard -L.../build/lib link conventions
-mkdir -p "$SCRIPT_DIR/build/lib"
-if [[ "$OUT_PATH" != "$SCRIPT_DIR/build/lib/$LIB_NAME" ]]; then
-  cp -f "$OUT_PATH" "$SCRIPT_DIR/build/lib/$LIB_NAME"
+# Also copy to build/lib for standard -L.../build/lib link conventions.
+#
+# A falsifier build is deliberately excluded: `build/lib` is what every other
+# consumer's `-L` points at, and silently putting an agent there with one of
+# its obligations removed would make every OTHER gate's green result a
+# fiction. A falsifier lives only in the output directory its caller named.
+if [[ ${#EXTRA_DEFINES[@]} -eq 0 ]]; then
+  mkdir -p "$SCRIPT_DIR/build/lib"
+  if [[ "$OUT_PATH" != "$SCRIPT_DIR/build/lib/$LIB_NAME" ]]; then
+    cp -f "$OUT_PATH" "$SCRIPT_DIR/build/lib/$LIB_NAME"
+  fi
 fi
