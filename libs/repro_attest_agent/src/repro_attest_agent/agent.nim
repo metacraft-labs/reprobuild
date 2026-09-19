@@ -331,30 +331,37 @@ proc parseBodyObject(body: string; required, optional: openArray[string];
 # Building a report
 # ---------------------------------------------------------------------
 
-proc buildReport(a: AttestationAgent; bindings: ReportBindings;
-                 challengeHex: string; nowMs: int64): string =
-  ## The one place a report is assembled, for both endpoints that produce
-  ## one.
+proc buildBoundReport*(driver: AttestationDriver; identity: AgentIdentity;
+                       bindings: ReportBindings; challengeHex: string;
+                       nowMs: int64): string =
+  ## The one place in this build a report is assembled.
+  ##
+  ## Exported, and taking a driver and an identity rather than an agent,
+  ## because there are now two instance-side callers: the daemon, which
+  ## answers a challenge somebody else brought, and the remote-unseal
+  ## client, which goes and gets one. A second assembly for the second
+  ## caller would be a second answer to "what did this instance bind",
+  ## and the whole discipline is that there is one.
   ##
   ## The 64 bytes are computed here from the challenge and the bindings,
   ## and the driver is handed them. Nothing a driver returns can reach
   ## the envelope's ``reportData``, so a driver that embeds different
   ## bytes in its evidence produces a report whose envelope and evidence
   ## disagree — which is the verifier's to catch, and is not something
-  ## this agent can be tricked into papering over.
+  ## this code can be tricked into papering over.
   let reportDataHex = reportDataHexFor(bindings, challengeHex)
-  let quote = acquireQuote(a.driver,
+  let quote = acquireQuote(driver,
     hexToBytes("reportData", reportDataHex))
   let report = attestationReport(
-    a.driver.backend,
+    driver.backend,
     rfc3339At(nowMs),
     challengeHex,
     bindings,
     quote.evidence,
     UnverifiedClaims(
-      unverifiedGeneration: a.identity.generation,
-      unverifiedConfigFingerprint: a.identity.configFingerprint,
-      unverifiedVerityRootHash: a.identity.verityRootHash),
+      unverifiedGeneration: identity.generation,
+      unverifiedConfigFingerprint: identity.configFingerprint,
+      unverifiedVerityRootHash: identity.verityRootHash),
     quote.certificates)
   result = renderAttestationReport(report)
 
@@ -371,6 +378,10 @@ proc buildReport(a: AttestationAgent; bindings: ReportBindings;
     raise newException(AgentError,
       "the report this agent just built does not bind the challenge it " &
       "was asked for; refusing to emit it")
+
+proc buildReport(a: AttestationAgent; bindings: ReportBindings;
+                 challengeHex: string; nowMs: int64): string =
+  buildBoundReport(a.driver, a.identity, bindings, challengeHex, nowMs)
 
 # ---------------------------------------------------------------------
 # Sessions

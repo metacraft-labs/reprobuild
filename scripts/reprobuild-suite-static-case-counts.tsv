@@ -1324,6 +1324,9 @@ tests/integration/t_r2_iso_boot.nim	nim	2
 tests/integration/t_r9_systemd_boot.nim	nim	2
 tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim	nim	1
 tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim	nim	3
+tests/integration/t_remote_unseal_boot.nim	nim	7
+tests/integration/t_remote_unseal_broker_refusal_fails_closed.nim	nim	6
+tests/integration/t_remote_unseal_client.nim	nim	11
 tests/integration/t_remove_gcs_only_unreferenced_checkouts_and_guards_dirty.nim	nim	3
 tests/integration/t_report_classifies_at_ahead_and_behind.nim	nim	1
 tests/integration/t_repos_add_records_project_membership_by_key.nim	nim	1

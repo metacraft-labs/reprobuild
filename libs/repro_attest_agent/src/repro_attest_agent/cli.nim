@@ -10,6 +10,14 @@
 ##   attestation-agent systemd-unit [--binary=PATH] [--listen=HOST:PORT]
 ##       [--tier=NAME] [--measurement-manifest=PATH]
 ##       [--provisioned-secrets-dir=PATH]
+##   attestation-agent remote-unseal --broker=URL [--volume=DEVICE:MAPPING]…
+##
+## ``remote-unseal`` is the early-boot half and is documented in
+## ``unseal_cli``: this machine attests to a broker, and either receives
+## the key to its own state volumes or opens nothing. Its flags are parsed
+## by that module rather than by the table below, because the two commands
+## share no option but ``--tier`` and folding them into one record would
+## let a flag meant for the daemon be accepted by the boot client.
 ##
 ## ``systemd-unit`` prints the service unit for the options it is given.
 ## The image build calls it instead of carrying a copy, so the flags in
@@ -42,6 +50,7 @@ import ./agent
 import ./httpd
 import ./secrets
 import ./unit
+import ./unseal_cli
 
 const
   TierMock = "mock"
@@ -74,6 +83,7 @@ proc renderUsage*(): string =
 Subcommands:
   serve          run the agent
   systemd-unit   print the service unit for these options
+  remote-unseal  attest to a broker for this machine's state-volume key
 
 Options:
       --listen HOST:PORT            listen address (default """ &
@@ -255,6 +265,13 @@ proc runSystemdUnit(o: Options): int =
   0
 
 proc runAttestationAgent*(args: seq[string]): int =
+  # Dispatched BEFORE `parseArgs`, because `remote-unseal` has its own
+  # option table. A subcommand whose flags were parsed by the daemon's
+  # parser first would accept `--listen` on a boot client, and a flag
+  # accepted where it means nothing is a flag an operator will one day
+  # believe did something.
+  if args.len > 0 and args[0] == "remote-unseal":
+    return runRemoteUnseal(args[1 .. ^1])
   var opts: Options
   try:
     opts = parseArgs(args)

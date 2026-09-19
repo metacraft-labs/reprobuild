@@ -260,3 +260,109 @@ Same reason as its two siblings: it needs a hardware-accelerated
 hypervisor, a host kernel and module tree, and one run takes minutes. It
 is driven by hand, and the records it produces are pinned so the gate
 that reads them runs offline in milliseconds.
+
+---
+
+# Taking one machine's evidence about state volumes it has no key for
+
+`take-remote-unseal-evidence.sh` is the fourth harness here, and it is
+the inverse of the sealing one above. There, the machine's own TPM held
+the key and the question was whether it would still release it after the
+boot changed. Here **the machine has no key at all** — no TPM, no sealed
+object, nothing on its disk and nothing in its initramfs — and the
+question is what happens when the party that does hold it says no.
+
+One run is **one machine across three power cycles**. Two LUKS2 volumes
+on virtio block devices persist across all three; nothing else does. A
+broker runs on the host, in its own process, and the guest reaches it
+*outbound* over QEMU's user-mode network — the direction is the opposite
+of the provisioning harness below, because here the machine is the one
+that needs something.
+
+| cycle | broker | what the guest does |
+|---|---|---|
+| `enroll` | releasing | attest, receive the volume key, **create** both LUKS2 volumes with it, put a root filesystem inside the first carrying an `init` and a SENTINEL, power off |
+| `unseal` | releasing | attest, receive the key, open both volumes, hand off to the `init` inside the encrypted one |
+| `refuse` | **refusing** | attest, be turned down, and not come up |
+
+## What makes "the boot failed" a measurement rather than a word
+
+The `init` that continues the boot lives **inside the encrypted
+volume**, and so does the sentinel it prints. Neither is in the
+initramfs, neither is in the kernel, and after the `enroll` cycle
+neither is anywhere the guest can read except through a mapping it has
+no key to create — the harness searches the shared directory before
+every later boot and records the count. So "the sentinel is on the
+console" and "the encrypted root filesystem executed" are the same
+statement.
+
+## The refusal is the library's own rule declining
+
+`--require-root-of-trust` does not add a rejection to the broker. It
+*withholds* the opt-in that the release helper requires before it will
+release against `accepted-without-a-root-of-trust`. A broker that
+refused with a hard-coded 403 would be testing the harness; this one
+refuses because the shipped rule declined, and the audit record says
+which rule and why.
+
+## The negative control, and why it has to be a real boot
+
+`UNSEAL_LOCAL_KEY_FALLBACK=1` plants the volume key in the initramfs as
+`/fallback.key` and has the guest fall back to it whenever the client
+comes back empty-handed. **That is the arrangement remote unsealing
+removes** — a machine with a locally cached key — and running it
+produces evidence in which the broker refuses with the *same* status and
+the *same* sentence, the volumes open anyway, and the machine comes up.
+The gate feeds both records to the same predicates: the refusal check
+must still be TRUE, the locked check must be FALSE, and the boot check
+must be TRUE.
+
+Without that capture, "it refused", "it stayed locked" and "it did not
+come up" could be three names for one check, and nothing would show it.
+**Never use that flag for a capture meant to represent correct
+behaviour.**
+
+## "Not found" is worth nothing from a search that finds nothing
+
+Four searches, each with its own control:
+
+1. the volume key and the sentinel are each planted at **five offsets**
+   of the raw volume and of the archive — the front, a megabyte in, the
+   middle, near the end, and the final 64 bytes — and found at all five;
+2. the **control run really carries the key in its initramfs**, and the
+   same search finds it there (`key_hits_initrd=1`) while the honest run
+   reports 0. That is a boot rather than an argument, and it is what
+   caught the search reading the *compressed* archive, where a
+   fixed-string grep finds nothing whatever the archive contains. Every
+   search now reads `initrd.cpio`, not `initrd.img`;
+3. the shared-directory search is shown to find a file planted in a
+   directory of its own;
+4. the volume search over the *encrypted* device is reported but is
+   deliberately not leaned on — it would come back empty whatever was
+   written there.
+
+## Nothing secret is brought home
+
+The volume key existed in the broker's memory, in one HPKE ciphertext,
+and on one process's standard input inside the guest. The sentinel
+existed in the host's copy of the root `init` and inside ciphertext.
+What is recorded is their SHA-256 — by the broker that released the key,
+by the client that opened it, by the root filesystem that reported its
+own `init`'s digest, and by the host that searched — so several
+producers can be shown to agree without publishing anything.
+
+## What this harness deliberately does NOT do
+
+* **No unified kernel image, no firmware, no TPM, no measured boot.**
+  The guest boots straight into an initramfs and its root of trust is a
+  software one; the broker's record says
+  `accepted-without-a-root-of-trust` out loud. Binding a release to
+  hardware evidence is a different question.
+* **The transport is plaintext HTTP** over QEMU's user-mode network.
+
+## Two wiring facts on top of the ones above
+
+* **Search the uncompressed archive.** See control 2 above: this is the
+  one that turned a claim into a measurement.
+* **`cbc` before `dm-crypt`**, exactly as the sealing harness records —
+  and `ext4` and the virtio network modules on top of that list.

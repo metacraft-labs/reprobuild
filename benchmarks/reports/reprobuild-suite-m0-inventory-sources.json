@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1685,
+    "nimTestBinaries": 1688,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 598,
     "staticallyDetectedRuntimeCompilerFlowTests": 103,
-    "testEntries": 1696
+    "testEntries": 1699
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1106,7 +1106,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 793,
+      "integration": 796,
       "platform/destructive": 113,
       "pure unit": 598,
       "unclassified": 180
@@ -1257,9 +1257,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1685,
+    "nimTestBinaryCount": 1688,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1696
+    "testEntryCount": 1699
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -29585,6 +29585,59 @@
       "source": "tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_remote_unseal_boot",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest_agent"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_remote_unseal_boot.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_remote_unseal_broker_refusal_fails_closed",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_agent"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_remote_unseal_broker_refusal_fails_closed.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_remote_unseal_client",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_agent"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_remote_unseal_client.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
