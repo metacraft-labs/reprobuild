@@ -2487,8 +2487,102 @@ proc powerShellRunCommandScript*(command: openArray[string];
   result.add("  exit 1\r\n")
   result.add("}\r\n")
 
+proc abnormalTerminationName*(exitCode: int): string =
+  ## Name the status of a child that DIED, or "" for an ordinary exit --
+  ## including an ordinary FAILING one.
+  ##
+  ## The two call for opposite responses, which is why they are worth telling
+  ## apart. A compiler that exits 1 has told us something about the code, and
+  ## running it again says the same thing. A compiler that takes an access
+  ## violation has told us nothing about the code at all: the fault is a
+  ## property of that run, and the only evidence about the input is whatever
+  ## it managed to print before dying.
+  when defined(windows):
+    # An unhandled fault is delivered AS the process exit code, carrying the
+    # NTSTATUS whose top nibble is the `error` severity. `getExitCodeProcess`
+    # fills an `int32`, so these reach us already sign-extended -- 0xC0000005
+    # arrives as -1073741819, which is why a plain `$exitCode` in a diagnostic
+    # reads as an arbitrary negative number rather than as a crash.
+    let status = cast[uint32](int32(exitCode))
+    if (status and 0xF000_0000'u32) != 0xC000_0000'u32:
+      return ""
+    case status
+    of 0xC000_0005'u32: "0xC0000005 access violation"
+    of 0xC000_001D'u32: "0xC000001D illegal instruction"
+    of 0xC000_0025'u32: "0xC0000025 noncontinuable exception"
+    of 0xC000_008C'u32: "0xC000008C array bounds exceeded"
+    of 0xC000_008E'u32: "0xC000008E float divide by zero"
+    of 0xC000_0094'u32: "0xC0000094 integer divide by zero"
+    of 0xC000_00FD'u32: "0xC00000FD stack overflow"
+    of 0xC000_0135'u32: "0xC0000135 a required DLL was not found"
+    of 0xC000_0139'u32: "0xC0000139 an entry point was not found"
+    of 0xC000_013A'u32: "0xC000013A terminated by Ctrl+C"
+    of 0xC000_0142'u32: "0xC0000142 a DLL failed to initialise"
+    of 0xC000_0409'u32: "0xC0000409 stack buffer overrun (fast fail)"
+    else: "0x" & toHex(status, 8) & " abnormal termination"
+  else:
+    # `osproc.waitForExit` reports a signalled child as 128 + signal. A shell
+    # that genuinely exits 130 is indistinguishable from one killed by SIGINT
+    # through this API; the ambiguity is inherent to the interface and is
+    # acceptable here because the callers below only ever run a COMPILER,
+    # which does not use the 129..191 range as a result.
+    if exitCode <= 128 or exitCode > 128 + 64:
+      return ""
+    case exitCode - 128
+    of 2: "SIGINT"
+    of 4: "SIGILL"
+    of 6: "SIGABRT"
+    of 7: "SIGBUS"
+    of 8: "SIGFPE"
+    of 9: "SIGKILL"
+    of 11: "SIGSEGV"
+    of 15: "SIGTERM"
+    else: "signal " & $(exitCode - 128)
+
+proc compilerCrashIsRetryable*(exitCode: int): bool =
+  ## Whether a died-rather-than-answered status is worth ONE more attempt.
+  ##
+  ## Deliberately narrower than `abnormalTerminationName`. Three kinds of
+  ## abnormal exit are excluded because a second attempt is not merely
+  ## wasteful but wrong:
+  ##
+  ##   * EXTERNAL termination -- Ctrl+C, SIGINT, SIGTERM, SIGKILL. Somebody or
+  ##     something asked this to stop. Restarting it overrides that, and in the
+  ##     SIGKILL case usually re-enters whatever ran the machine out of memory.
+  ##   * LOAD-TIME failures -- a missing DLL or a failed DLL init. These are
+  ##     deterministic properties of the installation, so a retry buys a
+  ##     guaranteed second failure at the cost of doubling the wait before the
+  ##     operator sees the real diagnostic.
+  ##   * ordinary exits, abnormal or not, which this is not asked about.
+  ##
+  ## What remains is the set that is nondeterministic in practice: a fault
+  ## inside a compile that had otherwise completed.
+  if abnormalTerminationName(exitCode).len == 0:
+    return false
+  when defined(windows):
+    let status = cast[uint32](int32(exitCode))
+    status notin [0xC000_013A'u32, 0xC000_0135'u32, 0xC000_0139'u32,
+      0xC000_0142'u32]
+  else:
+    (exitCode - 128) notin [2, 9, 15]
+
+proc commandFailure(command: openArray[string];
+    res: ProviderCompileExecutionResult; priorNote: string): ref OSError =
+  ## Build the diagnostic for a command that did not succeed, naming a crash
+  ## AS a crash. "command failed (-1073741819)" reads as an arbitrary number
+  ## and sends the reader looking for a compile error that was never emitted.
+  let quoted = command.mapIt(shellQuote(it)).join(" ")
+  let crash = abnormalTerminationName(res.exitCode)
+  let what =
+    if crash.len > 0:
+      "command terminated abnormally (" & crash & ")"
+    else:
+      "command failed (" & $res.exitCode & ")"
+  newException(OSError, what & ": " & quoted & "\n" & priorNote &
+    res.output & injectedLibraryNote(res.output))
+
 proc runCommand*(command: openArray[string];
-    cwd = ""): ProviderCompileExecutionResult =
+    cwd = ""; raiseOnFailure = true): ProviderCompileExecutionResult =
   if command.len == 0:
     raise newException(OSError, "runCommand requires a non-empty argv")
   when defined(windows):
@@ -2597,11 +2691,8 @@ proc runCommand*(command: openArray[string];
     result = ProviderCompileExecutionResult(
       exitCode: exitCode,
       output: output)
-  if result.exitCode != 0:
-    let quoted = command.mapIt(shellQuote(it)).join(" ")
-    raise newException(OSError, "command failed (" & $result.exitCode &
-      "): " & quoted & "\n" & result.output &
-      injectedLibraryNote(result.output))
+  if raiseOnFailure and result.exitCode != 0:
+    raise commandFailure(command, result, "")
 
 proc nimCompilerPath(): string =
   if cachedNimCompilerPath.len > 0:
@@ -4680,7 +4771,31 @@ proc runSharedNimcacheCompilerCommand(command: openArray[string]; cwd = ""):
   ## small lock file remains available for later sessions.
   var lock = acquireProviderNimcacheLock(command)
   try:
-    result = runCommand(command, cwd = cwd)
+    result = runCommand(command, cwd = cwd, raiseOnFailure = false)
+    var priorNote = ""
+    if compilerCrashIsRetryable(result.exitCode):
+      # The compiler died instead of answering, so this run produced no
+      # verdict about the recipe -- retrying is not papering over a compile
+      # error, it is asking the question that never got answered.
+      #
+      # Observed on Windows against `agent-harbor`: `nim c` printed its own
+      # `[SuccessX]` line, having written the provider binary, and then exited
+      # 0xC0000005. Because `just` sets `windows-shell` to `repro exec`, EVERY
+      # recipe line is a fresh nested `repro`, so a per-invocation crash
+      # probability that is tolerable once becomes a near-certain abort
+      # somewhere across a multi-recipe run.
+      #
+      # The same nimcache is reused deliberately. It is the compiler's own
+      # incremental directory, it is already guarded by the lock held here,
+      # and re-entering it is what makes the second attempt cost seconds
+      # rather than a full rebuild.
+      let firstCrash = abnormalTerminationName(result.exitCode)
+      priorNote = "note: a first attempt terminated abnormally (" &
+        firstCrash & ") and was retried once; the output below is the " &
+        "SECOND attempt's.\n"
+      result = runCommand(command, cwd = cwd, raiseOnFailure = false)
+    if result.exitCode != 0:
+      raise commandFailure(command, result, priorNote)
   finally:
     releaseProviderNimcacheLock(lock)
 

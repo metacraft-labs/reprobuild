@@ -2349,6 +2349,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim",
+    binary: "build/test-bin/t_compiler_crash_is_not_a_compile_error",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_multi_package_merge.nim",
     binary: "build/test-bin/t_multi_package_merge",
     defines: @[],
