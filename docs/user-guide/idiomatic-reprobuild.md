@@ -1161,12 +1161,24 @@ slot `project-provider.json`. On a real shared directory: 402 key dirs,
 positions, overwriting each other. It is now one directory per position
 (`positionKeyedNimcacheKey`).
 
+**The warmth it was defended for had already been deleted, by us.**
+`--forceBuild:on` was unconditional in the provider and extraction
+compile command from 2026-09-14, and it rebuilds every object
+regardless of what the directory holds — measured on a 17-object
+program, 17/17 rebuilt with the flag and 17/17 untouched without it. It
+landed in the same commit that rewrote the sharing comment to call the
+directory "intermediate storage, not an authority for C-object reuse".
+So the docstring forbidding a per-edge split was defending a benefit
+the same change had removed. Worth remembering as a shape: a
+justification and the thing it justifies can drift apart inside one
+diff, and the comment is the half that does not fail a test.
+
 Isolating it also turned out to be *faster*, which is the part that
-settles the argument. Six concurrent compiles in the engine's shape:
-shared-and-locked 65/155/108 s, isolated-per-edge 32/28/44 s — about
-3.1x — while paying cold compiles, because they proceed concurrently
-instead of queueing. Shared-and-unlocked corrupts: 4 of 18 failed, one
-process's object turning up on another's link line.
+settles the argument. Six concurrent **real provider compiles**:
+shared-and-locked 131.0 s total, isolated-per-position 27.8 s total —
+**4.7x** — while paying cold compiles, because they proceed
+concurrently instead of queueing. Shared-and-unlocked corrupts: a link
+error naming `@mrepro.nim.c.o`, the one contested slot.
 
 ### Sharing and safety are different questions
 
@@ -1227,7 +1239,7 @@ costs a permanent naming obligation on every edge.
 | `Build-Graph-Collections.md` status header (§3) | ⚠ Stale | Says "not yet implemented"; `collect` and the exclude rule ship. |
 | `mesKnownScopeLoss` comments (§5) | ✓ Fixed | Both comments now say what the code does: Level 1 publishes and narrows, Level 2 withholds and disables session-wide. |
 | Tool-owned cache placement (§11) | ☐ Not implemented | No DSL vocabulary; conventions each pick a path by hand. Draft: `reprobuild-specs/Tool-Owned-Caches.md`. |
-| Provider nimcache session token (§11) | ⚠ Known cost | Correct against `ENOTEMPTY`, but every `repro` run starts cold and leaks a tree into `$TMPDIR`. Needs a lock on a stable path instead. |
+| Provider nimcache session token (§11) | ✓ Fixed | Removed with the position-keyed nimcache. The token dodged a collision that correct scoping eliminates, and cost every `repro` run a cold start; the lock survives, now scoped per position, so the residual is two instances of one edge. |
 | `--progress=quiet` vs runquota output (§9) | ✓ Reconciled | `reprobuild-specs/CLI/build.md` §"The one thing `quiet` does not silence" now states the heartbeat as a deliberate exception, and says why: `Interactive-UX-And-Progress.md` Principle 1 outranks "disable all progress output" for a wait the build cannot bound. The spec was the thing that was wrong. |
 
 ## Related documentation
