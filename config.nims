@@ -472,8 +472,76 @@ proc nixDevShellSourcePath(envName, marker: string): string =
       return candidate
     ""
 
+proc reportUnresolvedPackagePath(envName: string;
+                                 candidates: openArray[string];
+                                 marker: string; envPath: string;
+                                 useDevShellFallback, optional: bool) =
+  ## Say, HERE, that a package got no ``--path``.
+  ##
+  ## Staying silent is not free. The ``--path`` is simply not added and the
+  ## first symptom is ``Error: cannot open file: <some/module>`` tens of
+  ## modules later, in a message that names neither this file, nor the
+  ## environment variable that would have fixed it, nor the development
+  ## shell that sets it. A reader of that message concludes the dependency
+  ## is missing from the workspace, and the conclusion is wrong often
+  ## enough to have cost real time. Name the package, the variable, every
+  ## directory tried, the marker file wanted, and the remedy.
+  ##
+  ## WHY THIS WARNS AND DOES NOT STOP, which is not the obvious choice and
+  ## was not the first one. A configuration file cannot know whether an
+  ## unresolved package is needed by the particular compilation about to
+  ## happen — Nim's ``--path`` is lazy, and a path nothing imports costs
+  ## nothing. The first version of this proc ended in ``quit(1)``, and it
+  ## broke a real and very common path: the engine's project-interface
+  ## extraction runs ``nim c`` against a STORE COPY of this repository
+  ## where none of the vendored ``libs/`` trees are present, supplies its
+  ## own ``--path`` flags instead, and compiles perfectly well with a
+  ## dozen packages unresolved here. Refusing there turned a working build
+  ## into a failure. So: say it, name everything, and let the compilation
+  ## proceed to fail on its own terms if the package really was wanted.
+  ## The value being delivered is that the operator sees this message
+  ## ABOVE the ``cannot open file`` one, not that the build stops.
+  var report = "\n" & (if optional: "note" else: "warning") &
+    ": config.nims added no --path for " & envName & "\n" &
+    "  wanted a directory containing: " & marker & "\n" &
+    "  $" & envName & ": " &
+    (if envPath.len == 0: "unset"
+     elif dirExists(envPath): "set to " & envPath & ", which has no " & marker
+     else: "set to " & envPath & ", which does not exist") & "\n"
+  if candidates.len == 0:
+    report.add "  candidate directories: none are declared for this package\n"
+  else:
+    for candidate in candidates:
+      report.add "  candidate directory: " & candidate & " -- " &
+        (if dirExists(candidate): "exists, but has no " & marker
+         else: "does not exist") & "\n"
+  if useDevShellFallback:
+    report.add "  development-shell fallback: consulted, no match\n"
+  report.add "  fix: build from inside the development shell " &
+    "(`direnv exec . <command>`, or `nix develop`), which exports " &
+    envName & "; or set " & envName &
+    " to a directory containing " & marker & "\n"
+  report.add "  the build CONTINUES without it: this file cannot tell " &
+    "whether the compilation about to run needs the package, and at least " &
+    "one that does not (the engine's interface extraction) compiles " &
+    "fine with it absent. If it IS needed, the next error will be " &
+    "`cannot open file` -- and this message is the answer to it.\n"
+  if optional:
+    report.add "  this package is declared optional, so its absence is " &
+      "expected in checkouts that do not carry the sibling\n"
+  echo report
+
 proc addPackagePath(envName: string; candidates: openArray[string];
-                    marker: string; useDevShellFallback = false) =
+                    marker: string; useDevShellFallback = false;
+                    optional = false) =
+  ## ``optional = true`` says a checkout is EXPECTED to be able to lack this
+  ## package, so its report reads as a note rather than a warning. It is for
+  ## packages whose absence the tree already tolerates -- today only
+  ## ``VM_HARNESS_SRC``, which ``config.nims`` itself guards with
+  ## ``vmHarnessAvailable`` further down, and which no Nix execution surface
+  ## exports. The distinction is about how surprising the absence is, not
+  ## about whether the build proceeds: see ``reportUnresolvedPackagePath``
+  ## for why nothing here refuses.
   let envPath = getEnv(envName)
   if envPath.len > 0 and fileExists(envPath / marker):
     switch("path", envPath)
@@ -487,6 +555,8 @@ proc addPackagePath(envName: string; candidates: openArray[string];
     if flakePath.len > 0:
       switch("path", flakePath)
       return
+  reportUnresolvedPackagePath(envName, candidates, marker, envPath,
+                              useDevShellFallback, optional)
 
 # M2 dev-env artifacts use status-im/nim-ssz-serialization for their canonical
 # payload. Prefer explicit checkouts, then workspace siblings, then local
@@ -613,7 +683,7 @@ addSiblingFirstPackagePath(".." / "nim-shm-gset" / "src", "SHM_GSET_SRC",
 # sibling-repo checkout.
 addPackagePath("VM_HARNESS_SRC", [
   ".." / "vm-harness" / "src",
-], "vm_harness.nim")
+], "vm_harness.nim", optional = true)
 
 # Define ``vmHarnessAvailable`` only when the optional vm-harness sibling is
 # actually present. The R2/R9 boot integration tests guard their
