@@ -86,6 +86,11 @@ when defined(linux):
 else:
   var O_NOFOLLOW_C: cint = 0
 
+when defined(posix):
+  const O_CLOEXEC_C = posix.O_CLOEXEC
+else:
+  const O_CLOEXEC_C = cint(0)
+
 type
   SecretStoreError* = object of CatchableError
     ## Every refusal here. Each message has exactly one producing site.
@@ -212,15 +217,16 @@ proc storeSecret*(s: ProvisionedSecretStore; name, secret: string): string =
   requireVolatileDirectory(s.dir, "re-checked before writing a secret")
 
   let fd = posix.open(path.cstring,
-    O_WRONLY or O_CREAT or O_TRUNC or O_NOFOLLOW_C or O_CLOEXEC,
+    O_WRONLY or O_CREAT or O_TRUNC or O_NOFOLLOW_C or O_CLOEXEC_C,
     Mode(SecretFileMode))
   if fd < 0:
     let err = osLastError()
-    if int(err) == int(ELOOP):
-      raise newException(SecretStoreError,
-        "the provisioned-secrets path " & path.escape() &
-        " is a symbolic link; a released secret is written to the " &
-        "directory this build checked, never through a link out of it")
+    when defined(posix):
+      if int(err) == int(ELOOP):
+        raise newException(SecretStoreError,
+          "the provisioned-secrets path " & path.escape() &
+          " is a symbolic link; a released secret is written to the " &
+          "directory this build checked, never through a link out of it")
     raiseOSError(err, "opening " & path & " for a released secret")
   try:
     # `chmod` after the fact, because the process umask subtracts from
