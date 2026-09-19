@@ -35,13 +35,38 @@ import std/[json, os, strutils, unittest]
 import repro_test_support
 
 const RepoMarker = "repro.nim"
-const HcrStems = [
-  "t_hcr_agent_process_target",
-  "t_e2e_repro_watch_hcr_multi_target_independent_patches",
-  "t_e2e_repro_watch_hcr_one_target_agent_inject_failure",
-]
 const ExpectedPassC = "-fpatchable-function-entry=16,0"
 const ExpectedPassL = "-Wl,-segprot,__HCR,rwx,rwx"
+
+## HX-S-10, 2026-09-19 — the stem list is DERIVED, not written down.
+##
+## This gate used to carry a three-name `const HcrStems` array. On 2026-09-18
+## two of those three -- `t_e2e_repro_watch_hcr_multi_target_independent_patches`
+## and `t_e2e_repro_watch_hcr_one_target_agent_inject_failure` -- were
+## deliberately made portable: `targetOs: soAny`, no codesign flags, and they
+## now build and PASS on Linux x86_64 (1 case each, measured 2026-09-19). The
+## hardcoded list did not move with them, so this gate went RED on `dev` and
+## stayed red, asserting that two portable tests must still be declared
+## macOS-only.
+##
+## That is Verification-Harness-Traps.md Sec. 35 with the arrow reversed: a
+## frozen subject list could not see the population change, and the CLAIM --
+## "the three macOS-arm64 HCR tests" -- stopped being true the moment the
+## population became one. The repair is the one that section prescribes:
+## enumerate the subject from the thing being described, and assert the
+## enumeration's own size against a floor so an empty derivation cannot satisfy
+## every check below it.
+##
+## The rule is now stated in BOTH directions, which the frozen list could not
+## do at all:
+##
+##   * every spec declaring `targetOs: soMacosArm64` must carry both flags, and
+##   * every spec carrying either flag must declare `targetOs: soMacosArm64`,
+##
+## so the flags cannot be attached without the cross-target guard, and the guard
+## cannot be declared without the flags. Adding a fourth macOS-arm64 HCR test
+## is then covered with no edit here; removing one is too.
+const MinMacosArmSpecs = 1
 
 proc findRepoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -56,16 +81,26 @@ proc findRepoRoot(): string =
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
 
-proc sliceForStem(content, stem: string): string =
-  ## Return a ~600-char slice of ``content`` starting at the TestSpec
-  ## entry whose ``binary`` field references the given stem. Returns the
-  ## empty string when the stem is not found.
-  let marker = "build/test-bin/" & stem & "\""
-  let pos = content.find(marker)
-  if pos < 0:
-    return ""
-  let limit = min(content.len, pos + 600)
-  content[pos ..< limit]
+proc testSpecSlices(content: string): seq[(string, string)] =
+  ## Every ``TestSpec(...)`` entry in ``repro_tests.nim``, as
+  ## ``(binary-stem, entry-text)``. The entry ends at the next ``TestSpec(``
+  ## or at end of text, so a field can never be read out of a neighbour's
+  ## record -- which a fixed-width slice could do.
+  result = @[]
+  const Marker = "TestSpec("
+  const BinaryMarker = "binary: \"build/test-bin/"
+  var pos = content.find(Marker)
+  while pos >= 0:
+    let nextPos = content.find(Marker, pos + Marker.len)
+    let stop = if nextPos < 0: content.len else: nextPos
+    let entry = content[pos ..< stop]
+    let bpos = entry.find(BinaryMarker)
+    if bpos >= 0:
+      let start = bpos + BinaryMarker.len
+      let close = entry.find('"', start)
+      if close > start:
+        result.add((entry[start ..< close], entry))
+    pos = nextPos
 
 proc parseGraphOutput(output: string): JsonNode =
   let start = output.find('{')
@@ -92,26 +127,45 @@ suite "Bootstrap-And-Self-Build B4: HCR flags carry through the typed-tool DSL":
     check "targetOs*: TargetOs" in reproTestsText
     check "soAny, soMacosArm64" in reproTestsText
 
-    # --- per-HCR-stem assertions ---
+    # --- per-HCR-stem assertions, over a DERIVED subject set ---
+    let specs = testSpecSlices(reproTestsText)
+    # The instrument first. A parse that found nothing would satisfy every
+    # assertion below by leaving nothing to disagree with it.
+    checkpoint("repro_tests.nim declares " & $specs.len & " TestSpec entries")
+    check specs.len >= 100
+
+    var macosArmStems: seq[string] = @[]
+    var flaggedStems: seq[string] = @[]
     var missing: seq[string] = @[]
-    for stem in HcrStems:
-      let slice = sliceForStem(reproTestsText, stem)
-      if slice.len == 0:
-        missing.add(stem & " (not present in repro_tests.nim)")
-        continue
-      var problems: seq[string] = @[]
-      if ExpectedPassC notin slice:
-        problems.add("missing extraPassC value " & ExpectedPassC)
-      if ExpectedPassL notin slice:
-        problems.add("missing extraPassL value " & ExpectedPassL)
-      if "targetOs: soMacosArm64" notin slice:
-        problems.add("missing targetOs: soMacosArm64")
-      if problems.len > 0:
-        missing.add(stem & " — " & problems.join("; "))
+    for (stem, entry) in specs:
+      let declaresMacosArm = "targetOs: soMacosArm64" in entry
+      let hasPassC = ExpectedPassC in entry
+      let hasPassL = ExpectedPassL in entry
+      if declaresMacosArm:
+        macosArmStems.add(stem)
+        var problems: seq[string] = @[]
+        if not hasPassC:
+          problems.add("missing extraPassC value " & ExpectedPassC)
+        if not hasPassL:
+          problems.add("missing extraPassL value " & ExpectedPassL)
+        if problems.len > 0:
+          missing.add(stem & " — " & problems.join("; "))
+      if hasPassC or hasPassL:
+        flaggedStems.add(stem)
+        if not declaresMacosArm:
+          missing.add(stem & " — carries the macOS codesign workaround flags " &
+            "without declaring targetOs: soMacosArm64, so binutils-ld on a " &
+            "Linux cross-target would be handed -segprot")
+    checkpoint("specs declaring targetOs: soMacosArm64 — " &
+      (if macosArmStems.len == 0: "(none)" else: macosArmStems.join(", ")))
     if missing.len > 0:
       for entry in missing:
         checkpoint("HCR spec problem: " & entry)
     check missing.len == 0
+    # The population floor. Zero macOS-arm64 specs would make the loop above
+    # vacuous, and "no spec is wrong" is not the claim this case makes.
+    check macosArmStems.len >= MinMacosArmSpecs
+    check flaggedStems.len >= MinMacosArmSpecs
 
     # --- repro.nim test-spec loop forwards the lists ---
     # The loop must call buildNimUnittest.build with extraPassC and
@@ -149,7 +203,13 @@ suite "Bootstrap-And-Self-Build B4: HCR flags carry through the typed-tool DSL":
       let reproBin = requireBinary(repoRoot / "build" / "bin" /
         addFileExt("repro", ExeExt), "reprobuild.apps.repro")
       let runquotad = requireRunQuotaDaemonBin(repoRoot)
-      let targetStem = HcrStems[0]
+      let macosArmSpecs = testSpecSlices(readFile(repoRoot / "repro_tests.nim"))
+      var targetStem = ""
+      for (stem, entry) in macosArmSpecs:
+        if "targetOs: soMacosArm64" in entry:
+          targetStem = stem
+          break
+      require targetStem.len > 0
       let target = ".#test-builds#" & targetStem
       let res = runShell(shellCommand(@[
         reproBin,
@@ -188,7 +248,14 @@ suite "Bootstrap-And-Self-Build B4: HCR flags carry through the typed-tool DSL":
           matchedAction = true
         check matchedAction
     else:
-      checkpoint("skipped — HCR tests are macOS-arm64-only at runtime; " &
-        "the build flags are gated on cross-target aarch64-darwin. On " &
-        "Linux/x86_64 the workaround is not exercised.")
+      # HX-S-10: this arm is genuinely macOS-arm64-only -- the codesign
+      # workaround it measures is gated on the aarch64-darwin cross-target --
+      # but it used to say so only in a `checkpoint`, which nothing greps. The
+      # lane manifest declares this gate `run:1+skip:1` on Linux and Windows,
+      # and a declared skip is accepted ONLY if it carries this diagnostic, so
+      # a bare skip() here would redden the lane rather than sit inside the
+      # allowance.
+      announceHcrUnsupportedHost(
+        "t_b4_hcr_flags_in_repro_tests engine arm", "macOS arm64",
+        "macOS arm64 CI on eph-macos-arm64")
       skip()
