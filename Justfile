@@ -547,6 +547,14 @@ lint:
     # two are told apart, and scripts/test-body-helper-compilation-dispositions.tsv
     # for the reviewed baseline.
     python3 ./scripts/check_test_body_helper_compilation.py 2>&1 | tee -a test-logs/lint.log
+    # HX-S-10: the HCR lane manifest against the tree. Same class as the three
+    # inventory gates above -- a source scan, no compiler, seconds -- and here
+    # for the same reason. What it refuses is an HCR gate added to ONE
+    # platform's lane: every gate source in the tree must carry a row declaring
+    # what all THREE platforms do with it. The census it holds the manifest to
+    # is a live walk of `tests/`, not a list, so a new file cannot be invisible
+    # to it (Verification-Harness-Traps.md Sec. 35).
+    python3 ./scripts/check_hcr_lane_manifest.py --check 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_workflows.sh 2>&1 | tee -a test-logs/lint.log
 
 format:
@@ -1055,6 +1063,181 @@ e2e_hcr_direct_patch_debug_unwind_replay:
         --out:build/test-bin/e2e_hcr_direct_patch_debug_unwind_replay \
         tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim \
         2>&1 | tee test-logs/e2e_hcr_direct_patch_debug_unwind_replay.log
+
+# ---------------------------------------------------------------------------
+# HX-S-10 — the thirteen HCR gates that had NO just target.
+#
+# Before this block the HCR family had 33 addressable targets and 46 gate
+# sources. The other thirteen were built and run only by the whole-suite `just
+# test`, which means a per-platform lane could not invoke them at all, and the
+# two that print `[SKIPPED]` off-platform -- `t_hcr_agent_process_target` and
+# `t_hcr_watch_inference` -- were invisible to anything smaller than the full
+# suite. `scripts/hcr-lane-manifest.tsv` declares what each of the three
+# platforms does with every one of the 46; these recipes are what lets a lane
+# actually address them.
+#
+# The recipes are deliberately the SAME SHAPE as the 33 above -- `nim c -r`
+# with a per-target nimcache, out path and tee'd log -- so a reader does not
+# have to learn a second convention, and so the lane's marker parsing sees the
+# same output format everywhere.
+# ---------------------------------------------------------------------------
+
+unit_hcr_agent_coordinator:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/unit_hcr_agent_coordinator \
+        --out:build/test-bin/unit_hcr_agent_coordinator \
+        tests/unit/t_hcr_agent_coordinator.nim \
+        2>&1 | tee test-logs/unit_hcr_agent_coordinator.log
+
+unit_hcr_agent_endpoint:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/unit_hcr_agent_endpoint \
+        --out:build/test-bin/unit_hcr_agent_endpoint \
+        tests/unit/t_hcr_agent_endpoint.nim \
+        2>&1 | tee test-logs/unit_hcr_agent_endpoint.log
+
+unit_hcr_agent_ipc:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/unit_hcr_agent_ipc \
+        --out:build/test-bin/unit_hcr_agent_ipc \
+        tests/unit/t_hcr_agent_ipc.nim \
+        2>&1 | tee test-logs/unit_hcr_agent_ipc.log
+
+unit_hcr_agent_protocol:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/unit_hcr_agent_protocol \
+        --out:build/test-bin/unit_hcr_agent_protocol \
+        tests/unit/t_hcr_agent_protocol.nim \
+        2>&1 | tee test-logs/unit_hcr_agent_protocol.log
+
+unit_hcr_agent_runtime:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/unit_hcr_agent_runtime \
+        --out:build/test-bin/unit_hcr_agent_runtime \
+        tests/unit/t_hcr_agent_runtime.nim \
+        2>&1 | tee test-logs/unit_hcr_agent_runtime.log
+
+unit_hcr_dispatch_c_smoke:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/unit_hcr_dispatch_c_smoke \
+        --out:build/test-bin/unit_hcr_dispatch_c_smoke \
+        tests/unit/t_hcr_dispatch_c_smoke.nim \
+        2>&1 | tee test-logs/unit_hcr_dispatch_c_smoke.log
+
+unit_hcr_gnu_dwarf_attributes:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/unit_hcr_gnu_dwarf_attributes \
+        --out:build/test-bin/unit_hcr_gnu_dwarf_attributes \
+        tests/unit/t_hcr_gnu_dwarf_attributes.nim \
+        2>&1 | tee test-logs/unit_hcr_gnu_dwarf_attributes.log
+
+# `t_hcr_agent_process_target` is the first of the two gates HX-S-10 names as
+# reading green while doing nothing. It is macOS-arm64 only and carries the
+# codesign workaround flags `repro_tests.nim` records for it; those flags are
+# emitted here only on Darwin, because binutils-ld refuses `-segprot` outright
+# (the same reason `repro.nim` gates them on `when defined(macosx)`).
+unit_hcr_agent_process_target:
+    mkdir -p test-logs build/test-bin build/nimcache
+    if [ "$(uname -s)" = "Darwin" ]; then extra="--passC:-fpatchable-function-entry=16,0 --passL:-Wl,-segprot,__HCR,rwx,rwx"; else extra=""; fi; nim c -r --threads:on $extra --nimcache:build/nimcache/unit_hcr_agent_process_target --out:build/test-bin/unit_hcr_agent_process_target tests/unit/t_hcr_agent_process_target.nim 2>&1 | tee test-logs/unit_hcr_agent_process_target.log
+
+# The second of the two. macOS-arm64 only; declared `unsupported` for the Linux
+# and Windows lanes in scripts/hcr-lane-manifest.tsv.
+unit_hcr_watch_inference:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/unit_hcr_watch_inference \
+        --out:build/test-bin/unit_hcr_watch_inference \
+        tests/unit/t_hcr_watch_inference.nim \
+        2>&1 | tee test-logs/unit_hcr_watch_inference.log
+
+# The three `tests/e2e/hcr-watch/` gates. HX-S-10 deliverable 4 decides what
+# they become: they are declared macOS-arm64-only in the lane manifest rather
+# than split, because each one's body is a single `repro watch` session whose
+# every assertion is about the macOS direct-HCR path -- there is no
+# platform-neutral half to lift out. They additionally need `build/bin/repro`
+# on PATH (`requiresReproBinary: true` in repro_tests.nim), so the macOS lane
+# must run `just build` before `scripts/run_hcr_lane.sh`.
+e2e_hcr_watch_inference:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_hcr_watch_inference \
+        --out:build/test-bin/e2e_hcr_watch_inference \
+        tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim \
+        2>&1 | tee test-logs/e2e_hcr_watch_inference.log
+
+e2e_repro_watch_hcr_multi_target_independent_patches:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_watch_hcr_multi_target_independent_patches \
+        --out:build/test-bin/e2e_repro_watch_hcr_multi_target_independent_patches \
+        tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim \
+        2>&1 | tee test-logs/e2e_repro_watch_hcr_multi_target_independent_patches.log
+
+e2e_repro_watch_hcr_one_target_agent_inject_failure:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_repro_watch_hcr_one_target_agent_inject_failure \
+        --out:build/test-bin/e2e_repro_watch_hcr_one_target_agent_inject_failure \
+        tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim \
+        2>&1 | tee test-logs/e2e_repro_watch_hcr_one_target_agent_inject_failure.log
+
+# The one gate in the family with a genuinely mixed body: a structural case
+# that runs on every host and an engine case that is macOS-arm64 only. The lane
+# manifest declares it `run:1+skip:1` on Linux and Windows, which is the only
+# cell form that admits a skip at all -- and it admits it only if the skipped
+# case prints a loud UNSUPPORTED naming the lane that does cover it.
+integration_b4_hcr_flags_in_repro_tests:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_b4_hcr_flags_in_repro_tests \
+        --out:build/test-bin/integration_b4_hcr_flags_in_repro_tests \
+        tests/integration/t_b4_hcr_flags_in_repro_tests.nim \
+        2>&1 | tee test-logs/integration_b4_hcr_flags_in_repro_tests.log
+
+# HX-S-10 — the three platform lanes over the HCR gate family. Each one refuses
+# a zero-case result, a `[SKIPPED]` the manifest did not declare, and a case
+# count below the measured per-platform floor. See scripts/run_hcr_lane.sh.
+hcr_lane_linux:
+    bash ./scripts/run_hcr_lane.sh --platform linux-x86_64 --verify-unsupported
+
+hcr_lane_macos:
+    bash ./scripts/run_hcr_lane.sh --platform macos-arm64 --verify-unsupported
+
+hcr_lane_windows:
+    bash ./scripts/run_hcr_lane.sh --platform windows-x86_64 --verify-unsupported
+
+# The two gates that PROVE the lanes. The first is the static one -- three
+# lanes exist and each invokes the family. The second is the dynamic one -- a
+# zero-case result, an undeclared skip and a below-floor count each redden a
+# real lane, measured against real gate output rather than asserted.
+integration_hx_s10_each_platform_lane_executes_the_reprobuild_hcr_family *args:
+    mkdir -p test-logs
+    bash tests/integration/test_hx_s10_each_platform_lane_executes_the_reprobuild_hcr_family.sh {{args}} \
+        2>&1 | tee test-logs/integration_hx_s10_each_platform_lane_executes_the_reprobuild_hcr_family.log
+
+integration_hx_s10_a_zero_case_result_is_not_a_pass *args:
+    mkdir -p test-logs
+    bash tests/integration/test_hx_s10_a_zero_case_result_is_not_a_pass.sh {{args}} \
+        2>&1 | tee test-logs/integration_hx_s10_a_zero_case_result_is_not_a_pass.log
 
 e2e_scoop_adapter_realize_and_launch:
     mkdir -p test-logs build/test-bin build/nimcache

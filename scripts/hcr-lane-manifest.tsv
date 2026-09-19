@@ -1,0 +1,105 @@
+# HX-S-10 — the HCR gate family's per-platform lane manifest.
+#
+# WHAT THIS FILE DECIDES
+#
+# For every HCR gate source in the tree, what EACH of the three platform lanes
+# does with it. `scripts/check_hcr_lane_manifest.py` holds this table to the
+# tree on every `just lint`; `scripts/run_hcr_lane.sh` executes it and refuses
+# a result that disagrees with it. Read the former's module docstring for the
+# full cell grammar and for why the declaration lives here rather than being
+# read out of each gate's own `when defined(...)` guard.
+#
+# WHY IT IS A TRACKED FILE AND NOT A DERIVED SET
+#
+# Because the failure being prevented is a gate added to ONE platform. A row
+# must carry a token for all three columns or lint fails by name, so "added to
+# Linux, forgot macOS and Windows" cannot be committed. A derivation from the
+# sources could never say that: it would simply agree with whatever the sources
+# happen to say, including nothing at all.
+#
+# CELL GRAMMAR (summary; the authority is check_hcr_lane_manifest.py)
+#
+#   run:<N>              run here, and execute at least N cases, and skip none
+#   run:unmeasured       run here; no floor measured on that platform YET
+#   run:<N>+skip:<M>     run here; exactly M cases may skip, and each must print
+#                        the loud `UNSUPPORTED: ... covered by ...` diagnostic
+#   unsupported          do not count it here; `--verify-unsupported` runs it
+#                        anyway and requires it to execute zero cases
+#
+# ONE RULE ABOUT `unsupported` THAT IS WORTH KNOWING BEFORE YOU WRITE IT
+#
+# A gate whose SOURCE carries no platform guard is portable by construction,
+# and lint refuses to let it be declared `unsupported` anywhere without the
+# note token `unsupported-despite-portable: <reason>`. That rule exists because
+# the first version of THIS FILE dropped `hcr_rb_application_abi_contract` --
+# the platform-neutral rb_hcr_* ABI contract gate, the one deliverable 5 of
+# HX-S-10 requires on all three lanes -- from the macOS lane, having read a
+# platform guard out of that file's whole-line COMMENT at :21. Nothing would
+# have said so: a gate that runs on two lanes instead of three still leaves
+# every lane green.
+#
+# WHERE THE NUMBERS COME FROM
+#
+#   linux-x86_64   MEASURED 2026-09-19 on Linux 6.12.85 x86_64 in reprobuild's
+#                  own dev shell, one `just <target>` per row, `[OK]` markers
+#                  counted from test-logs/<target>.log. 41 gates run, 5 declared
+#                  unsupported, 110 assertion cases.
+#   macos-arm64    NEVER MEASURED. Every `run:` cell is `unmeasured` and says so
+#                  rather than carrying a guessed number. The first real macOS
+#                  lane run prints the count for each and filling them in is
+#                  transcription. Do not write a floor you did not measure.
+#   windows-x86_64 NEVER MEASURED, same rule. Note that
+#                  `hcr_rb_application_abi_contract` is declared `run` there and
+#                  is EXPECTED RED — see its note. Turning that red green by
+#                  narrowing the row is explicitly out of bounds.
+#
+# `rc` is not in this table on purpose: a lane's verdict is about executed cases
+# and skips, not about a process exit status. The exit status is what read the
+# two bare `skip()` gates as green for their whole lives.
+source	just_target	linux-x86_64	macos-arm64	windows-x86_64	note
+tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	e2e_hcr_direct_patch_debug_unwind_replay	unsupported	run:unmeasured	unsupported	macOS arm64 direct-patch debug-unwind replay; no Linux or Windows arm.
+tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim	e2e_hcr_in_target_link_and_trampoline	unsupported	run:unmeasured	unsupported	macOS arm64 in-target link and trampoline; no Linux or Windows arm.
+tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim	e2e_hcr_linux_x86_64_single_threaded_direct_patch	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-far/t_e2e_hcr_linux_far_target_island_patch.nim	e2e_hcr_linux_far_target_island_patch	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim	integration_hcr_linux_island_exhaustion_refuses	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-rbhcr/t_e2e_hcr_linux_isonim_shim_against_real_agent.nim	e2e_hcr_linux_isonim_shim_against_real_agent	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_late_load_failure_still_reaches_after_reload.nim	integration_hcr_linux_late_load_failure_still_reaches_after_reload	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_managed_type_layout_change_lifecycle.nim	integration_hcr_linux_managed_type_layout_change_lifecycle	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_rejected_patch_never_fires_before_reload.nim	integration_hcr_linux_rejected_patch_never_fires_before_reload	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_threaded_synchronized_reload.nim	integration_hcr_linux_threaded_synchronized_reload	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim	e2e_hcr_linux_shared_library_sled_patch	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim	e2e_hcr_linux_concurrent_patch_no_torn_instruction	run:2	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_quiescence_handshake_and_release.nim	e2e_hcr_linux_quiescence_handshake_and_release	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-threads/t_integration_hcr_linux_on_stack_function_reported_skipped.nim	integration_hcr_linux_on_stack_function_reported_skipped	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-threads/t_integration_hcr_linux_quiescence_timeout_aborts_without_writing.nim	integration_hcr_linux_quiescence_timeout_aborts_without_writing	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-threads/t_integration_hcr_linux_signal_blocked_thread_refused_by_name.nim	integration_hcr_linux_signal_blocked_thread_refused_by_name	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_rolls_back_published_sites.nim	integration_hcr_linux_commit_failure_rolls_back_published_sites	run:4	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-txn/t_integration_hcr_linux_prepare_failure_leaves_process_byte_identical.nim	integration_hcr_linux_prepare_failure_leaves_process_byte_identical	run:3	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-txn/t_integration_hcr_linux_repeated_patch_of_same_function.nim	integration_hcr_linux_repeated_patch_of_same_function	run:4	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_backtrace_through_patched_function.nim	e2e_hcr_linux_backtrace_through_patched_function	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim	e2e_hcr_linux_registration_payloads_travel_over_the_production_wire	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_jit_symfile_accepted_by_gdb.nim	integration_hcr_linux_jit_symfile_accepted_by_gdb	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_register_frame_abi_detection.nim	integration_hcr_linux_register_frame_abi_detection	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/e2e/hcr-portable-rbhcr/t_hcr_rb_application_abi_contract.nim	hcr_rb_application_abi_contract	run:6	run:unmeasured	run:unmeasured	platform-neutral rb_hcr_* application ABI contract (HLX-M8). EXPECTED RED on Windows: repro_hcr_agent_windows.c defines none of the thirteen rb_hcr_* functions repro_hcr_agent.h declares. That red is HWX-M0's KNOWN GAP and must not be narrowed away.
+tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim	e2e_hcr_watch_inference	run:1	run:unmeasured	unsupported	repro watch HCR inference. Made portable 2026-09-18; MEASURED green on Linux x86_64 2026-09-19. Needs build/bin/repro. No Windows provider (HWX-M0).
+tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim	e2e_repro_watch_hcr_multi_target_independent_patches	run:1	run:unmeasured	unsupported	repro watch, multi-target. Made portable 2026-09-18; MEASURED green on Linux x86_64 2026-09-19. Needs build/bin/repro. No Windows provider (HWX-M0).
+tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim	e2e_repro_watch_hcr_one_target_agent_inject_failure	run:1	run:unmeasured	unsupported	repro watch, inject failure. Made portable 2026-09-18; MEASURED green on Linux x86_64 2026-09-19. Needs build/bin/repro. No Windows provider (HWX-M0).
+tests/integration/t_b4_hcr_flags_in_repro_tests.nim	integration_b4_hcr_flags_in_repro_tests	run:1+skip:1	run:unmeasured	run:unmeasured+skip:1	Mixed body: a structural case that runs everywhere and an engine case that is macOS-arm64 only. The only row using run:N+skip:M; the skipped case prints the loud UNSUPPORTED naming eph-macos-arm64.
+tests/integration/t_integration_hcr_linkgraph_relocation_classification.nim	integration_hcr_linkgraph_relocation_classification	unsupported	run:unmeasured	unsupported	macOS arm64 link-graph relocation classification; no Linux or Windows arm.
+tests/integration/t_integration_hcr_linux_build_id_mismatch_refused.nim	integration_hcr_linux_build_id_mismatch_refused	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim	integration_hcr_linux_cf_protection_sled_layout	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim	integration_hcr_linux_elf_object_parsing_and_patch_plan	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/integration/t_integration_hcr_linux_elf_symbol_resolution.nim	integration_hcr_linux_elf_symbol_resolution	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/integration/t_integration_hcr_linux_static_local_symbol_ambiguity_refused.nim	integration_hcr_linux_static_local_symbol_ambiguity_refused	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/integration/t_integration_hcr_reference_corpus_and_object_inputs.nim	integration_hcr_reference_corpus_and_object_inputs	run:1	run:unmeasured	run:unmeasured	platform-neutral: reference corpus and real object inputs, no platform guard.
+tests/unit/t_hcr_agent_coordinator.nim	unit_hcr_agent_coordinator	run:1	run:unmeasured	run:unmeasured	platform-neutral: no platform guard in the source.
+tests/unit/t_hcr_agent_endpoint.nim	unit_hcr_agent_endpoint	run:6	run:unmeasured	run:unmeasured	platform-neutral: no platform guard in the source.
+tests/unit/t_hcr_agent_ipc.nim	unit_hcr_agent_ipc	run:4	run:unmeasured	run:unmeasured	platform-neutral: no platform guard in the source.
+tests/unit/t_hcr_agent_process_target.nim	unit_hcr_agent_process_target	unsupported	run:unmeasured	unsupported	macOS arm64 direct-HCR process-target runtime. One of the two gates HX-S-10 names as reading green while doing nothing; its skip is now loud.
+tests/unit/t_hcr_agent_protocol.nim	unit_hcr_agent_protocol	run:28	run:unmeasured	run:unmeasured	platform-neutral: no platform guard in the source.
+tests/unit/t_hcr_agent_runtime.nim	unit_hcr_agent_runtime	run:4	run:unmeasured	run:unmeasured	platform-neutral: no platform guard in the source.
+tests/unit/t_hcr_dispatch_c_smoke.nim	unit_hcr_dispatch_c_smoke	run:1	run:unmeasured	run:unmeasured	platform-neutral: no platform guard in the source.
+tests/unit/t_hcr_gnu_dwarf_attributes.nim	unit_hcr_gnu_dwarf_attributes	run:6	run:unmeasured	run:unmeasured	platform-neutral: no platform guard in the source.
+tests/unit/t_hcr_watch_inference.nim	unit_hcr_watch_inference	unsupported	run:unmeasured	unsupported	macOS arm64 HCR watch inference. The second of the two gates HX-S-10 names; its skip is now loud.
+tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim	integration_hcr_linux_claim_conflict_with_recorder_refused	run:5	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
+tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim	unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions	run:9	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.

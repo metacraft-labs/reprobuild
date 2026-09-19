@@ -1,0 +1,223 @@
+name: HCR lanes
+
+# HX-S-10 — the reprobuild HCR gate family, on three platform lanes.
+#
+# WHAT THIS EXISTS FOR
+#
+# `HX-S-8` wired the two `codetracer`-side HCR justfile targets into a lane on
+# each platform. It did not wire REPROBUILD's own HCR gate family, and the two
+# are not the same suite. So until this workflow, every claim in
+# `HCR-Linux-ELF-Provider.milestones.org`, in the macOS tier of
+# `HCR-Per-Platform-Handoff.milestones.org` and in
+# `HCR-Windows-PE-Provider.milestones.org` rested on one developer's local run
+# on one host.
+#
+# WHY IT IS ITS OWN WORKFLOW AND NOT A JOB IN ci.yml
+#
+# Three reasons, in order of weight:
+#
+#   1. `ci.yml` supersedes its own older runs (`cancel-in-progress: true`) on a
+#      saturated self-hosted pool. A cancelled check is not a check, and the
+#      whole point of this milestone is that the HCR state stops depending on
+#      whether somebody happened to get a verdict.
+#   2. Two of these three lanes are DEFINED BUT NOT YET VERIFIED (see below),
+#      and a workflow whose jobs have different required-ness is easier to read
+#      as one file than as three jobs buried in a 900-line one.
+#   3. `ci.yml` has no macOS job at all. Adding the first one there would mean
+#      inheriting its sibling-clone and token-minting preamble for a job that
+#      needs neither.
+#
+# THE THREE LANES, AND WHICH OF THEM HAS ACTUALLY BEEN MEASURED
+#
+#   linux-x86_64    REQUIRED. Runs on push to dev/main and on every pull
+#                   request. MEASURED green 2026-09-19 on Linux 6.12.85 x86_64:
+#                   41 gates executed 110 assertion cases, 5 gates declared
+#                   unsupported and verified to execute zero cases here.
+#   macos-arm64     DEFINED, NEVER RUN. `workflow_dispatch` / `schedule` only.
+#   windows-x86_64  DEFINED, NEVER RUN. `workflow_dispatch` / `schedule` only.
+#                   It is EXPECTED RED when first run:
+#                   `hcr_rb_application_abi_contract` is declared `run` there
+#                   and `repro_hcr_agent_windows.c` defines none of the thirteen
+#                   `rb_hcr_*` functions `repro_hcr_agent.h` declares. That red
+#                   is HCR-Windows-PE-Provider HWX-M0's KNOWN GAP. It must be
+#                   reported, not narrowed away.
+#
+# The two unverified lanes are dispatch-gated rather than made required
+# DELIBERATELY, and this is the honest half of the milestone: a lane that has
+# never run cannot be asserted to pass, and making it required would either
+# redden every pull request or tempt somebody into relaxing a gate to stop it.
+# Promoting one is a two-line change -- add its trigger to the `on:` block and
+# delete its `if:` -- and the first agent to run it green on real hardware is
+# the one who should make it, together with replacing that lane's
+# `run:unmeasured` cells in `scripts/hcr-lane-manifest.tsv` with the counts the
+# lane prints.
+#
+# WHAT EACH LANE ACTUALLY ASSERTS
+#
+# Not "the job exited 0". `scripts/run_hcr_lane.sh` refuses:
+#   * a gate that reports ZERO assertion cases (exit 0 with nothing run),
+#   * a gate that prints `[SKIPPED]` the manifest did not declare,
+#   * a declared skip that does not carry the loud `UNSUPPORTED: ... covered
+#     by ...` diagnostic naming the lane that does cover it,
+#   * a gate whose case count falls below its measured per-gate floor,
+#   * a lane whose total case count falls below the per-platform floor,
+#   * a gate declared `unsupported` here that nevertheless executes cases.
+# See `scripts/check_hcr_lane_manifest.py` for where the expectations live.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # 04:00 UTC daily. The two unverified lanes take their first real runs
+    # here, off the pull-request path, so a red from a lane nobody has ever
+    # executed does not block unrelated work while it is being triaged.
+    - cron: '0 4 * * *'
+
+concurrency:
+  group: hcr-lanes-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  hcr-lane-linux:
+    name: HCR lane (linux-x86_64)
+    runs-on: [self-hosted, linux, x64]  # CIP-5: nix job (setup-dev-env) -> eph-linux-x64
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mint installation token for cross-repo sibling access
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+          permission-contents: read
+      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        with:
+          env-flavor: nix
+          gh-token: ${{ steps.ci_token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+      # The manifest-vs-tree check first: it is a source scan that answers in
+      # seconds, and if the work list disagrees with the tree there is no point
+      # compiling 46 gate binaries to find out.
+      - name: HCR lane manifest against the tree
+        run: dev-exec python3 scripts/check_hcr_lane_manifest.py --check
+      # Four gates in the family assert `build/bin/repro` exists rather than
+      # recompiling it (`requiresReproBinary` in repro_tests.nim). The lane
+      # refuses to start without it; this is the step that supplies it.
+      - name: Build repro
+        run: dev-exec just build
+      - name: Run the HCR lane
+        run: dev-exec just hcr_lane_linux
+      - name: Upload the per-platform census and gate logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hcr-lane-linux-x86_64
+          path: |
+            build/reports/hcr-lane-linux-x86_64.tsv
+            test-logs/hcr-lane-linux-x86_64.*.log
+          retention-days: 14
+
+  hcr-lane-macos:
+    name: HCR lane (macos-arm64) — DEFINED, NEVER RUN
+    # DELIBERATELY not on push or pull_request. This lane has never been
+    # executed; see the header. Promote it by adding it to the required set
+    # once a real run is green, and by replacing the macos-arm64
+    # `run:unmeasured` cells in scripts/hcr-lane-manifest.tsv with the counts
+    # this lane prints.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: [self-hosted, macos, arm64]  # CIP-5: nix macOS job -> eph-macos-arm64
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mint installation token for cross-repo sibling access
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+          permission-contents: read
+      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        with:
+          env-flavor: nix
+          gh-token: ${{ steps.ci_token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+      - name: HCR lane manifest against the tree
+        run: dev-exec python3 scripts/check_hcr_lane_manifest.py --check
+      - name: Build repro
+        run: dev-exec just build
+      - name: Run the HCR lane
+        run: dev-exec just hcr_lane_macos
+      - name: Upload the per-platform census and gate logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hcr-lane-macos-arm64
+          path: |
+            build/reports/hcr-lane-macos-arm64.tsv
+            test-logs/hcr-lane-macos-arm64.*.log
+          retention-days: 14
+
+  hcr-lane-windows:
+    name: HCR lane (windows-x86_64) — DEFINED, NEVER RUN, EXPECTED RED
+    # DELIBERATELY not on push or pull_request, for the same reason as the
+    # macOS lane plus one more: `hcr_rb_application_abi_contract` is declared
+    # `run` here and is EXPECTED to fail, because repro_hcr_agent_windows.c
+    # defines none of the thirteen rb_hcr_* functions repro_hcr_agent.h
+    # declares. That is HWX-M0's KNOWN GAP and this lane's job is to REPORT it
+    # on a schedule, not to be green.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: [self-hosted, windows, x64]  # CIP-5: DIY-Windows (env.ps1) -> eph-win-x64
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mint installation token for Windows dev environment
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+      - name: Setup Windows dev environment
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        env:
+          WINDOWS_DIY_HCR_TESTS: '1'
+        with:
+          env-flavor: windows-diy
+          gh-token: ${{ steps.ci_token.outputs.token }}
+      - name: Install just
+        shell: pwsh
+        run: choco install just -y
+      - name: HCR lane manifest against the tree
+        shell: bash
+        run: python scripts/check_hcr_lane_manifest.py --check
+      - name: Build repro
+        shell: bash
+        run: just build
+      - name: Run the HCR lane
+        shell: bash
+        run: just hcr_lane_windows
+      - name: Upload the per-platform census and gate logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hcr-lane-windows-x86_64
+          path: |
+            build/reports/hcr-lane-windows-x86_64.tsv
+            test-logs/hcr-lane-windows-x86_64.*.log
+          retention-days: 14
