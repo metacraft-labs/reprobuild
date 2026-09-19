@@ -573,6 +573,15 @@ int repro_hcr_lx_probe_quiesce_threads_on_stack_in(unsigned long long low,
                                                        (uint64_t)high);
 }
 
+/* HLX-M4 2026-09-19. How many parked threads' frame-pointer chains merely
+ * STOPPED rather than ENDED, at the last `threads_on_stack_in` call. Exported
+ * so a gate can tell the two causes of a -1 apart — "no threads were parked"
+ * and "the walks were blind" — instead of reading one numeral for both
+ * (Verification-Harness-Traps §20). */
+int repro_hcr_lx_probe_quiesce_incomplete_walks(void) {
+  return (int)repro_hcr_lx_quiesce_incomplete_walks;
+}
+
 unsigned long long repro_hcr_lx_probe_quiesce_park_ns(void) {
   return (unsigned long long)repro_hcr_lx_quiesce.last_park_ns;
 }

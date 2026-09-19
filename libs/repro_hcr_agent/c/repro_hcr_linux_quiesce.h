@@ -221,6 +221,18 @@ typedef struct repro_hcr_lx_parked_thread {
   volatile uint64_t sp;
   volatile uint64_t resume_pc;  /* 0 = resume where you were */
   volatile uint32_t frame_count;
+  /*
+   * HLX-M4, 2026-09-19 — 1 when the frame-pointer chain ENDED, 0 when the walk
+   * merely STOPPED.
+   *
+   * Without this the two are the same observation: a thread whose `rbp` holds
+   * arbitrary data (any `-fomit-frame-pointer` frame, which is `-O2`'s default)
+   * produces `frame_count == 0` exactly as a thread whose chain legitimately
+   * terminated at its entry frame does. `threads_on_stack_in` then answers a
+   * DETERMINATE zero over a walk that saw nothing, which is the reverse of what
+   * this file's own walk comment instructs callers to do.
+   */
+  volatile uint32_t frames_complete;
   volatile uint64_t frames[REPRO_HCR_LX_MAX_QUIESCE_FRAMES];
   /*
    * OUTER signal frames, and this field is here because HLX-M4 MEASURED that
@@ -340,8 +352,23 @@ static repro_hcr_lx_parked_thread *repro_hcr_lx_quiesce_slot_for(int32_t tid) {
  * frame pointer. A target built `-fomit-frame-pointer` (the default at `-O2`)
  * yields the innermost PC and usually nothing else, so `skippedFunctions`
  * derived from it is a LOWER BOUND on what is on-stack, never an upper one.
- * A DWARF walk belongs with the `.eh_frame` work in HLX-M5; until then callers
- * must treat a short walk as "unknown", not as "nothing on stack".
+ * DECIDED 2026-09-19 (HLX-M4): the frame-pointer lower bound IS the shipped
+ * answer on Linux x86_64, and the DWARF walk this comment used to defer to
+ * HLX-M5 is REFUSED rather than deferred again. The reason is the paragraph
+ * above, not a scheduling one: `_Unwind_Backtrace` is not async-signal-safe,
+ * this walk runs in a signal handler with every other thread parked, and
+ * HLX-M4's third deliverable forbids allocating anywhere between the signal
+ * and the release. HLX-M5 landed `.eh_frame` REGISTRATION, which makes an
+ * unwinder able to DESCRIBE a patch body; it does not make this handler able
+ * to CALL one. What changes instead is the REPORT: the bound now says it is a
+ * bound. See `frames_complete` on the slot and the `-1` arm of
+ * `repro_hcr_lx_quiesce_threads_on_stack_in`.
+ *
+ * `out_complete` receives 1 only when the chain ENDED — a null frame pointer
+ * or a null return address, i.e. the two ways a well-formed chain terminates.
+ * Every other exit (misalignment, the ascending/span bound, capacity) is the
+ * walk giving up, and the caller must not read the resulting count as an
+ * answer about the program.
  *
  * Bounds discipline: the chain must be strictly ascending, 8-aligned, start at
  * or above the interrupted SP, and stay inside 8 MiB of it. A wild `rbp` in a
@@ -350,15 +377,22 @@ static repro_hcr_lx_parked_thread *repro_hcr_lx_quiesce_slot_for(int32_t tid) {
 static uint32_t repro_hcr_lx_quiesce_walk_frames(uint64_t frame_pointer,
                                                  uint64_t stack_pointer,
                                                  volatile uint64_t *out,
-                                                 uint32_t capacity) {
+                                                 uint32_t capacity,
+                                                 volatile uint32_t *out_complete) {
   const uint64_t span = 8ull * 1024ull * 1024ull;
   uint64_t fp = frame_pointer;
   uint64_t previous = stack_pointer;
   uint32_t produced = 0;
+  *out_complete = 0;
   while (produced < capacity) {
     uint64_t next_fp;
     uint64_t return_address;
-    if (fp == 0 || (fp & 7u) != 0) {
+    if (fp == 0) {
+      /* The chain ENDED: a thread entry frame's saved `rbp` is zero. */
+      *out_complete = 1;
+      break;
+    }
+    if ((fp & 7u) != 0) {
       break;
     }
     if (fp < previous || fp - stack_pointer > span) {
@@ -368,6 +402,8 @@ static uint32_t repro_hcr_lx_quiesce_walk_frames(uint64_t frame_pointer,
     memcpy(&return_address, (const void *)(uintptr_t)(fp + 8),
            sizeof(return_address));
     if (return_address == 0) {
+      /* Also an end, not a give-up: no caller to return to. */
+      *out_complete = 1;
       break;
     }
     out[produced] = return_address;
@@ -664,7 +700,7 @@ static void repro_hcr_lx_quiesce_handler(int signo, siginfo_t *info,
   slot->frame_count = repro_hcr_lx_quiesce_walk_frames(
       (uint64_t)uc->uc_mcontext.gregs[REG_RBP],
       (uint64_t)uc->uc_mcontext.gregs[REG_RSP], slot->frames,
-      REPRO_HCR_LX_MAX_QUIESCE_FRAMES);
+      REPRO_HCR_LX_MAX_QUIESCE_FRAMES, &slot->frames_complete);
   repro_hcr_lx_quiesce_handler_stage = 3;
   slot->nested_count = repro_hcr_lx_collect_nested_frames(
       (uint64_t)uc->uc_mcontext.gregs[REG_RSP], slot->nested_pc,
@@ -1528,12 +1564,35 @@ static int32_t repro_hcr_lx_quiesce_adjust_window(uint64_t window_start,
   return adjusted;
 }
 
-/* Number of parked threads with at least one frame (PC or a walked return
+/*
+ * Number of parked threads with at least one frame (PC or a walked return
  * address) inside `[low, high)`. This is §6.2 step 5's on-stack detection, and
- * it is a LOWER bound — see the frame-walk comment. */
+ * it is a LOWER bound — see the frame-walk comment.
+ *
+ * Returns -1 for NOT DETERMINED, and that arm is the HLX-M4 repair of
+ * 2026-09-19. A lower bound of zero is not the statement "nothing is on
+ * stack"; it is the statement "this walk found nothing", and on a target
+ * compiled without frame pointers those are different facts with the same
+ * numeral. The rule, stated so it is checkable rather than felt:
+ *
+ *   - A POSITIVE answer is always determinate. Finding a frame inside the
+ *     window is a fact about the program no walk length can retract.
+ *   - A ZERO is determinate only if EVERY parked thread's chain ENDED. One
+ *     thread whose walk merely stopped is enough to make the zero unknown,
+ *     because that thread is exactly where the missed frame would be.
+ *
+ * `repro_hcr_lx_quiesce_incomplete_walks` is published beside this so the
+ * caller can report WHY an answer is indeterminate rather than only that it
+ * is; a bare -1 would be the "two causes, one diagnostic" shape
+ * (Verification-Harness-Traps §20) between "no threads were parked" and "the
+ * walks were blind".
+ */
+static int32_t repro_hcr_lx_quiesce_incomplete_walks = 0;
+
 static int32_t repro_hcr_lx_quiesce_threads_on_stack_in(uint64_t low,
                                                         uint64_t high) {
   int32_t hits = 0;
+  int32_t incomplete = 0;
   int32_t i;
   uint32_t f;
   for (i = 0; i < repro_hcr_lx_quiesce.slot_count; ++i) {
@@ -1541,6 +1600,9 @@ static int32_t repro_hcr_lx_quiesce_threads_on_stack_in(uint64_t low,
     int found = 0;
     if (slot->parked != 1) {
       continue;
+    }
+    if (slot->frames_complete != 1) {
+      incomplete += 1;
     }
     if (slot->pc >= low && slot->pc < high) {
       found = 1;
@@ -1553,6 +1615,10 @@ static int32_t repro_hcr_lx_quiesce_threads_on_stack_in(uint64_t low,
     if (found) {
       hits += 1;
     }
+  }
+  repro_hcr_lx_quiesce_incomplete_walks = incomplete;
+  if (hits == 0 && incomplete > 0) {
+    return -1;
   }
   return hits;
 }

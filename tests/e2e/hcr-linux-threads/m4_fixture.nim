@@ -94,7 +94,13 @@ proc buildPatchBodies*(repoRoot: string): tuple[a, b: seq[byte]] =
   result.b = parsed.functionBytes(PatchSymbolB)
 
 ## Compile one fixture with the real patchable build profile.
-proc buildFixture*(repoRoot, source, outputName: string): string =
+proc buildFixture*(repoRoot, source, outputName: string;
+                   extraFlags: openArray[string] = []): string =
+  ## `extraFlags` exists for exactly one caller: HLX-M4's on-stack determinacy
+  ## arm, which needs the SAME fixture built `-fomit-frame-pointer` so the
+  ## frame-pointer walk is blind and the detector must answer "not determined"
+  ## rather than "nothing on stack". One flag between the two builds — a
+  ## control differing in more than one thing explains nothing.
   let caseDir = m4CaseDir(repoRoot)
   let workDir = m4WorkDir(repoRoot)
   result = workDir / outputName
@@ -108,8 +114,8 @@ proc buildFixture*(repoRoot, source, outputName: string): string =
   doAssert linkFlags.contains("-Wl,--build-id=sha1")
   discard runOrFail(shellCommand(
     @["gcc", "-O2", "-g"] & compileFlags &
-    @["-fcf-protection=full",
-    "-I", repoRoot / "libs" / "repro_hcr_agent" / "c",
+    @["-fcf-protection=full"] & @extraFlags &
+    @["-I", repoRoot / "libs" / "repro_hcr_agent" / "c",
     "-o", result,
     caseDir / source,
     repoRoot / "libs" / "repro_hcr_agent" / "c" /

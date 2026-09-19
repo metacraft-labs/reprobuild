@@ -15,19 +15,34 @@
 ##     pages are never unmapped);
 ##   * the NEXT call runs the new body.
 ##
-## SCOPE, RECORDED RATHER THAN GLOSSED. Detection is a frame-pointer walk, not a
-## DWARF unwind: `_Unwind_Backtrace` takes a global lock and can allocate on its
-## first FDE lookup, which is precisely the deadlock §6.2's allocation rule
-## exists to prevent when a thread may be parked inside `malloc`. A frame
-## pointer walk is pure aligned memory reads and is async-signal-safe. The cost
-## is that it only sees frames compiled with a frame pointer, so the detection
-## is a LOWER BOUND on what is on stack — this fixture is built so the frame it
-## must find is visible, and a DWARF walk belongs with the `.eh_frame` work in
-## HLX-M5.
+## SCOPE, DECIDED RATHER THAN DEFERRED (2026-09-19). Detection is a
+## frame-pointer walk, not a DWARF unwind, and that is the SHIPPED ANSWER on
+## Linux x86_64 rather than an interim one. `_Unwind_Backtrace` takes a global
+## lock and can allocate on its first FDE lookup, which is precisely the
+## deadlock §6.2's allocation rule exists to prevent when a thread may be
+## parked inside `malloc`; a frame-pointer walk is pure aligned memory reads
+## and is async-signal-safe. HLX-M4's residue assigned the DWARF walk to
+## HLX-M5 in prose, HLX-M5 landed without it, and the assignment was unsound
+## on HLX-M4's own terms — `.eh_frame` registration makes an unwinder able to
+## DESCRIBE a patch body, not this handler able to CALL one. The assignment is
+## therefore closed by REFUSING it, with the reason above, not by moving it to
+## a fourth milestone.
 ##
-## The gate therefore also asserts the NEGATIVE control: a run in which no
-## thread is inside the victim must report zero. Without it, a detector that
-## answered "yes" to everything would pass the positive half for free.
+## THE COST IS NOW REPORTED INSTEAD OF ASSUMED AWAY. The walk sees only frames
+## compiled with a frame pointer, so it is a LOWER BOUND. A lower bound of zero
+## is the statement "this walk found nothing", not "nothing is on stack", and
+## the walk's own header has always instructed callers to treat a short walk as
+## unknown while the caller returned a determinate 0. It returns -1 — NOT
+## DETERMINED — when the answer is zero and any parked thread's chain merely
+## STOPPED rather than ENDED.
+##
+## THREE ARMS, and the middle one is a repair. The positive arm parks a thread
+## inside the victim. The negative control is nine threads none of which ever
+## enters it — that arm's detector call did not exist until 2026-09-19 and its
+## zero was the C initialiser travelling untouched to the printf, so the
+## control could never have caught the detector it was written to catch. The
+## third arm is the SAME fixture with ONE extra flag, `-fomit-frame-pointer`,
+## where the walk is blind and the answer must be -1.
 ##
 ## `allowed_mocks: none`.
 
@@ -95,26 +110,88 @@ when defined(linux) and defined(amd64):
       ck "the next call returned the NEW value",
         o["onStackNextValue"].getInt() == ValueA
 
+      ck "the positive arm's walks all ENDED, so its answer is determinate",
+        o["onStackIncompleteWalks"].getInt() == 0
+
       # NEGATIVE CONTROL over the same detector. The handshake arm has nine
       # threads and none of them ever enters the victim, so a detector that says
       # "yes" indiscriminately is caught here rather than passing the positive
       # half for free.
+      #
+      # CORRECTED 2026-09-19, and the correction is the reason this block is
+      # worth reading. Until now the detector was NEVER CALLED in this arm:
+      # `repro_hcr_lx_probe_quiesce_threads_on_stack_in` appeared only inside
+      # the fixture's `onstack` branch, so the zero asserted below was
+      # `int onstack_detected = 0;` — the initialiser — printed untouched. The
+      # control was a constant wearing a negation (Verification-Harness-Traps
+      # §7b), and it would have stayed green over a detector that answered
+      # "yes" to everything, which is precisely the failure it was written to
+      # catch. The fixture now runs the detector over the SAME victim range in
+      # this arm, and `onStackDetectorCalls` is asserted so "answered 0" and
+      # "was not asked" can never again be the same observation.
       let control = runFixture(binary,
         ["handshake", hex(bodies.a), hex(bodies.b), "4"])
       ck "the control arm exited cleanly", control.exitCode == 0
       ck "the control arm produced a result", control.payload != nil
+      ck "the detector was actually CALLED in the control arm, once per round",
+        control.payload["onStackDetectorCalls"].getInt() == 4
       ck "the detector reports nothing when nothing is on stack",
         control.payload["onStackDetected"].getInt() == 0
+      ck "the control arm's zero is DETERMINATE, not a blind walk",
+        control.payload["onStackIncompleteWalks"].getInt() == 0
       ck "the control arm really parked threads",
         control.payload["parkedObservations"].getInt() == 4 * 9
+
+      # DETERMINACY ARM — the HLX-M4 repair of 2026-09-19, and the arm that
+      # makes the two zeros above mean something.
+      #
+      # THE DECISION THIS ARM RECORDS. The frame-pointer lower bound IS the
+      # shipped answer on Linux x86_64. The DWARF walk that HLX-M4's residue
+      # assigned to HLX-M5 in prose is REFUSED, not deferred a third time:
+      # `_Unwind_Backtrace` is not async-signal-safe — libgcc's unwinder takes
+      # a global lock and can allocate on its first FDE lookup — this walk runs
+      # in a signal handler with every other thread parked, and HLX-M4's own
+      # third deliverable forbids allocating anywhere between the signal and
+      # the release. HLX-M5 landed `.eh_frame` REGISTRATION, which makes an
+      # unwinder able to DESCRIBE a patch body; it does not make this handler
+      # able to CALL one safely.
+      #
+      # What changes instead is the REPORT. A lower bound of zero is not the
+      # statement "nothing is on stack"; it is "this walk found nothing", and
+      # the header's own contract has always said a short walk must be treated
+      # as unknown while the caller returned a determinate 0. It now returns
+      # -1 when the answer is zero AND any parked thread's chain merely
+      # STOPPED rather than ENDED.
+      #
+      # ONE FLAG between this build and the one above: `-fomit-frame-pointer`,
+      # which is what an ordinary `-O2` target ships with. A control differing
+      # in more than one thing explains nothing.
+      let blindBinary = buildFixture(repoRoot, "hcr_lx_m4_quiesce.c",
+        "m4_quiesce_nofp", ["-fomit-frame-pointer"])
+      ck "the frame-pointer-less fixture was built", fileExists(blindBinary)
+      let blind = runFixture(blindBinary,
+        ["handshake", hex(bodies.a), hex(bodies.b), "4"])
+      ck "the blind arm exited cleanly", blind.exitCode == 0
+      ck "the blind arm produced a result", blind.payload != nil
+      ck "the blind arm parked the same nine threads, so the difference is the walk",
+        blind.payload["parkedObservations"].getInt() == 4 * 9
+      ck "the blind arm's walks STOPPED rather than ENDED",
+        blind.payload["onStackIncompleteWalks"].getInt() > 0
+      ck "a blind walk answers NOT DETERMINED, not zero",
+        blind.payload["onStackDetected"].getInt() == -1
+      # And the pair, asserted directly: same fixture, same arm, same thread
+      # set, opposite answers.
+      ck "the two builds disagree, which is what makes -1 informative",
+        blind.payload["onStackDetected"].getInt() !=
+          control.payload["onStackDetected"].getInt()
 
       # Evidence, written unconditionally: `checkpoint` output is only flushed
       # on failure, so a green run would otherwise leave no numbers behind.
       let logDir = repoRoot / "test-logs"
       createDir(logDir)
-      writeFile(logDir / "integration_hcr_linux_on_stack_function_reported_skipped.json", pretty(%*{"onstack": o, "control": control.payload}))
+      writeFile(logDir / "integration_hcr_linux_on_stack_function_reported_skipped.json", pretty(%*{"onstack": o, "control": control.payload, "blind": blind.payload}))
 
-      expectCount(asserted, 21)
+      expectCount(asserted, 31)
 
 else:
   suite "integration_hcr_linux_on_stack_function_reported_skipped":

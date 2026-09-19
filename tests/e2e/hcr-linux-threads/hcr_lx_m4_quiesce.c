@@ -134,6 +134,7 @@ extern int repro_hcr_lx_probe_quiesce_slot_parked(int index);
 extern int repro_hcr_lx_probe_quiesce_slot_frame_count(int index);
 extern unsigned long long repro_hcr_lx_probe_quiesce_slot_frame(int index,
                                                                 int frame);
+extern int repro_hcr_lx_probe_quiesce_incomplete_walks(void);
 extern int repro_hcr_lx_probe_quiesce_threads_on_stack_in(
     unsigned long long low, unsigned long long high);
 extern int repro_hcr_lx_probe_quiesce_unresponsive_count(void);
@@ -370,6 +371,14 @@ int main(int argc, char **argv) {
   int unresponsive_tid = -1;
   int deaf_tid = -1;
   int onstack_detected = 0;
+  /* HLX-M4 2026-09-19. Two facts the single `onstack_detected`
+   * numeral cannot carry: whether the detector was CALLED at all,
+   * and how many parked threads' frame chains merely STOPPED
+   * rather than ENDED. A -1 answer means "not determined", and
+   * without the second number a reader cannot tell which cause
+   * produced it. */
+  int onstack_detector_calls = 0;
+  int onstack_incomplete_walks = -1;
   int onstack_inflight_value = -1;
   int onstack_next_value = -1;
   int publications = 0;
@@ -556,6 +565,8 @@ int main(int argc, char **argv) {
        * lies outside it, so a hit means a genuine caller frame. */
       onstack_detected = repro_hcr_lx_probe_quiesce_threads_on_stack_in(
           entry, entry + 128);
+      onstack_detector_calls += 1;
+      onstack_incomplete_walks = repro_hcr_lx_probe_quiesce_incomplete_walks();
       if (repro_hcr_lx_probe_apply_direct_patch_at(entry, sled, body_a,
                                                    body_a_len) != 0) {
         publications += 1;
@@ -662,6 +673,36 @@ int main(int argc, char **argv) {
       if (repro_hcr_lx_probe_quiesce_park_ns() > park_ns_max) {
         park_ns_max = repro_hcr_lx_probe_quiesce_park_ns();
       }
+      /*
+       * THE NEGATIVE CONTROL, AND IT DID NOT EXIST UNTIL 2026-09-19.
+       *
+       * `integration_hcr_linux_on_stack_function_reported_skipped` has always
+       * asserted that this arm reports `onStackDetected == 0`, describing it
+       * as the control that would catch a detector answering "yes"
+       * indiscriminately. It could not: `threads_on_stack_in` was called ONLY
+       * in the `onstack` branch, so this arm's zero was
+       * `int onstack_detected = 0;` — the INITIALISER — travelling untouched
+       * to the printf. A constant wearing a negation
+       * (Verification-Harness-Traps §7b), and the detector was never run at
+       * all in the arm whose entire job was to run it over an empty case.
+       *
+       * It runs here now, over the SAME victim range the positive arm uses,
+       * with the same quiescence held, against nine threads none of which
+       * ever enters that function. `onStackDetectorCalls` is reported beside
+       * the answer so "the detector said 0" and "the detector was not called"
+       * are two different observations in the artifact rather than one
+       * numeral.
+       */
+      {
+        unsigned long long victim =
+            (unsigned long long)(uintptr_t)&hcr_lx_m4_q_victim_onstack;
+        onstack_detected =
+            repro_hcr_lx_probe_quiesce_threads_on_stack_in(victim,
+                                                           victim + 128);
+        onstack_detector_calls += 1;
+        onstack_incomplete_walks =
+            repro_hcr_lx_probe_quiesce_incomplete_walks();
+      }
       repro_hcr_lx_probe_quiesce_release();
       if (repro_hcr_lx_probe_quiesce_release_ns() > release_ns_max) {
         release_ns_max = repro_hcr_lx_probe_quiesce_release_ns();
@@ -724,6 +765,9 @@ int main(int argc, char **argv) {
   printf("  \"windowBefore\": \"0x%llx\",\n", window_before);
   printf("  \"windowAfter\": \"0x%llx\",\n", window_after);
   printf("  \"onStackDetected\": %d,\n", onstack_detected);
+  printf("  \"onStackDetectorCalls\": %d,\n", onstack_detector_calls);
+  printf("  \"onStackIncompleteWalks\": %d,\n",
+         onstack_incomplete_walks);
   printf("  \"onStackInFlightValue\": %d,\n", onstack_inflight_value);
   printf("  \"onStackNextValue\": %d,\n", onstack_next_value);
   printf("  \"publications\": %d,\n", publications);
