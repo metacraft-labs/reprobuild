@@ -914,7 +914,16 @@ jobs:
           git diff --exit-code -- flake.lock
           dev-exec nix flake metadata --no-update-lock-file --json > /dev/null
       - name: nix build
-        run: dev-exec nix build --no-update-lock-file .#default
+        # ``--log-lines 200`` widens nix's failure tail from its default 25.
+        # Twenty-five lines is not enough to see WHICH entrypoint's ``nim c``
+        # failed or why: ``scripts/build_apps.sh`` keeps going after a failed
+        # entrypoint and reports the failures at the very end, so the tail
+        # shows a LATER entrypoint's successful link and the one-line summary,
+        # with the actual compiler diagnostic scrolled off. A reader then
+        # cannot tell a source regression from a transient builder failure
+        # without reproducing the whole derivation by hand. The flag costs
+        # nothing on success (nix prints the tail only when a build fails).
+        run: dev-exec nix build --no-update-lock-file --log-lines 200 .#default
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4

@@ -218,7 +218,13 @@ require_contains .github/workflows/ci.yml "run: dev-exec just lint"
 require_contains .github/workflows/ci.yml "run: dev-exec just test"
 require_contains .github/workflows/ci.yml "git diff --exit-code -- flake.lock"
 require_contains .github/workflows/ci.yml "dev-exec nix flake metadata --no-update-lock-file --json"
-require_contains .github/workflows/ci.yml "run: dev-exec nix build --no-update-lock-file .#default"
+# ``--log-lines 200`` is part of the pinned literal, not incidental: nix's
+# default 25-line failure tail is shorter than the trailer
+# ``scripts/build_apps.sh`` prints after a failed entrypoint, so with the
+# default a failing build shows a LATER entrypoint's successful link and the
+# summary while the actual compiler diagnostic scrolls off. Keeping it in the
+# literal is what stops it being dropped again.
+require_contains .github/workflows/ci.yml "run: dev-exec nix build --no-update-lock-file --log-lines 200 .#default"
 require_contains .github/workflows/ci.yml "if: always()"
 require_contains .github/workflows/ci.yml "actions/upload-artifact@v4"
 require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "Linux", "X64", "benchmark"]'\'''

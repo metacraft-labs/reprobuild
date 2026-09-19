@@ -58,10 +58,12 @@
 ##   2. **Stability across invocations** -- the key contains no pid, no
 ##      session, no timestamp, so a second ``repro`` process computes the
 ##      SAME directory as the first and finds it populated. Pinned
-##      structurally (identical path across processes) because with
-##      ``--forceBuild:on`` still on the compile command there is no
-##      timing win to observe yet; that is gated on the separate Nim
-##      footprint fix, NOT on this change.
+##      structurally (identical path across processes). The timing win that
+##      stability buys is now REAL -- the Nim footprint fix landed and
+##      ``--forceBuild:on`` is gone from ``boundedNimCompileCommand`` -- but
+##      it is still deliberately not asserted here: a wall-clock ratio over
+##      two compiles is the flake this file already removed once (see arm 3).
+##      Arm 3 pins the reuse by ``.o`` mtime preservation instead.
 ##
 ##   2b. **Variant isolation** -- ``$REPRO_VARIANTS`` moves the key, so a
 ##      release build's objects cannot overwrite a debug build's in the
@@ -509,9 +511,16 @@ echo headerValue()
 
     putEnv(ProviderParallelBuildEnv, "4")
     let command = boundedNimCompileCommand()
-    check command.len == 4
+    check command.len == 3
     check command[1 .. 2] == @["c", "--parallelBuild:4"]
-    check command[3] == "--forceBuild:on"
+    # ``--forceBuild:on`` is GONE and must stay gone. It was justified by
+    # Nim's header blindness; the pinned compiler tracks each cached C
+    # object's header closure via ``-MD -MF`` depfiles, so forcing the
+    # backend now only throws away a correct incremental decision. This is
+    # the replacement for the old ``command[3] == "--forceBuild:on"`` pin --
+    # the same position, asserted in the opposite direction, so a
+    # reintroduction anywhere in the command fails here.
+    check not command.anyIt(it.startsWith("--forceBuild"))
 
   test "concurrent provider commands serialize ONE nimcache directory":
     ## THE DELIBERATE RESIDUAL. Position-keying removed the reason two
@@ -727,11 +736,12 @@ echo headerValue()
     ## which is exactly the defect this arm exists to catch. We re-exec this
     ## test binary and compare the child's answer with our own.
     ##
-    ## NOTE ON TIMING: reuse here is STRUCTURAL only. ``--forceBuild:on`` is
-    ## still on ``boundedNimCompileCommand`` (it masks a real Nim footprint
-    ## bug that omits the C header closure), so the second compile does not
-    ## get faster yet. The timing win is gated on that separate compiler
-    ## fix, not on this change.
+    ## NOTE ON TIMING: what this arm pins is STRUCTURAL -- two processes
+    ## agree on one directory. It deliberately does not time anything. The
+    ## compiler fix that this used to be gated on has landed and
+    ## ``--forceBuild:on`` is gone, so the second compile IS faster now; the
+    ## reuse that makes it faster is pinned deterministically by arm 3's
+    ## ``.o`` mtime-preservation check rather than by a wall-clock ratio.
     let scratch = getTempDir() / "repro-m0-arm2"
     createDir(scratch)
     defer:
