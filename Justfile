@@ -846,6 +846,20 @@ unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions:
         tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim \
         2>&1 | tee test-logs/unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.log
 
+# HLX-M9 — a text page the provider could not restore to PROT_READ|PROT_EXEC
+# is now reported on the `patchApplied` frame instead of dying in a process
+# static. Two arms of ONE binary separated by ONE environment variable, and
+# the agent's flag is corroborated against `/proc/self/maps`, which the kernel
+# writes and the agent never touches.
+e2e_hcr_linux_text_left_writable_reaches_the_wire:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_hcr_linux_text_left_writable_reaches_the_wire \
+        --out:build/test-bin/e2e_hcr_linux_text_left_writable_reaches_the_wire \
+        tests/e2e/hcr-linux-hardening/t_e2e_hcr_linux_text_left_writable_reaches_the_wire.nim \
+        2>&1 | tee test-logs/e2e_hcr_linux_text_left_writable_reaches_the_wire.log
+
 e2e_hcr_linux_x86_64_single_threaded_direct_patch:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \

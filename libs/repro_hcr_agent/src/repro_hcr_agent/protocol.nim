@@ -282,6 +282,17 @@ type
     dispatchAddress*: string
     oldCodeRetained*: bool
     sharedLibraryPositivePath*: bool
+    textLeftWritable*: bool
+      ## HLX-M9. True when the publication could not restore the target's text
+      ## mapping to `PROT_READ|PROT_EXEC`, so the process now carries WRITABLE
+      ## EXECUTABLE text for the rest of its lifetime. The patch is applied —
+      ## that is why the fact rides this frame and not a refusal.
+    textLeftWritableReported*: bool
+      ## Whether the field was PRESENT on the wire at all, following the
+      ## `HcrCodePatchEvent.present` precedent in this same file. Absent means
+      ## an agent predating HLX-M9, which is a different statement from an
+      ## agent reporting `false`, and collapsing the two would make a security
+      ## fact default to the reassuring answer (Verification-Harness-Traps §31).
     codePatchEvent*: HcrCodePatchEvent
     skippedFunctions*: seq[HcrSkippedFunction]
     windowsEvidence*: HcrWindowsPatchEvidence
@@ -533,6 +544,10 @@ proc patchAppliedJson(value: HcrPatchApplied): JsonNode =
     "oldCodeRetained": value.oldCodeRetained,
     "sharedLibraryPositivePath": value.sharedLibraryPositivePath
   }
+  if value.textLeftWritableReported:
+    # HLX-M9. Emitted only when it was OBSERVED, so this encoder cannot
+    # manufacture the reassuring `false` an absent field must not be read as.
+    result["textLeftWritable"] = newJBool(value.textLeftWritable)
   if value.dispatchAddress.len > 0:
     result["dispatchAddress"] = newJString(value.dispatchAddress)
   if value.entryAddress.len > 0:
@@ -621,6 +636,22 @@ proc requireBool(node: JsonNode; field: string): bool =
   let value = node.requireField(field)
   if value.kind != JBool:
     raise newException(ValueError, "JSON field is not a bool: " & field)
+  value.getBool()
+
+proc optionalBool(node: JsonNode; field: string; present: var bool): bool =
+  ## HLX-M9, and the same rule `optionalStringSeq` below states: absent is a
+  ## valid older frame and parses as the default, while present-but-wrong still
+  ## raises, because absent and malformed are different statements. `present`
+  ## is an out-parameter rather than a return-value pair so the caller is
+  ## forced to name a variable for it — a caller that only wants the value can
+  ## still get the reassuring default, but it cannot do so without saying so.
+  if not node.hasKey(field) or node[field].kind == JNull:
+    present = false
+    return false
+  let value = node[field]
+  if value.kind != JBool:
+    raise newException(ValueError, "JSON field is not a bool: " & field)
+  present = true
   value.getBool()
 
 proc stringSeq(node: JsonNode; field: string): seq[string] =
@@ -751,7 +782,12 @@ proc parseWindowsPatchEvidence(node: JsonNode): HcrWindowsPatchEvidence =
     firstInstructionLength: uint32(value.requireInt("firstInstructionLength")))
 
 proc parsePatchApplied(node: JsonNode): HcrPatchApplied =
+  var textLeftWritablePresent = false
+  let textLeftWritable =
+    node.optionalBool("textLeftWritable", textLeftWritablePresent)
   HcrPatchApplied(
+    textLeftWritable: textLeftWritable,
+    textLeftWritableReported: textLeftWritablePresent,
     codePatchEvent: parseCodePatchEvent(node),
     skippedFunctions: parseSkippedFunctions(node),
     windowsEvidence: parseWindowsPatchEvidence(node),

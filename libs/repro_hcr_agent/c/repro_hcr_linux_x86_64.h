@@ -1552,8 +1552,24 @@ static int (*repro_hcr_lx_unregister_eh_frame_hook)(uint64_t) = NULL;
  * on demand, and a commit-failure gate that cannot choose k cannot show that N
  * of M published sites were restored.
  */
+/*
+ * `repro_hcr_lx_restore_fault_site` names the site index at which the
+ * POST-STORE `mprotect(PROT_READ|PROT_EXEC)` must fail — the branch that sets
+ * `text_left_writable`. Added 2026-09-19 with HLX-M9's wire field, because
+ * that branch had never been executed by anything: the commit lever above
+ * only reaches the FORWARD leg, whose failure is a clean refusal before any
+ * byte is written.
+ *
+ * It does NOT fake the flag. It SKIPS the restore syscall, so the page really
+ * is left RW — the same state the kernel would leave it in, reachable on a
+ * healthy host with no way to make `mprotect` refuse on demand. That is what
+ * lets a gate corroborate the reported flag against `/proc/self/maps`, which
+ * the kernel writes and the agent does not, instead of asserting the agent's
+ * own bookkeeping against itself (Verification-Harness-Traps §7a).
+ */
 static int repro_hcr_lx_fail_patch_page_alloc = 0;
 static int repro_hcr_lx_commit_fault_site = -1;
+static int repro_hcr_lx_restore_fault_site = -1;
 
 static repro_hcr_lx_transaction repro_hcr_lx_last_txn;
 
@@ -2021,7 +2037,8 @@ static int repro_hcr_lx_txn_prepare(repro_hcr_lx_transaction *txn) {
  */
 static int repro_hcr_lx_txn_publish_site(repro_hcr_lx_transaction *txn,
                                          repro_hcr_lx_prepared_site *ps,
-                                         int fault_now) {
+                                         int fault_now,
+                                         int restore_fault_now) {
   const repro_hcr_lx_capabilities *caps = repro_hcr_lx_capability_report();
   int transient_protection;
   long protect_rc;
@@ -2151,14 +2168,22 @@ static int repro_hcr_lx_txn_publish_site(repro_hcr_lx_transaction *txn,
     repro_hcr_lx_last_report.quiesced = 1;
   }
 
-  if (repro_hcr_lx_raw_mprotect(ps->span_start,
+  if (restore_fault_now ||
+      repro_hcr_lx_raw_mprotect(ps->span_start,
                                 (size_t)(ps->span_end - ps->span_start),
                                 REPRO_HCR_LX_PROT_READ |
                                     REPRO_HCR_LX_PROT_EXEC) != 0) {
     /* The trampoline is already live, so reporting total failure here would
      * repeat the defect the Apple arm carried at its post-store `return NULL`.
      * The honest report is success plus a recorded flag; the capability probe
-     * at agent start exists so this path is unreachable on a supported host. */
+     * at agent start exists so this path is unreachable on a supported host.
+     *
+     * HLX-M9 2026-09-19: the flag now REACHES A CONSUMER. It rides the
+     * `patchApplied` frame as `textLeftWritable` — see
+     * `repro_hcr_text_left_writable` in `repro_hcr_agent.c` for why the
+     * applied frame and not a refusal. Under `restore_fault_now` the syscall
+     * is skipped rather than its result forged, so the page genuinely stays
+     * writable and a gate can read that back out of `/proc/self/maps`. */
     repro_hcr_lx_caps.text_left_writable = 1;
     repro_hcr_lx_last_report.text_left_writable = 1;
   }
@@ -2359,7 +2384,9 @@ static int repro_hcr_lx_txn_commit(repro_hcr_lx_transaction *txn) {
   }
   for (i = 0; i < txn->site_count; ++i) {
     int fault_now = (repro_hcr_lx_commit_fault_site == i);
-    int rc = repro_hcr_lx_txn_publish_site(txn, &txn->sites[i], fault_now);
+    int restore_fault_now = (repro_hcr_lx_restore_fault_site == i);
+    int rc = repro_hcr_lx_txn_publish_site(txn, &txn->sites[i], fault_now,
+                                           restore_fault_now);
     if (rc != REPRO_HCR_LX_OK) {
       txn->refusal = rc;
       txn->failed_site = i;

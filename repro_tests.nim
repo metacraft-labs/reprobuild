@@ -6975,6 +6975,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/hcr-linux-hardening/t_e2e_hcr_linux_text_left_writable_reaches_the_wire.nim",
+    binary: "build/test-bin/t_e2e_hcr_linux_text_left_writable_reaches_the_wire",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/hcr-linux-far/t_e2e_hcr_linux_far_target_island_patch.nim",
     binary: "build/test-bin/t_e2e_hcr_linux_far_target_island_patch",
     defines: @[],

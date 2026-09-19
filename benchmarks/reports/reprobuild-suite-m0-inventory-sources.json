@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1688,
+    "nimTestBinaries": 1689,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 598,
-    "staticallyDetectedRuntimeCompilerFlowTests": 103,
-    "testEntries": 1699
+    "staticallyDetectedRuntimeCompilerFlowTests": 104,
+    "testEntries": 1700
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1106,7 +1106,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 796,
+      "integration": 797,
       "platform/destructive": 113,
       "pure unit": 598,
       "unclassified": 180
@@ -1257,9 +1257,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1688,
+    "nimTestBinaryCount": 1689,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1699
+    "testEntryCount": 1700
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2033,6 +2033,52 @@
         }
       ],
       "source": "tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "PatchableCompileFlags",
+            "PatchableLinkFlags",
+            "caseDir",
+            "env",
+            "patchObj",
+            "repoRoot",
+            "targetBin"
+          ],
+          "line": 180,
+          "path": "tests/e2e/hcr-linux-hardening/t_e2e_hcr_linux_text_left_writable_reaches_the_wire.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "\"gcc\", \"-c\", \"-O2\", \"-fcf-protection=full\", \"-ffunction-sections\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "PatchableCompileFlags",
+            "PatchableLinkFlags",
+            "caseDir",
+            "env",
+            "patchObj",
+            "repoRoot",
+            "targetBin"
+          ],
+          "line": 193,
+          "path": "tests/e2e/hcr-linux-hardening/t_e2e_hcr_linux_text_left_writable_reaches_the_wire.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "@[\"gcc\", \"-O2\", \"-g\"] & PatchableCompileFlags &"
+        }
+      ],
+      "source": "tests/e2e/hcr-linux-hardening/t_e2e_hcr_linux_text_left_writable_reaches_the_wire.nim"
     },
     {
       "class": "integration",
@@ -20110,6 +20156,25 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_hcr_linux_text_left_writable_reaches_the_wire",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent",
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-hardening/t_e2e_hcr_linux_text_left_writable_reaches_the_wire.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": true,

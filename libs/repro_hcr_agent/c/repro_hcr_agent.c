@@ -1625,6 +1625,17 @@ static int repro_hcr_prepare_direct_patch(repro_hcr_direct_patch_txn *txn,
   txn->entry = entry;
   txn->patch_len = patch_len;
 
+  /*
+   * HLX-M9 2026-09-19 — the only way to reach the post-store restore failure
+   * on a host whose `mprotect` works, from a REAL agent over a REAL socket.
+   * Same shape and same spirit as `REPRO_HCR_SUPPRESS_PUBLICATION_STORE` and
+   * `REPRO_HCR_TEST_SHARED_LIBRARY_POSITIVE_PATH`: the agent never sets it,
+   * and it skips a syscall rather than forging its result, so the target's
+   * text page is genuinely left writable and `/proc/self/maps` says so.
+   */
+  repro_hcr_lx_restore_fault_site =
+      getenv("REPRO_HCR_TEST_FAIL_TEXT_RESTORE") != NULL ? 0 : -1;
+
   if (entry == NULL) {
     memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
     repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
@@ -2535,6 +2546,51 @@ static int repro_hcr_old_code_retained(void) {
 #endif
 }
 
+/*
+ * HLX-M9, 2026-09-19 — the target's text page was left WRITABLE, and this is
+ * the function that stops that fact dying in a process static.
+ *
+ * Both arms have always recorded it and neither has ever reported it. Linux
+ * sets `repro_hcr_lx_last_report.text_left_writable` when the post-store
+ * `mprotect(PROT_READ|PROT_EXEC)` fails and then, correctly, returns OK —
+ * the trampoline is live, so claiming total failure would repeat the very
+ * defect the Apple arm was repaired for. Apple sets
+ * `repro_hcr_apple_text_left_writable` in the same shape. The result on both
+ * was a successful `patchApplied` over a process now carrying writable
+ * executable text for the rest of its lifetime, with the only witness a
+ * static nothing called.
+ *
+ * WHY A `patchApplied` FIELD, and not the two alternatives HLX-M9's
+ * deliverable offered:
+ *
+ *   - NOT a refusal. The patch IS applied. A refusal would be false on the
+ *     wire and would make the coordinator disable HCR for a target whose
+ *     behaviour has already changed — the same wrong answer HLX-M8's residue
+ *     records for the Phase I path.
+ *   - NOT only a capability warning. Capabilities are negotiated ONCE, before
+ *     any publication; this fact is produced BY a publication and a host that
+ *     passed the start-up round-trip probe can still fail a later restore.
+ *     A capability string could only ever say "this might happen".
+ *   - A `patchApplied` field carries it at the severity the event has: this
+ *     publication succeeded AND degraded the process, reported together, in
+ *     the frame whose arrival is what tells the coordinator the code is live.
+ *
+ * The Linux value is the PER-PATCH report field, not the sticky capability
+ * bit. A consumer asking "did THIS patch leave text writable" must not be
+ * told yes because an earlier one did; the sticky bit
+ * (`repro_hcr_lx_caps.text_left_writable`) remains the process-lifetime fact
+ * and is what a future capability re-negotiation would read.
+ */
+static int repro_hcr_text_left_writable(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return repro_hcr_lx_last_report.text_left_writable;
+#elif defined(REPRO_HCR_TARGET_APPLE_ARM64)
+  return repro_hcr_apple_text_left_writable;
+#else
+  return 0;
+#endif
+}
+
 static int repro_hcr_shared_library_positive_path = 0;
 
 static int repro_hcr_get_shared_library_positive_path(void) {
@@ -2588,7 +2644,11 @@ static char *repro_hcr_patch_applied_json(const char *patch_id,
            "\"dispatchAddress\":\"0x%llx\","
            /* HLX-M3: an observation, not a literal. See
             * `repro_hcr_old_code_retained` above. */
-           "\"oldCodeRetained\":%s,\"sharedLibraryPositivePath\":%s%s}}",
+           "\"oldCodeRetained\":%s,\"sharedLibraryPositivePath\":%s,"
+           /* HLX-M9: the degradation that used to die in a process static.
+            * See `repro_hcr_text_left_writable` for why it rides the APPLIED
+            * frame rather than a refusal or a capability string. */
+           "\"textLeftWritable\":%s%s}}",
            REPRO_HCR_PROTOCOL_SCHEMA, REPRO_HCR_TRANSPORT_SCOPE, patch_id,
            changed_function, repro_hcr_symbol_generation(),
            debug_digest == NULL ? "" : debug_digest,
@@ -2597,6 +2657,7 @@ static char *repro_hcr_patch_applied_json(const char *patch_id,
            (unsigned long long)(uintptr_t)dispatch_entry,
            repro_hcr_old_code_retained() ? "true" : "false",
            shared_library_positive_path ? "true" : "false",
+           repro_hcr_text_left_writable() ? "true" : "false",
            repro_hcr_code_patch_json_fragment());
   return json;
 }
