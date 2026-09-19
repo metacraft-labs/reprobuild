@@ -6957,6 +6957,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
+    binary: "build/test-bin/t_e2e_hcr_linux_replay_of_patched_recording",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim",
     binary: "build/test-bin/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch",
     defines: @[],

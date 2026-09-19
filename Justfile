@@ -855,6 +855,23 @@ e2e_hcr_linux_x86_64_single_threaded_direct_patch:
         tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_x86_64_single_threaded_direct_patch.log
 
+# HLX-M7 third entry / HX-S-2 — a recorded patch bundle is applied AGAIN, at
+# its recorded geid, by the recorded program's own in-process HCR agent, and
+# the events either side of the boundary reproduce the body that produced them.
+# Campaigns: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org HLX-M7;
+#            reprobuild-specs/HCR-Per-Platform-Handoff.milestones.org HX-S-2.
+# Needs the sibling codetracer-native-recorder checkout built
+# (`just build-ct-mcr` there); the gate fails loudly naming that if it is not.
+e2e_hcr_linux_replay_of_patched_recording:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --path:tests/e2e/hcr-linux-direct \
+        --nimcache:build/nimcache/e2e_hcr_linux_replay_of_patched_recording \
+        --out:build/test-bin/e2e_hcr_linux_replay_of_patched_recording \
+        tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim \
+        2>&1 | tee test-logs/e2e_hcr_linux_replay_of_patched_recording.log
+
 # HLX-M2 — a function inside a `dlopen`ed shared library is patched.
 # Campaign: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org, HLX-M2.
 # Carries its own falsifier arm, which rebuilds the provider with the pre-M2

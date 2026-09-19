@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1681,
+    "nimTestBinaries": 1682,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 598,
-    "staticallyDetectedRuntimeCompilerFlowTests": 102,
-    "testEntries": 1692
+    "staticallyDetectedRuntimeCompilerFlowTests": 103,
+    "testEntries": 1693
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1106,7 +1106,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 789,
+      "integration": 790,
       "platform/destructive": 113,
       "pure unit": 598,
       "unclassified": 180
@@ -1257,9 +1257,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1681,
+    "nimTestBinaryCount": 1682,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1692
+    "testEntryCount": 1693
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1809,6 +1809,84 @@
         }
       ],
       "source": "tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "gcc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "PatchableCompileFlags",
+            "PatchableLinkFlags",
+            "a",
+            "caseDir",
+            "ctMcr",
+            "env",
+            "gcc",
+            "output",
+            "patchObj",
+            "repoRoot",
+            "targetBin"
+          ],
+          "line": 256,
+          "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "let gcc = findExe(\"gcc\")"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "PatchableCompileFlags",
+            "PatchableLinkFlags",
+            "a",
+            "caseDir",
+            "ctMcr",
+            "env",
+            "gcc",
+            "output",
+            "patchObj",
+            "repoRoot",
+            "targetBin"
+          ],
+          "line": 294,
+          "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "\"gcc\", \"-c\", \"-O2\", \"-fcf-protection=full\", \"-ffunction-sections\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "PatchableCompileFlags",
+            "PatchableLinkFlags",
+            "a",
+            "caseDir",
+            "ctMcr",
+            "env",
+            "gcc",
+            "output",
+            "patchObj",
+            "repoRoot",
+            "targetBin"
+          ],
+          "line": 310,
+          "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "@[\"gcc\", \"-O2\", \"-g\"] & PatchableCompileFlags &"
+        }
+      ],
+      "source": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim"
     },
     {
       "class": "integration",
@@ -19959,6 +20037,24 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_hcr_linux_replay_of_patched_recording",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": true,
