@@ -98,27 +98,49 @@ proc developOverridesMetadataPath*(projectRoot: string): string =
     return gitDir / "reprobuild" / "develop-overrides.json"
   projectRoot / ".repro" / "local" / "develop-overrides.json"
 
-proc addU16Le(outp: var seq[byte]; value: uint16) =
-  outp.add(byte(value and 0xff'u16))
-  outp.add(byte((value shr 8) and 0xff'u16))
+proc updateU16Le(hasher: blake3.Blake3Hasher; value: uint16) =
+  var bytes: array[2, byte]
+  bytes[0] = byte(value and 0xff'u16)
+  bytes[1] = byte((value shr 8) and 0xff'u16)
+  hasher.update(bytes)
 
-proc addU64Le(outp: var seq[byte]; value: uint64) =
+proc updateU64Le(hasher: blake3.Blake3Hasher; value: uint64) =
+  var bytes: array[8, byte]
   for shift in [0, 8, 16, 24, 32, 40, 48, 56]:
-    outp.add(byte((value shr shift) and 0xff'u64))
-
-proc addString(outp: var seq[byte]; value: string) =
-  for ch in value:
-    outp.add(byte(ord(ch)))
+    bytes[shift div 8] = byte((value shr shift) and 0xff'u64)
+  hasher.update(bytes)
 
 proc actionFingerprintDigest(payload: openArray[byte]): blake3.Blake3Digest =
-  var framed = newSeqOfCap[byte](
-    FrameMagic.len + 2 + ActionFingerprintDomainTag.len + 8 + payload.len)
-  framed.addString(FrameMagic)
-  framed.addU16Le(uint16(ActionFingerprintDomainTag.len))
-  framed.addString(ActionFingerprintDomainTag)
-  framed.addU64Le(uint64(payload.len))
-  framed.add(payload)
-  blake3.digest(framed)
+  ## THE FRAME HERE IS NOT A PRIVATE ONE. Magic, tag length, tag, payload
+  ## length, payload is the same layout `repro_hash/policy` frames, and
+  ## `ActionFingerprintDomainTag` is the same string its `hdActionFingerprint`
+  ## emits -- so this proc is byte-for-byte `casDigest(payload,
+  ## hdActionFingerprint)`. It is spelled out again rather than imported for
+  ## the reason the project-file names above are: this module is the
+  ## prompt-time fast path and `repro_hash` would pull `gxhash` and `xxh3`
+  ## into the front controller's link for a digest it never takes.
+  ##
+  ## `tests/unit/t_dev_env_cache_key_frame.nim` holds the duplication to that
+  ## claim: it recomputes this key through `repro_hash` and fails if the two
+  ## frames ever diverge. Without it the copy is free to drift, and drift
+  ## here does not fail loudly -- it silently invalidates every cached
+  ## dev-env edge.
+  ##
+  ## Streams the frame instead of concatenating it. The buffer this replaces
+  ## existed only to be handed to the one-shot `blake3.digest`, and its
+  ## payload half was a full copy of bytes the caller already owned. The same
+  ## defect in `repro_hash/policy.framedPayload` was the hottest leaf frame in
+  ## a warm-no-op profile; this copy was not on that path, but it is the same
+  ## defect and there is no reason to keep it.
+  var hasher = blake3.initHasher()
+  defer:
+    hasher.close()
+  hasher.update(FrameMagic)
+  hasher.updateU16Le(uint16(ActionFingerprintDomainTag.len))
+  hasher.update(ActionFingerprintDomainTag)
+  hasher.updateU64Le(uint64(payload.len))
+  hasher.update(payload)
+  hasher.finalize()
 
 proc computeDevEnvEdgeCacheKey*(projectRoot, activity, lockSliceId,
     developOverridesPath: string): string =

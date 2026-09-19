@@ -13806,6 +13806,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_dev_env_cache_key_frame.nim",
+    binary: "build/test-bin/t_dev_env_cache_key_frame",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_dev_env_cache_key_store_root.nim",
     binary: "build/test-bin/t_dev_env_cache_key_store_root",
     defines: @[],
@@ -13889,6 +13898,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_from_source_realization_platform.nim",
     binary: "build/test-bin/t_from_source_realization_platform",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_hash_policy_frame_bytes.nim",
+    binary: "build/test-bin/t_hash_policy_frame_bytes",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
