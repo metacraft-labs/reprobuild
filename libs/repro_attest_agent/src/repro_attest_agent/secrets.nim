@@ -236,8 +236,9 @@ proc storeSecret*(s: ProvisionedSecretStore; name, secret: string): string =
     # link in the directory this daemon writes to — is the same one that
     # makes a path-based `chmod` a hole, so both answers come from the
     # one descriptor.
-    if fchmod(fd, Mode(SecretFileMode)) != 0:
-      raiseOSError(osLastError(), "fchmod " & path)
+    when defined(posix):
+      if fchmod(fd, Mode(SecretFileMode)) != 0:
+        raiseOSError(osLastError(), "fchmod " & path)
     var written = 0
     while written < secret.len:
       let n = posix.write(fd, addr secret[written], secret.len - written)
