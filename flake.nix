@@ -296,31 +296,23 @@
       url = "github:metacraft-labs/reprobuild-test-adapters";
       flake = false;
     };
-    codetracer-native-recorder = {
-      # ct_interpose lives under ``ct_interpose/src`` in the native-recorder
-      # repo. This flake USED TO EXPORT ``CT_INTERPOSE_SRC`` pointing at it,
-      # on the belief that config.nims threaded the variable onto Nim's
-      # ``--path``. That stopped being true at ``86cb1bf6`` (the
-      # ct_interpose -> nim-stackable-hooks migration), which removed the
-      # only reader: ``grep -c CT_INTERPOSE_SRC config.nims`` answers 0.
-      # The packaging layer's wrapper set and this derivation's
-      # ``--set-default`` loop dropped it first (M1's N16); the dev-shell
-      # export, the lint hook and both derivation attributes are now gone
-      # too (M1's N19), so nothing anywhere sets a variable nothing reads.
-      # The INPUT stays: the package-closure assertion below still requires
-      # this store path to be reachable from the built package.
-      # In the CodeTracer workspace this input ``follows`` codetracer's own
-      # native-recorder input, so a local sibling checkout is used.
-      #
-      # We use the ``git+https`` URL form (git wire protocol) rather than
-      # the ``github:`` form (tarball archive via codeload.github.com):
-      # the codeload tarball endpoint 404s for this repo even for
-      # anonymous callers (see M9.R.55 evidence — tarball generation is
-      # apparently disabled at the repo level), while the anonymous git
-      # protocol clone works fine and produces a byte-identical narHash.
-      url = "git+https://github.com/metacraft-labs/codetracer-native-recorder?ref=stable";
-      flake = false;
-    };
+    # A source-only input was removed from this set, and this note is where
+    # a future reader finds out why rather than re-deriving it -- it names
+    # no repository on purpose, because the removal was about a dependency
+    # that did not exist rather than about any particular tree.
+    # The variable that threaded it onto Nim's ``--path``
+    # lost its last reader at ``86cb1bf6`` (the migration onto
+    # ``nim-stackable-hooks``), and the wrapper set, the dev-shell export,
+    # the lint hook and both derivation attributes followed it out. What
+    # kept the input alive after that was a single line in the
+    # package-closure assertion below -- an assertion the package could not
+    # satisfy, because nothing threaded the source into the package either.
+    # Measured before removal: the store path appeared ZERO times in
+    # ``nix derivation show .#packages.<system>.reprobuild``, so no output
+    # closure could ever contain it, and the check that required it is run
+    # by nothing in CI or the Justfile. Adding a source input that no
+    # derivation consumes costs every downstream lock a node -- see the gate
+    # in ``tests/unit`` that walks this file's lock.
     codetracer-src = {
       # CodeTracer owns the cross-language test driver ``ct-test``
       # (``src/ct_test/ct_test.nim``): TestCatalog v1 discovery over the
@@ -374,8 +366,10 @@
     # `std/streams`/`std/json` compile under `--mm:orc -d:useNimRtl`, which stock
     # 2.2.x rejects) plus CodeTracer's column-aware tracer. Built koch-boot-free
     # by nix/pkgs/by-name/re/reprobuild/nim-fork.nix. The fork uses the
-    # ``git+https`` clone form (its
-    # codeload tarball 404s, same as codetracer-native-recorder above); the
+    # ``git+https`` clone form (the git wire protocol) rather than the
+    # ``github:`` form, because its codeload tarball endpoint 404s even for
+    # anonymous callers while the anonymous clone works and produces a
+    # byte-identical narHash; the
     # compiler itself imports the three vendored deps below (trace/stew/results).
     #
     # This revision also renders the source location that `check` / `require` /
@@ -478,7 +472,6 @@
       nim-stackable-hooks-src,
       reprobuild-ct-test-runner-src,
       reprobuild-test-adapters-src,
-      codetracer-native-recorder,
       codetracer-src,
       runquota-src,
       io-mon-src,
@@ -1236,7 +1229,6 @@
                                       ${codetracer-src} \
                                       ${reprobuild-ct-test-runner-src} \
                                       ${reprobuild-test-adapters-src} \
-                                      ${codetracer-native-recorder} \
                                       ${runquota-src} \
                                       ${blake3Prefix} \
                                       ${pkgs.sqlite.out} \

@@ -152,17 +152,22 @@ makes them affordable at every push.
 
 ## Nix Dev Shell
 
-`nix develop` activates the compiler and library toolchain. To handle private
-dependency overrides on development hosts, `scripts/dev-shell.sh` auto-detects
-sibling checkouts:
+`nix develop` activates the compiler and library toolchain. Every input this
+flake declares is fetchable without credentials, so entering the shell needs
+no overrides and no tokens:
 
 ```bash
-# Clone the sibling native recorder (if developer credentials are configured):
-gh repo clone metacraft-labs/codetracer-native-recorder ../codetracer-native-recorder
-
-# Enter the dev shell:
+# Enter the dev shell (equivalently: `nix develop`, from the repo root):
 bash scripts/dev-shell.sh
 ```
+
+If you are adding an input, keep that property.
+`tests/unit/t_flake_lock_names_no_private_input.nim` refuses an input whose
+repository is not public, and refuses one on a host it has no way to ask —
+so an input an outside contributor cannot fetch fails before it reaches a
+lock. It does **not** check whether anything reads the input: a source input
+nothing consumes still costs every downstream lock a node, and only review
+catches that.
 
 The build needs this shell:
 

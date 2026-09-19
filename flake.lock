@@ -513,20 +513,6 @@
     "codetracer-native-recorder": {
       "flake": false,
       "locked": {
-        "ref": "stable",
-        "rev": "a407366dfe0ce875a104d916f499e8f347abb83d",
-        "type": "git",
-        "url": "https://github.com/metacraft-labs/codetracer-native-recorder"
-      },
-      "original": {
-        "ref": "stable",
-        "type": "git",
-        "url": "https://github.com/metacraft-labs/codetracer-native-recorder"
-      }
-    },
-    "codetracer-native-recorder_2": {
-      "flake": false,
-      "locked": {
         "lastModified": 1780948552,
         "narHash": "sha256-wNr+jtXbOWYeWhiOpHR8jYP8+KnxZbeiaOYmB/EUljI=",
         "ref": "stable",
@@ -4895,7 +4881,7 @@
       "inputs": {
         "bearssl-src": "bearssl-src_2",
         "bundlers": "bundlers_2",
-        "codetracer-native-recorder": "codetracer-native-recorder_2",
+        "codetracer-native-recorder": "codetracer-native-recorder",
         "codetracer-src": "codetracer-src_2",
         "ct-trace-format-src": "ct-trace-format-src_2",
         "flake-parts": [
@@ -5011,7 +4997,6 @@
       "inputs": {
         "bearssl-src": "bearssl-src",
         "bundlers": "bundlers",
-        "codetracer-native-recorder": "codetracer-native-recorder",
         "codetracer-src": "codetracer-src",
         "ct-trace-format-src": "ct-trace-format-src",
         "flake-parts": [
