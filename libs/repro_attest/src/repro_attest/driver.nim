@@ -286,13 +286,13 @@ type
     ## agreement runs on every backend. Folding the key into the driver
     ## would multiply the two.
     ##
-    ## This seam exists so the endpoint, its binding and its session
-    ## lifecycle can be built and proved now, while the key-encapsulation
-    ## mechanism they will carry is built separately. A build with no
-    ## source configured refuses key agreements rather than inventing a
-    ## key — a public key nobody holds the private half of is worse than
-    ## no key at all, because a secret encrypted to it is a secret
-    ## destroyed in transit.
+    ## The seam exists so the endpoint, its binding and its session
+    ## lifecycle are independent of the mechanism: the mechanism plugs in
+    ## here, and ``repro_attest/x25519_kem`` is the one this build
+    ## carries. A build with no source configured refuses key agreements
+    ## rather than inventing a key — a public key nobody holds the
+    ## private half of is worse than no key at all, because a secret
+    ## encrypted to it is a secret destroyed in transit.
     algorithmName: string
 
 proc initEphemeralKeySource*(s: EphemeralKeySource; algorithm: string) =
@@ -312,3 +312,45 @@ method generateEphemeralKeyPair*(s: EphemeralKeySource): EphemeralKeyPair
   raise newException(DriverError,
     "key source " & s.algorithm & " does not implement " &
     "generateEphemeralKeyPair")
+
+type
+  SecretRelease* = object
+    ## One released secret, as it reaches the instance. Every field is
+    ## RAW bytes except ``name``, which is the wire's own token.
+    ##
+    ## The session's identity is carried in full — ``challenge`` and
+    ## ``ephemeralPub`` — rather than being taken on trust from the
+    ## request that arrived with it. A key source rebuilds the context
+    ## the sender encrypted under out of the session the *agent* holds,
+    ## so a caller who changes either field is decrypting under a context
+    ## nobody encrypted under and gets a refusal rather than a plaintext.
+    privateKey*: string
+      ## The private half of the pair the evidence bound. It exists only
+      ## in the agent's session table; it is passed here and not stored.
+    challenge*: string
+    ephemeralPub*: string
+    name*: string
+    wrapped*: string
+      ## The framed blob, as ``provision.renderWrappedSecret`` composed
+      ## it. Parsing it is the key source's job, because the framing and
+      ## the mechanism have to agree about which suite produced it.
+
+method openReleasedSecret*(s: EphemeralKeySource;
+                           r: SecretRelease): string {.base.} =
+  ## Recover a released secret, or raise.
+  ##
+  ## Paired with ``generateEphemeralKeyPair`` on purpose: the thing that
+  ## mints the key is the thing that can open what was encrypted to it,
+  ## so a build can no more acquire half a mechanism than it can acquire
+  ## half a key. A source that only generates is a source that hands out
+  ## public keys nobody can use.
+  ##
+  ## **It must never return a plaintext it could not authenticate.** An
+  ## implementation that cannot open the blob raises; there is no
+  ## in-band spelling of failure, because a secret and an error are both
+  ## strings and a caller that had to tell them apart would eventually
+  ## get it wrong.
+  raise newException(DriverError,
+    "key source " & s.algorithm & " does not implement " &
+    "openReleasedSecret, so a secret released to a key it minted could " &
+    "not be recovered")

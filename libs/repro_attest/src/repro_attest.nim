@@ -27,6 +27,10 @@
 ##     the names a reader has to use.
 ##   * ``repro_attest/driver`` — the backend seam: what the agent asks a
 ##     root of trust for, and the little it is allowed to tell it.
+##   * ``repro_attest/provision`` — the framed document a released secret
+##     travels in, and the two context strings that bind it to one key
+##     agreement. Bytes in, bytes out: it composes no ciphertext, so it
+##     needs no cryptography and is re-exported here.
 ##   * ``repro_attest/mock_backend`` — a backend for a root of trust that
 ##     does not exist, so every other layer runs unmodified without one.
 ##   * ``repro_attest/sealing`` — the policy a TPM requires before it
@@ -35,11 +39,14 @@
 ##     carries it.
 ##   * ``repro_attest/hpke`` — RFC 9180 hybrid public key encryption,
 ##     which is how a secret gets to the machine an attestation just
-##     established the identity of. It is the one submodule this module
-##     does NOT re-export, and deliberately: it links BearSSL, and
-##     ``repro_attest`` is compiled into recipe accessor contexts that
-##     are staged without a ``nim-bearssl`` on the path. Import
-##     ``repro_attest/hpke`` directly.
+##     established the identity of. Not re-exported, and deliberately: it
+##     links BearSSL, and ``repro_attest`` is compiled into recipe
+##     accessor contexts that are staged without a ``nim-bearssl`` on the
+##     path. Import ``repro_attest/hpke`` directly.
+##   * ``repro_attest/x25519_kem`` — the mechanism itself: the ephemeral
+##     key source the agent mints key agreements with, and the opener
+##     that recovers what was released to one. Not re-exported, for the
+##     same reason ``hpke`` is not — it is built on it.
 ##   * ``repro_attest/tpm2_backend`` — the measured-boot backend: the
 ##     ``reproos.tpm2-evidence.v1`` composite that carries a quote, its
 ##     signature and the TCG event log as one blob, and the driver that
@@ -52,9 +59,10 @@ import ./repro_attest/manifest
 import ./repro_attest/binding
 import ./repro_attest/report
 import ./repro_attest/driver
+import ./repro_attest/provision
 import ./repro_attest/mock_backend
 import ./repro_attest/tpm2_backend
 import ./repro_attest/sealing
 
 export measurement, tpm2, event_log, manifest, binding, report, driver,
-       mock_backend, tpm2_backend, sealing
+       provision, mock_backend, tpm2_backend, sealing

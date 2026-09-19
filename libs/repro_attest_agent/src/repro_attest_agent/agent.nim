@@ -34,14 +34,26 @@
 ## issued under, expires, and may be consumed once.
 ##
 ## ``POST /provision`` — the four checks in the paragraph above, enforced
-## here. A failed check never consumes the session, so a caller guessing
-## at public keys cannot destroy a key agreement someone else is in the
-## middle of. A request that passes all four consumes it — the agent has
-## just spent that key's single use — and this build then answers 501,
-## because the key-encapsulation mechanism that would unwrap the secret
-## is not part of it. The binding is the part that had to be right now:
-## a build that gains the mechanism replaces the 501 with the release and
-## changes nothing above it.
+## here, and then the release itself. **No failure consumes the session**,
+## including a ciphertext that does not open. That rule is worth stating
+## in the negative, because the obvious alternative is worse: the
+## ephemeral public key and the challenge are both *published* in the
+## report, so anything that consumed a session on a bad request would
+## hand every reader of that report a way to destroy the key agreement
+## the legitimate holder of the secret is in the middle of completing. A
+## wrong ciphertext is refused by the AEAD and costs the attacker a round
+## trip; it does not cost the verifier its session. The session is
+## consumed exactly when a secret is really released, and the private
+## half goes with it.
+##
+## What the release *is*: the blob is opened by the key source that
+## minted the key — the mechanism and the key are one seam, so a build
+## cannot acquire half of either — under a context rebuilt from the
+## session this agent holds rather than from the request that arrived.
+## The plaintext is then written to the provisioned-secrets directory,
+## which ``secrets`` will not let be anything but a filesystem with no
+## backing store. A build with no mechanism, or no such directory,
+## answers 501 and releases nothing.
 ##
 ## ``GET /measurement-manifest`` — the baked-in document, byte for byte
 ## as the build published it. Informational and never authoritative: a
@@ -67,12 +79,13 @@
 ## is absent, not a stand-in for one that is present — and the clock is a
 ## parameter rather than an injected fake.
 
-import std/[json, net, strutils, tables, times]
+import std/[base64, json, net, strutils, tables, times]
 
 import repro_attest
 
 import ./httpd
 import ./limits
+import ./secrets
 
 const
   AgentHealthSchema* = "reproos.attestation-agent-health.v1"
@@ -102,6 +115,18 @@ const
   JsonContentType* = "application/json"
   TextContentType* = "text/plain"
 
+  AgentReleaseSchema* = "reproos.attestation-agent-release.v1"
+    ## What a successful ``POST /provision`` answers with. Versioned for
+    ## the reason the health document is: anything a caller parses is a
+    ## wire format.
+
+  MaxWrappedSecretBase64* = ((MaxWrappedCiphertextBytes +
+                              MaxEncapsulatedKeyBytes + 256) div 3 + 1) * 4
+    ## The ceiling on the ``wrappedSecret`` field, derived from the
+    ## document bounds ``provision`` enforces rather than chosen. A field
+    ## bound that disagrees with the document bound would refuse blobs
+    ## the format admits, or admit blobs it does not.
+
 type
   AgentIdentity* = object
     ## What the instance says about itself. These become ``claims``, and
@@ -122,6 +147,7 @@ type
   AttestationAgent* = ref object
     driver: AttestationDriver
     keySource: EphemeralKeySource
+    secretStore: ProvisionedSecretStore
     identity: AgentIdentity
     manifestText: string
     hasManifest: bool
@@ -143,11 +169,17 @@ proc rfc3339At(nowMs: int64): string =
 proc newAttestationAgent*(driver: AttestationDriver;
                           identity: AgentIdentity;
                           keySource: EphemeralKeySource = nil;
+                          secretStore: ProvisionedSecretStore = nil;
                           manifestText = "";
                           sessionTtlMs = DefaultSessionTtlMs;
                           maxSessions = DefaultMaxSessions): AttestationAgent =
   ## Everything that can be wrong with a configuration is wrong here,
   ## before the socket is bound.
+  ##
+  ## ``secretStore`` is a *constructed* store rather than a path, so the
+  ## filesystem it writes to has already been checked by the time this
+  ## agent exists. A daemon that would refuse every release is a daemon
+  ## that should not have started.
   if driver.isNil:
     raise newException(AgentError,
       "an attestation agent needs a backend driver; there is nothing it " &
@@ -206,7 +238,8 @@ proc newAttestationAgent*(driver: AttestationDriver;
     unverifiedConfigFingerprint: resolved.configFingerprint,
     unverifiedVerityRootHash: resolved.verityRootHash))
 
-  AttestationAgent(driver: driver, keySource: keySource, identity: resolved,
+  AttestationAgent(driver: driver, keySource: keySource,
+    secretStore: secretStore, identity: resolved,
     manifestText: manifestText, hasManifest: hasManifest,
     sessions: initTable[string, KeySession](), sessionTtlMs: sessionTtlMs,
     maxSessions: maxSessions)
@@ -214,6 +247,12 @@ proc newAttestationAgent*(driver: AttestationDriver;
 proc backend*(a: AttestationAgent): AttestationBackend = a.driver.backend
 proc tier*(a: AttestationAgent): AttestationTier = a.driver.tier
 proc openSessions*(a: AttestationAgent): int = a.sessions.len
+proc canRelease*(a: AttestationAgent): bool =
+  ## Whether this build can complete a provision at all: it needs a
+  ## mechanism to open the blob with and somewhere the secret is allowed
+  ## to land. Reported by ``/health`` so an operator learns this before a
+  ## verifier learns it from a 501.
+  (not a.keySource.isNil) and (not a.secretStore.isNil)
 
 # ---------------------------------------------------------------------
 # Responses
@@ -374,6 +413,9 @@ proc handleHealth(a: AttestationAgent): HttpResponse =
     "backendDetail": readiness.detail,
     "keyAgreement": (if a.keySource.isNil: "unavailable"
                      else: a.keySource.algorithm),
+    "provisionedSecretsDir": (if a.secretStore.isNil: ""
+                              else: a.secretStore.directory),
+    "canRelease": a.canRelease,
     "measurementManifest": (if a.hasManifest: "loaded" else: "absent"),
     "openKeyAgreements": a.sessions.len}
   jsonOk(pretty(doc) & "\n")
@@ -467,12 +509,27 @@ proc handleProvision(a: AttestationAgent; req: HttpRequest;
     ["ephemeralPub", "challenge", "wrappedSecret"], ["name"], fields)
   if bodyError.len > 0: return problem(400, bodyError)
 
+  # Asked before the session table is consulted, so a build that cannot
+  # complete a release does not first tell a caller whether a given
+  # public key is live. A 501 is about this build; a 404 is about this
+  # agent's state, and the two must not be orderable into an oracle.
+  if not a.canRelease:
+    return problem(501,
+      (if a.keySource.isNil:
+         "this build carries no key-encapsulation mechanism to unwrap a " &
+         "released secret with"
+       else:
+         "this build has no provisioned-secrets directory to release a " &
+         "secret into") &
+      ", so it will not consume a key agreement it could not complete")
+
   a.pruneSessions(nowMs)
   let pub = fields["ephemeralPub"]
 
-  # None of the four checks below consumes the session. A caller guessing
-  # at public keys must not be able to destroy a key agreement that
-  # someone else is in the middle of completing.
+  # NOTHING below consumes the session except a release that really
+  # happened. The public key and the challenge are both published in the
+  # report, so a rule that spent a session on a bad request would let any
+  # reader of that report deny the legitimate holder of the secret.
   if not a.sessions.hasKey(pub):
     return problem(404,
       "no open key agreement was issued for that public key; it was never " &
@@ -486,13 +543,72 @@ proc handleProvision(a: AttestationAgent; req: HttpRequest;
       "evidence")
   if fields["wrappedSecret"].len == 0:
     return problem(400, "wrappedSecret is empty")
+  if fields["wrappedSecret"].len > MaxWrappedSecretBase64:
+    return problem(413,
+      "wrappedSecret is " & $fields["wrappedSecret"].len &
+      " base64 characters; at most " & $MaxWrappedSecretBase64 &
+      " are carried")
 
-  # Every binding check has passed, so this key's single use is now
-  # spent, and the private half goes with it.
+  let name = (if fields.hasKey("name"): fields["name"] else: DefaultSecretName)
+  try:
+    validateSecretName(name)
+  except ProvisionError as err:
+    return problem(400, err.msg)
+
+  var wrapped = ""
+  try:
+    wrapped = base64.decode(fields["wrappedSecret"])
+  except CatchableError:
+    return problem(400,
+      "wrappedSecret is not base64; the released document is bytes and " &
+      "this field is how they are spelled")
+  if base64.encode(wrapped) != fields["wrappedSecret"]:
+    return problem(400,
+      "wrappedSecret is not canonical base64; the field a release rests " &
+      "on has to decode to exactly one thing")
+
+  var released = ""
+  try:
+    released = a.keySource.openReleasedSecret(SecretRelease(
+      privateKey: session.privateKey,
+      challenge: hexToBytes("challenge", session.challengeHex),
+      ephemeralPub: hexToBytes("bindings.ephemeralPub", pub),
+      name: name,
+      wrapped: wrapped))
+  except ProvisionError as err:
+    return problem(400, err.msg)
+  except CatchableError as err:
+    # `openReleasedSecret` raises whatever the mechanism raises, and the
+    # mechanism is not this module's to enumerate. What matters here is
+    # that a plaintext is never reached on this path: `released` is still
+    # the empty string, and the session is still open.
+    return problem(400,
+      "the released secret was not recovered: " & err.msg)
+  if released.len == 0:
+    # A mechanism that returned a plaintext of nothing has not released a
+    # secret, and writing an empty file would look exactly like success
+    # to whatever reads the directory.
+    return problem(400,
+      "the released secret opened to zero bytes; an empty file in the " &
+      "secrets directory is indistinguishable from a secret that arrived")
+
+  var path = ""
+  try:
+    path = a.secretStore.storeSecret(name, released)
+  except CatchableError as err:
+    # The filesystem refused, or is no longer the filesystem this daemon
+    # started on. The session is deliberately NOT consumed: nothing was
+    # released, and the operator's fix is on this machine.
+    return problem(500, err.msg)
+
+  # A secret really was released. Now, and only now, this key's single
+  # use is spent and the private half goes with it.
   a.consumeSession(pub)
-  problem(501,
-    "the key agreement is valid and has been consumed, but this build " &
-    "carries no key-encapsulation mechanism to unwrap the secret with")
+  jsonOk(pretty(%*{
+    "schema": AgentReleaseSchema,
+    "name": name,
+    "path": path,
+    "bytes": released.len}) & "\n")
 
 proc handleMeasurementManifest(a: AttestationAgent): HttpResponse =
   if not a.hasManifest:
@@ -516,6 +632,18 @@ proc routeCost*(verb, path: string): int {.gcsafe, raises: [].} =
   ## for probes would wave through as many quotes as probes, which is how
   ## an attacker exhausts the hardware without ever exceeding a
   ## request-count limit.
+  ##
+  ## ``/provision`` is NOT in the expensive bucket, and that was
+  ## reconsidered rather than assumed. It does real work now — a scalar
+  ## multiplication, an authenticated decryption and a filesystem write
+  ## — but none of it touches the root of trust, and the asymmetry this
+  ## split exists for is the DEVICE's: a TPM quote is a command
+  ## transaction measured in hundreds of milliseconds that the device
+  ## itself rate-limits, while an X25519 exchange and an AEAD open are
+  ## microseconds of CPU bounded by ``maxBodyBytes``. Charging a release
+  ## as though it were a quote was tried, and it bought nothing the body
+  ## bound does not already buy while making two neighbouring gates'
+  ## arithmetic depend on it.
   if path == PathAttestation or path == PathKeyAgreement: CostQuote
   else: CostCheap
 

@@ -115,7 +115,13 @@ suite "attestation agent — abuse bounds":
     let ok = post(h.port, "/provision",
       $(%*{"ephemeralPub": repeat("cd", 32), "challenge": ChallengeA,
            "wrappedSecret": "c2VjcmV0"}))
-    check ok.status == 404          # no such session — but the body was read
+    # 501, not 404: `sampleAgent()` has a key source but nowhere a
+    # released secret is allowed to land, and the endpoint says so
+    # BEFORE it consults the session table — deliberately, so that the
+    # answer is about this build rather than about which public keys are
+    # live. The body was still read and parsed to get here, which is
+    # what this case is about; a body over the bound never reaches it.
+    check ok.status == 501
     check "key agreement" in ok.body
     check stillServes(h.port)
 

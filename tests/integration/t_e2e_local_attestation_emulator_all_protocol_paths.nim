@@ -60,9 +60,11 @@
 ## release path needs in order to have a session at all; nothing about
 ## the attestation under test stands in for anything.
 
-import std/[json, net, options, os, random, strutils, times, unittest]
+import std/[base64, json, net, options, os, posix, random, strutils,
+            times, unittest]
 
 import repro_attest
+import repro_attest/x25519_kem
 import repro_attest_agent
 import repro_attest_verify
 import repro_cli_support/attest
@@ -155,14 +157,42 @@ proc bodyOf(raw: string): string =
 # The emulated machine
 # ---------------------------------------------------------------------
 
+var emulatorSecrets = ""
+
+proc emulatorSecretsDir(): string =
+  ## A directory on a filesystem with no backing store, found on the
+  ## machine running the gate. The agent refuses anything else.
+  if emulatorSecrets.len > 0: return emulatorSecrets
+  for base in ["/dev/shm", "/run/user/" & $getuid(), getTempDir()]:
+    if not dirExists(base): continue
+    let candidate = base / ("repro-emulator-secrets-" &
+      $getCurrentProcessId())
+    try:
+      createDir(candidate)
+      setFilePermissions(candidate, {fpUserRead, fpUserWrite, fpUserExec})
+      discard newProvisionedSecretStore(candidate)
+      emulatorSecrets = candidate
+      return candidate
+    except CatchableError:
+      removeDir(candidate)
+  doAssert false,
+    "this gate needs a filesystem with no backing store and found none"
+
 proc emulatorAgent(d: EmulatedTpm2Driver): AttestationAgent =
   ## The real daemon, with the emulator behind the driver seam and the
   ## honest manifest loaded. The identity is taken from the manifest by
   ## the agent itself, which is why only the generation is passed.
+  ## The key source is the SHIPPED mechanism and the secrets directory
+  ## is a real filesystem with no backing store, so the release path
+  ## below is the one a deployment runs. It was a published
+  ## non-mechanism while `/provision` answered 501; now that the
+  ## endpoint really releases, an agent that could not would make the
+  ## broker case read the same refusal whatever the verdict was.
   newAttestationAgent(
     driver = d,
     identity = AgentIdentity(generation: EmulatorGeneration),
-    keySource = newMockKeySource(),
+    keySource = newX25519KeySource(),
+    secretStore = newProvisionedSecretStore(emulatorSecretsDir()),
     manifestText = emulatorManifestText())
 
 proc scratchDir(): string =
@@ -627,23 +657,31 @@ suite "local attestation emulator: every protocol path, every fault":
       checkpoint($v.decision & " failed: " & $v.failedChecks)
       check v.decision == vdAccepted
 
-      # Released, because the verdict was the narrow acceptance. The
-      # daemon answers 501 — the binding held and the session was
-      # consumed, and this build carries no mechanism to unwrap with —
-      # which is the agent's own contract and not this gate's invention.
+      # Released, because the verdict was the narrow acceptance: the
+      # secret is encrypted to the key THIS report bound, under the
+      # context that session established, and the daemon decrypts it
+      # into its runtime directory.
+      let wrapped = base64.encode(wrapSecretForEphemeral(
+        hexToBytes("ephemeralPub", report.bindings.ephemeralPub),
+        hexToBytes("challenge", EmulatorChallenge),
+        "broker-released", "a secret the broker holds",
+        repeat('b', SeedBytes)))
       let released = httpExchange(agent.port, "POST", "/provision",
         $(%*{"ephemeralPub": report.bindings.ephemeralPub,
              "challenge": EmulatorChallenge,
-             "wrappedSecret": "an opaque wrapped secret"}))
-      check statusOf(released) == 501
-      check "consumed" in bodyOf(released)
+             "name": "broker-released",
+             "wrappedSecret": wrapped}))
+      check statusOf(released) == 200
+      check readFile(emulatorSecretsDir() / "broker-released") ==
+            "a secret the broker holds"
 
       # And the single use is spent: the same release presented twice is
       # refused, so "released" is a state change rather than a message.
       let again = httpExchange(agent.port, "POST", "/provision",
         $(%*{"ephemeralPub": report.bindings.ephemeralPub,
              "challenge": EmulatorChallenge,
-             "wrappedSecret": "an opaque wrapped secret"}))
+             "name": "broker-released",
+             "wrappedSecret": wrapped}))
       check statusOf(again) == 404
     finally:
       stopServed(agent)

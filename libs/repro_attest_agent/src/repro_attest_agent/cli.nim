@@ -36,9 +36,11 @@
 import std/[net, os, strutils]
 
 import repro_attest
+import repro_attest/x25519_kem
 
 import ./agent
 import ./httpd
+import ./secrets
 import ./unit
 
 const
@@ -196,6 +198,26 @@ proc runServe(o: Options): int =
     stderr.writeLine("attestation-agent: " & err.msg)
     return 2
 
+  # Created and CHECKED before the socket is bound, so a directory that
+  # cannot be made -- or that is not a filesystem a released secret may
+  # land on -- is a start-up failure rather than a provisioning failure
+  # hours later, discovered by whoever was waiting for the secret.
+  var store: ProvisionedSecretStore
+  if o.provisionedSecretsDir.len > 0:
+    try:
+      if not dirExists(o.provisionedSecretsDir):
+        createDir(o.provisionedSecretsDir)
+      # Narrowed rather than left at whatever the umask allowed. The unit
+      # this binary renders asks systemd for 0700; a daemon started by
+      # hand gets the same directory.
+      setFilePermissions(o.provisionedSecretsDir,
+        {fpUserRead, fpUserWrite, fpUserExec})
+      store = newProvisionedSecretStore(o.provisionedSecretsDir)
+    except CatchableError as err:
+      stderr.writeLine("attestation-agent: cannot use " &
+        o.provisionedSecretsDir & " for released secrets: " & err.msg)
+      return 1
+
   var agent: AttestationAgent
   try:
     agent = newAttestationAgent(
@@ -204,23 +226,12 @@ proc runServe(o: Options): int =
         generation: o.generation,
         configFingerprint: o.configFingerprint,
         verityRootHash: o.verityRootHash),
-      keySource = newMockKeySource(),
+      keySource = newX25519KeySource(),
+      secretStore = store,
       manifestText = manifestText)
   except CatchableError as err:
     stderr.writeLine("attestation-agent: " & err.msg)
     return 2
-
-  # Created before the socket is bound, so a directory that cannot be
-  # made is a start-up failure rather than a provisioning failure hours
-  # later.
-  if o.provisionedSecretsDir.len > 0 and
-     not dirExists(o.provisionedSecretsDir):
-    try:
-      createDir(o.provisionedSecretsDir)
-    except OSError as err:
-      stderr.writeLine("attestation-agent: cannot create " &
-        o.provisionedSecretsDir & ": " & err.msg)
-      return 1
 
   var server: HttpServer
   try:

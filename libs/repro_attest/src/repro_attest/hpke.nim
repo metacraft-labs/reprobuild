@@ -385,7 +385,19 @@ proc x25519(scalar, point: string): string =
   var be = newString(Nsk)
   for i in 0 ..< Nsk:
     be[i] = scalar[Nsk - 1 - i]
-  var buf = point
+  # **The copy below is load-bearing for the same reason ``aeadSeal``'s
+  # is, and this site is the OTHER instance of that defect.** BearSSL
+  # writes the scalar multiplication back over the buffer it is handed,
+  # in place, through ``addr buf[0]``. ``var buf = point`` shares the
+  # caller's payload rather than copying it whenever the payload is a
+  # string literal — Nim's string assignment shallow-copies a literal on
+  # purpose, since a literal is immutable — so a caller that passes a
+  # ``const`` public key writes through a pointer into the binary's
+  # read-only data: SIGSEGV, not a shared secret. Reproduced standalone;
+  # it was latent only because every public key reaching ``dh`` so far
+  # came out of ``hexToBytes`` or ``publicKey``, both of which allocate.
+  var buf = newString(Npk)
+  copyMem(addr buf[0], unsafeAddr point[0], Npk)
   let ok = bsslEcAbi.ecC25519I31.mul(
     cast[ptr byte](addr buf[0]), csize_t(Npk),
     cast[ConstPtrByte](addr be[0]), csize_t(Nsk),
@@ -637,7 +649,29 @@ proc chachaPoly(key, nonce, aad: string; data: var string;
                    cint(if encrypt: 1 else: 0))
 
 proc aeadSeal(aead: HpkeAead; key, nonce, aad, pt: string): string =
-  var buf = pt
+  ## **The copy below is load-bearing and must not be shortened back to
+  ## ``var buf = pt``.** Both AEAD routines encrypt *in place*, through
+  ## ``addr buf[0]``. ``var buf = pt`` is not a copy when the compiler
+  ## can see that ``pt`` is dead afterwards — it is a MOVE — and the
+  ## move propagates all the way up through ``seal`` and ``sealBase`` to
+  ## whatever the caller passed. When that is a string *literal* (or a
+  ## ``const``, which is one), the moved string's bytes live in the
+  ## binary's read-only data, and writing through them is a segmentation
+  ## fault rather than a ciphertext.
+  ##
+  ## It is a real defect and it was latent for exactly as long as every
+  ## caller was a test: the published vectors arrive as
+  ## ``hexToBytes(...)``, which is heap-allocated, so the whole corpus
+  ## ran through the move without touching read-only memory. The first
+  ## caller that sealed a literal crashed. ``newString`` plus
+  ## ``copyMem`` is an unconditional allocation that no optimisation can
+  ## elide.
+  ##
+  ## ``aeadOpen`` below does not need it: its ``buf`` comes from a slice
+  ## expression, which always allocates.
+  var buf = newString(pt.len)
+  if pt.len > 0:
+    copyMem(addr buf[0], unsafeAddr pt[0], pt.len)
   let tag =
     case aead
     of haAes128Gcm: aesGcm(key, nonce, aad, buf, true)

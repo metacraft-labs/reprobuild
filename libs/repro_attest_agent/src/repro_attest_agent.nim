@@ -8,6 +8,9 @@
 ##     ``std/net``, and nothing else.
 ##   * ``repro_attest_agent/agent`` — what each endpoint means and what
 ##     it refuses. Pure in the agent's state and the clock.
+##   * ``repro_attest_agent/secrets`` — where a released secret is
+##     allowed to land, and the ``statfs`` that makes "in memory only" a
+##     checked property rather than a deployment convention.
 ##   * ``repro_attest_agent/unit`` — the service unit, rendered by the
 ##     daemon it starts, so a flag has one spelling.
 ##   * ``repro_attest_agent/cli`` — the command line, including the
@@ -28,6 +31,7 @@
 import ./repro_attest_agent/agent
 import ./repro_attest_agent/httpd
 import ./repro_attest_agent/limits
+import ./repro_attest_agent/secrets
 import ./repro_attest_agent/unit
 
-export agent, httpd, limits, unit
+export agent, httpd, limits, secrets, unit

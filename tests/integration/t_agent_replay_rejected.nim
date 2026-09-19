@@ -42,12 +42,60 @@
 ## as a parameter, because the endpoint layer takes it as one; nothing is
 ## stubbed and nothing sleeps.
 
-import std/[json, net, strutils, unittest]
+import std/[base64, json, net, os, posix, strutils, unittest]
 
 import repro_attest
+import repro_attest/x25519_kem
 import repro_attest_agent
 
 include attestation_agent_harness
+
+# ---------------------------------------------------------------------
+# An agent that can really complete a release
+#
+# Rewritten when `/provision` stopped answering 501: a session is now
+# spent by a release that REALLY HAPPENED and by nothing else, which is
+# what every case below is about. Against a build that cannot release,
+# these cases would all be reading the same 501 — and, worse, the old
+# contract they were written against (a valid request spends the session
+# whether or not a secret arrives) handed every reader of a published
+# report a way to destroy the agreement its verifier was completing,
+# because the key and the challenge are both IN that report.
+#
+# So the agent here has the shipped mechanism and a real directory with
+# no backing store, and every provision below carries a real ciphertext.
+# ---------------------------------------------------------------------
+
+const ReplaySecret = "a released credential, for this gate only"
+
+var replayScratch = ""
+
+proc volatileDir(): string =
+  ## A directory on a filesystem with no backing store, found on the
+  ## machine running the gate. The agent refuses anything else, so a
+  ## machine with none fails loudly rather than skipping.
+  if replayScratch.len > 0: return replayScratch
+  for base in ["/dev/shm", "/run/user/" & $getuid(), getTempDir()]:
+    if not dirExists(base): continue
+    let candidate = base / ("reproos-replay-" & $getCurrentProcessId())
+    try:
+      createDir(candidate)
+      setFilePermissions(candidate, {fpUserRead, fpUserWrite, fpUserExec})
+      discard newProvisionedSecretStore(candidate)
+      replayScratch = candidate
+      return candidate
+    except CatchableError:
+      removeDir(candidate)
+  doAssert false,
+    "this gate needs a filesystem with no backing store and found none"
+
+proc releasingAgent(maxSessions = DefaultMaxSessions;
+                    sessionTtlMs = DefaultSessionTtlMs): AttestationAgent =
+  newAttestationAgent(
+    driver = newMockDriver(), identity = sampleIdentity(),
+    keySource = newX25519KeySource(),
+    secretStore = newProvisionedSecretStore(volatileDir()),
+    sessionTtlMs = sessionTtlMs, maxSessions = maxSessions)
 
 proc issueKeyAgreement(port: Port; challenge: string): AttestationReport =
   let response = post(port, "/key-agreement",
@@ -56,13 +104,22 @@ proc issueKeyAgreement(port: Port; challenge: string): AttestationReport =
   parseAttestationReport(response.body, "key agreement")
 
 proc provisionBody(pub, challenge: string): string =
+  ## A REAL release: the secret is encrypted to the key the evidence
+  ## bound, under the context that session established. A body carrying
+  ## anything else is refused without spending the session, which is the
+  ## property several cases below measure.
   $(%*{"ephemeralPub": pub, "challenge": challenge,
-       "wrappedSecret": "c2VjcmV0"})
+       "name": "replayed-credential",
+       "wrappedSecret": base64.encode(wrapSecretForEphemeral(
+         hexToBytes("ephemeralPub", pub),
+         hexToBytes("challenge", challenge),
+         "replayed-credential", ReplaySecret,
+         repeat('r', SeedBytes)))})
 
 suite "attestation agent — a stale or mismatched challenge fails":
 
   test "a challenge below the freshness floor is refused":
-    var h = startHarness(sampleAgent())
+    var h = startHarness(releasingAgent())
     defer: stopHarness(h)
 
     let short = get(h.port, "/attestation?challenge=" & ShortChallenge)
@@ -76,7 +133,7 @@ suite "attestation agent — a stale or mismatched challenge fails":
     check get(h.port, "/attestation?challenge=" & ChallengeA).status == 200
 
   test "a report answers its own challenge and refuses to be relabelled":
-    var h = startHarness(sampleAgent())
+    var h = startHarness(releasingAgent())
     defer: stopHarness(h)
 
     let body = get(h.port, "/attestation?challenge=" & ChallengeA).body
@@ -96,23 +153,22 @@ suite "attestation agent — a stale or mismatched challenge fails":
       discard parseAttestationReport(relabelled, "relabelled")
 
   test "a key agreement is usable once, and the replay is refused":
-    var h = startHarness(sampleAgent())
+    var h = startHarness(releasingAgent())
     defer: stopHarness(h)
 
     let report = issueKeyAgreement(h.port, ChallengeA)
     let pub = report.bindings.ephemeralPub
 
-    # Every binding check passes, so the session is spent. This build
-    # cannot unwrap, and says so — but the session is gone either way.
+    # A release that really happened, and only that, spends the session.
     let first = post(h.port, "/provision", provisionBody(pub, ChallengeA))
-    check first.status == 501
+    check first.status == 200
 
     let replay = post(h.port, "/provision", provisionBody(pub, ChallengeA))
     check replay.status == 404
     check "already been used once" in replay.body
 
   test "a key agreement is refused under a challenge it was not issued with":
-    var h = startHarness(sampleAgent())
+    var h = startHarness(releasingAgent())
     defer: stopHarness(h)
 
     let report = issueKeyAgreement(h.port, ChallengeA)
@@ -127,10 +183,10 @@ suite "attestation agent — a stale or mismatched challenge fails":
     # completing. This is the positive polarity of the check above and
     # the reason the four checks are ordered as they are.
     let honest = post(h.port, "/provision", provisionBody(pub, ChallengeA))
-    check honest.status == 501
+    check honest.status == 200
 
   test "a public key that was never issued is refused":
-    var h = startHarness(sampleAgent())
+    var h = startHarness(releasingAgent())
     defer: stopHarness(h)
 
     let never = post(h.port, "/provision",
@@ -141,7 +197,7 @@ suite "attestation agent — a stale or mismatched challenge fails":
     # issued reaches the next stage.
     let report = issueKeyAgreement(h.port, ChallengeA)
     check post(h.port, "/provision",
-      provisionBody(report.bindings.ephemeralPub, ChallengeA)).status == 501
+      provisionBody(report.bindings.ephemeralPub, ChallengeA)).status == 200
 
   test "a key agreement expires, and the expiry is what refuses it":
     # Driven through the endpoint layer rather than the socket, because
@@ -149,9 +205,7 @@ suite "attestation agent — a stale or mismatched challenge fails":
     # the clock as a parameter, so this is the real code path with a real
     # clock value, not a stubbed one.
     const ttlMs = 60_000
-    let agent = newAttestationAgent(
-      driver = newMockDriver(), identity = sampleIdentity(),
-      keySource = newMockKeySource(), sessionTtlMs = ttlMs)
+    let agent = releasingAgent(sessionTtlMs = ttlMs)
     const issuedAt = 1_000_000'i64
 
     let issued = agent.handleRequest(HttpRequest(verb: "POST",
@@ -166,7 +220,7 @@ suite "attestation agent — a stale or mismatched challenge fails":
     let justInTime = agent.handleRequest(HttpRequest(verb: "POST",
       path: "/provision", peer: "127.0.0.1",
       body: provisionBody(pub, ChallengeA)), issuedAt + ttlMs - 1)
-    check justInTime.status == 501
+    check justInTime.status == 200
 
     # A second agreement, and this time the clock passes the deadline.
     let second = agent.handleRequest(HttpRequest(verb: "POST",
@@ -183,7 +237,7 @@ suite "attestation agent — a stale or mismatched challenge fails":
     check agent.openSessions == 0
 
   test "two agreements under one challenge are two sessions":
-    var h = startHarness(sampleAgent())
+    var h = startHarness(releasingAgent())
     defer: stopHarness(h)
 
     let first = issueKeyAgreement(h.port, ChallengeA)
@@ -195,12 +249,12 @@ suite "attestation agent — a stale or mismatched challenge fails":
     # challenge, and conflating them would let one caller's provisioning
     # cancel another's.
     check post(h.port, "/provision",
-      provisionBody(first.bindings.ephemeralPub, ChallengeA)).status == 501
+      provisionBody(first.bindings.ephemeralPub, ChallengeA)).status == 200
     check post(h.port, "/provision",
-      provisionBody(second.bindings.ephemeralPub, ChallengeA)).status == 501
+      provisionBody(second.bindings.ephemeralPub, ChallengeA)).status == 200
 
   test "a key agreement cannot be minted by a GET, so the key is the agent's":
-    var h = startHarness(sampleAgent())
+    var h = startHarness(releasingAgent())
     defer: stopHarness(h)
 
     let refused = get(h.port,
@@ -234,7 +288,7 @@ suite "attestation agent — a stale or mismatched challenge fails":
     # reaches. It matters twice: a caller must not be able to spend
     # someone's single-use agreement by posting nothing, and "released
     # against an empty secret" must not be a state this build can enter.
-    var h = startHarness(sampleAgent())
+    var h = startHarness(releasingAgent())
     defer: stopHarness(h)
 
     let report = issueKeyAgreement(h.port, ChallengeA)
@@ -247,7 +301,7 @@ suite "attestation agent — a stale or mismatched challenge fails":
 
     # The session survived, so the refusal cost the holder nothing.
     check post(h.port, "/provision",
-      provisionBody(pub, ChallengeA)).status == 501
+      provisionBody(pub, ChallengeA)).status == 200
 
   test "the session table is bounded, sessions being minted by strangers":
     # Every key agreement is a private key in memory, minted by an
@@ -264,7 +318,9 @@ suite "attestation agent — a stale or mismatched challenge fails":
     const cap = 2
     let agent = newAttestationAgent(
       driver = newMockDriver(), identity = sampleIdentity(),
-      keySource = newMockKeySource(), maxSessions = cap)
+      keySource = newX25519KeySource(),
+      secretStore = newProvisionedSecretStore(volatileDir()),
+      maxSessions = cap)
     const at = 5_000_000'i64
     proc agree(): HttpResponse =
       agent.handleRequest(HttpRequest(verb: "POST", path: "/key-agreement",
@@ -288,7 +344,7 @@ suite "attestation agent — a stale or mismatched challenge fails":
     # having stopped working.
     check agent.handleRequest(HttpRequest(verb: "POST", path: "/provision",
       peer: "127.0.0.1", body: provisionBody(pubs[0], ChallengeA)),
-      at).status == 501
+      at).status == 200
     check agent.openSessions == cap - 1
     check agree().status == 200
 
@@ -298,7 +354,7 @@ suite "attestation agent — a stale or mismatched challenge fails":
     # let anyone who can observe one deny the verifier its answer, and
     # would protect nothing: the party that cares whether a report is
     # fresh is the party that chose the nonce.
-    var h = startHarness(sampleAgent())
+    var h = startHarness(releasingAgent())
     defer: stopHarness(h)
 
     let first = get(h.port, "/attestation?challenge=" & ChallengeA)

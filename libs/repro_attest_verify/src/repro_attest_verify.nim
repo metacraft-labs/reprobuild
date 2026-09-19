@@ -39,6 +39,10 @@
 ##   * ``repro_attest_verify/trust`` — what a chain of those is worth:
 ##     twelve refusals, one acceptance, and the structural separation
 ##     between a production trust evaluator and a test one.
+##   * ``repro_attest_verify/release`` — what a verdict is FOR: releasing
+##     a secret to the machine it accepted, and recording every decision
+##     — including the ones that release nothing — in a sink this build
+##     refuses to run without.
 ##   * ``repro_attest_verify/fetch`` — the command line's
 ##     ``--report-url``. Deliberately NOT imported by ``verify``: the
 ##     verifier proper touches no socket.
@@ -50,5 +54,6 @@ import ./repro_attest_verify/trust
 import ./repro_attest_verify/evidence
 import ./repro_attest_verify/challenge
 import ./repro_attest_verify/verify
+import ./repro_attest_verify/release
 
-export policy, verdict, x509, trust, evidence, challenge, verify
+export policy, verdict, x509, trust, evidence, challenge, verify, release

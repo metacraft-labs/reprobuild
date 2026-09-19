@@ -168,3 +168,95 @@ either would move the very value the experiment holds fixed.
   `crypt: unknown target type` — which reads like a missing `dm-crypt`
   module and is not one. There is no `modprobe` in this initramfs, so the
   order in `modules/load.order` is the only thing deciding it.
+
+---
+
+# Taking one machine's evidence about where a released secret went
+
+`take-provisioned-secret-evidence.sh` is the third harness here, and it
+asks the question the other two do not: a machine is handed a secret
+over a network **while it is running** — where does the plaintext end
+up, and what is left on its disk after it is power cycled?
+
+One run is **one machine across two power cycles**. A single raw disk
+image is attached as a virtio block device and persists across both;
+nothing else does.
+
+| cycle | what the guest does |
+|---|---|
+| `provision` | bring up the attestation agent, let the host verify a key agreement and hand back an HPKE-wrapped secret, decrypt it into the runtime directory, write bulk data **and a planted token** to the disk, power off |
+| `after-reboot` | boot again, report that the runtime directory is empty and that the disk still carries what the first cycle wrote, power off |
+
+The host is the verifier and it is genuinely a different party: it runs
+in its own process, talks to the guest over a forwarded TCP port, mints
+the nonce, verifies the report against a policy, and encrypts to the
+ephemeral key the evidence bound. The guest never sees the plaintext
+except as something it decrypted.
+
+## THE ASSERTION IS A SEARCH OF THE DISK, NOT A READING OF THE GUEST
+
+After the second cycle the host greps the raw image for two tokens: the
+**secret**, which must be absent, and the **planted token**, which must
+be present. The guest's own account of itself is corroboration; it is
+not the claim.
+
+Both tokens are 64 printable hexadecimal characters drawn from the
+host's random source. That is a realistic shape for a released
+credential, and it makes the search auditable — anyone can re-run the
+grep by hand.
+
+## "Not found" is worth nothing from a search that finds nothing
+
+Three separate answers, and two of them are boots rather than arguments:
+
+1. the planted token, written by the same guest to the same filesystem
+   in the same cycle, **is** found;
+2. the same search over the same image with the secret appended **does**
+   find it — the harness does this explicitly and records the count;
+3. `PROVISION_LEAK=1` runs the whole harness again with a guest that
+   copies its released secret onto the disk. That is the failure this
+   gate exists to detect, and the search then reports `secret_hits=1`.
+
+**Never use that flag for a capture meant to represent correct
+behaviour.**
+
+## Nothing secret is brought home
+
+The secret and the planted token existed only in that run and are in
+none of the pinned artifacts. What is recorded is their SHA-256 — by the
+host that released the secret, by the guest that decrypted it, and by
+the search — so `provisioned_secret_vectors.nim` can establish that all
+three are talking about one value without publishing it.
+
+## What this harness deliberately does NOT do
+
+* **No unified kernel image, no firmware, no TPM, no measured boot.**
+  The guest boots straight into an initramfs and its root of trust is a
+  software one; the pinned verdict says
+  `accepted-without-a-root-of-trust` out loud. Binding a release to
+  hardware evidence is a different question, asked by a different gate.
+* **The disk is an ordinary unencrypted ext4 filesystem.** That is the
+  conservative choice: an encrypted volume would make "the secret is not
+  on the disk" true for a reason that has nothing to do with the
+  property under test.
+
+## Two wiring facts
+
+* **`busybox` must be a build that actually has applets.** Several of
+  the static `busybox` derivations in a Nix store report an *empty*
+  `--list`, and an initramfs built from one comes up, runs `init`, and
+  answers every command with `applet not found` — which reads like a
+  broken script and is not one. Check `busybox --list | wc -l` before
+  blaming anything else.
+* **The guest's network is QEMU's user-mode stack, configured
+  statically.** There is no DHCP client in this initramfs; the guest
+  sets `10.0.2.15` and a default route to `10.0.2.2` by hand, which is
+  what `-netdev user` expects, and the host reaches the agent through
+  `hostfwd`.
+
+## Why this is not wired as a build edge
+
+Same reason as its two siblings: it needs a hardware-accelerated
+hypervisor, a host kernel and module tree, and one run takes minutes. It
+is driven by hand, and the records it produces are pinned so the gate
+that reads them runs offline in milliseconds.
