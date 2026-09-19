@@ -10882,7 +10882,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/test_contribution_fingerprint_invalidation_boundaries.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 26,
+      "staticCaseCount": 36,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -14137,7 +14137,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_source_cache_identity_binds_complete_solved_instance.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 35,
+      "staticCaseCount": 52,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

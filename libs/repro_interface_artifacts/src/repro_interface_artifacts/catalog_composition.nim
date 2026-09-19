@@ -435,7 +435,19 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
 
   # --- 2. Group by coordinate; one coordinate is one content ---------------
   var catalogs: seq[ResolvedCatalog] = @[]
-  groupOrder.sort(cmp)
+  # ``groupOrder`` is deliberately NOT sorted, and that is a COLLAPSE
+  # rather than an omission. Sorting it made ``catalogs`` deterministic,
+  # which made every ordering guard downstream inert: the catalog
+  # section, the ownership diagnostics, the eligible-candidate list and
+  # the selection order were all stable whether or not they sorted
+  # anything themselves. M6 verification measured the consequence —
+  # ``groupOrder.sort`` and ``catalogLines.sort`` EACH survived deletion
+  # with a green suite, so a refactor could have deleted either one on
+  # the strength of the tests and a later one its partner by the same
+  # reasoning. Each emitted section now owns its own order and is
+  # falsifiable on its own. The composed bytes are unchanged, because
+  # the emitted order was always the sorted-record order and never this
+  # grouping order.
   for digest in groupOrder:
     let group = groupImports[digest]
     var texts: seq[string] = @[]
@@ -474,7 +486,11 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
         " declares " & normalizedFingerprint(entry.interfaceFingerprint))
       canonicalOf[entry.packageName] =
         normalizedFingerprint(entry.interfaceFingerprint)
-  ownerOrder.sort(cmp)
+  # Not sorted, for the reason above: ``ownerOrder`` only chooses the
+  # order in which ``duplicate-canonical-interface`` diagnostics are
+  # RAISED, and every diagnostic is sorted by (kind, message) before it
+  # is reported. Two guards over one ordering meant neither could be
+  # falsified alone.
   var ambiguouslyOwned: seq[string] = @[]
   for packageName in ownerOrder:
     let declarations =
@@ -536,7 +552,10 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
       policyContributors[rule.targetPackage] = @[]
     policyOf[rule.targetPackage] = rule.contributor
     policyContributors[rule.targetPackage].add(rule.contributor)
-  policyPackages.sort(cmp)
+  # Not sorted, for the reason ``ownerOrder`` is not: this order reaches
+  # only ``contradictory-curator-policy`` and
+  # ``policy-selection-unsatisfied`` diagnostics, which the final
+  # diagnostic sort orders.
   for packageName in policyPackages:
     let named = policyContributors[packageName].sorted(cmp).
       deduplicate(isSorted = true)
@@ -636,7 +655,15 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
   contributionLines.sort(cmp)
 
   var resolverInput = CatalogCompositionMagic & "\n"
-  resolverInput.add(catalogLines.deduplicate(isSorted = true).join(""))
+  # The catalog section is NOT de-duplicated: step 2 groups imports BY
+  # coordinate digest and emits one ``ResolvedCatalog`` per group, and
+  # the digest is a field of the record, so two catalog lines cannot be
+  # equal. The grouping is the single guard, and it is falsifiable ("the
+  # same catalog imported twice is one catalog"). The interface and
+  # contribution sections DO de-duplicate, because one catalog may
+  # legitimately declare the same interface or the same contribution
+  # twice.
+  resolverInput.add(catalogLines.join(""))
   resolverInput.add(interfaceLines.deduplicate(isSorted = true).join(""))
   resolverInput.add(contributionLines.deduplicate(isSorted = true).join(""))
 
@@ -647,9 +674,15 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
       selection.contributionRecordDigest,
       catalogCoordinateDigest(selection.catalogCoordinate),
       $selection.reason))
-  selectionLines.sort(cmp)
+  # Neither sorted nor de-duplicated here, and both for one reason:
+  # ``selections`` carries exactly one entry per package name and is
+  # emitted in ``packageOrder``, which IS sorted and which the public
+  # ``CatalogComposition.selections`` list is ordered by as well. Sorting
+  # the rendered lines as well produced the same bytes (a ``select``
+  # record begins with its package name) while making both guards
+  # unfalsifiable on their own.
   var selectedGraph = CatalogSelectionMagic & "\n"
-  selectedGraph.add(selectionLines.deduplicate(isSorted = true).join(""))
+  selectedGraph.add(selectionLines.join(""))
 
   # --- 7. Fail closed ------------------------------------------------------
   diagnostics.sort(proc (a, b: CatalogDiagnostic): int =

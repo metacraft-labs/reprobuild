@@ -1373,3 +1373,532 @@ suite "test_source_cache_identity_binds_complete_solved_instance":
     writeFile(root / "recipe.nim",
       "import ./internal/helpers\nconst implementation = 2\n")
     check sourceProviderRevisionHex(root) != before
+
+  # -------------------------------------------------------------------------
+  # Cases added by the retroactive PER-GUARD mutation audit.
+  #
+  # Everything above was validated per CASE: every case had a falsifying
+  # mutation. That is a weaker property than it reads as, and the
+  # difference was measured on this module: applying a mutation to each
+  # GUARD individually, 69 of 122 guards could be disabled with the whole
+  # suite staying green, because several guards happened to cover the same
+  # case. The cases below pin the guards whose failure mode is a FALSE
+  # ACCEPT — a digest silently produced where the module owes a refusal, or
+  # a digest that fails to move when an input changes. That is the #171
+  # class itself, and it is the only failure this identity may not have.
+  #
+  # Each case names the guard it pins and the mutation that falsifies it,
+  # so a later refactor that deletes the guard cannot also pass.
+  # -------------------------------------------------------------------------
+
+  test "a bare import satisfied by the project root binds":
+    # Guard: ``collectSearchRoots`` seeds the search-root set with the
+    # project root itself. Nim resolves a bare ``import toplevel`` from a
+    # SUBDIRECTORY module against the project root, and without that root
+    # the spec resolves nowhere, has no on-disk evidence under any other
+    # root, and is therefore classified EXTERNAL and dropped — a digest
+    # over a closure that is missing a module the recipe compiles.
+    # Falsified by deleting ``addSearchRoot(roots, projectRoot,
+    # projectRoot, projectRoot)`` (and, equivalently, by deleting
+    # ``projectRelative``'s path==root branch, which is what makes that
+    # call record anything).
+    let root = createTempDir("m13-root-is-a-search-root-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "repro.nim", "import ./sub/child\nconst entry = 1\n")
+    createDir(root / "sub")
+    writeFile(root / "sub" / "child.nim", "import toplevel\nconst c = 1\n")
+    writeFile(root / "toplevel.nim", "const top = 1\n")
+    let closure = solvedSourceClosure(root)
+    check closure.missing.len == 0
+    check "toplevel.nim" in closure.files
+    let before = identityKeyOnEveryPath(bareInstance(root))
+    writeFile(root / "toplevel.nim", "const top = 2\n")
+    check identityKeyOnEveryPath(bareInstance(root)) != before
+
+  test "a renamed, a from-import and a multi-line import each bind":
+    # Guards: ``expandImportSpec``'s ``as`` / ``except`` reduction,
+    # ``importRefsOf``'s ``from x import y`` arm, and its multi-line
+    # continuation handling. Each one, disabled alone, drops a module
+    # from the closure SILENTLY: the spec stops resolving, carries no
+    # on-disk evidence in the shape the scanner then sees, is classified
+    # external, and the key stops moving with that module's bytes.
+    let root = createTempDir("m13-import-shapes-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "repro.nim",
+      "import ./alpha as a\n" &
+      "from ./beta import thing\n" &
+      "import\n" &
+      "  ./gamma,\n" &
+      "  ./delta\n" &
+      "const entry = 1\n")
+    for name in ["alpha", "beta", "gamma", "delta"]:
+      writeFile(root / (name & ".nim"), "const " & name & " = 1\n")
+    let closure = solvedSourceClosure(root)
+    check closure.missing.len == 0
+    for name in ["alpha", "beta", "gamma", "delta"]:
+      check (name & ".nim") in closure.files
+    # Each module's bytes must move the key ON ITS OWN, so one shape
+    # standing in for another cannot leave this green by luck.
+    var previous = identityKeyOnEveryPath(bareInstance(root))
+    for name in ["alpha", "beta", "gamma", "delta"]:
+      writeFile(root / (name & ".nim"), "const " & name & " = 2\n")
+      let now = identityKeyOnEveryPath(bareInstance(root))
+      check now != previous
+      previous = now
+
+  test "an extensionless include that resolves nowhere fails closed":
+    # Guard: ``isCandidateLocalSpec`` rule 2 — an ``include`` names a file
+    # by construction, because Nim textually inlines the target and an
+    # ``include`` of a library is not a thing recipes do. The extension
+    # rule (rule 3) covers ``include "frag.inc"`` and ``include x.nim``
+    # and therefore MASKS this one; an extensionless include is the input
+    # that separates them, and without rule 2 it is silently dropped.
+    let root = createTempDir("m13-include-bare-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "repro.nim", "include ghostfrag\nconst entry = 1\n")
+    failsClosed(bareInstance(root))
+    check "ghostfrag" in cacheEntryIdentityError(
+      solvedSourceCacheEntryIdentity(bareInstance(root)))
+    # The no-false-refusal control: the same shape that DOES resolve binds.
+    let present = createTempDir("m13-include-bare-present-", "")
+    defer: removeDir(present)
+    createDir(present)
+    writeFile(present / "repro.nim", "include realfrag\nconst entry = 1\n")
+    writeFile(present / "realfrag.nim", "const fragment = 1\n")
+    let before = identityKeyOnEveryPath(bareInstance(present))
+    writeFile(present / "realfrag.nim", "const fragment = 2\n")
+    check identityKeyOnEveryPath(bareInstance(present)) != before
+
+  test "a search path this scanner cannot evaluate is missing evidence":
+    # Guard: ``parseConfigPaths``' ``quotedOnly`` rule for
+    # ``switch("path", <expr>)``. A computed search path means the
+    # search-root SET is unknown, so no unresolved spec can be ruled out
+    # (rule 4) and the identity must refuse. Treating the unquoted
+    # argument as a literal instead silently drops a root that does not
+    # exist AND clears the unknown flag, so an import the compiler
+    # satisfies through that root is classified external and a digest is
+    # produced over the rest.
+    let root = createTempDir("m13-dynamic-path-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "config.nims",
+      "let computedRoot = \"lib\"\nswitch(\"path\", computedRoot)\n")
+    writeFile(root / "repro.nim", "import mystery\nconst entry = 1\n")
+    failsClosed(bareInstance(root))
+    # Control: the same tree with a STRING-LITERAL switch does not refuse,
+    # so the rule is not "every config file refuses".
+    let literal = createTempDir("m13-literal-path-", "")
+    defer: removeDir(literal)
+    createDir(literal)
+    writeFile(literal / "config.nims", "switch(\"path\", \"lib\")\n")
+    writeFile(literal / "repro.nim", "import mystery\nconst entry = 1\n")
+    check solvedSourceClosure(literal).missing.len == 0
+
+  test "a $projectDir search root is expanded rather than guessed":
+    # Two guards, and they are NOT a redundant pair — measured, each one
+    # disabled alone leaves the whole suite green, and disabling both
+    # leaves it green too:
+    #
+    #   * ``expandConfigValue`` expands ``$projectDir`` / ``$projectPath``
+    #     / ``$config``. Without it the root keeps its ``$``, which the
+    #     next guard turns into a refusal — a false REFUSAL of a correct
+    #     recipe;
+    #   * ``parseConfigPaths`` marks the root set UNKNOWN when a ``$``
+    #     survives expansion. Without it the unexpanded root is silently
+    #     dropped and the module behind it is classified external — a
+    #     digest that does not move with that module, the #171 class.
+    let root = createTempDir("m13-projectdir-path-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "nim.cfg", "--path:\"$projectDir/vendor\"\n")
+    writeFile(root / "repro.nim", "import vendormod\nconst entry = 1\n")
+    createDir(root / "vendor")
+    writeFile(root / "vendor" / "vendormod.nim", "const vendored = 1\n")
+    let closure = solvedSourceClosure(root)
+    check closure.missing.len == 0
+    check "vendor/vendormod.nim" in closure.files
+    let before = identityKeyOnEveryPath(bareInstance(root))
+    writeFile(root / "vendor" / "vendormod.nim", "const vendored = 2\n")
+    check identityKeyOnEveryPath(bareInstance(root)) != before
+
+    # The second guard needs a token this scanner does NOT expand, which
+    # is the only input on which it fires: a ``$`` that survives
+    # expansion means the root the compiler will use is unknown, so no
+    # unresolved spec can be ruled out and the identity must refuse.
+    let unknownToken = createTempDir("m13-unknown-token-path-", "")
+    defer: removeDir(unknownToken)
+    createDir(unknownToken)
+    writeFile(unknownToken / "nim.cfg", "--path:\"$nimbleDir/pkgs\"\n")
+    writeFile(unknownToken / "repro.nim", "import mystery\nconst entry = 1\n")
+    failsClosed(bareInstance(unknownToken))
+
+  test "an entry-specific config and a nimble srcDir are search roots":
+    # Guards: the ``<entry>.nim.cfg`` / ``<entry>.nims`` config names, and
+    # ``parseNimbleSrcDir``. Both are resolution channels Nim really uses;
+    # losing either drops a module out of the closure without any
+    # refusal, because a bare spec with no on-disk evidence under the
+    # REMAINING roots is classified external.
+    let cfgRoot = createTempDir("m13-entry-config-", "")
+    defer: removeDir(cfgRoot)
+    createDir(cfgRoot)
+    writeFile(cfgRoot / "repro.nim.cfg", "--path:\"tools\"\n")
+    writeFile(cfgRoot / "repro.nim", "import toolmod\nconst entry = 1\n")
+    createDir(cfgRoot / "tools")
+    writeFile(cfgRoot / "tools" / "toolmod.nim", "const tooled = 1\n")
+    check solvedSourceClosure(cfgRoot).missing.len == 0
+    check "tools/toolmod.nim" in solvedSourceClosure(cfgRoot).files
+    let cfgBefore = identityKeyOnEveryPath(bareInstance(cfgRoot))
+    writeFile(cfgRoot / "tools" / "toolmod.nim", "const tooled = 2\n")
+    check identityKeyOnEveryPath(bareInstance(cfgRoot)) != cfgBefore
+
+    let nimbleRoot = createTempDir("m13-nimble-srcdir-", "")
+    defer: removeDir(nimbleRoot)
+    createDir(nimbleRoot)
+    writeFile(nimbleRoot / "probe.nimble",
+      "version = \"0.1.0\"\nsrcDir = \"src\"\n")
+    writeFile(nimbleRoot / "repro.nim", "import libmod\nconst entry = 1\n")
+    createDir(nimbleRoot / "src")
+    writeFile(nimbleRoot / "src" / "libmod.nim", "const libbed = 1\n")
+    check solvedSourceClosure(nimbleRoot).missing.len == 0
+    check "src/libmod.nim" in solvedSourceClosure(nimbleRoot).files
+    let nimbleBefore = identityKeyOnEveryPath(bareInstance(nimbleRoot))
+    writeFile(nimbleRoot / "src" / "libmod.nim", "const libbed = 2\n")
+    check identityKeyOnEveryPath(bareInstance(nimbleRoot)) != nimbleBefore
+
+  test "supplied search roots are searched after the project's own":
+    # Guard: ``collectSearchRoots`` appends the CALLER's effective roots
+    # last, matching Nim's own order (config files before the command
+    # line). Searching them first makes the same spec resolve to the
+    # OTHER tree's copy, which lands outside the project root, is
+    # therefore classified as external code, and drops out of the closure
+    # — so the key stops moving with the in-project module the compiler
+    # would actually have used.
+    let base = createTempDir("m13-root-order-", "")
+    defer: removeDir(base)
+    let root = base / "proj"
+    createDir(root)
+    writeFile(root / "config.nims", "switch(\"path\", \"lib\")\n")
+    writeFile(root / "repro.nim", "import shared\nconst entry = 1\n")
+    createDir(root / "lib")
+    writeFile(root / "lib" / "shared.nim", "const inProject = 1\n")
+    createDir(base / "other")
+    writeFile(base / "other" / "shared.nim", "const elsewhere = 1\n")
+
+    var instance = bareInstance(root)
+    instance.effectiveSearchRoots = @[base / "other"]
+    let closure = solvedSourceClosure(root, @[], instance.effectiveSearchRoots)
+    check closure.missing.len == 0
+    check "lib/shared.nim" in closure.files
+    let before = identityKeyOnEveryPath(instance)
+    writeFile(root / "lib" / "shared.nim", "const inProject = 2\n")
+    check identityKeyOnEveryPath(instance) != before
+
+  test "a spec resolving outside the project root is external, not missing":
+    # Guard: the closure walk SKIPS a spec that resolves to a file
+    # outside the project root instead of queueing it. Queueing it turns
+    # every legitimate ``--path`` into another tree — a nimble
+    # dependency, a vendored sibling — into a permanent refusal, which is
+    # the "everything is PENDING" uselessness the external-vs-local rule
+    # exists to avoid.
+    #
+    # The second half is the part that is NOT a convenience: such a file
+    # must not enter the digest either, because no relocation-stable
+    # spelling exists for it. Its code is bound through
+    # ``dependencyInstances`` instead.
+    let base = createTempDir("m13-outside-external-", "")
+    defer: removeDir(base)
+    let root = base / "proj"
+    createDir(root)
+    writeFile(root / "repro.nim", "import vendored\nconst entry = 1\n")
+    createDir(base / "vendor")
+    writeFile(base / "vendor" / "vendored.nim", "const outside = 1\n")
+
+    var instance = bareInstance(root)
+    instance.effectiveSearchRoots = @[base / "vendor"]
+    let closure = solvedSourceClosure(root, @[], instance.effectiveSearchRoots)
+    check closure.missing.len == 0
+    check closure.files == @["repro.nim"]
+    let before = identityKeyOnEveryPath(instance)
+    writeFile(base / "vendor" / "vendored.nim", "const outside = 2\n")
+    check identityKeyOnEveryPath(instance) == before
+
+  test "a sibling directory sharing the root's prefix is outside the root":
+    # Guard: ``projectRelative`` requires a SEPARATOR after the root
+    # prefix. Without it ``<root>X/data.txt`` reads as inside ``<root>``
+    # and is digested under a mangled relative spelling — a file from
+    # another tree inside the identity, and relocation invariance gone.
+    let base = createTempDir("m13-prefix-sibling-", "")
+    defer: removeDir(base)
+    let root = base / "proj"
+    createDir(root)
+    writeFile(root / "repro.nim", "const entry = 1\n")
+    createDir(base / "projX")
+    writeFile(base / "projX" / "data.txt", "outside\n")
+    var instance = bareInstance(root)
+    instance.declaredSourceInputs = @[base / "projX" / "data.txt"]
+    failsClosed(instance)
+    check "outside the project root" in
+      cacheEntryIdentityError(solvedSourceCacheEntryIdentity(instance))
+
+  test "a compile-time read is bound against the project root, and only inside it":
+    # Two guards of the compile-time-read resolution, each a silent
+    # failure on its own:
+    #
+    #   * the read is resolved against the reading file's directory AND
+    #     the project root. Dropping the root fallback refuses a correct
+    #     recipe whose payload is addressed from the project root;
+    #   * a read that resolves OUTSIDE the project root is missing
+    #     evidence. Dropping that refusal binds nothing and produces a
+    #     digest that does not move with the file the build really reads.
+    let base = createTempDir("m13-read-scope-", "")
+    defer: removeDir(base)
+    let root = base / "proj"
+    createDir(root)
+    createDir(root / "sub")
+    createDir(root / "data")
+    writeFile(root / "repro.nim", "import ./sub/reader\nconst entry = 1\n")
+    writeFile(root / "sub" / "reader.nim",
+      "const payload = staticRead(\"data/payload.txt\")\n")
+    writeFile(root / "data" / "payload.txt", "payload 1\n")
+    let closure = solvedSourceClosure(root)
+    check closure.missing.len == 0
+    check "data/payload.txt" in closure.files
+    let before = identityKeyOnEveryPath(bareInstance(root))
+    writeFile(root / "data" / "payload.txt", "payload 2\n")
+    check identityKeyOnEveryPath(bareInstance(root)) != before
+
+    let outsideRoot = base / "outsidereader"
+    createDir(outsideRoot)
+    createDir(base / "elsewhere")
+    writeFile(base / "elsewhere" / "payload.txt", "elsewhere\n")
+    writeFile(outsideRoot / "repro.nim",
+      "const payload = staticRead(\"../elsewhere/payload.txt\")\n")
+    failsClosed(bareInstance(outsideRoot))
+    check "outside the project root" in
+      cacheEntryIdentityError(solvedSourceCacheEntryIdentity(
+        bareInstance(outsideRoot)))
+
+  test "a compile-time read's payload is not scanned as Nim source":
+    # Guard: the closure walk queues a compile-time-read target with
+    # ``scan: false``. Scanning it treats the DATA as code, so a payload
+    # that happens to contain the word ``import`` or ``slurp`` invents
+    # evidence that does not exist and refuses a correct recipe.
+    let root = createTempDir("m13-payload-not-code-", "")
+    defer: removeDir(root)
+    createDir(root)
+    writeFile(root / "repro.nim",
+      "const payload = staticRead(\"payload.txt\")\n")
+    writeFile(root / "payload.txt",
+      "import ./ghost\ninclude ./phantom\nslurp(\"nothing.txt\")\n")
+    let closure = solvedSourceClosure(root)
+    check closure.missing.len == 0
+    check "payload.txt" in closure.files
+    let before = identityKeyOnEveryPath(bareInstance(root))
+    writeFile(root / "payload.txt", "import ./ghost\nchanged\n")
+    check identityKeyOnEveryPath(bareInstance(root)) != before
+
+  test "an overload that cannot take the call does not hide the read":
+    # Guards: ``routineFit``'s arity rejections, and ``shadowVerdict``'s
+    # unknown-arity refusal. The measured failure of the per-file
+    # exclusion this module replaced was exactly this shape — a local
+    # declaration that the compiler does NOT apply at the call, used to
+    # drop a real ``system.slurp`` out of the closure, which is the #171
+    # defect re-created inside the fix for it. The parameter-TYPE half of
+    # the rule is pinned by "a shadowing declaration that cannot bind the
+    # call does not hide a read"; the ARITY half is pinned here.
+    let tooFew = createTempDir("m13-arity-too-few-", "")
+    defer: removeDir(tooFew)
+    createDir(tooFew)
+    writeFile(tooFew / "repro.nim",
+      "proc slurp(a, b: string): string = a & b\n" &
+      "const blob = slurp(\"payload.txt\")\n")
+    writeFile(tooFew / "payload.txt", "payload 1\n")
+    check solvedSourceClosure(tooFew).missing.len == 0
+    check "payload.txt" in solvedSourceClosure(tooFew).files
+    let tooFewBefore = identityKeyOnEveryPath(bareInstance(tooFew))
+    writeFile(tooFew / "payload.txt", "payload 2\n")
+    check identityKeyOnEveryPath(bareInstance(tooFew)) != tooFewBefore
+
+    let tooMany = createTempDir("m13-arity-too-many-", "")
+    defer: removeDir(tooMany)
+    createDir(tooMany)
+    writeFile(tooMany / "repro.nim",
+      "proc slurp(): string = \"local\"\n" &
+      "const blob = slurp(\"payload.txt\")\n")
+    writeFile(tooMany / "payload.txt", "payload 1\n")
+    check solvedSourceClosure(tooMany).missing.len == 0
+    check "payload.txt" in solvedSourceClosure(tooMany).files
+    let tooManyBefore = identityKeyOnEveryPath(bareInstance(tooMany))
+    writeFile(tooMany / "payload.txt", "payload 2\n")
+    check identityKeyOnEveryPath(bareInstance(tooMany)) != tooManyBefore
+
+    # A call whose ARITY the text does not decide, in a file that
+    # declares the name: undecidable, therefore missing evidence.
+    let unknownArity = createTempDir("m13-arity-unknown-", "")
+    defer: removeDir(unknownArity)
+    createDir(unknownArity)
+    writeFile(unknownArity / "repro.nim",
+      "proc slurp(label: string): string = label\n" &
+      "const name = \"payload.txt\"\n" &
+      "const blob = slurp name\n")
+    writeFile(unknownArity / "payload.txt", "payload 1\n")
+    failsClosed(bareInstance(unknownArity))
+    check "cannot be told apart" in cacheEntryIdentityError(
+      solvedSourceCacheEntryIdentity(bareInstance(unknownArity)))
+
+  test "no digest and no revision are reported over incomplete evidence":
+    # Guards: ``solvedSourceClosure`` suppresses ``digestHex`` whenever
+    # ``missing`` is non-empty, and ``sourceProviderRevisionHex`` returns
+    # the empty string on the same condition. Each one alone, and both
+    # together, left the whole suite green: the pending marker that
+    # ``sourceIdentity`` stamps covered every case, so the DIAGNOSTIC
+    # surface these two guards own — the value a caller reads directly
+    # off the closure — was unpinned.
+    let root = createTempDir("m13-no-partial-digest-", "")
+    defer: removeDir(root)
+    createDir(root)
+    # The two unresolvable specs are named so that DISCOVERY order and
+    # SORTED order disagree; a missing list that merely happens to be
+    # discovered alphabetically proves nothing about the sort.
+    writeFile(root / "repro.nim",
+      "import ./zulu\nimport ./alpha\nconst entry = 1\n")
+    let closure = solvedSourceClosure(root)
+    check closure.missing.len == 2
+    check closure.digestHex.len == 0
+    check sourceProviderRevisionHex(root).len == 0
+    # The missing list is sorted, so the diagnostic is a function of the
+    # tree rather than of the traversal order that discovered it.
+    check closure.missing == closure.missing.sorted(cmp)
+    check closure.missing[0].contains("alpha")
+    # Non-vacuity: the same tree WITH both modules present reports both a
+    # digest and a revision.
+    writeFile(root / "zulu.nim", "const zulu = 1\n")
+    writeFile(root / "alpha.nim", "const alpha = 1\n")
+    let complete = solvedSourceClosure(root)
+    check complete.missing.len == 0
+    check complete.digestHex.len == 64
+    check sourceProviderRevisionHex(root).len == 32
+
+  test "an instance with no root, no project file or no package name refuses":
+    # Guards: the empty-project-root refusal, the absent-project-file
+    # refusal (in both of its arms — ``resolveProjectFile`` raising and
+    # ``resolveProjectFile`` answering with an empty path), and the
+    # package-name refusal. Every one of them was unprotected: the legacy
+    # constructor's cases reach them, but that constructor is PENDING for
+    # four other reasons at once, so none of these could be falsified.
+    let empty = SolvedSourceInstance(
+      projectRoot: "",
+      packageName: "probe",
+      packageVersion: "1.0",
+      searchRootsKnown: true,
+      optionsSolved: true,
+      dependenciesResolved: true,
+      platform: bcsTypes.PlatformTriple(
+        cpu: "x86_64", os: "linux", abi: "gnu", libcVariant: "glibc"),
+      toolchain: bcsTypes.ToolchainIdentity(
+        name: "cmake", version: "3.29.2",
+        hostLdSoAbi: "x86_64-linux-gnu", extraFingerprint: ""))
+    let emptyIdentity = solvedSourceCacheEntryIdentity(empty)
+    check cacheEntryIdentityError(emptyIdentity).len > 0
+    check "project root is empty" in cacheEntryIdentityError(emptyIdentity)
+    expect CacheKeyError:
+      discard deriveCacheEntryKeyHex(emptyIdentity)
+
+    let noProjectFile = createTempDir("m13-no-project-file-", "")
+    defer: removeDir(noProjectFile)
+    createDir(noProjectFile)
+    writeFile(noProjectFile / "readme.txt", "not a project\n")
+    failsClosed(bareInstance(noProjectFile))
+    check "project file" in cacheEntryIdentityError(
+      solvedSourceCacheEntryIdentity(bareInstance(noProjectFile)))
+
+    # The OTHER arm of the same refusal, and a separate guard:
+    # ``resolveProjectFile`` RAISES when both ``repro.nim`` and
+    # ``reprobuild.nim`` exist. Swallowing that exception without
+    # recording missing evidence leaves ``entryPath`` empty, the closure
+    # empty, and a digest over nothing — which the empty-path arm above
+    # masks, so neither could be falsified alone.
+    let ambiguous = createTempDir("m13-ambiguous-project-file-", "")
+    defer: removeDir(ambiguous)
+    createDir(ambiguous)
+    writeFile(ambiguous / "repro.nim", "const entry = 1\n")
+    writeFile(ambiguous / "reprobuild.nim", "const legacy = 1\n")
+    failsClosed(bareInstance(ambiguous))
+    check "project file is unresolvable" in cacheEntryIdentityError(
+      solvedSourceCacheEntryIdentity(bareInstance(ambiguous)))
+
+    let named = createTempDir("m13-no-package-name-", "")
+    defer: removeDir(named)
+    writeProject(named)
+    var nameless = solvedInstance(named)
+    nameless.packageName = ""
+    failsClosed(nameless)
+    check "package name" in
+      cacheEntryIdentityError(solvedSourceCacheEntryIdentity(nameless))
+
+  test "a dependency instance key of the wrong width or alphabet refuses":
+    # Guard: ``isHex64``, in BOTH of its halves. The existing fail-closed
+    # case supplies a dependency key that is wrong in both respects at
+    # once, so either half alone could be deleted with the suite green —
+    # and a truncated-but-hex key is exactly the shape a caller produces
+    # by accident.
+    let root = createTempDir("m13-dep-key-shape-", "")
+    defer: removeDir(root)
+    writeProject(root)
+
+    var shortHex = solvedInstance(root)
+    shortHex.dependencyInstances = @["a1b2c3d4e5f60718293a4b5c6d7e8f90"]
+    failsClosed(shortHex)
+    check "malformed dependency instance key" in
+      cacheEntryIdentityError(solvedSourceCacheEntryIdentity(shortHex))
+
+    var wideNonHex = solvedInstance(root)
+    wideNonHex.dependencyInstances = @[repeat('z', 64)]
+    failsClosed(wideNonHex)
+    check "malformed dependency instance key" in
+      cacheEntryIdentityError(solvedSourceCacheEntryIdentity(wideNonHex))
+
+    # Non-vacuity: a well-formed key of the right width still keys.
+    check identityKeyOnEveryPath(solvedInstance(root)).len == 64
+
+  test "an empty supplied effective search root refuses":
+    # Guard: ``sourceIdentity`` rejects an EMPTY entry in a root set the
+    # caller asserts it reconstructed. An empty root is not a root the
+    # compiler was given, so the assertion is demonstrably wrong in the
+    # one respect this module can check — the same reasoning the
+    # non-existent-root refusal rests on, and separately unprotected.
+    let root = createTempDir("m13-empty-supplied-root-", "")
+    defer: removeDir(root)
+    writeProject(root)
+    var instance = solvedInstance(root)
+    instance.effectiveSearchRoots = @[root / "internal", "   "]
+    failsClosed(instance)
+    check "supplied effective search root is empty" in
+      cacheEntryIdentityError(solvedSourceCacheEntryIdentity(instance))
+
+  test "the pending diagnostic names every missing input in one order":
+    # Guard: ``sourceIdentity`` sorts ``missing`` before it stamps the
+    # marker, so the refusal text is a function of the instance rather
+    # than of the order the checks happen to run in. Diagnostic only —
+    # a PENDING identity cannot be keyed either way — but the value is
+    # part of the identity object, and an order-dependent one makes two
+    # equal instances compare unequal.
+    let root = createTempDir("m13-pending-order-", "")
+    defer: removeDir(root)
+    writeProject(root)
+    var instance = solvedInstance(root)
+    instance.optionsSolved = false
+    instance.dependenciesResolved = false
+    instance.toolchain.version = ""
+    instance.platform.abi = ""
+    let error = cacheEntryIdentityError(
+      solvedSourceCacheEntryIdentity(instance))
+    let head = "unbound solved source instance: "
+    let idx = error.find(head)
+    check idx >= 0
+    let listed = error[idx + head.len .. ^1].split("; ")
+    check listed.len == 4
+    check listed == listed.sorted(cmp)
