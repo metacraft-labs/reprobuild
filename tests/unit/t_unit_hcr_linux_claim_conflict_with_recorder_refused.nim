@@ -44,6 +44,23 @@ when defined(linux) and defined(amd64):
   const recorderClaimMap =
     "../../../codetracer-native-recorder/ct_inline_hook/claimed_guest_text.c"
 
+  ## The translation unit the claim map calls into. `claimed_guest_text.c` uses
+  ## no libc: every syscall it issues goes through `ct_recorder_gated_syscall`,
+  ## the recorder's single identifiable doorway to the kernel, which lives in a
+  ## different file. Compiling the map without it links with `undefined
+  ## reference to ct_recorder_gated_syscall`, which is how this gate — and the
+  ## three `hcr-linux-txn` gates that link the same map — were found red on
+  ## committed `dev` on 2026-09-19.
+  ##
+  ## The REAL doorway, not a stub: the symbol's entire purpose is that there is
+  ## exactly one of it, at one address, because replay-strict seccomp allows a
+  ## syscall by comparing the instruction pointer against precisely that
+  ## address. A local stub would be a second definition of the one thing that
+  ## must be unique (Verification-Harness-Traps §30a).
+  const recorderSyscallGate =
+    "../../../codetracer-native-recorder/ct_interpose/src/ct_interpose/" &
+    "recorder_syscall_gate.c"
+
   static:
     # A LOUD failure, not a skip. This gate is about two repositories agreeing;
     # if the sibling checkout is missing there is nothing to agree with, and a
@@ -55,7 +72,16 @@ when defined(linux) and defined(amd64):
       "The cross-patcher claim map is the arbitration surface itself, so " &
       "there is no version of this gate that does not need it."
 
+  static:
+    doAssert fileExists(currentSourcePath().parentDir / recorderSyscallGate),
+      "HLX-M7 claim-conflict gate needs the recorder's syscall doorway " &
+      "beside the claim map: " & recorderSyscallGate & " is not there. " &
+      "Without it the map links with `undefined reference to " &
+      "ct_recorder_gated_syscall`, which is a LINK failure and not a test " &
+      "result (Verification-Harness-Traps Sec. 14)."
+
   {.compile: recorderClaimMap.}
+  {.compile: recorderSyscallGate.}
   {.compile: "../../libs/repro_hcr_agent/c/repro_hcr_linux_x86_64_probe.c".}
 
   # --- the recorder's side of the map ---------------------------------------

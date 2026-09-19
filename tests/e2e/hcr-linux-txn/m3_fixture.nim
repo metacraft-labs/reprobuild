@@ -49,6 +49,23 @@ const
   ## of that assertion which does not need the real map.
   RecorderClaimMap* = "codetracer-native-recorder/ct_inline_hook/claimed_guest_text.c"
 
+  ## …and the translation unit the claim map calls into. `claimed_guest_text.c`
+  ## does not use libc: every syscall it issues goes through
+  ## `ct_recorder_gated_syscall`, the recorder's single identifiable doorway to
+  ## the kernel, which lives in a DIFFERENT file. Linking the map without the
+  ## doorway fails at LINK with `undefined reference to
+  ## ct_recorder_gated_syscall` — which is how these three gates were found red
+  ## on committed `dev` on 2026-09-19.
+  ##
+  ## The REAL doorway, not a stub. A stub would be a second definition of a
+  ## symbol whose whole purpose is that there is exactly one of it, in one
+  ## place, at one address (Verification-Harness-Traps §30a: a re-derived copy
+  ## agrees with itself while the original is wrong). It is self-contained —
+  ## `nm -u` on it reports only `_GLOBAL_OFFSET_TABLE_` — so linking it costs
+  ## these fixtures nothing else.
+  RecorderSyscallGate* =
+    "codetracer-native-recorder/ct_interpose/src/ct_interpose/recorder_syscall_gate.c"
+
 proc q(value: string): string = quoteShell(value)
 
 proc shellCommand*(args: openArray[string]): string =
@@ -72,6 +89,9 @@ proc m3CaseDir*(repoRoot: string): string =
 
 proc claimMapPath*(repoRoot: string): string =
   repoRoot.parentDir / RecorderClaimMap
+
+proc recorderSyscallGatePath*(repoRoot: string): string =
+  repoRoot.parentDir / RecorderSyscallGate
 
 ## Compile the patch object and extract all three bodies.
 proc buildPatchBodies*(repoRoot: string): tuple[a, b, c: seq[byte]] =
@@ -133,7 +153,8 @@ proc buildFixture*(repoRoot, outputName: string;
     caseDir / "hcr_lx_m3_txn.c", objs.plain, objs.short,
     repoRoot / "libs" / "repro_hcr_agent" / "c" /
       "repro_hcr_linux_x86_64_probe.c",
-    claimMapPath(repoRoot)] & linkFlags & @["-lpthread"]
+    claimMapPath(repoRoot),
+    recorderSyscallGatePath(repoRoot)] & linkFlags & @["-lpthread"]
   discard runOrFail(shellCommand(args), repoRoot)
 
 proc hex*(bytes: seq[byte]): string =
