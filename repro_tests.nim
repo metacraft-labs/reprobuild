@@ -2322,6 +2322,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.nim",
+    binary: "build/test-bin/t_an_apply_reports_reboot_required_from_a_build_action",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim",
     binary: "build/test-bin/t_smoke_phase_g_runinfraapply_dispatch",
     defines: @[],
@@ -3206,6 +3215,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_profile/tests/t_smoke_repro_profile.nim",
     binary: "build/test-bin/t_smoke_repro_profile",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_profile_compile/tests/t_a_real_dispatcher_carries_reboot_required.nim",
+    binary: "build/test-bin/t_a_real_dispatcher_carries_reboot_required",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -13716,6 +13734,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_config_package_paths_resolve.nim",
+    binary: "build/test-bin/t_config_package_paths_resolve",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_configure_build_tree_cleanup.nim",
     binary: "build/test-bin/t_configure_build_tree_cleanup",
     defines: @["reproProviderMode"],
@@ -13817,6 +13844,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_export_plan_carries_tool_ops.nim",
     binary: "build/test-bin/t_export_plan_carries_tool_ops",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_flake_lock_names_no_private_input.nim",
+    binary: "build/test-bin/t_flake_lock_names_no_private_input",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

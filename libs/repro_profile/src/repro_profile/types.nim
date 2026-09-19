@@ -65,6 +65,12 @@ type
     toolIdentityRefs*: seq[string]
     requiresElevation*: bool
     cacheable*: bool
+    rebootRequired*: bool
+      ## Mirror of ``BuildActionDef.rebootRequired``: the edge's effect
+      ## needs a restart before it takes hold. An edge that actually RAN
+      ## this apply folds this into ``ApplyResult.restartNeeded``, which is
+      ## what makes the apply's reboot notice reachable from a profile
+      ## rather than only from the Windows resource drivers.
 
   ProfileIntent* = object
     name*: string

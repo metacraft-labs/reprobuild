@@ -1003,6 +1003,30 @@ type
       ## ``requiresElevation = false`` so legacy artefacts continue
       ## to take the non-elevated fork path. Default ``false`` keeps
       ## every existing build-graph edge byte-identical to today.
+    rebootRequired*: bool
+      ## Declares that this edge's effect does not take hold until the
+      ## machine restarts, so an apply that RAN it owes the operator a
+      ## reboot notice.
+      ##
+      ## Read this next part before using it. Until this field existed,
+      ## ``ApplyResult.restartNeeded`` had exactly ONE write site, fed by
+      ## exactly four originators, and all four were behind
+      ## ``when defined(windows)``. On every other platform the flag was
+      ## provably always ``false``, which made the "a reboot is required"
+      ## line the apply already prints a rule with no reachable input --
+      ## unreachable code wearing the costume of a live one. This field is
+      ## the seam that gives it an input from a profile, on any platform.
+      ##
+      ## Scope, stated so it is not mistaken for something wider: this is a
+      ## PROFILE-scope attribute, consumed by ``repro infra apply``'s
+      ## action-edge half. It is deliberately NOT carried by the versioned
+      ## binary payload codec in ``runtime_core``, which serialises build
+      ## edges for project-interface artefacts -- an artefact round trip has
+      ## no apply to report a reboot to, and a codec version bump for a
+      ## field nothing on that path reads would cost every consumer an
+      ## envelope revision for nothing. A ``BuildActionDef`` that has been
+      ## through that codec therefore decodes with ``rebootRequired =
+      ## false``; the profile path does not go through it.
     recipeRevisionFingerprint*: string
       ## M9.R.34: BLAKE3-style digest of the recipe (``repro.nim`` /
       ## ``reprobuild.nim``) file bytes the action was emitted from.

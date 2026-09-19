@@ -271,6 +271,11 @@ proc projectActionResult(action: ProfileBuildAction;
   of asSucceeded:
     result.ok = true
     result.cacheHit = false
+    # Only a FRESH run earns the reboot notice. A cache hit means this
+    # edge's effect was applied by an earlier apply, and that apply
+    # already told the operator; repeating the notice on every
+    # subsequent converged apply would train them to ignore it.
+    result.rebootRequired = action.rebootRequired
   of asCacheHit, asUpToDate:
     result.ok = true
     result.cacheHit = true

@@ -203,6 +203,8 @@ proc encodeBuildAction(b: ProfileBuildAction): string =
     (if b.requiresElevation: "true" else: "false")
   result.add ",\"cacheable\":" &
     (if b.cacheable: "true" else: "false")
+  result.add ",\"rebootRequired\":" &
+    (if b.rebootRequired: "true" else: "false")
   result.add "}"
 
 proc emitProfileIntentJson*(p: ProfileIntent): string =
@@ -345,7 +347,12 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
         cwd: b["cwd"].getStr(),
         commandStatsId: b["commandStatsId"].getStr(),
         requiresElevation: b["requiresElevation"].getBool(),
-        cacheable: b["cacheable"].getBool())
+        cacheable: b["cacheable"].getBool(),
+        # Optional key: an envelope written before this field existed
+        # decodes with ``false``, which is the pre-existing behaviour
+        # exactly -- no envelope had a reboot to report.
+        rebootRequired: (if b.hasKey("rebootRequired"):
+                           b["rebootRequired"].getBool() else: false))
       for it in b["argv"]:
         ba.argv.add it.getStr()
       for it in b["deps"]:

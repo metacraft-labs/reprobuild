@@ -1814,6 +1814,7 @@ proc buildAction*(id: string; call: PublicCliCall;
                   toolIdentityRefKinds:
                     openArray[ToolIdentityRefKind] = [];
                   requiresElevation = false;
+                  rebootRequired = false;
                   cwdKind = acwdRecipeRoot;
                   cwdCustomPath = "";
                   declaredOutputs: openArray[string] = [];
@@ -1849,6 +1850,16 @@ proc buildAction*(id: string; call: PublicCliCall;
   ## ``pokInlineExecCall`` ``PrivilegedOperation`` instead of forking
   ## directly. ``false`` (the default) preserves the existing direct-
   ## fork path so every legacy edge is byte-identical to today.
+  ##
+  ## ``rebootRequired``: when ``true``, a PROFILE-scope edge that actually
+  ## ran this apply raises ``ApplyResult.restartNeeded``, which is the flag
+  ## ``repro infra apply``'s "a reboot is required to finish one or more
+  ## changes" line reads. It is a parameter here rather than only a field
+  ## because a field no caller can set is a declaration nothing consumes:
+  ## without this the attribute would be reachable only from a hand-built
+  ## ``ProfileBuildAction``, which is not a route any recipe has. A cache
+  ## hit does NOT re-raise it, and the versioned payload codec does not
+  ## carry it — see the field's own comment in ``types.nim`` for why.
   # M9.R.34: stamp the recipe-revision fingerprint at registration
   # time so edits to ``repro.nim`` / ``reprobuild.nim`` bus the local
   # action-cache key. ``computeRecipeRevisionFingerprint`` returns the
@@ -1883,6 +1894,7 @@ proc buildAction*(id: string; call: PublicCliCall;
     toolIdentityRefs: @toolIdentityRefs,
     toolIdentityRefKinds: @toolIdentityRefKinds,
     requiresElevation: requiresElevation,
+    rebootRequired: rebootRequired,
     recipeRevisionFingerprint: recipeRevisionFingerprint,
     cwdKind: cwdKind,
     cwdCustomPath: cwdCustomPath,

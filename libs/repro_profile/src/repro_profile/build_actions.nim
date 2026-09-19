@@ -138,7 +138,8 @@ proc toProfileBuildAction*(action: BuildActionDef): ProfileBuildAction =
     commandStatsId: action.commandStatsId,
     toolIdentityRefs: action.toolIdentityRefs,
     requiresElevation: action.requiresElevation,
-    cacheable: action.cacheable)
+    cacheable: action.cacheable,
+    rebootRequired: action.rebootRequired)
 
 proc addProfileBuildAction*(target: var seq[ProfileBuildAction];
                             action: BuildActionDef) =

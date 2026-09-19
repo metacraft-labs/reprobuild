@@ -93,6 +93,21 @@ type
       ## A dispatcher that cannot compute a fingerprint leaves this
       ## empty; the audit record then still identifies the edge by
       ## address and verdict, it just cannot explain a miss.
+    rebootRequired*: bool
+      ## True when this edge RAN and its effect does not take hold until
+      ## the machine restarts. Folded into ``ApplyResult.restartNeeded``
+      ## below, which is the flag the apply's reboot notice reads.
+      ##
+      ## This field exists because the notice had no reachable input off
+      ## Windows. ``restartNeeded`` has one write site, fed by one record
+      ## type, fed by four driver-level originators, and all four are
+      ## behind ``when defined(windows)``. The build-action half could not
+      ## contribute at all -- not because nothing chose to, but because
+      ## this type had no such field and ``dispatchBuildActions`` had no
+      ## such fold, while the build-action audit writer put a literal
+      ## ``false`` in every record it wrote. A rule whose input cannot be
+      ## constructed is not a conservative rule; it is dead code that
+      ## reads like a live one.
     diagnostic*: string
 
   BuildActionDispatcher* = proc(actions: seq[ProfileBuildAction];
@@ -289,7 +304,10 @@ proc writeBuildActionAuditRecords(logPath: string; ts: int64;
       diagnostic: (if o.ok: "" else: o.diagnostic),
       preDigestHex: "",
       postDigestHex: "",
-      restartNeeded: false,
+      # Was a literal ``false``. A constant here meant the on-disk log
+      # disagreed with the summary the same apply printed, and no reader
+      # could tell which edge owed the reboot.
+      restartNeeded: o.rebootRequired,
       recordClass: AuditClassBuildAction,
       fingerprintHex: o.fingerprintHex))
 
@@ -387,6 +405,14 @@ proc dispatchBuildActions(opts: ApplyOptions; result: var ApplyResult) =
     opts.buildActions, applyLockBeat(opts.stateDir))
   result.buildActionResults = outcomes
   for o in outcomes:
+    # The fold is OUTSIDE the ok/cacheHit partition below, and
+    # deliberately so. A partially-applied edge that failed can still
+    # have left the system in a state a restart completes, and an
+    # operator who is told nothing about that is worse off than one told
+    # about a reboot they turn out not to need. The dispatcher decides
+    # whether an edge earned the flag; this loop only propagates it.
+    if o.rebootRequired:
+      result.restartNeeded = true
     if not o.ok:
       inc result.errorCount
       result.diagnostics.add("build-action " & o.id & ": " & o.diagnostic)

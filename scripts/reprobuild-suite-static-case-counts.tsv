@@ -264,6 +264,7 @@ libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	5
 libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	163
 libs/repro_home_rollback/tests/t_smoke_home_rollback.nim	nim	2
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	nim	65
+libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.nim	nim	4
 libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
 libs/repro_interface_artifacts/tests/t_multi_package_merge.nim	nim	2
@@ -361,8 +362,9 @@ libs/repro_peer_cache/tests/t_peer_cache_tls_mixed_mode_compat.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_tls_per_tenant_ca_isolation.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_tls_per_tenant_isolation.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_tls_signed_advertisement_round_trip.nim	nim	1
-libs/repro_profile/tests/t_smoke_phase_g_action_edges.nim	nim	17
+libs/repro_profile/tests/t_smoke_phase_g_action_edges.nim	nim	18
 libs/repro_profile/tests/t_smoke_repro_profile.nim	nim	137
+libs/repro_profile_compile/tests/t_a_real_dispatcher_carries_reboot_required.nim	nim	2
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	nim	1
 libs/repro_profile_compile/tests/t_smoke_apply_integration.nim	nim	4
@@ -1531,6 +1533,7 @@ tests/unit/t_cargo_vendor_action.nim	nim	10
 tests/unit/t_closure_manifest.nim	nim	4
 tests/unit/t_cmake_direct_tool_identity.nim	nim	5
 tests/unit/t_config_nims_lib_resolution.nim	nim	7
+tests/unit/t_config_package_paths_resolve.nim	nim	5
 tests/unit/t_configure_build_tree_cleanup.nim	nim	12
 tests/unit/t_constructor_fetch_tool_refs.nim	nim	9
 tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	2
@@ -1543,6 +1546,7 @@ tests/unit/t_dev_env_path_ops.nim	nim	9
 tests/unit/t_electron_builder_binaries.nim	nim	5
 tests/unit/t_every_tool_profile_is_sealed.nim	nim	6
 tests/unit/t_export_plan_carries_tool_ops.nim	nim	4
+tests/unit/t_flake_lock_names_no_private_input.nim	nim	10
 tests/unit/t_fribidi_dev_stub.nim	nim	1
 tests/unit/t_from_source_cargo_recognition.nim	nim	8
 tests/unit/t_from_source_go_recognition.nim	nim	8

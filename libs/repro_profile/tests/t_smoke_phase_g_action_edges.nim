@@ -96,6 +96,34 @@ suite "Windows-System-Resources Phase G — push helpers":
     check target.len == 1
     check target[0].cwd == "/var/tmp/work"
 
+  test "addProfileBuildAction carries a declared reboot, and only when declared":
+    # THE LINK BETWEEN THE DSL AND THE PROFILE. `rebootRequired` is
+    # declared on `buildAction`, flattened by `toProfileBuildAction`, and
+    # read by the apply's fold; the apply-side cases live in
+    # `repro_infra` and `repro_profile_compile` and start from a
+    # hand-built `ProfileBuildAction`, so THIS is the only place the two
+    # steps closest to the declaration are exercised. Without it, deleting
+    # either the parameter's assignment in `buildAction` or the field's
+    # copy in `toProfileBuildAction` is green everywhere: measured, both
+    # deletions left every other case passing and both binaries
+    # byte-identical, because neither module was even linked in.
+    #
+    # Both polarities in one case, so a flattener that hard-wires `true`
+    # is a failure rather than a pass.
+    resetBuildActionRegistry()
+    let call = inlineExecCall(@["/bin/true"])
+    let restarting = buildAction(id = "restarting-edge", call = call,
+                                 rebootRequired = true)
+    let quiet = buildAction(id = "quiet-edge", call = call)
+    check restarting.rebootRequired
+    check not quiet.rebootRequired
+    var target: seq[ProfileBuildAction]
+    addProfileBuildAction(target, restarting)
+    addProfileBuildAction(target, quiet)
+    check target.len == 2
+    check target[0].rebootRequired
+    check not target[1].rebootRequired
+
   test "addProfileBuildAction rejects non-inline-exec call shape":
     # A typed-tool call whose ``call`` isn't `reprobuild.builtin.exec`
     # (e.g. a subcommand call like the ones gcc / meson emit) is NOT
