@@ -32,7 +32,8 @@
 ##
 ## > This is the direct lesson of `Compiles-Are-Normal-Edges.md`, which
 ## > records a case where `--define` flags "reached the command line … but
-## > `sharedProviderNimcacheKey` does not mention defines", so a stale
+## > `sharedProviderNimcacheKey` [since renamed
+## > `positionKeyedNimcacheKey`] does not mention defines", so a stale
 ## > artifact was served, "the feature that depended on those defines silently
 ## > did nothing, and a green build reported success". A lock-file designation
 ## > that silently fell back to the wrong lock file would fail in exactly that

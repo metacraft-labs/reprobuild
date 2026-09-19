@@ -268,7 +268,7 @@ libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.ni
 libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
 libs/repro_interface_artifacts/tests/t_multi_package_merge.nim	nim	2
-libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	1
+libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_source_discovery.nim	nim	3
 libs/repro_interface_artifacts/tests/t_reprobuild_source_root_from_binary_location.nim	nim	6
 libs/repro_interface_artifacts/tests/t_rp1_provider_artifact_edge_identity.nim	nim	9
@@ -1577,7 +1577,7 @@ tests/unit/t_m9r11_stub_provisioning_widening.nim	nim	11
 tests/unit/t_m9r12_3_runquota_standard_pools.nim	nim	5
 tests/unit/t_m9r12_4_autotools_emits_fetch.nim	nim	3
 tests/unit/t_m9r12_sh_inline_exec_and_typed_tool_fallback.nim	nim	15
-tests/unit/t_m9r13a_provider_compile_sharing.nim	nim	19
+tests/unit/t_m9r13a_provider_compile_sharing.nim	nim	20
 tests/unit/t_m9r13b_1_toolchain_pin.nim	nim	4
 tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	nim	9
 tests/unit/t_m9r13c_2_shim_lib_resolution.nim	nim	4
