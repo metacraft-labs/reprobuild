@@ -113,8 +113,7 @@ else:
     when isNixSupported:
       test "apply --plan previews every category and mutates nothing":
         when not defined(windows):
-          checkpoint "platform-skip: M72 plan dry-run gate is Windows-specific"
-          check true
+          skip("platform-skip: M72 plan dry-run gate is Windows-specific")
           return
 
         let tempRoot = createTempDir("repro-m72-plan-", "")

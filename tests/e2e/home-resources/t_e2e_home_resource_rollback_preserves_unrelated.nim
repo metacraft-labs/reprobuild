@@ -77,8 +77,7 @@ else:
   suite "M68 gate 4: e2e_home_resource_rollback_preserves_unrelated":
     test "rollback subtracts only Reprobuild contributions; user entries survive":
       when not defined(windows):
-        checkpoint "platform-skip: Windows env.userPath path is the gate"
-        check true
+        skip("platform-skip: Windows env.userPath path is the gate")
         return
 
       # Snapshot the real HKCU\Environment\Path so we can restore it.

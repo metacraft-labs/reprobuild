@@ -79,8 +79,7 @@ else:
   suite "M68 Phase B: integration_prevent_destroy":
     test "preventDestroy blocks the destroy; --accept-overwrite cannot bypass":
       when not defined(windows):
-        checkpoint "platform-skip: Windows registry resource is the subject"
-        check true
+        skip("platform-skip: Windows registry resource is the subject")
         return
 
       let testSubkey = "Software\\Reprobuild-Tests\\m68-pd-" &
@@ -157,8 +156,8 @@ else:
 
     test "control: a plain (lpDefault) resource IS destroyed on removal":
       when not defined(windows):
-        checkpoint "platform-skip"
-        check true
+        skip("platform-skip: the lpDefault control resource is a " &
+          "Windows registry value")
         return
 
       let testSubkey = "Software\\Reprobuild-Tests\\m68-pd-ctl-" &

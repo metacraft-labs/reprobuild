@@ -127,8 +127,7 @@ else:
 
     test "pre-existing correct symlink is a no-op cache-hit (not recreated)":
       when not defined(windows):
-        checkpoint "platform-skip: M72 stow gate is Windows-specific"
-        check true
+        skip("platform-skip: M72 stow gate is Windows-specific")
         return
       let tempRoot = createTempDir("repro-m72-stow-cachehit-", "")
       defer:
@@ -143,9 +142,8 @@ else:
       except OSError:
         symlinkOk = false
       if not symlinkOk:
-        checkpoint "platform-skip: host cannot create symlinks " &
-          "(developer mode off); the cache-hit assertion needs a symlink"
-        check true
+        skip("platform-skip: host cannot create symlinks " &
+          "(developer mode off); the cache-hit assertion needs a symlink")
       else:
         check symlinkExists(target)
         # Record the link's creation time. A delete + recreate would
@@ -169,7 +167,7 @@ else:
     test "pre-existing regular file is NOT clobbered; --reconcile-drift " &
          "replaces it and records prior content":
       when not defined(windows):
-        check true
+        skip("platform-skip: the M72 stow gate is Windows-specific")
         return
       let tempRoot = createTempDir("repro-m72-stow-regfile-", "")
       defer:
@@ -231,7 +229,7 @@ else:
 
     test "pre-existing symlink to a DIFFERENT source is reported as drift":
       when not defined(windows):
-        check true
+        skip("platform-skip: the M72 stow gate is Windows-specific")
         return
       let tempRoot = createTempDir("repro-m72-stow-wronglink-", "")
       defer:
@@ -248,8 +246,7 @@ else:
       except OSError:
         symlinkOk = false
       if not symlinkOk:
-        checkpoint "platform-skip: host cannot create symlinks"
-        check true
+        skip("platform-skip: host cannot create symlinks")
       else:
         check symlinkExists(target)
         let resolvedBefore = expandSymlink(target)

@@ -2723,7 +2723,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 312,
+          "line": 310,
           "path": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
           "patterns": [
             "repro-compile-home-profile"

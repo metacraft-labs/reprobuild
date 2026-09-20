@@ -115,9 +115,8 @@ else:
     when isNixSupported:
       test "apply realizes via the production catalog; cache-hit not reinstalled":
         when not defined(windows):
-          checkpoint "platform-skip: M72 production catalog gate is " &
-            "Windows-specific (the Scoop adapter is Windows-only)"
-          check true
+          skip("platform-skip: M72 production catalog gate is " &
+            "Windows-specific (the Scoop adapter is Windows-only)")
           return
 
         let scoopBinary = resolveScoopBinary()
