@@ -40,7 +40,8 @@
 ## ``scripts/bootstrap_guard.sh`` excludes ``tests/`` from the freshness scan
 ## that decides whether ``just bootstrap`` relinks the apps.
 
-import std/[json, os, osproc, sequtils, strtabs, strutils, times, unittest]
+import std/[json, os, osproc, sequtils, strtabs, strutils, tempfiles, times,
+  unittest]
 import repro_test_support
 
 const RepoMarker = "repro.nim"
@@ -96,15 +97,28 @@ proc reportActions(report: JsonNode): JsonNode =
   if result.isNil or result.kind == JNull:
     result = newJArray()
 
-proc runBuildHelpers(reproBin, repoRoot: string):
+proc runBuildHelpers(reproBin, repoRoot, reportPath: string):
     tuple[output: string; exitCode: int] =
+  ## THE DESTINATION IS NAMED, not defaulted. A bare ``--write-report`` lands
+  ## on ``<outDir>/build-report.json``, and ``outDir`` collapses to ONE
+  ## directory for every selector this suite drives: ``outputDirForTarget``
+  ## (``libs/repro_cli_support/src/repro_cli_support.nim:1103``) takes
+  ## ``outputName`` from ``resolveProjectFile(".")`` =
+  ## ``splitFile("repro.nim").name`` = ``repro`` (same file, 726-729), and
+  ## ``scripts/run_tests.sh`` sets no ``REPROBUILD_WORK_ROOT`` so the
+  ## worktree-scoped branch never fires. ``.#test-helpers``, ``.#apps`` and
+  ## every ``.#reprobuild.*`` selector therefore shared
+  ## ``<repoRoot>/.repro/build/repro/build-report.json``. This case is on
+  ## ``ExclusiveStems``, so nothing was concurrent with it — but that is a
+  ## property of the schedule, not of the case, and the pool-resident
+  ## ``t_b2_helpers_built_by_engine`` drives the SAME collection.
   let args = @[
     reproBin.quoteShell,
     "build",
     ".#test-helpers",
     "--tool-provisioning=path",
     "--daemon=off",
-    "--write-report",
+    "--write-report=" & reportPath.quoteShell,
     "--log=actions",
     "--progress=quiet",
   ]
@@ -134,7 +148,12 @@ suite "Bootstrap-And-Self-Build B2: helper invalidation":
         fileExists(touchedAbs):
       # Pass 1 — warm the cache. No assertion is read from this report; the
       # only thing it has to do is leave an entry behind for every helper edge.
-      let (firstOut, firstExit) = runBuildHelpers(reproBin, repoRoot)
+      let reportDir = createTempDir("repro-b2-helpers-report-", "")
+      defer: removeDir(reportDir)
+      let reportPath = reportDir / "build-report.json"
+
+      let (firstOut, firstExit) =
+        runBuildHelpers(reproBin, repoRoot, reportDir / "warmup-report.json")
       checkpoint("first exit=" & $firstExit)
       if firstExit != 0:
         checkpoint(firstOut)
@@ -144,17 +163,20 @@ suite "Bootstrap-And-Self-Build B2: helper invalidation":
         touchFile(touchedAbs)
         checkpoint("touched: " & touchedAbs)
 
-        let (output, exitCode) = runBuildHelpers(reproBin, repoRoot)
+        let (output, exitCode) =
+          runBuildHelpers(reproBin, repoRoot, reportPath)
         checkpoint("second exit=" & $exitCode)
         if exitCode != 0:
           checkpoint(output)
         check exitCode == 0
 
-        let reportPath = valueAfter(output, "buildReport:")
-        check reportPath.len > 0
+        # The engine must still ANNOUNCE a report — unchanged. Only the file
+        # that is parsed changed: this case's own, never the shared default.
+        let announced = valueAfter(output, "buildReport:")
+        check announced.len > 0
         check fileExists(reportPath)
 
-        if reportPath.len > 0 and fileExists(reportPath):
+        if announced.len > 0 and fileExists(reportPath):
           let report = parseFile(reportPath)
           let actions = reportActions(report)
           var helperActions: seq[JsonNode] = @[]

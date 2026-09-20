@@ -99,8 +99,17 @@ proc specSlice(reproTestsText, source: string): string =
   let limit = min(reproTestsText.len, pos + 400)
   reproTestsText[pos ..< limit]
 
-proc runBuildTarget(reproBin, repoRoot, selector, cacheRoot: string):
-    tuple[output: string; exitCode: int] =
+proc runBuildTarget(reproBin, repoRoot, selector, cacheRoot,
+                    reportPath: string): tuple[output: string; exitCode: int] =
+  ## THE REPORT NEEDED THE SAME SCOPING THE CACHE ROOT GOT. A bare
+  ## ``--write-report`` lands on ``<outDir>/build-report.json``, and ``outDir``
+  ## collapses to ONE directory for every selector this suite drives:
+  ## ``outputDirForTarget`` (``libs/repro_cli_support/src/
+  ## repro_cli_support.nim:1103``) takes ``outputName`` from
+  ## ``resolveProjectFile(".")`` = ``splitFile("repro.nim").name`` = ``repro``
+  ## (same file, 726-729), and ``scripts/run_tests.sh`` sets no
+  ## ``REPROBUILD_WORK_ROOT``. Scoping the cache root without scoping the
+  ## report left half the isolation this case's header argues for.
   let args = @[
     reproBin.quoteShell,
     "build",
@@ -108,7 +117,7 @@ proc runBuildTarget(reproBin, repoRoot, selector, cacheRoot: string):
     "--tool-provisioning=path",
     "--daemon=off",
     "--action-cache-root=" & cacheRoot.quoteShell,
-    "--write-report",
+    "--write-report=" & reportPath.quoteShell,
     "--log=actions",
     "--progress=quiet",
   ]
@@ -156,19 +165,24 @@ suite "Bootstrap-And-Self-Build B3: repro binary input wiring":
     if fileExists(reproBin) and fileExists(runquotad):
       let cacheRoot = createTempDir("repro-b3-invalidation-cache-", "")
       defer: removeDir(cacheRoot)
+      let reportDir = createTempDir("repro-b3-invalidation-report-", "")
+      defer: removeDir(reportDir)
+      let reportPath = reportDir / "build-report.json"
       let selector = ".#" & ExecuteActionId
       let (output, exitCode) = runBuildTarget(reproBin, repoRoot, selector,
-                                              cacheRoot)
+                                              cacheRoot, reportPath)
       checkpoint("exit=" & $exitCode)
       if exitCode != 0:
         checkpoint(output)
       check exitCode == 0
 
-      let reportPath = valueAfter(output, "buildReport:")
-      check reportPath.len > 0
+      # The engine must still ANNOUNCE a report — unchanged. Only the file
+      # that is parsed changed.
+      let announced = valueAfter(output, "buildReport:")
+      check announced.len > 0
       check fileExists(reportPath)
 
-      if reportPath.len > 0 and fileExists(reportPath):
+      if announced.len > 0 and fileExists(reportPath):
         let report = parseFile(reportPath)
         let actions = reportActions(report)
         var reproAppAction, executeAction: JsonNode = nil

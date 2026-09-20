@@ -177,20 +177,45 @@ suite "Bootstrap-And-Self-Build B3: repro test runs through engine":
       # the form, fall back to the bare target name which the implicit-
       # target-name pathway should accept.
       let executeStem = TargetTest
+      # THE REPORT THIS CASE READS MUST BE THE ONE IT WROTE, and a bare
+      # ``--write-report`` did not give it that. The default destination is
+      # ``<outDir>/build-report.json`` and ``outDir`` is
+      # ``outputDirForTarget`` (``libs/repro_cli_support/src/
+      # repro_cli_support.nim:1103``): for EVERY ``.#<fragment>`` selector
+      # anchored at this repo the fragment branch falls through to
+      # ``resolveProjectFile(".")`` and sets ``outputName`` to
+      # ``splitFile("repro.nim").name`` = ``repro`` (same file, 726-729), and
+      # ``scripts/run_tests.sh`` sets no ``REPROBUILD_WORK_ROOT``, so the
+      # worktree-scoped branch never fires either. One path,
+      # ``<repoRoot>/.repro/build/repro/build-report.json``, for every
+      # self-hosted case in the suite.
+      #
+      # THIS CASE IS IN THE PARALLEL POOL, and so is at least one other
+      # bare-``--write-report`` writer against the same anchor
+      # (``t_b4_python_tests_in_graph.nim``). So the file parsed below could
+      # already be another pool-mate's document, in which case
+      # ``executeAction`` is nil and the case fails saying the execute edge
+      # did not run — about a run that did. The second case in this same file
+      # already names its own destination; this one simply had not been
+      # brought along.
+      let reportDir = createTempDir("repro-b3-engine-report-", "")
+      defer: removeDir(reportDir)
+      let ownReportPath = reportDir / "build-report.json"
+      let writeReportFlag = "--write-report=" & ownReportPath.quoteShell
       var attempts: seq[seq[string]] = @[]
       attempts.add(@[
         reproBin.quoteShell, "build", ".#test#" & executeStem,
         "--tool-provisioning=path", "--daemon=off",
-        "--write-report", "--log=actions", "--progress=quiet"])
+        writeReportFlag, "--log=actions", "--progress=quiet"])
       attempts.add(@[
         reproBin.quoteShell, "build", executeStem,
         "--tool-provisioning=path", "--daemon=off",
-        "--write-report", "--log=actions", "--progress=quiet"])
+        writeReportFlag, "--log=actions", "--progress=quiet"])
       attempts.add(@[
         reproBin.quoteShell, "build",
         "reprobuild.test_execute." & executeStem,
         "--tool-provisioning=path", "--daemon=off",
-        "--write-report", "--log=actions", "--progress=quiet"])
+        writeReportFlag, "--log=actions", "--progress=quiet"])
 
       var lastOutput = ""
       var lastExit = -1
@@ -230,10 +255,13 @@ suite "Bootstrap-And-Self-Build B3: repro test runs through engine":
         # the absence.
         let routedViaBuildEdge = (resolvedSelector == executeStem)
         let executeActionId = "reprobuild.test_execute." & executeStem
-        let reportPath = valueAfter(lastOutput, "buildReport:")
+        # The engine must still ANNOUNCE a report — unchanged. What changed
+        # is only which file is then parsed: this case's own, never the
+        # shared default.
+        let announced = valueAfter(lastOutput, "buildReport:")
         var executeAction: JsonNode = nil
-        if reportPath.len > 0 and fileExists(reportPath):
-          let report = parseFile(reportPath)
+        if announced.len > 0 and fileExists(ownReportPath):
+          let report = parseFile(ownReportPath)
           let actions = reportActions(report)
           for action in actions:
             if action{"id"}.getStr() == executeActionId:

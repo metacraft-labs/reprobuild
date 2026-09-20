@@ -45,7 +45,7 @@
 ## state in which "every per-app action cache-hit" is vacuously true. Both
 ## now fail.
 
-import std/[json, os, osproc, strtabs, strutils, unittest]
+import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
 
 import repro_test_support
 
@@ -115,27 +115,43 @@ proc reportActions(report: JsonNode): JsonNode =
   if result.isNil or result.kind == JNull:
     result = newJArray()
 
-proc runBuildApps(reproBin, repoRoot: string; withReport: bool):
+proc runBuildApps(reproBin, repoRoot: string; reportPath: string):
     tuple[output: string; exitCode: int] =
   # The collection is named ``apps``; the ``.#apps`` fragment form
   # forces the CLI's name-resolver to look up the project's
   # named-target table rather than treat ``apps`` as the on-disk
   # ``apps/`` directory.
   #
-  # ``withReport=false`` swaps ``--write-report`` for ``--measure=none``
+  # An empty ``reportPath`` swaps ``--write-report=…`` for ``--measure=none``
   # on the first (warm-up) invocation. The report write itself is
   # cheap; the expensive part is per-action ``collectEvidence``, which
   # runs for every action that EXECUTES regardless of any flag — it is
   # inherent measurement, not a ``--measure`` category. We still skip the
   # report on the warm-up because the test only reads it on the SECOND
   # invocation and the engine writes a multi-MB JSON document.
+  #
+  # THE DESTINATION IS NAMED, not defaulted. A bare ``--write-report`` lands
+  # on ``<outDir>/build-report.json``, and ``outDir`` collapses to ONE
+  # directory for every selector this repo's suite drives:
+  # ``outputDirForTarget`` (``libs/repro_cli_support/src/
+  # repro_cli_support.nim:1103``) takes ``outputName`` from
+  # ``resolveProjectFile(".")`` = ``splitFile("repro.nim").name`` = ``repro``
+  # (same file, 726-729), and ``scripts/run_tests.sh`` sets no
+  # ``REPROBUILD_WORK_ROOT``, so the worktree-scoped branch never fires. So
+  # ``.#apps``, ``.#test-helpers`` and every ``.#reprobuild.*`` selector in
+  # this suite wrote and read ``<repoRoot>/.repro/build/repro/
+  # build-report.json``. This case is on ``ExclusiveStems`` today and so was
+  # never concurrent with another writer; the flag is named anyway, because
+  # "nothing else is running" is a scheduling accident and not a property of
+  # the case.
   let args = @[
     reproBin.quoteShell,
     "build",
     ".#apps",
     "--tool-provisioning=path",
     "--daemon=off",
-    (if withReport: "--write-report" else: "--measure=none"),
+    (if reportPath.len > 0: "--write-report=" & reportPath.quoteShell
+     else: "--measure=none"),
     "--log=actions",
     "--progress=quiet",
   ]
@@ -161,8 +177,12 @@ suite "Bootstrap-And-Self-Build B1: apps action cache hits on second run":
       # binaries the pre-existing ``build/bin/`` state happens to
       # carry. In a fully pre-warmed checkout this is already a fast
       # path; in a cold checkout it will compile every app.
+      let reportDir = createTempDir("repro-b1-apps-report-", "")
+      defer: removeDir(reportDir)
+      let reportPath = reportDir / "build-report.json"
+
       let (firstOut, firstExit) =
-        runBuildApps(reproBin, repoRoot, withReport = false)
+        runBuildApps(reproBin, repoRoot, reportPath = "")
       checkpoint("first exit=" & $firstExit)
       if firstExit != 0:
         checkpoint(firstOut)
@@ -171,20 +191,20 @@ suite "Bootstrap-And-Self-Build B1: apps action cache hits on second run":
       if firstExit == 0:
         # Second invocation — must be a no-op for every per-app action.
         let (secondOut, secondExit) =
-          runBuildApps(reproBin, repoRoot, withReport = true)
+          runBuildApps(reproBin, repoRoot, reportPath = reportPath)
         checkpoint("second exit=" & $secondExit)
         if secondExit != 0:
           checkpoint(secondOut)
           check secondExit == 0
         else:
-          let reportPath = valueAfter(secondOut, "buildReport:")
-          if reportPath.len == 0:
+          let announced = valueAfter(secondOut, "buildReport:")
+          if announced.len == 0:
             # ``--write-report`` was passed, so a missing report path is
             # the engine failing to honour a flag this case depends on —
             # a failure of the thing under test, not of the host.
             checkpoint("no buildReport: line in second-run output:")
             checkpoint(secondOut)
-            check reportPath.len > 0
+            check announced.len > 0
           elif not fileExists(reportPath):
             checkpoint("build report at " & reportPath & " not present")
             check fileExists(reportPath)

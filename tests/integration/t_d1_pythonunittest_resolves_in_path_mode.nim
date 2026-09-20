@@ -27,7 +27,7 @@
 ##          ``status == "asSucceeded"``, ``launched == true``, and
 ##          ``cacheDecision == "cdNotCacheable"``.
 
-import std/[json, os, osproc, strtabs, strutils, unittest]
+import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
 import repro_test_support
 
 const RepoMarker = "repro.nim"
@@ -176,6 +176,25 @@ suite "Deferred-Item D1: pythonUnittest resolves in path mode":
     check fileExists(reproBin)
     check fileExists(runquotad)
     if fileExists(reproBin) and fileExists(runquotad):
+      # REPORT ISOLATION. A bare ``--write-report`` lands on
+      # ``<outDir>/build-report.json``, and ``outDir`` is
+      # ``outputDirForTarget`` (``libs/repro_cli_support/src/
+      # repro_cli_support.nim:1103``) — for EVERY ``.#<fragment>`` selector
+      # anchored at this repo the fragment branch falls through to
+      # ``resolveProjectFile(".")`` and sets ``outputName`` to
+      # ``splitFile("repro.nim").name`` = ``repro`` (same file, line 726-729).
+      # So ``.#reprobuild.python_test.…``, ``.#apps``, ``.#test-helpers`` and
+      # every other selector this suite drives write ONE file,
+      # ``<repoRoot>/.repro/build/repro/build-report.json``, and
+      # ``REPROBUILD_WORK_ROOT`` is not set by ``scripts/run_tests.sh`` so the
+      # worktree-scoped branch never fires. Two concurrent cases would then
+      # each parse whichever run wrote last. ``--write-report=PATH``
+      # (``BuildReportPersistence.path``, same file ~line 7641) names an exact
+      # destination; the ``buildReport:`` line the engine prints is still
+      # asserted below, so "the engine honoured the flag" stays checked.
+      let reportDir = createTempDir("repro-d1-python-report-", "")
+      defer: removeDir(reportDir)
+      let reportPath = reportDir / "build-report.json"
       let selector = ".#" & ExecuteActionId
       let cmd = @[
         reproBin.quoteShell,
@@ -183,7 +202,7 @@ suite "Deferred-Item D1: pythonUnittest resolves in path mode":
         selector,
         "--tool-provisioning=path",
         "--daemon=off",
-        "--write-report",
+        "--write-report=" & reportPath.quoteShell,
         "--log=actions",
         "--progress=quiet"].join(" ")
       checkpoint("running: " & cmd)
@@ -196,8 +215,11 @@ suite "Deferred-Item D1: pythonUnittest resolves in path mode":
       check "references executable python3" notin output
       check exitCode == 0
 
-      let reportPath = valueAfter(output, "buildReport:")
-      check reportPath.len > 0
+      # The engine must still ANNOUNCE a report — that is the flag-honoured
+      # assertion this case has always made. What changed is only WHICH file
+      # is then parsed: the one this case named, never the shared default.
+      let announced = valueAfter(output, "buildReport:")
+      check announced.len > 0
       check fileExists(reportPath)
 
       let report = parseFile(reportPath)

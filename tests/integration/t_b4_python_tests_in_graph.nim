@@ -26,7 +26,7 @@
 ## profile to ``python3`` and executes it, so retaining that skip would hide a
 ## regression in working engine plumbing.
 
-import std/[json, os, strutils, unittest]
+import std/[json, os, strutils, tempfiles, unittest]
 
 import repro_test_support
 
@@ -154,6 +154,20 @@ suite "Bootstrap-And-Self-Build B4: Python tests participate in the graph":
 
     let fixtureStem = EngineFixture.splitFile().name
     let actionId = "reprobuild.python_test." & fixtureStem
+    # THE REPORT MUST BE THIS RUN'S. A bare ``--write-report`` lands on
+    # ``<outDir>/build-report.json``, and for every ``.#<fragment>`` selector
+    # anchored at this repo ``outDir`` resolves to one directory:
+    # ``outputDirForTarget`` (``libs/repro_cli_support/src/
+    # repro_cli_support.nim:1103``) takes ``outputName`` from
+    # ``resolveProjectFile(".")`` = ``splitFile("repro.nim").name`` = ``repro``
+    # (same file, 726-729), and ``scripts/run_tests.sh`` sets no
+    # ``REPROBUILD_WORK_ROOT``. This case is POOL-RESIDENT and it is not the
+    # only bare-``--write-report`` writer there, so the document parsed below
+    # could be a pool-mate's — in which case ``matchedAction`` is false and
+    # the case fails about a run that succeeded.
+    let reportDir = createTempDir("repro-b4-python-report-", "")
+    defer: removeDir(reportDir)
+    let reportPath = reportDir / "build-report.json"
     let res = runShell(shellCommand(@[
       reproBin,
       "build",
@@ -161,7 +175,7 @@ suite "Bootstrap-And-Self-Build B4: Python tests participate in the graph":
       "--tool-provisioning=path",
       "--daemon=off",
       "--no-runquota",
-      "--write-report",
+      "--write-report=" & reportPath,
       "--log=actions",
       "--progress=quiet",
     ], @[("PATH", runquotad.parentDir & $PathSep & getEnv("PATH"))]),
@@ -170,11 +184,13 @@ suite "Bootstrap-And-Self-Build B4: Python tests participate in the graph":
       checkpoint(res.output)
     check res.code == 0
 
-    let reportPath = valueAfter(res.output, "buildReport:")
-    checkpoint("build report: " & reportPath)
-    check reportPath.len > 0
+    # The engine must still ANNOUNCE a report — the flag-honoured assertion
+    # this case has always made. Only the file that is parsed changed.
+    let announced = valueAfter(res.output, "buildReport:")
+    checkpoint("build report: " & announced)
+    check announced.len > 0
     check fileExists(reportPath)
-    if reportPath.len > 0 and fileExists(reportPath):
+    if announced.len > 0 and fileExists(reportPath):
       let report = parseFile(reportPath)
       var matchedAction = false
       for action in report{"actions"}:
