@@ -170,6 +170,120 @@ const
   ## Python test edge and reads the shared full build report for the
   ## resulting action.
   ##
+  ## "DRIVES SELF-HOSTED BUILDS AGAINST SHARED STATE" IS NOT WHAT SETS THIS
+  ## CLUSTER APART, and reading the paragraph above as if it were is how the
+  ## list gets treated as closed. Roughly fifteen POOL-RESIDENT cases do the
+  ## same thing against the same repo root, and two of them mutate artifacts
+  ## the paragraph names as the reason for exclusivity:
+  ##
+  ##   * ``t_b5_bootstrap_idempotent`` (:115, :127) runs ``just bootstrap``,
+  ##     which on a positive ``scripts/bootstrap_guard.sh decide`` runs
+  ##     ``scripts/build_apps.sh`` — ``rm -f build/bin/<name>`` (:137) then
+  ##     relink (:612) for EVERY entrypoint, ``build/bin/repro`` included.
+  ##   * ``t_build_progress_modes`` (:29, :35, :59) drives ``.#test-helpers``
+  ##     against a COLD private ``--action-cache-root``, so every helper edge
+  ##     executes: nine ``build/test-bin/`` helpers plus
+  ##     ``build/bin/repro_test_runner`` (``repro.nim:2114``) — the running
+  ##     runner's own image.
+  ##   * ``t_b2_helpers_built_by_engine`` (:85-89) DELETES three
+  ##     ``build/test-bin/`` helpers and rebuilds them.
+  ##   * ``t_d1_buildnimunittest_resolves_in_path_mode`` (:163-172) and
+  ##     ``t_b3_repro_test_runs_through_engine`` (:182-193, :280-292) both
+  ##     relink ``build/test-bin/t_dsl_outputs_statement_basic_accepted`` —
+  ##     the same ``nim c --out:`` path, from the same pool.
+  ##
+  ## So the list is not a fence around a property; it is a fence around ten
+  ## particular cases, and what it actually buys is that they do not collide
+  ## with EACH OTHER. The phase ordering matters when reading a proposal to
+  ## remove an entry: the exclusive phase runs to completion BEFORE the first
+  ## worker thread is created (see the split at ``queue.items`` below), so a
+  ## stem taken off this list is not exposed to the other nine — it is exposed
+  ## to the pool. The question for each entry is therefore "does the POOL
+  ## touch this case's shared surface", not "does the cluster".
+  ##
+  ## ONE OF THE THREE REASONS ABOVE HAS BEEN RETIRED RATHER THAN RESTATED.
+  ## "the global ``.repro/build/.../build-report.json``" understated the
+  ## problem and has been fixed at the source. The ``...`` is not a
+  ## per-target directory: ``outputDirForTarget``
+  ## (``libs/repro_cli_support/src/repro_cli_support.nim:1103``) derives
+  ## ``outputName`` for every ``.#<fragment>`` selector anchored at this repo
+  ## from ``resolveProjectFile(".")``, i.e. ``splitFile("repro.nim").name`` =
+  ## ``repro`` (same file, 726-729), and ``scripts/run_tests.sh`` exports no
+  ## ``REPROBUILD_WORK_ROOT``, so the worktree-scoped branch never fires.
+  ## ``.#apps``, ``.#test-helpers``, ``.#test#<stem>`` and every
+  ## ``.#reprobuild.*`` selector in this suite wrote and read ONE file,
+  ## ``<repoRoot>/.repro/build/repro/build-report.json`` — exclusive cases and
+  ## pool cases alike. Every one of those call sites now passes
+  ## ``--write-report=<own temp path>``; the ``buildReport:`` line the engine
+  ## prints is still asserted at each, so "the engine honoured the flag" is
+  ## unchanged and only the file that gets parsed moved. That closes the
+  ## report surface for the whole family, so what remains under discussion for
+  ## each entry below is ARTIFACTS only.
+  ##
+  ## WHAT REMAINS, PER ENTRY, AND WHY IT IS NOT A KNOB AWAY.
+  ## Declared outputs are literal project-relative strings in ``repro.nim``
+  ## (``binary = "build/bin/…"``, ``binary = "build/test-bin/…"``), and
+  ## ``--work-root`` relocates only the engine's ``.repro/build/<outputName>``
+  ## scratch, never a declared output. ``nim.c`` links straight to ``--out:``
+  ## (``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/nim.nim:230-233``),
+  ## so a concurrent exec of the same path makes the link ``ETXTBSY`` and a
+  ## concurrent probe can read a half-written image. There is no per-test
+  ## redirect, and a private COPY of the project is not a per-test cost
+  ## anybody can pay (a cold ``.#apps`` is 15-30 minutes).
+  ##
+  ##   * B0 / D2 — both ``removeFile`` the sibling
+  ##     ``<workspace>/runquota/build/bin/runquotad`` and rebuild it through
+  ##     the ``runquota:runquotad`` cross-project selector. The output path
+  ##     belongs to runquota's own project file; there is nothing to redirect.
+  ##     Some forty pool cases hard-require that binary through
+  ##     ``requireRunQuotaDaemonBin`` and raise a fixture error when it is
+  ##     absent, so the delete window is a suite-wide outage.
+  ##   * B1 collection / B1 cache-hit / D5 — write ``build/bin/<app>``. The
+  ##     cache-hit case additionally asserts a property of the GLOBAL build
+  ##     state ("every ``reprobuild.apps.*`` action is cache-effective on the
+  ##     second run"), which any concurrent app rebuild falsifies. Isolating
+  ##     that would mean giving it its own app tree, not its own flag.
+  ##   * B2 invalidation — asserts that every NON-touched helper edge is
+  ##     ``cdHit`` / ``asUpToDate`` / not launched. ``t_b2_helpers_built_by_engine``
+  ##     deleting one of those outputs, or ``t_build_progress_modes`` relinking
+  ##     them from a cold cache, falsifies it directly.
+  ##   * B3 invalidation — asserts ``reprobuild.apps.repro`` LAUNCHED, i.e. it
+  ##     relinks ``build/bin/repro``: the single public CLI every other case in
+  ##     the suite executes. The artifact under test IS the shared singleton.
+  ##   * B3 execute-edge — would become a THIRD concurrent writer of
+  ##     ``build/test-bin/t_dsl_outputs_statement_basic_accepted``. The other
+  ##     two are already in the pool and already race each other; adding to
+  ##     that is not isolation. Retargeting one of the three to a stem of its
+  ##     own is the fix, and it is a source change nobody has measured yet.
+  ##
+  ## NO ENTRY WAS REMOVED ON THIS PASS, AND THE REASON IS THE BAR, NOT THE
+  ## ANALYSIS. Two entries survive the reading above:
+  ## ``t_d1_pythonunittest_resolves_in_path_mode``, whose ONLY shared surface
+  ## was the report (its edge is ``cdNotCacheable``, declares no outputs, and
+  ## runs a Python source-scanner that writes nothing); and
+  ## ``t_b1_repro_build_apps_byte_equivalent``, which writes nothing at all and
+  ## is threatened only by ``t_b5_bootstrap_idempotent``'s conditional
+  ## ``build_apps.sh``. Neither was taken off the list, because removing a stem
+  ## requires running the affected cases concurrently and repeatedly and
+  ## reporting the failure count, and that could not be run here: a git
+  ## worktree placed under ``<checkout>/.claude/worktrees/`` inherits the
+  ## PARENT checkout's ``config.nims`` through Nim's parent-directory config
+  ## walk, so ``reproRepoRoot`` and the ``libs/<name>/src`` search paths point
+  ## at the shared checkout, and a ``repro build`` from the worktree compiles
+  ## its own ``repro.nim`` against whatever branch the shared checkout is
+  ## parked on. Measure from a worktree that is a SIBLING of the checkout, not
+  ## a child of it.
+  ##
+  ## THE REPORT HAZARD IS NOT HYPOTHETICAL, and one round of it was observed
+  ## before the host became the binding constraint: six concurrent
+  ## ``repro build .#t<k>`` runs against one scratch project, each passing a
+  ## bare ``--write-report``, left a single
+  ## ``<proj>/.repro/build/repro/build-report.json`` whose ``actions`` array
+  ## held exactly ONE id (``t2``). Five of the six runs would have parsed a
+  ## document that does not mention their own build — which is the shape every
+  ## ``check <action> != nil`` in this family fails with. One round is one
+  ## round: it is evidence the mechanism is live, not a rate.
+  ##
   ## The M7 HTTPS cache gate starts a real TLS cache daemon and relies on
   ## process-local TLS context setup. Run it alone so other cache daemon tests
   ## cannot starve its listener startup under clean-cold load.

@@ -134,6 +134,25 @@ suite "Deferred-Item D1: buildNimUnittest resolves in path mode":
       # means neither test can decide the other's result.
       let cacheRoot = createTempDir("repro-d1-execute-cache-", "")
       defer: removeDir(cacheRoot)
+      # THE REPORT NEEDED THE SAME SCOPING THE CACHE ROOT GOT, and did not
+      # have it. A bare ``--write-report`` lands on
+      # ``<outDir>/build-report.json``; ``outDir`` comes from
+      # ``outputDirForTarget`` (``libs/repro_cli_support/src/
+      # repro_cli_support.nim:1103``) and for EVERY ``.#<fragment>`` selector
+      # anchored at this repo the fragment branch falls through to
+      # ``resolveProjectFile(".")``, setting ``outputName`` to
+      # ``splitFile("repro.nim").name`` = ``repro`` (same file, 726-729).
+      # ``REPROBUILD_WORK_ROOT`` is unset in ``scripts/run_tests.sh``, so the
+      # worktree-scoped branch never fires either. Every self-hosted case in
+      # this suite therefore wrote and read ONE path,
+      # ``<repoRoot>/.repro/build/repro/build-report.json`` — and THIS case is
+      # already in the parallel pool, so it shared that path with whatever
+      # else the pool happened to be running. The private cache root above
+      # stopped the two D1/B3 cases deciding each other's CACHE outcome; it
+      # never stopped them reading each other's REPORT.
+      let reportDir = createTempDir("repro-d1-execute-report-", "")
+      defer: removeDir(reportDir)
+      let reportPath = reportDir / "build-report.json"
       let selector = ".#" & ExecuteActionId
       let cmd = @[
         reproBin.quoteShell,
@@ -142,7 +161,7 @@ suite "Deferred-Item D1: buildNimUnittest resolves in path mode":
         "--tool-provisioning=path",
         "--daemon=off",
         "--action-cache-root=" & cacheRoot.quoteShell,
-        "--write-report",
+        "--write-report=" & reportPath.quoteShell,
         "--log=actions",
         "--progress=quiet"].join(" ")
       checkpoint("running: " & cmd)
@@ -155,8 +174,8 @@ suite "Deferred-Item D1: buildNimUnittest resolves in path mode":
       check "references executable ct_test_nim_unittest.buildNimUnittest" notin output
       check exitCode == 0
 
-      let reportPath = valueAfter(output, "buildReport:")
-      check reportPath.len > 0
+      let announced = valueAfter(output, "buildReport:")
+      check announced.len > 0
       check fileExists(reportPath)
 
       let report = parseFile(reportPath)

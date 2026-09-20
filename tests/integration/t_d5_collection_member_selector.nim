@@ -27,7 +27,7 @@
 ##      (apps collection) so the mechanism is verified across all
 ##      three of reprobuild's own collections, not just one.
 
-import std/[json, os, osproc, strtabs, strutils, unittest]
+import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
 
 import repro_test_support
 
@@ -84,14 +84,25 @@ proc reportActions(report: JsonNode): JsonNode =
     result = newJArray()
 
 proc runBuild(reproBin, repoRoot, selector: string;
-              withReport: bool): tuple[output: string; exitCode: int] =
+              reportPath: string): tuple[output: string; exitCode: int] =
+  ## THE DESTINATION IS NAMED, not defaulted (empty ``reportPath`` means "no
+  ## report, use ``--measure=none``"). A bare ``--write-report`` lands on
+  ## ``<outDir>/build-report.json``, and ``outDir`` collapses to ONE directory
+  ## for every selector this suite drives: ``outputDirForTarget``
+  ## (``libs/repro_cli_support/src/repro_cli_support.nim:1103``) takes
+  ## ``outputName`` from ``resolveProjectFile(".")`` =
+  ## ``splitFile("repro.nim").name`` = ``repro`` (same file, 726-729), and
+  ## ``scripts/run_tests.sh`` sets no ``REPROBUILD_WORK_ROOT``. This case
+  ## drives THREE different collections through that one path, so even its own
+  ## three arms were writing over each other's document.
   let args = @[
     reproBin.quoteShell,
     "build",
     selector,
     "--tool-provisioning=path",
     "--daemon=off",
-    (if withReport: "--write-report" else: "--measure=none"),
+    (if reportPath.len > 0: "--write-report=" & reportPath.quoteShell
+     else: "--measure=none"),
     "--log=actions",
     "--progress=quiet",
   ]
@@ -138,9 +149,12 @@ suite "Deferred Item D5: .#<collection>#<member> selector resolves through the e
       skip()
     else:
       discard requireRunQuotaDaemonBin(repoRoot)
+      let reportDir = createTempDir("repro-d5-test-report-", "")
+      defer: removeDir(reportDir)
+      let reportPath = reportDir / "build-report.json"
       let selector = ".#test#" & TargetTest
       let (output, exitCode) = runBuild(reproBin, repoRoot, selector,
-        withReport = true)
+        reportPath = reportPath)
       checkpoint("running selector: " & selector)
       checkpoint("exit=" & $exitCode)
       if exitCode != 0:
@@ -150,8 +164,8 @@ suite "Deferred Item D5: .#<collection>#<member> selector resolves through the e
       check "no build target matches" notin output
       check exitCode == 0
 
-      let reportPath = valueAfter(output, "buildReport:")
-      check reportPath.len > 0
+      let announced = valueAfter(output, "buildReport:")
+      check announced.len > 0
       check fileExists(reportPath)
 
       let report = parseFile(reportPath)
@@ -192,7 +206,7 @@ suite "Deferred Item D5: .#<collection>#<member> selector resolves through the e
       # an implicit target name pointing at the build action id.
       let selector = ".#test-builds#" & TargetTest
       let (output, exitCode) = runBuild(reproBin, repoRoot, selector,
-        withReport = false)
+        reportPath = "")
       checkpoint("running selector: " & selector)
       checkpoint("exit=" & $exitCode)
       if exitCode != 0:
@@ -215,9 +229,12 @@ suite "Deferred Item D5: .#<collection>#<member> selector resolves through the e
       skip()
     else:
       discard requireRunQuotaDaemonBin(repoRoot)
+      let reportDir = createTempDir("repro-d5-apps-report-", "")
+      defer: removeDir(reportDir)
+      let reportPath = reportDir / "build-report.json"
       let selector = ".#apps#" & AppsMember
       let (output, exitCode) = runBuild(reproBin, repoRoot, selector,
-        withReport = true)
+        reportPath = reportPath)
       checkpoint("running selector: " & selector)
       checkpoint("exit=" & $exitCode)
       if exitCode != 0:
@@ -225,8 +242,8 @@ suite "Deferred Item D5: .#<collection>#<member> selector resolves through the e
       check "unknown_target" notin output
       check exitCode == 0
 
-      let reportPath = valueAfter(output, "buildReport:")
-      check reportPath.len > 0
+      let announced = valueAfter(output, "buildReport:")
+      check announced.len > 0
       check fileExists(reportPath)
 
       let report = parseFile(reportPath)
@@ -259,7 +276,7 @@ suite "Deferred Item D5: .#<collection>#<member> selector resolves through the e
       discard requireRunQuotaDaemonBin(repoRoot)
       let selector = ".#test#nonexistent_member_xyz"
       let (output, exitCode) = runBuild(reproBin, repoRoot, selector,
-        withReport = false)
+        reportPath = "")
       checkpoint("running selector: " & selector)
       checkpoint("exit=" & $exitCode)
       check exitCode != 0
