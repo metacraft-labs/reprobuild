@@ -256,23 +256,101 @@ const
   ##     that is not isolation. Retargeting one of the three to a stem of its
   ##     own is the fix, and it is a source change nobody has measured yet.
   ##
-  ## NO ENTRY WAS REMOVED ON THIS PASS, AND THE REASON IS THE BAR, NOT THE
-  ## ANALYSIS. Two entries survive the reading above:
+  ## ONE OF THOSE TWO ENTRIES IS NOW REMOVED AND ONE IS KEPT, BOTH ON
+  ## MEASUREMENT. The pair that survived the reading above --
   ## ``t_d1_pythonunittest_resolves_in_path_mode``, whose ONLY shared surface
   ## was the report (its edge is ``cdNotCacheable``, declares no outputs, and
-  ## runs a Python source-scanner that writes nothing); and
+  ## runs a Python source-scanner that writes nothing), and
   ## ``t_b1_repro_build_apps_byte_equivalent``, which writes nothing at all and
-  ## is threatened only by ``t_b5_bootstrap_idempotent``'s conditional
-  ## ``build_apps.sh``. Neither was taken off the list, because removing a stem
-  ## requires running the affected cases concurrently and repeatedly and
-  ## reporting the failure count, and that could not be run here: a git
-  ## worktree placed under ``<checkout>/.claude/worktrees/`` inherits the
+  ## was threatened only by ``t_b5_bootstrap_idempotent``'s conditional
+  ## ``build_apps.sh`` -- was finally run against the pool from a worktree that
+  ## is a SIBLING of the checkout. That is what the previous pass could not do:
+  ## a git worktree placed under ``<checkout>/.claude/worktrees/`` inherits the
   ## PARENT checkout's ``config.nims`` through Nim's parent-directory config
   ## walk, so ``reproRepoRoot`` and the ``libs/<name>/src`` search paths point
   ## at the shared checkout, and a ``repro build`` from the worktree compiles
-  ## its own ``repro.nim`` against whatever branch the shared checkout is
-  ## parked on. Measure from a worktree that is a SIBLING of the checkout, not
-  ## a child of it.
+  ## its own ``repro.nim`` against whatever branch that checkout is parked on.
+  ##
+  ## MEASURED (2026-09-20, 32-core host, ambient load 21.9-33.0 across the
+  ## campaign; every figure below is a load-annotated observation):
+  ##
+  ##   * THE THREAT THIS PAIR WAS HELD AGAINST DOES NOT EXIST IN THE SHAPE IT
+  ##     WAS WRITTEN DOWN IN, two paragraphs up. ``build_apps.sh`` does NOT
+  ##     ``rm -f build/bin/<name>`` then relink for every entrypoint:
+  ##     ``discard_stale_binary`` is called on the two FAILURE paths only
+  ##     (``scripts/build_apps.sh:619`` when ``nim c`` exits non-zero, ``:628``
+  ##     when the freshness check rejects what it produced). On the success
+  ##     path ``nim c --out:build/bin/<name>`` links straight over the live
+  ##     path. The window is therefore a TORN READ / ``ETXTBSY``, never a
+  ##     missing file -- a narrower hazard, and a differently shaped one.
+  ##   * THE GATE IS SHUT IN A SUITE RUN, shown rather than assumed:
+  ##     ``bootstrap_guard.sh decide`` answered ``skip fresh`` at the head of
+  ##     all 12 rounds below. It is structural. ``scripts/run_tests.sh`` builds
+  ##     ``.#apps`` (step 3) immediately before the test phase, relinking
+  ##     ``build/bin/repro`` newer than every path in
+  ##     ``BOOTSTRAP_SOURCE_ROOTS`` (``apps libs config.nims flake.nix
+  ##     repro.nim scripts/build_apps.sh scripts/source_paths.sh``), and no
+  ##     test mutates any of those -- ``t_b2_helper_invalidation`` touches
+  ##     ``tests/fixtures/…``, which that list deliberately excludes. And
+  ##     ``t_b5_bootstrap_idempotent`` is the ONLY test in the tree that
+  ##     executes ``just bootstrap`` against the repo root (:114, :127).
+  ##   * UNSERIALIZED ARM, 12 rounds, both candidates at once against real pool
+  ##     load: ``t_b5_bootstrap_idempotent`` (the named threat),
+  ##     ``t_b4_python_tests_in_graph`` (pool-resident, and it drives the SAME
+  ##     ``reprobuild.python_test.test_dev_env_m9_policy`` edge D1 drives), and
+  ##     six concurrent ``repro build`` runs of that edge against this repo
+  ##     root. 0 failures of 12 for each candidate. The load was real rather
+  ##     than nominal: a round took ~5 minutes against ~35 seconds solo, both
+  ##     partner cases passed every round, and all six builds wrote a report
+  ##     naming the action.
+  ##   * THE INSTRUMENT DISCRIMINATES, which is the only thing that stops that
+  ##     0/12 from being vacuous -- the gate above means the hazard never fired
+  ##     during it. Forced open (``touch repro.nim`` ->
+  ##     ``bootstrap stale:repro.nim newer than build/bin/repro``), b5's seed
+  ##     ``just bootstrap`` ran a REAL ``build_apps.sh``: all 13 entrypoints
+  ##     relinked in place across 3m43s. Both candidates were looped through
+  ##     that entire window, 33 iterations each.
+  ##       ``t_b1_repro_build_apps_byte_equivalent``: 0 of 33, and 0 SKIPS --
+  ##           every iteration found all 13 binaries present and probed them,
+  ##           so this is a pass rather than the vacuous skip its missing-
+  ##           binary arm would otherwise report.
+  ##       ``t_d1_pythonunittest_resolves_in_path_mode``: 1 of 33, and the
+  ##           failure is unmistakably a collision and not starvation:
+  ##           ``/bin/sh: …/build/bin/reprobuild: Permission denied`` --
+  ##           ``ETXTBSY`` on the engine image mid-link -- surfacing as
+  ##           ``__repro_provider_compile asFailed``, no report written, and
+  ##           ``parseFile`` raising ``cannot read from file``.
+  ##
+  ## SO ``t_b1_repro_build_apps_byte_equivalent`` IS OFF THE LIST. It writes
+  ## nothing, its only other input (``apps/entrypoints.txt``) is mutated by no
+  ## test, and it survived both arms -- including a real relink of every binary
+  ## it probes. Be clear about what that buys: 2.5s of a measured 3.00h suite.
+  ## The entry is removed because it is not TRUE, not because it was expensive.
+  ##
+  ## ``t_d1_pythonunittest_resolves_in_path_mode`` STAYS, and the reason is the
+  ## 1 of 33 rather than an argument. Its report surface really was closed by
+  ## #338 and its edge really is ``cdNotCacheable`` with no declared outputs.
+  ## What remains is that it EXECUTES ``build/bin/repro``, which ``execv``s
+  ## ``build/bin/reprobuild``, and that image is relinked by a
+  ## ``build_apps.sh`` the POOL can still start. Exclusivity is exactly what
+  ## separates the two today: the exclusive phase completes before the first
+  ## worker thread, so D1 cannot overlap the pool-resident B5. The gate holds
+  ## under ``run_tests.sh``'s own ordering and is enforced NOWHERE else -- one
+  ## edit under ``libs/`` with ``REPROBUILD_TEST_WARM_REUSE=1`` reopens it.
+  ## 32.1s of a 3.00h suite does not buy a failure mode that has been seen.
+  ##
+  ## FOR WHOEVER COMES BACK TO THIS LIST FOR THE TIME, because this pass shows
+  ## the pair was never where the time was. Per-case durations from the
+  ## whole-suite run in ``test-logs/parallel-run-t16.json`` (1183 cases, 3.00h
+  ## wall): these stems are 1.05h, i.e. 35.0% of wall across 1.52% of the
+  ## cases, and TWO of them are 61% of that hour --
+  ## ``t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes`` at 1501s
+  ## and ``t_cross_repo_nim_library_src_threaded_onto_consumer_path`` at 793s.
+  ## The pair argued over above is 34.6s of 3778s. Any pass that actually wants
+  ## the exclusive phase's time back has to go at those two, whose stated
+  ## reason is the nested-extraction one below -- the same reason that was
+  ## RETIRED for ``t_e2e_local_reprobuild_project_build`` once the
+  ## ``.compile.lock`` landed. Nobody has re-measured them against it.
   ##
   ## THE REPORT HAZARD IS NOT HYPOTHETICAL, and one round of it was observed
   ## before the host became the binding constraint: six concurrent
@@ -385,7 +463,6 @@ const
     "t_a2_5_p8_throughput_bench",
     "t_b0_repro_build_runquota_daemon",
     "t_b1_apps_action_cache_hit",
-    "t_b1_repro_build_apps_byte_equivalent",
     "t_b1_repro_build_apps_collection",
     "t_b2_helper_invalidation",
     "t_b3_test_execute_edge_cache_hit",
