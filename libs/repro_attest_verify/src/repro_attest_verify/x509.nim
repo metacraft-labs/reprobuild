@@ -171,34 +171,46 @@ const
 # ---------------------------------------------------------------------
 
 const
-  TagBoolean = 0x01'u8
-  TagInteger = 0x02'u8
-  TagBitString = 0x03'u8
-  TagOctetString = 0x04'u8
-  TagOid = 0x06'u8
-  TagUtf8String = 0x0c'u8
-  TagPrintableString = 0x13'u8
-  TagIa5String = 0x16'u8
-  TagUtcTime = 0x17'u8
-  TagGeneralizedTime = 0x18'u8
-  TagSequence = 0x30'u8
-  TagSet = 0x31'u8
-  TagContext0 = 0xa0'u8
-  TagContext3 = 0xa3'u8
-  TagSanDnsName = 0x82'u8   ## ``[2] IMPLICIT IA5String``.
+  TagBoolean* = 0x01'u8
+  TagInteger* = 0x02'u8
+  TagBitString* = 0x03'u8
+  TagOctetString* = 0x04'u8
+  TagOid* = 0x06'u8
+  TagUtf8String* = 0x0c'u8
+  TagPrintableString* = 0x13'u8
+  TagIa5String* = 0x16'u8
+  TagUtcTime* = 0x17'u8
+  TagGeneralizedTime* = 0x18'u8
+  TagSequence* = 0x30'u8
+  TagSet* = 0x31'u8
+  TagContext0* = 0xa0'u8
+  TagContext3* = 0xa3'u8
+  TagSanDnsName* = 0x82'u8  ## ``[2] IMPLICIT IA5String``.
 
 type
-  DerNode = object
-    tag: byte
-    contentStart: int
-    contentLen: int
-    fin: int                ## Index one past the whole TLV.
+  DerNode* = object
+    ## Exported as the DER primitive layer, not as part of the
+    ## certificate model. A second profile of certificate — AMD's, whose
+    ## signatures are RSASSA-PSS and whose subject keys are P-384 — must
+    ## read the same grammar this module reads, and a second *reader*
+    ## would be a second opinion about what a TLV is. So the reader is
+    ## shared and only the PROFILE differs: `parseCertificate` above
+    ## admits the TPM profile and refuses everything else by name, and
+    ## `snp_chain` admits AMD's and refuses everything else by name.
+    ## Neither is reachable from the other's bytes.
+    tag*: byte
+    contentStart*: int
+    contentLen*: int
+    fin*: int               ## Index one past the whole TLV.
 
-proc fail(msg: string) {.noreturn.} =
+proc derFail*(msg: string) {.noreturn.} =
   raise newException(X509Error, msg)
 
-proc readTlv(buf: openArray[byte]; pos: var int; what: string;
-             limit: int): DerNode =
+proc fail(msg: string) {.noreturn.} =
+  derFail(msg)
+
+proc readTlv*(buf: openArray[byte]; pos: var int; what: string;
+              limit: int): DerNode =
   ## One TLV, in DER and not in BER, read inside an explicit parent bound.
   ##
   ## The two refusals worth naming: the indefinite form (``0x80``) has no
@@ -282,17 +294,17 @@ proc readTlv(buf: openArray[byte]; pos: var int; what: string;
   result.fin = result.contentStart + result.contentLen
   pos = result.fin
 
-proc expectTag(node: DerNode; tag: byte; what: string) =
+proc expectTag*(node: DerNode; tag: byte; what: string) =
   if node.tag != tag:
     fail(what & ": expected tag 0x" & toHex(int(tag), 2) & " and found 0x" &
       toHex(int(node.tag), 2))
 
-proc slice(buf: openArray[byte]; start, stop: int): seq[byte] =
+proc slice*(buf: openArray[byte]; start, stop: int): seq[byte] =
   result = newSeq[byte](stop - start)
   for i in 0 ..< result.len:
     result[i] = buf[start + i]
 
-proc oidToString(buf: openArray[byte]; node: DerNode; what: string): string =
+proc oidToString*(buf: openArray[byte]; node: DerNode; what: string): string =
   ## An OBJECT IDENTIFIER as dotted decimal.
   ##
   ## The first subidentifier packs two arcs, and the packing is NOT
@@ -343,7 +355,7 @@ proc oidToString(buf: openArray[byte]; node: DerNode; what: string): string =
     parts.add $arcs[i]
   parts.join(".")
 
-proc parseDerTime(buf: openArray[byte]; node: DerNode; what: string): int64 =
+proc parseDerTime*(buf: openArray[byte]; node: DerNode; what: string): int64 =
   ## ``UTCTime`` or ``GeneralizedTime``, both in the Z form RFC 5280
   ## requires. A local-time offset is refused rather than assumed to be
   ## UTC: a validity window read in the wrong zone is a window that
@@ -380,7 +392,7 @@ proc parseDerTime(buf: openArray[byte]; node: DerNode; what: string): int64 =
                     SecondRange(second), zone = utc())
   dt.toTime.toUnix
 
-proc commonNameOf(buf: openArray[byte]; dnStart, dnEnd: int): string =
+proc commonNameOf*(buf: openArray[byte]; dnStart, dnEnd: int): string =
   ## The first ``CN`` attribute of a Name, or ``""``. Advisory: it
   ## reaches diagnostics, never a decision. Every decision that involves
   ## a name compares the DER Name bytes, because two distinct Names can

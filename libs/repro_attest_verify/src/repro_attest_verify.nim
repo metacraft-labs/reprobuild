@@ -51,9 +51,13 @@ import ./repro_attest_verify/policy
 import ./repro_attest_verify/verdict
 import ./repro_attest_verify/x509
 import ./repro_attest_verify/trust
+import ./repro_attest_verify/snp_chain
+import ./repro_attest_verify/snp_report
+import ./repro_attest_verify/snp_tcb
 import ./repro_attest_verify/evidence
 import ./repro_attest_verify/challenge
 import ./repro_attest_verify/verify
 import ./repro_attest_verify/release
 
 export policy, verdict, x509, trust, evidence, challenge, verify, release
+export snp_chain, snp_report, snp_tcb

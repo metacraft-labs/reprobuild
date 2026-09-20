@@ -70,6 +70,7 @@ import repro_attest
 import ./challenge
 import ./evidence
 import ./policy
+import ./snp_chain
 import ./trust
 import ./verdict
 import ./x509
@@ -105,6 +106,17 @@ type
       ## The revocation lists this verifier holds. An empty set is not
       ## "nothing has been revoked" — it is a question that cannot be
       ## asked, and `checkCertificateChain` refuses on it.
+    vendorRevocationLists*: seq[string]
+      ## The same question for a confidential-computing chain, whose
+      ## lists are a different document: signed with RSASSA-PSS by a
+      ## vendor root rather than with ECDSA by an operator's anchor, so
+      ## they cannot travel in the field above. Raw DER, exactly as the
+      ## vendor's distribution service serves it.
+      ##
+      ## Empty is, again, not an answer of "nothing is revoked": the
+      ## chain evaluator refuses on it. There is deliberately no
+      ## `trustAnchors` companion — the roots of that chain are not the
+      ## operator's to choose. See `snp_chain`.
 
 const
   SoftwareRootTestReportSymbol* = "verifySoftwareRootTestReport"
@@ -290,7 +302,36 @@ proc checkCertificateChain(req: VerificationRequest;
       "collateral itself does not need the instance's copy")
   case inputs.backend
   of abMock: describeMockChain(inputs)
-  of abSevSnp, abTdx:
+  of abSevSnp:
+    if inputs.certificates.len != AmdChainElements:
+      return violated("a confidential-computing endorsement chain is " &
+        $AmdChainElements & " certificates — the endorsement key, the " &
+        "vendor's signing key and the vendor's root — and this report " &
+        "bundles " & $inputs.certificates.len)
+    var elements: seq[seq[byte]] = @[]
+    for der in inputs.certificates:
+      var bytes = newSeq[byte](der.len)
+      for i in 0 ..< der.len: bytes[i] = byte(der[i])
+      elements.add bytes
+    var crls: seq[seq[byte]] = @[]
+    for der in req.vendorRevocationLists:
+      var bytes = newSeq[byte](der.len)
+      for i in 0 ..< der.len: bytes[i] = byte(der[i])
+      crls.add bytes
+    # No anchor is passed, because there is no anchor to pass. The set
+    # of roots this can reach is a constant in `snp_chain`, and the
+    # verdict below is the only thing this function learns about it.
+    let verdict = evaluateAmdChain(elements[0], elements[1], elements[2],
+                                   crls, req.nowMs div 1000)
+    if verdict.isAccepted:
+      satisfied("the " & $inputs.certificates.len &
+        "-element bundled chain reaches this build's " & $verdict.rootLine &
+        " vendor root: " & verdict.detail)
+    else:
+      violated("the " & $inputs.certificates.len &
+        "-element bundled chain was refused (" & $verdict.reason & "): " &
+        verdict.detail)
+  of abTdx:
     violated("this build carries no reader for a " & $inputs.backend &
       " certificate chain, so the " & $inputs.certificates.len &
       " bundled element(s) were compared against nothing")

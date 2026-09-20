@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1697,
+    "nimTestBinaries": 1700,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 599,
     "staticallyDetectedRuntimeCompilerFlowTests": 106,
-    "testEntries": 1708
+    "testEntries": 1711
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1106,7 +1106,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 804,
+      "integration": 807,
       "platform/destructive": 113,
       "pure unit": 599,
       "unclassified": 180
@@ -1257,9 +1257,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1697,
+    "nimTestBinaryCount": 1700,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1708
+    "testEntryCount": 1711
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -30976,6 +30976,58 @@
       "source": "tests/integration/t_single_platform_entries_declare_platforms.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_snp_chain_requires_amd_root",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_snp_chain_requires_amd_root.nim",
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 27,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_snp_fixture_verify",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_snp_fixture_verify.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 20,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_snp_tcb_policy",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_snp_tcb_policy.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
