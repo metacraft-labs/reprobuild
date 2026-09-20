@@ -203,17 +203,24 @@ proc runExclusiveResourceCheck() =
   createDir(binDir)
   createDir(srcDir)
 
+  # MUST BE A SUBSET OF ``ExclusiveStems`` in
+  # ``tools/test-runner/repro_test_runner.nim``, because that is the list the
+  # runner classifies against: a stem named here but absent there gets its two
+  # fixture cases scheduled into the worker pool, and then the "N cases require
+  # exclusive execution" count, the interval count and ``countOverlap`` are all
+  # off by that stem. Two entries were removed here for exactly that reason:
+  # ``t_b1_repro_build_apps_byte_equivalent`` (left behind by #341, which took
+  # it off ``ExclusiveStems`` without touching this copy) and
+  # ``t_cross_repo_nim_library_src_threaded_onto_consumer_path``.
   const ExclusiveFixtures = [
     "t_a2_5_p3_streaming_sink",
     "t_a2_5_p8_throughput_bench",
     "t_b0_repro_build_runquota_daemon",
     "t_b1_apps_action_cache_hit",
-    "t_b1_repro_build_apps_byte_equivalent",
     "t_b1_repro_build_apps_collection",
     "t_b2_helper_invalidation",
     "t_b3_test_execute_edge_cache_hit",
     "t_b3_test_invalidation_rebuilds_repro",
-    "t_cross_repo_nim_library_src_threaded_onto_consumer_path",
     "t_d1_pythonunittest_resolves_in_path_mode",
     "t_d2_cross_project_selector_recognised",
     "t_d5_collection_member_selector",

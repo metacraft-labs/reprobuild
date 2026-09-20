@@ -379,12 +379,16 @@ const
   ## Under nested compiler load the server thread can be starved for the entire
   ## budget even though the transfer completes in under a second when the test
   ## owns the host. The native-shell gate performs nested provider extraction
-  ## for Bash, Zsh, and Fish; the SC-7 capstone and the SC-11 cross-repo
-  ## library test perform repeated nested interface extraction. Under
-  ## contention Nim was observed to report SuccessX without materializing the
-  ## requested extractor binary, so those three keep this scheduling boundary.
+  ## for Bash, Zsh, and Fish; the SC-7 capstone performs repeated nested
+  ## interface extraction. Under contention Nim was observed to report
+  ## SuccessX without materializing the requested extractor binary, so those
+  ## two keep this scheduling boundary.
   ## Keep these resource-sensitive checks fully enabled but execute them
   ## without competing test processes.
+  ##
+  ## ``t_cross_repo_nim_library_src_threaded_onto_consumer_path`` WAS THE
+  ## THIRD NAME IN THAT SENTENCE AND IS NOW OFF THE LIST. The block at the end
+  ## of this comment is the measurement; read it before putting it back.
   ##
   ## ``t_e2e_local_reprobuild_project_build`` IS DELIBERATELY ABSENT, and must
   ## not be re-added from the paragraph above. It sat on this list from
@@ -458,6 +462,146 @@ const
   ## start sharing one nimcache, or a suite run actually shows this stem
   ## failing in the pool with the guard message above. "It is slow and it
   ## compiles a lot" is not a reason; it was never the reason.
+  ##
+  ## ``t_cross_repo_nim_library_src_threaded_onto_consumer_path`` IS ALSO
+  ## DELIBERATELY ABSENT, on the same reading re-run against the code as it is
+  ## now. It was held on the nested-extraction sentence above.
+  ##
+  ## WHAT THE CONTENTION CONCRETELY IS TODAY. Every cache a nested extraction
+  ## writes is keyed on the RECIPE'S ABSOLUTE SOURCE PATH, and this case makes
+  ## that path fresh per test process: its whole fixture lives under
+  ## ``getTempDir() / "sc11-" & $getCurrentProcessId()``
+  ## (``t_cross_repo_nim_library_src_threaded_onto_consumer_path.nim:315``,
+  ## removed on entry and on exit). Concretely:
+  ##
+  ##   * the extraction nimcache is
+  ##     ``buildScratchRoot(workDir, scratchDir) / "nimcache-interface" /
+  ##     positionKeyedNimcacheKey(…, modulePath, …)``
+  ##     (``repro_interface_artifacts.nim:5189``), ``buildScratchRoot``
+  ##     returns ``scratchDir`` whenever one is passed (:4942), and the
+  ##     ``repro build`` path always passes one --
+  ##     ``outDir / "provider-work"`` (``repro_cli_support.nim:10057``), where
+  ##     ``outDir`` is ``parentDir(modulePath)/.repro/build/<outputName>``
+  ##     (``repro_cli_support.nim:1103``). A cross-repo producer gets its own,
+  ##     ``producerOutDir / "provider-work"`` (:10181).
+  ##   * the key itself mixes ``"project=" & absolutePath(producingProject)``
+  ##     (``repro_interface_artifacts.nim:4629``), so the ONE shared root left
+  ##     on this path -- the provider compile cache at
+  ##     ``getTempDir()/repro-nimcache-provider`` (:5764) -- is still
+  ##     subdivided by that per-process recipe path.
+  ##   * the extraction runner SOURCE is content-keyed
+  ##     (``extract_runner_<fnvHex64(source)>.nim``, :5110) and published by
+  ##     rename (:5117) -- two extractions share the path iff they would write
+  ##     identical bytes; the runner BINARY is a per-invocation
+  ##     ``createTempDir`` (:5019).
+  ##   * ``<nimcache>.compile.lock`` (:4793) and
+  ##     ``<artifact>.extract.lock`` (:4814) are still taken, and are still
+  ##     what makes TWO SESSIONS ON ONE RECIPE safe. They are simply not what
+  ##     separates this case from the pool any more.
+  ##
+  ## OBSERVED, not merely derived. Sampling ``/proc/<pid>/fd`` for held lock
+  ## files (never taking one, so the instrument cannot perturb what it
+  ## measures) over a 9363s window: this case's every lock lives under its own
+  ## ``sc11-<pid>`` tree -- ``…/provider-work/nimcache-interface/<k>``,
+  ## ``…/cross-repo-producers/greetlib/producer-iface-work/nimcache-interface/
+  ## <k>``, and the matching ``.extract.lock``s -- and concurrent copies
+  ## produced DISJOINT sets with every ``<k>`` distinct.
+  ##
+  ## MEASURED (2026-09-20, 32-core host carrying 20-100 of unrelated ambient
+  ## load; every figure is a load-annotated observation):
+  ##
+  ##   * THE HAZARD FIRED, which is the only thing that stops a 0-failure run
+  ##     from being vacuous. It fires BY CONSTRUCTION here: the fixture is new
+  ##     every round, so ``interfaceExtractionCacheProbe`` cannot short-circuit
+  ##     and every extraction really compiles. Shown rather than assumed --
+  ##     across 209 sampled instants, 173 had at least one candidate copy
+  ##     inside an extraction lock and 159 had two or more at the same instant;
+  ##     the peak was 11 distinct case instances holding extraction locks
+  ##     together at load 78.6, and 24 concurrent ``nim c`` extraction compiles
+  ##     in one sample.
+  ##   * AND NOTHING COLLIDED. Over those same instants, the number of times
+  ##     one lock path was open in two engine processes belonging to DIFFERENT
+  ##     case instances was 0 -- and 0 on any path owned by a candidate's
+  ##     scratch. (Compiler and shell children that show the fd inherited it
+  ##     across the fork of the compile the lock is protecting; they are the
+  ##     same holder and are excluded.)
+  ##   * THE INSTRUMENT DISCRIMINATES. Run against a ``nim`` wrapper on
+  ##     ``$REPRO_NIM_COMPILER`` that prints ``[SuccessX]`` and exits 0 without
+  ##     writing ``--out:…extract_runner`` -- the exact state the sentence
+  ##     above names -- the case FAILS, naming it: ``interface extraction
+  ##     runner was not compiled (exit=0, compiler reported success but
+  ##     produced no binary)`` at each of its six builds.
+  ##   * UNSERIALIZED ARM, 12 rounds, every round reported. Three batches of
+  ##     3/4/5 concurrent copies, each at the pool's own nesting budget
+  ##     (``REPROBUILD_MAX_PARALLELISM=3``), beside five POOL-RESIDENT partner
+  ##     cases that drive the same extraction path -- including
+  ##     ``t_e2e_local_reprobuild_project_build``, the stem whose exclusivity
+  ##     the block above retired on this very rationale.
+  ##       batch 1 (load 40.0 -> 44.1/46.6/48.3):  PASS 3135s, 3143s, 3153s
+  ##       batch 2 (load 48.9 -> 61.9/74.2/78.4/79.6): PASS 3185s, 3228s,
+  ##                                                   3236s, 3250s
+  ##       batch 3 (load 78.0 -> 37.4/37.4/37.9/39.1/39.2): PASS 2844s, 2856s,
+  ##                                                   2858s, 2859s, 2862s
+  ##     12 of 12 PASS. The partner cases passed every iteration too (36 of
+  ##     36), so the arm is not reporting a quiet host.
+  ##   * COST, measured as a PAIR rather than as an A/B in sequence. The
+  ##     exclusive phase hands its single case the undivided budget (24 here);
+  ##     a pool worker hands its nested build 3
+  ##     (``scripts/test_parallelism.sh``). Break-even is k=16: with 16 worker
+  ##     threads a pool case contributes duration/16 to wall clock where an
+  ##     exclusive one contributes all of it. Two copies were run at the SAME
+  ##     INSTANT, one at 3 and one at 24, so both saw the identical ambient
+  ##     load and their ratio is the quantity wanted; a sequential A/B on a
+  ##     host carrying 20-100 of other people's work measures the drift.
+  ##       pair 1 (load 29.5-30.8)  3 -> 1522s  24 -> 1530s  k=0.995
+  ##       pair 2 (load 23.0-24.6)  3 -> 1379s  24 -> 1387s  k=0.994
+  ##       pair 3 (load 31.1-36.6)  3 -> 1377s  24 -> 1373s  k=1.003
+  ##     k = 1.00, a sixteenth of break-even. The case is bound by a SEQUENCE
+  ##     of six builds' extractions, not by compile width, so the budget it
+  ##     gives up buys it nothing. Those six runs passed as well, which makes
+  ##     18 of 18 unserialized.
+  ##
+  ## DERIVED SAVING, from ``test-logs/parallel-run-t16.json`` (1183 cases,
+  ## 10809151ms wall, 16 threads; 3775912ms exclusive phase):
+  ## this stem is 792640ms of that phase. At the measured k=1.00 the pool
+  ## absorbs the same 793s across 16 workers -- 50s of wall -- so the suite
+  ## loses 743s: 6.9% of its wall clock and 19.7% of the exclusive phase, which
+  ## falls from 1.049h to 0.829h. Mean pool occupancy in that run was 10.0 of
+  ## 16 rather than 16; amortizing over that instead still nets 714s.
+  ##
+  ## PUT IT BACK ONLY IF the same facts stop holding: the extraction nimcache
+  ## stops being anchored on the consumer project, the position key stops
+  ## mixing the recipe's own path, the runner name stops being content-keyed,
+  ## or a suite run shows THIS stem failing in the pool with the
+  ## "produced no binary" message the discriminator above reproduces.
+  ##
+  ## ``t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes`` WAS THE
+  ## OTHER HALF OF THIS PASS AND STAYS, and the reason is not a hazard -- it is
+  ## that there is no green control to measure against. The case does not pass
+  ## on this branch AT ALL, one copy on an idle path, with no second test
+  ## running: ``repro build`` refuses to build or splice either producer --
+  ##   cross-repo producer: "exeprod" is declared at package level but not
+  ##   named by the selected action closure, and exports a compiled artifact
+  ##   rather than a Nim source root -- not building or splicing it for this
+  ##   target.
+  ## -- and the consume step then dies ``exeprod: command not found`` (127).
+  ## That is the §4.2a admission gate at
+  ## ``repro_cli_support.nim:10588-10606``, narrowed deliberately by #312
+  ## (``2a982ed2e``, 2026-09-17): a selector the selected action closure did
+  ## not name is admitted only when the producer exports NO compiled artifact.
+  ## This capstone's consumer declares ``uses: "exeprod"``/``"libprod"`` at
+  ## package level while its one action is a ``shell(…)`` that names neither,
+  ## and both producers export compiled artifacts -- so the gate refuses both.
+  ## #312's own measurement table lists SC-2, SC-3 and the two SC-11 cases; it
+  ## does not list this capstone, which is the union of both channels.
+  ## ``parallel-run-t16.json`` recorded it PASS, but that run is dated
+  ## 2026-08-01, seven weeks before the gate. Reproduced 12 of 12 under the
+  ## unserialized arm, once solo from a hand-written copy of the fixture with
+  ## ``--log=actions``, and once through the suite's own environment
+  ## (``build/bin`` and the runquota binaries on ``PATH``, RunQuota admitting:
+  ## ``lease=5``) -- always the identical assertion set. Whether it needs this
+  ## list is not answerable until it is green; removing an entry on a red case
+  ## would be exactly the weak evidence the paragraphs above refuse.
   ExclusiveStems = [
     "t_a2_5_p3_streaming_sink",
     "t_a2_5_p8_throughput_bench",
@@ -467,7 +611,6 @@ const
     "t_b2_helper_invalidation",
     "t_b3_test_execute_edge_cache_hit",
     "t_b3_test_invalidation_rebuilds_repro",
-    "t_cross_repo_nim_library_src_threaded_onto_consumer_path",
     "t_d1_pythonunittest_resolves_in_path_mode",
     "t_d2_cross_project_selector_recognised",
     "t_d5_collection_member_selector",
