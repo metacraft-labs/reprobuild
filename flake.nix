@@ -134,7 +134,22 @@
       # had drifted by exactly this commit) and makes io-mon name the shared
       # modules repo the way the rest of the workspace does. 1c41ba8 is the tip
       # of io-mon's `dev`.
-      url = "github:metacraft-labs/io-mon/1c41ba8ee9f012332ece9d3c0ca8ccab09ac1a3f";
+      #
+      # Bumped to b5c7990: `shim: build with -d:useMalloc, because the shim does
+      # not own its threads`. This input is what `librepro_monitor_shim.*` is
+      # compiled from in the sandboxed package build and in CI, and the
+      # previous pin builds a shim whose Nim allocator owns one heap PER THREAD.
+      # Injected into a host whose threads exit on the host's schedule, a cell
+      # freed on a thread other than its allocator's is handed back through a
+      # pointer into a TLS block the loader has already discarded. Measured on
+      # Windows as a 0xC0000005 in `addToSharedFreeList` on .NET's finalizer
+      # thread in every `powershell.exe` that hosted a large `nim c` -- the
+      # wrapper reprobuild itself uses for a compiler argv longer than cmd.exe
+      # accepts -- which surfaced for days as `__repro_provider_compile
+      # asFailed` blamed on the compiler. The pin carries the fix into every
+      # build that has no io-mon sibling; the sibling-overridden developer
+      # shells already have it. b5c7990 is the tip of io-mon's `dev`.
+      url = "github:metacraft-labs/io-mon/b5c7990123bf01dd3213805605c6eed28ed4a3a3";
       flake = false;
     };
     nim-shm-gset-src = {
