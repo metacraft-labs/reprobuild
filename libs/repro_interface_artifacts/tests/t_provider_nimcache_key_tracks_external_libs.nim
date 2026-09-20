@@ -26,9 +26,11 @@
 ## the edit (verified directly against ``nim c``, no ``--forceBuild``). Because
 ## ``reproLibSources`` walks only ``.nim``/``.nims``, its discriminating power
 ## is a strict SUBSET of what ``.sha1`` already provides — it could only ever
-## re-key the directory redundantly. (The real Nim soundness hole is the C
-## HEADER closure, which this fingerprint never covered and which
-## ``--forceBuild:on`` in ``boundedNimCompileCommand`` does.)
+## re-key the directory redundantly. (The C HEADER closure was the one hole
+## this fingerprint never covered. It is no longer a hole: the pinned compiler
+## emits a ``-MD -MF`` depfile per cached C object and reads it back before
+## reuse, which is why ``boundedNimCompileCommand`` no longer has to pass
+## ``--forceBuild:on``.)
 ##
 ## The guard that actually prevents the skew is the ARTIFACT-level freshness
 ## key, ``interfaceExtractionFingerprint``, which folds

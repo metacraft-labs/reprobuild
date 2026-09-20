@@ -4606,10 +4606,11 @@ proc positionKeyedNimcacheKey*(declaredCache, producingProject,
   ##   to prevent"), and it is not load-bearing here: Nim's own per-module
   ##   ``.sha1`` already invalidates a changed ``.nim`` inside the cache,
   ##   so the fingerprint's discriminating power is a strict SUBSET of the
-  ##   mechanism it was guarding. The real Nim soundness hole is the C
-  ##   HEADER closure, which this fingerprint never covered (it walks only
-  ##   ``.nim``/``.nims``) and which ``--forceBuild:on`` in
-  ##   ``boundedNimCompileCommand`` does cover. The artifact-level freshness
+  ##   mechanism it was guarding. The C HEADER closure was the one hole this
+  ##   fingerprint never covered (it walks only ``.nim``/``.nims``); the
+  ##   pinned compiler now covers it with per-object ``-MD -MF`` depfiles, so
+  ##   no key component and no compile flag has to stand in for it. See
+  ##   ``boundedNimCompileCommand``. The artifact-level freshness
   ##   guard that actually prevents harness<->binary skew is unchanged and
   ##   lives elsewhere: ``interfaceExtractionContext`` still folds
   ##   ``reproLibSourceFingerprint`` into ``interfaceExtractionFingerprint``.
@@ -4659,14 +4660,65 @@ proc boundedNimCompileCommand*(): seq[string] =
   ## Provider and interface-runner compiles are nested build-engine work. Keep
   ## their host-C waves under the same validated bound so either path cannot
   ## independently exhaust a constrained builder.
-  ## Nim's C-object freshness check does not track included headers. Once the
-  ## engine launches this edge, its backend must not reuse those unchecked
-  ## objects; reuse of the complete monitored compile belongs to the engine.
+  ##
+  ## NO ``--forceBuild:on``. The flag used to be here, and the justification
+  ## was Nim's HEADER BLINDNESS: the ``.sha1`` freshness check beside each
+  ## cached C object covered the ``.nim`` module that generated it but not the
+  ## C headers that object ``#include``s, so an edited header left a stale
+  ## ``.o`` that Nim would happily relink. Forcing the backend was the only
+  ## sound response available to a caller.
+  ##
+  ## THAT IS NO LONGER TRUE. The pinned compiler emits a depfile for every
+  ## cached C object and reads it back before reusing that object, so the
+  ## object's whole header closure is part of its freshness decision. It is
+  ## fail-closed: a missing, unreadable or INCOMPLETE depfile recompiles.
+  ##
+  ## Completeness is decided by the FILE, not by a correlate of it. The
+  ## compiler writes to ``<obj>.d.tmp``, having first removed ``<obj>.d``, and
+  ## on exit code 0 appends a ``# nim-depfile-complete`` line and renames the
+  ## temporary into place; the reader requires that line to be last. So every
+  ## intermediate state -- including whatever an interrupted build leaves --
+  ## reads as "header closure unknown", and a fresh ``.o`` can never sit beside
+  ## a previous run's ``.d``.
+  ##
+  ## An earlier revision of this mechanism gated reuse on ``mtime(.o) >=
+  ## mtime(.d)`` instead, reasoning that a C compiler writes the depfile during
+  ## preprocessing and the object after. WHICH OF THE TWO LANDS FIRST IS A
+  ## PROPERTY OF THE TOOLCHAIN, NOT A RULE: gcc hands off to a separate
+  ## assembler so the ``.d`` finishes first, but clang assembles in-process and
+  ## writes the object first. THIS REPOSITORY COMPILES THROUGH CLANG on every
+  ## host where ``cc`` is clang (the Nix dev shell here is one), so that guard
+  ## rejected sound objects, the rejection recompiled them, and the recompile
+  ## recreated the inversion -- permanently, with a different losing set each
+  ## run.
+  ##
+  ## Measured on this recipe, 118 C objects, the SAME compiler revision and the
+  ## same sources, changing only ``$CC``:
+  ##
+  ##   clang 21.1.8   78/118 inverted   warm rebuilds 78, 42, 25, 12, 7, 5
+  ##   gcc 15.2.0      0/118 inverted   warm rebuilds  0,  0,  0,  0
+  ##
+  ## Under the pinned revision clang rebuilds 0 on every warm compile, six in a
+  ## row, and 0 in all six lanes of a six-way concurrent run. Do not
+  ## reintroduce a timestamp comparison as a stand-in for completeness: on the
+  ## toolchain this repository uses it is not a conservative approximation, it
+  ## is a permanent cache miss.
+  ##
+  ## A caller that keeps forcing the backend is now paying a full C rebuild to
+  ## re-derive a decision the compiler already makes correctly.
+  ##
+  ## WHAT STILL OWNS REUSE OF THE WHOLE COMPILE: the engine's action cache, and
+  ## nothing here. This function selects the shape of ONE monitored compile;
+  ## whether that compile runs at all, and whether its outputs are served from
+  ## a previous run, is decided by the engine's action key over the observed
+  ## argv, inputs and reads (Compiles-Are-Normal-Edges.md). The nimcache is
+  ## intermediate storage underneath that decision, not an authority above it.
+  ## Dropping the flag changes how much of a compile that DOES run has to be
+  ## redone -- it does not widen what may be reused across edges.
   @[
     nimCompilerPath(),
     "c",
-    "--parallelBuild:" & $providerParallelBuildCount(),
-    "--forceBuild:on"
+    "--parallelBuild:" & $providerParallelBuildCount()
   ]
 
 type ReproFileLock* = object
@@ -5629,10 +5681,11 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # every provider links as `project-provider`), so sharers were different
   # POSITIONS overwriting each other's `@mrepro.nim.c` and
   # `project-provider.json`.
-  # This is intermediate storage, not an authority for C-object reuse:
-  # boundedNimCompileCommand forces the backend because Nim's `.sha1`
-  # check omits C headers. Complete monitored compile actions retain normal
-  # engine caching. Safe per-object reuse needs equivalent dependency checks.
+  # This is intermediate storage, not an authority for reuse of the compile:
+  # complete monitored compile actions are served (or not) by the engine's
+  # action cache. Per-object reuse INSIDE this directory is now the pinned
+  # compiler's own decision, taken against each object's `-MD -MF` header
+  # closure as well as its `.sha1` (see `boundedNimCompileCommand`).
   # `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` narrows the key further, to the
   # output binary path.
   let hostFlags = hostCCompilerFlags()

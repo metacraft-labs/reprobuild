@@ -442,7 +442,7 @@
     # monitored import/restore path: an initialized local could make the JS HCR
     # transform absorb the following try and emit an orphaned finally.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=0b5b5ec507d2d9c731d222184c625851377a02c8";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=c05e0102e3e0bcb4ceae841454c998549fcc87c8";
       flake = false;
     };
     nim-csources-src = {

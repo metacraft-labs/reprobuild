@@ -6037,7 +6037,7 @@
             "secondEntered",
             "secondStarted"
           ],
-          "line": 269,
+          "line": 271,
           "path": "tests/unit/t_m9r13a_provider_compile_sharing.nim",
           "patterns": [
             "nim-variable-argv"
@@ -6051,7 +6051,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 373,
+          "line": 375,
           "path": "tests/unit/t_m9r13a_provider_compile_sharing.nim",
           "patterns": [
             "repro-compile-provider-binary"
@@ -6067,7 +6067,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 394,
+          "line": 396,
           "path": "tests/unit/t_m9r13a_provider_compile_sharing.nim",
           "patterns": [
             "repro-compile-provider-binary"
@@ -6083,7 +6083,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 400,
+          "line": 402,
           "path": "tests/unit/t_m9r13a_provider_compile_sharing.nim",
           "patterns": [
             "repro-compile-provider-binary"
