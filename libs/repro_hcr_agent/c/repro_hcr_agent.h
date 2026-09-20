@@ -419,6 +419,37 @@ typedef struct RbHcrReloadInfo {
   uint32_t changed_files_count;
   const RbHcrTypeChange *changed_types;
   uint32_t changed_types_count;
+  /* OPEN-5, DECIDED 2026-09-20. Non-zero iff the code swap actually happened
+   * by the time this callback runs.
+   *
+   * WHY THE FIELD EXISTS. Zero `changed_types` in an after-reload callback is
+   * ambiguous: it is what a LATE LOAD FAILURE delivers (Patch-Loading-Lifecycle
+   * § 3.3 step 38, where Phase F failed after before-reload already fired and
+   * after-reload must still run so the application can restore) and it is
+   * equally what an ordinary patch with no layout change delivers. An
+   * application that saved state in before_reload has to tell those apart to
+   * know whether to restore it or to migrate it, and until now a PORTABLE one
+   * could not: the fact was computed and exported as
+   * `repro_hcr_rb_last_code_swapped()`, which is not one of the thirteen
+   * `rb_hcr_*` functions and so is unreachable from the portable ABI.
+   *
+   * WHY HERE, AND NOT AS A REFUSAL OR A WARNING. This follows a precedent this
+   * workspace has now set twice with the same reasoning, rather than inventing
+   * a third shape: HLX-M9's `textLeftWritable` (a publication that succeeds
+   * while degrading the process) and the Phase I registration failure (a
+   * registration that fails after the commit) both ride the APPLIED frame as a
+   * named field, and both explicitly rejected a refusal — "the patch IS
+   * applied; a refusal would be false on the wire" — and a capability warning,
+   * which is negotiated once, before the fact exists. `OPEN-5` is the same
+   * neither-success-nor-failure fact one level down, in the struct the
+   * application sees rather than in the protocol frame, so it takes the same
+   * answer.
+   *
+   * WHY NOW. The recorded cost argument: exactly one implementation of these
+   * functions exists anywhere, so the cost of widening the struct is at its
+   * minimum and rises with every further implementation. Appended last, so a
+   * consumer compiled against the previous layout keeps every offset it had. */
+  int code_swapped;
 } RbHcrReloadInfo;
 
 typedef void (*RbHcrReloadCallback)(const RbHcrReloadInfo *info,

@@ -4194,6 +4194,11 @@ static int rb_hcr_fire(const rb_hcr_callback_entry *list, size_t count,
       (include_changed_types && req->type_count > 0) ? types : NULL;
   info.changed_types_count =
       include_changed_types ? (uint32_t)req->type_count : 0u;
+  /* OPEN-5: the same fact `repro_hcr_rb_last_code_swapped()` reports, made
+   * reachable from the portable ABI. Read at DISPATCH time rather than cached,
+   * so a before-reload callback sees 0 and an after-reload callback on the same
+   * reload sees 1 — which is the distinction the field exists to carry. */
+  info.code_swapped = rb_hcr_last_code_swapped;
 
   /* Iterate over a copy: a callback may register or remove callbacks, and the
    * live array must not be re-read mid-dispatch. Registration order is the
