@@ -1163,15 +1163,32 @@ positions, overwriting each other. It is now one directory per position
 
 **The warmth it was defended for had already been deleted, by us.**
 `--forceBuild:on` was unconditional in the provider and extraction
-compile command from 2026-09-14, and it rebuilds every object
-regardless of what the directory holds — measured on a 17-object
-program, 17/17 rebuilt with the flag and 17/17 untouched without it. It
-landed in the same commit that rewrote the sharing comment to call the
-directory "intermediate storage, not an authority for C-object reuse".
-So the docstring forbidding a per-edge split was defending a benefit
-the same change had removed. Worth remembering as a shape: a
-justification and the thing it justifies can drift apart inside one
-diff, and the comment is the half that does not fail a test.
+compile command from 2026-09-14, and it rebuilt every object regardless
+of what the directory held — measured on a 17-object program, 17/17
+rebuilt with the flag and 17/17 untouched without it. It landed in the
+same commit that rewrote the sharing comment to call the directory
+"intermediate storage, not an authority for C-object reuse". So the
+docstring forbidding a per-edge split was defending a benefit the same
+change had removed. Worth remembering as a shape: a justification and
+the thing it justifies can drift apart inside one diff, and the comment
+is the half that does not fail a test.
+
+**Both are now gone, and the warmth is back.** The flag masked a real
+soundness bug — a changed C header left a stale `.o` in place, because
+Nim's object cache had three separate header-blind checks. The pinned
+compiler tracks the header closure, so the flag was deleted rather than
+merely loosened. Measured on this repo's own provider compile, 118 C
+objects, one nimcache per arm:
+
+| arm | cold | warm | objects rebuilt warm |
+| --- | --- | --- | --- |
+| old pin + `--forceBuild:on` | 114.9 s | 160–252 s | 118 / 118 |
+| current | 99.9 s | 28.4–30.4 s | **0 / 118**, six runs running |
+
+Six concurrent provider compiles: 0 failures, 0/118 rebuilt in every
+lane. The two workarounds were each replaced by the mechanism they
+stood in for — position scoping for the lock, a sound freshness check
+for the flag — rather than simply removed.
 
 Isolating it also turned out to be *faster*, which is the part that
 settles the argument. Six concurrent **real provider compiles**:
