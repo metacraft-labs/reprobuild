@@ -20,6 +20,7 @@
 #include "repro_hcr_windows_pe_symbols.h"
 #include "repro_hcr_windows_publish.h"
 #include "repro_hcr_windows_unwind_cfg.h"
+#include "repro_hcr_rb_abi_state.h"
 
 #include <windows.h>
 #include <sddl.h>
@@ -1439,3 +1440,72 @@ int repro_hcr_agent_last_publication_tier(void) {
 int repro_hcr_agent_last_on_stack_threads(void) {
   return repro_hcr_wp_last_report.captured_contexts;
 }
+
+/* ---------------------------------------------------------------------------
+ * The application-facing `rb_hcr_*` ABI on Windows.
+ *
+ * Before 2026-09-20 this translation unit defined NONE of the thirteen
+ * functions `repro_hcr_agent.h` declares unconditionally, so a Windows
+ * application that linked the agent failed at LINK time. Measured on a Linux
+ * host with clang targeting x86_64-w64-windows-gnu: five distinct undefined
+ * `rb_hcr_*` symbols and no executable. A linker error names a symbol, never a
+ * reason, so the agent had no way to tell the developer what was missing.
+ *
+ * The registry, the removal and de-duplication rules, the applied-reload
+ * window, the trace and the padded allocator are now SHARED with every other
+ * arm rather than copied here, so they cannot drift. Only the three seams
+ * below are per-platform.
+ *
+ * WHAT THIS CLAIMS. The ABI exists, links, and behaves: an embedder can
+ * register callbacks and managed types, query `rb_hcr_file_changed`, use the
+ * padded allocator, and call `rb_hcr_apply_reload` without the process failing
+ * to start.
+ *
+ * WHAT IT DOES NOT CLAIM. That Windows APPLIES patches through this path. The
+ * § 3.1 lifecycle is not wired to `repro_hcr_windows_apply_bundle` here;
+ * wiring it is HWX-M0's behavioural half and needs a real Windows host to
+ * verify, because thread suspension, IP adjustment and the publication store's
+ * serialisation cannot be judged under emulation. Until then a pending reload
+ * is REFUSED BY NAME — a diagnostic an application can act on, which is
+ * exactly what the link error could never be.
+ * ------------------------------------------------------------------------- */
+static SRWLOCK rb_hcr_padded_srwlock = SRWLOCK_INIT;
+
+static int rb_hcr_platform_pending_active(void) {
+  /* Nothing can be parked while the lifecycle is unwired: the Windows arm has
+   * no producer for a pending reload. Answering false is honest rather than
+   * conservative -- § 13.1 says an application may poll this and act on it,
+   * and a true here would send it to `rb_hcr_apply_reload` for a patch that
+   * does not exist. */
+  return 0;
+}
+
+static void rb_hcr_platform_apply_pending(void) {
+  rb_hcr_trace_add("reject:lifecycle-not-wired");
+}
+
+static void rb_hcr_platform_padded_lock(void) {
+  AcquireSRWLockExclusive(&rb_hcr_padded_srwlock);
+}
+
+static void rb_hcr_platform_padded_unlock(void) {
+  ReleaseSRWLockExclusive(&rb_hcr_padded_srwlock);
+}
+
+static int rb_hcr_platform_aligned_alloc(void **out, size_t alignment,
+                                         size_t size) {
+  /* `_aligned_malloc` takes (size, alignment) -- the OPPOSITE order to
+   * `posix_memalign(ptr, alignment, size)` -- and reports failure by returning
+   * NULL rather than an errno. Both differences are silent if transcribed
+   * carelessly. */
+  void *block = _aligned_malloc(size, alignment);
+  if (block == NULL) {
+    return -1;
+  }
+  *out = block;
+  return 0;
+}
+
+static void rb_hcr_platform_aligned_free(void *ptr) { _aligned_free(ptr); }
+
+#include "repro_hcr_rb_abi.h"
