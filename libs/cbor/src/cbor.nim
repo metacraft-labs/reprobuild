@@ -1,9 +1,21 @@
 import cbor/types
+import cbor/item
+import cbor/floats
+import cbor/bignum
+import cbor/reader
+import cbor/writer
+import cbor/diag
 import cbor/encode
 import cbor/decode
 import cbor/json_view
 
 export types
+export item
+export floats
+export bignum
+export reader
+export writer
+export diag
 export encode
 export decode
 export json_view

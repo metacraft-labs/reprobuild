@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1694,
+    "nimTestBinaries": 1697,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 599,
     "staticallyDetectedRuntimeCompilerFlowTests": 106,
-    "testEntries": 1705
+    "testEntries": 1708
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1106,7 +1106,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 801,
+      "integration": 804,
       "platform/destructive": 113,
       "pure unit": 599,
       "unclassified": 180
@@ -1257,9 +1257,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1694,
+    "nimTestBinaryCount": 1697,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1705
+    "testEntryCount": 1708
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -24249,6 +24249,36 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_cbor_rfc8949_malformed",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_cbor_rfc8949_malformed.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cbor_rfc8949_vectors",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_cbor_rfc8949_vectors.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_cert_gate_defaults_off_and_advisory_does_not_block",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -24642,6 +24672,23 @@
       "source": "tests/integration/t_config_layer_determines_tier_not_per_repo_field.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cose_rfc9052_vectors",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_cose_rfc9052_vectors.nim",
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

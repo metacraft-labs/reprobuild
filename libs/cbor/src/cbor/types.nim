@@ -1,6 +1,13 @@
-type
-  CborError* = object of CatchableError
+## The small string-keyed view. `CborError` used to be declared here;
+## it now lives in `cbor/item` beside the refusal vocabulary every part
+## of the library shares, and is re-exported so existing importers of
+## `cbor/types` are unaffected.
 
+import ./item
+
+export item.CborError, item.CborErrorKind, item.cborFail, item.cborFailAt
+
+type
   DynamicValueKind* = enum
     dvNull
     dvBool
