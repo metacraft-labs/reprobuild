@@ -152,7 +152,12 @@ when defined(posix) and isNixSupported:
       check fileExists(stubPath)
       check transientChildren(scratchRoot / "m7-temp",
         "repro-interface-extract-").len == 0
-      check transientChildren(scratchRoot / "m7-temp", "extract_runner_").len == 0
+      # The runner SOURCE is content-keyed and deliberately persists: one file
+      # per distinct runner source, never one per invocation. Its staging file
+      # is the only transient thing left in this directory.
+      check transientChildren(scratchRoot / "m7-temp",
+        "extract_runner_stage_").len == 0
+      check transientChildren(scratchRoot / "m7-temp", "extract_runner_").len == 1
 
       # A forced compiler failure still removes the extractor's private CWD.
       putEnv("REPRO_TEST_NIM_FAIL", "1")
@@ -163,7 +168,11 @@ when defined(posix) and isNixSupported:
       putEnv("REPRO_TEST_NIM_FAIL", "")
       check transientChildren(scratchRoot / "m7-temp",
         "repro-interface-extract-").len == 0
-      check transientChildren(scratchRoot / "m7-temp", "extract_runner_").len == 0
+      # Still ONE: the second extraction names the same module, so it derives
+      # the same content key and reuses the file the first one published.
+      check transientChildren(scratchRoot / "m7-temp",
+        "extract_runner_stage_").len == 0
+      check transientChildren(scratchRoot / "m7-temp", "extract_runner_").len == 1
 
       # Use a lightweight compiler response for the concurrency assertion; the
       # extractor above already exercised the real compiler. Each call still
@@ -248,9 +257,17 @@ when defined(posix) and isNixSupported:
       let first = extractInterfaceFromModule(modulePath,
         outputRoot / "first.rbsz", outputRoot / "first.nim", sourceRoot,
         scratchRoot, useExtractionCache = false, consumerRoot = projectRoot)
+      # EVERY object, the extraction runner's own included. That exclusion used
+      # to be here, and it is what let the defect hide: the runner's module was
+      # allocated a fresh random basename per invocation, so its object could
+      # never be reused and its predecessor was never removed -- one rebuilt
+      # object and three orphaned cache entries on every single warm run, with
+      # no reaper. The runner source is content-keyed now, so the runner has
+      # exactly one object here and it is subject to the same reuse claim as
+      # everything else in the directory.
       var objectTimes = initTable[string, Time]()
       for path in walkDirRec(scratchRoot / "nimcache-interface"):
-        if path.endsWith(".o") and "extract_runner" notin path.extractFilename:
+        if path.endsWith(".o"):
           objectTimes[path] = getLastModificationTime(path)
       require objectTimes.len >= 4
       writeFile(cwdLog, "")
@@ -262,14 +279,35 @@ when defined(posix) and isNixSupported:
       for path, modified in objectTimes:
         if not fileExists(path) or getLastModificationTime(path) != modified:
           inc rebuilt
-      checkpoint "shared objects: " & $objectTimes.len & ", rebuilt: " & $rebuilt
+      var objectsAfter = 0
+      for path in walkDirRec(scratchRoot / "nimcache-interface"):
+        if path.endsWith(".o"):
+          inc objectsAfter
+      checkpoint "shared objects: " & $objectTimes.len & ", rebuilt: " &
+        $rebuilt & ", after: " & $objectsAfter
+      # ASSERTED, not merely reported. These lines used to be a checkpoint
+      # alone, so a warm extraction that rebuilt objects printed a number and
+      # passed.
+      check rebuilt == 0
+      # AND THE SECOND HALF, WITHOUT WHICH THE FIRST IS VACUOUS HERE.
+      # ``rebuilt`` ranges over the objects that existed BEFORE the warm run,
+      # so it can only see an object that was touched or deleted. The defect
+      # this test now covers was neither: the runner's module had a fresh
+      # random basename every invocation, so a warm extraction ADDED
+      # ``@mextract_runner_<rand>.nim.c.o`` beside its predecessor and left
+      # both. Measured against the pre-fix code this case reported
+      # "rebuilt: 0" and passed while the directory grew every run. Only the
+      # COUNT catches it.
+      check objectsAfter == objectTimes.len
       let compilerCwds = readFile(cwdLog).splitLines().filterIt(it.len > 0)
       require compilerCwds.len == 1
       check compilerCwds[0].parentDir == scratchRoot / "m7-temp"
       check not dirExists(compilerCwds[0])
       check transientChildren(scratchRoot / "m7-temp",
         "repro-interface-extract-").len == 0
-      check transientChildren(scratchRoot / "m7-temp", "extract_runner_").len == 0
+      check transientChildren(scratchRoot / "m7-temp",
+        "extract_runner_stage_").len == 0
+      check transientChildren(scratchRoot / "m7-temp", "extract_runner_").len == 1
 
       # Keep the process-wide compiler observer alive for this regression too.
       block:
