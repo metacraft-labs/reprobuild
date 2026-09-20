@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1689,
+    "nimTestBinaries": 1694,
     "pureUnitConsolidationGroups": 50,
-    "pureUnitTests": 598,
-    "staticallyDetectedRuntimeCompilerFlowTests": 104,
-    "testEntries": 1700
+    "pureUnitTests": 599,
+    "staticallyDetectedRuntimeCompilerFlowTests": 106,
+    "testEntries": 1705
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1106,9 +1106,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 797,
+      "integration": 801,
       "platform/destructive": 113,
-      "pure unit": 598,
+      "pure unit": 599,
       "unclassified": 180
     },
     "graphOwnedTestArtifacts": [
@@ -1257,9 +1257,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1689,
+    "nimTestBinaryCount": 1694,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1700
+    "testEntryCount": 1705
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2084,6 +2084,88 @@
       "class": "integration",
       "matches": [
         {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "caseDir",
+            "compileFlags",
+            "env",
+            "linkFlags",
+            "oldPath",
+            "output",
+            "prepared",
+            "raw",
+            "repoRoot",
+            "repro",
+            "target"
+          ],
+          "line": 152,
+          "path": "tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_hardened_host_refuses_at_negotiation.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "@[\"gcc\", \"-O2\", \"-g\"] & @compileFlags &"
+        }
+      ],
+      "source": "tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_hardened_host_refuses_at_negotiation.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "caseDir",
+            "compileFlags",
+            "env",
+            "linkFlags",
+            "output",
+            "prepared",
+            "raw",
+            "repoRoot",
+            "repro",
+            "source"
+          ],
+          "line": 142,
+          "path": "tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "\"gcc\", \"-O2\", \"-g\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "caseDir",
+            "compileFlags",
+            "env",
+            "linkFlags",
+            "output",
+            "prepared",
+            "raw",
+            "repoRoot",
+            "repro",
+            "source"
+          ],
+          "line": 167,
+          "path": "tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "@[\"gcc\", \"-O2\", \"-g\"] & @compileFlags &"
+        }
+      ],
+      "source": "tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
           "assignedCommandVariable": "args",
           "commandVariableExecuted": true,
           "directExecutionLine": false,
@@ -2255,7 +2337,7 @@
             "target",
             "watch"
           ],
-          "line": 170,
+          "line": 173,
           "path": "tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim",
           "patterns": [
             "gcc"
@@ -2286,7 +2368,7 @@
             "socketPath",
             "sourcePath"
           ],
-          "line": 137,
+          "line": 138,
           "path": "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim",
           "patterns": [
             "gcc"
@@ -2311,7 +2393,7 @@
             "socketPath",
             "sourcePath"
           ],
-          "line": 140,
+          "line": 141,
           "path": "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim",
           "patterns": [
             "cc"
@@ -10921,6 +11003,23 @@
       "source": "libs/repro_infra/tests/t_smoke_repro_infra.nim",
       "sourceSuiteCount": 29,
       "staticCaseCount": 206,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_compiler_crash_is_not_a_compile_error",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -20181,6 +20280,76 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_integration_hcr_linux_hardened_host_refuses_at_negotiation",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_hardened_host_refuses_at_negotiation.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_hcr_linux_prepare_object_expands_compressed_debug_sections",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_linkgraph"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/hcr-linux-prepare/t_e2e_hcr_linux_prepare_object_expands_compressed_debug_sections.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_phase_i_refusal_reports_an_applied_patch",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hcr_agent"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/hcr-linux-prepare/t_integration_hcr_linux_phase_i_refusal_reports_an_applied_patch.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_hcr_linux_isonim_shim_against_real_agent",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -20497,6 +20666,7 @@
       "localDependencyShape": [
         "repro_dsl_stdlib",
         "repro_hcr_agent",
+        "repro_hcr_linkgraph",
         "repro_test_support"
       ],
       "owner": "tests/e2e",

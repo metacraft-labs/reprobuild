@@ -25007,6 +25007,69 @@ proc hcrWatchObjectCandidatesFromReport*(projectRoot, buildReportPath: string):
           objectPath: objectPath,
           sourcePath: sourceInputs[0])
 
+  # ---- FOLLOW THE OBJECT FORWARD THROUGH POST-PROCESSING EDGES.
+  #
+  # HLX-M8, 2026-09-20, and this is a PRODUCT DEFECT the `prepare-object`
+  # expansion work exposed. The loop above matches an action whose inputs
+  # contain exactly one C/C++ source, i.e. the COMPILE. `hcr.prepareObject`
+  # takes an `.o` and produces an `.o`, so it never matched, and
+  # `repro watch --hcr` has therefore always sent the COMPILER's object and
+  # never the prepared one. The `hcr.prepareObject` edge every watch fixture
+  # declares was decorative on the wire: on Linux its `SHF_COMPRESSED`
+  # expansion never reached the agent, and on macOS neither did the `__HCR`
+  # segment rewrite that is the pass's entire reason for existing.
+  #
+  # It was invisible because the one gate that asserted on the prepared
+  # artifact (`e2e_hcr_watch_inference`) asserted on the FILE ON DISK, which
+  # the edge really does write, and not on the bytes the session sent.
+  #
+  # The rule is the general one rather than a name match: an object that is
+  # the declared input of a later action whose declared output is also an
+  # object has been post-processed, and the LAST object in that chain is the
+  # one a patch must be cut from. Keying on the action's id would not work —
+  # measured, `defaultBuiltinActionId("hcr-prepareObject", …)` is overridden by
+  # the target name, so the edge appears as `patchable-object`.
+  var objectSuccessor = initTable[string, string]()
+  for action in report{"actions"}:
+    let evidence = action{"evidence"}
+    if evidence.kind != JObject:
+      continue
+    var producedObject = ""
+    for path in evidence.jsonStringSeqField("declaredOutputs"):
+      let outputPath = projectRoot.materialReportPath(path)
+      if outputPath.isObjectFile and fileExists(extendedPath(outputPath)):
+        producedObject = outputPath
+        break
+    if producedObject.len == 0:
+      continue
+    for path in evidence.jsonStringSeqField("declaredInputs"):
+      let inputPath = projectRoot.materialReportPath(path)
+      if inputPath.isObjectFile and inputPath != producedObject:
+        # A second consumer of the same object would make "the last object in
+        # the chain" ambiguous. Refuse to guess rather than pick one.
+        if objectSuccessor.hasKey(inputPath) and
+            objectSuccessor[inputPath] != producedObject:
+          raise newException(ValueError,
+            "HCR watch inference found two post-processing outputs for " &
+            inputPath & " (" & objectSuccessor[inputPath] & " and " &
+            producedObject & "); it cannot decide which object a patch " &
+            "should be cut from")
+        objectSuccessor[inputPath] = producedObject
+
+  for i in 0 ..< result.len:
+    var cursor = result[i].objectPath
+    var seen: seq[string] = @[cursor]
+    # Bounded so a cycle in the report cannot hang the watch session.
+    for _ in 0 ..< 8:
+      if not objectSuccessor.hasKey(cursor):
+        break
+      let next = objectSuccessor[cursor]
+      if next in seen:
+        break
+      cursor = next
+      seen.add cursor
+    result[i].objectPath = cursor
+
 proc captureInferredHcrWatchBaseline*(projectRoot, buildReportPath,
                                       artifacts: string):
     seq[HcrWatchObjectBaseline] =
@@ -25403,19 +25466,35 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
   if session.client.patchApplied.isNone:
     raise newException(ValueError,
       "HCR watch did not receive a patchApplied response")
+  let applied = session.client.patchApplied.get()
+  # HLX-M8. A Phase I registration refusal is a DEGRADED success, not a
+  # failure: the code is live, so this session keeps patching. It used to
+  # arrive as ``patchFailed``, which set ``fallbackOnly`` and stopped HCR for a
+  # target that had already been patched. The line below is what a reader sees
+  # instead, and it carries the NAMED refusal rather than a generic sentence,
+  # because the name is what says whether to rebuild the object differently.
+  var degradedSuffix = ""
+  if applied.registrationDegraded:
+    degradedSuffix = " registrationDegraded=1 diagnostic=" &
+      applied.registrationDiagnostic
   echo "repro watch: hcr patch applied patchId=" & request.patchId &
-    targetLogSuffix(session.config)
+    degradedSuffix & targetLogSuffix(session.config)
   flushStdout()
   # Named-Targets M4 §3.4: ``hcr/patchApplied`` carries ``target`` so
   # SSE consumers can route per-target events.
   var functions = newJArray()
   functions.add(%session.metadata.functionName)
+  var appliedPayload = %*{
+    "patchId": request.patchId,
+    "functions": functions
+  }
+  if applied.registrationDegradedReported:
+    appliedPayload["registrationDegraded"] = %applied.registrationDegraded
+    if applied.registrationDegraded:
+      appliedPayload["registrationDiagnostic"] = %applied.registrationDiagnostic
   emit.emitHcrEvent(session.config, "hcr/patchApplied",
-    "repro watch: hcr patch applied patchId=" & request.patchId,
-    %*{
-      "patchId": request.patchId,
-      "functions": functions
-    })
+    "repro watch: hcr patch applied patchId=" & request.patchId & degradedSuffix,
+    appliedPayload)
 
 type
   WatchCtIncrementalFlags* = object
@@ -29355,10 +29434,35 @@ proc runHcrPrepareObjectCommand(args: seq[string]): int =
     #
     # The edge is kept rather than elided so the graph shape is the same on both
     # hosts and the output the watch session reads from is a real artifact.
-    copyFile(extendedPath(parsed.input), extendedPath(parsed.output))
-    echo "repro hcr prepare-object: output=" & parsed.output &
-      " objectFormat=elf passthrough=1 (no ELF counterpart to the Mach-O " &
-      "__HCR segment rewrite; see Linux-ELF-Provider.md section 5.1)"
+    #
+    # HLX-M8, 2026-09-20 — and it is why the ELF arm is no longer a
+    # passthrough. The Mach-O segment rewrite has no ELF counterpart, but
+    # `prepare-object` is the pass that exists to make an object PATCHABLE, and
+    # on ELF there is one thing standing between an ordinary compile and a
+    # patchable object: `SHF_COMPRESSED` `.debug_*`. GCC emits them by default
+    # on this toolchain, the agent refuses such a symfile by name
+    # (`debug-object-compressed-debug-section`) because applying a relocation
+    # into a zlib stream corrupts it silently, and the only remedy was a
+    # per-edge `-gz=none` that `gcc` can express, `clang` cannot, and that one
+    # HCR edge in this repository carried while five others did not. Expanding
+    # the sections here fixes the class rather than the instances, and the
+    # per-edge flag becomes unnecessary rather than merely documented.
+    let report = expandElfCompressedSections(parsed.input, parsed.output)
+    if report.rewritten:
+      var names: seq[string] = @[]
+      for section in report.expanded:
+        names.add section.name & "(" & $section.compressedBytes & "->" &
+          $section.expandedBytes & ")"
+      echo "repro hcr prepare-object: output=" & parsed.output &
+        " objectFormat=elf decompressedSections=" & $report.expanded.len &
+        " sections=" & names.join(",") &
+        " (SHF_COMPRESSED expanded so the agent can relocate the debug " &
+        "sections in process; see Linux-ELF-Provider.md section 8)"
+    else:
+      echo "repro hcr prepare-object: output=" & parsed.output &
+        " objectFormat=elf decompressedSections=0 passthrough=1 (no " &
+        "SHF_COMPRESSED section, and no ELF counterpart to the Mach-O __HCR " &
+        "segment rewrite; see Linux-ELF-Provider.md section 5.1)"
   elif parsed.allCodeSections:
     let count = rewriteMachOArm64CodeSectionSegments(
       parsed.input, parsed.output, parsed.segmentName)

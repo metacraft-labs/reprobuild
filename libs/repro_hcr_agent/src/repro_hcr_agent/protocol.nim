@@ -206,6 +206,29 @@ type
     supportProfile*: string
     agentPid*: int
     capabilities*: seq[string]
+    patchingSupported*: bool
+      ## HLX-M9. False when the agent's host capability probe says this process
+      ## cannot be patched at all — on Linux, when the `mprotect` RW->RX round
+      ## trip over the provider's own scratch page does not complete.
+      ##
+      ## The provider has refused such a host since HLX-M4, but it refused in
+      ## `txn_prepare`, i.e. at the first reload. Reporting it during
+      ## negotiation is what lets a coordinator stop offering patches instead
+      ## of building one per edit and having each one refused.
+    patchingSupportedReported*: bool
+      ## Whether the key was present. ABSENT MEANS UNKNOWN, not `true`: an
+      ## agent predating HLX-M9 does not answer, and an arm with no host probe
+      ## deliberately does not answer either. A consumer that collapsed
+      ## "unknown" into "supported" would reproduce exactly the behaviour this
+      ## field exists to replace.
+    unsupportedReason*: string
+      ## The NAMED blocking policy plus the measurement that established it —
+      ## e.g. `host-text-protection-roundtrip-refused: … mprotect(RW) answered
+      ## 0 while mprotect(RX) answered -13. this process runs under PR_SET_MDWE
+      ## with PR_MDWE_REFUSE_EXEC_GAIN …`. Empty when `patchingSupported` is
+      ## true. "Unsupported host" on its own is a symptom; the policy is the
+      ## actionable fact, and the provider reads `PR_GET_MDWE` rather than
+      ## guessing which one it is.
 
   HcrPatchRequest* = object
     schemaId*: string
@@ -293,6 +316,30 @@ type
       ## an agent predating HLX-M9, which is a different statement from an
       ## agent reporting `false`, and collapsing the two would make a security
       ## fact default to the reassuring answer (Verification-Harness-Traps §31).
+    registrationDegraded*: bool
+      ## HLX-M8. True when Phase I (step 31 — GDB JIT symfile and `.eh_frame`
+      ## registration) refused AFTER the commit. The patch IS applied: the
+      ## trampoline is live and the layouts did change. What is missing is the
+      ## debugger's and unwinder's view of the patched body, so a breakpoint
+      ## inside it is attributed wrongly and a backtrace crossing it is
+      ## corrupt.
+      ##
+      ## This used to be reported as `patchFailed`, which made `repro watch`
+      ## print "falling back to rebuilds" and stop patching a target whose
+      ## behaviour had already changed. It rides the applied frame for the same
+      ## reason `textLeftWritable` does: the publication succeeded AND degraded
+      ## the process, and both halves belong in the frame whose arrival is what
+      ## tells the coordinator the code is live.
+    registrationDegradedReported*: bool
+      ## Whether the key was present at all. Absent means an agent predating
+      ## this change — which, for THIS field, is an agent that would have sent
+      ## `patchFailed` instead, so the two are not merely differently-worded.
+    registrationDiagnostic*: string
+      ## The NAMED refusal, e.g. `debug-object-compressed-debug-section`.
+      ## Empty when `registrationDegraded` is false. Named rather than
+      ## generic because "JIT debug object registration failed" was one
+      ## sentence for three unrelated causes (Verification-Harness-Traps §20)
+      ## and the cause is what tells a reader what to change.
     codePatchEvent*: HcrCodePatchEvent
     skippedFunctions*: seq[HcrSkippedFunction]
     windowsEvidence*: HcrWindowsPatchEvidence
@@ -482,11 +529,17 @@ proc sourceReloadResultJson*(value: HcrSourceReloadResult): JsonNode =
   result["refusedFiles"] = refused
 
 proc helloJson(value: HcrHello): JsonNode =
-  %*{
+  result = %*{
     "supportProfile": value.supportProfile,
     "agentPid": value.agentPid,
     "capabilities": stringArray(value.capabilities)
   }
+  if value.patchingSupportedReported:
+    # HLX-M9. Emitted only when the agent OBSERVED a host probe, so a re-encode
+    # cannot manufacture a `true` an absent key must be read as UNKNOWN.
+    result["patchingSupported"] = newJBool(value.patchingSupported)
+    if not value.patchingSupported and value.unsupportedReason.len > 0:
+      result["unsupportedReason"] = newJString(value.unsupportedReason)
 
 proc patchRequestJson*(request: HcrPatchRequest): JsonNode =
   result = newJObject()
@@ -548,6 +601,13 @@ proc patchAppliedJson(value: HcrPatchApplied): JsonNode =
     # HLX-M9. Emitted only when it was OBSERVED, so this encoder cannot
     # manufacture the reassuring `false` an absent field must not be read as.
     result["textLeftWritable"] = newJBool(value.textLeftWritable)
+  if value.registrationDegradedReported:
+    # HLX-M8. Same rule as the field above: emitted only when this agent
+    # OBSERVED Phase I, so a re-encoder cannot manufacture the reassuring
+    # `false` that an absent key must not be read as.
+    result["registrationDegraded"] = newJBool(value.registrationDegraded)
+    if value.registrationDegraded and value.registrationDiagnostic.len > 0:
+      result["registrationDiagnostic"] = newJString(value.registrationDiagnostic)
   if value.dispatchAddress.len > 0:
     result["dispatchAddress"] = newJString(value.dispatchAddress)
   if value.entryAddress.len > 0:
@@ -713,10 +773,16 @@ proc parseSourceGenerationMap(node: JsonNode): seq[HcrSourceGenerationEntry] =
     result.add parseSourceGeneration(value)
 
 proc parseHello(node: JsonNode): HcrHello =
+  var patchingSupportedPresent = false
+  let patchingSupported =
+    node.optionalBool("patchingSupported", patchingSupportedPresent)
   HcrHello(
     supportProfile: node.requireStr("supportProfile"),
     agentPid: node.requireInt("agentPid"),
-    capabilities: node.stringSeq("capabilities"))
+    capabilities: node.stringSeq("capabilities"),
+    patchingSupported: patchingSupported,
+    patchingSupportedReported: patchingSupportedPresent,
+    unsupportedReason: node.optionalStr("unsupportedReason"))
 
 proc parsePatchRequest*(node: JsonNode): HcrPatchRequest =
   result = HcrPatchRequest(
@@ -785,9 +851,15 @@ proc parsePatchApplied(node: JsonNode): HcrPatchApplied =
   var textLeftWritablePresent = false
   let textLeftWritable =
     node.optionalBool("textLeftWritable", textLeftWritablePresent)
+  var registrationDegradedPresent = false
+  let registrationDegraded =
+    node.optionalBool("registrationDegraded", registrationDegradedPresent)
   HcrPatchApplied(
     textLeftWritable: textLeftWritable,
     textLeftWritableReported: textLeftWritablePresent,
+    registrationDegraded: registrationDegraded,
+    registrationDegradedReported: registrationDegradedPresent,
+    registrationDiagnostic: node.optionalStr("registrationDiagnostic"),
     codePatchEvent: parseCodePatchEvent(node),
     skippedFunctions: parseSkippedFunctions(node),
     windowsEvidence: parseWindowsPatchEvidence(node),

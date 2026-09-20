@@ -22,6 +22,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -795,6 +796,95 @@ int repro_hcr_lx_probe_txn_site_refusal(int index) {
 }
 
 /* Levers. The agent sets neither. */
+/*
+ * HLX-M9 — the provider-owned code-page allocator, driven directly.
+ *
+ * WHY THIS IS REACHED HERE AND NOT THROUGH A PATCH. Under
+ * `PR_SET_MDWE(PR_MDWE_REFUSE_EXEC_GAIN)` — the only W^X policy this host can
+ * express — `repro_hcr_lx_txn_prepare` refuses BEFORE it reaches the page
+ * allocator, because the host capability probe already failed. That refusal is
+ * correct (the TARGET'S text still cannot be made writable, which is HLX-OQ-1's
+ * half and is not what this deliverable is about), but it means no patch path
+ * can ever exercise the allocator on a hardened host. The shim is the vehicle
+ * that can, and it runs the SAME production code the agent runs.
+ *
+ * `repro_hcr_lx_probe_code_page_cycle` performs one complete lifecycle —
+ * allocate, write through whatever alias the mechanism provides, finalize —
+ * and then CALLS the page. Its result is what the page returns, so a page
+ * that was allocated but never became executable cannot be reported as
+ * success.
+ */
+int repro_hcr_lx_probe_code_page_cycle(int force_anonymous,
+                                       unsigned long long *out_exec_base) {
+  size_t page_size = repro_hcr_lx_page_size();
+  void *page;
+  uint8_t *writer;
+  int previous = repro_hcr_lx_force_anonymous_code_pages;
+  int result;
+  /* `mov eax, 4242; ret` — a value no other fixture in this tree uses, so a
+   * stale mapping cannot be mistaken for this one. */
+  static const uint8_t body[] = {0xB8, 0x92, 0x10, 0x00, 0x00, 0xC3};
+
+  if (out_exec_base != NULL) {
+    *out_exec_base = 0;
+  }
+  repro_hcr_lx_force_anonymous_code_pages = force_anonymous;
+  page = repro_hcr_lx_map_code_page(NULL, page_size, 0);
+  if (page == NULL) {
+    repro_hcr_lx_force_anonymous_code_pages = previous;
+    return -1; /* allocation refused */
+  }
+  writer = repro_hcr_lx_code_writer(page);
+  memcpy(writer, body, sizeof(body));
+  if (repro_hcr_lx_finalize_code_page(page, page_size) != 0) {
+    repro_hcr_lx_release_code_page(page, page_size);
+    repro_hcr_lx_force_anonymous_code_pages = previous;
+    return -2; /* could not be made executable */
+  }
+  if (out_exec_base != NULL) {
+    *out_exec_base = (unsigned long long)(uintptr_t)page;
+  }
+  /* THE PAGE ITSELF ANSWERS. A `return 0` here without this call would be
+   * satisfied by a page that was mapped and never made runnable. */
+  result = ((int (*)(void))page)();
+  repro_hcr_lx_force_anonymous_code_pages = previous;
+  return result;
+}
+
+unsigned long long repro_hcr_lx_probe_dual_page_count(void) {
+  return repro_hcr_lx_dual_page_count;
+}
+
+unsigned long long repro_hcr_lx_probe_sealed_page_count(void) {
+  return repro_hcr_lx_dual_seal_count;
+}
+
+unsigned long long repro_hcr_lx_probe_fallback_page_count(void) {
+  return repro_hcr_lx_fallback_page_count;
+}
+
+int repro_hcr_lx_probe_memfd_dual_supported(void) {
+  return repro_hcr_lx_memfd_dual_supported(repro_hcr_lx_page_size());
+}
+
+/*
+ * Whether the KERNEL confirmed the last seal, by refusing a shared writable
+ * mapping of the memfd while it was still open. 0 for the anonymous fallback,
+ * which has no memfd and no seal.
+ *
+ * AN EARLIER VERSION OF THIS ASKED THE WRONG QUESTION and is recorded because
+ * the answer is easy to misread. It tried `mprotect(RW|EXEC)` on the exec view
+ * and expected the seal to refuse it. It does not, and should not: the exec
+ * view is `MAP_PRIVATE`, so making it writable produces a COPY-ON-WRITE page
+ * and touches neither the memfd nor any other mapping of it. `F_SEAL_WRITE`
+ * is a guarantee about the FILE — no shared writable alias can ever exist —
+ * and the `mprotect` route is exactly the exec-gain operation a W^X policy
+ * forbids anyway. Measured: that assertion read 1 on a correctly sealed page.
+ */
+int repro_hcr_lx_probe_last_seal_verified(void) {
+  return repro_hcr_lx_last_seal_verified;
+}
+
 void repro_hcr_lx_probe_set_fail_patch_page_alloc(int value) {
   repro_hcr_lx_fail_patch_page_alloc = value;
 }

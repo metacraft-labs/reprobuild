@@ -272,6 +272,24 @@ REPRO_HCR_AGENT_API const char *repro_hcr_agent_default_support_profile(void);
 /* Host capability probe results (see design §5.2 and §4.4). Both are evaluated
  * at agent start and are stable for the life of the process. */
 REPRO_HCR_AGENT_API int repro_hcr_agent_host_supports_direct_patch(void);
+
+/*
+ * HLX-M9 — how the provider's own code pages (patch bodies, island pages) were
+ * obtained. `dual` counts `memfd_create` dual mappings, whose exec view is
+ * `MAP_PRIVATE|PROT_READ|PROT_EXEC` and never writable; `sealed` counts those
+ * that reached `F_SEAL_WRITE`, after which no writable alias to that
+ * executable page can be created by anything; `fallback` counts the
+ * pre-HLX-M9 anonymous `PROT_READ|PROT_WRITE` pages that are `mprotect`ed to
+ * `PROT_READ|PROT_EXEC`, which is the shape a hardened kernel refuses.
+ *
+ * Observations only. Nothing in the agent branches on them, and a gate should
+ * treat them as CORROBORATION of what `/proc/self/maps` says rather than as
+ * the measurement — the kernel is the producer that cannot agree with a
+ * provider that only thinks it sealed something.
+ */
+REPRO_HCR_AGENT_API uint64_t repro_hcr_agent_dual_code_page_count(void);
+REPRO_HCR_AGENT_API uint64_t repro_hcr_agent_sealed_code_page_count(void);
+REPRO_HCR_AGENT_API uint64_t repro_hcr_agent_fallback_code_page_count(void);
 REPRO_HCR_AGENT_API int repro_hcr_agent_host_membarrier_sync_core(void);
 
 /* HLX-M4: the real-time signal number the tier-2 quiescence handshake uses

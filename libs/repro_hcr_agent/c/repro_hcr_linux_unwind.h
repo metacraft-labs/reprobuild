@@ -570,10 +570,13 @@ static void repro_hcr_lxu_deregister_by_convention(
  * allocation size, and that is the reason to do it — not that every other
  * choice fails outright.
  *
- * `repro_hcr_lx_map_patch_page_near` is the allocator HLX-M2 already uses to
- * put a patch body within `rel32` of its window, and it answers the same
- * question here. The displacement is checked afterwards anyway and refuses
- * `unwind-metadata-unplaceable` rather than truncating.
+ * `repro_hcr_lx_map_near_data_page` runs the same near-placement search HLX-M2
+ * uses to put a patch body within `rel32` of its window — it answers the same
+ * question — but places a WRITABLE, non-executable page. The distinction was
+ * added by HLX-M9 and is not cosmetic: the search itself now returns
+ * never-writable dual-mapped pages for code, and this buffer is written and
+ * relocated in place. The displacement is checked afterwards anyway and
+ * refuses `unwind-metadata-unplaceable` rather than truncating.
  * ------------------------------------------------------------------------- */
 REPRO_HCR_LXU_MAYBE_UNUSED
 static int repro_hcr_lxu_register_eh_frame(const uint8_t *bytes, uint64_t size,
@@ -630,8 +633,13 @@ static int repro_hcr_lxu_register_eh_frame(const uint8_t *bytes, uint64_t size,
     return REPRO_HCR_LXU_REFUSED_METADATA_TOO_LARGE;
   }
   mapped_length = (size_t)(((size + 4) + page_size - 1) / page_size) * page_size;
-  buffer = (uint8_t *)repro_hcr_lx_map_patch_page_near(code_address,
-                                                       mapped_length);
+  /* A NEAR DATA page, not a code page. The section is written into this
+   * mapping and its FDEs are relocated IN PLACE, so it must stay writable;
+   * and it is never executed, so it must not be executable. Using the code
+   * allocator here — which HLX-M9 made a never-writable dual mapping — faults
+   * on the `memcpy` two lines down, measured. */
+  buffer = (uint8_t *)repro_hcr_lx_map_near_data_page(code_address,
+                                                      mapped_length);
   if (buffer == NULL) {
     return REPRO_HCR_LXU_REFUSED_METADATA_UNPLACEABLE;
   }

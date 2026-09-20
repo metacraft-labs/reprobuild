@@ -14,9 +14,10 @@
 ## The gate therefore runs on Linux x86_64 and macOS arm64, and it is the only
 ## place `repro watch --hcr`'s PRODUCTION wire is driven on Linux at all.
 
-import std/[monotimes, os, osproc, sequtils, strutils, tempfiles, times, unittest]
+import std/[json, monotimes, os, osproc, sequtils, strutils, tempfiles, times, unittest]
 
 import repro_hcr_agent
+import repro_hcr_linkgraph/elf_decompress
 from repro_test_support import requireBinary, monitorShimPath
 
 const
@@ -337,14 +338,23 @@ suite "HCR watch inference E2E":
       let rawObject = projectRoot / "build" / "patchable.raw.o"
       check fileExists(preparedObject)
       when defined(linux):
-        # HLX-M8 residue, 2026-09-18. `Linux-ELF-Provider.md` §5.1: the Mach-O
-        # `__HCR` segment rewrite "has no ELF counterpart and is dropped", so
-        # the ELF arm of `prepare-object` is a passthrough and the prepared
-        # object must be byte-identical to the compiler's output. Before this
-        # change the edge ran the Mach-O parser over an ELF object and FAILED
-        # the build (`expected little-endian Mach-O 64-bit object`), so no
-        # Linux watch cycle could reach the agent wire at all.
-        check readFile(preparedObject) == readFile(rawObject)
+        # HLX-M8, 2026-09-20. This USED to assert the two objects were
+        # byte-identical, because the ELF arm of `prepare-object` was a
+        # passthrough — `Linux-ELF-Provider.md` §5.1's Mach-O `__HCR` segment
+        # rewrite has no ELF counterpart. The assertion is now the opposite,
+        # and the change is deliberate rather than a relaxation: the ELF arm
+        # EXPANDS `SHF_COMPRESSED` `.debug_*`, which this project's
+        # `gcc(debug3 = true)` edge emits by default and which the agent
+        # refuses by name, so the prepared object is a strictly larger object
+        # with the same sections uncompressed.
+        #
+        # The premise is asserted before the consequence: if this toolchain
+        # stopped compressing by default, `elfHasCompressedSections(rawObject)`
+        # goes red rather than the size comparison silently becoming an
+        # equality nobody re-read.
+        check elfHasCompressedSections(rawObject)
+        check not elfHasCompressedSections(preparedObject)
+        check readFile(preparedObject).len > readFile(rawObject).len
       else:
         # The macOS arm rewrites `section_64.segname`, so the two objects are
         # the same size and NOT the same bytes. Asserting the inequality keeps
@@ -352,5 +362,23 @@ suite "HCR watch inference E2E":
         # it would be wrong.
         check readFile(preparedObject) != readFile(rawObject)
         check log.contains("repro hcr prepare-object: output=build/patchable.o")
+
+      # ---- AND THE SESSION SENT THE PREPARED ONE, which is a different claim
+      # from "the edge wrote it".
+      #
+      # HLX-M8, 2026-09-20. It did not, on any platform, until this date:
+      # `hcrWatchObjectCandidatesFromReport` matched only actions whose inputs
+      # contain a C/C++ SOURCE, so the `.o`-to-`.o` `hcr.prepareObject` edge
+      # was never a candidate and the session always cut its patch from the
+      # COMPILER's object. The whole pass was decorative on the wire — on
+      # macOS the `__HCR` segment rewrite never reached the agent either. The
+      # assertion above could not see it because the edge really does write
+      # the file; what was missing was an assertion about the bytes SENT.
+      let baseline = parseJson(readFile(artifacts / "hcr-watch-baseline.json"))
+      check baseline["mode"].getStr() == "inferred"
+      check baseline["objects"].len == 1
+      let inferredObject = baseline["objects"][0]["object"].getStr()
+      check inferredObject.endsWith("patchable.o")
+      check not inferredObject.endsWith("patchable.raw.o")
     else:
       skip()

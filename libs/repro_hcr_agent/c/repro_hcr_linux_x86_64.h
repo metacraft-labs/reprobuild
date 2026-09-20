@@ -165,6 +165,37 @@ static const char *repro_hcr_lx_refusal_name(int code) {
 
 #define REPRO_HCR_LX_NR_MPROTECT 10
 #define REPRO_HCR_LX_NR_MEMBARRIER 324
+#define REPRO_HCR_LX_NR_PRCTL 157
+#define REPRO_HCR_LX_NR_MMAP 9
+#define REPRO_HCR_LX_NR_MUNMAP 11
+#define REPRO_HCR_LX_NR_FTRUNCATE 77
+#define REPRO_HCR_LX_NR_FCNTL 72
+#define REPRO_HCR_LX_NR_MEMFD_CREATE 319
+
+/* linux/memfd.h and linux/fcntl.h. HLX-M9. */
+#define REPRO_HCR_LX_MFD_CLOEXEC 0x0001U
+#define REPRO_HCR_LX_MFD_ALLOW_SEALING 0x0002U
+#define REPRO_HCR_LX_F_ADD_SEALS 1033
+#define REPRO_HCR_LX_F_GET_SEALS 1034
+#define REPRO_HCR_LX_F_SEAL_SEAL 0x0001
+#define REPRO_HCR_LX_F_SEAL_SHRINK 0x0002
+#define REPRO_HCR_LX_F_SEAL_GROW 0x0004
+#define REPRO_HCR_LX_F_SEAL_WRITE 0x0008
+#define REPRO_HCR_LX_FINAL_SEALS                                               \
+  (REPRO_HCR_LX_F_SEAL_SEAL | REPRO_HCR_LX_F_SEAL_SHRINK |                     \
+   REPRO_HCR_LX_F_SEAL_GROW | REPRO_HCR_LX_F_SEAL_WRITE)
+
+#define REPRO_HCR_LX_MAP_SHARED 0x01
+#define REPRO_HCR_LX_MAP_PRIVATE 0x02
+#define REPRO_HCR_LX_MAP_ANONYMOUS 0x20
+
+/* linux/prctl.h. `PR_GET_MDWE` is read, never set: the provider asks what
+ * policy the process is already under so a capability refusal can NAME it
+ * instead of describing its symptom. Kernels before 6.3 answer -EINVAL, which
+ * is a distinct answer from "no MDWE" and is reported as such. */
+#define REPRO_HCR_LX_PR_GET_MDWE 66
+#define REPRO_HCR_LX_PR_MDWE_REFUSE_EXEC_GAIN 1
+#define REPRO_HCR_LX_PR_MDWE_NO_INHERIT 2
 
 #define REPRO_HCR_LX_PROT_READ 0x1
 #define REPRO_HCR_LX_PROT_WRITE 0x2
@@ -194,6 +225,37 @@ static long repro_hcr_lx_raw_mprotect(uint64_t address, size_t length,
 static long repro_hcr_lx_raw_membarrier(int command, unsigned int flags) {
   return repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_MEMBARRIER, (long)command,
                                (long)flags, 0);
+}
+
+/* HLX-M9. Returns the process's MDWE flags, or the negated errno. Raw for the
+ * same reason `mprotect` is: in a process carrying MCR's interpose library,
+ * libc entry points are not the provider's to call from the patch path.
+ *
+ * FIVE ARGUMENTS, and that is load-bearing rather than pedantic. `prctl` takes
+ * five and `PR_GET_MDWE` REQUIRES arg2..arg4 to be zero, so issuing it through
+ * a three-argument wrapper leaves `r10`/`r8`/`r9` holding whatever the caller
+ * left there and the kernel answers `-EINVAL`. Measured: with the
+ * three-argument spelling this returned -22 on a kernel that implements
+ * `PR_GET_MDWE` perfectly well, and the provider then reported "this kernel
+ * does not implement PR_GET_MDWE" — a confidently wrong diagnostic, which is
+ * the worst outcome for a field whose entire job is to NAME the policy. */
+static long repro_hcr_lx_syscall5(long number, long a0, long a1, long a2,
+                                  long a3, long a4) {
+  long result;
+  register long r10 __asm__("r10") = a3;
+  register long r8 __asm__("r8") = a4;
+  register long r9 __asm__("r9") = 0;
+  __asm__ volatile("syscall"
+                   : "=a"(result)
+                   : "a"(number), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8),
+                     "r"(r9)
+                   : "rcx", "r11", "memory");
+  return result;
+}
+
+static long repro_hcr_lx_raw_get_mdwe(void) {
+  return repro_hcr_lx_syscall5(REPRO_HCR_LX_NR_PRCTL,
+                               (long)REPRO_HCR_LX_PR_GET_MDWE, 0, 0, 0, 0);
 }
 
 /* Tier-2 quiescence (design §6.2/§6.3, HLX-M4). Included here rather than by
@@ -496,6 +558,12 @@ typedef struct repro_hcr_lx_capabilities {
   int text_rwx_transition;
   long protection_probe_rwx_result;
   int text_left_writable;          /* set if a PROT_EXEC restore ever failed */
+  /* HLX-M9. `PR_GET_MDWE` for this process: the flags, or a negated errno.
+   * Read so a capability-time refusal can NAME the blocking policy instead of
+   * describing its symptom. A host that refuses the round trip WITHOUT MDWE
+   * set is a different finding from one that refuses it because MDWE is set,
+   * and the two must not be reported with the same sentence. */
+  long mdwe_flags;
   /* HX-L-2: 1 when target uses Clang + CET, whose maximal-length NOP sleds
    * placed after `endbr64` leave no admissible 8-byte-aligned window. */
   int clang_cet_unsupported;
@@ -577,6 +645,8 @@ static void repro_hcr_lx_probe_capabilities(void) {
        repro_hcr_lx_caps.membarrier_register_result == 0)
           ? 1
           : 0;
+
+  repro_hcr_lx_caps.mdwe_flags = repro_hcr_lx_raw_get_mdwe();
 
   page_size = repro_hcr_lx_page_size();
   scratch = repro_hcr_lx_map_anonymous(
@@ -760,6 +830,465 @@ static uint64_t repro_hcr_lx_page_start(uint64_t address, size_t page_size) {
   return address & ~((uint64_t)page_size - 1u);
 }
 
+/* ---------------------------------------------------------------------------
+ * HLX-M9 — PROVIDER-OWNED CODE PAGES AS A `memfd_create` DUAL MAPPING.
+ *
+ * WHAT THIS REPLACES, AND WHY.
+ *
+ * Every page the provider owns — a patch body, an island page — used to be
+ * `mmap(MAP_ANONYMOUS, PROT_READ|PROT_WRITE)`, written, then
+ * `mprotect(PROT_READ|PROT_EXEC)`. That is a W^X violation in the exact shape
+ * a hardened kernel forbids: a mapping that has been writable regains
+ * `PROT_EXEC`. Under `PR_MDWE_REFUSE_EXEC_GAIN` the second `mprotect` fails
+ * with `EACCES` (measured on Linux 6.12.85).
+ *
+ * The island path is worse than that, and the comment in
+ * `repro_hcr_lx_allocate_island` says why: a page that already holds LIVE
+ * islands cannot drop `PROT_EXEC` while a new island is written into it, so
+ * reuse needs a transient `RW|EXEC` — which the same policies refuse outright.
+ * On such a host island pages are simply never reused and the pool exhausts.
+ *
+ * THE DUAL MAPPING. One `memfd`, mapped twice:
+ *
+ *   exec view   `MAP_PRIVATE  | PROT_READ | PROT_EXEC`   (where code runs)
+ *   writer view `MAP_SHARED   | PROT_READ | PROT_WRITE`  (where code is put)
+ *
+ * The exec view is created executable and is NEVER writable, so no policy that
+ * refuses "exec gain" is engaged. Writes go through the separate shared alias
+ * and become visible through the private view, with no protection change on
+ * the executing mapping at any point — which is what makes an island page
+ * reusable while the islands already on it are live.
+ *
+ * WHY THE EXEC VIEW IS `MAP_PRIVATE`, AND THIS IS THE ONE THING TO GET RIGHT.
+ * `F_SEAL_WRITE` is refused `EBUSY` while ANY `MAP_SHARED` mapping of the
+ * memfd exists — including a `PROT_READ|PROT_EXEC` one, because the kernel's
+ * writable-mapping count is keyed on `VM_SHARED` and not on `PROT_WRITE`.
+ * Measured, all four orderings, with and without MDWE: with a shared exec view
+ * the seal fails and a later writable mapping is still granted, i.e. the page
+ * is NOT sealed and a gate asserting only "we called F_ADD_SEALS" would be
+ * green over it. With a private exec view the seal succeeds and the kernel
+ * then refuses a writable mapping `EPERM`.
+ *
+ * `MAP_PRIVATE` is copy-on-write, so the private view would stop tracking the
+ * shared alias if anything ever WROTE through it. Nothing can: it carries no
+ * `PROT_WRITE` and a write faults. Measured rather than argued — a page is
+ * executed, a later slot is written through the alias, the new slot runs and
+ * the earlier one is unchanged.
+ *
+ * FINALIZATION. When a page will receive no further writes, the writer alias
+ * is unmapped and `F_SEAL_WRITE` (with `SHRINK`/`GROW`/`SEAL`) is applied, so
+ * no writable alias to executable memory can ever be created again — not by
+ * this provider and not by anything else holding the fd. The fd is closed
+ * immediately afterwards; the mapping keeps the memfd alive.
+ *
+ * EVERY SYSCALL HERE IS RAW, AND THAT IS A DECISION, NOT A STYLE.
+ * See `repro_hcr_lx_memfd_dual_supported` for the reasoning and for its
+ * coupling to HLX-M7 (MCR interposes libc, and a provider fd MCR sees used but
+ * never sees created would make the recording inconsistent — so the provider
+ * takes the whole fd lifecycle out of MCR's view rather than half of it).
+ * ------------------------------------------------------------------------- */
+
+static long repro_hcr_lx_syscall6(long number, long a0, long a1, long a2,
+                                  long a3, long a4, long a5) {
+  long result;
+  register long r10 __asm__("r10") = a3;
+  register long r8 __asm__("r8") = a4;
+  register long r9 __asm__("r9") = a5;
+  __asm__ volatile("syscall"
+                   : "=a"(result)
+                   : "a"(number), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8),
+                     "r"(r9)
+                   : "rcx", "r11", "memory");
+  return result;
+}
+
+static long repro_hcr_lx_raw_mmap(uint64_t hint, size_t length, int protection,
+                                  int flags, int fd, long offset) {
+  return repro_hcr_lx_syscall6(REPRO_HCR_LX_NR_MMAP, (long)hint, (long)length,
+                               (long)protection, (long)flags, (long)fd,
+                               offset);
+}
+
+static long repro_hcr_lx_raw_munmap(uint64_t address, size_t length) {
+  return repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_MUNMAP, (long)address,
+                               (long)length, 0);
+}
+
+static long repro_hcr_lx_raw_memfd_create(const char *name, unsigned flags) {
+  return repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_MEMFD_CREATE, (long)name,
+                               (long)flags, 0);
+}
+
+static long repro_hcr_lx_raw_add_seals(int fd, int seals) {
+  return repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_FCNTL, (long)fd,
+                               (long)REPRO_HCR_LX_F_ADD_SEALS, (long)seals);
+}
+
+static long repro_hcr_lx_raw_get_seals(int fd) {
+  return repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_FCNTL, (long)fd,
+                               (long)REPRO_HCR_LX_F_GET_SEALS, 0);
+}
+
+/* The provider's own code pages that are not yet sealed. A sealed page needs
+ * no bookkeeping — its exec mapping simply persists — so an entry lives only
+ * from allocation to finalization, which bounds this table to the in-flight
+ * patch bodies plus the island pages with room left. */
+#define REPRO_HCR_LX_MAX_CODE_PAGES 96
+
+typedef struct repro_hcr_lx_code_page {
+  uint64_t exec_base;  /* 0 when the slot is free */
+  uint64_t write_base; /* 0 for a fallback anonymous page */
+  size_t length;
+  int fd; /* -1 for a fallback anonymous page */
+} repro_hcr_lx_code_page;
+
+static repro_hcr_lx_code_page
+    repro_hcr_lx_code_pages[REPRO_HCR_LX_MAX_CODE_PAGES];
+
+/* Observations, for gates. Nothing in the provider branches on them. */
+static uint64_t repro_hcr_lx_dual_page_count = 0;
+static uint64_t repro_hcr_lx_dual_seal_count = 0;
+static uint64_t repro_hcr_lx_fallback_page_count = 0;
+static long repro_hcr_lx_last_seal_result = 0;
+/* 1 when the KERNEL confirmed the last seal by refusing a shared writable
+ * mapping of the still-open memfd. `F_ADD_SEALS` returning 0 is this
+ * provider's claim about itself; this is the kernel's, and it is the one that
+ * catches the ordering mistake — a shared exec view makes `F_ADD_SEALS` fail
+ * `EBUSY` and leaves the writable mapping GRANTED. */
+static int repro_hcr_lx_last_seal_verified = 0;
+
+/* Test lever: force the anonymous fallback even where the dual mapping works,
+ * so a gate can compare the two paths on one host. Never set in production. */
+static int repro_hcr_lx_force_anonymous_code_pages = 0;
+
+static repro_hcr_lx_code_page *repro_hcr_lx_find_code_page(uint64_t exec_base) {
+  int i;
+  for (i = 0; i < REPRO_HCR_LX_MAX_CODE_PAGES; ++i) {
+    if (repro_hcr_lx_code_pages[i].exec_base == exec_base &&
+        exec_base != 0) {
+      return &repro_hcr_lx_code_pages[i];
+    }
+  }
+  return NULL;
+}
+
+static repro_hcr_lx_code_page *repro_hcr_lx_free_code_page_slot(void) {
+  int i;
+  for (i = 0; i < REPRO_HCR_LX_MAX_CODE_PAGES; ++i) {
+    if (repro_hcr_lx_code_pages[i].exec_base == 0) {
+      return &repro_hcr_lx_code_pages[i];
+    }
+  }
+  return NULL;
+}
+
+/*
+ * Whether this host can do it at all, probed ONCE through the whole sequence
+ * rather than by testing for `memfd_create`'s presence. A kernel with
+ * `memfd_create` but without `MFD_ALLOW_SEALING`, or a seccomp filter that
+ * permits the create and refuses the `fcntl`, would answer yes to a presence
+ * test and fail at the point of no return.
+ *
+ * THE PROBE VERIFIES THE SEAL WITH THE KERNEL, not with its own return code:
+ * after sealing it asks for a writable mapping and requires the kernel to
+ * REFUSE it. `F_ADD_SEALS` returning 0 is this provider's claim; the refusal
+ * is the kernel's.
+ *
+ * ---------------------------------------------------------------------------
+ * THE HLX-M7 COUPLING, DECIDED HERE BECAUSE IT CANNOT BE DECIDED SEPARATELY.
+ *
+ * MCR interposes libc, so a `memfd_create` reached through libc is a RECORDED
+ * event and a raw syscall is not. Design §5.1 already settled the same
+ * question for `mprotect` — raw, because calling the interposed libc entry
+ * from inside the patcher re-enters the recording path, and under tier-2
+ * quiescence that re-entry happens with every other thread parked.
+ *
+ * The decision here is RAW, for that reason and for one more that `mprotect`
+ * does not have: `memfd_create` produces a FILE DESCRIPTOR, which is
+ * process-visible state that outlives the call. A half-raw implementation —
+ * raw create, libc `close` — would give MCR a close on a descriptor it never
+ * saw opened, which is a recording that cannot be replayed rather than a
+ * recording that is merely incomplete. So the rule is the whole lifecycle or
+ * none of it: create, `ftruncate`, both `mmap`s, `munmap`, `fcntl` and `close`
+ * are all raw, and the fd carries `MFD_CLOEXEC` so it cannot leak into a child
+ * the recorder does follow.
+ *
+ * The patch does NOT thereby become invisible to replay. HLX-M7's
+ * `CodePatchEvent` is the designed channel by which provider activity enters
+ * the trace, it is emitted for every publication, and it carries the
+ * code-version boundary that replay needs. What raw syscalls remove is the
+ * provider's private memory management — which is not application behaviour
+ * and which a replay must not re-enact.
+ * ------------------------------------------------------------------------- */
+static int repro_hcr_lx_memfd_dual_probe_done = 0;
+static int repro_hcr_lx_memfd_dual_available = 0;
+
+static int repro_hcr_lx_memfd_dual_supported(size_t page_size) {
+  long fd;
+  long writer;
+  long exec;
+  long seal_rc;
+  long refused;
+
+  if (repro_hcr_lx_memfd_dual_probe_done) {
+    return repro_hcr_lx_memfd_dual_available;
+  }
+  repro_hcr_lx_memfd_dual_probe_done = 1;
+  repro_hcr_lx_memfd_dual_available = 0;
+
+  fd = repro_hcr_lx_raw_memfd_create(
+      "repro-hcr-probe",
+      REPRO_HCR_LX_MFD_CLOEXEC | REPRO_HCR_LX_MFD_ALLOW_SEALING);
+  if (fd < 0) {
+    return 0;
+  }
+  if (repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_FTRUNCATE, fd, (long)page_size,
+                            0) != 0) {
+    (void)repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_CLOSE, fd, 0, 0);
+    return 0;
+  }
+  writer = repro_hcr_lx_raw_mmap(
+      0, page_size, REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
+      REPRO_HCR_LX_MAP_SHARED, (int)fd, 0);
+  exec = repro_hcr_lx_raw_mmap(
+      0, page_size, REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_EXEC,
+      REPRO_HCR_LX_MAP_PRIVATE, (int)fd, 0);
+  if (writer < 0 || exec < 0) {
+    if (writer >= 0) (void)repro_hcr_lx_raw_munmap((uint64_t)writer, page_size);
+    if (exec >= 0) (void)repro_hcr_lx_raw_munmap((uint64_t)exec, page_size);
+    (void)repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_CLOSE, fd, 0, 0);
+    return 0;
+  }
+  (void)repro_hcr_lx_raw_munmap((uint64_t)writer, page_size);
+  seal_rc = repro_hcr_lx_raw_add_seals((int)fd, REPRO_HCR_LX_FINAL_SEALS);
+  /* THE KERNEL'S OWN ANSWER, not this provider's. */
+  refused = repro_hcr_lx_raw_mmap(
+      0, page_size, REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
+      REPRO_HCR_LX_MAP_SHARED, (int)fd, 0);
+  if (refused >= 0) {
+    (void)repro_hcr_lx_raw_munmap((uint64_t)refused, page_size);
+  }
+  /* THREE independent confirmations, required to agree: this provider's own
+   * `F_ADD_SEALS` return, the kernel's record of the seals it holds, and the
+   * kernel REFUSING a writable mapping. The first is a claim; the other two
+   * are the kernel's, and it is the third that a broken implementation cannot
+   * satisfy — a shared exec view makes `F_ADD_SEALS` fail `EBUSY` and leaves
+   * the writable mapping granted, which is exactly the trap this ordering
+   * avoids. */
+  if (seal_rc == 0 && refused < 0 &&
+      (repro_hcr_lx_raw_get_seals((int)fd) & REPRO_HCR_LX_F_SEAL_WRITE) != 0) {
+    repro_hcr_lx_memfd_dual_available = 1;
+  }
+  (void)repro_hcr_lx_raw_munmap((uint64_t)exec, page_size);
+  (void)repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_CLOSE, fd, 0, 0);
+  return repro_hcr_lx_memfd_dual_available;
+}
+
+/*
+ * Map one provider-owned code page. Returns the EXEC base, which is what every
+ * caller already holds and what `dispatch_address` is taken from; the writable
+ * alias is reached through `repro_hcr_lx_code_writer`.
+ *
+ * Falls back to the pre-HLX-M9 anonymous RW page when the dual mapping is
+ * unavailable, when the table is full, or when a gate forces it. A fallback
+ * page has `write_base == exec_base` and is finalized with `mprotect`, so the
+ * two paths differ in mechanism and not in the sequence a caller writes.
+ */
+static void *repro_hcr_lx_map_code_page(void *hint, size_t length,
+                                        int extra_flags) {
+  repro_hcr_lx_code_page *slot;
+  long fd;
+  long exec;
+  long writer;
+  int exec_flags = REPRO_HCR_LX_MAP_PRIVATE | extra_flags;
+
+  if (repro_hcr_lx_force_anonymous_code_pages ||
+      !repro_hcr_lx_memfd_dual_supported(length)) {
+    void *anonymous = repro_hcr_lx_map_anonymous(
+        hint, length, REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
+        extra_flags);
+    if (anonymous != NULL) {
+      repro_hcr_lx_fallback_page_count += 1;
+    }
+    return anonymous;
+  }
+
+  slot = repro_hcr_lx_free_code_page_slot();
+  if (slot == NULL) {
+    void *anonymous = repro_hcr_lx_map_anonymous(
+        hint, length, REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
+        extra_flags);
+    if (anonymous != NULL) {
+      repro_hcr_lx_fallback_page_count += 1;
+    }
+    return anonymous;
+  }
+
+  fd = repro_hcr_lx_raw_memfd_create(
+      "repro-hcr-code",
+      REPRO_HCR_LX_MFD_CLOEXEC | REPRO_HCR_LX_MFD_ALLOW_SEALING);
+  if (fd < 0) {
+    return NULL;
+  }
+  if (repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_FTRUNCATE, fd, (long)length, 0) !=
+      0) {
+    (void)repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_CLOSE, fd, 0, 0);
+    return NULL;
+  }
+  exec = repro_hcr_lx_raw_mmap(
+      (uint64_t)(uintptr_t)hint, length,
+      REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_EXEC, exec_flags, (int)fd, 0);
+  if (exec < 0) {
+    (void)repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_CLOSE, fd, 0, 0);
+    return NULL;
+  }
+  writer = repro_hcr_lx_raw_mmap(
+      0, length, REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
+      REPRO_HCR_LX_MAP_SHARED, (int)fd, 0);
+  if (writer < 0) {
+    (void)repro_hcr_lx_raw_munmap((uint64_t)exec, length);
+    (void)repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_CLOSE, fd, 0, 0);
+    return NULL;
+  }
+  slot->exec_base = (uint64_t)exec;
+  slot->write_base = (uint64_t)writer;
+  slot->length = length;
+  slot->fd = (int)fd;
+  repro_hcr_lx_dual_page_count += 1;
+  return (void *)(uintptr_t)exec;
+}
+
+/* Where a caller PUTS code. For a dual-mapped page this is the shared alias;
+ * for a fallback page it is the page itself, which is still RW at this point.
+ * A caller that wrote through the exec base of a dual-mapped page would fault,
+ * which is the correct failure — it is a page that is not writable. */
+static uint8_t *repro_hcr_lx_code_writer(void *exec_base) {
+  repro_hcr_lx_code_page *page =
+      repro_hcr_lx_find_code_page((uint64_t)(uintptr_t)exec_base);
+  if (page == NULL || page->write_base == 0) {
+    return (uint8_t *)exec_base;
+  }
+  return (uint8_t *)(uintptr_t)page->write_base;
+}
+
+/* Make the page receive no further writes: drop the writable alias and seal
+ * the memfd. Returns 0 on success. For a fallback page this is the
+ * pre-HLX-M9 `mprotect` to `PROT_READ|PROT_EXEC`, unchanged. */
+static int repro_hcr_lx_finalize_code_page(void *exec_base, size_t length) {
+  repro_hcr_lx_code_page *page =
+      repro_hcr_lx_find_code_page((uint64_t)(uintptr_t)exec_base);
+  /* RESET FIRST. These are per-page observations and a stale one is worse than
+   * none: leaving the previous page's answer in place made an anonymous
+   * fallback page — which has no memfd and no seal — report the SEAL VERIFIED
+   * of the dual page finalized before it. Measured, in the gate that reads
+   * them. */
+  repro_hcr_lx_last_seal_result = 0;
+  repro_hcr_lx_last_seal_verified = 0;
+  if (page == NULL) {
+    return repro_hcr_lx_raw_mprotect((uint64_t)(uintptr_t)exec_base, length,
+                                     REPRO_HCR_LX_PROT_READ |
+                                         REPRO_HCR_LX_PROT_EXEC) == 0
+               ? 0
+               : -1;
+  }
+  if (page->write_base != 0) {
+    (void)repro_hcr_lx_raw_munmap(page->write_base, page->length);
+    page->write_base = 0;
+  }
+  repro_hcr_lx_last_seal_result =
+      repro_hcr_lx_raw_add_seals(page->fd, REPRO_HCR_LX_FINAL_SEALS);
+  /* ASK THE KERNEL, while the fd is still open — this is the last moment it
+   * can be asked, and the answer is what distinguishes a seal that took from
+   * a seal that was refused. One syscall, on a path that runs once per page. */
+  {
+    long probe = repro_hcr_lx_raw_mmap(
+        0, page->length, REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
+        REPRO_HCR_LX_MAP_SHARED, page->fd, 0);
+    repro_hcr_lx_last_seal_verified = probe < 0 ? 1 : 0;
+    if (probe >= 0) {
+      (void)repro_hcr_lx_raw_munmap((uint64_t)probe, page->length);
+    }
+  }
+  if (repro_hcr_lx_last_seal_result != 0) {
+    /* The page is still correct and still executable — only the guarantee
+     * that no writable alias can be created later is missing. Refusing the
+     * patch over it would be a worse answer than reporting it, and the
+     * exec view was never writable in the first place. */
+    (void)repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_CLOSE, page->fd, 0, 0);
+    page->exec_base = 0;
+    page->fd = -1;
+    return 0;
+  }
+  repro_hcr_lx_dual_seal_count += 1;
+  (void)repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_CLOSE, page->fd, 0, 0);
+  page->exec_base = 0;
+  page->fd = -1;
+  return 0;
+}
+
+/* Give the page back entirely — the discard path. */
+static void repro_hcr_lx_release_code_page(void *exec_base, size_t length) {
+  repro_hcr_lx_code_page *page =
+      repro_hcr_lx_find_code_page((uint64_t)(uintptr_t)exec_base);
+  if (page == NULL) {
+    (void)repro_hcr_lx_unmap(exec_base, length);
+    return;
+  }
+  if (page->write_base != 0) {
+    (void)repro_hcr_lx_raw_munmap(page->write_base, page->length);
+  }
+  (void)repro_hcr_lx_raw_munmap(page->exec_base, page->length);
+  (void)repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_CLOSE, page->fd, 0, 0);
+  page->exec_base = 0;
+  page->write_base = 0;
+  page->fd = -1;
+  page->length = 0;
+}
+
+/*
+ * The placement probes below place TWO different kinds of page and the
+ * distinction is load-bearing: a CODE page is a dual-mapped, never-writable
+ * executable page, and a DATA page is an ordinary writable one that happens to
+ * need to be near the code.
+ *
+ * It is load-bearing because it was got wrong first, and the failure was a
+ * SIGSEGV rather than a wrong answer. `repro_hcr_lxu_register_eh_frame` places
+ * the retained `.eh_frame` copy with the same near-placement search the patch
+ * body uses — for the same reason, `DW_EH_PE_pcrel|sdata4` needs the
+ * displacement to fit an int32 — and then WRITES the section into it and
+ * relocates the FDEs in place. When that search started returning dual-mapped
+ * code pages, those writes went to a `PROT_READ|PROT_EXEC` mapping and every
+ * gate that registers a real `.eh_frame` crashed. The `.eh_frame` copy is data;
+ * it is not executed and must not be executable.
+ */
+static void *repro_hcr_lx_map_placed_page(void *hint, size_t length,
+                                          int extra_flags, int as_code) {
+  if (as_code) {
+    return repro_hcr_lx_map_code_page(hint, length, extra_flags);
+  }
+  return repro_hcr_lx_map_anonymous(
+      hint, length, REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
+      extra_flags);
+}
+
+static void repro_hcr_lx_release_placed_page(void *page, size_t length,
+                                             int as_code) {
+  if (as_code) {
+    repro_hcr_lx_release_code_page(page, length);
+  } else {
+    (void)repro_hcr_lx_unmap(page, length);
+  }
+}
+
+/* True when this exec base is a dual-mapped page that still has its writable
+ * alias — i.e. it can be written again with no protection change at all. The
+ * island allocator reads it to decide whether reusing a page with LIVE islands
+ * on it needs the `RW|EXEC` transient a hardened host refuses. */
+static int repro_hcr_lx_code_page_is_dual(uint64_t exec_base) {
+  repro_hcr_lx_code_page *page = repro_hcr_lx_find_code_page(exec_base);
+  return page != NULL && page->write_base != 0;
+}
+
 /*
  * Near-page allocation for the patch body, within +/-2 GiB of the published
  * window so the trampoline stays a 5-byte `E9 rel32`. Outward probing with
@@ -793,10 +1322,12 @@ static uint64_t repro_hcr_lx_page_start(uint64_t address, size_t page_size) {
  * i.e. with every other thread parked under tier 2. So: no `malloc`, no
  * `dl_iterate_phdr` (which takes the loader lock a parked thread may hold), a
  * static buffer, and `openat`/`read`/`close` issued as RAW syscalls rather than
- * through libc. The only libc call left is `mmap`, through
- * `repro_hcr_lx_map_anonymous`, which the body-page path has always used.
- * It is also only reached when the outward probe has already failed, so the
- * common case pays nothing for it.
+ * through libc. Since HLX-M9 the CODE-page path is raw too — `memfd_create`,
+ * `ftruncate`, both `mmap`s, `munmap`, `fcntl` and `close` — so the only libc
+ * call left on this path is the `mmap` inside `repro_hcr_lx_map_anonymous`,
+ * which now serves the anonymous FALLBACK and the near-DATA page rather than
+ * the body page. It is also only reached when the outward probe has already
+ * failed, so the common case pays nothing for it.
  */
 #define REPRO_HCR_LX_GAP_CHUNK 8192u
 
@@ -836,7 +1367,8 @@ static int repro_hcr_lx_parse_gap_line(const char *line, size_t length,
 }
 
 static void *repro_hcr_lx_map_patch_page_in_gap(uint64_t window_address,
-                                                size_t page_size) {
+                                                size_t page_size,
+                                                int as_code) {
   /* Stay inside the signed 2 GiB `rel32` limit with room for the instruction's
    * own +5 bias; reachability is re-checked on the result regardless. */
   const uint64_t reach = 0x7f000000ull;
@@ -889,17 +1421,16 @@ static void *repro_hcr_lx_map_patch_page_in_gap(uint64_t window_address,
           uint64_t gap_high = start < high ? start : high;
           if (gap_high > gap_low &&
               gap_high - gap_low >= (uint64_t)page_size) {
-            void *mapped = repro_hcr_lx_map_anonymous(
+            void *mapped = repro_hcr_lx_map_placed_page(
                 (void *)(uintptr_t)gap_low, page_size,
-                REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
-                REPRO_HCR_LX_MAP_FIXED_NOREPLACE);
+                REPRO_HCR_LX_MAP_FIXED_NOREPLACE, as_code);
             if (mapped != NULL) {
               if ((uint64_t)(uintptr_t)mapped == gap_low &&
                   repro_hcr_lx_rel32_reachable(
                       window_address, (uint64_t)(uintptr_t)mapped)) {
                 result = mapped;
               } else {
-                repro_hcr_lx_unmap(mapped, page_size);
+                repro_hcr_lx_release_placed_page(mapped, page_size, as_code);
               }
             }
           }
@@ -925,17 +1456,16 @@ static void *repro_hcr_lx_map_patch_page_in_gap(uint64_t window_address,
   /* The tail gap, above the last mapping the scan saw and below the reach
    * ceiling. Without this the highest gap in the region is never tried. */
   if (result == NULL && cursor < high && high - cursor >= (uint64_t)page_size) {
-    void *mapped = repro_hcr_lx_map_anonymous(
+    void *mapped = repro_hcr_lx_map_placed_page(
         (void *)(uintptr_t)cursor, page_size,
-        REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
-        REPRO_HCR_LX_MAP_FIXED_NOREPLACE);
+        REPRO_HCR_LX_MAP_FIXED_NOREPLACE, as_code);
     if (mapped != NULL) {
       if ((uint64_t)(uintptr_t)mapped == cursor &&
           repro_hcr_lx_rel32_reachable(window_address,
                                        (uint64_t)(uintptr_t)mapped)) {
         result = mapped;
       } else {
-        repro_hcr_lx_unmap(mapped, page_size);
+        repro_hcr_lx_release_placed_page(mapped, page_size, as_code);
       }
     }
   }
@@ -946,8 +1476,8 @@ static void *repro_hcr_lx_map_patch_page_in_gap(uint64_t window_address,
   return result;
 }
 
-static void *repro_hcr_lx_map_patch_page_near(uint64_t window_address,
-                                              size_t page_size) {
+static void *repro_hcr_lx_map_near_page(uint64_t window_address,
+                                        size_t page_size, int as_code) {
   const uint64_t reach = 0x60000000ull; /* stay well inside the 2 GiB limit */
   uint64_t base = repro_hcr_lx_page_start(window_address, page_size);
   uint64_t distance = 1;
@@ -963,10 +1493,9 @@ static void *repro_hcr_lx_map_patch_page_near(uint64_t window_address,
       if (hint_signed <= 0) {
         continue;
       }
-      mapped = repro_hcr_lx_map_anonymous(
+      mapped = repro_hcr_lx_map_placed_page(
           (void *)(uintptr_t)hint_signed, page_size,
-          REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
-          REPRO_HCR_LX_MAP_FIXED_NOREPLACE);
+          REPRO_HCR_LX_MAP_FIXED_NOREPLACE, as_code);
       if (mapped == NULL) {
         continue;
       }
@@ -975,7 +1504,7 @@ static void *repro_hcr_lx_map_patch_page_near(uint64_t window_address,
                                        (uint64_t)(uintptr_t)mapped)) {
         return mapped;
       }
-      repro_hcr_lx_unmap(mapped, page_size);
+      repro_hcr_lx_release_placed_page(mapped, page_size, as_code);
     }
     distance = distance < 64 ? distance + 1 : distance * 2;
   }
@@ -983,13 +1512,13 @@ static void *repro_hcr_lx_map_patch_page_near(uint64_t window_address,
   /* Strategy 2 (Trampoline-Mechanics §5.1). The probe above doubles its stride
    * after 64 pages and so steps over most of the region; a gap the size of one
    * page — which is all an island needs — is invisible to it. */
-  fallback = repro_hcr_lx_map_patch_page_in_gap(window_address, page_size);
+  fallback = repro_hcr_lx_map_patch_page_in_gap(window_address, page_size,
+                                               as_code);
   if (fallback != NULL) {
     return fallback;
   }
 
-  fallback = repro_hcr_lx_map_anonymous(
-      NULL, page_size, REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE, 0);
+  fallback = repro_hcr_lx_map_placed_page(NULL, page_size, 0, as_code);
   if (fallback == NULL) {
     return NULL;
   }
@@ -997,8 +1526,23 @@ static void *repro_hcr_lx_map_patch_page_near(uint64_t window_address,
                                    (uint64_t)(uintptr_t)fallback)) {
     return fallback;
   }
-  repro_hcr_lx_unmap(fallback, page_size);
+  repro_hcr_lx_release_placed_page(fallback, page_size, as_code);
   return NULL;
+}
+
+/* The two named entry points. `..._patch_page_near` places EXECUTABLE pages —
+ * patch bodies and island pages. `..._near_data_page` places a writable page
+ * that merely needs to be within int32 of the code, which is what the retained
+ * `.eh_frame` copy is. */
+static void *repro_hcr_lx_map_patch_page_near(uint64_t window_address,
+                                              size_t page_size) {
+  return repro_hcr_lx_map_near_page(window_address, page_size, 1);
+}
+
+REPRO_HCR_LX_MAYBE_UNUSED
+static void *repro_hcr_lx_map_near_data_page(uint64_t window_address,
+                                             size_t page_size) {
+  return repro_hcr_lx_map_near_page(window_address, page_size, 0);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1127,7 +1671,14 @@ static uint64_t repro_hcr_lx_allocate_island(uint64_t window_address,
     if (candidate->used >= slots_per_page) {
       continue;
     }
+    /* HLX-M9: a DUAL-MAPPED page needs no transient at all — the new island
+     * is written through the page's shared alias while the exec mapping keeps
+     * `PROT_EXEC` untouched, so the live islands on it are never at risk and
+     * no `RW|EXEC` transition is requested of the kernel. The `text_rwx`
+     * requirement below is the ANONYMOUS-fallback rule, and is why island
+     * reuse used to be impossible on a host that refuses `RW|EXEC`. */
     if (candidate->used > 0 &&
+        !repro_hcr_lx_code_page_is_dual(candidate->base) &&
         !repro_hcr_lx_capability_report()->text_rwx_transition) {
       continue;
     }
@@ -1174,6 +1725,28 @@ static uint64_t repro_hcr_lx_allocate_island(uint64_t window_address,
    * The slot being written is not reachable from anywhere until the publishing
    * store lands, so the write itself needs no atomicity.
    */
+  if (repro_hcr_lx_code_page_is_dual(page->base)) {
+    /* HLX-M9 — THE DUAL-MAPPED PATH, and the whole point of it is what is
+     * ABSENT here: no `mprotect` at all, in either direction, at any point.
+     * The island is written through the page's shared alias at the same
+     * offset, and the exec mapping is never touched, so every island already
+     * on this page stays executable across the write and no protection change
+     * is requested of a kernel that may refuse one. `repro_hcr_lx_island_
+     * reuse_transient_prot` is left at whatever it was, because no transient
+     * happened; the gates that assert it read it only on the fallback path. */
+    uint8_t *writer = repro_hcr_lx_code_writer((void *)(uintptr_t)page->base);
+    memcpy(writer + (slot - page->base), island, sizeof(island));
+    page->used += 1;
+    /* Sealed the moment it can take no more islands. Until then the shared
+     * alias must stay, which is the honest cost of a page that is written
+     * more than once — recorded rather than glossed. */
+    if (page->used >= slots_per_page) {
+      (void)repro_hcr_lx_finalize_code_page((void *)(uintptr_t)page->base,
+                                            page_size);
+    }
+    repro_hcr_lx_island_alloc_count += 1;
+    return slot;
+  }
   if (!fresh_page && page->used > 0) {
     /* The recorded value IS the argument, passed by name below rather than
      * respelled. That coupling is the whole point: a control is only a control
@@ -1331,9 +1904,8 @@ static void *repro_hcr_lx_map_patch_page_far(uint64_t window_address,
       if (hint == 0) {
         continue;
       }
-      mapped = repro_hcr_lx_map_anonymous(
+      mapped = repro_hcr_lx_map_code_page(
           (void *)(uintptr_t)hint, page_size,
-          REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
           REPRO_HCR_LX_MAP_FIXED_NOREPLACE);
       if (mapped == NULL) {
         continue;
@@ -1343,7 +1915,7 @@ static void *repro_hcr_lx_map_patch_page_far(uint64_t window_address,
                                         (uint64_t)(uintptr_t)mapped)) {
         return mapped;
       }
-      repro_hcr_lx_unmap(mapped, page_size);
+      repro_hcr_lx_release_code_page(mapped, page_size);
     }
   }
   return NULL;
@@ -1653,7 +2225,7 @@ static int repro_hcr_lx_txn_add(repro_hcr_lx_transaction *txn,
 static void repro_hcr_lx_txn_discard_prepared(repro_hcr_lx_transaction *txn,
                                               repro_hcr_lx_prepared_site *ps) {
   if (ps->patch_page != NULL) {
-    repro_hcr_lx_unmap(ps->patch_page, ps->patch_page_len);
+    repro_hcr_lx_release_code_page(ps->patch_page, ps->patch_page_len);
     ps->patch_page = NULL;
     txn->freed_body_count += 1;
   }
@@ -1842,9 +2414,7 @@ static int repro_hcr_lx_txn_prepare_site(repro_hcr_lx_transaction *txn,
     ps->patch_page = (uint8_t *)repro_hcr_lx_map_patch_page_near(
         ps->window_address, page_size);
     if (ps->patch_page == NULL) {
-      ps->patch_page = (uint8_t *)repro_hcr_lx_map_anonymous(
-          NULL, page_size, REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE,
-          0);
+      ps->patch_page = (uint8_t *)repro_hcr_lx_map_code_page(NULL, page_size, 0);
     }
   }
   if (ps->patch_page == NULL) {
@@ -1859,13 +2429,25 @@ static int repro_hcr_lx_txn_prepare_site(repro_hcr_lx_transaction *txn,
    * `jmp [rip+disp32]` and so must begin with `endbr64` on an IBT-enforcing
    * process. Emitting the landing pad unconditionally costs four bytes and
    * makes every body island-ready. */
-  if (body_prefix != 0) {
-    memcpy(ps->patch_page, repro_hcr_lx_endbr64, sizeof(repro_hcr_lx_endbr64));
+  /* HLX-M9: the body is put through the page's WRITABLE alias, which for a
+   * dual-mapped page is a different address from the one it will execute at.
+   * `repro_hcr_lx_code_writer` answers the page itself for the anonymous
+   * fallback, so the two mechanisms share this one sequence rather than
+   * forking it. Writing through `ps->patch_page` directly would fault on a
+   * dual-mapped page — correctly, because that mapping is not writable. */
+  {
+    uint8_t *writer = repro_hcr_lx_code_writer(ps->patch_page);
+    if (body_prefix != 0) {
+      memcpy(writer, repro_hcr_lx_endbr64, sizeof(repro_hcr_lx_endbr64));
+    }
+    memcpy(writer + body_prefix, ps->patch_bytes, ps->patch_len);
   }
-  memcpy(ps->patch_page + body_prefix, ps->patch_bytes, ps->patch_len);
-  if (repro_hcr_lx_raw_mprotect((uint64_t)(uintptr_t)ps->patch_page, page_size,
-                                REPRO_HCR_LX_PROT_READ |
-                                    REPRO_HCR_LX_PROT_EXEC) != 0) {
+  /* A patch body is written ONCE and never again, so this is the case
+   * `F_SEAL_WRITE` exists for: the writable alias is dropped and the memfd is
+   * sealed, after which no writable alias to this executable page can be
+   * created by anything. For the anonymous fallback this is the pre-HLX-M9
+   * `mprotect` to PROT_READ|PROT_EXEC, unchanged. */
+  if (repro_hcr_lx_finalize_code_page(ps->patch_page, page_size) != 0) {
     repro_hcr_lx_txn_discard_prepared(txn, ps);
     ps->refusal = REPRO_HCR_LX_REFUSED_PATCH_MEMORY_PROTECTION_FAILED;
     repro_hcr_lx_last_report.refusal = ps->refusal;

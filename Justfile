@@ -860,6 +860,60 @@ e2e_hcr_linux_text_left_writable_reaches_the_wire:
         tests/e2e/hcr-linux-hardening/t_e2e_hcr_linux_text_left_writable_reaches_the_wire.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_text_left_writable_reaches_the_wire.log
 
+# HLX-M8 -- `repro hcr prepare-object` expands SHF_COMPRESSED `.debug_*` on
+# ELF, so an ordinary `gcc(debug3 = true)` edge produces a registerable
+# debugObjectPayload without a per-edge `-gz=none`. The expansion is
+# cross-checked against `objcopy --decompress-debug-sections`, an independent
+# producer, and then driven end to end over a real agent socket.
+e2e_hcr_linux_prepare_object_expands_compressed_debug_sections:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_hcr_linux_prepare_object_expands_compressed_debug_sections \
+        --out:build/test-bin/e2e_hcr_linux_prepare_object_expands_compressed_debug_sections \
+        tests/e2e/hcr-linux-prepare/t_e2e_hcr_linux_prepare_object_expands_compressed_debug_sections.nim \
+        2>&1 | tee test-logs/e2e_hcr_linux_prepare_object_expands_compressed_debug_sections.log
+
+# HLX-M8 -- a Phase I (debugger/unwinder registration) refusal happens AFTER
+# the commit, so the code is live. It is reported as `patchApplied` carrying
+# `registrationDegraded` and a NAMED diagnostic, not as `patchFailed`. Two arms
+# of one binary separated by one payload.
+integration_hcr_linux_phase_i_refusal_reports_an_applied_patch:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_phase_i_refusal_reports_an_applied_patch \
+        --out:build/test-bin/integration_hcr_linux_phase_i_refusal_reports_an_applied_patch \
+        tests/e2e/hcr-linux-prepare/t_integration_hcr_linux_phase_i_refusal_reports_an_applied_patch.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_phase_i_refusal_reports_an_applied_patch.log
+
+# HLX-M9 -- a host that cannot complete the mprotect RW->RX round trip is
+# refused DURING NEGOTIATION, with a diagnostic naming the blocking policy
+# (read from PR_GET_MDWE, not guessed). The hardened arm is a real
+# prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN), not an injected failure.
+integration_hcr_linux_hardened_host_refuses_at_negotiation:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_hardened_host_refuses_at_negotiation \
+        --out:build/test-bin/integration_hcr_linux_hardened_host_refuses_at_negotiation \
+        tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_hardened_host_refuses_at_negotiation.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_hardened_host_refuses_at_negotiation.log
+
+# HLX-M9 -- provider-owned code pages (patch bodies, island pages) are a
+# memfd_create dual mapping: the exec view is MAP_PRIVATE|PROT_READ|PROT_EXEC
+# and never writable, and a page that takes no more writes gets F_SEAL_WRITE.
+# Measured against the anonymous mechanism on ONE binary, with and without a
+# real prctl(PR_SET_MDWE), and the seal is asserted as the KERNEL's answer.
+integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings \
+        --out:build/test-bin/integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings \
+        tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings.log
+
 e2e_hcr_linux_x86_64_single_threaded_direct_patch:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \

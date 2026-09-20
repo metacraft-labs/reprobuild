@@ -150,10 +150,35 @@ static void print_hex(const uint8_t *bytes, size_t len) {
  * This is the leak check, and it is deliberately the KERNEL's answer rather
  * than the provider's `freed_body_count`. A provider that incremented its own
  * counter and forgot the `munmap` would agree with itself; the kernel would
- * not. Anonymous is the qualifier that matters: every file-backed `r-xp` is a
- * loaded object, and the only anonymous executable pages in this fixture are
- * patch bodies and islands.
+ * not.
+ *
+ * WHAT COUNTS, WIDENED 2026-09-20 (HLX-M9), and the widening is not a
+ * relaxation. This used to count ANONYMOUS executable mappings only, on the
+ * reasoning that "every file-backed r-xp is a loaded object". That stopped
+ * being true when provider-owned code pages became `memfd_create` dual
+ * mappings: a patch body is now file-backed by a memfd named
+ * `/memfd:repro-hcr-code`, so the anonymous count went to ZERO and this gate
+ * went red against a provider that was leaking exactly as much as before.
+ *
+ * The property under test is "how many bytes of PROVIDER-OWNED executable
+ * mapping does this process hold", and the qualifier that expresses it is now
+ * two alternatives: an executable mapping with no pathname (the anonymous
+ * fallback) OR one whose pathname names this provider's memfd. Matching the
+ * NAME rather than merely "any file-backed r-xp" is what keeps the check as
+ * narrow as it was — a loaded shared object still does not count.
+ *
+ * The memfd name is also a real improvement this incidentally records: a
+ * retained patch body used to be an anonymous executable page indistinguishable
+ * from any JIT's, and is now labelled in `/proc/self/maps`.
+ *
+ * `nfields >= 6` and not `== 6`, measured: the kernel writes the pathname as
+ * `/memfd:repro-hcr-code (deleted)` — the fd is closed as soon as both views
+ * exist — and the space makes that TWO tokens. `== 6` matched nothing and the
+ * count stayed at the zero this widening exists to fix, which is the kind of
+ * near-miss that reads as "no leak" rather than as "no measurement".
  */
+#define REPRO_HCR_CODE_MEMFD_NAME "/memfd:repro-hcr-code"
+
 static long long anon_exec_bytes(void) {
   int fd = open("/proc/self/maps", O_RDONLY);
   static char buffer[512 * 1024];
@@ -202,7 +227,11 @@ static long long anon_exec_bytes(void) {
           fields[nfields++] = token;
           token = strtok_r(NULL, " \t", &save);
         }
-        if (nfields == 5 && strlen(fields[1]) >= 4 && fields[1][2] == 'x') {
+        if (strlen(fields[1]) >= 4 && fields[1][2] == 'x' &&
+            (nfields == 5 ||
+             (nfields >= 6 &&
+              strncmp(fields[5], REPRO_HCR_CODE_MEMFD_NAME,
+                      strlen(REPRO_HCR_CODE_MEMFD_NAME)) == 0))) {
           /* BYTES, not lines. The kernel merges adjacent anonymous mappings
            * with identical protection into ONE `/proc/self/maps` line, so a
            * line count cannot tell two retained patch pages from three. The

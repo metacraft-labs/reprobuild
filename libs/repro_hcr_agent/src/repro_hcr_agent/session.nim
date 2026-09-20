@@ -113,6 +113,29 @@ proc observeHello(session: var HcrAgentSession; direction: HcrMessageDirection;
         ", got " & message.hello.supportProfile)
   if not message.hello.capabilities.containsValue("hcr-agent-protocol"):
     raise newException(ValueError, "agent did not advertise hcr-agent-protocol")
+  # HLX-M9 — CAPABILITY-TIME REFUSAL.
+  #
+  # The agent probes the host's `mprotect` RW->RX round trip at start-up and,
+  # on a host that cannot complete it, has refused since HLX-M4 — but in
+  # `txn_prepare`, at the FIRST RELOAD. That is late and it is unclear: the
+  # developer edits a file, waits for a rebuild, and gets a refusal named
+  # `unsupported-host` that says nothing about which policy blocked it.
+  #
+  # Refusing HERE is what lets a coordinator stop offering patches at all,
+  # and the agent's diagnostic names the blocking policy rather than its
+  # symptom — it reads `PR_GET_MDWE` instead of guessing.
+  #
+  # ABSENT is UNKNOWN. An agent predating this change does not answer, and so
+  # reaches the same behaviour it always had; only an explicit `false` refuses.
+  if message.hello.patchingSupportedReported and
+      not message.hello.patchingSupported:
+    let reason =
+      if message.hello.unsupportedReason.len > 0:
+        message.hello.unsupportedReason
+      else:
+        "the agent reported the host unsupported and named no reason"
+    raise newException(ValueError,
+      "agent reports this host cannot be patched: " & reason)
   session.agentCapabilities = message.hello.capabilities
   session.state = hssAgentHelloReceived
 

@@ -1,6 +1,7 @@
 import repro_hcr_linkgraph/types
 import repro_hcr_linkgraph/macho
 import repro_hcr_linkgraph/elf
+import repro_hcr_linkgraph/elf_decompress
 import repro_hcr_linkgraph/coff
 import repro_hcr_linkgraph/windows_symbols
 import repro_hcr_linkgraph/windows_unwind
@@ -14,6 +15,7 @@ import repro_hcr_linkgraph/type_layout
 export types
 export macho
 export elf
+export elf_decompress
 export coff
 export windows_symbols
 export windows_unwind

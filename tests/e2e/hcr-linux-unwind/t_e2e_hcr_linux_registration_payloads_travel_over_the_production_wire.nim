@@ -92,13 +92,16 @@ package hcrWirePatch:
       source = "src/patchable.c",
       output = "build/patchable.raw.o",
       debug3 = true,
-      # LOAD-BEARING, and it is the finding this gate produced. This toolchain
-      # emits `SHF_COMPRESSED` `.debug_*` by default, and the agent refuses a
-      # compressed symfile by name because a relocation applied into a zlib
-      # stream corrupts it silently. Without this, the JIT registration fails
-      # for every patch `repro watch --hcr` delivers on Linux — measured, see
-      # the file header.
-      debugCompression = "none",
+      # REMOVED 2026-09-20 (HLX-M8), and its absence is now LOAD-BEARING in the
+      # other direction. This edge used to carry `debugCompression = "none"`
+      # because this toolchain emits `SHF_COMPRESSED` `.debug_*` by default and
+      # the agent refuses a compressed symfile by name. `repro hcr
+      # prepare-object` now EXPANDS those sections on ELF, so the per-edge flag
+      # is unnecessary rather than merely documented — and this gate is what
+      # proves it, because `jitRegistered` below goes red the moment the
+      # expansion stops happening. Putting the flag back would make that
+      # assertion pass for a reason that has nothing to do with the pass under
+      # test.
       compileOnly = true,
       after = @[buildDir])
     let obj = hcr.prepareObject(

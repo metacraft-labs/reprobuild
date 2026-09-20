@@ -1636,6 +1636,13 @@ static int repro_hcr_prepare_direct_patch(repro_hcr_direct_patch_txn *txn,
   repro_hcr_lx_restore_fault_site =
       getenv("REPRO_HCR_TEST_FAIL_TEXT_RESTORE") != NULL ? 0 : -1;
 
+  /* HLX-M9 2026-09-20 — force the PRE-HLX-M9 anonymous code-page mechanism on
+   * a host where the `memfd` dual mapping works, so a gate can run both
+   * mechanisms on ONE binary. Same shape as the levers above: the agent never
+   * sets it, and it selects a real code path rather than forging an outcome. */
+  repro_hcr_lx_force_anonymous_code_pages =
+      getenv("REPRO_HCR_TEST_FORCE_ANONYMOUS_CODE_PAGES") != NULL ? 1 : 0;
+
   if (entry == NULL) {
     memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
     repro_hcr_lx_last_report.refusal = REPRO_HCR_LX_REFUSED_INVALID_ARGUMENT;
@@ -2387,20 +2394,129 @@ static const char *repro_hcr_source_reload_capability_suffix(void) {
   return ",\"" REPRO_HCR_AGENT_CAPABILITY_SOURCE_RELOAD "\"";
 }
 
+/* Defined below. Declared here because three encoders above the definition
+ * need it and the alternative is three copies of one escaper. */
+static void repro_hcr_json_escape(const char *value, char *out,
+                                  size_t out_cap);
+
+/*
+ * HLX-M9 — CAPABILITY-TIME REFUSAL.
+ *
+ * The host capability probe (design §5.2) has run at agent start since HLX-M0
+ * and the provider has refused an unsupported host since HLX-M4 — but it
+ * refused in `repro_hcr_lx_txn_prepare`, i.e. at the FIRST RELOAD, as
+ * `REPRO_HCR_LX_REFUSED_UNSUPPORTED_HOST`. A developer on a hardened host
+ * therefore learned that HCR does not work there by editing a file, waiting
+ * for a rebuild, and getting a refusal whose name says "unsupported host" and
+ * nothing about WHY.
+ *
+ * Negotiation is where that belongs, and it is also the only place a
+ * coordinator can act on it: it can stop offering patches at all instead of
+ * building one per edit and having each refused.
+ *
+ * WHAT THE DIAGNOSTIC MUST DO, and why it reads the way it does. "Unsupported
+ * host" is a symptom. The blocking POLICY is the actionable fact, and it is
+ * knowable rather than guessable: `PR_GET_MDWE` reports whether this process
+ * is under `PR_MDWE_REFUSE_EXEC_GAIN`, so the provider can distinguish
+ *
+ *   - MDWE is set, and that is the refusal — actionable: the launcher set it;
+ *   - MDWE is NOT set and the round trip still fails — a DIFFERENT finding
+ *     (SELinux `execmod`, a seccomp filter, a hardened kernel), and reporting
+ *     it as MDWE would send a reader to fix the wrong thing;
+ *   - the kernel does not implement `PR_GET_MDWE` (pre-6.3, -EINVAL) — which
+ *     is a third answer and is not "no MDWE".
+ *
+ * The measured syscall results ride along, because the signature of this
+ * policy class is precisely that the RW step SUCCEEDS and only the PROT_EXEC
+ * restore fails.
+ */
+static int repro_hcr_agent_patching_supported(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  const repro_hcr_lx_capabilities *caps = repro_hcr_lx_capability_report();
+  return caps->text_protection_roundtrip ? 1 : 0;
+#else
+  /* No probe on this arm. Answering "supported" here would be a claim; the
+   * field is simply not reported (see `repro_hcr_hello_json`), which the
+   * coordinator reads as UNKNOWN rather than as yes. */
+  return 1;
+#endif
+}
+
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+static void repro_hcr_agent_unsupported_reason(char *out, size_t out_cap) {
+  const repro_hcr_lx_capabilities *caps = repro_hcr_lx_capability_report();
+  const char *policy;
+  char policy_buffer[320];
+
+  if (caps->mdwe_flags < 0) {
+    snprintf(policy_buffer, sizeof(policy_buffer),
+             "this kernel does not implement PR_GET_MDWE (prctl answered %ld), "
+             "so the policy could not be named; SELinux execmod and seccomp "
+             "are the usual causes",
+             caps->mdwe_flags);
+    policy = policy_buffer;
+  } else if ((caps->mdwe_flags &
+              (long)REPRO_HCR_LX_PR_MDWE_REFUSE_EXEC_GAIN) != 0) {
+    policy = "this process runs under PR_SET_MDWE with "
+             "PR_MDWE_REFUSE_EXEC_GAIN, which forbids regaining PROT_EXEC on "
+             "any mapping that has been writable";
+    policy_buffer[0] = '\0';
+  } else {
+    snprintf(policy_buffer, sizeof(policy_buffer),
+             "PR_MDWE_REFUSE_EXEC_GAIN is NOT set on this process "
+             "(PR_GET_MDWE answered %ld), so the refusal comes from some "
+             "other policy - SELinux execmod, a seccomp filter, or a "
+             "hardened kernel",
+             caps->mdwe_flags);
+    policy = policy_buffer;
+  }
+
+  snprintf(out, out_cap,
+           "host-text-protection-roundtrip-refused: the provider probed the "
+           "RW->RX round trip on its own scratch page at agent start and "
+           "mprotect(PROT_READ|PROT_WRITE) answered %ld while "
+           "mprotect(PROT_READ|PROT_EXEC) answered %ld. %s. Patching this "
+           "process would make its text writable and then be unable to make "
+           "it executable again, so no patch is offered.",
+           caps->protection_probe_rw_result, caps->protection_probe_rx_result,
+           policy);
+}
+#endif
+
 static char *repro_hcr_hello_json(const char *support_profile) {
-  char *json = (char *)malloc(2048);
+  char *json = (char *)malloc(4096);
+  char supported_fragment[1024];
   if (json == NULL) {
     return NULL;
   }
-  snprintf(json, 2048,
+  if (repro_hcr_agent_patching_supported()) {
+    snprintf(supported_fragment, sizeof(supported_fragment),
+             ",\"patchingSupported\":true");
+  } else {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+    char reason[640];
+    char escaped[900];
+    repro_hcr_agent_unsupported_reason(reason, sizeof(reason));
+    repro_hcr_json_escape(reason, escaped, sizeof(escaped));
+    snprintf(supported_fragment, sizeof(supported_fragment),
+             ",\"patchingSupported\":false,\"unsupportedReason\":\"%s\"",
+             escaped);
+#else
+    snprintf(supported_fragment, sizeof(supported_fragment),
+             ",\"patchingSupported\":false,\"unsupportedReason\":"
+             "\"host-unsupported-reason-unavailable\"");
+#endif
+  }
+  snprintf(json, 4096,
            "{\"schemaId\":\"%s\",\"transportScope\":\"%s\","
            "\"protocolVersion\":1,\"messageId\":\"agent-hello-1\","
            "\"kind\":\"hello\",\"hello\":{\"supportProfile\":\"%s\","
-           "\"agentPid\":%ld,\"capabilities\":[%s%s]}}",
+           "\"agentPid\":%ld,\"capabilities\":[%s%s]%s}}",
            REPRO_HCR_PROTOCOL_SCHEMA, REPRO_HCR_TRANSPORT_SCOPE,
            support_profile, (long)getpid(),
            repro_hcr_capabilities_json_array(),
-           repro_hcr_source_reload_capability_suffix());
+           repro_hcr_source_reload_capability_suffix(),
+           supported_fragment);
   return json;
 }
 
@@ -2591,6 +2707,49 @@ static int repro_hcr_text_left_writable(void) {
 #endif
 }
 
+/*
+ * HLX-M8, 2026-09-20 — the Phase I degradation.
+ *
+ * Phase I (debugger/unwinder registration, step 31) runs AFTER the commit.
+ * When it fails the code is LIVE and the layouts DID change; only the
+ * debugger's view of the patched body is missing. Until this change that was
+ * reported as `hcr/patchFailed`, which is false on the wire in the way an
+ * application acts on: `repro watch` printed "hcr patch failed … falling back
+ * to rebuilds" and set `fallbackOnly` for a target whose behaviour had
+ * ALREADY changed, and the coordinator's state machine recorded a failure for
+ * a process that was running the new code.
+ *
+ * It is now reported as `hcr/patchApplied` carrying `registrationDegraded`,
+ * which is the same decision, for the same reason, as HLX-M9's
+ * `textLeftWritable`: a publication that succeeded AND degraded the process is
+ * reported as both, on the frame whose arrival is what tells the coordinator
+ * the code is live. See `repro_hcr_patch_applied_json`.
+ */
+static int rb_hcr_last_registration_degraded = 0;
+static char rb_hcr_last_registration_diagnostic[512];
+
+/* Name a registration refusal code. On Linux this is the provider's own
+ * vocabulary (`debug-object-compressed-debug-section`,
+ * `unwind-register-frame-unavailable`, …); elsewhere there is no code to name
+ * and the caller gets a word that does not pretend otherwise. A refusal
+ * reported as an unnamed failure is the "three causes, one diagnostic" trap
+ * this field exists to close, so the fallback says `unnamed` rather than
+ * inventing a Linux name. */
+static const char *repro_hcr_registration_refusal_name(int code) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return repro_hcr_lxu_refusal_name(code);
+#else
+  (void)code;
+  return "unnamed-registration-refusal";
+#endif
+}
+
+/* Defined below; declared here because the applied-frame encoder needs it and
+ * sits above the definition. Same reason the failed-frame encoder forward-
+ * declares it — one escaper, one behaviour. */
+static void repro_hcr_json_escape(const char *value, char *out,
+                                  size_t out_cap);
+
 static int repro_hcr_shared_library_positive_path = 0;
 
 static int repro_hcr_get_shared_library_positive_path(void) {
@@ -2609,8 +2768,24 @@ static char *repro_hcr_patch_applied_json(const char *patch_id,
                                           void *dispatch_entry,
                                           int shared_library_positive_path) {
   char *json = (char *)malloc(8192);
+  char registration_escaped[1024];
+  char registration_fragment[1100];
   if (json == NULL) {
     return NULL;
+  }
+  /* HLX-M8. The Phase I degradation rides the APPLIED frame. `Diagnostic` is
+   * emitted only when the degradation is real, so a reader cannot mistake an
+   * empty string for "registration succeeded and said nothing". */
+  if (rb_hcr_last_registration_degraded) {
+    repro_hcr_json_escape(rb_hcr_last_registration_diagnostic,
+                          registration_escaped, sizeof(registration_escaped));
+    snprintf(registration_fragment, sizeof(registration_fragment),
+             ",\"registrationDegraded\":true,"
+             "\"registrationDiagnostic\":\"%s\"",
+             registration_escaped);
+  } else {
+    snprintf(registration_fragment, sizeof(registration_fragment),
+             ",\"registrationDegraded\":false");
   }
   snprintf(json, 8192,
            "{\"schemaId\":\"%s\",\"transportScope\":\"%s\","
@@ -2648,7 +2823,7 @@ static char *repro_hcr_patch_applied_json(const char *patch_id,
            /* HLX-M9: the degradation that used to die in a process static.
             * See `repro_hcr_text_left_writable` for why it rides the APPLIED
             * frame rather than a refusal or a capability string. */
-           "\"textLeftWritable\":%s%s}}",
+           "\"textLeftWritable\":%s%s%s}}",
            REPRO_HCR_PROTOCOL_SCHEMA, REPRO_HCR_TRANSPORT_SCOPE, patch_id,
            changed_function, repro_hcr_symbol_generation(),
            debug_digest == NULL ? "" : debug_digest,
@@ -2658,6 +2833,7 @@ static char *repro_hcr_patch_applied_json(const char *patch_id,
            repro_hcr_old_code_retained() ? "true" : "false",
            shared_library_positive_path ? "true" : "false",
            repro_hcr_text_left_writable() ? "true" : "false",
+           registration_fragment,
            repro_hcr_code_patch_json_fragment());
   return json;
 }
@@ -4293,7 +4469,26 @@ static void rb_hcr_run_lifecycle(rb_hcr_reload_request *req) {
    * be able to attribute the patched frame. A failure here is reported on the
    * wire, but the code IS live and the layouts DID change, so the after-reload
    * callbacks below still receive the FULL changed_types — this is not step 38,
-   * and telling the application "nothing to migrate" would be false. */
+   * and telling the application "nothing to migrate" would be false.
+   *
+   * DECIDED 2026-09-20 (HLX-M8). What "reported on the wire" means was the
+   * open half of that sentence, and the answer used to be `hcr/patchFailed`
+   * for a patch that is LIVE. It is now `hcr/patchApplied` with
+   * `registrationDegraded` set and a diagnostic naming the refusal. `ok` is
+   * therefore NOT cleared here — the three lines below that used to clear it
+   * now set the degradation instead. The reasoning is HLX-M9's, applied to the
+   * case HLX-M9's own decision block already names as "the same wrong answer
+   * this campaign records for the Phase I path":
+   *
+   *   - NOT a refusal. The trampoline is live and the target's behaviour has
+   *     changed. `patchFailed` makes `repro watch` set `fallbackOnly` and stop
+   *     patching a target it has already patched, and makes the coordinator
+   *     record a failure for a process running new code.
+   *   - NOT silence. A missing symfile or unregistered FDE means a debugger
+   *     stopping in the patched body attributes it wrongly and a backtrace
+   *     crossing it is corrupt. That is a real degradation an IDE should show.
+   *   - A FIELD on the applied frame carries it at the severity it has: this
+   *     publication succeeded AND degraded the process, reported together. */
   /* HLX-M5 residue, 2026-09-18. Everything the two registrations learn used to
    * be written into a local `..._evidence` struct and dropped on the floor, so
    * the ONLY way a process could tell a registration from a no-op was to go
@@ -4312,22 +4507,36 @@ static void rb_hcr_run_lifecycle(rb_hcr_reload_request *req) {
   rb_hcr_last_fde_found = 0;
   rb_hcr_last_jit_refusal = 0;
   rb_hcr_last_unwind_refusal = 0;
+  rb_hcr_last_registration_degraded = 0;
+  rb_hcr_last_registration_diagnostic[0] = '\0';
 
   if (req->debug_hex != NULL) {
     repro_hcr_jit_registration_evidence jit_evidence;
     const char *debug_symbol = req->changed_function != NULL
                                    ? req->changed_function
                                    : req->target_symbol;
+    int jit_rc;
     memset(&jit_evidence, 0, sizeof(jit_evidence));
     debug_bytes = repro_hcr_bytes_from_hex(req->debug_hex, &debug_len);
-    if (debug_bytes == NULL || debug_len == 0 ||
-        repro_hcr_register_jit_debug_object(
-            debug_bytes, (uint64_t)debug_len,
-            (uint64_t)(uintptr_t)dispatch_entry, debug_symbol,
-            &jit_evidence) != 0) {
-      ok = 0;
-      failure_message = "JIT debug object registration failed";
+    jit_rc = (debug_bytes == NULL || debug_len == 0)
+                 ? -1
+                 : repro_hcr_register_jit_debug_object(
+                       debug_bytes, (uint64_t)debug_len,
+                       (uint64_t)(uintptr_t)dispatch_entry, debug_symbol,
+                       &jit_evidence);
+    if (jit_rc != 0) {
+      /* The NAMED refusal reaches the wire. It used to stop at the boolean
+       * `rb_hcr_last_jit_refusal`, so "JIT debug object registration failed"
+       * was the same sentence for a compressed debug section, an unsupported
+       * CIE augmentation and an unplaceable relocated FDE — three causes, one
+       * diagnostic (Verification-Harness-Traps §20). The refusal NAME is what
+       * tells a reader to rebuild `-gz=none`, and it is now in the frame. */
+      rb_hcr_last_registration_degraded = 1;
       rb_hcr_last_jit_refusal = 1;
+      snprintf(rb_hcr_last_registration_diagnostic,
+               sizeof(rb_hcr_last_registration_diagnostic),
+               "JIT debug object registration failed: %s",
+               repro_hcr_registration_refusal_name(jit_rc));
     } else {
       rb_hcr_last_debug_object_bytes = (size_t)debug_len;
       rb_hcr_last_jit_registered = 1;
@@ -4335,7 +4544,12 @@ static void rb_hcr_run_lifecycle(rb_hcr_reload_request *req) {
       rb_hcr_last_jit_register_hook_calls = jit_evidence.register_hook_call_count;
     }
   }
-  if (ok && req->unwind_hex != NULL) {
+  /* Attempted even when the JIT arm degraded. They register INDEPENDENT things
+   * — a symfile a debugger reads and an FDE an unwinder reads — and skipping
+   * the second because the first refused would lose a registration that would
+   * have succeeded, for no reason beyond the old code's use of one `ok` flag
+   * for both. The diagnostic below names both refusals when both happen. */
+  if (req->unwind_hex != NULL) {
     repro_hcr_unwind_registration_evidence unwind_evidence;
     int unwind_rc;
     memset(&unwind_evidence, 0, sizeof(unwind_evidence));
@@ -4347,9 +4561,14 @@ static void rb_hcr_run_lifecycle(rb_hcr_reload_request *req) {
                           (uint64_t)(uintptr_t)dispatch_entry,
                           (uint64_t)patch_len, &unwind_evidence);
     if (unwind_rc != 0) {
-      ok = 0;
+      size_t used = strlen(rb_hcr_last_registration_diagnostic);
       rb_hcr_last_unwind_refusal = unwind_rc;
-      failure_message = "dynamic unwind registration failed";
+      rb_hcr_last_registration_degraded = 1;
+      snprintf(rb_hcr_last_registration_diagnostic + used,
+               sizeof(rb_hcr_last_registration_diagnostic) - used,
+               "%sdynamic unwind registration failed: %s",
+               used == 0 ? "" : "; ",
+               repro_hcr_registration_refusal_name(unwind_rc));
     } else {
       rb_hcr_last_unwind_metadata_bytes = (size_t)unwind_len;
       rb_hcr_last_eh_frame_registered = 1;
@@ -4368,27 +4587,22 @@ static void rb_hcr_run_lifecycle(rb_hcr_reload_request *req) {
   rb_hcr_last_after_fired =
       rb_hcr_fire(rb_hcr_after_callbacks, rb_hcr_after_callback_count, req, 1);
 
-  if (ok) {
-    repro_hcr_send_owned_json(
-        req->fd,
-        repro_hcr_lifecycle_json(req->patch_id, "hcr/patchApplied", 2));
-    repro_hcr_send_owned_json(
-        req->fd,
-        repro_hcr_patch_applied_json(req->patch_id, req->changed_function,
-                                     req->debug_digest, req->unwind_digest,
-                                     entry, dispatch_entry,
-                                     repro_hcr_get_shared_library_positive_path()));
-  } else {
-    snprintf(rb_hcr_last_rejection, sizeof(rb_hcr_last_rejection), "%s",
-             failure_message);
-    repro_hcr_send_owned_json(
-        req->fd,
-        repro_hcr_lifecycle_json(req->patch_id, "hcr/patchFailed", 2));
-    repro_hcr_send_owned_json(
-        req->fd, repro_hcr_patch_failed_json(req->patch_id,
-                                             req->changed_function,
-                                             failure_message));
-  }
+  /* Phase G succeeded, so this frame is `patchApplied` UNCONDITIONALLY. There
+   * used to be a `patchFailed` arm here, reached only when a Phase I
+   * registration refused — for a patch that was live. It is gone rather than
+   * made conditional: after the commit there is no longer a state in which
+   * `patchFailed` is a true statement about this process, and leaving the
+   * branch in place would invite the next edit to reach for it. The
+   * degradation travels on `registrationDegraded` instead. */
+  repro_hcr_send_owned_json(
+      req->fd,
+      repro_hcr_lifecycle_json(req->patch_id, "hcr/patchApplied", 2));
+  repro_hcr_send_owned_json(
+      req->fd,
+      repro_hcr_patch_applied_json(req->patch_id, req->changed_function,
+                                   req->debug_digest, req->unwind_digest,
+                                   entry, dispatch_entry,
+                                   repro_hcr_get_shared_library_positive_path()));
 
   free(patch_bytes);
   free(debug_bytes);
@@ -4615,6 +4829,37 @@ int repro_hcr_agent_host_supports_direct_patch(void) {
   return repro_hcr_lx_capability_report()->text_protection_roundtrip;
 #elif defined(REPRO_HCR_TARGET_APPLE_ARM64)
   return 1;
+#else
+  return 0;
+#endif
+}
+
+/*
+ * HLX-M9 — provider-owned code-page observations. Read-only; nothing in the
+ * agent branches on them. They corroborate what a gate reads out of
+ * `/proc/self/maps`, which is the kernel's answer and the stronger one; these
+ * are the provider's own, and the pair is only meaningful because they come
+ * from different places.
+ */
+uint64_t repro_hcr_agent_dual_code_page_count(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return repro_hcr_lx_dual_page_count;
+#else
+  return 0;
+#endif
+}
+
+uint64_t repro_hcr_agent_sealed_code_page_count(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return repro_hcr_lx_dual_seal_count;
+#else
+  return 0;
+#endif
+}
+
+uint64_t repro_hcr_agent_fallback_code_page_count(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return repro_hcr_lx_fallback_page_count;
 #else
   return 0;
 #endif
