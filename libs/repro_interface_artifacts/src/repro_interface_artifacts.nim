@@ -5022,17 +5022,6 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
       removeDir(extendedPath(tempRoot))
     except OSError:
       discard
-  # Nim includes the main module's directory in every C compiler invocation.
-  # Keep that directory stable so a new extraction does not invalidate all
-  # shared objects, while atomically allocating each invocation's source file.
-  let (runnerFile, runnerPath) =
-    createTempFile("extract_runner_", ".nim", tempParent)
-  close(runnerFile)
-  defer:
-    try:
-      removeFile(extendedPath(runnerPath))
-    except OSError:
-      discard
   # M9.R.14b.2: Pin the recipe import to its absolute path so that
   # ``import repro`` does not resolve through Nim's search path. The
   # generic ``import <moduleName>`` form used to ride on
@@ -5066,7 +5055,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     let absoluteResourceModule =
       absolutePath(resourceModule).replace('\\', '/')
     resourceImport = "import \"" & absoluteResourceModule & "\"\n"
-  writeFile(extendedPath(runnerPath),
+  let runnerSource =
     "import std/os\n" &
     "import repro_interface_artifacts\n" &
     "import repro_project_dsl\n" &
@@ -5075,7 +5064,72 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     "import \"" & absoluteModulePath & "\"\n\n" &
     "let artifact = artifactFromRegisteredDsl(paramStr(3))\n" &
     "writeInterfaceArtifact(paramStr(1), artifact)\n" &
-    "writeNimInterfaceStub(paramStr(2), artifact)\n")
+    "writeNimInterfaceStub(paramStr(2), artifact)\n"
+  # CONTENT-KEYED, and therefore stable across invocations.
+  #
+  # Nim names a nimcache entry after the MAIN MODULE and puts the main
+  # module's DIRECTORY on every C compiler invocation. The directory has
+  # always been stable (``tempParent``); the FILE used to be a fresh
+  # ``createTempFile`` per invocation, so the runner's own translation unit
+  # arrived under a new name every time. Its object
+  # ``@mextract_runner_<rand>.nim.c.o`` could therefore never be reused, and
+  # was never removed: measured on a warm extraction, exactly one object
+  # rebuilt on 6 of 6 runs -- the entire residual of an otherwise perfectly
+  # warm cache, 1 of 229 -- while the key directory grew by three entries
+  # (``.c``, ``.c.d``, ``.c.o``) per run, without bound and with no reaper
+  # anywhere. Tool-Owned-Caches.md, "Lifecycle", forbids exactly that.
+  #
+  # THE RANDOMNESS WAS LOAD-BEARING, AND A LITERAL FIXED NAME WOULD BE
+  # UNSAFE. ``tempParent`` is keyed on ``(workDir, scratchDir)`` ONLY: it is
+  # COARSER than the nimcache, which is position-keyed per recipe, so every
+  # recipe extracted against one scratch tree shares this one directory.
+  # Nothing serialises recipe A against recipe B -- their
+  # ``<nimcache>.compile.lock`` paths differ by construction (see
+  # ``acquireProviderNimcacheLock``, which says so, and counts that as the
+  # measured concurrency win), and ``acquireInterfaceArtifactLock`` is keyed
+  # on the ARTIFACT path, which is not a component of the nimcache key at
+  # all. A literal ``extract_runner.nim`` would let two concurrent
+  # extractions of DIFFERENT recipes write different bytes to one path --
+  # precisely the clobber the random name was dodging.
+  #
+  # Keying the name on the runner's own SOURCE TEXT dodges it too, and by
+  # construction rather than by luck: two extractions share this path if and
+  # only if they would have written identical bytes into it, so the write is
+  # idempotent and no content can be lost. The name varies only with
+  # ``modulePath`` and ``resourceModule``, never with the recipe's BODY, so
+  # editing a recipe does not orphan its object; and ``modulePath`` is
+  # already a nimcache key component, so within one key directory this
+  # normally resolves to exactly one runner and one object.
+  #
+  # AND IT IS NOT DELETED. The old ``defer removeFile`` ran after the
+  # compile had released the nimcache lock, so under a shared name one
+  # extraction's cleanup could delete the source a sibling was about to
+  # hand to ``nim c``. Leaving the file is what makes the shared name safe,
+  # and it trades unbounded per-RUN growth for one file per distinct runner
+  # source -- bounded, and identifiable from its own name.
+  let runnerPath = tempParent /
+    ("extract_runner_" & fnvHex64([runnerSource]) & ".nim")
+  if not fileExists(extendedPath(runnerPath)):
+    # Publish by rename, so a concurrent extraction that derived the same
+    # name never observes a partially written file: the path either does not
+    # exist yet or already holds the whole source.
+    let (stageFile, stagePath) =
+      createTempFile("extract_runner_stage_", ".tmp", tempParent)
+    try:
+      stageFile.write(runnerSource)
+    finally:
+      close(stageFile)
+    try:
+      moveFile(extendedPath(stagePath), extendedPath(runnerPath))
+    except OSError:
+      # Windows refuses to replace a file another process holds open. That
+      # process published byte-identical content, so its copy is ours too.
+      try:
+        removeFile(extendedPath(stagePath))
+      except OSError:
+        discard
+      if not fileExists(extendedPath(runnerPath)):
+        raise
   let runnerBin = tempRoot / "extract_runner"
   let hostFlags = hostCCompilerFlags()
   let libFlags = reproLibPathFlags(workDir)
