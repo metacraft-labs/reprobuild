@@ -98,8 +98,7 @@ else:
   suite "M68 Phase B: integration_resource_move":
     test "resource move carries the binding forward; no driver runs":
       when not defined(windows):
-        checkpoint "platform-skip: Windows registry resource is the subject"
-        check true
+        skip("platform-skip: Windows registry resource is the subject")
         return
 
       let testSubkey = "Software\\Reprobuild-Tests\\m68-move-" &
@@ -192,8 +191,8 @@ else:
 
     test "resource move rejects unknown <old> and conflicting <new>":
       when not defined(windows):
-        checkpoint "platform-skip"
-        check true
+        skip("platform-skip: the moved resource is a Windows " &
+          "registry value")
         return
 
       let testSubkey = "Software\\Reprobuild-Tests\\m68-move-err-" &

@@ -55,8 +55,7 @@ else:
   suite "M63 gate 2: e2e_repro_home_apply_noop":
     test "re-apply with no changes short-circuits to no-op":
       when not defined(windows):
-        checkpoint "skipping on non-Windows"
-        check true
+        skip("platform-skip: M63 gate 2 drives a real Scoop install; Windows-only")
         return
       let scoopBinary = resolveScoopBinary()
       doAssert scoopBinary.len > 0,

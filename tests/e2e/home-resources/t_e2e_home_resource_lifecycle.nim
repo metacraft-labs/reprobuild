@@ -79,8 +79,7 @@ else:
   suite "M68 gate 1: e2e_home_resource_lifecycle_create_update_destroy":
     test "create / update / drift / reconcile across managed-block, gitconfig, PATH":
       when not defined(windows):
-        checkpoint "platform-skip: Windows-focused Phase A coverage"
-        check true
+        skip("platform-skip: Windows-focused Phase A coverage")
         return
       let testSubkey = "Software\\Reprobuild-Tests\\m68-gate1-" &
         $epochTime()

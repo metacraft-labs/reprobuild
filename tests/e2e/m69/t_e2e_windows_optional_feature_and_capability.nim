@@ -27,8 +27,12 @@
 ## verified — so the `windows.optionalFeature` / `windows.capability`
 ## / `windows.service` DRIVERS are proven without mutating the host.
 ##
-## No `skip`, no `xfail` — the pure-logic half ALWAYS runs and always
-## asserts; only the real-mutation half is VM-gated.
+## No `xfail` — the pure-logic half ALWAYS runs and always asserts on
+## a Windows host; only the real-mutation half is VM-gated. The gated
+## half reports SKIP with its reason, never PASS: a case that did not
+## run must not be reported the way a case that ran and asserted is,
+## or a regression in the real-mutation path would hide behind a
+## green run on a host that never executed it.
 ##
 ## ===========================================================================
 ## WINDOWS-SANDBOX DESIGN — gate-split for the M69 system-scope
@@ -178,6 +182,17 @@ const HostRunsGate = defined(windows)
 const PlatformSkipReason =
   "[platform N/A] t_e2e_windows_optional_feature_and_capability: " &
     "DISM / capability / service drivers are Windows-only"
+
+const VmSkipReason =
+  "[VM-gated] REPRO_M69_FEATURE_VM not set: the REAL-mutation half " &
+    "alters the host, so it runs only inside the M69 system-scope " &
+    "Sandbox harness (tools/sandbox-m69-system/)"
+  ## Reason recorded by the REAL-scenario cases when the disposable
+  ## environment is absent. It is a ``skip`` and not a ``check true``
+  ## deliberately: a case that cannot run must not report the same
+  ## status as a case that ran and asserted, or a regression in the
+  ## real-mutation path would be indistinguishable from a green run
+  ## on a host that never executed it.
 
 template gatedTest(name: string; body: untyped) =
   ## Register the case unconditionally, and on a host that cannot run it
@@ -394,11 +409,7 @@ suite "windows.optionalFeature: REAL reboot-free lifecycle (VM-only)":
 
   gatedTest "select the reboot-free feature for this run":
     if not vmMode:
-      echo "  [VM-gated] REPRO_M69_FEATURE_VM not set — skipping " &
-        "reboot-free Optional-Feature lifecycle. Run inside the M69 " &
-        "system-scope Sandbox harness (`tools/sandbox-m69-system/`) " &
-        "to exercise it."
-      check true                          # keep the test honest under unittest
+      skip(VmSkipReason & " — reboot-free Optional-Feature lifecycle")
     else:
       when defined(windows):
         # Probe each candidate; the first one that exists wins.
@@ -419,8 +430,7 @@ suite "windows.optionalFeature: REAL reboot-free lifecycle (VM-only)":
 
   gatedTest "REAL: enable -> observe Enabled, RestartNeeded=False (full lifecycle)":
     if not vmMode:
-      echo "  [VM-gated] not run on host"
-      check true
+      skip(VmSkipReason & " — enable -> observe Enabled lifecycle")
     else:
       when defined(windows):
         let feature = getEnv("REPRO_M69_REBOOT_FREE_FEATURE")
@@ -465,8 +475,7 @@ suite "windows.optionalFeature: REAL reboot-free lifecycle (VM-only)":
 
   gatedTest "REAL: out-of-band disable is observed as drift on next plan":
     if not vmMode:
-      echo "  [VM-gated] not run on host"
-      check true
+      skip(VmSkipReason & " — out-of-band drift detection")
     else:
       when defined(windows):
         let feature = getEnv("REPRO_M69_REBOOT_FREE_FEATURE")
@@ -506,8 +515,7 @@ suite "windows.optionalFeature: REAL reboot-free lifecycle (VM-only)":
 
   gatedTest "REAL: rollback without --accept-feature-destroy refuses; with it disables":
     if not vmMode:
-      echo "  [VM-gated] not run on host"
-      check true
+      skip(VmSkipReason & " — rollback --accept-feature-destroy gate")
     else:
       when defined(windows):
         let feature = getEnv("REPRO_M69_REBOOT_FREE_FEATURE")
@@ -614,10 +622,7 @@ suite "windows.capability + service: REAL apply (VM-only)":
 
   gatedTest "REAL: OpenSSH server capability install + sshd service config":
     if not vmMode:
-      echo "  [VM-gated] REPRO_M69_FEATURE_VM not set — skipping " &
-        "OpenSSH-server / sshd-service scenario. Run inside the M69 " &
-        "system-scope Sandbox harness."
-      check true
+      skip(VmSkipReason & " — OpenSSH-server capability + sshd service")
     else:
       when defined(windows):
         let stateDir = createTempDir("repro-m69-cap-vm-", "")
@@ -797,10 +802,7 @@ suite "windows.optionalFeature: REAL RestartNeeded-reporting contract (VM-only)"
 
   gatedTest "REAL: WSL enable surfaces RestartNeeded without claiming Enabled":
     if not vmMode:
-      echo "  [VM-gated] REPRO_M69_FEATURE_VM not set — skipping " &
-        "WSL RestartNeeded-reporting contract. Run inside the M69 " &
-        "system-scope Sandbox harness."
-      check true
+      skip(VmSkipReason & " — WSL RestartNeeded-reporting contract")
     else:
       when defined(windows):
         # WSL is the canonical reboot-gated feature. The CORE CONTRACT

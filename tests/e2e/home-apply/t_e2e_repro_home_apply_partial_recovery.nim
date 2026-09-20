@@ -59,8 +59,7 @@ else:
   suite "M63 gate 3: e2e_repro_home_apply_partial_recovery":
     test "killed apply quarantines on next run; current stays intact":
       when not defined(windows):
-        checkpoint "skipping on non-Windows"
-        check true
+        skip("platform-skip: M63 gate 3 drives a real Scoop install; Windows-only")
         return
       let scoopBinary = resolveScoopBinary()
       doAssert scoopBinary.len > 0

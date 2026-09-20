@@ -177,8 +177,7 @@ else:
     test "byte-identical regular-file target is a no-op cache-hit; " &
          "apply succeeds, file untouched, plan and apply agree":
       when not defined(windows):
-        checkpoint "platform-skip: M76 stow gate is Windows-specific"
-        check true
+        skip("platform-skip: M76 stow gate is Windows-specific")
         return
       let tempRoot = createTempDir("repro-m76-byteident-", "")
       defer:
@@ -223,7 +222,7 @@ else:
     test "wrong-source link whose resolved content is byte-identical " &
          "to the stow source is a cache-hit":
       when not defined(windows):
-        check true
+        skip("platform-skip: the M76 stow gate is Windows-specific")
         return
       let tempRoot = createTempDir("repro-m76-wronglink-ident-", "")
       defer:
@@ -241,9 +240,8 @@ else:
       except OSError:
         symlinkOk = false
       if not symlinkOk:
-        checkpoint "platform-skip: host cannot create symlinks " &
-          "(developer mode off); the wrong-link cache-hit case needs one"
-        check true
+        skip("platform-skip: host cannot create symlinks " &
+          "(developer mode off); the wrong-link cache-hit case needs one")
       else:
         check symlinkExists(target)
         # The link points at a DIFFERENT path than the stow source...
@@ -267,7 +265,7 @@ else:
     test "genuinely-differing regular-file target still raises " &
          "EStowConflict; --reconcile-drift required (M72 contract)":
       when not defined(windows):
-        check true
+        skip("platform-skip: the M76 stow gate is Windows-specific")
         return
       let tempRoot = createTempDir("repro-m76-differs-", "")
       defer:
@@ -343,7 +341,7 @@ else:
     test "stow target reached through a parent directory junction into " &
          "the stow tree materializes cleanly as a cache-hit":
       when not defined(windows):
-        check true
+        skip("platform-skip: the M76 stow gate is Windows-specific")
         return
       let tempRoot = createTempDir("repro-m76-parentjunction-", "")
       defer:

@@ -616,7 +616,8 @@ suite "nested lock-push capability security":
         moveDir(savedPrivate, reproPrivate)
         discardHookCapability(gitBin, fx.repo, issued.token)
     else:
-      check true
+      skip("[platform N/A] native metadata-substitution attacks are a " &
+        "POSIX-only shape; this case has no non-POSIX coverage")
 
   test "native POSIX ownership mismatch is refused":
     when defined(posix):
@@ -700,7 +701,8 @@ suite "nested lock-push capability security":
         if ownerResult.code != 0: checkpoint(ownerResult.output)
         check ownerResult.code == 0
     else:
-      check true
+      skip("[platform N/A] POSIX ownership mismatch has no non-POSIX " &
+        "equivalent; this case has no non-POSIX coverage")
 
   test "parent normal and POSIX signal cleanup remove unclaimed pending files":
     let gitBin = findExe("git")
@@ -793,7 +795,8 @@ suite "nested lock-push capability security":
       removeCapabilityScratch(valid)
       check not dirExists(valid)
     else:
-      check true
+      skip("[platform N/A] the adversarial cleanup-validator shapes are " &
+        "POSIX path shapes; this case has no non-POSIX coverage")
 
   test "concurrent POSIX directory component swaps never authorize through a link":
     when defined(posix):
@@ -882,7 +885,8 @@ suite "nested lock-push capability security":
         for token in tokens:
           discardHookCapability(gitBin, fx.repo, token)
     else:
-      check true
+      skip("[platform N/A] concurrent directory-component swaps need " &
+        "POSIX symlink semantics; this case has no non-POSIX coverage")
 
   test "real nested backend push scrubs preserved user-hook environment":
     let gitBin = findExe("git")

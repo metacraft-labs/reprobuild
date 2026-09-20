@@ -243,8 +243,7 @@ else:
     when isNixSupported:
       test "real ~/dotfiles replaced by repro home apply; non-destructive":
         when not defined(windows):
-          checkpoint "platform-skip: M70 gate is Windows-host-specific"
-          check true
+          skip("platform-skip: M70 gate is Windows-host-specific")
           return
 
         # -------------------------------------------------------------------

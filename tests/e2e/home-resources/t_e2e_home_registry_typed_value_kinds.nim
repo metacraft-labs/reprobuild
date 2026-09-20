@@ -81,8 +81,7 @@ else:
   suite "M68 gate 2: e2e_home_registry_typed_value_kinds":
     test "all six typed kinds round-trip; drift detected; rollback":
       when not defined(windows):
-        checkpoint "platform-skip: Windows-only gate"
-        check true
+        skip("platform-skip: Windows-only gate")
         return
       # Per-test subkey: timestamp keeps parallel CI runs collision-free.
       let testSubkey = "Software\\Reprobuild-Tests\\m68-gate2-" &

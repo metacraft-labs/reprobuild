@@ -70,8 +70,7 @@ else:
   suite "M63 gate 1: e2e_repro_home_apply_fresh_install":
     test "fresh apply realizes a Scoop package end-to-end":
       when not defined(windows):
-        checkpoint "skipping on non-Windows"
-        check true
+        skip("platform-skip: M63 gate 1 drives a real Scoop install; Windows-only")
         return
       let scoopBinary = resolveScoopBinary()
       doAssert scoopBinary.len > 0,
