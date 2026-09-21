@@ -33711,7 +33711,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_cargo_lock_vendor_plan.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 19,
+      "staticCaseCount": 23,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -33729,7 +33729,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_cargo_vendor_action.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
