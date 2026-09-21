@@ -249,7 +249,7 @@ suite "M4 — cakBuiltin installer family realize":
     let hostDark = findExe("dark")
     if hostDark.len == 0:
       echo "  [skip] no host dark.exe on PATH; cannot seed wix3 prefix"
-      skip()
+      skip("no host dark.exe on PATH -- cannot seed the wix3 catalog prefix")
     else:
       var store = openStore(storeDir)
       defer: store.close()
@@ -295,7 +295,7 @@ suite "M4 — cakBuiltin installer family realize":
     let hostLessmsi = findExe("lessmsi")
     if hostLessmsi.len == 0:
       echo "  [skip] no host lessmsi.exe on PATH"
-      skip()
+      skip("no host lessmsi.exe on PATH -- cannot seed the lessmsi catalog prefix")
     else:
       var store = openStore(storeDir)
       defer: store.close()
@@ -332,7 +332,7 @@ suite "M4 — cakBuiltin installer family realize":
     let hostInnounp = findExe("innounp")
     if hostInnounp.len == 0:
       echo "  [skip] no host innounp.exe on PATH"
-      skip()
+      skip("no host innounp.exe on PATH -- cannot seed the innounp catalog prefix")
     else:
       var store = openStore(storeDir)
       defer: store.close()
@@ -382,13 +382,13 @@ suite "M4 — cakBuiltin installer family realize":
         @[("meson.exe", "stub-meson-payload\n")])
     if hostLessmsi.len == 0:
       echo "  [skip] no host lessmsi.exe on PATH"
-      skip()
+      skip("no host lessmsi.exe on PATH")
     elif hostCandle.len == 0:
       echo "  [skip] no host candle.exe (WiX) on PATH; needed to build MSI"
-      skip()
+      skip("no host candle.exe (WiX) on PATH -- needed to build the synthetic MSI")
     elif msiPath.len == 0:
       echo "  [skip] could not build minimal MSI (candle/light failed)"
-      skip()
+      skip("could not build the minimal MSI (candle/light failed)")
     else:
       let sha = fileShaHex(msiPath, "sha256")
       var store = openStore(storeDir)
@@ -443,10 +443,10 @@ suite "M4 — cakBuiltin installer family realize":
         @[("shared.txt", "content-from-beta-different-bytes\n")])
     if hostSeven.len == 0 or hostLessmsi.len == 0 or hostCandle.len == 0:
       echo "  [skip] need 7z + lessmsi + candle on PATH for merge-conflict test"
-      skip()
+      skip("need 7z + lessmsi + candle on PATH for the merge-conflict bundle")
     elif msi1.len == 0 or msi2.len == 0:
       echo "  [skip] could not build minimal MSIs"
-      skip()
+      skip("could not build the minimal MSIs (candle/light failed)")
     else:
       # Bundle them into a synthetic 7z archive (the fallback shape).
       let bundleStage = stagingDir / "bundle-inner"
@@ -505,10 +505,10 @@ suite "M4 — cakBuiltin installer family realize":
         @[("hello.txt", "msiexec-payload\n")])
     if hostCandle.len == 0:
       echo "  [skip] no host candle.exe (WiX) on PATH; cannot build MSI"
-      skip()
+      skip("no host candle.exe (WiX) on PATH -- cannot build the MSI")
     elif msiPath.len == 0:
       echo "  [skip] could not build minimal MSI for msiexec test"
-      skip()
+      skip("could not build the minimal MSI for the msiexec test")
     else:
       let sha = fileShaHex(msiPath, "sha256")
       # Strip PATH of lessmsi.exe so we'd raise

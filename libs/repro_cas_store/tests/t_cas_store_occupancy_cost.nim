@@ -496,11 +496,11 @@ suite "M4 store occupancy — the cheap oracle that does not work":
       checkpoint("[platform N/A] size-on-disk is queried through " &
         "GetCompressedFileSizeW; the POSIX st_blocks equivalent is not " &
         "exercised by this campaign")
-      skip()
+      skip("not a Windows host -- size-on-disk here is GetCompressedFileSizeW; the POSIX st_blocks equivalent is out of scope")
     elif vols.len == 0:
       checkpoint("[host N/A] no volume on this host supports block " &
         "cloning, so there is no clone to mis-measure")
-      skip()
+      skip("no volume on this host supports block cloning, so there is no clone to mis-measure")
     else:
       let vol = vols[0]
       let dir = vol.dir / "oracle"
@@ -541,11 +541,11 @@ suite "M4 store occupancy — the live measurement":
     if getEnv(CostGateEnv).len == 0:
       checkpoint("[sandbox-gated] " & CostGateEnv & " not set — this " &
         "case moves ~896 MiB and polls volume free space for minutes")
-      skip()
+      skip("REPRO_M4_STORE_COST not set -- this case moves ~896 MiB and polls volume free space for minutes")
     elif vols.len == 0:
       checkpoint("[host N/A] no volume on this host supports block " &
         "cloning")
-      skip()
+      skip("no volume on this host supports block cloning")
     else:
       let res = measureStoreCost(vols[0])
       # ECHOED rather than checkpointed. A cost figure that is only
@@ -569,11 +569,11 @@ suite "M4 store occupancy — the live measurement":
     let vols = copyOnlyVolumes()
     if getEnv(CostGateEnv).len == 0:
       checkpoint("[sandbox-gated] " & CostGateEnv & " not set")
-      skip()
+      skip("REPRO_M4_STORE_COST not set -- this case moves ~896 MiB and polls volume free space for minutes")
     elif vols.len == 0:
       checkpoint("[host N/A] every volume on this host supports block " &
         "cloning, so the copy arm's cost cannot be measured here")
-      skip()
+      skip("every volume on this host supports block cloning, so the copy-only arm cannot be measured here")
     else:
       let res = measureStoreCost(vols[0])
       echo "    copy-only store volume ", vols[0].dir, " (", vols[0].fsName,

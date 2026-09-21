@@ -247,7 +247,7 @@ suite "csharp-dotnet convention M42":
 
   test "emitFragment: hello-binary fixture produces a single build action":
     if not dotnetToolchainReady():
-      skip()
+      skip("dotnet not on PATH")
     else:
       let conv = dotnet_convention.csharpDotnetConvention()
       let request = dummyRequest(HelloBinaryFixture)
@@ -308,7 +308,7 @@ suite "csharp-dotnet convention M42":
     # ``dotnetExecutable()`` and raises when dotnet is missing, this
     # test SKIPs when the toolchain is unavailable.
     if not dotnetToolchainReady():
-      skip()
+      skip("dotnet not on PATH")
     else:
       let scratch = getTempDir() / "test_csharp_dotnet_convention_custom_coords"
       if dirExists(scratch):
@@ -360,7 +360,7 @@ suite "csharp-dotnet convention M42":
     # Library output: ``OutputType=Library`` (or omitted) ⇒ ``.dll``.
     # AssemblyName defaults to the csproj basename when omitted.
     if not dotnetToolchainReady():
-      skip()
+      skip("dotnet not on PATH")
     else:
       let scratch = getTempDir() / "test_csharp_dotnet_convention_library_output"
       if dirExists(scratch):

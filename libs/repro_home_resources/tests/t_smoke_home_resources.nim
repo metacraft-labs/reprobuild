@@ -187,7 +187,7 @@ suite "M68 smoke: home resource lifecycle":
         check e.requiredPlatform == "linux"
         check e.currentPlatform != "linux"
     else:
-      skip()
+      skip("host is Linux -- this case pins the off-Linux ENotImplementedPlatform path of linux.gsettings")
 
   test "phase-B: macos.userDefault raises ENotImplementedPlatform off-macOS":
     when not defined(macosx):
@@ -203,7 +203,7 @@ suite "M68 smoke: home resource lifecycle":
         check e.requiredPlatform == "macosx"
         check e.currentPlatform != "macosx"
     else:
-      skip()
+      skip("host is macOS -- this case pins the off-macOS ENotImplementedPlatform path of macos.userDefault")
 
   test "phase-B: systemd.userUnit raises ENotImplementedPlatform off-Linux":
     when not defined(linux):
@@ -221,7 +221,7 @@ suite "M68 smoke: home resource lifecycle":
         check e.resourceKind == "systemd.userUnit"
         check e.requiredPlatform == "linux"
     else:
-      skip()
+      skip("host is Linux -- this case pins the off-Linux ENotImplementedPlatform path of systemd.userUnit")
 
   test "phase-B: launchd.userAgent raises ENotImplementedPlatform off-macOS":
     when not defined(macosx):
@@ -236,7 +236,7 @@ suite "M68 smoke: home resource lifecycle":
         check e.resourceKind == "launchd.userAgent"
         check e.requiredPlatform == "macosx"
     else:
-      skip()
+      skip("host is macOS -- this case pins the off-macOS ENotImplementedPlatform path of launchd.userAgent")
 
   test "M83 step 4b: systemd.userUnit with state parameter still off-Linux":
     # The applyUserUnit signature now takes `state` (default
@@ -247,7 +247,7 @@ suite "M68 smoke: home resource lifecycle":
         discard applyUserUnit("/tmp/repro-m83-4b-systemd-state",
           "repro-state.service", "[Unit]\n", false, susStopped)
     else:
-      skip()
+      skip("host is Linux -- this case pins the off-Linux ENotImplementedPlatform path of systemd.userUnit")
 
   test "M83 step 4b: launchd.userAgent with keepAlive parameter still off-macOS":
     # The applyLaunchAgent signature now takes `keepAlive` (default
@@ -257,7 +257,7 @@ suite "M68 smoke: home resource lifecycle":
         discard applyLaunchAgent("/tmp/repro-m83-4b-launchd-ka",
           "com.example.repro.ka", "<plist/>", true, keepAlive = true)
     else:
-      skip()
+      skip("host is macOS -- this case pins the off-macOS ENotImplementedPlatform path of launchd.userAgent")
 
   # ----------------------------------------------------------------
   # Phase B pure-function unit tests. The Linux/macOS drivers'
@@ -1551,7 +1551,7 @@ suite "M83 step 7: linux.dconfKey driver":
         check e.requiredPlatform == "linux"
         check e.currentPlatform != "linux"
     else:
-      skip()
+      skip("host is Linux -- this case pins the off-Linux ENotImplementedPlatform path of applyDconfKey")
 
   test "phase-B: observeDconfKey raises ENotImplementedPlatform off-Linux":
     when not defined(linux):
@@ -1559,7 +1559,7 @@ suite "M83 step 7: linux.dconfKey driver":
         discard observeDconfKey(
           "/org/gnome/desktop/interface/color-scheme")
     else:
-      skip()
+      skip("host is Linux -- this case pins the off-Linux ENotImplementedPlatform path of observeDconfKey")
 
   test "phase-B: destroyDconfKey raises ENotImplementedPlatform off-Linux":
     when not defined(linux):
@@ -1567,7 +1567,7 @@ suite "M83 step 7: linux.dconfKey driver":
         destroyDconfKey(
           "/org/gnome/desktop/interface/color-scheme")
     else:
-      skip()
+      skip("host is Linux -- this case pins the off-Linux ENotImplementedPlatform path of destroyDconfKey")
 
   test "resourceValidationError: clean dconf resource passes":
     check resourceValidationError(Resource(kind: rkLinuxDconfKey,
@@ -1779,7 +1779,7 @@ suite "M83 step 7: linux.kdeConfigKey driver":
         check e.requiredPlatform == "linux"
         check e.currentPlatform != "linux"
     else:
-      skip()
+      skip("host is Linux -- this case pins the off-Linux ENotImplementedPlatform path of applyKdeConfigKey")
 
   test "phase-B: observeKdeConfigKey raises ENotImplementedPlatform off-Linux":
     when not defined(linux):
@@ -1787,7 +1787,7 @@ suite "M83 step 7: linux.kdeConfigKey driver":
         discard observeKdeConfigKey("kdeglobals", "General",
           "ColorScheme", 6)
     else:
-      skip()
+      skip("host is Linux -- this case pins the off-Linux ENotImplementedPlatform path of observeKdeConfigKey")
 
   test "phase-B: destroyKdeConfigKey raises ENotImplementedPlatform off-Linux":
     when not defined(linux):
@@ -1795,7 +1795,7 @@ suite "M83 step 7: linux.kdeConfigKey driver":
         destroyKdeConfigKey("kdeglobals", "General",
           "ColorScheme", 6)
     else:
-      skip()
+      skip("host is Linux -- this case pins the off-Linux ENotImplementedPlatform path of destroyKdeConfigKey")
 
   test "M83 step 7: applyKdeConfigKey with kdeVersion=5 still off-Linux":
     # The applyKdeConfigKey signature accepts kdeVersion = 5; the
@@ -1806,7 +1806,7 @@ suite "M83 step 7: linux.kdeConfigKey driver":
         discard applyKdeConfigKey("kdeglobals", "General",
           "ColorScheme", "BreezeDark", 5)
     else:
-      skip()
+      skip("host is Linux -- this case pins the off-Linux ENotImplementedPlatform path of applyKdeConfigKey")
 
   test "resourceValidationError: clean KDE resource passes":
     check resourceValidationError(Resource(kind: rkLinuxKdeConfigKey,

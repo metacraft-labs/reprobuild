@@ -174,12 +174,12 @@ alpha::not_a_real_test
 suite "t_ct_test_runner_partition_file_mode":
   test "partition file: runs only the listed three of five tests":
     if not runPartitionFileCase():
-      skip()
+      skip("ct-test-runner not built at ct-test/build/bin/ct-test-runner")
 
   test "partition slice: not implemented, exits 2 with diagnostic":
     if not runPartitionSliceDiagnosticCase():
-      skip()
+      skip("ct-test-runner not built at ct-test/build/bin/ct-test-runner")
 
   test "partition file names that don't match any test produce warning":
     if not runPartitionMissingNamesCase():
-      skip()
+      skip("ct-test-runner not built at ct-test/build/bin/ct-test-runner")

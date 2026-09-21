@@ -131,7 +131,7 @@ suite "M9.R.13b.1 -- vendored-hash define propagation":
             "on XXH3_64bits.")
         check hasDefine
     else:
-      skip()  # non-Windows: branch tested via the system prefix path
+      skip("not a Windows host -- this arm pins the Windows providerCompileCommand flags")  # non-Windows: branch tested via the system prefix path
 
   test "Arm 2: REPROBUILD_USE_SYSTEM_HASH_LIBS=1 suppresses define":
     when defined(windows):
@@ -148,7 +148,7 @@ suite "M9.R.13b.1 -- vendored-hash define propagation":
             "would multiply-define the symbols).")
         check not hasDefine
     else:
-      skip()
+      skip("not a Windows host -- this arm pins the Windows providerCompileCommand flags")
 
   test "Arm 3: include dirs still emitted alongside define":
     when defined(windows):
@@ -175,7 +175,7 @@ suite "M9.R.13b.1 -- vendored-hash define propagation":
         check blakeI
         check xxhI
     else:
-      skip()
+      skip("not a Windows host -- this arm pins the Windows providerCompileCommand flags")
 
   test "Arm 4: env values other than 1/true/yes/on do NOT suppress define":
     when defined(windows):
@@ -192,4 +192,4 @@ suite "M9.R.13b.1 -- vendored-hash define propagation":
             checkpoint("env=" & ambiguous & " command: " & cmd.join(" "))
           check hasDefine
     else:
-      skip()
+      skip("not a Windows host -- this arm pins the Windows providerCompileCommand flags")

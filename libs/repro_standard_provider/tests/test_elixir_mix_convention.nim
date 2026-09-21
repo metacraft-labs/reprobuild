@@ -244,7 +244,7 @@ suite "elixir-mix convention M62":
     ## toolchain is ACTUALLY missing — when both ARE installed, skip
     ## rather than hand-wave the gate.
     if elixirToolchainReady():
-      skip()
+      skip("elixir and mix are both on PATH -- this case asserts the gate only when the toolchain is genuinely absent")
     else:
       let scratch = getTempDir() / "test_elixir_mix_no_toolchain"
       if dirExists(scratch):
@@ -276,7 +276,7 @@ suite "elixir-mix convention M62":
     ## ``uses:`` tokens (single-token accept pattern, mirroring
     ## M30 / M56 / M57 / M60 / M61).
     if not elixirToolchainReady():
-      skip()
+      skip("elixir or mix not on PATH")
     else:
       let scratch = getTempDir() / "test_elixir_mix_token_mix"
       if dirExists(scratch):
@@ -306,9 +306,9 @@ suite "elixir-mix convention M62":
 
   test "emitFragment: hello-binary fixture produces escript-build + wrapper actions":
     if not elixirToolchainReady():
-      skip()
+      skip("elixir or mix not on PATH")
     elif not fileExists(HelloBinaryFixture / "mix.exs"):
-      skip()
+      skip("fixture missing: reprobuild-examples/elixir-mix/hello-binary/mix.exs")
     else:
       let conv = elixir_convention.elixirMixConvention()
       let request = dummyRequest(HelloBinaryFixture)
@@ -364,9 +364,9 @@ suite "elixir-mix convention M62":
 
   test "emitFragment: wrapper depends on escript-build action (chained ordering)":
     if not elixirToolchainReady():
-      skip()
+      skip("elixir or mix not on PATH")
     elif not fileExists(HelloBinaryFixture / "mix.exs"):
-      skip()
+      skip("fixture missing: reprobuild-examples/elixir-mix/hello-binary/mix.exs")
     else:
       let conv = elixir_convention.elixirMixConvention()
       let request = dummyRequest(HelloBinaryFixture)
