@@ -318,3 +318,8 @@ else:
   suite "t_e2e_repro_watch_multiple_named_targets":
     test "multi-target watch E2E is not available on this platform":
       echo "[platform N/A] repro watch multi-target E2E requires kqueue or inotify"
+      skip("platform N/A: repro watch multi-target E2E requires kqueue or " &
+        "inotify")
+      # "not available on this platform" was only ever a title; the body
+      # passed. The `skip` beside the marker turns the title into the
+      # reported status on any host that has neither kqueue nor inotify.

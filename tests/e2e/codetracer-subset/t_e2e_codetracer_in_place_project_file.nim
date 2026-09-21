@@ -3208,3 +3208,10 @@ else:
   suite "e2e_codetracer_in_place_project_file":
     test "CodeTracer automatic monitor project gate is skipped on this platform":
       echo "[platform N/A] automatic monitor dependency gathering requires preload hooks"
+      skip("platform N/A: automatic monitor dependency gathering requires " &
+        "preload hooks")
+      # The case's own title said "is skipped" while the body passed. The
+      # `skip` beside the marker makes the title true: the echo stays as the
+      # greppable declaration that this coverage does not apply to the host,
+      # and the reported STATUS is now skipped rather than a PASS that
+      # asserted nothing.

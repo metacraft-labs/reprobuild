@@ -2703,7 +2703,7 @@
             "toolPath",
             "traceEnv"
           ],
-          "line": 1282,
+          "line": 1288,
           "path": "tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim",
           "patterns": [
             "nim-argv"
@@ -4404,7 +4404,7 @@
             "src",
             "tmp"
           ],
-          "line": 329,
+          "line": 330,
           "path": "tests/integration/t_integration_launch_plan_binding_strategies.nim",
           "patterns": [
             "nim-c"
@@ -4425,7 +4425,7 @@
             "src",
             "tmp"
           ],
-          "line": 420,
+          "line": 424,
           "path": "tests/integration/t_integration_launch_plan_binding_strategies.nim",
           "patterns": [
             "nim-c"
