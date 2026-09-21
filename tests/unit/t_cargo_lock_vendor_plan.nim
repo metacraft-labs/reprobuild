@@ -132,6 +132,23 @@ suite "Cargo.lock vendor plan":
     check back[0].gitSubdir == "crates/ulid"
     check back[0].directoryName == "ulid-1.1.3"
 
+  test "the package name is read out of a Cargo.toml's [package] table":
+    # How the generator tells which subdirectory of a multi-crate git repo
+    # holds the crate a lockfile names. Only `name` under `[package]` counts:
+    # a `name` in another table (a dependency, a [[bin]]) must not be picked.
+    check cratePackageName("[package]\nname = \"foo\"\nversion = \"1\"\n") ==
+      "foo"
+    # A name in a later table does not override the package's.
+    check cratePackageName(
+      "[package]\nname = \"foo\"\n\n[dependencies]\nname = \"bar\"\n") == "foo"
+    # A dependency's name before any [package] is not the package name.
+    check cratePackageName(
+      "[dependencies]\nname = \"bar\"\n\n[package]\nname = \"foo\"\n") == "foo"
+    # A virtual-workspace manifest has no [package] name.
+    check cratePackageName("[workspace]\nmembers = [\"a\", \"b\"]\n") == ""
+    # Whitespace and no-space spellings both read.
+    check cratePackageName("[package]\nname=\"z\"\n") == "z"
+
   test "a committed v1 crates.io-only manifest still parses":
     # Back-compat: the header moved to v2, but the five committed v1
     # manifests must keep reading.

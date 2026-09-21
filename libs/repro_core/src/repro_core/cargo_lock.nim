@@ -119,6 +119,40 @@ proc isGit*(entry: VendorEntry): bool =
   ## Whether this entry is a git crate rather than a crates.io one.
   entry.gitSource.len > 0
 
+proc cratePackageName*(cargoTomlText: string): string =
+  ## The `name` under a `Cargo.toml`'s `[package]` table, or `""` when the
+  ## file has none (a virtual-workspace manifest with only `[workspace]`).
+  ##
+  ## A targeted scan, not a TOML deserializer, for the same reason the
+  ## lockfile reader is one: only one key in one table is wanted, and a
+  ## manifest carries `name` keys in other tables (`[dependencies]` entries,
+  ## `[[bin]]`) that a blind search would trip over. So the walk tracks the
+  ## current `[table]` header and reads `name` only while inside
+  ## `[package]`. This is how the generator tells which subdirectory of a
+  ## cloned multi-crate git repo holds the crate a lockfile names.
+  var inPackage = false
+  for rawLine in cargoTomlText.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    if line.startsWith("["):
+      inPackage = line == "[package]"
+      continue
+    if not inPackage:
+      continue
+    let eq = line.find('=')
+    if eq < 0:
+      continue
+    if line[0 ..< eq].strip() != "name":
+      continue
+    # `name = "..."` — take the first double-quoted value.
+    let rest = line[eq + 1 .. ^1].strip()
+    if rest.len >= 2 and rest[0] == '"':
+      let close = rest.find('"', 1)
+      if close > 0:
+        return rest[1 ..< close]
+  ""
+
 proc parseGitSource*(source: string): tuple[configKey, url, refKind,
     refValue, commit: string] =
   ## Decompose a lockfile `git+…` source string into the pieces cargo's
