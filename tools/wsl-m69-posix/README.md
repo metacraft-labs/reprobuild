@@ -3,7 +3,7 @@
 > **Migration note (2026-06).** The lifecycle logic in
 > `run-wsl-m69-posix.ps1` and `provision-and-run-m69-posix.sh` is now
 > wrapped by the Nim
-> [`vm-harness`](https://github.com/metacraft-labs/vm-harness) library's
+> [`vm-harness`](https://github.com/metacraft-labs/gosti) library's
 > `WslBackend` adapter (M1 of the *Multi-OS VM Automation Campaign*; see
 > `metacraft/reprobuild-specs/Multi-OS-VM-Automation-Campaign.milestones.org`).
 > The PowerShell + bash scripts in this directory are Tier-2 reprobuild

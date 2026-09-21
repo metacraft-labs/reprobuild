@@ -436,7 +436,7 @@ jobs:
       - name: Clone vm-harness sibling
         uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
         with:
-          repo: metacraft-labs/vm-harness
+          repo: metacraft-labs/gosti
           ref: dev
           path: ${{ github.workspace }}/../vm-harness
           gh-token: ${{ steps.ci_token.outputs.token }}
