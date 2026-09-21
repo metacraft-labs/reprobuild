@@ -150,26 +150,58 @@ proc emitCargoVendorAction*(projectRoot, packageName: string;
   # dependency the manifest no longer names.
   script.add("rm -rf \"" & q(vendorDir) & "\"; ")
   script.add("mkdir -p \"" & q(vendorDir) & "\"; ")
-  script.add("while IFS=\"" & tab & "\" read -r repro_url repro_sha " &
-    "repro_dir; do ")
-  script.add("case \"$repro_url\" in ''|'#'*) continue;; esac; ")
-  script.add("repro_crate=\"" & q(cacheDir) & "/$repro_dir.crate\"; ")
+  # Four fields are read, not three: a crates.io line fills the first three
+  # and leaves the fourth empty, and a git line uses all four with a leading
+  # ``git`` marker in the first. Branching on that marker keeps the two
+  # kinds in one loop over one manifest.
+  script.add("while IFS=\"" & tab & "\" read -r repro_a repro_b repro_c " &
+    "repro_d; do ")
+  script.add("case \"$repro_a\" in ''|'#'*) continue;; esac; ")
+  script.add("if [ \"$repro_a\" = git ]; then ")
+  # git line: repro_b=<full lockfile source>, repro_c=<subdir>, repro_d=<dir>.
+  # The commit is the fragment after '#'; the URL is between 'git+' and the
+  # first '?' (or the '#' when there is no qualifier). The clone is cached by
+  # commit — an immutable content address — so several crates from one repo
+  # clone it once, and a re-run reuses it.
+  script.add("repro_commit=\"${repro_b##*#}\"; ")
+  script.add("repro_srckey=\"${repro_b%#*}\"; ")
+  script.add("repro_giturl=\"${repro_srckey#git+}\"; ")
+  script.add("repro_giturl=\"${repro_giturl%%\\?*}\"; ")
+  script.add("repro_gitco=\"" & q(cacheDir) & "/git-$repro_commit\"; ")
+  script.add("if [ ! -d \"$repro_gitco\" ]; then ")
+  script.add("rm -rf \"$repro_gitco.part\"; ")
+  script.add("git clone -q --no-checkout \"$repro_giturl\" " &
+    "\"$repro_gitco.part\"; ")
+  script.add("git -C \"$repro_gitco.part\" checkout -q \"$repro_commit\"; ")
+  script.add("rm -rf \"$repro_gitco.part/.git\"; ")
+  script.add("mv -f \"$repro_gitco.part\" \"$repro_gitco\"; fi; ")
+  # Copy the crate subtree out. A '.' subdir is the whole repo (a
+  # single-crate repo); anything else is a crate nested in the tree. Either
+  # way it lands at ``<vendor>/<name>-<version>``.
+  script.add("rm -rf \"" & q(vendorDir) & "/$repro_d\"; ")
+  script.add("cp -R \"$repro_gitco/$repro_c\" \"" &
+    q(vendorDir) & "/$repro_d\"; ")
+  script.add("printf '{\"files\":{},\"package\":null}' > \"" &
+    q(vendorDir) & "/$repro_d/.cargo-checksum.json\"; ")
+  script.add("continue; fi; ")
+  # crates.io line: repro_a=url, repro_b=sha256, repro_c=<name-version>.
+  script.add("repro_crate=\"" & q(cacheDir) & "/$repro_c.crate\"; ")
   script.add("if [ ! -f \"$repro_crate\" ]; then ")
   script.add("curl -fsSL " & CurlFetchRetryArgs &
-    " -o \"$repro_crate.part\" \"$repro_url\"; ")
+    " -o \"$repro_crate.part\" \"$repro_a\"; ")
   script.add("mv -f \"$repro_crate.part\" \"$repro_crate\"; fi; ")
   # Verified on every run, not only after a download: a cache entry
   # corrupted in place is exactly what this check exists to catch.
-  script.add("printf '%s  %s\\n' \"$repro_sha\" \"$repro_crate\" | " &
+  script.add("printf '%s  %s\\n' \"$repro_b\" \"$repro_crate\" | " &
     "sha256sum -c - > /dev/null; ")
   script.add("tar " & forceLocal & "-xf \"$repro_crate\" -C \"" &
     q(vendorDir) & "\"; ")
-  script.add("printf '{\"files\":{},\"package\":\"%s\"}' \"$repro_sha\" > \"" &
-    q(vendorDir) & "/$repro_dir/.cargo-checksum.json\"; ")
+  script.add("printf '{\"files\":{},\"package\":\"%s\"}' \"$repro_b\" > \"" &
+    q(vendorDir) & "/$repro_c/.cargo-checksum.json\"; ")
   script.add("done < \"" & q(manifest) & "\"; ")
   script.add("mkdir -p \"" & q(configDir) & "\"; ")
   var configText = ""
-  for line in cargoVendorConfig(vendorDir).splitLines():
+  for line in cargoVendorConfig(vendorDir, plan).splitLines():
     if line.len == 0:
       configText.add("\\n")
     else:
@@ -193,4 +225,4 @@ proc emitCargoVendorAction*(projectRoot, packageName: string;
     commandStatsId = "cargo-vendor.crates-io",
     env = shellFetchRuntimeEnv(),
     toolIdentityRefs = @["sh", "rm", "mkdir", "curl", "mv", "tar", "gzip",
-      "sha256sum", "printf"])
+      "sha256sum", "printf", "git", "cp"])

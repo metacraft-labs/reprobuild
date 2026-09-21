@@ -189,3 +189,38 @@ suite "cargo vendor action":
     check not script.contains("ansi_term-0.12.1")
     check script.contains("done < \"" &
       cargoVendorManifestPath(root).replace('\\', '/') & "\"")
+
+  const GitManifest = "# repro cargo vendor manifest v2\n" &
+    "https://static.crates.io/crates/camino/camino-1.1.9.crate\t" &
+    "8b96ec4966b5813e2c0507c1f86115c8c5abaadc3980879c3424042a02fd1ad3\t" &
+    "camino-1.1.9\n" &
+    "git\tgit+https://github.com/dylanhart/ulid-rs?tag=v1.1.3#" &
+    "a33a00f8dadbade0fd55b82ccb392589b7e3006d\t.\tulid-1.1.3\n"
+
+  test "a git line drives a clone-and-copy, and the config carries its source":
+    # The single loop handles both kinds: a git line clones at the pinned
+    # commit and copies the crate subtree; the config gets the git source
+    # block cargo needs. Without either, an offline build reaches the network
+    # for that crate and dies.
+    let root = withRecipeRoot(GitManifest)
+    defer:
+      try: removeDir(root) except CatchableError: discard
+    let plan = readVendorManifest(root)
+    let act = emitCargoVendorAction(root, "gitSource", plan, "", "")
+    let script = scriptOf(act)
+    # The git branch: a clone at the commit and a copy of the subtree, with
+    # the null-package checksum a git-vendored crate carries.
+    check script.contains("git clone")
+    check script.contains("checkout")
+    check script.contains("\"package\":null")
+    # The crates.io branch is still present in the same loop.
+    check script.contains("sha256sum -c")
+    # The tools the git branch needs are declared, so the store resolves
+    # them rather than the host PATH.
+    check "git" in act.toolIdentityRefs
+    check "cp" in act.toolIdentityRefs
+    # The config.toml the action writes carries the git source block, keyed
+    # exactly as cargo spells it (no `#<commit>` fragment).
+    check script.contains(
+      "[source.\"git+https://github.com/dylanhart/ulid-rs?tag=v1.1.3\"]")
+    check script.contains("tag = \"v1.1.3\"")

@@ -11,7 +11,7 @@
 ## reader does not understand exactly has to raise at the point where the
 ## lockfile is read, and each of those refusals has a case below.
 
-import std/[strutils, unittest]
+import std/[sequtils, strutils, unittest]
 
 import repro_core/cargo_lock
 
@@ -75,15 +75,74 @@ suite "Cargo.lock vendor plan":
     check plan.len == 2
     check plan[0].url.startsWith("https://static.crates.io/crates/")
 
-  test "a git dependency is refused rather than dropped":
-    # Silently skipping it yields a plan that looks complete and a build
-    # that fails offline for a reason nothing reported.
+  test "a git dependency becomes a git vendor entry, not a refusal":
+    # A git dep used to be refused; it is now cloned and vendored. The plan
+    # carries it as a git entry with the pieces cargo's config block and a
+    # checkout both need, taken verbatim from the source string.
     let lock = MinimalLock.replace(
       "source = \"registry+https://github.com/rust-lang/crates.io-index\"\n" &
       "checksum = \"d52a9bb7ec0cf484c551830a7ce27bd20d67eac647e1befb56b0be4ee39a55d2\"",
-      "source = \"git+https://github.com/ogham/rust-ansi-term?rev=abc#abc\"")
-    expect CargoLockError:
-      discard vendorPlan(parseCargoLock(lock))
+      "source = \"git+https://github.com/ogham/rust-ansi-term?tag=v0.12.1#a33a00f8dadbade0fd55b82ccb392589b7e3006d\"")
+    let plan = vendorPlan(parseCargoLock(lock))
+    let git = plan.filterIt(it.isGit)
+    check git.len == 1
+    check git[0].name == "ansi_term"
+    check git[0].directoryName == "ansi_term-0.12.1"
+    check git[0].gitSource ==
+      "git+https://github.com/ogham/rust-ansi-term?tag=v0.12.1"
+    check git[0].gitUrl == "https://github.com/ogham/rust-ansi-term"
+    check git[0].gitRefKind == "tag"
+    check git[0].gitRefValue == "v0.12.1"
+    check git[0].gitCommit == "a33a00f8dadbade0fd55b82ccb392589b7e3006d"
+    check git[0].gitSubdir == "."
+    # And a non-git dep alongside it is still a crates.io entry.
+    check plan.anyIt(not it.isGit)
+
+  test "a git config block matches cargo's exact spelling, byte for byte":
+    # This is the unforgiving part: a mis-keyed [source."..."] is silently
+    # ignored by cargo and the offline build reaches for the network. The
+    # key drops the '#<commit>' fragment; the qualifier line names the same
+    # rev/tag/branch the source did. Verified against cargo vendor's own
+    # output for the ulid fixture.
+    let e = VendorEntry(
+      name: "ulid", version: "1.1.3", directoryName: "ulid-1.1.3",
+      gitSource: "git+https://github.com/dylanhart/ulid-rs?tag=v1.1.3",
+      gitUrl: "https://github.com/dylanhart/ulid-rs",
+      gitRefKind: "tag", gitRefValue: "v1.1.3",
+      gitCommit: "a33a00f8dadbade0fd55b82ccb392589b7e3006d", gitSubdir: ".")
+    let cfg = cargoVendorConfig("vendor", @[e])
+    check "[source.\"git+https://github.com/dylanhart/ulid-rs?tag=v1.1.3\"]" in
+      cfg
+    check "git = \"https://github.com/dylanhart/ulid-rs\"" in cfg
+    check "tag = \"v1.1.3\"" in cfg
+    check cargoChecksumJson(e) == "{\"files\":{},\"package\":null}"
+
+  test "a git entry round-trips through the v2 manifest":
+    let e = VendorEntry(
+      name: "ulid", version: "1.1.3", directoryName: "ulid-1.1.3",
+      gitSource: "git+https://github.com/dylanhart/ulid-rs?rev=abc123",
+      gitUrl: "https://github.com/dylanhart/ulid-rs",
+      gitRefKind: "rev", gitRefValue: "abc123",
+      gitCommit: "abc123", gitSubdir: "crates/ulid")
+    let back = parseVendorManifest(renderVendorManifest(@[e]))
+    check back.len == 1
+    check back[0].isGit
+    check back[0].gitSource == e.gitSource
+    check back[0].gitCommit == e.gitCommit
+    check back[0].gitSubdir == "crates/ulid"
+    check back[0].directoryName == "ulid-1.1.3"
+
+  test "a committed v1 crates.io-only manifest still parses":
+    # Back-compat: the header moved to v2, but the five committed v1
+    # manifests must keep reading.
+    let v1 = "# repro cargo vendor manifest v1\n" &
+      "https://static.crates.io/crates/ansi_term/ansi_term-0.12.1.crate\t" &
+      "d52a9bb7ec0cf484c551830a7ce27bd20d67eac647e1befb56b0be4ee39a55d2\t" &
+      "ansi_term-0.12.1\n"
+    let back = parseVendorManifest(v1)
+    check back.len == 1
+    check (not back[0].isGit)
+    check back[0].name == "ansi_term"
 
   test "a registry dependency with no checksum is refused":
     let lock = MinimalLock.replace(
@@ -121,21 +180,19 @@ suite "Cargo.lock vendor plan":
     expect CargoLockError:
       discard parseCargoLock(lock)
 
-  test "a comment containing a hash inside a string survives":
-    # `#` is a comment introducer everywhere except inside a quoted
-    # string, and a git source URL carries one before its revision. The
-    # refusal below has to be about the SOURCE, not about a truncated
-    # line.
+  test "a hash inside a quoted git source survives, not truncated as a comment":
+    # `#` introduces a comment everywhere except inside a quoted string, and
+    # a git source carries one before its revision. The source has to reach
+    # the planner whole: the commit AFTER the `#` is exactly what a checkout
+    # pins, so a reader that truncated the line at `#` would lose it.
     let lock = MinimalLock.replace(
-      "source = \"registry+https://github.com/rust-lang/crates.io-index\"",
-      "source = \"git+https://example.invalid/x?rev=deadbeef#deadbeef\"")
-    var message = ""
-    try:
-      discard vendorPlan(parseCargoLock(lock))
-    except CargoLockError as err:
-      message = err.msg
-    check message.contains("not crates.io")
-    check message.contains("deadbeef")
+      "source = \"registry+https://github.com/rust-lang/crates.io-index\"\n" &
+      "checksum = \"d52a9bb7ec0cf484c551830a7ce27bd20d67eac647e1befb56b0be4ee39a55d2\"",
+      "source = \"git+https://example.invalid/x?rev=deadbeef#deadbeefcafe\"")
+    let git = vendorPlan(parseCargoLock(lock)).filterIt(it.isGit)
+    check git.len == 1
+    check git[0].gitCommit == "deadbeefcafe"
+    check git[0].gitRefValue == "deadbeef"
 
   test "the same crate twice with the same checksum collapses":
     let doubled = MinimalLock & """

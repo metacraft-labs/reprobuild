@@ -36,15 +36,19 @@
 ##   unknown one is guessing;
 ## * a registry package with no `checksum` — there would be nothing to
 ##   verify the download against;
-## * a `git+` source — those are not on crates.io and need a clone, which
-##   this plan cannot express;
 ## * a syntactically valid line this module does not recognise inside a
 ##   `[[package]]` block.
+##
+## A `git+` source is NOT refused: it becomes a git vendor entry, cloned at
+## the immutable commit the lockfile pins and pointed at by a per-source
+## block in `.cargo/config.toml`. A source that is neither crates.io nor
+## `git+` (a `path` source, say) is still refused, because the plan has no
+## way to express it.
 ##
 ## A package with NO `source` key is the local workspace member itself and
 ## is correctly absent from the plan — it is the thing being built.
 
-import std/[algorithm, os, strutils, tables]
+import std/[algorithm, os, sets, strutils, tables]
 
 type
   CargoLockError* = object of CatchableError
@@ -65,18 +69,102 @@ type
       ## is empty.
 
   VendorEntry* = object
-    ## One crate to download and unpack into the vendor directory.
+    ## One crate to place into the vendor directory. Two kinds, told apart
+    ## by `gitSource`: a crates.io crate (empty `gitSource`) is a `.crate`
+    ## tarball fetched from `url` and verified against `sha256`; a git crate
+    ## (non-empty `gitSource`) is cloned from `gitUrl` at `gitCommit` and its
+    ## `gitSubdir` copied out. The two never mix per entry.
     name*: string
     version*: string
     url*: string
-      ## The crates.io static download URL.
+      ## The crates.io static download URL. Empty for a git entry.
     sha256*: string
       ## From the lockfile. The fetch step verifies against this and
       ## nothing else — there is no second source of truth to consult.
+      ## Empty for a git entry: a git source has no crate-tarball digest;
+      ## its `gitCommit` is the content address instead.
     directoryName*: string
       ## `<name>-<version>`, which is both the directory cargo expects
       ## inside a vendored source and the name inside the `.crate`
-      ## tarball.
+      ## tarball. A git crate uses the same `<name>-<version>` directory —
+      ## `cargo vendor --versioned-dirs` does, and cargo finds a crate by
+      ## scanning the vendor tree, not by the directory's name.
+    gitSource*: string
+      ## The `[source."…"]` key cargo's `.cargo/config.toml` uses for this
+      ## crate's git source — the lockfile source string with its
+      ## `#<commit>` fragment stripped, e.g.
+      ## `git+https://github.com/x/y?tag=v1`. Empty for a crates.io entry;
+      ## its presence is what makes an entry a git entry. It has to match
+      ## cargo's spelling byte for byte, or the source replacement is
+      ## silently ignored and the build reaches for the network.
+    gitUrl*: string
+      ## The bare git URL (`https://github.com/x/y`) — what `git clone`
+      ## takes and what the config block's `git = ` line carries.
+    gitRefKind*: string
+      ## `rev`, `tag` or `branch` — the qualifier cargo's config block
+      ## states beside `git`. Empty for a crates.io entry.
+    gitRefValue*: string
+      ## The value of that qualifier (the rev/tag/branch as written in the
+      ## source).
+    gitCommit*: string
+      ## The resolved commit the lockfile pins in its `#<commit>` fragment.
+      ## This is what the fetch step checks out — an immutable content
+      ## address — regardless of whether the qualifier was a branch or tag.
+    gitSubdir*: string
+      ## The crate's path within the git tree, `.` for a single-crate repo.
+      ## A repo can carry several crates in subdirectories, and only the
+      ## one whose `Cargo.toml` matches is copied out.
+
+proc isGit*(entry: VendorEntry): bool =
+  ## Whether this entry is a git crate rather than a crates.io one.
+  entry.gitSource.len > 0
+
+proc parseGitSource*(source: string): tuple[configKey, url, refKind,
+    refValue, commit: string] =
+  ## Decompose a lockfile `git+…` source string into the pieces cargo's
+  ## vendor config and a clone both need. Input, as cargo writes it:
+  ##
+  ##   git+https://github.com/x/y?tag=v1.1.3#a33a00f8dadbade0…
+  ##
+  ## yields configKey `git+https://github.com/x/y?tag=v1.1.3` (the
+  ## `#<commit>` fragment dropped, because cargo's `[source."…"]` key drops
+  ## it), url `https://github.com/x/y`, refKind `tag`, refValue `v1.1.3`,
+  ## commit `a33a00f8…`. A source with no `?<qualifier>` (a default-branch
+  ## dependency) yields an empty refKind/refValue; the `#<commit>` is always
+  ## present in a lockfile, and its absence is refused rather than guessed.
+  if not source.startsWith("git+"):
+    raise newException(CargoLockError,
+      "not a git source: " & source)
+  let hashPos = source.rfind('#')
+  if hashPos < 0:
+    raise newException(CargoLockError,
+      "git source has no '#<commit>' fragment, so there is no immutable" &
+      " revision to check out: " & source)
+  result.commit = source[hashPos + 1 .. ^1]
+  if result.commit.len == 0:
+    raise newException(CargoLockError,
+      "git source has an empty '#<commit>' fragment: " & source)
+  result.configKey = source[0 ..< hashPos]
+  let afterScheme = result.configKey["git+".len .. ^1]
+  let qPos = afterScheme.find('?')
+  if qPos < 0:
+    result.url = afterScheme
+  else:
+    result.url = afterScheme[0 ..< qPos]
+    let query = afterScheme[qPos + 1 .. ^1]
+    let eqPos = query.find('=')
+    if eqPos < 0:
+      raise newException(CargoLockError,
+        "git source qualifier is not '<kind>=<value>': " & source)
+    result.refKind = query[0 ..< eqPos]
+    result.refValue = query[eqPos + 1 .. ^1]
+    if result.refKind notin ["rev", "tag", "branch"]:
+      raise newException(CargoLockError,
+        "git source qualifier '" & result.refKind & "' is not one of" &
+        " rev/tag/branch: " & source)
+  if result.url.len == 0:
+    raise newException(CargoLockError,
+      "git source has no URL: " & source)
 
 const
   CratesIoRegistrySources* = [
@@ -289,13 +377,33 @@ proc vendorPlan*(packages: openArray[CargoLockPackage]): seq[VendorEntry] =
           "Cargo.lock: package '" & pkg.name & "' has a checksum but no" &
           " source, which is not a shape cargo writes")
       continue
+    if pkg.source.startsWith("git+"):
+      # A git dependency. It is cloned at its pinned commit and its crate
+      # subtree copied into the vendor tree, and cargo is pointed at it by a
+      # per-source block in `.cargo/config.toml`. The subdirectory within
+      # the repo is left as `.` here — the single-crate-repo case, which is
+      # what a lockfile alone can prove; a repo that carries several crates
+      # needs the subdir resolved by scanning it, which is the generator's
+      # job, not this pure-lockfile planner's.
+      let git = parseGitSource(pkg.source)
+      result.add(VendorEntry(
+        name: pkg.name,
+        version: pkg.version,
+        directoryName: pkg.name & "-" & pkg.version,
+        gitSource: git.configKey,
+        gitUrl: git.url,
+        gitRefKind: git.refKind,
+        gitRefValue: git.refValue,
+        gitCommit: git.commit,
+        gitSubdir: "."))
+      continue
     if not isRegistrySource(pkg.source):
       raise newException(CargoLockError,
         "Cargo.lock: package '" & pkg.name & " " & pkg.version &
-        "' comes from '" & pkg.source & "', which is not crates.io." &
-        " A vendored build cannot express that source; vendor the" &
-        " dependency into the fetched tarball or pin a release that" &
-        " does not use it.")
+        "' comes from '" & pkg.source & "', which is neither crates.io" &
+        " nor a git source. A vendored build cannot express that source;" &
+        " vendor the dependency into the fetched tarball or pin a release" &
+        " that does not use it.")
     if pkg.checksum.len == 0:
       raise newException(CargoLockError,
         "Cargo.lock: registry package '" & pkg.name & " " & pkg.version &
@@ -340,9 +448,19 @@ proc cargoChecksumJson*(entry: VendorEntry): string =
   ## directory honestly has. Populating it would mean hashing every file
   ## in every crate on every build to restate what the `package` digest —
   ## which IS checked, against the lockfile — already covers.
-  "{\"files\":{},\"package\":\"" & entry.sha256 & "\"}"
+  ##
+  ## A git crate has no crate-tarball digest, so its `package` is `null` —
+  ## the spelling cargo writes for a git-vendored crate. Verified against a
+  ## real offline build: cargo accepts an empty `files` map with a null
+  ## `package` for a git source exactly as it does the `package`-digest
+  ## form for a crates.io one, so neither kind needs per-file hashing.
+  if entry.isGit:
+    "{\"files\":{},\"package\":null}"
+  else:
+    "{\"files\":{},\"package\":\"" & entry.sha256 & "\"}"
 
-proc cargoVendorConfig*(vendorDir: string): string =
+proc cargoVendorConfig*(vendorDir: string;
+    plan: openArray[VendorEntry] = @[]): string =
   ## The `.cargo/config.toml` that points cargo at the vendored directory
   ## instead of the network.
   ##
@@ -362,9 +480,26 @@ proc cargoVendorConfig*(vendorDir: string): string =
   ## of this function, whose comment claimed replacing one spelling would
   ## leave the other live. It does not: there is one source, reached two
   ## ways.
+  ## Each git source in `plan` gets its own block too, keyed by the exact
+  ## `[source."git+…"]` spelling cargo uses and stating `git = ` plus the
+  ## one `rev`/`tag`/`branch` qualifier the lockfile carried. A missing or
+  ## misspelled block is not a soft failure: cargo falls through to the
+  ## network for that crate and the offline build dies, so the key comes
+  ## verbatim from `parseGitSource`.
   let normalized = vendorDir.replace('\\', '/')
   result = "[source.crates-io]\n"
   result.add("replace-with = \"vendored-sources\"\n\n")
+  var emittedGit = initHashSet[string]()
+  for entry in plan:
+    if not entry.isGit:
+      continue
+    if emittedGit.containsOrIncl(entry.gitSource):
+      continue
+    result.add("[source.\"" & entry.gitSource & "\"]\n")
+    result.add("git = \"" & entry.gitUrl & "\"\n")
+    if entry.gitRefKind.len > 0:
+      result.add(entry.gitRefKind & " = \"" & entry.gitRefValue & "\"\n")
+    result.add("replace-with = \"vendored-sources\"\n\n")
   result.add("[source.vendored-sources]\n")
   result.add("directory = \"" & normalized & "\"\n")
 
@@ -391,23 +526,34 @@ proc cargoVendorConfig*(vendorDir: string): string =
 # set of dependencies that moved.
 
 const
-  VendorManifestHeader* = "# repro cargo vendor manifest v1"
-    ## First line of every manifest. Version-tagged so a reader that meets
-    ## a manifest it cannot interpret says so instead of skipping lines it
-    ## does not recognise — the same refusal posture as the lockfile
-    ## reader, for the same reason.
+  VendorManifestHeaderV1* = "# repro cargo vendor manifest v1"
+    ## The original header: crates.io-only manifests, three-column lines.
+  VendorManifestHeaderV2* = "# repro cargo vendor manifest v2"
+    ## v2 adds git-source lines (a leading `git` column) beside the
+    ## crates.io lines, which keep their exact v1 shape. A v1 reader is
+    ## refused a v2 file rather than left to skip lines it cannot read —
+    ## the same refusal posture as the lockfile reader.
+  VendorManifestHeader* = VendorManifestHeaderV2
+    ## What the emitter writes. Both headers are accepted on read, so the
+    ## committed v1 manifests (all crates.io-only) keep parsing unchanged.
 
 proc renderVendorManifest*(plan: openArray[VendorEntry]): string =
   ## Serialise a plan to its committed form.
   ##
-  ## Columns are url, sha256, directory name. The directory name is
-  ## carried rather than recomputed so the file says, in full, what the
-  ## fetch step will create — a reader of the diff does not have to know
-  ## the `<name>-<version>` convention to see what moved.
+  ## A crates.io crate is three columns — url, sha256, directory name — the
+  ## directory name carried rather than recomputed so the file says, in
+  ## full, what the fetch step will create. A git crate is five: a leading
+  ## `git` marker, the FULL lockfile source (with its `#<commit>` so the
+  ## checkout is pinned in the file), the crate's subdirectory within the
+  ## repo, and the directory name.
   result = VendorManifestHeader & "\n"
   for entry in plan:
-    result.add(entry.url & "\t" & entry.sha256 & "\t" &
-      entry.directoryName & "\n")
+    if entry.isGit:
+      result.add("git\t" & entry.gitSource & "#" & entry.gitCommit & "\t" &
+        entry.gitSubdir & "\t" & entry.directoryName & "\n")
+    else:
+      result.add(entry.url & "\t" & entry.sha256 & "\t" &
+        entry.directoryName & "\n")
 
 proc parseVendorManifest*(text: string): seq[VendorEntry] =
   ## Read a committed manifest back.
@@ -423,15 +569,40 @@ proc parseVendorManifest*(text: string): seq[VendorEntry] =
     if line.len == 0:
       continue
     if not sawHeader:
-      if line != VendorManifestHeader:
+      if line notin [VendorManifestHeaderV1, VendorManifestHeaderV2]:
         raise newException(CargoLockError,
           "cargo vendor manifest line " & $lineNo & ": expected the header " &
-          "'" & VendorManifestHeader & "', got: " & line)
+          "'" & VendorManifestHeaderV2 & "' (or v1), got: " & line)
       sawHeader = true
       continue
     if line.startsWith("#"):
       continue
     let fields = line.split('\t')
+    if fields.len >= 1 and fields[0] == "git":
+      # git<TAB><full-lockfile-source><TAB><subdir><TAB><name-version>
+      if fields.len != 4:
+        raise newException(CargoLockError,
+          "cargo vendor manifest line " & $lineNo & ": a git line is " &
+          "'git<TAB>source<TAB>subdir<TAB>dir', expected 4 fields, got " &
+          $fields.len)
+      let git = parseGitSource(fields[1])
+      let dir = fields[3]
+      let dash = dir.rfind('-')
+      if dash <= 0 or dash == dir.len - 1:
+        raise newException(CargoLockError,
+          "cargo vendor manifest line " & $lineNo & ": directory name is " &
+          "not <name>-<version>: " & dir)
+      result.add(VendorEntry(
+        name: dir[0 ..< dash],
+        version: dir[dash + 1 .. ^1],
+        directoryName: dir,
+        gitSource: git.configKey,
+        gitUrl: git.url,
+        gitRefKind: git.refKind,
+        gitRefValue: git.refValue,
+        gitCommit: git.commit,
+        gitSubdir: fields[2]))
+      continue
     if fields.len != 3:
       raise newException(CargoLockError,
         "cargo vendor manifest line " & $lineNo & ": expected 3 " &
