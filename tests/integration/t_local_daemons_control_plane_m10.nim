@@ -362,3 +362,10 @@ suite "Local daemons/control-plane M10 development self-restart":
         "IPC/process-image-locking verification"
     else:
       echo "[platform N/A] Windows staged-copy dev restart gate"
+      skip("platform N/A: Windows staged-copy dev restart gate")
+      # The case name promises a Windows gate; on a POSIX host there is no
+      # such gate to run. The marker said so and the case still reported
+      # PASS. The `skip` makes the declaration the reported status.
+      # NOTE the `when defined(windows)` arm above is assertionless too, under
+      # a one-off `[planned]` marker that no lint counts; that is a separate
+      # marker class and is left as it stands.

@@ -1063,6 +1063,12 @@ suite "e2e_local_reprobuild_project_build":
     else:
       test "automatic monitor project CLI E2E is skipped on this platform":
         echo "[platform N/A] automatic monitor dependency gathering requires preload hooks"
+        skip("platform N/A: automatic monitor dependency gathering requires " &
+          "preload hooks")
+        # The title claimed a skip that the body never performed. The `skip`
+        # beside the marker makes the claim the reported status, so a host
+        # without preload hooks counts this as unrun coverage instead of
+        # reporting an [OK] from a case with no assertion in it.
 
     test "public CLI lowers explicit make depfile policy and rejects incompatible monitor depfile":
       let repoRoot = getCurrentDir()

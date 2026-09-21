@@ -308,7 +308,8 @@ suite "M56 CAS content-addressing":
 # ---------------------------------------------------------------------------
 # Suite 6: Windows launcher binary — runs on Windows only.
 # On other platforms the test prints a structured [platform N/A] marker
-# as the spec allows.
+# as the spec allows, and skips, so the marker is the case's reported
+# status and not merely a line of output beside a PASS.
 # ---------------------------------------------------------------------------
 
 proc findLauncherSource(): string =
@@ -340,11 +341,14 @@ suite "windows strategy 1: native launcher + sidecar + CAS":
   when not defined(windows):
     test "skipped (non-Windows host)":
       echo "[platform N/A] suite: windows native launcher (host is not Windows)"
-      # The `[platform N/A]` marker above IS this case's statement: it is the
-      # repository's structured, greppable declaration that the coverage does
-      # not apply to this host. A `check true` beside it added nothing and
-      # taught the shape that an assertion which cannot fail is acceptable
-      # filler, so it is gone.
+      skip("platform N/A: suite: windows native launcher (host is not Windows)")
+      # The `[platform N/A]` marker above IS this case's declaration: it is
+      # the repository's structured, greppable statement that the coverage
+      # does not apply to this host. The `skip` beside it makes that
+      # declaration the case's reported STATUS, so the case named "skipped
+      # (non-Windows host)" is finally skipped rather than passed. A `check
+      # true` would give neither: an assertion that cannot fail is filler,
+      # and the PASS it produces is the same filler one level up.
   else:
     test "launcher compiles and depends only on KERNEL32 + CRT API set":
       let tmp = createTempDir("repro-m57-launcher-build-", "")

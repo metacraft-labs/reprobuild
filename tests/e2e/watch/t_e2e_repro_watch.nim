@@ -1591,3 +1591,9 @@ else:
   suite "e2e_repro_watch":
     test "event-driven watch E2E is macOS kqueue-only in M31":
       echo "[platform N/A] repro watch filesystem E2E currently requires macOS kqueue"
+      skip("platform N/A: repro watch filesystem E2E currently requires " &
+        "macOS kqueue")
+      # M31 confines the event-driven watch E2E to macOS kqueue, so on every
+      # other host this arm has nothing to exercise. The marker declares that;
+      # the `skip` makes the runner report it, so the whole suite is counted
+      # as unrun on Linux instead of contributing a green case.
