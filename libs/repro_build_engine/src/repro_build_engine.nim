@@ -1038,6 +1038,11 @@ type
     cirEmptyEvidence = "empty-evidence"
     cirMonitorLoss = "monitor-loss"
     cirMonitorFlushFailed = "monitor-flush-failed"
+    cirMissingDependencyReport = "missing-dependency-report"
+      ## A cacheable edge declared a recognized dependency report (a
+      ## depfile) and produced none of the paths it declared, so it
+      ## contributed no evidence at all. See the aggregate guard in
+      ## ``collectEvidence``.
 
   MonitorEvidenceRequirement* = object
     ## WHAT THIS BUILD NEEDS A CAPTURE TO HAVE OBSERVED BEFORE IT WILL TRUST IT
@@ -6840,8 +6845,16 @@ proc collectEvidence(action: BuildAction; strict: bool;
             if action.cacheable:
               result.publishable = false
       continue
+    # How many of this report's declared paths actually resolved to a file
+    # the reader could be pointed at. The per-path arms below deliberately
+    # tolerate a miss (``required = false``); this counter is what lets the
+    # AGGREGATE "the report produced nothing at all" case be distinguished
+    # from it. See the guard after the loop.
+    var resolvedReportFiles = 0
+    var expectedReportPaths: seq[string] = @[]
     for output in report.outputs:
       let path = action.expectedPath(output)
+      expectedReportPaths.add(path)
       # MR16: a depfile entry whose path contains a glob meta-character
       # is expanded against the action's cwd at evidence-collection
       # time and the matched files are each parsed as the declared
@@ -6862,6 +6875,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
         # the 260-character ``MAX_PATH`` limit.
         for resolved in walkPattern(path):
           inc matched
+          inc resolvedReportFiles
           try:
             result.evidence.addPathSet(seen,
               readRecognizedDependencyReport($report.formatName, resolved),
@@ -6881,6 +6895,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
         continue
       if not fileExists(extendedPath(path)):
         continue
+      inc resolvedReportFiles
       try:
         result.evidence.addPathSet(seen,
           readRecognizedDependencyReport($report.formatName, path),
@@ -6888,6 +6903,97 @@ proc collectEvidence(action: BuildAction; strict: bool;
       except DependencyReportError as err:
         result.evidence.diagnostics.add("dependency report invalid: " & err.msg)
         result.publishable = false
+    # ── The declared-but-never-written depfile tripwire ──────────────────
+    #
+    # An edge that DECLARES a dependency report and produces NONE of the
+    # files it declared has told the engine nothing about its inputs. Until
+    # this guard, that was indistinguishable from an edge that genuinely
+    # read nothing: every per-path arm above is `required = false` (see
+    # ``depfilePolicyMulti`` in repro_cli_support.nim, which tolerates a
+    # miss because a GLOB may legitimately expand to zero files — cargo's
+    # debug/release split declares both profile dirs and only one exists),
+    # so a missing literal depfile fell through the bare ``continue`` two
+    # branches up with no diagnostic and a fully publishable record.
+    #
+    # That comment on ``depfilePolicyMulti`` already promised "the engine
+    # surfaces 'no depfile produced at all' as a missing-evidence
+    # diagnostic at the AGGREGATE-POLICY level, not per-path". Nothing
+    # implemented the promise. This is it.
+    #
+    # WHY HERE AND NOT BY FLIPPING ``required`` TO ``true``. Two reasons.
+    # (1) The per-path tolerance is load-bearing and correct: a glob with
+    # zero matches is not evidence of anything wrong, and the cargo edges
+    # would hard-fail the moment one profile directory was absent.
+    # (2) ``required = true`` routes to ``publishable = false``, which the
+    # scheduler turns into ``asFailed`` — a build outage. Absent evidence
+    # on a cacheable edge does not warrant killing the build; it warrants
+    # refusing to bank a cache entry whose key cannot be trusted. That is
+    # ``disableCacheHits``: publication is withheld, the action still
+    # succeeds, and ``traceCacheIneligibility`` records why.
+    #
+    # SCOPED TO ``action.cacheable`` on purpose, matching the precedent two
+    # arms up and at the monitor-fold below. An uncacheable edge always
+    # re-runs, so no stale result can be served from evidence it never
+    # produced — there is nothing to protect and nothing to say.
+    #
+    # THIS GUARD IS NOT INERT ON TODAY'S GRAPH, and the reason is worth
+    # writing down because the belief that it WOULD be is what let the hole
+    # sit here. ``compileDependencyPolicy`` (repro_dsl_stdlib .../nim.nim)
+    # only reaches ``makeDepfilePolicy(cacheDir / "nim-compile.d")`` on its
+    # UNCACHEABLE branch — but it short-circuits first on
+    # ``if policy.kind != bdpDefault: return policy``, so a recipe that
+    # passes the depfile policy EXPLICITLY never reaches the cacheable test
+    # at all and keeps ``nim.c``'s ``cacheable = true`` default. repro.nim
+    # does exactly that for the monitor-shim edges. Measured on this tree
+    # (`reprobuild graph --json`, 1743 actions): exactly one action carries
+    # a ``dgRecognizedFormat`` policy — ``reprobuild.test_fixtures.
+    # monitor_shim`` — it is ``cacheable: true``, its sole declared report
+    # is ``build/nimcache/repro_monitor_shim/nim-compile.d``, and nothing in
+    # this repository or in the Nim fork writes a file by that name. It is a
+    # cacheable edge publishing records keyed on an empty observed-input set,
+    # and it is the sole producer of the live monitor shim.
+    #
+    # The evidence it wants DOES exist, under another name: ``nim c`` drives
+    # the C backend with ``-MD -MF <unit>.nim.c.d``, so each nimcache holds
+    # one real make-format depfile per translation unit (197 of them for
+    # ``build/nimcache/repro-binary-cache``). ``makeDepfilePolicy`` already
+    # accepts globs (MR16), so ``<nimcache>/*.d`` is the declaration those
+    # edges should carry. That is a recipe fix and not this one's business;
+    # what this guard does is stop the silence.
+    #
+    # NOT applied to the ``IomonFormatName`` arm, which ``continue``s above
+    # this point: those outputs are declared ``required = true`` and already
+    # fail closed, which is the stronger contract that arm wants.
+    #
+    # IT *IS* APPLIED to ``dgRecognizedFormatValidatedByMonitor``, and that is
+    # the one arguable call in here, so name it rather than let it be an
+    # accident of where the loop sits. Such an edge carries a SECOND evidence
+    # source, so a missing report is not the same as no evidence, and a
+    # narrower guard could let it publish on the monitor alone. It does not,
+    # for two reasons: the absence still means the tool stopped emitting what
+    # its author declared — the drift this tripwire exists to catch — and
+    # Failure-Semantics.md's default for an ambiguous correctness question is
+    # to fail closed. There are ZERO such edges in the graph today, so the
+    # choice costs nothing now; if one appears and this proves too strict,
+    # the fix is to skip the refusal (not the diagnostic) when
+    # ``action.dependencyPolicy.kind in MonitorPolicyKinds``.
+    #
+    # M5 (Compiles-Are-Normal-Edges) replaces the ``nim-compile.d`` edges
+    # with monitored ones and retires the fallback entirely. This is a
+    # tripwire until then, not the fix.
+    if action.cacheable and report.outputs.len > 0 and
+        resolvedReportFiles == 0:
+      result.evidence.diagnostics.add(
+        "action '" & action.id & "' declared a " & $report.formatName &
+        " dependency report but produced none of its declared paths (" &
+        expectedReportPaths.join(", ") & "); the action ran with no " &
+        "dependency evidence, so \"no dependencies\" cannot be told apart " &
+        "from \"nothing was recorded\" and its action-cache entry is not " &
+        "published. Either make the command write that file or move the " &
+        "edge off the depfile policy. Spec: " &
+        "Compiles-Are-Normal-Edges.md.")
+      result.disableCacheHits = true
+      result.cacheIneligibilityReasons.incl(cirMissingDependencyReport)
   let converters = action.converterSpecsForPolicy()
   if action.dependencyPolicy.kind in ConverterPolicyKinds and converters.len == 0:
     result.evidence.diagnostics.add(

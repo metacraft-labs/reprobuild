@@ -414,6 +414,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_declared_depfile_absent_is_not_cacheable.nim",
+    binary: "build/test-bin/t_declared_depfile_absent_is_not_cacheable",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim",
     binary: "build/test-bin/t_declared_env_is_in_the_cache_key",
     defines: @[],
