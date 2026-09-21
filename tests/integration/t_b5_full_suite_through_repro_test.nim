@@ -52,10 +52,10 @@ suite "Bootstrap-And-Self-Build B5: full suite via the slimmed pipeline":
     let testBinDir = repoRoot / "build" / "test-bin"
     if not fileExists(reproBin):
       checkpoint("skipped — ./build/bin/repro missing; run `just bootstrap` first")
-      skip()
+      skip("./build/bin/repro missing — run `just bootstrap` first")
     elif not dirExists(testBinDir):
       checkpoint("skipped — build/test-bin/ missing; run `just test` once first")
-      skip()
+      skip("build/test-bin/ missing — run `just test` once first")
     else:
       var testBinCount = 0
       for kind, _ in walkDir(testBinDir):
@@ -80,7 +80,7 @@ suite "Bootstrap-And-Self-Build B5: full suite via the slimmed pipeline":
     if getEnv("REPRO_B5_FULL_SUITE_RUN") != "1":
       checkpoint("skipped — set REPRO_B5_FULL_SUITE_RUN=1 to run the " &
         "full 20+ minute suite end-to-end via `just test`.")
-      skip()
+      skip("REPRO_B5_FULL_SUITE_RUN=1 not set — the 20+ minute full-suite end-to-end is opt-in")
     else:
       let repoRoot = findRepoRoot()
       let cmd = "just test"

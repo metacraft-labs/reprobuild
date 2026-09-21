@@ -258,4 +258,4 @@ suite "Bootstrap-And-Self-Build B4: HCR flags carry through the typed-tool DSL":
       announceHcrUnsupportedHost(
         "t_b4_hcr_flags_in_repro_tests engine arm", "macOS arm64",
         "macOS arm64 CI on eph-macos-arm64")
-      skip()
+      skip("macOS arm64 only — the codesign workaround is gated on the aarch64-darwin cross-target; covered by the macOS arm64 CI lane (eph-macos-arm64)")

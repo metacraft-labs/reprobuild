@@ -143,4 +143,4 @@ suite "t_ct_test_runner_full_suite_parity":
   test "M3 internal runner and M4 ct-test-runner agree on pass/fail/skip totals":
     let ran = runParityCase()
     if not ran:
-      skip()
+      skip("parity prerequisite missing — reprobuild repo root, build/bin/repro_test_runner, or ct-test-runner via CT_TEST_RUNNER/PATH; see checkpoint")

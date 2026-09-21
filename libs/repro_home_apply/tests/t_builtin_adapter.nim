@@ -322,7 +322,7 @@ suite "M64 — cakBuiltin adapter":
           zipped = res.exitCode == 0
     if not zipped:
       echo "  [skip] no zip producer on PATH; skipping afZip test"
-      skip()
+      skip("no zip producer on PATH (neither `zip` nor PowerShell Compress-Archive)")
     else:
       let sha = fileShaHex(zipPath, "sha256")
       let url = fileToUrl(absolutePath(zipPath))
@@ -372,7 +372,7 @@ suite "M64 — cakBuiltin adapter":
     let sevenZip = findExe("7z")
     if sevenZip.len == 0:
       echo "  [skip] no 7z binary on PATH; skipping afSevenZip test"
-      skip()
+      skip("7z not on PATH")
     else:
       # Lay out the inner dir the archive will ship:
       #   stagingDir / tool-1.0.0 / bin / tool.cmd

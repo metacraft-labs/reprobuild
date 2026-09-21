@@ -276,4 +276,4 @@ when defined(macosx):
 when not defined(macosx):
   suite "integration_hcr_linkgraph_relocation_classification":
     test "M26 Mach-O arm64 gate is macOS-only":
-      skip()
+      skip("macOS only — the M26 Mach-O arm64 gate")

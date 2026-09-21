@@ -144,10 +144,10 @@ suite "M4 — cakBuiltin Inno Setup realize (fpc shape)":
           ("bin/ppcx64.exe", "stub-ppcx64-payload\n")])
     if hostInnounp.len == 0:
       echo "  [skip] no host innounp.exe on PATH"
-      skip()
+      skip("innounp not on PATH")
     elif exePath.len == 0:
       echo "  [skip] no iscc.exe on PATH; cannot build synthetic Inno fixture"
-      skip()
+      skip("iscc not on PATH — cannot build the synthetic Inno Setup fixture")
     else:
       let sha = fileShaHex(exePath, "sha256")
       var store = openStore(storeDir)

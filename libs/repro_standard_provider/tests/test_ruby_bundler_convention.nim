@@ -204,7 +204,7 @@ suite "ruby-bundler convention M56":
     ## only when the toolchain is ACTUALLY missing — when both ARE
     ## installed, skip rather than hand-wave the gate.
     if rubyToolchainReady():
-      skip()
+      skip("ruby or bundle not on PATH")
     else:
       let scratch = getTempDir() / "test_ruby_bundler_no_toolchain"
       if dirExists(scratch):
@@ -233,7 +233,7 @@ suite "ruby-bundler convention M56":
 
   test "emitFragment: hello-binary fixture produces install + wrapper actions":
     if not rubyToolchainReady():
-      skip()
+      skip("ruby or bundle not on PATH")
     else:
       let conv = ruby_convention.rubyBundlerConvention()
       let request = dummyRequest(HelloBinaryFixture)

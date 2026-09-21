@@ -226,6 +226,6 @@ suite "t_just_test_hot_cache_is_no_op_build":
       checkpoint("skipped — set " & LongTestEnv &
         "=1 to run the long-form full-suite sweep. The invariant itself is " &
         "guarded by the single-target case above, which always runs.")
-      skip()
+      skip("REPRO_M1_LONG_TEST=1 not set — the long-form full-suite sweep is opt-in; the single-target case above always runs")
     else:
       runHotCacheCheck("test")

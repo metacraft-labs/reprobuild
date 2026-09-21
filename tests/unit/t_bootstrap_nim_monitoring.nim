@@ -20,7 +20,7 @@ suite "bootstrap Nim monitoring":
         check source.lockIdentity == source.nixpkgsRef & "?narHash=" &
           CanonicalNixpkgsNarHash & "#nim"
     else:
-      skip()
+      skip("not Linux — the pinned nixpkgs compiler channel is the Linux bootstrap path")
 
   test "Windows retains its pinned native archive":
     when defined(windows):
@@ -32,7 +32,7 @@ suite "bootstrap Nim monitoring":
         check tool.tarballProvisioning[0].executablePath == "bin/nim.exe"
         check tool.tarballProvisioning[0].sha256.len == 64
     else:
-      skip()
+      skip("not Windows — the pinned native tarball is the Windows bootstrap path")
 
   test "an explicit bootstrap compiler is preserved without provisioning":
     when defined(linux):
@@ -57,4 +57,4 @@ suite "bootstrap Nim monitoring":
       check getEnv("REPRO_BOOTSTRAP_CC") == compiler
       check not dirExists(store)
     else:
-      skip()
+      skip("not Linux — ensureBootstrapToolchainEnv is exercised on the Linux bootstrap path")

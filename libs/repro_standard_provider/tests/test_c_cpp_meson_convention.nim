@@ -239,7 +239,7 @@ suite "c-cpp-meson convention M39":
 
   test "emitFragment: hello-binary fixture produces configure + build actions":
     if not mesonToolchainReady():
-      skip()
+      skip("meson, ninja, or a C compiler (gcc/clang) not on PATH")
     else:
       let conv = meson_convention.cCppMesonConvention()
       let request = dummyRequest(HelloBinaryFixture)
@@ -311,11 +311,11 @@ suite "c-cpp-meson convention M39":
     # PATH from an unrelated dev-deps install. This guard catches a
     # regression where the convention drops the ``CC=...`` pin.
     if not mesonToolchainReady():
-      skip()
+      skip("meson, ninja, or a C compiler (gcc/clang) not on PATH")
     elif findExe("sh").len == 0:
       # The CC pin only applies on the sh-wrapped path; the no-sh
       # fallback intentionally skips it.
-      skip()
+      skip("sh not on PATH — the CC pin only exists on the sh-wrapped configure path")
     else:
       let conv = meson_convention.cCppMesonConvention()
       let request = dummyRequest(HelloBinaryFixture)

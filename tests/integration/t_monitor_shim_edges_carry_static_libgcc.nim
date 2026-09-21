@@ -204,7 +204,7 @@ suite "every Windows monitor-artefact edge links libgcc statically":
       "build_shim.sh"
     if not fileExists(sibling):
       checkpoint("[not applicable] no io-mon sibling at " & sibling)
-      skip()
+      skip("no io-mon sibling checkout — ../io-mon/scripts/build_shim.sh absent")
     else:
       let text = readFile(sibling)
       checkpoint(sibling & " mentions " & StaticLibgcc & ": " &
@@ -223,7 +223,7 @@ suite "every Windows monitor-artefact edge links libgcc statically":
     # lower and nothing this arm could assert.
     when not defined(windows):
       checkpoint("[platform N/A] the monitor-artefact edges are Windows-only")
-      skip()
+      skip("Windows only — the monitor-artefact edges are declared in the provider's Windows-only arm")
     else:
       let repoRoot = findRepoRoot()
       let reproBin = repoRoot / "build" / "bin" / addFileExt("repro", ExeExt)

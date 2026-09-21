@@ -21,7 +21,6 @@
 # To fix a row: give the `skip()` a reason that names the condition, e.g.
 #   skip("git not on PATH; this case needs a real repository")
 # and delete nothing here -- the next run rewrites the file for you.
-libs/ct_test_unittest_parallel/tests/t_ct_test_runner_full_suite_parity.nim	M3 internal runner and M4 ct-test-runner agree on pass/fail/skip totals	1
 libs/repro_binary_cache_client/tests/test_publish_in_process.nim	a compressible prefix over the raw limit publishes compressed	1
 libs/repro_binary_cache_client/tests/test_publish_in_process.nim	extractPrefix reads a zstd-compressed archive transparently	1
 libs/repro_build_engine/tests/t_action_cache_output_integrity.nim	corrupted output is not handed to a downstream consumer	1
@@ -51,7 +50,6 @@ libs/repro_build_engine/tests/test_engine_worker_pool.nim	the pool drains when a
 libs/repro_build_engine/tests/test_monitor_depfile_flush_is_async_and_atomic.nim	flush temp is on the destination filesystem	1
 libs/repro_build_engine/tests/test_monitor_finish_handoff_is_exclusive.nim	the carrier cannot give a monitor two owners	1
 libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim	in-process monitor hosting is not supported on this platform	1
-libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim	unchanged skips / changed-executed re-runs / changed-unexecuted skips	1
 libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	a profile that genuinely fails to compile still fails, with a reason	1
 libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	infra apply converges a profile whose resources are all action edges	1
 libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	infra plan accepts a profile whose resources are all action edges	1
@@ -83,15 +81,12 @@ libs/repro_dsl_stdlib/tests/t_n48_apt_jammy_tar_operands.nim	test_n48_apt_data_m
 libs/repro_home_apply/tests/t_adapter_chain.nim	cakNix in preference is skipped cleanly (placeholder branch)	1
 libs/repro_home_apply/tests/t_adapter_chain.nim	custom preference [scoop, builtin] respects ordering	1
 libs/repro_home_apply/tests/t_adapter_chain.nim	jdk resolves via cakBuiltin on the platform default chain	1
-libs/repro_home_apply/tests/t_builtin_adapter.nim	realizeBuiltinPackage: 7z extraction + extract_path flatten	1
-libs/repro_home_apply/tests/t_builtin_adapter.nim	realizeBuiltinPackage: zip extraction + extract_path flatten	1
 libs/repro_home_apply/tests/t_builtin_adapter_7z_nested.nim	test_m3_nested_7z_disabled_keeps_inner_archives	1
 libs/repro_home_apply/tests/t_builtin_adapter_7z_nested.nim	test_m3_nested_7z_flatten_synthetic_gcc_winlibs_shape	1
 libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	test_m3_basic_7z_still_works_erlang_shape	1
 libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	test_m3_discover_sevenzip_finds_catalog_prefix	1
 libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	test_m3_sfx_flatten_synthetic_git_realizes_bin_git	1
 libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	test_m3_sfx_flatten_synthetic_ruby_shape	1
-libs/repro_home_apply/tests/t_builtin_adapter_installer_innosetup_fpc.nim	test_m4_innosetup_realize_synthetic_fpc_shape	2
 libs/repro_home_apply/tests/t_builtin_adapter_installer_nsis_erlang.nim	test_m11_imInstallerNsis_synthetic_otp_shape	1
 libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim	test_m6_extractor_discovery_returns_usable_extractor	1
 libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim	test_m6_realize_imMsys2Pacman_cache_hit_on_re_realize	1
@@ -129,8 +124,6 @@ libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	a f
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	every counted resource is audited; the two populations stay apart	1
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	the planner's drift baseline ignores build-action records	1
 libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	t_infra_apply_substitutes_from_cache	1
-libs/repro_standard_provider/tests/test_c_cpp_autotools_convention.nim	emitFragment: M28 per-source lift (configure + compile(s) + link)	1
-libs/repro_standard_provider/tests/test_c_cpp_autotools_convention.nim	force Mode B via REPRO_AUTOTOOLS_MODE=B on a plain Mode-A project	1
 libs/repro_standard_provider/tests/test_c_cpp_cmake_convention.nim	emitFragment: hello-binary fixture produces configure + build actions	1
 libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
 libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim	depends_on references undeclared package — rejected	1
@@ -141,14 +134,8 @@ libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim	recognize: M
 libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim	recognize: M34 does NOT defer when Cargo.toml is present (Mode 2 territory)	1
 libs/repro_standard_provider/tests/test_c_cpp_make_convention.nim	emitFragment: binary fixture produces compile + link actions	1
 libs/repro_standard_provider/tests/test_c_cpp_make_convention.nim	emitFragment: library-static fixture produces archive action	1
-libs/repro_standard_provider/tests/test_c_cpp_meson_convention.nim	emitFragment: configure action's argv pins CC for compiler discovery	2
-libs/repro_standard_provider/tests/test_c_cpp_meson_convention.nim	emitFragment: hello-binary fixture produces configure + build actions	1
 libs/repro_standard_provider/tests/test_emit_cache_m18.nim	second emit re-uses cached nimcache manifest without re-running nim c	1
 libs/repro_standard_provider/tests/test_emit_cache_m18.nim	source-file edit invalidates cache and re-runs nim c	1
-libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
-libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim	recognize: negative — ghc/cabal not on PATH (toolchain probe)	1
-libs/repro_standard_provider/tests/test_java_maven_convention.nim	emitFragment: hello-binary fixture produces a single package action	1
-libs/repro_standard_provider/tests/test_java_maven_convention.nim	output-path resolution: artifactId + version compose the jar filename	1
 libs/repro_standard_provider/tests/test_jsts_convention.nim	emitFragment M21: typescript-cli emits npm-ci + esbuild + shim + test-run	2
 libs/repro_standard_provider/tests/test_jsts_convention.nim	emitFragment M21: typescript-library has no npm-ci / esbuild / shim / test actions	1
 libs/repro_standard_provider/tests/test_jsts_convention.nim	emitFragment M24: vite scratch project emits a single crude action	1
@@ -161,13 +148,6 @@ libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	emitFragment:
 libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	layout A: single-member workspace with src/<pkg>.ts at root	1
 libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	layout B-flat: per-member <pkg>/main.ts at root (no src/)	1
 libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	recognize: positive — Mode 3 fixture (no package.json, node available)	1
-libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: forward fixture does NOT trigger reverse-direction emit	2
-libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: mixed fixture wires C++ exec -> Nim archive end-to-end	1
-libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: mixed fixture wires Nim app -> C archive end-to-end	1
-libs/repro_standard_provider/tests/test_ocaml_dune_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
-libs/repro_standard_provider/tests/test_ocaml_dune_convention.nim	recognize: negative — ocaml/dune not on PATH (toolchain probe)	1
-libs/repro_standard_provider/tests/test_php_composer_convention.nim	emitFragment: hello-binary fixture produces install + wrapper actions	1
-libs/repro_standard_provider/tests/test_php_composer_convention.nim	recognize: negative — php/composer not on PATH (toolchain probe)	1
 libs/repro_standard_provider/tests/test_python_convention.nim	emitFragment M20: console-script emits installer action with shim outputs	1
 libs/repro_standard_provider/tests/test_python_convention.nim	emitFragment M20: library-pure emits byte-compile + sdist actions, no installer	1
 libs/repro_standard_provider/tests/test_python_convention.nim	emitFragment M24: maturin scratch project emits a single crude action	1
@@ -179,10 +159,6 @@ libs/repro_standard_provider/tests/test_python_direct_convention.nim	executable 
 libs/repro_standard_provider/tests/test_python_direct_convention.nim	layout A: single-member workspace with src/<pkg>/__init__.py at root	1
 libs/repro_standard_provider/tests/test_python_direct_convention.nim	layout B-flat: multi-package workspace with per-member <pkg>/<pkg>/__init__.py	1
 libs/repro_standard_provider/tests/test_python_direct_convention.nim	recognize: positive — Mode 3 fixture (no pyproject.toml, python available)	1
-libs/repro_standard_provider/tests/test_ruby_bundler_convention.nim	emitFragment: hello-binary fixture produces install + wrapper actions	1
-libs/repro_standard_provider/tests/test_ruby_bundler_convention.nim	recognize: negative — ruby/bundle not on PATH (toolchain probe)	1
-libs/repro_standard_provider/tests/test_swift_swiftpm_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
-libs/repro_standard_provider/tests/test_swift_swiftpm_convention.nim	recognize: negative — swift not on PATH (toolchain probe)	1
 libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	test_n48_conda_zstd_fallback_runs_without_a_shell	3
 libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	test_n48_tarball_arm_extracts_into_destinations_gnu_tar_would_unquote	2
 libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	test_n48_tarball_arm_opens_an_absolute_windows_archive_path	2
@@ -197,8 +173,6 @@ libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim	tracked_direct
 tests/e2e/dev-env/t_e2e_shell_hook_cd_activate_deactivate.nim	bash_hook_short_circuits_repeated_prompts_via_REPRO_PROJECT_ROOT	2
 tests/e2e/dev-env/t_e2e_shell_hook_noop_io_bounded.nim	noop_fast_path_does_not_open_build_engine_artifacts	2
 tests/e2e/dev-env/t_e2e_shell_hook_realistic_workload.nim	fast_path_keeps_40_prompts_under_cumulative_budget	1
-tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	M28 debug/unwind/replay gate is macOS arm64-only	1
-tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim	M27 real direct trampoline gate is macOS arm64-only	1
 tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim	linux x86_64 only	1
 tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim	HLX-M0 direct patch gate is linux-x86_64-only	1
 tests/e2e/hcr-linux-far/t_e2e_hcr_linux_far_target_island_patch.nim	HLX-M2 island gate is linux-x86_64-only	1
@@ -223,15 +197,7 @@ tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_rolls_back_publis
 tests/e2e/hcr-linux-txn/t_integration_hcr_linux_prepare_failure_leaves_process_byte_identical.nim	linux/amd64 only	1
 tests/e2e/hcr-linux-txn/t_integration_hcr_linux_repeated_patch_of_same_function.nim	linux/amd64 only	1
 tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim	HLX-M5 wire registration gate is linux-x86_64-only	1
-tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim	repro watch infers HCR patch metadata without fixture JSON	1
-tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim	t_e2e_repro_watch_hcr_multi_target_independent_patches	1
-tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim	t_e2e_repro_watch_hcr_one_target_agent_inject_failure	1
-tests/e2e/home-resources/t_e2e_macos_user_default_restart_target.nim	restartTarget killall fires on change, not on a cache-hit	1
 tests/e2e/local-build-engine/t_repro_build_target_matching_project_file_stem.nim	repro build repro selects only the named target	1
-tests/e2e/m78/t_e2e_profile_declared_resources_apply.nim	a profile `resources:` block materializes through `repro home apply`	1
-tests/e2e/m79/t_integration_shell_integration_replan_idempotent.nim	an unchanged `shell.integration` resource re-plans as no-op; a content edit still drifts	1
-tests/e2e/macos-monitor/t_macos_monitor_shim_event_taxonomy.nim	macOS monitor shim event taxonomy is unsupported on non-macOS	1
-tests/e2e/sharding/t_e2e_repro_test_shard_workspace_integration.nim	t_e2e_repro_test_shard_workspace_integration	1
 tests/integration/t_a_behind_only_refusal_names_a_pasteable_command.nim	t_a_behind_only_refusal_names_a_pasteable_command	2
 tests/integration/t_a_behind_pin_sibling_is_not_recorded_as_the_new_pin.nim	t_a_behind_pin_sibling_is_not_recorded_as_the_new_pin	1
 tests/integration/t_a_behind_pin_skip_names_the_sibling_distance_and_remedy.nim	t_a_behind_pin_skip_names_the_sibling_distance_and_remedy	2
@@ -283,10 +249,7 @@ tests/integration/t_b2_helpers_built_by_engine.nim	each helper binary loads and 
 tests/integration/t_b2_helpers_built_by_engine.nim	engine materialises every test-helper binary via .#test-helpers	1
 tests/integration/t_b3_repro_test_runs_through_engine.nim	alias forwards ordinary build flags to the test collection	1
 tests/integration/t_b3_repro_test_runs_through_engine.nim	engine: small test runs end-to-end through repro build .#test#<name>	1
-tests/integration/t_b4_hcr_flags_in_repro_tests.nim	engine: HCR flags reach nim c argv on macOS-arm64	1
 tests/integration/t_b5_bootstrap_idempotent.nim	behavioural: just bootstrap no-ops when ./build/bin/repro exists	1
-tests/integration/t_b5_full_suite_through_repro_test.nim	end-to-end: just test runs the full slimmed pipeline (REPRO_B5_FULL_SUITE_RUN=1 only)	1
-tests/integration/t_b5_full_suite_through_repro_test.nim	structural: prior just test produced the expected artefacts	2
 tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	t_checkout_with_the_module_tree_is_accepted	1
 tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	t_nothing_reachable_fails_naming_the_dev_shell	1
 tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	t_sibling_checkout_is_found_with_no_value_set	1
@@ -456,7 +419,6 @@ tests/integration/t_develop_selectors_compose_in_fixed_order.nim	t_develop_selec
 tests/integration/t_develop_set_is_union_of_all_backends.nim	t_develop_set_is_union_of_all_backends	1
 tests/integration/t_develop_warns_and_names_omitted_personal_repos.nim	t_develop_warns_and_names_omitted_personal_repos	1
 tests/integration/t_docs_hooks_reflect_public_tier_only_server_gate.nim	CLI/hooks.md corrected: no stale authoritative-for-locks claim; public-tier-only language present	1
-tests/integration/t_e2e_cross_compilation_aarch64.nim	cross gcc + link produces an aarch64 ELF binary	1
 tests/integration/t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable.nim	t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable	1
 tests/integration/t_emitted_overrides_match_the_develop_set.nim	t_emitted_overrides_match_the_develop_set	1
 tests/integration/t_env_inheritance_census_is_reported.nim	the census classifies a real graph's PATH declarations	1
@@ -531,7 +493,6 @@ tests/integration/t_host_binary_format_is_proven_before_execution.nim	the built 
 tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim	a cache hit whose present output cannot be rewritten succeeds	1
 tests/integration/t_installed_engine_read_only_source_tree.nim	t_installed_engine_builds_a_foreign_project	1
 tests/integration/t_installed_engine_read_only_source_tree.nim	t_unwritable_root_reports_which_path_and_why	1
-tests/integration/t_integration_hcr_linkgraph_relocation_classification.nim	M26 Mach-O arm64 gate is macOS-only	1
 tests/integration/t_integration_hcr_linux_build_id_mismatch_refused.nim	HLX-M1 build-id verification gate is linux-x86_64-only	1
 tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim	HLX-M0 sled layout gate is linux-x86_64-only	1
 tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim	HLX-M1 ELF object parsing gate is linux-x86_64-only	1
@@ -541,9 +502,6 @@ tests/integration/t_integration_scheduler_dependency_gathering_policies.nim	auto
 tests/integration/t_integrity_mismatch_surfaces_per_tier.nim	t_integrity_mismatch_surfaces_per_tier	1
 tests/integration/t_integrity_uses_vcs_native_hash_else_own_file_hash_both_multihash.nim	t_integrity_uses_vcs_native_hash_else_own_file_hash_both_multihash	1
 tests/integration/t_is_published_accepts_any_remote_name.nim	head on a non-origin remote counts as published	1
-tests/integration/t_just_test_end_to_end_via_parallel_runner.nim	`just test` runs the full suite through the M3 parallel runner	1
-tests/integration/t_just_test_hot_cache_is_no_op_build.nim	second build of the :test aggregate is fully cache-hit (gated by REPRO_M1_LONG_TEST)	1
-tests/integration/t_just_test_via_ct_test_runner.nim	`just test` runs the full suite through ct-test-runner	1
 tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim	t_legacy_manifest_without_team_route_warns_and_scaffolds	1
 tests/integration/t_library_load_evidence_is_recorded.nim	changing a DT_NEEDED library re-runs the edge	1
 tests/integration/t_local_gateway_pre_receive_rejects_uncovered_push_even_with_no_verify.nim	t_local_gateway_pre_receive_rejects_uncovered_push_even_with_no_verify	1
@@ -575,7 +533,6 @@ tests/integration/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_d
 tests/integration/t_locking_explain_reports_resolved_tier_backend_and_layer.nim	t_locking_explain_reports_resolved_tier_backend_and_layer	1
 tests/integration/t_long_operations_announce_plan_and_emit_live_progress.nim	t_long_operations_announce_plan_and_emit_live_progress	1
 tests/integration/t_m9r21_4_hardware_e2e.nim	live probe round-trips via the macro (Linux only)	1
-tests/integration/t_m9r22b_2_apply_loopback.nim	Test#5 (loopback): simple-ext4 against a 1G image	1
 tests/integration/t_managed_hook_reentry_guard_prevents_recursive_publish.nim	t_managed_hook_reentry_guard_prevents_recursive_publish	1
 tests/integration/t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract.nim	t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract	1
 tests/integration/t_managed_hooks_stand_down_during_git_operations.nim	t_a_checkout_outside_any_operation_still_runs_the_hook	1
@@ -624,14 +581,11 @@ tests/integration/t_migrate_leaves_a_pinned_checkout_on_its_pin.nim	t_migrate_do
 tests/integration/t_migrate_leaves_a_pinned_checkout_on_its_pin.nim	t_migrate_reports_a_pinned_checkout_that_drifted_off_its_pin	1
 tests/integration/t_mixed_public_clean_team_unpublished_refuses.nim	t_mixed_public_clean_team_unpublished_refuses	1
 tests/integration/t_mixed_workspace_each_record_in_its_own_backend_only.nim	t_mixed_workspace_each_record_in_its_own_backend_only	1
-tests/integration/t_monitor_shim_edges_carry_static_libgcc.nim	engine: every lowered monitor-artefact action carries --passL:-static-libgcc	1
-tests/integration/t_monitor_shim_edges_carry_static_libgcc.nim	the sibling io-mon script still agrees that the flag is required	1
 tests/integration/t_nested_bootstrap_runtime_closure.nim	nested consumer prepares runtime data of an already cycle-broken tool	1
 tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	t_nested_topology_full_pipeline_without_org_root_repo	1
 tests/integration/t_nim_package_path_handling.nim	t_nim_package_path_handling	1
 tests/integration/t_nix_daemon_provisioner.nim	direct all-output fallback strips provisioned loader paths	1
 tests/integration/t_only_overridden_nodes_are_rewritten.nim	t_only_overridden_nodes_are_rewritten	1
-tests/integration/t_pcr_composite_matches_tpm.nim	t_pcr_composite_matches_live_swtpm	1
 tests/integration/t_personal_workspace_restores_on_fresh_machine_from_pushed_lock_and_dotfiles.nim	t_personal_workspace_restores_on_fresh_machine_from_pushed_lock_and_dotfiles	1
 tests/integration/t_post_commit_cache_push_propagates_objects_to_sibling_workspace.nim	test_ra5_cache_push_makes_w1_commit_visible_in_w2	1
 tests/integration/t_post_commit_cache_push_runs_opportunistic_gc.nim	t_post_commit_cache_push_runs_opportunistic_gc	1
@@ -800,7 +754,6 @@ tests/integration/t_sync_scoped_to_named_project_touches_only_that_project.nim	t
 tests/integration/t_sync_skips_fetch_when_locked_sha_already_present.nim	t_sync_skips_fetch_when_locked_sha_already_present	1
 tests/integration/t_team_backend_routed_lock_reads_back_and_is_idempotent.nim	t_team_backend_routed_lock_reads_back_and_is_idempotent	1
 tests/integration/t_team_repo_record_only_no_checkout.nim	t_team_repo_record_only_no_checkout	1
-tests/integration/t_test_certificate_conformance_vectors.nim	t_test_certificate_conformance_vectors	2
 tests/integration/t_the_status_report_does_not_call_an_unpublished_row_recordable.nim	t_the_status_report_does_not_call_an_unpublished_row_recordable	1
 tests/integration/t_the_unpushed_skip_names_the_push_that_would_make_it_lockable.nim	t_the_unpushed_skip_names_the_push_that_would_make_it_lockable	2
 tests/integration/t_top_level_sync_pull_shortcuts_match_workspace_forms.nim	t_top_level_sync_pull_shortcuts_match_workspace_forms	1
@@ -956,9 +909,6 @@ tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim	a clean 
 tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim	a modified tree whose git warns on stderr still reads dirty	1
 tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim	a status that genuinely fails still surfaces its diagnostic	1
 tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim	an untracked-only tree whose git warns on stderr is still untracked	1
-tests/unit/t_bootstrap_nim_monitoring.nim	Linux uses the pinned compiler channel instead of the static archive	1
-tests/unit/t_bootstrap_nim_monitoring.nim	Windows retains its pinned native archive	1
-tests/unit/t_bootstrap_nim_monitoring.nim	an explicit bootstrap compiler is preserved without provisioning	1
 tests/unit/t_cached_source_dependency_closure.nim	cache-only source inherits declared fallback paths and identity	1
 tests/unit/t_cached_source_dependency_closure.nim	directly selected fallback inherits and fingerprints its runtime closure	1
 tests/unit/t_cached_source_dependency_closure.nim	fallback without a recipe never traverses caller metadata	1
@@ -981,8 +931,6 @@ tests/unit/t_constructor_fetch_tool_refs.nim	verified unchanged fetches preserve
 tests/unit/t_hcr_agent_ipc.nim	Unix socket transport carries framed protocol messages	1
 tests/unit/t_hcr_agent_ipc.nim	agent can connect through launch environment socket path	1
 tests/unit/t_hcr_agent_ipc.nim	coordinator and endpoint use Unix socket IPC with session validation	1
-tests/unit/t_hcr_agent_process_target.nim	process target runtime is covered by the macOS arm64 lane, not this host	1
-tests/unit/t_hcr_watch_inference.nim	infers patch metadata from ordinary C object rebuild	1
 tests/unit/t_library_stage_alias.nim	preserve the installed name behind the public artifact name	1
 tests/unit/t_library_stage_alias.nim	scope cleanup edges by build directory	1
 tests/unit/t_library_stage_alias.nim	stage a host-native executable under its public interface name	1

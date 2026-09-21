@@ -174,4 +174,4 @@ suite "M68 gate 3: e2e_macos_user_default_restart_target":
     else:
       checkpoint "platform-skip: macos.userDefault is the gate; " &
         "macOS-only"
-      skip()
+      skip("macOS only — macos.userDefault is the resource under test")

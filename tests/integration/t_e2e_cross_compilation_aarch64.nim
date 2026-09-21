@@ -106,7 +106,7 @@ suite "Spec-Implementation M5: cross-compilation aarch64 e2e":
       checkpoint("no aarch64 cross-gcc available on this host;")
       checkpoint("set REPRO_AARCH64_GCC=/path/to/aarch64-linux-gnu-gcc")
       checkpoint("or install gcc-aarch64-linux-gnu to enable this test")
-      skip()
+      skip("no aarch64 cross-gcc on this host — set REPRO_AARCH64_GCC or install gcc-aarch64-linux-gnu")
     else:
       let root = reproRoot()
       let fixtureRoot =

@@ -432,4 +432,4 @@ suite "t_e2e_repro_watch_hcr_multi_target_independent_patches":
       # stdout log line carries the JSON-derived ``target=`` suffix
       # the test searches for.
     else:
-      skip()
+      skip("host is neither macOS arm64 nor Linux x86-64 — HCR watch runs only on those")

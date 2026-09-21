@@ -284,7 +284,7 @@ when defined(linux):
 
     test "Test#5 (loopback): simple-ext4 against a 1G image":
       if not canRunLoopbackE2e():
-        skip()
+        skip("REPRO_DISK_LOOPBACK_E2E=1 not set, a loopback tool (losetup/parted/sgdisk/mkfs.ext4/mkfs.vfat/wipefs) is missing, or not running as root")
       else:
         # Set up a real 1G loopback image. The simple layout needs
         # 512M for ESP + room for ext4 root; ESP alone needs ≥256MB

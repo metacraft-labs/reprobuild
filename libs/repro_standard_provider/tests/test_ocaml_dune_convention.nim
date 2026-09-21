@@ -196,7 +196,7 @@ suite "ocaml-dune convention M46":
     ## toolchain is ACTUALLY missing — when both ARE installed, skip
     ## rather than hand-wave the gate.
     if ocamlToolchainReady():
-      skip()
+      skip("ocaml or dune not on PATH")
     else:
       let scratch = getTempDir() / "test_ocaml_dune_convention_no_toolchain"
       if dirExists(scratch):
@@ -224,7 +224,7 @@ suite "ocaml-dune convention M46":
 
   test "emitFragment: hello-binary fixture produces a single build action":
     if not ocamlToolchainReady():
-      skip()
+      skip("ocaml or dune not on PATH")
     else:
       let conv = ocaml_convention.ocamlDuneConvention()
       let request = dummyRequest(HelloBinaryFixture)

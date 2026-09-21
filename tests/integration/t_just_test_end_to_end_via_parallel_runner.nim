@@ -63,6 +63,6 @@ suite "t_just_test_end_to_end_via_parallel_runner":
     if getEnv(LongTestEnv) != "1":
       checkpoint("skipped — set " & LongTestEnv &
         "=1 to run the long-form end-to-end verifier")
-      skip()
+      skip("REPRO_M1_LONG_TEST=1 not set — the long-form end-to-end verifier is opt-in")
     else:
       runEndToEnd()

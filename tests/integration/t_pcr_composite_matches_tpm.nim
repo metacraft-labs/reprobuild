@@ -374,7 +374,7 @@ suite "PCR composite against a real TPM":
           LiveGateEnv & "=0, which replaces anything the caller exported. " &
           "Nothing was measured and no TPM was started. Build the edge " &
           "that declares it on instead: repro build test-live-tpm-quote")
-      skip()
+      skip("REPROOS_TPM_QUOTE_GATE=1 not set — no TPM was started and nothing was measured")
     else:
       # EVIDENCE THAT THIS BODY RAN, written before anything can refuse.
       #

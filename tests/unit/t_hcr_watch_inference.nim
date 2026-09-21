@@ -119,4 +119,4 @@ suite "HCR watch inference":
       announceHcrUnsupportedHost(
         "t_hcr_watch_inference", "macOS arm64",
         "macOS arm64 CI on eph-macos-arm64")
-      skip()
+      skip("macOS arm64 only — covered by the macOS arm64 CI lane (eph-macos-arm64)")

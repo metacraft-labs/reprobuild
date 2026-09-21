@@ -116,7 +116,7 @@ suite "M78 gate: e2e_profile_declared_resources_apply":
     test "a profile `resources:` block materializes through `repro home apply`":
       when not defined(windows):
         checkpoint "platform-skip: M78 gate exercises the Windows leg"
-        skip()
+        skip("Windows only — the M78 gate exercises the Windows leg")
       else:
 
         # Snapshot the real HKCU\Environment\Path so the gate never

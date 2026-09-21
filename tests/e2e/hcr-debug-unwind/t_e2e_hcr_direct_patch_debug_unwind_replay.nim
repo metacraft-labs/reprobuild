@@ -209,4 +209,4 @@ when defined(macosx) and defined(arm64):
 when not (defined(macosx) and defined(arm64)):
   suite "e2e_hcr_direct_patch_debug_unwind_replay":
     test "M28 debug/unwind/replay gate is macOS arm64-only":
-      skip()
+      skip("macOS arm64 only — the M28 debug/unwind/replay gate")

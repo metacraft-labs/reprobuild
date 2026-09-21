@@ -167,7 +167,7 @@ suite "swift-swiftpm convention M43":
     ## ACTUALLY missing — when swift IS installed, skip rather than
     ## hand-wave the gate.
     if swiftToolchainReady():
-      skip()
+      skip("swift not on PATH")
     else:
       let scratch = getTempDir() / "test_swift_swiftpm_convention_no_toolchain"
       if dirExists(scratch):
@@ -197,7 +197,7 @@ suite "swift-swiftpm convention M43":
 
   test "emitFragment: hello-binary fixture produces a single build action":
     if not swiftToolchainReady():
-      skip()
+      skip("swift not on PATH")
     else:
       let conv = swift_convention.swiftSwiftpmConvention()
       let request = dummyRequest(HelloBinaryFixture)
