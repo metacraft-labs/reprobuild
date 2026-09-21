@@ -99,7 +99,7 @@ suite "kotlin-gradle convention M41":
 
   test "recognize: positive — scratch Groovy DSL build.gradle":
     if findExe("javac").len == 0 or findExe("gradle").len == 0:
-      skip()
+      skip("javac or gradle not on PATH")
     else:
       let scratch = getTempDir() / "test_kotlin_gradle_convention_groovy_dsl"
       if dirExists(scratch):
@@ -269,7 +269,7 @@ suite "kotlin-gradle convention M41":
 
   test "emitFragment: hello-binary fixture produces a single build action":
     if not gradleToolchainReady(HelloBinaryFixture):
-      skip()
+      skip("javac not on PATH, or neither gradle nor a gradlew wrapper in reprobuild-examples/kotlin-gradle/hello-binary")
     else:
       let conv = gradle_convention.kotlinGradleConvention()
       let request = dummyRequest(HelloBinaryFixture)
@@ -321,7 +321,7 @@ suite "kotlin-gradle convention M41":
     # gradle is missing, this test SKIPs when the toolchain is
     # unavailable.
     if findExe("javac").len == 0 or findExe("gradle").len == 0:
-      skip()
+      skip("javac or gradle not on PATH")
     else:
       let scratch = getTempDir() / "test_kotlin_gradle_convention_custom_coords"
       if dirExists(scratch):

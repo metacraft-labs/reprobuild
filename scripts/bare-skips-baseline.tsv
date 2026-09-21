@@ -22,9 +22,6 @@
 #   skip("git not on PATH; this case needs a real repository")
 # and delete nothing here -- the next run rewrites the file for you.
 libs/ct_test_unittest_parallel/tests/t_ct_test_runner_full_suite_parity.nim	M3 internal runner and M4 ct-test-runner agree on pass/fail/skip totals	1
-libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim	partition file names that don't match any test produce warning	1
-libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim	partition file: runs only the listed three of five tests	1
-libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim	partition slice: not implemented, exits 2 with diagnostic	1
 libs/repro_binary_cache_client/tests/test_publish_in_process.nim	a compressible prefix over the raw limit publishes compressed	1
 libs/repro_binary_cache_client/tests/test_publish_in_process.nim	extractPrefix reads a zstd-compressed archive transparently	1
 libs/repro_build_engine/tests/t_action_cache_output_integrity.nim	corrupted output is not handed to a downstream consumer	1
@@ -54,9 +51,6 @@ libs/repro_build_engine/tests/test_engine_worker_pool.nim	the pool drains when a
 libs/repro_build_engine/tests/test_monitor_depfile_flush_is_async_and_atomic.nim	flush temp is on the destination filesystem	1
 libs/repro_build_engine/tests/test_monitor_finish_handoff_is_exclusive.nim	the carrier cannot give a monitor two owners	1
 libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim	in-process monitor hosting is not supported on this platform	1
-libs/repro_cas_store/tests/t_cas_store_occupancy_cost.nim	a reflink store does not pay for a materialization	2
-libs/repro_cas_store/tests/t_cas_store_occupancy_cost.nim	a store volume without block cloning pays for every copy	2
-libs/repro_cas_store/tests/t_cas_store_occupancy_cost.nim	size-on-disk reports a block clone at its full logical size	2
 libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim	unchanged skips / changed-executed re-runs / changed-unexecuted skips	1
 libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	a profile that genuinely fails to compile still fails, with a reason	1
 libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	infra apply converges a profile whose resources are all action edges	1
@@ -97,12 +91,6 @@ libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	test_m3_basic_7
 libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	test_m3_discover_sevenzip_finds_catalog_prefix	1
 libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	test_m3_sfx_flatten_synthetic_git_realizes_bin_git	1
 libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	test_m3_sfx_flatten_synthetic_ruby_shape	1
-libs/repro_home_apply/tests/t_builtin_adapter_installer.nim	test_m4_discover_dark_finds_catalog_prefix	1
-libs/repro_home_apply/tests/t_builtin_adapter_installer.nim	test_m4_discover_innounp_finds_catalog_prefix	1
-libs/repro_home_apply/tests/t_builtin_adapter_installer.nim	test_m4_discover_lessmsi_finds_catalog_prefix	1
-libs/repro_home_apply/tests/t_builtin_adapter_installer.nim	test_m4_msi_extractor_dispatch_honors_msiexec_env_var	2
-libs/repro_home_apply/tests/t_builtin_adapter_installer.nim	test_m4_msi_realize_via_lessmsi_synthetic_meson_shape	3
-libs/repro_home_apply/tests/t_builtin_adapter_installer.nim	test_m4_nsis_msi_bundle_merge_conflict_fails_closed	2
 libs/repro_home_apply/tests/t_builtin_adapter_installer_innosetup_fpc.nim	test_m4_innosetup_realize_synthetic_fpc_shape	2
 libs/repro_home_apply/tests/t_builtin_adapter_installer_nsis_erlang.nim	test_m11_imInstallerNsis_synthetic_otp_shape	1
 libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim	test_m6_extractor_discovery_returns_usable_extractor	1
@@ -120,19 +108,6 @@ libs/repro_home_apply/tests/test_m25_adapter_preference_text_macro_parity.nim	te
 libs/repro_home_apply/tests/test_m69_env_userpath_multi_package.nim	applyUserPath: two packages write two independent rc blocks	1
 libs/repro_home_apply/tests/test_m69_env_userpath_multi_package.nim	observeUserPath returns joined-entries digest in both branches	1
 libs/repro_home_apply/tests/test_m69_env_userpath_multi_package.nim	realWorldIdentity encodes the per-resource block id (POSIX)	1
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	M83 step 4b: launchd.userAgent with keepAlive parameter still off-macOS	1
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	M83 step 4b: systemd.userUnit with state parameter still off-Linux	1
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	M83 step 7: applyKdeConfigKey with kdeVersion=5 still off-Linux	1
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: destroyDconfKey raises ENotImplementedPlatform off-Linux	1
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: destroyKdeConfigKey raises ENotImplementedPlatform off-Linux	1
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: launchd.userAgent raises ENotImplementedPlatform off-macOS	1
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: linux.dconfKey raises ENotImplementedPlatform off-Linux	1
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: linux.gsettings raises ENotImplementedPlatform off-Linux	1
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: linux.kdeConfigKey raises ENotImplementedPlatform off-Linux	1
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: macos.userDefault raises ENotImplementedPlatform off-macOS	1
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: observeDconfKey raises ENotImplementedPlatform off-Linux	1
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: observeKdeConfigKey raises ENotImplementedPlatform off-Linux	1
-libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: systemd.userUnit raises ENotImplementedPlatform off-Linux	1
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	off-macOS: applyHomebrewCask raises ENotImplementedPlatform	1
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	off-macOS: applyHomebrewFormula raises ENotImplementedPlatform	1
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	off-macOS: applyHomebrewFormula raises off-mac even with version+args	1
@@ -168,19 +143,8 @@ libs/repro_standard_provider/tests/test_c_cpp_make_convention.nim	emitFragment: 
 libs/repro_standard_provider/tests/test_c_cpp_make_convention.nim	emitFragment: library-static fixture produces archive action	1
 libs/repro_standard_provider/tests/test_c_cpp_meson_convention.nim	emitFragment: configure action's argv pins CC for compiler discovery	2
 libs/repro_standard_provider/tests/test_c_cpp_meson_convention.nim	emitFragment: hello-binary fixture produces configure + build actions	1
-libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
-libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim	output-path resolution: OutputType=Library yields .dll	1
-libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim	output-path resolution: TargetFramework + AssemblyName + OutputType compose the binary filename	1
-libs/repro_standard_provider/tests/test_elixir_mix_convention.nim	emitFragment: hello-binary fixture produces escript-build + wrapper actions	2
-libs/repro_standard_provider/tests/test_elixir_mix_convention.nim	emitFragment: wrapper depends on escript-build action (chained ordering)	2
-libs/repro_standard_provider/tests/test_elixir_mix_convention.nim	recognize: negative — elixir/mix not on PATH (toolchain probe)	1
-libs/repro_standard_provider/tests/test_elixir_mix_convention.nim	recognize: positive — accepts ``mix`` token in uses	1
 libs/repro_standard_provider/tests/test_emit_cache_m18.nim	second emit re-uses cached nimcache manifest without re-running nim c	1
 libs/repro_standard_provider/tests/test_emit_cache_m18.nim	source-file edit invalidates cache and re-runs nim c	1
-libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim	emitFragment: hello-binary fixture produces escriptize + wrapper actions	2
-libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim	emitFragment: wrapper depends on escriptize action (chained ordering)	2
-libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim	recognize: negative — erl/rebar3 not on PATH (toolchain probe)	1
-libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim	recognize: positive — accepts ``rebar3`` token in uses	1
 libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
 libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim	recognize: negative — ghc/cabal not on PATH (toolchain probe)	1
 libs/repro_standard_provider/tests/test_java_maven_convention.nim	emitFragment: hello-binary fixture produces a single package action	1
@@ -197,9 +161,6 @@ libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	emitFragment:
 libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	layout A: single-member workspace with src/<pkg>.ts at root	1
 libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	layout B-flat: per-member <pkg>/main.ts at root (no src/)	1
 libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	recognize: positive — Mode 3 fixture (no package.json, node available)	1
-libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
-libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim	output-path resolution: projectName + version compose the jar filename	1
-libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim	recognize: positive — scratch Groovy DSL build.gradle	1
 libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: forward fixture does NOT trigger reverse-direction emit	2
 libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: mixed fixture wires C++ exec -> Nim archive end-to-end	1
 libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: mixed fixture wires Nim app -> C archive end-to-end	1
@@ -1028,18 +989,6 @@ tests/unit/t_library_stage_alias.nim	stage a host-native executable under its pu
 tests/unit/t_m9r13a_provider_compile_sharing.nim	Linux bootstrap compiler does not replace package CC	1
 tests/unit/t_m9r13a_provider_compile_sharing.nim	Linux interface compilation has a pinned compiler channel	1
 tests/unit/t_m9r13a_provider_compile_sharing.nim	test_provider_compile_command_prefers_runtime_cc_on_posix	1
-tests/unit/t_m9r13b_1_toolchain_pin.nim	Arm 1: vendored sources present + env unset -> define emitted	1
-tests/unit/t_m9r13b_1_toolchain_pin.nim	Arm 2: REPROBUILD_USE_SYSTEM_HASH_LIBS=1 suppresses define	1
-tests/unit/t_m9r13b_1_toolchain_pin.nim	Arm 3: include dirs still emitted alongside define	1
-tests/unit/t_m9r13b_1_toolchain_pin.nim	Arm 4: env values other than 1/true/yes/on do NOT suppress define	1
-tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	a restrictive DACL is access-denied, not stale — and its owner survives	1
-tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	a restrictive DACL on the canonical pipe is unreachable, fast	3
-tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	a terminate target cannot be built for an unidentified owner	1
-tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	probeWindowsPipeOwner classifies a live local server as wpsHealthy	1
-tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	probeWindowsPipeOwner on stale orphan returns wpsStale	2
-tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	probeWindowsPipeOwner returns wpsAbsent for never-existed pipe	1
-tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	terminateStalePipeOwner is a no-op on already-dead PID	1
-tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	the same probe DOES report absent for a genuinely absent pipe	1
 tests/unit/t_m9r14f_2_rpath_patching.nim	linux_end_to_end_patchelf_against_synthetic_elf	1
 tests/unit/t_m9r14f_2_rpath_patching.nim	linux_preserves_prelinked_libc_from_matching_link_directory	1
 tests/unit/t_m9r15q_5_rpath_nix_stub_deps.nim	linux_end_to_end_rpath_excludes_dangling_includes_real	1

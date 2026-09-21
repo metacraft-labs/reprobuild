@@ -229,7 +229,7 @@ suite "DSL-port M9.R.13c.1 — runquota stale-pipe recovery":
       check probe.serverPid == 0
       check probe.ownerAlive == false
     else:
-      skip()
+      skip("not a Windows host -- probeWindowsPipeOwner classifies the Windows NPFS namespace")
 
   test "probeWindowsPipeOwner classifies a live local server as wpsHealthy":
     when defined(windows):
@@ -246,7 +246,7 @@ suite "DSL-port M9.R.13c.1 — runquota stale-pipe recovery":
       finally:
         discard winCloseHandle(h)
     else:
-      skip()
+      skip("not a Windows host -- probeWindowsPipeOwner classifies the Windows NPFS namespace")
 
   test "a restrictive DACL is access-denied, not stale — and its owner survives":
     when defined(windows):
@@ -292,7 +292,7 @@ suite "DSL-port M9.R.13c.1 — runquota stale-pipe recovery":
       finally:
         discard winCloseHandle(h)
     else:
-      skip()
+      skip("not a Windows host -- the access-denied-vs-stale defect is specific to Windows NPFS pipe DACLs")
 
   test "the same probe DOES report absent for a genuinely absent pipe":
     when defined(windows):
@@ -315,7 +315,7 @@ suite "DSL-port M9.R.13c.1 — runquota stale-pipe recovery":
       # Closing the last handle returns the name to NPFS.
       check probeWindowsPipeOwner(absent).status == wpsAbsent
     else:
-      skip()
+      skip("not a Windows host -- the access-denied-vs-stale defect is specific to Windows NPFS pipe DACLs")
 
   test "a restrictive DACL on the canonical pipe is unreachable, fast":
     when defined(windows):
@@ -328,7 +328,7 @@ suite "DSL-port M9.R.13c.1 — runquota stale-pipe recovery":
       # pipe the kernel has already refused us.
       let canonical = defaultRunQuotaWindowsPipePath()
       if canonical.len == 0:
-        skip()
+        skip("the default runquota endpoint is not a named pipe, so there is no canonical pipe path to bind")
       else:
         var h = cast[Handle](-1)
         try:
@@ -340,7 +340,7 @@ suite "DSL-port M9.R.13c.1 — runquota stale-pipe recovery":
           echo "M9.R.13c.1 canonical-DACL arm: canonical pipe already " &
             "bound; skipping"
         if h == cast[Handle](-1):
-          skip()
+          skip("the canonical runquota pipe is already bound -- FILE_FLAG_FIRST_PIPE_INSTANCE refuses the second instance this arm needs")
         else:
           try:
             let probe = probeWindowsPipeOwner(canonical)
@@ -353,7 +353,7 @@ suite "DSL-port M9.R.13c.1 — runquota stale-pipe recovery":
           finally:
             discard winCloseHandle(h)
     else:
-      skip()
+      skip("not a Windows host -- the access-denied-vs-stale defect is specific to Windows NPFS pipe DACLs")
 
   test "terminateStalePipeOwner is a no-op on already-dead PID":
     when defined(windows):
@@ -365,7 +365,7 @@ suite "DSL-port M9.R.13c.1 — runquota stale-pipe recovery":
                                    serverPid: int32(0x7FFFFFFE))
       check terminateStalePipeOwner(stalePipeOwner(probe)) == true
     else:
-      skip()
+      skip("not a Windows host -- terminateStalePipeOwner acts on a Windows pipe owner PID")
 
   test "a terminate target cannot be built for an unidentified owner":
     when defined(windows):
@@ -397,7 +397,7 @@ suite "DSL-port M9.R.13c.1 — runquota stale-pipe recovery":
       expect AssertionDefect:
         discard terminateStalePipeOwner(StalePipeOwner())
     else:
-      skip()
+      skip("not a Windows host -- terminateStalePipeOwner acts on a Windows pipe owner PID")
 
   test "isRunQuotaDaemonReachable returns false when the canonical pipe is absent":
     # The function is total and side-effect-free. In the test harness
@@ -468,7 +468,7 @@ suite "DSL-port M9.R.13c.1 — runquota stale-pipe recovery":
         # other arms already cover the classifier. Skip in that case.
         if not ready:
           echo "M9.R.13c.1 stale-arm: child failed to bind pipe; skipping"
-          skip()
+          skip("the powershell child never bound the synthetic pipe, so no stale orphan could be staged")
         else:
           # Kill the owner; the kernel will close the server handle as
           # part of process exit and the pipe object will eventually be
@@ -484,4 +484,4 @@ suite "DSL-port M9.R.13c.1 — runquota stale-pipe recovery":
           try: discard child.waitForExit() except CatchableError: discard
         child.close()
     else:
-      skip()
+      skip("not a Windows host -- the stale-orphan wedge is specific to Windows NPFS handle persistence")

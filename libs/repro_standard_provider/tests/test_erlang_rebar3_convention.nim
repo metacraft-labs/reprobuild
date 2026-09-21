@@ -206,7 +206,7 @@ suite "erlang-rebar3 convention M61":
     ## toolchain is ACTUALLY missing — when both ARE installed, skip
     ## rather than hand-wave the gate.
     if erlangToolchainReady():
-      skip()
+      skip("erl and rebar3 are both on PATH -- this case asserts the gate only when the toolchain is genuinely absent")
     else:
       let scratch = getTempDir() / "test_erlang_rebar3_no_toolchain"
       if dirExists(scratch):
@@ -237,7 +237,7 @@ suite "erlang-rebar3 convention M61":
     ## equivalent ``uses:`` tokens (single-token accept pattern, mirroring
     ## M30 / M56 / M57 / M60).
     if not erlangToolchainReady():
-      skip()
+      skip("erl or rebar3 not on PATH")
     else:
       let scratch = getTempDir() / "test_erlang_rebar3_token_rebar3"
       if dirExists(scratch):
@@ -268,9 +268,9 @@ suite "erlang-rebar3 convention M61":
 
   test "emitFragment: hello-binary fixture produces escriptize + wrapper actions":
     if not erlangToolchainReady():
-      skip()
+      skip("erl or rebar3 not on PATH")
     elif not fileExists(HelloBinaryFixture / "rebar.config"):
-      skip()
+      skip("fixture missing: reprobuild-examples/erlang-rebar3/hello-binary/rebar.config")
     else:
       let conv = erlang_convention.erlangRebar3Convention()
       let request = dummyRequest(HelloBinaryFixture)
@@ -324,9 +324,9 @@ suite "erlang-rebar3 convention M61":
 
   test "emitFragment: wrapper depends on escriptize action (chained ordering)":
     if not erlangToolchainReady():
-      skip()
+      skip("erl or rebar3 not on PATH")
     elif not fileExists(HelloBinaryFixture / "rebar.config"):
-      skip()
+      skip("fixture missing: reprobuild-examples/erlang-rebar3/hello-binary/rebar.config")
     else:
       let conv = erlang_convention.erlangRebar3Convention()
       let request = dummyRequest(HelloBinaryFixture)
