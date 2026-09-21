@@ -13905,6 +13905,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_cargo_deinherit.nim",
+    binary: "build/test-bin/t_cargo_deinherit",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_cargo_vendor_action.nim",
     binary: "build/test-bin/t_cargo_vendor_action",
     defines: @[],

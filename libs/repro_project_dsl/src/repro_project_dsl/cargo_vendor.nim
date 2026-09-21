@@ -120,6 +120,7 @@ proc emitCargoVendorAction*(projectRoot, packageName: string;
   let cacheDir = cargoVendorCacheDir(projectRoot)
   let stamp = cargoVendorStampPath(projectRoot)
   let manifest = cargoVendorManifestPath(projectRoot)
+  let overridesDir = cargoVendorOverridesDir(projectRoot)
   let configDir = cargoConfigDir(projectRoot)
   createDir(extendedPath(cargoVendorRoot(projectRoot)))
 
@@ -196,6 +197,16 @@ proc emitCargoVendorAction*(projectRoot, packageName: string;
   script.add("find \"" & q(vendorDir) & "/$repro_d\" -mindepth 2 " &
     "-name Cargo.toml 2>/dev/null | while IFS= read -r repro_sub; do " &
     "rm -rf \"$(dirname \"$repro_sub\")\"; done; ")
+  # A committed de-inherited manifest, if this git crate is a workspace
+  # member. Its `workspace = true` fields cannot resolve once the crate is
+  # vendored standalone — the workspace root is gone — so the generator
+  # inlined them from that root and committed the result. Overwrite the
+  # crate's own Cargo.toml with it. Absent for a crate that inherits
+  # nothing, which is why this is a conditional copy rather than a required
+  # one.
+  script.add("if [ -f \"" & q(overridesDir) & "/$repro_d/Cargo.toml\" ]; " &
+    "then cp -f \"" & q(overridesDir) & "/$repro_d/Cargo.toml\" \"" &
+    q(vendorDir) & "/$repro_d/Cargo.toml\"; fi; ")
   script.add("printf '{\"files\":{},\"package\":null}' > \"" &
     q(vendorDir) & "/$repro_d/.cargo-checksum.json\"; ")
   script.add("continue; fi; ")

@@ -687,12 +687,23 @@ const
   CargoVendorManifestName* = "cargo-vendor.manifest"
     ## The committed manifest, beside the recipe's `repro.nim`.
 
+  CargoVendorOverridesDirName* = "cargo-vendor-overrides"
+    ## A committed directory beside the manifest holding de-inherited
+    ## `Cargo.toml` files for git crates that are workspace members —
+    ## `<name>-<version>/Cargo.toml` each. Committed rather than recomputed
+    ## at build time so the closure a build compiles against stays fully
+    ## visible to review, the same reason the manifest is committed. Absent
+    ## when no git crate in the closure inherits from a workspace.
+
   CargoVendorSubdir* = ".repro/cargo-vendor"
     ## Scratch root for the unpacked tree and the download cache. Under
     ## `.repro/` so `repro clean` takes it with everything else.
 
 proc cargoVendorManifestPath*(projectRoot: string): string =
   projectRoot / CargoVendorManifestName
+
+proc cargoVendorOverridesDir*(projectRoot: string): string =
+  projectRoot / CargoVendorOverridesDirName
 
 proc cargoVendorRoot*(projectRoot: string): string =
   projectRoot / CargoVendorSubdir
