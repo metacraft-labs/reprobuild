@@ -71,6 +71,9 @@ import ./challenge
 import ./evidence
 import ./policy
 import ./snp_chain
+import ./tdx_chain
+import ./tdx_collateral
+import ./tdx_quote
 import ./trust
 import ./verdict
 import ./x509
@@ -115,8 +118,23 @@ type
       ##
       ## Empty is, again, not an answer of "nothing is revoked": the
       ## chain evaluator refuses on it. There is deliberately no
-      ## `trustAnchors` companion — the roots of that chain are not the
-      ## operator's to choose. See `snp_chain`.
+      ## `trustAnchors` companion — the roots of those chains are not
+      ## the operator's to choose. See `snp_chain` and `tdx_chain`.
+      ##
+      ## The two vendors' lists travel in the same field on purpose.
+      ## Each evaluator sets aside every list whose issuer is not the
+      ## authority it is judging, by name, so a verifier holding both
+      ## vendors' collateral hands both to both and each takes its own.
+    vendorCollateral*: TdxCollateralBundle
+      ## The vendor-signed documents this VERIFIER fetched: what the
+      ## platform's trusted-computing base is worth, and what the
+      ## quoting enclave is supposed to be. Never taken from the report
+      ## — a machine that chose the document it is judged against would
+      ## be grading its own paper.
+    hasVendorCollateral*: bool
+      ## Whether the field above was filled. An absent bundle is not a
+      ## pass: the reader then establishes no status, and the floor
+      ## check fails for any tier that is supposed to have one.
 
 const
   SoftwareRootTestReportSymbol* = "verifySoftwareRootTestReport"
@@ -125,10 +143,20 @@ const
     ## ``SoftwareRootTestChainSymbol`` in ``trust.nim`` for why a spelling
     ## has to be readable from the build that lacks the symbol.
 
-  BuiltInReaders*: array[2, string] = [MockReaderName, Tpm2ReaderName]
+  BuiltInReaders*: array[3, string] =
+    [MockReaderName, Tpm2ReaderName, TdxReaderName]
     ## The readers this build carries. A verdict whose evidence was read
     ## by anything else is caveated, because it rests on a claim the
     ## caller made rather than on code that shipped here.
+    ##
+    ## **This list is a claim about the build and it has to be kept in
+    ## step with `readAuthoritativeEvidence`'s dispatch.** A reader that
+    ## ships and is not named here caveats every verdict it produces
+    ## with "the caller read this", which is false; one that is named
+    ## here and does not ship would drop a caveat that is true. The
+    ## trust-domain reader was missing from it for exactly as long as it
+    ## existed, and a gate now asserts the absence of that caveat on a
+    ## verdict this build's own reader produced.
 
 # ---------------------------------------------------------------------
 # The individual checks
@@ -332,9 +360,35 @@ proc checkCertificateChain(req: VerificationRequest;
         "-element bundled chain was refused (" & $verdict.reason & "): " &
         verdict.detail)
   of abTdx:
-    violated("this build carries no reader for a " & $inputs.backend &
-      " certificate chain, so the " & $inputs.certificates.len &
-      " bundled element(s) were compared against nothing")
+    if inputs.certificates.len != TdxChainElements:
+      return violated("a trust-domain endorsement chain is " &
+        $TdxChainElements & " certificates — the provisioning " &
+        "certification key, its authority and the vendor's root — and " &
+        "this report bundles " & $inputs.certificates.len)
+    var elements: seq[seq[byte]] = @[]
+    for der in inputs.certificates:
+      var bytes = newSeq[byte](der.len)
+      for i in 0 ..< der.len: bytes[i] = byte(der[i])
+      elements.add bytes
+    var crls: seq[seq[byte]] = @[]
+    for der in req.vendorRevocationLists:
+      var bytes = newSeq[byte](der.len)
+      for i in 0 ..< der.len: bytes[i] = byte(der[i])
+      crls.add bytes
+    # No anchor is passed, because there is no anchor to pass. The set
+    # of roots this can reach is a constant in `tdx_chain`, and the
+    # verdict below is the only thing this function learns about it.
+    let verdict = evaluateIntelPckChain(elements[0], elements[1],
+                                        elements[2], crls,
+                                        req.nowMs div 1000)
+    if verdict.isAccepted:
+      satisfied("the " & $inputs.certificates.len &
+        "-element bundled chain reaches this build's vendor root: " &
+        verdict.detail)
+    else:
+      violated("the " & $inputs.certificates.len &
+        "-element bundled chain was refused (" & $verdict.reason & "): " &
+        verdict.detail)
   of abTpm2:
     # The evaluator is supplied by whichever of this module's two
     # drivers is running. Both call the same eleven checks; the
@@ -679,7 +733,8 @@ proc verifyAttestationReport*(req: VerificationRequest): Verdict =
     return rejectUnparseable(req, err.msg)
   except BindingError as err:
     return rejectUnparseable(req, err.msg)
-  let reading = readAuthoritativeEvidence(report)
+  let reading = readAuthoritativeEvidence(report, req.vendorCollateral,
+                                          req.hasVendorCollateral)
   when defined(reproAttestSoftwareRootTestTrust):
     verifySoftwareRootTestReport(req, report, reading)
   else:

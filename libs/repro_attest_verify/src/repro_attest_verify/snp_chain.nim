@@ -522,13 +522,24 @@ proc parseAmdCertificate*(der: openArray[byte]): AmdCert =
     derFail("tbsCertificate: no version is present, so this is a v1 " &
       "certificate; this profile reads v3 only")
   let serialNode = readTlv(der, t, "serialNumber", tbsNode.fin)
-  expectTag(serialNode, TagInteger, "serialNumber")
-  if serialNode.contentLen == 0 or serialNode.contentLen > 20:
-    derFail("tbsCertificate: the serial number is " &
-      $serialNode.contentLen & " bytes; RFC 5280 bounds it at 20")
-  for i in 0 ..< serialNode.contentLen:
-    result.serialHex.add toHex(int(der[serialNode.contentStart + i]), 2)
-  result.serialHex = result.serialHex.toLowerAscii
+  # One reader for serial numbers, shared with the X.509 profile beside
+  # this one. This used to bound the serial's ENCODING at twenty octets,
+  # where RFC 5280 §4.1.2.2 bounds its VALUE — and DER writes a
+  # non-negative INTEGER whose top bit is set with a leading zero octet,
+  # so a conformant twenty-octet serial above `0x7f…` occupies
+  # twenty-one content octets and was refused.
+  #
+  # No processor vendor certificate in reach is affected: every root and
+  # intermediate this backend reads carries a three-octet serial and
+  # every endorsement key certificate carries a one-octet one, measured
+  # across the live certificate service and every pinned fixture. So
+  # this is a latent bound rather than one anything here trips, and it
+  # is repaired because the repair also brings the two readers into
+  # agreement about what a serial IS — the shared procedure enforces
+  # DER's minimality, which this one did not, and a serial that spells
+  # differently on the two sides of a withdrawal comparison is a
+  # withdrawal that silently does not apply.
+  result.serialHex = readSerialNumber(der, serialNode, "tbsCertificate")
 
   let innerAlgStart = t
   let innerAlg = readTlv(der, t, "tbsCertificate", tbsNode.fin)
@@ -630,10 +641,10 @@ proc parseAmdCrl*(der: openArray[byte]): AmdCrl =
       expectTag(entry, TagSequence, "revoked entry")
       var e = entry.contentStart
       let serialNode = readTlv(der, e, "revoked serialNumber", entry.fin)
-      expectTag(serialNode, TagInteger, "revoked serialNumber")
-      var hex = ""
-      for i in 0 ..< serialNode.contentLen:
-        hex.add toHex(int(der[serialNode.contentStart + i]), 2)
+      # The same reader as the certificate side, deliberately: a serial
+      # is only ever compared against another serial, and the two sides
+      # have to agree about what one is or a withdrawal stops applying.
+      let hex = readSerialNumber(der, serialNode, "revoked entry")
       if result.revokedSerials.len >= MaxRevokedEntries:
         derFail("revocation list: more than " & $MaxRevokedEntries &
           " entries")

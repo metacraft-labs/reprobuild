@@ -23,9 +23,9 @@
 ## launch measurement it attests, the 64 bytes it bound, the vendor's
 ## TCB level. It is the only component that touches signatures.
 ##
-## This build carries two: the **mock** reader and the **measured-boot**
-## reader. For every other backend the reading is a **violation**, not a
-## skip —
+## This build carries three: the **mock** reader, the **measured-boot**
+## reader and the **trust-domain** reader. For every other backend the
+## reading is a **violation**, not a skip —
 ##
 ##     a verdict on evidence that nothing parsed is a verdict on
 ##     nothing,
@@ -110,6 +110,9 @@ import std/[options, strutils]
 import repro_attest
 
 import ./policy
+import ./tdx_chain
+import ./tdx_collateral
+import ./tdx_quote
 import ./verdict
 import ./x509
 
@@ -165,6 +168,11 @@ const
   MockReaderName* = "reproos.mock-evidence.v1 reader"
 
   Tpm2ReaderName* = Tpm2EvidenceSchema & " reader"
+
+  TdxReaderName* = "intel.tdx-quote.v4-v5 reader"
+    ## Named for the wire format rather than for a schema of this
+    ## project's, because the bytes it reads are Intel's and no envelope
+    ## of ours wraps them.
 
   LaunchMeasurementBank* = TpmAlgSha256
     ## The bank the measurement manifest's launch expectations are
@@ -430,13 +438,122 @@ proc readTpm2Evidence(r: AttestationReport;
          SignatureCheckedNoteSuffix
      else: NoSignatureCheckedNote))
 
+proc readTdxEvidence(r: AttestationReport;
+                     inputs: var AuthoritativeInputs;
+                     collateral: TdxCollateralBundle;
+                     haveCollateral: bool): CheckFinding =
+  ## The trust-domain reader: three signatures, one binding, and the
+  ## two facts a verdict downstream needs.
+  ##
+  ## ## What it establishes
+  ##
+  ## That the report's TD measurement and its 64 bound bytes were signed
+  ## by a key whose certificate a provisioning authority issued — and
+  ## that the quoting enclave's report is *about that key* rather than
+  ## about some other one presented beside it. All three signatures are
+  ## checked, and the binding between the second and the first is what
+  ## makes the three one statement instead of three.
+  ##
+  ## ## What it does NOT establish, and why that is a different check
+  ##
+  ## **Who the authority is.** The provisioning certificate comes out of
+  ## the quote, so this reader can say the quote is self-consistent and
+  ## nothing more. Whether the chain reaches a root this build holds the
+  ## key of is `checkCertificateChain`'s question, and it is asked
+  ## against `tdx_chain`'s pinned root with no anchor anybody can
+  ## supply. A reading that reported "signature checked" without saying
+  ## that would be read as more than it is, so the finding names the
+  ## certificate it checked against and leaves the judgement where it
+  ## belongs.
+  ##
+  ## ## The collateral is the verifier's, or there is none
+  ##
+  ## A trusted-computing-base status can only come from vendor-signed
+  ## documents the VERIFIER holds. When none is supplied this reader
+  ## leaves `tdxTcbStatus` unset, and `checkTcbFloor` then reports that
+  ## no reader supplied one — which, for a confidential-computing tier,
+  ## is a failure. That is the fail-closed direction: an absent bundle
+  ## cannot produce an acceptance.
+  inputs.readerName = TdxReaderName
+  var quote: TdxQuote
+  try:
+    quote = parseTdxQuote(toOpenArrayByte(authoritativeEvidence(r), 0,
+      authoritativeEvidence(r).len - 1))
+  except TdxQuoteError as err:
+    return violated("the evidence did not read as a trust-domain " &
+      "attestation quote: " & err.msg)
+  except CatchableError as err:
+    return violated("the evidence did not read as a trust-domain " &
+      "attestation quote: " & err.msg)
+
+  var leaf: X509Cert
+  try:
+    leaf = parseCertificate(quote.pckChain[0])
+  except X509Error as err:
+    return violated("the quote's own endorsement material does not " &
+      "read as a certificate, so there is no key to check its quoting " &
+      "enclave's report against: " & err.msg)
+
+  if not verifyQeReportSignature(quote, leaf.publicKey):
+    return violated("the quoting enclave's report does not verify under " &
+      "the key of " & describeName(leaf.subjectDn, leaf.subjectCn) &
+      ", the certificate the quote carries for it")
+  let binding = qeReportBindsAttestationKey(quote)
+  if not binding.isBound:
+    return violated("the quoting enclave's report is not about this " &
+      "quote's attestation key: " & binding.detail)
+  if not verifyQuoteSignature(quote):
+    return violated("the trust domain's report does not verify under " &
+      "the attestation key the quoting enclave vouched for")
+
+  inputs.launchMeasurement = some(hexOf(quote.body.mrTd))
+  inputs.reportDataInEvidence = some(hexOf(quote.body.reportData))
+  inputs.attestationKeySubject =
+    some(describeName(leaf.subjectDn, leaf.subjectCn))
+
+  var tcbNote = "no vendor collateral was supplied to this reader, so " &
+    "no trusted-computing-base status was established"
+  if haveCollateral:
+    var platform: IntelPlatformDescription
+    try:
+      platform = intelPlatformOf(leaf)
+    except X509Error as err:
+      return violated("the quote's endorsement certificate carries a " &
+        "platform description this build cannot read, so no " &
+        "trusted-computing-base document can be selected: " & err.msg)
+    if not platform.present or not platform.tcb.hasComponents or
+       not platform.tcb.hasPceSvn:
+      return violated("the quote's endorsement certificate states no " &
+        "complete platform description, so the vendor's " &
+        "trusted-computing-base document cannot be applied to it")
+    let verdict = establishTdxTcbStatus(collateral, quote, platform)
+    if not verdict.isEstablished:
+      return violated("the vendor collateral this verifier holds does " &
+        "not establish a trusted-computing-base status for this quote (" &
+        $verdict.outcome & "): " & verdict.detail)
+    inputs.tdxTcbStatus = some(verdict.status)
+    tcbNote = verdict.detail
+
+  satisfied("the evidence is a version-" & $quote.version &
+    " trust-domain attestation quote whose quoting enclave report " &
+    "verifies under " & describeName(leaf.subjectDn, leaf.subjectCn) &
+    ", whose report data is the digest of this quote's own attestation " &
+    "key, and whose trust-domain report verifies under that key; so the " &
+    "measurement and the 64 bound bytes read out of it are values that " &
+    "chain speaks for — whether the chain is one to believe is the " &
+    "certificate-chain check's question and not this one's. " & tcbNote)
+
 proc unreadableBackend(backend: AttestationBackend): CheckFinding =
   violated("this build carries no reader for " & ($backend).escape() &
     " evidence, so nothing parsed the only authoritative field this " &
     "report has; a verdict on evidence nothing read would be a verdict " &
     "on nothing")
 
-proc readAuthoritativeEvidence*(r: AttestationReport): EvidenceReading =
+proc readAuthoritativeEvidence*(r: AttestationReport;
+                                collateral: TdxCollateralBundle =
+                                  TdxCollateralBundle();
+                                haveCollateral: bool = false):
+                               EvidenceReading =
   ## Read one report's evidence with the reader for its backend.
   ##
   ## The dispatch is an exhaustive ``case`` over the backend enum rather
@@ -449,7 +566,10 @@ proc readAuthoritativeEvidence*(r: AttestationReport): EvidenceReading =
     result.finding = readMockEvidence(r, result.inputs)
   of abTpm2:
     result.finding = readTpm2Evidence(r, result.inputs)
-  of abSevSnp, abTdx:
+  of abTdx:
+    result.finding = readTdxEvidence(r, result.inputs, collateral,
+      haveCollateral)
+  of abSevSnp:
     result.inputs.readerName = "none"
     result.finding = unreadableBackend(r.backend)
 

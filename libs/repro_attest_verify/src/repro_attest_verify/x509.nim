@@ -166,6 +166,26 @@ const
   MaxRevokedEntries* = 4_096
   MaxOidArcs* = 16
 
+  MaxSerialValueOctets* = 20
+    ## RFC 5280 §4.1.2.2: "Certificate users MUST be able to handle
+    ## serialNumber values up to 20 octets."
+    ##
+    ## **Twenty octets of VALUE, not twenty octets of encoding, and the
+    ## difference is not academic.** DER writes a non-negative INTEGER
+    ## whose top bit is set with a leading zero octet so it does not read
+    ## as negative, so a conformant 20-octet serial above `0x7f…`
+    ## occupies 21 content octets. Intel issues exactly that: the
+    ## provisioning certification certificates inside every genuine
+    ## attestation quote carry serials beginning `00 bb…` and `00 95…`,
+    ## and a reader that bounded the encoding refused all of them. That
+    ## is how this was found — not by reading the RFC, but by a genuine
+    ## vendor certificate being turned away.
+    ##
+    ## `readSerialNumber` below therefore bounds the value and enforces
+    ## DER's own minimality, so the widening this fixes is not a
+    ## loosening: `00 05` — a leading zero that is not needed — is
+    ## refused now and was accepted before.
+
 # ---------------------------------------------------------------------
 # Tags
 # ---------------------------------------------------------------------
@@ -422,6 +442,47 @@ proc commonNameOf*(buf: openArray[byte]; dnStart, dnEnd: int): string =
       return s
   ""
 
+proc readSerialNumber*(buf: openArray[byte]; node: DerNode;
+                       what: string): string =
+  ## One `CertificateSerialNumber`, as the lower-case hex of the octets
+  ## DER wrote — **including** a leading zero DER's sign rule required.
+  ##
+  ## The hex keeps the encoding rather than the value, and that is the
+  ## deliberate half of this. A serial is only ever compared against
+  ## another serial read by this same procedure out of another DER
+  ## document — a certificate against a revocation list entry — and DER
+  ## gives one value exactly one encoding, so comparing encodings is
+  ## comparing values with no normalisation step to disagree about.
+  ## Stripping the pad here would mean stripping it in both places or in
+  ## neither, and "in one place" is the failure that silently stops a
+  ## revocation from matching.
+  ##
+  ## Three rules, and each refuses something different:
+  ##
+  ##   * an empty INTEGER is not a number;
+  ##   * a redundant leading `0x00` is not DER — it is a second spelling
+  ##     of one serial, and two spellings of one serial is two serials;
+  ##   * more than `MaxSerialValueOctets` octets of value is past what
+  ##     RFC 5280 requires a reader to handle.
+  expectTag(node, TagInteger, what & " serialNumber")
+  if node.contentLen == 0:
+    fail(what & ": the serial number is an empty INTEGER")
+  let leadingPad = buf[node.contentStart] == 0'u8
+  if leadingPad and node.contentLen >= 2 and
+     (buf[node.contentStart + 1] and 0x80'u8) == 0'u8:
+    fail(what & ": the serial number begins 0x00 0x" &
+      toHex(int(buf[node.contentStart + 1]), 2) &
+      ", and DER writes a leading zero octet only when the octet after " &
+      "it has its top bit set; this is a second spelling of one number")
+  let valueOctets = node.contentLen - (if leadingPad: 1 else: 0)
+  if valueOctets > MaxSerialValueOctets:
+    fail(what & ": the serial number carries " & $valueOctets &
+      " octets of value; RFC 5280 bounds it at " & $MaxSerialValueOctets)
+  result = ""
+  for i in 0 ..< node.contentLen:
+    result.add toHex(int(buf[node.contentStart + i]), 2)
+  result = result.toLowerAscii
+
 proc readAlgorithmEcdsaSha256(buf: openArray[byte]; node: DerNode;
                               what: string) =
   expectTag(node, TagSequence, what)
@@ -620,14 +681,7 @@ proc parseCertificate*(der: openArray[byte]): X509Cert =
     fail("tbsCertificate: no version is present, so this is a v1 " &
       "certificate; this build reads v3 only")
   let serialNode = readTlv(der, t, "serialNumber", tbsNode.fin)
-  expectTag(serialNode, TagInteger, "serialNumber")
-  if serialNode.contentLen == 0 or serialNode.contentLen > 20:
-    fail("tbsCertificate: the serial number is " & $serialNode.contentLen &
-      " bytes; RFC 5280 bounds it at 20")
-  result.serialHex = ""
-  for i in 0 ..< serialNode.contentLen:
-    result.serialHex.add toHex(int(der[serialNode.contentStart + i]), 2)
-  result.serialHex = result.serialHex.toLowerAscii
+  result.serialHex = readSerialNumber(der, serialNode, "tbsCertificate")
   let innerAlgNode = readTlv(der, t, "tbsCertificate", tbsNode.fin)
   readAlgorithmEcdsaSha256(der, innerAlgNode, "tbsCertificate")
   let issuerStart = t
@@ -716,15 +770,16 @@ proc parseCrl*(der: openArray[byte]): X509Crl =
       expectTag(entry, TagSequence, "revoked entry")
       var e = entry.contentStart
       let serialNode = readTlv(der, e, "revoked serialNumber", entry.fin)
-      expectTag(serialNode, TagInteger, "revoked serialNumber")
-      var hex = ""
-      for i in 0 ..< serialNode.contentLen:
-        hex.add toHex(int(der[serialNode.contentStart + i]), 2)
+      # The SAME reader as the certificate's, for the same reason a
+      # revocation match is a string comparison: two readers would be
+      # two spellings, and a serial that spells differently on the two
+      # sides is a revocation that silently does not apply.
+      let hex = readSerialNumber(der, serialNode, "revoked entry")
       let dateNode = readTlv(der, e, "revocationDate", entry.fin)
       if result.revoked.len >= MaxRevokedEntries:
         fail("revocation list: more than " & $MaxRevokedEntries & " entries")
       result.revoked.add X509RevokedEntry(
-        serialHex: hex.toLowerAscii,
+        serialHex: hex,
         revokedAt: parseDerTime(der, dateNode, "revocationDate"))
   if t < tbsNode.fin and der[t] == TagContext0:
     discard readTlv(der, t, "crlExtensions", tbsNode.fin)
