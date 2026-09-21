@@ -141,3 +141,74 @@ suite "de-inheriting a git-vendored crate manifest":
     check w.package["edition"] == "\"2024\""
     check w.dependencies["foo"] == "\"3\""
     check w.dependencies["bar"] == "{ version = \"2\" }"
+
+suite "repointing intra-workspace path dependencies":
+
+  proc sib(): Table[string, string] =
+    ## mxc_b's vendor directory is <name>-<version>, as `directoryName` names it.
+    {"mxc_b": "mxc_b-0.4.0", "mxc_c": "mxc_c-1.2.0"}.toTable
+
+  test "an inline path+version dep is repointed at the sibling vendor dir":
+    let res = rewriteWorkspacePathDeps(
+      "[dependencies]\nmxc_b = { version = \"0.4.0\", path = \"crates/mxc_b\" }\n",
+      sib())
+    check "path = \"../mxc_b-0.4.0\"" in res
+    check "version = \"0.4.0\"" in res          # version is KEPT
+    check "crates/mxc_b" notin res
+
+  test "the path is kept, never dropped for a bare version":
+    # A version-only dep would resolve against crates.io, not the vendored git
+    # source — so the rewrite must never strip the path down to a version.
+    let res = rewriteWorkspacePathDeps(
+      "[dependencies]\nmxc_b = { path = \"crates/mxc_b\", version = \"0.4.0\" }\n",
+      sib())
+    check "path = " in res
+
+  test "a dotted dep.path is repointed":
+    let res = rewriteWorkspacePathDeps(
+      "[dependencies]\nmxc_b.path = \"crates/mxc_b\"\nmxc_b.version = \"0.4.0\"\n",
+      sib())
+    check "mxc_b.path = \"../mxc_b-0.4.0\"" in res
+    check "mxc_b.version = \"0.4.0\"" in res
+
+  test "a [dependencies.<sibling>] section path line is repointed":
+    # This is the spelling `cargo vendor` itself emits.
+    let res = rewriteWorkspacePathDeps(
+      "[dependencies.mxc_b]\nversion = \"0.4.0\"\npath = \"crates/mxc_b\"\n",
+      sib())
+    check "path = \"../mxc_b-0.4.0\"" in res
+    check "version = \"0.4.0\"" in res
+
+  test "a build-dependencies sibling path is repointed too":
+    let res = rewriteWorkspacePathDeps(
+      "[build-dependencies]\nmxc_c = { path = \"../mxc_c\", version = \"1.2.0\" }\n",
+      sib())
+    check "path = \"../mxc_c-1.2.0\"" in res
+
+  test "a non-sibling path dependency is left exactly alone":
+    let crate = "[dependencies]\nhelper = { path = \"../helper\" }\n"
+    check rewriteWorkspacePathDeps(crate, sib()) == crate
+
+  test "a sibling without a path (a plain version) is not given one":
+    # Nothing to repoint; inventing a path would be wrong. Left byte for byte.
+    let crate = "[dependencies]\nmxc_b = \"0.4.0\"\n"
+    check rewriteWorkspacePathDeps(crate, sib()) == crate
+
+  test "no siblings means the manifest passes through byte for byte":
+    let crate = "[dependencies]\nmxc_b = { path = \"crates/mxc_b\" }\n"
+    check rewriteWorkspacePathDeps(crate, initTable[string, string]()) == crate
+
+  test "de-inherit then repoint composes: workspace path dep lands corrected":
+    # The real codex shape: the crate inherits mxc_b from the workspace, whose
+    # [workspace.dependencies] entry carries BOTH a path and a version. Deinherit
+    # inlines that spec (path and all); the repoint then fixes the path.
+    var w: WorkspaceInheritance
+    w.dependencies = {
+      "mxc_b": "{ path = \"crates/mxc_b\", version = \"0.4.0\" }"}.toTable
+    let inlined = deinheritCargoToml(
+      "[dependencies]\nmxc_b = { workspace = true }\n", w)
+    check "crates/mxc_b" in inlined          # deinherit carried the wrong path
+    let res = rewriteWorkspacePathDeps(inlined, sib())
+    check "path = \"../mxc_b-0.4.0\"" in res
+    check "version = \"0.4.0\"" in res
+    check "crates/mxc_b" notin res

@@ -356,3 +356,135 @@ proc deinheritCargoToml*(crateToml: string;
   # newline, so joining round-trips the terminator (and any `\r`) exactly —
   # no separate trailing-newline fix-up, which would double it.
   result = outLines.join("\n")
+
+# ---------------------------------------------------------------------------
+# Intra-workspace ``path`` dependencies.
+#
+# A git repository's workspace member commonly depends on a SIBLING member by
+# path — ``mxc_b = { path = "crates/mxc_b", version = "0.4.0" }`` — or inherits
+# such a spec through ``mxc_b = { workspace = true }`` (which `deinheritCargoToml`
+# inlines to the same, carrying the workspace's path). Once the crates are
+# vendored the path is wrong twice over: it was written relative to the
+# workspace root, and the sibling now lives in its own flat vendor directory.
+#
+# The fix is NOT to drop the path and keep the version — a bare version makes
+# cargo look the crate up on crates.io (``no matching package named `mxc_b`
+# found; location searched: crates.io index``), because a version-only
+# dependency defaults to the registry source, not the vendored git source. The
+# path is what binds the dependency to the same source. So the path is KEPT and
+# REPOINTED at the sibling's vendor directory, matching what `cargo vendor`
+# does (it keeps the path too, repointed at its flat ``../<name>`` sibling).
+# Here the vendor directory is ``<name>-<version>`` (see `directoryName`), so
+# the path becomes ``../<name>-<version>``.
+
+proc rewritePathValue(value, dirRel: string): tuple[text: string, hit: bool] =
+  ## Replace the ``path`` field of an inline-table dependency value with
+  ## ``dirRel`` (a quoted string), keeping every other field and its order.
+  ## ``hit`` is false — value returned unchanged — when the value is not an
+  ## inline table or carries no ``path``.
+  let s = value.strip()
+  if s.len < 2 or s[0] != '{':
+    return (value, false)
+  var parts: seq[string] = @[]
+  var hit = false
+  for (k, v) in inlineTableFields(value):
+    if k == "path":
+      hit = true
+      parts.add("path = " & dirRel)
+    else:
+      parts.add(k & " = " & v)
+  if not hit:
+    return (value, false)
+  ("{ " & parts.join(", ") & " }", true)
+
+proc splitLastDot(header: string): tuple[prefix, last: string] =
+  ## Split a table header on its last ``.`` that is outside quotes, so a
+  ## ``target.'cfg(unix)'.dependencies.mxc_b`` header yields prefix
+  ## ``target.'cfg(unix)'.dependencies`` and last ``mxc_b``. A header with no
+  ## unquoted ``.`` yields an empty prefix.
+  var inStr = false
+  var quote = ' '
+  var idx = -1
+  for i, ch in header:
+    if inStr:
+      if ch == quote: inStr = false
+    elif ch == '"' or ch == '\'':
+      inStr = true; quote = ch
+    elif ch == '.':
+      idx = i
+  if idx < 0:
+    ("", header)
+  else:
+    (header[0 ..< idx], header[idx + 1 .. ^1])
+
+proc rewriteWorkspacePathDeps*(crateToml: string;
+                               siblings: Table[string, string]): string =
+  ## Repoint every ``path`` dependency that names a sibling vendored crate at
+  ## that sibling's vendor directory. ``siblings`` maps a crate NAME to its
+  ## vendor directory name (``<name>-<version>``); a dependency whose name is
+  ## absent from the table, or which carries no ``path``, is left exactly as
+  ## written. Handles the three dependency spellings cargo accepts: the inline
+  ## table (``dep = { path = … }``), the dotted key (``dep.path = …``), and the
+  ## section table (``[dependencies.dep]`` with a ``path = …`` line).
+  if siblings.len == 0:
+    return crateToml
+  var current = ""
+  var sectionDep = ""
+  var outLines: seq[string] = @[]
+  for rawLine in crateToml.splitLines():
+    let header = tableHeader(rawLine)
+    if header.len > 0:
+      current = header
+      sectionDep = ""
+      let (prefix, last) = splitLastDot(header)
+      if isDependencyTable(prefix) and siblings.hasKey(last):
+        sectionDep = last
+      outLines.add(rawLine)
+      continue
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      outLines.add(rawLine)
+      continue
+
+    var indentLen = 0
+    while indentLen < rawLine.len and rawLine[indentLen] in {' ', '\t'}:
+      inc indentLen
+    let indent = rawLine[0 ..< indentLen]
+
+    # A ``path = …`` line inside a ``[dependencies.<sibling>]`` section table.
+    if sectionDep.len > 0:
+      let kv = splitKeyValue(line)
+      if kv.ok and kv.key == "path":
+        outLines.add(indent & "path = \"../" & siblings[sectionDep] & "\"")
+        continue
+      outLines.add(rawLine)
+      continue
+
+    if not isDependencyTable(current):
+      outLines.add(rawLine)
+      continue
+
+    let kv = splitKeyValue(line)
+    if not kv.ok:
+      outLines.add(rawLine)
+      continue
+
+    # Dotted ``dep.path = "…"``.
+    if kv.key.endsWith(".path"):
+      let dep = kv.key[0 ..< ^len(".path")]
+      if siblings.hasKey(dep):
+        outLines.add(indent & dep & ".path = \"../" & siblings[dep] & "\"")
+        continue
+      outLines.add(rawLine)
+      continue
+
+    # Inline ``dep = { … path = "…" … }``.
+    if siblings.hasKey(kv.key):
+      let (rewritten, hit) = rewritePathValue(kv.value,
+        "\"../" & siblings[kv.key] & "\"")
+      if hit:
+        outLines.add(indent & kv.key & " = " & rewritten)
+        continue
+    outLines.add(rawLine)
+
+  result = outLines.join("\n")
