@@ -334,6 +334,13 @@ jobs:
           owner: metacraft-labs
           # setup-dev-env uses the lint closure; the test job also clones the
           # three repositories appended below explicitly.
+          #
+          # These are EXACT current repository names. The mint does NOT follow
+          # the rename redirect that the REST API does, so a renamed entry
+          # fails the whole token with a 422 and every later step is skipped,
+          # including `just test`. `gosti` below was `vm-harness`.
+          # NB: the list is a literal block scalar -- a `#` line inside it is
+          # sent as a repository name, not treated as a comment.
           repositories: |
             codetracer
             codetracer-design-system
@@ -373,7 +380,7 @@ jobs:
             codetracer-native-recorder
             reprobuild-cmake
             reprobuild-examples
-            vm-harness
+            gosti
           permission-contents: read
 
       # Sibling clones: setup-dev-env clones the CodeTracer sibling declared in
@@ -436,7 +443,10 @@ jobs:
       - name: Clone vm-harness sibling
         uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
         with:
-          repo: metacraft-labs/vm-harness
+          # The REPO was renamed to gosti; the local PATH stays ../vm-harness
+          # because that is what `config.nims` falls back to (see above), so
+          # the checkout must keep the directory name the build expects.
+          repo: metacraft-labs/gosti
           ref: dev
           path: ${{ github.workspace }}/../vm-harness
           gh-token: ${{ steps.ci_token.outputs.token }}
