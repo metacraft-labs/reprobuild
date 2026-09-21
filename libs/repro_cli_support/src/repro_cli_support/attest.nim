@@ -107,6 +107,16 @@ type
     hexOnly*: bool
     trustAnchorPaths*: seq[string]
     revocationListPaths*: seq[string]
+    firmware*: string
+    vcpus*: string
+    vcpuType*: string
+    guestPolicy*: string
+    guestFeatures*: string
+    vmm*: string
+    snpKernel*: string
+    snpInitrd*: string
+    snpCmdline*: string
+    hasSnpCmdline*: bool
 
 type
   AttestExitCode* = enum
@@ -185,6 +195,21 @@ repro attest expect --image <dir-or-uki> [options]
       --config-fingerprint TOKEN    the recipe's configuration fingerprint
       --backend NAME                compute this backend only; repeatable
                                     (""" & KnownBackends.join(", ") & """)
+      --firmware PATH               the confidential-launch firmware image;
+                                    supplying it computes the sev-snp
+                                    expectation, and requires the five flags
+                                    below
+      --vcpus N                     how many processors the guest is launched
+                                    with
+      --vcpu-type NAME              the machine model the hypervisor presents
+      --guest-policy 0xHEX          the launch policy the guest is started
+                                    under
+      --guest-features 0xHEX        the feature word each processor starts with
+      --vmm NAME                    the hypervisor that will start it (""" &
+    KnownVmms.join(", ") & """)
+      --launch-kernel PATH          measure a directly booted kernel
+      --launch-initrd PATH          the initial ramdisk beside it
+      --launch-cmdline TEXT         the command line beside it
       --out PATH                    write the manifest instead of printing it
       --check PATH                  compare against an existing manifest and
                                     exit 1 if it differs
@@ -296,6 +321,18 @@ proc parseAttestArgs*(args: seq[string]): AttestCliOptions =
     of "--config-fingerprint":
       result.configFingerprint = valueFor(args, i, "--config-fingerprint")
     of "--backend": result.backends.add valueFor(args, i, "--backend")
+    of "--firmware": result.firmware = valueFor(args, i, "--firmware")
+    of "--vcpus": result.vcpus = valueFor(args, i, "--vcpus")
+    of "--vcpu-type": result.vcpuType = valueFor(args, i, "--vcpu-type")
+    of "--guest-policy": result.guestPolicy = valueFor(args, i, "--guest-policy")
+    of "--guest-features":
+      result.guestFeatures = valueFor(args, i, "--guest-features")
+    of "--vmm": result.vmm = valueFor(args, i, "--vmm")
+    of "--launch-kernel": result.snpKernel = valueFor(args, i, "--launch-kernel")
+    of "--launch-initrd": result.snpInitrd = valueFor(args, i, "--launch-initrd")
+    of "--launch-cmdline":
+      result.snpCmdline = valueFor(args, i, "--launch-cmdline")
+      result.hasSnpCmdline = true
     of "--out": result.outPath = valueFor(args, i, "--out")
     of "--check": result.checkPath = valueFor(args, i, "--check")
     else:
@@ -373,13 +410,104 @@ proc runAttestExpect(opts: AttestCliOptions): int =
     if opts.backends.len > 0: opts.backends
     else: @(KnownBackends)
 
+  # The confidential-launch expectation. It is computed only when the
+  # caller names the firmware, because the measurement is a function of
+  # the firmware's bytes and of five things no build can infer — how many
+  # processors, which machine model, which hypervisor, which feature
+  # word, which launch policy. There is no default for any of them: a
+  # default would produce a well-formed digest for a machine nobody asked
+  # for, and the symptom would arrive months later as an attestation
+  # failure with nothing to point at. So naming the firmware requires
+  # naming all five, and naming none of them leaves the array empty and
+  # visibly so.
+  var launches: seq[SevSnpLaunchInputs] = @[]
+  if opts.firmware.len == 0:
+    for flag in [("--vcpus", opts.vcpus), ("--vcpu-type", opts.vcpuType),
+                 ("--guest-policy", opts.guestPolicy),
+                 ("--guest-features", opts.guestFeatures),
+                 ("--vmm", opts.vmm), ("--launch-kernel", opts.snpKernel),
+                 ("--launch-initrd", opts.snpInitrd)]:
+      if flag[1].len > 0:
+        stderr.writeLine("repro attest expect: " & flag[0] & " describes a " &
+          "confidential launch and no --firmware was given, so nothing " &
+          "would be measured with it")
+        return 2
+    if opts.hasSnpCmdline:
+      stderr.writeLine("repro attest expect: --launch-cmdline describes a " &
+        "confidential launch and no --firmware was given, so nothing would " &
+        "be measured with it")
+      return 2
+  else:
+    if not fileExists(opts.firmware):
+      stderr.writeLine("repro attest expect: no firmware image at " &
+        opts.firmware)
+      return 2
+    var inputs = SevSnpLaunchInputs(firmware: readFile(opts.firmware))
+    for flag in [("--vcpus", opts.vcpus), ("--vcpu-type", opts.vcpuType),
+                 ("--guest-policy", opts.guestPolicy),
+                 ("--guest-features", opts.guestFeatures),
+                 ("--vmm", opts.vmm)]:
+      if flag[1].len == 0:
+        stderr.writeLine("repro attest expect: --firmware computes a " &
+          "confidential-launch expectation and " & flag[0] & " is required " &
+          "with it; a launch measurement computed from a default is a " &
+          "number no machine will report")
+        return 2
+    try:
+      inputs.vcpus = parseInt(opts.vcpus)
+    except ValueError:
+      stderr.writeLine("repro attest expect: --vcpus is not a number: " &
+        opts.vcpus)
+      return 2
+    inputs.vcpuType = opts.vcpuType
+    for flag in [("--guest-policy", opts.guestPolicy),
+                 ("--guest-features", opts.guestFeatures)]:
+      if not flag[1].startsWith("0x"):
+        stderr.writeLine("repro attest expect: " & flag[0] &
+          " must be written as 0x<hex>, got " & flag[1])
+        return 2
+    try:
+      inputs.guestPolicy = uint64(parseHexInt(opts.guestPolicy))
+      inputs.guestFeatures = uint64(parseHexInt(opts.guestFeatures))
+    except ValueError:
+      stderr.writeLine("repro attest expect: --guest-policy and " &
+        "--guest-features must be hexadecimal")
+      return 2
+    if opts.snpKernel.len > 0:
+      if not fileExists(opts.snpKernel):
+        stderr.writeLine("repro attest expect: no kernel at " & opts.snpKernel)
+        return 2
+      inputs.measuresKernel = true
+      inputs.kernel = readFile(opts.snpKernel)
+      if opts.snpInitrd.len > 0:
+        if not fileExists(opts.snpInitrd):
+          stderr.writeLine("repro attest expect: no initial ramdisk at " &
+            opts.snpInitrd)
+          return 2
+        inputs.initrd = readFile(opts.snpInitrd)
+      inputs.cmdline = opts.snpCmdline
+    elif opts.snpInitrd.len > 0 or opts.hasSnpCmdline:
+      stderr.writeLine("repro attest expect: --launch-initrd and " &
+        "--launch-cmdline are measured as part of a directly booted " &
+        "kernel's digests, and no --launch-kernel was given")
+      return 2
+    try:
+      inputs.vmm = vmmKindFor(opts.vmm)
+    except SnpLaunchError as err:
+      stderr.writeLine("repro attest expect: --vmm: " & err.msg)
+      return 2
+    launches.add inputs
+
   var text = ""
   try:
     let manifest = attestedImageManifest(opts.configFingerprint,
-      readFile(ukiPath), verityDigest, rootHash, backends)
+      readFile(ukiPath), verityDigest, rootHash, backends, launches)
     text = renderAttestedImageManifest(manifest)
   except ManifestError as err:
     stderr.writeLine("repro attest expect: " & err.msg)
+    return 2
+  except SnpLaunchError as err:
+    stderr.writeLine("repro attest expect: " & opts.firmware & ": " & err.msg)
     return 2
   except MeasurementError as err:
     stderr.writeLine("repro attest expect: " & ukiPath & ": " & err.msg)

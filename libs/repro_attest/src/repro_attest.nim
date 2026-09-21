@@ -10,6 +10,9 @@
 ##   * ``repro_attest/measurement`` — precomputation of a unified kernel
 ##     image's PCR 11 from the image bytes, and the replay template that
 ##     lets a verifier re-derive it without the image.
+##   * ``repro_attest/snp_launch`` — precomputation of the launch
+##     measurement a confidential guest's security processor will report,
+##     from the firmware image and the parameters of the launch.
 ##   * ``repro_attest/manifest`` — the ``reproos.attested-image.v1``
 ##     document: typed record, canonical renderer, strict parser.
 ##   * ``repro_attest/tpm2`` — the TPM 2.0 structure codec: the
@@ -53,6 +56,7 @@
 ##     assembles it.
 
 import ./repro_attest/measurement
+import ./repro_attest/snp_launch
 import ./repro_attest/tpm2
 import ./repro_attest/event_log
 import ./repro_attest/manifest
@@ -64,5 +68,5 @@ import ./repro_attest/mock_backend
 import ./repro_attest/tpm2_backend
 import ./repro_attest/sealing
 
-export measurement, tpm2, event_log, manifest, binding, report, driver,
-       provision, mock_backend, tpm2_backend, sealing
+export measurement, snp_launch, tpm2, event_log, manifest, binding, report,
+       driver, provision, mock_backend, tpm2_backend, sealing

@@ -42,6 +42,7 @@
 import std/[json, strutils]
 
 import ./measurement
+import ./snp_launch
 
 type
   ManifestError* = object of CatchableError
@@ -377,24 +378,109 @@ proc tpmExpectationFor*(ukiImage: string): TpmExpectation =
   let m = measureUkiPcr11(ukiImage)
   TpmExpectation(pcr11: m.pcr11, eventLogTemplate: renderEventLogTemplate(m))
 
+type
+  SevSnpLaunchInputs* = object
+    ## One confidential launch, as the build knows it.
+    ##
+    ## Every field here is an input to the measurement, and there is no
+    ## default for any of them: a wrong `vcpus`, a wrong machine model, a
+    ## wrong hypervisor or a wrong feature word each produce a
+    ## well-formed digest that no machine will ever report, and the
+    ## symptom arrives at the far end of a deployment as an attestation
+    ## failure with nothing to point at. So the caller states all of it.
+    firmware*: string
+      ## The confidential-launch firmware image, whole.
+    vcpus*: int
+    vcpuType*: string
+      ## The machine model the hypervisor will present, by the name it
+      ## is asked for by.
+    guestPolicy*: uint64
+      ## The launch policy. It is NOT an input to the measurement — it
+      ## is a separate field of the report — and it is recorded because
+      ## a verifier has to check it against the report too.
+    guestFeatures*: uint64
+    vmm*: SnpVmmKind
+    measuresKernel*: bool
+    kernel*, initrd*: string
+    cmdline*: string
+
+proc lowerHexOf(v: uint64): string =
+  ## The shortest lower-case hexadecimal spelling, which is the one the
+  ## schema's ``policy`` key accepts. Written out because ``toHex`` pads
+  ## or truncates to a width, and either would produce a document this
+  ## build's own parser refuses.
+  if v == 0: return "0"
+  const Digits = "0123456789abcdef"
+  var x = v
+  var reversed = ""
+  while x > 0'u64:
+    reversed.add Digits[int(x and 0xf'u64)]
+    x = x shr 4
+  for i in countdown(reversed.len - 1, 0): result.add reversed[i]
+
+proc sevSnpExpectationFor*(inputs: SevSnpLaunchInputs): SevSnpExpectation =
+  ## The confidential-launch expectation for one launch shape.
+  ##
+  ## ## What this entry does and does not determine
+  ##
+  ## The TPM entry beside it carries a replay template, and the validator
+  ## replays it and refuses an entry that disagrees with itself. **This
+  ## entry cannot be checked that way, and the reason is the schema.**
+  ## The measurement depends on the firmware's bytes, the processor count
+  ## and model, the hypervisor, the feature word, and the digests of a
+  ## directly booted kernel; the schema has room for the processor count,
+  ## the model, and the firmware's *digest*. A digest is not the bytes,
+  ## and three of the inputs have no key at all.
+  ##
+  ## So a reader of a published manifest can compare this value against a
+  ## report; it cannot re-derive it from the document. Closing that is a
+  ## schema change, which would have to carry every document already
+  ## written, and it is not made here — but it is written down, because
+  ## a field that looks self-describing and is not is worse than one that
+  ## does not look it.
+  var p = SevLaunchParameters(mode: slmSevSnp, vcpus: inputs.vcpus,
+    vcpuSignature: cpuSignatureFor(inputs.vcpuType),
+    guestFeatures: inputs.guestFeatures, vmm: inputs.vmm,
+    hasKernel: inputs.measuresKernel, cmdline: inputs.cmdline)
+  for c in inputs.firmware: p.firmware.add byte(c)
+  for c in inputs.kernel: p.kernel.add byte(c)
+  for c in inputs.initrd: p.initrd.add byte(c)
+  SevSnpExpectation(
+    vcpus: inputs.vcpus,
+    vcpuType: inputs.vcpuType,
+    ovmf: DigestPrefix & sha256Hex(inputs.firmware),
+    policy: "0x" & lowerHexOf(inputs.guestPolicy),
+    measurement: launchDigestHex(p))
+
 proc attestedImageManifest*(configFingerprint, ukiImage, verityImageDigest,
                             verityRootHash: string;
-                            backends: openArray[string] = KnownBackends
+                            backends: openArray[string] = KnownBackends;
+                            sevSnpLaunches: openArray[SevSnpLaunchInputs] = []
                             ): AttestedImageManifest =
   ## Build the manifest for one attested image.
   ##
   ## ``backends`` enumerates the launch shapes to compute. A name outside
   ## ``KnownBackends`` is refused HERE — at the build — so an image is
-  ## never published with an expectation nothing can verify. Backends
-  ## whose calculators do not exist yet contribute an empty array, which
-  ## says "this build computed no expectation for you" rather than
-  ## silently omitting the key.
+  ## never published with an expectation nothing can verify.
+  ##
+  ## ``sevSnpLaunches`` is empty for a build that does not know how its
+  ## image will be launched, and the confidential-launch array is then
+  ## emitted as visibly EMPTY rather than omitted: "this build computed
+  ## no expectation for you" is a statement, and a missing key is not.
+  ## A launch supplied while that backend is not among ``backends`` is
+  ## refused rather than dropped — a parameter that does nothing is a
+  ## lie about what was published.
   for b in backends:
     if b notin KnownBackends:
       raise newException(ManifestError,
         "unknown launch measurement backend " & b.escapeJson() &
         "; this build computes " & KnownBackends.join(", ") &
         " and refuses to emit an expectation it cannot name")
+  if sevSnpLaunches.len > 0 and BackendSevSnp notin backends:
+    raise newException(ManifestError,
+      $sevSnpLaunches.len & " confidential launch shape(s) were supplied " &
+      "and " & BackendSevSnp.escapeJson() & " is not among the backends " &
+      "being computed, so they would be measured and thrown away")
   result.configFingerprint = configFingerprint
   result.imageOutputs = ImageOutputs(
     uki: DigestPrefix & sha256Hex(ukiImage),
@@ -402,7 +488,10 @@ proc attestedImageManifest*(configFingerprint, ukiImage, verityImageDigest,
     verityRootHash: verityRootHash)
   if BackendTpm in backends:
     result.tpm = @[tpmExpectationFor(ukiImage)]
-  # sev-snp and tdx launch-digest precomputation is not implemented; the
-  # arrays stay empty and say so, rather than carrying a placeholder a
-  # verifier could mistake for a computed value.
+  if BackendSevSnp in backends:
+    for launch in sevSnpLaunches:
+      result.sevSnp.add sevSnpExpectationFor(launch)
+  # The other vendor's launch-digest precomputation is not implemented;
+  # that array stays empty and says so, rather than carrying a
+  # placeholder a verifier could mistake for a computed value.
   validateAttestedImageManifest(result)

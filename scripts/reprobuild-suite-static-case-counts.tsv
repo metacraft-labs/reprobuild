@@ -1396,7 +1396,10 @@ tests/integration/t_shared_clone_uses_full_repo_url_for_base_remote.nim	nim	1
 tests/integration/t_shell_entry_reports_drift_over_the_applied_overrides.nim	nim	1
 tests/integration/t_single_platform_entries_declare_platforms.nim	nim	8
 tests/integration/t_snp_chain_requires_amd_root.nim	nim	27
+tests/integration/t_snp_digest_vectors.nim	nim	16
+tests/integration/t_snp_expectation_reaches_the_manifest.nim	nim	12
 tests/integration/t_snp_fixture_verify.nim	nim	20
+tests/integration/t_snp_launch_refusals.nim	nim	34
 tests/integration/t_snp_tcb_policy.nim	nim	15
 tests/integration/t_solved_packages_are_first_class_locked_deps.nim	nim	1
 tests/integration/t_source_producer_revalidation.nim	nim	2
