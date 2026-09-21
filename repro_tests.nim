@@ -13896,8 +13896,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "tests/unit/t_cargo_lock_vendor_plan.nim",
-    binary: "build/test-bin/t_cargo_lock_vendor_plan",
+    source: "tests/unit/t_cargo_deinherit.nim",
+    binary: "build/test-bin/t_cargo_deinherit",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -13905,8 +13905,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "tests/unit/t_cargo_deinherit.nim",
-    binary: "build/test-bin/t_cargo_deinherit",
+    source: "tests/unit/t_cargo_lock_vendor_plan.nim",
+    binary: "build/test-bin/t_cargo_lock_vendor_plan",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -15041,6 +15041,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_nix_propagated_store_paths.nim",
     binary: "build/test-bin/t_nix_propagated_store_paths",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_nonredistributable_publish_gate.nim",
+    binary: "build/test-bin/t_nonredistributable_publish_gate",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

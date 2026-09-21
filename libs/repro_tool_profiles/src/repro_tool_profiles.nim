@@ -3149,6 +3149,18 @@ proc substituteToolPrefix(plan: TarballAcquisitionPlan;
       version & " from the shared cache (no download)")
     flushStoreDiagnostics()
 
+proc barredFromCachePublication*(plan: TarballAcquisitionPlan): bool =
+  ## Whether a realized prefix must NOT be uploaded to a shared binary cache,
+  ## as a property of the PACKAGE rather than of the machine running it. The
+  ## sole bar today is a ``nonRedistributable`` payload: a licence that lets
+  ## this machine fetch and realize the bytes for its own use does not
+  ## necessarily let it re-serve them to everyone else, and a cache is
+  ## re-serving. ``publishToolPrefix`` consults this BEFORE it looks for
+  ## publish credentials, so the payload stays unpublished on a machine
+  ## configured to publish exactly as on one that is not — the refusal cannot
+  ## be an accident of who happens to have credentials.
+  plan.declaredNonRedistributable
+
 proc publishToolPrefix(plan: TarballAcquisitionPlan;
                        packageName, version, prefix: string) =
   ## Publish a freshly realized prefix so the next machine substitutes it.
@@ -3176,7 +3188,7 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
   #
   # Checked before the credential test rather than after, so the refusal is
   # a property of the package rather than an accident of who is running.
-  if plan.declaredNonRedistributable:
+  if barredFromCachePublication(plan):
     return
   let keyPath = getEnv("REPRO_BINARY_CACHE_KEY_PATH", "")
   let certPath = getEnv("REPRO_BINARY_CACHE_CERT_PATH", "")
