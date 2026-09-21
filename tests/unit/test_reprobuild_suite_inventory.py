@@ -7210,6 +7210,10 @@ compileProfileBinary()
 
         for summary_update in [
             {"passed": 9, "failed": 1},
+            # Still rejected, but no longer because skips are banned: this
+            # record carries no ``skippedWithoutReasonCount``, and for a
+            # record predating that field the only safe reading is the old
+            # one. The explained-skip path is exercised below.
             {"passed": 9, "skipped": 1},
         ]:
             with self.subTest(summary_update=summary_update):
@@ -7232,6 +7236,124 @@ compileProfileBinary()
         rejected = clone()
         rejected["runs"].append(json.loads(json.dumps(rejected["runs"][2])))
         self.assertIsNone(inventory.completed_clean_attempt(rejected))
+
+    def test_completed_clean_runs_admits_explained_skips_but_not_bare_ones(self):
+        """A skip that says why is not an incompleteness; a silent one is.
+
+        The predicate used to require ``passed == total``, which — because
+        the runner's four statuses partition ``total`` — meant every single
+        case had to PASS. A suite with any honest platform gate in it could
+        therefore never be recorded as complete or measured, and every
+        conversion of a vacuous pass into a real skip pushed the suite
+        further out of reach. The rule is now "pass or explained skip".
+        """
+        fingerprint = "same-source"
+
+        def timing_with(summary: dict, rollup_extra: dict | None = None) -> dict:
+            runner_summary: dict = {"summary": dict(summary)}
+            runner_summary.update(rollup_extra or {})
+            return {
+                "sourceFingerprint": fingerprint,
+                "runs": [
+                    {
+                        "attemptIndex": 1,
+                        "attemptKind": "clean",
+                        "cleanFirst": True,
+                        "label": label,
+                        "exitCode": 0,
+                        "timedOut": False,
+                        "elapsedMs": 1000 + index,
+                        "summaryJson": f"evidence/{label}.json",
+                        "summarySha256": f"{index + 1:064x}",
+                        "sourceFingerprint": fingerprint,
+                        "runnerSummary": json.loads(json.dumps(runner_summary)),
+                    }
+                    for index, label in enumerate(
+                        ["clean-cold", "clean-warm-1", "clean-warm-2"]
+                    )
+                ],
+            }
+
+        # Nine passes and one skip, and the run states that every skip it
+        # contains carries a reason. That is a complete run.
+        explained = timing_with(
+            {"total": 10, "passed": 9, "failed": 0, "skipped": 1,
+             "harness_errors": 0},
+            {"skippedWithoutReasonCount": 0},
+        )
+        self.assertEqual(inventory.completed_clean_attempt(explained), 1)
+        self.assertEqual(inventory.measured_timing(explained)["coldRunMs"], 1000)
+
+        # The same counts, but one of those skips never said why. The run
+        # cannot be distinguished from one that quietly stopped running a
+        # case, so it does not count as complete.
+        bare = timing_with(
+            {"total": 10, "passed": 9, "failed": 0, "skipped": 1,
+             "harness_errors": 0},
+            {"skippedWithoutReasonCount": 1},
+        )
+        self.assertIsNone(inventory.completed_clean_attempt(bare))
+
+        # An all-pass run stays complete — this rule loosens what counts as
+        # complete, it does not change the meaning of a passing suite.
+        all_pass = timing_with(
+            {"total": 10, "passed": 10, "failed": 0, "skipped": 0,
+             "harness_errors": 0},
+            {"skippedWithoutReasonCount": 0},
+        )
+        self.assertEqual(inventory.completed_clean_attempt(all_pass), 1)
+
+        # A harness error is NOT an explained skip. Under the old rule
+        # ``passed == total`` excluded it for free; now that the rule is
+        # arithmetic, a case that never started must still disqualify the
+        # run, whether it shows up as an unaccounted-for case...
+        unaccounted = timing_with(
+            {"total": 10, "passed": 8, "failed": 0, "skipped": 1,
+             "harness_errors": 1},
+            {"skippedWithoutReasonCount": 0},
+        )
+        self.assertIsNone(inventory.completed_clean_attempt(unaccounted))
+
+        # ...or as an artifact whose own counts contradict each other
+        # (buckets sum to ``total``, yet a non-zero error is reported).
+        self_contradictory = timing_with(
+            {"total": 10, "passed": 9, "failed": 0, "skipped": 1,
+             "harness_errors": 1},
+            {"skippedWithoutReasonCount": 0},
+        )
+        self.assertIsNone(inventory.completed_clean_attempt(self_contradictory))
+
+    def test_summarize_runner_counts_skips_that_never_said_why(self):
+        """The reason must come from the cases, not from a producer's claim."""
+        doc = {
+            "summary": {"total": 3, "passed": 1, "failed": 0, "skipped": 2,
+                        "harness_errors": 0},
+            "tests": [
+                {"name": "runs here", "status": "PASS"},
+                {"name": "explained", "status": "SKIP",
+                 "skip_reason": "platform N/A: requires Windows"},
+                {"name": "silent", "status": "SKIP"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "summary.json"
+            path.write_text(json.dumps(doc), encoding="utf-8")
+            report = inventory.summarize_runner(path)
+
+        self.assertEqual(report["skippedWithoutReasonCount"], 1)
+        self.assertEqual(
+            [case["name"] for case in report["skippedWithoutReasonCases"]],
+            ["silent"],
+        )
+
+        # Whitespace is not a reason. A caller that writes " " to satisfy
+        # the field would otherwise buy completeness with an empty string.
+        doc["tests"][1]["skip_reason"] = "   "
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "summary.json"
+            path.write_text(json.dumps(doc), encoding="utf-8")
+            report = inventory.summarize_runner(path)
+        self.assertEqual(report["skippedWithoutReasonCount"], 2)
 
     def test_timed_runs_force_and_record_live_benchmark_policy(self):
         captured_environments = []

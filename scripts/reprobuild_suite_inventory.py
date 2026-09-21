@@ -4535,6 +4535,21 @@ def summarize_runner(summary_path: Path) -> dict[str, Any] | None:
         t for t in tests
         if not isinstance(t.get("name"), str) or not t.get("name").strip()
     ]
+    # A skip is a claim that a case SHOULD NOT run here, and a claim needs
+    # a reason. Without one the artifact cannot distinguish "deliberately
+    # not applicable on this platform" from "quietly stopped being run",
+    # and the second is indistinguishable from a passing case to every
+    # consumer downstream. The runner already writes ``skip_reason`` per
+    # case, but only when it is non-empty, so absence is the signal.
+    # Counted rather than raised, for the same reason ``unnamed`` is:
+    # a damaged or legacy artifact must stay inspectable.
+    skipped_without_reason = [
+        t for t in tests
+        if t.get("status") == "SKIP"
+        and not (
+            isinstance(t.get("skip_reason"), str) and t["skip_reason"].strip()
+        )
+    ]
     return {
         "path": str(summary_path),
         "summary": doc.get("summary", {}),
@@ -4546,6 +4561,8 @@ def summarize_runner(summary_path: Path) -> dict[str, Any] | None:
         "unrecognizedStatusTests": other,
         "unnamedCaseCount": len(unnamed),
         "unnamedCases": unnamed[:20],
+        "skippedWithoutReasonCount": len(skipped_without_reason),
+        "skippedWithoutReasonCases": skipped_without_reason[:20],
         "warmReviewCandidates": [t for t in tests if t.get("duration_ms", 0) > 20_000],
     }
 
@@ -4723,16 +4740,49 @@ def completed_clean_runs(timing: dict[str, Any]) -> dict[str, dict[str, Any]] | 
             continue
         runs = [selected[label] for label in expected]
         fingerprints = {run.get("sourceFingerprint") for run in runs}
-        summaries = [
-            (run.get("runnerSummary") or {}).get("summary", {}) for run in runs
-        ]
+        rollups = [(run.get("runnerSummary") or {}) for run in runs]
+        summaries = [rollup.get("summary", {}) for rollup in rollups]
+        # What "complete" means, spelled out rather than implied. This
+        # used to read ``passed == total and failed == 0 and skipped == 0``,
+        # in which the last two clauses were redundant: the runner's four
+        # statuses (pass/fail/skip/harness-error) partition ``total``, so
+        # ``passed == total`` already forced every other bucket to zero.
+        # The condition was therefore "every single case passed", which a
+        # suite containing any legitimate platform gate can never satisfy
+        # — so no such run could ever be recorded as complete or measured,
+        # and every conversion of a vacuous pass into an honest skip moved
+        # the suite further from being measurable at all.
+        #
+        # A skip is not a pass and must never be counted as one. But it is
+        # not an incompleteness either, PROVIDED it says why. So the test
+        # is now: nothing failed, nothing errored, and every case is
+        # either a pass or an explained skip.
         summaries_are_complete = all(
             isinstance(summary.get("total"), int)
             and summary["total"] > 0
-            and summary.get("passed") == summary["total"]
             and summary.get("failed") == 0
-            and summary.get("skipped") == 0
+            # Because the four statuses partition ``total``, the arithmetic
+            # clause below is what actually forces failures and harness
+            # errors to zero. This line is the redundant-but-load-bearing
+            # cross-check: it catches an artifact whose own counts
+            # contradict each other. It defaults to 0 because records
+            # predating the field exist, and for those the arithmetic
+            # clause is already conclusive.
+            and summary.get("harness_errors", 0) == 0
+            and isinstance(summary.get("passed"), int)
+            and isinstance(summary.get("skipped"), int)
+            and summary["passed"] + summary["skipped"] == summary["total"]
             for summary in summaries
+        )
+        # ``skippedWithoutReasonCount`` is newer than some already-recorded
+        # runs. Where it is absent the only safe reading is the old one, so
+        # a legacy record must still have had no skips at all to qualify;
+        # absence never counts as "all reasons present".
+        skips_are_explained = all(
+            rollup.get("skippedWithoutReasonCount") == 0
+            if isinstance(rollup.get("skippedWithoutReasonCount"), int)
+            else summary.get("skipped") == 0
+            for rollup, summary in zip(rollups, summaries)
         )
         elapsed_is_measured = all(
             isinstance(run.get("elapsedMs"), (int, float))
@@ -4750,6 +4800,7 @@ def completed_clean_runs(timing: dict[str, Any]) -> dict[str, dict[str, Any]] | 
         if (
             all(run.get("exitCode") == 0 and not run.get("timedOut") for run in runs)
             and summaries_are_complete
+            and skips_are_explained
             and elapsed_is_measured
             and summaries_have_provenance
             and len(fingerprints) == 1
