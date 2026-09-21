@@ -539,6 +539,18 @@ lint:
     # surface it. See the script header for the 268-case incident that
     # motivated it.
     python3 ./scripts/check_vacuous_test_cases.py 2>&1 | tee -a test-logs/lint.log
+    # The bare-skip ratchet, immediately beside the vacuous-case gate because
+    # the two guard opposite ends of the same property. That one refuses a case
+    # that PRETENDS to have run; this one refuses a case that declines to run
+    # and will not say why. Since #347, `completed_clean_runs()` records a suite
+    # run as COMPLETE only when every case is a pass or a skip THAT CARRIES A
+    # REASON, so one unexplained skip anywhere makes the whole run
+    # unrecordable. Measured on dev: 1222 bare skips against 122 explained, so
+    # the predicate is unsatisfiable today. Burning that down is separate work;
+    # scripts/bare-skips-baseline.tsv pins the population so it cannot grow
+    # while that happens. Source scan, no compiler, same cost class as its
+    # neighbours.
+    python3 ./scripts/check_bare_skips.py 2>&1 | tee -a test-logs/lint.log
     # Graph-Owned-Test-Artifacts M3: refuse a NEW test that compiles a helper
     # program in its own body instead of declaring a `repro.nim` build edge.
     # Source scan, no compiler, same class as the two gates above. It does NOT
