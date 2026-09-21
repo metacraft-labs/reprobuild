@@ -181,6 +181,21 @@ proc emitCargoVendorAction*(projectRoot, packageName: string;
   script.add("rm -rf \"" & q(vendorDir) & "/$repro_d\"; ")
   script.add("cp -R \"$repro_gitco/$repro_c\" \"" &
     q(vendorDir) & "/$repro_d\"; ")
+  # A vendored crate is ONE package: exactly one Cargo.toml, at its root.
+  # A git subtree carries the crate's own sub-projects too — `examples/*`,
+  # `fuzz/`, `benches/` each with their own Cargo.toml — and cargo, reading
+  # the vendor directory, tries to parse every one of them. Those
+  # sub-manifests routinely inherit fields from the repo's workspace
+  # (`something.workspace = true`), which is absent once the crate is
+  # vendored standalone, so cargo rejects the whole source and falls back
+  # to the network. `cargo vendor` includes only the crate's own packaged
+  # files; this removes every nested-Cargo.toml directory to the same end,
+  # deepest paths first so a nested sub-project inside a sub-project also
+  # goes. (A crates.io `.crate` is already packaged, so this is the git
+  # path only.)
+  script.add("find \"" & q(vendorDir) & "/$repro_d\" -mindepth 2 " &
+    "-name Cargo.toml 2>/dev/null | while IFS= read -r repro_sub; do " &
+    "rm -rf \"$(dirname \"$repro_sub\")\"; done; ")
   script.add("printf '{\"files\":{},\"package\":null}' > \"" &
     q(vendorDir) & "/$repro_d/.cargo-checksum.json\"; ")
   script.add("continue; fi; ")
@@ -225,4 +240,4 @@ proc emitCargoVendorAction*(projectRoot, packageName: string;
     commandStatsId = "cargo-vendor.crates-io",
     env = shellFetchRuntimeEnv(),
     toolIdentityRefs = @["sh", "rm", "mkdir", "curl", "mv", "tar", "gzip",
-      "sha256sum", "printf", "git", "cp"])
+      "sha256sum", "printf", "git", "cp", "find", "dirname"])
