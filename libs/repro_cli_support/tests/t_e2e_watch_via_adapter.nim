@@ -158,7 +158,7 @@ suite "repro watch seam — real ct end-to-end (gated on $CT_BIN)":
       # No built ct on this host: the genuine end-to-end can't run. The fake-ct
       # suite above already asserts the seam's exec/parse/map + fail-safe; CI sets
       # CT_BIN to the ct built in the codetracer sibling, where this runs for real.
-      skip()
+      skip("no built ct on this host — set CT_BIN to the ct built in the codetracer sibling")
     elif not dirExists(threeFuncsTrace):
       checkpoint("CT_BIN set but m0_three_funcs fixture missing at " & threeFuncsTrace)
       fail()

@@ -355,4 +355,4 @@ int main(int argc, char **argv) {
 when not defined(macosx):
   suite "e2e_macos_monitor_shim_event_taxonomy":
     test "macOS monitor shim event taxonomy is unsupported on non-macOS":
-      skip()
+      skip("macOS only — the monitor shim event taxonomy is a macOS-interpose-hooks backend gate")

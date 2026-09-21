@@ -381,4 +381,4 @@ suite "HCR watch inference E2E":
       check inferredObject.endsWith("patchable.o")
       check not inferredObject.endsWith("patchable.raw.o")
     else:
-      skip()
+      skip("host is neither macOS arm64 nor Linux x86-64 — HCR watch inference runs only on those")

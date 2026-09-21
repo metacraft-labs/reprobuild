@@ -204,7 +204,7 @@ suite "php-composer convention M57":
     ## only when the toolchain is ACTUALLY missing — when both ARE
     ## installed, skip rather than hand-wave the gate.
     if phpToolchainReady():
-      skip()
+      skip("php or composer not on PATH")
     else:
       let scratch = getTempDir() / "test_php_composer_no_toolchain"
       if dirExists(scratch):
@@ -233,7 +233,7 @@ suite "php-composer convention M57":
 
   test "emitFragment: hello-binary fixture produces install + wrapper actions":
     if not phpToolchainReady():
-      skip()
+      skip("php or composer not on PATH")
     else:
       let conv = php_convention.phpComposerConvention()
       let request = dummyRequest(HelloBinaryFixture)

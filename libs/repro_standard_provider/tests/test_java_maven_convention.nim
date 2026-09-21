@@ -244,7 +244,7 @@ suite "java-maven convention M40":
 
   test "emitFragment: hello-binary fixture produces a single package action":
     if not mavenToolchainReady():
-      skip()
+      skip("mvn or javac not on PATH")
     else:
       let conv = maven_convention.javaMavenConvention()
       let request = dummyRequest(HelloBinaryFixture)
@@ -297,7 +297,7 @@ suite "java-maven convention M40":
     # SKIPs when the toolchain is unavailable; the recognize-test
     # branch above covers the no-toolchain-on-PATH path.
     if not mavenToolchainReady():
-      skip()
+      skip("mvn or javac not on PATH")
     else:
       let scratch = getTempDir() / "test_java_maven_convention_custom_coords"
       if dirExists(scratch):

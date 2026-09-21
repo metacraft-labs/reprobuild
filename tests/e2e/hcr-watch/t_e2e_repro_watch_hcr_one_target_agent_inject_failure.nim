@@ -393,4 +393,4 @@ suite "t_e2e_repro_watch_hcr_one_target_agent_inject_failure":
       check not log.contains("repro watch: hcr patch applied patchId=" &
         "repro-watch-hcr-patch-0001 target=a")
     else:
-      skip()
+      skip("host is neither macOS arm64 nor Linux x86-64 — HCR watch runs only on those")

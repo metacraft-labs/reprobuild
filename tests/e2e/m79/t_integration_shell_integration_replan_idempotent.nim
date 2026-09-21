@@ -114,7 +114,7 @@ suite "M79 gate: integration_shell_integration_replan_idempotent":
       checkpoint "platform-skip: M79 gate exercises the Windows leg " &
         "(the shell.integration driver uses the PowerShell-profile " &
         "managed-block writer on Windows)"
-      skip()
+      skip("Windows only — the shell.integration driver uses the PowerShell-profile managed-block writer")
     else:
 
       let tempRoot = createTempDir("repro-m79-gate-", "")

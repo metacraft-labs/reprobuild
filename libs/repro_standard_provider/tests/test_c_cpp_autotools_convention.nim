@@ -242,7 +242,7 @@ suite "c-cpp-autotools convention M17":
 
   test "emitFragment: M28 per-source lift (configure + compile(s) + link)":
     if not autotoolsAvailable(HelloBinaryFixture):
-      skip()
+      skip("autotools toolchain incomplete: needs gcc/clang, make, sh, and autoreconf when no checked-in configure")
     else:
       let conv = autotools_convention.cCppAutotoolsConvention()
       let request = dummyRequest(HelloBinaryFixture)
@@ -592,7 +592,7 @@ suite "c-cpp-autotools convention — Mode B (crude fallback)":
     # force env var must route it to Mode B regardless. This proves the
     # explicit escape hatch (noted for spec clarification) works.
     if not fileExists(HelloBinaryFixture / "configure.ac"):
-      skip()
+      skip("fixture missing: reprobuild-examples/c-cpp-autotools/hello-binary/configure.ac")
     else:
       putEnv("REPRO_AUTOTOOLS_MODE", "B")
       defer: delEnv("REPRO_AUTOTOOLS_MODE")

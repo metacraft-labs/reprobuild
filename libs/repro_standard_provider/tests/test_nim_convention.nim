@@ -508,7 +508,7 @@ package nimapp:
       # Missing nim/gcc on PATH — the convention's recognize check
       # short-circuits to false. Skip the assertions instead of failing
       # the test in a stripped-down sandbox.
-      skip()
+      skip("nim not on PATH — nim convention recognize() returns false")
     else:
       let request = dummyRequest(MixedFixtureRoot)
       let fragment = conv.emitFragment(MixedFixtureRoot, request)
@@ -621,7 +621,7 @@ suite "nim convention cross-language reverse (Mode 3 mixed workspace, C++ -> Nim
       # Missing nim/g++ on PATH — the convention's recognize check
       # short-circuits to false. Skip the assertions instead of failing
       # the test in a stripped-down sandbox.
-      skip()
+      skip("nim not on PATH — nim convention recognize() returns false")
     else:
       let request = dummyRequest(ReverseMixedFixtureRoot)
       let fragment = conv.emitFragment(ReverseMixedFixtureRoot, request)
@@ -718,9 +718,9 @@ suite "nim convention cross-language reverse (Mode 3 mixed workspace, C++ -> Nim
     # doesn't accidentally emit reverse-direction actions.
     let conv = nim_convention.nimConvention()
     if not fileExists(MixedFixtureRoot / "repro.nim"):
-      skip()
+      skip("fixture missing: reprobuild-examples/mixed/nim-uses-cpp-lib")
     elif not conv.recognize(MixedFixtureRoot, dummyRequest(MixedFixtureRoot)):
-      skip()
+      skip("nim not on PATH — nim convention recognize() returns false")
     else:
       let request = dummyRequest(MixedFixtureRoot)
       let fragment = conv.emitFragment(MixedFixtureRoot, request)

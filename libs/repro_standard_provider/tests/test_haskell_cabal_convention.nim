@@ -228,7 +228,7 @@ suite "haskell-cabal convention M55":
     ## toolchain is ACTUALLY missing — when both ARE installed, skip
     ## rather than hand-wave the gate.
     if haskellToolchainReady():
-      skip()
+      skip("ghc or cabal not on PATH")
     else:
       let scratch = getTempDir() / "test_haskell_cabal_no_toolchain"
       if dirExists(scratch):
@@ -258,7 +258,7 @@ suite "haskell-cabal convention M55":
 
   test "emitFragment: hello-binary fixture produces a single build action":
     if not haskellToolchainReady():
-      skip()
+      skip("ghc or cabal not on PATH")
     else:
       let conv = haskell_convention.haskellCabalConvention()
       let request = dummyRequest(HelloBinaryFixture)

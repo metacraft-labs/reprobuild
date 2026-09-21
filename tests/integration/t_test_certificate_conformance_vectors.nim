@@ -131,10 +131,10 @@ suite "test-certificate.v1 conformance vectors":
     if root.len == 0:
       checkpoint("test-certificates-spec sibling not found; set " &
         "TEST_CERTIFICATES_SPEC to the checkout that carries vectors/")
-      skip()
+      skip("test-certificates-spec sibling not found — set TEST_CERTIFICATES_SPEC to the checkout carrying vectors/")
     elif findExe("ssh-keygen").len == 0:
       checkpoint("ssh-keygen is required for the signature group")
-      skip()
+      skip("ssh-keygen not on PATH — required for the signature group")
     else:
       let index = parseFile(root / "index.json")
       # The suite's own namespace declaration must be the one we sign under.

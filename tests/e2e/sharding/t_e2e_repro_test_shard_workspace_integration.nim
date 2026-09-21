@@ -158,6 +158,6 @@ suite "CI-Sharding M2 follow-up — workspace integration":
     if getEnv(LongTestEnv) != "1":
       checkpoint("skipped — set " & LongTestEnv &
         "=1 to run the long-form workspace shard verifier")
-      skip()
+      skip("REPRO_M1_LONG_TEST=1 not set — the long-form workspace shard verifier is opt-in")
     else:
       runWorkspaceShard()
