@@ -99,7 +99,11 @@ const
     ## big-endian bytes.
 
   TpmAlgKeyedHash* = TpmAlgId(0x0008'u16)
-  TpmAlgNull* = TpmAlgId(0x0010'u16)
+  # ``TpmAlgNull`` is NOT redeclared here. This module imports the structure
+  # codec above, which already exports it with the same value, and exporting
+  # a second one made the name ambiguous in every module that imported both --
+  # which is three gates that stopped compiling entirely, silently, because
+  # nothing builds a gate that does not compile.
 
   # TPMA_OBJECT, the bits this module has an opinion about.
   AttrFixedTpm* = 0x00000002'u32
