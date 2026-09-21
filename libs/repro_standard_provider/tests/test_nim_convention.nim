@@ -782,11 +782,11 @@ suite "nim convention M35 cross-language forward (Nim -> Rust)":
       checkpoint "fixture missing — looked at " & RustForwardMixedFixtureRoot
       fail()
     elif not rustcOnPathForM35():
-      skip()
+      skip("rustc not on PATH")
     elif not conv.recognize(RustForwardMixedFixtureRoot,
         dummyRequest(RustForwardMixedFixtureRoot)):
       # Missing nim on PATH — skip cleanly.
-      skip()
+      skip("nim not on PATH — nim convention recognize() returns false")
     else:
       let request = dummyRequest(RustForwardMixedFixtureRoot)
       let fragment = conv.emitFragment(RustForwardMixedFixtureRoot, request)
@@ -864,12 +864,12 @@ suite "nim convention M35 cross-language forward (Nim -> Rust)":
     # — only the library-direction emit fires.
     let conv = nim_convention.nimConvention()
     if not fileExists(RustForwardMixedFixtureRoot / "repro.nim"):
-      skip()
+      skip("fixture missing: reprobuild-examples/mixed/nim-uses-rust-lib")
     elif not rustcOnPathForM35():
-      skip()
+      skip("rustc not on PATH")
     elif not conv.recognize(RustForwardMixedFixtureRoot,
         dummyRequest(RustForwardMixedFixtureRoot)):
-      skip()
+      skip("nim not on PATH — nim convention recognize() returns false")
     else:
       let request = dummyRequest(RustForwardMixedFixtureRoot)
       let fragment = conv.emitFragment(RustForwardMixedFixtureRoot, request)
@@ -897,10 +897,10 @@ suite "nim convention M35 cross-language reverse (Rust -> Nim)":
       checkpoint "fixture missing — looked at " & RustReverseMixedFixtureRoot
       fail()
     elif not rustcOnPathForM35():
-      skip()
+      skip("rustc not on PATH")
     elif not conv.recognize(RustReverseMixedFixtureRoot,
         dummyRequest(RustReverseMixedFixtureRoot)):
-      skip()
+      skip("nim not on PATH — nim convention recognize() returns false")
     else:
       let request = dummyRequest(RustReverseMixedFixtureRoot)
       let fragment = conv.emitFragment(RustReverseMixedFixtureRoot, request)
@@ -992,12 +992,12 @@ suite "nim convention M35 cross-language reverse (Rust -> Nim)":
     # emit must stay silent.
     let conv = nim_convention.nimConvention()
     if not fileExists(RustReverseMixedFixtureRoot / "repro.nim"):
-      skip()
+      skip("fixture missing: reprobuild-examples/mixed/rust-uses-nim-lib")
     elif not rustcOnPathForM35():
-      skip()
+      skip("rustc not on PATH")
     elif not conv.recognize(RustReverseMixedFixtureRoot,
         dummyRequest(RustReverseMixedFixtureRoot)):
-      skip()
+      skip("nim not on PATH — nim convention recognize() returns false")
     else:
       let request = dummyRequest(RustReverseMixedFixtureRoot)
       let fragment = conv.emitFragment(RustReverseMixedFixtureRoot, request)

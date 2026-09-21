@@ -323,7 +323,7 @@ suite "rust convention M4":
 
   test "emitFragment: two-action graph against canonical fixture":
     if not rustToolchainAvailable():
-      skip()
+      skip("rustc or cargo not on PATH")
     else:
       let conv = rust_convention.rustConvention()
       let request = dummyRequest(FixtureRoot)
@@ -404,7 +404,7 @@ suite "rust convention M4":
     # a (compile, run, stamp) action triple per test under a
     # non-default ``test`` target. The default target stays bin/lib-only.
     if not rustToolchainAvailable():
-      skip()
+      skip("rustc or cargo not on PATH")
     elif not fileExists(TestFixtureRoot / "reprobuild.nim"):
       checkpoint "fixture missing — looked at " & TestFixtureRoot
       fail()
@@ -474,7 +474,7 @@ suite "rust convention M4":
     # Inverse cohort: the rust/binary fixture has no ``tests/`` directory
     # so the convention must not emit any ``rustc-test-*`` actions.
     if not rustToolchainAvailable():
-      skip()
+      skip("rustc or cargo not on PATH")
     else:
       let conv = rust_convention.rustConvention()
       let request = dummyRequest(FixtureRoot)
@@ -498,7 +498,7 @@ suite "rust convention M4":
     # crate_c bin similarly carries the full direct + transitive
     # ``--extern`` set (plus the transitive ``-L dependency`` paths).
     if not rustToolchainAvailable():
-      skip()
+      skip("rustc or cargo not on PATH")
     elif not fileExists(WorkspaceChainFixtureRoot / "reprobuild.nim"):
       checkpoint "fixture missing — looked at " & WorkspaceChainFixtureRoot
       fail()
@@ -584,7 +584,7 @@ suite "rust convention M4":
     # cdylib`` and whose primary output is the platform-named dynamic
     # library (``<n>.dll`` on Windows, ``lib<n>.so/.dylib`` on POSIX).
     if not rustToolchainAvailable():
-      skip()
+      skip("rustc or cargo not on PATH")
     elif not fileExists(CdylibFixtureRoot / "reprobuild.nim"):
       checkpoint "fixture missing — looked at " & CdylibFixtureRoot
       fail()
@@ -657,7 +657,7 @@ suite "rust convention M4":
     # (those would mean the convention tried Mode A and would fail at
     # rustc-resolve time).
     if not rustToolchainAvailable():
-      skip()
+      skip("rustc or cargo not on PATH")
     elif not fileExists(CratesIoFixtureRoot / "reprobuild.nim"):
       checkpoint "fixture missing — looked at " & CratesIoFixtureRoot
       fail()
@@ -670,7 +670,8 @@ suite "rust convention M4":
       let conv = rust_convention.rustConvention()
       let request = dummyRequest(CratesIoFixtureRoot)
       if not conv.recognize(CratesIoFixtureRoot, request):
-        skip()
+        skip("crates.io fixture not recognized — cargo metadata --offline " &
+          "cannot resolve the registry dep from this host's CARGO_HOME")
       else:
         var fragmentOk = true
         var fragment: GraphFragment
@@ -682,7 +683,8 @@ suite "rust convention M4":
           # a convention bug. Mark skip rather than fail loud.
           fragmentOk = false
         if not fragmentOk:
-          skip()
+          skip("cargo metadata failed offline — the crates.io dep is not in " &
+            "this host's CARGO_HOME registry")
         else:
           var sawMode = false
           for node in fragment.nodes:

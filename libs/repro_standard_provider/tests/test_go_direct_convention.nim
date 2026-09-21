@@ -124,7 +124,7 @@ when isNixSupported:
 
     test "recognize: positive — Mode 3 fixture (no go.mod, go available)":
       if not goOnPath():
-        skip()
+        skip("go not on PATH")
       else:
         let conv = go_direct_convention.goDirectConvention()
         let request = dummyRequest(Mode3Fixture)
@@ -195,7 +195,7 @@ package x:
       # ``go build`` path (instead of ``go tool compile / go tool link``)
       # handles cgo's preprocessor + linker integration.
       if not goOnPath():
-        skip()
+        skip("go not on PATH")
       else:
         let dir = makeScratch("with-cgo")
         writeFile(dir / "repro.nim", """
@@ -226,7 +226,7 @@ when isNixSupported:
 
     test "emitFragment: produces per-member compile + link with importcfg wiring":
       if not goOnPath():
-        skip()
+        skip("go not on PATH")
       else:
         let conv = go_direct_convention.goDirectConvention()
         let request = dummyRequest(Mode3Fixture)
@@ -341,7 +341,7 @@ when isNixSupported:
 
     test "depends_on cycle is rejected before any compile fires":
       if not goOnPath():
-        skip()
+        skip("go not on PATH")
       else:
         let dir = makeScratch("cycle")
         writeFile(dir / "repro.nim", """
@@ -375,7 +375,7 @@ depends_on betaPkg: alphaPkg
 
     test "depends_on references undeclared package — rejected":
       if not goOnPath():
-        skip()
+        skip("go not on PATH")
       else:
         let dir = makeScratch("undeclared")
         writeFile(dir / "repro.nim", """
@@ -410,7 +410,7 @@ when isNixSupported:
 
     test "layout B: multi-package workspace with per-<member>/*.go":
       if not goOnPath():
-        skip()
+        skip("go not on PATH")
       else:
         let dir = makeScratch("layout-b-recognise")
         writeFile(dir / "repro.nim", """
@@ -440,7 +440,7 @@ package binPkg:
 
     test "layout A: single-member workspace with src/*.go at root":
       if not goOnPath():
-        skip()
+        skip("go not on PATH")
       else:
         let dir = makeScratch("layout-a-bin")
         writeFile(dir / "repro.nim", """
@@ -481,7 +481,7 @@ when isNixSupported:
 
     test "forward: Go binary uses cgo and picks up C archive via -ldflags":
       if not goOnPath():
-        skip()
+        skip("go not on PATH")
       else:
         let conv = go_direct_convention.goDirectConvention()
         let request = dummyRequest(Mode3MixedForwardFixture)
@@ -557,7 +557,7 @@ when isNixSupported:
 
     test "reverse: Go library emits -buildmode=c-archive when consumed by C++":
       if not goOnPath():
-        skip()
+        skip("go not on PATH")
       else:
         let conv = go_direct_convention.goDirectConvention()
         let request = dummyRequest(Mode3MixedReverseFixture)
@@ -667,7 +667,7 @@ when isNixSupported:
       # ``go-direct-link-*`` actions (NOT ``go-direct-build-*``). This
       # is the load-bearing regression check for M31 behaviour.
       if not goOnPath():
-        skip()
+        skip("go not on PATH")
       else:
         let conv = go_direct_convention.goDirectConvention()
         let request = dummyRequest(Mode3Fixture)
@@ -699,7 +699,7 @@ when isNixSupported:
 
     test "forward cycle: Go binary depends_on C lib AND C lib depends_on Go app — rejected":
       if not goOnPath():
-        skip()
+        skip("go not on PATH")
       else:
         let dir = makeScratch("xlang-cycle")
         writeFile(dir / "repro.nim", """

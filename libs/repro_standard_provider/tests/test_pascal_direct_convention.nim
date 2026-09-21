@@ -92,9 +92,9 @@ suite "pascal-direct convention recognition":
 
   test "recognize: positive — Mode 3 fixture (no *.lpi, fpc on PATH)":
     if not fpcOnPath():
-      skip()
+      skip("fpc not on PATH")
     elif not dirExists(Mode3Fixture):
-      skip()
+      skip("fixture missing: reprobuild-examples/pascal-mode3/binary-with-library")
     else:
       let conv = pascal_direct_convention.pascalDirectConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -142,7 +142,7 @@ package x:
 
   test "recognize: negative — no Pascal members declared":
     if not fpcOnPath():
-      skip()
+      skip("fpc not on PATH")
     else:
       let dir = makeScratch("no-members")
       writeFile(dir / "repro.nim", """
@@ -159,7 +159,7 @@ package x:
 
   test "recognize: positive — accepts ``pascal`` token in uses":
     if not fpcOnPath():
-      skip()
+      skip("fpc not on PATH")
     else:
       let dir = makeScratch("pascal-token")
       writeFile(dir / "repro.nim", """
@@ -181,7 +181,7 @@ package x:
 
   test "recognize: positive — accepts ``freepascal`` token in uses":
     if not fpcOnPath():
-      skip()
+      skip("fpc not on PATH")
     else:
       let dir = makeScratch("freepascal-token")
       writeFile(dir / "repro.nim", """
@@ -203,7 +203,7 @@ package x:
 
   test "recognize: positive — accepts .pp source extension":
     if not fpcOnPath():
-      skip()
+      skip("fpc not on PATH")
     else:
       let dir = makeScratch("pp-extension")
       writeFile(dir / "repro.nim", """
@@ -227,9 +227,9 @@ suite "pascal-direct convention emit (Mode 3 fixture)":
 
   test "emitFragment: per-member fpc compile + ar rcs + fpc link":
     if not fpcOnPath():
-      skip()
+      skip("fpc not on PATH")
     elif not dirExists(Mode3Fixture):
-      skip()
+      skip("fixture missing: reprobuild-examples/pascal-mode3/binary-with-library")
     else:
       let conv = pascal_direct_convention.pascalDirectConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -321,7 +321,7 @@ suite "pascal-direct convention dep validation":
 
   test "depends_on cycle is rejected before any compile fires":
     if not fpcOnPath():
-      skip()
+      skip("fpc not on PATH")
     else:
       let dir = makeScratch("cycle")
       writeFile(dir / "repro.nim", """
@@ -355,7 +355,7 @@ depends_on betaPkg: alphaPkg
 
   test "depends_on references undeclared package — rejected":
     if not fpcOnPath():
-      skip()
+      skip("fpc not on PATH")
     else:
       let dir = makeScratch("undeclared")
       writeFile(dir / "repro.nim", """
@@ -387,9 +387,9 @@ suite "pascal-direct convention M59 cross-language (forward direction)":
 
   test "forward: Pascal binary picks up C archive via -k linker pass-through":
     if not fpcOnPath() or not gccOnPath():
-      skip()
+      skip("fpc or gcc/clang not on PATH")
     elif not dirExists(Mode3MixedForwardFixture):
-      skip()
+      skip("fixture missing: reprobuild-examples/mixed/pascal-uses-cpp-lib")
     else:
       let conv = pascal_direct_convention.pascalDirectConvention()
       let request = dummyRequest(Mode3MixedForwardFixture)
@@ -453,9 +453,9 @@ suite "pascal-direct convention M59 cross-language (reverse direction)":
 
   test "reverse: C++ binary picks up Pascal archive as trailing positional":
     if not fpcOnPath() or not gppOnPath():
-      skip()
+      skip("fpc or g++/clang++ not on PATH")
     elif not dirExists(Mode3MixedReverseFixture):
-      skip()
+      skip("fixture missing: reprobuild-examples/mixed/cpp-uses-pascal-lib")
     else:
       let conv = pascal_direct_convention.pascalDirectConvention()
       let request = dummyRequest(Mode3MixedReverseFixture)

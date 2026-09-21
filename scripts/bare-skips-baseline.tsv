@@ -154,16 +154,6 @@ libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	a f
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	every counted resource is audited; the two populations stay apart	1
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	the planner's drift baseline ignores build-action records	1
 libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	t_infra_apply_substitutes_from_cache	1
-libs/repro_standard_provider/tests/test_ada_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
-libs/repro_standard_provider/tests/test_ada_direct_convention.nim	depends_on references undeclared package — rejected	1
-libs/repro_standard_provider/tests/test_ada_direct_convention.nim	emitFragment: per-member gcc -c + ar rcs + gnatmake link	1
-libs/repro_standard_provider/tests/test_ada_direct_convention.nim	forward: Ada binary picks up C archive after -largs	2
-libs/repro_standard_provider/tests/test_ada_direct_convention.nim	pure-Ada fixture: library archive emitted at canonical path	1
-libs/repro_standard_provider/tests/test_ada_direct_convention.nim	recognize: negative — no Ada members declared	1
-libs/repro_standard_provider/tests/test_ada_direct_convention.nim	recognize: positive — Mode 3 fixture (no *.gpr, gnatmake on PATH)	1
-libs/repro_standard_provider/tests/test_ada_direct_convention.nim	recognize: positive — accepts ``ada`` token in uses	1
-libs/repro_standard_provider/tests/test_ada_direct_convention.nim	recognize: positive — accepts ``gnat`` token in uses	1
-libs/repro_standard_provider/tests/test_ada_direct_convention.nim	reverse: C++ binary picks up Ada archive as trailing positional	2
 libs/repro_standard_provider/tests/test_c_cpp_autotools_convention.nim	emitFragment: M28 per-source lift (configure + compile(s) + link)	1
 libs/repro_standard_provider/tests/test_c_cpp_autotools_convention.nim	force Mode B via REPRO_AUTOTOOLS_MODE=B on a plain Mode-A project	1
 libs/repro_standard_provider/tests/test_c_cpp_cmake_convention.nim	emitFragment: hello-binary fixture produces configure + build actions	1
@@ -178,23 +168,9 @@ libs/repro_standard_provider/tests/test_c_cpp_make_convention.nim	emitFragment: 
 libs/repro_standard_provider/tests/test_c_cpp_make_convention.nim	emitFragment: library-static fixture produces archive action	1
 libs/repro_standard_provider/tests/test_c_cpp_meson_convention.nim	emitFragment: configure action's argv pins CC for compiler discovery	2
 libs/repro_standard_provider/tests/test_c_cpp_meson_convention.nim	emitFragment: hello-binary fixture produces configure + build actions	1
-libs/repro_standard_provider/tests/test_crystal_convention.nim	emitFragment Mode 2: shards-install + shards-build actions chained	2
-libs/repro_standard_provider/tests/test_crystal_convention.nim	emitFragment Mode 3: single crystal-direct-build action	2
-libs/repro_standard_provider/tests/test_crystal_convention.nim	recognize: positive — Mode 2 fixture (shard.yml + shard.lock + crystal + shards on PATH)	2
-libs/repro_standard_provider/tests/test_crystal_convention.nim	recognize: positive — Mode 3 fixture (no shard.yml; crystal on PATH)	2
-libs/repro_standard_provider/tests/test_crystal_convention.nim	recognize: positive — accepts ``shards`` token in uses	1
 libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
 libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim	output-path resolution: OutputType=Library yields .dll	1
 libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim	output-path resolution: TargetFramework + AssemblyName + OutputType compose the binary filename	1
-libs/repro_standard_provider/tests/test_d_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
-libs/repro_standard_provider/tests/test_d_direct_convention.nim	depends_on references undeclared package — rejected	1
-libs/repro_standard_provider/tests/test_d_direct_convention.nim	emitFragment: per-member -lib + executable link actions	1
-libs/repro_standard_provider/tests/test_d_direct_convention.nim	forward: D binary picks up C archive via -L= pass-through	2
-libs/repro_standard_provider/tests/test_d_direct_convention.nim	pure-D fixture: library not marked cConsumable	1
-libs/repro_standard_provider/tests/test_d_direct_convention.nim	recognize: negative — no D members declared	1
-libs/repro_standard_provider/tests/test_d_direct_convention.nim	recognize: positive — Mode 3 fixture (no dub manifest, D on PATH)	1
-libs/repro_standard_provider/tests/test_d_direct_convention.nim	recognize: positive — accepts ``ldc2`` token in uses	1
-libs/repro_standard_provider/tests/test_d_direct_convention.nim	reverse: C++ binary picks up D archive as trailing positional	2
 libs/repro_standard_provider/tests/test_elixir_mix_convention.nim	emitFragment: hello-binary fixture produces escript-build + wrapper actions	2
 libs/repro_standard_provider/tests/test_elixir_mix_convention.nim	emitFragment: wrapper depends on escript-build action (chained ordering)	2
 libs/repro_standard_provider/tests/test_elixir_mix_convention.nim	recognize: negative — elixir/mix not on PATH (toolchain probe)	1
@@ -205,31 +181,6 @@ libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim	emitFragmen
 libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim	emitFragment: wrapper depends on escriptize action (chained ordering)	2
 libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim	recognize: negative — erl/rebar3 not on PATH (toolchain probe)	1
 libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim	recognize: positive — accepts ``rebar3`` token in uses	1
-libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	cConsumable=false when no C/C++ downstream (pure Fortran)	1
-libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	cConsumable=true when C/C++ executable depends on Fortran lib	1
-libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
-libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	depends_on references undeclared package — rejected	1
-libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	emitFragment: per-source compile + archive + link actions	1
-libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	forward: Fortran binary picks up C archive on link argv	1
-libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	recognize: negative — no Fortran members declared	1
-libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	recognize: positive — Mode 3 fixture (gfortran on PATH)	1
-libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	reverse: C++ binary picks up Fortran archive + runtime libs	1
-libs/repro_standard_provider/tests/test_go_convention.nim	emitFragment M22: go/library (no tests) emits no test actions	1
-libs/repro_standard_provider/tests/test_go_convention.nim	emitFragment M22: library-with-tests emits a non-default test target	1
-libs/repro_standard_provider/tests/test_go_convention.nim	emitFragment: graph shape against canonical fixture	1
-libs/repro_standard_provider/tests/test_go_convention.nim	emitFragment: library-only fixture emits no link actions	1
-libs/repro_standard_provider/tests/test_go_convention.nim	emitFragment: multi-binary fixture produces one link per cmd	1
-libs/repro_standard_provider/tests/test_go_direct_convention.nim	M31 fixture (pure Go workspace) still uses go tool compile / link	1
-libs/repro_standard_provider/tests/test_go_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
-libs/repro_standard_provider/tests/test_go_direct_convention.nim	depends_on references undeclared package — rejected	1
-libs/repro_standard_provider/tests/test_go_direct_convention.nim	emitFragment: produces per-member compile + link with importcfg wiring	1
-libs/repro_standard_provider/tests/test_go_direct_convention.nim	forward cycle: Go binary depends_on C lib AND C lib depends_on Go app — rejected	1
-libs/repro_standard_provider/tests/test_go_direct_convention.nim	forward: Go binary uses cgo and picks up C archive via -ldflags	1
-libs/repro_standard_provider/tests/test_go_direct_convention.nim	layout A: single-member workspace with src/*.go at root	1
-libs/repro_standard_provider/tests/test_go_direct_convention.nim	layout B: multi-package workspace with per-<member>/*.go	1
-libs/repro_standard_provider/tests/test_go_direct_convention.nim	recognize: positive — Mode 3 fixture (no go.mod, go available)	1
-libs/repro_standard_provider/tests/test_go_direct_convention.nim	recognize: positive — import \"C\" anywhere (M36: cgo lifted)	1
-libs/repro_standard_provider/tests/test_go_direct_convention.nim	reverse: Go library emits -buildmode=c-archive when consumed by C++	1
 libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
 libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim	recognize: negative — ghc/cabal not on PATH (toolchain probe)	1
 libs/repro_standard_provider/tests/test_java_maven_convention.nim	emitFragment: hello-binary fixture produces a single package action	1
@@ -249,25 +200,11 @@ libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	recognize: po
 libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
 libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim	output-path resolution: projectName + version compose the jar filename	1
 libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim	recognize: positive — scratch Groovy DSL build.gradle	1
-libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: forward fixture does NOT trigger reverse-direction Rust emit	3
 libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: forward fixture does NOT trigger reverse-direction emit	2
-libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: forward fixture emits Rust staticlib + Nim link picks it up	2
 libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: mixed fixture wires C++ exec -> Nim archive end-to-end	1
 libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: mixed fixture wires Nim app -> C archive end-to-end	1
-libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: reverse fixture does NOT trigger forward-direction Rust lib emit	3
-libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: reverse fixture wires Rust exec -> Nim archive end-to-end	2
 libs/repro_standard_provider/tests/test_ocaml_dune_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
 libs/repro_standard_provider/tests/test_ocaml_dune_convention.nim	recognize: negative — ocaml/dune not on PATH (toolchain probe)	1
-libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
-libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	depends_on references undeclared package — rejected	1
-libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	emitFragment: per-member fpc compile + ar rcs + fpc link	2
-libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	forward: Pascal binary picks up C archive via -k linker pass-through	2
-libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	recognize: negative — no Pascal members declared	1
-libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	recognize: positive — Mode 3 fixture (no *.lpi, fpc on PATH)	2
-libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	recognize: positive — accepts .pp source extension	1
-libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	recognize: positive — accepts ``freepascal`` token in uses	1
-libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	recognize: positive — accepts ``pascal`` token in uses	1
-libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	reverse: C++ binary picks up Pascal archive as trailing positional	2
 libs/repro_standard_provider/tests/test_php_composer_convention.nim	emitFragment: hello-binary fixture produces install + wrapper actions	1
 libs/repro_standard_provider/tests/test_php_composer_convention.nim	recognize: negative — php/composer not on PATH (toolchain probe)	1
 libs/repro_standard_provider/tests/test_python_convention.nim	emitFragment M20: console-script emits installer action with shim outputs	1
@@ -283,34 +220,8 @@ libs/repro_standard_provider/tests/test_python_direct_convention.nim	layout B-fl
 libs/repro_standard_provider/tests/test_python_direct_convention.nim	recognize: positive — Mode 3 fixture (no pyproject.toml, python available)	1
 libs/repro_standard_provider/tests/test_ruby_bundler_convention.nim	emitFragment: hello-binary fixture produces install + wrapper actions	1
 libs/repro_standard_provider/tests/test_ruby_bundler_convention.nim	recognize: negative — ruby/bundle not on PATH (toolchain probe)	1
-libs/repro_standard_provider/tests/test_rust_convention.nim	emitFragment M22: library-with-tests emits a non-default test target	1
-libs/repro_standard_provider/tests/test_rust_convention.nim	emitFragment M22: rust/binary has no test actions	1
-libs/repro_standard_provider/tests/test_rust_convention.nim	emitFragment M23: cdylib emits --crate-type cdylib link argv	1
-libs/repro_standard_provider/tests/test_rust_convention.nim	emitFragment M23: project with crates.io dep routes to Mode B	3
-libs/repro_standard_provider/tests/test_rust_convention.nim	emitFragment M23: workspace-lib-chain topological order	1
-libs/repro_standard_provider/tests/test_rust_convention.nim	emitFragment: two-action graph against canonical fixture	1
-libs/repro_standard_provider/tests/test_rust_direct_convention.nim	M30 fixture (pure Rust workspace) still produces rlib, not staticlib	1
-libs/repro_standard_provider/tests/test_rust_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
-libs/repro_standard_provider/tests/test_rust_direct_convention.nim	depends_on references undeclared package — rejected	1
-libs/repro_standard_provider/tests/test_rust_direct_convention.nim	emitFragment: produces per-crate link actions with --extern wiring	1
-libs/repro_standard_provider/tests/test_rust_direct_convention.nim	forward cycle: Rust binary depends_on C lib AND C lib depends_on Rust app — rejected	1
-libs/repro_standard_provider/tests/test_rust_direct_convention.nim	forward: Rust binary picks up C archive via -L native + -l static	1
-libs/repro_standard_provider/tests/test_rust_direct_convention.nim	layout A: single-member workspace with src/main.rs at root	1
-libs/repro_standard_provider/tests/test_rust_direct_convention.nim	layout B: multi-package workspace with <member>/src/{main,lib}.rs	1
-libs/repro_standard_provider/tests/test_rust_direct_convention.nim	recognize: negative — no rust members declared	1
-libs/repro_standard_provider/tests/test_rust_direct_convention.nim	recognize: positive — Mode 3 fixture (no Cargo.toml, rustc available)	1
-libs/repro_standard_provider/tests/test_rust_direct_convention.nim	reverse cycle: C++ binary depends_on Rust lib AND Rust lib depends_on C++ app — rejected	1
-libs/repro_standard_provider/tests/test_rust_direct_convention.nim	reverse: Rust library emits --crate-type=staticlib when consumed by C++	1
 libs/repro_standard_provider/tests/test_swift_swiftpm_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
 libs/repro_standard_provider/tests/test_swift_swiftpm_convention.nim	recognize: negative — swift not on PATH (toolchain probe)	1
-libs/repro_standard_provider/tests/test_zig_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
-libs/repro_standard_provider/tests/test_zig_direct_convention.nim	depends_on references undeclared package — rejected	1
-libs/repro_standard_provider/tests/test_zig_direct_convention.nim	emitFragment: per-member build-lib + build-exe actions	1
-libs/repro_standard_provider/tests/test_zig_direct_convention.nim	forward: Zig binary picks up C archive as trailing positional	1
-libs/repro_standard_provider/tests/test_zig_direct_convention.nim	pure-zig fixture: library not marked cConsumable	1
-libs/repro_standard_provider/tests/test_zig_direct_convention.nim	recognize: negative — no zig members declared	1
-libs/repro_standard_provider/tests/test_zig_direct_convention.nim	recognize: positive — Mode 3 fixture (no build.zig, zig on PATH)	1
-libs/repro_standard_provider/tests/test_zig_direct_convention.nim	reverse: C++ binary picks up Zig archive as trailing positional	1
 libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	test_n48_conda_zstd_fallback_runs_without_a_shell	3
 libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	test_n48_tarball_arm_extracts_into_destinations_gnu_tar_would_unquote	2
 libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	test_n48_tarball_arm_opens_an_absolute_windows_archive_path	2
