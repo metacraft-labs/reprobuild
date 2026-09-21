@@ -121,7 +121,7 @@ suite "d-direct convention recognition":
 
   test "recognize: positive — Mode 3 fixture (no dub manifest, D on PATH)":
     if not dOnPath():
-      skip()
+      skip("no D compiler on PATH (ldmd2, dmd, or ldc2)")
     else:
       let conv = d_direct_convention.dDirectConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -190,7 +190,7 @@ package x:
 
   test "recognize: negative — no D members declared":
     if not dOnPath():
-      skip()
+      skip("no D compiler on PATH (ldmd2, dmd, or ldc2)")
     else:
       let dir = makeScratch("no-members")
       writeFile(dir / "repro.nim", """
@@ -207,7 +207,7 @@ package x:
 
   test "recognize: positive — accepts ``ldc2`` token in uses":
     if not dOnPath():
-      skip()
+      skip("no D compiler on PATH (ldmd2, dmd, or ldc2)")
     else:
       let dir = makeScratch("ldc2-token")
       writeFile(dir / "repro.nim", """
@@ -231,7 +231,7 @@ suite "d-direct convention emit (Mode 3 fixture)":
 
   test "emitFragment: per-member -lib + executable link actions":
     if not dOnPath():
-      skip()
+      skip("no D compiler on PATH (ldmd2, dmd, or ldc2)")
     else:
       let conv = d_direct_convention.dDirectConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -311,7 +311,7 @@ suite "d-direct convention dep validation":
 
   test "depends_on cycle is rejected before any compile fires":
     if not dOnPath():
-      skip()
+      skip("no D compiler on PATH (ldmd2, dmd, or ldc2)")
     else:
       let dir = makeScratch("cycle")
       writeFile(dir / "repro.nim", """
@@ -345,7 +345,7 @@ depends_on betaPkg: alphaPkg
 
   test "depends_on references undeclared package — rejected":
     if not dOnPath():
-      skip()
+      skip("no D compiler on PATH (ldmd2, dmd, or ldc2)")
     else:
       let dir = makeScratch("undeclared")
       writeFile(dir / "repro.nim", """
@@ -377,9 +377,9 @@ suite "d-direct convention M45 cross-language (forward direction)":
 
   test "forward: D binary picks up C archive via -L= pass-through":
     if not dOnPath() or not gccOnPath():
-      skip()
+      skip("no D compiler on PATH, or gcc/clang not on PATH")
     elif not dirExists(Mode3MixedForwardFixture):
-      skip()
+      skip("fixture missing: reprobuild-examples/mixed/d-uses-cpp-lib")
     else:
       let conv = d_direct_convention.dDirectConvention()
       let request = dummyRequest(Mode3MixedForwardFixture)
@@ -442,9 +442,9 @@ suite "d-direct convention M45 cross-language (reverse direction)":
 
   test "reverse: C++ binary picks up D archive as trailing positional":
     if not dOnPath() or not gppOnPath():
-      skip()
+      skip("no D compiler on PATH, or g++/clang++ not on PATH")
     elif not dirExists(Mode3MixedReverseFixture):
-      skip()
+      skip("fixture missing: reprobuild-examples/mixed/cpp-uses-d-lib")
     else:
       let conv = d_direct_convention.dDirectConvention()
       let request = dummyRequest(Mode3MixedReverseFixture)
@@ -528,7 +528,7 @@ suite "d-direct convention M45 cConsumable toggle":
     # consequence at this milestone is only on the downstream wiring
     # path — no archive layout change.
     if not dOnPath():
-      skip()
+      skip("no D compiler on PATH (ldmd2, dmd, or ldc2)")
     else:
       let conv = d_direct_convention.dDirectConvention()
       let request = dummyRequest(Mode3Fixture)

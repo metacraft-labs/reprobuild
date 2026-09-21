@@ -95,7 +95,7 @@ suite "ada-direct convention recognition":
 
   test "recognize: positive — Mode 3 fixture (no *.gpr, gnatmake on PATH)":
     if not gnatmakeOnPath():
-      skip()
+      skip("gnatmake not on PATH")
     else:
       let conv = ada_direct_convention.adaDirectConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -143,7 +143,7 @@ package x:
 
   test "recognize: negative — no Ada members declared":
     if not gnatmakeOnPath():
-      skip()
+      skip("gnatmake not on PATH")
     else:
       let dir = makeScratch("no-members")
       writeFile(dir / "repro.nim", """
@@ -160,7 +160,7 @@ package x:
 
   test "recognize: positive — accepts ``ada`` token in uses":
     if not gnatmakeOnPath():
-      skip()
+      skip("gnatmake not on PATH")
     else:
       let dir = makeScratch("ada-token")
       writeFile(dir / "repro.nim", """
@@ -182,7 +182,7 @@ package x:
 
   test "recognize: positive — accepts ``gnat`` token in uses":
     if not gnatmakeOnPath():
-      skip()
+      skip("gnatmake not on PATH")
     else:
       let dir = makeScratch("gnat-token")
       writeFile(dir / "repro.nim", """
@@ -206,7 +206,7 @@ suite "ada-direct convention emit (Mode 3 fixture)":
 
   test "emitFragment: per-member gcc -c + ar rcs + gnatmake link":
     if not gnatmakeOnPath():
-      skip()
+      skip("gnatmake not on PATH")
     else:
       let conv = ada_direct_convention.adaDirectConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -304,7 +304,7 @@ suite "ada-direct convention dep validation":
 
   test "depends_on cycle is rejected before any compile fires":
     if not gnatmakeOnPath():
-      skip()
+      skip("gnatmake not on PATH")
     else:
       let dir = makeScratch("cycle")
       writeFile(dir / "repro.nim", """
@@ -342,7 +342,7 @@ depends_on betaPkg: alphaPkg
 
   test "depends_on references undeclared package — rejected":
     if not gnatmakeOnPath():
-      skip()
+      skip("gnatmake not on PATH")
     else:
       let dir = makeScratch("undeclared")
       writeFile(dir / "repro.nim", """
@@ -374,9 +374,9 @@ suite "ada-direct convention M58 cross-language (forward direction)":
 
   test "forward: Ada binary picks up C archive after -largs":
     if not gnatmakeOnPath() or not gccOnPath():
-      skip()
+      skip("gnatmake or gcc/clang not on PATH")
     elif not dirExists(Mode3MixedForwardFixture):
-      skip()
+      skip("fixture missing: reprobuild-examples/mixed/ada-uses-cpp-lib")
     else:
       let conv = ada_direct_convention.adaDirectConvention()
       let request = dummyRequest(Mode3MixedForwardFixture)
@@ -444,9 +444,9 @@ suite "ada-direct convention M58 cross-language (reverse direction)":
 
   test "reverse: C++ binary picks up Ada archive as trailing positional":
     if not gnatmakeOnPath() or not gppOnPath():
-      skip()
+      skip("gnatmake or g++/clang++ not on PATH")
     elif not dirExists(Mode3MixedReverseFixture):
-      skip()
+      skip("fixture missing: reprobuild-examples/mixed/cpp-uses-ada-lib")
     else:
       let conv = ada_direct_convention.adaDirectConvention()
       let request = dummyRequest(Mode3MixedReverseFixture)
@@ -516,7 +516,7 @@ suite "ada-direct convention M58 cConsumable toggle":
 
   test "pure-Ada fixture: library archive emitted at canonical path":
     if not gnatmakeOnPath():
-      skip()
+      skip("gnatmake not on PATH")
     else:
       let conv = ada_direct_convention.adaDirectConvention()
       let request = dummyRequest(Mode3Fixture)

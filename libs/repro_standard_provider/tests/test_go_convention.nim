@@ -206,7 +206,7 @@ suite "go convention M5 + M14":
 
   test "emitFragment: graph shape against canonical fixture":
     if not goToolchainAvailable():
-      skip()
+      skip("go not on PATH")
     else:
       let conv = go_convention.goConvention()
       let request = dummyRequest(FixtureRoot)
@@ -309,7 +309,7 @@ suite "go convention M5 + M14":
 
   test "emitFragment: multi-binary fixture produces one link per cmd":
     if not goToolchainAvailable():
-      skip()
+      skip("go not on PATH")
     else:
       let conv = go_convention.goConvention()
       let request = dummyRequest(MultiBinaryFixtureRoot)
@@ -363,7 +363,7 @@ suite "go convention M5 + M14":
 
   test "emitFragment: library-only fixture emits no link actions":
     if not goToolchainAvailable():
-      skip()
+      skip("go not on PATH")
     else:
       let conv = go_convention.goConvention()
       let request = dummyRequest(LibraryFixtureRoot)
@@ -418,7 +418,7 @@ suite "go convention M5 + M14":
     # package, paired with an ``fs.stamp`` companion. Default target
     # stays compile-only; tests opt in via ``repro build .#test``.
     if not goToolchainAvailable():
-      skip()
+      skip("go not on PATH")
     else:
       let conv = go_convention.goConvention()
       let request = dummyRequest(LibraryWithTestsFixtureRoot)
@@ -469,7 +469,7 @@ suite "go convention M5 + M14":
     # Inverse cohort: the go/library fixture has no ``*_test.go`` files
     # so the convention must not emit any ``go-test-*`` actions.
     if not goToolchainAvailable():
-      skip()
+      skip("go not on PATH")
     else:
       let conv = go_convention.goConvention()
       let request = dummyRequest(LibraryFixtureRoot)

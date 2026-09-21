@@ -112,7 +112,7 @@ suite "zig-direct convention recognition":
 
   test "recognize: positive — Mode 3 fixture (no build.zig, zig on PATH)":
     if not zigOnPath():
-      skip()
+      skip("zig not on PATH")
     else:
       let conv = zig_direct_convention.zigDirectConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -160,7 +160,7 @@ package x:
 
   test "recognize: negative — no zig members declared":
     if not zigOnPath():
-      skip()
+      skip("zig not on PATH")
     else:
       let dir = makeScratch("no-members")
       writeFile(dir / "repro.nim", """
@@ -179,7 +179,7 @@ suite "zig-direct convention emit (Mode 3 fixture)":
 
   test "emitFragment: per-member build-lib + build-exe actions":
     if not zigOnPath():
-      skip()
+      skip("zig not on PATH")
     else:
       let conv = zig_direct_convention.zigDirectConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -259,7 +259,7 @@ suite "zig-direct convention dep validation":
 
   test "depends_on cycle is rejected before any compile fires":
     if not zigOnPath():
-      skip()
+      skip("zig not on PATH")
     else:
       let dir = makeScratch("cycle")
       writeFile(dir / "repro.nim", """
@@ -293,7 +293,7 @@ depends_on betaPkg: alphaPkg
 
   test "depends_on references undeclared package — rejected":
     if not zigOnPath():
-      skip()
+      skip("zig not on PATH")
     else:
       let dir = makeScratch("undeclared")
       writeFile(dir / "repro.nim", """
@@ -325,7 +325,7 @@ suite "zig-direct convention M44 cross-language (forward direction)":
 
   test "forward: Zig binary picks up C archive as trailing positional":
     if not zigOnPath() or not gccOnPath():
-      skip()
+      skip("zig or gcc/clang not on PATH")
     else:
       let conv = zig_direct_convention.zigDirectConvention()
       let request = dummyRequest(Mode3MixedForwardFixture)
@@ -394,7 +394,7 @@ suite "zig-direct convention M44 cross-language (reverse direction)":
 
   test "reverse: C++ binary picks up Zig archive as trailing positional":
     if not zigOnPath() or not gppOnPath():
-      skip()
+      skip("zig or g++/clang++ not on PATH")
     else:
       let conv = zig_direct_convention.zigDirectConvention()
       let request = dummyRequest(Mode3MixedReverseFixture)
@@ -483,7 +483,7 @@ suite "zig-direct convention M44 cConsumable toggle":
     # flag's observable consequence at this milestone is only on the
     # downstream wiring path — no archive layout change.
     if not zigOnPath():
-      skip()
+      skip("zig not on PATH")
     else:
       let conv = zig_direct_convention.zigDirectConvention()
       let request = dummyRequest(Mode3Fixture)

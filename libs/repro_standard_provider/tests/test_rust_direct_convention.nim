@@ -94,7 +94,7 @@ suite "rust-direct convention recognition":
 
   test "recognize: positive — Mode 3 fixture (no Cargo.toml, rustc available)":
     if not rustcOnPath():
-      skip()
+      skip("rustc not on PATH")
     else:
       let conv = rust_direct_convention.rustDirectConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -141,7 +141,7 @@ package x:
 
   test "recognize: negative — no rust members declared":
     if not rustcOnPath():
-      skip()
+      skip("rustc not on PATH")
     else:
       let dir = makeScratch("no-members")
       writeFile(dir / "repro.nim", """
@@ -160,7 +160,7 @@ suite "rust-direct convention emit (Mode 3 fixture)":
 
   test "emitFragment: produces per-crate link actions with --extern wiring":
     if not rustcOnPath():
-      skip()
+      skip("rustc not on PATH")
     else:
       let conv = rust_direct_convention.rustDirectConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -240,7 +240,7 @@ suite "rust-direct convention dep validation":
 
   test "depends_on cycle is rejected before any compile fires":
     if not rustcOnPath():
-      skip()
+      skip("rustc not on PATH")
     else:
       let dir = makeScratch("cycle")
       writeFile(dir / "repro.nim", """
@@ -274,7 +274,7 @@ depends_on betaPkg: alphaPkg
 
   test "depends_on references undeclared package — rejected":
     if not rustcOnPath():
-      skip()
+      skip("rustc not on PATH")
     else:
       let dir = makeScratch("undeclared")
       writeFile(dir / "repro.nim", """
@@ -308,7 +308,7 @@ suite "rust-direct convention layout recognition":
 
   test "layout A: single-member workspace with src/main.rs at root":
     if not rustcOnPath():
-      skip()
+      skip("rustc not on PATH")
     else:
       let dir = makeScratch("layout-a-bin")
       writeFile(dir / "repro.nim", """
@@ -330,7 +330,7 @@ package soloPkg:
 
   test "layout B: multi-package workspace with <member>/src/{main,lib}.rs":
     if not rustcOnPath():
-      skip()
+      skip("rustc not on PATH")
     else:
       let dir = makeScratch("layout-b-recognise")
       writeFile(dir / "repro.nim", """
@@ -377,7 +377,7 @@ suite "rust-direct convention M34 cross-language (forward direction)":
 
   test "forward: Rust binary picks up C archive via -L native + -l static":
     if not rustcOnPath():
-      skip()
+      skip("rustc not on PATH")
     else:
       let conv = rust_direct_convention.rustDirectConvention()
       let request = dummyRequest(Mode3MixedForwardFixture)
@@ -453,7 +453,7 @@ suite "rust-direct convention M34 cross-language (reverse direction)":
 
   test "reverse: Rust library emits --crate-type=staticlib when consumed by C++":
     if not rustcOnPath():
-      skip()
+      skip("rustc not on PATH")
     else:
       let conv = rust_direct_convention.rustDirectConvention()
       let request = dummyRequest(Mode3MixedReverseFixture)
@@ -566,7 +566,7 @@ suite "rust-direct convention M34 cConsumable preserves M30 rlib emit":
     # so cConsumable=false for mathlib and the convention must still emit
     # --crate-type=rlib. M30 behaviour preserved.
     if not rustcOnPath():
-      skip()
+      skip("rustc not on PATH")
     else:
       let conv = rust_direct_convention.rustDirectConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -603,7 +603,7 @@ suite "rust-direct convention M34 cross-language cycle + undeclared":
 
   test "forward cycle: Rust binary depends_on C lib AND C lib depends_on Rust app — rejected":
     if not rustcOnPath():
-      skip()
+      skip("rustc not on PATH")
     else:
       let dir = makeScratch("xlang-cycle")
       writeFile(dir / "repro.nim", """
@@ -638,7 +638,7 @@ depends_on cLibPkg: rustAppPkg
 
   test "reverse cycle: C++ binary depends_on Rust lib AND Rust lib depends_on C++ app — rejected":
     if not rustcOnPath():
-      skip()
+      skip("rustc not on PATH")
     else:
       let dir = makeScratch("xlang-reverse-cycle")
       writeFile(dir / "repro.nim", """

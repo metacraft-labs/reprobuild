@@ -86,7 +86,7 @@ suite "fortran-direct convention recognition":
 
   test "recognize: positive — Mode 3 fixture (gfortran on PATH)":
     if not gfortranOnPath():
-      skip()
+      skip("gfortran not on PATH")
     else:
       let conv = fortran_direct_convention.fortranDirectConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -113,7 +113,7 @@ package x:
 
   test "recognize: negative — no Fortran members declared":
     if not gfortranOnPath():
-      skip()
+      skip("gfortran not on PATH")
     else:
       let dir = makeScratch("no-members")
       writeFile(dir / "repro.nim", """
@@ -132,7 +132,7 @@ suite "fortran-direct convention emit (Mode 3 fixture)":
 
   test "emitFragment: per-source compile + archive + link actions":
     if not gfortranOnPath():
-      skip()
+      skip("gfortran not on PATH")
     else:
       let conv = fortran_direct_convention.fortranDirectConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -213,7 +213,7 @@ suite "fortran-direct convention dep validation":
 
   test "depends_on cycle is rejected before any compile fires":
     if not gfortranOnPath():
-      skip()
+      skip("gfortran not on PATH")
     else:
       let dir = makeScratch("cycle")
       writeFile(dir / "repro.nim", """
@@ -247,7 +247,7 @@ depends_on betaPkg: alphaPkg
 
   test "depends_on references undeclared package — rejected":
     if not gfortranOnPath():
-      skip()
+      skip("gfortran not on PATH")
     else:
       let dir = makeScratch("undeclared")
       writeFile(dir / "repro.nim", """
@@ -279,7 +279,7 @@ suite "fortran-direct convention M37 cross-language (forward direction)":
 
   test "forward: Fortran binary picks up C archive on link argv":
     if not gfortranOnPath() or not gccOnPath():
-      skip()
+      skip("gfortran or gcc/clang not on PATH")
     else:
       let conv = fortran_direct_convention.fortranDirectConvention()
       let request = dummyRequest(Mode3MixedForwardFixture)
@@ -335,7 +335,7 @@ suite "fortran-direct convention M37 cross-language (reverse direction)":
 
   test "reverse: C++ binary picks up Fortran archive + runtime libs":
     if not gfortranOnPath() or not gppOnPath():
-      skip()
+      skip("gfortran or g++/clang++ not on PATH")
     else:
       let conv = fortran_direct_convention.fortranDirectConvention()
       let request = dummyRequest(Mode3MixedReverseFixture)
@@ -413,7 +413,7 @@ suite "fortran-direct convention cConsumable toggle":
     # is gfortran-driven so libgfortran is pulled in by the driver
     # automatically; no explicit -lgfortran on the link argv.
     if not gfortranOnPath():
-      skip()
+      skip("gfortran not on PATH")
     else:
       let conv = fortran_direct_convention.fortranDirectConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -444,7 +444,7 @@ suite "fortran-direct convention cConsumable toggle":
     # rest of the runtime) onto the C++ link argv via the
     # cConsumable-driven runtime injection.
     if not gfortranOnPath() or not gppOnPath():
-      skip()
+      skip("gfortran or g++/clang++ not on PATH")
     else:
       let conv = fortran_direct_convention.fortranDirectConvention()
       let request = dummyRequest(Mode3MixedReverseFixture)

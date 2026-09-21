@@ -148,9 +148,9 @@ package x:
 
   test "recognize: positive — Mode 2 fixture (shard.yml + shard.lock + crystal + shards on PATH)":
     if not crystalOnPath() or not shardsOnPath():
-      skip()
+      skip("crystal or shards not on PATH")
     elif not dirExists(Mode2Fixture):
-      skip()
+      skip("fixture missing: reprobuild-examples/crystal-shards/hello-binary")
     else:
       let conv = crystal_convention.crystalConvention()
       let request = dummyRequest(Mode2Fixture)
@@ -158,9 +158,9 @@ package x:
 
   test "recognize: positive — Mode 3 fixture (no shard.yml; crystal on PATH)":
     if not crystalOnPath():
-      skip()
+      skip("crystal not on PATH")
     elif not dirExists(Mode3Fixture):
-      skip()
+      skip("fixture missing: reprobuild-examples/crystal-mode3/hello-binary")
     else:
       let conv = crystal_convention.crystalConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -168,7 +168,7 @@ package x:
 
   test "recognize: positive — accepts ``shards`` token in uses":
     if not crystalOnPath():
-      skip()
+      skip("crystal not on PATH")
     else:
       let dir = makeScratch("shards-token")
       writeFile(dir / "repro.nim", """
@@ -206,9 +206,9 @@ suite "crystal convention emit shape":
 
   test "emitFragment Mode 3: single crystal-direct-build action":
     if not crystalOnPath():
-      skip()
+      skip("crystal not on PATH")
     elif not dirExists(Mode3Fixture):
-      skip()
+      skip("fixture missing: reprobuild-examples/crystal-mode3/hello-binary")
     else:
       let conv = crystal_convention.crystalConvention()
       let request = dummyRequest(Mode3Fixture)
@@ -258,9 +258,9 @@ suite "crystal convention emit shape":
 
   test "emitFragment Mode 2: shards-install + shards-build actions chained":
     if not crystalOnPath() or not shardsOnPath():
-      skip()
+      skip("crystal or shards not on PATH")
     elif not dirExists(Mode2Fixture):
-      skip()
+      skip("fixture missing: reprobuild-examples/crystal-shards/hello-binary")
     else:
       let conv = crystal_convention.crystalConvention()
       let request = dummyRequest(Mode2Fixture)
