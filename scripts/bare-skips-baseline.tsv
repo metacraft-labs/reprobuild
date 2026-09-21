@@ -1,0 +1,1147 @@
+# bare-skip baseline -- every test case that calls `skip()` without saying why.
+#
+# See scripts/check_bare_skips.py for what this is and why it has no
+# justification column. In short: `completed_clean_runs()` records a suite run
+# as COMPLETE only when every case is a pass or an EXPLAINED skip, and this
+# file pins the unexplained population so it cannot grow while it is burnt
+# down.
+#
+# Regenerate with: python3 scripts/check_bare_skips.py --write-baseline
+#
+# Format: <source>\t<case title>\t<count of bare skips in that case>
+# Line numbers are deliberately absent so an edit above a site does not
+# invalidate the baseline -- the same reason
+# scripts/shell-command-strings-baseline.txt omits them.
+#
+# The ratchet runs ONE WAY. A case whose bare-skip count EXCEEDS its row here
+# (or that has no row) is refused by name. A row whose count has fallen is
+# rewritten smaller by the next run and a row that has reached zero is dropped,
+# so fixing a site costs you no manual edit -- commit the result.
+#
+# To fix a row: give the `skip()` a reason that names the condition, e.g.
+#   skip("git not on PATH; this case needs a real repository")
+# and delete nothing here -- the next run rewrites the file for you.
+libs/ct_test_unittest_parallel/tests/t_ct_test_runner_full_suite_parity.nim	M3 internal runner and M4 ct-test-runner agree on pass/fail/skip totals	1
+libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim	partition file names that don't match any test produce warning	1
+libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim	partition file: runs only the listed three of five tests	1
+libs/ct_test_unittest_parallel/tests/t_ct_test_runner_partition_file_mode.nim	partition slice: not implemented, exits 2 with diagnostic	1
+libs/repro_binary_cache_client/tests/test_publish_in_process.nim	a compressible prefix over the raw limit publishes compressed	1
+libs/repro_binary_cache_client/tests/test_publish_in_process.nim	extractPrefix reads a zstd-compressed archive transparently	1
+libs/repro_build_engine/tests/t_action_cache_output_integrity.nim	corrupted output is not handed to a downstream consumer	1
+libs/repro_build_engine/tests/t_action_cache_output_integrity.nim	corrupted output preserving size and mtime is not reported up to date	1
+libs/repro_build_engine/tests/t_action_cache_output_integrity.nim	warm re-run executes zero edges (performance regression guard)	1
+libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim	1. a changed DECLARED value re-runs the edge	1
+libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim	2. a changed PASSTHROUGH value does NOT re-run the edge	1
+libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim	3. a changed PASSTHROUGH NAME SET re-runs the edge	1
+libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim	a warm no-op of a metadata-only graph performs zero content digests	1
+libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim	the counter is per build, not cumulative	1
+libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim	the per-edge scheduler path also performs zero content digests	1
+libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim	the same graph in restore mode DOES hash bytes (counter control)	1
+libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	a non-cacheable store-tool edge is unaffected	1
+libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	automatic-monitor: a store-tool edge with one KEYED input still publishes	1
+libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	automatic-monitor: an observed set that the tool-root elision empties does not publish	1
+libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	converter-validated-by-monitor: one KEYED converted input still publishes	1
+libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	converter-validated-by-monitor: the elision emptying the key does not publish	1
+libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	recognized-format-validated-by-monitor: one KEYED input still publishes	1
+libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	recognized-format-validated-by-monitor: the elision emptying the key does not publish	1
+libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	the guard's SCOPE is graded: an edge outside it still publishes an elided-empty key	1
+libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim	1. unchanged inputs: the run edge is not re-launched	1
+libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim	2. changed input: the run edge is re-launched	1
+libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim	3. changed test binary: the run edge is re-launched	1
+libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim	4. a zero-output edge that has never run is still executed	1
+libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim	unchanged inputs hit with rebuildMissingOutputsOnCacheHit = false	1
+libs/repro_build_engine/tests/test_engine_worker_pool.nim	the pool drains when an exception unwinds out of the build	1
+libs/repro_build_engine/tests/test_monitor_depfile_flush_is_async_and_atomic.nim	flush temp is on the destination filesystem	1
+libs/repro_build_engine/tests/test_monitor_finish_handoff_is_exclusive.nim	the carrier cannot give a monitor two owners	1
+libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim	in-process monitor hosting is not supported on this platform	1
+libs/repro_cas_store/tests/t_cas_store_occupancy_cost.nim	a reflink store does not pay for a materialization	2
+libs/repro_cas_store/tests/t_cas_store_occupancy_cost.nim	a store volume without block cloning pays for every copy	2
+libs/repro_cas_store/tests/t_cas_store_occupancy_cost.nim	size-on-disk reports a block clone at its full logical size	2
+libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim	unchanged skips / changed-executed re-runs / changed-unexecuted skips	1
+libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	a profile that genuinely fails to compile still fails, with a reason	1
+libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	infra apply converges a profile whose resources are all action edges	1
+libs/repro_cli_support/tests/t_infra_apply_profile_without_live_state.nim	infra plan accepts a profile whose resources are all action edges	1
+libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	test_ra32_a_committed_noncanonical_record_is_refused_and_names_its_repair	1
+libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	test_ra32_a_conflicting_twin_does_not_deny_unrelated_publishing	1
+libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	test_ra32_a_refused_publish_never_unstages_the_operators_own_work	1
+libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	test_ra32_a_stray_not_already_upstream_does_not_deny_publishing	1
+libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	test_ra32_every_locks_project_reader_reads_the_encoded_component	1
+libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	test_ra32_migrate_locks_plans_without_touching_the_store	1
+libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	test_ra32_migrate_locks_refuses_a_canonical_path_that_cannot_publish	1
+libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	test_ra32_migrate_locks_refuses_an_already_published_record	1
+libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	test_ra32_migrate_locks_refuses_as_a_whole_before_the_first_move	1
+libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	test_ra32_migrate_locks_repairs_and_the_result_publishes	1
+libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	test_ra32_publish_never_moves_or_deletes_anything	1
+libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	test_ra32_sibling_backends_keep_every_component_inside_the_store	1
+libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	test_ra32_slash_named_repo_publishes	1
+libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	test_ra32_slash_named_repo_records_at_depth_four	1
+libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	test_ra32_the_append_only_rule_has_no_exception	1
+libs/repro_cli_support/tests/t_strategy_unknown_name_refused.nim	the dispatcher actually emits that diagnostic	1
+libs/repro_daemon_core/tests/t_daemon_writer_identity.nim	the Linux /proc/<pid>/stat field-22 path	1
+libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	a manifest carrying a real profile is compiled and applied	1
+libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	a profile that prints no intent is named as such, not as bad JSON	1
+libs/repro_deploy_agent/tests/t_deploy_agent_cli_compiles_manifest_profile.nim	an empty profileText is not a failed compile	1
+libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim	converged manifest substitutes build outputs from the binary cache	1
+libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim	t_repro_deploy_agent_converges_from_signed_manifest	1
+libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim	t_repro_https_cache_end_to_end	1
+libs/repro_dsl_stdlib/tests/t_n48_apt_jammy_tar_operands.nim	test_n48_apt_data_member_extracts_into_dirs_gnu_tar_would_unquote	2
+libs/repro_dsl_stdlib/tests/t_n48_apt_jammy_tar_operands.nim	test_n48_apt_data_member_extracts_under_an_absolute_windows_outdir	2
+libs/repro_home_apply/tests/t_adapter_chain.nim	cakNix in preference is skipped cleanly (placeholder branch)	1
+libs/repro_home_apply/tests/t_adapter_chain.nim	custom preference [scoop, builtin] respects ordering	1
+libs/repro_home_apply/tests/t_adapter_chain.nim	jdk resolves via cakBuiltin on the platform default chain	1
+libs/repro_home_apply/tests/t_builtin_adapter.nim	realizeBuiltinPackage: 7z extraction + extract_path flatten	1
+libs/repro_home_apply/tests/t_builtin_adapter.nim	realizeBuiltinPackage: zip extraction + extract_path flatten	1
+libs/repro_home_apply/tests/t_builtin_adapter_7z_nested.nim	test_m3_nested_7z_disabled_keeps_inner_archives	1
+libs/repro_home_apply/tests/t_builtin_adapter_7z_nested.nim	test_m3_nested_7z_flatten_synthetic_gcc_winlibs_shape	1
+libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	test_m3_basic_7z_still_works_erlang_shape	1
+libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	test_m3_discover_sevenzip_finds_catalog_prefix	1
+libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	test_m3_sfx_flatten_synthetic_git_realizes_bin_git	1
+libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	test_m3_sfx_flatten_synthetic_ruby_shape	1
+libs/repro_home_apply/tests/t_builtin_adapter_installer.nim	test_m4_discover_dark_finds_catalog_prefix	1
+libs/repro_home_apply/tests/t_builtin_adapter_installer.nim	test_m4_discover_innounp_finds_catalog_prefix	1
+libs/repro_home_apply/tests/t_builtin_adapter_installer.nim	test_m4_discover_lessmsi_finds_catalog_prefix	1
+libs/repro_home_apply/tests/t_builtin_adapter_installer.nim	test_m4_msi_extractor_dispatch_honors_msiexec_env_var	2
+libs/repro_home_apply/tests/t_builtin_adapter_installer.nim	test_m4_msi_realize_via_lessmsi_synthetic_meson_shape	3
+libs/repro_home_apply/tests/t_builtin_adapter_installer.nim	test_m4_nsis_msi_bundle_merge_conflict_fails_closed	2
+libs/repro_home_apply/tests/t_builtin_adapter_installer_innosetup_fpc.nim	test_m4_innosetup_realize_synthetic_fpc_shape	2
+libs/repro_home_apply/tests/t_builtin_adapter_installer_nsis_erlang.nim	test_m11_imInstallerNsis_synthetic_otp_shape	1
+libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim	test_m6_extractor_discovery_returns_usable_extractor	1
+libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim	test_m6_realize_imMsys2Pacman_cache_hit_on_re_realize	1
+libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim	test_m6_realize_imMsys2Pacman_extracts_and_flattens	1
+libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim	test_m6_tar_filter_arm_extracts_into_destinations_gnu_tar_would_unquote	2
+libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim	test_m6_tar_filter_arm_opens_an_absolute_windows_archive_path	2
+libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim	test_m6_zstd_pipe_arm_extracts_into_destinations_gnu_tar_would_unquote	2
+libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim	test_m6_zstd_pipe_arm_extracts_real_bytes_without_a_shell	2
+libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim	test_m6_zstd_pipe_arm_reports_a_corrupt_archive_loudly	1
+libs/repro_home_apply/tests/t_builtin_adapter_msys2.nim	test_m6_zstd_pipe_arm_returns_when_tar_exits_without_reading_its_stdin	1
+libs/repro_home_apply/tests/test_m25_adapter_preference_text_macro_parity.nim	test_m25_adapter_preference_macos_alias_canonicalizes_in_both	1
+libs/repro_home_apply/tests/test_m25_adapter_preference_text_macro_parity.nim	test_m25_adapter_preference_macro_form_emits_same_shape	1
+libs/repro_home_apply/tests/test_m25_adapter_preference_text_macro_parity.nim	test_m25_adapter_preference_text_macro_shape_equal	1
+libs/repro_home_apply/tests/test_m69_env_userpath_multi_package.nim	applyUserPath: two packages write two independent rc blocks	1
+libs/repro_home_apply/tests/test_m69_env_userpath_multi_package.nim	observeUserPath returns joined-entries digest in both branches	1
+libs/repro_home_apply/tests/test_m69_env_userpath_multi_package.nim	realWorldIdentity encodes the per-resource block id (POSIX)	1
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	M83 step 4b: launchd.userAgent with keepAlive parameter still off-macOS	1
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	M83 step 4b: systemd.userUnit with state parameter still off-Linux	1
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	M83 step 7: applyKdeConfigKey with kdeVersion=5 still off-Linux	1
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: destroyDconfKey raises ENotImplementedPlatform off-Linux	1
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: destroyKdeConfigKey raises ENotImplementedPlatform off-Linux	1
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: launchd.userAgent raises ENotImplementedPlatform off-macOS	1
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: linux.dconfKey raises ENotImplementedPlatform off-Linux	1
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: linux.gsettings raises ENotImplementedPlatform off-Linux	1
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: linux.kdeConfigKey raises ENotImplementedPlatform off-Linux	1
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: macos.userDefault raises ENotImplementedPlatform off-macOS	1
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: observeDconfKey raises ENotImplementedPlatform off-Linux	1
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: observeKdeConfigKey raises ENotImplementedPlatform off-Linux	1
+libs/repro_home_resources/tests/t_smoke_home_resources.nim	phase-B: systemd.userUnit raises ENotImplementedPlatform off-Linux	1
+libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	off-macOS: applyHomebrewCask raises ENotImplementedPlatform	1
+libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	off-macOS: applyHomebrewFormula raises ENotImplementedPlatform	1
+libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	off-macOS: applyHomebrewFormula raises off-mac even with version+args	1
+libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	off-macOS: destroyHomebrewCask raises ENotImplementedPlatform	1
+libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	off-macOS: destroyHomebrewFormula raises ENotImplementedPlatform	1
+libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	off-macOS: observeHomebrewCask raises ENotImplementedPlatform	1
+libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	off-macOS: observeHomebrewFormula raises ENotImplementedPlatform	1
+libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim	a PRESENT input inside an output path is still probed	2
+libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim	an input absent inside an existing output path is skipped	1
+libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim	the store-absence skip row is wired and is reset with its count	1
+libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	BUYS: retargeting a dangling link to another absent target invalidates	1
+libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	COSTS: a dangling link whose target appears does NOT invalidate	1
+libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	a FIFO input is not recorded; a dangling symlink input is	1
+libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	a symlink to a file tracks the LINK, not the file it points at	1
+libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	regular file, directory, symlinks, dangling link, FIFO, absent path	1
+libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	the retired classifier agreed on five cases and disagreed on two	1
+libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	a cache-missing edge is identifiable, and so is why it missed	1
+libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	a failed edge is audited as an error with its diagnostic	1
+libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	every counted resource is audited; the two populations stay apart	1
+libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	the planner's drift baseline ignores build-action records	1
+libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	t_infra_apply_substitutes_from_cache	1
+libs/repro_standard_provider/tests/test_ada_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
+libs/repro_standard_provider/tests/test_ada_direct_convention.nim	depends_on references undeclared package — rejected	1
+libs/repro_standard_provider/tests/test_ada_direct_convention.nim	emitFragment: per-member gcc -c + ar rcs + gnatmake link	1
+libs/repro_standard_provider/tests/test_ada_direct_convention.nim	forward: Ada binary picks up C archive after -largs	2
+libs/repro_standard_provider/tests/test_ada_direct_convention.nim	pure-Ada fixture: library archive emitted at canonical path	1
+libs/repro_standard_provider/tests/test_ada_direct_convention.nim	recognize: negative — no Ada members declared	1
+libs/repro_standard_provider/tests/test_ada_direct_convention.nim	recognize: positive — Mode 3 fixture (no *.gpr, gnatmake on PATH)	1
+libs/repro_standard_provider/tests/test_ada_direct_convention.nim	recognize: positive — accepts ``ada`` token in uses	1
+libs/repro_standard_provider/tests/test_ada_direct_convention.nim	recognize: positive — accepts ``gnat`` token in uses	1
+libs/repro_standard_provider/tests/test_ada_direct_convention.nim	reverse: C++ binary picks up Ada archive as trailing positional	2
+libs/repro_standard_provider/tests/test_c_cpp_autotools_convention.nim	emitFragment: M28 per-source lift (configure + compile(s) + link)	1
+libs/repro_standard_provider/tests/test_c_cpp_autotools_convention.nim	force Mode B via REPRO_AUTOTOOLS_MODE=B on a plain Mode-A project	1
+libs/repro_standard_provider/tests/test_c_cpp_cmake_convention.nim	emitFragment: hello-binary fixture produces configure + build actions	1
+libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
+libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim	depends_on references undeclared package — rejected	1
+libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim	emitFragment: build actions carry toolIdentityRefs (M9.N Batch B)	1
+libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim	emitFragment: ignores members from Nim-toolchain packages	1
+libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim	emitFragment: produces per-source compile + archive + link actions with dep wiring	1
+libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim	recognize: M34 defers to rust-direct on mixed Rust+C/C++ workspaces	1
+libs/repro_standard_provider/tests/test_c_cpp_direct_convention.nim	recognize: M34 does NOT defer when Cargo.toml is present (Mode 2 territory)	1
+libs/repro_standard_provider/tests/test_c_cpp_make_convention.nim	emitFragment: binary fixture produces compile + link actions	1
+libs/repro_standard_provider/tests/test_c_cpp_make_convention.nim	emitFragment: library-static fixture produces archive action	1
+libs/repro_standard_provider/tests/test_c_cpp_meson_convention.nim	emitFragment: configure action's argv pins CC for compiler discovery	2
+libs/repro_standard_provider/tests/test_c_cpp_meson_convention.nim	emitFragment: hello-binary fixture produces configure + build actions	1
+libs/repro_standard_provider/tests/test_crystal_convention.nim	emitFragment Mode 2: shards-install + shards-build actions chained	2
+libs/repro_standard_provider/tests/test_crystal_convention.nim	emitFragment Mode 3: single crystal-direct-build action	2
+libs/repro_standard_provider/tests/test_crystal_convention.nim	recognize: positive — Mode 2 fixture (shard.yml + shard.lock + crystal + shards on PATH)	2
+libs/repro_standard_provider/tests/test_crystal_convention.nim	recognize: positive — Mode 3 fixture (no shard.yml; crystal on PATH)	2
+libs/repro_standard_provider/tests/test_crystal_convention.nim	recognize: positive — accepts ``shards`` token in uses	1
+libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
+libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim	output-path resolution: OutputType=Library yields .dll	1
+libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim	output-path resolution: TargetFramework + AssemblyName + OutputType compose the binary filename	1
+libs/repro_standard_provider/tests/test_d_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
+libs/repro_standard_provider/tests/test_d_direct_convention.nim	depends_on references undeclared package — rejected	1
+libs/repro_standard_provider/tests/test_d_direct_convention.nim	emitFragment: per-member -lib + executable link actions	1
+libs/repro_standard_provider/tests/test_d_direct_convention.nim	forward: D binary picks up C archive via -L= pass-through	2
+libs/repro_standard_provider/tests/test_d_direct_convention.nim	pure-D fixture: library not marked cConsumable	1
+libs/repro_standard_provider/tests/test_d_direct_convention.nim	recognize: negative — no D members declared	1
+libs/repro_standard_provider/tests/test_d_direct_convention.nim	recognize: positive — Mode 3 fixture (no dub manifest, D on PATH)	1
+libs/repro_standard_provider/tests/test_d_direct_convention.nim	recognize: positive — accepts ``ldc2`` token in uses	1
+libs/repro_standard_provider/tests/test_d_direct_convention.nim	reverse: C++ binary picks up D archive as trailing positional	2
+libs/repro_standard_provider/tests/test_elixir_mix_convention.nim	emitFragment: hello-binary fixture produces escript-build + wrapper actions	2
+libs/repro_standard_provider/tests/test_elixir_mix_convention.nim	emitFragment: wrapper depends on escript-build action (chained ordering)	2
+libs/repro_standard_provider/tests/test_elixir_mix_convention.nim	recognize: negative — elixir/mix not on PATH (toolchain probe)	1
+libs/repro_standard_provider/tests/test_elixir_mix_convention.nim	recognize: positive — accepts ``mix`` token in uses	1
+libs/repro_standard_provider/tests/test_emit_cache_m18.nim	second emit re-uses cached nimcache manifest without re-running nim c	1
+libs/repro_standard_provider/tests/test_emit_cache_m18.nim	source-file edit invalidates cache and re-runs nim c	1
+libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim	emitFragment: hello-binary fixture produces escriptize + wrapper actions	2
+libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim	emitFragment: wrapper depends on escriptize action (chained ordering)	2
+libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim	recognize: negative — erl/rebar3 not on PATH (toolchain probe)	1
+libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim	recognize: positive — accepts ``rebar3`` token in uses	1
+libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	cConsumable=false when no C/C++ downstream (pure Fortran)	1
+libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	cConsumable=true when C/C++ executable depends on Fortran lib	1
+libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
+libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	depends_on references undeclared package — rejected	1
+libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	emitFragment: per-source compile + archive + link actions	1
+libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	forward: Fortran binary picks up C archive on link argv	1
+libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	recognize: negative — no Fortran members declared	1
+libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	recognize: positive — Mode 3 fixture (gfortran on PATH)	1
+libs/repro_standard_provider/tests/test_fortran_direct_convention.nim	reverse: C++ binary picks up Fortran archive + runtime libs	1
+libs/repro_standard_provider/tests/test_go_convention.nim	emitFragment M22: go/library (no tests) emits no test actions	1
+libs/repro_standard_provider/tests/test_go_convention.nim	emitFragment M22: library-with-tests emits a non-default test target	1
+libs/repro_standard_provider/tests/test_go_convention.nim	emitFragment: graph shape against canonical fixture	1
+libs/repro_standard_provider/tests/test_go_convention.nim	emitFragment: library-only fixture emits no link actions	1
+libs/repro_standard_provider/tests/test_go_convention.nim	emitFragment: multi-binary fixture produces one link per cmd	1
+libs/repro_standard_provider/tests/test_go_direct_convention.nim	M31 fixture (pure Go workspace) still uses go tool compile / link	1
+libs/repro_standard_provider/tests/test_go_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
+libs/repro_standard_provider/tests/test_go_direct_convention.nim	depends_on references undeclared package — rejected	1
+libs/repro_standard_provider/tests/test_go_direct_convention.nim	emitFragment: produces per-member compile + link with importcfg wiring	1
+libs/repro_standard_provider/tests/test_go_direct_convention.nim	forward cycle: Go binary depends_on C lib AND C lib depends_on Go app — rejected	1
+libs/repro_standard_provider/tests/test_go_direct_convention.nim	forward: Go binary uses cgo and picks up C archive via -ldflags	1
+libs/repro_standard_provider/tests/test_go_direct_convention.nim	layout A: single-member workspace with src/*.go at root	1
+libs/repro_standard_provider/tests/test_go_direct_convention.nim	layout B: multi-package workspace with per-<member>/*.go	1
+libs/repro_standard_provider/tests/test_go_direct_convention.nim	recognize: positive — Mode 3 fixture (no go.mod, go available)	1
+libs/repro_standard_provider/tests/test_go_direct_convention.nim	recognize: positive — import \"C\" anywhere (M36: cgo lifted)	1
+libs/repro_standard_provider/tests/test_go_direct_convention.nim	reverse: Go library emits -buildmode=c-archive when consumed by C++	1
+libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
+libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim	recognize: negative — ghc/cabal not on PATH (toolchain probe)	1
+libs/repro_standard_provider/tests/test_java_maven_convention.nim	emitFragment: hello-binary fixture produces a single package action	1
+libs/repro_standard_provider/tests/test_java_maven_convention.nim	output-path resolution: artifactId + version compose the jar filename	1
+libs/repro_standard_provider/tests/test_jsts_convention.nim	emitFragment M21: typescript-cli emits npm-ci + esbuild + shim + test-run	2
+libs/repro_standard_provider/tests/test_jsts_convention.nim	emitFragment M21: typescript-library has no npm-ci / esbuild / shim / test actions	1
+libs/repro_standard_provider/tests/test_jsts_convention.nim	emitFragment M24: vite scratch project emits a single crude action	1
+libs/repro_standard_provider/tests/test_jsts_convention.nim	emitFragment M24: vite scratch project with lockfile uses npm ci	1
+libs/repro_standard_provider/tests/test_jsts_convention.nim	emitFragment: node-server produces a JS-copy action	1
+libs/repro_standard_provider/tests/test_jsts_convention.nim	emitFragment: typescript-library produces a tsc-compile action	1
+libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
+libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	depends_on references undeclared package — rejected	1
+libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	emitFragment: produces per-executable bundle + wrapper	1
+libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	layout A: single-member workspace with src/<pkg>.ts at root	1
+libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	layout B-flat: per-member <pkg>/main.ts at root (no src/)	1
+libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	recognize: positive — Mode 3 fixture (no package.json, node available)	1
+libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
+libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim	output-path resolution: projectName + version compose the jar filename	1
+libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim	recognize: positive — scratch Groovy DSL build.gradle	1
+libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: forward fixture does NOT trigger reverse-direction Rust emit	3
+libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: forward fixture does NOT trigger reverse-direction emit	2
+libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: forward fixture emits Rust staticlib + Nim link picks it up	2
+libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: mixed fixture wires C++ exec -> Nim archive end-to-end	1
+libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: mixed fixture wires Nim app -> C archive end-to-end	1
+libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: reverse fixture does NOT trigger forward-direction Rust lib emit	3
+libs/repro_standard_provider/tests/test_nim_convention.nim	emitFragment: reverse fixture wires Rust exec -> Nim archive end-to-end	2
+libs/repro_standard_provider/tests/test_ocaml_dune_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
+libs/repro_standard_provider/tests/test_ocaml_dune_convention.nim	recognize: negative — ocaml/dune not on PATH (toolchain probe)	1
+libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
+libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	depends_on references undeclared package — rejected	1
+libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	emitFragment: per-member fpc compile + ar rcs + fpc link	2
+libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	forward: Pascal binary picks up C archive via -k linker pass-through	2
+libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	recognize: negative — no Pascal members declared	1
+libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	recognize: positive — Mode 3 fixture (no *.lpi, fpc on PATH)	2
+libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	recognize: positive — accepts .pp source extension	1
+libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	recognize: positive — accepts ``freepascal`` token in uses	1
+libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	recognize: positive — accepts ``pascal`` token in uses	1
+libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	reverse: C++ binary picks up Pascal archive as trailing positional	2
+libs/repro_standard_provider/tests/test_php_composer_convention.nim	emitFragment: hello-binary fixture produces install + wrapper actions	1
+libs/repro_standard_provider/tests/test_php_composer_convention.nim	recognize: negative — php/composer not on PATH (toolchain probe)	1
+libs/repro_standard_provider/tests/test_python_convention.nim	emitFragment M20: console-script emits installer action with shim outputs	1
+libs/repro_standard_provider/tests/test_python_convention.nim	emitFragment M20: library-pure emits byte-compile + sdist actions, no installer	1
+libs/repro_standard_provider/tests/test_python_convention.nim	emitFragment M24: maturin scratch project emits a single crude action	1
+libs/repro_standard_provider/tests/test_python_convention.nim	emitFragment: library-pure produces a wheel-build action	1
+libs/repro_standard_provider/tests/test_python_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
+libs/repro_standard_provider/tests/test_python_direct_convention.nim	depends_on references undeclared package — rejected	1
+libs/repro_standard_provider/tests/test_python_direct_convention.nim	emitFragment: produces per-member stage + byte-compile + wrapper	1
+libs/repro_standard_provider/tests/test_python_direct_convention.nim	executable missing __main__.py is rejected with a clear ValueError	1
+libs/repro_standard_provider/tests/test_python_direct_convention.nim	layout A: single-member workspace with src/<pkg>/__init__.py at root	1
+libs/repro_standard_provider/tests/test_python_direct_convention.nim	layout B-flat: multi-package workspace with per-member <pkg>/<pkg>/__init__.py	1
+libs/repro_standard_provider/tests/test_python_direct_convention.nim	recognize: positive — Mode 3 fixture (no pyproject.toml, python available)	1
+libs/repro_standard_provider/tests/test_ruby_bundler_convention.nim	emitFragment: hello-binary fixture produces install + wrapper actions	1
+libs/repro_standard_provider/tests/test_ruby_bundler_convention.nim	recognize: negative — ruby/bundle not on PATH (toolchain probe)	1
+libs/repro_standard_provider/tests/test_rust_convention.nim	emitFragment M22: library-with-tests emits a non-default test target	1
+libs/repro_standard_provider/tests/test_rust_convention.nim	emitFragment M22: rust/binary has no test actions	1
+libs/repro_standard_provider/tests/test_rust_convention.nim	emitFragment M23: cdylib emits --crate-type cdylib link argv	1
+libs/repro_standard_provider/tests/test_rust_convention.nim	emitFragment M23: project with crates.io dep routes to Mode B	3
+libs/repro_standard_provider/tests/test_rust_convention.nim	emitFragment M23: workspace-lib-chain topological order	1
+libs/repro_standard_provider/tests/test_rust_convention.nim	emitFragment: two-action graph against canonical fixture	1
+libs/repro_standard_provider/tests/test_rust_direct_convention.nim	M30 fixture (pure Rust workspace) still produces rlib, not staticlib	1
+libs/repro_standard_provider/tests/test_rust_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
+libs/repro_standard_provider/tests/test_rust_direct_convention.nim	depends_on references undeclared package — rejected	1
+libs/repro_standard_provider/tests/test_rust_direct_convention.nim	emitFragment: produces per-crate link actions with --extern wiring	1
+libs/repro_standard_provider/tests/test_rust_direct_convention.nim	forward cycle: Rust binary depends_on C lib AND C lib depends_on Rust app — rejected	1
+libs/repro_standard_provider/tests/test_rust_direct_convention.nim	forward: Rust binary picks up C archive via -L native + -l static	1
+libs/repro_standard_provider/tests/test_rust_direct_convention.nim	layout A: single-member workspace with src/main.rs at root	1
+libs/repro_standard_provider/tests/test_rust_direct_convention.nim	layout B: multi-package workspace with <member>/src/{main,lib}.rs	1
+libs/repro_standard_provider/tests/test_rust_direct_convention.nim	recognize: negative — no rust members declared	1
+libs/repro_standard_provider/tests/test_rust_direct_convention.nim	recognize: positive — Mode 3 fixture (no Cargo.toml, rustc available)	1
+libs/repro_standard_provider/tests/test_rust_direct_convention.nim	reverse cycle: C++ binary depends_on Rust lib AND Rust lib depends_on C++ app — rejected	1
+libs/repro_standard_provider/tests/test_rust_direct_convention.nim	reverse: Rust library emits --crate-type=staticlib when consumed by C++	1
+libs/repro_standard_provider/tests/test_swift_swiftpm_convention.nim	emitFragment: hello-binary fixture produces a single build action	1
+libs/repro_standard_provider/tests/test_swift_swiftpm_convention.nim	recognize: negative — swift not on PATH (toolchain probe)	1
+libs/repro_standard_provider/tests/test_zig_direct_convention.nim	depends_on cycle is rejected before any compile fires	1
+libs/repro_standard_provider/tests/test_zig_direct_convention.nim	depends_on references undeclared package — rejected	1
+libs/repro_standard_provider/tests/test_zig_direct_convention.nim	emitFragment: per-member build-lib + build-exe actions	1
+libs/repro_standard_provider/tests/test_zig_direct_convention.nim	forward: Zig binary picks up C archive as trailing positional	1
+libs/repro_standard_provider/tests/test_zig_direct_convention.nim	pure-zig fixture: library not marked cConsumable	1
+libs/repro_standard_provider/tests/test_zig_direct_convention.nim	recognize: negative — no zig members declared	1
+libs/repro_standard_provider/tests/test_zig_direct_convention.nim	recognize: positive — Mode 3 fixture (no build.zig, zig on PATH)	1
+libs/repro_standard_provider/tests/test_zig_direct_convention.nim	reverse: C++ binary picks up Zig archive as trailing positional	1
+libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	test_n48_conda_zstd_fallback_runs_without_a_shell	3
+libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	test_n48_tarball_arm_extracts_into_destinations_gnu_tar_would_unquote	2
+libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	test_n48_tarball_arm_opens_an_absolute_windows_archive_path	2
+libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim	unreadable directory enumeration falls back to individual probes	2
+libs/repro_workspace_vcs/tests/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths.nim	t_shared_bare_migration_is_in_place_and_keeps_the_cache_refs	1
+libs/repro_workspace_vcs/tests/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths.nim	t_shared_bare_refresh_advances_heads_of_a_bare_cloned_without_a_refspec	1
+libs/repro_workspace_vcs/tests/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths.nim	t_shared_bare_wiring_is_recognised_whoever_wrote_the_alternates_entry	1
+libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim	regeneration_is_idempotent	1
+libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim	regeneration_preserves_user_entries	1
+libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim	symlinked_checkout_uses_the_no_slash_form	1
+libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim	tracked_directory_is_not_ignored	1
+tests/e2e/dev-env/t_e2e_shell_hook_cd_activate_deactivate.nim	bash_hook_short_circuits_repeated_prompts_via_REPRO_PROJECT_ROOT	2
+tests/e2e/dev-env/t_e2e_shell_hook_noop_io_bounded.nim	noop_fast_path_does_not_open_build_engine_artifacts	2
+tests/e2e/dev-env/t_e2e_shell_hook_realistic_workload.nim	fast_path_keeps_40_prompts_under_cumulative_budget	1
+tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	M28 debug/unwind/replay gate is macOS arm64-only	1
+tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim	M27 real direct trampoline gate is macOS arm64-only	1
+tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim	linux x86_64 only	1
+tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim	HLX-M0 direct patch gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-far/t_e2e_hcr_linux_far_target_island_patch.nim	HLX-M2 island gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim	HLX-M2 island exhaustion gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-hardening/t_e2e_hcr_linux_text_left_writable_reaches_the_wire.nim	requires linux x86_64	1
+tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_hardened_host_refuses_at_negotiation.nim	the hardened-host negotiation gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings.nim	the provider code-page gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-prepare/t_e2e_hcr_linux_prepare_object_expands_compressed_debug_sections.nim	the ELF prepare-object expansion gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-prepare/t_integration_hcr_linux_phase_i_refusal_reports_an_applied_patch.nim	the Phase I degraded-publication gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-rbhcr/t_e2e_hcr_linux_isonim_shim_against_real_agent.nim	HLX-M8 IsoNim shim gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_late_load_failure_still_reaches_after_reload.nim	HLX-M8 step-38 gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_managed_type_layout_change_lifecycle.nim	HLX-M8 managed-type lifecycle gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_rejected_patch_never_fires_before_reload.nim	HLX-M8 rejected-patch gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_threaded_synchronized_reload.nim	HLX-M8 threaded synchronized-mode gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim	HLX-M2 shared-library sled gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim	HLX-M4 concurrency gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_quiescence_handshake_and_release.nim	HLX-M4 quiescence gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-threads/t_integration_hcr_linux_on_stack_function_reported_skipped.nim	HLX-M4 on-stack gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-threads/t_integration_hcr_linux_quiescence_timeout_aborts_without_writing.nim	HLX-M4 quiescence timeout gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-threads/t_integration_hcr_linux_signal_blocked_thread_refused_by_name.nim	HLX-M4 signal-blocked quiescence gate is linux-x86_64-only	1
+tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_rolls_back_published_sites.nim	linux/amd64 only	1
+tests/e2e/hcr-linux-txn/t_integration_hcr_linux_prepare_failure_leaves_process_byte_identical.nim	linux/amd64 only	1
+tests/e2e/hcr-linux-txn/t_integration_hcr_linux_repeated_patch_of_same_function.nim	linux/amd64 only	1
+tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim	HLX-M5 wire registration gate is linux-x86_64-only	1
+tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim	repro watch infers HCR patch metadata without fixture JSON	1
+tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim	t_e2e_repro_watch_hcr_multi_target_independent_patches	1
+tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim	t_e2e_repro_watch_hcr_one_target_agent_inject_failure	1
+tests/e2e/home-resources/t_e2e_macos_user_default_restart_target.nim	restartTarget killall fires on change, not on a cache-hit	1
+tests/e2e/local-build-engine/t_repro_build_target_matching_project_file_stem.nim	repro build repro selects only the named target	1
+tests/e2e/m78/t_e2e_profile_declared_resources_apply.nim	a profile `resources:` block materializes through `repro home apply`	1
+tests/e2e/m79/t_integration_shell_integration_replan_idempotent.nim	an unchanged `shell.integration` resource re-plans as no-op; a content edit still drifts	1
+tests/e2e/macos-monitor/t_macos_monitor_shim_event_taxonomy.nim	macOS monitor shim event taxonomy is unsupported on non-macOS	1
+tests/e2e/sharding/t_e2e_repro_test_shard_workspace_integration.nim	t_e2e_repro_test_shard_workspace_integration	1
+tests/integration/t_a_behind_only_refusal_names_a_pasteable_command.nim	t_a_behind_only_refusal_names_a_pasteable_command	2
+tests/integration/t_a_behind_pin_sibling_is_not_recorded_as_the_new_pin.nim	t_a_behind_pin_sibling_is_not_recorded_as_the_new_pin	1
+tests/integration/t_a_behind_pin_skip_names_the_sibling_distance_and_remedy.nim	t_a_behind_pin_skip_names_the_sibling_distance_and_remedy	2
+tests/integration/t_a_clean_workspace_pushes_without_a_diagnostic.nim	t_a_clean_workspace_pushes_without_a_diagnostic	1
+tests/integration/t_a_commit_that_moves_no_sibling_does_not_touch_the_lock.nim	t_a_commit_that_moves_no_sibling_does_not_touch_the_lock	1
+tests/integration/t_a_dirty_sibling_leaves_the_lock_alone.nim	t_a_dirty_sibling_leaves_the_lock_alone	1
+tests/integration/t_a_dirty_sibling_outside_the_closure_does_not_block.nim	t_a_dirty_sibling_outside_the_closure_does_not_block	1
+tests/integration/t_a_flake_pinned_input_is_not_moved_behind_the_flakes_back.nim	t_a_declined_refresh_exits_non_zero	1
+tests/integration/t_a_flake_pinned_input_is_not_moved_behind_the_flakes_back.nim	t_a_flake_pin_the_author_moved_is_recorded_not_declined	1
+tests/integration/t_a_flake_pinned_input_is_not_moved_behind_the_flakes_back.nim	t_a_flake_pinned_input_is_not_moved_behind_the_flakes_back	1
+tests/integration/t_a_flake_pinned_input_is_not_moved_behind_the_flakes_back.nim	t_a_push_over_a_rev_pinned_input_names_the_flake_edit	1
+tests/integration/t_a_flake_pinned_input_is_not_moved_behind_the_flakes_back.nim	t_a_rev_pinned_sibling_that_is_behind_is_not_sent_to_the_flake	1
+tests/integration/t_a_gate_refusal_over_an_unpublished_sibling_names_the_push_first.nim	t_a_gate_refusal_over_an_unpublished_sibling_names_the_push_first	2
+tests/integration/t_a_linked_worktree_sibling_is_reported_and_gated.nim	t_a_linked_worktree_sibling_is_reported_and_gated	1
+tests/integration/t_a_mixed_workspace_records_only_the_ahead_inputs.nim	t_a_mixed_workspace_records_only_the_ahead_inputs	1
+tests/integration/t_a_mixed_workspace_records_only_the_publishable_inputs.nim	t_a_mixed_workspace_records_only_the_publishable_inputs	1
+tests/integration/t_a_pushed_sibling_is_still_recorded.nim	t_a_pushed_sibling_is_still_recorded	1
+tests/integration/t_a_repo_not_in_develop_mode_is_not_substituted.nim	t_a_repo_not_in_develop_mode_is_not_substituted	1
+tests/integration/t_a_root_repo_flake_is_reported_not_refused.nim	t_a_root_repo_flake_is_reported_not_refused	1
+tests/integration/t_a_sibling_override_excludes_gitignored_build_output.nim	t_a_sibling_override_excludes_gitignored_build_output	1
+tests/integration/t_a_sibling_whose_pin_is_not_fetched_is_not_recorded.nim	t_a_sibling_whose_pin_is_not_fetched_is_not_recorded	2
+tests/integration/t_a_worktree_sibling_is_not_invisible_to_the_refresh.nim	t_a_worktree_sibling_is_not_invisible_to_the_refresh	1
+tests/integration/t_activity_mock_tier_allowed_on_plain_layout.nim	mock on the plain layout plans, and the plan has an id	1
+tests/integration/t_activity_mock_tier_allowed_on_plain_layout.nim	the SAME layout refuses the SAME activity at a tier that needs evidence	1
+tests/integration/t_activity_validate_gate.nim	a cvm tier on the same layout is refused for the same reason	1
+tests/integration/t_activity_validate_gate.nim	a tpm tier on a writable-root layout does not reach a plan	1
+tests/integration/t_activity_validate_gate.nim	the same tier on the attested layout plans, and emits its activity	1
+tests/integration/t_add_respects_develop_mode_policy_and_overrides.nim	test_ra22_binary_override_on_develop_org_repo_no_checkout	1
+tests/integration/t_add_respects_develop_mode_policy_and_overrides.nim	test_ra22_develop_org_repo_defaults_to_develop_checkout_and_edge	1
+tests/integration/t_add_respects_develop_mode_policy_and_overrides.nim	test_ra22_develop_override_on_third_party_repo_checks_out	1
+tests/integration/t_add_respects_develop_mode_policy_and_overrides.nim	test_ra22_no_membership_clones_without_adding_dependency	1
+tests/integration/t_add_respects_develop_mode_policy_and_overrides.nim	test_ra22_pins_revision_only_when_there_is_nothing_to_inherit	1
+tests/integration/t_add_respects_develop_mode_policy_and_overrides.nim	test_ra22_third_party_repo_defaults_to_binary_no_checkout	1
+tests/integration/t_amend_and_rebase_are_idempotent.nim	t_amend_and_rebase_are_idempotent	1
+tests/integration/t_an_ahead_sibling_is_still_recorded.nim	t_an_ahead_sibling_is_still_recorded	1
+tests/integration/t_an_unobservable_sibling_is_not_substituted.nim	t_an_unobservable_sibling_is_not_substituted	1
+tests/integration/t_an_unpushed_sibling_revision_is_not_recorded.nim	t_an_unprovable_publication_is_not_read_as_published	1
+tests/integration/t_an_unpushed_sibling_revision_is_not_recorded.nim	t_an_unpushed_sibling_revision_is_not_recorded	1
+tests/integration/t_an_unresolvable_membership_is_not_read_as_no_overrides.nim	t_an_unresolvable_membership_is_not_read_as_no_overrides	1
+tests/integration/t_apply_if_binds_config_by_workspace_path.nim	t_apply_if_binds_config_by_workspace_path	1
+tests/integration/t_b0_develop_mode_uses_local_source.nim	repro graph records a path-mode runquotad profile	1
+tests/integration/t_b0_repro_build_runquota_daemon.nim	engine builds runquotad via cross-project selector (or skips)	1
+tests/integration/t_b1_apps_action_cache_hit.nim	second repro build apps cache-hits every per-app nim c edge	1
+tests/integration/t_b1_repro_build_apps_byte_equivalent.nim	every apps/entrypoints.txt entry yields a present binary	1
+tests/integration/t_b1_repro_build_apps_byte_equivalent.nim	every shipped binary is executable and produces output	1
+tests/integration/t_b1_repro_build_apps_byte_equivalent.nim	repro version flags self-identify as the right app	1
+tests/integration/t_b1_repro_build_apps_collection.nim	engine materialises every apps/entrypoints.txt binary	1
+tests/integration/t_b2_helpers_built_by_engine.nim	each helper binary loads and prints a usage banner	1
+tests/integration/t_b2_helpers_built_by_engine.nim	engine materialises every test-helper binary via .#test-helpers	1
+tests/integration/t_b3_repro_test_runs_through_engine.nim	alias forwards ordinary build flags to the test collection	1
+tests/integration/t_b3_repro_test_runs_through_engine.nim	engine: small test runs end-to-end through repro build .#test#<name>	1
+tests/integration/t_b4_hcr_flags_in_repro_tests.nim	engine: HCR flags reach nim c argv on macOS-arm64	1
+tests/integration/t_b5_bootstrap_idempotent.nim	behavioural: just bootstrap no-ops when ./build/bin/repro exists	1
+tests/integration/t_b5_full_suite_through_repro_test.nim	end-to-end: just test runs the full slimmed pipeline (REPRO_B5_FULL_SUITE_RUN=1 only)	1
+tests/integration/t_b5_full_suite_through_repro_test.nim	structural: prior just test produced the expected artefacts	2
+tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	t_checkout_with_the_module_tree_is_accepted	1
+tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	t_nothing_reachable_fails_naming_the_dev_shell	1
+tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	t_sibling_checkout_is_found_with_no_value_set	1
+tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	t_stale_explicit_value_is_not_silently_replaced	1
+tests/integration/t_bearssl_source_resolution_rejects_stale_layout.nim	t_stale_layout_is_rejected_loudly_when_named_explicitly	1
+tests/integration/t_behind_pin_is_never_silent.nim	t_behind_pin_is_never_silent	1
+tests/integration/t_behind_pin_warns_and_does_not_fail.nim	t_behind_pin_warns_and_does_not_fail	1
+tests/integration/t_branch_fork_clones_root_submodules.nim	t_fork_populates_root_workspace_submodule	1
+tests/integration/t_branch_fork_inherits_project_set.nim	t_fork_inherits_the_enabled_project_set	1
+tests/integration/t_branch_fork_inherits_project_set.nim	t_fork_projects_flag_replaces_the_set	1
+tests/integration/t_branch_fork_inherits_project_set.nim	t_fork_refuses_an_unresolvable_project_set	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	t_branch_fork_materializes_repo_missing_from_source	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	t_branch_fork_rejects_invalid_declared_baseline	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	t_branch_refuses_destination_inside_workspace	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	t_workspace_new_derives_branch_from_basename	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	t_workspace_new_existing_branch_checks_out	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	t_workspace_new_requires_a_destination_path	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	test_m27_fork_cuts_from_local_only_commit	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	test_m27_fork_include_changes_copies_uncommitted_work	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	test_m27_fork_leaves_uncommitted_work_behind_by_default	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	test_m27_fork_materializes_new_workspace_on_branch	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	test_m27_fork_refuses_cwd_or_ancestor_destination	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	test_m27_fork_refuses_non_empty_destination	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	test_m27_fork_refuses_when_branch_exists_on_remote	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	test_m27_fork_rerun_is_idempotent	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	test_m27_include_changes_requires_the_fork_form	1
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	test_m27_workspace_branch_alias_forks_identically	1
+tests/integration/t_branch_from_mainlines.nim	test_wv7_fetch_default_refreshes_the_mainline	1
+tests/integration/t_branch_from_mainlines.nim	test_wv7_fetch_requires_from_mainlines	1
+tests/integration/t_branch_from_mainlines.nim	test_wv7_from_mainlines_and_existing_branch_contradict	1
+tests/integration/t_branch_from_mainlines.nim	test_wv7_from_mainlines_cuts_from_mainline_not_source_head	1
+tests/integration/t_branch_from_mainlines.nim	test_wv7_undeclared_mainline_refuses_before_creating_anything	1
+tests/integration/t_branch_from_mainlines.nim	test_wv7_unresolvable_mainline_names_fetch	1
+tests/integration/t_branch_unpublished_source_head.nim	t_branch_carry_preserves_attribution	1
+tests/integration/t_branch_unpublished_source_head.nim	t_branch_clean_source_is_unaffected	1
+tests/integration/t_branch_unpublished_source_head.nim	t_branch_declared_policy_starts_from_manifest_revision	1
+tests/integration/t_branch_unpublished_source_head.nim	t_branch_fetch_resolves_apparently_unpublished_head	1
+tests/integration/t_branch_unpublished_source_head.nim	t_branch_refuses_unpublished_source_by_default	1
+tests/integration/t_build_progress_modes.nim	verify advanced progress reporting modes	1
+tests/integration/t_cache_push_cannot_publish_a_branch.nim	test_cache_push_writes_only_the_cache_namespace	1
+tests/integration/t_cached_source_closure_preparation.nim	<outside any test case>	1
+tests/integration/t_cert_gate_defaults_off_and_advisory_does_not_block.nim	t_cert_gate_defaults_off_and_advisory_does_not_block	1
+tests/integration/t_certificate_policy_required_advisory_off_modes.nim	t_certificate_note_ref_name_read_tells_unreadable_from_absent	1
+tests/integration/t_certificate_policy_required_advisory_off_modes.nim	t_certificate_policy_required_advisory_off_modes	1
+tests/integration/t_certificate_signature_verifies_against_registered_key.nim	t_certificate_signature_verifies_against_registered_key	1
+tests/integration/t_certificates_travel_with_pushed_commit.nim	t_certificates_travel_with_pushed_commit	1
+tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	t_a_hostile_fetch_url_deletes_a_real_directory_before_this_rule	1
+tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	t_a_lock_supplied_revision_cannot_escape_the_producer_cache	1
+tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	t_clone_cleanup_and_force_reset_resolve_a_reparse_point_target	1
+tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	t_clone_cleanup_refuses_to_delete_the_workspace_root_or_an_ancestor	1
+tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	t_develop_all_reset_refuses_a_lock_path_that_names_the_workspace	1
+tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	t_develop_all_reset_refuses_a_reparse_point_aimed_at_the_workspace	1
+tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	t_force_sync_on_the_workspace_root_skips_the_clean_and_says_so	1
+tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	t_repro_remove_refuses_a_checkout_that_reparses_onto_the_root	1
+tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	t_repro_remove_refuses_the_workspace_root_by_name_and_in_the_gc_set	1
+tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	t_workspace_disable_refuses_a_checkout_that_reparses_onto_the_root	1
+tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	t_workspace_disable_still_refuses_to_remove_the_workspace_root	1
+tests/integration/t_ci_skips_targets_covered_by_valid_certificate_per_platform.nim	t_ci_skips_targets_covered_by_valid_certificate_per_platform	1
+tests/integration/t_clean_probe_reads_stdout_not_git_diagnostics.nim	a clean tree whose git warns on stderr reads clean	1
+tests/integration/t_clean_probe_reads_stdout_not_git_diagnostics.nim	a git status that genuinely fails still surfaces its diagnostic	1
+tests/integration/t_clean_probe_reads_stdout_not_git_diagnostics.nim	a modified tree whose git warns on stderr still reads dirty	1
+tests/integration/t_clean_probe_reads_stdout_not_git_diagnostics.nim	an ambiguous-refname warning does not become the answer	1
+tests/integration/t_cli_repro_lock_explain.nim	explain a satisfied variant — JSON output	1
+tests/integration/t_cli_repro_lock_explain.nim	explain a satisfied variant — text output	1
+tests/integration/t_cli_repro_lock_explain.nim	explain an unsat fixture — minimal core in JSON	1
+tests/integration/t_cli_repro_lock_explain.nim	missing variant positional emits exit 2	1
+tests/integration/t_cli_repro_lock_explain.nim	unknown verb emits exit 2	1
+tests/integration/t_clone_action_honors_partial_blobless_and_single_branch.nim	test_ra14_accelerators_excluded_from_clone_fingerprint	1
+tests/integration/t_clone_action_honors_partial_blobless_and_single_branch.nim	test_ra14_clone_honors_blobless_and_single_branch_transparently	1
+tests/integration/t_cmake_install_mirror_tools.nim	selected alias keeps mirror refs and runs with declared tools only	1
+tests/integration/t_commit_records_the_sibling_revision_the_shell_actually_used.nim	t_a_refreshed_lock_does_not_churn_under_nix	3
+tests/integration/t_commit_records_the_sibling_revision_the_shell_actually_used.nim	t_commit_records_the_sibling_revision_nix_resolves_to_it	3
+tests/integration/t_commit_records_the_sibling_revision_the_shell_actually_used.nim	t_commit_records_the_sibling_revision_the_shell_actually_used	1
+tests/integration/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep.nim	t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep	1
+tests/integration/t_committed_lock_folds_sibling_develop_deps.nim	t_committed_lock_folds_sibling_develop_deps	1
+tests/integration/t_committed_lock_pins_solved_graph_and_build_consumes_it.nim	--lock selects an alternate committed lock	1
+tests/integration/t_committed_lock_pins_solved_graph_and_build_consumes_it.nim	`repro why` answers the package question from the solved graph	1
+tests/integration/t_committed_lock_pins_solved_graph_and_build_consumes_it.nim	no committed lock — build solves the inputs implicitly	1
+tests/integration/t_committed_lock_pins_solved_graph_and_build_consumes_it.nim	refresh writes the lock and build consumes the pinned graph	1
+tests/integration/t_committed_lock_records_canonical_remote_url_when_not_named_origin.nim	t_committed_lock_records_canonical_remote_url_when_not_named_origin	1
+tests/integration/t_concurrent_lock_publishes_retry_without_user_visible_failure.nim	t_concurrent_lock_publishes_retry_without_user_visible_failure	1
+tests/integration/t_concurrent_publish_disjoint_per_backend.nim	t_concurrent_publish_disjoint_per_backend	1
+tests/integration/t_config_layer_determines_tier_not_per_repo_field.nim	t_config_layer_determines_tier_not_per_repo_field	1
+tests/integration/t_cross_repo_nim_library_src_threaded_onto_consumer_path.nim	t_cross_repo_library_consumer_does_not_build_producer_tests	1
+tests/integration/t_cross_repo_nim_library_src_threaded_onto_consumer_path.nim	t_cross_repo_nim_library_src_threaded_onto_consumer_path	2
+tests/integration/t_cross_tier_move_between_layers_errors_loudly.nim	t_cross_tier_move_between_layers_errors_loudly	1
+tests/integration/t_d1_buildnimunittest_resolves_in_path_mode.nim	behavioural: engine lowers + executes the buildNimUnittest.run edge end-to-end	2
+tests/integration/t_d2_cross_project_selector_recognised.nim	engine accepts runquota:runquotad without a usage dump	1
+tests/integration/t_d5_collection_member_selector.nim	behavioural: ``.#test#<stem>`` resolves to the execute edge and runs end-to-end	1
+tests/integration/t_d5_collection_member_selector.nim	collection-agnostic: ``.#apps#<name>`` resolves to an apps-collection member	1
+tests/integration/t_d5_collection_member_selector.nim	collection-agnostic: ``.#test-builds#<stem>`` resolves to the build edge	1
+tests/integration/t_d5_collection_member_selector.nim	diagnostic: unknown member produces clear error with collection hints	1
+tests/integration/t_d6_runner_test_timeout.nim	behavioural: --test-timeout=3 SIGKILLs a 60s sleeper and reports FAIL+TIMEOUT	1
+tests/integration/t_d6_runner_test_timeout.nim	behavioural: emitted output resets the idle deadline	1
+tests/integration/t_daemon_idle_does_not_reread_its_image.nim	integration_idle_dev_daemon_does_not_reread_its_own_image	1
+tests/integration/t_declared_daemon_ipc_trust.nim	a checked peer that is REPLACED does not inherit trust	1
+tests/integration/t_declared_daemon_ipc_trust.nim	a declaration that identifies no program is refused before it connects	1
+tests/integration/t_declared_daemon_ipc_trust.nim	a declaration whose check fails is not trusted — one arm per assertion	1
+tests/integration/t_declared_daemon_ipc_trust.nim	a declared, checked daemon this build did not spawn publishes and warm-hits	1
+tests/integration/t_declared_daemon_ipc_trust.nim	a refused check is refused by the registration, not only by its caller	1
+tests/integration/t_declared_daemon_ipc_trust.nim	an INET peer is never trusted, however hard it is declared or registered	1
+tests/integration/t_declared_daemon_ipc_trust.nim	an UNDECLARED peer still downgrades while a declared one is trusted	1
+tests/integration/t_declared_daemon_ipc_trust.nim	an edge talking to a daemon whose declaration fails its check still downgrades	1
+tests/integration/t_declared_daemon_ipc_trust.nim	one peer pid serving two endpoints: the activator is refused, and the residual is stated	1
+tests/integration/t_declared_daemon_ipc_trust.nim	the check refuses an image it cannot verify rather than degrading	1
+tests/integration/t_declared_daemon_ipc_trust.nim	the graded .iomon still carries the connect and the loss the exemption forgave	1
+tests/integration/t_declared_daemon_ipc_trust.nim	the real CLI applies declared trust on arms that never spawn	1
+tests/integration/t_declared_daemon_ipc_trust.nim	the uid re-check reads the EFFECTIVE uid, on a peer whose two differ	1
+tests/integration/t_derived_daemon_ipc_trust.nim	a live daemon this process did not register still downgrades	1
+tests/integration/t_derived_daemon_ipc_trust.nim	a recycled pid does not inherit trust	1
+tests/integration/t_derived_daemon_ipc_trust.nim	an INET peer is never trusted, even when its own pid is registered	1
+tests/integration/t_derived_daemon_ipc_trust.nim	an action that talks only to a trusted daemon publishes, and a warm run hits	1
+tests/integration/t_derived_daemon_ipc_trust.nim	the /proc identity is parsed past a comm that contains spaces	1
+tests/integration/t_derived_daemon_ipc_trust.nim	the real CLI spawn arm registers the daemon it started	1
+tests/integration/t_derived_daemon_ipc_trust.nim	the recognized .iomon report arm is graded against the same trust	1
+tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim	engine: a git-using test runs through repro build .#test#<name>	1
+tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim	git and its https helper start under both loader-injection channels	3
+tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim	git fetch over https moves a remote-tracking ref in this shell	4
+tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim	the check refuses a second glibc on the loader path, naming both	3
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_declaration_scan_ignores_knobs_that_are_only_mentioned	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_drift_check_names_the_source_that_moved	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_envrc_declares_only_knobs_the_guard_can_probe	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_fingerprint_moves_when_an_overridden_source_moves	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_fingerprint_sees_a_git_tree_override_not_only_path	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_git_helpers_are_the_resolved_binarys_own	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_guard_accepts_a_plugin_that_honours_every_declared_knob	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_guard_agrees_with_a_real_plugin_build_when_one_is_present	2
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_guard_is_silent_when_no_knob_is_set	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_guard_probes_offered_knobs_even_when_unset	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_guard_rejects_a_plugin_that_ignores_the_auto_knob	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_guard_reports_a_missing_plugin_differently	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_lint_gate_declaration_arm_is_workspace_shape_aware	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_lint_gate_fails_on_a_cache_of_unknown_provenance	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_lint_gate_fails_when_a_recorded_source_has_moved	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_lint_gate_fails_when_the_auto_arm_cannot_reach_a_sibling	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_lint_gate_fails_when_the_lock_is_newer_than_the_cache	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_lint_gate_refuses_an_envrc_that_states_no_knob_at_all	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_lint_gate_refuses_when_its_own_tools_are_absent	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_lint_gate_requires_the_flake_files_to_be_watched	1
+tests/integration/t_dev_shell_override_guards.nim	t_dev_shell_source_state_ignores_an_ambient_git_environment	1
+tests/integration/t_develop_all_clones_deps_at_locked_revisions.nim	t_develop_all_clones_deps_at_locked_revisions	1
+tests/integration/t_develop_all_clones_into_a_second_placement_root.nim	t_develop_all_clones_into_a_second_placement_root	1
+tests/integration/t_develop_all_refuses_to_report_an_absent_checkout.nim	t_develop_all_refuses_to_report_an_absent_checkout	1
+tests/integration/t_develop_all_reset_reconciles_drifted_sibling.nim	t_develop_all_reset_reconciles_drifted_sibling	1
+tests/integration/t_develop_at_rev_walks_to_nearest_locked_ancestor.nim	t_develop_at_rev_walks_to_nearest_locked_ancestor	1
+tests/integration/t_develop_commit_keyed_backend_reads_only_the_key_record.nim	t_develop_commit_keyed_backend_does_not_read_lock_history_per_repo	1
+tests/integration/t_develop_commit_keyed_backend_reads_only_the_key_record.nim	t_develop_commit_keyed_backend_ignores_a_record_at_another_coordinate	1
+tests/integration/t_develop_commit_keyed_backend_reads_only_the_key_record.nim	t_develop_commit_keyed_partition_at_the_key_pins_every_sibling	1
+tests/integration/t_develop_commit_keyed_backend_reads_only_the_key_record.nim	t_develop_without_a_root_repo_keeps_the_project_wide_partition_read	1
+tests/integration/t_develop_composes_lock_set_without_a_committed_lock.nim	t_develop_composes_lock_set_without_a_committed_lock	1
+tests/integration/t_develop_dependency_modes_walk_a_real_depends_graph.nim	t_develop_dependency_modes_walk_a_real_depends_graph	1
+tests/integration/t_develop_excludes_evidence_only_repos.nim	t_develop_excludes_evidence_only_repos	1
+tests/integration/t_develop_ignores_sha_pinned_manifest_without_a_lock_record.nim	t_develop_ignores_sha_pinned_manifest_without_a_lock_record	1
+tests/integration/t_develop_list_reports_tier_and_backend.nim	t_develop_list_reports_tier_and_backend	1
+tests/integration/t_develop_lock_store_supplies_private_route.nim	t_develop_lock_store_supplies_private_route	1
+tests/integration/t_develop_only_except_refuse_unknown_names.nim	t_develop_only_except_refuse_unknown_names	1
+tests/integration/t_develop_per_repo_lock_contributes_only_its_self_record.nim	t_develop_per_repo_lock_contributes_only_its_self_record	1
+tests/integration/t_develop_public_only_unchanged.nim	t_develop_public_only_unchanged	1
+tests/integration/t_develop_reads_each_participating_repos_committed_lock.nim	t_develop_reads_each_participating_repos_committed_lock	1
+tests/integration/t_develop_refuses_cross_backend_revision_conflict.nim	t_develop_refuses_cross_backend_revision_conflict	1
+tests/integration/t_develop_refuses_inexact_revision_and_leaves_no_checkout.nim	t_develop_refuses_inexact_revision_and_leaves_no_checkout	1
+tests/integration/t_develop_refuses_unreachable_team_backend.nim	t_develop_refuses_unreachable_team_backend	1
+tests/integration/t_develop_refuses_unreadable_backend_before_membership_degrades.nim	t_develop_refuses_unreadable_backend_before_membership_degrades	1
+tests/integration/t_develop_refuses_unreadable_backend_of_any_kind.nim	t_develop_refuses_unreadable_backend_of_any_kind	1
+tests/integration/t_develop_root_lock_outranks_a_per_repo_lock.nim	t_develop_root_lock_outranks_a_per_repo_lock	1
+tests/integration/t_develop_selectors_compose_in_fixed_order.nim	t_develop_selectors_compose_in_fixed_order	1
+tests/integration/t_develop_set_is_union_of_all_backends.nim	t_develop_set_is_union_of_all_backends	1
+tests/integration/t_develop_warns_and_names_omitted_personal_repos.nim	t_develop_warns_and_names_omitted_personal_repos	1
+tests/integration/t_docs_hooks_reflect_public_tier_only_server_gate.nim	CLI/hooks.md corrected: no stale authoritative-for-locks claim; public-tier-only language present	1
+tests/integration/t_e2e_cross_compilation_aarch64.nim	cross gcc + link produces an aarch64 ELF binary	1
+tests/integration/t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable.nim	t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable	1
+tests/integration/t_emitted_overrides_match_the_develop_set.nim	t_emitted_overrides_match_the_develop_set	1
+tests/integration/t_env_inheritance_census_is_reported.nim	the census classifies a real graph's PATH declarations	1
+tests/integration/t_env_inheritance_census_is_reported.nim	the census counts each declaration class over a real build	1
+tests/integration/t_envrc_needs_no_override_env_vars.nim	t_envrc_needs_no_override_env_vars	1
+tests/integration/t_every_commit_form_stages_through_the_installed_hook.nim	t_every_commit_form_stages_through_the_installed_hook	1
+tests/integration/t_every_commit_form_stages_through_the_installed_hook.nim	t_the_managed_body_hands_the_index_over_under_a_private_name	1
+tests/integration/t_evidence_publish_verb_and_lock_flag_on_test_sharding.nim	t_evidence_publish_verb_and_lock_flag_on_test_sharding	2
+tests/integration/t_execute_edge_gives_tests_a_usable_path.nim	engine: a python-test edge with a non-empty prefix still gets a usable PATH	1
+tests/integration/t_execute_edge_gives_tests_a_usable_path.nim	engine: the execute edge runs it, and it reports OK not SKIPPED	1
+tests/integration/t_executed_binary_is_a_recorded_input.nim	a MUTABLE directory inside the store is neither elided nor keyed as content-addressed	1
+tests/integration/t_executed_binary_is_a_recorded_input.nim	a store root reached through PATH or NODE_PATH is elided too	1
+tests/integration/t_executed_binary_is_a_recorded_input.nim	a tool under REPROBUILD'S OWN store is in the key just like a Nix one	1
+tests/integration/t_executed_binary_is_a_recorded_input.nim	abs: an absolute exec inside a shell command is in the cache key	1
+tests/integration/t_executed_binary_is_a_recorded_input.nim	argv0: the action's own root image is in the cache key	1
+tests/integration/t_executed_binary_is_a_recorded_input.nim	bare: the pre-existing accidental coverage still holds	1
+tests/integration/t_executed_binary_is_a_recorded_input.nim	execvp: an unresolved exec name is never materialised against cwd	1
+tests/integration/t_executed_binary_is_a_recorded_input.nim	swapping the PROGRAM inside one derivation also re-runs the edge	1
+tests/integration/t_executed_binary_is_a_recorded_input.nim	swapping the store-resolved argv[0] re-runs the edge, and each tool keeps its own record	1
+tests/integration/t_exit_codes_are_documented_and_stable.nim	the CLI reference documents exactly the codes the command can return	1
+tests/integration/t_external_cli_store_contract_writes_and_reads.nim	t_external_cli_store_contract_writes_and_reads	1
+tests/integration/t_gate_and_sync_consume_unified_locked_deps_regardless_of_source.nim	t_gate_and_sync_consume_unified_locked_deps_regardless_of_source	2
+tests/integration/t_gate_consumes_published_evidence_for_unclonable_private_repo.nim	t_gate_consumes_published_evidence_for_unclonable_private_repo	1
+tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim	checkout_dirty_names_offender_and_remedy	1
+tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim	checkout_missing_branch_names_offender_and_remedy	1
+tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim	develop_degenerate_lock_path_names_offender_and_remedy	1
+tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim	disable_workspace_root_names_offender_and_remedy	1
+tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim	gate_dirty_names_offender_and_remedy	1
+tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim	gate_lock_publish_failure_names_offender_and_remedy	1
+tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim	gate_unpublished_names_offender_and_remedy	1
+tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim	remove_dirty_non_tty_names_offender_and_remedy	1
+tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim	remove_workspace_root_names_offender_and_remedy	1
+tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim	remove_workspace_root_remedy_is_a_runnable_command	1
+tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim	sync_dirty_names_offender_and_remedy	1
+tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim	sync_unpublished_names_offender_and_remedy	1
+tests/integration/t_gate_refusals_name_offender_and_remedy_command.nim	sync_unreadable_names_offender_and_remedy	1
+tests/integration/t_health_fix_remediates_safe_issues_only.nim	test_ra30_fix_clones_missing_sibling_reachable_from_local_bare	1
+tests/integration/t_health_fix_remediates_safe_issues_only.nim	test_ra30_fix_does_not_touch_unsafe_failures	1
+tests/integration/t_health_reports_each_layer_status_with_remedy.nim	test_ra30_every_failing_check_carries_a_remedy_command	1
+tests/integration/t_health_reports_each_layer_status_with_remedy.nim	test_ra30_manifest_absent_fails	1
+tests/integration/t_health_reports_each_layer_status_with_remedy.nim	test_ra30_missing_sibling_fails_with_clone_remedy_present_passes	1
+tests/integration/t_health_reports_each_layer_status_with_remedy.nim	test_ra30_reports_all_expected_layer_names	1
+tests/integration/t_health_reports_each_layer_status_with_remedy.nim	test_ra30_workspace_marker_drives_ok_vs_fail	1
+tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim	all partial-upgrade combinations refuse and ensure repairs them	1
+tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim	core hooksPath receives and runs the complete canonical bundle	1
+tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim	missing CLI fails closed and exact configured CLI handles both calls	1
+tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim	protocol mismatch names the repository for every hooksPath form	1
+tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim	real push preflight refuses absent partial unknown and marker-only bundles	1
+tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim	spoofed legacy sentinel and guessed capability cannot bypass a real push	1
+tests/integration/t_hooks_ensure_coexists_with_pre_commit_shim.nim	test_ra4_ensure_preserves_pre_commit_shim_and_clears_legacy_guard	1
+tests/integration/t_hooks_ensure_installs_a_managed_pre_commit_hook.nim	t_hooks_ensure_installs_a_managed_pre_commit_hook	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_a_crash_after_the_installer_converges_without_a_refusal	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_a_manifest_backend_checkout_is_still_a_single_repo_target	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_a_surviving_hook_repairs_a_deleted_pre_push_gate	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_ensure_reaches_every_repo_when_the_workspace_root_is_a_git_repo	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_ensure_refuses_a_crlf_shim_against_its_lf_twin	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_ensure_refuses_shims_whose_exec_target_is_shell_syntax	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_ensure_refuses_shims_whose_install_python_is_shell_syntax	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_ensure_refuses_shims_whose_pre_commit_arguments_differ	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_ensure_refuses_shims_whose_reduced_lines_differ_in_indentation	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_ensure_refuses_shims_whose_template_id_value_differs	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_ensure_refuses_two_shims_that_carry_no_pre_commit_template_id	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_ensure_reinstalls_the_dispatcher_after_a_second_shadowing	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_ensure_repairs_a_regenerated_pre_commit_shim	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_ensure_repairs_a_shim_whose_interpreter_path_moved	2
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_ensure_still_refuses_a_second_distinct_user_hook	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_hook_repair_preserves_an_active_dispatcher_reader	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_the_handoff_leaves_a_hand_written_chained_hook_alone	1
+tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim	test_the_pre_commit_handoff_never_uncovers_the_dispatcher	1
+tests/integration/t_hooks_noop_outside_initialized_workspace.nim	t_hooks_noop_outside_initialized_workspace	1
+tests/integration/t_host_binary_format_is_proven_before_execution.nim	the built repro is this platform's, and the pair set is the hazard	1
+tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim	a cache hit whose present output cannot be rewritten succeeds	1
+tests/integration/t_installed_engine_read_only_source_tree.nim	t_installed_engine_builds_a_foreign_project	1
+tests/integration/t_installed_engine_read_only_source_tree.nim	t_unwritable_root_reports_which_path_and_why	1
+tests/integration/t_integration_hcr_linkgraph_relocation_classification.nim	M26 Mach-O arm64 gate is macOS-only	1
+tests/integration/t_integration_hcr_linux_build_id_mismatch_refused.nim	HLX-M1 build-id verification gate is linux-x86_64-only	1
+tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim	HLX-M0 sled layout gate is linux-x86_64-only	1
+tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim	HLX-M1 ELF object parsing gate is linux-x86_64-only	1
+tests/integration/t_integration_hcr_linux_elf_symbol_resolution.nim	HLX-M1 ELF symbol resolution gate is linux-x86_64-only	1
+tests/integration/t_integration_hcr_linux_static_local_symbol_ambiguity_refused.nim	HLX-M1 static-local ambiguity gate is linux-x86_64-only	1
+tests/integration/t_integration_scheduler_dependency_gathering_policies.nim	automatic monitor policies are unsupported on this platform	1
+tests/integration/t_integrity_mismatch_surfaces_per_tier.nim	t_integrity_mismatch_surfaces_per_tier	1
+tests/integration/t_integrity_uses_vcs_native_hash_else_own_file_hash_both_multihash.nim	t_integrity_uses_vcs_native_hash_else_own_file_hash_both_multihash	1
+tests/integration/t_is_published_accepts_any_remote_name.nim	head on a non-origin remote counts as published	1
+tests/integration/t_just_test_end_to_end_via_parallel_runner.nim	`just test` runs the full suite through the M3 parallel runner	1
+tests/integration/t_just_test_hot_cache_is_no_op_build.nim	second build of the :test aggregate is fully cache-hit (gated by REPRO_M1_LONG_TEST)	1
+tests/integration/t_just_test_via_ct_test_runner.nim	`just test` runs the full suite through ct-test-runner	1
+tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim	t_legacy_manifest_without_team_route_warns_and_scaffolds	1
+tests/integration/t_library_load_evidence_is_recorded.nim	changing a DT_NEEDED library re-runs the edge	1
+tests/integration/t_local_gateway_pre_receive_rejects_uncovered_push_even_with_no_verify.nim	t_local_gateway_pre_receive_rejects_uncovered_push_even_with_no_verify	1
+tests/integration/t_lock_coherence_reports_the_diff_advisory_only.nim	t_lock_coherence_reports_the_diff_advisory_only	1
+tests/integration/t_lock_failure_remedies_name_a_runnable_command.nim	t_lock_failure_remedies_name_a_runnable_command	1
+tests/integration/t_lock_file_only_workspace_fully_described_from_lock_not_head.nim	t_lock_file_only_workspace_fully_described_from_lock_not_head	1
+tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	a push race at one key leaves the published bytes byte-identical	1
+tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	a stale store never rewrites a record already published at its key	1
+tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	concurrent disjoint lock-only remote advance is preserved	1
+tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	delete unsafe mode and corrupt expected record all fail closed	1
+tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	dirty index tree rename symlink and wrong record identity are refused	1
+tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	exact repository path rejects fresh recovery race and root transplants	1
+tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	failed no-staged push is retained and retry reaches backend first	1
+tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	fetch failure retains the exact verified local-only chain	1
+tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	non-lock local or remote movement is never rebased or pushed	1
+tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	one observed push race rebases the named branch and then noops	1
+tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	real repeated non-fast-forward races exhaust the bounded retry safely	1
+tests/integration/t_lock_refresh_and_validate_without_building.nim	refresh updates the lock in place when inputs change	1
+tests/integration/t_lock_refresh_and_validate_without_building.nim	refresh writes the lock and produces no build artifacts	1
+tests/integration/t_lock_refresh_and_validate_without_building.nim	validate fails on a malformed lock	1
+tests/integration/t_lock_refresh_and_validate_without_building.nim	validate fails on a tampered lock with a diagnostic	1
+tests/integration/t_lock_refresh_and_validate_without_building.nim	validate passes on a consistent lock	1
+tests/integration/t_lock_refresh_folds_uses_sibling_producer_deps.nim	t_lock_refresh_folds_uses_sibling_producer_deps	1
+tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim	lock refresh folds constraints from selected from-source producers	1
+tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim	t_lock_refresh_reads_solver_inputs_from_compiled_provider	1
+tests/integration/t_lock_store_backend_roundtrip_each_backend.nim	t_lock_store_backend_roundtrip_each_backend	1
+tests/integration/t_lock_store_inside_another_repo_is_not_publishable.nim	t_lock_store_inside_another_repo_is_not_publishable	1
+tests/integration/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db.nim	t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db	1
+tests/integration/t_locking_explain_reports_resolved_tier_backend_and_layer.nim	t_locking_explain_reports_resolved_tier_backend_and_layer	1
+tests/integration/t_long_operations_announce_plan_and_emit_live_progress.nim	t_long_operations_announce_plan_and_emit_live_progress	1
+tests/integration/t_m9r21_4_hardware_e2e.nim	live probe round-trips via the macro (Linux only)	1
+tests/integration/t_m9r22b_2_apply_loopback.nim	Test#5 (loopback): simple-ext4 against a 1G image	1
+tests/integration/t_managed_hook_reentry_guard_prevents_recursive_publish.nim	t_managed_hook_reentry_guard_prevents_recursive_publish	1
+tests/integration/t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract.nim	t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract	1
+tests/integration/t_managed_hooks_stand_down_during_git_operations.nim	t_a_checkout_outside_any_operation_still_runs_the_hook	1
+tests/integration/t_managed_hooks_stand_down_during_git_operations.nim	t_bisect_keeps_its_detached_head	1
+tests/integration/t_managed_hooks_stand_down_during_git_operations.nim	t_hook_is_inert_and_says_so_when_the_git_state_cannot_be_read	1
+tests/integration/t_managed_hooks_stand_down_during_git_operations.nim	t_post_commit_stands_down_during_a_cherry_pick	1
+tests/integration/t_managed_hooks_stand_down_during_git_operations.nim	t_rebase_in_a_linked_worktree_is_detected_too	1
+tests/integration/t_managed_hooks_stand_down_during_git_operations.nim	t_rebase_leaves_the_mainline_branch_exactly_where_it_was	1
+tests/integration/t_managed_hooks_stand_down_during_git_operations.nim	t_the_am_backend_rebase_is_detected_before_its_state_dir_exists	1
+tests/integration/t_manifest_cache_serves_only_the_url_it_was_cloned_for.nim	t_a_colliding_manifest_url_is_not_served_the_incumbents_tree	1
+tests/integration/t_manifest_cache_serves_only_the_url_it_was_cloned_for.nim	t_a_legitimate_manifest_cache_entry_still_hits	1
+tests/integration/t_manifest_cache_serves_only_the_url_it_was_cloned_for.nim	t_an_unverifiable_manifest_cache_entry_is_refused_and_not_deleted	1
+tests/integration/t_manifest_commit_targets_the_manifest_repo_under_inherited_git_dir.nim	t_manifest_commit_targets_the_manifest_repo_under_inherited_git_dir	1
+tests/integration/t_manifest_copyfile_linkfile_materialized_after_sync.nim	copyfile copies and linkfile symlinks after init, idempotent, tracks revision	1
+tests/integration/t_manifest_init_rejects_unsigned_or_tampered_manifest.nim	t_manifest_init_rejects_unsigned_or_tampered_manifest	2
+tests/integration/t_manifest_store_ops_routed_through_interface_not_literals.nim	t_manifest_store_ops_routed_through_interface_not_literals	1
+tests/integration/t_manifest_tags_select_repo_subset.nim	tags select the expected repo subset on sync	1
+tests/integration/t_manifests_reports_single_project_workspace.nim	t_manifests_reports_single_project_workspace	1
+tests/integration/t_measurement_flags_cli.nim	--measure, --show and the --write-* family are accepted	1
+tests/integration/t_measurement_flags_cli.nim	--measure=none omits the trace and the cache evidence entirely	1
+tests/integration/t_measurement_flags_cli.nim	--no-write-report suppresses the failure report too	1
+tests/integration/t_measurement_flags_cli.nim	--stats-groups keeps its own vocabulary and rejects strangers	1
+tests/integration/t_measurement_flags_cli.nim	--write-report honours the conventional path and an exact path	1
+tests/integration/t_measurement_flags_cli.nim	a FAILED build writes its failure report unasked	1
+tests/integration/t_measurement_flags_cli.nim	a successful build writes nothing without being asked	1
+tests/integration/t_measurement_flags_cli.nim	an unknown measurement category is rejected, with the vocabulary	1
+tests/integration/t_measurement_flags_cli.nim	every retired build flag fails as an unknown flag	1
+tests/integration/t_measurement_flags_cli.nim	presentation is independent of collection	1
+tests/integration/t_measurement_flags_cli.nim	the retired workspace report flag fails as an unknown flag	1
+tests/integration/t_membership_model_fork_upstream_remote_alignment.nim	t_fork_upstream_is_configured_at_its_own_path	1
+tests/integration/t_membership_model_fork_upstream_remote_alignment.nim	t_unrecognized_checkout_is_left_untouched	1
+tests/integration/t_membership_model_sets_cli.nim	t_json_surfaces_are_set_based	1
+tests/integration/t_membership_model_sets_cli.nim	t_repos_add_refuses_mixing_a_set_and_a_project	1
+tests/integration/t_membership_model_sets_cli.nim	t_repos_remove_drops_the_member_and_keeps_the_fragment	1
+tests/integration/t_membership_model_sets_cli.nim	t_sets_add_and_repos_add_author_the_new_shape	1
+tests/integration/t_membership_model_sets_cli.nim	t_sets_and_projects_are_one_namespace	1
+tests/integration/t_membership_model_sets_cli.nim	t_sets_remove_prunes_orphans_declared_by_either_spelling	1
+tests/integration/t_membership_model_templates_scaffold_sets.nim	t_default_template_from_host_config_is_applied_and_reported	1
+tests/integration/t_membership_model_templates_scaffold_sets.nim	t_missing_template_fails_loudly_from_either_source	1
+tests/integration/t_membership_model_templates_scaffold_sets.nim	t_no_template_opts_out_of_the_configured_default	1
+tests/integration/t_membership_model_templates_scaffold_sets.nim	t_project_spelling_takes_templates_and_the_result_parses	1
+tests/integration/t_membership_model_templates_scaffold_sets.nim	t_template_and_no_template_together_are_refused	1
+tests/integration/t_membership_model_templates_scaffold_sets.nim	t_template_seeds_membership_and_is_reported	1
+tests/integration/t_membership_repo_push_anchors_no_foreign_lock_record.nim	t_membership_repo_push_anchors_no_foreign_lock_record	1
+tests/integration/t_migrate_leaves_a_pinned_checkout_on_its_pin.nim	t_migrate_does_not_attach_a_pinned_checkout_whose_branch_ran_ahead	1
+tests/integration/t_migrate_leaves_a_pinned_checkout_on_its_pin.nim	t_migrate_reports_a_pinned_checkout_that_drifted_off_its_pin	1
+tests/integration/t_mixed_public_clean_team_unpublished_refuses.nim	t_mixed_public_clean_team_unpublished_refuses	1
+tests/integration/t_mixed_workspace_each_record_in_its_own_backend_only.nim	t_mixed_workspace_each_record_in_its_own_backend_only	1
+tests/integration/t_monitor_shim_edges_carry_static_libgcc.nim	engine: every lowered monitor-artefact action carries --passL:-static-libgcc	1
+tests/integration/t_monitor_shim_edges_carry_static_libgcc.nim	the sibling io-mon script still agrees that the flag is required	1
+tests/integration/t_nested_bootstrap_runtime_closure.nim	nested consumer prepares runtime data of an already cycle-broken tool	1
+tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	t_nested_topology_full_pipeline_without_org_root_repo	1
+tests/integration/t_nim_package_path_handling.nim	t_nim_package_path_handling	1
+tests/integration/t_nix_daemon_provisioner.nim	direct all-output fallback strips provisioned loader paths	1
+tests/integration/t_only_overridden_nodes_are_rewritten.nim	t_only_overridden_nodes_are_rewritten	1
+tests/integration/t_pcr_composite_matches_tpm.nim	t_pcr_composite_matches_live_swtpm	1
+tests/integration/t_personal_workspace_restores_on_fresh_machine_from_pushed_lock_and_dotfiles.nim	t_personal_workspace_restores_on_fresh_machine_from_pushed_lock_and_dotfiles	1
+tests/integration/t_post_commit_cache_push_propagates_objects_to_sibling_workspace.nim	test_ra5_cache_push_makes_w1_commit_visible_in_w2	1
+tests/integration/t_post_commit_cache_push_runs_opportunistic_gc.nim	t_post_commit_cache_push_runs_opportunistic_gc	1
+tests/integration/t_post_commit_lock_survives_a_repo_local_repro_dir.nim	t_post_commit_lock_covers_a_repo_of_a_non_primary_project	1
+tests/integration/t_post_commit_lock_survives_a_repo_local_repro_dir.nim	t_post_commit_lock_survives_a_repo_local_repro_dir	1
+tests/integration/t_post_commit_publishes_evidence_and_excludes_from_cache_push.nim	t_post_commit_publishes_evidence_and_excludes_from_cache_push	1
+tests/integration/t_post_commit_refreshes_lock_and_pushes_cache.nim	test_ra4_post_commit_refreshes_lock_and_pushes_cache_nonblocking	1
+tests/integration/t_post_merge_hook_reconciles_local_state.nim	t_post_merge_never_fails_the_pull_for_an_unresolvable_workspace	1
+tests/integration/t_post_merge_hook_reconciles_local_state.nim	t_post_merge_reconciles_then_goes_quiet	1
+tests/integration/t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks.nim	t_lock_publish_forces_generated_locks_ignored_in_the_manifest_checkout	1
+tests/integration/t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks.nim	t_lock_publish_skips_manifest_layer_nested_in_unrelated_checkout	1
+tests/integration/t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks.nim	t_lock_store_route_refuses_a_plain_directory_nested_in_a_checkout	1
+tests/integration/t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks.nim	t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks	1
+tests/integration/t_pre_push_consumes_evidence_and_applies_tier_unreachable_policy.nim	t_pre_push_consumes_evidence_and_applies_tier_unreachable_policy	1
+tests/integration/t_pre_push_currency_read_routes_per_backend.nim	t_pre_push_currency_read_routes_per_backend	1
+tests/integration/t_pre_push_gate_checks_only_pushed_repo_dependency_closure.nim	t_pre_push_gate_checks_only_pushed_repo_dependency_closure	1
+tests/integration/t_pre_push_lock_records_unmaterialized_declared_repo.nim	a dirty materialized sibling still refuses, naming it	1
+tests/integration/t_pre_push_lock_records_unmaterialized_declared_repo.nim	a real git push succeeds with a declared, never-cloned repo	1
+tests/integration/t_pre_push_lock_records_unmaterialized_declared_repo.nim	the lock pins the materialized repos and names the unmaterialized one	1
+tests/integration/t_pre_push_membership_repo_scopes_to_touched_fragments.nim	dirty repo INSIDE the touched fragments still refuses, naming it	1
+tests/integration/t_pre_push_membership_repo_scopes_to_touched_fragments.nim	dirty repo OUTSIDE the touched fragments does not block the push	1
+tests/integration/t_pre_push_passes_on_heterogeneous_branches.nim	t_pre_push_passes_on_heterogeneous_branches	1
+tests/integration/t_pre_push_protocol_v2_policy_regressions.nim	an unpublished develop override on the outgoing repo does not refuse	1
+tests/integration/t_pre_push_protocol_v2_policy_regressions.nim	dependency and preserved-hook policy remain ordered before lock write	1
+tests/integration/t_pre_push_protocol_v2_policy_regressions.nim	public manifest lock cannot publish a private-only reference	1
+tests/integration/t_pre_push_protocol_v2_policy_regressions.nim	shared backend failure refuses while personal warns after marked write	1
+tests/integration/t_pre_push_protocol_v2_ref_validation.nim	manifest origin accepts only the exact metacraft-labs checkout alias	1
+tests/integration/t_pre_push_protocol_v2_ref_validation.nim	real SHA-1 pushes enforce strict outgoing-current semantics	1
+tests/integration/t_pre_push_protocol_v2_ref_validation.nim	real SHA-256 pushes enforce the same semantics when Git supports it	1
+tests/integration/t_pre_push_public_only_writes_no_manifest_lock.nim	no declared route: gate passes, no locks/ tree, no publish diagnostic	1
+tests/integration/t_pre_push_publishes_only_when_publish_locks_opted_in.nim	t_pre_push_publishes_only_when_publish_locks_opted_in	1
+tests/integration/t_pre_push_refuses_an_undeclared_depends_edge.nim	t_pre_push_refuses_an_undeclared_depends_edge	1
+tests/integration/t_pre_push_refuses_on_unreachable_team_backend.nim	t_pre_push_refuses_on_unreachable_team_backend	1
+tests/integration/t_pre_push_refuses_when_lock_publish_fails.nim	t_pre_push_refuses_when_lock_publish_fails	1
+tests/integration/t_pre_push_requires_certificate_coverage_when_project_opts_in.nim	t_pre_push_requires_certificate_coverage_when_project_opts_in	1
+tests/integration/t_pre_push_rewrite_orphan_gate.nim	a force-push of the declared mainline is refused naming the branch	1
+tests/integration/t_pre_push_rewrite_orphan_gate.nim	a force-push orphaning a sibling's locked commit is refused by name	1
+tests/integration/t_pre_push_rewrite_orphan_gate.nim	a rebased feature branch force-push publishes instead of refusing	1
+tests/integration/t_pre_push_rewrite_orphan_gate.nim	a rewrite whose old tip is not local is refused with a fetch remedy	1
+tests/integration/t_pre_push_rewrite_orphan_gate.nim	create and fast-forward branch updates still pass	1
+tests/integration/t_pre_push_warns_and_allows_on_unreachable_personal_backend.nim	t_pre_push_warns_and_allows_on_unreachable_personal_backend	1
+tests/integration/t_pre_push_writes_the_lock_record_it_demands.nim	t_pre_push_writes_the_lock_record_it_demands	1
+tests/integration/t_pre_receive_accepts_clean_public_lock_and_stays_blind_to_private_tiers.nim	t_pre_receive_accepts_clean_public_lock_and_stays_blind_to_private_tiers	1
+tests/integration/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch.nim	t_pre_receive_lock_gate_refuses_a_lock_it_cannot_read	1
+tests/integration/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch.nim	t_pre_receive_rejects_a_pushed_lock_whose_checkout_path_is_unusable	1
+tests/integration/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch.nim	t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch	1
+tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim	a preloaded shim starts every driver an imposing one would break	4
+tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim	engine: a source-built repro builds a project outside its own tree	5
+tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim	the check refuses a shim that imposes a runtime, naming both	3
+tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim	the shim imposes no C runtime on the processes it is preloaded into	3
+tests/integration/t_private_repo_participates_via_evidence_without_source_exposure.nim	t_private_repo_participates_via_evidence_without_source_exposure	1
+tests/integration/t_project_extension_adds_edges_to_original_when_present.nim	present extension contributes its target into originalProject's graph	1
+tests/integration/t_project_extension_inert_when_absent_and_auto_activates_in_develop_workspace.nim	inert when absent, auto-activates by presence in the develop workspace	1
+tests/integration/t_project_extension_target_rehomed_and_toggles_without_force_rebuild.nim	t_project_extension_target_rehomed_and_toggles_without_force_rebuild	1
+tests/integration/t_projects_add_writes_and_pushes_manifest.nim	test_ra6_projects_add_and_repos_add_push_to_bare_upstream	1
+tests/integration/t_projects_add_writes_and_pushes_manifest.nim	test_ra6_projects_add_refuses_a_workspace_root_inside_another_checkout	1
+tests/integration/t_prompt_cache_is_its_own_file_and_marks_staleness.nim	t_prompt_cache_is_its_own_file_and_marks_staleness	1
+tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim	private repo with no assigned backend fails loud	1
+tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim	t_public_committed_team_manifest_personal_db_mixed	1
+tests/integration/t_pull_refuses_to_rewind_unpublished_work.nim	t_pull_force_converges_a_skipped_repo	1
+tests/integration/t_pull_refuses_to_rewind_unpublished_work.nim	t_pull_skips_repos_whose_branch_carries_unpublished_commits	1
+tests/integration/t_push_refuses_when_the_lock_disagrees_with_the_siblings.nim	t_push_refuses_when_the_lock_disagrees_with_the_siblings	1
+tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim	t_recertify_is_noop_when_no_executed_function_changed	1
+tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim	t_alignment_leaves_a_checkout_alone_when_no_binding_can_be_created	1
+tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim	t_alignment_leaves_a_checkout_alone_when_no_remote_is_declared	1
+tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim	t_alignment_renames_the_primary_remote_and_still_prunes_a_stale_one	1
+tests/integration/t_remove_gcs_only_unreferenced_checkouts_and_guards_dirty.nim	test_ra22_remove_dirty_gc_target_non_tty_without_force_refuses	1
+tests/integration/t_remove_gcs_only_unreferenced_checkouts_and_guards_dirty.nim	test_ra22_remove_dirty_gc_target_with_force_removes	1
+tests/integration/t_remove_gcs_only_unreferenced_checkouts_and_guards_dirty.nim	test_ra22_remove_gcs_unique_checkout_keeps_shared	1
+tests/integration/t_report_classifies_at_ahead_and_behind.nim	t_report_classifies_at_ahead_and_behind	1
+tests/integration/t_repos_add_records_project_membership_by_key.nim	a preceding array is not mistaken for the membership array	1
+tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	test_repo_add_mints_one_org_named_remote_that_the_next_repo_reuses	1
+tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	test_repo_add_reuses_matching_org_remote_and_omits_revision	1
+tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	test_repo_add_reuses_the_generic_host_base_and_keeps_the_org_in_name	1
+tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	test_repo_add_to_a_freshly_created_project_stays_readable	1
+tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	test_repo_add_validates_an_explicit_revision_against_the_remote	1
+tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	test_repo_add_without_a_branch_is_refused_and_writes_nothing	1
+tests/integration/t_repro_build_test_aggregate_builds_every_test.nim	repro build test --dry-run enumerates every declared edge	1
+tests/integration/t_repro_push_publishes_dependency_closure_in_topological_order.nim	t_repro_push_named_project_publishes_same_closure	1
+tests/integration/t_repro_push_publishes_dependency_closure_in_topological_order.nim	t_repro_push_publishes_dependency_closure_in_topological_order	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	already-published closure without records fails honestly on retry	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	custom remote accepts a detached HEAD contained by an advertised tip	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	divergent second push URL refuses globally without any mutation	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	every later shared backend failure is discovered before source mutation	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	first source drift after global preflight is caught before transport	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	fresh push advertisements catch a later remote branch deletion	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	later receive failure reports prefix and retry resumes	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	later source drift after an earlier push stops the remaining suffix	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	linked lock backend stages commits and completes exact publication	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	linked source worktree is discovered and published through real hooks	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	published-at-preflight later member is revalidated after earlier hook	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	raw dependent refuses unpublished dependency	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	raw outgoing control and dependency-first closure publish exact locks	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	routed team and personal backends preflight and complete independently	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	three-repo backend-ahead recovery rejects every invalid prefix shape	1
+tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	three-repo retry resumes verified core backend prefix	1
+tests/integration/t_repro_push_sync_integrates_upstream_then_publishes.nim	t_repro_push_sync_conflict_stops_with_remedy	1
+tests/integration/t_repro_push_sync_integrates_upstream_then_publishes.nim	t_repro_push_sync_integrates_upstream_then_publishes	1
+tests/integration/t_repro_test_issues_certificate_by_default_in_clean_state.nim	t_repro_test_issues_certificate_by_default_in_clean_state	1
+tests/integration/t_repro_test_reports_no_certificate_with_remedy_when_dirty_or_unpushed.nim	t_repro_test_reports_no_certificate_with_remedy_when_dirty_or_unpushed	1
+tests/integration/t_repro_test_runner_relative_results_git_config.nim	relative results dir survives git -C in an opaque child	2
+tests/integration/t_runquota_long_temp_rendezvous.nim	the client still refuses a live endpoint after its parent becomes writable	1
+tests/integration/t_runquota_long_temp_rendezvous.nim	the daemon still refuses a preexisting world-writable parent	1
+tests/integration/t_runquota_long_temp_rendezvous.nim	two callers connect to independent real daemons under a long TMPDIR	1
+tests/integration/t_s7_repro_build_restores_a_deleted_output.nim	t_s7_repro_build_restores_a_deleted_output	1
+tests/integration/t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes.nim	t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes	2
+tests/integration/t_sc_develop_mode_consumes_sibling_exe_and_lib_from_source.nim	t_sc_develop_mode_consumes_sibling_exe_and_lib_from_source	2
+tests/integration/t_sc_executable_producer_edge_spliced_and_on_path.nim	t_sc_executable_producer_edge_spliced_and_on_path	1
+tests/integration/t_sc_library_producer_edge_spliced_through_aux_channels.nim	t_sc_library_producer_edge_spliced_through_aux_channels	2
+tests/integration/t_sc_lock_pinned_fetches_and_builds_sibling_from_source.nim	t_sc_lock_pinned_fetches_and_builds_sibling_from_source	2
+tests/integration/t_sc_typed_cross_project_consumption_both_modes.nim	t_sc_typed_cross_project_consumption_both_modes	2
+tests/integration/t_selectors_narrow_the_override_state_report.nim	t_selectors_narrow_the_override_state_report	1
+tests/integration/t_shared_clone_alternates_skip_redownload.nim	test_ra5_alternates_skip_redownload_and_transparent	1
+tests/integration/t_shared_clone_cache_repacks_and_bounds_growth.nim	test_ra15_cache_repacks_and_prunes_dead_workspace_refs	1
+tests/integration/t_shared_clone_cache_repacks_and_bounds_growth.nim	test_ra15_empty_live_set_does_not_prune_any_cache_refs	1
+tests/integration/t_shared_clone_uses_full_repo_url_for_base_remote.nim	t_shared_clone_uses_full_repo_url_for_base_remote	1
+tests/integration/t_shell_entry_reports_drift_over_the_applied_overrides.nim	t_shell_entry_reports_drift_over_the_applied_overrides	1
+tests/integration/t_solved_packages_are_first_class_locked_deps.nim	t_solved_packages_are_first_class_locked_deps	1
+tests/integration/t_source_producer_revalidation.nim	consumer tracks recipe imports, action inputs and entry edits	1
+tests/integration/t_source_producer_revalidation.nim	existing artifact bootstraps an active producer without skipping it	1
+tests/integration/t_source_revalidation_invocation_scope.nim	later builds in the same process revalidate producers	1
+tests/integration/t_spec_6_2_matches_implementation.nim	every setting the config carries is named in the snippet	1
+tests/integration/t_spec_6_2_matches_implementation.nim	the prose names the mechanism that actually enforces the rule	1
+tests/integration/t_spec_6_2_matches_implementation.nim	the section exists and carries exactly one nim block	1
+tests/integration/t_spec_6_2_matches_implementation.nim	the snippet compiles, and builds the activity the module builds	2
+tests/integration/t_spec_6_2_matches_implementation.nim	the snippet uses no form the activity macro cannot parse	1
+tests/integration/t_stale_repro_refusal_names_a_remedy_that_does_not_disarm_the_gate.nim	t_stale_repro_refusal_names_a_remedy_that_does_not_disarm_the_gate	1
+tests/integration/t_status_health_add_remove_use_unified_resolver.nim	t_status_health_add_remove_use_unified_resolver	1
+tests/integration/t_store_and_registry_deps_carry_coordinates_and_integrity.nim	t_store_and_registry_deps_carry_coordinates_and_integrity	1
+tests/integration/t_switch_mainline_and_fetch.nim	test_switch_fetch_by_default_fast_forwards_behind_branch	1
+tests/integration/t_switch_mainline_and_fetch.nim	test_switch_mainline_refuses_fragment_without_branch	1
+tests/integration/t_switch_mainline_and_fetch.nim	test_switch_mainline_rejects_branch_positional	1
+tests/integration/t_switch_mainline_and_fetch.nim	test_switch_mainline_sends_each_repo_to_its_declared_branch	1
+tests/integration/t_switch_mainline_and_fetch.nim	test_switch_no_fetch_leaves_behind_branch_untouched	1
+tests/integration/t_switch_mainline_and_fetch.nim	test_switch_refuses_diverged_branch_instead_of_repointing	1
+tests/integration/t_switch_new_branch_marks_feature_branch.nim	test_m28_start_converges_mixed_local_matrix	1
+tests/integration/t_switch_new_branch_marks_feature_branch.nim	test_m28_start_creates_branch_when_missing	1
+tests/integration/t_switch_new_branch_marks_feature_branch.nim	test_m28_start_is_idempotent_for_same_branch	1
+tests/integration/t_switch_new_branch_marks_feature_branch.nim	test_m28_start_marks_metadata_so_sync_preserves_branch	1
+tests/integration/t_switch_new_branch_marks_feature_branch.nim	test_m28_start_refuses_mixed_when_remote_branch_involved	1
+tests/integration/t_switch_new_branch_marks_feature_branch.nim	test_m28_start_refuses_when_any_repo_dirty	1
+tests/integration/t_switch_new_branch_marks_feature_branch.nim	test_m28_start_switches_when_branch_already_exists	1
+tests/integration/t_switch_stashes_and_restores_per_repo_wip.nim	t_switch_stashes_and_restores_per_repo_wip	1
+tests/integration/t_sync_check_operate_from_committed_lock_without_manifests.nim	t_sync_check_operate_from_committed_lock_without_manifests	1
+tests/integration/t_sync_clones_commit_pinned_repo.nim	t_sync_clones_repo_pinned_to_a_fully_qualified_tag	1
+tests/integration/t_sync_clones_commit_pinned_repo.nim	t_sync_clones_repo_pinned_to_a_non_tip_commit	1
+tests/integration/t_sync_clones_commit_pinned_repo.nim	t_sync_discards_a_checkout_that_failed_after_the_clone	1
+tests/integration/t_sync_clones_commit_pinned_repo.nim	t_sync_fails_when_a_declared_repo_cannot_be_cloned	1
+tests/integration/t_sync_clones_newly_declared_dependency_after_pull.nim	t_sync_clones_newly_declared_dependency_after_pull	1
+tests/integration/t_sync_fast_forwards_feature_branch_from_its_own_upstream.nim	t_sync_fast_forwards_feature_branch_from_its_own_upstream	1
+tests/integration/t_sync_ff_only_per_repo_upstream.nim	t_sync_ff_only_per_repo_upstream	1
+tests/integration/t_sync_ff_only_per_repo_upstream.nim	t_sync_updates_submodules_after_fast_forward	1
+tests/integration/t_sync_honours_branch_and_revision_together.nim	t_branch_and_revision_resolve_to_different_fields	1
+tests/integration/t_sync_honours_branch_and_revision_together.nim	t_sync_lands_on_the_pinned_commit_not_the_branch_tip	1
+tests/integration/t_sync_mainline_reconcile.nim	test_sync_mainline_fast_forwards_when_branch_has_no_local_commits	1
+tests/integration/t_sync_mainline_reconcile.nim	test_sync_mainline_leaves_conflicting_repo_untouched	1
+tests/integration/t_sync_mainline_reconcile.nim	test_sync_mainline_merge_records_a_merge_commit	1
+tests/integration/t_sync_mainline_reconcile.nim	test_sync_mainline_only_selects_a_subset	1
+tests/integration/t_sync_mainline_reconcile.nim	test_sync_mainline_rebase_replays_local_commits	1
+tests/integration/t_sync_mainline_reconcile.nim	test_sync_mainline_reconciles_each_repo_against_its_own_mainline	1
+tests/integration/t_sync_mainline_reconcile.nim	test_sync_mainline_refuses_dirty_repo_when_integrating	1
+tests/integration/t_sync_mainline_reconcile.nim	test_sync_mainline_reports_diverged_without_a_flavor	1
+tests/integration/t_sync_reports_partial_manifest_advance_without_rollback.nim	t_sync_reports_partial_manifest_advance_without_rollback	1
+tests/integration/t_sync_resumes_after_interruption_and_force_sync_overwrites_dirty.nim	t_sync_resumes_after_interruption_and_force_sync_overwrites_dirty	1
+tests/integration/t_sync_scoped_to_named_project_touches_only_that_project.nim	t_sync_scoped_to_named_project_touches_only_that_project	1
+tests/integration/t_sync_skips_fetch_when_locked_sha_already_present.nim	t_sync_skips_fetch_when_locked_sha_already_present	1
+tests/integration/t_team_backend_routed_lock_reads_back_and_is_idempotent.nim	t_team_backend_routed_lock_reads_back_and_is_idempotent	1
+tests/integration/t_team_repo_record_only_no_checkout.nim	t_team_repo_record_only_no_checkout	1
+tests/integration/t_test_certificate_conformance_vectors.nim	t_test_certificate_conformance_vectors	2
+tests/integration/t_the_status_report_does_not_call_an_unpublished_row_recordable.nim	t_the_status_report_does_not_call_an_unpublished_row_recordable	1
+tests/integration/t_the_unpushed_skip_names_the_push_that_would_make_it_lockable.nim	t_the_unpushed_skip_names_the_push_that_would_make_it_lockable	2
+tests/integration/t_top_level_sync_pull_shortcuts_match_workspace_forms.nim	t_top_level_sync_pull_shortcuts_match_workspace_forms	1
+tests/integration/t_unpublished_evidence_names_the_search_that_ran.nim	t_unpublished_evidence_names_the_search_that_ran	1
+tests/integration/t_unrouted_private_repo_refuses_loudly.nim	t_unrouted_private_repo_refuses_loudly	1
+tests/integration/t_unsigned_or_wrong_key_certificate_is_rejected.nim	t_unsigned_or_wrong_key_certificate_is_rejected	1
+tests/integration/t_vcs_private_metadata_dir_resolves_worktree_safe.nim	t_vcs_private_metadata_dir_resolves_worktree_safe	1
+tests/integration/t_workspace_bootstrap_reads_host_repo_config_no_hardcoded_defaults.nim	t_workspace_bootstrap_reads_host_repo_config_no_hardcoded_defaults	1
+tests/integration/t_workspace_branch_create_records_metadata.nim	test_m14_show_form_returns_new_branch_after_create	1
+tests/integration/t_workspace_branch_create_records_metadata.nim	test_m14_show_form_returns_trunk_on_freshly_initialised_workspace	1
+tests/integration/t_workspace_clone_auto_trusts_per_repo_envrc.nim	t_workspace_clone_auto_trusts_per_repo_envrc	1
+tests/integration/t_workspace_definition_projects_repos.nim	t_workspace_projects_add_rejects_existing	1
+tests/integration/t_workspace_definition_projects_repos.nim	t_workspace_projects_list_marks_enabled	1
+tests/integration/t_workspace_definition_projects_repos.nim	t_workspace_projects_remove_refuses_while_enabled	1
+tests/integration/t_workspace_definition_projects_repos.nim	t_workspace_repos_add_multi_project	1
+tests/integration/t_workspace_definition_projects_repos.nim	t_workspace_repos_remove_keeps_fragment_by_default	1
+tests/integration/t_workspace_develop_clones_and_registers_override.nim	test_m22_develop_clones_when_no_source_flag	1
+tests/integration/t_workspace_develop_clones_and_registers_override.nim	test_m22_develop_idempotent_for_same_source	1
+tests/integration/t_workspace_develop_clones_and_registers_override.nim	test_m22_develop_refuses_collision_at_different_source	1
+tests/integration/t_workspace_develop_clones_and_registers_override.nim	test_m22_develop_registers_when_source_provided	1
+tests/integration/t_workspace_develop_clones_and_registers_override.nim	test_m22_develop_rejects_unknown_package	1
+tests/integration/t_workspace_enable_materializes_added_projects.nim	t_workspace_enable_materializes_added_projects	1
+tests/integration/t_workspace_enable_materializes_added_projects.nim	t_workspace_enable_no_sync_records_only	1
+tests/integration/t_workspace_forall_runs_command_in_every_participating_repo.nim	test_ra20_forall_runs_command_in_every_participating_repo	1
+tests/integration/t_workspace_git_tool_identity.nim	test_m1_identity_deterministic_across_path_variants	1
+tests/integration/t_workspace_hooks_ensure_is_idempotent_across_three_runs.nim	test_m17_hooks_dispatch_noop_succeeds	1
+tests/integration/t_workspace_hooks_ensure_is_idempotent_across_three_runs.nim	test_m17_hooks_ensure_chains_pre_existing_user_hook	1
+tests/integration/t_workspace_hooks_ensure_is_idempotent_across_three_runs.nim	test_m17_hooks_ensure_installs_the_managed_hook_set_per_repo	1
+tests/integration/t_workspace_hooks_ensure_is_idempotent_across_three_runs.nim	test_m17_hooks_ensure_is_idempotent_across_three_runs	1
+tests/integration/t_workspace_hooks_ensure_is_idempotent_across_three_runs.nim	test_m17_hooks_ensure_refreshes_drifted_hook	1
+tests/integration/t_workspace_init_bootstraps_manifest_cache_outside_workspace.nim	t_workspace_init_bootstraps_manifest_cache_outside_workspace	1
+tests/integration/t_workspace_init_clones_missing_and_reports_existing.nim	test_m9_init_clones_two_missing_repos	1
+tests/integration/t_workspace_init_clones_missing_and_reports_existing.nim	test_m9_init_no_workspace_root_uses_cwd	1
+tests/integration/t_workspace_init_clones_missing_and_reports_existing.nim	test_m9_init_reports_divergence_without_modifying	1
+tests/integration/t_workspace_init_clones_missing_and_reports_existing.nim	test_m9_init_reports_existing_up_to_date	1
+tests/integration/t_workspace_init_clones_missing_and_reports_existing.nim	test_m9_init_unknown_project_errors	1
+tests/integration/t_workspace_init_clones_org_root_repo_and_syncs_into_named_path.nim	t_workspace_init_clones_org_root_repo_and_syncs_into_named_path	1
+tests/integration/t_workspace_lock_latest_resolves_via_git_history_per_repo.nim	t_workspace_lock_latest_resolves_via_git_history_per_repo	1
+tests/integration/t_workspace_lock_partition_resolves_a_sibling_for_ci.nim	t_workspace_lock_partition_resolves_a_sibling_for_ci	1
+tests/integration/t_workspace_lock_public_only_reports_it_recorded_nothing.nim	t_workspace_lock_public_only_reports_it_recorded_nothing	1
+tests/integration/t_workspace_lock_round_trips_through_resolver.nim	test_m11_lock_clean_workspace_round_trips_through_resolver	1
+tests/integration/t_workspace_lock_round_trips_through_resolver.nim	test_m11_lock_dirty_workspace_refuses	1
+tests/integration/t_workspace_lock_round_trips_through_resolver.nim	test_m11_lock_idempotent_when_rerun_at_same_sha	1
+tests/integration/t_workspace_lock_round_trips_through_resolver.nim	test_m11_lock_report_json_well_formed	1
+tests/integration/t_workspace_lock_round_trips_through_resolver.nim	test_m11_new_sha_writes_new_per_repo_lock_no_index	1
+tests/integration/t_workspace_manifest_refresh_after_post_merge.nim	test_m19a_post_merge_fast_forwards_manifest_layer	1
+tests/integration/t_workspace_manifest_refresh_skips_when_divergent.nim	test_m19a_post_merge_skips_when_manifest_layer_divergent	1
+tests/integration/t_workspace_manifest_refresh_skips_when_locally_dirty.nim	test_m19a_post_merge_skips_when_manifest_layer_dirty	1
+tests/integration/t_workspace_manifests_enumerates_layers.nim	test_m12_manifests_json_mode_includes_per_layer_shape	1
+tests/integration/t_workspace_manifests_enumerates_layers.nim	test_m12_manifests_two_layer_workspace_lists_both	1
+tests/integration/t_workspace_manifests_private_override_shadows_public.nim	test_m8_compose_result_passes_m6_duplicate_check	1
+tests/integration/t_workspace_manifests_private_override_shadows_public.nim	test_m8_layer_missing_project_raises	1
+tests/integration/t_workspace_manifests_private_override_shadows_public.nim	test_m8_local_path_layer_loads_without_clone	1
+tests/integration/t_workspace_manifests_private_override_shadows_public.nim	test_m8_private_layer_shadows_public_for_overlapping_repo	1
+tests/integration/t_workspace_marker_accepts_committed_lock_only_repo.nim	t_workspace_marker_accepts_committed_lock_only_repo	1
+tests/integration/t_workspace_membership_enable_disable.nim	t_workspace_disable_keeps_shared_repos	1
+tests/integration/t_workspace_membership_enable_disable.nim	t_workspace_disable_refuses_unpushed_work	1
+tests/integration/t_workspace_membership_enable_disable.nim	t_workspace_enable_refuses_undefined_project	1
+tests/integration/t_workspace_membership_enable_disable.nim	t_workspace_ws_alias_dispatches	1
+tests/integration/t_workspace_metadata_branch_survives_init_and_status.nim	test_m13_init_is_idempotent_for_branch_metadata	1
+tests/integration/t_workspace_metadata_branch_survives_init_and_status.nim	test_m13_init_records_trunk_as_active_branch	1
+tests/integration/t_workspace_metadata_branch_survives_init_and_status.nim	test_m13_status_reads_active_branch_from_metadata	1
+tests/integration/t_workspace_migrate_reconciles_local_state.nim	t_migrate_adds_a_forks_upstream_and_leaves_a_correct_checkout_alone	1
+tests/integration/t_workspace_migrate_reconciles_local_state.nim	t_migrate_attaches_a_detached_head_to_the_declared_branch	1
+tests/integration/t_workspace_migrate_reconciles_local_state.nim	t_migrate_renames_prefix_named_remote_to_origin_and_is_idempotent	1
+tests/integration/t_workspace_migrate_refuses_to_endanger_work.nim	t_migrate_leaves_a_checkout_it_cannot_recognize_completely_alone	1
+tests/integration/t_workspace_migrate_refuses_to_endanger_work.nim	t_migrate_skips_checkouts_carrying_work_and_reports_the_remedy	1
+tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	test_m19_fixture_seeds_three_distinguishable_repos	1
+tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	test_m19_post_commit_log_file_appended_on_each_run	1
+tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	test_m19_post_commit_succeeds_when_lock_writer_fails	3
+tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	test_m19_post_commit_succeeds_when_no_workspace_toml	1
+tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	test_m19_post_commit_succeeds_when_workspace_dirty	1
+tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	test_m19_post_commit_writes_lock_when_workspace_clean	1
+tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	test_m19b_published_is_earned_by_reaching_the_upstream	1
+tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	test_m19b_records_stranded_behind_pushed_commits_are_loud	1
+tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	test_m19b_unpublished_lock_is_never_reported_as_success	1
+tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	test_ra30_lock_is_anchored_at_the_repo_whose_commit_fired_the_hook	1
+tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	test_ra30_undeclared_triggering_repo_writes_no_lock_and_says_so	1
+tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	test_ra31_a_published_record_is_still_immutable	1
+tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	test_ra31_gate_supersedes_its_own_unpublished_draft	1
+tests/integration/t_workspace_pre_push_blocks_lock_with_private_only_refs.nim	test_m26_pre_push_blocks_when_new_lock_added_with_private_refs	1
+tests/integration/t_workspace_pre_push_blocks_lock_with_private_only_refs.nim	test_m26_pre_push_blocks_when_public_lock_references_private_only_repo	1
+tests/integration/t_workspace_pre_push_blocks_lock_with_private_only_refs.nim	test_m26_pre_push_passes_when_lock_only_references_public_repos	1
+tests/integration/t_workspace_pre_push_blocks_lock_with_private_only_refs.nim	test_m26_pre_push_passes_when_lock_unchanged_in_push	1
+tests/integration/t_workspace_pre_push_blocks_on_develop_override_cleanliness.nim	test_m23_pre_push_blocks_when_develop_override_dirty	1
+tests/integration/t_workspace_pre_push_blocks_on_develop_override_cleanliness.nim	test_m23_pre_push_blocks_when_develop_override_missing	1
+tests/integration/t_workspace_pre_push_blocks_on_develop_override_cleanliness.nim	test_m23_pre_push_blocks_when_develop_override_unpublished	1
+tests/integration/t_workspace_pre_push_blocks_on_develop_override_cleanliness.nim	test_m23_pre_push_passes_when_no_overrides_recorded	1
+tests/integration/t_workspace_pre_push_blocks_on_develop_override_cleanliness.nim	test_m23_pre_push_passes_with_clean_published_override	1
+tests/integration/t_workspace_pre_push_blocks_when_head_unpublished.nim	t_workspace_pre_push_blocks_when_head_unpublished	1
+tests/integration/t_workspace_pre_push_blocks_when_repo_dirty.nim	t_workspace_pre_push_blocks_when_repo_dirty	1
+tests/integration/t_workspace_pre_push_passes_when_clean_and_published_and_locked.nim	t_workspace_pre_push_passes_when_clean_and_published_and_locked	1
+tests/integration/t_workspace_pre_push_refreshes_lock_when_missing.nim	t_workspace_pre_push_refreshes_lock_when_missing	1
+tests/integration/t_workspace_private_layer_e2e.nim	test_m25_init_fails_with_clear_diagnostic_when_private_layer_unreachable	1
+tests/integration/t_workspace_private_layer_e2e.nim	test_m25_init_succeeds_with_full_access_to_public_and_private	1
+tests/integration/t_workspace_private_layer_e2e.nim	test_m25_init_succeeds_with_public_only_when_skip_flag_present	1
+tests/integration/t_workspace_private_layer_e2e.nim	test_m25_lock_round_trips_after_full_access_init	1
+tests/integration/t_workspace_project_set_conflict_refused.nim	t_workspace_project_set_conflict_refused	1
+tests/integration/t_workspace_project_set_unions_repos.nim	t_workspace_project_set_unions_repos	1
+tests/integration/t_workspace_project_set_unions_repos.nim	t_workspace_project_set_visible_to_list_and_sync	1
+tests/integration/t_workspace_pull_continues_past_a_failing_repo.nim	t_pull_converges_every_remaining_repo_after_a_failure	1
+tests/integration/t_workspace_pull_converges_each_repo_to_manifest_revision_tracking_branch.nim	t_workspace_pull_converges_each_repo_to_manifest_revision_tracking_branch	1
+tests/integration/t_workspace_pull_converges_each_repo_to_manifest_revision_tracking_branch.nim	t_workspace_sync_honors_current_branch_unlike_pull	1
+tests/integration/t_workspace_remove_prompts_on_dirty_and_refuses_in_non_tty.nim	test_ra9_remove_clean_repo_allowed_without_force	1
+tests/integration/t_workspace_remove_prompts_on_dirty_and_refuses_in_non_tty.nim	test_ra9_remove_dirty_non_tty_without_force_refuses_intact	1
+tests/integration/t_workspace_remove_prompts_on_dirty_and_refuses_in_non_tty.nim	test_ra9_remove_dirty_with_force_performs_removal	1
+tests/integration/t_workspace_remove_prompts_on_dirty_and_refuses_in_non_tty.nim	test_ra9_remove_dry_run_previews_per_repo_effect_no_mutation	1
+tests/integration/t_workspace_routes_repo_sets_to_distinct_backends.nim	public-only workspace with no routing config constructs no backend	1
+tests/integration/t_workspace_routes_repo_sets_to_distinct_backends.nim	t_workspace_routes_repo_sets_to_distinct_backends	1
+tests/integration/t_workspace_shared_clones_list_and_rewire.nim	test_ra5_shared_clones_root_list_rewire	1
+tests/integration/t_workspace_status_shows_active_branch_and_drift.nim	test_m12_status_active_branch_is_trunk_when_repos_diverge	1
+tests/integration/t_workspace_status_shows_active_branch_and_drift.nim	test_m12_status_ambiguous_trunk_ref_does_not_leak_git_warning	1
+tests/integration/t_workspace_status_shows_active_branch_and_drift.nim	test_m12_status_at_lock_when_no_drift	1
+tests/integration/t_workspace_status_shows_active_branch_and_drift.nim	test_m12_status_dirty_checkout_flagged	1
+tests/integration/t_workspace_status_shows_active_branch_and_drift.nim	test_m12_status_drifted_when_head_advanced_past_lock	1
+tests/integration/t_workspace_status_shows_active_branch_and_drift.nim	test_m12_status_extended_queries	1
+tests/integration/t_workspace_status_shows_active_branch_and_drift.nim	test_m12_status_file_details_lists_paths_with_xy_codes	1
+tests/integration/t_workspace_status_shows_active_branch_and_drift.nim	test_m12_status_missing_checkout_reported	1
+tests/integration/t_workspace_status_shows_active_branch_and_drift.nim	test_m12_status_no_lock_recorded_runs_without_error	1
+tests/integration/t_workspace_switch_switches_all_repos.nim	test_m15_switch_creates_tracking_branch_when_missing_locally	1
+tests/integration/t_workspace_switch_switches_all_repos.nim	test_m15_switch_idempotent_when_already_on_branch	1
+tests/integration/t_workspace_switch_switches_all_repos.nim	test_m15_switch_records_new_branch_in_metadata	1
+tests/integration/t_workspace_switch_switches_all_repos.nim	test_m15_switch_refuses_when_branch_missing_in_any_repo	1
+tests/integration/t_workspace_switch_switches_all_repos.nim	test_m15_switch_stashes_dirty_repo_and_switches	1
+tests/integration/t_workspace_switch_switches_all_repos.nim	test_m15_switch_switches_all_repos_to_existing_local_branch	1
+tests/integration/t_workspace_sync_fetches_repos_in_parallel.nim	t_workspace_sync_fetches_repos_in_parallel	1
+tests/integration/t_workspace_sync_jobs_network_pool_bounds_concurrency.nim	t_workspace_sync_jobs_network_pool_bounds_concurrency	1
+tests/integration/t_workspace_sync_never_advises_pushing_onto_a_rewritten_remote.nim	t_workspace_sync_never_advises_pushing_onto_a_rewritten_remote	1
+tests/integration/t_workspace_sync_never_advises_pushing_onto_a_rewritten_remote.nim	t_workspace_sync_rewritten_remote_on_the_trunk_branch_is_not_locally_unpublished	1
+tests/integration/t_workspace_sync_refuses_to_classify_on_a_failed_fetch.nim	t_workspace_sync_refuses_to_classify_on_a_failed_fetch	1
+tests/integration/t_workspace_sync_selectors_narrow_the_default_path.nim	t_workspace_sync_selectors_narrow_the_default_path	1
+tests/integration/t_workspace_sync_seven_corner_cases.nim	test_m10_sync_clean_at_locked_revision	1
+tests/integration/t_workspace_sync_seven_corner_cases.nim	test_m10_sync_clean_fast_forwardable	1
+tests/integration/t_workspace_sync_seven_corner_cases.nim	test_m10_sync_declared_branch_does_not_override_the_pin	1
+tests/integration/t_workspace_sync_seven_corner_cases.nim	test_m10_sync_detached_at_locked_revision_reattaches	1
+tests/integration/t_workspace_sync_seven_corner_cases.nim	test_m10_sync_detached_sha_pin_attaches_when_branch_tip_matches	1
+tests/integration/t_workspace_sync_seven_corner_cases.nim	test_m10_sync_detached_sha_pin_stays_detached_when_no_branch_matches	1
+tests/integration/t_workspace_sync_seven_corner_cases.nim	test_m10_sync_dirty_refuses_and_reports	1
+tests/integration/t_workspace_sync_seven_corner_cases.nim	test_m10_sync_divergent_feature_branch_reports_only	1
+tests/integration/t_workspace_sync_seven_corner_cases.nim	test_m10_sync_locally_unpublished_refuses_and_reports	1
+tests/integration/t_workspace_sync_seven_corner_cases.nim	test_m10_sync_missing_checkout_clones	1
+tests/integration/t_workspace_sync_seven_corner_cases.nim	test_m10_sync_orphan_remote_tracking_ref_is_not_an_attach_candidate	1
+tests/integration/t_workspace_sync_summary_counts_a_force_reset.nim	t_workspace_sync_summary_counts_a_force_reset	1
+tests/integration/t_workspace_vcs_clone_cacheable.nim	test_m2_clone_cacheable_second_call_is_receipt_cas_hit	1
+tests/integration/t_workspace_vcs_clone_cacheable.nim	test_m2_clone_fingerprint_differs_for_different_revisions	1
+tests/integration/t_workspace_vcs_fetch_no_op_when_up_to_date.nim	test_m2_fetch_fingerprint_includes_repo_path	1
+tests/integration/t_workspace_vcs_fetch_no_op_when_up_to_date.nim	test_m2_fetch_no_op_when_up_to_date	1
+tests/integration/t_workspace_vcs_hybrid_workspace_clone.nim	test_m3_hybrid_workspace_clone_routes_both_vcses_in_one_runbuild	1
+tests/integration/t_workspace_vcs_switch_preserves_dirty_state.nim	test_m2_is_clean_query_observes_dirty_state	1
+tests/integration/t_workspace_vcs_switch_preserves_dirty_state.nim	test_m2_switch_refuses_on_dirty_and_surfaces_structured_reason	1
+tests/integration/t_workspace_vcs_switch_preserves_dirty_state.nim	test_m2_switch_succeeds_on_clean_tree	1
+tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim	a clean tree whose git warns on stderr reads clean	1
+tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim	a modified tree whose git warns on stderr still reads dirty	1
+tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim	a status that genuinely fails still surfaces its diagnostic	1
+tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim	an untracked-only tree whose git warns on stderr is still untracked	1
+tests/unit/t_bootstrap_nim_monitoring.nim	Linux uses the pinned compiler channel instead of the static archive	1
+tests/unit/t_bootstrap_nim_monitoring.nim	Windows retains its pinned native archive	1
+tests/unit/t_bootstrap_nim_monitoring.nim	an explicit bootstrap compiler is preserved without provisioning	1
+tests/unit/t_cached_source_dependency_closure.nim	cache-only source inherits declared fallback paths and identity	1
+tests/unit/t_cached_source_dependency_closure.nim	directly selected fallback inherits and fingerprints its runtime closure	1
+tests/unit/t_cached_source_dependency_closure.nim	fallback without a recipe never traverses caller metadata	1
+tests/unit/t_cached_source_dependency_closure.nim	historical fallback paths cannot shadow the currently selected provider	1
+tests/unit/t_configure_build_tree_cleanup.nim	Autotools raw Makefile copying creates its configure stamp in the build tree	1
+tests/unit/t_configure_build_tree_cleanup.nim	CMake cleanup creates its missing stamp directory at execution	1
+tests/unit/t_configure_build_tree_cleanup.nim	CMake pipeline excludes its shared mutable build tree	1
+tests/unit/t_configure_build_tree_cleanup.nim	Meson cleanup creates its missing stamp directory at execution	1
+tests/unit/t_configure_build_tree_cleanup.nim	Meson pipeline excludes its shared mutable build tree	1
+tests/unit/t_configure_build_tree_cleanup.nim	source patch actions inherit recipe tool identities	1
+tests/unit/t_constructor_fetch_tool_refs.nim	BLAKE3 fetch commands and identities select b3sum together	1
+tests/unit/t_constructor_fetch_tool_refs.nim	CMake, Meson, and Autotools declare every shell command tool	1
+tests/unit/t_constructor_fetch_tool_refs.nim	Meson timestamp refresh runs with only its declared shell tools	1
+tests/unit/t_constructor_fetch_tool_refs.nim	archive replay preserves stamps but changed extraction settings invalidate them	1
+tests/unit/t_constructor_fetch_tool_refs.nim	changed fetch programs update stamps and malformed stamps are repaired	1
+tests/unit/t_constructor_fetch_tool_refs.nim	custom-shell synthesis declares every fetch command tool	1
+tests/unit/t_constructor_fetch_tool_refs.nim	failed verification leaves the previous stamp and extraction untouched	1
+tests/unit/t_constructor_fetch_tool_refs.nim	standard fetch isolates its loader paths for every source kind	1
+tests/unit/t_constructor_fetch_tool_refs.nim	verified unchanged fetches preserve consumer stamp timestamps	1
+tests/unit/t_hcr_agent_ipc.nim	Unix socket transport carries framed protocol messages	1
+tests/unit/t_hcr_agent_ipc.nim	agent can connect through launch environment socket path	1
+tests/unit/t_hcr_agent_ipc.nim	coordinator and endpoint use Unix socket IPC with session validation	1
+tests/unit/t_hcr_agent_process_target.nim	process target runtime is covered by the macOS arm64 lane, not this host	1
+tests/unit/t_hcr_watch_inference.nim	infers patch metadata from ordinary C object rebuild	1
+tests/unit/t_library_stage_alias.nim	preserve the installed name behind the public artifact name	1
+tests/unit/t_library_stage_alias.nim	scope cleanup edges by build directory	1
+tests/unit/t_library_stage_alias.nim	stage a host-native executable under its public interface name	1
+tests/unit/t_m9r13a_provider_compile_sharing.nim	Linux bootstrap compiler does not replace package CC	1
+tests/unit/t_m9r13a_provider_compile_sharing.nim	Linux interface compilation has a pinned compiler channel	1
+tests/unit/t_m9r13a_provider_compile_sharing.nim	test_provider_compile_command_prefers_runtime_cc_on_posix	1
+tests/unit/t_m9r13b_1_toolchain_pin.nim	Arm 1: vendored sources present + env unset -> define emitted	1
+tests/unit/t_m9r13b_1_toolchain_pin.nim	Arm 2: REPROBUILD_USE_SYSTEM_HASH_LIBS=1 suppresses define	1
+tests/unit/t_m9r13b_1_toolchain_pin.nim	Arm 3: include dirs still emitted alongside define	1
+tests/unit/t_m9r13b_1_toolchain_pin.nim	Arm 4: env values other than 1/true/yes/on do NOT suppress define	1
+tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	a restrictive DACL is access-denied, not stale — and its owner survives	1
+tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	a restrictive DACL on the canonical pipe is unreachable, fast	3
+tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	a terminate target cannot be built for an unidentified owner	1
+tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	probeWindowsPipeOwner classifies a live local server as wpsHealthy	1
+tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	probeWindowsPipeOwner on stale orphan returns wpsStale	2
+tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	probeWindowsPipeOwner returns wpsAbsent for never-existed pipe	1
+tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	terminateStalePipeOwner is a no-op on already-dead PID	1
+tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	the same probe DOES report absent for a genuinely absent pipe	1
+tests/unit/t_m9r14f_2_rpath_patching.nim	linux_end_to_end_patchelf_against_synthetic_elf	1
+tests/unit/t_m9r14f_2_rpath_patching.nim	linux_preserves_prelinked_libc_from_matching_link_directory	1
+tests/unit/t_m9r15q_5_rpath_nix_stub_deps.nim	linux_end_to_end_rpath_excludes_dangling_includes_real	1
+tests/unit/t_m9r9_auto_recurse.nim	test_m9r9_prepare_only_materializes_source_producer	1
+tests/unit/t_msi_archive_type.nim	an administrative install yields the payload, not an install	2
+tests/unit/t_runquota_endpoint_paths.nim	UTF-8 paths are bounded in bytes rather than characters	1
+tests/unit/t_runquota_endpoint_paths.nim	different long temp roots remain distinct for the same caller	1
+tests/unit/t_runquota_endpoint_paths.nim	long callers are not truncated to the same rendezvous	1
+tests/unit/t_runquota_endpoint_paths.nim	long temp roots retain bounded independent private rendezvous paths	1
+tests/unit/t_runquota_endpoint_paths.nim	the terminating NUL counts against the native socket address budget	1
+tests/unit/t_script_launcher.nim	the generated launcher actually runs the script	1
+tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim	linux/amd64 only	1
+tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim	HLX-M0 x86_64 trampoline gate is linux-x86_64-only	1
+tests/unit/t_workspace_root_for_repo_managed_worktree.nim	ignores an incomplete temp sibling and follows .repo common dir	1
+tools/catalog-harvester/tests/test_n48_msys2_tar_operands.nim	test_n48_msys2_extracts_members_into_dirs_gnu_tar_would_unquote	1
+tools/catalog-harvester/tests/test_n48_msys2_tar_operands.nim	test_n48_msys2_lists_an_absolute_windows_archive_path	1
