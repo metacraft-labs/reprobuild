@@ -52,6 +52,7 @@ libs/repro_build_engine/tests/t_child_cpu_stats_row.nim	nim	7
 libs/repro_build_engine/tests/t_da1i_evidence_scope.nim	nim	30
 libs/repro_build_engine/tests/t_daemon_check_platform_refusal.nim	nim	2
 libs/repro_build_engine/tests/t_dark_window_cache_records_are_drained.nim	nim	9
+libs/repro_build_engine/tests/t_declared_depfile_absent_is_not_cacheable.nim	nim	3
 libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim	nim	13
 libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim	nim	4
 libs/repro_build_engine/tests/t_engine_implicit_target_name_basename_rule.nim	nim	1

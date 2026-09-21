@@ -2462,7 +2462,15 @@ proc depfilePolicyMulti(paths: openArray[string]): DependencyGatheringPolicy =
         # expand to zero files (e.g. cargo's debug/release split: only
         # one profile dir exists per build). The engine surfaces "no
         # depfile produced at all" as a missing-evidence diagnostic at
-        # the aggregate-policy level, not per-path.
+        # the aggregate-policy level, not per-path: see the
+        # ``cirMissingDependencyReport`` guard at the end of the
+        # recognized-report loop in ``collectEvidence``
+        # (repro_build_engine.nim). It withholds the action-cache
+        # publication of a CACHEABLE edge that produced none of its
+        # declared report paths, and leaves every other edge alone.
+        # Do not "fix" a missing depfile by flipping this to ``true``:
+        # ``required = true`` routes to ``publishable = false``, which
+        # the scheduler turns into ``asFailed``.
   DependencyGatheringPolicy(
     kind: dgRecognizedFormat,
     completeness: decComplete,
