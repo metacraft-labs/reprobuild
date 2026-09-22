@@ -185,6 +185,11 @@ package cargo:
         boolFlag locked is bool, alias = "--locked"
         boolFlag release is bool, alias = "--release"
         boolFlag noRun is bool, alias = "--no-run"
+        # `cargo test` accepts --no-default-features exactly as `cargo build`
+        # does, and a crate whose default features are host-specific has to be
+        # able to test the same feature set it builds. `build` and `install`
+        # above carry the flag; its absence here was the gap.
+        boolFlag noDefaultFeatures is bool, alias = "--no-default-features"
         flag manifestPath is string,
           alias = "--manifest-path",
           role = input
