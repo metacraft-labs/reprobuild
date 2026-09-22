@@ -38,47 +38,47 @@ package rustfmt:
     # cargo-fmt subcommand front at `<prefix>/bin/cargo-fmt.exe`. See
     # ``mergeRustInstallerComponents`` in
     # ``repro_tool_profiles.nim``.
-    tarball url = "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-pc-windows-msvc.tar.xz",
-      sha256 = "7e536d87bb539cdf94a969ecb491e1340f2641a11cf57d6169892f395d68c702",
+    tarball url = "https://static.rust-lang.org/dist/rust-1.94.0-x86_64-pc-windows-msvc.tar.xz",
+      sha256 = "2e65904a4340df11a1ed8a86a7cc5c08e09f65453ce822ef36159c605a97f6a5",
       archiveType = "tar.xz",
       stripComponents = 1,
       executablePath = "bin/rustfmt.exe",
-      packageId = "rust@1.92.0",
+      packageId = "rust@1.94.0",
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:rust@1.92.0:sha256:7e536d87bb539cdf94a969ecb491e1340f2641a11cf57d6169892f395d68c702"
+      lockIdentity = "tarball:rust@1.94.0:sha256:2e65904a4340df11a1ed8a86a7cc5c08e09f65453ce822ef36159c605a97f6a5"
     # Linux x86_64: same rust standalone-distribution tarball as the
     # Windows entry — different triple. The realize loop's rust-installer
     # auto-merge flattens rustfmt-preview / cargo / rustc into a single
     # prefix, so `rustfmt` lands at `<prefix>/bin/rustfmt` alongside
     # `cargo-fmt`.
-    tarball url = "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-unknown-linux-gnu.tar.xz",
-      sha256 = "d2ccef59dd9f7439f2c694948069f789a044dc1addcc0803613232af8f88ee0c",
+    tarball url = "https://static.rust-lang.org/dist/rust-1.94.0-x86_64-unknown-linux-gnu.tar.xz",
+      sha256 = "e8fa4185f3ef6ae32725ff638b1ecdbff28f5d651dc0b3111e2539350d03b15a",
       archiveType = "tar.xz",
       stripComponents = 1,
       executablePath = "bin/rustfmt",
-      packageId = "rust@1.92.0",
+      packageId = "rust@1.94.0",
       cpu = "x86_64",
       os = "linux",
-      lockIdentity = "tarball:rust@1.92.0:linux:sha256:d2ccef59dd9f7439f2c694948069f789a044dc1addcc0803613232af8f88ee0c"
+      lockIdentity = "tarball:rust@1.94.0:linux:sha256:e8fa4185f3ef6ae32725ff638b1ecdbff28f5d651dc0b3111e2539350d03b15a"
     # macOS aarch64: same rust standalone-distribution tarball — different
     # triple (Apple Silicon). All current GitHub-hosted macOS runners are
     # M1/M2/M3, so aarch64 is the only macOS slice we ship. The
     # rust-installer auto-merge places `rustfmt` at `<prefix>/bin/rustfmt`
     # alongside `cargo-fmt`.
-    tarball url = "https://static.rust-lang.org/dist/rust-1.92.0-aarch64-apple-darwin.tar.xz",
-      sha256 = "22276ecf826b22e718f099d7bf7ddb8c88aa46230fdba74962ab3c5031472268",
+    tarball url = "https://static.rust-lang.org/dist/rust-1.94.0-aarch64-apple-darwin.tar.xz",
+      sha256 = "9e55893e014e6aa76924b4cc244a289ad56de4d89d3721fbd5c7f497b31ea33c",
       archiveType = "tar.xz",
       stripComponents = 1,
       executablePath = "bin/rustfmt",
-      packageId = "rust@1.92.0",
+      packageId = "rust@1.94.0",
       cpu = "aarch64",
       os = "macos",
-      lockIdentity = "tarball:rust@1.92.0:macos-aarch64:sha256:22276ecf826b22e718f099d7bf7ddb8c88aa46230fdba74962ab3c5031472268"
+      lockIdentity = "tarball:rust@1.94.0:macos-aarch64:sha256:9e55893e014e6aa76924b4cc244a289ad56de4d89d3721fbd5c7f497b31ea33c"
 
 let rustfmtCatalog* = @[
   VersionedProvisioning(
-    version: "1.92.0",
+    version: "1.94.0",
     archive_format: afTarXz,
     install_method: imExtract,
     bin_relpath: @[
@@ -87,26 +87,26 @@ let rustfmtCatalog* = @[
     ],
     platforms: @[
       PlatformBinary(cpu: pcX86_64, os: poWindows,
-        url: "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-pc-windows-msvc.tar.xz",
-        sha256: "7e536d87bb539cdf94a969ecb491e1340f2641a11cf57d6169892f395d68c702",
+        url: "https://static.rust-lang.org/dist/rust-1.94.0-x86_64-pc-windows-msvc.tar.xz",
+        sha256: "2e65904a4340df11a1ed8a86a7cc5c08e09f65453ce822ef36159c605a97f6a5",
         sha512: "",
-        extract_path: "rust-1.92.0-x86_64-pc-windows-msvc"),
+        extract_path: "rust-1.94.0-x86_64-pc-windows-msvc"),
       PlatformBinary(cpu: pcX86_64, os: poLinux,
-        url: "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-unknown-linux-gnu.tar.xz",
-        sha256: "d2ccef59dd9f7439f2c694948069f789a044dc1addcc0803613232af8f88ee0c",
+        url: "https://static.rust-lang.org/dist/rust-1.94.0-x86_64-unknown-linux-gnu.tar.xz",
+        sha256: "e8fa4185f3ef6ae32725ff638b1ecdbff28f5d651dc0b3111e2539350d03b15a",
         sha512: "",
         sha1: "",
-        extract_path: "rust-1.92.0-x86_64-unknown-linux-gnu",
+        extract_path: "rust-1.94.0-x86_64-unknown-linux-gnu",
         bin_relpath_override: @[
           "rustfmt-preview/bin/rustfmt",
           "rustfmt-preview/bin/cargo-fmt"
         ]),
       PlatformBinary(cpu: pcX86_64, os: poMacos,
-        url: "https://static.rust-lang.org/dist/rust-1.92.0-x86_64-apple-darwin.tar.xz",
-        sha256: "ef71fcdcd50efd3301144e701faf15124113a1b2efe9a111175d7d1e4f2d31d2",
+        url: "https://static.rust-lang.org/dist/rust-1.94.0-x86_64-apple-darwin.tar.xz",
+        sha256: "63fe27931d4b8da0b0069f13d4d2c04792203a5cabb4df17ff15495aaaab0ef7",
         sha512: "",
         sha1: "",
-        extract_path: "rust-1.92.0-x86_64-apple-darwin",
+        extract_path: "rust-1.94.0-x86_64-apple-darwin",
         bin_relpath_override: @[
           "rustfmt-preview/bin/rustfmt",
           "rustfmt-preview/bin/cargo-fmt"
