@@ -2475,6 +2475,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_store_optimise_dedup.nim",
+    binary: "build/test-bin/t_store_optimise_dedup",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim",
     binary: "build/test-bin/t_absent_store_inputs_skip_revalidation",
     defines: @[],
@@ -14150,6 +14159,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_from_source_cargo_recognition.nim",
     binary: "build/test-bin/t_from_source_cargo_recognition",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_from_source_npm_recognition.nim",
+    binary: "build/test-bin/t_from_source_npm_recognition",
     defines: @["reproProviderMode"],
     requiresReproBinary: false,
     extraPassC: @[],
