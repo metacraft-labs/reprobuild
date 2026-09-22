@@ -35753,40 +35753,121 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
   # (`repro lock refresh` there correctly answers "no solver inputs found").
   var perRepo: PublicTierCommittedLocks
   var perRepoContributed = 0
+  var perRepoOverrode = 0
+    ## Records the per-repo medium supplied for a repo the ROOT lock also named.
+    ## Counted separately from ``perRepoContributed`` (which counts repos ONLY
+    ## the per-repo medium named) because the inventory line must name every
+    ## medium that actually answered, and a run in which the per-repo locks
+    ## only *replaced* entries answered just as much as one in which they added.
   if publicContributes:
     perRepo = participatingRepoCommittedLocks(root)
-    # The ROOT lock wins where both speak. Its entry for a repo is this
-    # workspace's own solved pin; the repo's self-record is what that repo last
-    # published about itself, and the two disagreeing is a lock-coherence
-    # observation (advisory, and already reported as such), never a develop-set
-    # failure. Gap-filling keeps the composed set a strict superset of the
-    # pre-DS-1 read for every workspace that has a root lock.
-    var haveNames = initHashSet[string]()
-    var havePaths = initHashSet[string]()
-    for d in result.lock.deps:
-      if d.name.len > 0: haveNames.incl(d.name)
-      if d.path.len > 0: havePaths.incl(d.path)
+    # A REPO'S OWN LOCK OUTRANKS THE ROOT REPO'S LOCK, for that repo.
+    #
+    # This inverts the previous rule ("the ROOT lock wins where both speak"),
+    # which was never in a spec: it was stated in this comment and pinned by a
+    # test that cited this comment as its authority. The governing statement is
+    # the repository owner's: *develop sets are not read from the root repo,
+    # only from the lock file of the specific project repo.* It agrees with
+    # what the medium is declared to hold — "the solved-graph pins for **the
+    # repo's** public dependencies + **the repo's own** public coordinates"
+    # (Unified-Locking-And-Hooks.md §3, the public row) — so a repo's own
+    # coordinates are published by that repo and nowhere else, and with
+    # CLAUDE.md's "Locking is **per repo** … There is no workspace-wide lock
+    # file".
+    #
+    # The defect this removes is not hypothetical. In the metacraft workspace
+    # the root repo's `repro.lock` is a stale two-entry document that pins
+    # `reprobuild` at `../dev/reprobuild-latest` — a path that does not exist —
+    # while `reprobuild/repro.lock` pins `reprobuild` at `reprobuild`, where the
+    # checkout actually is. Under the old rule the root's answer won and
+    # `repro develop --list --all --workspace-root=<ws>` reported `reprobuild`
+    # as `absent` at a directory nothing had ever created; `--all` would have
+    # tried to clone it there.
+    #
+    # DISAGREEMENT IS NEVER SILENT. CLI/develop.md §"Conflicts are refused,
+    # never resolved" makes two backends disagreeing fatal precisely so a
+    # checkout's revision can never depend on resolution order. This is one
+    # backend's two files, so it is decided rather than refused — but the
+    # decision is announced, naming both files and both answers, because an
+    # undisclosed choice between two pins is the same hazard with the volume
+    # turned down.
+    var rootIndexByName = initTable[string, int]()
+    var rootIndexByPath = initTable[string, int]()
+    for i, d in result.lock.deps:
+      if d.name.len > 0 and d.name notin rootIndexByName:
+        rootIndexByName[d.name] = i
+      if d.path.len > 0 and d.path notin rootIndexByPath:
+        rootIndexByPath[d.path] = i
     for d in perRepo.deps:
-      if (d.name.len > 0 and d.name in haveNames) or
-          (d.path.len > 0 and d.path in havePaths):
-        continue
-      if d.name.len > 0: haveNames.incl(d.name)
-      if d.path.len > 0: havePaths.incl(d.path)
-      result.lock.deps.add(d)
-      inc perRepoContributed
+      var at = -1
+      if d.name.len > 0 and d.name in rootIndexByName:
+        at = rootIndexByName[d.name]
+      elif d.path.len > 0 and d.path in rootIndexByPath:
+        at = rootIndexByPath[d.path]
+      if at >= 0:
+        # The root repo's lock also speaks about this repo. The repo's own lock
+        # wins; say so whenever the two answers actually differ.
+        let prev = result.lock.deps[at]
+        if prev.coordinates.revision != d.coordinates.revision or
+            prev.path != d.path:
+          result.warnings.add("'" & (if d.name.len > 0: d.name else: d.path) &
+            "' is pinned by TWO files of the public tier's committed-lock " &
+            "medium, and they disagree: " & committedLockP & " (the ROOT " &
+            "repo's lock) says path '" & prev.path & "' revision '" &
+            prev.coordinates.revision & "', while " &
+            (root / d.path / CommittedLockFileName) & " (the repo's OWN " &
+            "lock) says path '" & d.path & "' revision '" &
+            d.coordinates.revision & "'. The repo's OWN lock is used: a repo " &
+            "publishes its own coordinates and the workspace root does not " &
+            "publish them for it. Remedy: drop the stale entry from " &
+            committedLockP & " (a multi-repo workspace root has no " &
+            "workspace-wide lock file), or re-run `repro lock refresh` in " &
+            root / d.path & " if its own lock is the stale one.")
+        result.lock.deps[at] = d
+        inc perRepoOverrode
+        # The replacement usually carries a DIFFERENT path from the entry it
+        # replaced (that is half of what the disagreement above is about), so
+        # the path index must learn the new one. Without this the slot the
+        # record now occupies is reachable by name only, and a second root
+        # consumer in the same document — `<repo>-shadow`, rebased onto the
+        # same workspace path — matches neither index and is admitted as a
+        # second repo at one location. `break` in ``participatingRepoCommitted-
+        # Locks`` already stops that at the source; this keeps the second line
+        # of defence real rather than nominal.
+        if d.path.len > 0 and d.path notin rootIndexByPath:
+          rootIndexByPath[d.path] = at
+        if d.name.len > 0 and d.name notin rootIndexByName:
+          rootIndexByName[d.name] = at
+      else:
+        if d.name.len > 0 and d.name notin rootIndexByName:
+          rootIndexByName[d.name] = result.lock.deps.len
+        if d.path.len > 0 and d.path notin rootIndexByPath:
+          rootIndexByPath[d.path] = result.lock.deps.len
+        result.lock.deps.add(d)
+        inc perRepoContributed
   let perRepoLocation =
     "the in-repo repro.lock of each participating repo under " & root
+  let perRepoAnswered = perRepoContributed + perRepoOverrode
   var committedLockReport = DevelopBackendReport(tier: "public",
     backendKind: "committed-lock",
     # Name the medium that actually answered. A workspace whose records live in
     # the participating repos must not have its inventory line point at a root
     # path nothing reads and nothing may write.
+    #
+    # And when BOTH answered, name both. ``records`` is the size of the composed
+    # union, so a line reading "committed-lock at <root>/repro.lock — 37
+    # record(s)" for a file whose ``deps`` array holds two entries attributed 35
+    # records to a document that does not contain them; the operator who opens
+    # that file to check finds nothing there and has no way to learn where the
+    # rest came from.
     location:
-      (if committedLockPresent or perRepoContributed == 0: committedLockP
-       else: perRepoLocation),
-    reachable: committedLockPresent or perRepoContributed > 0,
+      (if committedLockPresent and perRepoAnswered > 0:
+         committedLockP & " + " & perRepoLocation
+       elif perRepoAnswered > 0: perRepoLocation
+       else: committedLockP),
+    reachable: committedLockPresent or perRepoAnswered > 0,
     diagnostic:
-      (if committedLockPresent or perRepoContributed > 0: ""
+      (if committedLockPresent or perRepoAnswered > 0: ""
        elif perRepo.probed.len == 0: "no committed lock at " & committedLockP
        else: "no committed lock at " & committedLockP & ", and none of the " &
          $perRepo.probed.len & " participating repo checkout(s) under " & root &
@@ -65146,7 +65227,7 @@ proc flakeDeclaredInputsAt(flakeRoot: string):
 
 proc flakeBindInputsToCheckouts(inputNames: openArray[string];
     checkoutOf: Table[string, string]; suffixes: openArray[string];
-    identity: GitToolIdentity;
+    identity: GitToolIdentity; workspaceRoot: string;
     report: var seq[string]): seq[FlakeOverrideBinding] =
   ## Bind each declared flake input to the develop-set checkout of the repo its
   ## (suffix-stripped) name denotes. Every input that is NOT bound and could
@@ -65177,13 +65258,53 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
   ## resolves it: `repro flake refresh-lock` answers "could not read HEAD …
   ## keeps its pin" and exits 0, so the operator would loop forever on a gate
   ## that never stops refusing.
+  ## ## AN UNBOUND INPUT IS NAMED, NOT DROPPED
+  ##
+  ## The two reasons an input can fail to match the develop set are NOT the same
+  ## thing and must not produce the same silence:
+  ##
+  ##   * the input names nothing this workspace has — `nixpkgs`, `flake-parts`,
+  ##     a vendored upstream. Keeping the pin is the only possible answer and
+  ##     there is nothing to act on, so these are reported ONCE, as a named
+  ##     list, rather than one line each;
+  ##   * the input names a repo whose checkout is sitting right there beside the
+  ##     workspace root, and it is still not substituted — because no lock
+  ##     backend holds a record pinning it ("A repo enters the develop set only
+  ##     when a backend **holds a record** for it pinning an **exact 40-hex
+  ##     revision**", CLI/develop.md §"A revision comes from a lock record or
+  ##     not at all"), or because the selection excluded it. THAT is the case
+  ##     that used to vanish, and it is the one with a remedy: the dev shell
+  ##     silently built the `flake.lock` pin of a repo the developer is
+  ##     actively editing next door.
+  ##
+  ## Measured: in the metacraft workspace five of reprobuild's inputs are in the
+  ## second class (`runquota-src`, `nixos-modules`, `codetracer-native-recorder`,
+  ## `nim-shm-gset-src`, `reprobuild-ct-test-runner-src` — every one a manifest
+  ## member, checked out, carrying a `flake.nix`, and carrying no `repro.lock`).
+  ## The verb reported ONE skip and said nothing about those five.
+  var unknownToWorkspace: seq[string]
+  let wsRoot = if workspaceRoot.len > 0: absolutePath(workspaceRoot) else: ""
   for name in inputNames:
     let repo = stripFlakeInputSuffix(name, suffixes)
     if repo notin checkoutOf:
-      # Either the flake input names no repo of this workspace at all, or the
-      # selection deliberately left that repo out. Both keep the input on its
-      # `flake.lock` pin, which is the NF-1 behaviour that distinguishes this
-      # from `NIX_FLAKE_OVERRIDE_AUTO`'s all-or-nothing substitution.
+      let sibling = if wsRoot.len > 0: wsRoot / repo else: ""
+      if sibling.len > 0 and dirExists(extendedPath(sibling)):
+        report.add("NOT substituted: flake input '" & name & "' names repo '" &
+          repo & "', which IS checked out at " & sibling & " but is NOT in " &
+          "the develop set, so it keeps its flake.lock pin and the shell " &
+          "builds the PINNED revision rather than that working tree. A repo " &
+          "enters the develop set only when a lock backend holds a record " &
+          "pinning it to an exact revision. Remedy: give it one — `repro " &
+          "lock refresh` run IN " & sibling & " publishes that repo's own " &
+          "committed lock, which is the record this reads — or, if the " &
+          "omission is deliberate, it came from this invocation's selection " &
+          "(--only / --except / --tier)." &
+          (if fileExists(extendedPath(sibling / "flake.nix")): ""
+            else: " NOTE: that checkout has no flake.nix, so a lock record " &
+              "alone would not make it substitutable either — nix cannot take " &
+              "a non-flake directory as an input."))
+      else:
+        unknownToWorkspace.add(name)
       continue
     let dir = checkoutOf[repo]
     if dir.len == 0 or not dirExists(extendedPath(dir)):
@@ -65270,6 +65391,15 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
 
     result.add(FlakeOverrideBinding(input: name, repo: repo, path: dir,
       rev: head.output.strip()))
+  if unknownToWorkspace.len > 0:
+    # ONE line, not one per input: these name nothing the workspace has, the
+    # `flake.lock` pin is the only possible answer, and there is no action to
+    # take. Still named, so the arithmetic of the account below closes —
+    # "23 declared, 4 substituted" with 19 unexplained is the shape of a silent
+    # drop even when every drop happens to be correct.
+    unknownToWorkspace.sort()
+    report.add("kept on their flake.lock pins (no repo of this workspace " &
+      "carries the name): " & unknownToWorkspace.join(", "))
   result.sort(proc (a, b: FlakeOverrideBinding): int = cmp(a.input, b.input))
 
 proc flakeLocalDirOfOverrideRef*(rf: string): string =
@@ -66346,7 +66476,7 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
 
   # ---- bind inputs to develop-set checkouts ------------------------------
   let emitted = flakeBindInputsToCheckouts(inputNames, checkoutOf, suffixes,
-    identity, report)
+    identity, selection.workspaceRoot, report)
 
   # ---- the SAME bindings, compared against the pins (§3.2) ----------------
   let state = flakeOverrideStateReport(flakeRoot, emitted, identity)
@@ -67192,7 +67322,7 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     return
   result.notices = selection.notices
   let bound = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
-    suffixes, identity, result.notices)
+    suffixes, identity, selection.workspaceRoot, result.notices)
   if bound.len == 0:
     result.tag = "no-overrides"
     result.diagnostic = "no flake input of " & declared.flakePath &
@@ -67782,7 +67912,7 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   var skipped: seq[string]
   for n in selection.notices: skipped.add(n)
   let exact = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
-    defaultFlakeInputStripSuffixes, identity, skipped)
+    defaultFlakeInputStripSuffixes, identity, selection.workspaceRoot, skipped)
   var state = flakeOverrideStateReport(flakeRoot, exact, identity)
   if not state.ok:
     result.examined = true
@@ -68163,7 +68293,8 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
       return refuse()
     for n in selection.notices: notices.add(n)
     bindings = flakeBindInputsToCheckouts(declared.names,
-      selection.checkoutOf, suffixes, identity, notices)
+      selection.checkoutOf, suffixes, identity, selection.workspaceRoot,
+      notices)
 
   var state = flakeOverrideStateReport(flakeRoot, bindings, identity)
   if not state.ok:
