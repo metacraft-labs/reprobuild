@@ -45,6 +45,7 @@ import repro_standard_provider/conventions/from_source_make as from_source_make_
 import repro_standard_provider/conventions/from_source_custom as from_source_custom_convention
 import repro_standard_provider/conventions/from_source_cargo as from_source_cargo_convention
 import repro_standard_provider/conventions/from_source_go as from_source_go_convention
+import repro_standard_provider/conventions/from_source_npm as from_source_npm_convention
 import repro_standard_provider/conventions/java_maven as java_maven_convention
 import repro_standard_provider/conventions/kotlin_gradle as kotlin_gradle_convention
 import repro_standard_provider/conventions/csharp_dotnet as csharp_dotnet_convention
@@ -197,6 +198,15 @@ when defined(reproProviderMode):
     from_source_go_convention.fromSourceGoConvention())
   addDefaultConvention(go_convention.goConvention())
   addDefaultConvention(python_convention.pythonConvention())
+  # from_source_npm BEFORE the in-tree jsts convention, for the same reason
+  # from_source_cargo goes before the in-tree rust one: a recipe that FETCHES
+  # its source and pins an npm build closure is this one's. Its recognise
+  # rejects when a root ``package.json`` is present -- which a from-source
+  # recipe never has, since its ``package.json`` arrives inside the fetched
+  # tarball -- and requires a committed ``npm-build-closure.manifest``, so the
+  # order is defensive in either direction.
+  addDefaultConvention(
+    from_source_npm_convention.fromSourceNpmConvention())
   addDefaultConvention(jsts_convention.javaScriptTypeScriptConvention())
   # from_source_autotools (M9.L.2) registered BEFORE c_cpp_autotools so
   # the from-source variant claims recipes that declare a ``fetch:``
