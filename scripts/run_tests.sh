@@ -39,6 +39,58 @@ source scripts/source_paths.sh
 source scripts/monitor_shim_probe.sh
 # shellcheck source=scripts/test_parallelism.sh
 source scripts/test_parallelism.sh
+# REFUSE OUTSIDE THE DEV SHELL, and refuse on the thing that actually differs.
+#
+# Run from a shell that never entered this repository's dev shell, this script
+# used to proceed. It resolved a DIFFERENT compiler and announced it as a pass --
+#   check_toolchain_dlopen: ok (/nix/store/...-nim-wrapper-2.2.4/bin/nim ...)
+# where the dev shell supplies the CodeTracer Nim fork -- and then died several
+# minutes later on
+#   repro build: error: Failed to connect or spawn reprobuild-nix-daemon
+# which names the daemon, an area with its own open defects, rather than the
+# shell. Measured 2026-09-22: eight wasted minutes and a misdirected debugging
+# lead.
+#
+# The check is on the RESOLVED COMPILER, deliberately, because the obvious
+# alternatives are vacuous here:
+#   * IN_NIX_SHELL is `impure` in BOTH shells on this host -- it discriminates
+#     nothing, and a check that cannot fail is worse than none;
+#   * BEARSSL_SRC is unset outside the dev shell, but lines below already
+#     scavenge one out of /nix/store, so it is not load-bearing either.
+# The compiler is what the suite's whole toolchain premise rests on, so that is
+# what gets asserted.
+#
+# Windows DIY has no Nix dev shell and supplies its own toolchain, so the
+# requirement is scoped to the platforms where the flake provides one.
+# REPROBUILD_SKIP_DEV_SHELL_CHECK=1 is the documented escape for a deliberately
+# different toolchain; it is not a way to silence a mistake.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT) ;;
+  *)
+    if [[ "${REPROBUILD_SKIP_DEV_SHELL_CHECK:-0}" != "1" ]]; then
+      resolved_nim="$(command -v nim 2>/dev/null || true)"
+      if [[ -z "${resolved_nim}" ]]; then
+        printf 'run_tests.sh: refusing: no `nim` on PATH.\n' >&2
+        printf '  This suite needs the CodeTracer Nim fork from the dev shell.\n' >&2
+        printf '  Run it as:  direnv exec . bash ./scripts/run_tests.sh\n' >&2
+        printf '  (or `nix develop` first). To override: REPROBUILD_SKIP_DEV_SHELL_CHECK=1\n' >&2
+        exit 1
+      fi
+      resolved_nim_real="$(readlink -f "${resolved_nim}" 2>/dev/null || printf '%s' "${resolved_nim}")"
+      if [[ "${resolved_nim_real}" != *nim-fork* ]]; then
+        printf 'run_tests.sh: refusing: `nim` is not the CodeTracer fork.\n' >&2
+        printf '  resolved: %s\n' "${resolved_nim_real}" >&2
+        printf '  version:  %s\n' "$("${resolved_nim}" --version 2>/dev/null | head -1)" >&2
+        printf '  The suite is built and asserted against the fork; a stock Nim\n' >&2
+        printf '  compiles a different program. Run it as:\n' >&2
+        printf '      direnv exec . bash ./scripts/run_tests.sh\n' >&2
+        printf '  (or `nix develop` first). To override: REPROBUILD_SKIP_DEV_SHELL_CHECK=1\n' >&2
+        exit 1
+      fi
+    fi
+    ;;
+esac
+
 # Test runs exercise user-facing CLI latency gates, so the app bootstrap and
 # graph-owned app rebuilds must use optimized binaries by default. Developers
 # can still opt into debug apps explicitly with REPROBUILD_BUILD_MODE=debug.
