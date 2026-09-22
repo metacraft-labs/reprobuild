@@ -28848,7 +28848,7 @@ proc runStoreCommand*(args: seq[string]): int =
   ## override the per-user default; the `$REPRO_STORE_ROOT` env var
   ## is honoured otherwise.
   if args.len == 0:
-    echo "usage: repro store {gc | recover | roots | list | " &
+    echo "usage: repro store {gc | recover | roots | list | optimise | " &
       "materialize <src-dir> <dst-dir>} " &
       "[--store-root=PATH] [--grace-seconds=N] [--json] [--no-shared-inode]"
     return 2
@@ -28981,6 +28981,28 @@ proc runStoreCommand*(args: seq[string]): int =
       for row in store.listPrefixes():
         echo "  - " & row.adapter & " " & row.packageName & " " &
           row.version & " " & row.realizedPath
+      return 0
+    of "optimise", "optimize":
+      # Post-hoc hardlink dedup across every realized prefix — the
+      # complement to materialisation-time `cloneSiblingRealization`, which
+      # only fires when a same-content sibling already exists and so misses
+      # the packages that shared one tarball but realized concurrently (the
+      # four Rust tools racing to four full copies). Published prefixes are
+      # immutable, so a shared inode between two byte-identical files has no
+      # writer on either end — the same safety `materializeDirectory`'s
+      # shared-inode arm relies on.
+      let prefixesRoot = root / "prefixes"
+      let res = optimiseStore(prefixesRoot)
+      let mib = res.reclaimed.float / (1024.0 * 1024.0)
+      if emitJson:
+        echo "{\"store_root\":\"" & root.replace("\\", "/") &
+          "\",\"linked\":" & $res.linked &
+          ",\"reclaimed_bytes\":" & $res.reclaimed & "}"
+      else:
+        echo "repro store optimise: store-root=" & root
+        echo "files linked: " & $res.linked
+        echo "reclaimed: " & $res.reclaimed & " bytes (" &
+          formatFloat(mib, ffDecimal, 1) & " MiB)"
       return 0
     else:
       stderr.writeLine("repro store: unknown subcommand: " & sub)

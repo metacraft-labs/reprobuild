@@ -32,11 +32,13 @@ import ./repro_local_store/sqlite3_binding
 import ./repro_local_store/store
 import ./repro_local_store/lru_eviction
 import ./repro_local_store/sandbox_manifest
+import ./repro_local_store/optimise
 export action_index
 export sqlite3_binding
 export store
 export lru_eviction
 export sandbox_manifest
+export optimise
 
 type
   LocalStoreError* = object of CatchableError
