@@ -573,9 +573,25 @@ proc parsePageList(img: var OvmfImage; data: openArray[byte]) =
     img.sections.add OvmfSection(gpa: gpa, size: size, kind: kind)
   img.hasPageList = true
 
-proc parseOvmfImage*(data: openArray[byte]): OvmfImage =
+proc parseOvmfImage*(data: openArray[byte];
+                     withPageList = true): OvmfImage =
   ## Read a firmware image's GUID footer table and, if it publishes one,
   ## its confidential-launch page list.
+  ##
+  ## `withPageList` exists because this reader has two callers and only
+  ## one of them is about this vendor. The GUID footer is a container
+  ## format both vendors put their metadata in; the page list inside it
+  ## is THIS vendor's, and the other vendor's measurement does not
+  ## depend on a byte of it. Parsing it anyway is not merely wasted
+  ## work — it is a refusal with the wrong subject, and a real one: a
+  ## shipped trust-domain firmware in this repository's corpus carries
+  ## a page list whose last two entries are zeroed, presumably because
+  ## its builder does not support this vendor at all. Reading it made
+  ## that firmware unmeasurable for a reason that had nothing to do
+  ## with the measurement being asked for. The footer rules stay
+  ## shared, because two readers disagreeing about where a firmware's
+  ## table begins is a hazard this repository has already paid for
+  ## once; the page list does not, because it is not shared.
   ##
   ## The table is walked from its end backwards, because that is how it
   ## is built: each entry states its own total length, and the entry
@@ -633,7 +649,7 @@ proc parseOvmfImage*(data: openArray[byte]): OvmfImage =
   if result.hasEntry(ParavisorInfoGuid):
     launchFail(slcParavisorNotMeasured,
       "the image publishes a supervisor information block")
-  if result.hasEntry(OvmfSevMetadataGuid):
+  if withPageList and result.hasEntry(OvmfSevMetadataGuid):
     parsePageList(result, data)
 
 proc resetVectorEip*(img: OvmfImage): uint32 =

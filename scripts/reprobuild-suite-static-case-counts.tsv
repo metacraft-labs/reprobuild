@@ -1435,6 +1435,9 @@ tests/integration/t_target_triple_drives_the_microarch_host_target.nim	nim	10
 tests/integration/t_targets_are_sorted_and_deduplicated_in_the_signed_payload.nim	nim	1
 tests/integration/t_tdx_chain_requires_intel_root.nim	nim	17
 tests/integration/t_tdx_collateral_and_verifier_arm.nim	nim	27
+tests/integration/t_tdx_expectation_reaches_the_verifier.nim	nim	12
+tests/integration/t_tdx_launch_refusals.nim	nim	41
+tests/integration/t_tdx_launch_vectors.nim	nim	21
 tests/integration/t_tdx_quote_fixture_verify.nim	nim	20
 tests/integration/t_team_backend_routed_lock_reads_back_and_is_idempotent.nim	nim	1
 tests/integration/t_team_repo_record_only_no_checkout.nim	nim	1

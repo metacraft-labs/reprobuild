@@ -43,6 +43,7 @@ import std/[json, strutils]
 
 import ./measurement
 import ./snp_launch
+import ./tdx_launch
 
 type
   ManifestError* = object of CatchableError
@@ -452,10 +453,76 @@ proc sevSnpExpectationFor*(inputs: SevSnpLaunchInputs): SevSnpExpectation =
     policy: "0x" & lowerHexOf(inputs.guestPolicy),
     measurement: launchDigestHex(p))
 
+type
+  TdxLaunchInputs* = object
+    ## One trust-domain launch, as the build knows it.
+    ##
+    ## The two halves are computed from two different things and both
+    ## are required, because the schema's row carries both and a row
+    ## half-filled from a default would be a published expectation
+    ## nobody computed.
+    firmware*: string
+      ## The trust-domain firmware image, whole. `mrtd` is a function of
+      ## these bytes and of ONE other thing — the order below. Not of
+      ## the processor count, not of the memory size, not of the machine
+      ## model. That is the substantive difference from the other
+      ## vendor's launch, where five further inputs each change it.
+    order*: TdxHostOrder
+      ## Which order the host that creates the domain feeds the
+      ## measurement records in. There is no default and there must not
+      ## be one: both orders are attested by genuine quotes, and a
+      ## default would publish a correct expectation for one host and a
+      ## wrong one for every other.
+    registerLog*: string
+      ## The measurement record the domain wrote, in either of the two
+      ## shapes it is published in — the binary log firmware writes, or
+      ## the sequence of entries an agent serves beside a quote. The
+      ## three runtime registers the schema carries are REPLAYED from
+      ## it. There is no way to compute them from an image alone in this
+      ## build: the first holds the firmware's measurement of virtual
+      ## hardware the build never sees, and the other two the boot's own
+      ## measurements.
+
+proc tdxExpectationFor*(inputs: TdxLaunchInputs): TdxExpectation =
+  ## The trust-domain expectation for one launch.
+  ##
+  ## ## What this entry does and does not determine
+  ##
+  ## `mrtd` is self-determining in a way its SEV-SNP neighbour is not:
+  ## it is a function of the firmware image alone, so a reader holding
+  ## that image can re-derive it. The three runtime registers are not —
+  ## they are a replay of a log this document does not carry, exactly as
+  ## the TPM entry's registers are, except that the TPM entry publishes
+  ## its replay template beside them and this schema has no key for one.
+  ## So a reader can check `mrtd` against the firmware and can only
+  ## compare the other three against a quote.
+  ##
+  ## ## Why a reset register is refused rather than published
+  ##
+  ## A register a log never reached holds forty-eight zero bytes, and a
+  ## published expectation of forty-eight zero bytes agrees with every
+  ## domain that never extended that register — including one running
+  ## something else entirely. This build will not write that row. A
+  ## domain may perfectly well leave a register unextended; what it may
+  ## not do is have this build call the resulting value an expectation.
+  var image = newSeq[byte](inputs.firmware.len)
+  for i in 0 ..< inputs.firmware.len: image[i] = byte(inputs.firmware[i])
+  let replay = foldTdxRegisters(readTdxMeasurementRecord(inputs.registerLog))
+  for r in 0 ..< 3:
+    if not replay.reached[r]:
+      tdxFail(tlcPublishedRegisterIsAResetValue,
+        "runtime register " & $r & " of the three this document carries")
+  TdxExpectation(
+    mrtd: tdxMrtdHex(image, inputs.order),
+    rtmr0: toHexLower(replay.registers[0]),
+    rtmr1: toHexLower(replay.registers[1]),
+    rtmr2: toHexLower(replay.registers[2]))
+
 proc attestedImageManifest*(configFingerprint, ukiImage, verityImageDigest,
                             verityRootHash: string;
                             backends: openArray[string] = KnownBackends;
-                            sevSnpLaunches: openArray[SevSnpLaunchInputs] = []
+                            sevSnpLaunches: openArray[SevSnpLaunchInputs] = [];
+                            tdxLaunches: openArray[TdxLaunchInputs] = []
                             ): AttestedImageManifest =
   ## Build the manifest for one attested image.
   ##
@@ -481,6 +548,11 @@ proc attestedImageManifest*(configFingerprint, ukiImage, verityImageDigest,
       $sevSnpLaunches.len & " confidential launch shape(s) were supplied " &
       "and " & BackendSevSnp.escapeJson() & " is not among the backends " &
       "being computed, so they would be measured and thrown away")
+  if tdxLaunches.len > 0 and BackendTdx notin backends:
+    raise newException(ManifestError,
+      $tdxLaunches.len & " trust-domain launch(es) were supplied and " &
+      BackendTdx.escapeJson() & " is not among the backends being " &
+      "computed, so they would be measured and thrown away")
   result.configFingerprint = configFingerprint
   result.imageOutputs = ImageOutputs(
     uki: DigestPrefix & sha256Hex(ukiImage),
@@ -491,7 +563,10 @@ proc attestedImageManifest*(configFingerprint, ukiImage, verityImageDigest,
   if BackendSevSnp in backends:
     for launch in sevSnpLaunches:
       result.sevSnp.add sevSnpExpectationFor(launch)
-  # The other vendor's launch-digest precomputation is not implemented;
-  # that array stays empty and says so, rather than carrying a
-  # placeholder a verifier could mistake for a computed value.
+  if BackendTdx in backends:
+    for launch in tdxLaunches:
+      result.tdx.add tdxExpectationFor(launch)
+  # A backend named with no launch supplied for it still emits its array,
+  # visibly EMPTY: "this build computed no expectation for you" is a
+  # statement and a missing key is not.
   validateAttestedImageManifest(result)

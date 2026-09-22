@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1709,
+    "nimTestBinaries": 1712,
     "pureUnitConsolidationGroups": 50,
     "pureUnitTests": 602,
     "staticallyDetectedRuntimeCompilerFlowTests": 106,
-    "testEntries": 1720
+    "testEntries": 1723
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1108,7 +1108,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 813,
+      "integration": 816,
       "platform/destructive": 113,
       "pure unit": 602,
       "unclassified": 180
@@ -1259,9 +1259,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1709,
+    "nimTestBinaryCount": 1712,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1720
+    "testEntryCount": 1723
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -31668,6 +31668,60 @@
       "source": "tests/integration/t_tdx_collateral_and_verifier_arm.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 27,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tdx_expectation_reaches_the_verifier",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify",
+        "repro_cli_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tdx_expectation_reaches_the_verifier.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tdx_launch_refusals",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tdx_launch_refusals.nim",
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 41,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tdx_launch_vectors",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tdx_launch_vectors.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

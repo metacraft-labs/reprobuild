@@ -117,6 +117,9 @@ type
     snpInitrd*: string
     snpCmdline*: string
     hasSnpCmdline*: bool
+    tdxFirmware*: string
+    tdxRegisterLog*: string
+    tdxPageOrder*: string
 
 type
   AttestExitCode* = enum
@@ -210,6 +213,16 @@ repro attest expect --image <dir-or-uki> [options]
       --launch-kernel PATH          measure a directly booted kernel
       --launch-initrd PATH          the initial ramdisk beside it
       --launch-cmdline TEXT         the command line beside it
+      --td-firmware PATH            the trust-domain firmware image;
+                                    supplying it computes the tdx expectation
+                                    and requires --td-register-log with it
+      --td-register-log PATH        the event log the domain wrote, replayed
+                                    into the three runtime registers the
+                                    document carries
+      --td-page-order NAME          the order the host folds a page's
+                                    contents in (""" & tdxHostOrderNames() & """);
+                                    both occur in the wild and they give
+                                    different measurements
       --out PATH                    write the manifest instead of printing it
       --check PATH                  compare against an existing manifest and
                                     exit 1 if it differs
@@ -333,6 +346,11 @@ proc parseAttestArgs*(args: seq[string]): AttestCliOptions =
     of "--launch-cmdline":
       result.snpCmdline = valueFor(args, i, "--launch-cmdline")
       result.hasSnpCmdline = true
+    of "--td-firmware": result.tdxFirmware = valueFor(args, i, "--td-firmware")
+    of "--td-register-log":
+      result.tdxRegisterLog = valueFor(args, i, "--td-register-log")
+    of "--td-page-order":
+      result.tdxPageOrder = valueFor(args, i, "--td-page-order")
     of "--out": result.outPath = valueFor(args, i, "--out")
     of "--check": result.checkPath = valueFor(args, i, "--check")
     else:
@@ -498,16 +516,72 @@ proc runAttestExpect(opts: AttestCliOptions): int =
       return 2
     launches.add inputs
 
+  # The trust-domain expectation. Two inputs, both required together:
+  # the initial-memory measurement is a function of the firmware image
+  # alone, and the three runtime registers the document carries are a
+  # REPLAY of the log a domain wrote. Neither can be defaulted — an
+  # absent log would mean publishing three rows of zeroes, which agree
+  # with every domain that never extended those registers.
+  var tdxLaunches: seq[TdxLaunchInputs] = @[]
+  if opts.tdxFirmware.len == 0:
+    for flag in [("--td-register-log", opts.tdxRegisterLog),
+                 ("--td-page-order", opts.tdxPageOrder)]:
+      if flag[1].len > 0:
+        stderr.writeLine("repro attest expect: " & flag[0] & " describes a " &
+          "trust-domain launch and no --td-firmware was given, so nothing " &
+          "would be measured with it")
+        return 2
+  else:
+    if not fileExists(opts.tdxFirmware):
+      stderr.writeLine("repro attest expect: no trust-domain firmware image " &
+        "at " & opts.tdxFirmware)
+      return 2
+    if opts.tdxRegisterLog.len == 0:
+      stderr.writeLine("repro attest expect: --td-firmware computes a " &
+        "trust-domain expectation and --td-register-log is required with " &
+        "it; the three runtime registers are replayed from a log and " &
+        "cannot be derived from an image")
+      return 2
+    if not fileExists(opts.tdxRegisterLog):
+      stderr.writeLine("repro attest expect: no event log at " &
+        opts.tdxRegisterLog)
+      return 2
+    if opts.tdxPageOrder.len == 0:
+      stderr.writeLine("repro attest expect: --td-firmware computes a " &
+        "trust-domain expectation and --td-page-order is required with " &
+        "it; both orders occur on real hosts and they give different " &
+        "measurements, so a default would be a number no machine reports")
+      return 2
+    var order: TdxHostOrder
+    try:
+      order = tdxHostOrderFor(opts.tdxPageOrder)
+    except TdxLaunchError as err:
+      stderr.writeLine("repro attest expect: --td-page-order: " & err.msg)
+      return 2
+    tdxLaunches.add TdxLaunchInputs(
+      firmware: readFile(opts.tdxFirmware),
+      registerLog: readFile(opts.tdxRegisterLog),
+      order: order)
+
   var text = ""
   try:
     let manifest = attestedImageManifest(opts.configFingerprint,
-      readFile(ukiPath), verityDigest, rootHash, backends, launches)
+      readFile(ukiPath), verityDigest, rootHash, backends, launches,
+      tdxLaunches)
     text = renderAttestedImageManifest(manifest)
   except ManifestError as err:
     stderr.writeLine("repro attest expect: " & err.msg)
     return 2
   except SnpLaunchError as err:
     stderr.writeLine("repro attest expect: " & opts.firmware & ": " & err.msg)
+    return 2
+  except TdxLaunchError as err:
+    stderr.writeLine("repro attest expect: " & opts.tdxFirmware & ": " &
+      err.msg)
+    return 2
+  except TcgEventLogError as err:
+    stderr.writeLine("repro attest expect: " & opts.tdxRegisterLog & ": " &
+      err.msg)
     return 2
   except MeasurementError as err:
     stderr.writeLine("repro attest expect: " & ukiPath & ": " & err.msg)
