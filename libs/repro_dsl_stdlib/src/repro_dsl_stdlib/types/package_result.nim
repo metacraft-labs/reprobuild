@@ -115,6 +115,18 @@ type
     destdir*: string
     components*: Table[string, string]
 
+  NodePackageResult* = object
+    ## Returned by `node_package(...)` — the from-source npm/bun build. Two
+    ## roles: `compileEdge` is `npm ci --offline` + the project's bundle
+    ## script; `installEdge` stages the built bundle under `usr/lib/<name>/`
+    ## and writes a node launcher at `usr/bin/<name>`. The fetch and the
+    ## offline-mirror vendor are emitted by the `from-source-npm` convention
+    ## and depended on by the compile edge, not carried here.
+    compileEdge*: BuildActionDef
+    installEdge*: BuildActionDef
+    destdir*: string
+    components*: Table[string, string]
+
   GoPackageResult* = object
     ## Returned by ``go_package(...)``. Same three roles as its siblings,
     ## and the same reading of ``buildEdge`` as ``CargoPackageResult``:
@@ -386,6 +398,20 @@ proc executable*(r: CargoPackageResult; name: string): Executable =
     currentOwningPackage(), "executable", name)
   emitInstallTreeMirror(r.installEdge, "", r.destdir,
     currentOwningPackage(), "cargo")
+  newExecutable(
+    install = r.installEdge,
+    executableName = name,
+    installPrefix = componentPath(r.components, "runtime"))
+
+proc executable*(r: NodePackageResult; name: string): Executable =
+  ## Stage the installed node launcher and mirror the install tree, exactly
+  ## as the cargo slice does. The from-source resolver looks under
+  ## `<recipeRoot>/.repro/output/<name>/`, so a bare `Executable` without the
+  ## glue would install fine and still be invisible to consumers.
+  emitAutotoolsStageCopy(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "executable", name)
+  emitInstallTreeMirror(r.installEdge, "", r.destdir,
+    currentOwningPackage(), "npm")
   newExecutable(
     install = r.installEdge,
     executableName = name,
