@@ -98,6 +98,30 @@ proc recordVariant(f: var Fixture; weak: ContentDigest; variant: int):
   f.cache.recordActionResult(f.store, weak, ffpTimestamp,
     inputs, [outputPath], outputRoot = "", storeOutputBlobs = true)
 
+proc shmFixture(tag: string): Fixture =
+  ## `openFixture` with the Tier-2 index ATTACHED. Top level rather than
+  ## inside one suite because three suites below need it: the arm §8 puts in
+  ## front of the alias is only reachable on a cache opened this way, and
+  ## every case that opens a cache the other way is silent about it.
+  let root = createTempDir("repro-index-c1-" & tag & "-", "")
+  let workRoot = root / "work"
+  createDir(workRoot)
+  Fixture(
+    root: root,
+    workRoot: workRoot,
+    cache: openActionCache(root / "action-cache", attachShm = true),
+    store: openStore(root / "store"))
+
+proc completeTheIndex(f: var Fixture; weak: ContentDigest) =
+  ## Drive the edge into the state §8 step 5 leaves behind: the index holds
+  ## a reference per container AND the `edge-complete` element, which is
+  ## the only state in which the index arm is allowed to answer. A publish
+  ## alone does not produce it — `writePerEdgeRecord` inserts references
+  ## and nothing else — so the union read has to run once, which is what
+  ## removing the alias forces.
+  removeFile(f.aliasPath(weak))
+  discard f.cache.readHotRecord(weak)
+
 suite "C1 — the newest candidate is addressable":
 
   test "a consultation decodes ONE record, not every record the edge has":
@@ -283,6 +307,118 @@ suite "C1 — the newest candidate is addressable":
     check actionRecordDecodeStats().records == 1
     # The survivor is the newest path-set, the 11-input one.
     check hot.record.inputs.len == 11
+
+suite "C1 — and through the Tier-2 index arm, which runs FIRST":
+  ## Every case above opens its cache with `attachShm = false`, so the arm
+  ## §8 puts in FRONT of the alias is not exercised by any of them. That gap
+  ## is not academic: on a host where the index is attached and complete —
+  ## which is every warm developer build — `readHotRecord` never reaches the
+  ## alias at all, so C1's cost property has to hold on the index path or it
+  ## does not hold anywhere. Measured before these cases existed, a warm
+  ## zlib CMake no-op decoded 103 containers across 37 edges (4.36 MB) and
+  ## used 37 of them (427 KB).
+  ##
+  ## Same counter-not-stopwatch discipline as the suite above, and the same
+  ## controls: each claim is paired with a state in which the SAME read must
+  ## pay for every container.
+
+  test "a consultation decodes ONE record, not every container the index names":
+    var f = shmFixture("one-of-n")
+    defer: closeFixture(f)
+    if not f.cache.actionIndexCounters().attached:
+      skip()
+    else:
+      let weak = weakOf("index.one-of-n")
+      for variant in 0 ..< 6:
+        discard f.recordVariant(weak, variant)
+      check f.recNames(weak).len == 6
+
+      # THE CONTROL, and it runs first because it is also what completes the
+      # index: the union read must pay for all six. A counter that cannot
+      # move would satisfy the claim below vacuously.
+      resetOutputStateCheckStats()
+      f.completeTheIndex(weak)
+      check actionRecordDecodeStats().records == 6
+      check actionIndexStats().unionFallbacks == 1
+
+      resetOutputStateCheckStats()
+      let hot = f.cache.readHotRecord(weak)
+      check hot.found
+      # The index arm answered — not the alias, not the union read.
+      check actionIndexStats().resolvedHits == 1
+      check actionIndexStats().unionFallbacks == 0
+      # C1: one record decoded, out of six the edge has.
+      check actionRecordDecodeStats().records == 1
+      # And the six containers are still READ: the ordering key is a trailer
+      # and a file name, so they are read and not interpreted. This pins the
+      # claim to "decodes one", which is what it is, rather than to "opens
+      # one", which it is not.
+      check actionRecordDecodeStats().containerReads == 6
+      # The sidecar of the one container that was decoded, and no other.
+      check actionRecordDecodeStats().sidecarReads <= 2
+
+      # The answer must be the union read's answer. A fast path that returns
+      # a different record is a correctness bug wearing an optimization's
+      # clothes. The newest path-set is the six-input one.
+      check hot.record.inputs.len == 6
+
+  test "the index arm and the union read agree on every edge shape":
+    ## The decision, not the cost. `readHotRecord` through the index arm has
+    ## to return exactly what a Tier-1-only reader returns, for an edge with
+    ## one container and for an edge that has hit the retention cap.
+    for containerCount in [1, 2, 8, 11]:
+      var f = shmFixture("agree-" & $containerCount)
+      defer: closeFixture(f)
+      if not f.cache.actionIndexCounters().attached:
+        skip()
+      else:
+        let weak = weakOf("index.agree." & $containerCount)
+        for variant in 0 ..< containerCount:
+          discard f.recordVariant(weak, variant)
+        f.completeTheIndex(weak)
+
+        resetOutputStateCheckStats()
+        let viaIndex = f.cache.readHotRecord(weak)
+        check actionIndexStats().resolvedHits == 1
+        check viaIndex.found
+
+        # Tier 1 alone, over the same directory.
+        var tier1 = openActionCache(f.root / "action-cache", attachShm = false)
+        defer: tier1.closeShmTier()
+        let viaTier1 = tier1.readHotRecord(weak)
+        check viaTier1.found
+        check viaIndex.record.inputs == viaTier1.record.inputs
+        check viaIndex.record.outputs == viaTier1.record.outputs
+        check viaIndex.record.policy == viaTier1.record.policy
+        check viaIndex.record.weakFingerprint == viaTier1.record.weakFingerprint
+        check viaIndex.record.determinism == viaTier1.record.determinism
+
+  test "a container the index names but cannot be read is still a miss":
+    ## The pre-existing degradation, re-checked against the lazy walk: the
+    ## reads all happen in the enumeration, so a dangling reference must
+    ## still send the caller to the union read rather than being silently
+    ## skipped because the walk stopped before reaching it.
+    var f = shmFixture("dangling")
+    defer: closeFixture(f)
+    if not f.cache.actionIndexCounters().attached:
+      skip()
+    else:
+      let weak = weakOf("index.dangling")
+      let oldest = f.recordVariant(weak, 0)
+      for variant in 1 ..< 3:
+        discard f.recordVariant(weak, variant)
+      f.completeTheIndex(weak)
+      # Delete the OLDEST container — named for the FIRST path-set recorded,
+      # and therefore the one a newest-first walk would never have reached.
+      removeFile(f.edgeDir(weak) /
+        (digestHex(oldest.strongFingerprint) & ".rec"))
+
+      resetOutputStateCheckStats()
+      let hot = f.cache.readHotRecord(weak)
+      check hot.found
+      check actionIndexStats().unresolvedReferences == 1
+      check actionIndexStats().unionFallbacks == 1
+      check hot.record.inputs.len == 3
 
 suite "C4 — paths are interned within a record":
 
@@ -666,3 +802,149 @@ suite "records written before the trust epoch are refused":
     future[5] = byte(0)
     expect EnvelopeError:
       discard decodeActionResultRecord(future)
+
+suite "C1 — the index arm's two premises are CHECKED, not assumed":
+  ## The lazy walk stops at the first weak match going newest→oldest, and it
+  ## is the union read's answer only because of two facts about the directory
+  ## it is walking:
+  ##
+  ##   * a container holds records carrying the strong fingerprint it is
+  ##     NAMED for, so two containers in one edge directory contribute
+  ##     disjoint strong fingerprints and the union read's cross-container
+  ##     dedup can never drop a NEWER record on account of an older one; and
+  ##   * the sequence the walk ordered on — read out of the trailer without
+  ##     decoding anything — is the sequence a full decode reports.
+  ##
+  ## Neither is this reader's to guarantee. A cache root is shared with other
+  ## binaries and with older and newer builds of this one, so both are
+  ## checked at runtime and a failed check returns to the alias and then to
+  ## the union read. These two cases are that check firing.
+  ##
+  ## BOTH ARE BUILT SO THE GUARD CHANGES THE ANSWER, not merely the cost. A
+  ## case in which deleting the guard only changed which arm replied would
+  ## stay green with the guard deleted, which is the failure this whole
+  ## campaign keeps finding; each case below therefore pins the RECORD, and
+  ## pins it against a Tier-1-only reader over the same directory rather
+  ## than against a number typed into the test.
+
+  proc perEdgeHeader(count: uint32): string =
+    ## `encodePerEdgeFile`'s 10-byte header, written out here rather than
+    ## exported: these cases forge containers the production writer will not
+    ## write, so they cannot obtain the bytes from it.
+    result = "RBPE"
+    result.add(char(2))    # PerEdgeFileVersion — the sequence-trailer format
+    result.add(char(0))
+    for i in 0 ..< 4:
+      result.add(char((count shr (8 * uint32(i))) and 0xff'u32))
+
+  proc seqTrailer(value: uint64): string =
+    for i in 0 ..< 8:
+      result.add(char((value shr (8 * uint64(i))) and 0xff'u64))
+
+  proc frameOf(container: string): string =
+    ## The single RBAR frame — length word, payload and tail checksum — out
+    ## of a one-record container, so a forged container can be assembled
+    ## from frames a real writer produced and every checksum in it is real.
+    container[10 ..< container.len - 8]
+
+  test "a MISFILED container is refused, and the union read's answer stands":
+    var f = shmFixture("misfiled")
+    defer: closeFixture(f)
+    if not f.cache.actionIndexCounters().attached:
+      skip()
+    else:
+      let weak = weakOf("index.misfiled")
+      # The OLDER container, legitimately named: one input, strong S.
+      let small = f.recordVariant(weak, 0)
+      let sName = digestHex(small.strongFingerprint) & ".rec"
+      let sBytes = readFile(f.edgeDir(weak) / sName)
+      # The NEWER container, legitimately named: seven inputs, strong X.
+      let wide = f.recordVariant(weak, 6)
+      let xName = digestHex(wide.strongFingerprint) & ".rec"
+      f.completeTheIndex(weak)
+      check f.recNames(weak).len == 2
+
+      # Forge a container holding the SEVEN-input record while carrying the
+      # ONE-input record's strong fingerprint — written by the production
+      # writer, so the frame and its checksum are real — and then move it
+      # under the WRONG name. The two containers now share a strong
+      # fingerprint, which is exactly the premise being broken.
+      var mislabelled = wide
+      mislabelled.strongFingerprint = small.strongFingerprint
+      f.cache.writePerEdgeRecords(weak, [mislabelled])
+      let forged = readFile(f.edgeDir(weak) / sName)
+      writeFile(f.edgeDir(weak) / sName, sBytes)
+      writeFile(f.edgeDir(weak) / xName, forged)
+
+      resetOutputStateCheckStats()
+      let hot = f.cache.readHotRecord(weak)
+      check hot.found
+      # The guard fired. The arm counted its resolved hit and then declined,
+      # so the consultation finished on the union read — the documented
+      # degradation, and the one an unresolvable reference already takes.
+      check actionIndexStats().resolvedHits == 1
+      check actionIndexStats().unionFallbacks == 1
+
+      # THE ASSERTION THE GUARD EXISTS FOR, and it is not a typed-in number:
+      # a Tier-1-only reader over the same directory is asked what the union
+      # read makes of it. The older container is ordered first and
+      # contributes the strong fingerprint, so the newer container's record
+      # is deduped away and the ONE-input record survives. A walk that
+      # trusted the file name would have stopped at the newest container and
+      # answered with the SEVEN-input record instead.
+      var tier1 = openActionCache(f.root / "action-cache", attachShm = false)
+      defer: tier1.closeShmTier()
+      let union = tier1.loadPerEdgeRecords(weak)
+      check union.len == 1
+      check union[^1].inputs.len == 1
+      check hot.record.inputs.len == union[^1].inputs.len
+
+  test "a container whose scanned order the DECODE disputes is refused":
+    var f = shmFixture("seq-dispute")
+    defer: closeFixture(f)
+    if not f.cache.actionIndexCounters().attached:
+      skip()
+    else:
+      let weak = weakOf("index.seq-dispute")
+      # Oldest: five inputs. Newest: one input, and the container this case
+      # forges over.
+      discard f.recordVariant(weak, 4)
+      let small = f.recordVariant(weak, 0)
+      let sName = digestHex(small.strongFingerprint) & ".rec"
+      let sBytes = readFile(f.edgeDir(weak) / sName)
+      f.completeTheIndex(weak)
+      check f.recNames(weak).len == 2
+
+      # A container the ORDERING scan walks to the end and a full decode
+      # stops halfway through. Frame 0 is this binary's own record; frame 1
+      # is the pre-epoch record above — checksum-valid, and REFUSED by
+      # `decodeRecord` rather than decoded; frame 2 is frame 0 again, there
+      # only so the decoder's `break` leaves bytes between where it stopped
+      # and the trailer. `decodePerEdgeFileWithSeq` therefore reports
+      # sequence 0 where `scanPerEdgeFileWriteSequence` reports 4242 — the
+      # shape the scan's own docstring names, and what a record written by a
+      # NEWER reprobuild sharing this cache root looks like.
+      var legacy = ""
+      for b in unhex(V2ContainerHex):
+        legacy.add(char(b))
+      let good = frameOf(sBytes)
+      let stale = frameOf(legacy)
+      writeFile(f.edgeDir(weak) / sName,
+        perEdgeHeader(3) & good & stale & good & seqTrailer(4242'u64))
+
+      resetOutputStateCheckStats()
+      let hot = f.cache.readHotRecord(weak)
+      check hot.found
+      check actionIndexStats().resolvedHits == 1
+      check actionIndexStats().unionFallbacks == 1
+
+      # Same shape of assertion as above. The forged container decodes to
+      # sequence 0, so a Tier-1 reader orders it OLDEST and answers with the
+      # five-input record; a walk that trusted the scanned 4242 would have
+      # stopped at it and answered with the one-input record.
+      var tier1 = openActionCache(f.root / "action-cache", attachShm = false)
+      defer: tier1.closeShmTier()
+      let union = tier1.loadPerEdgeRecords(weak)
+      check union.len == 2
+      check union[^1].inputs.len == 5
+      check hot.record.inputs.len == union[^1].inputs.len

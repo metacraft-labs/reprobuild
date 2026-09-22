@@ -3068,6 +3068,59 @@ proc decodePerEdgeFile(raw: openArray[byte]): seq[ActionResultRecord] =
   ## need the write sequence (legacy migration + intactness probes).
   decodePerEdgeFileWithSeq(raw).records
 
+proc scanPerEdgeFileWriteSequence(raw: openArray[byte]): uint64 =
+  ## The ORDERING half of `decodePerEdgeFileWithSeq`, with the record bodies
+  ## left where they are.
+  ##
+  ## §5.3's total order over an edge's containers is `(writeSequence,
+  ## strongHex)`. BOTH components are addressable without interpreting a
+  ## single record: the sequence is an 8-byte trailer and the strong-fp hex
+  ## is the file's own name. A reader that only needs to know WHICH container
+  ## is newest therefore needs no record from any of them — which is what
+  ## lets `readHotRecord` decode one container instead of all of them
+  ## (Action-Cache-Per-Edge-Store.md §5.5 C1: "the cost of a consultation
+  ## MUST be proportional to the candidates it evaluates, not to the
+  ## candidates the edge has").
+  ##
+  ## Byte-for-byte the SAME walk as `decodePerEdgeFileWithSeq`: same magic
+  ## and version gate, same frame-length bounds, the same per-frame tail
+  ## checksum, the same `break` on a torn body leaving `pos` past the frame
+  ## it stopped on, and the same "exactly 8 bytes remain" trailer rule. It
+  ## omits exactly two things, and both are per-record work: the slice that
+  ## copies a frame's payload out of `raw`, and `decodeRecord` itself.
+  ##
+  ## THE ONE WAY IT CAN DISAGREE, and why that is safe. A frame whose
+  ## checksum matches but whose BODY `decodeRecord` refuses — most often a
+  ## record written by a newer reprobuild sharing the cache root — makes the
+  ## full decoder `break` where this walk continues, so the full decoder
+  ## reports `0` and this reports the file's true sequence. Callers must
+  ## therefore treat this as the ordering key ONLY and re-derive the
+  ## authoritative sequence from the container they go on to decode; the one
+  ## caller does exactly that, and refuses the fast path when the two differ.
+  if raw.len < 10:
+    return
+  for i in 0 ..< 4:
+    if raw[i] != byte(ord(PerEdgeFileMagic[i])):
+      return
+  var pos = 4
+  let version = readU16Le(raw, pos)
+  if version notin {PerEdgeFileVersionLegacy, PerEdgeFileVersion}:
+    return
+  let count = int(readU32Le(raw, pos))
+  for _ in 0 ..< count:
+    if pos + 8 > raw.len:
+      break
+    let length = int(readU32Le(raw, pos))
+    if length < 0 or length > MaxActionRecordFrameBytes or pos + length + 4 > raw.len:
+      break
+    let payloadStart = pos
+    pos += length
+    let tail = readU32Le(raw, pos)
+    if tail != recordTail(raw.toOpenArray(payloadStart, pos - 5)):
+      break
+  if version >= PerEdgeFileVersion and pos + 8 == raw.len:
+    result = readU64Le(raw, pos)
+
 proc perEdgeRecordFileIsIntact*(raw: openArray[byte]): bool =
   ## Strict validator: true iff `raw` is a byte-complete per-edge file — a
   ## valid RBPE header whose declared record count is fully present and every
@@ -3316,27 +3369,36 @@ type
     strongHex: string
     records: seq[ActionResultRecord]
 
-proc readRecContainer(dirPath, fileName: string): RecContainer =
-  ## Read + decode ONE container and staple on its `.octime` / `.det`
-  ## sidecars. `ok = false` means "treat this file as absent", which is what
-  ## every failure here has always meant: a `.rec` this binary cannot decode
-  ## is most often one written by a NEWER reprobuild sharing the cache root,
-  ## and letting the envelope error escape would abort an otherwise healthy
-  ## build over a cache file — the opposite of the fail-closed rule in
-  ## Failure-Semantics.md.
-  let path = dirPath / fileName
-  var decoded: tuple[records: seq[ActionResultRecord]; writeSequence: uint64]
+proc readRecBytes(dirPath, fileName: string):
+    tuple[ok: bool; raw: seq[byte]] =
+  ## The I/O half of `readRecContainer`, split out so a caller that only has
+  ## to ORDER the candidates can get their bytes without interpreting any
+  ## record in them. `ok = false` means "treat this file as absent" — the
+  ## same meaning `RecContainer.ok = false` has always carried, and reached
+  ## through the same exception set, so splitting the proc cannot change
+  ## which files a reader considers present.
   try:
     # Timed around the `readFile` ONLY, so the container row prices the I/O
-    # and the decode row prices the CPU. `decodePerEdgeFileWithSeq` below
-    # calls `decodeRecord`, which accumulates into its own row; overlapping
-    # the two regions would double-count the decode into both.
+    # and the decode row prices the CPU; overlapping the two regions would
+    # double-count the decode into both.
     let readStart = getMonoTime()
-    let raw = bytes(readFile(extendedPath(path)))
+    result.raw = bytes(readFile(extendedPath(dirPath / fileName)))
     perEdgeContainerReadNanos += (getMonoTime() - readStart).inNanoseconds
     inc perEdgeContainerReads
+    result.ok = true
+  except OSError, IOError:
+    result = (ok: false, raw: @[])
+
+proc decodeRecContainer(dirPath, fileName: string;
+                        raw: openArray[byte]): RecContainer =
+  ## The CPU half of `readRecContainer`: decode one container's already-read
+  ## bytes and staple on its `.octime` / `.det` sidecars. Split from the read
+  ## so it can be deferred to the one container a consultation actually
+  ## needs; the body below is the body `readRecContainer` has always had.
+  var decoded: tuple[records: seq[ActionResultRecord]; writeSequence: uint64]
+  try:
     decoded = decodePerEdgeFileWithSeq(raw)
-  except OSError, IOError, EnvelopeError:
+  except EnvelopeError:
     return RecContainer(ok: false)
   # Tie-break key from the file's own strong-fp nonce (its base name), so
   # even legacy/seq-0 files or a hypothetical duplicate sequence still sort
@@ -3383,6 +3445,19 @@ proc readRecContainer(dirPath, fileName: string): RecContainer =
       discard
   RecContainer(ok: true, writeSequence: decoded.writeSequence,
     strongHex: strongHex, records: decoded.records)
+
+proc readRecContainer(dirPath, fileName: string): RecContainer =
+  ## Read + decode ONE container and staple on its `.octime` / `.det`
+  ## sidecars. `ok = false` means "treat this file as absent", which is what
+  ## every failure here has always meant: a `.rec` this binary cannot decode
+  ## is most often one written by a NEWER reprobuild sharing the cache root,
+  ## and letting the envelope error escape would abort an otherwise healthy
+  ## build over a cache file — the opposite of the fail-closed rule in
+  ## Failure-Semantics.md.
+  let read = readRecBytes(dirPath, fileName)
+  if not read.ok:
+    return RecContainer(ok: false)
+  decodeRecContainer(dirPath, fileName, read.raw)
 
 proc loadNewestPerEdgeRecordsViaAlias(cache: ActionCache;
                                       weak: ContentDigest):
@@ -3938,6 +4013,76 @@ proc warmIndexFromDisk(cache: ActionCache; weak: ContentDigest;
   if everyInsert and everyContainerDecoded:
     discard cache.shm.idx.insertEdgeComplete(weak)
 
+type
+  IndexArmKind = enum
+    ## What §8's index-first arm was able to say about an edge.
+    iakUnavailable
+      ## The index cannot answer. The caller MUST take a path that does not
+      ## depend on it; Tier 1 is authoritative and unconditionally correct.
+    iakNegative
+      ## The index is complete and holds NO reference for this edge, so the
+      ## edge has no record. Reached with zero filesystem operations.
+    iakCandidates
+      ## The index resolved the edge's containers. `entries` holds every one
+      ## of them, ordered OLDEST→NEWEST by §5.3's total order.
+
+  IndexedCandidates = object
+    kind: IndexArmKind
+    dirPath: string
+    entries: seq[tuple[writeSequence: uint64; strongHex, fileName: string;
+                       raw: seq[byte]]]
+
+proc indexedCandidatesForWeak(cache: ActionCache; weak: ContentDigest):
+    IndexedCandidates =
+  ## §8 steps 1-4, up to but NOT including record decoding.
+  ##
+  ## Every container the index references is read and ORDERED here, and none
+  ## is interpreted. That split is the point: §5.3's order is
+  ## `(writeSequence, strongHex)`, the sequence is an 8-byte trailer and the
+  ## hex is the file name, so ordering the candidates costs no record decode
+  ## at all (see `scanPerEdgeFileWriteSequence`). Which candidates a caller
+  ## then decodes is the caller's decision, and it is where §5.5 C1's "cost
+  ## proportional to the candidates it EVALUATES" is either honoured or lost.
+  ##
+  ## An unresolvable reference is a MISS, never an error and never a false
+  ## hit: it is counted and the caller falls back to the path that does not
+  ## depend on the index at all.
+  if cache.shm == nil or not cache.shm.enabled:
+    return IndexedCandidates(kind: iakUnavailable)
+  let view = cache.shm.idx.enumerateEdge(weak)
+  if not view.attached or not view.complete:
+    return IndexedCandidates(kind: iakUnavailable)
+  if view.liveStrong.len == 0:
+    inc actionIndexNegativeHits
+    return IndexedCandidates(kind: iakNegative)
+  result = IndexedCandidates(kind: iakCandidates,
+    dirPath: cache.perEdgeDirPath(weak))
+  for strong in view.liveStrong:
+    let fileName = recFileNameForStrong(strong)
+    let read = readRecBytes(result.dirPath, fileName)
+    if not read.ok:
+      cache.shm.idx.noteUnresolvedReference()
+      inc actionIndexUnresolvedRefs
+      return IndexedCandidates(kind: iakUnavailable)
+    result.entries.add((
+      writeSequence: scanPerEdgeFileWriteSequence(read.raw),
+      strongHex: fileName.splitFile.name,
+      fileName: fileName,
+      raw: read.raw))
+  # The SAME total order §5.3 makes semantic, recovered from the containers'
+  # own trailers. The index deliberately does not carry the write sequence
+  # (§12.E): carrying it would make the element bytes change on every
+  # convergent rewrite of one path-set, so the element count would grow with
+  # WRITES instead of with distinct keys — the one property the structure is
+  # chosen for.
+  result.entries.sort(proc (a, b: tuple[writeSequence: uint64;
+                                        strongHex, fileName: string;
+                                        raw: seq[byte]]): int =
+    result = cmp(a.writeSequence, b.writeSequence)
+    if result == 0:
+      result = cmp(a.strongHex, b.strongHex))
+  inc actionIndexResolvedHits
+
 proc indexedRecordsForWeak(cache: ActionCache; weak: ContentDigest):
     Option[seq[ActionResultRecord]] =
   ## §8 steps 1-4: the index-first arm.
@@ -3958,43 +4103,105 @@ proc indexedRecordsForWeak(cache: ActionCache; weak: ContentDigest):
   ## An unresolvable reference is a MISS, never an error and never a false hit:
   ## it is counted and the caller falls back to the path that does not depend
   ## on the index at all.
-  if cache.shm == nil or not cache.shm.enabled:
+  let candidates = cache.indexedCandidatesForWeak(weak)
+  case candidates.kind
+  of iakUnavailable:
     return none(seq[ActionResultRecord])
-  let view = cache.shm.idx.enumerateEdge(weak)
-  if not view.attached or not view.complete:
-    return none(seq[ActionResultRecord])
-  if view.liveStrong.len == 0:
-    inc actionIndexNegativeHits
+  of iakNegative:
     return some(newSeq[ActionResultRecord]())
-  let dirPath = cache.perEdgeDirPath(weak)
-  var containers: seq[RecContainer] = @[]
-  for strong in view.liveStrong:
-    let container = readRecContainer(dirPath, recFileNameForStrong(strong))
-    if not container.ok:
-      cache.shm.idx.noteUnresolvedReference()
-      inc actionIndexUnresolvedRefs
-      return none(seq[ActionResultRecord])
-    containers.add(container)
-  # The SAME total order §5.3 makes semantic, recovered from the containers'
-  # own trailers. The index deliberately does not carry the write sequence
-  # (§12.E): carrying it would make the element bytes change on every
-  # convergent rewrite of one path-set, so the element count would grow with
-  # WRITES instead of with distinct keys — the one property the structure is
-  # chosen for.
-  containers.sort(proc (a, b: RecContainer): int =
-    result = cmp(a.writeSequence, b.writeSequence)
-    if result == 0:
-      result = cmp(a.strongHex, b.strongHex))
-  inc actionIndexResolvedHits
+  of iakCandidates:
+    discard
   var records: seq[ActionResultRecord] = @[]
   var seenStrong = initHashSet[string]()
-  for container in containers:
+  for entry in candidates.entries:
+    let container = decodeRecContainer(candidates.dirPath, entry.fileName,
+      entry.raw)
     for record in container.records:
       let key = digestKey(record.strongFingerprint)
       if key notin seenStrong:
         seenStrong.incl(key)
         records.add(record)
   some(records)
+
+proc indexedNewestRecordForWeak(cache: ActionCache; weak: ContentDigest):
+    tuple[kind: IndexArmKind; found: bool; record: ActionResultRecord] =
+  ## §8's index arm answering the ONE question a warm consultation asks:
+  ## which record does the newest-wins rule select? — and decoding only the
+  ## containers it has to look at to answer it.
+  ##
+  ## §5.5 C1 is normative ("the cost of a consultation MUST be proportional
+  ## to the candidates it EVALUATES, not to the candidates the edge has") and
+  ## the newest-alias accelerator has honoured it since it was written. The
+  ## index arm did not: it runs FIRST, and it decoded every container the
+  ## edge has before discarding all but one. On a developer cache that is
+  ## most of the work a no-op does — measured on a warm zlib CMake no-op,
+  ## 103 containers decoded across 37 edges, 4.36 MB, of which the 37 that
+  ## were used are 427 KB. The other 90.2% was read, slice-copied, checksummed,
+  ## decoded, deduped and dropped. This walks the SAME order from the other
+  ## end and stops.
+  ##
+  ## WHY STOPPING IS THE SAME ANSWER. `indexedRecordsForWeak` concatenates
+  ## each container's records in oldest→newest order, dropping any record
+  ## whose strong fingerprint an EARLIER container already contributed, and
+  ## the caller then scans that list backwards for the first weak match. A
+  ## container's records all carry the strong fingerprint the container is
+  ## NAMED for (`recFileNameForStrong`), so two containers in one edge
+  ## directory contribute disjoint strong fingerprints and the cross-container
+  ## dedup can never drop a newer record on account of an older one. The
+  ## concatenation is therefore a per-container dedup pasted end to end, and
+  ## scanning it backwards is scanning containers newest→oldest, each one's
+  ## deduped records backwards. That is what this loop does.
+  ##
+  ## Both premises are CHECKED rather than assumed, because a cache root is
+  ## shared with other binaries and neither is this reader's to guarantee:
+  ##
+  ##   * a container whose records do not all carry its own name's strong
+  ##     fingerprint is misfiled, so the disjointness argument does not hold
+  ##     for it; and
+  ##   * `scanPerEdgeFileWriteSequence` orders on a sequence read without
+  ##     decoding, which a frame this binary cannot decode makes larger than
+  ##     the one the full decode reports — so the order this walk used may
+  ##     not be §5.3's.
+  ##
+  ## Either one returns `iakUnavailable`, which sends the caller to the alias
+  ## read and then to the union read: the same degradation an unresolvable
+  ## reference already takes, and unconditionally correct because Tier 1 is
+  ## authoritative.
+  ##
+  ## WHAT THAT DOES TO THE §11 ROWS, said out loud because a row that
+  ## double-counts silently is worse than one that does not exist. Both
+  ## refusals happen AFTER `indexedCandidatesForWeak` has counted the
+  ## resolved hit, so an edge that trips one contributes to `resolvedHits`
+  ## and then to `unionFallbacks`. The two rows stop partitioning the
+  ## consultations exactly in the states this proc declines to answer in —
+  ## which is the same thing a climbing `unresolvedReferences` already
+  ## signals, and on a healthy root neither moves.
+  let candidates = cache.indexedCandidatesForWeak(weak)
+  if candidates.kind != iakCandidates:
+    return (kind: candidates.kind, found: false,
+            record: ActionResultRecord())
+  for i in countdown(candidates.entries.high, 0):
+    let entry = candidates.entries[i]
+    let container = decodeRecContainer(candidates.dirPath, entry.fileName,
+      entry.raw)
+    if container.writeSequence != entry.writeSequence:
+      return (kind: iakUnavailable, found: false,
+              record: ActionResultRecord())
+    var seenStrong = initHashSet[string]()
+    var deduped: seq[ActionResultRecord] = @[]
+    for record in container.records:
+      if toHex(record.strongFingerprint.bytes) != entry.strongHex:
+        return (kind: iakUnavailable, found: false,
+                record: ActionResultRecord())
+      let key = digestKey(record.strongFingerprint)
+      if key notin seenStrong:
+        seenStrong.incl(key)
+        deduped.add(record)
+    for j in countdown(deduped.high, 0):
+      if deduped[j].weakFingerprint == weak:
+        return (kind: iakCandidates, found: true,
+                record: hotMetadataRecord(deduped[j]))
+  (kind: iakCandidates, found: false, record: ActionResultRecord())
 
 proc unionReadEdge(cache: ActionCache; weak: ContentDigest):
     seq[ActionResultRecord] =
@@ -4022,13 +4229,16 @@ proc readHotRecord*(cache: var ActionCache; weak: ContentDigest):
   ## to the union read — whenever it cannot prove that container is the newest.
   ## The union read is last and is unconditionally correct.
   timedPerEdgeRecordLoad:
-    let indexed = cache.indexedRecordsForWeak(weak)
-    if indexed.isSome:
-      let candidates = indexed.get()
-      for i in countdown(candidates.high, 0):
-        if candidates[i].weakFingerprint == weak:
-          return (found: true, record: hotMetadataRecord(candidates[i]))
+    let indexedNewest = cache.indexedNewestRecordForWeak(weak)
+    case indexedNewest.kind
+    of iakNegative:
       return (found: false, record: ActionResultRecord())
+    of iakCandidates:
+      if indexedNewest.found:
+        return (found: true, record: indexedNewest.record)
+      return (found: false, record: ActionResultRecord())
+    of iakUnavailable:
+      discard
     let viaAlias = cache.loadNewestPerEdgeRecordsViaAlias(weak)
     if viaAlias.isSome:
       let aliasRecords = viaAlias.get()
