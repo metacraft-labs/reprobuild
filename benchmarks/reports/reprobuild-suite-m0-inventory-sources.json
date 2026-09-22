@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1712,
-    "pureUnitConsolidationGroups": 50,
-    "pureUnitTests": 602,
+    "nimTestBinaries": 1714,
+    "pureUnitConsolidationGroups": 51,
+    "pureUnitTests": 604,
     "staticallyDetectedRuntimeCompilerFlowTests": 106,
-    "testEntries": 1723
+    "testEntries": 1725
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -293,7 +293,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 3,
+      "count": 4,
       "defines": [],
       "dependencyShape": [
         "repro_local_store"
@@ -302,7 +302,8 @@
       "sources": [
         "libs/repro_local_store/tests/t_a4_p4_eviction.nim",
         "libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim",
-        "libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim"
+        "libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim",
+        "libs/repro_local_store/tests/t_store_optimise_dedup.nim"
       ],
       "targetOs": "soAny"
     },
@@ -904,6 +905,23 @@
       "targetOs": "soAny"
     },
     {
+      "count": 2,
+      "defines": [
+        "reproProviderMode"
+      ],
+      "dependencyShape": [
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_standard_provider"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_from_source_cargo_recognition.nim",
+        "tests/unit/t_from_source_go_recognition.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 4,
       "defines": [],
       "dependencyShape": [
@@ -1110,7 +1128,7 @@
       "graph-fixture": 12,
       "integration": 816,
       "platform/destructive": 113,
-      "pure unit": 602,
+      "pure unit": 604,
       "unclassified": 180
     },
     "graphOwnedTestArtifacts": [
@@ -1259,9 +1277,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1712,
+    "nimTestBinaryCount": 1714,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1723
+    "testEntryCount": 1725
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -11408,6 +11426,23 @@
       "source": "libs/repro_local_store/tests/t_sqlite_smoke.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_store_optimise_dedup",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_store_optimise_dedup.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -34222,7 +34257,9 @@
       "binary": "build/test-bin/t_from_source_go_recognition",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
-      "defines": [],
+      "defines": [
+        "reproProviderMode"
+      ],
       "language": "nim",
       "localDependencyShape": [
         "repro_project_dsl",
@@ -34234,6 +34271,28 @@
       "source": "tests/unit/t_from_source_go_recognition.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_from_source_npm_recognition",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_standard_provider"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_from_source_npm_recognition.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
