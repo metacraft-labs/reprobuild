@@ -86,10 +86,17 @@ when defined(linux):
 else:
   var O_NOFOLLOW_C: cint = 0
 
+# `let`, not `const`, for the same reason `O_NOFOLLOW_C` above is a `var`:
+# on Linux `std/posix` gives `O_CLOEXEC` as a compile-time constant, but on
+# macOS and the BSDs it is an `importc`'d variable standing for a header
+# macro, and a `const` binding of one is a compile error ("cannot evaluate
+# at compile time"). The only use is the runtime `or` chain in the
+# `posix.open` in `storeSecret` below, which already mixes in the `var`
+# above, so nothing here ever wanted a compile-time value.
 when defined(posix):
-  const O_CLOEXEC_C = posix.O_CLOEXEC
+  let O_CLOEXEC_C = posix.O_CLOEXEC
 else:
-  const O_CLOEXEC_C = cint(0)
+  let O_CLOEXEC_C = cint(0)
 
 type
   SecretStoreError* = object of CatchableError
