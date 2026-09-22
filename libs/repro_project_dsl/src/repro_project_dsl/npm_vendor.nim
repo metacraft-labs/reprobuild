@@ -103,10 +103,19 @@ proc emitNpmVendorAction*(projectRoot, packageName: string;
   # keyed the closure on and is carried for readability/debuggability.
   script.add("while read -r repro_path repro_sha repro_url; do ")
   script.add("case \"$repro_path\" in ''|'#'*) continue;; esac; ")
-  # The archive lands under the mirror by its URL basename — the same name
-  # the lockfile's `resolved` carries, so the sed rewrite below points at it.
-  script.add("repro_base=\"${repro_url##*/}\"; ")
-  script.add("repro_cached=\"" & q(cacheDir) & "/$repro_base\"; ")
+  # Key the mirror by the URL's HOST-RELATIVE PATH, not its basename. Two
+  # DIFFERENT packages can share a basename — `@jsonjoy.com/base64` and
+  # `@protobufjs/base64` both resolve to `.../base64-1.1.2.tgz` — and a
+  # basename key would (1) make the second entry's sha256 check run against
+  # the first's already-cached bytes and fail the whole vendor step, and
+  # (2) rewrite both `resolved` fields to one `file:` path so `npm ci`
+  # installed one package's tarball for the other. The path after the host
+  # (`@jsonjoy.com/base64/-/base64-1.1.2.tgz`) is unique per package, and the
+  # sed below reconstructs exactly the same path from the lockfile URL.
+  script.add("repro_rel=\"${repro_url#*://}\"; ")
+  script.add("repro_rel=\"${repro_rel#*/}\"; ")
+  script.add("repro_cached=\"" & q(cacheDir) & "/$repro_rel\"; ")
+  script.add("mkdir -p \"$(dirname \"$repro_cached\")\"; ")
   script.add("if [ ! -f \"$repro_cached\" ]; then ")
   script.add("curl -fsSL " & CurlFetchRetryArgs &
     " -o \"$repro_cached.part\" \"$repro_url\"; ")
@@ -115,16 +124,19 @@ proc emitNpmVendorAction*(projectRoot, packageName: string;
   # in place is exactly what this catches.
   script.add("printf '%s  %s\\n' \"$repro_sha\" \"$repro_cached\" | " &
     "sha256sum -c - > /dev/null; ")
-  script.add("cp -f \"$repro_cached\" \"" & q(tarballs) & "/$repro_base\"; ")
+  script.add("repro_dest=\"" & q(tarballs) & "/$repro_rel\"; ")
+  script.add("mkdir -p \"$(dirname \"$repro_dest\")\"; ")
+  script.add("cp -f \"$repro_cached\" \"$repro_dest\"; ")
   script.add("done < \"" & q(manifest) & "\"; ")
   # Rewrite the lockfile into an offline mirror: every registry `resolved`
-  # becomes a `file:tarballs/<archive>` path, and its registry `integrity`
-  # is dropped (reprobuild's verified sha256 governs from here). `npm ci
-  # --offline`, which the recipe's build runs next, then installs entirely
-  # from the local tarballs. See the module doc for why this rather than the
-  # npm cache.
-  script.add("sed -i -E 's#(\"resolved\": \")https?://[^\"]*/" &
-    "([^/\"]+\\.tgz)\"#\\1file:tarballs/\\2\"#g; /\"integrity\":/d' \"" &
+  # becomes a `file:tarballs/<host-relative-path>` reference, and its
+  # registry `integrity` is dropped (reprobuild's verified sha256 governs
+  # from here). `[^/]+` matches the host so the capture is the full unique
+  # path. `npm ci --offline`, which the recipe's build runs next, then
+  # installs entirely from the local tarballs. See the module doc for why
+  # this rather than the npm cache.
+  script.add("sed -i -E 's#(\"resolved\": \")https?://[^/]+/" &
+    "([^\"]+\\.tgz)\"#\\1file:tarballs/\\2\"#g; /\"integrity\":/d' \"" &
     q(lockfile) & "\"; ")
   script.appendVerifiedFetchStamp(stamp)
 
