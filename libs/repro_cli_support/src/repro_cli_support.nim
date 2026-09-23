@@ -15617,11 +15617,21 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
     # real command. Offered only while that path is still executable: a Nix
     # store path survives a great deal but not a garbage collection, and a
     # command that cannot run is the defect this replaced.
-    result.add("    if [ -x " & quoteShell(hookAuthorBin) & " ]; then\n")
+    #
+    # POSIX quoting, never ``quoteShell``: this body is a ``sh`` script on
+    # every host, but ``quoteShell`` quotes for the host the GENERATOR runs
+    # on. On Windows that is cmd.exe's rules, which leave
+    # ``C:\Users\...\repro.exe`` bare; ``sh`` then eats every backslash, the
+    # ``-x`` test asks about ``C:Users...repro.exe``, and this line -- the
+    # only runnable remedy in the refusal -- was never printed on Windows.
+    # The echoed command is quoted for the same reason: typed into Git Bash
+    # as printed, an unquoted Windows path loses its separators.
+    result.add("    if [ -x " & quoteShellPosix(hookAuthorBin) & " ]; then\n")
     result.add("      echo \"repro hooks:   3. To push right now with the " &
       "build that installed this hook:\" >&2\n")
-    result.add("      echo \"repro hooks:        REPROBUILD_REPRO=" &
-      hookAuthorBin & " git push\" >&2\n")
+    result.add("      echo " & quoteShellPosix("repro hooks:        " &
+      "REPROBUILD_REPRO=" & quoteShellPosix(hookAuthorBin) & " git push") &
+      " >&2\n")
     result.add("    fi\n")
   result.add("  fi\n")
   result.add("  echo \"repro hooks: Do not reach for --no-verify: it also " &
@@ -15629,9 +15639,10 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
   result.add("  echo \"repro hooks: are working, such as pushing an " &
     "unpublished or unlocked head.\" >&2\n")
   result.add("}\n\n")
-  # Attribution for a dispatch that DID run and failed: the binary that
-  # produced the refusal is named next to it, so a diagnostic can never be
-  # read as coming from a build other than the one that emitted it.
+  # Attribution for a dispatch that DID run: the binary that produced the
+  # verdict is named next to it, so a diagnostic can never be read as coming
+  # from a build other than the one that emitted it. The non-blocking hooks
+  # name it only when they failed; `pre-push` names it always (see below).
   result.add("repro_dispatch_attribution() {\n")
   result.add("  echo \"repro hooks: " & hookName & " above was produced by " &
     "$REPRO_CMD (resolved from $REPRO_CMD_SOURCE).\" >&2\n")
@@ -15745,8 +15756,16 @@ proc vcsManagedHookBody(hookName, hookContract, hookAuthorBin: string): string =
       else: ""
     result.add("  " & indexHandover & "\"$REPRO_CMD\" hooks dispatch " &
       hookName & " --repo-root \"$REPO_ROOT\" -- \"$@\" || REPRO_STATUS=$?\n")
-  result.add("  if [ \"$REPRO_STATUS\" -ne 0 ]; then " &
-    "repro_dispatch_attribution; fi\n")
+  if hookName == "pre-push":
+    # The gate's verdict is attributed whichever way it went. A PASS names its
+    # build too: "repro check: OK" from an interpreter nobody can identify is
+    # exactly the unverifiable pass the contract handshake exists to prevent,
+    # and on a host where several builds all answer `repro 0.1.3` the path is
+    # the only thing that says which one evaluated this push.
+    result.add("  repro_dispatch_attribution\n")
+  else:
+    result.add("  if [ \"$REPRO_STATUS\" -ne 0 ]; then " &
+      "repro_dispatch_attribution; fi\n")
   result.add("  exit $REPRO_STATUS\n")
   result.add("fi\n")
   if hookName == "pre-push":
@@ -40379,9 +40398,29 @@ const
   # The two anchors around the one machine-local value a managed hook body
   # carries. Kept beside the reader rather than inside it so the coupling to
   # `vcsManagedHookBody`'s escape-hatch block is visible from both ends.
+  #
+  # That block writes the line as
+  #   echo <quoteShellPosix("repro hooks: ... REPROBUILD_REPRO=" &
+  #                         quoteShellPosix(author) & " git push")> >&2
+  # and the message always contains spaces, so the outer quoting is always
+  # the single-quoted form. Change one end and the other stops finding the
+  # author: every hook written from a second path of the same build is then
+  # reported as "old or partially upgraded" and `repro push` stops at
+  # hook-preflight. Tripwire: t_repro_push_accepts_hooks_the_same_build_wrote_
+  # from_another_path (tests/integration/t_repro_push_sync_integrates_...).
   ManagedHookAuthorEchoPrefix =
-    "      echo \"repro hooks:        REPROBUILD_REPRO="
-  ManagedHookAuthorEchoSuffix = " git push\" >&2"
+    "      echo 'repro hooks:        REPROBUILD_REPRO="
+  ManagedHookAuthorEchoSuffix = " git push' >&2"
+
+proc unquoteShellPosixWord(quoted: string): string =
+  ## Inverse of `quoteShellPosix` for one word: bare as-is, or `'...'` with
+  ## each embedded quote spelled `'"'"'`. Only ever used to PROPOSE a
+  ## candidate that the caller then re-renders byte-exactly, so a misreading
+  ## can reject a body but never accept one.
+  if quoted.len >= 2 and quoted[0] == '\'' and quoted[^1] == '\'':
+    quoted[1 .. ^2].replace("'\"'\"'", "'")
+  else:
+    quoted
 
 proc managedHookAuthorBin(body: string): string =
   ## The `repro` path an installed managed hook advertises in its escape
@@ -40391,8 +40430,10 @@ proc managedHookAuthorBin(body: string): string =
         line.endsWith(ManagedHookAuthorEchoSuffix) and
         line.len > ManagedHookAuthorEchoPrefix.len +
           ManagedHookAuthorEchoSuffix.len:
-      return line[ManagedHookAuthorEchoPrefix.len ..
-        ^(ManagedHookAuthorEchoSuffix.len + 1)]
+      # Undo the outer (message) quoting, then the inner (path) quoting.
+      let inner = line[ManagedHookAuthorEchoPrefix.len ..
+        ^(ManagedHookAuthorEchoSuffix.len + 1)].replace("'\"'\"'", "'")
+      return unquoteShellPosixWord(inner)
   ""
 
 proc managedHookBodyIsCurrent(hookName, body: string): bool =

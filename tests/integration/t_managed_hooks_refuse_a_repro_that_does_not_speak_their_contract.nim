@@ -59,6 +59,11 @@ import std/[os, osproc, strutils, tempfiles, unittest]
 import repro_test_support
 
 proc q(value: string): string = quoteShell(value)
+# For text that goes INTO an ``sh`` script (the stubs below). ``quoteShell``
+# quotes for the host's command line -- cmd.exe on Windows, which leaves
+# ``C:\...`` bare -- and ``sh`` then eats every backslash, so an ``exec`` of
+# the real binary fails and a marker is written somewhere nobody looks.
+proc qsh(value: string): string = quoteShellPosix(value)
 
 proc runCmd(command: string; cwd = ""): tuple[code: int; output: string] =
   let res = execCmdEx(command, workingDir = cwd,
@@ -106,7 +111,7 @@ proc writeStaleStub(path, marker: string) =
     "  exit 1\n" &
     "fi\n" &
     "if [ \"${1:-}\" = \"hooks\" ] && [ \"${2:-}\" = \"dispatch\" ]; then\n" &
-    "  : > " & q(marker) & "\n" &
+    "  : > " & qsh(marker) & "\n" &
     "  echo \"" & bogusDiagnostic & "\" >&2\n" &
     "  exit 1\n" &
     "fi\n" &
@@ -120,10 +125,10 @@ proc writeContractAwareFailingStub(path, realRepro, marker: string) =
   writeFile(path,
     "#!/usr/bin/env sh\n" &
     "if [ \"${1:-}\" = \"hooks\" ] && [ \"${2:-}\" = \"protocol\" ]; then\n" &
-    "  exec " & q(realRepro) & " \"$@\"\n" &
+    "  exec " & qsh(realRepro) & " \"$@\"\n" &
     "fi\n" &
     "if [ \"${1:-}\" = \"hooks\" ] && [ \"${2:-}\" = \"dispatch\" ]; then\n" &
-    "  : > " & q(marker) & "\n" &
+    "  : > " & qsh(marker) & "\n" &
     "  echo \"" & bogusDiagnostic & "\" >&2\n" &
     "  exit 1\n" &
     "fi\n" &

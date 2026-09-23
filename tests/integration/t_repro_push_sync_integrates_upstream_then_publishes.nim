@@ -22,6 +22,19 @@
 ## auto-integrate: it STOPS (non-zero) with a remedy NAMING the repo, and
 ## publishes nothing (the manifest bare is untouched).
 ##
+## Part 3 — the push preflight accepts hooks the SAME build wrote from ANOTHER
+## path. The managed pre-push body bakes in the path of the binary that ran
+## ``hooks ensure`` (its escape hatch), and ``repro push``'s hook-preflight
+## recovers that path from the body to re-render it byte-exactly. If the
+## generator's quoting of that line and the reader's anchors disagree, every
+## hook written from a second path (build tree vs. installed profile, a moved
+## store path) is reported "old or partially upgraded" and the push stops at
+## ``hook-preflight`` -- the refusal 7376fc7fa removed, back again. The case
+## installs the hooks with a relocated copy of the build directory and pushes
+## with the original, then asserts the push was NOT stopped at hook-preflight.
+## It asserts nothing past that stage: on Windows this suite's source push
+## fails for an unrelated, pre-existing reason (Part 1 records it).
+##
 ## Hermetic: only local ``git init`` / ``git init --bare`` repos; no network.
 ## Skip rule: ``git`` missing on PATH.
 
@@ -360,3 +373,40 @@ suite "RA-25 — repro push --sync integrates upstream then publishes":
       # lib's local commit never reached its bare.
       check bareHead(gitBin, fx.manifestBare) == manifestBefore
       discard mateSha
+
+  test "t_repro_push_accepts_hooks_the_same_build_wrote_from_another_path":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = setupFixture(gitBin, "author")
+      defer: removeDir(fx.scratch)
+      # An outgoing commit, made BEFORE the re-anchor below: its post-commit
+      # hook re-runs `hooks ensure` with REPROBUILD_REPRO and would otherwise
+      # put the original path straight back.
+      discard commitFile(gitBin, fx.workspaceRoot / "app", "app-local.txt",
+        "app work\n", "app local work")
+
+      # The same build, at a second path: the whole bin directory, so the thin
+      # client finds its engine (and the engine its DLLs) beside it.
+      let relocatedDir = fx.scratch / "relocated-bin"
+      copyDir(fx.reproBin.parentDir, relocatedDir)
+      let relocatedRepro = relocatedDir / fx.reproBin.extractFilename
+      for path in [fx.workspaceRoot, fx.workspaceRoot / ".repro" / "manifests"]:
+        let reanchored = runShell(shellCommand(@[relocatedRepro, "hooks",
+          "ensure", "--vcs", "--workspace-root=" & path],
+          @[(name: "REPROBUILD_REPRO", value: relocatedRepro)]))
+        checkpoint("re-anchor at " & path & ": " & reanchored.output)
+        check reanchored.code == 0
+      # Precondition, or the case proves nothing: the hook now advertises the
+      # RELOCATED build, so the pushing binary's own rendering differs from it.
+      let managed = fx.workspaceRoot / "app" / ".git" / "hooks" /
+        "pre-push.repro-managed"
+      check relocatedDir in readFile(managed)
+      check fx.reproBin.parentDir notin readFile(managed)
+
+      let res = invokePush(fx, [])
+      checkpoint("push with hooks from another path: " & res.output)
+      check "old or partially upgraded" notin res.output
+      let report = readReport(fx)
+      check report["stoppedStage"].getStr() != "hook-preflight"

@@ -64,15 +64,23 @@
 ##   (R8) the opposite mismatch gets the opposite advice: a binary that DOES
 ##        speak the handshake and merely generates a different hook is handed
 ##        the reinstall command, because for it the reinstall is the fix
+##   (R9) the gate's verdict names the build that produced it, a pass
+##        included
 ##
 ## Hermetic: one ``createTempDir``, a local bare remote, no network.
 ## Skip rule: ``git`` missing on PATH — announced, not silent.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
+import repro_core/cli_images
 import repro_test_support
 
 proc q(value: string): string = quoteShell(value)
+# For text that goes INTO an ``sh`` script (the stubs below). ``quoteShell``
+# quotes for the host's command line -- cmd.exe on Windows, which leaves
+# ``C:\...`` bare -- and ``sh`` then eats every backslash, so an ``exec`` of
+# the real binary fails and a marker is written somewhere nobody looks.
+proc qsh(value: string): string = quoteShellPosix(value)
 
 proc runCmd(command: string; cwd = ""): tuple[code: int; output: string] =
   let res = execCmdEx(command, workingDir = cwd,
@@ -116,7 +124,7 @@ proc writeStaleStub(path, marker: string) =
     "  exit 1\n" &
     "fi\n" &
     "if [ \"${1:-}\" = \"hooks\" ] && [ \"${2:-}\" = \"dispatch\" ]; then\n" &
-    "  : > " & q(marker) & "\n" &
+    "  : > " & qsh(marker) & "\n" &
     "  exit 1\n" &
     "fi\n" &
     "exit 0\n")
@@ -198,7 +206,20 @@ suite "a stale repro's refusal names a remedy that does not disarm the gate":
         if line.startsWith("repro hooks:"):
           check '<' notin line
           check '>' notin line
-      check ("REPROBUILD_REPRO=" & reproBin) in msg
+      # POSIX-quoted, because the command is typed into a POSIX shell. On
+      # Linux and macOS the build path needs no quoting and this is the bare
+      # path. On Windows it is ``'C:\...\repro.exe'`` -- and before the body
+      # quoted it that way, the line was not printed there at all: ``sh`` read
+      # the unquoted path with its backslashes eaten, and ``[ -x ... ]`` said no.
+      #
+      # The path is the ENGINE's (``reprobuild``), not ``reproBin``'s:
+      # ``repro`` is the thin client, and ``hooks ensure`` is not routable, so
+      # it execs the engine and the engine bakes in its own ``getAppFilename``.
+      # Comparing against ``reproBin`` passed on POSIX only by accident --
+      # ``.../bin/repro`` is a prefix of ``.../bin/reprobuild`` -- and failed
+      # on Windows, where ``repro.exe`` is not a prefix of ``reprobuild.exe``.
+      let hookAuthor = reproBin.parentDir / reprobuildEngineExeName()
+      check ("REPROBUILD_REPRO=" & quoteShellPosix(hookAuthor) & " git push") in msg
       check "git push" in msg
 
       # (R4) the refusal must never TELL the operator to reinstall the hooks
@@ -259,7 +280,12 @@ suite "a stale repro's refusal names a remedy that does not disarm the gate":
       check differentPush.code != 0
       # Here the reinstall IS the remedy, and it is offered as a command that
       # names the binary and this repository — not forbidden, not templated.
-      check (differentStub & " hooks ensure --vcs " & repoPath) in dmsg
+      # The repository is named the way the hook learns it -- git's own
+      # ``--show-toplevel`` -- which on Windows is ``C:/...`` while
+      # ``createTempDir`` spells the same directory ``C:\...``.
+      let repoTop = requireGit(q(gitBin) & " -C " & q(repoPath) &
+        " rev-parse --show-toplevel").strip()
+      check (differentStub & " hooks ensure --vcs " & repoTop) in dmsg
       # ... and the "it predates the handshake" story must NOT be told about a
       # binary that just proved it does not.
       check "predates this handshake" notin dmsg
@@ -270,4 +296,10 @@ suite "a stale repro's refusal names a remedy that does not disarm the gate":
         @[(name: "REPROBUILD_REPRO", value: reproBin)]))
       checkpoint("(R7) real-binary push output:\n" & realPush.output)
       check "could not be evaluated" notin realPush.output
+      # (R9) whatever the gate decided, the output names the build that
+      # decided it. A pass is attributed too: an OK from an unidentified
+      # interpreter is the unverifiable pass the handshake exists to prevent.
+      # This push leaves an initialized workspace out of the fixture, so the
+      # gate PASSES here -- the case that used to print no attribution at all.
+      check ("pre-push above was produced by " & reproBin) in realPush.output
       check "--no-verify" notin realPush.output
