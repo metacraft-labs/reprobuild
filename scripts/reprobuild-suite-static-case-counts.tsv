@@ -67,6 +67,7 @@ libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim	nim	3
 libs/repro_build_engine/tests/t_inherited_environment_cache.nim	nim	6
 libs/repro_build_engine/tests/t_m4_publisher_path_stores_output_blobs.nim	nim	8
 libs/repro_build_engine/tests/t_m9r73_session_invalidation_reaches_every_consumer.nim	nim	4
+libs/repro_build_engine/tests/t_monitor_shim_resolver_memo_keys_its_inputs.nim	nim	3
 libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim	nim	13
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
