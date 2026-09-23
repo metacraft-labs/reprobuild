@@ -12,6 +12,9 @@ self-hosted-runner:
     # matrix, so those uses reach actionlint as an expression rather than a
     # literal -- they are listed here anyway so a literal use stays checked.
     - eph-linux-x64
+    # Dedicated release runner class (release.yml `plan`, `publish-release`
+    # and the Linux leg of release-platforms.json).
+    - eph-linux-x64-release
     - eph-linux-arm64
     - eph-macos-arm64
     - eph-win-x64
@@ -19,3 +22,6 @@ self-hosted-runner:
     # Persistent bare-metal NixOS host (ci.yml's monitor/benchmark leg).
     - bare-metal
     - nixos
+    # Persistent Windows runners with a provisioned dev environment (the
+    # Windows leg of release-platforms.json).
+    - dev-env-ready
