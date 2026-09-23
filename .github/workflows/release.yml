@@ -129,6 +129,26 @@ jobs:
     name: ${{ matrix.os-name }} (${{ matrix.arch }}) Release Build
     needs: plan
     runs-on: ${{ matrix.runner }}
+    env:
+      # Per-edge lines instead of a repainting bar, on every leg.
+      #
+      # The default (`bar-line`) redraws one status line in place. A terminal
+      # collapses those repaints; a CI log keeps every one of them, and the bar
+      # ELIDES the very thing a stuck build needs to name -- it renders the
+      # running action's path truncated to terminal width
+      # ("C:\actions-runner\_work\re...").
+      #
+      # Measured on the windows leg of run 33641812258: the log was 55k lines,
+      # 50k of them bar repaints, and every single one reported the same
+      # "checked=10/20 running=2" with both running actions unnameable. The leg
+      # then hit the 240-minute cap. From that log it is impossible to say WHICH
+      # two actions were outstanding, or whether they were slow or wedged.
+      #
+      # `simple-lines` writes "Starting: <command>" and "Finished: <command> in
+      # <duration> [SUCCESS|FAILED]", flushed, one line per transition. That
+      # names every action in full and times it, which turns "the leg timed out"
+      # into "this action took N minutes" or "this action never finished".
+      REPROBUILD_PROGRESS: simple-lines
     strategy:
       # fail-fast stays false so ONE broken leg still lets the others report.
       # That is a diagnostics choice only -- it no longer affects what gets
