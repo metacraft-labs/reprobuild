@@ -24,7 +24,7 @@
   "platforms": [
     {
       "os-name": "linux",
-      "runner": "eph-linux-x64-release",
+      "runner": ["self-hosted", "linux", "x64", "bare-metal"],
       "env-flavor": "nix",
       "platform": "linux",
       "arch": "x86_64",
