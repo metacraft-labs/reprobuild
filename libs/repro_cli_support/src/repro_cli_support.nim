@@ -12554,6 +12554,17 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
                          renderShell = false): DevEnvEdgeResult =
   var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
+  let toolProvisioning = resolveToolProvisioningWithEnv(tpmUnspecified)
+  # MR5, applied to the dev-env path. `computeDevEnvEdge` may compile the
+  # recipe provider, and that compile is the SAME provider compile edge the
+  # build uses (Development-Environments-And-Control-API.md). `build`,
+  # `develop` and graph inspection all publish the tool-store nim and gcc
+  # before extracting; this path did not, so `repro exec` and `repro shell`
+  # took both from PATH -- which on a Windows host without env.ps1 holds
+  # neither, and failed with `CreateProcessW failed (2)` for `nim c` while
+  # `repro build` of the same recipe succeeded. A no-op outside `tarball`
+  # and `from-source`, so the default activation path pays nothing.
+  ensureBootstrapToolchainEnv(toolProvisioning, resolveStoreRoot() / "tool-store")
   let monitor = publicDevEnvMonitor(publicCliPath)
   computeDevEnvEdge(DevEnvEdgeConfig(
     modulePath: selection.modulePath,
@@ -12567,7 +12578,7 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
     activity: selection.activity,
     lockSliceId: selection.lockSliceId,
     developOverridesPath: selection.developOverridesPath,
-    toolProvisioning: resolveToolProvisioningWithEnv(tpmUnspecified),
+    toolProvisioning: toolProvisioning,
     renderShell: renderShell,
     statsEnabled: selection.statsPath.len > 0))
 
