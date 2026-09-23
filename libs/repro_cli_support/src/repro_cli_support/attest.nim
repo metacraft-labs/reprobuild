@@ -81,6 +81,7 @@ type
     ascExpect
     ascVerify
     ascChallenge
+    ascLaunch
     ascNone ## no or unknown subcommand
 
   AttestCliOptions* = object
@@ -120,6 +121,13 @@ type
     tdxFirmware*: string
     tdxRegisterLog*: string
     tdxPageOrder*: string
+    provider*: string
+    region*: string
+    instanceName*: string
+    instanceShape*: string
+    imageReference*: string
+    subnet*: string
+    sshKeyReference*: string
 
 type
   AttestExitCode* = enum
@@ -185,6 +193,10 @@ Subcommands:
   expect     compute the measurement manifest for an attested image
   challenge  mint a verifier nonce and record when it was minted
   verify     check a runtime report against a measurement policy
+  launch     describe a confidential-instance launch on a public cloud:
+             the provider invocation it would be made with and the
+             expected-measurement identity a policy would pin. It
+             launches nothing and this build carries nothing that could.
 
 repro attest expect --image <dir-or-uki> [options]
       --image PATH                  the image build's output directory, or
@@ -258,6 +270,32 @@ repro attest verify --report-file PATH | --report-url URL [options]
       --json                        print the machine-readable verdict
       --out PATH                    write the verdict instead of printing it
 
+repro attest launch --provider NAME --instance-shape NAME [options]
+      --provider NAME               the cloud (""" & cloudProviderNames() & """)
+      --region NAME                 the region or zone the instance sits in
+      --instance-name NAME          what the instance is called
+      --instance-shape NAME         the instance shape; it decides the
+                                    processor count and which root of trust
+                                    the instance attests with
+      --image-reference REF         the provider's reference to the disk
+                                    image. NOT covered by any launch
+                                    measurement here; see the CLI reference.
+      --subnet ID                   the network the instance is placed on
+      --ssh-key-reference REF       the provider's reference to the operator
+                                    public key
+      --firmware PATH               the confidential-launch firmware image
+      --vcpu-type NAME              the machine model, on a sev-snp shape
+      --guest-policy 0xHEX          the launch policy, on a sev-snp shape
+      --guest-features 0xHEX        the feature word, on a sev-snp shape
+      --td-page-order NAME          the host fold order, on a tdx shape
+      --td-register-log PATH        the measurement record, on a tdx shape
+      --config-fingerprint TOKEN    the recipe's configuration fingerprint
+      --uki PATH                    the unified kernel image
+      --verity-image-digest DIGEST  sha256:<hex> of the root image
+      --verity-root-hash HEX        the dm-verity root hash
+      --out PATH                    write the expected manifest as well as
+                                    printing the plan
+
 Exit codes:
   0  success, or a verdict of `accepted`
   1  a --check mismatch, a verdict of `rejected`, or a runtime failure
@@ -288,6 +326,7 @@ proc parseAttestArgs*(args: seq[string]): AttestCliOptions =
   of "expect": result.sub = ascExpect
   of "verify": result.sub = ascVerify
   of "challenge": result.sub = ascChallenge
+  of "launch": result.sub = ascLaunch
   else:
     raise newException(ValueError,
       "unknown `repro attest` subcommand: " & args[0])
@@ -351,6 +390,17 @@ proc parseAttestArgs*(args: seq[string]): AttestCliOptions =
       result.tdxRegisterLog = valueFor(args, i, "--td-register-log")
     of "--td-page-order":
       result.tdxPageOrder = valueFor(args, i, "--td-page-order")
+    of "--provider": result.provider = valueFor(args, i, "--provider")
+    of "--region": result.region = valueFor(args, i, "--region")
+    of "--instance-name":
+      result.instanceName = valueFor(args, i, "--instance-name")
+    of "--instance-shape":
+      result.instanceShape = valueFor(args, i, "--instance-shape")
+    of "--image-reference":
+      result.imageReference = valueFor(args, i, "--image-reference")
+    of "--subnet": result.subnet = valueFor(args, i, "--subnet")
+    of "--ssh-key-reference":
+      result.sshKeyReference = valueFor(args, i, "--ssh-key-reference")
     of "--out": result.outPath = valueFor(args, i, "--out")
     of "--check": result.checkPath = valueFor(args, i, "--check")
     else:
@@ -646,6 +696,97 @@ proc runAttestChallenge(opts: AttestCliOptions): int =
   AttestExitAccepted
 
 # ---------------------------------------------------------------------
+# launch
+#
+# There is no effector here, and that is the whole design: this
+# subcommand reaches `cloudLaunchPlan`, which takes none and has no
+# route to one. `performCloudLaunch` — the procedure that WOULD hand an
+# invocation on — is not called from this file, and an armed launch
+# needs an effector the caller supplies, which this build does not
+# contain. So the command's "it launches nothing" is a property of what
+# it can reach rather than of a flag it happens not to pass.
+# ---------------------------------------------------------------------
+
+proc readLaunchFileArg(flag, path: string; into: var string): string =
+  ## Read a file a launch parameter names, or return the sentence to
+  ## refuse with. An empty result means it was read.
+  if path.len == 0: return ""
+  if not fileExists(path):
+    return "repro attest launch: no file at " & path & " for " & flag
+  into = readFile(path)
+  ""
+
+proc runAttestLaunch(opts: AttestCliOptions): int =
+  var spec: CloudLaunchSpec
+  if opts.provider.len == 0:
+    stderr.writeLine("repro attest launch: --provider is required; this " &
+      "build describes launches on " & cloudProviderNames())
+    return AttestExitUsage
+  try:
+    spec.provider = cloudProviderFor(opts.provider)
+  except CloudLaunchError as err:
+    stderr.writeLine("repro attest launch: " & err.msg)
+    return AttestExitUsage
+
+  spec.region = opts.region
+  spec.instanceName = opts.instanceName
+  spec.instanceShape = opts.instanceShape
+  spec.imageReference = opts.imageReference
+  spec.subnet = opts.subnet
+  spec.sshKeyReference = opts.sshKeyReference
+  spec.machineModel = opts.vcpuType
+  spec.guestPolicy = opts.guestPolicy
+  spec.guestFeatures = opts.guestFeatures
+  spec.foldOrder = opts.tdxPageOrder
+  spec.configFingerprint = opts.configFingerprint
+  spec.verityImageDigest = opts.verityImageDigest
+  spec.verityRootHash = opts.verityRootHash
+
+  for pair in [("--firmware", opts.firmware), ("--uki", opts.uki),
+               ("--td-register-log", opts.tdxRegisterLog)]:
+    var into = ""
+    let complaint = readLaunchFileArg(pair[0], pair[1], into)
+    if complaint.len > 0:
+      stderr.writeLine(complaint)
+      return AttestExitUsage
+    case pair[0]
+    of "--firmware": spec.firmware = into
+    of "--uki": spec.ukiImage = into
+    else: spec.registerLog = into
+
+  var plan: seq[string] = @[]
+  var manifestText = ""
+  try:
+    plan = checkedCloudLaunchPlan(spec)
+    manifestText = cloudExpectedManifestText(spec)
+  except CloudLaunchError as err:
+    stderr.writeLine("repro attest launch: " & err.msg)
+    return AttestExitUsage
+  except SnpLaunchError as err:
+    stderr.writeLine("repro attest launch: " & err.msg)
+    return AttestExitUsage
+  except TdxLaunchError as err:
+    stderr.writeLine("repro attest launch: " & err.msg)
+    return AttestExitUsage
+  except TcgEventLogError as err:
+    stderr.writeLine("repro attest launch: " & opts.tdxRegisterLog & ": " &
+      err.msg)
+    return AttestExitUsage
+  except ManifestError as err:
+    stderr.writeLine("repro attest launch: " & err.msg)
+    return AttestExitUsage
+
+  var outcome = CloudLaunchOutcome(plan: plan, manifestText: manifestText,
+    identity: DigestPrefix & sha256Hex(manifestText))
+  if opts.outPath.len > 0:
+    let dir = opts.outPath.parentDir
+    if dir.len > 0 and not dirExists(dir): createDir(dir)
+    writeFile(opts.outPath, manifestText)
+    echo "wrote " & opts.outPath
+  stdout.write(renderCloudLaunchPlanText(outcome))
+  AttestExitAccepted
+
+# ---------------------------------------------------------------------
 # verify
 # ---------------------------------------------------------------------
 
@@ -786,6 +927,7 @@ proc runAttestCommand*(args: seq[string]): int =
   of ascExpect: runAttestExpect(opts)
   of ascVerify: runAttestVerify(opts)
   of ascChallenge: runAttestChallenge(opts)
+  of ascLaunch: runAttestLaunch(opts)
   of ascNone:
     stderr.write(renderAttestUsage())
     AttestExitUsage

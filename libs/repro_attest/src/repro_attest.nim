@@ -69,6 +69,12 @@
 ##     request, and the reader that turns the host's GUID-indexed
 ##     certificate table into the list of certificates an envelope
 ##     carries.
+##   * ``repro_attest/cloud_launch`` — describing a launch on a public
+##     cloud: the parameters a provider is asked for, which of them reach
+##     the expectation a verifier compares against, the provider
+##     invocation such a launch would be made with, and the seam that
+##     invocation would have to travel through. It performs no launch and
+##     this build ships nothing that could.
 ##   * ``repro_attest/tdx_backend`` — the trust-domain backend: the
 ##     driver that hands over the quote a quoting enclave produced, and
 ##     the checks that establish it answers THIS request. It bundles no
@@ -91,7 +97,8 @@ import ./repro_attest/tsm_report
 import ./repro_attest/snp_backend
 import ./repro_attest/tdx_backend
 import ./repro_attest/sealing
+import ./repro_attest/cloud_launch
 
 export measurement, snp_launch, tdx_launch, tpm2, event_log, manifest,
        binding, report, driver, provision, mock_backend, tpm2_backend,
-       tsm_report, snp_backend, tdx_backend, sealing
+       tsm_report, snp_backend, tdx_backend, sealing, cloud_launch

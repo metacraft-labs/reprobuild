@@ -6,18 +6,21 @@
 ## On a processor that supports neither confidential-computing
 ## technology `/sys/kernel/config/tsm/report` does not exist, and no
 ## document is ever obtained from a root of trust. That is not hedged
-## anywhere below: one case asserts the absence directly, against the
-## real path, so the limit is a measured fact in the gate's own output
-## rather than a sentence in a comment.
+## anywhere below: one case reads the real path and REPORTS which kind
+## of machine it is running on, so the limit is a measured fact in the
+## gate's own output rather than a sentence in a comment.
 ##
-## **Known limit, recorded here because it must be read before this
-## suite is run anywhere else.** That case and the two census pins below
-## state the absence as an INVARIANT, so this suite is RED on a host that
-## does expose the surface — which is the hardware it describes. It needs
-## a two-armed form: absent, assert the absence; present, assert the live
-## pass. The second arm is deliberately not written here, because a
-## branch nothing can execute is the defect this gate exists to avoid; it
-## belongs in the change that first has such a host to falsify it on.
+## **This suite no longer depends on the host having no such surface,
+## and that was a real defect.** It used to state the absence as an
+## INVARIANT — against the real path, on the live probe, and through the
+## census pins that follow from them — so it was red on exactly the
+## hardware it describes. The repair is not a second arm written blind:
+## every rule about an absent surface is now driven through a root this
+## gate creates the absence of, which is absent on EVERY host, so the
+## census is host-independent. What remains host-dependent is one case
+## that REPORTS which kind of machine this is, and both of its arms are
+## the same probe the cases around it already drive against a directory
+## under this gate's control.
 ##
 ## What that leaves is everything except the one pass a kernel performs,
 ## and it is most of the module:
@@ -448,27 +451,65 @@ suite "the three filesystem operations":
     writeAttribute(b.dir / TsmInblobAttr, boundBytes, "inblob", "<gate>")
     check readFile(b.dir / TsmInblobAttr) == boundBytes
 
-suite "the live surface, on a machine that has none":
-
-  test "THIS MACHINE EXPOSES NO SUCH SURFACE, and the gate says so":
-    # The honest statement, asserted rather than written in a comment.
-    # If this ever fails, this host has grown a confidential-computing
-    # root of trust and everything this gate says about what it could
-    # not exercise needs re-reading.
-    check not dirExists(TsmReportRoot)
+suite "the live surface, whichever kind of machine this is":
 
   test "the probe names the directory an operator should look for":
-    let p = newConfigfsTsmSource().sourceProbe()
+    # Driven through a root this gate KNOWS is absent, not through the
+    # real one. The default root is one value of the same parameter, so
+    # this is the same rule with the same reader; what it stops being
+    # is a statement about the HOST. Written against the real path, this
+    # case and the two below turned the absence of a root of trust into
+    # an invariant, and the suite went red on exactly the hardware it
+    # describes.
+    let b = newBench()
+    let absent = b.dir / "no-such-surface"
+    check not dirExists(absent)
+    let p = newConfigfsTsmSource(root = absent).sourceProbe()
     check not p.ready
-    check TsmReportRoot in p.detail
+    check absent in p.detail
     # And it is the PATH that is named, not merely the fact of absence.
-    check "no " & TsmReportRoot in p.detail
+    check "no " & absent in p.detail
 
   test "asking for a document on such a machine refuses by naming it":
+    let b = newBench()
+    let absent = b.dir / "no-such-surface"
+    check not dirExists(absent)
     let e = refuses(proc () =
-      discard readTsmReport(newConfigfsTsmSource(), boundBytes))
+      discard readTsmReport(newConfigfsTsmSource(root = absent), boundBytes))
     check e.kind == tseSurfaceAbsent
-    check TsmReportRoot in e.msg
+    check absent in e.msg
+
+  test "and the default root is still the one an operator would look at":
+    # What the parameterisation above must not cost: the default has to
+    # remain the real path, or the two cases before this one would be
+    # exercising the rule against a directory nobody has and saying
+    # nothing about the directory everybody does.
+    check newConfigfsTsmSource().entryRoot == TsmReportRoot
+    check TsmReportRoot == "/sys/kernel/config/tsm/report"
+
+  test "what THIS host is, reported rather than assumed":
+    # Two arms, and neither is written blind: each arm's body is the
+    # same probe the cases above and beside it drive against a directory
+    # this gate controls — absent in the two cases above, present in
+    # "a probe on a surface that DOES exist reports ready" below. What
+    # this case adds is which of the two THIS host is, as a report.
+    #
+    # The census no longer depends on the answer, which is the point:
+    # `tseSurfaceAbsent` is reached above through a root that is absent
+    # on every host, so a machine that HAS the surface does not lose a
+    # rule and does not redden this suite.
+    let p = newConfigfsTsmSource().sourceProbe()
+    check TsmReportRoot in p.detail
+    if dirExists(TsmReportRoot):
+      check p.ready
+      checkpoint("this host EXPOSES a confidential-computing report " &
+        "surface; everything this gate says about what it could not " &
+        "exercise needs re-reading, and the live pass is now runnable")
+    else:
+      check not p.ready
+      checkpoint("this host exposes no confidential-computing report " &
+        "surface, so no document here was ever obtained from a root of " &
+        "trust")
 
   test "an entry that cannot be made is refused, and the root is named":
     # The surface EXISTS and is not writable — the shape a machine is in
