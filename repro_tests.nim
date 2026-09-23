@@ -12528,6 +12528,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_snp_agent_backend.nim",
+    binary: "build/test-bin/t_snp_agent_backend",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_snp_chain_requires_amd_root.nim",
     binary: "build/test-bin/t_snp_chain_requires_amd_root",
     defines: @[],
@@ -12539,6 +12548,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_snp_digest_vectors.nim",
     binary: "build/test-bin/t_snp_digest_vectors",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_snp_evidence_reaches_the_verdict.nim",
+    binary: "build/test-bin/t_snp_evidence_reaches_the_verdict",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -12861,6 +12879,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_tdx_agent_backend.nim",
+    binary: "build/test-bin/t_tdx_agent_backend",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_tdx_chain_requires_intel_root.nim",
     binary: "build/test-bin/t_tdx_chain_requires_intel_root",
     defines: @[],
@@ -13097,6 +13124,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_tpm_quote_verifies.nim",
     binary: "build/test-bin/t_tpm_quote_verifies",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_tsm_report_transport.nim",
+    binary: "build/test-bin/t_tsm_report_transport",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

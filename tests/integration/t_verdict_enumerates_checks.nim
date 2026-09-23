@@ -416,20 +416,29 @@ suite "a verdict enumerates every check, and a skip is never a pass":
 
   # -- the checks whose failing branch nothing else reaches -----------
 
-  test "a backend this build cannot read is refused, not skipped":
+  test "evidence that does not read as its backend's document is refused":
+    # This build now ships a reader for every backend in the enum, so
+    # there is no longer an "it carries no reader" answer to reach. What
+    # replaces it is the failing branch of the reader itself: evidence
+    # that is not the vendor's document at all. The outcome a verdict
+    # must reach is the same one — REFUSED, and refused by the native
+    # evidence check rather than skipped past it.
     let prod = parseAttestationPolicy(productionPolicyText(), "<prod>")
     let v = verifyAttestationReport(verificationRequest(
       sevSnpReportText(), prod, some(sampleManifestText())))
     check v.checks[vcNativeEvidence].outcome == coFailed
     check v.checks[vcNativeEvidence].kind == fkViolated
-    check "carries no reader for" in v.checks[vcNativeEvidence].detail
-    check "a verdict on evidence nothing read" in
+    check "did not read as a security-processor attestation report" in
       v.checks[vcNativeEvidence].detail
     check v.decision == vdRejected
     # The tier and the backend are ACCEPTED by this policy, so nothing
     # but the unreadable evidence decided it.
     check v.checks[vcTierAccepted].outcome == coPassed
     check v.checks[vcBackendAccepted].outcome == coPassed
+    # And the reading is NOT caveated as the caller's: the reader that
+    # refused is one this build carries and says so.
+    for c in v.caveats:
+      check "which is not a reader this build carries" notin c
 
   test "mock evidence that does not verify is refused":
     # The mock reader's failing branch: a mock-backend envelope whose

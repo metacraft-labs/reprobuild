@@ -31,14 +31,17 @@
 ##
 ## ## What this gate does NOT establish
 ##
-## That a verifier compares the value. It cannot yet: the measurement
-## check reads a launch measurement out of *evidence*, and this build has
-## no reader for this backend's evidence — reports of this kind are
-## refused as unreadable one layer earlier. So the expectation is
-## published and is in the shape the comparison reads, and the comparison
-## itself has no input on this backend. That is stated here rather than
-## implied away, and the case below pins the shape so the two halves
-## cannot drift apart while they wait for each other.
+## That a verifier compares the value. That claim is made next door, by
+## the gate that drives a genuine report all the way to a verdict row,
+## and it is made there because it needs genuine evidence rather than a
+## computed expectation. What this gate establishes is the other half:
+## the value this build PUBLISHES is the one that comparison reads, and
+## it is the width the report's own field has. The case below pins the
+## shape so the two halves cannot drift apart.
+##
+## (When this was written the comparison had no input at all, because
+## this build carried no reader for this backend's evidence. It carries
+## one now; the division of labour between the two gates is unchanged.)
 ##
 ## ## Mocking
 ##
@@ -351,11 +354,10 @@ suite "the computed launch measurement reaches the published document":
   test "the published value is in the shape the comparison reads":
     # The verifier's measurement check reads `manifest.sevSnp[i]
     # .measurement` and compares it against a launch measurement taken
-    # out of evidence. This build has no reader for this backend's
-    # evidence, so that comparison has no input and this gate does not
-    # claim otherwise. What it does claim is that the value published
-    # here is the one that comparison would read, and that it is the
-    # width the report's own field has.
+    # out of evidence. That the comparison HAPPENS is the neighbouring
+    # gate's claim, made against a genuine report. What this one claims
+    # is that the value published here is the one that comparison reads,
+    # and that it is the width the report's own field has.
     let firmware = readFile(firmwareFile(UpstreamOvmfAmdSevSuffixHex))
     let e = sevSnpExpectationFor(SevSnpLaunchInputs(firmware: firmware,
       vcpus: 1, vcpuType: "EPYC-v4", guestPolicy: 0x30000'u64,

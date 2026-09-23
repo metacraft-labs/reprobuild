@@ -110,6 +110,8 @@ import std/[options, strutils]
 import repro_attest
 
 import ./policy
+import ./snp_chain
+import ./snp_report
 import ./tdx_chain
 import ./tdx_collateral
 import ./tdx_quote
@@ -173,6 +175,11 @@ const
     ## Named for the wire format rather than for a schema of this
     ## project's, because the bytes it reads are Intel's and no envelope
     ## of ours wraps them.
+
+  SnpReaderName* = "amd.sev-snp-attestation-report.v2-v3 reader"
+    ## Named for the wire format for the same reason the line above is:
+    ## the bytes are the vendor's, the document is the vendor's, and no
+    ## envelope of this project's wraps them.
 
   LaunchMeasurementBank* = TpmAlgSha256
     ## The bank the measurement manifest's launch expectations are
@@ -543,11 +550,106 @@ proc readTdxEvidence(r: AttestationReport;
     "chain speaks for — whether the chain is one to believe is the " &
     "certificate-chain check's question and not this one's. " & tcbNote)
 
-proc unreadableBackend(backend: AttestationBackend): CheckFinding =
-  violated("this build carries no reader for " & ($backend).escape() &
-    " evidence, so nothing parsed the only authoritative field this " &
-    "report has; a verdict on evidence nothing read would be a verdict " &
-    "on nothing")
+proc readSnpEvidence(r: AttestationReport;
+                     inputs: var AuthoritativeInputs): CheckFinding =
+  ## The security-processor reader: one signature, one binding, and the
+  ## three facts a verdict downstream needs.
+  ##
+  ## ## What it establishes
+  ##
+  ## That the report's launch measurement, its trusted-computing-base
+  ## version and its 64 bound bytes were signed by the key of the
+  ## endorsement certificate this report bundles. That is one
+  ## public-key operation over the document's own signed prefix, and it
+  ## is what turns those three fields from things a machine said into
+  ## things a certified key said.
+  ##
+  ## ## What it does NOT establish, and why that is a different check
+  ##
+  ## **Who issued that certificate.** It comes out of the report's own
+  ## bundle, so this reader can say the report and the certificate agree
+  ## and nothing more. Whether the chain reaches a root this build holds
+  ## the key of is `checkCertificateChain`'s question, asked against
+  ## `snp_chain`'s pinned roots with no anchor anybody can supply. A
+  ## reading that reported "signature checked" without saying that would
+  ## be read as more than it is, so the finding names the certificate it
+  ## checked against and leaves the judgement where it belongs.
+  ##
+  ## ## A report bundling no chain is refused, and the trust-domain
+  ## reader beside it is not
+  ##
+  ## The asymmetry is in the documents, not in this build's appetite. A
+  ## trust-domain quote carries its endorsement chain INSIDE the signed
+  ## bytes, so there is always a key to check it against. A
+  ## security-processor report carries no key material at all: with no
+  ## bundled chain there is nothing to verify the signature under, and
+  ## every field this reader would hand on would be a field the machine
+  ## being judged chose for itself — including the launch measurement,
+  ## which the manifest check would then compare against a published
+  ## expectation and report as matching.
+  ##
+  ## So this reader refuses rather than reading what it can. That is the
+  ## fail-closed direction, and it is the same one an absent collateral
+  ## bundle takes next door.
+  inputs.readerName = SnpReaderName
+  var report: SnpReport
+  try:
+    report = parseSnpReport(toOpenArrayByte(authoritativeEvidence(r), 0,
+      authoritativeEvidence(r).len - 1))
+  except SnpReportError as err:
+    return violated("the evidence did not read as a security-processor " &
+      "attestation report: " & err.msg)
+  except CatchableError as err:
+    return violated("the evidence did not read as a security-processor " &
+      "attestation report: " & err.msg)
+
+  if not r.hasBundledCertificates or inputs.certificates.len == 0:
+    # The second disjunct is not reachable through the envelope's own
+    # parser, which refuses a present-but-empty chain. It is here
+    # because this reader indexes element zero two lines below and the
+    # input is a document the machine being judged wrote: a verifier
+    # that could be made to read past the end of a sequence by a report
+    # is a verifier an attacker can stop. It has an input in the gate,
+    # which builds the value directly rather than through the parser.
+    return violated("this report bundles no certificate chain, and a " &
+      "security-processor attestation report carries no key material of " &
+      "its own; so there is nothing to check its signature under, and " &
+      "every field in it would be a field the machine being judged chose " &
+      "for itself")
+
+  let endorsementDer = inputs.certificates[0]
+  var leaf: AmdCert
+  try:
+    leaf = parseAmdCertificate(
+      toOpenArrayByte(endorsementDer, 0, endorsementDer.len - 1))
+  except X509Error as err:
+    return violated("the first bundled certificate does not read as an " &
+      "endorsement certificate, so there is no key to check this " &
+      "report's signature against: " & err.msg)
+
+  if not verifyReportSignature(report, leaf.ecPoint):
+    return violated("the report does not verify under the key of " &
+      describeName(leaf.subjectDn, leaf.subjectCn) &
+      ", the endorsement certificate this report bundles for it")
+
+  inputs.launchMeasurement = some(hexOf(report.measurement))
+  inputs.reportDataInEvidence = some(hexOf(report.reportData))
+  inputs.sevSnpTcb = some(SevSnpTcbMinimum(
+    bootloader: report.reportedTcb.bootloader,
+    tee: report.reportedTcb.tee,
+    snp: report.reportedTcb.snp,
+    microcode: report.reportedTcb.microcode))
+  inputs.attestationKeySubject =
+    some(describeName(leaf.subjectDn, leaf.subjectCn))
+
+  satisfied("the evidence is a version-" & $report.version &
+    " security-processor attestation report signed by the " &
+    $report.signingKey & " of " &
+    describeName(leaf.subjectDn, leaf.subjectCn) &
+    "; so the launch measurement, the platform version and the 64 bound " &
+    "bytes read out of it are values that key speaks for; whether that " &
+    "certificate is one to believe is the certificate-chain check's " &
+    "question and not this one's")
 
 proc readAuthoritativeEvidence*(r: AttestationReport;
                                 collateral: TdxCollateralBundle =
@@ -560,6 +662,13 @@ proc readAuthoritativeEvidence*(r: AttestationReport;
   ## than a table something can register into. A registry would be the
   ## seam through which a caller installs a reader that vouches for
   ## anything, which is a verifier bypass wearing a reader's clothes.
+  ##
+  ## Every arm now names a reader this build ships. There is no longer a
+  ## "this build carries no reader" answer, and the branch that produced
+  ## one has been removed rather than left standing: a branch nothing
+  ## can reach is a sentence nobody will ever read, and the next backend
+  ## added to the enum will fail to compile here instead of quietly
+  ## inheriting it.
   result.inputs = projectEnvelope(r)
   case r.backend
   of abMock:
@@ -570,8 +679,7 @@ proc readAuthoritativeEvidence*(r: AttestationReport;
     result.finding = readTdxEvidence(r, result.inputs, collateral,
       haveCollateral)
   of abSevSnp:
-    result.inputs.readerName = "none"
-    result.finding = unreadableBackend(r.backend)
+    result.finding = readSnpEvidence(r, result.inputs)
 
 proc describeMockChain*(inputs: AuthoritativeInputs): CheckFinding =
   ## What a bundled mock chain is worth, checked against literals of this

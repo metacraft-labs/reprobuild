@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1715,
+    "nimTestBinaries": 1719,
     "pureUnitConsolidationGroups": 51,
     "pureUnitTests": 605,
     "staticallyDetectedRuntimeCompilerFlowTests": 106,
-    "testEntries": 1726
+    "testEntries": 1730
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1127,7 +1127,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 816,
+      "integration": 820,
       "platform/destructive": 113,
       "pure unit": 605,
       "unclassified": 180
@@ -1278,9 +1278,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1715,
+    "nimTestBinaryCount": 1719,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1726
+    "testEntryCount": 1730
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -31057,6 +31057,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_snp_agent_backend",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_snp_agent_backend.nim",
+      "sourceSuiteCount": 9,
+      "staticCaseCount": 42,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_snp_chain_requires_amd_root",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -31087,6 +31105,24 @@
       "source": "tests/integration/t_snp_digest_vectors.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 16,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_snp_evidence_reaches_the_verdict",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_snp_evidence_reaches_the_verdict.nim",
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31691,6 +31727,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_tdx_agent_backend",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tdx_agent_backend.nim",
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 28,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_tdx_chain_requires_intel_root",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -32163,6 +32217,23 @@
       "source": "tests/integration/t_tpm_quote_verifies.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tsm_report_transport",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tsm_report_transport.nim",
+      "sourceSuiteCount": 9,
+      "staticCaseCount": 38,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

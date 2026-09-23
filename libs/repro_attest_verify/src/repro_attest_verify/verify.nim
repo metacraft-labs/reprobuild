@@ -48,12 +48,18 @@
 ##
 ## ## The embedding seam
 ##
-## ``verifyWithReading`` takes a reading a *caller* performed, for a
-## backend this build carries no reader for. That is the API a downstream
-## broker with its own SEV-SNP verifier plugs into, and it is not a
-## bypass of anything: the caller supplies only the six facts a reader
-## produces, and the envelope's tier, backend, challenge and bindings are
-## re-projected from the report here rather than taken from the reading.
+## ``verifyWithReading`` takes a reading a *caller* performed. This
+## build now ships a reader for every backend the schema names, so the
+## seam is no longer about a backend nobody here can parse; what it is
+## about is a reader that establishes MORE than this build's does. The
+## security-processor reader, for instance, refuses a report that
+## bundles no chain, because it has no way to fetch the endorsement
+## certificate for one; a broker that fetches from the vendor's key
+## distribution service can read what this build cannot and plug the
+## result in here. It is not a bypass of anything: the caller supplies
+## only the six facts a reader produces, and the envelope's tier,
+## backend, challenge and bindings are re-projected from the report here
+## rather than taken from the reading.
 ## A reading that disagreed with the report about what tier it is cannot
 ## make the verdict disagree. The reader's name is recorded in the
 ## verdict and a reader this build does not carry earns a caveat, so a
@@ -143,8 +149,8 @@ const
     ## ``SoftwareRootTestChainSymbol`` in ``trust.nim`` for why a spelling
     ## has to be readable from the build that lacks the symbol.
 
-  BuiltInReaders*: array[3, string] =
-    [MockReaderName, Tpm2ReaderName, TdxReaderName]
+  BuiltInReaders*: array[4, string] =
+    [MockReaderName, Tpm2ReaderName, TdxReaderName, SnpReaderName]
     ## The readers this build carries. A verdict whose evidence was read
     ## by anything else is caveated, because it rests on a claim the
     ## caller made rather than on code that shipped here.
@@ -156,7 +162,10 @@ const
     ## here and does not ship would drop a caveat that is true. The
     ## trust-domain reader was missing from it for exactly as long as it
     ## existed, and a gate now asserts the absence of that caveat on a
-    ## verdict this build's own reader produced.
+    ## verdict this build's own reader produced. The security-processor
+    ## reader arrived with that lesson already paid for: it is named
+    ## here in the same change that added it, and the same gate shape
+    ## holds it there.
 
 # ---------------------------------------------------------------------
 # The individual checks

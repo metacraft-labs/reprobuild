@@ -58,6 +58,22 @@
 ##     ``reproos.tpm2-evidence.v1`` composite that carries a quote, its
 ##     signature and the TCG event log as one blob, and the driver that
 ##     assembles it.
+##   * ``repro_attest/tsm_report`` — the kernel's unified
+##     attestation-report directory: the write-then-read pass a
+##     confidential guest makes over it, and the counter discipline that
+##     makes the document it reads back an answer to the question it
+##     asked rather than to a question another process asked.
+##   * ``repro_attest/snp_backend`` — the security-processor backend:
+##     the driver that hands over the document a confidential guest's
+##     firmware signed, the checks that establish it answers THIS
+##     request, and the reader that turns the host's GUID-indexed
+##     certificate table into the list of certificates an envelope
+##     carries.
+##   * ``repro_attest/tdx_backend`` — the trust-domain backend: the
+##     driver that hands over the quote a quoting enclave produced, and
+##     the checks that establish it answers THIS request. It bundles no
+##     certificates, because a trust-domain quote carries its own chain
+##     inside the signed document.
 
 import ./repro_attest/measurement
 import ./repro_attest/snp_launch
@@ -71,8 +87,11 @@ import ./repro_attest/driver
 import ./repro_attest/provision
 import ./repro_attest/mock_backend
 import ./repro_attest/tpm2_backend
+import ./repro_attest/tsm_report
+import ./repro_attest/snp_backend
+import ./repro_attest/tdx_backend
 import ./repro_attest/sealing
 
 export measurement, snp_launch, tdx_launch, tpm2, event_log, manifest,
        binding, report, driver, provision, mock_backend, tpm2_backend,
-       sealing
+       tsm_report, snp_backend, tdx_backend, sealing
