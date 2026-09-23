@@ -152,7 +152,7 @@ stdenv.mkDerivation {
 
     # `nimpretty` is the FORMATTER half of the toolchain, and it has to come
     # from the FORK for the same reason the compiler does. `scripts/
-    # format_sources.sh` (and therefore `just format`, a command CLAUDE.md
+    # format_sources.sh` (and therefore `just format`, a command AGENTS.md
     # documents) guards its nimpretty arm with `command -v nimpretty`, and this
     # derivation shipped none — the fork's `bin/` carries only `nim`, `nim-gdb`
     # and `nim-gdb.bat` — so `just format` formatted `flake.nix` and exited 0

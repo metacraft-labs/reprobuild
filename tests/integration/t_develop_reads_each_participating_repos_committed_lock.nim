@@ -27,7 +27,7 @@
 ##
 ## The composer nevertheless read exactly that one path. In a workspace where
 ## every participating repo commits its own `repro.lock` — the shape the
-## workspace CLAUDE.md describes ("Locking is **per repo**: each participating
+## workspace AGENTS.md describes ("Locking is **per repo**: each participating
 ## repo commits its own `repro.lock` … There is no workspace-wide lock file and
 ## no shared lock index") — the union therefore came out EMPTY, and since "An
 ## empty union … is the only lock-set failure" every consumer downstream failed

@@ -13,7 +13,7 @@
 # is the 2.3.1 fork built by nix/pkgs/by-name/re/reprobuild/nim-fork.nix,
 # whose `bin/` shipped `nim`, `nim-gdb` and `nim-gdb.bat` and nothing
 # else. So `just format` — a command
-# CLAUDE.md documents — formatted `flake.nix`, exited 0, and touched ZERO Nim
+# AGENTS.md documents — formatted `flake.nix`, exited 0, and touched ZERO Nim
 # files. A formatter that reports success without running is worse than no
 # formatter, because the next reader concludes the tree is formatted.
 #

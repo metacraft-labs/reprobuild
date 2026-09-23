@@ -35622,7 +35622,7 @@ type
     ## model has no place for. Reading only that one path therefore answers
     ## "this workspace has no public lock record at all" for a workspace in
     ## which every participating repo commits one — which is the shape
-    ## CLAUDE.md states outright ("Locking is **per repo**: each participating
+    ## AGENTS.md states outright ("Locking is **per repo**: each participating
     ## repo commits its own `repro.lock` … There is no workspace-wide lock file")
     ## and which CLI/develop.md §"The Develop Set Is The Workspace Lock Set"
     ## legislates for directly:
