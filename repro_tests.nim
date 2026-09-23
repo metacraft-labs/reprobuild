@@ -12294,6 +12294,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_repro_test_runner_survives_its_binary_being_replaced.nim",
+    binary: "build/test-bin/t_repro_test_runner_survives_its_binary_being_replaced",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_reproos_source_bridge_inventory.nim",
     binary: "build/test-bin/t_reproos_source_bridge_inventory",
     defines: @[],
