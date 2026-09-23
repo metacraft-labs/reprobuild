@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1719,
+    "nimTestBinaries": 1720,
     "pureUnitConsolidationGroups": 51,
     "pureUnitTests": 605,
     "staticallyDetectedRuntimeCompilerFlowTests": 106,
-    "testEntries": 1730
+    "testEntries": 1731
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1128,7 +1128,7 @@
     "classificationCounts": {
       "graph-fixture": 12,
       "integration": 820,
-      "platform/destructive": 113,
+      "platform/destructive": 114,
       "pure unit": 605,
       "unclassified": 180
     },
@@ -1278,9 +1278,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1719,
+    "nimTestBinaryCount": 1720,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1730
+    "testEntryCount": 1731
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -37018,6 +37018,21 @@
       "source": "tests/unit/test_reprobuild_suite_inventory.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 90,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_expand_archive_boundary_support",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/windows",
+      "requiresReproBinary": false,
+      "source": "tests/windows/t_expand_archive_boundary_support.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
