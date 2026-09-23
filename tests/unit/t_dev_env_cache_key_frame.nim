@@ -110,7 +110,16 @@ suite "dev-env cache key frame":
 
     putEnv("REPRO_DEVELOP_OVERRIDES_FILE", "/some/where")
     delEnv("REPRO_TOOL_PROVISIONING")
-    defer: delEnv("REPRO_DEVELOP_OVERRIDES_FILE")
+    # The ambient store root must not leak into the pinned payload: set it
+    # to a known value so the `REPRO_STORE_ROOT` part is exercised with a
+    # value rather than only as `<unset>`, and restore it afterwards.
+    let savedStoreRoot = getEnv("REPRO_STORE_ROOT")
+    let hadStoreRoot = existsEnv("REPRO_STORE_ROOT")
+    putEnv("REPRO_STORE_ROOT", "/some/store")
+    defer:
+      delEnv("REPRO_DEVELOP_OVERRIDES_FILE")
+      if hadStoreRoot: putEnv("REPRO_STORE_ROOT", savedStoreRoot)
+      else: delEnv("REPRO_STORE_ROOT")
 
     for activity in ["", "build", "shell"]:
       for lockSliceId in ["", "slice-1"]:
@@ -125,7 +134,8 @@ suite "dev-env cache key frame":
           "developOverrides=" &
             fingerprintPart(os.normalizedPath(absolutePath(overrides))),
           envPart("REPRO_DEVELOP_OVERRIDES_FILE"),
-          envPart("REPRO_TOOL_PROVISIONING")
+          envPart("REPRO_TOOL_PROVISIONING"),
+          envPart("REPRO_STORE_ROOT")
         ]
         check computeDevEnvEdgeCacheKey(root, activity, lockSliceId,
           overrides) == expectedKey(parts.join("\n"))
@@ -163,3 +173,9 @@ suite "dev-env cache key frame":
     putEnv("REPRO_TOOL_PROVISIONING", "on")
     note(computeDevEnvEdgeCacheKey(root, "build", "s1", overrides))
     delEnv("REPRO_TOOL_PROVISIONING")
+    let savedStoreRoot = getEnv("REPRO_STORE_ROOT")
+    let hadStoreRoot = existsEnv("REPRO_STORE_ROOT")
+    putEnv("REPRO_STORE_ROOT", root / "other-store")
+    note(computeDevEnvEdgeCacheKey(root, "build", "s1", overrides))
+    if hadStoreRoot: putEnv("REPRO_STORE_ROOT", savedStoreRoot)
+    else: delEnv("REPRO_STORE_ROOT")
