@@ -122,6 +122,73 @@ proc completeTheIndex(f: var Fixture; weak: ContentDigest) =
   removeFile(f.aliasPath(weak))
   discard f.cache.readHotRecord(weak)
 
+const ShmIndexDisableEnv = "REPRO_ACTION_CACHE_SHM"
+  ## The store's own opt-out switch, spelled out here for the same reason
+  ## `aliasPath` spells out the alias name rather than importing it: a test
+  ## that took the name from the implementation could not notice the
+  ## implementation renaming it.
+
+proc indexArmDisabledByEnv(): bool =
+  ## `repro_local_store.shmTierEnabledByEnv`, inverted. Kept in step with it
+  ## by value, not by import, for the reason above; the default is ON, so
+  ## only an explicitly falsey setting counts as an opt-out.
+  getEnv(ShmIndexDisableEnv, "1").toLowerAscii() in ["0", "off", "false", "no"]
+
+template onTheIndexArm(f: untyped; body: untyped) =
+  ## Run `body` against the Tier-2 index arm, or say — by name, in the
+  ## result document — why the arm went unexercised.
+  ##
+  ## WHY THIS IS NOT `if not attached: skip()`, WHICH IT WAS.
+  ##
+  ## The entire reason this suite exists is that the suite above it opens
+  ## its fixture with `attachShm = false`, so the arm answering every warm
+  ## build was exercised by nothing while the file reported green. A bare
+  ## `skip()` here reproduces that same defect one level up: on any host
+  ## where the attach fails, these cases report SKIPPED with no reason, the
+  ## run is still green, and nobody is told that the arm this suite was
+  ## written to cover was not run. A coverage hole that announces itself as
+  ## a pass is the exact failure being closed.
+  ##
+  ## So `attached == false` is not one condition. It is three, and they do
+  ## not deserve the same answer:
+  ##
+  ## * The platform has no chain management at all — `actionIndexSupported`
+  ##   is false on Windows and on anything that is neither Linux nor macOS,
+  ##   because the arm is built on `link(2)` and `flock(2)`. The arm does
+  ##   not exist here, so there is nothing to run and nothing is wrong.
+  ##   SKIP, with that as the reason.
+  ## * The operator turned it off — `REPRO_ACTION_CACHE_SHM` falsey. The arm
+  ##   exists and was deliberately not attached. SKIP, naming the variable,
+  ##   so a run that skipped these cases can be traced back to the switch
+  ##   that caused it.
+  ## * The platform supports it, nobody opted out, and the attach STILL
+  ##   failed. That is an environment regression — a lost mapping, a sandbox
+  ##   refusing `MAP_SHARED`, a broken anchor — and turning it into a green
+  ##   run is how a suite comes to depend on its host for its coverage.
+  ##   FAIL, and name what was expected.
+  ##
+  ## The third branch is the load-bearing one, and it is why this is not
+  ## simply `skip("shm index not attached")`: that reason would be true in
+  ## all three cases and actionable in none of them.
+  if f.cache.actionIndexCounters().attached:
+    body
+  elif not actionIndexSupported:
+    skip("the Tier-2 action index is compiled out on this platform: it " &
+         "needs POSIX chain management (link(2), flock(2)), so " &
+         "readHotRecord here is Tier-1 only and there is no index arm to " &
+         "exercise")
+  elif indexArmDisabledByEnv():
+    skip(ShmIndexDisableEnv & " is set falsey, which forces the Tier-2 " &
+         "index off, so the arm under test was deliberately not attached; " &
+         "unset it to run this case")
+  else:
+    checkpoint(ShmIndexDisableEnv & " is not disabled and this build has " &
+      "actionIndexSupported = true, so the Tier-2 index was expected to " &
+      "attach and did not. These cases cover the arm that answers every " &
+      "warm build; reporting them as skipped would record a lost " &
+      "accelerator as a green run.")
+    fail()
+
 suite "C1 — the newest candidate is addressable":
 
   test "a consultation decodes ONE record, not every record the edge has":
@@ -325,9 +392,7 @@ suite "C1 — and through the Tier-2 index arm, which runs FIRST":
   test "a consultation decodes ONE record, not every container the index names":
     var f = shmFixture("one-of-n")
     defer: closeFixture(f)
-    if not f.cache.actionIndexCounters().attached:
-      skip()
-    else:
+    onTheIndexArm f:
       let weak = weakOf("index.one-of-n")
       for variant in 0 ..< 6:
         discard f.recordVariant(weak, variant)
@@ -369,9 +434,7 @@ suite "C1 — and through the Tier-2 index arm, which runs FIRST":
     for containerCount in [1, 2, 8, 11]:
       var f = shmFixture("agree-" & $containerCount)
       defer: closeFixture(f)
-      if not f.cache.actionIndexCounters().attached:
-        skip()
-      else:
+      onTheIndexArm f:
         let weak = weakOf("index.agree." & $containerCount)
         for variant in 0 ..< containerCount:
           discard f.recordVariant(weak, variant)
@@ -400,9 +463,7 @@ suite "C1 — and through the Tier-2 index arm, which runs FIRST":
     ## skipped because the walk stopped before reaching it.
     var f = shmFixture("dangling")
     defer: closeFixture(f)
-    if not f.cache.actionIndexCounters().attached:
-      skip()
-    else:
+    onTheIndexArm f:
       let weak = weakOf("index.dangling")
       let oldest = f.recordVariant(weak, 0)
       for variant in 1 ..< 3:
@@ -850,9 +911,7 @@ suite "C1 — the index arm's two premises are CHECKED, not assumed":
   test "a MISFILED container is refused, and the union read's answer stands":
     var f = shmFixture("misfiled")
     defer: closeFixture(f)
-    if not f.cache.actionIndexCounters().attached:
-      skip()
-    else:
+    onTheIndexArm f:
       let weak = weakOf("index.misfiled")
       # The OLDER container, legitimately named: one input, strong S.
       let small = f.recordVariant(weak, 0)
@@ -902,9 +961,7 @@ suite "C1 — the index arm's two premises are CHECKED, not assumed":
   test "a container whose scanned order the DECODE disputes is refused":
     var f = shmFixture("seq-dispute")
     defer: closeFixture(f)
-    if not f.cache.actionIndexCounters().attached:
-      skip()
-    else:
+    onTheIndexArm f:
       let weak = weakOf("index.seq-dispute")
       # Oldest: five inputs. Newest: one input, and the container this case
       # forges over.

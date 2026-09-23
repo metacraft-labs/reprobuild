@@ -1422,6 +1422,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_cargo_test_no_default_features.nim",
+    binary: "build/test-bin/t_cargo_test_no_default_features",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_committed_lock_pins_versions.nim",
     binary: "build/test-bin/t_committed_lock_pins_versions",
     defines: @[],
