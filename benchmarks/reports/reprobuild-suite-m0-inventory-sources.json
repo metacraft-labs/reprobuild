@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1714,
+    "nimTestBinaries": 1715,
     "pureUnitConsolidationGroups": 51,
-    "pureUnitTests": 604,
+    "pureUnitTests": 605,
     "staticallyDetectedRuntimeCompilerFlowTests": 106,
-    "testEntries": 1725
+    "testEntries": 1726
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -134,21 +134,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 2,
-      "defines": [],
-      "dependencyShape": [
-        "repro_dsl_stdlib",
-        "repro_lock_files"
-      ],
-      "owner": "libs/repro_dsl_stdlib",
-      "sources": [
-        "libs/repro_dsl_stdlib/tests/t_doc_comment_position_from_first_line.nim",
-        "libs/repro_dsl_stdlib/tests/t_doc_comment_reaches_listing_and_diagnostic.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 29,
+      "count": 30,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -156,6 +142,7 @@
       ],
       "owner": "libs/repro_dsl_stdlib",
       "sources": [
+        "libs/repro_dsl_stdlib/tests/t_cargo_test_no_default_features.nim",
         "libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim",
         "libs/repro_dsl_stdlib/tests/t_m68_baseline_catalog.nim",
         "libs/repro_dsl_stdlib/tests/t_nde0a_apt_jammy.nim",
@@ -185,6 +172,20 @@
         "libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim",
         "libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim",
         "libs/repro_dsl_stdlib/tests/t_shell_extra_env.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_lock_files"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "sources": [
+        "libs/repro_dsl_stdlib/tests/t_doc_comment_position_from_first_line.nim",
+        "libs/repro_dsl_stdlib/tests/t_doc_comment_reaches_listing_and_diagnostic.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1128,7 +1129,7 @@
       "graph-fixture": 12,
       "integration": 816,
       "platform/destructive": 113,
-      "pure unit": 604,
+      "pure unit": 605,
       "unclassified": 180
     },
     "graphOwnedTestArtifacts": [
@@ -1277,9 +1278,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1714,
+    "nimTestBinaryCount": 1715,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1725
+    "testEntryCount": 1726
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9138,6 +9139,24 @@
       "source": "libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cargo_test_no_default_features",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_cargo_test_no_default_features.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
