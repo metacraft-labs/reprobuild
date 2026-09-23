@@ -43213,10 +43213,27 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   # `post-commit` shares `post-checkout`'s exposure: git fires it for EVERY
   # commit a rebase, a `git am` or a sequencer run replays (observed live,
   # with `rebase-merge` + `CHERRY_PICK_HEAD` present each time). Everything
-  # below writes `repro.lock` into the working tree and spawns a ref push —
-  # into a tree mid-rebase, on a detached HEAD, for a commit the operation is
-  # about to discard. The post-rebase lock is not lost by standing down: the
+  # below writes a lock RECORD and spawns a ref push — for a commit the
+  # operation is about to discard, on a detached HEAD, beside a tree
+  # mid-rebase. The post-rebase record is not lost by standing down: the
   # pre-push gate refreshes it before anything is published.
+  #
+  # THE RECORD, NOT `repro.lock`. This sentence used to read "writes
+  # `repro.lock` into the working tree", and both halves of that were wrong in
+  # the direction that matters. What this proc writes is the OUT-OF-TREE,
+  # SHA-keyed `<manifest-layer>/locks/<project>/<repo>/<sha>.toml` — never the
+  # committed `repro.lock`, and never the working tree at all (see the accurate
+  # note beside the `executeWorkspaceLock` call below, and `VcsHookNames` for
+  # the backend table this follows). "The pre-push gate refreshes it" is true of
+  # that record (§8.2's out-of-tree row, M18) and FALSE of `repro.lock`:
+  # Unified-Locking-And-Hooks.md §13.1 makes the update rule a property of the
+  # BACKEND, and for an in-tree committed lock the gate "verifies only" —
+  # writing it at push time is the self-reference §13.1 shows has no closing
+  # order. Nothing on any hook path writes `repro.lock`; the in-tree artifact
+  # reprobuild DOES maintain at commit time is `flake.lock`, from `pre-commit`
+  # (NF-2, `runPreCommitLockCommand`). Read as it stood, this comment described
+  # a commit-path refresh of `repro.lock` that does not exist and a pre-push
+  # refresh of it that must not.
   let postCommitRepo =
     if parsed.currentRepo.len > 0: parsed.currentRepo
     else: getCurrentDir()   # the managed hook body cd's to the repo root
