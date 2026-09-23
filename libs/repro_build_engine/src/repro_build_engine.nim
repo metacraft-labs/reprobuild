@@ -9158,6 +9158,20 @@ proc monitorShimLibInLibraryPath*(runtimeLibraryPath, dllExt: string;
       return candidate
   ""
 
+const RuntimeLibraryPathEnv = "REPROBUILD_RUNTIME_LIBRARY_PATH"
+
+proc resolveMonitorShimLibForInstallUncached(): string =
+  result = findShimLibrary()
+  if result.len > 0:
+    return result
+  result = monitorShimLibInLibraryPath(
+    getEnv(RuntimeLibraryPathEnv),
+    HostDynamicLibraryExt,
+    proc(path: string): bool = fileExists(extendedPath(path)))
+
+var shimLibMemoKey {.threadvar.}: string
+var shimLibMemoValue {.threadvar.}: string
+
 proc resolveMonitorShimLibForInstall*(): string =
   ## io-mon's four discovery arms, then the package's private libdir.
   ##
@@ -9182,13 +9196,78 @@ proc resolveMonitorShimLibForInstall*(): string =
   ## LAST, so a develop checkout and an operator's explicit override both
   ## keep winning. Empty means "monitoring not configured", which the
   ## caller turns into a bypass rather than into a failure.
-  result = findShimLibrary()
+  ##
+  ## MEMOISED ON ITS OWN INPUTS, not on "the build" or "the process".
+  ## ``launchChildEnv`` runs this once per ACTION -- via
+  ## ``actionEnvResolver`` it is on the WARM NO-OP path, where no action
+  ## executes and the environment is wanted only for the fingerprint.
+  ## Measured on the 37-edge zlib fixture: 37 calls, 1.1 ms of a 33.4 ms
+  ## no-op (3.3%), nearly all of it ``getAppDir``, which is
+  ## ``_NSGetExecutablePath`` followed by a ``realpath`` of every path
+  ## component.
+  ##
+  ## The three things the answer varies with are all in the key:
+  ##
+  ##   * ``$REPRO_MONITOR_SHIM_LIB`` -- the operator pin;
+  ##   * ``$REPROBUILD_RUNTIME_LIBRARY_PATH`` -- the installed-package arm;
+  ##   * the CURRENT DIRECTORY -- io-mon's last discovery arm is
+  ##     ``<cwd>/build/lib``.
+  ##
+  ## ``getAppDir`` is the one input left out, and it is the only one that
+  ## genuinely cannot change inside a process.
+  ##
+  ## Keying rather than scoping is deliberate. A cache scoped to "the
+  ## process" would be WRONG HERE: the user daemon chdirs per request
+  ## (``enterDaemonRequestDirectory``) and applies and restores a
+  ## per-request environment around every build, so a daemon that froze
+  ## this answer on its first request would serve it to every later build
+  ## from a different project directory. A keyed memo cannot do that --
+  ## a changed cwd or a changed override is a MISS, whatever the cache's
+  ## lifetime, and the daemon needs no shutdown or per-build reset hook.
+  ##
+  ## A NEGATIVE ANSWER IS NEVER CACHED. Empty means "monitoring not
+  ## configured" and the caller turns it into a bypass. The filesystem is
+  ## an input this key does not cover, and a build CAN produce the shim
+  ## part-way through -- reprobuild builds its own
+  ## ``build/lib/librepro_monitor_shim.dylib``. Caching the empty answer
+  ## would freeze that bypass for every action after the first, silently
+  ## un-monitoring actions whose recorded inputs then come out
+  ## incomplete. That is a correctness regression, not a speed-up, so the
+  ## empty answer re-probes every time and costs exactly what it costs
+  ## today. A cached POSITIVE has no equivalent hazard: rebuilding the
+  ## shim in place yields the same path.
+  ##
+  ## A CACHED POSITIVE IS STILL RE-EXISTENCE-CHECKED, for 0.5 us against
+  ## the ~15 us the full resolve costs. Without it the memo would quietly
+  ## weaken io-mon's pin contract -- ``findShimLibrary`` RAISES when
+  ## ``$REPRO_MONITOR_SHIM_LIB`` names a file that does not exist, rather
+  ## than falling through to a discovered shim, precisely so a stale pin
+  ## cannot produce a capture from a shim the operator did not ask for.
+  ## A memo that answered from a path that has since been deleted would
+  ## turn that raise into a seed pointing at nothing. One ``fileExists``
+  ## on the way out keeps the contract and costs nothing measurable.
+  ##
+  ## ``{.threadvar.}`` because ``launchChildEnv`` is also reached from the
+  ## scheduler's worker threads; a shared global here would be a data race
+  ## for a memo whose whole value is that it is cheap. Per-thread, each
+  ## worker pays one resolve.
+  var key = ""
+  try:
+    key = getEnv(ShimLibOverrideEnv) & "\0" & getEnv(RuntimeLibraryPathEnv) &
+      "\0" & getCurrentDir()
+  except OSError:
+    # An unnameable cwd. ``findShimLibrary`` tolerates it on the override
+    # arm (it returns before building the candidate list), so the resolver
+    # must too: skip the memo entirely rather than turn a working override
+    # into a raise.
+    return resolveMonitorShimLibForInstallUncached()
+  if shimLibMemoValue.len > 0 and shimLibMemoKey == key and
+      fileExists(extendedPath(shimLibMemoValue)):
+    return shimLibMemoValue
+  result = resolveMonitorShimLibForInstallUncached()
   if result.len > 0:
-    return result
-  result = monitorShimLibInLibraryPath(
-    getEnv("REPROBUILD_RUNTIME_LIBRARY_PATH"),
-    HostDynamicLibraryExt,
-    proc(path: string): bool = fileExists(extendedPath(path)))
+    shimLibMemoKey = key
+    shimLibMemoValue = result
 
 proc launchChildEnv(action: BuildAction;
                     config: BuildEngineConfig): seq[string] =

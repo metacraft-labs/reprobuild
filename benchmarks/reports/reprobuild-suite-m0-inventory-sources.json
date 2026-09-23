@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1719,
+    "nimTestBinaries": 1720,
     "pureUnitConsolidationGroups": 51,
     "pureUnitTests": 605,
     "staticallyDetectedRuntimeCompilerFlowTests": 106,
-    "testEntries": 1730
+    "testEntries": 1731
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1130,7 +1130,7 @@
       "integration": 820,
       "platform/destructive": 113,
       "pure unit": 605,
-      "unclassified": 180
+      "unclassified": 181
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1278,9 +1278,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1719,
+    "nimTestBinaryCount": 1720,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1730
+    "testEntryCount": 1731
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7344,6 +7344,24 @@
       "source": "libs/repro_build_engine/tests/t_m9r73_session_invalidation_reaches_every_consumer.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_monitor_shim_resolver_memo_keys_its_inputs",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_monitor_shim_resolver_memo_keys_its_inputs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
