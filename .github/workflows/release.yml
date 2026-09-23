@@ -58,7 +58,10 @@ on:
 jobs:
   plan:
     name: Plan release
-    runs-on: [self-hosted, linux, x64]
+    # Release jobs run on the dedicated `eph-linux-x64-release` runner class so a
+    # release is not queued behind ordinary CI. The Linux build leg in
+    # .github/release-platforms.json names the same class.
+    runs-on: eph-linux-x64-release
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       version: ${{ steps.plan.outputs.version }}
@@ -451,7 +454,8 @@ jobs:
     permissions:
       contents: write
       id-token: write
-    runs-on: [self-hosted, linux, x64]
+    # Same dedicated release runner class as `plan` (see there).
+    runs-on: eph-linux-x64-release
     # `always()` so a failed matrix reaches the explicit assertion below and
     # reports a RED publish job. Plain `needs:` semantics would SKIP this job,
     # which renders green-ish in the UI -- the same quiet non-event that let
