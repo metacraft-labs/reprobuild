@@ -1127,10 +1127,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 820,
+      "integration": 821,
       "platform/destructive": 113,
       "pure unit": 605,
-      "unclassified": 181
+      "unclassified": 180
     },
     "graphOwnedTestArtifacts": [
       {
@@ -7349,8 +7349,8 @@
     },
     {
       "binary": "build/test-bin/t_monitor_shim_resolver_memo_keys_its_inputs",
-      "class": "unclassified",
-      "classificationReason": "mutates the process environment",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -7361,7 +7361,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/t_monitor_shim_resolver_memo_keys_its_inputs.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

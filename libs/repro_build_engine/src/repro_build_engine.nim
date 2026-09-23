@@ -9234,8 +9234,42 @@ proc resolveMonitorShimLibForInstall*(): string =
   ## un-monitoring actions whose recorded inputs then come out
   ## incomplete. That is a correctness regression, not a speed-up, so the
   ## empty answer re-probes every time and costs exactly what it costs
-  ## today. A cached POSITIVE has no equivalent hazard: rebuilding the
-  ## shim in place yields the same path.
+  ## today. ``t_monitor_shim_resolver_memo_keys_its_inputs`` pins this;
+  ## the case re-execs a copy of itself to get a controlled ``appDir``,
+  ## because in any built tree the test binary's own ``<appDir>/../lib``
+  ## is ``build/lib`` and already holds the shim, so the empty answer
+  ## cannot arise in-process. A memo that stored the empty answer passes
+  ## the file's other three cases.
+  ##
+  ## A cached POSITIVE carries ONE KNOWN, NARROW GAP, recorded here
+  ## rather than papered over, because the obvious sentence -- "rebuilding
+  ## the shim in place yields the same path" -- covers less than it
+  ## sounds like. It answers a REBUILD; it does not answer a
+  ## HIGHER-PRIORITY ARM APPEARING LATER. ``findShimLibrary`` prefers
+  ## ``<appDir>/../lib`` over ``<cwd>/build/lib``, so a cached answer from
+  ## the second arm keeps being served even once the first arm exists,
+  ## for as long as the key holds.
+  ##
+  ## It is a real gap and not a theoretical one, but reaching it needs
+  ## ``<appDir>/../lib/`` -- the ``lib`` sibling of the RUNNING ``repro``
+  ## binary's own directory -- to gain a shim mid-build, i.e. someone
+  ## installing into the running installation's prefix while a build is in
+  ## flight. In a dev checkout the two arms name the SAME directory
+  ## (``<repo>/build/lib``) whenever the cwd is the repo root, so there is
+  ## nothing to shadow; with an installed ``repro`` the higher-priority
+  ## arm is a package directory that exists before the build starts and
+  ## therefore wins the first resolve outright.
+  ##
+  ## It is also strictly less serious than the negative-cache hazard
+  ## above: both paths name a real shim, so the cost is a capture whose
+  ## provenance is the lower-priority arm, not a capture that never
+  ## happened. It is left open DELIBERATELY. Closing it means re-walking
+  ## the arms on every hit, and the walk is the ``getAppDir`` this memo
+  ## exists to avoid. If it ever does matter, the cheap fix is to cache
+  ## ``getAppDir`` once -- it genuinely cannot change within a process,
+  ## which is why it is the one input left out of the key -- and probe
+  ## ``<appDir>/../lib`` on a hit for the same ~0.5 us the existing
+  ## re-existence check costs.
   ##
   ## A CACHED POSITIVE IS STILL RE-EXISTENCE-CHECKED, for 0.5 us against
   ## the ~15 us the full resolve costs. Without it the memo would quietly
@@ -9247,19 +9281,62 @@ proc resolveMonitorShimLibForInstall*(): string =
   ## turn that raise into a seed pointing at nothing. One ``fileExists``
   ## on the way out keeps the contract and costs nothing measurable.
   ##
-  ## ``{.threadvar.}`` because ``launchChildEnv`` is also reached from the
-  ## scheduler's worker threads; a shared global here would be a data race
-  ## for a memo whose whole value is that it is cheap. Per-thread, each
-  ## worker pays one resolve.
+  ## ``{.threadvar.}`` IS DEFENSIVE AGAINST A FUTURE POOL TENANT. IT IS
+  ## NOT A DESCRIPTION OF TODAY'S THREADING, and the previous version of
+  ## this comment -- "``launchChildEnv`` is also reached from the
+  ## scheduler's worker threads" -- was simply false. Nothing on this
+  ## path runs off the scheduler thread. Engine-Threadpool TP-1's pool
+  ## has exactly TWO tenants (``worker_pool.nim``'s header says so and
+  ## enumerates them): HM-5's depfile flush ``runFlushJob``, which
+  ## renames a file io-mon already created, and TP-2's
+  ## ``runMonitorFinishJob``, which calls ``finishMonitor``. Neither
+  ## touches the launch environment. Every caller that reaches this
+  ## resolver arrives through ``preparedRunQuotaCommand`` --
+  ## ``startMonitorHost``, ``startDirect``/``startRunQuotaProcess`` and
+  ## the tool-path probe in ``executedToolImagePath`` -- and all of them
+  ## are on the scheduler thread.
+  ##
+  ## Claiming otherwise also contradicted this module's own documented
+  ## invariant: ``beginMonitorSpawnContext`` states that the engine "runs
+  ## N concurrent child PROCESSES from one poll loop, not N threads", and
+  ## a comment that disagrees with that is worse than no comment, because
+  ## the next reader has to work out which one is lying.
+  ##
+  ## The scope is kept anyway, on cost rather than on necessity: a plain
+  ## global compiles here too (no ``gcsafe`` refusal, since this proc is
+  ## not reached from the ``{.nimcall, gcsafe.}`` tenants), but per-thread
+  ## costs one extra resolve per thread that ever calls this -- today
+  ## exactly zero -- and nothing anywhere depends on two threads agreeing
+  ## on the answer. So it is the cheap scope that stays correct if a third
+  ## tenant ever does build a launch environment, which is the same
+  ## "every new tenant owes this paragraph an answer" discipline
+  ## ``worker_pool.nim`` already asks for. Do not upgrade this to a lock
+  ## or downgrade it to a global on the strength of a threading claim
+  ## nobody has re-checked.
   var key = ""
   try:
     key = getEnv(ShimLibOverrideEnv) & "\0" & getEnv(RuntimeLibraryPathEnv) &
       "\0" & getCurrentDir()
   except OSError:
-    # An unnameable cwd. ``findShimLibrary`` tolerates it on the override
-    # arm (it returns before building the candidate list), so the resolver
-    # must too: skip the memo entirely rather than turn a working override
-    # into a raise.
+    # An unnameable cwd (``getCurrentDir`` is the only thing above that
+    # can raise this). The memo cannot build a key, so it STEPS ASIDE and
+    # hands the caller whatever the resolver would have done without a
+    # memo at all -- no more and no less.
+    #
+    # NOT because ``findShimLibrary`` tolerates an unnameable cwd. It does
+    # not, and an earlier version of this comment claimed it did. Even an
+    # ABSOLUTE ``$REPRO_MONITOR_SHIM_LIB`` raises here, because
+    # ``absolutePath(override)`` takes ``root = getCurrentDir()`` as a
+    # DEFAULT ARGUMENT, and a Nim default argument is evaluated at the
+    # call site whether or not the body goes on to use it (measured: with
+    # the cwd removed, ``absolutePath`` on an absolute path raises
+    # ``OSError`` just as it does on a relative one). With no override the
+    # candidate walk calls ``getCurrentDir`` directly and raises too.
+    #
+    # So this arm buys exactly one thing, and it is worth having: the
+    # memo's own bookkeeping never becomes a NEW failure site. The raise
+    # the caller sees comes from the resolve it asked for, on every host
+    # and on both arms.
     return resolveMonitorShimLibForInstallUncached()
   if shimLibMemoValue.len > 0 and shimLibMemoKey == key and
       fileExists(extendedPath(shimLibMemoValue)):
