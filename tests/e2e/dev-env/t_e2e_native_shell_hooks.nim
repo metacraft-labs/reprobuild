@@ -1,6 +1,7 @@
 import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
     unittest]
 
+import repro_core/cli_images
 import repro_test_support
 
 proc q(value: string): string =
@@ -199,13 +200,28 @@ proc requireNativeStats(statsPath: string) =
   check stats["stats"]["shellRenderingCacheHit"].getBool()
 
 proc reproPathWithSpaces(c: M6Case): string =
+  ## A relocated ``repro`` install whose directory contains spaces, so the
+  ## rendered hooks are proven to quote the path they invoke.
+  ##
+  ## ``repro`` is the thin daemon client: everything it does not route to the
+  ## daemon -- including ``__repro-native-shell-activate`` -- it ``execv``s to
+  ## the ENGINE image, which it resolves as a sibling in its OWN directory
+  ## (``resolveFullCli`` in ``apps/repro-client/repro_client.nim``). An
+  ## install is therefore the PAIR, and relocating the client alone produces
+  ## a ``repro`` that can only print "no reprobuild image to fall back to".
+  ## Both images are copied, not symlinked: the client names its directory
+  ## through ``getAppFilename``, which resolves a symlink back to
+  ## ``build/bin`` and would silently stop exercising the spaced path.
   let dir = c.tempRoot / "bin with spaces"
   createDir(dir)
   result = dir / addFileExt("repro", ExeExt)
-  if not fileExists(result):
-    copyFile(c.reproBin, result)
-    setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec,
-      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+  let engineSrc = parentDir(c.reproBin) / reprobuildEngineExeName()
+  let engineDst = dir / reprobuildEngineExeName()
+  for (src, dst) in [(c.reproBin, result), (engineSrc, engineDst)]:
+    if not fileExists(dst):
+      copyFile(src, dst)
+      setFilePermissions(dst, {fpUserRead, fpUserWrite, fpUserExec,
+        fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
 proc installNativeHooks(c: M6Case) =
   discard requireRepro(c, @["hooks", "ensure", "--shell", "bash"])
