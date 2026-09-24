@@ -450,9 +450,9 @@ jobs:
           # build (next step) because `.#release` rewrites build\bin.
           & ./windows/stage-release-dlls.ps1
 
-          # Run the `.#release` build from a COPY of repro.exe at a different
-          # path. That build's `reprobuild.apps.repro` edge RELINKS
-          # build\bin\repro.exe -- the very binary orchestrating the build -- and
+          # Run the `.#release` build from a COPY of the engine at a different
+          # path. That build RELINKS the engine image -- the very binary
+          # orchestrating the build -- and
           # on Windows a running .exe holds an exclusive lock on its own image
           # file, so the linker cannot open it for output:
           #
@@ -471,10 +471,19 @@ jobs:
           # clingo.dll / sqlite3_64.dll / libcrypto-3-x64.dll / libssl / vcruntime
           # etc. still resolve from the orchestrator's own directory at load time
           # (Win32 LoadLibrary searches the exe's dir first). It is removed in the
-          # `finally` so the packaged archive carries only repro.exe, never the
-          # orchestrator copy.
+          # `finally` so the packaged archive never carries the orchestrator
+          # copy.
+          #
+          # THE COPY IS OF THE ENGINE, `reprobuild.exe`, NOT OF `repro.exe`.
+          # `repro.exe` is now the thin daemon client, and it `execv`s
+          # build\bin\reprobuild.exe for this build (see
+          # libs/repro_core/src/repro_core/cli_images.nim). Copying the client
+          # moved the lock rather than removing it: the 0.2.0 dry run failed
+          # with `ld.exe: cannot open output file ...\build\bin\reprobuild.exe:
+          # Permission denied`. The engine does not decide what it is from its
+          # file name, so running it under another one is sound.
           $orchestrator = "build\bin\repro-orchestrator.exe"
-          Copy-Item -LiteralPath "build\bin\repro.exe" -Destination $orchestrator -Force
+          Copy-Item -LiteralPath "build\bin\reprobuild.exe" -Destination $orchestrator -Force
           try {
             & ".\$orchestrator" build --tool-provisioning=path --daemon=off --no-runquota .#release
             if ($LASTEXITCODE -ne 0) {
