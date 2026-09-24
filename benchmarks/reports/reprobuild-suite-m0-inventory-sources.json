@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1651,
+    "nimTestBinaries": 1653,
     "pureUnitConsolidationGroups": 50,
-    "pureUnitTests": 588,
+    "pureUnitTests": 589,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1662
+    "testEntries": 1664
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1102,8 +1102,8 @@
       "graph-fixture": 12,
       "integration": 772,
       "platform/destructive": 115,
-      "pure unit": 588,
-      "unclassified": 175
+      "pure unit": 589,
+      "unclassified": 176
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1251,9 +1251,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1651,
+    "nimTestBinaryCount": 1653,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1662
+    "testEntryCount": 1664
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10907,6 +10907,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/test_provisioning_realization_lock_record",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_lock",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/test_provisioning_realization_lock_record.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_codec_smoke",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -11356,6 +11375,25 @@
       "source": "libs/repro_lock_gen/tests/t_lock_generation_one_path_four_entry_points.nim",
       "sourceSuiteCount": 4,
       "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_lock_refresh_carries_provisioning_forward",
+      "class": "unclassified",
+      "classificationReason": "creates threads (through `libs/repro_lock_gen/tests/loopback_metadata_server.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_lock",
+        "repro_lock_gen",
+        "repro_solver"
+      ],
+      "owner": "libs/repro_lock_gen",
+      "requiresReproBinary": false,
+      "source": "libs/repro_lock_gen/tests/t_lock_refresh_carries_provisioning_forward.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

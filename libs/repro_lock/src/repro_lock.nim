@@ -60,17 +60,29 @@
 ## SHA-lock layer and MO-2's evidence model). MO-1 records the source
 ## identity the unified solver actually keys on (the package-definition
 ## name); deeper provenance layers above it.
+##
+## ## Locked provisioning realizations (ReproOS-Campaign-Completion M7 D2)
+##
+## A v2 document may also carry ``provisioning = [{ record = "…", … }]`` —
+## the locked provisioning realizations of ``repro_lock/provisioning``,
+## re-exported here. The key is written only when there is at least one
+## record, so a lock without them is byte-identical to what this module
+## wrote before they existed; the reader is strict about it (see that
+## module). They are not part of ``lockIdentityOf``: see
+## ``LockedDependencies.provisioning``.
 
 import std/[algorithm, strutils, tables]
 
 import repro_solver
 import repro_multihash
 import repro_lock/identity
+import repro_lock/provisioning
 
 export UnifiedSolution
 export SelectionStatus
 export repro_multihash
 export identity
+export provisioning
 
 const SolvedGraphLockSchemaV1* = "reprobuild.solved-graph-lock.v1"
   ## The historical MO-1 schema string, retained ONLY so a stale lock can be
@@ -218,6 +230,34 @@ type
     variants*: seq[LockedVariant]
     packages*: seq[LockedPackage]
     deps*: seq[LockedDep]
+    provisioning: seq[LockedRealization]
+      ## M7 deliverable 2 — the locked provisioning realizations
+      ## (``repro_lock/provisioning``), serialised under the ``provisioning``
+      ## key and ONLY when non-empty, so every lock written before them
+      ## re-serialises byte-identically.
+      ##
+      ## Deliberately NOT exported. A record is handed out only by
+      ## ``lockedRealizationFor``, which takes the CURRENT interface and
+      ## contribution fingerprints and refuses a stale record, so no reader
+      ## can use a locked realization without checking it. Set it with
+      ## ``withProvisioningRealizations``.
+      ##
+      ## Deliberately NOT projected into ``lockIdentityOf`` either. The spec
+      ## (Provisioning-Contributions.md, Locks And Snapshots) requires that
+      ## refreshing only a contribution leave downstream typechecking cached
+      ## while invalidating the realization and build edges that selected
+      ## it. The §6.2 lock identity governs EVERY action under the lock, so
+      ## folding the record in would invalidate typechecking too.
+      ##
+      ## OPEN OBLIGATION, stated plainly: NOTHING yet invalidates the
+      ## realization and build edges that selected a locked realization
+      ## when its contribution fingerprint changes. That is safe today ONLY
+      ## because nothing consumes the record -- no build edge selects a
+      ## provisioning realization from the lock (M7 deliverable 3). The
+      ## deliverable that makes an edge consume a record must also key that
+      ## edge on the record's contribution fingerprint (deliverables 3/4);
+      ## until then this exclusion must not be read as the invalidation
+      ## design being done.
 
 # ---------------------------------------------------------------------------
 # Provenance digest (dependency-free, deterministic)
@@ -628,6 +668,36 @@ proc lockIdentityOf*(ld: LockedDependencies): LockIdentity =
   ## not a parameter and cannot become one.
   lockIdentityOf(canonicalSolvedGraph(ld))
 
+proc withProvisioningRealizations*(ld: LockedDependencies;
+                                   records: seq[LockedRealization]):
+    LockedDependencies =
+  ## ``ld`` with its locked provisioning realizations replaced by
+  ## ``records``. Every record must have been sealed by
+  ## ``sealLockedRealization`` (or read back by the strict reader);
+  ## ``serializeLockedDependencies`` refuses one that was not.
+  result = ld
+  result.provisioning = records
+
+proc provisioningRealizationCount*(ld: LockedDependencies): int =
+  ## How many provisioning realizations the lock records. A count, not the
+  ## records: see ``lockedRealizationFor``.
+  ld.provisioning.len
+
+proc lockedRealizationFor*(ld: LockedDependencies;
+                           packageName, hostPlatform, targetPlatform: string;
+                           currentInterfaceFingerprint,
+                           currentContributionFingerprint: string):
+    LockedRealization =
+  ## The locked provisioning realization of ``packageName`` on this
+  ## host/target pair, returned ONLY if it still matches the current
+  ## canonical interface fingerprint and the current contribution
+  ## fingerprint. Raises ``StaleLockedRealizationError`` (saying which one
+  ## moved) otherwise, and ``LockedRealizationError`` when the lock records
+  ## none. See ``repro_lock/provisioning.requireCurrentRealization``.
+  requireCurrentRealization(ld.provisioning, packageName, hostPlatform,
+    targetPlatform, currentInterfaceFingerprint,
+    currentContributionFingerprint)
+
 # ---------------------------------------------------------------------------
 # MO-11 — non-VCS coordinates + integrity for solved packages, and the lift of
 # the solved package graph into first-class ``LockedDep``s.
@@ -838,6 +908,14 @@ proc serializeLockedDependencies*(ld: LockedDependencies): string =
     if i > 0: result.add(", ")
     result.add(serializeDepInline(d))
   result.add("]\n")
+  # provisioning — M7 D2's locked realizations. Emitted ONLY when there is
+  # one, so a lock without them is byte-identical to what this writer
+  # produced before they existed. Raises ``LockedRealizationError`` on a
+  # record that was not sealed by the lock writer, is malformed, or shares
+  # a (package, host, target) key with another.
+  if ld.provisioning.len > 0:
+    result.add(ProvisioningLockKey & " = " &
+      serializeProvisioningRealizations(ld.provisioning) & "\n")
 
 proc serializeSolvedGraphLock*(lock: SolvedGraphLock): string =
   ## Render a ``SolvedGraphLock`` to a canonical committed-lock document.
@@ -863,6 +941,17 @@ proc serializeSolvedGraphLock*(lock: SolvedGraphLock): string =
   ## (``tests/t_lock_writer_output_reads_back.nim``).
   serializeLockedDependencies(lockedDepsFromSolved(lock))
 
+const ProvisioningRepairAdvice =
+  "the lock writer never produces this, and `repro lock refresh` carries " &
+  "the provisioning array forward rather than regenerating it (it refuses " &
+  "to replace a lock whose array it cannot read); restore the " &
+  "`provisioning` line from version control, or remove it deliberately"
+  ## The repair a malformed ``provisioning`` array calls for. NOT "regenerate
+  ## with ``repro lock refresh``": a refresh re-solves the package graph and
+  ## cannot re-derive a locked provisioning selection, so it carries the
+  ## array forward (``withProvisioningCarriedForward``) and refuses one it
+  ## cannot read rather than dropping it.
+
 proc parseLockedDependencies*(content: string): LockedDependencies =
   ## Parse a committed lock into the unified model. Accepts ONLY the v2
   ## schema; a v1-tagged (or any other) lock is rejected LOUDLY by
@@ -871,14 +960,38 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
   ## ``parseSolvedGraphLock``'s grammar; the ``deps`` array is the v2 addition.
   let solved = parseSolvedGraphLock(content)  # validates schema + solved part
   result = lockedDepsFromSolved(solved)
-  # Pull the v2 ``deps`` array (empty when the lock carries no deps).
+  # Pull the v2 ``deps`` array (empty when the lock carries no deps), and
+  # M7 D2's ``provisioning`` array (absent from every lock written before it).
+  var sawProvisioning = false
   for rawLine in content.splitLines():
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#") or line.startsWith("["):
       continue
     let eq = line.find('=')
-    if eq <= 0: continue
-    if line[0 ..< eq].strip() != "deps": continue
+    if eq <= 0:
+      # A ``provisioning`` line cut before its ``=`` is a truncated record
+      # array, not a line to skip: skipping it would read a lock that
+      # selected a contributor as one that selected none.
+      if line.startsWith(ProvisioningLockKey):
+        raise newException(SolvedGraphLockParseError,
+          "lock has a truncated `" & ProvisioningLockKey & "` line; " &
+          ProvisioningRepairAdvice)
+      continue
+    let key = line[0 ..< eq].strip()
+    if key == ProvisioningLockKey:
+      if sawProvisioning:
+        raise newException(SolvedGraphLockParseError,
+          "lock carries the `" & ProvisioningLockKey & "` key twice; " &
+          ProvisioningRepairAdvice)
+      sawProvisioning = true
+      try:
+        result.provisioning = parseProvisioningRealizations(
+          line[eq + 1 .. ^1])
+      except LockedRealizationError as err:
+        raise newException(SolvedGraphLockParseError,
+          "lock " & err.msg & "; " & ProvisioningRepairAdvice)
+      continue
+    if key != "deps": continue
     let rhs = line[eq + 1 .. ^1].strip()
     for f in inlineTables(rhs):
       let kindRaw = f.getOrDefault("coord_kind", "vcs")
@@ -910,3 +1023,52 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
         participation: f.getOrDefault("participation", ""),
         depends: splitNames(f.getOrDefault("depends", "")),
         tags: splitNames(f.getOrDefault("tags", ""))))
+
+proc documentCarriesProvisioning(content: string): bool =
+  ## Whether a committed lock document spells a ``provisioning`` key at all
+  ## -- including one cut before its ``=`` -- by the line rules
+  ## ``parseLockedDependencies`` applies.
+  for rawLine in content.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#") or line.startsWith("["):
+      continue
+    let eq = line.find('=')
+    if eq <= 0:
+      if line.startsWith(ProvisioningLockKey): return true
+    elif line[0 ..< eq].strip() == ProvisioningLockKey:
+      return true
+  false
+
+proc withProvisioningCarriedForward*(fresh: LockedDependencies;
+                                     incumbentDocument: string):
+    LockedDependencies =
+  ## ``fresh`` -- a lock just produced by a SOLVE, which knows nothing about
+  ## provisioning -- carrying the locked provisioning realizations of the
+  ## incumbent committed lock document UNCHANGED. The two doors that write
+  ## the committed lock (``repro lock refresh`` and ``repro lock solve
+  ## --write``, ``repro_lock_gen``) call this, so a refresh never silently
+  ## turns a pinned contributor into "no lock, choose again".
+  ##
+  ## Carrying a record forward unchanged is safe: a record is handed back
+  ## only by ``lockedRealizationFor`` against the CURRENT interface and
+  ## contribution fingerprints, so a record the new solve made stale refuses
+  ## on read instead of being used. Re-selecting a contributor is M7
+  ## deliverables 3 and 5, not a side effect of re-solving versions.
+  ##
+  ## An incumbent without a ``provisioning`` key contributes nothing (and
+  ## may be any document at all, as before). An incumbent WITH one must
+  ## parse; otherwise this raises ``SolvedGraphLockParseError`` and the
+  ## caller must not replace the committed lock.
+  result = fresh
+  if not documentCarriesProvisioning(incumbentDocument):
+    return
+  var incumbent: LockedDependencies
+  try:
+    incumbent = parseLockedDependencies(incumbentDocument)
+  except CatchableError as err:
+    raise newException(SolvedGraphLockParseError,
+      "refusing to replace the committed lock: it carries a `" &
+      ProvisioningLockKey & "` array that cannot be read, and a refresh " &
+      "carries locked provisioning realizations forward -- it never drops " &
+      "one silently (" & err.msg & ")")
+  result.provisioning = incumbent.provisioning

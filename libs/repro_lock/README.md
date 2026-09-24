@@ -37,4 +37,26 @@ not workspace VCS state.
   write.
 - `sameSolution` — structural equality used by `repro lock validate` to
   detect a tampered or stale lock.
+- `repro_lock/provisioning` (re-exported) — the locked provisioning
+  realization (ReproOS-Campaign-Completion M7 deliverable 2): one record per
+  (package, host platform, target platform) binding the canonical interface
+  fingerprint, the selected contributor and its contribution fingerprint, the
+  catalog workspace/remote/full-width revision/interface-artifact identity,
+  the realization kind, lock identity and integrity, and the selected
+  capabilities. Serialized under the `provisioning` key of the same v2
+  document ONLY when non-empty, so every existing lock re-serializes
+  byte-identically; each record carries its own version tag
+  (`reprobuild.locked-provisioning-realization.v1`). The reader is strict
+  (missing/unknown/duplicate fields, truncation and non-canonical spelling
+  refuse). `withProvisioningRealizations` sets the records;
+  `lockedRealizationFor` hands one back ONLY against the current interface
+  and contribution fingerprints. The records are NOT part of `lockIdentityOf`
+  -- safe only because no build edge consumes a record yet; the per-edge
+  invalidation on a contribution change is an OPEN obligation of the
+  deliverable that adds the first consumer (M7 D3/D4).
+  `withProvisioningCarriedForward` is how `repro lock refresh` / `repro lock
+  solve --write` (`repro_lock_gen`) keep the array: carried forward
+  unchanged, and a refresh refuses rather than drop an array it cannot read.
+  The writer that turns a composed catalog selection into a record is
+  `repro_interface_artifacts/contribution_lock`.
 - `inputsDigestOf` / `currentPlatformId` — provenance helpers.

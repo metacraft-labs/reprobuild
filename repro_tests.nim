@@ -2448,6 +2448,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/test_provisioning_realization_lock_record.nim",
+    binary: "build/test-bin/test_provisioning_realization_lock_record",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_launch_plan/tests/t_codec_smoke.nim",
     binary: "build/test-bin/t_codec_smoke",
     defines: @[],
@@ -2666,6 +2675,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_lock_gen/tests/t_lock_generation_one_path_four_entry_points.nim",
     binary: "build/test-bin/t_lock_generation_one_path_four_entry_points",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_lock_gen/tests/t_lock_refresh_carries_provisioning_forward.nim",
+    binary: "build/test-bin/t_lock_refresh_carries_provisioning_forward",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

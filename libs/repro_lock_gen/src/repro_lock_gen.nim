@@ -959,6 +959,25 @@ proc generateLock*(req: LockGenerationRequest): LockGenerationResult =
 # The four doors
 # ---------------------------------------------------------------------------
 
+proc landCommittedLock(generated: var LockGenerationResult;
+                       writeTo: string) =
+  ## Land a generated lock at the COMMITTED path, carrying forward the
+  ## locked provisioning realizations (ReproOS-Campaign-Completion M7 D2)
+  ## of the lock it replaces. The solve knows nothing about provisioning, so
+  ## writing ``generated.lockDocument`` as it stands would silently drop a
+  ## pinned contributor. ``withProvisioningCarriedForward`` raises -- BEFORE
+  ## anything is written -- when the incumbent carries a ``provisioning``
+  ## array it cannot read. With no array to carry, the bytes written are
+  ## exactly the generated document, as before.
+  if fileExists(writeTo):
+    let carried = withProvisioningCarriedForward(
+      parseLockedDependencies(generated.lockDocument), readFile(writeTo))
+    if carried.provisioningRealizationCount > 0:
+      generated.lockDocument = serializeLockedDependencies(carried)
+  createDir(parentDir(writeTo))
+  writeFile(writeTo, generated.lockDocument)
+  generated.lockPath = writeTo
+
 proc runLockSolve*(req: LockGenerationRequest; writeTo: string):
     LockGenerationResult =
   ## `repro lock solve [--write]` — generate, then land the lock at the
@@ -967,9 +986,7 @@ proc runLockSolve*(req: LockGenerationRequest; writeTo: string):
   r.entryPoint = lgeLockSolve
   result = generateLock(r)
   if writeTo.len > 0:
-    createDir(parentDir(writeTo))
-    writeFile(writeTo, result.lockDocument)
-    result.lockPath = writeTo
+    landCommittedLock(result, writeTo)
 
 proc runImplicitBuildSolve*(req: LockGenerationRequest):
     LockGenerationResult =
@@ -1009,9 +1026,7 @@ proc runLockRefresh*(req: LockGenerationRequest; writeTo: string):
   r.entryPoint = lgeLockRefresh
   result = generateLock(r)
   if writeTo.len > 0:
-    createDir(parentDir(writeTo))
-    writeFile(writeTo, result.lockDocument)
-    result.lockPath = writeTo
+    landCommittedLock(result, writeTo)
 
 # ---------------------------------------------------------------------------
 # The pinned path
