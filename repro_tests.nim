@@ -378,6 +378,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_cache_hit_evidence_paths_are_built_on_demand.nim",
+    binary: "build/test-bin/t_cache_hit_evidence_paths_are_built_on_demand",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_child_cpu_stats_row.nim",
     binary: "build/test-bin/t_child_cpu_stats_row",
     defines: @[],
@@ -8354,6 +8363,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/watch/t_e2e_repro_watch.nim",
     binary: "build/test-bin/t_e2e_repro_watch",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/watch/t_e2e_repro_watch_arms_on_cache_hit_evidence.nim",
+    binary: "build/test-bin/t_e2e_repro_watch_arms_on_cache_hit_evidence",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

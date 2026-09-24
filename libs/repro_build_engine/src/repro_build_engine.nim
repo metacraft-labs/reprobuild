@@ -777,6 +777,32 @@ type
     statsEnabled*: bool
     suppressTrace*: bool
     skipCacheHitEvidence*: bool
+    elideCacheHitEvidencePaths*: bool
+      ## "No consumer of THIS run wants the cache-hit evidence's path
+      ## STRINGS." When true, a cache hit's `ActionResult` carries
+      ## `evidencePathCounts` (exact lengths) and empty path seqs instead of
+      ## the reconstructed strings; see `EvidencePathCounts` for what that
+      ## costs and why.
+      ##
+      ## ORTHOGONAL TO `skipCacheHitEvidence`, AND NOT A TELEMETRY FLAG.
+      ## `skipCacheHitEvidence` says the evidence is not to be reconstructed
+      ## at all, and it also picks which whole-graph fast-scan arm runs — it
+      ## has SERVING consequences. This one has none: the record that was
+      ## loaded, the inputs revalidated, the fingerprints compared and the
+      ## cache decision reached are identical either way. It is a statement
+      ## about who is going to READ the result, made by the caller that
+      ## knows — the CLI, at parse time, from `repro watch` and
+      ## `--write-report`.
+      ##
+      ## THE DEFAULT IS `false` AND THAT IS LOAD-BEARING. Every config
+      ## literal that does not mention this field keeps the full path sets,
+      ## because the failure mode of the other polarity is silent: `repro
+      ## watch` arming its watcher on an empty path set is blind to every
+      ## source file and still looks exactly like a working watcher (see
+      ## `BuildCommandOutcome.inputEvidencePaths`, which records that this
+      ## regression has already shipped once). A field whose zero value
+      ## costs a little time is recoverable; one whose zero value hangs the
+      ## watch loop is not.
     peerCacheActionFetcher*: PeerCacheActionFetcher
       ## Peer-Cache M1 (Linux-Distro-Recipe-Validation M5 wiring,
       ## 2026-06-12): when non-nil, consulted on action-cache miss to
@@ -1002,6 +1028,47 @@ type
       ## M6 — what the capture's backend profile says about whether entropy
       ## reads are observable at all.
 
+  EvidencePathCounts* = object
+    ## The LENGTHS a cache hit's reconstructed `PathSetEvidence` would have
+    ## had, for a run in which the path STRINGS were not built at all.
+    ##
+    ## WHY IT EXISTS. Reconstructing a cache hit's evidence from its record
+    ## is O(RECORDED INPUTS), not O(actions): `evidenceFromRecord` copies
+    ## both declared seqs and then hashes, copies and accumulates one string
+    ## per entry in `record.inputs`, summed over every record the run looked
+    ## up. On a warm CMake no-op that is ~1400 strings built and dropped at
+    ## exit. Only TWO consumers ever read those strings — `repro watch`'s
+    ## watched-path set and `--write-report`'s `actions[].evidence` — and
+    ## both are decided at CLI parse time. Every OTHER reader (the per-action
+    ## log line's `evidence=depfile:<n>`, the `dependency-evidence` stats
+    ## observation) takes `.len` and nothing else. This object is what those
+    ## readers get instead, so their numbers are unchanged by the elision
+    ## rather than approximately unchanged.
+    ##
+    ## `elided` IS THE DISCRIMINANT AND ITS ZERO VALUE IS THE SAFE ONE. False
+    ## means "this result carries its real path seqs; read THEM" — which is
+    ## what an executed action, a `PathSetEvidence()` from a skipped lookup,
+    ## and every result produced before this existed all are. The counts
+    ## below are meaningless unless `elided` is true, and the accessors
+    ## (`declaredInputCount` and friends) are the only supported way to read
+    ## either half, precisely so a new count reader cannot pick the wrong one.
+    ##
+    ## THE COUNTS ARE EXACT, NOT ESTIMATED. `evidenceCountsFromRecord`
+    ## performs the same de-duplication `evidenceFromRecord` performs, by
+    ## folding the "already seen" set into the declared-path set the full
+    ## version tests against — the two sets are disjoint by construction, so
+    ## one `containsOrIncl` decides exactly what the full version's
+    ## `contains` + `addUnique` pair decides. It saves the string COPIES and
+    ## the seq growth, not the decision.
+    elided*: bool
+    declaredInputs*: int
+    declaredOutputs*: int
+    depfileInputs*: int
+    monitorReads*: int
+    monitorWrites*: int
+    monitorProbes*: int
+    diagnostics*: int
+
   MonitorEvidenceStatus* = enum
     ## M9.R.72.3 — spec-graded monitor-loss status. Implements the ladder
     ## from Failure-Semantics.md §"Monitoring Failures":
@@ -1153,6 +1220,14 @@ type
     runQuotaBackend*: string
     runQuotaSocket*: string
     evidence*: PathSetEvidence
+    evidencePathCounts*: EvidencePathCounts
+      ## Populated INSTEAD of `evidence` when the engine was told no consumer
+      ## of this run wants the cache-hit path strings
+      ## (`BuildEngineConfig.elideCacheHitEvidencePaths`). Left at its zero
+      ## value — `elided = false` — on every other result, which is what makes
+      ## `evidence` the thing to read for an executed action. Read both halves
+      ## through `declaredInputCount` / `depfileInputCount` / … rather than
+      ## reaching into either directly.
     strongFingerprintHex*: string
       ## M17 (``ext_repro_action``): the ACTION-CACHE KEY the lookup
       ## compared against, hex-encoded, or "" when the lookup found no
@@ -7637,7 +7712,13 @@ proc cacheEnumeratedDirectories(action: BuildAction;
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
     result.addUnique(seen, path)
-proc evidenceFromRecord(action: BuildAction; record: ActionResultRecord): PathSetEvidence =
+proc evidenceFromRecord*(action: BuildAction;
+                         record: ActionResultRecord): PathSetEvidence =
+  ## Exported for the regression test that pins it against
+  ## `evidenceCountsFromRecord` DIRECTLY, on records the production publish
+  ## path cannot produce — same precedent, and same reason, as
+  ## `cacheInputPaths`. The two must agree on every record, not only on the
+  ## well-formed ones this engine happens to write today.
   result.declaredInputs = action.inputs
   result.declaredOutputs = action.outputs
   var declaredInputPaths = initHashSet[string]()
@@ -7653,6 +7734,76 @@ proc evidenceFromRecord(action: BuildAction; record: ActionResultRecord): PathSe
         result.monitorReads.addUnique(seenMonitorReads, input.path)
       else:
         result.depfileInputs.addUnique(seenDepfileInputs, input.path)
+
+proc evidenceCountsFromRecord*(action: BuildAction;
+                              record: ActionResultRecord): EvidencePathCounts =
+  ## What `evidenceFromRecord` above would have COUNTED, without building any
+  ## of the strings it would have built. Every `.len` a downstream reader can
+  ## ask for is filled in here, including the ones the full version leaves at
+  ## zero (`monitorWrites` / `monitorProbes` / `diagnostics`), so no reader
+  ## has to know which fields this reconstruction populates.
+  ##
+  ## THE DE-DUPLICATION IS THE SAME DECISION, TAKEN ONCE INSTEAD OF TWICE.
+  ## The full version tests each record input against `declaredInputPaths`
+  ## and then, via `addUnique`, against a second set of the entries it has
+  ## already emitted. Those two sets are disjoint by construction — nothing
+  ## is ever added to the second that is in the first — so their UNION
+  ## answers both tests, and one `containsOrIncl` against that union both
+  ## asks and records. What is saved is the copy of each accepted path into
+  ## the result seq (and the seq's growth), not the decision, so the count
+  ## is exact for any record, including one whose `inputs` carry duplicates.
+  result.elided = true
+  result.declaredInputs = action.inputs.len
+  result.declaredOutputs = action.outputs.len
+  # Sized for the population up front. A `HashSet`'s CONTENTS do not depend
+  # on its capacity, so this changes no answer; it removes the ~12 doublings
+  # a record with tens of thousands of inputs would otherwise walk through,
+  # each of which re-seats every entry inserted so far.
+  var seen = initHashSet[string](action.inputs.len + record.inputs.len)
+  for input in action.inputs:
+    seen.incl(materialPath(action.cwd, input))
+  var undeclared = 0
+  for input in record.inputs:
+    if not seen.containsOrIncl(input.path):
+      inc undeclared
+  if action.dependencyPolicy.kind in MonitorPolicyKinds:
+    result.monitorReads = undeclared
+  else:
+    result.depfileInputs = undeclared
+
+proc evidencePathsElided*(item: ActionResult): bool =
+  ## Whether this result's path seqs were deliberately not built. The one
+  ## question a consumer of the path STRINGS has to ask before trusting an
+  ## empty seq to mean "there were none".
+  item.evidencePathCounts.elided
+
+proc declaredInputCount*(item: ActionResult): int =
+  if item.evidencePathCounts.elided: item.evidencePathCounts.declaredInputs
+  else: item.evidence.declaredInputs.len
+
+proc declaredOutputCount*(item: ActionResult): int =
+  if item.evidencePathCounts.elided: item.evidencePathCounts.declaredOutputs
+  else: item.evidence.declaredOutputs.len
+
+proc depfileInputCount*(item: ActionResult): int =
+  if item.evidencePathCounts.elided: item.evidencePathCounts.depfileInputs
+  else: item.evidence.depfileInputs.len
+
+proc monitorReadCount*(item: ActionResult): int =
+  if item.evidencePathCounts.elided: item.evidencePathCounts.monitorReads
+  else: item.evidence.monitorReads.len
+
+proc monitorWriteCount*(item: ActionResult): int =
+  if item.evidencePathCounts.elided: item.evidencePathCounts.monitorWrites
+  else: item.evidence.monitorWrites.len
+
+proc monitorProbeCount*(item: ActionResult): int =
+  if item.evidencePathCounts.elided: item.evidencePathCounts.monitorProbes
+  else: item.evidence.monitorProbes.len
+
+proc evidenceDiagnosticCount*(item: ActionResult): int =
+  if item.evidencePathCounts.elided: item.evidencePathCounts.diagnostics
+  else: item.evidence.diagnostics.len
 
 proc processCwd(action: BuildAction; process: ProcessSpec): string =
   let cwd = $process.cwd
@@ -12918,12 +13069,30 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     warmCache.cache = cache
     warmCache.evidence = actionCacheDurableEvidence(sharedRoot / "action-cache")
 
-  proc cacheHitEvidence(action: BuildAction;
-                        record: ActionResultRecord): PathSetEvidence =
+  proc assignCacheHitEvidence(item: var ActionResult;
+                              action: BuildAction;
+                              record: ActionResultRecord) =
+    ## Fill in ONE of a cache-hit result's two evidence halves.
+    ##
+    ## Both halves are written here rather than by the call sites so the
+    ## choice between them is made in exactly one place: five scheduler and
+    ## fast-scan arms reach this, and a sixth that filled in only `evidence`
+    ## would report zero counts for a run that elided, which is the silent
+    ## shape this whole seam exists to avoid.
     if config.skipCacheHitEvidence:
-      PathSetEvidence()
+      # The zero value is ASSIGNED rather than left alone, which is what the
+      # four scheduler call sites did when this seam returned a value. On
+      # today's paths the slot is already zero — a cache hit never ran, so
+      # nothing collected evidence into it — but "already zero" is a
+      # property of the callers, and this is the one line that does not have
+      # to depend on it.
+      item.evidence = PathSetEvidence()
+      item.evidencePathCounts = EvidencePathCounts()
+      return
+    if config.elideCacheHitEvidencePaths:
+      item.evidencePathCounts = evidenceCountsFromRecord(action, record)
     else:
-      evidenceFromRecord(action, record)
+      item.evidence = evidenceFromRecord(action, record)
 
   proc publishPeerCacheBundle(weakFingerprint: ContentDigest;
                               record: ActionResultRecord) =
@@ -13255,13 +13424,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       let record =
         if config.skipCacheHitEvidence: ActionResultRecord()
         else: hotRecords[i]
-      fastResult.results.add(ActionResult(
+      var item = ActionResult(
         id: action.id,
         status: asUpToDate,
         cacheDecision: cdHit,
         reason: fastNoopReuseReason(action),
-        dependencyPolicyKind: action.dependencyPolicy.kind,
-        evidence: cacheHitEvidence(action, record)))
+        dependencyPolicyKind: action.dependencyPolicy.kind)
+      assignCacheHitEvidence(item, action, record)
+      fastResult.results.add(item)
     finishStat("repro cache hit result materialize", resultMaterializeStart)
     finishMetadataCacheStats(metadataCache)
     fastResult.stats = stats
@@ -14127,8 +14297,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           case lookup.status
           of aclHit:
             if config.rebuildMissingOutputsOnCacheHit and reusableInPlace:
-              runResult.results[idToIndex.resultIndex(id)].evidence =
-                cacheHitEvidence(action, lookup.record)
+              assignCacheHitEvidence(
+                runResult.results[idToIndex.resultIndex(id)], action,
+                lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
@@ -14155,8 +14326,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 cas.materializeActionCacheOutputs(lookup.record, action.cwd)
                 fileMetadataCache.clear()
                 finishStat("repro cache restore", restoreStart)
-              runResult.results[idToIndex.resultIndex(id)].evidence =
-                cacheHitEvidence(action, lookup.record)
+              assignCacheHitEvidence(
+                runResult.results[idToIndex.resultIndex(id)], action,
+                lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
@@ -14167,8 +14339,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               continue
           of aclHybridCutoff:
             if config.rebuildMissingOutputsOnCacheHit and reusableInPlace:
-              runResult.results[idToIndex.resultIndex(id)].evidence =
-                cacheHitEvidence(action, lookup.record)
+              assignCacheHitEvidence(
+                runResult.results[idToIndex.resultIndex(id)], action,
+                lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
@@ -14192,8 +14365,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 cas.materializeActionCacheOutputs(lookup.record, action.cwd)
                 fileMetadataCache.clear()
                 finishStat("repro cache restore", restoreStart)
-              runResult.results[idToIndex.resultIndex(id)].evidence =
-                cacheHitEvidence(action, lookup.record)
+              assignCacheHitEvidence(
+                runResult.results[idToIndex.resultIndex(id)], action,
+                lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
