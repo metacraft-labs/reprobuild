@@ -3687,6 +3687,31 @@ proc publishBootstrapCompilerEnv*(compilerPath: string;
   if windowsHost and getEnv("CC").len == 0:
     putEnv("CC", compilerPathForShellEnvironment(compilerPath, true))
 
+proc bootstrapToolchainProvisioned*(mode: ToolProvisioningMode): bool =
+  ## Whether ``ensureBootstrapToolchainEnv`` provisions the provider-compile
+  ## toolchain under ``mode``.
+  ##
+  ## The toolchain that compiles a recipe's provider is the BOOTSTRAP's, not
+  ## the recipe's: the recipe's ``defaultToolProvisioning`` can only be read
+  ## after that compile. Gating the bootstrap on the mode therefore made it
+  ## depend on something only ``REPRO_TOOL_PROVISIONING`` or a flag could say
+  ## in advance, and a plain ``repro shell`` compiled the recipe with whatever
+  ## ``nim`` and ``gcc`` were on ``PATH`` -- on a Windows host without the DIY
+  ## ``env.ps1``, none (measured 2026-09-23). Absent a lock pin, the bootstrap
+  ## provisions Nim as a regular package whatever the mode
+  ## (reprobuild-specs/Distribution-And-Packaging.milestones.org, M5,
+  ## "pin the provider-compile toolchain", rule 2).
+  ##
+  ## Windows only, for now. Linux resolves both compilers through Nix, which
+  ## a ``path``-mode host need not have; and there is no macOS arm in
+  ## ``bootstrapNimToolUse`` (it falls through to the Linux archive). Both
+  ## keep the old gate until they have a provisioning route that works in
+  ## every mode.
+  when defined(windows):
+    true
+  else:
+    mode == tpmTarball or mode == tpmFromSource
+
 proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
                                   storeRoot: string) =
   ## MR5 — before the engine's interface-extract step shells out to
@@ -3696,8 +3721,9 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
   ## (which on Windows often is FPC's 1999-era 32-bit gcc, breaking
   ## the compile with `nimbase.h: Invalid argument`).
   ##
-  ## Only fires for tool-provisioning modes where the project's
-  ## toolUses are resolved via the engine's tool-store (`tarball` and
+  ## Which modes it fires for is ``bootstrapToolchainProvisioned``: every
+  ## mode on Windows; on other hosts only the modes that resolve the
+  ## project's toolUses through the engine's tool-store (`tarball` and
   ## `from-source`; `nix`/`scoop` arrange their toolchain separately).
   ## Linux uses the pinned Nix channel for both bootstrap compilers so Nim
   ## can be monitored; the vendor Linux Nim archive is statically linked.
@@ -3717,7 +3743,7 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
   ## 1999-era i386-target gcc; on Linux a sealed profile may have no gcc at
   ## all. Both fail while compiling Nim-generated C before the recipe graph
   ## is available.
-  if mode != tpmTarball and mode != tpmFromSource:
+  if not bootstrapToolchainProvisioned(mode):
     return
   let effectiveStoreRoot =
     if storeRoot.len > 0: storeRoot

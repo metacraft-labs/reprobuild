@@ -12676,8 +12676,8 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
   # before extracting; this path did not, so `repro exec` and `repro shell`
   # took both from PATH -- which on a Windows host without env.ps1 holds
   # neither, and failed with `CreateProcessW failed (2)` for `nim c` while
-  # `repro build` of the same recipe succeeded. A no-op outside `tarball`
-  # and `from-source`, so the default activation path pays nothing.
+  # `repro build` of the same recipe succeeded. Which modes it provisions
+  # under is `bootstrapToolchainProvisioned` (every mode on Windows).
   ensureBootstrapToolchainEnv(toolProvisioning, resolveStoreRoot() / "tool-store")
   let monitor = publicDevEnvMonitor(publicCliPath)
   computeDevEnvEdge(DevEnvEdgeConfig(

@@ -4761,6 +4761,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode_on_windows.nim",
+    binary: "build/test-bin/t_bootstrap_toolchain_provisioned_in_every_mode_on_windows",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim",
     binary: "build/test-bin/t_n48_tool_profiles_tar_operands",
     defines: @[],
