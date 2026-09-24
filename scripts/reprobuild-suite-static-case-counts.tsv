@@ -1489,6 +1489,7 @@ tests/integration/t_unpublished_evidence_names_the_search_that_ran.nim	nim	1
 tests/integration/t_unrouted_private_repo_refuses_loudly.nim	nim	1
 tests/integration/t_unsatisfiable_floor_does_not_fall_through_to_path.nim	nim	6
 tests/integration/t_unsigned_or_wrong_key_certificate_is_rejected.nim	nim	1
+tests/integration/t_uses_resolves_reprobuild_packages_interface.nim	nim	3
 tests/integration/t_v2_artifact_resolves_on_a_v3_host.nim	nim	1
 tests/integration/t_v3_artifact_refused_on_a_v2_host.nim	nim	1
 tests/integration/t_vcs_private_metadata_dir_resolves_worktree_safe.nim	nim	1

@@ -13347,6 +13347,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_uses_resolves_reprobuild_packages_interface.nim",
+    binary: "build/test-bin/t_uses_resolves_reprobuild_packages_interface",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_v2_artifact_resolves_on_a_v3_host.nim",
     binary: "build/test-bin/t_v2_artifact_resolves_on_a_v3_host",
     defines: @[],
