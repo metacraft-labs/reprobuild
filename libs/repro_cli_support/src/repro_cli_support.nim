@@ -5504,6 +5504,20 @@ proc actionResultJson(item: ActionResult): JsonNode =
   # Windows: include exitCode/stdout/stderr in the build report so failed
   # actions can be diagnosed without re-running them. Without this, the JSON
   # report only carries status/cacheDecision/etc. and failures look opaque.
+  #
+  # ``actions[].evidence`` is one of exactly two readers of the cache-hit
+  # evidence's path STRINGS, and the run that writes this document is
+  # supposed to have asked the engine for them (see
+  # ``reportWillBeWritten`` in ``executeBuildTarget``). An elided result
+  # reaching here would emit ``"monitorReads": []`` for an action that read
+  # a thousand files — a document that is wrong rather than absent, and that
+  # ``repro watch``'s report-reading arm would then believe. Refuse instead.
+  if item.evidencePathsElided():
+    raise newException(ValueError,
+      "internal: build action " & item.id & " carries elided cache-hit " &
+      "evidence, but a build report that serialises evidence PATHS is " &
+      "being written. The report-persistence decision and the engine's " &
+      "`elideCacheHitEvidencePaths` have gone out of step.")
   %*{
     "id": item.id,
     "status": $item.status,
@@ -5820,12 +5834,12 @@ proc renderBuildCacheEvidence*(buildResult: BuildRunResult): string =
   result = "cache evidence:\n"
   for item in buildResult.results:
     result.add("  " & item.id &
-      " declaredInputs=" & $item.evidence.declaredInputs.len &
-      " declaredOutputs=" & $item.evidence.declaredOutputs.len &
-      " depfileInputs=" & $item.evidence.depfileInputs.len &
-      " monitorReads=" & $item.evidence.monitorReads.len &
-      " monitorWrites=" & $item.evidence.monitorWrites.len &
-      " monitorProbes=" & $item.evidence.monitorProbes.len & '\n')
+      " declaredInputs=" & $item.declaredInputCount() &
+      " declaredOutputs=" & $item.declaredOutputCount() &
+      " depfileInputs=" & $item.depfileInputCount() &
+      " monitorReads=" & $item.monitorReadCount() &
+      " monitorWrites=" & $item.monitorWriteCount() &
+      " monitorProbes=" & $item.monitorProbeCount() & '\n')
 
 proc hasFailedActions(buildResult: BuildRunResult): bool =
   for item in buildResult.results:
@@ -8669,13 +8683,13 @@ proc recordStatsForBuildRun(runResult: BuildRunResult) =
     enqueueStatsObservation(scgDeps, "dependency-evidence", %*{
       "actionId": item.id,
       "policy": $item.dependencyPolicyKind,
-      "declaredInputs": item.evidence.declaredInputs.len,
-      "declaredOutputs": item.evidence.declaredOutputs.len,
-      "depfileInputs": item.evidence.depfileInputs.len,
-      "monitorReads": item.evidence.monitorReads.len,
-      "monitorWrites": item.evidence.monitorWrites.len,
-      "monitorProbes": item.evidence.monitorProbes.len,
-      "diagnostics": item.evidence.diagnostics.len
+      "declaredInputs": item.declaredInputCount(),
+      "declaredOutputs": item.declaredOutputCount(),
+      "depfileInputs": item.depfileInputCount(),
+      "monitorReads": item.monitorReadCount(),
+      "monitorWrites": item.monitorWriteCount(),
+      "monitorProbes": item.monitorProbeCount(),
+      "diagnostics": item.evidenceDiagnosticCount()
     })
 
 proc cliPathExists(path: string): bool =
@@ -9292,6 +9306,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
 
                         monitorHosting = mhmNever;
                         evidenceScope = esFull;
+                        wantsInputEvidencePaths = true;
                         benchmarkPath = "";
                         eventSink: BuildCommandEventSink = nil;
                         cancelCheck: BuildCancelCallback = nil;
@@ -9302,6 +9317,23 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         peerCacheInstaller: PeerCacheActionBundleInstaller =
                           nil):
     BuildCommandOutcome =
+  ## ``wantsInputEvidencePaths`` — does the CALLER intend to read
+  ## ``BuildCommandOutcome.inputEvidencePaths``? Only ``repro watch`` does;
+  ## it arms its filesystem watcher over that set and is blind without it.
+  ## The other half of the demand — ``--write-report``'s
+  ## ``actions[].evidence`` — is NOT a parameter, it is derived below from
+  ## ``reportPersistence``, so no call site can get it wrong.
+  ##
+  ## IT DEFAULTS TO ``true``, WHICH IS THE WHOLE POINT OF THE SPELLING. The
+  ## consequence of wrongly saying "no" is a watcher armed on the project
+  ## file alone — silent, and indistinguishable from a working watch loop
+  ## until an edit produces no rebuild (see
+  ## ``BuildCommandOutcome.inputEvidencePaths``). The consequence of wrongly
+  ## saying "yes" is some milliseconds. So the safe answer is the default
+  ## every call site gets for free, and ``repro build`` — the one caller
+  ## that provably reads nothing but the COUNTS — is the only one that has
+  ## to say otherwise.
+  ##
   ## ``extraNameSelectors`` carries the Named-Targets M2 name-shaped
   ## positional arguments AFTER the first positional has been folded
   ## into ``target``. They join the closure union inside
@@ -9326,6 +9358,19 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   let configureStatsDir = getEnv("REPRO_STATS_DIR")
   let statsEnabled = mcTiming in measureSet or configureStatsDir.len > 0 or
     benchmarkPath.len > 0 or statsGroupEnabled(scgTiming)
+  # The full build report is the second — and last — reader of the cache-hit
+  # evidence's path STRINGS (``actions[].evidence``). It is derived here from
+  # the same predicate the report writer itself uses further down rather than
+  # passed in, so the two cannot disagree: a run that writes the document
+  # always has the strings the document is made of.
+  #
+  # The FAILURE report is deliberately not in this union. It enumerates only
+  # failed and blocked actions and carries no ``evidence`` member at all (see
+  # ``writeBuildFailureReport``), so it reads none of these strings.
+  let reportWillBeWritten =
+    reportPersistence.requested and not reportPersistence.suppressed
+  let wantEvidencePaths = wantsInputEvidencePaths or reportWillBeWritten
+  let elideCacheHitEvidencePaths = not wantEvidencePaths
   var buildStats: BuildStats
   discard consumeInterfaceArtifactWarmStats()
   let buildTotalStart = statStart(statsEnabled)
@@ -9602,7 +9647,32 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         selectedActionId)
 
   proc collectInputEvidence(buildResult: BuildRunResult) =
+    if not wantEvidencePaths:
+      # Nobody will read ``BuildCommandOutcome.inputEvidencePaths`` on this
+      # invocation — that is the same statement that told the engine not to
+      # build the strings in the first place — so there is nothing to
+      # harvest. The two are ONE decision, made once above and read here and
+      # by the engine config, which is what keeps the empty seq below from
+      # ever being an accident.
+      return
     for item in buildResult.results:
+      # An ELIDED result's path seqs are empty because nobody asked for them,
+      # not because the action observed nothing — and the difference is
+      # invisible downstream: `repro watch` would arm its watcher on the
+      # remaining project file, report `watching paths=2`, and block forever
+      # on an edit that produces no event. That is the regression
+      # `BuildCommandOutcome.inputEvidencePaths` already records once. So
+      # reaching here with an elided result is a WIRING defect
+      # (`wantsInputEvidencePaths` said no and somebody read the paths
+      # anyway) and it says so, loudly, instead of silently returning a
+      # short list.
+      if item.evidencePathsElided():
+        raise newException(ValueError,
+          "internal: build action " & item.id & " carries elided cache-hit " &
+          "evidence, but this run is collecting input evidence PATHS. " &
+          "`executeBuildTarget(wantsInputEvidencePaths = …)` and the " &
+          "consumer of `BuildCommandOutcome.inputEvidencePaths` have gone " &
+          "out of step.")
       for group in [item.evidence.declaredInputs, item.evidence.depfileInputs,
           item.evidence.monitorReads, item.evidence.monitorProbes]:
         for path in group:
@@ -9665,6 +9735,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       publishCachedResults: publishCacheHits,
       suppressTrace: mcTrace notin measureSet,
       skipCacheHitEvidence: mcCacheEvidence notin measureSet,
+      # Cache-hit evidence PATHS: built only when a consumer of this run
+      # will read the strings (`repro watch`, `--write-report`). The counts
+      # the log line and the stats observation take are unaffected — see
+      # `EvidencePathCounts`. Wired into EVERY config whose results reach
+      # `collectInputEvidence` or `writeBuildReport`, for the reason the
+      # `monitorHosting` note above gives: these are alternative entry
+      # points into the SAME build, and a flag wired to only one of them
+      # takes effect or not depending on which path the graph happened to
+      # take.
+      elideCacheHitEvidencePaths: elideCacheHitEvidencePaths,
       cancelCallback: cancelCheck,
       peerCacheActionFetcher: peerCacheFetcher,
       peerCacheActionPublisher: peerCachePublisher,
@@ -9790,7 +9870,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         " socket=" & (if item.runQuotaSocket.len >
             0: item.runQuotaSocket else: "default") &
         " lease=" & $item.leaseId &
-        " evidence=depfile:" & $item.evidence.depfileInputs.len)
+        " evidence=depfile:" & $item.depfileInputCount())
     finishStat(buildStats, statsEnabled, "repro action log render",
       actionLogStart)
     buildResult.stats = buildStats
@@ -9915,6 +9995,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         buildEpoch: currentBuildEpoch(),
         suppressTrace: mcTrace notin measureSet,
         skipCacheHitEvidence: mcCacheEvidence notin measureSet,
+        # Cache-hit evidence PATHS: built only when a consumer of this run
+        # will read the strings (`repro watch`, `--write-report`). The counts
+        # the log line and the stats observation take are unaffected — see
+        # `EvidencePathCounts`. Wired into EVERY config whose results reach
+        # `collectInputEvidence` or `writeBuildReport`, for the reason the
+        # `monitorHosting` note above gives: these are alternative entry
+        # points into the SAME build, and a flag wired to only one of them
+        # takes effect or not depending on which path the graph happened to
+        # take.
+        elideCacheHitEvidencePaths: elideCacheHitEvidencePaths,
         cancelCallback: cancelCheck)
       cmakeRegenerationConfig.statsEnabled = statsEnabled
       cmakeRegenerationResult = runBuild(graph([cmakeRegenerationAction]),
@@ -10884,6 +10974,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         buildEpoch: currentBuildEpoch(),
         suppressTrace: mcTrace notin measureSet,
         skipCacheHitEvidence: mcCacheEvidence notin measureSet,
+        # Cache-hit evidence PATHS: built only when a consumer of this run
+        # will read the strings (`repro watch`, `--write-report`). The counts
+        # the log line and the stats observation take are unaffected — see
+        # `EvidencePathCounts`. Wired into EVERY config whose results reach
+        # `collectInputEvidence` or `writeBuildReport`, for the reason the
+        # `monitorHosting` note above gives: these are alternative entry
+        # points into the SAME build, and a flag wired to only one of them
+        # takes effect or not depending on which path the graph happened to
+        # take.
+        elideCacheHitEvidencePaths: elideCacheHitEvidencePaths,
         cancelCallback: cancelCheck)
       providerCompileConfig.statsEnabled = statsEnabled
       # Distinguish "running" from "checking" so a silent hang inside
@@ -11197,6 +11297,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       publishCachedResults: publishCacheHits,
       suppressTrace: mcTrace notin measureSet,
       skipCacheHitEvidence: mcCacheEvidence notin measureSet,
+      # Cache-hit evidence PATHS: built only when a consumer of this run
+      # will read the strings (`repro watch`, `--write-report`). The counts
+      # the log line and the stats observation take are unaffected — see
+      # `EvidencePathCounts`. Wired into EVERY config whose results reach
+      # `collectInputEvidence` or `writeBuildReport`, for the reason the
+      # `monitorHosting` note above gives: these are alternative entry
+      # points into the SAME build, and a flag wired to only one of them
+      # takes effect or not depending on which path the graph happened to
+      # take.
+      elideCacheHitEvidencePaths: elideCacheHitEvidencePaths,
       cancelCallback: cancelCheck)
     # S7 — ``--restore-cached-outputs`` is what makes the CAS-restore
     # configuration reachable from ``repro build`` at all. Until it existed,
@@ -11343,7 +11453,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         " socket=" & (if item.runQuotaSocket.len >
             0: item.runQuotaSocket else: "default") &
         " lease=" & $item.leaseId &
-        " evidence=depfile:" & $item.evidence.depfileInputs.len)
+        " evidence=depfile:" & $item.depfileInputCount())
     if reportPersistence.requested and not reportPersistence.suppressed:
       logSummary("buildReport: " & reportPath)
     finishStat(buildStats, statsEnabled, "repro action log render",
@@ -21471,6 +21581,17 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
 
         monitorHosting = monitorHosting,
         evidenceScope = evidenceScope,
+        # ``repro build`` returns an EXIT CODE. Nothing on this path reads
+        # ``BuildCommandOutcome.inputEvidencePaths`` — that field exists for
+        # ``repro watch``'s watcher, which has its own call site below and
+        # takes the safe default. What a build DOES read out of the cache-hit
+        # evidence is counts: ``evidence=depfile:<n>`` on each action line,
+        # ``--show=cache-evidence``, and the ``dependency-evidence`` stats
+        # observation. Those are unaffected (``EvidencePathCounts``), and
+        # ``--write-report`` — the other reader of the strings — turns the
+        # strings back on from inside ``executeBuildTarget``, so it cannot be
+        # lost by editing this list.
+        wantsInputEvidencePaths = false,
         benchmarkPath = benchmarkPath,
         eventSink = eventSink,
         cancelCheck = cancelCheck,
@@ -26117,6 +26238,16 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         measureSet = measureSet,
         reportPersistence = reportPersistence,
         restoreCachedOutputs = restoreCachedOutputs,
+        # THE WATCHER IS THE REASON THE PATHS ARE COLLECTED AT ALL. Said
+        # explicitly here even though it is the default, because this is the
+        # one call site where the default being wrong is not a slow build but
+        # a watch loop that arms on the project file, prints
+        # ``watching paths=2``, and blocks forever on edits it can no longer
+        # see. ``watchPathsFromOutcome(outcome)`` a few lines below is the
+        # consumer; ``tests/e2e/watch/
+        # t_e2e_repro_watch_arms_on_cache_hit_evidence.nim`` is what makes
+        # removing this line go red.
+        wantsInputEvidencePaths = true,
         eventSink = buildEventSink,
         cancelCheck = cancelCheck,
         extraNameSelectors = extraNameSelectors)
