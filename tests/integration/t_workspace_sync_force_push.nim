@@ -1,4 +1,22 @@
 ## M10 — ``repro workspace sync`` force-push rebase integration test.
+##
+## CONTRACT NOTE (changed): the rebase is an OPT-IN.
+##
+## These cases used to drive the rebase with a BARE ``repro sync``, because
+## ``--rebase-on-force-push`` defaulted to on. That default is the safety
+## defect fixed alongside this edit — it made a plain sync reset every
+## checkout whose remote had been rewritten, with no RA-9 preview and no
+## confirmation, and (measured on a real workspace) reset twelve of them
+## while reporting ``force-reset 0, skipped 0``.
+##
+## So the rebase is now requested explicitly, with ``--rebase-on-force-push
+## --yes``, and what each case asserts about the rebase ITSELF — detection,
+## patch-id selection, replay order, no duplication — is unchanged. The
+## bare-sync invocation that used to stand in for the opt-in is not dropped:
+## it is now asserted to REFUSE, which is the behaviour it should always
+## have had. The gating contract in full (preview, confirmation, counting,
+## conflict recovery) lives in
+## ``t_workspace_sync_does_not_rewrite_a_force_pushed_checkout_unasked.nim``.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support
@@ -235,8 +253,23 @@ suite "repro workspace sync (force-push rebase)":
     check entryRefused["action"].getStr() == "none"
     check entryRefused["executionStatus"].getStr() == "refused"
 
-    # 2. Run workspace sync with default settings (should rebase automatically)
-    let res = invokeSync(fx)
+    # 1b. A BARE sync must refuse too. The rebase is an opt-in, so the
+    # default and the explicit ``--no-`` spelling agree; before the fix they
+    # did not, and the default was the destructive one.
+    let resDefault = invokeSync(fx)
+    checkpoint("resDefault output: " & resDefault.output)
+    check resDefault.code == 2
+    let entryDefault = onlyRepoEntry(readReport(fx))
+    check entryDefault["syncCase"].getStr() == "force_push_rebase"
+    check entryDefault["action"].getStr() == "none"
+    check entryDefault["executionStatus"].getStr() == "refused"
+    # And it moved nothing: HEAD still carries C1 and C2 over the old base.
+    check requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / "lib") &
+      " rev-parse HEAD~2").strip() == fx.pushedSha
+
+    # 2. Ask for the rebase explicitly and confirm it (non-TTY, so ``--yes``
+    # is what carries the RA-9 confirmation).
+    let res = invokeSync(fx, ["--rebase-on-force-push", "--yes"])
     if res.code != 0:
       checkpoint("output: " & res.output)
     check res.code == 0
@@ -314,7 +347,9 @@ suite "repro workspace sync (force-push rebase)":
     check "local C2" notin upstreamSubjects
     check "local C3" notin upstreamSubjects
 
-    let res = invokeSync(fx)
+    # The rebase is an opt-in (see the contract note at the top of this
+    # file); this case is about WHICH commits it replays, so it asks for it.
+    let res = invokeSync(fx, ["--rebase-on-force-push", "--yes"])
     if res.code != 0:
       checkpoint("output: " & res.output)
     check res.code == 0

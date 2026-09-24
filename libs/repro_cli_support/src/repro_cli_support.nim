@@ -32568,6 +32568,21 @@ type
     succeeded*: int   ## existing checkout updated (ff / attach / merge).
     cloned*: int      ## a newly-declared repo cloned.
     forceReset*: int  ## ``--force-sync`` overwrote a divergent/dirty repo.
+    rebased*: int
+      ## ``--rebase-on-force-push`` moved a force-pushed branch onto the
+      ## rewritten remote history (``git reset --hard`` + patch-id-selective
+      ## replay of the commits the operator still owns).
+      ##
+      ## Counted SEPARATELY from ``succeeded`` because it is not an ordinary
+      ## update: the branch ref is moved onto a history that may share no
+      ## commit with the one it was on, and the pre-rewrite tip survives only
+      ## as the backup ref the executor writes. Folding it into "updated" is
+      ## precisely how a run that reset 12 checkouts reported
+      ## ``force-reset 0, skipped 0`` — the digest denied work it had done.
+      ## It is also NOT folded into ``forceReset``, whose documented meaning
+      ## is the ``--force-sync`` overwrite; the two are reached by different
+      ## flags and preserve different amounts of local work, so one counter
+      ## cannot honestly stand for both.
     noop*: int        ## already at the locked revision / nothing to do.
     skipped*: int     ## reported but deliberately not acted on.
     cloneFailed*: int ## a newly-declared repo could not be cloned.
@@ -32592,6 +32607,17 @@ proc summarize*(report: WorkspaceSyncReport): WorkspaceSyncSummary =
         ["failed", "clone_failed", "declared_branch_missing", "refused"]:
       inc result.forceReset
       continue
+    # Same shape, same reason, for the OTHER action that moves a branch onto
+    # a history it did not have: the force-push rebase. It too reports
+    # ``executionStatus = "succeeded"``, so without this test it was claimed
+    # by the switch's first arm and counted as an ordinary update. Measured:
+    # 12 repos reset onto a rewritten remote by one run, digest line
+    # ``updated 61 … force-reset 0, skipped 0`` — every one of the 12 hidden
+    # inside ``updated``.
+    if entry.action == "force_push_rebase" and entry.executionStatus notin
+        ["failed", "clone_failed", "declared_branch_missing", "refused"]:
+      inc result.rebased
+      continue
     case entry.executionStatus
     of "succeeded": inc result.succeeded
     of "cloned": inc result.cloned
@@ -32608,6 +32634,7 @@ proc toJsonNode*(summary: WorkspaceSyncSummary): JsonNode =
   result["succeeded"] = %summary.succeeded
   result["cloned"] = %summary.cloned
   result["forceReset"] = %summary.forceReset
+  result["rebased"] = %summary.rebased
   result["noop"] = %summary.noop
   result["skipped"] = %summary.skipped
   result["cloneFailed"] = %summary.cloneFailed
@@ -32705,7 +32732,14 @@ proc renderSyncSummaryLines*(report: WorkspaceSyncReport): seq[string] =
   let s = report.summarize()
   result.add("workspace sync summary: " &
     "updated " & $s.succeeded & ", cloned " & $s.cloned &
-    ", force-reset " & $s.forceReset & ", up-to-date " & $s.noop &
+    ", force-reset " & $s.forceReset &
+    # Rendered UNCONDITIONALLY, unlike ``CLONE FAILED`` below. The digest's
+    # job here is to let an operator confirm that nothing was rewritten, and
+    # a counter that is absent when it is zero cannot distinguish "zero" from
+    # "this build does not report it" — which is the reading that let 12
+    # rewritten checkouts pass unnoticed.
+    ", rebased " & $s.rebased &
+    ", up-to-date " & $s.noop &
     ", skipped " & $s.skipped &
     (if s.cloneFailed > 0: ", CLONE FAILED " & $s.cloneFailed else: "") &
     ", refused " & $s.refused &
@@ -32838,7 +32872,19 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
   ## the project name to find ``projects/<name>.toml``.
   result.workspaceRoot = ""
   result.toolProvisioning = tpmPathOnly
-  result.rebaseOnForcePush = true
+  # ``--rebase-on-force-push`` is an OPT-IN, and this default is the
+  # enforcement of that. The action it enables (``saForcePushRebase``) runs
+  # ``git reset --hard <remote>/<branch>`` before replaying anything, so a
+  # default of ``true`` made a bare ``repro sync`` a destructive command on
+  # every checkout whose remote had been rewritten — with no RA-9 preview and
+  # no confirmation, and the flag that supposedly requested it never typed.
+  # Measured on a real workspace: 12 repos reset by a run that reported
+  # ``force-reset 0, skipped 0``.
+  #
+  # The planner's refusal text has always said "run 'repro sync
+  # --rebase-on-force-push' to rebase your local commits on the new history".
+  # That sentence is only honest when the flag is what turns the rebase on.
+  result.rebaseOnForcePush = false
   var i = 0
   while i < args.len:
     let arg = args[i]
@@ -37348,15 +37394,26 @@ proc offerSafeRemedy*(description: string; remedyCommand: string;
 
 type
   ForceSyncGuardOutcome = enum
-    ## Result of the RA-16 / RA-9 destructive-command safety gate for
-    ## ``--force-sync``.
+    ## Result of the RA-16 / RA-9 destructive-command safety gate that guards
+    ## EVERY sync path which moves a branch ref off the history it is on.
     fsgNoTargets       ## no divergent/dirty repos → nothing to force, sync as normal.
     fsgConfirmed       ## the overwrite is authorized (``--yes``/``--force`` or a TTY confirm).
     fsgRefusedNonTty   ## non-TTY with no ``--yes`` → refuse cleanly (do not hang, do not overwrite).
     fsgDeclined        ## interactive operator answered "no".
 
+  DestructiveSyncKind = enum
+    ## WHICH destructive sync path a gated target is bound for. The two
+    ## differ in how much local work survives, so the preview must name them
+    ## apart — an operator who is told "OVERWRITE, discarding local changes"
+    ## about a rebase that will replay their commits learns the wrong thing,
+    ## and so does one told the reverse.
+    dskOverwrite  ## ``--force-sync``: ``git reset --hard`` + ``git clean -ffdx``.
+    dskRebase     ## ``--rebase-on-force-push``: reset onto the rewritten
+                  ## remote, then replay the patch-id-unique local commits.
+
   ForceSyncTarget = object
     repoIdx: int
+    kind: DestructiveSyncKind
     path: string
     syncCase: SyncCase
     observed: string
@@ -37364,36 +37421,70 @@ type
 
 proc forceSyncGuard(args: WorkspaceSyncArgs;
                     targets: seq[ForceSyncTarget]): ForceSyncGuardOutcome =
-  ## RA-16 ``--force-sync`` is a destructive multi-repo command, so it is
-  ## subject to the RA-9 destructive-command safety rules: PREVIEW the
+  ## THE one RA-9 destructive-command gate on the sync path: PREVIEW the
   ## per-repo effect, then CONFIRM. ``--yes``/``--force`` opts out of the
   ## prompt. In a non-interactive context (no TTY) WITHOUT the flag we
   ## REFUSE cleanly with a clear message rather than hanging on a prompt
-  ## that can never be answered. A normal sync (no ``--force-sync``) never
-  ## reaches this gate and keeps report-only-skipping divergent repos.
+  ## that can never be answered.
+  ##
+  ## It guards BOTH destructive sync paths, and that is the point of it
+  ## taking a ``kind`` rather than being ``--force-sync``-specific. It used
+  ## to gate only ``--force-sync``; ``--rebase-on-force-push`` reached
+  ## ``executeForcePushRebase``'s ``git reset --hard`` without passing any
+  ## gate at all, and (because that flag defaulted to ON) so did a bare
+  ## ``repro sync``. A second destructive path that does not route through
+  ## the chokepoint makes the chokepoint decorative, so there is now no
+  ## branch-moving sync action that can be scheduled without coming through
+  ## here.
+  ##
+  ## A plain sync with neither flag produces no targets at all and keeps
+  ## report-only-skipping divergent repos (``fsgNoTargets``).
   if targets.len == 0:
     return fsgNoTargets
-  # Preview: one line per repo we are about to OVERWRITE.
-  stderr.writeLine("repro workspace sync --force-sync will OVERWRITE " &
-    $targets.len & " checkout(s) to the locked revision (discarding local " &
-    "changes):")
+  var overwrites, rebases: seq[ForceSyncTarget]
   for t in targets:
+    if t.kind == dskOverwrite: overwrites.add(t) else: rebases.add(t)
+  proc previewLine(t: ForceSyncTarget) =
     stderr.writeLine("  " & t.path & " [" & syncCaseTag(t.syncCase) & "]" &
       (if t.observed.len > 0: " " & t.observed else: "") &
       " → " & t.expected)
+  if overwrites.len > 0:
+    stderr.writeLine("repro workspace sync --force-sync will OVERWRITE " &
+      $overwrites.len & " checkout(s) to the locked revision (discarding " &
+      "local changes):")
+    for t in overwrites: previewLine(t)
+  if rebases.len > 0:
+    # Say exactly what the rebase does to the branch, including the part an
+    # operator would not guess: the reset happens FIRST, and the pre-rewrite
+    # tip survives only as the backup ref the executor writes.
+    stderr.writeLine("repro workspace sync --rebase-on-force-push will " &
+      "RESET " & $rebases.len & " branch(es) onto their rewritten remote " &
+      "history and replay the local commits that are not already upstream " &
+      "(the pre-rewrite tip is kept as refs/repro/pre-rewrite/<branch>/<sha>):")
+    for t in rebases: previewLine(t)
   # RA-9: defer the opt-out / TTY / non-TTY decision to the shared
-  # ``confirmDestructive`` chokepoint so ``--force-sync`` refuses in a
-  # non-interactive context identically to ``remove`` and ``checkout``.
+  # ``confirmDestructive`` chokepoint so these refuse in a non-interactive
+  # context identically to ``remove`` and ``checkout``.
+  let verb =
+    if overwrites.len > 0 and rebases.len > 0: "Overwrite / rewrite"
+    elif rebases.len > 0: "Rewrite"
+    else: "Overwrite"
+  let flags =
+    if overwrites.len > 0 and rebases.len > 0:
+      "--force-sync / --rebase-on-force-push"
+    elif rebases.len > 0: "--rebase-on-force-push"
+    else: "--force-sync"
   case confirmDestructive(
-      prompt = "Overwrite the checkout(s) above? This DISCARDS local " &
-        "changes. [y/N] ",
+      prompt = verb & " the checkout(s) above? This MOVES branch refs and " &
+        "may DISCARD local work. [y/N] ",
       autoYes = args.assumeYes,
       isTty = isatty(stdin),
       flagName = "--yes",
-      refuseMessage = "refusing to --force-sync in a non-interactive " &
-        "context without --yes/--force (would discard local changes)",
+      refuseMessage = "refusing to " & flags & " in a non-interactive " &
+        "context without --yes/--force (would move branch refs and may " &
+        "discard local work)",
       declineMessage =
-        "force-sync declined; leaving divergent checkouts untouched")
+        "declined; leaving the divergent checkouts untouched")
   of ddConfirmed: fsgConfirmed
   of ddRefusedNonTty: fsgRefusedNonTty
   of ddDeclined: fsgDeclined
@@ -37894,7 +37985,13 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     observations.add(observation)
 
   # Step 4: planner.
-  let planned = planSync(resolved.repos, observations, args.rebaseOnForcePush)
+  #
+  # ``var``, not ``let``: the RA-9 destructive gate below may DOWNGRADE a
+  # ``saForcePushRebase`` decision back to a refusal when the operator does
+  # not confirm it. Rewriting the decision (rather than carrying a side
+  # table) keeps one code path responsible for reporting, counting and the
+  # exit code.
+  var planned = planSync(resolved.repos, observations, args.rebaseOnForcePush)
 
   # Step 5 (RA-5c): checkout phase. Collect every repo's mutating action
   # (clone / merge-ff / attach) into ONE graph and run it once. No-op /
@@ -37937,22 +38034,61 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     reference
   var cloneRepoIdx = initHashSet[int]()
 
-  # RA-16 ``--force-sync``: the planner SKIPS-and-reports a divergent /
-  # dirty / locally-unpublished checkout (``saNone``). With ``--force-sync``
-  # the operator opts into OVERWRITING those to the locked revision. We
-  # gather the candidate set, run them through the destructive-command
-  # safety gate ONCE (preview + confirm, or refuse cleanly in a non-TTY
-  # without ``--yes``), and only then schedule the force-reset actions. A
-  # normal sync (no flag) never enters this branch — it keeps skipping.
+  # RA-16 / RA-9 — the ONE destructive gate on the sync path.
+  #
+  # Two sync outcomes move a branch ref off the history it is on:
+  #
+  #   * ``--force-sync``              — the planner SKIPS-and-reports a
+  #     divergent / dirty / locally-unpublished / force-pushed checkout
+  #     (``saNone``), and this flag opts into OVERWRITING it to the locked
+  #     revision.
+  #   * ``--rebase-on-force-push``    — the planner emits
+  #     ``saForcePushRebase``, whose executor resets the branch onto the
+  #     rewritten remote before replaying the local commits that are not
+  #     already upstream.
+  #
+  # BOTH are gathered here and run through the destructive-command safety
+  # gate ONCE (preview + confirm, or refuse cleanly in a non-TTY without
+  # ``--yes``), and only then scheduled. The rebase used to bypass this gate
+  # entirely — and, because its flag defaulted to ON, a bare ``repro sync``
+  # did too. A plain sync with neither flag gathers no targets and keeps
+  # report-only-skipping, which is the documented behaviour.
   var forceResetRepos = initHashSet[int]()
   var forceResetTarget = initTable[int, string]()
-  if args.forceSync:
+  # Force-push rebases the operator did NOT authorize. Their decisions are
+  # rewritten into refusals below, so an unconfirmed gate leaves the checkout
+  # exactly as a refusal does: untouched, reported, and counted.
+  var deniedRebaseRepos = initHashSet[int]()
+  block destructiveGate:
     var targets: seq[ForceSyncTarget]
     for repoIdx, decision in planned.report.decisions:
+      if decision.action == saForcePushRebase:
+        # ``--rebase-on-force-push`` is what produced this decision (the
+        # planner emits ``saForcePushRebase`` only when that flag is set), so
+        # the operator has asked for it — but asking for the MODE is not the
+        # same as confirming the per-repo blast radius, which is what RA-9
+        # requires and what only this preview can show.
+        targets.add(ForceSyncTarget(
+          repoIdx: repoIdx, kind: dskRebase, path: decision.path,
+          syncCase: decision.syncCase, observed: decision.observed,
+          expected:
+            (if observations[repoIdx].remoteBranchTip.len > 0:
+               observations[repoIdx].remoteBranchTip
+             else: decision.expected)))
+        continue
+      if not args.forceSync:
+        continue
       if decision.action != saNone:
         continue
+      # ``scForcePushRebase`` belongs in this set, and its absence was a
+      # promise the tool did not keep: the planner's own refusal text for a
+      # rewritten remote ends "or discard it with 'repro sync --force-sync'",
+      # yet that case was filtered out here, so ``--force-sync`` did nothing
+      # for it and the repo stayed refused however many times the operator
+      # ran the named remedy.
       if decision.syncCase notin
-          {scDirty, scLocallyUnpublished, scDivergentFeatureBranch}:
+          {scDirty, scLocallyUnpublished, scDivergentFeatureBranch,
+           scForcePushRebase}:
         continue
       let repo = resolved.repos[repoIdx]
       # The concrete commit to reset onto: the SHA-pinned revision itself,
@@ -37977,12 +38113,37 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         continue
       forceResetTarget[repoIdx] = target
       targets.add(ForceSyncTarget(
-        repoIdx: repoIdx, path: decision.path, syncCase: decision.syncCase,
+        repoIdx: repoIdx, kind: dskOverwrite, path: decision.path,
+        syncCase: decision.syncCase,
         observed: decision.observed, expected: decision.expected))
     let guard = forceSyncGuard(args, targets)
-    if guard == fsgConfirmed:
-      for t in targets:
-        forceResetRepos.incl(t.repoIdx)
+    for t in targets:
+      if guard == fsgConfirmed:
+        if t.kind == dskOverwrite:
+          forceResetRepos.incl(t.repoIdx)
+        # A confirmed rebase needs no bookkeeping: its decision already
+        # carries ``saForcePushRebase`` and is scheduled below unchanged.
+      elif t.kind == dskRebase:
+        deniedRebaseRepos.incl(t.repoIdx)
+      # An unconfirmed OVERWRITE needs no bookkeeping either: its decision is
+      # already ``saNone`` + a refusal reason, so leaving it alone is exactly
+      # the report-only-skip the gate declined into.
+
+  # Turn every unauthorized rebase back into the refusal it would have been
+  # without ``--rebase-on-force-push``. Done on the decisions themselves, so
+  # a single code path downstream reports, counts and exit-codes it — rather
+  # than a parallel "was it gated" flag that the reporting loop could forget
+  # to consult, which is the shape of the defect being fixed.
+  for repoIdx in deniedRebaseRepos:
+    planned.report.decisions[repoIdx].action = saNone
+    planned.report.decisions[repoIdx].refusalReason =
+      "remote branch was force-pushed and the rebase onto the rewritten " &
+      "history was NOT confirmed, so '" &
+      planned.report.decisions[repoIdx].path & "' was left untouched; " &
+      "re-run with '--yes' to confirm it, or resolve it by hand"
+    planned.report.decisions[repoIdx].message =
+      "refusing to rewrite force-pushed checkout at '" &
+      planned.report.decisions[repoIdx].path & "' without confirmation"
 
   for repoIdx, decision in planned.report.decisions:
     let resolvedRepo = resolved.repos[repoIdx]

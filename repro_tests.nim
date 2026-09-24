@@ -14004,6 +14004,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_workspace_sync_does_not_rewrite_a_force_pushed_checkout_unasked.nim",
+    binary: "build/test-bin/t_workspace_sync_does_not_rewrite_a_force_pushed_checkout_unasked",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_workspace_sync_fetches_repos_in_parallel.nim",
     binary: "build/test-bin/t_workspace_sync_fetches_repos_in_parallel",
     defines: @[],

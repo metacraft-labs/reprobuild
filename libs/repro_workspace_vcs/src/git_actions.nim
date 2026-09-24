@@ -916,13 +916,20 @@ proc renderForceResetReceipt(payload: GitVcsPayload; headSha: string): string =
   result.add("git-version\t" & payload.identityVersion & "\n")
   result.add("git-identity\t" & payload.identityDigestHex & "\n")
 
-proc renderForcePushRebaseReceipt(payload: GitVcsPayload; headSha: string): string =
+proc renderForcePushRebaseReceipt(payload: GitVcsPayload;
+                                  headSha, preRewriteSha,
+                                  backupRef: string): string =
   result = ForcePushRebaseReceiptHeader & "\n"
   result.add("kind\t" & WorkspaceVcsKind & "\n")
   result.add("operation\tforce-push-rebase\n")
   result.add("revision\t" & payload.revision & "\n")
   result.add("base-sha\t" & payload.baseSha & "\n")
   result.add("repo-path\t" & payload.repoPath & "\n")
+  # The history this action moved the branch OFF, and where it can still be
+  # found. A receipt for a destructive action that records only the new state
+  # documents the outcome but not the recovery.
+  result.add("pre-rewrite-sha\t" & preRewriteSha & "\n")
+  result.add("pre-rewrite-ref\t" & backupRef & "\n")
   result.add("head-sha\t" & headSha & "\n")
   result.add("git-version\t" & payload.identityVersion & "\n")
   result.add("git-identity\t" & payload.identityDigestHex & "\n")
@@ -1688,32 +1695,105 @@ proc executeForcePushRebase(payload: GitVcsPayload;
     if sha.len > 0:
       commitsToCherryPick.add(sha)
 
-  # 2. Reset the branch to the remote tracking tip
+  # 2. Record the pre-rewrite tip under a REF before moving the branch.
+  #
+  #    Step 3 below is a ``git reset --hard``, after which the history this
+  #    checkout was on is reachable from nothing but the reflog — and a
+  #    reflog entry is a 90-day expiry candidate, not a record. On the
+  #    workspace this was diagnosed in, twelve branches were moved onto a
+  #    rewritten remote and every superseded tip was left in exactly that
+  #    state. Nothing was lost only because the rewrite happened to be
+  #    patch-equivalent; the tool could not know that, and for an operator
+  #    with genuine local commits the difference between "recoverable" and
+  #    "gone" is this ref.
+  #
+  #    The name embeds the superseded SHA, so a second run cannot clobber the
+  #    first run's backup, and re-running after a successful rebase is a
+  #    no-op rather than a fresh "backup" of the already-rewritten state.
+  #    ``refs/repro/...`` is outside ``refs/heads`` and ``refs/remotes``, so
+  #    it is invisible to branch listing, to ``git cherry``, and to the
+  #    planner's own ``HEAD --not --remotes`` probe: it keeps the objects
+  #    alive without changing any classification.
+  let preRewriteHead = resolveHeadSha(payload, target)
+  if not preRewriteHead.ok:
+    return failed("force-push-rebase-head-probe-failed",
+      "refusing to rewrite '" & target & "': could not resolve the " &
+      "pre-rewrite HEAD to back it up (" & preRewriteHead.diagnostic & ")")
+  # ``branchName`` is non-empty by construction (the planner only schedules
+  # this for a branch that HAS a remote counterpart), but an empty component
+  # would make ``git update-ref`` reject the name and turn a missing input
+  # into an unexplained refusal — so name the detached case explicitly.
+  let backupSeg = if payload.branchName.len > 0: payload.branchName
+                  else: "detached"
+  let backupRef = "refs/repro/pre-rewrite/" & backupSeg & "/" &
+    preRewriteHead.sha
+  let backupRes = runGit(payload,
+    ["-C", target, "update-ref", backupRef, preRewriteHead.sha])
+  if backupRes.exitCode != 0:
+    # Refuse rather than proceed. The backup is the only thing that makes
+    # this action recoverable, so an unrecoverable rewrite is not a
+    # degraded success — it is the thing we declined to do.
+    return failed("force-push-rebase-backup-failed",
+      "refusing to rewrite '" & target & "': could not record the " &
+      "pre-rewrite tip " & preRewriteHead.sha & " at " & backupRef & " (" &
+      backupRes.output.trimmed & ")")
+
+  # 3. Reset the branch to the remote tracking tip
   let resetRes = runGit(payload,
     ["-C", target, "reset", "--hard", remoteRef])
   if resetRes.exitCode != 0:
     return failed("force-push-rebase-reset-failed",
       "git reset --hard " & remoteRef & " failed: " & resetRes.output.trimmed)
 
-  # 3. Cherry-pick each of the still-unique local commits, oldest first.
+  # 4. Cherry-pick each of the still-unique local commits, oldest first.
   for rawCommit in commitsToCherryPick:
     let commit = rawCommit.strip()
     if commit.len == 0: continue
     let cpRes = runGit(payload, ["-C", target, "cherry-pick", commit])
     if cpRes.exitCode != 0:
       discard runGit(payload, ["-C", target, "cherry-pick", "--abort"])
+      # PUT THE CHECKOUT BACK. The reset in step 3 already happened, so
+      # without this the branch is left sitting on the remote tip with the
+      # operator's commits dropped — a FAILED action that nonetheless
+      # performed the destructive half and threw away the work it was
+      # invoked to preserve. A conflicting replay is a judgment call only a
+      # human can make, and they can only make it on the history they had.
+      let restoreRes = runGit(payload,
+        ["-C", target, "reset", "--hard", preRewriteHead.sha])
+      let restoreNote =
+        if restoreRes.exitCode == 0:
+          "; the checkout was restored to its pre-rewrite tip " &
+            preRewriteHead.sha & " and is UNCHANGED"
+        else:
+          "; the checkout could NOT be restored automatically (" &
+            restoreRes.output.trimmed & ") — recover it with 'git -C " &
+            target & " reset --hard " & backupRef & "'"
       return failed("cherry-pick-failed",
         "git cherry-pick " & commit & " failed: " & cpRes.output.trimmed &
           " (replaying " & $commitsToCherryPick.len &
           " commit(s) whose change is not yet on " & remoteRef & "; " &
-          $alreadyUpstream & " already-landed commit(s) were skipped)")
+          $alreadyUpstream & " already-landed commit(s) were skipped)" &
+          restoreNote)
 
   let headRes = resolveHeadSha(payload, target)
   if not headRes.ok:
     return failed("force-push-rebase-head-probe-failed", headRes.diagnostic)
-  let receipt = renderForcePushRebaseReceipt(payload, headRes.sha)
+  let receipt = renderForcePushRebaseReceipt(payload, headRes.sha,
+    preRewriteHead.sha, backupRef)
   writeReceipt(receiptPath, receipt)
-  succeeded()
+  # A SUCCESS that moved the branch onto a different history says so on the
+  # row the operator reads, and names the ref that makes it reversible —
+  # the same `reason`/`stderr` pairing `executeForceReset` uses for its
+  # partial overwrite.
+  var done = succeeded()
+  done.reason = "force-push-rebase-rewrote-branch"
+  done.stderr = "rewrote '" & payload.repoPath & "' onto " & remoteRef &
+    ", replaying " & $commitsToCherryPick.len & " local commit(s) (" &
+    $alreadyUpstream & " already upstream); the pre-rewrite tip " &
+    preRewriteHead.sha & " is kept at " & backupRef &
+    " (recover with 'git -C " & payload.repoPath & " reset --hard " &
+    backupRef & "')"
+  done
 
 type
   WorkspaceVcsSubExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}

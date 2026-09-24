@@ -313,7 +313,7 @@ proc trunkNameFor(resolved: ResolvedRepo): string =
 
 proc classifyRepoState*(resolved: ResolvedRepo;
                         observation: RepoSyncObservation;
-                        rebaseOnForcePush: bool = true): RepoSyncDecision =
+                        rebaseOnForcePush: bool = false): RepoSyncDecision =
   ## Map ``(resolved, observation)`` to one of the seven canonical
   ## cases. The decision logic deliberately runs in a fixed priority
   ## order:
@@ -332,6 +332,30 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   ## 7. ``divergent_feature_branch``   (everything else — the operator is
   ##                                    on a feature branch that has its
   ##                                    own history vs the lock)
+  ##
+  ## ``rebaseOnForcePush`` DEFAULTS TO FALSE, and that default is a safety
+  ## boundary rather than a stylistic choice. ``saForcePushRebase`` is
+  ## executed by ``executeForcePushRebase``, which does ``git reset --hard
+  ## <remote>/<branch>`` and only then replays what it can. Whatever the
+  ## replay restores, the branch ref HAS been moved onto a history that may
+  ## share no commit with the one it was on — a destructive act on the
+  ## operator's checkout, so it is subject to RA-9 (preview, then confirm)
+  ## and to RA-16's rule that a divergent checkout is report-only-skipped
+  ## unless the operator opted in.
+  ##
+  ## It defaulted to TRUE, and ``parseWorkspaceSyncArgs`` defaulted the flag
+  ## to true as well, so a bare ``repro sync`` reset every checkout for which
+  ## a force-push had been RECORDED — no preview, no confirmation, and
+  ## counted in the digest as an ordinary "updated". Measured on a real
+  ## workspace: 12 repos reset by a run whose own summary said ``force-reset
+  ## 0, skipped 0``. The refusal text in the force-push arm below has always
+  ## told the operator to "run 'repro sync --rebase-on-force-push'", which is
+  ## only true advice if the flag is an opt-in; under the old default the
+  ## rebase had already happened by the time anyone could read it.
+  ##
+  ## Consequence: a force-pushed checkout now classifies as
+  ## ``scForcePushRebase`` + ``saNone`` — refused and reported — exactly as a
+  ## checkout whose branch has no remote counterpart always did.
   result.name = resolved.name
   result.path = resolved.path
   result.expected = resolved.revision
@@ -592,7 +616,7 @@ proc classifyRepoState*(resolved: ResolvedRepo;
 
 proc planSync*(resolved: openArray[ResolvedRepo];
                observations: openArray[RepoSyncObservation];
-               rebaseOnForcePush: bool = true):
+               rebaseOnForcePush: bool = false):
               tuple[plan: SyncPlan; report: SyncReport] =
   ## Drive ``classifyRepoState`` over every (resolved, observation)
   ## pair. ``resolved.len`` MUST equal ``observations.len`` — the
