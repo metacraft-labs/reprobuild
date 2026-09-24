@@ -49,6 +49,13 @@ proc hasOpFor(ops: openArray[ForeignEnvOp]; name: string): bool =
 
 suite "nf4_foreign_env_contract":
 
+  test "standalone flakes do not require a workspace resolver":
+    let root = createTempDir("repro-standalone-flake-", "")
+    defer: removeDir(root)
+    writeFile(root / "flake.nix", "{ outputs = _: {}; }")
+    check workspaceFlakeOverrides(root).len == 0
+
+
   test "the_flake_activation_is_one_line_in_repro_nim":
     # The owner's requirement, made checkable: activating a whole flake must
     # reduce to ONE line of `repro.nim` with no arguments to work out.

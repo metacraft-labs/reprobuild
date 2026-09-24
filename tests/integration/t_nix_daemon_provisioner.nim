@@ -24,6 +24,7 @@ import std/[unittest, os, osproc, strutils, tempfiles]
 import repro_core
 import repro_core/dependency_gathering
 import repro_build_engine
+import repro_dev_env_engine
 import repro_interface_artifacts
 import repro_tool_profiles
 
@@ -90,6 +91,28 @@ when defined(posix):
       fpOthersRead})
 
 suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
+
+  test "dev env repeated uses share acquisition but distinct selectors do not":
+    let fixtureRoot = prepareFixtureRoot(findRepoRoot())
+    defer: removeDir(fixtureRoot)
+    let useDef = InterfaceToolUse(packageSelector: "sh", rawConstraint: "sh",
+      nixProvisioning: @[InterfaceNixProvisioning(
+        selector: FixtureSelector, executablePath: FixtureExecutable)])
+    var other = useDef
+    other.nixProvisioning = @[InterfaceNixProvisioning(
+      selector: ".#different-sh", executablePath: FixtureExecutable)]
+    let actions = devEnvNixProvisioningActions([useDef, useDef, other],
+      tpmNix, fixtureRoot, fixtureRoot)
+    check actions.len == 2
+    check actions[0].id != actions[1].id
+    check actions[0].outputs != actions[1].outputs
+    check actions[0].argv == @["nix", FixtureSelector]
+    let repeated = devEnvNixProvisioningActions([useDef, useDef],
+      tpmNix, fixtureRoot, fixtureRoot)
+    check repeated.len == 1
+    check repeated[0].id == actions[0].id
+    check devEnvNixProvisioningActions([useDef], tpmPathOnly,
+      fixtureRoot, fixtureRoot).len == 0
 
   when defined(posix):
     test "production provisioner rejects non-executable REPROBUILD_NIX_DAEMON_BIN":

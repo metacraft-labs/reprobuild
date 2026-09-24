@@ -52,6 +52,7 @@ alongside the change:
 
 ```bash
 python3 scripts/reprobuild_suite_inventory.py --write-static-case-counts
+python3 scripts/reprobuild_suite_inventory.py --write-inventory-sources
 ```
 
 It needs no built binaries and takes well under a minute. Review what it
@@ -59,6 +60,10 @@ writes: a row that **decreases or disappears** means test cases left the
 suite, which is the event this file exists to make visible. The check runs in
 `tests/unit/test_reprobuild_suite_inventory.py` and names the source and both
 numbers when it fails, so there is never a total to reconcile by hand.
+
+Refresh both records: the source inventory also records each source's static
+case count. Refresh the source inventory when changing a test's local library
+imports too, since it records that dependency list even when no file is added.
 
 ## Adding or removing test sources
 

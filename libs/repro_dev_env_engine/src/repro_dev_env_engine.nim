@@ -511,6 +511,49 @@ proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
     weakFingerprint = weak,
     dependencyPolicy = automaticMonitorGatheringPolicy())
 
+proc devEnvNixProvisioningActions*(toolUses: openArray[InterfaceToolUse];
+    effectiveProvisioning: ToolProvisioningMode;
+    outDir, workDir: string): seq[BuildAction] =
+  ## One foreign acquisition per selector, regardless of dependency multiplicity.
+  var seen: seq[string]
+  for useDef in toolUses:
+    if effectiveProvisioning in {tpmUnspecified, tpmNix} and
+        useDef.nixProvisioning.len > 0:
+      let plan = nixAcquisitionPlan(useDef)
+      # Several dependency paths may request the same realization. Key the
+      # edge by its acquisition selector, not by the package name: distinct
+      # selectors of the same package must also have distinct receipt outputs.
+      let identity = hexDigest(fingerprintText([
+        "reprobuild.dev-env.nix-provision.v2", plan.nixSelector]))
+      if identity in seen:
+        continue
+      seen.add(identity)
+      let receiptDir = outDir / "tool-store" / "nix-provision"
+      let receiptFile = receiptDir / (identity & ".receipt")
+
+      let provAction = BuildAction(
+        # Named-Lock-Files §7.2. A foreign-provisioner edge is materialised by
+        # a provisioner Reprobuild does not own — the very case that decided
+        # design A over path-partitioning (§7.2's owner note) — and no solved
+        # package instance reaches it here.
+        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+        kind: bakForeignProvision,
+        id: "nix-provision." & identity,
+        argv: @["nix", plan.nixSelector],
+        outputs: @[receiptFile],
+        cwd: workDir,
+        commandStatsId: "repro dev-env nix provision edge",
+        cacheable: true,
+        weakFingerprint: fingerprintText([
+          "reprobuild.dev-env.nix-provision.v1",
+          useDef.packageSelector,
+          plan.nixSelector
+        ]),
+        dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor)
+      )
+      result.add(provAction)
+
+
 proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if config.modulePath.len == 0:
     raiseDevEnvEdge("modulePath is required")
@@ -569,38 +612,12 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   result.providerBinaryPath = active.outDir / "provider" / "project-provider"
   result.providerArtifactPath = active.outDir / "provider-compile.rbsz"
 
-  # Construct bakForeignProvision actions for Nix tool uses
-  var provisioningActions: seq[BuildAction] = @[]
-  var provisioningReceipts: seq[string] = @[]
-  for useDef in interfaceArtifact.projectInterface.toolUses:
-    if effectiveProvisioning in {tpmUnspecified, tpmNix} and
-        useDef.nixProvisioning.len > 0:
-      let plan = nixAcquisitionPlan(useDef)
-      let receiptDir = active.outDir / "tool-store" / "nix-provision"
-      let receiptFile = receiptDir / (safeStoreSegment(useDef.packageSelector, "nix-package") & ".receipt")
-
-      let provAction = BuildAction(
-        # Named-Lock-Files §7.2. A foreign-provisioner edge is materialised by
-        # a provisioner Reprobuild does not own — the very case that decided
-        # design A over path-partitioning (§7.2's owner note) — and no solved
-        # package instance reaches it here.
-        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
-        kind: bakForeignProvision,
-        id: "nix-provision." & useDef.packageSelector,
-        argv: @["nix", plan.nixSelector],
-        outputs: @[receiptFile],
-        cwd: workDir,
-        commandStatsId: "repro dev-env nix provision edge",
-        cacheable: true,
-        weakFingerprint: fingerprintText([
-          "reprobuild.dev-env.nix-provision.v1",
-          useDef.packageSelector,
-          plan.nixSelector
-        ]),
-        dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor)
-      )
-      provisioningActions.add(provAction)
-      provisioningReceipts.add(receiptFile)
+  let provisioningActions = devEnvNixProvisioningActions(
+    interfaceArtifact.projectInterface.toolUses, effectiveProvisioning,
+    active.outDir, workDir)
+  var provisioningReceipts: seq[string]
+  for provision in provisioningActions:
+    provisioningReceipts.add(provision.outputs)
 
   var provider: ProviderCompileArtifact
   let providerPlan = providerCompilePlan(active.modulePath,

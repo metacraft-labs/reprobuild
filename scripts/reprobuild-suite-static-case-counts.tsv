@@ -1283,10 +1283,10 @@ tests/integration/t_negative_chain_fixtures.nim	nim	14
 tests/integration/t_nested_bootstrap_runtime_closure.nim	nim	1
 tests/integration/t_nested_lock_push_capability_security.nim	nim	10
 tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	nim	1
-tests/integration/t_nf4_foreign_env_contract.nim	nim	10
+tests/integration/t_nf4_foreign_env_contract.nim	nim	11
 tests/integration/t_nim_package_path_handling.nim	nim	1
 tests/integration/t_nix_daemon_ipc.nim	nim	4
-tests/integration/t_nix_daemon_provisioner.nim	nim	3
+tests/integration/t_nix_daemon_provisioner.nim	nim	4
 tests/integration/t_no_runtime_compilation_in_tests.nim	nim	2
 tests/integration/t_only_overridden_nodes_are_rewritten.nim	nim	1
 tests/integration/t_optin_layer_runs_under_the_engine.nim	nim	1

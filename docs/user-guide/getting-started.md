@@ -12,6 +12,35 @@ use a different language, see the per-language tutorial under
 
 ## Prerequisites
 
+### Keeping an existing Nix development shell
+
+To activate an existing flake through repro's shell hook, add this to a new
+`repro.nim`, or add the `devEnv` call to your existing package:
+
+```nim
+import repro_project_dsl
+import repro_dsl_stdlib/foreign_env
+
+package projectEnvironment:
+  devEnv:
+    useFlakeDevShell()
+```
+
+Run `repro allow` and enter the directory with the repro shell hook enabled.
+Direnv activation is not required. The flake continues to provide its packages
+and shell setup. Add `.repro/` to `.gitignore` for the local activation artifacts.
+
+Inside a workspace, local flakes obtain their sibling input overrides from
+`repro flake override-args`. Explicit `overrideInputs` entries take precedence;
+`workspaceOverrides = false` disables automatic bindings. A resolver failure
+fails activation instead of silently selecting different sources. Standalone
+and remote flakes do not acquire workspace overrides.
+
+Use `flakeRef = "./nix"` for a nested flake or `flakeRef = ".#ci"` for another
+shell. The default profile lives in `.repro/foreign-env/flake-profile`.
+
+### Building the example
+
 You need:
 
 - `repro` on `PATH` (the reprobuild CLI). See the [main

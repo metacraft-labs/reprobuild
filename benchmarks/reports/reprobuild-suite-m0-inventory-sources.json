@@ -23507,7 +23507,9 @@
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_dsl_stdlib"
+      ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_a_root_repo_flake_is_reported_not_refused.nim",
@@ -29081,7 +29083,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_nf4_foreign_env_contract.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -29126,6 +29128,7 @@
       "localDependencyShape": [
         "repro_build_engine",
         "repro_core",
+        "repro_dev_env_engine",
         "repro_interface_artifacts",
         "repro_tool_profiles"
       ],
@@ -29133,7 +29136,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_nix_daemon_provisioner.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
