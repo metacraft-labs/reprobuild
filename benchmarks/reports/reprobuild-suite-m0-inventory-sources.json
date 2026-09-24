@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1729,
+    "nimTestBinaries": 1730,
     "pureUnitConsolidationGroups": 53,
     "pureUnitTests": 608,
     "staticallyDetectedRuntimeCompilerFlowTests": 106,
-    "testEntries": 1740
+    "testEntries": 1741
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1153,7 +1153,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 824,
+      "integration": 825,
       "platform/destructive": 115,
       "pure unit": 608,
       "unclassified": 181
@@ -1304,9 +1304,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1729,
+    "nimTestBinaryCount": 1730,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1740
+    "testEntryCount": 1741
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -19794,6 +19794,23 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/configurable-system/t_e2e_configurable_system_in_dsl.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_dev_env_announces_before_working",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/dev-env/t_e2e_dev_env_announces_before_working.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
