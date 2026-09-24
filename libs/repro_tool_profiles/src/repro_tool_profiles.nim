@@ -2202,17 +2202,83 @@ proc resolveZstdExe(): string =
   ## only question is whether a zstd exists.
   uncontrolledFindExe("zstd")
 
-proc resolveSevenZipExe(): string =
-  ## Look up a `7z` / `7z.exe` on PATH. Used for `.7z` archives and
-  ## `.7z.exe` (SFX) payloads. Both Scoop's `main/7zip` and the
-  ## system 7-Zip install satisfy this; on POSIX, `p7zip`'s `7z`
-  ## binary speaks the same CLI.
+const
+  # 7-Zip for the extractor bootstrap. MUST match the Windows x86_64 entry of
+  # `sevenzipCatalog` in `repro_dsl_stdlib/packages/sevenzip.nim`;
+  # `t_sevenzip_bootstrap_matches_stdlib_catalog` checks that it does. The MSI,
+  # not the `.exe` installer or a `.7z`, because `msiexec /a` unpacks it with
+  # nothing but the OS: the extractor must not need an extractor.
+  BootstrapSevenZipVersion = "26.01"
+  BootstrapSevenZipWindowsMsiUrl =
+    "https://github.com/ip7z/7zip/releases/download/26.01/7z2601-x64.msi"
+  BootstrapSevenZipWindowsMsiSha256 =
+    "a47ea8dcf8bc08e6de474cae77c828e031fa22cb528f6095defffebf11cd02f2"
+
+proc bootstrapSevenZipToolUse*(): InterfaceToolUse =
+  ## The 7-Zip that extracts `.7z` and `.7z.exe` tool archives -- git for
+  ## Windows and the bootstrap gcc among them. An ordinary tarball-provisioned
+  ## package, realized into the tool store like any other; see
+  ## `resolveSevenZipExe` for why. Windows only: no POSIX tool in the catalogs
+  ## ships as a 7z archive.
+  result = InterfaceToolUse(
+    rawConstraint: "7zip",
+    packageSelector: "7zip@" & BootstrapSevenZipVersion,
+    executableName: "7z")
+  when defined(windows):
+    result.tarballProvisioning = @[
+      InterfaceTarballProvisioning(
+        packageName: "7zip",
+        url: BootstrapSevenZipWindowsMsiUrl,
+        sha256: BootstrapSevenZipWindowsMsiSha256,
+        archiveType: "msi",
+        executablePath: "Files/7-Zip/7z.exe",
+        stripComponents: 0,
+        packageId: "7zip@" & BootstrapSevenZipVersion,
+        lockIdentity: "tarball:7zip@" & BootstrapSevenZipVersion &
+          ":sha256:" & BootstrapSevenZipWindowsMsiSha256,
+        cpu: "x86_64",
+        os: "windows")]
+
+proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
+                         writerMode = "direct"):
+    PathOnlyToolProfile
+
+proc resolveSevenZipExe(storeRoot: string): string =
+  ## The `7z` that extracts `.7z` archives and `.7z.exe` (SFX) payloads.
+  ##
+  ## On Windows, 7-Zip is realized into the tool store FIRST, as a regular
+  ## package (`bootstrapSevenZipToolUse`). This used to search `PATH` only, so
+  ## tarball provisioning -- whose point is not to depend on the host --
+  ## depended on a host 7-Zip: on a cold store without one, git for Windows
+  ## and the bootstrap gcc (both 7z archives) could not be realized
+  ## (reprobuild-specs/issues/2026-09-24-tarball-realizer-takes-7z-from-path.md).
+  ## `PATH` stays as the fallback for when the store route fails (offline with
+  ## a cold cache), and is the only route on POSIX, where `p7zip`'s `7z` or
+  ## `7zz` speaks the same CLI.
+  ##
+  ## The longer-term shape is the extractor as a dependency EDGE of the
+  ## provisioning edge that needs it
+  ## (Dependency-Provisioning-In-Build-Graph.md, section 4). Tarball
+  ## realization is not an edge yet, so this realizes it inline, the way
+  ## `ensureBootstrapToolchainEnv` realizes the bootstrap compilers.
+  var storeFailure = ""
+  when defined(windows):
+    if storeRoot.len > 0:
+      try:
+        let profile = resolveTarballTool(bootstrapSevenZipToolUse(), storeRoot)
+        if profile.resolvedExecutablePath.len > 0:
+          return profile.resolvedExecutablePath
+      except CatchableError as err:
+        storeFailure = err.msg
   for name in @["7z", "7z.exe", "7zz"]:
     let exe = findExe(name)
     if exe.len > 0:
       return exe
   raise newException(OSError,
-    "tool-resolution failed: no 7z extractor available (looked for 7z, 7z.exe, 7zz on PATH)")
+    "tool-resolution failed: no 7z extractor available (" &
+    (if storeFailure.len > 0: "realizing 7zip into the tool store failed: " &
+      storeFailure & "; " else: "") &
+    "looked for 7z, 7z.exe, 7zz on PATH)")
 
 proc removeSingleTopLevelDir(destination: string) =
   ## When a zip / 7z archive ships its payload under a single top-
@@ -2425,7 +2491,10 @@ proc mergeRustInstallerComponents(destination: string) =
 
 proc extractTarballArchive(archivePath, destination, archiveType: string;
                            stripComponents: int;
-                           declaredExecutablePath = "") =
+                           declaredExecutablePath = "";
+                           storeRoot = "") =
+  ## `storeRoot` is where an extractor this archive needs is realized from
+  ## (`resolveSevenZipExe`); empty means "search PATH only".
   validateTarEntries(archivePath, archiveType)
   createDir(extendedPath(destination))
   let lowerType = archiveType.toLowerAscii()
@@ -2520,7 +2589,8 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
     removeDir(extendedPath(staging))
     createDir(extendedPath(staging))
     try:
-      extractTarballArchive(archivePath, staging, "zip", 0)
+      extractTarballArchive(archivePath, staging, "zip", 0,
+        storeRoot = storeRoot)
       # N48: the walk is EXTENDED-LENGTH (``\\?\…``) because that is what
       # opens reliably from Nim, but the result is a CHILD PROCESS OPERAND and
       # the ``\\?\`` prefix does not survive one. Measured: MSYS2's zstd.exe
@@ -2700,11 +2770,11 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
       # tar discovery, the ``--force-local`` retry for Windows drive letters,
       # and the strip handling.
       extractTarballArchive(payloadTar, destination, "tar", stripComponents,
-        declaredExecutablePath)
+        declaredExecutablePath, storeRoot)
     finally:
       removeDir(extendedPath(staging))
   of "7z", "7z.exe":
-    let sevenZipExe = resolveSevenZipExe()
+    let sevenZipExe = resolveSevenZipExe(storeRoot)
     # `x` = extract with full paths preserved.
     # `-o<dir>` = output directory (NO space between -o and the path).
     # `-y` = assume yes for all prompts (overwrites).
@@ -2930,7 +3000,7 @@ proc unpackClosure(plan: TarballAcquisitionPlan;
     if dirExists(extendedPath(target)):
       removeDir(extendedPath(target))
     extractTarballArchive(downloaded.path, target, entryPlan.archiveType,
-      entryPlan.stripComponents, "")
+      entryPlan.stripComponents, "", storeRoot)
 
 proc toolCacheIdentity(plan: TarballAcquisitionPlan;
                        packageName, version: string): CacheEntryIdentity =
@@ -3291,7 +3361,7 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
   try:
     if not cloned:
       extractTarballArchive(downloaded.path, tempPrefix, plan.archiveType,
-        plan.stripComponents, plan.declaredExecutablePath)
+        plan.stripComponents, plan.declaredExecutablePath, storeRoot)
       # The declared closure, unpacked into the same staging prefix. After
       # the root archive because an entry lands UNDER it
       # (``node_modules/...``), and before the prune/alias/launcher steps

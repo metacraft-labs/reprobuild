@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1728,
+    "nimTestBinaries": 1729,
     "pureUnitConsolidationGroups": 53,
-    "pureUnitTests": 607,
+    "pureUnitTests": 608,
     "staticallyDetectedRuntimeCompilerFlowTests": 106,
-    "testEntries": 1739
+    "testEntries": 1740
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1155,7 +1155,7 @@
       "graph-fixture": 12,
       "integration": 824,
       "platform/destructive": 115,
-      "pure unit": 607,
+      "pure unit": 608,
       "unclassified": 181
     },
     "graphOwnedTestArtifacts": [
@@ -1304,9 +1304,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1728,
+    "nimTestBinaryCount": 1729,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1739
+    "testEntryCount": 1740
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10151,6 +10151,24 @@
       "source": "libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_sevenzip_bootstrap_matches_stdlib_catalog",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_sevenzip_bootstrap_matches_stdlib_catalog.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
