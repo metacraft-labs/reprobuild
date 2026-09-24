@@ -86,11 +86,15 @@ when defined(windows):
     sanitizeStaticExec(staticExec("cmd /C if defined IO_MON_SRC (echo %IO_MON_SRC%)"))
   const CompileTimeStackableHooksSrc =
     sanitizeStaticExec(staticExec("cmd /C if defined STACKABLE_HOOKS_SRC (echo %STACKABLE_HOOKS_SRC%)"))
+  const CompileTimeShmGsetSrc =
+    sanitizeStaticExec(staticExec("cmd /C if defined SHM_GSET_SRC (echo %SHM_GSET_SRC%)"))
 else:
   const CompileTimeIoMonSrc =
     sanitizeStaticExec(staticExec("printf %s \"${IO_MON_SRC:-}\""))
   const CompileTimeStackableHooksSrc =
     sanitizeStaticExec(staticExec("printf %s \"${STACKABLE_HOOKS_SRC:-}\""))
+  const CompileTimeShmGsetSrc =
+    sanitizeStaticExec(staticExec("printf %s \"${SHM_GSET_SRC:-}\""))
 
 # Interface extraction compiles this project file without the provider build
 # body. Keep the stdlib typed-value surface visible for generated DSL helpers.
@@ -2336,6 +2340,14 @@ package reprobuild:
     let stackableHooksSrc = block:
       let fromEnv = CompileTimeStackableHooksSrc
       if fromEnv.len > 0: fromEnv else: ".." / "nim-stackable-hooks" / "src"
+    # io-mon's dependency capture sits on nim-shm-gset (``shm_gset/transport``,
+    # imported by ``io_mon/writer.nim``), so every shim edge below needs it on
+    # its path. ``config.nims`` cannot supply it: these edges compile a file
+    # from io-mon's tree -- a nix store path in CI -- so reprobuild's own
+    # project config is never read. Resolved exactly like the two above.
+    let shmGsetSrc = block:
+      let fromEnv = CompileTimeShmGsetSrc
+      if fromEnv.len > 0: fromEnv else: ".." / "nim-shm-gset" / "src"
     let monitorShimNimcache = "build/nimcache/repro_monitor_shim"
     # The fixture builds the preload monitor itself. Running that compiler
     # process under the same preload shim can trigger host compiler ICEs; keep
@@ -2352,10 +2364,17 @@ package reprobuild:
           @[]
       reprobuildTestFixturesActions.add(nim.c(
         source = ioMonSrc / "io_mon" / "shim" / "macos_interpose.nim",
+        # ``-d:useMalloc``: io-mon's shim entry points REFUSE to compile
+        # without it (``{.error.}`` when ``appType == "lib"``), because the
+        # shim does not own its threads -- with Nim's per-thread heaps a cell
+        # freed on a host thread other than its allocator's is returned through
+        # a TLS block the loader already discarded. io-mon's ``build_shim.sh``
+        # sets it; every shim edge here mirrors it.
+        defines = @["useMalloc"],
         binary = "build/lib/librepro_monitor_shim.dylib",
         appLib = true,
         threadsOn = true,
-        paths = @[ioMonSrc, stackableHooksSrc],
+        paths = @[ioMonSrc, stackableHooksSrc, shmGsetSrc],
         passC = macosShimArchFlags,
         passL = macosShimArchFlags,
         nimcache = monitorShimNimcache,
@@ -2368,6 +2387,13 @@ package reprobuild:
       # of ``scripts/build_apps.sh`` and io-mon's ``build_shim.sh``.
       reprobuildTestFixturesActions.add(nim.c(
         source = ioMonSrc / "io_mon" / "shim" / "windows_interpose.nim",
+        # ``-d:useMalloc``: io-mon's shim entry points REFUSE to compile
+        # without it (``{.error.}`` when ``appType == "lib"``), because the
+        # shim does not own its threads -- with Nim's per-thread heaps a cell
+        # freed on a host thread other than its allocator's is returned through
+        # a TLS block the loader already discarded. io-mon's ``build_shim.sh``
+        # sets it; every shim edge here mirrors it.
+        defines = @["useMalloc"],
         binary = monitorArtifactPath(MonitorShim64Name),
         appLib = true,
         threadsOn = true,
@@ -2392,7 +2418,7 @@ package reprobuild:
         # ``tests/integration/t_monitor_shim_edges_carry_static_libgcc.nim``
         # asserts it over both this recipe and the lowered graph.
         passL = @["-static-libgcc"],
-        paths = @[ioMonSrc, stackableHooksSrc],
+        paths = @[ioMonSrc, stackableHooksSrc, shmGsetSrc],
         nimcache = monitorShimNimcache,
         dependencyPolicy = monitorShimPolicy,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
@@ -2441,6 +2467,13 @@ package reprobuild:
         let shim32Nimcache = "build/nimcache/repro_monitor_shim32"
         reprobuildTestFixturesActions.add(nim.c(
           source = ioMonSrc / "io_mon" / "shim" / "windows_interpose.nim",
+          # ``-d:useMalloc``: io-mon's shim entry points REFUSE to compile
+          # without it (``{.error.}`` when ``appType == "lib"``), because the
+          # shim does not own its threads -- with Nim's per-thread heaps a cell
+          # freed on a host thread other than its allocator's is returned through
+          # a TLS block the loader already discarded. io-mon's ``build_shim.sh``
+          # sets it; every shim edge here mirrors it.
+          defines = @["useMalloc"],
           binary = monitorArtifactPath(MonitorShim32Name),
           appLib = true,
           threadsOn = true,
@@ -2450,7 +2483,7 @@ package reprobuild:
           gccExe = i686Gcc,
           gccLinkerExe = i686Gcc,
           passL = @["-static-libgcc", "-Wl,--kill-at"],
-          paths = @[ioMonSrc, stackableHooksSrc],
+          paths = @[ioMonSrc, stackableHooksSrc, shmGsetSrc],
           extraEnv = i686PathEnv,
           nimcache = shim32Nimcache,
           dependencyPolicy =
@@ -2472,7 +2505,7 @@ package reprobuild:
           gccExe = i686Gcc,
           gccLinkerExe = i686Gcc,
           passL = @["-static-libgcc"],
-          paths = @[ioMonSrc, stackableHooksSrc],
+          paths = @[ioMonSrc, stackableHooksSrc, shmGsetSrc],
           extraEnv = i686PathEnv,
           nimcache = probe32Nimcache,
           dependencyPolicy =
@@ -2494,7 +2527,7 @@ package reprobuild:
             "inject_helper.nim",
           binary = monitorArtifactPath(Inject64HelperName),
           passL = @["-static-libgcc"],
-          paths = @[ioMonSrc, stackableHooksSrc],
+          paths = @[ioMonSrc, stackableHooksSrc, shmGsetSrc],
           nimcache = inject64Nimcache,
           dependencyPolicy =
             makeDepfilePolicy(inject64Nimcache / "nim-compile.d"),
@@ -2530,10 +2563,17 @@ package reprobuild:
         ioMonSrc / "io_mon" / "hooks" / "linux_preload_versions.map"
       reprobuildTestFixturesActions.add(nim.c(
         source = ioMonSrc / "io_mon" / "shim" / "linux_preload.nim",
+        # ``-d:useMalloc``: io-mon's shim entry points REFUSE to compile
+        # without it (``{.error.}`` when ``appType == "lib"``), because the
+        # shim does not own its threads -- with Nim's per-thread heaps a cell
+        # freed on a host thread other than its allocator's is returned through
+        # a TLS block the loader already discarded. io-mon's ``build_shim.sh``
+        # sets it; every shim edge here mirrors it.
+        defines = @["useMalloc"],
         binary = "build/lib/librepro_monitor_shim.so",
         appLib = true,
         threadsOn = true,
-        paths = @[ioMonSrc, stackableHooksSrc],
+        paths = @[ioMonSrc, stackableHooksSrc, shmGsetSrc],
         passL = @["-Wl,--version-script=" & linuxShimVersionScript],
         # ``NIX_DONT_SET_RPATH`` is as load-bearing here as ``-static-libgcc``
         # is on the Windows arm above, and for the same reason: this library is
