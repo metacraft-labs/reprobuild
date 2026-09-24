@@ -6750,6 +6750,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/dev-env/t_e2e_dev_env_announces_before_working.nim",
+    binary: "build/test-bin/t_e2e_dev_env_announces_before_working",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_binds_materialized_producer.nim",
     binary: "build/test-bin/t_e2e_dev_env_binds_materialized_producer",
     defines: @[],
@@ -6788,15 +6797,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_edge_cache.nim",
     binary: "build/test-bin/t_e2e_dev_env_edge_cache",
-    defines: @[],
-    requiresReproBinary: true,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny,
-    selfInterposes: false),
-  TestSpec(
-    source: "tests/e2e/dev-env/t_e2e_dev_env_announces_before_working.nim",
-    binary: "build/test-bin/t_e2e_dev_env_announces_before_working",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
