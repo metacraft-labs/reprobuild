@@ -251,7 +251,7 @@ suite "RA-25 — repro push --sync integrates upstream then publishes":
   test "t_repro_push_sync_integrates_upstream_then_publishes":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("no `git` on PATH: this suite drives real git repositories end to end, so there is nothing to exercise without it")
     else:
       # ---- Part 1: --sync --rebase integrates upstream, then publishes ----
       let fx = setupFixture(gitBin, "ok")
@@ -338,7 +338,7 @@ suite "RA-25 — repro push --sync integrates upstream then publishes":
     # STOPS (non-zero) with a remedy naming the repo, publishing nothing.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("no `git` on PATH: this suite drives real git repositories end to end, so there is nothing to exercise without it")
     else:
       let fx = setupFixture(gitBin, "conflict")
       defer: removeDir(fx.scratch)
@@ -377,7 +377,7 @@ suite "RA-25 — repro push --sync integrates upstream then publishes":
   test "t_repro_push_accepts_hooks_the_same_build_wrote_from_another_path":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("no `git` on PATH: this suite drives real git repositories end to end, so there is nothing to exercise without it")
     else:
       let fx = setupFixture(gitBin, "author")
       defer: removeDir(fx.scratch)
