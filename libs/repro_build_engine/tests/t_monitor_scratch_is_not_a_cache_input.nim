@@ -131,3 +131,47 @@ suite "the monitor's drop-in tool directory is not a cache input":
 
     check first == second
     check first.hasPath(realInput)
+
+  test "a compiler wrapper's per-invocation response file is not an input":
+    ## The nixpkgs cc/ld wrappers stage the argument list they forward in
+    ## `$TMPDIR/cc-params.XXXXXX`, created with `mktemp`, read straight
+    ## back, and unlinked within the same invocation. The random tail is
+    ## new every run, so these paths could never repeat in the key.
+    ##
+    ## They cannot be excluded through `ignoredInputPrefixes` because they
+    ## sit directly in `$TMPDIR`, and naming that directory would swallow
+    ## real inputs with them -- which is what the positive assertions here
+    ## guard.
+    let workRoot = UnitRoot / "proj"
+    let ccParams = TmpRoot / "cc-params.QmhTEN"
+    let ldParams = TmpRoot / "ld-params.MxHKFl"
+    let declaredInput = workRoot / "src" / "main.nim"
+    # Genuine inputs in the very same directory, including two whose names
+    # are the bare prefixes with no random tail.
+    let tmpNeighbour = TmpRoot / "generated-config.json"
+    let bareCc = TmpRoot / "cc-params"
+    let bareLd = TmpRoot / "ld-params"
+
+    let act = action("compile", ["nim", "c"],
+      cwd = workRoot,
+      inputs = ["src/main.nim"],
+      outputs = ["out/provider"],
+      cacheable = true,
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+
+    var evidence: PathSetEvidence
+    evidence.declaredInputs = act.inputs
+    evidence.declaredOutputs = act.outputs
+    evidence.monitorReads = @[declaredInput, ccParams, ldParams,
+                              tmpNeighbour, bareCc, bareLd]
+    evidence.monitorWrites = @[ccParams, ldParams]
+
+    let inputs = act.cacheInputPaths(evidence)
+
+    check not inputs.hasPath(ccParams)
+    check not inputs.hasPath(ldParams)
+
+    check inputs.hasPath(declaredInput)
+    check inputs.hasPath(tmpNeighbour)
+    check inputs.hasPath(bareCc)
+    check inputs.hasPath(bareLd)

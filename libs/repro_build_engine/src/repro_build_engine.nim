@@ -7661,7 +7661,43 @@ proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
     if normalized == normalizedRoot or normalized.startsWith(normalizedRoot & "/"):
       return true
 
-const MonitorSandboxToolsPrefix = "repro-fs-snoop-sandbox-tools-"
+const
+  MonitorSandboxToolsPrefix = "repro-fs-snoop-sandbox-tools-"
+  CompilerWrapperScratchPrefixes = ["cc-params.", "ld-params."]
+
+proc isCompilerWrapperScratchPath(path: string): bool =
+  ## A compiler wrapper's per-invocation response file is not an input.
+  ##
+  ## The nixpkgs `cc`/`ld` wrappers stage the argument list they are about
+  ## to forward in `"${TMPDIR:-/tmp}/cc-params.XXXXXX"` (and the `ld`
+  ## equivalent), created with `mktemp`, written, read straight back, and
+  ## unlinked inside the SAME invocation. The name's random tail is new
+  ## every time, so the provider-compile edge's key carried a handful of
+  ## paths that could never repeat: measured across two consecutive warm
+  ## runs, the edge's entire input set was identical except for exactly
+  ## these, and the edge therefore missed on every run of an unchanged
+  ## project.
+  ##
+  ## `providerCompileIgnoredInputPrefixes` already excludes this edge's
+  ## other write-then-read-back scratch -- the shared provider nimcache and
+  ## the per-recipe scratch tree -- for precisely this reason, and says so:
+  ## "derived state a tool writes and reads back is not an input, and
+  ## recording it makes a warm entry miss its cache for no reason a user
+  ## can act on." These files are the same thing one level down, in the
+  ## toolchain rather than in Reprobuild, and they are missed by that list
+  ## only because they sit directly in `$TMPDIR` rather than in a directory
+  ## of their own -- which an `ignoredInputPrefixes` entry cannot name
+  ## without swallowing all of `$TMPDIR`, real inputs included.
+  ##
+  ## Matched on the BASENAME, and only with a non-empty random tail, so an
+  ## ordinary file a project happens to keep called `cc-params` or
+  ## `ld-params.conf` is untouched. As with the directory below, dropping a
+  ## genuine input from a key would serve a stale result, which is worse
+  ## than the miss being fixed; the paired test asserts both directions.
+  let name = path.replace('\\', '/').rsplit('/', 1)[^1]
+  for prefix in CompilerWrapperScratchPrefixes:
+    if name.len > prefix.len and name.startsWith(prefix):
+      return true
 
 proc isMonitorSandboxToolsPath(path: string): bool =
   ## The monitor's OWN drop-in tool directory is engine bookkeeping, not a
@@ -7774,7 +7810,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
-         path.isMonitorSandboxToolsPath()):
+         path.isMonitorSandboxToolsPath() or
+         path.isCompilerWrapperScratchPath()):
       continue
     result.addUnique(seen, path)
   for input in evidence.monitorReads:
@@ -7784,7 +7821,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
-         path.isMonitorSandboxToolsPath()):
+         path.isMonitorSandboxToolsPath() or
+         path.isCompilerWrapperScratchPath()):
       continue
     result.addUnique(seen, path)
   for probe in evidence.monitorProbes:
@@ -7794,7 +7832,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
       continue
     if not declaredMaterialized.contains(key) and
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
-         path.isMonitorSandboxToolsPath()):
+         path.isMonitorSandboxToolsPath() or
+         path.isCompilerWrapperScratchPath()):
       continue
     result.addUnique(seen, path)
 
