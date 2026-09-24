@@ -24,10 +24,28 @@ if [[ "${test_tmp_parent}" == "${repo_root}" || "${test_tmp_parent}" == "${repo_
   echo "refusing REPROBUILD_TEST_TMPDIR inside checkout: ${test_tmp_parent}" >&2
   exit 1
 fi
-test_tmp_root="${test_tmp_parent%/}/current"
+# The scratch slot is per-CHECKOUT, not one shared name. It used to be
+# ".../current" for every run, and the next line deletes it unconditionally:
+# two concurrent runs — the normal state on this host — therefore raced, the
+# second run's startup deleting the first run's live TMPDIR out from under an
+# in-flight compiler. That other sessions already work around this by hand is
+# visible in the parent directory itself, whose siblings (exclmeasure, iso,
+# mut, n2-run, ...) are hand-set REPROBUILD_TEST_TMPDIR values.
+#
+# Keyed on a checksum of the absolute checkout path rather than its basename:
+# the slot has to stay SHORT because a unix socket bound under TMPDIR must fit
+# sun_path's 108 bytes, and two worktrees can share a basename anyway. The
+# result is 49 characters against the old 47, so this does not move that limit.
+# The `rm -rf` is kept — every run still starts from empty scratch — but now
+# only ever deletes the scratch of the checkout that owns it.
+test_tmp_slot="$(printf '%s' "${repo_root}" | cksum | cut -d' ' -f1)"
+test_tmp_root="${test_tmp_parent%/}/${test_tmp_slot}"
 rm -rf "${test_tmp_root}"
 mkdir -p "${test_tmp_root}"
 export TMPDIR="${test_tmp_root}" TMP="${test_tmp_root}" TEMP="${test_tmp_root}"
+# Print the mapping: a numeric slot is not self-describing, and a developer
+# looking for a run's scratch should not have to re-derive the checksum.
+echo "run_tests.sh: scratch TMPDIR=${test_tmp_root} (checkout ${repo_root})"
 
 if [[ "${REPROBUILD_TEST_WARM_REUSE:-0}" != "1" ]]; then
   rm -rf build/test-bin
