@@ -603,6 +603,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_whole_graph_shortcut_matches_per_edge_verdict.nim",
+    binary: "build/test-bin/t_whole_graph_shortcut_matches_per_edge_verdict",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_workspace_declaring_nothing_unchanged.nim",
     binary: "build/test-bin/t_workspace_declaring_nothing_unchanged",
     defines: @[],

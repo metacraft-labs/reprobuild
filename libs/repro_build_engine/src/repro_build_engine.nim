@@ -13379,11 +13379,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         finishMetadataCacheStats(metadataCache)
         fastResult.stats = stats
         return some(fastResult)
-      of hmssMissingRecord, hmssInputChanged, hmssOutputChanged:
+      of hmssMissingRecord, hmssInputChanged, hmssOutputChanged,
+          hmssPolicyNeedsContentHash:
         # `hmssOutputChanged` is a declared output that no longer matches the
         # record that claims to have produced it. Falling back to the full
         # scheduler is the fail-closed answer: it re-consults each edge and
         # re-executes the ones whose outputs were disturbed.
+        #
+        # `hmssPolicyNeedsContentHash` is a `ffpChecksum` edge: the scan
+        # compares `FileMetadata` and that policy is validated by the content
+        # hash, so the scan has no answer here and MUST NOT report one. It
+        # goes straight to the scheduler rather than falling through to the
+        # per-record arm below, which would only refuse it again at
+        # `lookupHotMetadataRecord` and then return `none` from here anyway.
         return none(BuildRunResult)
       of hmssUnavailable, hmssCorrupt:
         discard
