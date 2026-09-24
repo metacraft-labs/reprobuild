@@ -370,8 +370,8 @@ proc computeDevEnvEdgeCacheKey*(config: DevEnvEdgeConfig): string =
   devEnvCacheKey.computeDevEnvEdgeCacheKey(config.projectRoot, config.activity,
     config.lockSliceId, config.developOverridesPath)
 
-proc devEnvIntrospectionIgnoredInputPrefixes*(projectRoot: string):
-    seq[string] =
+proc devEnvIntrospectionIgnoredInputPrefixes*(projectRoot: string;
+    protocolRoot = ""): seq[string] =
   ## Prefixes the dev-env introspection edge's monitor must NOT record as
   ## inputs. The same shape as `providerCompileIgnoredInputPrefixes`, and for
   ## the same reason: derived state a tool writes and reads back is not an
@@ -424,6 +424,21 @@ proc devEnvIntrospectionIgnoredInputPrefixes*(projectRoot: string):
   ## else `$HOME/.cache/nix`) rather than through Nim's `getCacheDir()`, which
   ## answers `~/Library/Caches` on macOS while `nix` keeps using `~/.cache`
   ## there.
+  ##   * the edge's OWN protocol directory (`<outDir>/dev-env-protocol`).
+  ##     The introspection edge talks to the provider binary by writing a
+  ##     request file and reading the response back out of this directory,
+  ##     so every one of its files is state this action produced in THIS
+  ##     run. They are rewritten on every invocation, which means their
+  ##     metadata is new every time: recording them made the edge depend on
+  ##     its own transcript and miss on every warm run, forever, on a
+  ##     project nothing had touched. Measured with the paths otherwise
+  ##     identical between two consecutive runs -- same names, same sizes,
+  ##     only the mtimes moved. This is the same rule S5 applies to an
+  ##     action's declared outputs (`selfWrittenOutputKeys`), reached from
+  ##     the ignore list because the transcript is scratch rather than a
+  ##     declared product.
+  if protocolRoot.len > 0:
+    result.add(absolutePath(protocolRoot))
   if projectRoot.len > 0:
     result.add(absolutePath(projectRoot) / ".repro" / "foreign-env")
   let xdgCache = getEnv("XDG_CACHE_HOME")
@@ -486,7 +501,8 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
     cacheable = true,
     weakFingerprint = weak,
     dependencyPolicy = automaticMonitorGatheringPolicy(
-      devEnvIntrospectionIgnoredInputPrefixes(config.projectRoot)))
+      devEnvIntrospectionIgnoredInputPrefixes(config.projectRoot,
+        protocolRoot)))
 
 proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
                        shellFragmentPath, navigatorStatsPath: string): BuildAction =
