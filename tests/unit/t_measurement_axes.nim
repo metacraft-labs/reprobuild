@@ -251,3 +251,69 @@ suite "measurement axes: PERSIST (--write-report and the failure report)":
       %*{"repos": []})
     flushStagedFailureReport(2)
     check not fileExists(dest)
+
+suite "measurement axes: a COLLECT category never gates a SERVING path":
+
+  test "the CMake regeneration hot-record fast hit ignores the measure set":
+    ## The defect this owns (#360's shape, second instance): the CMake
+    ## regeneration edge's hot-metadata-record fast hit was gated on
+    ## ``mcCacheEvidence notin measureSet and not forceRebuild``. Since
+    ## ``mcCacheEvidence`` is in ``DefaultMeasureSet``, that made the arm
+    ## UNREACHABLE on every default ``repro build`` — it ran only under an
+    ## explicit ``--measure=none,…``, which is to say the serving path was
+    ## live only for the callers who had asked for the least telemetry.
+    ##
+    ## ``MeasureCategory``'s own doc comment is the specification being
+    ## enforced here: each category's data "has NO consumer in the
+    ## correctness path". Whether a cache entry may be SERVED is squarely in
+    ## the correctness path, so no subset of ``MeasureSet`` may move the
+    ## answer.
+    ##
+    ## MUTATION: put the clause back —
+    ##   ``mcCacheEvidence notin measure and not forceRebuild``
+    ## — and the ``DefaultMeasureSet`` row below flips to false while the
+    ## ``{}`` row stays true, so the enumeration's "every subset agrees"
+    ## check fails. Deleting the ``forceRebuild`` term instead fails the
+    ## second check.
+    ##
+    ## Scope, stated plainly: this pins the PREDICATE. It cannot see a future
+    ## edit that reintroduces a measure-set term at the call site rather than
+    ## here — but a call site that re-tests what the predicate exists to
+    ## answer is visible on its face, and the predicate's doc comment names
+    ## the hazard.
+    var subsets: seq[MeasureSet] = @[]
+    # DERIVED FROM THE ENUM, not from a hand-written list of the three
+    # categories that exist today. A fourth category added to
+    # ``MeasureCategory`` is then enumerated automatically and is subject to
+    # the invariance check below on its first build. The hand-rolled triple
+    # loop this replaced would have kept asserting "all 8 subsets" while
+    # silently covering 8 of 16.
+    const CategoryCount =
+      ord(high(MeasureCategory)) - ord(low(MeasureCategory)) + 1
+    for mask in 0 ..< (1 shl CategoryCount):
+      var s: MeasureSet = {}
+      for category in MeasureCategory:
+        if (mask and (1 shl (ord(category) - ord(low(MeasureCategory))))) != 0:
+          s.incl(category)
+      subsets.add(s)
+    check subsets.len == 1 shl CategoryCount
+    check CategoryCount == 3  # the count the prose above is written about
+
+    # Every subset of the collection axis gives the same answer, for both
+    # values of the one input that IS a serving input.
+    for selection in subsets:
+      check cmakeRegenerationHotHitEligible(selection, forceRebuild = false) ==
+        cmakeRegenerationHotHitEligible({}, forceRebuild = false)
+      check cmakeRegenerationHotHitEligible(selection, forceRebuild = true) ==
+        cmakeRegenerationHotHitEligible({}, forceRebuild = true)
+
+    # And the answer is the one the serving semantics require: available
+    # unless the caller asked for a rebuild. Asserted against the REAL
+    # default, so a regression that only shows up under
+    # ``DefaultMeasureSet`` is a red case rather than a silent one.
+    check cmakeRegenerationHotHitEligible(DefaultMeasureSet,
+      forceRebuild = false)
+    check not cmakeRegenerationHotHitEligible(DefaultMeasureSet,
+      forceRebuild = true)
+    check cmakeRegenerationHotHitEligible({}, forceRebuild = false)
+    check not cmakeRegenerationHotHitEligible({}, forceRebuild = true)
