@@ -176,7 +176,8 @@ proc flakePrintDevEnvArgv*(nixExe, flakeRef, profilePath: string;
   ## shape is asserted by a test rather than by reading it: an override arm
   ## that silently emits nothing is the exact defect §5 records the
   ## content-pinned direnv plugin shipping.
-  result = @[nixExe, "print-dev-env"]
+  # Activation may evaluate a changed input, but must not edit source locks.
+  result = @[nixExe, "print-dev-env", "--no-write-lock-file"]
   if profilePath.len > 0:
     result.add("--profile")
     result.add(profilePath)

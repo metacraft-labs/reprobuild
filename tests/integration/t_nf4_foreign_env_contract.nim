@@ -98,7 +98,7 @@ suite "nf4_foreign_env_contract":
       "/w/.repro/foreign-env/flake-profile",
       @[("runquota-src", "/w/../runquota"), ("io-mon-src", "/w/../io-mon")])
     check argv == @[
-      "/usr/bin/nix", "print-dev-env",
+      "/usr/bin/nix", "print-dev-env", "--no-write-lock-file",
       "--profile", "/w/.repro/foreign-env/flake-profile",
       ".?submodules=1",
       "--override-input", "runquota-src", "path:/w/../runquota",
@@ -107,9 +107,9 @@ suite "nf4_foreign_env_contract":
     # An empty override list emits no override arguments at all — and an
     # override with a missing half is dropped rather than emitted broken,
     # because `nix` would otherwise consume the next argument as the path.
-    check flakePrintDevEnvArgv("nix", ".", "") == @["nix", "print-dev-env", "."]
+    check flakePrintDevEnvArgv("nix", ".", "") == @["nix", "print-dev-env", "--no-write-lock-file", "."]
     check flakePrintDevEnvArgv("nix", ".", "", @[("named", "")]) ==
-      @["nix", "print-dev-env", "."]
+      @["nix", "print-dev-env", "--no-write-lock-file", "."]
 
   test "a_foreign_contribution_is_a_diff_not_the_whole_environment":
     # The capture sources a script from a real environment, so most of what

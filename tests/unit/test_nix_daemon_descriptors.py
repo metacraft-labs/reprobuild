@@ -68,6 +68,19 @@ class DaemonDescriptors(unittest.TestCase):
                 time.sleep(0.01)
         self.fail("daemon did not bind its socket")
 
+    def test_staged_helper_starts_without_python_on_path(self):
+        # Exercise the shipped staging script and the real daemon, not a
+        # substitute helper that would conceal interpreter-resolution errors.
+        staged = self.root / "bin" / "reprobuild-nix-daemon"
+        script = DAEMON.parents[2] / "scripts" / "stage_nix_daemon.py"
+        subprocess.run([sys.executable, str(script), str(DAEMON), str(staged)],
+                       check=True)
+        env = dict(os.environ, PATH=str(self.root / "empty-path"))
+        result = subprocess.run(
+            [str(staged), "--socket-path", str(self.root / "staged.sock"),
+             "--idle-exit-ms=50"], env=env, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+
     def test_releases_inherited_file_lock_while_alive(self):
         path = self.root / "operation.lock"
         with path.open("w+b") as owner:

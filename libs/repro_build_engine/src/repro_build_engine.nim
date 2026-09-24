@@ -12413,7 +12413,9 @@ type
     path*: string
     label*: string
 
-const NixDaemonRelativePaths*: array[4, string] = [
+const NixDaemonRelativePaths*: array[5, string] = [
+  # Prefer the staged helper, whose interpreter is pinned at build time.
+  "build/bin/reprobuild-nix-daemon",
   # The dev tree's CHECKED-IN helper, relative to the REPOSITORY ROOT.
   "tools/reprobuild-nix-daemon/reprobuild-nix-daemon",
   # The dev tree's BUILT helper, relative to the REPOSITORY ROOT.
@@ -12510,8 +12512,8 @@ proc nixDaemonCandidates*(cwd, exePath, envSourceRoot: string): seq[
   ## THE FULL, ORDERED CANDIDATE LIST -- pure, so it can be pinned by a test
   ## without a daemon, a socket or a build.
   ##
-  ## The first three entries are the historical ``action.cwd``-relative ones
-  ## and keep their historical labels and their historical ORDER; everything
+  ## The staged helper precedes the three historical ``action.cwd``-relative
+  ## entries, which retain their labels and relative order; everything
   ## after them is the root x relative-path product from
   ## ``nixDaemonSearchRoots`` and ``NixDaemonRelativePaths``.
   var seen = initHashSet[string]()
@@ -12521,6 +12523,8 @@ proc nixDaemonCandidates*(cwd, exePath, envSourceRoot: string): seq[
       if path.len > 0 and not seen.containsOrIncl(path):
         result.add(NixDaemonCandidate(path: path, label: labelExpr))
   if cwd.len > 0:
+    consider(cwd / "build" / "bin" / "reprobuild-nix-daemon",
+      "local staged reprobuild-nix-daemon")
     consider(cwd / "build" / "reprobuild-nix-daemon",
       "local reprobuild-nix-daemon")
     consider(cwd / "tools" / "reprobuild-nix-daemon" /
@@ -12610,7 +12614,16 @@ proc unresolvableScriptInterpreter*(path: string): string =
   finally:
     f.close()
   let interp = shebangInterpreter(first)
-  if interp.len > 0 and not fileExists(interp): interp else: ""
+  if interp.len > 0 and not fileExists(interp):
+    return interp
+  if interp.extractFilename() == "env":
+    let words = first[2 .. ^1].splitWhitespace()
+    # Diagnose the simple env shebang used by the source helper. Other env
+    # option forms remain env's responsibility.
+    if words.len == 2 and not words[1].startsWith("-") and
+        findExe(words[1]).len == 0:
+      return words[1] & " (not found on PATH)"
+  ""
 
 proc resolveNixDaemonExecutable*(cwd, exePath, envSourceRoot,
     envBin: string): string =
@@ -12923,6 +12936,7 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           sock.connectUnix(socketPath)
           connected = true
         except CatchableError:
+          sock.close()
           # Spawn daemon process detached.
           #
           # THE CANDIDATE LIST IS A PURE FUNCTION -- `nixDaemonCandidates` --
@@ -12940,8 +12954,9 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
             exePath = getAppFilename(),
             envSourceRoot = getEnv("REPROBUILD_SOURCE_ROOT"),
             envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN"))
-          discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
+          let daemon = startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
             options = {poDaemon, poUsePath})
+          defer: daemon.close()
           for i in 0 .. 40:
             sleep(50)
             try:
@@ -12950,7 +12965,7 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
               connected = true
               break
             except CatchableError:
-              discard
+              sock.close()
         if not connected:
           raiseEngine("Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
         
@@ -12959,10 +12974,12 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           "selector": selector,
           "workspaceRoot": action.cwd
         }
-        sock.send($req & "\n")
         var respLine = ""
-        sock.readLine(respLine)
-        sock.close()
+        try:
+          sock.send($req & "\n")
+          sock.readLine(respLine)
+        finally:
+          sock.close()
         
         if respLine.len == 0:
           raiseEngine("Received empty response from reprobuild-nix-daemon")

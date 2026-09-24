@@ -284,12 +284,8 @@
       # 41ab1b9 is an ANCESTOR of 49006c3, so the explicit Windows child
       # environment (``6a53408``) this pin was chosen for is carried forward.
       #
-      # Bumped to 203a3b8: the same `ci: name the shared modules repo by the
-      # name it has now` commit as io-mon's 1c41ba8 above, and the same
-      # reasoning — one commit, no source change, retargeting this repo's own
-      # `nixos-modules` input at `metacraft-labs/devops-modules`. 203a3b8 is
-      # the tip of nim-stackable-hooks' `dev`.
-      url = "github:metacraft-labs/nim-stackable-hooks/203a3b87366d321e2ea3f7f2126e88f28da48202";
+      # Keep this pin aligned with the published workspace dependency.
+      url = "github:metacraft-labs/nim-stackable-hooks/6f8e9c68e654d6243fc934bc2319984a0f34d3b9";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {

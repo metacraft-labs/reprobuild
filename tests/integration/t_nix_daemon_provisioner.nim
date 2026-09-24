@@ -149,6 +149,35 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
         res.stderr
       check not fileExists(receiptFile)
 
+    when defined(linux):
+      test "failed daemon startup does not leak connection or process descriptors":
+        # A real false process supplies the startup failure. Every connection
+        # reaches the kernel; no mock daemon or socket is involved.
+        let previousUser = getEnv("USER")
+        let previousDaemon = getEnv("REPROBUILD_NIX_DAEMON_BIN")
+        putEnv("USER", "repro-failed-start-" & $getCurrentProcessId())
+        putEnv("REPROBUILD_NIX_DAEMON_BIN", findExe("false"))
+        defer:
+          putEnv("USER", previousUser)
+          putEnv("REPROBUILD_NIX_DAEMON_BIN", previousDaemon)
+        proc descriptorCount(): int =
+          for entry in walkDir("/proc/self/fd"):
+            inc result
+        let before = descriptorCount()
+        let action = BuildAction(
+          governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+          kind: bakForeignProvision,
+          id: "test.foreign.nix.failed-start",
+          argv: @["nix", FixtureSelector],
+          outputs: @[getTempDir() / "repro-failed-start-receipt"],
+          cwd: findRepoRoot(),
+          dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor))
+        for attempt in 0 .. 2:
+          let res = executeBuiltinAction(action)
+          check res.status == asFailed
+          check "Failed to connect or spawn" in res.stderr
+        check descriptorCount() == before
+
     test "direct all-output fallback strips provisioned loader paths":
       let repoRoot = findRepoRoot()
       let daemonPath = findNixDaemon(repoRoot)

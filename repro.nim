@@ -1800,25 +1800,19 @@ package reprobuild:
       actionId = "reprobuild.apps.repro"))
 
     let reprobuildNixDaemon = shell(
-      command = "mkdir -p build/bin && " &
-        "cp tools/reprobuild-nix-daemon/reprobuild-nix-daemon " &
-        "build/bin/reprobuild-nix-daemon && " &
-        "chmod +x build/bin/reprobuild-nix-daemon",
+      command = "python3 scripts/stage_nix_daemon.py " &
+        "tools/reprobuild-nix-daemon/reprobuild-nix-daemon " &
+        "build/bin/reprobuild-nix-daemon",
       actionId = "reprobuild.apps.reprobuild-nix-daemon",
       extraInputs = @[
         "tools/reprobuild-nix-daemon/reprobuild-nix-daemon",
+        "scripts/stage_nix_daemon.py",
       ],
       extraOutputs = @[
         "build/bin/reprobuild-nix-daemon",
       ])
-    # The three bare commands this shell line runs. Declaring them is
-    # what puts coreutils' bin dir on this edge's PATH now that an
-    # action's PATH no longer ends in the caller's `$PATH`, and what
-    # keeps their `uses:` entries alive through the fragment-scoped
-    # identity realization (`scopedToolArtifact`) when the build is
-    # `repro build .#apps` rather than a whole-graph build.
-    appendRegisteredActionToolIdentityRefs(reprobuildNixDaemon.id,
-      ["mkdir", "cp", "chmod"])
+    # Staging pins this realized interpreter into the helper's shebang.
+    appendRegisteredActionToolIdentityRefs(reprobuildNixDaemon.id, ["python3"])
     reprobuildAppsActions.add(reprobuildNixDaemon)
     discard target("reprobuild-nix-daemon", reprobuildNixDaemon)
 

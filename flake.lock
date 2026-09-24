@@ -2920,17 +2920,17 @@
     "nim-stackable-hooks-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1789557804,
-        "narHash": "sha256-JM/cROq80mG3YMV/jdX+KWKGlckr4UcLStCKgh8k0ZE=",
+        "lastModified": 1790181467,
+        "narHash": "sha256-vt6CGPbK0N2K/bTxttNcPez6iqyDwRXo7ao1ilO3gRQ=",
         "owner": "metacraft-labs",
         "repo": "nim-stackable-hooks",
-        "rev": "203a3b87366d321e2ea3f7f2126e88f28da48202",
+        "rev": "6f8e9c68e654d6243fc934bc2319984a0f34d3b9",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "nim-stackable-hooks",
-        "rev": "203a3b87366d321e2ea3f7f2126e88f28da48202",
+        "rev": "6f8e9c68e654d6243fc934bc2319984a0f34d3b9",
         "type": "github"
       }
     },
@@ -4982,9 +4982,11 @@
     "reprobuild-test-adapters-src_2": {
       "flake": false,
       "locked": {
+        "lastModified": 1790181481,
+        "narHash": "sha256-uZYWTs4Brnh62lAeG6OwpF3BuFmLB9QNyOeDku4TGeA=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-test-adapters",
-        "rev": "91fac5e61e611c4388a2661dc6e84c14382da60a",
+        "rev": "3ec75c639bf9bb533ffb641da057efbae22ce95d",
         "type": "github"
       },
       "original": {

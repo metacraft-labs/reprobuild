@@ -31,6 +31,7 @@ import std/[os, osproc, sequtils, streams, strtabs, strutils, tempfiles,
   unittest]
 
 import repro_build_engine
+import repro_dsl_stdlib/foreign_env
 import repro_dev_env_artifacts
 import repro_dev_env_engine
 import repro_provider_runtime
@@ -345,6 +346,19 @@ suite "e2e_nf4_flake_dev_shell":
     let fixture = prepareFixture()
     let monitor = prepareMonitorTools(fixture.repoRoot,
       fixture.root / "monitor", "nf4-flake")
+
+    test "activating_a_changed_flake_preserves_the_committed_lock":
+      let project = fixture.cloneProject("preserve-lock")
+      let originalLock = readFile(project / "flake.lock")
+      let flakePath = project / "flake.nix"
+      writeFile(flakePath, readFile(flakePath).replace(fixture.sibA, fixture.sibB))
+      let ops = flakeDevShellOps(project, flakeRef = ".", nixExe = nixExe())
+      var marker = ""
+      for op in ops:
+        if op.name == "NF4_SIB_MARKER":
+          marker = op.value.strip()
+      check marker == "sibB"
+      check readFile(project / "flake.lock") == originalLock
 
     test "activating_a_flake_from_repro_nim_yields_the_same_shell":
       let project = fixture.cloneProject("same-shell")

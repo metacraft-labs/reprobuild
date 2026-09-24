@@ -7487,7 +7487,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 13,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -20234,6 +20234,7 @@
         "repro_build_engine",
         "repro_dev_env_artifacts",
         "repro_dev_env_engine",
+        "repro_dsl_stdlib",
         "repro_provider_runtime",
         "repro_test_support"
       ],
@@ -20241,7 +20242,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/dev-env/t_e2e_nf4_flake_dev_shell.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -29172,7 +29173,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_nix_daemon_provisioner.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -37495,7 +37496,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_nix_daemon_descriptors.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

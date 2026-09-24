@@ -71,7 +71,7 @@ libs/repro_build_engine/tests/t_m4_publisher_path_stores_output_blobs.nim	nim	8
 libs/repro_build_engine/tests/t_m9r73_session_invalidation_reaches_every_consumer.nim	nim	4
 libs/repro_build_engine/tests/t_monitor_scratch_is_not_a_cache_input.nim	nim	3
 libs/repro_build_engine/tests/t_monitor_shim_resolver_memo_keys_its_inputs.nim	nim	4
-libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim	nim	13
+libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim	nim	14
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
 libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim	nim	4
@@ -778,7 +778,7 @@ tests/e2e/dev-env/t_e2e_dev_env_runquota_queue_is_loud_and_bounded.nim	nim	1
 tests/e2e/dev-env/t_e2e_develop_overrides_activity.nim	nim	2
 tests/e2e/dev-env/t_e2e_hooks_shell_direnv.nim	nim	3
 tests/e2e/dev-env/t_e2e_native_shell_hooks.nim	nim	3
-tests/e2e/dev-env/t_e2e_nf4_flake_dev_shell.nim	nim	5
+tests/e2e/dev-env/t_e2e_nf4_flake_dev_shell.nim	nim	6
 tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim	nim	2
 tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim	nim	2
 tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim	nim	2
@@ -1288,7 +1288,7 @@ tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	nim	
 tests/integration/t_nf4_foreign_env_contract.nim	nim	11
 tests/integration/t_nim_package_path_handling.nim	nim	1
 tests/integration/t_nix_daemon_ipc.nim	nim	4
-tests/integration/t_nix_daemon_provisioner.nim	nim	4
+tests/integration/t_nix_daemon_provisioner.nim	nim	5
 tests/integration/t_no_runtime_compilation_in_tests.nim	nim	2
 tests/integration/t_only_overridden_nodes_are_rewritten.nim	nim	1
 tests/integration/t_optin_layer_runs_under_the_engine.nim	nim	1
@@ -1758,7 +1758,7 @@ tests/unit/test_continuous_benchmarking_policy.py	python	7
 tests/unit/test_ct_test_surface_addressability.py	python	14
 tests/unit/test_dev_shell_hook_scope.py	python	6
 tests/unit/test_graph_owned_test_artifacts.py	python	23
-tests/unit/test_nix_daemon_descriptors.py	python	4
+tests/unit/test_nix_daemon_descriptors.py	python	5
 tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_publish_surface_routing.py	python	35
 tests/unit/test_reprobuild_suite_inventory.py	python	90
