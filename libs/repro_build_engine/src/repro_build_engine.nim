@@ -7649,16 +7649,151 @@ proc expandPolicyPath(action: BuildAction; path: string): string =
     start = result.find('$', start)
 
 proc ignoredInputRoots(action: BuildAction): seq[string] =
+  ## Each ignored prefix, in BOTH the spelling the recipe wrote and the
+  ## spelling the kernel reports, because those are routinely not the same
+  ## string and `isUnderAnyRoot` compares path components literally.
+  ##
+  ## On macOS `/tmp` is a symlink to `private/tmp`. A root derived from
+  ## `getTempDir()` is therefore `/tmp/...`, while every path the monitor
+  ## observes comes back already resolved as `/private/tmp/...`. Neither is
+  ## wrong and they name the same directory, but one is not a component
+  ## prefix of the other, so the ignore silently never fires.
+  ##
+  ## That is not a small loss where it happened. The provider compile's
+  ## ignore list exists to keep the SHARED provider nimcache out of the key
+  ## -- a directory reused across recipes and across sessions on purpose,
+  ## and rewritten by every compile that lands in it. With the ignore
+  ## inert, 514 nimcache paths were in the key, so the edge could not hit
+  ## on a second run of an unchanged project, and everything downstream of
+  ## it missed too. Measured: every one of those paths was recorded under
+  ## `/private/tmp`, and not one under `/tmp`.
+  ##
+  ## Resolved once per root rather than per observed path: there are a
+  ## handful of roots and tens of thousands of paths, and resolving the
+  ## latter would put a syscall on the hot comparison. A root that does not
+  ## exist yet simply contributes its literal spelling, which is what it
+  ## does today.
   for prefix in action.dependencyPolicy.ignoredInputPrefixes:
     let expanded = action.expandPolicyPath(prefix)
-    if expanded.len > 0:
-      result.add(expanded)
+    if expanded.len == 0:
+      continue
+    result.add(expanded)
+    try:
+      let resolved = expandFilename(expanded)
+      if resolved.len > 0 and resolved != expanded:
+        result.add(resolved)
+    except CatchableError:
+      discard
 
 proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
   let normalized = path.replace('\\', '/')
   for root in roots:
     let normalizedRoot = root.replace('\\', '/')
     if normalized == normalizedRoot or normalized.startsWith(normalizedRoot & "/"):
+      return true
+
+const
+  MonitorSandboxToolsPrefix = "repro-fs-snoop-sandbox-tools-"
+  CompilerWrapperScratchPrefixes = ["cc-params.", "ld-params."]
+
+proc isCompilerWrapperScratchPath(path: string): bool =
+  ## A compiler wrapper's per-invocation response file is not an input.
+  ##
+  ## The nixpkgs `cc`/`ld` wrappers stage the argument list they are about
+  ## to forward in `"${TMPDIR:-/tmp}/cc-params.XXXXXX"` (and the `ld`
+  ## equivalent), created with `mktemp`, written, read straight back, and
+  ## unlinked inside the SAME invocation. The name's random tail is new
+  ## every time, so the provider-compile edge's key carried a handful of
+  ## paths that could never repeat: measured across two consecutive warm
+  ## runs, the edge's entire input set was identical except for exactly
+  ## these, and the edge therefore missed on every run of an unchanged
+  ## project.
+  ##
+  ## `providerCompileIgnoredInputPrefixes` already excludes this edge's
+  ## other write-then-read-back scratch -- the shared provider nimcache and
+  ## the per-recipe scratch tree -- for precisely this reason, and says so:
+  ## "derived state a tool writes and reads back is not an input, and
+  ## recording it makes a warm entry miss its cache for no reason a user
+  ## can act on." These files are the same thing one level down, in the
+  ## toolchain rather than in Reprobuild, and they are missed by that list
+  ## only because they sit directly in `$TMPDIR` rather than in a directory
+  ## of their own -- which an `ignoredInputPrefixes` entry cannot name
+  ## without swallowing all of `$TMPDIR`, real inputs included.
+  ##
+  ## Matched on the BASENAME, and only with a non-empty random tail, so an
+  ## ordinary file a project happens to keep called `cc-params` or
+  ## `ld-params.conf` is untouched. As with the directory below, dropping a
+  ## genuine input from a key would serve a stale result, which is worse
+  ## than the miss being fixed; the paired test asserts both directions.
+  let name = path.replace('\\', '/').rsplit('/', 1)[^1]
+  for prefix in CompilerWrapperScratchPrefixes:
+    if name.len > prefix.len and name.startsWith(prefix):
+      return true
+
+proc isMonitorSandboxToolsPath(path: string): bool =
+  ## The monitor's OWN drop-in tool directory is engine bookkeeping, not a
+  ## project input, and it must never reach an action-cache key.
+  ##
+  ## On macOS the interpose backend cannot inject into a system-protected
+  ## platform binary, so before running a monitored action it drops
+  ## injectable copies of the shells and core utilities an action may exec
+  ## into a temporary directory and points the monitored process at it.
+  ## Unless an operator supplies a pre-built bundle, that directory is
+  ## created fresh for every monitored run and its NAME carries the
+  ## creating pid and a nanosecond timestamp:
+  ##
+  ##   <tmp>/repro-fs-snoop-sandbox-tools-<pid>-<sec>-<nsec>-<pid>/bin/sh
+  ##
+  ## Any action whose command runs a shell probes `<dir>/bin/sh`, so the
+  ## probe set of an otherwise byte-identical action carried one value that
+  ## was new on every invocation. The weak fingerprint stayed stable, so
+  ## every run landed in the SAME per-edge directory and wrote yet another
+  ## record under a fresh strong fingerprint -- the accumulation
+  ## `Action-Cache-Per-Edge-Store.md` §5.1 rules out when it requires
+  ## identical path-sets to "converge on one filename -- a rewrite, never
+  ## an accumulation". A warm `repro exec` / `repro shell` therefore re-ran
+  ## the dev-env introspection edge every single time on an unchanged
+  ## project, and no number of repeat runs could ever settle.
+  ##
+  ## The general rule is `Tool-Owned-Caches.md` §What The Cache Key May
+  ## Observe: whatever the engine allocates to back a path "is engine
+  ## bookkeeping. It MUST NOT appear in any cache key. It MAY change
+  ## between runs without invalidating anything." The dev-env cache key was
+  ## already corrected once from the other side for the same reason --
+  ## `Shell-Direnv-Hook.milestones.org` M77 records `REPRO_MONITOR_SHIM_LIB`
+  ## and `REPRO_FS_SNOOP` being DROPPED from it after the syscall-bound test
+  ## "caught them flapping under fs-snoop wrapping (build-engine
+  ## infrastructure, not dev-env contract)". This is that same
+  ## infrastructure flapping again, reaching the key through the observed
+  ## path-set instead of through an environment variable.
+  ##
+  ## Matched on a path SEGMENT rather than against a resolved root because
+  ## the directory belongs to the monitor and is created inside the
+  ## monitored run: the engine never holds its path, and the temp root it
+  ## sits under varies per host and per `TMPDIR`. An operator-supplied
+  ## bundle keeps a stable name of its own choosing and so cannot churn;
+  ## it is left alone rather than guessed at.
+  ##
+  ## The segment must match the GENERATED name exactly -- the prefix
+  ## followed by the four decimal fields the monitor appends
+  ## (`<pid>-<unix-seconds>-<nanoseconds>-<nonce>`) -- and not merely start
+  ## with the prefix. A `startsWith` test alone also swallows an ordinary
+  ## project file that happens to be named after this directory, and
+  ## dropping a genuine input from a cache key serves a stale result, which
+  ## is a worse failure than the miss being fixed here. The paired test
+  ## asserts that case directly.
+  for segment in path.replace('\\', '/').split('/'):
+    if not segment.startsWith(MonitorSandboxToolsPrefix):
+      continue
+    let fields = segment.substr(MonitorSandboxToolsPrefix.len).split('-')
+    if fields.len != 4:
+      continue
+    var allNumeric = true
+    for field in fields:
+      if field.len == 0 or not field.allCharsInSet({'0' .. '9'}):
+        allNumeric = false
+        break
+    if allNumeric:
       return true
 
 proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[string] =
@@ -7678,6 +7813,10 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   ##   dependency, and a heuristic must not overrule it (a declared
   ##   input that happens to live inside a ``/nix/store`` tool root, for
   ##   instance, would otherwise be silently dropped from the key).
+  ## * the monitor-scratch filter drops the monitor's own drop-in tool
+  ##   directory -- see ``isMonitorSandboxToolsPath``. Like the filter
+  ##   above it yields to a declaration, so an action that genuinely
+  ##   declares such a path keeps it.
   ## * S5's self-write filter drops the action's OWN declared outputs
   ##   from the OBSERVED channels only — see ``selfWrittenOutputKeys``
   ##   for why those are provably not inputs, and for the
@@ -7701,7 +7840,9 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+         path.isMonitorSandboxToolsPath() or
+         path.isCompilerWrapperScratchPath()):
       continue
     result.addUnique(seen, path)
   for input in evidence.monitorReads:
@@ -7710,7 +7851,9 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+         path.isMonitorSandboxToolsPath() or
+         path.isCompilerWrapperScratchPath()):
       continue
     result.addUnique(seen, path)
   for probe in evidence.monitorProbes:
@@ -7719,7 +7862,9 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+         path.isMonitorSandboxToolsPath() or
+         path.isCompilerWrapperScratchPath()):
       continue
     result.addUnique(seen, path)
 

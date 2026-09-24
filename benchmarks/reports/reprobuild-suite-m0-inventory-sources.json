@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1743,
+    "nimTestBinaries": 1745,
     "pureUnitConsolidationGroups": 53,
-    "pureUnitTests": 608,
+    "pureUnitTests": 610,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1754
+    "testEntries": 1756
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -57,7 +57,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 5,
+      "count": 6,
       "defines": [],
       "dependencyShape": [
         "repro_build_engine"
@@ -67,6 +67,7 @@
         "libs/repro_build_engine/tests/t_daemon_check_platform_refusal.nim",
         "libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim",
         "libs/repro_build_engine/tests/t_fingerprint_audit_every_action_has_lock_identity.nim",
+        "libs/repro_build_engine/tests/t_monitor_scratch_is_not_a_cache_input.nim",
         "libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim",
         "libs/repro_build_engine/tests/test_m9r75_source_write_reject.nim"
       ],
@@ -1155,7 +1156,7 @@
       "graph-fixture": 12,
       "integration": 835,
       "platform/destructive": 115,
-      "pure unit": 608,
+      "pure unit": 610,
       "unclassified": 184
     },
     "graphOwnedTestArtifacts": [
@@ -1304,9 +1305,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1743,
+    "nimTestBinaryCount": 1745,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1754
+    "testEntryCount": 1756
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7357,6 +7358,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_ignored_root_survives_a_symlinked_prefix",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_ignored_root_survives_a_symlinked_prefix.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_inherited_environment_cache",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -7416,6 +7435,23 @@
       "source": "libs/repro_build_engine/tests/t_m9r73_session_invalidation_reaches_every_consumer.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_monitor_scratch_is_not_a_cache_input",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_monitor_scratch_is_not_a_cache_input.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
