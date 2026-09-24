@@ -9,10 +9,12 @@
 ##     Spins up the daemon, executes the `bakForeignProvision` action for the local
 ##     flake, asserts that the output receipt is successfully created containing a valid
 ##     Nix store path, and ensures that the daemon exits successfully.
-##   * Scenario 3.2: Observed Dependencies Capture
+##   * Scenario 3.2: Provisioner-Reported Dependencies Capture
 ##     Asserts that the file paths read during flake evaluation (specifically `flake.nix`
-##     and `flake.lock`) are returned as observed input dependencies (`monitorReads`)
-##     within the action result's evidence.
+##     and `flake.lock`) are returned as `provisionerReportedInputs` within the action
+##     result's evidence, that `monitorReads` stays EMPTY (nothing observed this
+##     action; it execs nothing), and that the evidence records
+##     `evcForeignProvisionerReport` as the source. DA-1f.
 ##
 ## Testing Strategy:
 ##   * Pure, mock-free integration test running against the Python daemon shim
@@ -258,9 +260,20 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
     check fileExists(storePath / FixtureExecutable)
     checkpoint("Resolved store path: " & storePath)
 
-    # Verify observed dependencies (monitorReads) carry the actual local flake
+    # Verify the daemon-reported dependencies carry the actual local flake
     # inputs used for resolution.
-    let reads = res.evidence.monitorReads
+    #
+    # DA-1f — THE CHANNEL IS `provisionerReportedInputs`, NOT `monitorReads`,
+    # and the difference is the subject rather than a rename. These paths come
+    # out of a JSON reply this process parsed; io-mon observed none of them
+    # and could not have, because the action execs nothing — it opens a unix
+    # socket and `reprobuild-nix-daemon` evaluates on its behalf. Putting them
+    # in the monitor's channel made a derived peer attribution
+    # indistinguishable from an observation, which is the shape
+    # `reprobuild-specs/Dependency-Observation-Attribution.md` rule 7 forbids.
+    # The report is kept — it is class-3 DERIVED attribution and strictly
+    # better than anything a monitor could supply here — and it is named.
+    let reads = res.evidence.provisionerReportedInputs
     check reads.len > 0
 
     var foundFlakeNix = false
@@ -273,7 +286,17 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
 
     check foundFlakeNix
     check foundFlakeLock
-    checkpoint("Observed dependencies: " & $reads)
+    checkpoint("Provisioner-reported dependencies: " & $reads)
+
+    # THE OTHER HALF, AND THE ONE A RENAME WOULD NOT HAVE BOUGHT. The monitor
+    # channel must be EMPTY: nothing observed this action, and the engine must
+    # not claim otherwise. Re-pointing the assignment back at `monitorReads`
+    # reddens here even though every assertion above would still pass.
+    check res.evidence.monitorReads.len == 0
+    # And the report says who filled it. A set that is populated but unmarked
+    # is the state DA-1f found everywhere else in this engine.
+    check evcForeignProvisionerReport in res.evidence.evidenceProvenance
+    check evcMonitorCapture notin res.evidence.evidenceProvenance
 
     # Clean up receipt
     removeFile(receiptFile)

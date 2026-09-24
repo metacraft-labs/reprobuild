@@ -990,6 +990,83 @@ type
       ## monitor could not have seen an entropy read, so silence proves
       ## nothing.
 
+  EvidenceContributor* = enum
+    ## DA-1f — WHO put something into this action's OBSERVED channels
+    ## (`depfileInputs`, `monitorReads`, `monitorWrites`, `monitorProbes`,
+    ## `monitorDirectoryEnumerations`).
+    ##
+    ## WHY THE CHANNELS ARE NOT ENOUGH. Those five fields are the terms of
+    ## the zero-evidence guard, whose whole question is *"did anything look at
+    ## this action?"*. Five `seq[string]`s cannot answer it, because a path
+    ## the ENGINE reconstructed, a path REPLAYED out of a cache record and a
+    ## path a monitor really observed are the same string in the same seq.
+    ## `832f5fa2` was one instance of that confusion reaching the guard;
+    ## `EvidenceCollection.engineSuppliedRootImage` was the first,
+    ## single-purpose answer to it. This set is that answer generalised, so
+    ## the NEXT contributor is marked at the point it contributes rather than
+    ## discovered by an audit.
+    ##
+    ## ATTRIBUTION, NOT SUPPRESSION. Nothing here removes a path from a
+    ## channel or from the key. The paths are all still recorded, still
+    ## hashed and still invalidate the edge. See
+    ## `../../../reprobuild-specs/Dependency-Observation-Attribution.md`
+    ## §"Attribution, not suppression" and rule 8.
+    ##
+    ## THE ZERO VALUE IS `{}`, WHICH CLAIMS NOTHING, so a consumer that asks
+    ## whether an OBSERVING contributor is PRESENT — rather than whether a
+    ## synthesising one is absent — is fail-closed against a writer that
+    ## forgot to mark itself. `depfileObservedNothing` is written that way and
+    ## is the only such consumer today.
+    ##
+    ## DO NOT READ THAT AS A PROPERTY OF THE GUARD. It is a property of ONE of
+    ## the guard's five terms. The other four — `monitorObservedNoReads` and
+    ## the `.len == 0` tests on `monitorWrites`, `monitorProbes` and
+    ## `monitorDirectoryEnumerations` — still ask whether the CHANNEL is
+    ## empty, and a set is not empty because an unmarked writer filled it.
+    ## Measured, not inferred: a probe adding one unmarked path to
+    ## `monitorReads` in `collectEvidence` suppressed the zero-evidence
+    ## diagnostic, PUBLISHED a record for an edge that observed nothing, and
+    ## served it back as a `cdHit` on the warm run. The same probe against
+    ## `depfileInputs` changed nothing. Marking a new writer is therefore
+    ## still mandatory rather than merely advisable, and converting the other
+    ## four terms is the follow-up that would make it enforced.
+    evcMonitorCapture
+      ## A `MonitorRecord` from an io-mon capture of THIS action reached
+      ## `foldOneMonitorRecord`. The only contributor that is an observation
+      ## of the action by the engine's own monitor.
+    evcToolReportedDepfile
+      ## A dependency report a TOOL wrote while doing the action's work —
+      ## `gcc -MD`, rustc's `.d`, a post-build converter emitting a
+      ## recognized format. An observation, by something other than io-mon.
+    evcRootImageReconstruction
+      ## `executedToolImagePath`: the action's own root image, resolved from
+      ## argv the way the launcher resolves it. A correct cache input and not
+      ## an observation — the launcher's exec precedes the shim's
+      ## constructor, so no record can carry it. Paired with
+      ## `EvidenceCollection.engineSuppliedRootImage`, which carries the PATH
+      ## this flag only reports the existence of.
+    evcReplayedCacheRecord
+      ## `evidenceFromRecord`: the channels were rebuilt from a PRIOR run's
+      ## recorded input list on a cache HIT. The action did not run and
+      ## nothing observed anything on this build.
+    evcDeclarationDerivedDepfile
+      ## A depfile carrying `repro_depfile.DeclarationDerivedDepfileMarker` —
+      ## `fs.unmonitorableActionDepfile` assembled its text from the recipe
+      ## author's `inputs`. Real evidence in the sense that the paths are
+      ## hashed; not an observation, because nothing looked at the action.
+    evcPostBuildConverterReport
+      ## `addPathSet(recognized = false)`: a post-build converter's
+      ## `repro-pathset` output, folded into the MONITOR's channels because
+      ## that is where its inputs/outputs/probes/enumerations belong
+      ## semantically. The converter is not io-mon and did not necessarily
+      ## observe anything — a converter may simply restate what its edge
+      ## declares.
+    evcForeignProvisionerReport
+      ## `bakForeignProvision`: the dependency list a provisioner daemon
+      ## reported for its own evaluation (class 3 — "a daemon that accounted
+      ## for its own" contribution). Derived attribution from a peer, not an
+      ## observation this engine made.
+
   PathSetEvidence* = object
     declaredInputs*: seq[string]
     declaredOutputs*: seq[string]
@@ -1044,6 +1121,43 @@ type
     entropyObservability*: EntropyObservability
       ## M6 — what the capture's backend profile says about whether entropy
       ## reads are observable at all.
+
+    provisionerReportedInputs*: seq[string]
+      ## DA-1f — the paths a FOREIGN PROVISIONER daemon reported reading
+      ## while it resolved this action's selector.
+      ##
+      ## WHY IT IS NOT `monitorReads`. It used to be. `bakForeignProvision`
+      ## built a `PathSetEvidence(monitorReads: …)` out of the
+      ## `"dependencies"` array of a JSON reply from `reprobuild-nix-daemon`
+      ## — engine-parsed data entering the MONITOR's channel, which is the
+      ## shape rule 7 forbids and the shape `832f5fa2` had just been fixed
+      ## for. It was inert only because the scheduler overwrote the whole
+      ## object with a fresh `collectEvidence` one line later, which is not a
+      ## property anything enforced.
+      ##
+      ## IT IS A REAL, AND BETTER-THAN-MONITORED, ATTRIBUTION. The action
+      ## execs nothing: it opens a unix socket and the daemon evaluates on
+      ## its behalf, so io-mon could never see these reads from here. The
+      ## daemon's `TrackingSourceAccessor` reports the paths its evaluation
+      ## actually read — class 3, "a daemon that accounted for its own"
+      ## contribution, and DERIVED rather than declared
+      ## (`Dependency-Observation-Attribution.md` §"Derived beats declared").
+      ## Keeping it and naming it is what that document calls attribution;
+      ## deleting it would have been suppression.
+      ##
+      ## IT IS NOT IN THE ACTION-CACHE KEY YET, and that is a deliberate
+      ## boundary rather than an oversight: `cacheInputPaths` does not read
+      ## this field, so no edge's fingerprint moves because of it. Keying on
+      ## it is the follow-up that makes a `flake.lock` edit re-provision, and
+      ## it re-keys every dev-env provisioning edge (rule 10), so it wants
+      ## its own change and its own drain argument.
+
+    evidenceProvenance*: set[EvidenceContributor]
+      ## DA-1f — every source that wrote into the observed channels above.
+      ## See `EvidenceContributor`. Read by `monitorObservedNothing` (the
+      ## zero-evidence guard's terms) and rendered by `repro why` /
+      ## `--write-report`, which is where "a reader cannot tell a replay from
+      ## an observation" was the whole complaint.
 
   EvidencePathCounts* = object
     ## The LENGTHS a cache hit's reconstructed `PathSetEvidence` would have
@@ -3803,11 +3917,55 @@ type
       ## cache entry on a pid, and a pid is not stable across runs.
 
 proc monitorProfileEvidenceComplete(detail: string): bool =
-  result = true
+  ## Does this `mrBackendProfile` record CLAIM that its capture's evidence is
+  ## complete? A record that does not say so has not said so.
+  ##
+  ## DA-1f — THE DEFAULT USED TO BE `true`, AND IT WAS THE WRONG ONE. Two
+  ## predicates in this file read the same record's `detail` and disagreed
+  ## about what an absent token means: this one assumed the good claim
+  ## (fail-OPEN), while `monitorProfileSupportsNonDeterminism` twelve lines
+  ## below returns `false` for a missing `supported=` (fail-CLOSED). Same
+  ## bytes, same producer, opposite defaults. This is the one that was wrong,
+  ## for four reasons, in order of weight:
+  ##
+  ## 1. The consequence is asymmetric and the asymmetry runs the other way.
+  ##    Answering `false` wrongly costs a `mesUnknownScopeLoss` — the action
+  ##    still succeeds, it just does not publish, so the price is a rebuild.
+  ##    Answering `true` wrongly publishes a record whose capture may have
+  ##    been incomplete, which is a stale hit. Failure-Semantics.md
+  ##    §General Rules: an ambiguous correctness question fails closed.
+  ## 2. An absent claim is not a claim. That is exactly the reading
+  ##    `monitorProfileSupportsNonDeterminism` already applies, and its own
+  ##    docstring gives the reason ("a profile that does not name it … cannot
+  ##    have produced the record, so its silence is not evidence"). Silence
+  ##    about completeness is not evidence of completeness either.
+  ## 3. It is this campaign's own settled rule about zero values. The
+  ##    milestones appendix records it as "when the zero value of a type is
+  ##    unsafe, the fix is to make the zero value mean the safe thing", and
+  ##    `effectiveRequiredInterest` in this same file was changed for exactly
+  ##    that reason — an unset requirement is now the STRONGEST one, not the
+  ##    weakest.
+  ## 4. IT COSTS NOTHING AGAINST ANY REAL CAPTURE, which is the difference
+  ##    between a fail-closed default and a fail-closed default that breaks
+  ##    the build. io-mon's `capabilities.backendProfileRecord` appends
+  ##    `";evidenceComplete=" & …` UNCONDITIONALLY to every profile record it
+  ##    writes, so no capture io-mon produces reaches the new default. What
+  ##    reaches it is a truncated, hand-written or foreign `detail` — which
+  ##    is precisely the case that should not be trusted.
+  ##
+  ## NOTE WHAT IS *NOT* CHANGED: io-mon's own `profileFromRecords` starts
+  ## from `defaultHooksMonitorProfile`, whose `evidenceComplete` is `true`,
+  ## so it is fail-open on the same token. That is its business — it is
+  ## describing a BACKEND, and a backend's default profile is a known-good
+  ## fact it holds locally. This predicate is describing a CAPTURE that
+  ## arrived from somewhere, and a consumer supplying its own bar rather than
+  ## inheriting the producer's is the pattern `evaluateMonitorEvidence`
+  ## already uses on the capability axis.
   for part in detail.split(';'):
     let pair = part.split("=", 1)
     if pair.len == 2 and pair[0] == "evidenceComplete":
       return pair[1] == "true"
+  false
 
 const NonDeterminismCapabilityId = "non-determinism"
   ## io-mon's `capabilityId(mcapNonDeterminism)`. Matched against both the
@@ -5718,6 +5876,14 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   ## means, silently, in the dependency set. So the decode and the fold are
   ## separated here and the fold is shared.
 
+  # DA-1f — a real monitor record reached the fold. This is the ONE
+  # contributor that means "io-mon looked at this action", and it is marked
+  # here rather than at any of the seven arms below so that no future arm can
+  # be added without it: the mark is a property of the SOURCE, not of which
+  # channel a record happens to land in. Idempotent and one OR instruction, so
+  # it is free on the 97k-record `nim c` fold.
+  evidence.evidenceProvenance.incl evcMonitorCapture
+
   # DA-2 — the `mrIpcConnect` records are what io-mon's (c)-arm loss text is
   # DERIVED FROM, so they are what `resolvePeerAttribution` re-asks io-mon
   # about. Collected only when this action has a trusted peer at all, so an
@@ -6276,6 +6442,31 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
 
 proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
                 pathSet: DependencyPathSet; recognized: bool) =
+  # DA-1f — mark WHO produced this path set before folding it, because after
+  # the fold the entries are indistinguishable from monitor-observed ones.
+  #
+  # `recognized` selects the CHANNEL, and the provenance follows the channel
+  # for the recognized arm only: a recognized-format report is a depfile a
+  # TOOL wrote while doing the action's work (`gcc -MD`, rustc's `.d`) — an
+  # observation, by something other than io-mon — unless its own text carries
+  # the declaration-derived generator stamp, in which case nothing looked at
+  # the action at all (see `repro_depfile.DeclarationDerivedDepfileMarker`).
+  #
+  # The `recognized = false` arm is the one rule 8 named. It puts a post-build
+  # converter's `repro-pathset` output into `monitorReads` / `monitorWrites` /
+  # `monitorProbes` — the MONITOR's channels — and downstream could not tell
+  # those entries from observations. They stay exactly where they are, in the
+  # same channels, for the reason the enumeration arm below gives: a converter
+  # -reported enumeration must land where a monitor-reported one lands or the
+  # two sources disagree about what the same observation means. What changes
+  # is that the source is now named.
+  if recognized:
+    if pathSet.declarationDerived:
+      evidence.evidenceProvenance.incl evcDeclarationDerivedDepfile
+    else:
+      evidence.evidenceProvenance.incl evcToolReportedDepfile
+  else:
+    evidence.evidenceProvenance.incl evcPostBuildConverterReport
   if recognized:
     for input in pathSet.inputs:
       evidence.depfileInputs.addUnique(seen.depfileInputs, input)
@@ -6511,6 +6702,40 @@ proc monitorObservedNoReads(col: EvidenceCollection): bool {.inline.} =
       col.evidence.monitorReads[0] == col.engineSuppliedRootImage
   else: false
 
+proc depfileObservedNothing(col: EvidenceCollection): bool {.inline.} =
+  ## DA-1f — the `depfileInputs` term of the zero-evidence guard, asked the
+  ## way `monitorObservedNoReads` asks its own: not *"is the set empty"* but
+  ## *"did anything LOOK at the action to fill it"*.
+  ##
+  ## The two producers of this channel are not the same kind of fact. A
+  ## `gcc -MD` depfile is an observation — the compiler lists the headers it
+  ## opened. A depfile `fs.unmonitorableActionDepfile` emitted is a literal
+  ## assembled from the recipe author's `inputs`; its own docstring says
+  ## "nothing looked at the action to produce it". Both land here as the same
+  ## strings, so counting the set answered the wrong question for the second
+  ## one, and a set that is 100% declaration-derived could satisfy a guard
+  ## whose subject is observation.
+  ##
+  ## THE TEST IS FOR PRESENCE OF AN OBSERVER, NOT ABSENCE OF A SYNTHESISER,
+  ## which is what keeps an unmarked contributor fail-closed: a future writer
+  ## into `depfileInputs` that forgets to mark itself reads as "nothing
+  ## observed" and costs a publish, never as "something observed".
+  ##
+  ## THE PATHS THEMSELVES ARE UNTOUCHED. They stay in the channel, in the
+  ## key, hashed and invalidating, exactly as before — attribution, not
+  ## suppression (`Dependency-Observation-Attribution.md`).
+  ##
+  ## REACHABILITY TODAY IS ZERO, AND IS THE POINT. `makeDepfilePolicy`
+  ## lowers to a recognized-format kind, which is outside
+  ## `MonitorPolicyKinds`, so an edge consuming an `unmonitorableActionDepfile`
+  ## is not one `monitorEvidenceRequired` covers and this guard never runs for
+  ## it. The hole opens the moment somebody pairs such a depfile with
+  ## `dgRecognizedFormatValidatedByMonitor`, which is a one-word edit in a
+  ## recipe and nothing would have reported it. Closing it while it costs
+  ## nothing is cheaper than discovering it as a stale hit.
+  col.evidence.depfileInputs.len == 0 or
+    evcToolReportedDepfile notin col.evidence.evidenceProvenance
+
 proc applyMonitorEvidenceStatus(action: BuildAction;
                                 status: MonitorEvidenceStatus;
                                 col: var EvidenceCollection) =
@@ -6615,7 +6840,7 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
         col.evidence.monitorWrites.len == 0 and
         col.evidence.monitorProbes.len == 0 and
         col.evidence.monitorDirectoryEnumerations.len == 0 and
-        col.evidence.depfileInputs.len == 0:
+        col.depfileObservedNothing():
       col.evidence.diagnostics.add(
         zeroEvidenceDiagnostic(action.id, MonitorHasLibraryLoadFloor))
       col.disableCacheHits = true
@@ -6896,7 +7121,38 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # author owns that set and the engine adding an undeclared path to the key
   # behind their back is a different decision, with a different blast radius,
   # and it is not the one this change makes.
-  if action.dependencyPolicy.kind in MonitorPolicyKinds:
+  #
+  # AND SCOPED TO `bakProcess`, which is the half DA-1f found missing. This
+  # fold answers "which on-disk image did the LAUNCHER exec for this action",
+  # and a built-in has no launcher and execs nothing: `executeBuiltinAction`
+  # runs it in-process. `monitoredAction` already draws exactly this line —
+  # it returns early for `kind != bakProcess` because "there is no child
+  # process to interpose on" — and the two scopes have to agree, or the
+  # engine reconstructs an image for an action nothing ever ran.
+  #
+  # `bakForeignProvision` is why it matters rather than being tidiness. It
+  # carries `cacheable: true`, `dgAutomaticMonitor` and
+  # `argv: @["nix", <selector>]`, and it declares no inputs — so this fold
+  # PATH-resolved `nix` and made that binary the one non-declared entry in
+  # the key of an edge that never execs it. The action opens a unix socket
+  # and `reprobuild-nix-daemon` evaluates on its behalf; `argv[0]` there is a
+  # PROVISIONER DISCRIMINATOR (`if provisioner != "nix": raiseEngine`), not an
+  # executable name, so resolving it against `PATH` was a category error on
+  # top of an attribution one. What that action's evaluation really read is
+  # reported by the daemon and lands in `provisionerReportedInputs`.
+  #
+  # WHAT DOES NOT MOVE ONTO BUILT-INS: the zero-evidence guard itself. It
+  # asks whether the MONITOR observed anything, and no built-in is monitored
+  # by construction (`monitoredAction`'s early return means
+  # `monitorEvidenceRequired` is false for every one of them), so the guard
+  # would answer "observed nothing" for the entire class and refuse every
+  # built-in a cache record. That is not the guard firing, it is the guard
+  # being asked a question it cannot be asked. A built-in's evidence contract
+  # is its declared inputs and outputs plus whatever report it produces; the
+  # defect DA-1f found was not a missing guard but a fabricated observation,
+  # and it is removed here rather than guarded against downstream.
+  if action.dependencyPolicy.kind in MonitorPolicyKinds and
+      action.kind == bakProcess:
     let rootImage = executedToolImagePath(action, config)
     if rootImage.len > 0 and not rootImage.isVolatileMonitorPath():
       result.evidence.monitorReads.addUnique(seen.monitorReads, rootImage)
@@ -6904,6 +7160,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
       # what the MONITOR saw, and this entry is a reconstruction rather than
       # an observation. See `EvidenceCollection.engineSuppliedRootImage`.
       result.engineSuppliedRootImage = rootImage
+      result.evidence.evidenceProvenance.incl evcRootImageReconstruction
   let reports = action.reportSpecsForPolicy()
   if action.dependencyPolicy.kind in RecognizedPolicyKinds and reports.len == 0:
     result.evidence.diagnostics.add(
@@ -7750,6 +8007,28 @@ proc evidenceFromRecord*(action: BuildAction;
   ## path cannot produce — same precedent, and same reason, as
   ## `cacheInputPaths`. The two must agree on every record, not only on the
   ## well-formed ones this engine happens to write today.
+  ##
+  ## DA-1f — EVERY SET THIS BUILDS IS A REPLAY, AND IT SAYS SO. The channels
+  ## below are rebuilt from a PREVIOUS run's recorded input list on a cache
+  ## HIT: the action did not run, no monitor was started, and nothing observed
+  ## anything on this build. Measured in the DA-1 audit: the fixed engine
+  ## reported `monitorReads = ["/bin/sh"]` for an action that observed nothing
+  ## and did not run.
+  ##
+  ## THIS IS NOT A SOUNDNESS BUG AND THE MARK IS NOT A FIX FOR ONE. No
+  ## completeness predicate consumes this object — `collectEvidence` is not
+  ## called on the hit path, so no guard can be retired by it. What reads it
+  ## is `repro why`, `--write-report` and the launch-path comparison suites,
+  ## and for those a replay that renders identically to an observation is a
+  ## reader hazard: the hit-path answer to "what did this action read" looks
+  ## like a measurement and is a recollection. `evcReplayedCacheRecord` is
+  ## what lets a reader tell them apart, and `evidenceJson` renders it.
+  ##
+  ## IT IS SET UNCONDITIONALLY, before any channel is filled, so that a record
+  ## with an EMPTY input list is still marked a replay. "No paths" and "no
+  ## paths, and also nothing looked" are different facts and the emptier one
+  ## is where the confusion is easiest.
+  result.evidenceProvenance.incl evcReplayedCacheRecord
   result.declaredInputs = action.inputs
   result.declaredOutputs = action.outputs
   var declaredInputPaths = initHashSet[string]()
@@ -12556,19 +12835,37 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         prepareBuiltinFileOutput(receiptPath)
         writeFile(extendedPath(receiptPath), outPath)
         
-        var observedReads: seq[string] = @[]
+        # DA-1f — THE DAEMON'S REPORT IS KEPT AND IS NAMED. It used to be
+        # assigned to `monitorReads`, the MONITOR's channel, which is the
+        # shape `Dependency-Observation-Attribution.md` rule 7 forbids: a
+        # JSON reply this process parsed is not something io-mon observed,
+        # and once merged into that seq nothing downstream could separate the
+        # two. It was harmless only because the scheduler overwrote the whole
+        # `PathSetEvidence` with a fresh `collectEvidence` one line after
+        # this returns — an accident of call order, not a guard.
+        #
+        # It is not deleted, because it is the best attribution available
+        # here and better than a monitored one could be. This action execs
+        # nothing; it opens a unix socket and the daemon evaluates on its
+        # behalf, so io-mon cannot see these reads at all. The daemon's
+        # `TrackingSourceAccessor` reports what its evaluation really read —
+        # class 3, DERIVED, "a daemon that accounted for its own"
+        # contribution. Deleting it would be suppression; moving it to a
+        # channel that says who filled it is attribution.
+        var provisionerReads: seq[string] = @[]
         if resp.hasKey("dependencies"):
           for depNode in resp["dependencies"]:
             let depPath = depNode.getOrDefault("path").getStr()
             if depPath.len > 0:
-              observedReads.add(relativePath(depPath, action.cwd))
-              
+              provisionerReads.add(relativePath(depPath, action.cwd))
+
         result.status = asSucceeded
         result.exitCode = 0
         result.evidence = PathSetEvidence(
           declaredInputs: action.inputs,
           declaredOutputs: action.outputs,
-          monitorReads: observedReads
+          provisionerReportedInputs: provisionerReads,
+          evidenceProvenance: {evcForeignProvisionerReport}
         )
         return
     of bakProcess:
@@ -14884,9 +15181,23 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           if finished.status == asSucceeded:
             invalidateCachedOutputs(plan.action)
             let evidenceStart = statStart()
-            let evidence = collectEvidence(plan.action, strict = true,
+            var evidence = collectEvidence(plan.action, strict = true,
               config = addr config)
             finishStat("repro evidence collect", evidenceStart)
+            # DA-1f — the one thing the BUILT-IN knew that `collectEvidence`
+            # cannot re-derive: what a foreign provisioner daemon reported
+            # about its own evaluation. `collectEvidence` builds a fresh
+            # `PathSetEvidence` from the action and its reports, so this
+            # assignment used to discard the daemon's report entirely — which
+            # is the only reason that report's former home in `monitorReads`
+            # was inert. Carried forward explicitly, into the channel that
+            # names its source, so the attribution survives instead of
+            # depending on nobody noticing it was dropped.
+            if finished.evidence.provisionerReportedInputs.len > 0:
+              evidence.evidence.provisionerReportedInputs =
+                finished.evidence.provisionerReportedInputs
+              evidence.evidence.evidenceProvenance.incl(
+                evcForeignProvisionerReport)
             runResult.results[idx].evidence = evidence.evidence
             if not evidence.publishable:
               runResult.results[idx].status = asFailed
