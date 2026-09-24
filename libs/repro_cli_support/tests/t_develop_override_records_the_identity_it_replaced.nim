@@ -64,14 +64,16 @@
 ##
 ## **What is NOT covered, stated rather than implied:** the verb is called in
 ## THIS process rather than by executing `build/bin/repro`, so "end to end"
-## here means "through the verb dispatcher". The built `repro` is still
-## required — see `nameTheRealCliForTheEngine` — because the engine spawns it
+## here means "through the verb dispatcher". The built engine
+## (`build/bin/reprobuild`) is still required — see
+## `nameTheRealCliForTheEngine` — because the engine spawns it
 ## for the monitored helper edges the verb reaches; it is a collaborator here,
 ## not the entry point.
 
 import std/[exitprocs, json, os, posix, strutils, tables, unittest]
 
 import repro_cli_support
+import repro_core/cli_images
 import repro_dsl_stdlib/configurables/variants
 import repro_lock
 import repro_test_support
@@ -287,7 +289,7 @@ proc solvedVersionOf(package: string): seq[string] =
 # `tests/integration/t_runner_cpu_progress_liveness.nim`.
 #
 # `nameTheRealCliForTheEngine` below closes the OTHER half — it points the
-# engine at the built `repro`, so the image it spawns dispatches the verb
+# engine at the built `reprobuild`, so the image it spawns dispatches the verb
 # instead of being this binary. Both are wanted and neither replaces the
 # other: naming the CLI removes the recursion at its source, and memoising
 # keeps enumeration from doing minutes of engine work even when the spawn
@@ -338,14 +340,26 @@ proc nameTheRealCliForTheEngine() =
   ## NOT a test double. It names the REAL CLI, and it is the same image
   ## production spawns; all it supplies is the answer `getAppFilename()`
   ## already gives inside the real `repro` process and cannot give here.
-  ## `repro` is a build-graph artifact (`reprobuild.apps.repro` ->
-  ## `build/bin/repro`, built before tests run), so it is asserted present
-  ## rather than compiled, per `Test-Fixtures-In-Build-Graph.md`.
+  ##
+  ## IT NAMES THE ENGINE, `build/bin/reprobuild` — NOT `build/bin/repro`.
+  ## Since the thin-client rename `build/bin/repro` is the thin daemon client,
+  ## which implements none of the internal verbs and resolves the engine it
+  ## hands over to FROM THIS SAME VARIABLE. Pointing the variable at the thin
+  ## client therefore made every monitored helper spawn a thin client that
+  ## `execv`ed itself forever: one pid, no children, a core busy in `execve`,
+  ## no output. That is what hung this file for 90+ minutes per case. The
+  ## contract is `apps/repro-trampoline`'s: the variable names the ENGINE,
+  ## never the entry point.
+  ##
+  ## The engine is a build-graph artifact (`reprobuild.apps.reprobuild` ->
+  ## `build/bin/reprobuild`, built before tests run and declared on this
+  ## file's execute edge), so it is asserted present rather than compiled,
+  ## per `Test-Fixtures-In-Build-Graph.md`.
   if getEnv("REPRO_PUBLIC_CLI_PATH").len > 0:
     return
   putEnv("REPRO_PUBLIC_CLI_PATH",
-    requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
-      "reprobuild.apps.repro"))
+    requireBinary(repoRoot() / "build" / "bin" / reprobuildEngineExeName(),
+      "reprobuild.apps.reprobuild"))
 
 proc scenario(label: string; lockedPackages: openArray[LockedPackage];
               recipe: string; versionFile = ""): Scenario =

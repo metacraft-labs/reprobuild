@@ -126,9 +126,10 @@
 ##     progress renderer into a library both clients can link — a separate
 ##     change, not a thing to approximate here.
 ##
-## EXIT CODES OF ITS OWN: 127 only, and only when ``execv`` of the full image
-## fails. Every other exit code is the daemon-hosted build's or the full
-## image's.
+## EXIT CODES OF ITS OWN: 127 only — when ``execv`` of the full image fails,
+## when no full image can be named, or when the one an override names is THIS
+## binary (see ``refuseSelfAsEngine``). Every other exit code is the
+## daemon-hosted build's or the full image's.
 ##
 ## HOW A USER REACHES IT: by typing ``repro``. Both images are members of
 ## ``repro.nim``'s ``apps`` collection, so ``.#apps`` / ``.#release`` build
@@ -262,6 +263,48 @@ const
 proc thinClientDir(): string =
   parentDir(getAppFilename())
 
+proc namesThisImage(path: string): bool =
+  ## Is ``path`` the file this process is running from? Compared by FILE
+  ## IDENTITY, not by spelling: a symlink, a ``..`` segment or a relative path
+  ## that reaches this image is still this image, and ``execv`` of it is still
+  ## a loop. Falls back to comparing normalized spellings only when the path
+  ## cannot be stat'ed (it then cannot be exec'd either, and the ``execv``
+  ## failure below reports that).
+  let self = getAppFilename()
+  try:
+    sameFile(path, self)
+  except OSError:
+    normalizedPath(absolutePath(path)) == normalizedPath(self)
+
+proc refuseSelfAsEngine(source, path: string) {.noreturn.} =
+  ## An override named THIS BINARY as the engine to hand over to.
+  ##
+  ## Handing over would ``execv`` this same image with the same argv and the
+  ## same environment, which resolves the same override and ``execv``s again:
+  ## an unbounded loop at ONE pid that never exits, writes nothing, and burns
+  ## a core in ``execve`` for as long as anyone lets it. Nothing about it looks
+  ## like a failure from outside — the process is alive and busy, its argv is
+  ## the caller's, and it has no children — so a caller waiting on it (the io
+  ## monitor's parent, a test runner's no-progress watchdog, a shell) waits
+  ## until something external kills it. It was measured doing exactly that for
+  ## over ninety minutes per invocation when a test set
+  ## ``REPRO_PUBLIC_CLI_PATH`` to ``build/bin/repro`` after that name moved to
+  ## this binary.
+  ##
+  ## Both overrides name the ENGINE by contract (``apps/repro-trampoline``
+  ## sets ``REPRO_PUBLIC_CLI_PATH`` to ``bin/reprobuild``, "never ``exe``"), so
+  ## one naming the thin client is a misconfiguration. It is REFUSED rather
+  ## than skipped in favour of the sibling probe, for the reason the
+  ## trampoline refuses a prefix with no engine: the variable exists to pin
+  ## which engine runs, and silently running a different one than the caller
+  ## named is the failure that must be visible.
+  stderr.writeLine("repro: " & source & " names this thin client (" & path &
+    "), not the " & ReprobuildEngineName & " engine; handing over to it " &
+    "would exec this binary again forever. Point " & source & " at " &
+    ReprobuildEngineName & " (normally the " & reprobuildEngineExeName() &
+    " beside this binary), or unset it.")
+  quit(ExitExecFailed)
+
 proc resolveFullCli(): string =
   ## The engine image this client defers to. Empty when none can be named —
   ## the caller then has nothing to fall back to and says so.
@@ -299,14 +342,23 @@ proc resolveFullCli(): string =
   ## `nix/pkgs/by-name/re/reprobuild/package.nix` fails the build if the hidden
   ## image is not there, so a nixpkgs change surfaces as a build failure rather
   ## than as a daemon that restarts on every other invocation.
+  ##
+  ## Neither override may name this binary; see ``refuseSelfAsEngine``. The
+  ## sibling probe below has always guarded the same case, and an override is
+  ## the more likely of the two to hit it, because it is typed by hand.
   let overridden = getEnv(FullCliEnvVar)
   if overridden.len > 0:
+    if namesThisImage(overridden):
+      refuseSelfAsEngine(FullCliEnvVar, overridden)
     return overridden
   let public = getEnv(PublicCliEnvVar)
   if public.len > 0:
-    return
+    let named =
       if public.isAbsolute: normalizedPath(public)
       else: normalizedPath(getCurrentDir() / public)
+    if namesThisImage(named):
+      refuseSelfAsEngine(PublicCliEnvVar, named)
+    return named
   let dir = thinClientDir()
   let engineName = reprobuildEngineExeName()
   let hidden = dir /
@@ -316,7 +368,7 @@ proc resolveFullCli(): string =
   let sibling = dir / engineName
   # Guard against a layout in which this binary IS the engine: exec'ing
   # ourselves is an infinite loop, not a fallback.
-  if fileExists(sibling) and sibling != getAppFilename():
+  if fileExists(sibling) and not namesThisImage(sibling):
     return sibling
   let libexec = parentDir(dir) / "libexec" / BootstrapSiblingDir / engineName
   if fileExists(libexec):

@@ -1462,6 +1462,7 @@ tests/integration/t_test_execute_edge_declares_repro_binary_reached_via_helper.n
 tests/integration/t_the_resolving_launcher_execs_the_pinned_image.nim	nim	13
 tests/integration/t_the_status_report_does_not_call_an_unpublished_row_recordable.nim	nim	1
 tests/integration/t_the_unpushed_skip_names_the_push_that_would_make_it_lockable.nim	nim	1
+tests/integration/t_thin_client_refuses_to_exec_itself.nim	nim	4
 tests/integration/t_thin_daemon_client.nim	nim	9
 tests/integration/t_ti1_interface_artifact_edge.nim	nim	4
 tests/integration/t_ti2_separate_module_producer.nim	nim	2
