@@ -275,8 +275,8 @@ libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim	nim	9
 libs/repro_interface_artifacts/tests/t_runtime_tool_uses_codec.nim	nim	3
 libs/repro_interface_artifacts/tests/t_windows_dynlib_staging.nim	nim	4
 libs/repro_interface_artifacts/tests/t_windows_long_command_script.nim	nim	2
-libs/repro_interface_artifacts/tests/test_catalog_composition_is_order_independent.nim	nim	22
-libs/repro_interface_artifacts/tests/test_contribution_fingerprint_invalidation_boundaries.nim	nim	36
+libs/repro_interface_artifacts/tests/test_catalog_composition_is_order_independent.nim	nim	25
+libs/repro_interface_artifacts/tests/test_contribution_fingerprint_invalidation_boundaries.nim	nim	46
 libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim	nim	6
 libs/repro_launch_plan/tests/t_codec_smoke.nim	nim	12
 libs/repro_local_store/tests/t_a4_p4_eviction.nim	nim	4
@@ -459,7 +459,7 @@ libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim	nim	6
 libs/repro_project_dsl/tests/t_multi_package_macro.nim	nim	5
 libs/repro_project_dsl/tests/t_source_cache_identity.nim	nim	2
-libs/repro_project_dsl/tests/t_source_cache_identity_binds_complete_solved_instance.nim	nim	52
+libs/repro_project_dsl/tests/t_source_cache_identity_binds_complete_solved_instance.nim	nim	96
 libs/repro_project_dsl/tests/t_tool_identity_ref_kind_codec.nim	nim	2
 libs/repro_project_dsl/tests/test_depends_on_macro.nim	nim	3
 libs/repro_project_dsl/tests/test_library_macro.nim	nim	12

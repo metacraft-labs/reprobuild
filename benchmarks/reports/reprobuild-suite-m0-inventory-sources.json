@@ -10863,7 +10863,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/test_catalog_composition_is_order_independent.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 22,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -10882,7 +10882,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/test_contribution_fingerprint_invalidation_boundaries.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 36,
+      "staticCaseCount": 46,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -14137,7 +14137,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_source_cache_identity_binds_complete_solved_instance.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 52,
+      "staticCaseCount": 96,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

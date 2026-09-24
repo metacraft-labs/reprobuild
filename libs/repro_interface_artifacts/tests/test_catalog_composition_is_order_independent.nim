@@ -723,3 +723,138 @@ suite "catalog composition is order independent":
     check twice.diagnostics.len == 0
     check twice.resolverInput == once.resolverInput
     check twice.selectedGraph == once.selectedGraph
+
+  # -------------------------------------------------------------------------
+  # Redundant-guard collapse, second pass (2026-09-23). M6 verification named
+  # seven ordering guards that no test could falsify alone; 859a746a removed
+  # five of them. Re-measured per guard afterwards, the two it kept
+  # (``catalogLines.sort``, ``packageOrder.sort``) now redden on their own,
+  # the eligible-candidate sort and the ambiguity message's own sort were
+  # still each other's mask, and so were the diagnostic sort's two keys on
+  # the one multi-cause fixture the suite had. The candidate sort is now
+  # collapsed; the cases below pin the survivors.
+  # -------------------------------------------------------------------------
+
+  test "an unsatisfied curator policy lists the eligible contributors in one order":
+    ## The eligible-candidate sort is gone (see the site comment in
+    ## ``composeCatalogs``), so this message now orders its own list. With
+    ## no sort anywhere, the list follows import order and two orders of
+    ## the same imports refuse with two different texts -- a refusal that
+    ## is not byte-identical under permutation, which the module docstring
+    ## promises it is. Falsified by dropping ``.sorted(cmp)`` from the
+    ## "Eligible contributors" list (keeping an order-preserving dedupe).
+    let imports = @[interfacesCatalog(), nixCatalog(), scoopCatalog()]
+    let absentPolicy = CatalogSelectionPolicy(selections: @[
+      CatalogSelectionRule(targetPackage: "federatedTarget",
+        contributor: "github:example/absent-catalog")])
+    let reference = composeCatalogs(imports, absentPolicy)
+    check reference.refused
+    check reference.resolverInput.len == 0
+    check reference.selections.len == 0
+    let messages = messagesOfKind(reference, cdPolicySelectionUnsatisfied)
+    check messages.len == 1
+    check messages[0].contains("Eligible contributors: \"" & NixContributor &
+      "\", \"" & ScoopContributor & "\".")
+    for order in permutationsOf(imports.len):
+      let permuted = composeCatalogs(reorder(imports, order), absentPolicy)
+      check permuted.diagnosticReport == reference.diagnosticReport
+
+  test "diagnostics are reported kind-major, then by message, under any order":
+    ## "a refusal with several causes reports them in one stable order"
+    ## raises three diagnostics of three DIFFERENT kinds with three
+    ## different messages, so either sort key alone orders it: measured,
+    ## the kind key and the message key could each be deleted with the
+    ## suite green. That matters more since 859a746a removed
+    ## ``ownerOrder.sort`` and ``policyPackages.sort`` on the strength of
+    ## this very sort -- their raise order is now import order and policy
+    ## order, and the message key is the only thing between that and the
+    ## report. Falsified by dropping the message tie-break (the two
+    ## same-kind halves below) or the kind key (the kind-major half).
+    #
+    # Two duplicate-canonical-interface causes, raised in the order their
+    # packages are first seen -- which is import order.
+    let rival = catalogAt(ScoopRemote, ScoopRev, "/w/rival-packages",
+      CatalogContent(canonicalInterfaces: @[
+        catalogInterface("federatedHelper",
+          canonicalFingerprint("federatedHelper")),
+        catalogInterface("federatedTarget",
+          canonicalFingerprint("federatedTarget"))], contributions: @[]))
+    let owners = @[interfacesCatalog(), rival]
+    let ownedTwice = composeCatalogs(owners, CatalogSelectionPolicy())
+    check ownedTwice.refused
+    check messagesOfKind(ownedTwice, cdDuplicateCanonicalInterface).len == 2
+    for order in permutationsOf(owners.len):
+      check composeCatalogs(reorder(owners, order),
+        CatalogSelectionPolicy()).diagnosticReport ==
+        ownedTwice.diagnosticReport
+
+    # Two contradictory-policy causes, raised in POLICY order. Each package's
+    # last entry names a contributor that is eligible for it in both
+    # policies, so the two refuse for exactly the same reasons.
+    let imports = @[interfacesCatalog(), nixCatalog(), scoopCatalog()]
+    proc rule(targetPackage, contributor: string): CatalogSelectionRule =
+      CatalogSelectionRule(targetPackage: targetPackage,
+        contributor: contributor)
+    let targetFirst = CatalogSelectionPolicy(selections: @[
+      rule("federatedTarget", NixContributor),
+      rule("federatedTarget", ScoopContributor),
+      rule("federatedHelper", ScoopContributor),
+      rule("federatedHelper", NixContributor)])
+    let helperFirst = CatalogSelectionPolicy(selections: @[
+      rule("federatedHelper", ScoopContributor),
+      rule("federatedHelper", NixContributor),
+      rule("federatedTarget", ScoopContributor),
+      rule("federatedTarget", NixContributor)])
+    let contradicted = composeCatalogs(imports, targetFirst)
+    check messagesOfKind(contradicted, cdContradictoryPolicy).len == 2
+    check composeCatalogs(imports, helperFirst).diagnosticReport ==
+      contradicted.diagnosticReport
+
+    # Kind-major. The message order of these three causes is NOT their kind
+    # order, so only the kind key puts them where the docstring says.
+    var ambient = nixCatalog()
+    ambient.coordinate.revision = ""
+    var absent = scoopCatalog()
+    absent.content = none(CatalogContent)
+    let mixed = composeCatalogs(@[interfacesCatalog(), ambient, absent],
+      nixPolicy())
+    let kinds = mixed.diagnostics.mapIt(ord(it.kind))
+    check kinds.len == 3
+    check kinds == kinds.sorted()
+    let texts = mixed.diagnostics.mapIt(it.message)
+    check texts != texts.sorted()
+
+  test "a contradictory curator policy refuses identically in any entry order":
+    ## "a contradictory curator policy refuses instead of taking the last"
+    ## gives both entries an ELIGIBLE contributor, so either one "winning"
+    ## selects something and nothing else is raised. Verification of the
+    ## per-guard pass (2026-09-23) measured the two shapes it does not
+    ## cover: the entries are still folded into ``policyOf`` last-wins, and
+    ## consulting that map after the contradiction made the refusal depend
+    ## on which entry was written last. With one eligible and one absent
+    ## contributor, only the order writing the absent one last added a
+    ## ``policy-selection-unsatisfied`` diagnostic; for a package no catalog
+    ## offers, that diagnostic named whichever contributor came last. The
+    ## composition refused either way, so no composed byte moved, but the
+    ## refusal was not byte-identical under permutation, which the module
+    ## docstring promises. Falsified by deleting the contradictory-package
+    ## skip from the selection loop (the first pair) or from the trailing
+    ## unsatisfied-policy loop (the second pair).
+    let imports = @[interfacesCatalog(), nixCatalog(), scoopCatalog()]
+    proc rule(targetPackage, contributor: string): CatalogSelectionRule =
+      CatalogSelectionRule(targetPackage: targetPackage,
+        contributor: contributor)
+    for (package, first, second) in [
+        ("federatedTarget", NixContributor, "github:example/absent-catalog"),
+        ("unofferedPackage", "github:example/first", "github:example/second")]:
+      let forward = composeCatalogs(imports, CatalogSelectionPolicy(
+        selections: @[rule(package, first), rule(package, second)]))
+      let backward = composeCatalogs(imports, CatalogSelectionPolicy(
+        selections: @[rule(package, second), rule(package, first)]))
+      checkpoint "package: " & package
+      check forward.refused
+      check backward.refused
+      check messagesOfKind(forward, cdContradictoryPolicy).len == 1
+      check messagesOfKind(forward, cdPolicySelectionUnsatisfied).len == 0
+      check messagesOfKind(backward, cdPolicySelectionUnsatisfied).len == 0
+      check forward.diagnosticReport == backward.diagnosticReport

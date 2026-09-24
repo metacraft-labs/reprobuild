@@ -147,7 +147,9 @@
 ##
 ## ## Cycles
 ##
-## ``visited`` is a stack of ``<target package>\0<contributor>`` keys.
+## ``visited`` is a stack of ``(target package, contributor)`` keys,
+## each field length-prefixed (``dependencyKey``) so that no byte a
+## field may contain can make two coordinates spell one key.
 ## A dependency already on the stack is a cycle and is folded in as the
 ## LEAF identity instead of being recursed into, exactly as
 ## ``foreignPackageIdentityRec`` does; the stack is popped after each
@@ -478,7 +480,11 @@ proc normalizedFingerprint*(value: string): string =
 proc contributionCoordinate*(dep: ContributionDependencyRef): string =
   ## The stable spelling of a declared dependency coordinate — the tuple
   ## the leaf identity binds — for diagnostics, de-duplication and
-  ## ordering. Not a digest, and not an input of any payload.
+  ## ordering. Not a digest, not an input of any payload, and not the memo
+  ## key: it is not injective when a package name or contributor id
+  ## contains ``@``. In the unbound report that can merge two such
+  ## coordinates into one entry (``dependenciesFullyResolved`` is still
+  ## false); as a memo key it was a false accept.
   dep.targetPackage & "@" & dep.contributor & "#" &
     normalizedFingerprint(dep.targetInterfaceFingerprint)
 
@@ -645,7 +651,24 @@ proc leafContributionIdentityHex*(dep: ContributionDependencyRef): string =
   hexOfDigest(payload)
 
 proc dependencyKey(targetPackage, contributor: string): string =
-  targetPackage & "\0" & contributor
+  ## The ``visited`` key, and the prefix of the memo key. LENGTH-PREFIXED
+  ## with the same ``putStr`` framing the payloads use, because nothing
+  ## forbids either field from containing any byte: a separator-joined
+  ## key (``package & "\0" & contributor``, which this used to be) spells
+  ## ``("a\0b", "c")`` and ``("a", "b\0c")`` identically, and no choice of
+  ## separator byte helps -- ``("a\0", "b")`` / ``("a", "\0b")`` put it on
+  ## the boundary itself. Measured as a false accept: the memo served one
+  ## dependency the other's sub-fingerprint, and ``visited`` read a
+  ## non-cycle as a cycle and folded a resolvable dependency in as a leaf.
+  result = ""
+  result.putStr(targetPackage)
+  result.putStr(contributor)
+
+proc dependencyMemoKey(dep: ContributionDependencyRef): string =
+  ## The memo key: the full coordinate the resolver is a function of,
+  ## framed exactly like ``dependencyKey`` so it is injective too.
+  result = dependencyKey(dep.targetPackage, dep.contributor)
+  result.putStr(normalizedFingerprint(dep.targetInterfaceFingerprint))
 
 # ---------------------------------------------------------------------------
 # The composer
@@ -857,7 +880,18 @@ proc composeContribution(identity: ContributionIdentity;
         for r in subFp.refusals:
           refusals.add("dependency " & dep.targetPackage & ": " & r)
 
-    let memoKey = contributionCoordinate(dep)
+    # Length-prefixed (``dependencyMemoKey``), and deliberately NOT
+    # ``contributionCoordinate``: that is a diagnostic spelling and is not
+    # injective -- ``("a@b", "c")`` and ``("a", "b@c")`` spell identically
+    # -- so keying the memo on it served one dependency the other's
+    # sub-fingerprint, and the parent stopped moving with the second one's
+    # realization metadata. Measured by the per-guard audit's second pass
+    # as a false accept in the unmutated module; "two dependency
+    # coordinates are never one memo entry" pins it. Its first repair
+    # joined the fields with a NUL, which has the same defect for a field
+    # that CONTAINS a NUL; "a NUL inside a coordinate cannot forge a memo
+    # or cycle key" pins that.
+    let memoKey = dependencyMemoKey(dep)
     var served = false
     if memoKey in memo:
       let cached = memo[memoKey]

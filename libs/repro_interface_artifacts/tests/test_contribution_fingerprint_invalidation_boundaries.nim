@@ -117,6 +117,13 @@ const
     "f1def744605ba3160e89988e0c798572face12dbaf3d1d48980760e760afda2c"
   PinnedRecordDigestHex =
     "e5156f93892102d964fb2c9babb6ed15689ae4ddb371ccac9f3388aa7d1d06e9"
+  # The same pin for a contribution declaring EVERY realization family
+  # with every field set -- see "every realization family's encoding is
+  # pinned by value".
+  PinnedEveryFamilyHex =
+    "5f4e227e817b3ee902cbca6abc0a23cab2931e158d78d68d7299650548ab74cb"
+  PinnedEveryFamilyRecordHex =
+    "782b4863e7d7a82777fd4a8459f3f5f1b7791ab5fa570555c12617d1acc15483"
 
 proc findPackage(name: string): PackageDef =
   for pkg in registeredPackages():
@@ -219,6 +226,47 @@ proc recipeDigest(root: string): string =
     raise newException(ValueError,
       "recipe closure incomplete: " & closure.missing.join("; "))
   closure.digestHex
+
+proc fullyDeclaredIdentity(): ContributionIdentity =
+  ## One contribution declaring EVERY realization family with EVERY field
+  ## set to a distinct non-empty value, built from literals rather than
+  ## lifted through the DSL -- the per-guard audit's second pass needs a
+  ## field it can change without the projection normalising it first.
+  const catalog = "github:example/field-catalog"
+  ContributionIdentity(
+    contribution: InterfaceProvisioningContribution(
+      targetPackage: "fieldTarget",
+      targetInterfaceFingerprint: repeat('a', 64),
+      contributor: catalog,
+      nixProvisioning: @[InterfaceNixProvisioning(
+        packageName: "fieldTarget", contributor: catalog,
+        selector: "nixpkgs#field", executablePath: "bin/field",
+        expressionFile: "nix/field.nix", nixpkgsRef: "github:NixOS/nixpkgs",
+        nixpkgsRev: repeat('b', 40), nixpkgsNarHash: repeat('c', 64),
+        packageId: "field@1.0.0", lockIdentity: "nix-lock-1")],
+      tarballProvisioning: @[InterfaceTarballProvisioning(
+        packageName: "fieldTarget", contributor: catalog,
+        url: "https://example.invalid/field.tar.gz",
+        mirrors: @["https://mirror.invalid/field.tar.gz"],
+        sha256: repeat('d', 64), archiveType: "tar.gz",
+        executablePath: "bin/field", executableAlias: "field-alias",
+        prunePaths: @["share/doc"], stripComponents: 1,
+        packageId: "field@1.0.0", lockIdentity: "tar-lock-1",
+        cpu: "x86_64", os: "linux")],
+      scoopProvisioning: @[InterfaceScoopProvisioning(
+        packageName: "fieldTarget", contributor: catalog,
+        bucket: "main", app: "field", version: "1.0.0",
+        preferredVersion: "1.0.0", manifestChecksum: repeat('e', 64),
+        manifestUrl: "https://example.invalid/main/field.json",
+        executablePath: "bin/field.exe",
+        requiresExecutionProfileChecksum: false,
+        packageId: "field@1.0.0", lockIdentity: "scoop-lock-1")]),
+    providerIdentity: repeat('f', 64),
+    fromSourceProvisioning: @[FromSourceRealization(
+      packageName: "fieldTarget", contributor: catalog,
+      recipePath: "recipes/field", recipeDigest: repeat('1', 64),
+      recipeInputs: @[("toolchain", "gcc-14")],
+      packageId: "field@1.0.0", lockIdentity: "src-lock-1")])
 
 suite "contribution fingerprint invalidation boundaries":
 
@@ -2199,3 +2247,485 @@ suite "contribution fingerprint invalidation boundaries":
     check ContributionLeafMagic != ContributionRecordMagic
     check fingerprint.hex != PinnedLeafHex
     check fingerprint.hex != PinnedRecordDigestHex
+
+  # -------------------------------------------------------------------------
+  # Cases added by the per-guard audit's SECOND pass (2026-09-23).
+  #
+  # The first pass ended at a rate limit without recording a per-guard
+  # table. Re-run with one mutation per guard, each in a freshly
+  # ``rm -rf``'d nimcache, against this suite and the catalog-composition
+  # suite, it measured 44 of 160 enumerated guards in
+  # ``contribution_fingerprint.nim`` still individually disableable with
+  # both suites green. The cases below pin the ones whose failure mode is a
+  # false accept -- a fingerprint that does not move when a declared input
+  # changes, or one produced where a refusal is owed -- plus the
+  # canonicalisation guards that were cheap to pin. Each names the mutation
+  # that reddens it.
+  # -------------------------------------------------------------------------
+
+  test "every declared field of every realization family moves the fingerprint":
+    ## Per-guard audit, second pass. The first pass pinned three fields
+    ## (``prunePaths``, ``stripComponents``,
+    ## ``requiresExecutionProfileChecksum``); measured afterwards, 21 more
+    ## could each be deleted from their encoder with the suite green --
+    ## every tarball and scoop field except the url, sha256, bucket, app,
+    ## checksum and those three, plus the nix ``expressionFile`` /
+    ## ``lockIdentity`` and the from-source ``packageId`` /
+    ## ``lockIdentity``. Each is declared realization policy, so a lock
+    ## keyed on a fingerprint that ignores it does not notice the policy
+    ## changing: the aliasing direction. Falsified by replacing any one
+    ## encoder entry's value with ``""`` (e.g. ``("archiveType", "")``).
+    let full = fullyDeclaredIdentity()
+    let baseHex = hexOf(full, noContributionResolver)
+    const fields = [
+      "nix expressionFile", "nix lockIdentity",
+      "tarball packageName", "tarball contributor", "tarball archiveType",
+      "tarball executablePath", "tarball executableAlias",
+      "tarball packageId", "tarball lockIdentity", "tarball cpu", "tarball os",
+      "scoop packageName", "scoop contributor", "scoop version",
+      "scoop preferredVersion", "scoop manifestUrl", "scoop executablePath",
+      "scoop packageId", "scoop lockIdentity",
+      "from-source packageId", "from-source lockIdentity"]
+    for field in fields:
+      var edited = full
+      case field
+      of "nix expressionFile":
+        edited.contribution.nixProvisioning[0].expressionFile = "nix/other.nix"
+      of "nix lockIdentity":
+        edited.contribution.nixProvisioning[0].lockIdentity = "nix-lock-2"
+      of "tarball packageName":
+        edited.contribution.tarballProvisioning[0].packageName = "otherTarget"
+      of "tarball contributor":
+        edited.contribution.tarballProvisioning[0].contributor = "github:x/y"
+      of "tarball archiveType":
+        edited.contribution.tarballProvisioning[0].archiveType = "zip"
+      of "tarball executablePath":
+        edited.contribution.tarballProvisioning[0].executablePath = "bin/other"
+      of "tarball executableAlias":
+        edited.contribution.tarballProvisioning[0].executableAlias = "other"
+      of "tarball packageId":
+        edited.contribution.tarballProvisioning[0].packageId = "field@2.0.0"
+      of "tarball lockIdentity":
+        edited.contribution.tarballProvisioning[0].lockIdentity = "tar-lock-2"
+      of "tarball cpu":
+        edited.contribution.tarballProvisioning[0].cpu = "aarch64"
+      of "tarball os":
+        edited.contribution.tarballProvisioning[0].os = "windows"
+      of "scoop packageName":
+        edited.contribution.scoopProvisioning[0].packageName = "otherTarget"
+      of "scoop contributor":
+        edited.contribution.scoopProvisioning[0].contributor = "github:x/y"
+      of "scoop version":
+        edited.contribution.scoopProvisioning[0].version = "2.0.0"
+      of "scoop preferredVersion":
+        edited.contribution.scoopProvisioning[0].preferredVersion = "2.0.0"
+      of "scoop manifestUrl":
+        edited.contribution.scoopProvisioning[0].manifestUrl =
+          "https://example.invalid/extras/field.json"
+      of "scoop executablePath":
+        edited.contribution.scoopProvisioning[0].executablePath = "bin/o.exe"
+      of "scoop packageId":
+        edited.contribution.scoopProvisioning[0].packageId = "field@2.0.0"
+      of "scoop lockIdentity":
+        edited.contribution.scoopProvisioning[0].lockIdentity = "scoop-lock-2"
+      of "from-source packageId":
+        edited.fromSourceProvisioning[0].packageId = "field@2.0.0"
+      of "from-source lockIdentity":
+        edited.fromSourceProvisioning[0].lockIdentity = "src-lock-2"
+      else:
+        doAssert false, "unhandled field " & field
+      checkpoint "field: " & field
+      check hexOf(edited, noContributionResolver) != baseHex
+
+  test "the artifact-readable record binds every family, canonically":
+    ## Per-guard audit, second pass. ``interfaceContributionRecordDigest``
+    ## is what catalog composition keys a contribution on. Measured, its
+    ## TARBALL realizations could be dropped from it with every suite
+    ## green (the catalog suite's fixtures carry nix and scoop only), so
+    ## two catalogs differing in an archive URL composed to one resolver
+    ## input: a false accept one layer up. Its realization-blob SORT and
+    ## its pin NORMALISATION were unpinned too, and each of those makes
+    ## one catalog two catalogs depending on declaration order or on how
+    ## the pin is spelled. Falsified by deleting
+    ## ``blobs.add(encodeTarball(realization))``, ``blobs.sort(cmp)`` or
+    ## the ``normalizedFingerprint`` call in that proc.
+    let full = fullyDeclaredIdentity()
+    let base = interfaceContributionRecordDigest(full.contribution)
+
+    var movedTarball = full.contribution
+    movedTarball.tarballProvisioning[0].url =
+      "https://example.invalid/field-moved.tar.gz"
+    check interfaceContributionRecordDigest(movedTarball) != base
+    var movedScoop = full.contribution
+    movedScoop.scoopProvisioning[0].manifestUrl =
+      "https://example.invalid/extras/field.json"
+    check interfaceContributionRecordDigest(movedScoop) != base
+
+    # Declaration order of two realizations is not observable.
+    var twoNix = full.contribution
+    var second = twoNix.nixProvisioning[0]
+    second.selector = "nixpkgs#field-2"
+    twoNix.nixProvisioning.add(second)
+    var swapped = twoNix
+    swapped.nixProvisioning = @[twoNix.nixProvisioning[1],
+      twoNix.nixProvisioning[0]]
+    check interfaceContributionRecordDigest(swapped) ==
+      interfaceContributionRecordDigest(twoNix)
+    check interfaceContributionRecordDigest(twoNix) != base
+
+    # Nor is the pin's spelling.
+    var spelled = full.contribution
+    spelled.targetInterfaceFingerprint =
+      "B3:" & full.contribution.targetInterfaceFingerprint.toUpperAscii()
+    check interfaceContributionRecordDigest(spelled) == base
+
+    # What the record deliberately does NOT bind: the provider identity and
+    # the from-source recipe, neither of which an artifact carries.
+    var providerOnly = full
+    providerOnly.providerIdentity = repeat('9', 64)
+    providerOnly.fromSourceProvisioning[0].recipeDigest = repeat('8', 64)
+    check interfaceContributionRecordDigest(providerOnly.contribution) == base
+    check hexOf(providerOnly, noContributionResolver) !=
+      hexOf(full, noContributionResolver)
+
+  test "every realization family's encoding is pinned by value":
+    ## Per-guard audit, second pass. The by-value case above pins a
+    ## contribution carrying nix and from-source realizations only, so the
+    ## TARBALL and SCOOP family tags (``putStr("tarball")`` /
+    ## ``putStr("scoop")``) had no counterexample: their field maps name
+    ## disjoint fields, so no relation can make two families coincide.
+    ## They are still the contract. Falsified by deleting either tag, or
+    ## any field of any family. A deliberate re-key bumps the magic and
+    ## updates these literals in the same commit.
+    let full = fullyDeclaredIdentity()
+    let fingerprint = contributionFingerprint(full, noContributionResolver)
+    checkpoint "fingerprint " & fingerprint.hex
+    checkpoint "record " & interfaceContributionRecordDigest(full.contribution)
+    check fingerprint.isResolved
+    check fingerprint.hex == PinnedEveryFamilyHex
+    check interfaceContributionRecordDigest(full.contribution) ==
+      PinnedEveryFamilyRecordHex
+
+  test "every accepted spelling of a pin is one pin":
+    ## Per-guard audit, second pass. ``normalizedFingerprint`` strips
+    ## whitespace, folds case and removes one of three algorithm prefixes.
+    ## The earlier "a pin's spelling" case goes through the DSL, whose
+    ## projection already normalises the TARGET pin before this module
+    ## sees it, so measured, the strip and the ``blake3:`` / ``b3:``
+    ## prefixes could each be dropped with the suite green -- and so could
+    ## the composer's use of the NORMALISED target fingerprint in the
+    ## payload. A caller building ``ContributionIdentity`` directly (the
+    ## federation resolver does) then gets a different contribution, or a
+    ## refusal, for the same pin. Falsified by removing ``strip()``, a
+    ## prefix, or by putting ``c.targetInterfaceFingerprint`` in the
+    ## payload instead of ``targetFingerprint``.
+    let hex = repeat('a', 64)
+    for spelled in ["  " & hex & "\n", "blake3:" & hex, "b3:" & hex,
+                    "blake3-256:" & hex, hex.toUpperAscii(),
+                    "B3:" & hex.toUpperAscii()]:
+      checkpoint "spelling: " & spelled
+      check normalizedFingerprint(spelled) == hex
+
+    let full = fullyDeclaredIdentity()
+    let baseHex = hexOf(full, noContributionResolver)
+    let providerHex = full.providerIdentity
+    for (prefix, suffix, upper) in [("  ", "\n", false), ("blake3:", "", false),
+                                    ("b3:", "", true)]:
+      let target = prefix & (if upper: hex.toUpperAscii() else: hex) & suffix
+      let provider = prefix &
+        (if upper: providerHex.toUpperAscii() else: providerHex) & suffix
+      checkpoint "target pin: " & target
+      var targetSpelled = full
+      targetSpelled.contribution.targetInterfaceFingerprint = target
+      check hexOf(targetSpelled, noContributionResolver) == baseHex
+      checkpoint "provider identity: " & provider
+      var providerSpelled = full
+      providerSpelled.providerIdentity = provider
+      check hexOf(providerSpelled, noContributionResolver) == baseHex
+
+  test "a whitespace-only identity field is a missing one":
+    ## Per-guard audit, second pass. The contributor-id and target-package
+    ## checks ``strip()`` before testing for emptiness, and measured,
+    ## either strip could be dropped with the suite green. A contributor
+    ## id of ``"  "`` then fingerprints: a required identity input that
+    ## names nothing, bound into a hex -- a false accept. Falsified by
+    ## ``if c.contributor.len == 0`` / ``if c.targetPackage.len == 0``.
+    for blank in [" ", "\t", " \n "]:
+      var noContributor = fullyDeclaredIdentity()
+      noContributor.contribution.contributor = blank
+      let a = contributionFingerprint(noContributor, noContributionResolver)
+      check not a.isResolved
+      check a.refusalReason.contains("contributor id")
+      var noTarget = fullyDeclaredIdentity()
+      noTarget.contribution.targetPackage = blank
+      let b = contributionFingerprint(noTarget, noContributionResolver)
+      check not b.isResolved
+      check b.refusalReason.contains("target package name")
+
+  test "an SRI integrity body is at least twenty characters":
+    ## Per-guard audit, second pass. The first pass pinned that SOME
+    ## minimum exists (``sha256-short`` refuses); the BOUNDARY was not
+    ## pinned, so ``< 20`` could become ``< 19`` with the suite green and
+    ## admit a 19-character body as integrity evidence. Falsified by
+    ## ``if body.len < 19``.
+    var nineteen = fullyDeclaredIdentity()
+    nineteen.contribution.nixProvisioning[0].nixpkgsNarHash =
+      "sha256-" & repeat('A', 19)
+    let short = contributionFingerprint(nineteen, noContributionResolver)
+    check not short.isResolved
+    check short.refusalReason.contains("nixpkgsNarHash")
+    var twenty = fullyDeclaredIdentity()
+    twenty.contribution.nixProvisioning[0].nixpkgsNarHash =
+      "sha256-" & repeat('A', 20)
+    check contributionFingerprint(twenty, noContributionResolver).isResolved
+
+  test "two dependency coordinates are never one memo entry":
+    ## Per-guard audit, second pass -- and a false accept the audit found
+    ## in the UNMUTATED module rather than in a mutant. The memo used to be
+    ## keyed on ``contributionCoordinate``, the diagnostic spelling
+    ## ``<package>@<contributor>#<pin>``. That spelling is not injective:
+    ## ``("a@b", "c")`` and ``("a", "b@c")`` spell identically, so the
+    ## second dependency was SERVED the first one's sub-fingerprint and
+    ## the parent stopped moving with the second one's realization
+    ## metadata -- two dependencies, one key. The memo is now keyed on
+    ## the NUL-separated ``dependencyKey`` plus the normalised pin. The
+    ## ``@`` separator's own deletion is the same class without an ``@``
+    ## in any name, and is pinned below on the unbound report, which still
+    ## uses that spelling. Falsified by keying the memo on
+    ## ``contributionCoordinate(dep)`` again (the ``a@b`` pair), and by
+    ## deleting ``"@"`` from ``contributionCoordinate`` (the report).
+    let fp = targetFingerprint()
+    let pin = repeat('3', 64)
+    var secondPackage = ""
+    var secondContributor = ""
+    var secondSelector = ""
+
+    proc resolver(dep: ContributionDependencyRef):
+        Option[ContributionIdentity] {.gcsafe.} =
+      {.cast(gcsafe).}:
+        let selector =
+          if dep.targetPackage == secondPackage and
+              dep.contributor == secondContributor: secondSelector
+          else: "nixpkgs#first"
+        var identity = identityOf(contributionDef(fp,
+          nix = @[nixDef(selector = selector)]))
+        identity.contribution.targetPackage = dep.targetPackage
+        identity.contribution.contributor = dep.contributor
+        identity.contribution.targetInterfaceFingerprint =
+          dep.targetInterfaceFingerprint
+        some(identity)
+
+    for pair in [(("a@b", "c"), ("a", "b@c")), (("ab", "c"), ("a", "bc"))]:
+      secondPackage = pair[1][0]
+      secondContributor = pair[1][1]
+      secondSelector = "nixpkgs#second-1"
+      let root = identityOf(contributionDef(fp, nix = @[nixDef()]),
+        dependencies = @[
+          ContributionDependencyRef(targetPackage: pair[0][0],
+            contributor: pair[0][1], targetInterfaceFingerprint: pin),
+          ContributionDependencyRef(targetPackage: pair[1][0],
+            contributor: pair[1][1], targetInterfaceFingerprint: pin)])
+      checkpoint "pair: " & $pair
+      let before = contributionFingerprint(root, resolver)
+      check before.isResolved
+      check before.dependenciesFullyResolved
+      secondSelector = "nixpkgs#second-2"
+      let after = contributionFingerprint(root, resolver)
+      check after.isResolved
+      check after.hex != before.hex
+
+    # The unbound report names both coordinates of the ``@``-free pair.
+    let unbound = contributionFingerprint(
+      identityOf(contributionDef(fp, nix = @[nixDef()]), dependencies = @[
+        ContributionDependencyRef(targetPackage: "ab", contributor: "c",
+          targetInterfaceFingerprint: pin),
+        ContributionDependencyRef(targetPackage: "a", contributor: "bc",
+          targetInterfaceFingerprint: pin)]),
+      noContributionResolver)
+    check unbound.isResolved
+    check unbound.unresolvedDependencies.len == 2
+
+  test "a NUL inside a coordinate cannot forge a memo or cycle key":
+    ## Review of the per-guard pass (2026-09-23). The fix for the ``@``
+    ## collision above keyed the memo, and the ``visited`` stack, on
+    ## ``package & "\0" & contributor`` -- a separator with no framing, and
+    ## neither field is forbidden to contain a NUL. ``("a\0b", "c")`` and
+    ## ``("a", "b\0c")`` then spell one key: measured, the second
+    ## dependency was SERVED the first one's sub-fingerprint and the
+    ## parent's hex stayed ``5847db72...`` across a change to the second
+    ## one's realization metadata, where ``859a746a`` (which keyed on the
+    ## ``@`` spelling) moved. ``("a\0", "b")`` / ``("a", "\0b")`` is the
+    ## second pair: it defeats ANY single-separator key, whatever the
+    ## separator byte, because the separator sits at the boundary itself.
+    ## The keys are now length-prefixed. Falsified by keying the memo on
+    ## ``targetPackage & "\0" & contributor`` again (the memo pairs), and
+    ## by doing the same to ``dependencyKey`` (the cycle case).
+    let fp = targetFingerprint()
+    let pin = repeat('4', 64)
+    var secondPackage = ""
+    var secondContributor = ""
+    var secondSelector = ""
+
+    proc resolver(dep: ContributionDependencyRef):
+        Option[ContributionIdentity] {.gcsafe.} =
+      {.cast(gcsafe).}:
+        let selector =
+          if dep.targetPackage == secondPackage and
+              dep.contributor == secondContributor: secondSelector
+          else: "nixpkgs#first"
+        var identity = identityOf(contributionDef(fp,
+          nix = @[nixDef(selector = selector)]))
+        identity.contribution.targetPackage = dep.targetPackage
+        identity.contribution.contributor = dep.contributor
+        identity.contribution.targetInterfaceFingerprint =
+          dep.targetInterfaceFingerprint
+        some(identity)
+
+    # The memo: two sibling dependencies, one key under a naive separator.
+    for pair in [(("a\0b", "c"), ("a", "b\0c")),
+                 (("a\0", "b"), ("a", "\0b"))]:
+      secondPackage = pair[1][0]
+      secondContributor = pair[1][1]
+      secondSelector = "nixpkgs#second-1"
+      let root = identityOf(contributionDef(fp, nix = @[nixDef()]),
+        dependencies = @[
+          ContributionDependencyRef(targetPackage: pair[0][0],
+            contributor: pair[0][1], targetInterfaceFingerprint: pin),
+          ContributionDependencyRef(targetPackage: pair[1][0],
+            contributor: pair[1][1], targetInterfaceFingerprint: pin)])
+      checkpoint "memo pair: " & $pair
+      let before = contributionFingerprint(root, resolver)
+      check before.isResolved
+      check before.dependenciesFullyResolved
+      secondSelector = "nixpkgs#second-2"
+      let after = contributionFingerprint(root, resolver)
+      check after.isResolved
+      check after.hex != before.hex
+
+    # The ``visited`` stack: a dependency whose coordinate merely SPELLS the
+    # same as its parent's under a naive separator is not a cycle. Read as
+    # one, it is folded in as a bare leaf and reported unbound, and the
+    # parent stops moving with the dependency's realization metadata.
+    for pair in [(("a\0b", "c"), ("a", "b\0c")),
+                 (("a\0", "b"), ("a", "\0b"))]:
+      secondPackage = pair[1][0]
+      secondContributor = pair[1][1]
+      secondSelector = "nixpkgs#second-1"
+      var root = identityOf(contributionDef(fp, nix = @[nixDef()]),
+        dependencies = @[ContributionDependencyRef(
+          targetPackage: pair[1][0], contributor: pair[1][1],
+          targetInterfaceFingerprint: pin)])
+      root.contribution.targetPackage = pair[0][0]
+      root.contribution.contributor = pair[0][1]
+      checkpoint "cycle pair: " & $pair
+      let before = contributionFingerprint(root, resolver)
+      check before.isResolved
+      check before.dependenciesFullyResolved
+      check before.unresolvedDependencies.len == 0
+      secondSelector = "nixpkgs#second-2"
+      let after = contributionFingerprint(root, resolver)
+      check after.isResolved
+      check after.hex != before.hex
+
+  test "memoisation: a served sub-graph still counts towards its parent's depth":
+    ## Per-guard audit, second pass. When a node's dependency is SERVED
+    ## from the memo, the node's own ``edgeDepth`` must still grow by the
+    ## served sub-graph's depth. Measured, that update could be deleted
+    ## with the suite green. The node then records ``edgeDepth == 0``, is
+    ## memoised with it, and is later reused near the bound where a fresh
+    ## composition refuses: a hex where a refusal is owed. Falsified by
+    ## deleting ``edgeDepth = max(edgeDepth, 1 + cached.edgeDepth)``.
+    ##
+    ## Shape: ``root -> {first, mid, long}``. ``first`` composes
+    ## ``sub-0 .. sub-2`` (whose deepest node owns an unbindable edge) and
+    ## memoises it; ``mid`` depends on ``sub-0`` too, so its composition
+    ## is SERVED ``sub-0``; ``long`` reaches ``mid`` through
+    ## ``c-1 .. c-chainTail``. At ``chainTail = 59`` the fresh composition
+    ## of that path puts ``sub-2``'s edge at depth 64 and refuses.
+    let fp = targetFingerprint()
+    let pinned = repeat('9', 64)
+
+    proc coord(name: string): ContributionDependencyRef =
+      ContributionDependencyRef(targetPackage: name,
+        contributor: Contributor, targetInterfaceFingerprint: pinned)
+
+    proc node(name: string; deps: seq[ContributionDependencyRef]):
+        ContributionIdentity =
+      ContributionIdentity(
+        contribution: InterfaceProvisioningContribution(
+          targetPackage: name,
+          targetInterfaceFingerprint: pinned,
+          contributor: Contributor,
+          nixProvisioning: @[InterfaceNixProvisioning(
+            packageName: name, contributor: Contributor,
+            selector: "nixpkgs#" & name, executablePath: "bin/" & name,
+            nixpkgsRev: NixRev, nixpkgsNarHash: NarHashA)]),
+        providerIdentity: ProviderB,
+        dependencies: deps)
+
+    var chainTail = 0
+    const subHeight = 2
+
+    proc resolver(d: ContributionDependencyRef):
+        Option[ContributionIdentity] {.gcsafe.} =
+      {.cast(gcsafe).}:
+        let name = d.targetPackage
+        if name == "ghost":
+          return none(ContributionIdentity)
+        if name == "first" or name == "mid":
+          return some(node(name, @[coord("sub-0")]))
+        if name == "long":
+          return some(node("long", @[coord("c-1")]))
+        if name.startsWith("c-"):
+          let level = parseInt(name["c-".len .. ^1])
+          if level < chainTail:
+            return some(node(name, @[coord("c-" & $(level + 1))]))
+          return some(node(name, @[coord("mid")]))
+        if name.startsWith("sub-"):
+          let level = parseInt(name["sub-".len .. ^1])
+          if level < subHeight:
+            return some(node(name, @[coord("sub-" & $(level + 1))]))
+          return some(node(name, @[coord("ghost")]))
+        none(ContributionIdentity)
+
+    proc compose(order: seq[string]): ContributionFingerprint =
+      var deps: seq[ContributionDependencyRef] = @[]
+      for name in order:
+        deps.add(coord(name))
+      contributionFingerprint(
+        identityOf(contributionDef(fp, nix = @[nixDef()]), dependencies = deps),
+        resolver)
+
+    chainTail = MaxContributionDepth - 5
+    let straight = compose(@["first", "mid", "long"])
+    let reversed = compose(@["long", "mid", "first"])
+    checkpoint "straight resolved=" & $straight.isResolved
+    checkpoint "reversed resolved=" & $reversed.isResolved
+    check not straight.isResolved
+    check straight.refusalReason.contains(
+      "contribution dependency depth exceeds " & $MaxContributionDepth)
+    check straight.isResolved == reversed.isResolved
+
+    # Control: one level shorter, both orders fit, on one hex.
+    chainTail = MaxContributionDepth - 6
+    let fits = compose(@["first", "mid", "long"])
+    check fits.isResolved
+    check fits.hex == compose(@["long", "mid", "first"]).hex
+
+  test "a fingerprint is resolved only with a full hex and no refusal":
+    ## Per-guard audit, second pass. The composer never produces a hex
+    ## together with a refusal, or neither, so each half of ``isResolved``
+    ## was masked by the other and could be deleted with the suite green.
+    ## ``ContributionFingerprint`` is a public object, though, and its
+    ## zero value must not read as a usable identity. Falsified by
+    ## dropping either conjunct of ``isResolved``.
+    check not ContributionFingerprint().isResolved
+    check not ContributionFingerprint(hex: repeat('a', 63)).isResolved
+    check not ContributionFingerprint(hex: repeat('a', 64),
+      refusals: @["provider identity"]).isResolved
+    check ContributionFingerprint(hex: repeat('a', 64)).isResolved
+    check not ContributionFingerprint(hex: repeat('a', 64),
+      unresolvedDependencies: @[ContributionDependencyRef(
+        targetPackage: "libz", contributor: Contributor,
+        targetInterfaceFingerprint: repeat('1', 64))]).
+      dependenciesFullyResolved

@@ -556,10 +556,12 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
   # only ``contradictory-curator-policy`` and
   # ``policy-selection-unsatisfied`` diagnostics, which the final
   # diagnostic sort orders.
+  var contradictoryPolicy: seq[string] = @[]
   for packageName in policyPackages:
     let named = policyContributors[packageName].sorted(cmp).
       deduplicate(isSorted = true)
     if named.len > 1:
+      contradictoryPolicy.add(packageName)
       refuse(cdContradictoryPolicy,
         "curator policy names " & $named.len & " different contributors for " &
         "package \"" & packageName & "\": " &
@@ -578,11 +580,28 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
   var selections: seq[CatalogSelection] = @[]
   var satisfiedPolicy: seq[string] = @[]
   for packageName in packageOrder:
-    var candidates = eligible.filterIt(it.targetPackage == packageName)
-    candidates.sort(proc (a, b: EligibleContribution): int =
-      result = cmp(a.contributor, b.contributor)
-      if result == 0: result = cmp(a.catalogKey, b.catalogKey)
-      if result == 0: result = cmp(a.recordDigest, b.recordDigest))
+    # ``candidates`` is deliberately NOT sorted -- the last of the seven
+    # redundant-by-construction guards M6 verification named, collapsed
+    # rather than pinned. Its order reaches no composed byte: a selection is
+    # made only when exactly ONE candidate is wanted, so ``wanted[0]`` is
+    # order-free, and every candidate shares the canonical fingerprint. It
+    # reached only two diagnostic texts, and each of those now orders its
+    # own list: the ambiguity message sorts ``described``, the
+    # unsatisfied-policy message sorts its contributor ids. The candidate
+    # sort and the ``described`` sort were each other's mask -- measured,
+    # either could be deleted with the suite green -- so a refactor could
+    # delete one on the strength of the tests and a later one the other.
+    if packageName in contradictoryPolicy:
+      # Refused above. Which of its entries "wins" is undecidable, so
+      # NOTHING -- no selection and no diagnostic -- is derived from either
+      # entry. ``policyOf`` folds the entries last-wins, and consulting it
+      # here made the REFUSAL depend on the entry written last (verification
+      # of the per-guard pass, 2026-09-23): with one eligible and one absent
+      # contributor, only the order that wrote the absent one last added a
+      # ``policy-selection-unsatisfied`` diagnostic, and that message named
+      # whichever contributor came last.
+      continue
+    let candidates = eligible.filterIt(it.targetPackage == packageName)
     var wanted = candidates
     var reason = csUniqueEligible
     if packageName in policyOf:
@@ -595,8 +614,9 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
           "\", but no imported catalog offers an eligible contribution " &
           "from it. Eligible contributors: " &
           (if candidates.len == 0: "<none>"
-           else: candidates.mapIt("\"" & it.contributor & "\"").
-             deduplicate().join(", ")) & ".")
+           else: candidates.mapIt(it.contributor).sorted(cmp).
+             deduplicate(isSorted = true).mapIt("\"" & it & "\"").
+             join(", ")) & ".")
         continue
       satisfiedPolicy.add(packageName)
     if wanted.len > 1:
@@ -623,7 +643,10 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
       reason: reason))
 
   for packageName in policyPackages:
-    if packageName in packageOrder or packageName in satisfiedPolicy:
+    if packageName in packageOrder or packageName in satisfiedPolicy or
+        packageName in contradictoryPolicy:
+      # A contradictory package is skipped for the reason given in the
+      # selection loop: ``policyOf`` would name its LAST entry.
       continue
     refuse(cdPolicySelectionUnsatisfied,
       "curator policy selects contributor \"" & policyOf[packageName] &
