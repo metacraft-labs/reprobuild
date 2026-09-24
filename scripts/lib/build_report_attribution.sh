@@ -129,12 +129,41 @@ repro_build_report_selectors() {
   local file="$1"
   [[ -f "${file}" ]] || return 1
   local found
-  found="$(tr -d '\n' < "${file}" \
-    | grep -oE '"targetResolution"[[:space:]]*:[[:space:]]*\[[^]]*\]' \
-    | grep -oE '"selector"[[:space:]]*:[[:space:]]*"[^"]*"' \
-    | sed -E 's/^"selector"[[:space:]]*:[[:space:]]*"(.*)"$/\1/')" || return 1
+  # Read a bounded TAIL first, and only fall back to the whole document.
+  #
+  # ``targetResolution`` is emitted near the END of the report — after it come
+  # only ``runQuota`` and ``stats``, both small and fixed-shape — so the tail
+  # holds it in practice. That matters enormously, because the comment above
+  # understates the size: the success report for ``.#test-builds`` was
+  # MEASURED at 2,515,919,084 bytes on a single line. ``grep`` must buffer a
+  # whole line before it can match, so scanning the document to find a field
+  # sitting in its last ~300 bytes cost ~72 minutes and ~1.7 GB of RSS, once
+  # per call — and ``repro_collect_build_reports`` calls this again on the
+  # mismatch path, per selector. On the run that found this, the suite had
+  # spent 50 minutes in that grep, after a 5h31m build, without running a
+  # single test.
+  #
+  # The fallback keeps this a speed change and not a behaviour change: if a
+  # future emitter moves the field out of the tail, the whole-document read
+  # still answers, at the old cost. Both paths share one filter so they cannot
+  # drift apart, and the array is still bounded at the first ``]`` exactly as
+  # before.
+  found="$(tail -c "${REPRO_BUILD_REPORT_TAIL_BYTES:-65536}" "${file}" \
+    | repro_build_report_selector_filter)"
+  [[ -n "${found}" ]] ||
+    found="$(repro_build_report_selector_filter < "${file}")"
   [[ -n "${found}" ]] || return 1
   printf '%s\n' "${found}"
+}
+
+repro_build_report_selector_filter() {
+  ## stdin (report text) -> one selector per line. Shared by the bounded and
+  ## the whole-document reads in ``repro_build_report_selectors`` so the two
+  ## can never disagree about what a selector is.
+  tr -d '\n' \
+    | grep -oE '"targetResolution"[[:space:]]*:[[:space:]]*\[[^]]*\]' \
+    | grep -oE '"selector"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | sed -E 's/^"selector"[[:space:]]*:[[:space:]]*"(.*)"$/\1/'
 }
 
 repro_build_report_covers() {
