@@ -36518,8 +36518,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_measurement_axes.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 14,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

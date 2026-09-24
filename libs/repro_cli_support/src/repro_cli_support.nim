@@ -7849,6 +7849,39 @@ const
     ## instruments the invalidation and cache-lookup hot paths, which is
     ## exactly where a build's own overhead lives.
 
+proc cmakeRegenerationHotHitEligible*(measure: MeasureSet;
+                                      forceRebuild: bool): bool =
+  ## May the CMake regeneration edge be SERVED from its hot metadata record?
+  ##
+  ## This is a serving decision, so it reads exactly one thing: whether the
+  ## caller asked for a rebuild. ``measure`` is accepted and deliberately
+  ## never read, and the parameter is here so that fact is a testable
+  ## property rather than an absence — see ``tests/unit/t_measurement_axes``.
+  ##
+  ## It did read it. The gate used to be
+  ## ``mcCacheEvidence notin measureSet and not forceRebuild``, which put a
+  ## COLLECTION category (``MeasureCategory``'s doc comment: "each one's data
+  ## has NO consumer in the correctness path") in charge of whether a serving
+  ## path existed at all. Because ``mcCacheEvidence`` is in
+  ## ``DefaultMeasureSet``, the arm was unreachable on every default
+  ## invocation and ran only for someone who passed ``--measure=none,…`` —
+  ## i.e. the arm was enforced-and-measured precisely where nobody runs it.
+  ## Its predecessor (``reportMode == brmNone and logMode == blmQuiet``) had
+  ## the same shape and the opposite default, so the rewrite silently turned
+  ## the common case off.
+  ##
+  ## The serving preconditions are the ones inside the arm — outputs present,
+  ## a hot metadata record for this weak fingerprint and policy, the record
+  ## servable under ``unservableCacheRecordReason``, and its inputs
+  ## metadata-unchanged. All four are already tested there, and the arm's
+  ## ``ActionResult`` is byte-identical to the one the state-freshness arm
+  ## below it synthesises (same id, ``asCacheHit``, ``launched = false``,
+  ## ``cdHit``, same dependency-policy kind, no evidence) — which is itself
+  ## ungated. So no report, log line or stats observation can tell the two
+  ## apart, and there was nothing for a measurement category to protect.
+  discard measure
+  not forceRebuild
+
 proc measureCategoryNames*(): seq[string] =
   result = @[]
   for category in MeasureCategory:
@@ -9906,7 +9939,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       cmakeRegenerationBuildAction(cmakeMeta, publicCliPath)
     let cmakeCacheRoot = outDir / "cmake-regeneration-cache"
     var cmakeFastHit = false
-    if mcCacheEvidence notin measureSet and not forceRebuild:
+    if cmakeRegenerationHotHitEligible(measureSet, forceRebuild):
       # The CMake regeneration action's cache lives under the shared
       # user-level action cache root, matching the runBuild() path below
       # (Provider-Compile-Tiering.md §"Cache Scope" Phase 1).
