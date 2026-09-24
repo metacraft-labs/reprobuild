@@ -149,7 +149,7 @@
       # asFailed` blamed on the compiler. The pin carries the fix into every
       # build that has no io-mon sibling; the sibling-overridden developer
       # shells already have it. b5c7990 is the tip of io-mon's `dev`.
-      url = "github:metacraft-labs/io-mon/3b6196efc2021ba202add54a21b25f0268d70c79";
+      url = "github:metacraft-labs/io-mon/2717ce8c574ca7a4a0b8f32e7fc0381a71a325ec";
       flake = false;
     };
     nim-shm-gset-src = {
