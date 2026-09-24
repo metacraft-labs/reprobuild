@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1726,
+    "nimTestBinaries": 1727,
     "pureUnitConsolidationGroups": 53,
     "pureUnitTests": 607,
     "staticallyDetectedRuntimeCompilerFlowTests": 106,
-    "testEntries": 1737
+    "testEntries": 1738
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1156,7 +1156,7 @@
       "integration": 824,
       "platform/destructive": 114,
       "pure unit": 607,
-      "unclassified": 180
+      "unclassified": 181
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1304,9 +1304,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1726,
+    "nimTestBinaryCount": 1727,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1737
+    "testEntryCount": 1738
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8547,6 +8547,24 @@
       "source": "libs/repro_cli_support/tests/t_provider_compile_entry_points_publish_bootstrap_toolchain.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_runquota_auto_spawn_defers_to_host_config",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_runquota_auto_spawn_defers_to_host_config.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

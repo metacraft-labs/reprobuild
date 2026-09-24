@@ -1116,6 +1116,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_runquota_auto_spawn_defers_to_host_config.nim",
+    binary: "build/test-bin/t_runquota_auto_spawn_defers_to_host_config",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim",
     binary: "build/test-bin/t_s7_build_paths_reach_the_restore_config",
     defines: @[],

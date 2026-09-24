@@ -63,6 +63,10 @@ import repro_runquota
 # ``runquotad``'s query interface. This module is the ONLY read path;
 # nothing here opens the store's database file.
 import repro_runquota/stats_query
+import runquota_daemon/host_config
+  # The host's RunQuota budget file. The daemon reads it at start; the
+  # auto-spawn below reads it only to know which flags NOT to pass, since a
+  # flag overrides the file (reprobuild-specs/RunQuota-Host-Configuration.md).
 import repro_hash
 # M4: unified Workspace-VCS evidence record + derived JSON view.
 # ``writeBuildReport`` embeds the JSON view under the new
@@ -17929,6 +17933,53 @@ proc assembleRunquotadPoolArgs*(extraPools: openArray[BuildPool]): seq[string] =
     result.add("--pool")
     result.add(name & "=" & $seen[name])
 
+proc autoRunQuotaBudgetArgs*(host: HostConfig;
+                             extraPools: openArray[BuildPool];
+                             cpuMilli: uint32):
+    tuple[args: seq[string]; warnings: seq[string]] =
+  ## The budget flags an auto-spawned ``runquotad`` is started with.
+  ##
+  ## The daemon is host-wide: whoever spawns it sets the budget for every
+  ## workspace on the host. Measured 2026-09-23 on a 125.6 GiB workstation:
+  ## the only daemon had been auto-spawned by another workspace with the
+  ## 16 GiB default and refused a provider compile. The budget is now the
+  ## host file's (``hostConfigPath``), which the daemon reads at start and
+  ## which a flag would override. So a flag is passed only for what the file
+  ## leaves unset:
+  ##
+  ## - memory: ``REPROBUILD_RUNQUOTA_MEMORY_BYTES`` still wins as an explicit
+  ##   per-invocation override, with a warning when it disagrees with the
+  ##   file, because the daemon it spawns budgets every other workspace too.
+  ##   Otherwise the file's value, or ``DefaultAutoRunQuotaMemoryBytes``.
+  ## - cpu: ``cpuMilli`` unless the file sets ``cpu_milli``.
+  ## - pools: a convention pool the file sizes is left to the file. A pool
+  ##   the recipe declares is always passed, because the engine's in-process
+  ##   gate uses the recipe's figure and the two gates must agree (see
+  ##   ``assembleRunquotadPoolArgs``).
+  let memoryOverride = getEnv("REPROBUILD_RUNQUOTA_MEMORY_BYTES", "")
+  if memoryOverride.len > 0:
+    let memory = autoRunQuotaMemoryBytes()
+    result.args.add(["--memory-bytes", $memory])
+    if host.memoryBytes.isSome and host.memoryBytes.get != memory:
+      result.warnings.add("REPROBUILD_RUNQUOTA_MEMORY_BYTES=" & $memory &
+        " overrides memory_bytes = " & $host.memoryBytes.get & " in " &
+        host.sourcePath & "; the RunQuota daemon being started serves the " &
+        "whole host, so this budget applies to every workspace on it")
+  elif host.memoryBytes.isNone:
+    result.args.add(["--memory-bytes", $DefaultAutoRunQuotaMemoryBytes])
+  if host.cpuMilli.isNone:
+    result.args.add(["--cpu-milli", $int(cpuMilli)])
+  var recipePools = initHashSet[string]()
+  for pool in extraPools:
+    recipePools.incl(pool.name)
+  let poolArgs = assembleRunquotadPoolArgs(extraPools)
+  var i = 0
+  while i + 1 < poolArgs.len:
+    let name = poolArgs[i + 1].split("=", 1)[0]
+    if name notin host.pools or name in recipePools:
+      result.args.add([poolArgs[i], poolArgs[i + 1]])
+    i += 2
+
 var machineDaemonTrustApplied = false
 
 proc applyMachineDeclaredDaemonTrust*(): seq[DaemonCheckReport]
@@ -18144,14 +18195,12 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
   # recipe's ``buildPool("nim_pty.pty-serial", 1)`` never reaches the
   # daemon, its execute-edge lease hits ``lease request exceeds named-pool
   # budget: nim_pty.pty-serial``, and the build hangs.
-  let standardPoolArgs = assembleRunquotadPoolArgs(extraPools)
-  let memoryBytes = $autoRunQuotaMemoryBytes()
+  let budget = autoRunQuotaBudgetArgs(readHostConfig(), extraPools,
+    buildMaxParallelism() * 1000'u32)
+  for warning in budget.warnings:
+    stderr.writeLine("repro: warning: " & warning)
   when defined(windows):
-    var args = @[
-      "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
-      "--memory-bytes", memoryBytes
-    ]
-    args.add(standardPoolArgs)
+    var args = budget.args
     # Clear any stale value so the client side falls through to
     # ``defaultEndpoint`` and meets the daemon on the per-user pipe.
     putEnv("RUNQUOTA_SOCKET", "")
@@ -18161,12 +18210,8 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
       "reprobuild-runquota-" & $getCurrentProcessId())
     # fileExists excludes Unix sockets; removeFile also accepts a missing path.
     removeFile(socket)
-    var args = @[
-      "--socket", socket,
-      "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
-      "--memory-bytes", memoryBytes
-    ]
-    args.add(standardPoolArgs)
+    var args = @["--socket", socket]
+    args.add(budget.args)
     putEnv("RUNQUOTA_SOCKET", socket)
   result = startProcess(runquotad, args = args, options = {poUsePath})
   for _ in 0 ..< 300:
