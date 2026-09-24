@@ -50,6 +50,8 @@
 
 import std/[os, strutils]
 
+import blake3
+
 import repro_core/paths
 import repro_project_dsl
 import repro_project_dsl/shell_fetch
@@ -136,7 +138,9 @@ proc emitNpmVendorAction*(projectRoot, packageName: string;
   proc q(value: string): string =
     value.replace("\\", "/").replace("\"", "\\\"")
 
-  var script = "set -e; "
+  # The POPULATE body: download, verify and load every archive. Built on
+  # its own so the up-to-date token below can bind it.
+  var script = ""
   script.add("mkdir -p \"" & q(cacheDir) & "\"; ")
   # The npm cache is rebuilt from scratch: an entry left by a previous
   # closure would still satisfy a lookup, and the build could succeed
@@ -181,12 +185,59 @@ proc emitNpmVendorAction*(projectRoot, packageName: string;
   # A committed lock (see `NpmBuildClosureLockName`) replaces the fetched
   # one, so `npm ci` installs the lock the closure manifest was generated
   # from. Decided at emission time so its presence is part of the action,
-  # and the file is an input so an edit to it re-runs the vendor.
+  # and the file is an input so an edit to it re-runs the vendor. It runs
+  # on EVERY execution, the up-to-date path included: the fetch action
+  # re-extracts `src/` each run, which restores upstream's lock.
   let overrideLock = npmBuildClosureLockPath(projectRoot)
   let hasOverrideLock = fileExists(overrideLock)
+  var prologue = "set -e; "
   if hasOverrideLock:
-    script.add("cp -f \"" & q(overrideLock) & "\" \"" & q(lockfile) & "\"; ")
-  script.appendVerifiedFetchStamp(stamp)
+    prologue.add("cp -f \"" & q(overrideLock) & "\" \"" & q(lockfile) &
+      "\"; ")
+
+  # UP-TO-DATE SKIP. This action is non-cacheable (it reaches the network),
+  # so the engine runs it on every build — and under automatic monitoring
+  # re-populating gemini-cli's 1340-archive cache took about an hour. It is
+  # skipped when BOTH hold:
+  #   * the stamp carries a token over the populate program AND the
+  #     manifest's and committed lock's CONTENTS (so a changed pin, closure
+  #     or lock re-populates), and
+  #   * the private cache holds one index entry per unique archive URL (so
+  #     a deleted or half-written cache re-populates).
+  # Skipping is safe where it could be wrong: `npm ci` re-verifies every
+  # tarball against the lockfile's sha512 `integrity`, so a corrupted entry
+  # fails the build loudly (and a missing one fails `ENOTCACHED`) instead of
+  # producing a different product. The count uses only shell builtins, so
+  # the check adds no tool to the action's identity.
+  var manifestText = ""
+  try: manifestText = readFile(manifest)
+  except CatchableError: discard
+  var lockText = ""
+  if hasOverrideLock:
+    try: lockText = readFile(overrideLock)
+    except CatchableError: discard
+  var uniqueUrls: seq[string] = @[]
+  for line in manifestText.splitLines():
+    let fields = line.strip().splitWhitespace()
+    if fields.len == 3 and not fields[0].startsWith("#") and
+        fields[2] notin uniqueUrls:
+      uniqueUrls.add(fields[2])
+  let token = "repro-npm-vendor-v1:" & blake3.toHex(blake3.digest(
+    script & "\n--manifest--\n" & manifestText & "\n--lock--\n" & lockText))
+  let escapedStamp = q(stamp)
+  let indexGlob = q(npmCache) & "/_cacache/index-v5/*/*/*"
+  var full = prologue
+  full.add("repro_up=0; if [ -f \"" & escapedStamp & "\" ] && " &
+    "IFS= read -r repro_tok < \"" & escapedStamp & "\" && " &
+    "[ \"$repro_tok\" = \"" & token & "\" ]; then repro_have=0; " &
+    "for repro_f in " & indexGlob & "; do " &
+    "[ -f \"$repro_f\" ] && repro_have=$((repro_have + 1)); done; " &
+    "[ \"$repro_have\" -ge " & $uniqueUrls.len & " ] && repro_up=1; fi; ")
+  full.add("if [ \"$repro_up\" = 1 ]; then printf '%s\\n' " &
+    "'npm vendor: private cache up to date (" & $uniqueUrls.len &
+    " archives)'; else " & script & "printf '%s\\n' '" & token &
+    "' > \"" & escapedStamp & "\"; fi")
+  script = full
 
   var inputs: seq[string] = @[manifest]
   if hasOverrideLock:
