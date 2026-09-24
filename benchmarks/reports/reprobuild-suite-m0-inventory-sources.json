@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1742,
+    "nimTestBinaries": 1743,
     "pureUnitConsolidationGroups": 53,
     "pureUnitTests": 608,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1753
+    "testEntries": 1754
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1153,7 +1153,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 834,
+      "integration": 835,
       "platform/destructive": 115,
       "pure unit": 608,
       "unclassified": 184
@@ -1304,9 +1304,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1742,
+    "nimTestBinaryCount": 1743,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1753
+    "testEntryCount": 1754
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -31748,6 +31748,27 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_status_health_add_remove_use_unified_resolver.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_stdlib_python_tarball_arms_realize",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_stdlib_python_tarball_arms_realize.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

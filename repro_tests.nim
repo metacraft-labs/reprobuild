@@ -12861,6 +12861,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_stdlib_python_tarball_arms_realize.nim",
+    binary: "build/test-bin/t_stdlib_python_tarball_arms_realize",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_store_and_registry_deps_carry_coordinates_and_integrity.nim",
     binary: "build/test-bin/t_store_and_registry_deps_carry_coordinates_and_integrity",
     defines: @[],

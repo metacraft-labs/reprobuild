@@ -1435,6 +1435,7 @@ tests/integration/t_stackable_hooks_extracted_process_tree.nim	nim	3
 tests/integration/t_stale_repro_refusal_names_a_remedy_that_does_not_disarm_the_gate.nim	nim	1
 tests/integration/t_stats_reads_shared_store.nim	nim	5
 tests/integration/t_status_health_add_remove_use_unified_resolver.nim	nim	1
+tests/integration/t_stdlib_python_tarball_arms_realize.nim	nim	1
 tests/integration/t_store_and_registry_deps_carry_coordinates_and_integrity.nim	nim	1
 tests/integration/t_store_daemon_m66_dev.nim	nim	6
 tests/integration/t_switch_mainline_and_fetch.nim	nim	6
