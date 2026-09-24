@@ -19801,6 +19801,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_dev_env_announces_before_working",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/dev-env/t_e2e_dev_env_announces_before_working.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_dev_env_binds_materialized_producer",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",

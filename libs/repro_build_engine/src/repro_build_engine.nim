@@ -5730,6 +5730,20 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     else:
       let recordStatus = classifyEventLossDetail(record.detail)
       status = worseMonitorStatus(status, recordStatus)
+      if recordStatus == mesUnknownScopeLoss and record.detail.len > 0:
+        # Principle 2 ("name the offender") applied to the one diagnostic that
+        # could not. The summary elsewhere says an action will not be published
+        # and why in the abstract; only the detail says WHICH image or peer did
+        # it — `image=/usr/bin/cc` (SIP-protected, no drop-in) reads very
+        # differently from an IPC connect to a breakaway daemon, and the
+        # remedies are unrelated. Carried verbatim: io-mon owns the wording,
+        # and a paraphrase here would be a second thing to keep in step.
+        #
+        # Deliberately on the CLASSIFIED path only. A deferred IPC loss has
+        # not been judged yet, and naming an offender that `resolvePeerAttribution`
+        # is about to clear would be the suppression-vs-attribution mistake in
+        # reverse.
+        evidence.diagnostics.add("monitor loss: " & record.detail)
   elif record.kind == mrBackendProfile and
       not monitorProfileEvidenceComplete(record.detail):
     status = worseMonitorStatus(status, mesUnknownScopeLoss)
