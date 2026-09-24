@@ -63,6 +63,7 @@
 import std/[options, os, strutils, times]
 
 import repro_attest
+import repro_attest/cloud_lease
 import repro_attest_verify
 import repro_attest_verify/fetch
 
@@ -82,6 +83,7 @@ type
     ascVerify
     ascChallenge
     ascLaunch
+    ascReap
     ascNone ## no or unknown subcommand
 
   AttestCliOptions* = object
@@ -128,6 +130,12 @@ type
     imageReference*: string
     subnet*: string
     sshKeyReference*: string
+    leaseStore*: string
+    leaseTtlSeconds*: string
+    leaseRateMicros*: string
+    leaseOut*: string
+    planOut*: string
+    leaseNow*: string
 
 type
   AttestExitCode* = enum
@@ -193,6 +201,10 @@ Subcommands:
   expect     compute the measurement manifest for an attested image
   challenge  mint a verifier nonce and record when it was minted
   verify     check a runtime report against a measurement policy
+  reap       report what a sweep of a cloud-lease store would destroy:
+             every lease it can see, whether its owner is alive, whether
+             it has expired, what it has cost so far, and the invocation
+             each one would be destroyed with. It destroys nothing.
   launch     describe a confidential-instance launch on a public cloud:
              the provider invocation it would be made with and the
              expected-measurement identity a policy would pin. It
@@ -295,6 +307,24 @@ repro attest launch --provider NAME --instance-shape NAME [options]
       --verity-root-hash HEX        the dm-verity root hash
       --out PATH                    write the expected manifest as well as
                                     printing the plan
+      --lease-store DIR             hold the launch under a lease whose
+                                    record is written in DIR BEFORE the
+                                    plan is rendered, and put the lease's
+                                    tags on the rendered invocation
+      --lease-ttl-seconds N         how long the hold lasts; a hold with
+                                    no deadline is refused
+      --lease-rate-micros-per-hour N  what an hour of this instance costs.
+                                    Omitted, the hold is reported as
+                                    unpriced rather than as free
+      --lease-out PATH              write the lease record itself
+      --plan-out PATH               write the rendered provider invocation,
+                                    one argument per line
+      --now UNIX                    the moment the lease is taken from,
+                                    for a caller that needs a stated one
+
+repro attest reap --lease-store DIR [--now UNIX]
+      --lease-store DIR             the lease store to sweep
+      --now UNIX                    the moment to judge expiry against
 
 Exit codes:
   0  success, or a verdict of `accepted`
@@ -327,6 +357,7 @@ proc parseAttestArgs*(args: seq[string]): AttestCliOptions =
   of "verify": result.sub = ascVerify
   of "challenge": result.sub = ascChallenge
   of "launch": result.sub = ascLaunch
+  of "reap": result.sub = ascReap
   else:
     raise newException(ValueError,
       "unknown `repro attest` subcommand: " & args[0])
@@ -401,6 +432,15 @@ proc parseAttestArgs*(args: seq[string]): AttestCliOptions =
     of "--subnet": result.subnet = valueFor(args, i, "--subnet")
     of "--ssh-key-reference":
       result.sshKeyReference = valueFor(args, i, "--ssh-key-reference")
+    of "--lease-store": result.leaseStore = valueFor(args, i, "--lease-store")
+    of "--lease-ttl-seconds":
+      result.leaseTtlSeconds = valueFor(args, i, "--lease-ttl-seconds")
+    of "--lease-rate-micros-per-hour":
+      result.leaseRateMicros =
+        valueFor(args, i, "--lease-rate-micros-per-hour")
+    of "--lease-out": result.leaseOut = valueFor(args, i, "--lease-out")
+    of "--plan-out": result.planOut = valueFor(args, i, "--plan-out")
+    of "--now": result.leaseNow = valueFor(args, i, "--now")
     of "--out": result.outPath = valueFor(args, i, "--out")
     of "--check": result.checkPath = valueFor(args, i, "--check")
     else:
@@ -754,10 +794,66 @@ proc runAttestLaunch(opts: AttestCliOptions): int =
     of "--uki": spec.ukiImage = into
     else: spec.registerLog = into
 
+  # The lease, minted BEFORE the plan is rendered and written to disk
+  # before anything else happens. Nothing is created by this command, so
+  # nothing here is at risk — but the ORDER is the contract this command
+  # documents, and a command that wrote the record afterwards would be
+  # documenting the wrong one.
+  var holder: CloudLeaseHolder = nil
+  let leaseWanted = opts.leaseStore.len > 0 or opts.leaseOut.len > 0
+  var leaseNow = getTime().toUnix
+  if opts.leaseNow.len > 0:
+    try:
+      leaseNow = parseBiggestInt(opts.leaseNow)
+    except ValueError:
+      stderr.writeLine("repro attest launch: --now is " &
+        opts.leaseNow.escape() & " and it is read as whole seconds")
+      return AttestExitUsage
+  var leaseTtl = DefaultLeaseTtlSeconds
+  if opts.leaseTtlSeconds.len > 0:
+    try:
+      leaseTtl = parseBiggestInt(opts.leaseTtlSeconds)
+    except ValueError:
+      stderr.writeLine("repro attest launch: --lease-ttl-seconds is " &
+        opts.leaseTtlSeconds.escape() & " and it is read as whole seconds")
+      return AttestExitUsage
+  var leaseRate = 0'i64
+  if opts.leaseRateMicros.len > 0:
+    try:
+      leaseRate = parseBiggestInt(opts.leaseRateMicros)
+    except ValueError:
+      stderr.writeLine("repro attest launch: " &
+        "--lease-rate-micros-per-hour is " & opts.leaseRateMicros.escape() &
+        " and it is read as a whole number")
+      return AttestExitUsage
+  if leaseWanted:
+    let root = (if opts.leaseStore.len > 0: opts.leaseStore
+                else: opts.leaseOut.parentDir)
+    try:
+      holder = acquireCloudLease(openCloudLeaseStore(root), spec,
+        delayed(initDuration(seconds = int(leaseTtl))), leaseNow, leaseRate)
+    except CloudLeaseError as err:
+      stderr.writeLine("repro attest launch: " & err.msg)
+      return AttestExitUsage
+    except CloudLaunchError as err:
+      stderr.writeLine("repro attest launch: " & err.msg)
+      return AttestExitUsage
+    except OSError, IOError:
+      stderr.writeLine("repro attest launch: the lease record could not " &
+        "be written under " & root)
+      return AttestExitUsage
+
   var plan: seq[string] = @[]
   var manifestText = ""
+  var scan: PlanSecretScan
   try:
-    plan = checkedCloudLaunchPlan(spec)
+    if holder != nil:
+      plan = leasedLaunchPlan(spec, holder.lease)
+      scan = requirePlanCarriesNoCredential(plan)
+    else:
+      let checked = checkedCloudLaunchPlanScanned(spec)
+      plan = checked.plan
+      scan = checked.scan
     manifestText = cloudExpectedManifestText(spec)
   except CloudLaunchError as err:
     stderr.writeLine("repro attest launch: " & err.msg)
@@ -776,14 +872,75 @@ proc runAttestLaunch(opts: AttestCliOptions): int =
     stderr.writeLine("repro attest launch: " & err.msg)
     return AttestExitUsage
 
+  let warning = renderUnsearchableSecretWarning(scan)
+  if warning.len > 0:
+    stderr.writeLine("repro attest launch: " & warning)
+
   var outcome = CloudLaunchOutcome(plan: plan, manifestText: manifestText,
-    identity: DigestPrefix & sha256Hex(manifestText))
+    identity: DigestPrefix & sha256Hex(manifestText), secretScan: scan)
   if opts.outPath.len > 0:
     let dir = opts.outPath.parentDir
     if dir.len > 0 and not dirExists(dir): createDir(dir)
     writeFile(opts.outPath, manifestText)
     echo "wrote " & opts.outPath
+  if opts.planOut.len > 0:
+    # The rendered invocation, written where something can read it.
+    # This module's own contract calls a plan "the thing that gets
+    # recorded as a fixture", and until now the only way to obtain one
+    # was to scrape standard output.
+    let dir = opts.planOut.parentDir
+    if dir.len > 0 and not dirExists(dir): createDir(dir)
+    writeFile(opts.planOut, plan.join("\n") & "\n")
+    echo "wrote " & opts.planOut
+  if holder != nil and opts.leaseOut.len > 0:
+    let dir = opts.leaseOut.parentDir
+    if dir.len > 0 and not dirExists(dir): createDir(dir)
+    writeFile(opts.leaseOut, renderCloudLease(holder.lease))
+    echo "wrote " & opts.leaseOut
   stdout.write(renderCloudLaunchPlanText(outcome))
+  if holder != nil:
+    stdout.write("lease-id: " & holder.lease.leaseId & "\n")
+    stdout.write("lease-expires-at: " &
+      $holder.lease.expiresAtUnix & "\n")
+  AttestExitAccepted
+
+# ---------------------------------------------------------------------
+# reap
+#
+# The sweep, and it destroys nothing for the same reason `launch`
+# creates nothing: the library's reaper takes an effector, this build
+# ships none, and the command does not construct one. What it prints is
+# the decision for every lease it can see and the invocation each one
+# would be destroyed with.
+# ---------------------------------------------------------------------
+
+proc runAttestReap(opts: AttestCliOptions): int =
+  if opts.leaseStore.len == 0:
+    stderr.writeLine("repro attest reap: --lease-store is required; a " &
+      "sweep with no store named would either scan nothing or scan " &
+      "somewhere nobody asked for")
+    return AttestExitUsage
+  if not dirExists(opts.leaseStore):
+    stderr.writeLine("repro attest reap: no lease store at " &
+      opts.leaseStore)
+    return AttestExitUsage
+  var now = getTime().toUnix
+  if opts.leaseNow.len > 0:
+    try:
+      now = parseBiggestInt(opts.leaseNow)
+    except ValueError:
+      stderr.writeLine("repro attest reap: --now is " &
+        opts.leaseNow.escape() & " and it is read as whole seconds")
+      return AttestExitUsage
+  try:
+    stdout.write(renderReapPlanText(openCloudLeaseStore(opts.leaseStore),
+      now, processOwnerLiveness()))
+  except CloudLeaseError as err:
+    stderr.writeLine("repro attest reap: " & err.msg)
+    return AttestExitUsage
+  except CloudLaunchError as err:
+    stderr.writeLine("repro attest reap: " & err.msg)
+    return AttestExitUsage
   AttestExitAccepted
 
 # ---------------------------------------------------------------------
@@ -928,6 +1085,7 @@ proc runAttestCommand*(args: seq[string]): int =
   of ascVerify: runAttestVerify(opts)
   of ascChallenge: runAttestChallenge(opts)
   of ascLaunch: runAttestLaunch(opts)
+  of ascReap: runAttestReap(opts)
   of ascNone:
     stderr.write(renderAttestUsage())
     AttestExitUsage

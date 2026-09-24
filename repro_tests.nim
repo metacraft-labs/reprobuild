@@ -10764,6 +10764,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_leaked_instance_is_reaped.nim",
+    binary: "build/test-bin/t_leaked_instance_is_reaped",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim",
     binary: "build/test-bin/t_legacy_manifest_without_team_route_warns_and_scaffolds",
     defines: @[],
@@ -13070,6 +13079,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_team_repo_record_only_no_checkout.nim",
     binary: "build/test-bin/t_team_repo_record_only_no_checkout",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_teardown_runs_on_failure_path.nim",
+    binary: "build/test-bin/t_teardown_runs_on_failure_path",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

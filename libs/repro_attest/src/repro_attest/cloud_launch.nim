@@ -89,14 +89,57 @@
 ## an argument vector.
 ##
 ## And the rendered plan is checked against the environment: if any
-## declared provider credential variable is set and its value occurs in
-## the plan, the plan is refused rather than returned. A plan is the
-## thing that gets recorded as a fixture, and a fixture is the thing
-## that gets committed.
+## declared provider **secret** is set and its value occurs in the plan,
+## the plan is refused rather than returned. A plan is the thing that
+## gets recorded as a fixture, and a fixture is the thing that gets
+## committed.
+##
+## ## A secret and an identifier are not the same thing
+##
+## Each provider's tooling reads several variables out of the
+## environment, and they are not one kind. `AWS_SECRET_ACCESS_KEY` holds
+## credential material and must never reach a recorded plan.
+## `CLOUDSDK_CORE_PROJECT` holds the name of a project, and one of these
+## clouds spells its image references
+## `projects/<project>/global/images/<name>` — so a *correct* plan
+## carries that value, and a check that looked for it refused the
+## ordinary configuration and called a project name credential material.
+## `GOOGLE_APPLICATION_CREDENTIALS` is a third thing again: a path to a
+## file that holds the secret. The path is not the secret, and a
+## legitimate plan can spell a path under the same directory.
+##
+## So `CloudEnvVarKind` separates the three, and *only* `cevSecret` is
+## searched for. The other two are declared rather than dropped, because
+## an effector still has to be told which variables to pass on.
+##
+## ## A value too short to look for is REPORTED, not refused
+##
+## The search is a substring test, and a substring test needs a floor.
+## Without one, a session-token variable set to `1` matches the `1` in
+## `--count 1` and refuses a perfectly good plan — which is a false
+## positive dressed as a security finding. Below `MinSecretValueLen` the
+## question "does this plan carry that secret" is not answerable by
+## substring, so the variable is named in the scan's `unsearchable` list
+## and the caller is expected to say so. That is not a hole: real
+## credential material on these three clouds is twenty characters at the
+## very shortest, so a value below the floor is a broken environment
+## rather than a secret this build declined to protect.
+##
+## ## The environment is a parameter
+##
+## Every check above takes a `CloudEnvLookup`. A gate that read the
+## developer's own environment would pass or fail depending on whose
+## machine it ran on, which is how the two faults above shipped: they
+## were invisible to a gate that happened to run with those variables
+## unset. Pass an explicit lookup and the result is a property of the
+## inputs.
 ##
 ## ## Mocking
 ##
 ## None. Real firmware bytes, the real calculators, the real schema.
+## `CloudEnvLookup` is not a mock of the environment: it is the
+## environment's *name*, and `processEnvLookup` is the implementation
+## the command uses.
 
 import std/[os, strutils]
 
@@ -656,46 +699,172 @@ proc cloudLaunchPlan*(spec: CloudLaunchSpec): seq[string] =
         shape.surface),
       "--maintenance-policy", "TERMINATE"]
 
-proc credentialEnvNamesFor*(provider: CloudProvider): seq[string] =
-  ## The environment variables each provider's own tooling reads a
-  ## credential out of. Declared so that an armed effector can pass them
-  ## by NAME, and so that the check below can look for their VALUES.
+type
+  CloudEnvVarKind* = enum
+    ## What a provider variable's VALUE is, which decides whether its
+    ## occurrence in a rendered plan is a finding or the plan working
+    ## correctly. See this module's header: conflating the first with
+    ## the third refuses the ordinary configuration of a cloud.
+    cevSecret = "secret"
+      ## Credential material. Must never reach a recorded plan, and no
+      ## correct plan carries it.
+    cevSecretLocation = "secret-location"
+      ## A PATH to a file holding credential material. The path is not
+      ## the secret; a correct plan can legitimately spell a path in the
+      ## same directory, so searching for it produces false refusals and
+      ## protects nothing.
+    cevIdentifier = "identifier"
+      ## Names a project, account, tenancy, profile or region. A correct
+      ## plan is SUPPOSED to carry this value.
+
+  CloudEnvVar* = object
+    name*: string
+    kind*: CloudEnvVarKind
+
+  CloudEnvLookup* = proc (name: string): string {.closure.}
+    ## How a check reads the environment. A parameter rather than an
+    ## ambient read, so a caller can state the environment it means and
+    ## a gate is not a statement about the developer's machine.
+
+  PlanSecretScan* = object
+    ## What the secret check could and could not look for. Returned
+    ## rather than discarded, because "this variable was not searched
+    ## for" is something the operator has to be told.
+    searched*: seq[string]
+    unsearchable*: seq[string]
+
+const
+  MinSecretValueLen* = 16
+    ## Below this a value is not searched for. The shortest credential
+    ## any of these three providers issues is twenty characters, so the
+    ## floor is well under every real one and well over the lengths that
+    ## collide with ordinary invocation text — `1`, `us-east-1`, `0x30000`.
+
+proc providerEnvVarsFor*(provider: CloudProvider): seq[CloudEnvVar] =
+  ## Every environment variable this provider's own tooling reads, with
+  ## what kind of value each one holds. The single declaration: the
+  ## effector's name list, the secret check's search set and the
+  ## identifier set are all derived from it, so they cannot drift apart.
   case provider
   of cpAwsEc2:
-    @["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]
+    @[CloudEnvVar(name: "AWS_ACCESS_KEY_ID", kind: cevSecret),
+      CloudEnvVar(name: "AWS_SECRET_ACCESS_KEY", kind: cevSecret),
+      CloudEnvVar(name: "AWS_SESSION_TOKEN", kind: cevSecret),
+      CloudEnvVar(name: "AWS_SHARED_CREDENTIALS_FILE",
+                  kind: cevSecretLocation),
+      CloudEnvVar(name: "AWS_WEB_IDENTITY_TOKEN_FILE",
+                  kind: cevSecretLocation),
+      CloudEnvVar(name: "AWS_REGION", kind: cevIdentifier),
+      CloudEnvVar(name: "AWS_DEFAULT_REGION", kind: cevIdentifier),
+      CloudEnvVar(name: "AWS_PROFILE", kind: cevIdentifier)]
   of cpGcpCompute:
-    @["GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_AUTH_ACCESS_TOKEN",
-      "CLOUDSDK_CORE_PROJECT"]
+    @[CloudEnvVar(name: "CLOUDSDK_AUTH_ACCESS_TOKEN", kind: cevSecret),
+      CloudEnvVar(name: "GOOGLE_OAUTH_ACCESS_TOKEN", kind: cevSecret),
+      CloudEnvVar(name: "GOOGLE_APPLICATION_CREDENTIALS",
+                  kind: cevSecretLocation),
+      CloudEnvVar(name: "CLOUDSDK_CORE_PROJECT", kind: cevIdentifier),
+      CloudEnvVar(name: "GOOGLE_CLOUD_PROJECT", kind: cevIdentifier),
+      CloudEnvVar(name: "CLOUDSDK_COMPUTE_ZONE", kind: cevIdentifier)]
   of cpAzureCvm:
-    @["AZURE_CLIENT_SECRET", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID"]
+    @[CloudEnvVar(name: "AZURE_CLIENT_SECRET", kind: cevSecret),
+      CloudEnvVar(name: "AZURE_CLIENT_CERTIFICATE_PATH",
+                  kind: cevSecretLocation),
+      CloudEnvVar(name: "AZURE_CLIENT_ID", kind: cevIdentifier),
+      CloudEnvVar(name: "AZURE_TENANT_ID", kind: cevIdentifier),
+      CloudEnvVar(name: "AZURE_SUBSCRIPTION_ID", kind: cevIdentifier)]
+
+proc providerEnvNamesFor*(provider: CloudProvider): seq[string] =
+  ## Every name, whatever its kind. This is what an effector is handed:
+  ## a launch needs the project and the region as much as it needs the
+  ## key, and it reads all of them out of its own environment.
+  for v in providerEnvVarsFor(provider): result.add v.name
+
+proc credentialEnvNamesFor*(provider: CloudProvider): seq[string] =
+  ## The SECRETS only — the variables whose value must never occur in a
+  ## recorded plan. Narrower than `providerEnvNamesFor` on purpose: this
+  ## is the search set, and a name on it that is not a secret is a false
+  ## refusal waiting for the first operator who exports it.
+  for v in providerEnvVarsFor(provider):
+    if v.kind == cevSecret: result.add v.name
 
 proc allCredentialEnvNames*(): seq[string] =
   for p in CloudProvider:
     for name in credentialEnvNamesFor(p):
       if name notin result: result.add name
 
-proc requirePlanCarriesNoCredential*(plan: seq[string]) =
-  ## Every declared credential variable's value, looked for in the
-  ## rendered invocation.
+proc allProviderEnvVars*(): seq[CloudEnvVar] =
+  for p in CloudProvider:
+    for v in providerEnvVarsFor(p):
+      var known = false
+      for seen in result:
+        if seen.name == v.name: known = true
+      if not known: result.add v
+
+proc processEnvLookup*(): CloudEnvLookup =
+  ## The real environment. The only reader of `getEnv` in this module.
+  result = proc (name: string): string = getEnv(name)
+
+proc fixedEnvLookup*(pairs: openArray[(string, string)]): CloudEnvLookup =
+  ## A stated environment, for a caller that means a particular one —
+  ## including the empty one, which is what a gate about plans rather
+  ## than about machines should be asking.
+  let table = @pairs
+  result = proc (name: string): string =
+    for pair in table:
+      if pair[0] == name: return pair[1]
+    ""
+
+proc requirePlanCarriesNoCredential*(plan: seq[string];
+                                     env: CloudEnvLookup = nil):
+                                     PlanSecretScan {.discardable.} =
+  ## Every declared SECRET's value, looked for in the rendered
+  ## invocation.
   ##
-  ## Every provider's variables are checked, not only the one being
+  ## Every provider's secrets are checked, not only the one being
   ## launched on: a plan recorded as a fixture is read by whoever finds
   ## it, and which cloud it names does not narrow what a mistake could
   ## have put in it.
+  ##
+  ## Identifiers and secret LOCATIONS are not searched for, and that is
+  ## the repair rather than a relaxation — see this module's header.
+  let lookup = (if env == nil: processEnvLookup() else: env)
   let joined = plan.join(" ")
   for name in allCredentialEnvNames():
-    let value = getEnv(name)
+    let value = lookup(name)
     if value.len == 0: continue
+    if value.len < MinSecretValueLen:
+      result.unsearchable.add name
+      continue
+    result.searched.add name
     if value in joined:
       cloudFail(clcLaunchPlanCarriesCredentialMaterial,
         "the value of " & name & " occurs in the invocation")
 
-proc checkedCloudLaunchPlan*(spec: CloudLaunchSpec): seq[string] =
-  ## The plan, and the credential check over it. The two are separate
+proc renderUnsearchableSecretWarning*(scan: PlanSecretScan): string =
+  ## What an operator is told about a variable the check could not look
+  ## for. Empty when there is nothing to say, so a caller can test it
+  ## rather than test the list.
+  if scan.unsearchable.len == 0: return ""
+  "these variables are declared to hold credential material and are " &
+    "set to a value shorter than " & $MinSecretValueLen & " characters, " &
+    "so this plan was NOT searched for them: " &
+    scan.unsearchable.join(", ")
+
+proc checkedCloudLaunchPlanScanned*(spec: CloudLaunchSpec;
+                                    env: CloudEnvLookup = nil):
+                                    tuple[plan: seq[string];
+                                          scan: PlanSecretScan] =
+  ## The plan, the secret check over it, and what that check could not
+  ## look for.
+  result.plan = cloudLaunchPlan(spec)
+  result.scan = requirePlanCarriesNoCredential(result.plan, env)
+
+proc checkedCloudLaunchPlan*(spec: CloudLaunchSpec;
+                             env: CloudEnvLookup = nil): seq[string] =
+  ## The plan, and the secret check over it. The two are separate
   ## procedures so a caller with no environment to speak of can render a
   ## plan, and one procedure so nobody has to remember to run the check.
-  result = cloudLaunchPlan(spec)
-  requirePlanCarriesNoCredential(result)
+  checkedCloudLaunchPlanScanned(spec, env).plan
 
 # ---------------------------------------------------------------------
 # The effector seam — and the mode that never reaches it
@@ -707,12 +876,17 @@ type
     clmArmed = "armed"
 
   CloudEffect* = object
-    ## Exactly what an effector would be handed. The credential
-    ## variables travel as NAMES: an effector reads them out of its own
+    ## Exactly what an effector would be handed. The provider variables
+    ## travel as NAMES: an effector reads them out of its own
     ## environment, so no value of one is ever inside a value this
     ## module built, printed or could record.
+    ##
+    ## It is EVERY name and not only the secrets. A launch needs the
+    ## project and the region as much as it needs the key, and the
+    ## narrowing that belongs here is on the kinds the check searches
+    ## for, not on what the tool is allowed to read.
     argv*: seq[string]
-    credentialEnvNames*: seq[string]
+    providerEnvNames*: seq[string]
 
   CloudEffector* = proc (effect: CloudEffect): int {.closure.}
 
@@ -725,16 +899,23 @@ type
       ## zero, and it is a COUNT rather than a flag so that a gate can
       ## tell "never called" from "called and said nothing".
     effectStatus*: int
+    secretScan*: PlanSecretScan
+      ## What the secret check looked for, and what it could not look
+      ## for. Carried out rather than logged inside, because the caller
+      ## is the one with somewhere to print it.
 
 proc performCloudLaunch*(spec: CloudLaunchSpec; mode: CloudLaunchMode;
-                         effector: CloudEffector = nil): CloudLaunchOutcome =
+                         effector: CloudEffector = nil;
+                         env: CloudEnvLookup = nil): CloudLaunchOutcome =
   ## Compute everything, and hand the invocation on only when armed.
   ##
   ## Both modes do the SAME work up to the last statement. That is
   ## deliberate: a dry run that took a shorter path would prove nothing
   ## about the path an armed launch takes, and "the dry run creates
   ## nothing" would be a statement about different code.
-  result.plan = checkedCloudLaunchPlan(spec)
+  let checked = checkedCloudLaunchPlanScanned(spec, env)
+  result.plan = checked.plan
+  result.secretScan = checked.scan
   result.manifestText = cloudExpectedManifestText(spec)
   result.identity = DigestPrefix & sha256Hex(result.manifestText)
   case mode
@@ -746,7 +927,7 @@ proc performCloudLaunch*(spec: CloudLaunchSpec; mode: CloudLaunchMode;
         "the invocation is " & $result.plan.len & " arguments long")
     result.effectsAttempted = 1
     result.effectStatus = effector(CloudEffect(argv: result.plan,
-      credentialEnvNames: credentialEnvNamesFor(spec.provider)))
+      providerEnvNames: providerEnvNamesFor(spec.provider)))
 
 proc renderCloudLaunchPlanText*(outcome: CloudLaunchOutcome): string =
   ## The operator-facing rendering: the invocation, one argument per
