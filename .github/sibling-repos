@@ -97,7 +97,14 @@ reprobuild-ct-test-runner=dev
 # as fallback, so the "unsupported platform  for the io-mon shim" failure the pin
 # guarded against does not regress. The retirement/hardening campaign re-baselines
 # against this latest io-mon runtime rather than the frozen 8a55c4f one.
-io-mon=e2ee15afe8dd7f538ec2ce79af9a1aa512addce2
+#
+# Moved e2ee15a -> 3b6196e (2026-09-24) to match `io-mon-src` in flake.nix.
+# The two had drifted: dev's engine uses io-mon's `EvidenceScope` (DA-1i),
+# which e2ee15a predates, so the Windows release bootstrap -- the one build
+# that resolves io-mon from THIS file rather than from the flake -- failed
+# with "undeclared identifier: 'EvidenceScope'" in repro_build_engine.nim.
+# e2ee15a is an ancestor of 3b6196e.
+io-mon=3b6196efc2021ba202add54a21b25f0268d70c79
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood
@@ -115,7 +122,10 @@ io-mon=e2ee15afe8dd7f538ec2ce79af9a1aa512addce2
 # -- macos_bodypatch.nim (the arm64e PAC fix) and the linux syscall-scanner are
 # byte-identical -- so the darwin/linux release legs compile the same shim as
 # before.
-nim-stackable-hooks=d51b571a3d53f92a3200541e8267f7bb25d36c6c
+#
+# Moved d51b571 -> 203a3b8 (2026-09-24) to match `nim-stackable-hooks-src` in
+# flake.nix, as the note above requires. d51b571 is an ancestor of 203a3b8.
+nim-stackable-hooks=203a3b87366d321e2ea3f7f2126e88f28da48202
 runquota=dev
 nim-shm-queue=08d87d26067568e980f4356c4abcf2a0d841a310
 nim-shm-gset=c646982b354cb5b1fa8734f94b951a660419d75c
