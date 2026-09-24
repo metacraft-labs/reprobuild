@@ -203,6 +203,7 @@ else:
 
   suite "repro test runner survives its own binary being replaced":
     test "cases after the runner's file is replaced still run":
-      checkpoint("[platform N/A] the regression is the Linux /proc/self/exe " &
-        "link text; other platforms keep getAppFilename()")
-      skip()
+      skip("platform N/A: the regression this case pins is the Linux " &
+        "/proc/self/exe link text, which goes stale when the binary is " &
+        "replaced; every other platform keeps getAppFilename() and has " &
+        "nothing to survive")
