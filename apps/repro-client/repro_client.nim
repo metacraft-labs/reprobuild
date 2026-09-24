@@ -126,6 +126,29 @@
 ##     progress renderer into a library both clients can link — a separate
 ##     change, not a thing to approximate here.
 ##
+## THE ONE THING IT ANSWERS WITHOUT THE DAEMON: A CONFIRMED SHELL-HOOK NO-OP.
+##
+## ``repro dev-env export <shell>`` runs on EVERY prompt of every shell with
+## the hook installed (Shell-Direnv-Hook.md, "Fast-Path Cache-Key Check").
+## When ``$__REPRO_APPLIED`` already equals the project's dev-env cache key
+## the whole answer is a one-line no-op script, and computing that key needs
+## a handful of file reads and one BLAKE3 digest -- nothing from the engine.
+## Handing that invocation over costs a second image load: the engine's
+## ~24 MB, its libclingo / libstdc++ / OpenSSL (including reading
+## ``openssl.cnf``) and its module init, on every prompt, to print a comment.
+## So this binary answers it itself through
+## ``repro_cli_support/dev_env_fast_path``, whose key comes from
+## ``repro_dev_env_engine/cache_key`` -- the very module the engine calls for
+## the same check, which was written to take no engine dependency precisely so
+## a front controller could do this.
+##
+## It is the same shape of exception as the routed build, not a second CLI:
+## the fast path recognises only a CONFIRMED no-op and returns "not handled"
+## for everything else -- an unknown flag, ``--allow-stale``, a missing or
+## different ``$__REPRO_APPLIED``, an untrusted directory, any parse doubt --
+## and the invocation is then handed over unchanged, so every activation,
+## diagnostic and exit code is still the engine's.
+##
 ## EXIT CODES OF ITS OWN: 127 only — when ``execv`` of the full image fails,
 ## when no full image can be named, or when the one an override names is THIS
 ## binary (see ``refuseSelfAsEngine``). Every other exit code is the
@@ -240,6 +263,7 @@ else:
 import repro_core/ambient_execution
 import repro_core/cli_images
 import repro_daemon_core
+import repro_cli_support/dev_env_fast_path
 
 const
   FullCliEnvVar = "REPRO_FULL_CLI"
@@ -566,6 +590,12 @@ proc streamDaemonBuild(fullCli: string; args: seq[string]): int =
 
 proc main(): int =
   let args = commandLineParams()
+  # Shell-Direnv-Hook.md: a confirmed ``dev-env export`` no-op is answered
+  # here, before the engine is resolved or loaded. Anything the fast path
+  # cannot PROVE is a no-op falls through to the hand-over below.
+  let devEnvNoOp = tryDevEnvExportFastPath(args)
+  if devEnvNoOp.handled:
+    return devEnvNoOp.exitCode
   let fullCli = resolveFullCli()
   if fullCli.len == 0 or not shouldRouteToDaemon(args):
     handOver(fullCli, args)

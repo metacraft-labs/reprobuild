@@ -779,7 +779,7 @@ tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim	nim	2
 tests/e2e/dev-env/t_e2e_repro_exec_shell.nim	nim	4
 tests/e2e/dev-env/t_e2e_shell_hook_cd_activate_deactivate.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_noop_io_bounded.nim	nim	1
-tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim	nim	1
+tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim	nim	2
 tests/e2e/dev-env/t_e2e_shell_hook_realistic_workload.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_templates.nim	nim	10
 tests/e2e/dotfiles-replacement/t_e2e_dotfiles_replacement_on_real_host.nim	nim	2

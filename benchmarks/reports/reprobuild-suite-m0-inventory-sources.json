@@ -20251,7 +20251,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
