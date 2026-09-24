@@ -1373,6 +1373,7 @@ tests/integration/t_repro_test_runner_process_group_cleanup.nim	nim	9
 tests/integration/t_repro_test_runner_relative_results_git_config.nim	nim	1
 tests/integration/t_repro_test_runner_reporting_contract.nim	nim	0
 tests/integration/t_repro_test_runner_suiteless_case_round_trip.nim	nim	0
+tests/integration/t_repro_test_runner_survives_its_binary_being_replaced.nim	nim	2
 tests/integration/t_reproos_source_bridge_inventory.nim	nim	1
 tests/integration/t_required_features_are_a_subset_of_host_features.nim	nim	1
 tests/integration/t_reseal_on_generation_switch.nim	nim	4
