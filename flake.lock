@@ -532,7 +532,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "codetracer",
-        "rev": "6131186870269731391796c0c670ea0322de5007",
+        "rev": "e8745982ce460184ebb29a6d342b8d21154646a7",
         "type": "github"
       },
       "original": {
@@ -4954,7 +4954,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "reprobuild-ct-test-runner",
-        "rev": "bc6bb9341a5c984d897a475278b51d412b8094ee",
+        "rev": "905027c2d4c591d66dfd9421c9311b9e2dff902a",
         "type": "github"
       },
       "original": {
