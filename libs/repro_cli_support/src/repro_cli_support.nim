@@ -15091,6 +15091,14 @@ proc renderPosixDevEnvUnload(artifact: DevEnvArtifact): string =
     result.add("  __repro_native_sep=$3\n")
     result.add("  eval \"__repro_native_value=\\${$__repro_native_var-}\"\n")
     result.add("  __repro_native_out=\n")
+    # The loop below splits the value by relying on field splitting of an
+    # UNQUOTED expansion. POSIX shells and bash do that; zsh does not (its
+    # SH_WORD_SPLIT option is off by default), so under zsh the loop saw the
+    # whole PATH as ONE part, removed nothing, and every cd out of a project
+    # left its prepended entries behind -- one more copy per activation.
+    # ``local_options`` scopes the setting to this function, so the user's
+    # interactive shell keeps its own splitting behaviour.
+    result.add("  if [ -n \"${ZSH_VERSION-}\" ]; then setopt local_options sh_word_split; fi\n")
     result.add("  __repro_native_old_ifs=$IFS\n")
     result.add("  IFS=$__repro_native_sep\n")
     result.add("  for __repro_native_part in $__repro_native_value; do\n")

@@ -239,22 +239,34 @@ proc installNativeHooks(c: M6Case) =
     readFile(c.xdgConfig / "fish" / "config.fish")
 
 proc posixProbeScript(projectA, projectB: string): string =
-  "cd " & q(projectA) & "\n" &
+  # PATHRESTORED: leaving every project must give back the PATH the shell
+  # started with. Checked explicitly because the OUT line cannot see PATH:
+  # an unload that removes nothing leaves the prepended entries behind, one
+  # more copy per activation, and nothing else in this probe notices.
+  "__repro_probe_path0=$PATH\n" &
+    "cd " & q(projectA) & "\n" &
     "printf 'A:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" \"$(fixture-tool)\"\n" &
     "cd " & q(projectB) & "\n" &
     "printf 'B:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" \"$(fixture-tool)\"\n" &
     "cd " & q(parentDir(projectA)) & "\n" &
     "printf 'OUT:%s|%s|%s\\n' \"${AUX_VALUE-unset}\" \"${FIXTURE_MODE-unset}\" \"${REPRO_DEV_ENV_PROJECT_ROOT-unset}\"\n" &
+    "if [ \"$PATH\" = \"$__repro_probe_path0\" ]; then echo PATHRESTORED:yes; else printf 'PATHRESTORED:no:%s\\n' \"$PATH\"; fi\n" &
     "cd " & q(projectA) & "\n" &
     "printf 'A2:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" \"$(fixture-tool)\"\n"
 
 proc fishProbeScript(projectA, projectB: string): string =
-  "cd " & q(projectA) & "\n" &
+  # PATHRESTORED: see ``posixProbeScript``. Both sides are joined with
+  # ``string join``: fish joins a quoted PATH with ":" but a quoted list
+  # whose name does not end in PATH with spaces, so comparing the two
+  # quoted variables directly could never be equal.
+  "set -g __repro_probe_path0 (string join : $PATH)\n" &
+    "cd " & q(projectA) & "\n" &
     "printf 'A:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" (fixture-tool)\n" &
     "cd " & q(projectB) & "\n" &
     "printf 'B:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" (fixture-tool)\n" &
     "cd " & q(parentDir(projectA)) & "\n" &
     "printf 'OUT:%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\"\n" &
+    "if test (string join : $PATH) = \"$__repro_probe_path0\"; echo PATHRESTORED:yes; else; printf 'PATHRESTORED:no:%s\\n' \"$PATH\"; end\n" &
     "cd " & q(projectA) & "\n" &
     "printf 'A2:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" (fixture-tool)\n"
 
@@ -274,6 +286,7 @@ proc requireBashHook(c: M6Case) =
   requireShellValue(res.output, "B:",
     "B:beta|two|" & c.projectB & "|tool:beta:two")
   requireShellValue(res.output, "OUT:", "OUT:unset|unset|unset")
+  requireShellValue(res.output, "PATHRESTORED:", "PATHRESTORED:yes")
   requireShellValue(res.output, "A2:",
     "A2:alpha|one|" & c.projectA & "|tool:alpha:one")
   requireNativeStats(statsPath)
@@ -296,6 +309,7 @@ proc requireZshHook(c: M6Case) =
   requireShellValue(res.output, "B:",
     "B:beta|two|" & c.projectB & "|tool:beta:two")
   requireShellValue(res.output, "OUT:", "OUT:unset|unset|unset")
+  requireShellValue(res.output, "PATHRESTORED:", "PATHRESTORED:yes")
   requireShellValue(res.output, "A2:",
     "A2:alpha|one|" & c.projectA & "|tool:alpha:one")
   requireNativeStats(statsPath)
@@ -313,6 +327,7 @@ proc requireFishHook(c: M6Case; fish: string) =
   requireShellValue(res.output, "B:",
     "B:beta|two|" & c.projectB & "|tool:beta:two")
   requireShellValue(res.output, "OUT:", "OUT:||")
+  requireShellValue(res.output, "PATHRESTORED:", "PATHRESTORED:yes")
   requireShellValue(res.output, "A2:",
     "A2:alpha|one|" & c.projectA & "|tool:alpha:one")
   requireNativeStats(statsPath)
