@@ -1170,3 +1170,295 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
     check not keyed.contains("suspect the monitor backend")
     check emptyKeyedInputSetDiagnostic("pkg.some_edge", 7, 7) !=
       zeroEvidenceDiagnostic("pkg.some_edge", MonitorHasLibraryLoadFloor)
+
+suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
+  ## The five channels the guard above reads cannot answer the question the
+  ## guard is asking. `monitorReads` is a `seq[string]`, and a path the ENGINE
+  ## reconstructed from argv, a path REPLAYED out of a cache record, a path a
+  ## provisioner daemon reported and a path a monitor really observed are the
+  ## same string in the same seq. `EvidenceCollection.engineSuppliedRootImage`
+  ## was the first, single-purpose answer to that; `PathSetEvidence
+  ## .evidenceProvenance` is it generalised, so the NEXT contributor is marked
+  ## where it contributes instead of being found by an audit.
+  ##
+  ## Spec: `reprobuild-specs/Dependency-Observation-Attribution.md`
+  ## §"Attribution, not suppression" and rules 7 and 8.
+
+  test "a built-in gets NO root-image fold, and a process action does":
+    ## DA-1f ITEM 1 — THE BOTH-DIRECTIONS PAIR, because either half alone
+    ## passes against a broken engine. The refusal case alone is satisfied by
+    ## an engine that folds no root image for anything; the acceptance case
+    ## alone is satisfied by the engine that had the defect.
+    ##
+    ## WHAT THE DEFECT WAS. `collectEvidence`'s root-image fold was scoped to
+    ## `dependencyPolicy.kind in MonitorPolicyKinds` and nothing else, while
+    ## `monitoredAction` — the proc that decides what is monitored at all —
+    ## returns early for `kind != bakProcess` because "there is no child
+    ## process to interpose on". So for every BUILT-IN carrying the default
+    ## `automaticMonitorGatheringPolicy()` the fold was active and the monitor
+    ## was not, and the engine reconstructed an on-disk image for an action
+    ## that execs nothing and put it in the key.
+    ##
+    ## WHY THE FIXTURE IS A `bakWriteText` AND NOT THE PRODUCTION SHAPE. The
+    ## live case DA-1f names is `bakForeignProvision`
+    ## (`repro_dev_env_engine`: `cacheable: true`, `dgAutomaticMonitor`,
+    ## `argv: @["nix", <selector>]`, no declared inputs), which cannot run
+    ## here — it opens a unix socket and needs a live `reprobuild-nix-daemon`.
+    ## Its own coverage is `tests/integration/t_nix_daemon_provisioner.nim`.
+    ## What that shape and this one share is exactly the two things the fold
+    ## reads: a `kind != bakProcess` and an `argv[0]` that is a BARE NAME the
+    ## engine never execs. `builtinAction` cannot express it because it sets
+    ## no argv at all — which is why the defect was invisible for every
+    ## built-in except the one constructed by hand.
+    ##
+    ## `sh` is the bare name on purpose: it is on `PATH` on every host this
+    ## suite runs on, so the reconstruction SUCCEEDS if it is attempted, and
+    ## the case fails on a path being present rather than on a resolution
+    ## having quietly returned "".
+    let f = makeFixture("da1f-builtin-root-image")
+    defer: removeDir(f.root)
+    let config = testConfig(f.cacheRoot)
+    let outPath = f.workRoot / "written.txt"
+
+    var builtin = builtinAction(bakWriteText, "da1f/builtin-with-argv",
+      cwd = f.workRoot,
+      outputs = [outPath],
+      cacheable = true,
+      weakFingerprint = weak("da1f/builtin-with-argv"),
+      text = "da1f\n",
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    builtin.argv = @["sh", "--a-selector-not-a-command"]
+    check builtin.kind != bakProcess
+    # `builtinAction` tags every built-in with the default
+    # `automaticMonitorGatheringPolicy()`, which is a `MonitorPolicyKinds`
+    # member — that is exactly why the fold reached them.
+    check builtin.dependencyPolicy.kind == dgAutomaticMonitor
+
+    let builtinRun = runBuild(graph([builtin]), config)
+    let rb = builtinRun.byId(builtin.id)
+    checkpoint("builtin: status=" & $rb.status &
+      " reads=" & $rb.evidence.monitorReads &
+      " provenance=" & $rb.evidence.evidenceProvenance)
+    check rb.status == asSucceeded
+    # THE REFUSAL. Nothing execs this action's argv, so nothing may claim its
+    # `argv[0]` is one of its inputs.
+    check rb.evidence.monitorReads.len == 0
+    check evcRootImageReconstruction notin rb.evidence.evidenceProvenance
+
+    # THE ACCEPTANCE, and the control that stops the line above passing for
+    # the wrong reason: the SAME bare name, on a `bakProcess` action, must
+    # still be reconstructed and still be marked a reconstruction. Deleting
+    # the fold outright reddens here; deleting only its `kind == bakProcess`
+    # clause reddens above.
+    let f2 = makeFixture("da1f-process-root-image")
+    defer: removeDir(f2.root)
+    f2.writeRmdf(@[processRecord(), readRecord(f2.observedPath)])
+    var proc0 = f2.runEdge("da1f/process-with-argv")
+    proc0.argv = @["sh", "-c", "echo ran >> " & f2.runLogPath]
+    let processRun = runBuild(graph([proc0]), testConfig(f2.cacheRoot))
+    let rp = processRun.byId(proc0.id)
+    checkpoint("process: status=" & $rp.status &
+      " reads=" & $rp.evidence.monitorReads &
+      " provenance=" & $rp.evidence.evidenceProvenance)
+    check rp.status == asSucceeded
+    check evcRootImageReconstruction in rp.evidence.evidenceProvenance
+    # The reconstruction really resolved — an absolute path, not the bare
+    # name — so this arm is comparing a resolution against a refusal rather
+    # than two empty answers.
+    var resolvedRootImage = ""
+    for path in rp.evidence.monitorReads:
+      if path.isAbsolute and path.extractFilename == "sh":
+        resolvedRootImage = path
+    checkpoint("resolved root image: " & resolvedRootImage)
+    check resolvedRootImage.len > 0
+
+  test "a monitor capture marks itself, and a cache-hit replay marks itself":
+    ## DA-1f ITEM 3 — the hit path replays a PREVIOUS run's recorded inputs
+    ## into `monitorReads` for an action that did not run and observed
+    ## nothing. That is not a soundness bug (no completeness predicate is
+    ## consumed on the hit path) and this case does not pretend it is; what it
+    ## pins is that the two are DISTINGUISHABLE, which is what `repro why` and
+    ## the launch-path suites need and did not have.
+    ##
+    ## BOTH DIRECTIONS AGAIN. A cold run must carry `evcMonitorCapture` and
+    ## must NOT carry `evcReplayedCacheRecord`; the warm one the reverse.
+    ## Asserting only the warm half would pass against an engine that marks
+    ## every evidence set a replay.
+    let f = makeFixture("da1f-replay-provenance")
+    defer: removeDir(f.root)
+    f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
+    let act = f.runEdge("da1f/replay-provenance")
+    let g = graph([act])
+    let config = testConfig(f.cacheRoot)
+
+    let first = runBuild(g, config)
+    let r0 = first.byId(act.id)
+    checkpoint("cold: decision=" & $r0.cacheDecision &
+      " provenance=" & $r0.evidence.evidenceProvenance)
+    check r0.status == asSucceeded
+    check r0.launched
+    check evcMonitorCapture in r0.evidence.evidenceProvenance
+    check evcReplayedCacheRecord notin r0.evidence.evidenceProvenance
+
+    let warm = runBuild(g, config)
+    let r1 = warm.byId(act.id)
+    checkpoint("warm: decision=" & $r1.cacheDecision &
+      " launched=" & $r1.launched &
+      " reads=" & $r1.evidence.monitorReads &
+      " provenance=" & $r1.evidence.evidenceProvenance)
+    check r1.cacheDecision in ReuseDecisions
+    check not r1.launched
+    # THE DENOMINATOR. If the hit path reported an EMPTY read set there would
+    # be nothing to mistake for an observation and the mark would be
+    # decorative. It does not: it reports the recorded input, for an action
+    # that did not run.
+    check r1.evidence.monitorReads.len > 0
+    check evcReplayedCacheRecord in r1.evidence.evidenceProvenance
+    check evcMonitorCapture notin r1.evidence.evidenceProvenance
+
+  test "a post-build converter's report is folded, and is named":
+    ## DA-1f ITEM 4b — `addPathSet(recognized = false)` puts a converter's
+    ## `repro-pathset` entries into `monitorReads`, the MONITOR's channel.
+    ## That placement is deliberate and stays (a converter-reported
+    ## enumeration must land where a monitor-reported one lands, or the two
+    ## sources disagree about what the same observation means), so this case
+    ## pins BOTH halves: the entry is still there, and it is now attributable.
+    let f = makeFixture("da1f-converter-provenance")
+    defer: removeDir(f.root)
+    f.writeRmdf(@[processRecord()])
+    let act = f.converterValidatedByMonitorEdge("da1f/converter-provenance",
+      converterReports = "input\\t" & f.observedPath & "\\n")
+    let first = runBuild(graph([act]), testConfig(f.cacheRoot))
+    let r0 = first.byId(act.id)
+    checkpoint("converter: status=" & $r0.status &
+      " reads=" & $r0.evidence.monitorReads &
+      " provenance=" & $r0.evidence.evidenceProvenance)
+    check r0.status == asSucceeded
+    check f.observedPath in r0.evidence.monitorReads
+    check evcPostBuildConverterReport in r0.evidence.evidenceProvenance
+
+  test "a declaration-derived depfile cannot answer the observation question":
+    ## DA-1f ITEM 4a — `depfileInputs` is a TERM OF THE GUARD, and two very
+    ## different things write into it. A `gcc -MD` depfile is an observation.
+    ## A depfile `fs.unmonitorableActionDepfile` emitted is a literal built
+    ## from the recipe author's `inputs`; its own docstring says "nothing
+    ## looked at the action to produce it". Both arrive as the same bytes in
+    ## the same format, so counting the channel answered the wrong question
+    ## for the second one and a 100% declaration-derived set could satisfy a
+    ## guard whose whole subject is observation.
+    ##
+    ## THE PAIR, because the refusal alone would pass against an engine that
+    ## distrusted every depfile. Same edge, same capture (empty), same two
+    ## prerequisites — only the GENERATOR STAMP in the depfile's comment
+    ## differs, and it flips the publish.
+    ##
+    ## THE PATHS ARE NOT SUPPRESSED, and the third assertion in each arm says
+    ## so: `depfileInputs` carries the prerequisite in BOTH arms. What changes
+    ## is what the engine is willing to conclude from it.
+    for declarationDerived in [false, true]:
+      let name = "da1f-depfile-" &
+        (if declarationDerived: "declared" else: "observed")
+      let f = makeFixture(name)
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord()])
+      # The generator stamp is a COMMENT, exactly as
+      # `unmonitorableActionDepfileText` writes it. The rule below it is
+      # identical in both arms, which is what makes the comment the only
+      # variable. The round trip against the DSL's REAL output — so this
+      # needle cannot drift from what the generator writes — is
+      # `tests/unit/t_unmonitorable_action_depfile_guards.nim`.
+      let header =
+        if declarationDerived:
+          "# generated by unmonitorableActionDepfile - this action is not\\n"
+        else:
+          "# generated by a tool that opened these files\\n"
+      let act = f.reportValidatedByMonitorEdge("da1f/depfile/" & name)
+      var patched = act
+      patched.argv = @[RootImage, "-c",
+        "echo ran >> " & f.runLogPath & "; printf '" & header &
+        "out: " & f.observedPath & "\\n' > " & f.makeDepfilePath]
+      let first = runBuild(graph([patched]), testConfig(f.cacheRoot))
+      let r0 = first.byId(patched.id)
+      checkpoint(name & ": depfileInputs=" & $r0.evidence.depfileInputs &
+        " provenance=" & $r0.evidence.evidenceProvenance &
+        " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+      check r0.status == asSucceeded
+      # ATTRIBUTION, NOT SUPPRESSION: the prerequisite is in the channel in
+      # both arms and is keyed on in both arms.
+      check f.observedPath in r0.evidence.depfileInputs
+
+      let diagnosed = r0.evidence.diagnostics.join(" ")
+      if declarationDerived:
+        check evcDeclarationDerivedDepfile in r0.evidence.evidenceProvenance
+        check evcToolReportedDepfile notin r0.evidence.evidenceProvenance
+        check diagnosed.contains("no observation of any kind")
+        check not f.hasRecord(patched)
+      else:
+        check evcToolReportedDepfile in r0.evidence.evidenceProvenance
+        check evcDeclarationDerivedDepfile notin
+          r0.evidence.evidenceProvenance
+        check not diagnosed.contains("no observation of any kind")
+        check f.hasRecord(patched)
+
+suite "DA-1f: a backend profile that claims nothing is not a claim of completeness":
+  ## ITEM 5 — the asymmetry, settled. `monitorProfileEvidenceComplete` used to
+  ## start at `true`, so a profile record with no `evidenceComplete=` token
+  ## was assumed COMPLETE, while `monitorProfileSupportsNonDeterminism` twelve
+  ## lines below returns `false` for a missing `supported=`. Same record, same
+  ## producer, opposite defaults.
+  ##
+  ## GRADED THROUGH THE FOLD, not by calling the predicate: the predicate is
+  ## private, and what matters is that the answer reaches
+  ## `applyMonitorEvidenceStatus` as a Level 2 loss. A case on the predicate
+  ## alone would stay green if the fold stopped consulting it.
+
+  test "a profile record with no evidenceComplete token downgrades":
+    var evidence: PathSetEvidence
+    var seen: EvidenceSeenSets
+    let silent = MonitorRecord(
+      kind: mrBackendProfile,
+      observationKind: moBackendProfile,
+      path: "silent-profile",
+      detail: "backend=linux-preload-hooks;supported=file-read;required=")
+    let status = foldMonitorRecordsEvidence(@[silent], "/tmp", evidence, seen)
+    checkpoint("silent profile -> " & $status)
+    check status == mesUnknownScopeLoss
+
+  test "a profile record that says true is complete, and false is not":
+    ## THE TWO BOUNDS. Without the `true` arm the change above could be "never
+    ## trust a profile", which would refuse every real capture; without the
+    ## `false` arm it could be "always trust one", which is the defect.
+    for (token, expected) in [("true", mesComplete),
+                              ("false", mesUnknownScopeLoss)]:
+      var evidence: PathSetEvidence
+      var seen: EvidenceSeenSets
+      let record = MonitorRecord(
+        kind: mrBackendProfile,
+        observationKind: moBackendProfile,
+        path: "stated-profile",
+        detail: "backend=linux-preload-hooks;supported=file-read;" &
+          "required=;evidenceComplete=" & token)
+      let status = foldMonitorRecordsEvidence(@[record], "/tmp", evidence,
+        seen)
+      checkpoint("evidenceComplete=" & token & " -> " & $status)
+      check status == expected
+
+  test "io-mon's OWN profile records still read as complete":
+    ## THE COST CONTROL, and the reason this flip is cheap rather than a
+    ## build break. io-mon's `capabilities.backendProfileRecord` appends
+    ## `";evidenceComplete=" & …` UNCONDITIONALLY, so no capture io-mon writes
+    ## reaches the new default — only a truncated, hand-written or foreign
+    ## detail does. Measured against the real producer on whatever host runs
+    ## this, rather than asserted.
+    let records = profileRecords(defaultHooksMonitorProfile())
+    var sawProfile = false
+    for record in records:
+      if record.kind == mrBackendProfile:
+        sawProfile = true
+        check record.detail.contains("evidenceComplete=")
+    check sawProfile
+    var evidence: PathSetEvidence
+    var seen: EvidenceSeenSets
+    let status = foldMonitorRecordsEvidence(records, "/tmp", evidence, seen)
+    checkpoint("this host's real profile -> " & $status)
+    check status == mesComplete

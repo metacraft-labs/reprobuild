@@ -75,7 +75,7 @@ libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
 libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim	nim	4
 libs/repro_build_engine/tests/t_whole_graph_shortcut_matches_per_edge_verdict.nim	nim	2
 libs/repro_build_engine/tests/t_workspace_declaring_nothing_unchanged.nim	nim	7
-libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	nim	21
+libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	nim	28
 libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim	nim	5
 libs/repro_build_engine/tests/test_action_cache_restore_narrow_payloads.nim	nim	5
 libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim	nim	12
@@ -1744,7 +1744,7 @@ tests/unit/t_tool_identity_key_resolves_before_it_keys.nim	nim	10
 tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim	nim	21
 tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim	nim	6
 tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim	nim	10
-tests/unit/t_unmonitorable_action_depfile_guards.nim	nim	13
+tests/unit/t_unmonitorable_action_depfile_guards.nim	nim	16
 tests/unit/t_version.nim	nim	2
 tests/unit/t_voice_model_packages.nim	nim	5
 tests/unit/t_windows_system_hash_mode.nim	nim	2

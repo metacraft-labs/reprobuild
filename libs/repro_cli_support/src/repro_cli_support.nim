@@ -5438,6 +5438,17 @@ proc writeLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
     pools: lowered.pools)
 
 proc evidenceJson(evidence: PathSetEvidence): JsonNode =
+  # DA-1f — `evidenceProvenance` is rendered BESIDE the path sets, not
+  # instead of anything, because this is the reader the milestone is about.
+  # The channels themselves cannot answer "did anything look at this action":
+  # a path the engine reconstructed from argv, a path replayed out of a cache
+  # record on a HIT, a path a provisioner daemon reported and a path a monitor
+  # really observed are the same string in the same array. A `repro why`
+  # reader who cannot tell a replay from an observation reads a recollection
+  # as a measurement. See `EvidenceContributor`.
+  var provenance: seq[string] = @[]
+  for contributor in evidence.evidenceProvenance:
+    provenance.add $contributor
   %*{
     "declaredInputs": jsonStringSeq(evidence.declaredInputs),
     "declaredOutputs": jsonStringSeq(evidence.declaredOutputs),
@@ -5445,6 +5456,9 @@ proc evidenceJson(evidence: PathSetEvidence): JsonNode =
     "monitorReads": jsonStringSeq(evidence.monitorReads),
     "monitorWrites": jsonStringSeq(evidence.monitorWrites),
     "monitorProbes": jsonStringSeq(evidence.monitorProbes),
+    "provisionerReportedInputs":
+      jsonStringSeq(evidence.provisionerReportedInputs),
+    "evidenceProvenance": jsonStringSeq(provenance),
     "diagnostics": jsonStringSeq(evidence.diagnostics)
   }
 
