@@ -129,6 +129,25 @@ case "${os}" in
     # PT_INTERP cannot be $ORIGIN-relative, so instead of repointing the
     # interpreter we launch through the bundled loader explicitly. The .real
     # binary's own PT_INTERP is ignored when the loader is invoked this way.
+    #
+    # THE ENGINE IS NAMED EXPLICITLY, because launching through the loader
+    # changes what a binary sees as its own image: `/proc/self/exe` -- hence
+    # Nim's `getAppFilename()` -- is the LOADER in lib/, not bin/.<app>.real.
+    # The thin client `bin/repro` finds the engine next to its own image, so it
+    # probed lib/reprobuild and gave up ("repro: no reprobuild image to fall
+    # back to"), and the engine would take the loader as its own self-spawn
+    # path. `REPRO_PUBLIC_CLI_PATH` is the one variable both read for exactly
+    # this (see apps/repro-trampoline/repro_trampoline.nim), so every wrapper
+    # names the engine's own wrapper there -- bin/, so sibling providers still
+    # resolve -- unless the caller (e.g. the trampoline, for a pinned prefix)
+    # already set it.
+    engine_wrapper_line=""
+    if [ -e "${bindir}/reprobuild" ]; then
+      # Literal on purpose: it is expanded by the WRAPPER at run time, and the
+      # heredoc below inserts a variable's value without expanding it again.
+      # shellcheck disable=SC2016
+      engine_wrapper_line=': "${REPRO_PUBLIC_CLI_PATH:=${here}/reprobuild}"; export REPRO_PUBLIC_CLI_PATH'
+    fi
     while IFS= read -r -d '' app; do
       is_elf "${app}" || continue
       base="$(basename "${app}")"
@@ -139,6 +158,7 @@ case "${os}" in
 # reprobuild portable launcher: run the real binary through the bundled glibc
 # loader so it does not depend on the host's /nix/store or system glibc.
 here=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
+${engine_wrapper_line}
 exec "\${here}/../lib/${loadername}" --library-path "\${here}/../lib" "\${here}/.${base}.real" "\$@"
 EOS
       chmod +x "${app}"
