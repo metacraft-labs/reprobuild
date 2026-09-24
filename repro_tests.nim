@@ -819,6 +819,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_ignored_root_survives_a_symlinked_prefix.nim",
+    binary: "build/test-bin/t_ignored_root_survives_a_symlinked_prefix",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_monitor_scratch_is_not_a_cache_input.nim",
     binary: "build/test-bin/t_monitor_scratch_is_not_a_cache_input",
     defines: @[],

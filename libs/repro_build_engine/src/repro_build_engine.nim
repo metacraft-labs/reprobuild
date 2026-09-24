@@ -7649,10 +7649,41 @@ proc expandPolicyPath(action: BuildAction; path: string): string =
     start = result.find('$', start)
 
 proc ignoredInputRoots(action: BuildAction): seq[string] =
+  ## Each ignored prefix, in BOTH the spelling the recipe wrote and the
+  ## spelling the kernel reports, because those are routinely not the same
+  ## string and `isUnderAnyRoot` compares path components literally.
+  ##
+  ## On macOS `/tmp` is a symlink to `private/tmp`. A root derived from
+  ## `getTempDir()` is therefore `/tmp/...`, while every path the monitor
+  ## observes comes back already resolved as `/private/tmp/...`. Neither is
+  ## wrong and they name the same directory, but one is not a component
+  ## prefix of the other, so the ignore silently never fires.
+  ##
+  ## That is not a small loss where it happened. The provider compile's
+  ## ignore list exists to keep the SHARED provider nimcache out of the key
+  ## -- a directory reused across recipes and across sessions on purpose,
+  ## and rewritten by every compile that lands in it. With the ignore
+  ## inert, 514 nimcache paths were in the key, so the edge could not hit
+  ## on a second run of an unchanged project, and everything downstream of
+  ## it missed too. Measured: every one of those paths was recorded under
+  ## `/private/tmp`, and not one under `/tmp`.
+  ##
+  ## Resolved once per root rather than per observed path: there are a
+  ## handful of roots and tens of thousands of paths, and resolving the
+  ## latter would put a syscall on the hot comparison. A root that does not
+  ## exist yet simply contributes its literal spelling, which is what it
+  ## does today.
   for prefix in action.dependencyPolicy.ignoredInputPrefixes:
     let expanded = action.expandPolicyPath(prefix)
-    if expanded.len > 0:
-      result.add(expanded)
+    if expanded.len == 0:
+      continue
+    result.add(expanded)
+    try:
+      let resolved = expandFilename(expanded)
+      if resolved.len > 0 and resolved != expanded:
+        result.add(resolved)
+    except CatchableError:
+      discard
 
 proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
   let normalized = path.replace('\\', '/')
