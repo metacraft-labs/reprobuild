@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1730,
+    "nimTestBinaries": 1731,
     "pureUnitConsolidationGroups": 53,
     "pureUnitTests": 608,
-    "staticallyDetectedRuntimeCompilerFlowTests": 106,
-    "testEntries": 1741
+    "staticallyDetectedRuntimeCompilerFlowTests": 107,
+    "testEntries": 1742
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1153,7 +1153,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 825,
+      "integration": 826,
       "platform/destructive": 115,
       "pure unit": 608,
       "unclassified": 181
@@ -1304,9 +1304,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1730,
+    "nimTestBinaryCount": 1731,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1741
+    "testEntryCount": 1742
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5317,6 +5317,32 @@
         }
       ],
       "source": "tests/integration/t_repro_test_runner_suiteless_case_round_trip.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "compilation",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "binDir",
+            "fixture",
+            "fixtureSource",
+            "root",
+            "runner",
+            "scratch",
+            "summary"
+          ],
+          "line": 139,
+          "path": "tests/integration/t_repro_test_runner_survives_its_binary_being_replaced.nim",
+          "patterns": [
+            "nim-c"
+          ],
+          "snippet": "let compilation = execCmdEx(\"nim c --hints:off --warnings:off\" &"
+        }
+      ],
+      "source": "tests/integration/t_repro_test_runner_survives_its_binary_being_replaced.nim"
     },
     {
       "class": "integration",
@@ -30588,6 +30614,21 @@
       "source": "tests/integration/t_repro_test_runner_suiteless_case_round_trip.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 0,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_repro_test_runner_survives_its_binary_being_replaced",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_repro_test_runner_survives_its_binary_being_replaced.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
