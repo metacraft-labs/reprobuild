@@ -36,7 +36,7 @@ export jsts_dep_scanner
 export convention_attribution
 export injected_libraries
 
-const ReprobuildVersion* {.strdefine.} = "0.1.4"
+const ReprobuildVersion* {.strdefine.} = "0.2.0"
   ## The release version this image reports through ``repro --version``.
   ##
   ## M5 SELF-HOST: a ``{.strdefine.}`` rather than a bare literal so ONE
