@@ -49,6 +49,7 @@ import repro_core/ambient_execution
               # for the io-mon / nim-stackable-hooks sibling resolution in the
               # test-fixtures monitor-shim build edge below.
 import repro_project_dsl
+import repro_dsl_stdlib/foreign_env
 import repro_dsl_stdlib/packages/sh
 import repro_dsl_stdlib/packages/gcc as gcc_module
 import repro_dsl_stdlib/fs as dslfs
@@ -535,6 +536,9 @@ package reprobuild:
     # ``flake.nix`` and ``config.nims``.
 
   devEnv:
+    when not defined(windows):
+      useFlakeDevShell()
+
     # Windows language-fixture toolchains for the 73
     # ``scripts/validate-standard-provider-*.ps1`` harnesses and their
     # Tier 2b conventions: java-maven (M40), kotlin-gradle (M41),
