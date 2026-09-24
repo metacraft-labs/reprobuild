@@ -9837,8 +9837,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "tests/integration/t_develop_root_lock_outranks_a_per_repo_lock.nim",
-    binary: "build/test-bin/t_develop_root_lock_outranks_a_per_repo_lock",
+    source: "tests/integration/t_develop_repo_own_lock_outranks_the_root_lock.nim",
+    binary: "build/test-bin/t_develop_repo_own_lock_outranks_the_root_lock",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
