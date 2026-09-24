@@ -1107,6 +1107,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_provider_compile_entry_points_publish_bootstrap_toolchain.nim",
+    binary: "build/test-bin/t_provider_compile_entry_points_publish_bootstrap_toolchain",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim",
     binary: "build/test-bin/t_s7_build_paths_reach_the_restore_config",
     defines: @[],
@@ -1991,6 +2000,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_with_lock_file_block_scope.nim",
     binary: "build/test-bin/t_with_lock_file_block_scope",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_workspace_floor_windows_tarball_arms.nim",
+    binary: "build/test-bin/t_workspace_floor_windows_tarball_arms",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
