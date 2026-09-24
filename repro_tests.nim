@@ -2466,6 +2466,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
+    binary: "build/test-bin/t_recipe_c_compiler_selection_is_loud",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_reprobuild_source_root_from_binary_location.nim",
     binary: "build/test-bin/t_reprobuild_source_root_from_binary_location",
     defines: @[],
@@ -4779,6 +4788,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_tool_profiles/tests/t_bootstrap_cc_override_is_honoured_and_scoped.nim",
+    binary: "build/test-bin/t_bootstrap_cc_override_is_honoured_and_scoped",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode_on_windows.nim",
     binary: "build/test-bin/t_bootstrap_toolchain_provisioned_in_every_mode_on_windows",
     defines: @[],
@@ -6932,6 +6950,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim",
     binary: "build/test-bin/t_e2e_repro_dev_sessions",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/e2e/dev-env/t_e2e_repro_exec_recipe_compiler.nim",
+    binary: "build/test-bin/t_e2e_repro_exec_recipe_compiler",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

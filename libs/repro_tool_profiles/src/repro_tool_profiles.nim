@@ -3757,6 +3757,99 @@ proc publishBootstrapCompilerEnv*(compilerPath: string;
   if windowsHost and getEnv("CC").len == 0:
     putEnv("CC", compilerPathForShellEnvironment(compilerPath, true))
 
+type
+  BootstrapToolchainEnvSnapshot* = object
+    ## The values the bootstrap toolchain publishes into this process's
+    ## environment, as they were BEFORE it did. See
+    ## ``snapshotBootstrapToolchainEnv``.
+    entries: seq[tuple[name: string; present: bool; value: string]]
+
+const bootstrapToolchainEnvNames = ["CC", "REPRO_BOOTSTRAP_CC",
+  "REPRO_NIM_COMPILER"]
+
+proc snapshotBootstrapToolchainEnv*(): BootstrapToolchainEnvSnapshot =
+  ## Capture ``CC``, ``REPRO_BOOTSTRAP_CC`` and ``REPRO_NIM_COMPILER`` before
+  ## ``ensureBootstrapToolchainEnv`` publishes the provider-compile toolchain.
+  ##
+  ## That toolchain is reprobuild's OWN, for compiling a recipe. It is
+  ## published through the process environment because the provider compile
+  ## runs as a child action that inherits it -- and so, unless it is taken
+  ## back, does the user's command. ``repro exec -- cargo build`` then ran
+  ## with ``CC`` pointing at the tool-store MinGW gcc, which cc-rs honours
+  ## for an MSVC target. The activation surfaces take a snapshot on entry
+  ## and ``restoreBootstrapToolchainEnv`` it before they start the user's
+  ## command, so the command sees the environment the user gave it plus the
+  ## dev-env, and nothing reprobuild used for itself.
+  for name in bootstrapToolchainEnvNames:
+    result.entries.add((name: name, present: existsEnv(name),
+      value: getEnv(name)))
+
+proc restoreBootstrapToolchainEnv*(snapshot: BootstrapToolchainEnvSnapshot) =
+  ## Undo whatever the bootstrap toolchain published since ``snapshot``.
+  for entry in snapshot.entries:
+    if entry.present:
+      putEnv(entry.name, entry.value)
+    elif existsEnv(entry.name):
+      delEnv(entry.name)
+
+when defined(windows):
+  type BootstrapToolchainError* = object of CCompilerUnusableError
+    ## The pinned recipe-compile C compiler could not be provisioned, or the
+    ## compiler named by ``REPRO_BOOTSTRAP_CC`` is unusable.
+
+  proc ensureWindowsBootstrapCCompiler(storeRoot: string) =
+    ## Publish a WORKING, PINNED C compiler for the recipe compile, or fail
+    ## saying which compiler and why. Never falls back to PATH.
+    ##
+    ## Windows has no system C compiler, and the one PATH offers is whatever
+    ## the Machine PATH happens to list first -- on the host where this was
+    ## measured (2026-09-23), FPC's 1999-era i386 gcc 2.95, which cannot find
+    ## ``stddef.h``. So:
+    ##
+    ## * ``REPRO_BOOTSTRAP_CC`` set: it is the user's (or an enclosing
+    ##   ``repro``'s) explicit choice. It is probed and kept; an unusable one
+    ##   is an error naming it. It used to be silently OVERWRITTEN here with
+    ##   the tool-store compiler, so the documented override did not work.
+    ## * otherwise the pinned winlibs gcc (``bootstrapGccToolUse``: URL +
+    ##   sha256) is realised into the tool store, probed, and published. If
+    ##   that fails the error says what failed and how to override it. It used
+    ##   to be swallowed, after which Nim picked ``gcc.exe`` off PATH without
+    ##   a word.
+    ##
+    ## Successful probes are cached under ``<storeRoot>/compiler-probes``, so
+    ## the steady-state cost is a file-existence check.
+    let probeCache = storeRoot / "compiler-probes"
+    let existing = getEnv(bootstrapCCompilerEnv)
+    if existing.len > 0:
+      if not existing.isAbsolute or not fileExists(extendedPath(existing)):
+        raise newException(BootstrapToolchainError,
+          bootstrapCCompilerEnv & "=" & existing & " does not name an " &
+          "existing file by absolute path. " & cCompilerOverrideRemedy())
+      requireUsableCCompiler(existing, bootstrapCCompilerEnv &
+        " (set in the environment)", probeCache)
+      publishBootstrapCompilerEnv(existing, true)
+      return
+    let useDef = bootstrapGccToolUse()
+    var pinned = ""
+    try:
+      let profile = resolveTarballTool(useDef, storeRoot)
+      pinned = profile.resolvedExecutablePath
+    except CatchableError as err:
+      raise newException(BootstrapToolchainError,
+        "could not provision the pinned C compiler for compiling the recipe (" &
+        useDef.packageSelector & ", " &
+        useDef.tarballProvisioning[0].url & ", sha256 " &
+        useDef.tarballProvisioning[0].sha256 & ") into the tool store at " &
+        storeRoot & ": " & err.msg & "\n  " & cCompilerOverrideRemedy())
+    if pinned.len == 0:
+      raise newException(BootstrapToolchainError,
+        "the pinned C compiler " & useDef.packageSelector & " resolved to no " &
+        "executable in the tool store at " & storeRoot & ". " &
+        cCompilerOverrideRemedy())
+    requireUsableCCompiler(pinned, "the pinned bootstrap compiler " &
+      useDef.packageSelector & " in the tool store", probeCache)
+    publishBootstrapCompilerEnv(pinned, true)
+
 proc bootstrapToolchainProvisioned*(mode: ToolProvisioningMode): bool =
   ## Whether ``ensureBootstrapToolchainEnv`` provisions the provider-compile
   ## toolchain under ``mode``.
@@ -3833,35 +3926,27 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
       # the existing PATH-based fallback in `nimCompilerPath()` still
       # runs and may succeed when the host has a usable nim/gcc.
       discard
-  when defined(windows) or defined(linux):
+  when defined(windows):
+    ensureWindowsBootstrapCCompiler(effectiveStoreRoot)
+  elif defined(linux):
     # Resolve the compiler through a pinned bootstrap channel. Linux needs
     # this in from-source mode because the sealed recipe-interface compile
     # runs before the recipe's own tool declarations are available.
     # Publish only through `$REPRO_BOOTSTRAP_CC`, which pins Nim's compiler
     # subprocess without overriding the compiler selected by package actions.
     var bootstrapGcc = ""
-    when defined(linux):
-      let existing = getEnv("REPRO_BOOTSTRAP_CC")
-      if existing.isAbsolute and fileExists(extendedPath(existing)):
-        bootstrapGcc = existing
+    let existing = getEnv("REPRO_BOOTSTRAP_CC")
+    if existing.isAbsolute and fileExists(extendedPath(existing)):
+      bootstrapGcc = existing
     if bootstrapGcc.len == 0:
       try:
-        let useDef = bootstrapGccToolUse()
-        when defined(windows):
-          let profile = resolveTarballTool(useDef, effectiveStoreRoot)
-          if profile.resolvedExecutablePath.len > 0:
-            bootstrapGcc = profile.resolvedExecutablePath
-        else:
-          let profile = resolveNixTool(useDef, effectiveStoreRoot)
-          if profile.resolvedExecutablePath.len > 0:
-            bootstrapGcc = profile.resolvedExecutablePath
+        let profile = resolveNixTool(bootstrapGccToolUse(), effectiveStoreRoot)
+        if profile.resolvedExecutablePath.len > 0:
+          bootstrapGcc = profile.resolvedExecutablePath
       except CatchableError:
         discard
     if bootstrapGcc.len > 0:
-      when defined(windows):
-        publishBootstrapCompilerEnv(bootstrapGcc, true)
-      else:
-        publishBootstrapCompilerEnv(bootstrapGcc, false)
+      publishBootstrapCompilerEnv(bootstrapGcc, false)
 
 proc blake3HexBytes*(bytes: openArray[byte]): string =
   blake3.toHex(blake3.digest(bytes))

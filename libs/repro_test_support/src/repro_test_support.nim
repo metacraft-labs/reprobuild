@@ -29,7 +29,7 @@
 ## without duplicating the boilerplate; the behaviour is identical
 ## across Linux, macOS, and Windows.
 
-import std/[os, osproc, streams, strtabs, strutils, unittest]
+import std/[os, osproc, streams, strtabs, strutils, times, unittest]
 
 from repro_core/paths import extendedPath, runquotaEndpointPath
 from repro_core/process_streams import drainStream
@@ -173,7 +173,12 @@ proc shellCommand*(args: openArray[string];
   result.args = @args
   result.env = @env
 
-proc runShell*(cmd: CmdSpec; cwd = getCurrentDir()): CmdResult =
+const runShellTimedOutCode* = -2
+  ## ``runShell``'s exit code when ``timeoutMs`` expired and the child was
+  ## terminated. Distinct from ``-1`` (``peekExitCode``'s "still running").
+
+proc runShell*(cmd: CmdSpec; cwd = getCurrentDir();
+               timeoutMs = 0): CmdResult =
   ## Invoke ``cmd.args[0]`` with ``cmd.args[1..^1]`` under ``cwd``,
   ## merging stderr into stdout (the pre-refactor behaviour of
   ## ``execCmdEx`` with ``poStdErrToStdOut``).
@@ -181,6 +186,11 @@ proc runShell*(cmd: CmdSpec; cwd = getCurrentDir()): CmdResult =
   ## The subprocess inherits the parent environment, overlaid with
   ## ``cmd.env`` — matching the per-invocation override semantics
   ## the old ``VAR=value cmd`` shell prefix provided.
+  ##
+  ## ``timeoutMs > 0`` bounds the wait: past it the child is terminated and
+  ## the result carries ``runShellTimedOutCode`` plus whatever output had
+  ## arrived. For a test whose regression IS a hang, so that the regression
+  ## fails the case instead of wedging the suite.
   if cmd.args.len == 0:
     raise newException(ValueError, "shellCommand returned an empty argv")
   var envTable = newStringTable()
@@ -198,6 +208,18 @@ proc runShell*(cmd: CmdSpec; cwd = getCurrentDir()): CmdResult =
     env = envTable,
     options = {poStdErrToStdOut, poUsePath})
   defer: process.close()
+  let deadline =
+    if timeoutMs > 0: epochTime() + float(timeoutMs) / 1000.0
+    else: 0.0
+  proc timedOut(): bool =
+    deadline > 0.0 and epochTime() >= deadline
+  proc giveUp(res: var CmdResult) =
+    try: process.terminate()
+    except CatchableError, OSError: discard
+    discard process.waitForExit(5_000)
+    res.code = runShellTimedOutCode
+    res.output.add("\n[runShell: timed out after " & $timeoutMs &
+      "ms; child terminated]\n")
   # Three interacting Nim 2.2.x pitfalls force this hand-rolled loop:
   #
   # (a) ``stream.readAll`` breaks the read loop the FIRST time
@@ -239,11 +261,17 @@ proc runShell*(cmd: CmdSpec; cwd = getCurrentDir()): CmdResult =
         result.code = process.peekExitCode()
         if result.code != -1:
           break
+        if timedOut():
+          giveUp(result)
+          break
         sleep(PollSleepMs)
         continue
       if bytesAvail == 0:
         result.code = process.peekExitCode()
         if result.code != -1:
+          break
+        if timedOut():
+          giveUp(result)
           break
         sleep(PollSleepMs)
         continue
@@ -314,6 +342,9 @@ proc runShell*(cmd: CmdSpec; cwd = getCurrentDir()): CmdResult =
       result.code = process.peekExitCode()
       if result.code != -1:
         discard drainAvailable(fd, result.output)
+        break
+      if timedOut():
+        giveUp(result)
         break
       sleep(PollSleepMs)
 

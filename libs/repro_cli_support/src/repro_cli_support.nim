@@ -13922,6 +13922,7 @@ proc buildRunEdgeSessionResolver*(
 proc runReproRunCommand(args: openArray[string];
                         publicCliPath: string): int =
   let parsed = parseReproRunArgs(args)
+  let userToolchainEnv = snapshotBootstrapToolchainEnv()
   var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
   var listedTasks = inspectDevEnvTasks(parsed.selection, publicCliPath)
@@ -13978,6 +13979,7 @@ proc runReproRunCommand(args: openArray[string];
     let toolOps = devEnvToolShellOps(edge, parsed.selection)
     let producerOps = devEnvProducerActivation(artifact,
       parsed.selection.projectRoot)
+    restoreBootstrapToolchainEnv(userToolchainEnv)
     return runTaskCommand(artifact, edge.artifactPath, task,
       parsed.forwardedArgs, parsed.selection.projectRoot, producerOps, toolOps)
 
@@ -14109,6 +14111,9 @@ proc runReproTasksCommand(args: openArray[string];
 proc runReproExecCommand(args: openArray[string];
                          publicCliPath: string): int =
   let parsed = parseDevEnvExecArgs(args)
+  # The bootstrap toolchain the edge below publishes is for compiling the
+  # recipe, not for the user's command; see `snapshotBootstrapToolchainEnv`.
+  let userToolchainEnv = snapshotBootstrapToolchainEnv()
   let edge = computePublicDevEnv(parsed.selection, publicCliPath,
     announce = true)
   writeDevEnvStats(parsed.selection.statsPath, edge, "exec")
@@ -14121,6 +14126,7 @@ proc runReproExecCommand(args: openArray[string];
   let toolOps = devEnvToolShellOps(edge, parsed.selection)
   let producerOps = devEnvProducerActivation(artifact,
     parsed.selection.projectRoot)
+  restoreBootstrapToolchainEnv(userToolchainEnv)
   return runActivatedCommand(artifact, edge.artifactPath, parsed.command,
     parsed.selection.projectRoot, producerOps, toolOps)
 
@@ -14139,6 +14145,7 @@ proc defaultInteractiveShell(): string =
 proc runReproShellCommand(args: openArray[string];
                           publicCliPath: string): int =
   let parsed = parseDevEnvShellArgs(args)
+  let userToolchainEnv = snapshotBootstrapToolchainEnv()
   let edge = computePublicDevEnv(parsed.selection, publicCliPath,
     announce = true)
   writeDevEnvStats(parsed.selection.statsPath, edge, "shell")
@@ -14157,6 +14164,7 @@ proc runReproShellCommand(args: openArray[string];
       parsed.shellPath
     else:
       defaultInteractiveShell()
+  restoreBootstrapToolchainEnv(userToolchainEnv)
   return spawnActivatedShell(artifact, edge.artifactPath, shellPath,
     parsed.selection.projectRoot, producerOps, toolOps)
 

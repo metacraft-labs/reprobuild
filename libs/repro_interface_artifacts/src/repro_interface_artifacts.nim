@@ -86,6 +86,7 @@ else:
 
 import cbor
 import repro_core
+import repro_core/ambient_execution
 import repro_core/paths as corepaths
 import repro_domain_types
 import repro_hash
@@ -2807,6 +2808,181 @@ when defined(macosx):
     let nonSip = firstNonSipCCompilerOnPath()
     if nonSip.len > 0: nonSip else: candidate
 
+type
+  CCompilerUnusableError* = object of CatchableError
+    ## The C compiler selected for compiling a recipe -- its interface
+    ## extractor and its provider -- is missing or cannot compile a trivial C
+    ## translation unit. The message names the compiler, where it was selected
+    ## from, what failed, and how to point reprobuild at a different one.
+
+  CCompilerProbe* = object
+    compiler*: string
+    usable*: bool
+    detail*: string
+      ## Why the probe failed (the compiler's own output, or the reason it
+      ## could not run). Empty when ``usable``.
+
+const
+  bootstrapCCompilerEnv* = "REPRO_BOOTSTRAP_CC"
+    ## The one knob that names the recipe-compile C compiler. Set by
+    ## ``ensureBootstrapToolchainEnv`` to the pinned tool-store compiler, or by
+    ## the user to override it.
+  cCompilerProbeSource = """
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+/* Nim generates C for THIS host's pointer width. A compiler for another
+   target (e.g. an i386 gcc on an x86_64 host) links garbage, so refuse it
+   here, where the message can say so, rather than three layers later. */
+typedef char repro_probe_pointer_width[
+  (sizeof(void *) == REPRO_PROBE_POINTER_BYTES) ? 1 : -1];
+int repro_probe(void) { return (int)(sizeof(size_t) + strlen("ok")); }
+"""
+
+var cachedCCompilerProbes = initTable[string, CCompilerProbe]()
+
+proc cCompilerIdentity(cc: string): string =
+  ## Path plus size plus mtime: what a probe verdict is keyed on. A replaced
+  ## compiler binary gets probed again.
+  result = cc
+  try:
+    let info = getFileInfo(extendedPath(cc))
+    result.add("|" & $info.size & "|" & $info.lastWriteTime.toUnix() & "." &
+      $info.lastWriteTime.nanosecond())
+  except CatchableError, OSError:
+    result.add("|?")
+
+proc cCompilerProbeMarkerName(identity: string): string =
+  var h = 0xcbf29ce484222325'u64
+  for ch in identity.toLowerAscii():
+    h = (h xor uint64(ord(ch))) * 0x100000001b3'u64
+  const hexDigits = "0123456789abcdef"
+  result = newString(16)
+  for i in 0 ..< 16:
+    result[15 - i] = hexDigits[int((h shr (uint64(i) * 4)) and 0xF'u64)]
+  result.add(".ok")
+
+proc probeCCompiler*(cc: string; cacheDir = ""): CCompilerProbe =
+  ## Compile a trivial translation unit that includes the standard headers
+  ## Nim's generated C needs, with the host's pointer width asserted, and
+  ## report whether ``cc`` can do it.
+  ##
+  ## This is what turns "``capi.c:1: stddef.h: No such file or directory``"
+  ## -- measured 2026-09-23 on a Windows host whose Machine PATH put FPC's
+  ## 1999-era gcc 2.95 ahead of everything else -- into a diagnostic that
+  ## names the compiler that was chosen and how to choose another.
+  ##
+  ## Verdicts are memoised per process, and a SUCCESS is also recorded as a
+  ## marker in ``cacheDir`` (when given) keyed on the compiler's path, size
+  ## and mtime, so an activation that runs on every ``just`` recipe does not
+  ## pay a compiler start-up each time. Failures are never cached: the fix is
+  ## usually to the environment, and the next run must see it.
+  let identity = cCompilerIdentity(cc)
+  if cachedCCompilerProbes.hasKey(identity):
+    return cachedCCompilerProbes[identity]
+  result = CCompilerProbe(compiler: cc)
+  if not isAbsolute(cc) or not fileExists(extendedPath(cc)):
+    result.detail = "no such file"
+    cachedCCompilerProbes[identity] = result
+    return
+  let marker =
+    if cacheDir.len > 0: cacheDir / cCompilerProbeMarkerName(identity)
+    else: ""
+  if marker.len > 0 and fileExists(extendedPath(marker)):
+    result.usable = true
+    cachedCCompilerProbes[identity] = result
+    return
+  var scratch = ""
+  try:
+    scratch = createTempDir("repro-cc-probe-", "")
+    let source = scratch / "probe.c"
+    writeFile(extendedPath(source), cCompilerProbeSource)
+    let res = runCommand(@[cc, "-c",
+      "-DREPRO_PROBE_POINTER_BYTES=" & $sizeof(pointer),
+      source, "-o", scratch / "probe.o"], cwd = scratch,
+      raiseOnFailure = false)
+    if res.exitCode == 0:
+      result.usable = true
+    else:
+      let output = res.output.strip()
+      result.detail = "exit status " & $res.exitCode &
+        (if output.len > 0: ":\n" & output else: "")
+  except CatchableError, OSError:
+    result.detail = "could not run it: " & getCurrentExceptionMsg()
+  finally:
+    if scratch.len > 0:
+      try: removeDir(extendedPath(scratch))
+      except CatchableError, OSError: discard
+  if result.usable and marker.len > 0:
+    try:
+      createDir(extendedPath(cacheDir))
+      writeFile(extendedPath(marker), identity & "\n")
+    except CatchableError, OSError:
+      discard
+  cachedCCompilerProbes[identity] = result
+
+proc cCompilerOverrideRemedy*(): string =
+  ## How to point reprobuild at a different recipe-compile C compiler.
+  "Set " & bootstrapCCompilerEnv & " to the absolute path of a working " &
+    (when defined(windows): "64-bit MinGW-w64 gcc.exe"
+     else: "C compiler for this host") &
+    ", or unset it to use the pinned bootstrap compiler reprobuild " &
+    "provisions into its tool store."
+
+proc cCompilerUnusableMessage*(probe: CCompilerProbe; origin: string): string =
+  ## The diagnostic for a compiler that failed ``probeCCompiler``.
+  var detail = probe.detail
+  const maxDetail = 2000
+  if detail.len > maxDetail:
+    detail = detail[0 ..< maxDetail] & " [...]"
+  result = "the C compiler selected for compiling the recipe cannot " &
+    "compile a trivial C file that includes <stddef.h>" &
+    "\n  compiler: " & probe.compiler &
+    "\n  selected from: " & origin &
+    "\n  failure: " & detail.replace("\n", "\n    ") &
+    "\n  remedy: " & cCompilerOverrideRemedy()
+
+proc requireUsableCCompiler*(cc, origin: string; cacheDir = "") =
+  ## Raise ``CCompilerUnusableError`` unless ``cc`` passes ``probeCCompiler``.
+  let probe = probeCCompiler(cc, cacheDir)
+  if not probe.usable:
+    raise newException(CCompilerUnusableError,
+      cCompilerUnusableMessage(probe, origin))
+
+when defined(windows):
+  var warnedPathCCompiler = false
+
+  proc pathCCompilerFallback(): string =
+    ## Last resort on Windows, where there is no system ``cc``: the first
+    ## ``gcc.exe`` on PATH -- but never SILENTLY. Before this, a compile that
+    ## reached here emitted no ``--gcc.exe`` flag at all, so Nim looked
+    ## ``gcc.exe`` up on PATH itself, and Windows puts the Machine PATH ahead
+    ## of the User PATH: every recipe compile on the affected host got FPC's
+    ## gcc 2.95 and died on ``stddef.h``. Now the candidate is probed, an
+    ## unusable one is refused with its path and the override, and a usable
+    ## one is named in a warning, because an unpinned compiler is exactly what
+    ## ``ensureBootstrapToolchainEnv`` exists to prevent: reaching here means
+    ## an entry point compiled a recipe without calling it.
+    let onPath = uncontrolledFindExe("gcc")
+    if onPath.len == 0:
+      raise newException(CCompilerUnusableError,
+        "no C compiler for compiling the recipe: " & bootstrapCCompilerEnv &
+        " is unset, CC is not an absolute path, and there is no gcc.exe on " &
+        "PATH. " & cCompilerOverrideRemedy())
+    let origin = "the first gcc.exe on PATH (" & bootstrapCCompilerEnv &
+      " is unset, so no pinned compiler was published for this process)"
+    requireUsableCCompiler(onPath, origin)
+    if not warnedPathCCompiler:
+      warnedPathCCompiler = true
+      try:
+        stderr.writeLine("repro: warning: compiling the recipe with " &
+          onPath & ", " & origin & ". " & cCompilerOverrideRemedy())
+        flushFile(stderr)
+      except IOError, OSError:
+        discard
+    onPath
+
 proc hostCCompilerPath(): string =
   # MR9 — `$REPRO_BOOTSTRAP_CC` is the bootstrap-resolved gcc absolute
   # path published by `ensureBootstrapToolchainEnv` (tool_profiles.nim)
@@ -2819,10 +2995,17 @@ proc hostCCompilerPath(): string =
   # bootstrap pin first guarantees nim's `--gcc.exe:` flag points at
   # the reprobuild-provisioned winlibs gcc instead of whatever
   # PATH-resolution would pick (e.g. FPC's 32-bit-target gcc 2.95).
-  let bootstrapCC = getEnv("REPRO_BOOTSTRAP_CC")
-  if bootstrapCC.len > 0 and isAbsolute(bootstrapCC) and
-      fileExists(extendedPath(bootstrapCC)):
-    return bootstrapCC
+  #
+  # A SET but unusable value is an error, not a reason to fall through: it
+  # is somebody's explicit choice of compiler, and silently compiling with a
+  # different one is how the wrong gcc went unnoticed.
+  let bootstrapCC = getEnv(bootstrapCCompilerEnv)
+  if bootstrapCC.len > 0:
+    if isAbsolute(bootstrapCC) and fileExists(extendedPath(bootstrapCC)):
+      return bootstrapCC
+    raise newException(CCompilerUnusableError,
+      bootstrapCCompilerEnv & "=" & bootstrapCC & " does not name an " &
+      "existing file by absolute path. " & cCompilerOverrideRemedy())
   let ccEnv = getEnv("CC")
   if ccEnv.len > 0 and isAbsolute(ccEnv):
     when defined(macosx):
@@ -2839,7 +3022,17 @@ proc hostCCompilerPath(): string =
         return runtimeCC
   if BuiltCCompilerPath.len > 0 and fileExists(extendedPath(BuiltCCompilerPath)):
     return BuiltCCompilerPath
-  ""
+  when defined(windows):
+    return pathCCompilerFallback()
+  else:
+    ""
+
+proc recipeCCompilerPath*(): string =
+  ## The C compiler the next recipe compile (interface extractor or provider)
+  ## will hand Nim via ``--gcc.exe``: the selection ``hostCCompilerFlags``
+  ## makes, exposed so its refusals can be tested without running a compile.
+  ## Raises ``CCompilerUnusableError`` where the compile itself would.
+  hostCCompilerPath()
 
 var cachedHostCCompilerFamily = ""
 
