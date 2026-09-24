@@ -7661,6 +7661,74 @@ proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
     if normalized == normalizedRoot or normalized.startsWith(normalizedRoot & "/"):
       return true
 
+const MonitorSandboxToolsPrefix = "repro-fs-snoop-sandbox-tools-"
+
+proc isMonitorSandboxToolsPath(path: string): bool =
+  ## The monitor's OWN drop-in tool directory is engine bookkeeping, not a
+  ## project input, and it must never reach an action-cache key.
+  ##
+  ## On macOS the interpose backend cannot inject into a system-protected
+  ## platform binary, so before running a monitored action it drops
+  ## injectable copies of the shells and core utilities an action may exec
+  ## into a temporary directory and points the monitored process at it.
+  ## Unless an operator supplies a pre-built bundle, that directory is
+  ## created fresh for every monitored run and its NAME carries the
+  ## creating pid and a nanosecond timestamp:
+  ##
+  ##   <tmp>/repro-fs-snoop-sandbox-tools-<pid>-<sec>-<nsec>-<pid>/bin/sh
+  ##
+  ## Any action whose command runs a shell probes `<dir>/bin/sh`, so the
+  ## probe set of an otherwise byte-identical action carried one value that
+  ## was new on every invocation. The weak fingerprint stayed stable, so
+  ## every run landed in the SAME per-edge directory and wrote yet another
+  ## record under a fresh strong fingerprint -- the accumulation
+  ## `Action-Cache-Per-Edge-Store.md` §5.1 rules out when it requires
+  ## identical path-sets to "converge on one filename -- a rewrite, never
+  ## an accumulation". A warm `repro exec` / `repro shell` therefore re-ran
+  ## the dev-env introspection edge every single time on an unchanged
+  ## project, and no number of repeat runs could ever settle.
+  ##
+  ## The general rule is `Tool-Owned-Caches.md` §What The Cache Key May
+  ## Observe: whatever the engine allocates to back a path "is engine
+  ## bookkeeping. It MUST NOT appear in any cache key. It MAY change
+  ## between runs without invalidating anything." The dev-env cache key was
+  ## already corrected once from the other side for the same reason --
+  ## `Shell-Direnv-Hook.milestones.org` M77 records `REPRO_MONITOR_SHIM_LIB`
+  ## and `REPRO_FS_SNOOP` being DROPPED from it after the syscall-bound test
+  ## "caught them flapping under fs-snoop wrapping (build-engine
+  ## infrastructure, not dev-env contract)". This is that same
+  ## infrastructure flapping again, reaching the key through the observed
+  ## path-set instead of through an environment variable.
+  ##
+  ## Matched on a path SEGMENT rather than against a resolved root because
+  ## the directory belongs to the monitor and is created inside the
+  ## monitored run: the engine never holds its path, and the temp root it
+  ## sits under varies per host and per `TMPDIR`. An operator-supplied
+  ## bundle keeps a stable name of its own choosing and so cannot churn;
+  ## it is left alone rather than guessed at.
+  ##
+  ## The segment must match the GENERATED name exactly -- the prefix
+  ## followed by the four decimal fields the monitor appends
+  ## (`<pid>-<unix-seconds>-<nanoseconds>-<nonce>`) -- and not merely start
+  ## with the prefix. A `startsWith` test alone also swallows an ordinary
+  ## project file that happens to be named after this directory, and
+  ## dropping a genuine input from a cache key serves a stale result, which
+  ## is a worse failure than the miss being fixed here. The paired test
+  ## asserts that case directly.
+  for segment in path.replace('\\', '/').split('/'):
+    if not segment.startsWith(MonitorSandboxToolsPrefix):
+      continue
+    let fields = segment.substr(MonitorSandboxToolsPrefix.len).split('-')
+    if fields.len != 4:
+      continue
+    var allNumeric = true
+    for field in fields:
+      if field.len == 0 or not field.allCharsInSet({'0' .. '9'}):
+        allNumeric = false
+        break
+    if allNumeric:
+      return true
+
 proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[string] =
   ## The action-cache key's input path set: the paths whose content or
   ## metadata a later run compares against to decide ``cdHit`` /
@@ -7678,6 +7746,10 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   ##   dependency, and a heuristic must not overrule it (a declared
   ##   input that happens to live inside a ``/nix/store`` tool root, for
   ##   instance, would otherwise be silently dropped from the key).
+  ## * the monitor-scratch filter drops the monitor's own drop-in tool
+  ##   directory -- see ``isMonitorSandboxToolsPath``. Like the filter
+  ##   above it yields to a declaration, so an action that genuinely
+  ##   declares such a path keeps it.
   ## * S5's self-write filter drops the action's OWN declared outputs
   ##   from the OBSERVED channels only — see ``selfWrittenOutputKeys``
   ##   for why those are provably not inputs, and for the
@@ -7701,7 +7773,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+         path.isMonitorSandboxToolsPath()):
       continue
     result.addUnique(seen, path)
   for input in evidence.monitorReads:
@@ -7710,7 +7783,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+         path.isMonitorSandboxToolsPath()):
       continue
     result.addUnique(seen, path)
   for probe in evidence.monitorProbes:
@@ -7719,7 +7793,8 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+         path.isMonitorSandboxToolsPath()):
       continue
     result.addUnique(seen, path)
 
