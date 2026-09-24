@@ -772,6 +772,7 @@ tests/e2e/dev-env/t_e2e_dev_env_export_pwsh.nim	nim	4
 tests/e2e/dev-env/t_e2e_dev_env_export_zsh.nim	nim	3
 tests/e2e/dev-env/t_e2e_dev_env_performance_gates.nim	nim	2
 tests/e2e/dev-env/t_e2e_dev_env_provider_compile_edge.nim	nim	3
+tests/e2e/dev-env/t_e2e_dev_env_runquota_queue_is_loud_and_bounded.nim	nim	1
 tests/e2e/dev-env/t_e2e_develop_overrides_activity.nim	nim	2
 tests/e2e/dev-env/t_e2e_hooks_shell_direnv.nim	nim	3
 tests/e2e/dev-env/t_e2e_native_shell_hooks.nim	nim	3
@@ -1722,6 +1723,7 @@ tests/unit/t_run_consumes.nim	nim	6
 tests/unit/t_runquota_endpoint_paths.nim	nim	6
 tests/unit/t_runquota_grant_wait_unresponsive.nim	nim	11
 tests/unit/t_runquota_grant_wait_wedged_connected.nim	nim	2
+tests/unit/t_runquota_queue_wait_is_loud_and_bounded.nim	nim	15
 tests/unit/t_rx_consumer_own_pool_forwarded_despite_unresolved_sibling.nim	nim	4
 tests/unit/t_rx_runquotad_forwards_custom_pools.nim	nim	5
 tests/unit/t_same_project_fragment_selectors.nim	nim	10

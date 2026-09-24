@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1739,
+    "nimTestBinaries": 1741,
     "pureUnitConsolidationGroups": 53,
     "pureUnitTests": 608,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1750
+    "testEntries": 1752
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1153,10 +1153,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 832,
+      "integration": 833,
       "platform/destructive": 115,
       "pure unit": 608,
-      "unclassified": 183
+      "unclassified": 184
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1304,9 +1304,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1739,
+    "nimTestBinaryCount": 1741,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1750
+    "testEntryCount": 1752
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -20116,6 +20116,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_dev_env_runquota_queue_is_loud_and_bounded",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/dev-env/t_e2e_dev_env_runquota_queue_is_loud_and_bounded.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_develop_overrides_activity",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -36845,6 +36863,23 @@
       "source": "tests/unit/t_runquota_grant_wait_wedged_connected.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_runquota_queue_wait_is_loud_and_bounded",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_runquota"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_runquota_queue_wait_is_loud_and_bounded.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

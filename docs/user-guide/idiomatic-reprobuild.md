@@ -963,6 +963,28 @@ test were actually present.
   on an older client, that silent hang is the behaviour you will see, and
   a queued build really is indistinguishable from a wedged one.
 
+  The build ENGINE's own scheduler waits on RunQuota through a second path
+  -- the inline session in `runBuild`, which every `repro build` action
+  and the dev-env activation's recipe compile go through -- and until
+  2026-09-24 that path was silent and unbounded too: `repro exec -- echo
+  hi` hung for as long as another workspace's build held the host budget.
+  It now announces a block once nothing of its own is running (after
+  1 s), repeats every 5 s, and names the queued actions, the daemon's
+  reason, the endpoint and the leases holding the budget:
+
+  ```text
+  runquota.waiting __repro_provider_compile queued at RunQuota for 6s (endpoint …): waiting for resource budget: …
+    capacity is held by:
+    lease 14 "npm-vendor-geminiCliSource" session 8 state=supervisor_lost cpu=1000m mem=1.5 GiB
+  ```
+
+  A lease in `state=supervisor_lost` belongs to a process that died; it
+  keeps its budget until `runquotad` is restarted. The dev-env surfaces
+  (`repro exec`/`shell`/`run`/`tasks`) give up after two minutes of that,
+  with the same facts and the remedies; `REPRO_RUNQUOTA_QUEUE_TIMEOUT`
+  (milliseconds) changes the bound for them and sets one for `repro
+  build`, which has none by default.
+
 > **Agents, note:** `configuredBuildProgressMode`
 > (`repro_cli_support.nim:6942`) defaults to `bpmQuiet` whenever
 > `IN_AGENT_SHELL` is set. So an agent's `repro build` is quiet by

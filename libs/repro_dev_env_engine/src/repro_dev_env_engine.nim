@@ -5,6 +5,7 @@ import repro_core
 import repro_dev_env_engine/cache_key as devEnvCacheKey
 import repro_hash
 import repro_interface_artifacts
+import repro_runquota
 import repro_tool_profiles
 
 type
@@ -209,6 +210,14 @@ proc engineConfig(config: DevEnvEdgeConfig): BuildEngineConfig =
     bypassRunQuota: false,
     fallbackToRunQuotaBypass: true,
     inlineRunQuota: true,
+    # A dev-env activation is a person (or a ``just`` recipe) waiting to run
+    # one command, and its graph is one small recipe compile. When another
+    # workspace's build holds the whole RunQuota budget that compile used to
+    # queue with no word and no end -- the 2026-09-24 ``repro exec`` hang.
+    # Ask to be served first when capacity frees, and give up with a
+    # diagnosis rather than waiting silently forever.
+    runQuotaInteractive: true,
+    runQuotaQueueTimeoutMs: devEnvRunQuotaQueueTimeoutMsDefault,
     suppressTrace: false,
     skipCacheHitEvidence: false)
   result.statsEnabled = config.statsEnabled

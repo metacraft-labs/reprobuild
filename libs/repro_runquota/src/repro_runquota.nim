@@ -33,6 +33,13 @@ type
     memoryBytes*: uint64
     namedPool*: string
     namedPoolUnits*: uint32
+    interactive*: bool
+      ## Somebody is waiting at a prompt for this lease: a dev-env activation
+      ## (``repro exec``/``shell``/``run``) compiling the recipe it needs before
+      ## it can start the user's command. Offered at RunQuota's
+      ## ``priorityInteractive`` so that, when capacity frees up, it is granted
+      ## ahead of queued build work instead of behind it. It does not preempt
+      ## anything already running.
 
   ReproCommandSpec* = object
     argv*: seq[string]
@@ -79,6 +86,12 @@ type
     lease: RunQuotaLease
     command: ReproCommandSpec
     active*: bool
+    reason*: string
+      ## The daemon's stated reason for queueing the candidate (its queue
+      ## diagnostic), e.g. "waiting for resource budget: candidate does not fit
+      ## current CPU, memory, IO, or pool budget". Carried so the scheduler can
+      ## say WHAT it is waiting on; it used to be dropped on the floor here,
+      ## which is how a queued ``repro exec`` became a silent hang.
 
   ReproRunQuotaGrant* = object
     candidateId*: uint64
@@ -116,7 +129,7 @@ proc toRunQuotaRequest*(request: ReproResourceRequest): ResourceRequest =
     commandStatsId: request.commandStatsId,
     resources: resources,
     deadline: noDeadline(),
-    priority: priorityNormal,
+    priority: (if request.interactive: priorityInteractive else: priorityNormal),
     metadata: metadataNone())
 
 proc diagnosticText(diagnostic: Diagnostic): string =
@@ -182,6 +195,10 @@ const
   grantHeartbeatMsDefault = 5_000
   grantUnresponsiveMsDefault = 600_000  # 10 minutes of total silence.
   grantBoundedReadMsDefault = 1_500
+  runQuotaQueueAnnounceAfterMs* = 1_000
+    ## How long a scheduler must be fully blocked at RunQuota before it says
+    ## so. Long enough that ordinary momentary queueing stays quiet, short
+    ## enough that nobody wonders whether the tool is working.
 
 proc envIntMs(name: string; fallback: int): int =
   ## Read a millisecond override from ``name``.  Empty/invalid/<=0 values
@@ -1453,7 +1470,8 @@ proc offerWithRunQuotaRetry(session: ReproRunQuotaSession;
             candidateId: candidateId,
             lease: decision.lease,
             command: command,
-            active: true))
+            active: true,
+            reason: decision.diagnostic.diagnosticText()))
       denied = true
       denialMessage = decision.diagnostic.diagnosticText()
     if denied:
@@ -1543,7 +1561,8 @@ proc offerWithRunQuotaBatch*(session: ReproRunQuotaSession;
               candidateId: cid,
               lease: decision.lease,
               command: commands[inputIndex],
-              active: true))
+              active: true,
+              reason: decision.diagnostic.diagnosticText()))
         else:
           # Per docs/runquota-policy.md: a denied candidate MUST delay
           # and retry, not fail the build.  The other batch members have
@@ -1583,6 +1602,259 @@ proc pollRunQuotaGrants*(session: ReproRunQuotaSession):
         lease: decision.lease))
   except CatchableError as err:
     raise newException(ReproRunQuotaError, err.msg)
+
+type
+  ReproRunQuotaGrantPoll* = object
+    ## One bounded read of the grant stream. ``frameReceived`` is liveness: the
+    ## daemon answered the outstanding GrantNext (usually with an EMPTY batch
+    ## while our candidates are still legitimately queued). ``false`` means no
+    ## complete frame arrived inside the window, which on its own does not tell
+    ## a quiet daemon from a wedged one -- ``probeRunQuotaLiveness`` does.
+    frameReceived*: bool
+    grants*: seq[ReproRunQuotaGrant]
+
+proc pollRunQuotaGrantsBounded*(session: ReproRunQuotaSession;
+                                timeoutMs: int): ReproRunQuotaGrantPoll =
+  ## ``pollRunQuotaGrants`` with the read bounded to ``timeoutMs``.
+  ##
+  ## The unbounded form blocks in ``recv`` until the daemon answers, so a
+  ## daemon that accepts the connection and then never answers (wedged, or
+  ## mid-restart) froze the build engine's scheduler loop with nothing on
+  ## screen. This form returns after ``timeoutMs`` either way and keeps the
+  ## GrantNext parked, so the caller can keep its own clock and say so.
+  if not session.active:
+    raise newException(ReproRunQuotaError, "runquota session is not active")
+  try:
+    let polled = session.session.pollNextGrantBounded(max(1, timeoutMs))
+    case polled.kind
+    of grantPollTimeout:
+      result.frameReceived = false
+    of grantPollFrame:
+      result.frameReceived = true
+      for decision in polled.decisions:
+        result.grants.add(ReproRunQuotaGrant(
+          candidateId: decision.clientCandidateId,
+          queued: decision.queued,
+          active: decision.lease.active,
+          diagnostic: decision.diagnostic.diagnosticText(),
+          lease: decision.lease))
+  except CatchableError as err:
+    raise newException(ReproRunQuotaError, err.msg)
+
+proc probeRunQuotaLiveness*(session: ReproRunQuotaSession;
+                            timeoutMs: int): bool =
+  ## A bounded status round trip on the session's own connection. ``true``
+  ## proves the daemon is alive and answering; ``false`` is silence (or a
+  ## dead connection). Never blocks longer than ``timeoutMs``.
+  if session.isNil or not session.active:
+    return false
+  try:
+    discard session.client.daemonStatus(timeoutMs = max(1, timeoutMs))
+    true
+  except CatchableError:
+    false
+
+proc runQuotaEndpointText*(): string =
+  ## The RunQuota endpoint this process talks to, as a reader would type it:
+  ## the ``RUNQUOTA_SOCKET`` override when set, otherwise the host-wide default.
+  ## Named in every queue diagnostic because "which daemon?" is the first
+  ## question when a wait is caused by somebody else's work.
+  let overridePath = getEnv("RUNQUOTA_SOCKET")
+  let endpoint =
+    if overridePath.len > 0: endpointForPath(overridePath)
+    else: defaultEndpoint()
+  if overridePath.len > 0 and overridePath != endpoint.path:
+    endpoint.path & " (RUNQUOTA_SOCKET=" & overridePath & ")"
+  else:
+    endpoint.path
+
+proc formatLeaseBytes(bytes: BiggestInt): string =
+  const gib = 1024.0 * 1024.0 * 1024.0
+  const mib = 1024.0 * 1024.0
+  if float(bytes) >= gib:
+    formatFloat(float(bytes) / gib, ffDecimal, 1) & " GiB"
+  else:
+    formatFloat(float(bytes) / mib, ffDecimal, 0) & " MiB"
+
+proc summarizeRunQuotaLeaseHolders*(leasesJson: string;
+                                    excludeSessionId = 0'u64): seq[string] =
+  ## Render the daemon's ``leases`` inspection document as one line per lease
+  ## that currently HOLDS capacity (everything except queued candidates), e.g.
+  ##
+  ##   lease 14 "npm-vendor-geminiCliSource" session 8 state=supervisor_lost cpu=1000m mem=1.5 GiB
+  ##
+  ## This is the "what am I waiting on" half of a queue diagnostic. The
+  ## daemon's own queue reason says only that a candidate does not fit; it
+  ## does not say who is holding the budget, and the answer is routinely
+  ## another workspace's build -- or a lease whose supervisor died and which
+  ## still pins memory. Pure (a JSON string in, lines out) so it is testable
+  ## without a daemon. Malformed input yields no lines rather than raising: a
+  ## diagnostic must never be the thing that fails.
+  try:
+    let doc = parseJson(leasesJson)
+    if doc.kind != JObject or not doc.hasKey("leases") or
+        doc["leases"].kind != JArray:
+      return
+    for lease in doc["leases"]:
+      if lease.kind != JObject:
+        continue
+      let state = lease{"state"}.getStr()
+      if state == "queued":
+        continue
+      let sessionId = uint64(lease{"session_id"}.getBiggestInt())
+      if excludeSessionId != 0'u64 and sessionId == excludeSessionId:
+        continue
+      let resources = lease{"resources"}
+      var line = "lease " & $lease{"id"}.getBiggestInt() & " \"" &
+        lease{"label"}.getStr() & "\" session " & $sessionId &
+        " state=" & state
+      if resources != nil and resources.kind == JObject:
+        line.add(" cpu=" & $resources{"cpu_milli"}.getBiggestInt() & "m")
+        line.add(" mem=" &
+          formatLeaseBytes(resources{"memory_bytes"}.getBiggestInt()))
+        let pools = resources{"named_pools"}
+        if pools != nil and pools.kind == JArray:
+          for pool in pools:
+            line.add(" pool:" & pool{"name"}.getStr() & "=" &
+              $pool{"units"}.getBiggestInt())
+      result.add(line)
+  except CatchableError:
+    result = @[]
+
+proc runQuotaLeaseHolders*(session: ReproRunQuotaSession): seq[string] =
+  ## Best-effort snapshot of who holds the daemon's capacity right now, via
+  ## the ``leases`` inspection subject on the session's own connection. Empty
+  ## on any failure. Callers invoke it only right after the daemon has
+  ## answered a grant poll, i.e. while it is demonstrably responsive.
+  if session.isNil or not session.active:
+    return
+  try:
+    result = summarizeRunQuotaLeaseHolders(
+      session.client.inspectionJson("leases"))
+  except CatchableError:
+    result = @[]
+
+const
+  runQuotaQueueTimeoutEnv* = "REPRO_RUNQUOTA_QUEUE_TIMEOUT"
+    ## Milliseconds. Bounds how long a scheduler whose every in-flight action
+    ## is QUEUED at RunQuota (so nothing of its own is making progress) keeps
+    ## waiting before it fails with a diagnostic naming what it waited on.
+  devEnvRunQuotaQueueTimeoutMsDefault* = 120_000
+    ## The bound a dev-env activation (``repro exec``/``shell``/``run``/
+    ## ``tasks``) uses when ``REPRO_RUNQUOTA_QUEUE_TIMEOUT`` is unset: two
+    ## minutes of being unable to start even its own small recipe compile
+    ## because other work holds the whole budget. A ``just`` recipe that
+    ## waited longer than that with nothing to show was indistinguishable from
+    ## a hang, which is the defect this bound exists to remove.
+
+proc runQuotaQueueTimeoutMs*(fallback: int): int =
+  ## ``REPRO_RUNQUOTA_QUEUE_TIMEOUT`` when it holds a positive integer,
+  ## otherwise ``fallback`` (``0`` = no bound, heartbeats only).
+  let raw = getEnv(runQuotaQueueTimeoutEnv, "").strip()
+  if raw.len == 0:
+    return fallback
+  try:
+    let parsed = parseInt(raw)
+    if parsed > 0: parsed else: fallback
+  except ValueError:
+    fallback
+
+type
+  RunQuotaQueueWaitVerdict* = enum
+    ## What the scheduler should do on one tick of a RunQuota queue wait.
+    rqwKeepWaiting   ## not blocked, or blocked but nothing to say yet
+    rqwAnnounce      ## just became blocked: say what we are waiting on, once
+    rqwHeartbeat     ## still blocked: say so again, with how long
+    rqwTimedOut      ## blocked past the bound: fail with a diagnostic
+
+  RunQuotaQueueWait* = object
+    ## State of a scheduler's "am I stuck behind somebody else's leases?"
+    ## clock. ``blocked`` means every in-flight action of THIS scheduler is
+    ## queued at RunQuota, so nothing of its own is making progress -- the
+    ## only state in which a wait can look like a hang. Queueing while some of
+    ## our own actions run is ordinary contention and is left to the progress
+    ## renderer.
+    blockedSinceMs*: int
+    lastReportMs*: int
+    announced*: bool
+
+proc initRunQuotaQueueWait*(): RunQuotaQueueWait =
+  RunQuotaQueueWait(blockedSinceMs: -1, lastReportMs: -1, announced: false)
+
+proc stepRunQuotaQueueWait*(wait: var RunQuotaQueueWait; blocked: bool;
+                            nowMs, announceAfterMs, heartbeatMs,
+                            timeoutMs: int): RunQuotaQueueWaitVerdict =
+  ## Advance the queue-wait clock by one scheduler tick. Pure, so the policy
+  ## is unit-tested without a daemon:
+  ##
+  ## * not blocked -> reset; the next block starts a fresh clock;
+  ## * blocked for ``timeoutMs`` (> 0) -> ``rqwTimedOut``;
+  ## * blocked for ``announceAfterMs`` -> ``rqwAnnounce`` exactly once (a
+  ##   candidate queued for a few milliseconds is ordinary and says nothing);
+  ## * after that, ``rqwHeartbeat`` every ``heartbeatMs``.
+  ##
+  ## ``timeoutMs <= 0`` never times out; the wait is then bounded only by the
+  ## daemon-silence deadline, but it is never silent.
+  if not blocked:
+    wait = initRunQuotaQueueWait()
+    return rqwKeepWaiting
+  if wait.blockedSinceMs < 0:
+    wait.blockedSinceMs = nowMs
+  let blockedMs = nowMs - wait.blockedSinceMs
+  if timeoutMs > 0 and blockedMs >= timeoutMs:
+    return rqwTimedOut
+  if not wait.announced:
+    if blockedMs < announceAfterMs:
+      return rqwKeepWaiting
+    wait.announced = true
+    wait.lastReportMs = nowMs
+    return rqwAnnounce
+  if heartbeatMs > 0 and nowMs - wait.lastReportMs >= heartbeatMs:
+    wait.lastReportMs = nowMs
+    return rqwHeartbeat
+  rqwKeepWaiting
+
+proc holdersText(holders: openArray[string]): string =
+  if holders.len == 0:
+    return "  (the daemon did not report any lease holding capacity)"
+  for i, holder in holders:
+    if i > 0:
+      result.add("\n")
+    result.add("  " & holder)
+
+proc runQuotaQueueWaitMessage*(actions: openArray[string];
+                               reason, endpoint: string;
+                               holders: openArray[string];
+                               waitedMs: int): string =
+  ## The line printed when a scheduler becomes fully blocked at RunQuota and on
+  ## each heartbeat after that. Names the actions, the daemon's reason, the
+  ## endpoint, and who holds the capacity.
+  result = "runquota.waiting " & actions.join(", ") &
+    " queued at RunQuota for " & $(waitedMs div 1000) & "s" &
+    " (endpoint " & endpoint & ")"
+  if reason.len > 0:
+    result.add(": " & reason)
+  result.add("\n  capacity is held by:\n" & holdersText(holders))
+
+proc runQuotaQueueTimeoutMessage*(actions: openArray[string];
+                                  reason, endpoint: string;
+                                  holders: openArray[string];
+                                  waitedMs: int): string =
+  ## The failure a bounded queue wait ends with. Principle 2 of
+  ## Interactive-UX-And-Progress.md: name the offender and the fix.
+  result = "gave up after " & $(waitedMs div 1000) & "s waiting for a " &
+    "RunQuota grant for " & actions.join(", ") & " (endpoint " & endpoint &
+    ")"
+  if reason.len > 0:
+    result.add(": " & reason)
+  result.add(".\n  Nothing of this command could start because the RunQuota " &
+    "budget is held by:\n" & holdersText(holders))
+  result.add("\n  Remedies: wait for that work to finish and retry; stop it; " &
+    "a lease in state=supervisor_lost belongs to a process that died and " &
+    "keeps its budget until runquotad is restarted; raise the bound with " &
+    runQuotaQueueTimeoutEnv & "=<milliseconds>; or bypass RunQuota for this " &
+    "command with REPROBUILD_NO_RUNQUOTA=1 (unsafe: its processes are then " &
+    "not admitted against the host budget).")
 
 proc startGrantedWithRunQuota*(session: ReproRunQuotaSession;
                                queued: var ReproRunQuotaQueuedProcess;

@@ -729,6 +729,23 @@ type
     # launches child processes directly under leases instead of spawning a
     # `repro __repro-runquota-helper` process for every action.
     inlineRunQuota*: bool
+    runQuotaQueueTimeoutMs*: int
+      ## Bound, in milliseconds, on how long this build may sit with EVERY
+      ## in-flight action queued at RunQuota -- i.e. with nothing of its own
+      ## running -- before it fails the queued actions with a diagnostic that
+      ## names them, the daemon's reason, the endpoint and the leases holding
+      ## the budget. ``0`` (the default) sets no bound. Either way the wait is
+      ## never silent: becoming blocked is announced and re-announced every
+      ## ``grantHeartbeatMs()``.
+      ##
+      ## The dev-env activation sets it (``repro exec`` & co.): its whole graph
+      ## is one small recipe compile, so being blocked means another
+      ## workspace's build holds the host budget, and waiting on that without
+      ## a word for an hour is what made every ``just`` recipe look hung.
+    runQuotaInteractive*: bool
+      ## Offer this build's leases at RunQuota's interactive priority, so a
+      ## human waiting at a prompt is served before queued batch work when
+      ## capacity frees up. Set by the dev-env activation only.
     # OPT-IN, and ``mhmNever`` by default because measurement says so. Above
     # ``mhmNever`` the engine hosts io-mon's consumer itself on the launch
     # paths it spawns (today only the RunQuota-bypass path) instead of putting
@@ -13845,12 +13862,33 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       running[index].id, message)
     running[index].processKind = rpkInlineRunQuotaFailed
 
+  # RunQuota queue-wait observability and bounds. See ``tickRunQuotaQueue``.
+  var runQuotaQueueWait = initRunQuotaQueueWait()
+  var runQuotaLastAliveMs = -1
+  var runQuotaLastLivenessProbeMs = -1
+  # ``REPRO_RUNQUOTA_QUEUE_TIMEOUT`` overrides the caller's bound in either
+  # direction (it can also bound a ``repro build``, whose default is none).
+  let effectiveRunQuotaQueueTimeoutMs =
+    runQuotaQueueTimeoutMs(config.runQuotaQueueTimeoutMs)
+
+  proc engineNowMs(): int =
+    int(monotonicNowNs() div 1_000_000'i64)
+
   proc pollInlineRunQuotaGrants(): int =
     result = -1
     if not inlineRunQuotaSessionOpen or not hasPendingInlineRunQuota():
       return
     try:
-      for grant in pollRunQuotaGrants(inlineRunQuotaSession):
+      # BOUNDED. This used to be ``pollRunQuotaGrants``, whose read blocks in
+      # ``recv`` until the daemon answers: a daemon that accepted the
+      # connection and then stopped answering froze this scheduler loop --
+      # and with it ``repro exec`` -- with nothing on screen. A short window
+      # keeps the loop turning; ``tickRunQuotaQueue`` owns the clock that
+      # tells a quiet daemon from a wedged one.
+      let polled = pollRunQuotaGrantsBounded(inlineRunQuotaSession, 20)
+      if polled.frameReceived:
+        runQuotaLastAliveMs = engineNowMs()
+      for grant in polled.grants:
         for j in 0 ..< running.len:
           if running[j].processKind != rpkInlineRunQuotaPending:
             continue
@@ -13886,6 +13924,105 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           failRunningAction(j, "runquota inline grant polling failed: " &
             err.msg)
           return j
+
+  proc pendingRunQuotaSummary(): tuple[actions: seq[string]; reason: string] =
+    for item in running:
+      if item.processKind != rpkInlineRunQuotaPending:
+        continue
+      result.actions.add(item.id)
+      let reason = item.queuedRunQuotaProcess.reason
+      if reason.len > 0 and result.reason.len == 0:
+        result.reason = reason
+
+  proc failAllPendingRunQuota(message: string): int =
+    ## Withdraw every queued lease from the daemon and fail its action with
+    ## ``message``. Returns the index of the first failed entry, for the wait
+    ## loop to reap; the others are reaped on the following iterations.
+    result = -1
+    for j in 0 ..< running.len:
+      if running[j].processKind != rpkInlineRunQuotaPending:
+        continue
+      try:
+        var queued = running[j].queuedRunQuotaProcess
+        cancelQueued(queued)
+        running[j].queuedRunQuotaProcess = queued
+      except CatchableError:
+        discard
+      failRunningAction(j, message)
+      if result < 0:
+        result = j
+
+  proc tickRunQuotaQueue(): int =
+    ## Make a RunQuota queue wait loud and bounded. Returns the index of a
+    ## running entry this tick failed, or ``-1``.
+    ##
+    ## Two distinct things can keep a queued action from starting, and both
+    ## used to be SILENT and UNBOUNDED -- observed 2026-09-24 as ``repro exec
+    ## -- echo hi`` hanging for as long as another workspace's build held the
+    ## host's RunQuota budget:
+    ##
+    ## * the daemon is alive and the candidate simply does not fit. Once every
+    ##   in-flight action of THIS build is queued (nothing of ours is making
+    ##   progress), say so -- which actions, the daemon's reason, the
+    ##   endpoint and WHICH leases hold the budget -- and repeat that every
+    ##   ``grantHeartbeatMs()``. With ``config.runQuotaQueueTimeoutMs`` set,
+    ##   fail after that long with the same facts and the remedies. It is a
+    ##   diagnosis, not a timeout that hides one;
+    ## * the daemon has stopped answering. No grant-stream frame and no reply
+    ##   to a bounded status probe for ``grantUnresponsiveMs()`` fails the
+    ##   queued actions, the same deadline ``awaitGrantLoop`` applies.
+    result = -1
+    if not inlineRunQuotaSessionOpen or not hasPendingInlineRunQuota():
+      runQuotaQueueWait = initRunQuotaQueueWait()
+      runQuotaLastAliveMs = -1
+      return
+    let now = engineNowMs()
+    if runQuotaLastAliveMs < 0:
+      # The offer that queued the candidate was itself a round trip.
+      runQuotaLastAliveMs = now
+    let silentMs = now - runQuotaLastAliveMs
+    if silentMs >= grantBoundedReadMs() and
+        (runQuotaLastLivenessProbeMs < 0 or
+         now - runQuotaLastLivenessProbeMs >= grantBoundedReadMs()):
+      runQuotaLastLivenessProbeMs = now
+      if probeRunQuotaLiveness(inlineRunQuotaSession, grantBoundedReadMs()):
+        runQuotaLastAliveMs = engineNowMs()
+    if engineNowMs() - runQuotaLastAliveMs >= grantUnresponsiveMs():
+      let pending = pendingRunQuotaSummary()
+      return failAllPendingRunQuota("runquota stopped responding while " &
+        pending.actions.join(", ") & " waited for a lease at " &
+        runQuotaEndpointText() & ": no grant-stream frame and no status " &
+        "reply for " & $grantUnresponsiveMs() & "ms (the daemon may be " &
+        "wedged or mid-restart). Retry, restart runquotad, or bypass " &
+        "RunQuota for this command with REPROBUILD_NO_RUNQUOTA=1 (unsafe).")
+    var blocked = true
+    for item in running:
+      if item.processKind != rpkInlineRunQuotaPending:
+        blocked = false
+        break
+    let verdict = stepRunQuotaQueueWait(runQuotaQueueWait, blocked, now,
+      runQuotaQueueAnnounceAfterMs, grantHeartbeatMs(),
+      effectiveRunQuotaQueueTimeoutMs)
+    case verdict
+    of rqwKeepWaiting:
+      discard
+    of rqwAnnounce, rqwHeartbeat, rqwTimedOut:
+      let pending = pendingRunQuotaSummary()
+      let holders = runQuotaLeaseHolders(inlineRunQuotaSession)
+      let waitedMs = now - runQuotaQueueWait.blockedSinceMs
+      if verdict == rqwTimedOut:
+        return failAllPendingRunQuota(runQuotaQueueTimeoutMessage(
+          pending.actions, pending.reason, runQuotaEndpointText(), holders,
+          waitedMs))
+      try:
+        stderr.writeLine(runQuotaQueueWaitMessage(pending.actions,
+          pending.reason, runQuotaEndpointText(), holders, waitedMs))
+        # Flushed: stderr is block-buffered whenever it is a pipe -- every
+        # ``just`` recipe, CI log and agent harness -- and a wait message
+        # that sits in a buffer is the silent hang it exists to prevent.
+        flushFile(stderr)
+      except IOError, OSError:
+        discard
 
   proc recordCacheLookupFacts(id: string; lookup: ActionCacheLookup) =
     ## M17: pin the ACTION-CACHE KEY and the miss reason at the only
@@ -14987,6 +15124,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         var commands = newSeq[ReproCommandSpec](stagedInlineLaunches.len)
         for k, staged in stagedInlineLaunches:
           requests[k] = staged.action.runQuotaRequest()
+          requests[k].interactive = config.runQuotaInteractive
           commands[k] = staged.action.runQuotaCommand(config)
         var offers: seq[ReproRunQuotaOffer]
         var batchFailure = ""
@@ -15124,6 +15262,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if hasPendingInlineRunQuota() and epochTime() >= nextGrantPoll:
           runIndex = pollInlineRunQuotaGrants()
           nextGrantPoll = epochTime() + 0.025
+          if runIndex >= 0:
+            break
+          runIndex = tickRunQuotaQueue()
           if runIndex >= 0:
             break
         # In-Process-Monitor-Hosting HM-4 — settle EVERY hosted monitor whose

@@ -6894,6 +6894,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/e2e/dev-env/t_e2e_dev_env_runquota_queue_is_loud_and_bounded.nim",
+    binary: "build/test-bin/t_e2e_dev_env_runquota_queue_is_loud_and_bounded",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/e2e/dev-env/t_e2e_develop_overrides_activity.nim",
     binary: "build/test-bin/t_e2e_develop_overrides_activity",
     defines: @[],
@@ -15428,6 +15437,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_runquota_grant_wait_wedged_connected.nim",
     binary: "build/test-bin/t_runquota_grant_wait_wedged_connected",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_runquota_queue_wait_is_loud_and_bounded.nim",
+    binary: "build/test-bin/t_runquota_queue_wait_is_loud_and_bounded",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
