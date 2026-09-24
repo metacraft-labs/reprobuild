@@ -1130,7 +1130,7 @@ type
       ## built a `PathSetEvidence(monitorReads: …)` out of the
       ## `"dependencies"` array of a JSON reply from `reprobuild-nix-daemon`
       ## — engine-parsed data entering the MONITOR's channel, which is the
-      ## shape rule 7 forbids and the shape `832f5fa2` had just been fixed
+      ## shape rule 6 forbids and the shape `832f5fa2` had just been fixed
       ## for. It was inert only because the scheduler overwrote the whole
       ## object with a fresh `collectEvidence` one line later, which is not a
       ## property anything enforced.
@@ -12837,7 +12837,7 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         
         # DA-1f — THE DAEMON'S REPORT IS KEPT AND IS NAMED. It used to be
         # assigned to `monitorReads`, the MONITOR's channel, which is the
-        # shape `Dependency-Observation-Attribution.md` rule 7 forbids: a
+        # shape `Dependency-Observation-Attribution.md` rule 6 forbids: a
         # JSON reply this process parsed is not something io-mon observed,
         # and once merged into that seq nothing downstream could separate the
         # two. It was harmless only because the scheduler overwrote the whole
