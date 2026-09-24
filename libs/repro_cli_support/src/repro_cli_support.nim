@@ -13276,12 +13276,21 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
     # as a working environment that quietly provisions none of what the
     # recipe declares, which is the failure this whole surface exists to
     # remove — so it is reported rather than assumed harmless.
+    #
+    # The remedies named are only the ones every surface that reaches this
+    # line accepts. `repro shell`, `repro exec` and `repro run` take no
+    # `--tool-provisioning` flag: CLI/exec.md and CLI/shell.md
+    # list none among their decision inputs, and Shell-Direnv-Hook.md
+    # ("Fast-Path Cache-Key Check") keys the activation on the project file
+    # and "a small subset of env vars the edge consumes" — so the mode reaches
+    # an activation through the recipe or REPRO_TOOL_PROVISIONING, never a
+    # flag. Naming the flag here sent readers to a command that rejects it.
     stderr.writeLine("repro dev-env: warning: " &
       $interfaceArtifact.projectInterface.toolUses.len &
       " package(s) are declared in uses: but no tool provisioning mode is " &
       "resolved, so none of them will be on PATH. Set " &
-      "`defaultToolProvisioning` in the recipe, or pass " &
-      "--tool-provisioning=, or set REPRO_TOOL_PROVISIONING.")
+      "`defaultToolProvisioning` in the recipe, or set " &
+      "REPRO_TOOL_PROVISIONING (for example REPRO_TOOL_PROVISIONING=nix).")
     return
 
   let storeRoot = resolveStoreRoot() / "tool-store"

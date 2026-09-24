@@ -20292,7 +20292,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/dev-env/t_e2e_repro_exec_shell.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

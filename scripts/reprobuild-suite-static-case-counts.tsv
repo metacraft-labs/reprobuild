@@ -781,7 +781,7 @@ tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim	nim	2
 tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim	nim	2
 tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim	nim	2
 tests/e2e/dev-env/t_e2e_repro_exec_recipe_compiler.nim	nim	2
-tests/e2e/dev-env/t_e2e_repro_exec_shell.nim	nim	4
+tests/e2e/dev-env/t_e2e_repro_exec_shell.nim	nim	5
 tests/e2e/dev-env/t_e2e_shell_hook_cd_activate_deactivate.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_noop_io_bounded.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim	nim	2
