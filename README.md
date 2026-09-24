@@ -53,7 +53,7 @@ putting its `bin/` on your `PATH`:
 
 ```bash
 # Linux x86_64 — adjust the version and platform to taste
-VERSION=0.1.3
+VERSION=0.1.4
 PLATFORM=linux-x86_64   # or darwin-aarch64; Windows ships a .zip
 curl -fsSLO "https://github.com/metacraft-labs/reprobuild/releases/download/v${VERSION}/reprobuild-${VERSION}-${PLATFORM}.tar.gz"
 tar -xzf "reprobuild-${VERSION}-${PLATFORM}.tar.gz"

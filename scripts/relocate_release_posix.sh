@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+#
+# Make a packaged reprobuild release tree run OFF nix.
+#
+# The `.#release` build produces binaries linked by the nix toolchain: their
+# ELF PT_INTERP is a `/nix/store/...-glibc/.../ld-linux-*.so` and their
+# DT_RPATH / dlopen resolution points at `/nix/store` lib dirs. Packaging then
+# raw-copies them (release.yml `cp -a build/bin/* build/lib/*`), so the tarball
+# only runs where `/nix/store` exists. `scripts/verify_release.sh`'s multi-distro
+# docker sweep catches this: `exec /reprobuild/bin/repro: no such file or
+# directory` on ubuntu:24.04 is a missing ELF interpreter.
+#
+# This step rewrites the extracted `pkg/` tree to be self-contained:
+#
+#   Linux  — bundle the FULL runtime closure (incl. the nix glibc + its loader,
+#            libssl/libcrypto, libblake3/libxxhash/libsqlite3, libgcc_s/libstdc++,
+#            and the bare-dlopen'd libclingo/libzstd) into `lib/`, set every ELF's
+#            rpath to `$ORIGIN/../lib`, and replace each `bin/<app>` with a tiny
+#            wrapper that execs the BUNDLED loader with `--library-path lib`. The
+#            bundled loader+libc are a matched pair, so the result is independent
+#            of the target distro's glibc (passes debian:11 .. ubuntu:24.04).
+#            A wrapper is used rather than `patchelf --set-interpreter` because a
+#            tarball can be unpacked anywhere and PT_INTERP cannot be relative to
+#            the binary ($ORIGIN is not honoured for the interpreter).
+#
+#   Darwin — bundle the otool(1) dylib closure into `lib/`, rewrite install names
+#            / add LC_RPATH to `@loader_path/../lib` (via fixup_macho_runtime.sh),
+#            and ad-hoc re-sign (every install_name_tool edit invalidates the
+#            signature and macOS refuses to exec a Mach-O with a stale one).
+#
+# Idempotent-ish and loud: it fails hard rather than shipping a half-relocated
+# tree, because a broken relocation becomes a 404-at-runtime for every consumer.
+set -euo pipefail
+
+pkg_dir="${1:?usage: relocate_release_posix.sh <pkg_dir>}"
+bindir="${pkg_dir}/bin"
+libdir="${pkg_dir}/lib"
+mkdir -p "${libdir}"
+
+os="$(uname -s)"
+
+is_elf() { [ -f "$1" ] && [ "$(LC_ALL=C od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')" = "7f454c46" ]; }
+
+case "${os}" in
+  Linux*)
+    command -v patchelf >/dev/null 2>&1 || { echo "relocate: patchelf not on PATH" >&2; exit 1; }
+
+    # No `patchelf --set-rpath` is used anywhere below: the wrapper (step 4)
+    # launches every binary through the bundled loader with an explicit
+    # `--library-path lib`, which governs BOTH DT_NEEDED and bare-name dlopen
+    # resolution. Rewriting rpaths is therefore unnecessary — and running
+    # patchelf over the bundled `ld-linux-*.so` corrupts the loader and makes
+    # every launch segfault, which is exactly what an earlier version did.
+    # patchelf is used only for its read-only --print-interpreter / --print-rpath.
+
+    # ---- 0. Locate the bare-dlopen'd libs (libclingo, libzstd) --------------
+    # ldd does NOT list them (dlopen'd at runtime, not DT_NEEDED). Gather source
+    # dirs from the build-env prefixes AND from repro's baked rpath (build_apps.sh
+    # put the nix clingo/zstd dirs there).
+    declare -a src_dirs=()
+    [ -n "${CLINGO_PREFIX:-}" ] && src_dirs+=("${CLINGO_PREFIX}/lib" "${CLINGO_PREFIX}")
+    [ -n "${ZSTD_PREFIX:-}" ] && src_dirs+=("${ZSTD_PREFIX}/lib" "${ZSTD_PREFIX}")
+    if [ -x "${bindir}/repro" ]; then
+      while IFS= read -r d; do
+        [ -n "${d}" ] && src_dirs+=("${d}")
+      done < <(patchelf --print-rpath "${bindir}/repro" 2>/dev/null | tr ':' '\n')
+    fi
+
+    find_lib() {
+      # find_lib <soname-glob> — first match (incl. symlinks) in src_dirs, then
+      # a bounded nix-store scan as a fallback (ZSTD_PREFIX is often unset and
+      # zstd is not in any binary's rpath).
+      local glob="$1" d hit
+      for d in "${src_dirs[@]:-}"; do
+        [ -d "${d}" ] || continue
+        hit="$(find "${d}" -maxdepth 2 -name "${glob}" \( -type f -o -type l \) 2>/dev/null | head -n1 || true)"
+        [ -n "${hit}" ] && { printf '%s\n' "${hit}"; return 0; }
+      done
+      find /nix/store -maxdepth 3 -name "${glob}" \( -type f -o -type l \) 2>/dev/null | head -n1
+    }
+
+    # Bundle the bare-dlopen'd libs under the EXACT names repro dlopens
+    # (`libclingo.so`, `libzstd.so.1`). `cp -L` dereferences the symlink chain,
+    # so forcing the destination name gives the container a file with the name
+    # the loader looks up — the nix dir that carried the unversioned symlink is
+    # not present off-nix, which is why bundling a versioned copy failed with
+    # `could not load: libclingo.so`.
+    for spec in 'libclingo.so*:libclingo.so' 'libzstd.so.1*:libzstd.so.1'; do
+      glob="${spec%%:*}"; dest="${spec##*:}"
+      src="$(find_lib "${glob}" || true)"
+      if [ -n "${src}" ]; then
+        cp -Lf "${src}" "${libdir}/${dest}"
+      else
+        echo "relocate: WARNING ${dest} not found (dlopen may fail off-nix)" >&2
+      fi
+    done
+
+    # ---- 1. Transitive ldd closure of every ELF in bin/ + lib/ --------------
+    resolve_deps() {
+      ldd "$1" 2>/dev/null | sed -nE 's#.* => (/[^ ]+) \(0x[0-9a-f]+\)$#\1#p'
+      # the loader line has no "=>"
+      ldd "$1" 2>/dev/null | sed -nE 's#^[[:space:]]*(/[^ ]*ld-linux[^ ]*) \(0x[0-9a-f]+\)$#\1#p'
+    }
+    changed=1
+    while [ "${changed}" = 1 ]; do
+      changed=0
+      while IFS= read -r -d '' elf; do
+        is_elf "${elf}" || continue
+        while IFS= read -r dep; do
+          [ -n "${dep}" ] || continue
+          [ -e "${dep}" ] || continue
+          base="$(basename "${dep}")"
+          case "${base}" in linux-vdso*|'') continue ;; esac
+          if [ ! -e "${libdir}/${base}" ]; then
+            cp -Lf "${dep}" "${libdir}/${base}"
+            changed=1
+          fi
+        done < <(resolve_deps "${elf}")
+      done < <(find "${bindir}" "${libdir}" -type f -print0)
+    done
+
+    # ---- 2. The loader (copied verbatim, never patched) ---------------------
+    loader="$(patchelf --print-interpreter "${bindir}/repro")"
+    loadername="$(basename "${loader}")"
+    [ -e "${libdir}/${loadername}" ] || cp -Lf "${loader}" "${libdir}/${loadername}"
+    chmod u+w "${libdir}/${loadername}" 2>/dev/null || true
+
+    # ---- 3. Wrap every bin so it execs the bundled loader relocatably -------
+    # PT_INTERP cannot be $ORIGIN-relative, so instead of repointing the
+    # interpreter we launch through the bundled loader explicitly. The .real
+    # binary's own PT_INTERP is ignored when the loader is invoked this way.
+    while IFS= read -r -d '' app; do
+      is_elf "${app}" || continue
+      base="$(basename "${app}")"
+      case "${base}" in .*.real) continue ;; esac
+      mv "${app}" "${bindir}/.${base}.real"
+      cat > "${app}" <<EOS
+#!/bin/sh
+# reprobuild portable launcher: run the real binary through the bundled glibc
+# loader so it does not depend on the host's /nix/store or system glibc.
+here=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
+exec "\${here}/../lib/${loadername}" --library-path "\${here}/../lib" "\${here}/.${base}.real" "\$@"
+EOS
+      chmod +x "${app}"
+    done < <(find "${bindir}" -type f -print0)
+
+    echo "relocate(linux): bundled $(find "${libdir}" -type f | wc -l | tr -d ' ') libs; wrapped $(find "${bindir}" -name '.*.real' | wc -l | tr -d ' ') bins."
+    ;;
+
+  Darwin*)
+    # ---- 1. Bundle the otool dylib closure into lib/ ------------------------
+    # Walk each Mach-O in bin/ + lib/, copy every /nix/store (or other absolute,
+    # non-system) dylib dependency into lib/, iterating to a fixpoint.
+    is_macho() { file -b "$1" 2>/dev/null | grep -q 'Mach-O'; }
+    dylib_deps() {
+      otool -L "$1" 2>/dev/null | tail -n +2 | awk '{print $1}' \
+        | grep -E '^/' | grep -vE '^/usr/lib/|^/System/'
+    }
+    changed=1
+    while [ "${changed}" = 1 ]; do
+      changed=0
+      while IFS= read -r -d '' img; do
+        is_macho "${img}" || continue
+        while IFS= read -r dep; do
+          [ -n "${dep}" ] || continue
+          [ -e "${dep}" ] || continue
+          base="$(basename "${dep}")"
+          case "${base}" in @*) continue ;; esac
+          if [ ! -e "${libdir}/${base}" ]; then
+            cp -Lf "${dep}" "${libdir}/${base}"
+            chmod u+w "${libdir}/${base}" 2>/dev/null || true
+            changed=1
+          fi
+        done < <(dylib_deps "${img}")
+      done < <(find "${bindir}" "${libdir}" -type f -print0)
+    done
+
+    # bare-dlopen'd libs (libclingo/libzstd) — otool won't list them. Bundle
+    # under the EXACT names repro dlopens (libclingo.dylib / libzstd.1.dylib);
+    # a versioned copy would fail off-nix with `could not load: libclingo.dylib`.
+    dfind_lib() {
+      local glob="$1" pfx hit
+      for pfx in "${CLINGO_PREFIX:-}" "${ZSTD_PREFIX:-}"; do
+        [ -n "${pfx}" ] || continue
+        hit="$(find "${pfx}" -maxdepth 2 -name "${glob}" \( -type f -o -type l \) 2>/dev/null | head -n1 || true)"
+        [ -n "${hit}" ] && { printf '%s\n' "${hit}"; return 0; }
+      done
+      find /nix/store -maxdepth 3 -name "${glob}" \( -type f -o -type l \) 2>/dev/null | head -n1
+    }
+    for spec in 'libclingo*.dylib:libclingo.dylib' 'libzstd.1*.dylib:libzstd.1.dylib'; do
+      glob="${spec%%:*}"; dest="${spec##*:}"
+      src="$(dfind_lib "${glob}" || true)"
+      if [ -n "${src}" ]; then
+        cp -Lf "${src}" "${libdir}/${dest}"; chmod u+w "${libdir}/${dest}" 2>/dev/null || true
+      else
+        echo "relocate: WARNING ${dest} not found (dlopen may fail off-nix)" >&2
+      fi
+    done
+
+    # ---- 2. Rewrite install names / rpath to @loader_path/../lib -----------
+    # fixup_macho_runtime.sh adds LC_RPATH entries and sets -id on libraries,
+    # per-arch for universal images. Point every image at the bundled lib dir.
+    script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+    # A single @loader_path/../lib LC_RPATH resolves to pkg/lib for BOTH the
+    # bin/ executables (@loader_path=bin -> ../lib) and the lib/ dylibs
+    # (@loader_path=lib -> ../lib == lib). One rpath keeps the added load
+    # commands within the reserved header pad.
+    bash "${script_dir}/fixup_macho_runtime.sh" "${pkg_dir}" "@loader_path/../lib"
+
+    # Also rewrite each absolute dependency reference to @rpath/<base> so the
+    # LC_RPATH above resolves it from the bundle rather than /nix/store.
+    while IFS= read -r -d '' img; do
+      is_macho "${img}" || continue
+      chmod u+w "${img}" 2>/dev/null || true
+      while IFS= read -r dep; do
+        [ -n "${dep}" ] || continue
+        case "${dep}" in /usr/lib/*|/System/*|@*) continue ;; esac
+        install_name_tool -change "${dep}" "@rpath/$(basename "${dep}")" "${img}" 2>/dev/null || true
+      done < <(dylib_deps "${img}")
+    done < <(find "${bindir}" "${libdir}" -type f -print0)
+
+    # ---- 3. Ad-hoc re-sign (install_name_tool invalidated signatures) ------
+    while IFS= read -r -d '' img; do
+      is_macho "${img}" || continue
+      codesign --remove-signature "${img}" 2>/dev/null || true
+      codesign -f -s - "${img}" 2>/dev/null || codesign -f -s - --preserve-metadata=entitlements "${img}" 2>/dev/null || true
+    done < <(find "${bindir}" "${libdir}" -type f -print0)
+
+    echo "relocate(darwin): bundled $(find "${libdir}" -type f | wc -l | tr -d ' ') dylibs; re-signed bin/ + lib/."
+    ;;
+
+  *)
+    echo "relocate: unsupported OS ${os}" >&2
+    exit 1
+    ;;
+esac

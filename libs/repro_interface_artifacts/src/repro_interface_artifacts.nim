@@ -2648,12 +2648,42 @@ proc runCommand*(command: openArray[string];
         discard
       raise newException(OSError, "CreateProcessW failed (" & $err & ") for: " & commandLine)
 
-    discard winWaitForSingleObject(pi.hProcess, WinWaitInfinite)
+    # Bounded wait. A wedged `nim c` -- whose gcc children can deadlock on
+    # Windows and hold the runner for HOURS (observed on the 0.1.4 release:
+    # a 4h+ hang on the full-closure interface extract) -- must fail fast with
+    # whatever it wrote to the sink, never hang.
+    # REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS overrides the default cap; a
+    # value <= 0 restores the unbounded wait. On timeout the WHOLE process
+    # tree (nim.exe -> gcc.exe) is killed with `taskkill /T`, so no orphaned
+    # compiler keeps the slot busy, and the partial sink is still read -- so
+    # with `--listCmd` the LAST command in it is the sub-command that wedged.
+    var timeoutSecs = 1800
+    block:
+      let raw = getEnv("REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS").strip()
+      if raw.len > 0:
+        try:
+          timeoutSecs = parseInt(raw)
+        except ValueError:
+          timeoutSecs = 1800
+    var timedOut = false
+    if timeoutSecs <= 0:
+      discard winWaitForSingleObject(pi.hProcess, WinWaitInfinite)
+    else:
+      # WAIT_TIMEOUT is 0x102; WAIT_OBJECT_0 (0) means the process exited.
+      let waitResult = winWaitForSingleObject(pi.hProcess,
+        ProviderLockDword(min(timeoutSecs, high(int32) div 1000) * 1000))
+      if waitResult == ProviderLockDword(0x102):
+        timedOut = true
+        # No shell redirection: execCmd does not route through a shell that
+        # interprets `>`, so a `> nul` reaches taskkill as a literal argument
+        # and the kill silently no-ops. Its status lines go to the log.
+        discard execCmd("taskkill /F /T /PID " & $pi.dwProcessId)
+        discard winWaitForSingleObject(pi.hProcess, WinWaitInfinite)
     var rawExitCode: ProviderLockDword = 0
     discard winGetExitCodeProcess(pi.hProcess, addr rawExitCode)
     discard providerLockCloseHandle(pi.hThread)
     discard providerLockCloseHandle(pi.hProcess)
-    let exitCode = int(cast[int32](rawExitCode))
+    var exitCode = int(cast[int32](rawExitCode))
 
     var output = ""
     if fileExists(extendedPath(sinkPath)):
@@ -2665,6 +2695,12 @@ proc runCommand*(command: openArray[string];
         removeFile(extendedPath(sinkPath))
       except CatchableError:
         discard
+    if timedOut:
+      exitCode = 124
+      output = "runCommand: TIMED OUT after " & $timeoutSecs &
+        "s and killed the nim/gcc process tree. Partial sink output follows; " &
+        "with --listCmd the LAST command shown is the one that wedged.\n" &
+        output
     result = ProviderCompileExecutionResult(
       exitCode: exitCode,
       output: output)
@@ -5278,6 +5314,14 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
       producerPathFlags.add("--path:" & absolutePath(extra))
   if producerPathFlags.len > 0:
     command.insert(producerPathFlags, 4 + libFlags.len)
+  # Diagnostic (opt-in via REPRO_INTERFACE_LIST_CMD): make the otherwise-silent
+  # interface `nim c` echo every sub-command (the gcc.exe compile/link lines) it
+  # issues. Paired with runCommand's Windows timeout-and-dump-sink, the LAST
+  # echoed command in the dump names the exact sub-process that wedged, turning a
+  # silent multi-hour hang into an actionable error. Inserted among the flags
+  # (index 2), never after `runnerPath`, or nim treats it as a second input file.
+  if getEnv("REPRO_INTERFACE_LIST_CMD").len > 0:
+    command.insert(@["--listCmd"], 2)
   # `workDir` is the reprobuild library lookup/fingerprint root. Installed Nix
   # packages deliberately point it at their immutable source closure, so it is
   # not a valid compiler working directory: Nim writes relative linker response

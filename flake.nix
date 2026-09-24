@@ -289,6 +289,11 @@
       # reasoning — one commit, no source change, retargeting this repo's own
       # `nixos-modules` input at `metacraft-labs/devops-modules`. 203a3b8 is
       # the tip of nim-stackable-hooks' `dev`.
+      #
+      # It also carries what the 0.1.4 release branch pinned d51b571 for (the
+      # PR #6 merge: the arm64e PAC fix in the macOS body-patch primitive and
+      # the `inlineHookTransactionCapacity()` io-mon's Windows shim calls):
+      # d51b571 is an ancestor of 203a3b8.
       url = "github:metacraft-labs/nim-stackable-hooks/203a3b87366d321e2ea3f7f2126e88f28da48202";
       flake = false;
     };
