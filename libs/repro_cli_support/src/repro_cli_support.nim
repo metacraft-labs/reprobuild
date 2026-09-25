@@ -11906,6 +11906,9 @@ const DevelopOverridesEnvVar = "REPRO_DEVELOP_OVERRIDES_FILE"
   ## comment holding them together.
 
 proc runDevEnvIntrospectionHelper(args: openArray[string]): int =
+  # Provider compilation has finished. Its private source roots must not be
+  # mistaken for caller variables when foreign capture subtracts its baseline.
+  clearSeededSourcePackageEnvironment()
   let providerBinary = valueAfterFlag(args, "--provider-binary")
   let providerArtifactId = valueAfterFlag(args, "--provider-artifact-id")
   let projectRoot = valueAfterFlag(args, "--project-root")

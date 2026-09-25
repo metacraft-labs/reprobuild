@@ -16,6 +16,7 @@ const
   EnvelopeTypeDevEnv = 1'u16
 
   MaxTextBytes = 16 * 1024
+  MaxEnvValueBytes = 128 * 1024
   MaxMetadataBytes = 1024 * 1024
   MaxListItems = 4096
   MaxShellOps = 4096
@@ -31,13 +32,14 @@ type
   DevEnvArtifactCodecError* = object of CatchableError
 
   SszText = List[byte, MaxTextBytes]
+  SszEnvValue = List[byte, MaxEnvValueBytes]
   SszBytes = List[byte, MaxMetadataBytes]
   SszStringList = List[SszText, MaxListItems]
 
   DevEnvShellOpSsz = object
     kind: uint8
     name: SszText
-    value: SszText
+    value: SszEnvValue
     separator: SszText
     activityRequirements: SszStringList
 
@@ -183,6 +185,14 @@ proc toSszText(value: string): SszText =
     fail("dev-env artifact text value exceeds SSZ bound")
   SszText.init(fromByteString(value))
 
+proc toSszEnvValue(value: string): SszEnvValue =
+  # Nix compiler/linker flags can exceed the metadata text bound. SSZ list
+  # capacities are not serialized, so existing values retain their exact
+  # payload bytes and content IDs while the decoder accepts larger values.
+  if value.len > MaxEnvValueBytes:
+    fail("dev-env environment value exceeds 128 KiB SSZ bound")
+  SszEnvValue.init(fromByteString(value))
+
 proc fromSszText(value: SszText): string =
   toByteString(value.asSeq())
 
@@ -220,7 +230,7 @@ proc toSsz(value: DevEnvShellOp): DevEnvShellOpSsz =
   DevEnvShellOpSsz(
     kind: uint8(ord(value.kind)),
     name: toSszText(value.name),
-    value: toSszText(value.value),
+    value: toSszEnvValue(value.value),
     separator: toSszText(value.separator),
     activityRequirements: toSszStringList(value.activityRequirements))
 
@@ -230,7 +240,7 @@ proc fromSsz(value: DevEnvShellOpSsz): DevEnvShellOp =
   DevEnvShellOp(
     kind: DevEnvShellOpKind(value.kind),
     name: fromSszText(value.name),
-    value: fromSszText(value.value),
+    value: toByteString(value.value.asSeq()),
     separator: fromSszText(value.separator),
     activityRequirements: fromSszStringList(value.activityRequirements))
 

@@ -154,6 +154,28 @@ proc builtSourcePackageRoot(envName: string): string =
     if entry[0] == envName:
       return entry[1]
 
+const SeededSourceEnvironmentVar* = "REPRO_BOOTSTRAP_SOURCE_ENV"
+  ## Private provenance for compiler source roots injected by this CLI. It
+  ## travels with child compiler environments, but is removed before a provider
+  ## captures the user's development environment. Values are hex encoded so
+  ## every valid filesystem path survives this environment-only transport.
+
+proc clearSeededSourcePackageEnvironment*() =
+  ## Remove only unchanged bootstrap additions. Explicit caller values and
+  ## overrides made since seeding remain authoritative.
+  for line in getEnv(SeededSourceEnvironmentVar).splitLines():
+    let split = line.find('=')
+    if split <= 0:
+      continue
+    let name = line[0 ..< split]
+    try:
+      let value = parseHexStr(line[split + 1 .. ^1])
+      if existsEnv(name) and getEnv(name) == value:
+        delEnv(name)
+    except ValueError:
+      discard
+  delEnv(SeededSourceEnvironmentVar)
+
 proc seedSourcePackageEnvironment*(roots: openArray[(string, string)]) =
   ## Child compilers rebuild the interface-artifact module and therefore
   ## cannot see its parent's compile-time constants. Export valid embedded
@@ -168,6 +190,10 @@ proc seedSourcePackageEnvironment*(roots: openArray[(string, string)]) =
     if not existsEnv(envName) and root.isAbsolute and
         dirExists(extendedPath(root)):
       putEnv(envName, root)
+      let previous = getEnv(SeededSourceEnvironmentVar)
+      putEnv(SeededSourceEnvironmentVar,
+        previous & (if previous.len > 0: "\n" else: "") &
+        envName & "=" & toHex(root))
 
 proc ensureBuiltSourcePackageEnvironment*() =
   seedSourcePackageEnvironment(BuiltSourcePackageRoots)

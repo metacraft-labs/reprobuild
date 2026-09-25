@@ -391,6 +391,9 @@ stdenv.mkDerivation (finalAttrs: {
         --set-default XXHASH_PREFIX ${xxhash} \
         --set-default CLINGO_PREFIX ${clingo} \
         --set-default REPRO_NIM_COMPILER ${nimFork}/bin/nim
+      # Tag only defaults actually added by this wrapper. Foreign capture must
+      # compare against caller state, not mistake compiler inputs for that state.
+      ${python3}/bin/python3 scripts/mark_wrapper_defaults.py "$b"
     done
 
     # Dependency-Attribution MAC-1 — make the thin client and the engine agree

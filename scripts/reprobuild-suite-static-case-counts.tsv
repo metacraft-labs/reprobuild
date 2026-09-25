@@ -283,7 +283,7 @@ libs/repro_interface_artifacts/tests/t_multi_package_merge.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_source_discovery.nim	nim	3
 libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim	nim	8
-libs/repro_interface_artifacts/tests/t_reprobuild_source_root_from_binary_location.nim	nim	6
+libs/repro_interface_artifacts/tests/t_reprobuild_source_root_from_binary_location.nim	nim	8
 libs/repro_interface_artifacts/tests/t_rp1_provider_artifact_edge_identity.nim	nim	9
 libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim	nim	9
 libs/repro_interface_artifacts/tests/t_runtime_tool_uses_codec.nim	nim	3
@@ -1604,6 +1604,7 @@ tests/unit/t_daemon_request_working_directory.nim	nim	4
 tests/unit/t_declared_package_deps_from_recipe.nim	nim	6
 tests/unit/t_dev_env_cache_key_frame.nim	nim	4
 tests/unit/t_dev_env_cache_key_store_root.nim	nim	4
+tests/unit/t_dev_env_large_values.nim	nim	3
 tests/unit/t_dev_env_path_ops.nim	nim	9
 tests/unit/t_electron_builder_binaries.nim	nim	5
 tests/unit/t_every_tool_profile_is_sealed.nim	nim	6
@@ -1762,6 +1763,7 @@ tests/unit/test_nix_daemon_descriptors.py	python	5
 tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_publish_surface_routing.py	python	35
 tests/unit/test_reprobuild_suite_inventory.py	python	90
+tests/unit/test_wrapper_default_provenance.py	python	3
 tools/catalog-harvester/tests/test_gh_releases_source.nim	nim	26
 tools/catalog-harvester/tests/test_harvester_app_name_validation.nim	nim	6
 tools/catalog-harvester/tests/test_harvester_history.nim	nim	3
