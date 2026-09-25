@@ -13122,6 +13122,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_sync_and_hooks_help_print_usage.nim",
+    binary: "build/test-bin/t_sync_and_hooks_help_print_usage",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_sync_check_operate_from_committed_lock_without_manifests.nim",
     binary: "build/test-bin/t_sync_check_operate_from_committed_lock_without_manifests",
     defines: @[],

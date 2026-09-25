@@ -17252,6 +17252,21 @@ proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
       echo "  " & k & ": " & $report.summary[k]
   report.exitCode
 
+const HooksUsage = """usage: repro hooks <ensure|reinstall|uninstall> [--vcs] [--shell-direnv]
+                   [--shell=bash|zsh|fish|pwsh] [--workspace-root=PATH]
+                   [--json] [--write-report[=PATH]] [PATH]
+
+  ensure      install or repair the managed hooks (idempotent)
+  reinstall   rewrite the managed hooks from scratch
+  uninstall   remove the managed hooks
+
+  --vcs            the managed git hooks of every workspace repo
+                   (or of the repo at PATH)
+  --shell-direnv   the direnv .envrc activation block
+  --shell=NAME     a native shell activation hook
+With no selector flag both --vcs and --shell-direnv are implied.
+"""
+
 proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
   if args.len == 0:
     raise newException(ValueError,
@@ -17600,6 +17615,14 @@ proc runHooksCommand(args: openArray[string]): int =
       if args.len > 1: args[1 .. ^1]
       else: @[]
     return runCachePushCommand(cacheArgs)
+  if args.len > 0 and (args[0] == "help" or "--help" in args or
+      "-h" in args):
+    # An explicit help request prints usage to stdout and exits 0 (the
+    # convention ``wantsHelp`` documents). It used to reach the flag parser
+    # and fail as "unsupported hooks flag: --help". Bare ``repro hooks`` keeps
+    # its error: it names a missing action, not a request for help.
+    stdout.write(HooksUsage)
+    return 0
   let parsed = parseHooksCommand(args)
   case parsed.action
   of hakEnsure:
@@ -33807,35 +33830,82 @@ proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs): ResolvedProject =
   resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
     "`repro workspace sync`").resolved
 
-proc resolveNamedProjectOrVariant(workspaceRoot, name: string): ResolvedProject =
-  ## RA-27 scoped sync: resolve ONE named project (or variant) from the
-  ## manifest layer so its repo set can scope the participating set. An
-  ## unknown name is a clear, actionable error (Principle 2) naming where
-  ## we looked — the spec's "unknown project name → clear error".
+proc repoPassedAsProjectMessage(name: string): string =
+  "'" & name & "' is a repo, not a project: a positional argument to " &
+    "`repro sync` names a project (or variant, or repo-set). To sync " &
+    "only this repo, run `repro sync --only=" & name & "` (--only takes " &
+    "a comma-separated list; --filter takes a glob)"
+
+proc refuseRepoPassedAsProject(workspaceRoot: string;
+                               scopeProjects: openArray[string]) =
+  ## Up-front form of the refusal in ``resolveNamedProjectOrVariant``, for the
+  ## paths that resolve a positional BEFORE any participating set exists: a
+  ## workspace with no recorded metadata (the positional is the resolution
+  ## target) and ``--mainline`` (which resolves from the first positional).
+  ## Both would otherwise answer with the generic "no repo-set, project or
+  ## variant named" text. A name is refused only when no project, variant or
+  ## repo-set by that name exists AND a repo fragment does, so every name that
+  ## resolved before still resolves identically.
+  let root = manifestsRoot(workspaceRoot)
+  for name in scopeProjects:
+    if fileExists(root / "projects" / (name & ".toml")) or
+        fileExists(root / "variants" / (name & ".toml")) or
+        fileExists(root / repoSetsDirName / (name & ".toml")):
+      continue
+    if fileExists(root / "repos" / (name & ".toml")):
+      raise newException(ValueError, repoPassedAsProjectMessage(name))
+
+proc resolveNamedProjectOrVariant(workspaceRoot, name: string;
+    participatingRepos: openArray[string] = []): ResolvedProject =
+  ## RA-27 scoped sync: resolve ONE named project (or variant, or repo-set)
+  ## from the manifest layer so its repo set can scope the participating set.
+  ## The rungs and their order match ``resolveWorkspaceProjectShared``, so a
+  ## name the workspace's own resolution accepts is never refused here.
+  ##
+  ## An unknown name is a clear, actionable error (Principle 2) naming where
+  ## we looked. When the name is not a project but IS a repo participating in
+  ## this workspace, the error names the spelling that does what was meant —
+  ## ``--only=<repo>`` — rather than the generic unknown-project text: the
+  ## documented way to scope a force-push migration used to be ``repro ws sync
+  ## <repo>``, which never worked. The positional is deliberately NOT
+  ## reinterpreted as a repo selector: several names are both a project and a
+  ## repo, and a word whose meaning flips the day a manifest defines a project
+  ## by that name would silently widen the sweep (CLI/sync.md, Summary).
   let manifestsRoot = manifestsRoot(workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (name & ".toml")
   let variantFile = manifestsRoot / "variants" / (name & ".toml")
+  let repoSetFile = manifestsRoot / repoSetsDirName / (name & ".toml")
   if fileExists(projectFile):
     return resolveProject(projectFile)
   if fileExists(variantFile):
     return resolveVariant(variantFile)
+  if fileExists(repoSetFile):
+    return resolveRepoSet(repoSetFile)
+  if name in participatingRepos or
+      fileExists(manifestsRoot / "repos" / (name & ".toml")):
+    raise newException(ValueError, repoPassedAsProjectMessage(name))
   raise newException(ValueError,
     "unknown project '" & name & "' passed to `repro workspace sync` " &
-      "(no `projects/" & name & ".toml` or `variants/" & name &
-      ".toml` under '" & manifestsRoot &
+      "(no `projects/" & name & ".toml`, `variants/" & name &
+      ".toml` or `" & repoSetsDirName & "/" & name & ".toml` under '" &
+      manifestsRoot &
       "'); run `repro workspace sync` with no project to sync the whole " &
-      "workspace, or pass a known project name")
+      "workspace, pass a known project name, or select repos with " &
+      "--only / --filter")
 
 proc scopeRepoPathSet(workspaceRoot: string;
-    scopeProjects: openArray[string]): HashSet[string] =
+    scopeProjects: openArray[string];
+    participatingRepos: openArray[string] = []): HashSet[string] =
   ## The union of repo ``path`` values declared by the named projects.
   ## ``executeWorkspaceSync`` filters the workspace's participating repo
   ## set to this union — the resolver already knows project→repos, so a
   ## scoped sync is exactly "keep only repos that belong to a named
-  ## project". An unknown name raises (see ``resolveNamedProjectOrVariant``).
+  ## project". An unknown name raises (see ``resolveNamedProjectOrVariant``);
+  ## ``participatingRepos`` lets that error recognise a repo name.
   result = initHashSet[string]()
   for name in scopeProjects:
-    let proj = resolveNamedProjectOrVariant(workspaceRoot, name)
+    let proj = resolveNamedProjectOrVariant(workspaceRoot, name,
+      participatingRepos)
     for repo in proj.repos:
       result.incl(repo.path)
 
@@ -38318,7 +38388,11 @@ proc narrowSyncRepoSet(args: WorkspaceSyncArgs;
   ## there is no longer a place to apply two of them.
   result = repos
   if args.scopeProjects.len > 0:
-    let scopePaths = scopeRepoPathSet(workspaceRoot, args.scopeProjects)
+    var repoNames: seq[string]
+    for repo in repos:
+      repoNames.add(repo.name)
+    let scopePaths = scopeRepoPathSet(workspaceRoot, args.scopeProjects,
+      repoNames)
     var kept: seq[ResolvedRepo]
     for repo in result:
       if repo.path in scopePaths:
@@ -39639,6 +39713,38 @@ proc runMainlineSyncCommand(parsed: WorkspaceSyncArgs): int =
       stdout.writeLine(line)
   report.exitCode
 
+const WorkspaceSyncUsage = """usage: repro sync [<project>...] [options]
+       repro workspace sync [<project>...] [options]
+
+Fetch every selected repo and fast-forward it toward its own current-branch
+upstream; clone declared repos that are missing. A <project> positional (a
+project, variant or repo-set name) scopes the sync to that project's repos.
+To scope to individual repos use --only / --except / --filter.
+
+selection:
+  --only=a,b            only the named repos (exact names)
+  --except=a,b          drop the named repos
+  --filter=GLOB         repos whose name matches GLOB
+  --tags=t,-u           by manifest tag (a leading '-' excludes)
+reconciliation:
+  --mainline            reconcile toward each repo's manifest-declared branch
+  --rebase | --merge    how --mainline integrates a diverged branch
+  --rebase-on-force-push
+                        replay local commits onto a rewritten upstream
+  --force-sync          overwrite divergent/dirty checkouts (confirms)
+  --yes, --force        skip the --force-sync confirmation
+execution:
+  --jobs N, -j N        default parallelism for fetch and checkout
+  --jobs-network N      parallel fetches (default 8)
+  --jobs-checkout N     parallel checkouts (default: CPU count)
+  --dry-run             print the plan and exit; mutates nothing
+  --json                one machine-readable document on stdout
+  --write-report[=PATH] persist the report as sync-report.json
+  --verbose, -v         include raw per-repo tool output
+  --workspace-root=PATH operate on another workspace
+  --tool-provisioning=path|nix|tarball|scoop
+"""
+
 proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ## ``repro workspace sync [<project>...] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop]
@@ -39693,7 +39799,14 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ##         (``dirty`` or ``locally_unpublished``). The operator has
   ##         manual work to do. Distinct from exit-1 ("sync blew up")
   ##         so scripts can tell the two apart.
+  if "--help" in args or "-h" in args:
+    # Explicit help prints usage to stdout and exits 0 (``wantsHelp``
+    # convention). It used to be refused as "unsupported `repro workspace
+    # sync` flag: --help".
+    stdout.write(WorkspaceSyncUsage)
+    return 0
   let parsed = parseWorkspaceSyncArgs(args)
+  refuseRepoPassedAsProject(parsed.workspaceRoot, parsed.scopeProjects)
   # ``--mainline`` reconciles toward each repo's manifest-declared branch
   # instead of its own upstream. Different target, different decision table,
   # so a separate executor — see the block comment above it.
