@@ -4441,11 +4441,30 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         # output (``staticExec`` swallows the failure) — then ``newFingerprint``
         # stays empty and the guards below refuse to cache, so the next consumer
         # retries instead of caching a poisoned/empty result.
+        #
+        # The frame is looked for at the start of a LINE, not only at byte 0.
+        # ``staticExec`` merges the compile's output with the program's, and
+        # the compile is not always silent: ``config.nims`` reports every
+        # package it could add no ``--path`` for (``reportUnresolvedPackagePath``)
+        # on stdout, before the generator has run, and ``--hints:off
+        # --warnings:off`` does not reach a configuration file's own ``echo``.
+        # An engine installed away from its sibling checkouts always has such
+        # packages, so requiring the frame at byte 0 refused every generator
+        # run there although the generator itself had succeeded. Anything
+        # before the first frame line is the compile's; the frame and
+        # everything after it is the program's. A generator that never ran
+        # still has no frame, and is still refused below.
         var newFingerprint = ""
         if genOut.len > 0:
-          let nl = genOut.find('\n')
-          if nl >= 0 and genOut.startsWith("IFP:"):
-            newFingerprint = genOut[4 ..< nl].strip()
+          let frameStart =
+            if genOut.startsWith("IFP:"): 0
+            else:
+              let at = genOut.find("\nIFP:")
+              if at >= 0: at + 1 else: -1
+          let nl =
+            if frameStart >= 0: genOut.find('\n', frameStart) else: -1
+          if nl >= 0:
+            newFingerprint = genOut[frameStart + 4 ..< nl].strip()
             accessorSrc = genOut[nl + 1 .. ^1]
           else:
             error("resource accessor generation failed for '" & selector &
