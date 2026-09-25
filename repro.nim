@@ -2388,7 +2388,7 @@ package reprobuild:
       # dry runs 36070347140 and 36080613401). Scoped to this edge's env, the
       # same way the i686 edges below carry their compiler's bin dir; the
       # fallback is where Xcode's Command Line Tools install it.
-      let macosLipo = findExe("lipo")
+      let macosLipo = uncontrolledFindExe("lipo")
       let macosShimEnv = @[("PATH",
         (if macosLipo.len > 0: macosLipo.parentDir else: "/usr/bin") &
           $PathSep & getEnv("PATH"))]
