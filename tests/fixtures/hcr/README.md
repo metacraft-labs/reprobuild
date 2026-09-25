@@ -11,6 +11,8 @@ From the repository root, run the relevant gate with its negative controls:
 ```sh
 bash tests/integration/test_hax_m0_reverse_relocation_index_and_dead_patch_reachability.sh --include-falsifier
 bash tests/integration/test_hax_m1_binary_type_layout_diff_detects_field_shifts.sh --include-falsifier
+bash tests/integration/test_hax_m2_macho_lazy_symbol_and_vtable_interception.sh --include-falsifier  # macOS: builds Mach-O dylibs
+bash tests/integration/test_hax_m3_cli_watcher_triggers_compilation_and_patch_push.sh --include-falsifier
 ```
 
 Passing the source-enrollment check does not execute these shell gates. They

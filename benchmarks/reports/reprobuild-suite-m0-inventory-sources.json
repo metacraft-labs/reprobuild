@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1747,
+    "nimTestBinaries": 1745,
     "pureUnitConsolidationGroups": 49,
     "pureUnitTests": 585,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1759
+    "testEntries": 1757
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1086,7 +1086,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 895,
+      "integration": 893,
       "platform/destructive": 115,
       "pure unit": 585,
       "unclassified": 153
@@ -1237,9 +1237,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1747,
+    "nimTestBinaryCount": 1745,
     "pythonTestFileCount": 12,
-    "testEntryCount": 1759
+    "testEntryCount": 1757
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -34228,40 +34228,6 @@
       "source": "tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
-      "binary": "build/test-bin/test_hax_m2_macho_lazy_symbol_and_vtable_interception",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
-      "defines": [],
-      "language": "nim",
-      "localDependencyShape": [
-        "repro_hcr_agent"
-      ],
-      "owner": "tests/integration",
-      "requiresReproBinary": false,
-      "source": "tests/integration/test_hax_m2_macho_lazy_symbol_and_vtable_interception.nim",
-      "sourceSuiteCount": 0,
-      "staticCaseCount": 0,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
-      "binary": "build/test-bin/test_hax_m3_cli_watcher_triggers_compilation_and_patch_push",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
-      "defines": [],
-      "language": "nim",
-      "localDependencyShape": [
-        "repro_dsl_stdlib"
-      ],
-      "owner": "tests/integration",
-      "requiresReproBinary": true,
-      "source": "tests/integration/test_hax_m3_cli_watcher_triggers_compilation_and_patch_push.nim",
-      "sourceSuiteCount": 0,
-      "staticCaseCount": 0,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

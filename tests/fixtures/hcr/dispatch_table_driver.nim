@@ -1,4 +1,4 @@
-# test_hax_m2_macho_lazy_symbol_and_vtable_interception.nim
+# dispatch_table_driver.nim
 #
 # Integration verification test for Milestone HAX-M2:
 # "Dispatch Table and Stub Interception"
