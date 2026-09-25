@@ -10,13 +10,20 @@ const
   # ``dev``-branch Tup compiler flags. Keep the full-command fingerprint
   # pinned to that corrected command, and assert the flag explicitly below so
   # a future hash refresh cannot accidentally hide its removal.
-  NimJsSemanticsHash = "e64dd35563bfa374"
-  NimJsWithoutOldCaseObjectsHash = "a7cf3ce1b73f8bfa"
+  #
+  # Refreshed at a9ef983e (the revision ``flake.lock`` pins for
+  # ``codetracer-src``): CodeTracer 85c6dfe73 appended the eight
+  # ``../runquota/libs/*/src`` search paths to ``NIM_REPO_PATH_FLAGS``, which
+  # ``!nim_js`` expands through ``NIM_SELECTED``. That is the only change to a
+  # fingerprinted definition since 04d6aff3; ``!trace_object_file`` is
+  # unchanged, so its hash is too.
+  NimJsSemanticsHash = "b8d6481bcc00d87b"
+  NimJsWithoutOldCaseObjectsHash = "85e7880da3e33f69"
   TraceObjectFileSemanticsHash = "3d1a52e3befe61cf"
   CodeTracerTupSemanticsCommit =
-    "04d6aff3d012b3e768dbebba186c950637e0c2b3"
+    "a9ef983ed1e7d9a60b85034b596f55ea8b2164f5"
   PinnedTupSemanticsFixture =
-    "tests/fixtures/codetracer-subset/Tuprules-04d6aff3.tup"
+    "tests/fixtures/codetracer-subset/Tuprules-a9ef983e.tup"
 
 type
   TupRules = object
