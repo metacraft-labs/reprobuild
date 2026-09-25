@@ -14458,6 +14458,20 @@ proc runDevEnvExportCommand(args: openArray[string];
   if not parsed.allowStale and emitDevEnvDiagnostics(artifact):
     return 1
 
+  # The edge cache is shared by exec and other shells. Keep this activation's
+  # RBDE and rollback sidecar together in a private, unique directory so an
+  # ordinary cache refresh cannot change the artifact sealed below.
+  let activationArtifactPath =
+    try:
+      let activationDir = createTempDir("activation-", "",
+        parentDir(edge.artifactPath))
+      let snapshotPath = activationDir / extractFilename(edge.artifactPath)
+      writeDevEnvArtifact(snapshotPath, artifact)
+      snapshotPath
+    except CatchableError as err:
+      stderr.writeLine("repro dev-env export: " & err.msg)
+      return 1
+
   # W2 — this surface REPORTS producer pins but does not apply them, and the
   # asymmetry with ``repro shell`` / ``exec`` / ``run`` is deliberate rather
   # than an omission. The export plan is sealed: ``dev-env deactivate``
@@ -14487,14 +14501,14 @@ proc runDevEnvExportCommand(args: openArray[string];
   var plan = shellOpsToExportPlan(
     devEnvToolShellOpsAt(edge.interfacePath, selection.outDir))
   let toolOpCount = plan.len
-  plan.add(devEnvArtifactToExportPlan(edge.artifactPath))
+  plan.add(devEnvArtifactToExportPlan(activationArtifactPath))
   # M77 — emit the cache-key as the ``__REPRO_APPLIED`` marker. The
   # next prompt's fast path re-derives the same key from on-disk
   # inputs and compares; a match short-circuits without any build
   # engine work. Using the cache key (not the SSZ artifact ID) is what
   # makes the fast path actually fast.
   let fingerprint = candidateKey
-  let manifestPath = rollbackManifestPath(edge.artifactPath)
+  let manifestPath = rollbackManifestPath(activationArtifactPath)
   # M75 — emit the manifest path as a marker BEFORE the
   # ``__REPRO_APPLIED`` fingerprint so the hook's deactivation arm
   # can locate the manifest via ``$__REPRO_ACTIVE_MANIFEST`` on the

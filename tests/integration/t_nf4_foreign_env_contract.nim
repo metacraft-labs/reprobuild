@@ -13,7 +13,7 @@
 ## functions with no boundary at all. The nix-dependent half of NF-4 lives in
 ## `tests/e2e/dev-env/t_e2e_nf4_flake_dev_shell.nim`, which runs a real `nix`.
 
-import std/[algorithm, os, osproc, strutils, tempfiles, unittest]
+import std/[algorithm, os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_dev_env_engine
 import repro_dev_env_engine/cache_key
@@ -47,7 +47,69 @@ proc hasOpFor(ops: openArray[ForeignEnvOp]; name: string): bool =
       return true
   false
 
+# Child mode exercises the real capture boundary in independent processes.
+if paramCount() == 3 and paramStr(1) == "--capture-worker":
+  let root = paramStr(2)
+  let label = paramStr(3)
+  let producer = "printf 'export REPRO_CAPTURE_OWNER=%s\\n' \"$1\"; " &
+    "if [ \"$1\" = first ]; then touch \"$2/ready\"; " &
+    "while [ ! -e \"$2/release\" ]; do sleep 0.02; done; fi"
+  let ops = captureForeignEnvOps(@[findExe("bash"), "-c", producer,
+    "capture-test", label, root], root, root / "print-dev-env.bash")
+  doAssert opFor(ops, "REPRO_CAPTURE_OWNER", feoSet).value == label
+  quit(0)
+
 suite "nf4_foreign_env_contract":
+
+  test "concurrent_captures_keep_their_own_output_and_script":
+    let root = createTempDir("repro-concurrent-capture-", "")
+    defer: removeDir(root)
+    var first = startProcess(getAppFilename(), args =
+      ["--capture-worker", root, "first"], options = {})
+    defer:
+      if first.running(): first.terminate()
+      first.close()
+    var ready = false
+    for attempt in 0 ..< 3000:
+      if fileExists(root / "ready"):
+        ready = true
+        break
+      if not first.running(): break
+      sleep(20)
+    if not ready:
+      first.terminate()
+    require ready
+    var second = startProcess(getAppFilename(), args =
+      ["--capture-worker", root, "second"], options = {})
+    defer:
+      if second.running(): second.terminate()
+      second.close()
+    let secondCode = second.waitForExit(60000)
+    if secondCode == -1: second.terminate()
+    writeFile(root / "release", "")
+    let firstCode = first.waitForExit(60000)
+    if firstCode == -1: first.terminate()
+    if secondCode != 0: checkpoint second.errorStream.readAll()
+    if firstCode != 0: checkpoint first.errorStream.readAll()
+    check secondCode == 0
+    check firstCode == 0
+    for kind, path in walkDir(root):
+      check kind != pcDir # Per-call scratch must be removed.
+
+  test "non_shell_environment_names_are_not_unset_by_capture":
+    let root = createTempDir("repro-cargo-environment-", "")
+    defer: removeDir(root)
+    var baseline = currentEnvironmentPairs()
+    baseline.add(("CC_wasm32-unknown-unknown", "/toolchain/clang"))
+    baseline.add(("9INVALID", "inherited"))
+    let ops = captureForeignEnvOps(
+      @[findExe("bash"), "-c", "printf 'export _VALID9=captured\\n'"],
+      root, root / "environment.bash", baseline = baseline)
+    check not ops.hasOpFor("CC_wasm32-unknown-unknown")
+    check not ops.hasOpFor("9INVALID")
+    check opFor(ops, "_VALID9", feoSet).value == "captured"
+    let synthetic = foreignEnvOpsFromDump([], @[("NEW-INVALID", "ignored")])
+    check synthetic.len == 0
 
   test "standalone flakes do not require a workspace resolver":
     let root = createTempDir("repro-standalone-flake-", "")

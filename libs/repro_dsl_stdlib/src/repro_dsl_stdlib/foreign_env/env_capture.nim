@@ -38,7 +38,7 @@
 ## baseline does not survive is reported as a plain `setEnv`, which is the
 ## conservative answer.
 
-import std/[algorithm, os, osproc, streams, strtabs, strutils, tables]
+import std/[algorithm, os, osproc, streams, strtabs, strutils, tables, tempfiles]
 
 import repro_core/ambient_execution
 import repro_core/paths
@@ -78,7 +78,14 @@ const
     ## Names never recorded as a contribution, whatever they hold.
 
 proc isIgnoredForeignEnvName*(name: string): bool =
-  ## True when `name` is shell bookkeeping rather than a contribution.
+  ## Ignore bookkeeping and names the shell dump cannot represent. Cargo may
+  ## pass OS environment keys such as CC_wasm32-unknown-unknown; their absence
+  ## from `export -p`'s identifier dump is not an instruction to unset them.
+  if name.len == 0 or name[0] notin {'A'..'Z', 'a'..'z', '_'}:
+    return true
+  for ch in name:
+    if ch notin {'A'..'Z', 'a'..'z', '0'..'9', '_'}:
+      return true
   for ignored in ForeignEnvIgnoredNames:
     if name == ignored:
       return true
@@ -318,18 +325,18 @@ proc captureForeignEnvOps*(argv: openArray[string]; workingDir, scriptPath: stri
   ## migrating from whatever direnv context the caller was already in) gets
   ## that filtering applied consistently across all three.
   ##
-  ## `scriptPath` is where the produced script is kept. It is a stable name,
-  ## and the file is deliberately NOT deleted afterwards, for two reasons. It
-  ## is the thing to read when a dev shell is not what somebody expected — the
-  ## foreign environment's own words, not Reprobuild's summary of them. And a
-  ## per-run temporary name would put a different path into the observed input
-  ## set on every evaluation, which is churn the invalidation machinery would
-  ## then have to absorb; a stable path with deterministic content is simply
-  ## another correctly-fingerprinted input.
+  ## Each call owns its producer output, captured dump and sourced script.
+  ## Concurrent shell entries must not truncate or remove each other's files.
+  ## `scriptPath` is only the last successful diagnostic script, published by
+  ## rename after sourcing the private copy. The private directory lives under
+  ## the same project foreign-env scratch tree already excluded from inputs.
   let baselinePairs =
     if baseline.len > 0: @baseline else: currentEnvironmentPairs()
   let baselineEnv = environmentTable(baselinePairs)
-  let scratch = parentDir(scriptPath)
+  createDir(extendedPath(parentDir(scriptPath)))
+  let scratch = createTempDir("capture-", "", parentDir(scriptPath))
+  defer: removeDir(extendedPath(scratch))
+  let privateScript = scratch / "environment.bash"
   let produced = runCaptureCommand(argv, workingDir,
     scratch / "producer.stdout", scratch / "producer.stderr", baselineEnv,
     captureShell)
@@ -343,12 +350,11 @@ proc captureForeignEnvOps*(argv: openArray[string]; workingDir, scriptPath: stri
       "an empty environment" &
       (if produced.error.len > 0: "\n" & produced.error.strip() else: ""))
 
-  createDir(extendedPath(parentDir(scriptPath)))
-  writeFile(extendedPath(scriptPath), produced.output)
+  writeFile(extendedPath(privateScript), produced.output)
 
   let shell = resolveCaptureShell(captureShell)
   let dumped = runCaptureCommand(
-    @[shell, "--noprofile", "--norc", "-c", captureScriptFor(scriptPath)],
+    @[shell, "--noprofile", "--norc", "-c", captureScriptFor(privateScript)],
     workingDir, scratch / "capture.stdout", scratch / "capture.stderr",
     baselineEnv, captureShell)
   if dumped.exitCode != 0:
@@ -356,5 +362,6 @@ proc captureForeignEnvOps*(argv: openArray[string]; workingDir, scriptPath: stri
       "sourcing the environment produced by " & argv.join(" ") &
       " failed with exit code " & $dumped.exitCode &
       (if dumped.error.len > 0: "\n" & dumped.error.strip() else: ""))
-  foreignEnvOpsFromDump(baselinePairs, parseNulEnvDump(dumped.output),
+  result = foreignEnvOpsFromDump(baselinePairs, parseNulEnvDump(dumped.output),
     separator)
+  moveFile(extendedPath(privateScript), extendedPath(scriptPath))

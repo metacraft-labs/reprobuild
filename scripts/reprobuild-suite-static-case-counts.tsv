@@ -765,7 +765,7 @@ tests/e2e/dev-env/t_e2e_dev_env_announces_before_working.nim	nim	4
 tests/e2e/dev-env/t_e2e_dev_env_binds_materialized_producer.nim	nim	2
 tests/e2e/dev-env/t_e2e_dev_env_deactivate_per_shell.nim	nim	7
 tests/e2e/dev-env/t_e2e_dev_env_deactivate_round_trip.nim	nim	5
-tests/e2e/dev-env/t_e2e_dev_env_deactivate_tampered.nim	nim	6
+tests/e2e/dev-env/t_e2e_dev_env_deactivate_tampered.nim	nim	7
 tests/e2e/dev-env/t_e2e_dev_env_edge_cache.nim	nim	3
 tests/e2e/dev-env/t_e2e_dev_env_export_bash.nim	nim	4
 tests/e2e/dev-env/t_e2e_dev_env_export_fish.nim	nim	4
@@ -1285,7 +1285,7 @@ tests/integration/t_negative_chain_fixtures.nim	nim	14
 tests/integration/t_nested_bootstrap_runtime_closure.nim	nim	1
 tests/integration/t_nested_lock_push_capability_security.nim	nim	10
 tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	nim	1
-tests/integration/t_nf4_foreign_env_contract.nim	nim	11
+tests/integration/t_nf4_foreign_env_contract.nim	nim	13
 tests/integration/t_nim_package_path_handling.nim	nim	1
 tests/integration/t_nix_daemon_ipc.nim	nim	4
 tests/integration/t_nix_daemon_provisioner.nim	nim	5

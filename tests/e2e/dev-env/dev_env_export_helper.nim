@@ -92,6 +92,13 @@ proc envFor*(c: M74Case): StringTableRef =
     if key.startsWith("__REPRO_"):
       continue
     result[key] = value
+  # Exercise the fixture's built client/engine pair, even when the outer test
+  # command was launched through a different installed Repro environment.
+  # shellCommand overlays env entries onto its parent, so omission would
+  # inherit the outer override again; explicitly export empty values.
+  result["REPRO_FULL_CLI"] = ""
+  result["REPRO_PUBLIC_CLI_PATH"] = ""
+  result["REPROBUILD_REPRO"] = ""
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
   result["REPRO_DEV_ENV_AUTO_ALLOW"] = "1"
   result["HOME"] = c.tempRoot
