@@ -2,8 +2,8 @@
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
     "nimTestBinaries": 1747,
-    "pureUnitConsolidationGroups": 49,
-    "pureUnitTests": 585,
+    "pureUnitConsolidationGroups": 48,
+    "pureUnitTests": 584,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
     "testEntries": 1759
   },
@@ -91,19 +91,6 @@
       "sources": [
         "libs/repro_cli_support/tests/t_provider_compile_entry_points_publish_bootstrap_toolchain.nim",
         "libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 2,
-      "defines": [],
-      "dependencyShape": [
-        "repro_daemon_core"
-      ],
-      "owner": "libs/repro_daemon_core",
-      "sources": [
-        "libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim",
-        "libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1088,8 +1075,8 @@
       "graph-fixture": 11,
       "integration": 895,
       "platform/destructive": 115,
-      "pure unit": 585,
-      "unclassified": 153
+      "pure unit": 584,
+      "unclassified": 154
     },
     "graphOwnedTestArtifacts": [
       {
@@ -8960,8 +8947,8 @@
     },
     {
       "binary": "build/test-bin/t_daemon_active_session_tally",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -8971,7 +8958,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 17,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
