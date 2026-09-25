@@ -75,7 +75,7 @@ when defined(linux) and defined(amd64):
       let repoRoot = getCurrentDir()
       let workDir = repoRoot / "build" / "hcr-linux-phase-i"
       createDir(workDir)
-      let repro = repoRoot / "build" / "bin" / "repro"
+      let repro = repoRoot / "build" / "bin" / "repro".addFileExt(ExeExt)
       if not fileExists(repro):
         raise newException(IOError,
           Gate & " requires the built `repro` binary at " & repro &
