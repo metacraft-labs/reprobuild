@@ -12834,6 +12834,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_shared_bare_refresh_keeps_objects_borrowers_reference.nim",
+    binary: "build/test-bin/t_shared_bare_refresh_keeps_objects_borrowers_reference",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_shared_clone_alternates_skip_redownload.nim",
     binary: "build/test-bin/t_shared_clone_alternates_skip_redownload",
     defines: @[],
