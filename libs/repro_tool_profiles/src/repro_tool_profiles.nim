@@ -16,6 +16,7 @@ import repro_domain_types
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_hash
 import repro_interface_artifacts
+import repro_interface_artifacts/provisioning_pins
 import repro_local_store
 # Binary-cache substitution for realized tool prefixes. Adding these imports
 # is what closes the gap where a package realized by URL+digest never
@@ -1026,47 +1027,141 @@ proc effectiveNixSelector(selected: InterfaceNixProvisioning): string =
       selected.nixpkgsNarHash) & "#" & selected.selector["nixpkgs#".len .. ^1]
   selected.selector
 
-proc requestedProvisioningContributor(): string =
-  getEnv("REPRO_PROVISIONING_CONTRIBUTOR").strip()
+const RemovedContributorSelectorEnv* = "REPRO_PROVISIONING_CONTRIBUTOR"
+  ## The environment-variable pseudo-lock M7 deliverable 3 removed. It is not
+  ## read as a selection any more; a non-empty value REFUSES provisioning
+  ## selection (``refuseRemovedContributorSelector``) rather than being
+  ## ignored, so a caller that still relies on it learns that it no longer
+  ## selects anything instead of silently getting another contributor.
+
+proc refuseRemovedContributorSelector(packageSelector: string) =
+  ## Refuse loudly while the removed selector is still set. Ignoring it
+  ## would be silent: whoever set it expects contributor X, and would get
+  ## the lock's or the unique eligible contributor instead with no signal.
+  ## Honouring it would let the environment override the committed lock.
+  let value = getEnv(RemovedContributorSelectorEnv)
+  if value.len > 0:
+    raise newException(ValueError,
+      "tool-resolution failed: " & RemovedContributorSelectorEnv &
+      " is set (\"" & value & "\") while resolving package \"" &
+      packageSelector & "\", but selecting a provisioning contributor " &
+      "through the environment was removed (ReproOS M7 deliverable 3). A " &
+      "contribution is selected only by the committed lock (the repro.lock " &
+      "`provisioning` records) or an explicit curator policy, and the " &
+      "environment never overrides either. Unset " &
+      RemovedContributorSelectorEnv & "; to pin a contributor, lock the " &
+      "selection.")
 
 proc contributorLabel(value: string): string =
   if value.len > 0: value else: "canonical-package"
 
-proc contributorLockIdentity(contributor, realizationIdentity: string): string =
-  if contributor.len == 0:
+proc selectContributor(useDef: InterfaceToolUse; family: string;
+                       offered: openArray[string]; scope = ""): string =
+  ## WHICH contributor provisions ``useDef`` in ``family``, given the
+  ## contributor of every eligible entry. Precedence (Provisioning-
+  ## Contributions.md, Resolution): the resolver's pin -- the committed lock
+  ## or an explicit curator policy, already checked against the composed
+  ## catalogs and the consumer's artifact -- else a unique eligible
+  ## contributor, else an ambiguity refusal. Import order never decides, and
+  ## neither does the environment. Returns "" only when ``offered`` is empty.
+  refuseRemovedContributorSelector(useDef.packageSelector)
+  let pin = useDef.provisioningPin
+  var candidates: seq[string] = @[]
+  for contributor in offered:
+    if contributor notin candidates:
+      candidates.add(contributor)
+  candidates.sort(cmp)
+  if pin.isPinned:
+    let defects = pinDefects(pin)
+    if defects.len > 0:
+      raise newException(ValueError,
+        "tool-resolution failed: malformed provisioning pin on package \"" &
+        useDef.packageSelector & "\": " & defects.join("; "))
+    if pin.packageName != useDef.packageSelector:
+      raise newException(ValueError,
+        "tool-resolution failed: the provisioning pin on package \"" &
+        useDef.packageSelector & "\" was made for package \"" &
+        pin.packageName & "\"")
+    if pin.contributor notin candidates:
+      raise newException(ValueError,
+        "tool-resolution failed: the provisioning selection for package \"" &
+        useDef.packageSelector & "\" pins " & describePin(pin) &
+        ", but no " & family & " realization from it is eligible" & scope &
+        "; eligible contributors: " &
+        (if candidates.len == 0: "<none>"
+         else: candidates.mapIt(contributorLabel(it)).join(", ")) &
+        ". The pin is not relaxed to another contributor: provision the " &
+        "package in a family the pinned contribution declares, or refresh " &
+        "the lock.")
+    return pin.contributor
+  if candidates.len > 1:
+    raise newException(ValueError,
+      "tool-resolution failed: ambiguous " & family &
+      " provisioning for package \"" & useDef.packageSelector &
+      "\"; eligible contributors: " &
+      candidates.mapIt(contributorLabel(it)).join(", ") &
+      "; import order is never a selection rule -- select one through the " &
+      "committed lock (repro.lock `provisioning`) or an explicit curator " &
+      "policy")
+  if candidates.len == 1: candidates[0] else: ""
+
+proc contributorLockIdentity(contributor: string; pin: ProvisioningPin;
+                             realizationIdentity: string): string =
+  ## The plan's lock identity. A PINNED selection additionally binds the
+  ## contribution fingerprint the resolver verified, so the realized prefix
+  ## (``unifiedPrefixPath``), the tool profile fingerprint and the typed-tool
+  ## action fingerprint all move when only the contribution changes -- the
+  ## realization and build edges that selected it are invalidated -- while
+  ## the lock's ``lockIdentityOf`` (typechecking) does not
+  ## (Provisioning-Contributions.md, Locks And Snapshots; M7 deliverable 4).
+  if pin.isPinned:
+    "contributor:" & contributor & "\ncontribution:" &
+      pin.contributionFingerprint & "\n" & realizationIdentity
+  elif contributor.len == 0:
     realizationIdentity
   else:
     "contributor:" & contributor & "\n" & realizationIdentity
 
+proc lockedRealizationOf(useDef: InterfaceToolUse): string =
+  ## The realization lock identity a COMMITTED-LOCK pin names, or "" when
+  ## the use is unpinned or the pin selects a contributor only (curator
+  ## policy / unique eligible).
+  if useDef.provisioningPin.isPinned:
+    useDef.provisioningPin.realizationLockIdentity
+  else:
+    ""
+
+proc refuseLockedRealizationMissing(useDef: InterfaceToolUse;
+                                    family, scope: string) {.noreturn.} =
+  raise newException(ValueError,
+    "tool-resolution failed: the provisioning selection for package \"" &
+    useDef.packageSelector & "\" pins realization \"" &
+    useDef.provisioningPin.realizationLockIdentity & "\" of " &
+    describePin(useDef.provisioningPin) & ", but the pinned contributor " &
+    "declares no " & family & " realization with that lock identity" &
+    scope & ". The locked realization is not replaced by another of the " &
+    "contributor's realizations: provision the package in the family the " &
+    "lock pins, or refresh the lock.")
+
 proc selectNixProvisioning(useDef: InterfaceToolUse):
     InterfaceNixProvisioning =
-  let requested = requestedProvisioningContributor()
-  var contributors: seq[string] = @[]
   # ``result.selector`` is NOT a usable "nothing chosen yet" sentinel: an entry
   # whose selector is empty is still an ELIGIBLE entry with incomplete
   # metadata, and treating it as unchosen reported "no nix realization" for a
   # package that declares one. ``nixAcquisitionPlan`` owns the completeness
   # diagnostic; selection only decides WHICH entry.
-  var chosen = false
+  let contributor = selectContributor(useDef, "nix",
+    useDef.nixProvisioning.mapIt(it.contributor))
+  let wanted = lockedRealizationOf(useDef)
   for candidate in useDef.nixProvisioning:
-    if requested.len > 0 and candidate.contributor != requested:
-      continue
-    if candidate.contributor notin contributors:
-      contributors.add(candidate.contributor)
-    if not chosen:
-      result = candidate
-      chosen = true
-  if not chosen:
-    raise newException(ValueError,
-      "tool-resolution failed: provisioning contributor \"" & requested &
-      "\" has no nix realization for package \"" &
-      useDef.packageSelector & "\"")
-  if requested.len == 0 and contributors.len > 1:
-    raise newException(ValueError,
-      "tool-resolution failed: ambiguous nix provisioning for package \"" &
-      useDef.packageSelector & "\"; eligible contributors: " &
-      contributors.mapIt(contributorLabel(it)).join(", ") &
-      "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
+    if candidate.contributor == contributor and
+        (wanted.len == 0 or candidate.lockIdentity == wanted):
+      return candidate
+  if wanted.len > 0:
+    refuseLockedRealizationMissing(useDef, "nix", "")
+  raise newException(ValueError,
+    "tool-resolution failed: no nix realization for package \"" &
+    useDef.packageSelector & "\"")
 
 proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
   if useDef.nixProvisioning.len == 0:
@@ -1101,7 +1196,8 @@ proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
     nixpkgsRef: selected.nixpkgsRef,
     nixpkgsRev: selected.nixpkgsRev,
     nixpkgsNarHash: selected.nixpkgsNarHash,
-    lockIdentity: contributorLockIdentity(selected.contributor, lockIdentity))
+    lockIdentity: contributorLockIdentity(selected.contributor,
+      useDef.provisioningPin, lockIdentity))
 
 proc unsafeRelativePath(value: string): bool =
   let normalized = value.replace('\\', '/')
@@ -1848,25 +1944,27 @@ proc selectTarballProvisioning(useDef: InterfaceToolUse):
   ## act as a catch-all when no per-platform slice is supplied. Entries
   ## are walked in declaration order so author intent is preserved
   ## (early entries beat later catch-alls).
-  let requested = requestedProvisioningContributor()
-  var contributors: seq[string] = @[]
-  var candidates: seq[InterfaceTarballProvisioning] = @[]
+  ##
+  ## WHICH contributor's entries are eligible is decided first, among the
+  ## host-matching entries only, by ``selectContributor`` (pin, else unique,
+  ## else refuse); declaration order then applies within that one
+  ## contributor's entries -- unless a committed-lock pin names the locked
+  ## realization, in which case that entry and no other is taken.
+  var hostMatching: seq[InterfaceTarballProvisioning] = @[]
   for provisioning in useDef.tarballProvisioning:
-    if not matchesHostPlatform(provisioning):
-      continue
-    if requested.len > 0 and provisioning.contributor != requested:
-      continue
-    candidates.add(provisioning)
-    if provisioning.contributor notin contributors:
-      contributors.add(provisioning.contributor)
-  if requested.len == 0 and contributors.len > 1:
-    raise newException(ValueError,
-      "tool-resolution failed: ambiguous tarball provisioning for package \"" &
-      useDef.packageSelector & "\"; eligible contributors: " &
-      contributors.mapIt(contributorLabel(it)).join(", ") &
-      "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
-  if candidates.len > 0:
-    return candidates[0]
+    if matchesHostPlatform(provisioning):
+      hostMatching.add(provisioning)
+  let contributor = selectContributor(useDef, "tarball",
+    hostMatching.mapIt(it.contributor),
+    " for host cpu=" & hostCpuToken() & " os=" & hostOsToken())
+  let wanted = lockedRealizationOf(useDef)
+  for provisioning in hostMatching:
+    if provisioning.contributor == contributor and
+        (wanted.len == 0 or provisioning.lockIdentity == wanted):
+      return provisioning
+  if wanted.len > 0:
+    refuseLockedRealizationMissing(useDef, "tarball",
+      " eligible for host cpu=" & hostCpuToken() & " os=" & hostOsToken())
   raise newException(ValueError,
     "tool-resolution failed: no tarball provisioning entry for package \"" &
     useDef.packageSelector & "\" matches host cpu=" & hostCpuToken() &
@@ -1903,6 +2001,7 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
     declaredPrunePaths: selected.prunePaths,
     stripComponents: selected.stripComponents,
     lockIdentity: contributorLockIdentity(selected.contributor,
+      useDef.provisioningPin,
       if selected.lockIdentity.len > 0:
         selected.lockIdentity
       else:
@@ -3547,27 +3646,15 @@ proc scoopAcquisitionPlan*(useDef: InterfaceToolUse): ScoopAcquisitionPlan =
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
       "\" does not declare provisioning: scoopApp metadata")
-  let requested = requestedProvisioningContributor()
-  var contributors: seq[string] = @[]
-  var candidates: seq[InterfaceScoopProvisioning] = @[]
-  for candidate in useDef.scoopProvisioning:
-    if requested.len > 0 and candidate.contributor != requested:
-      continue
-    candidates.add(candidate)
-    if candidate.contributor notin contributors:
-      contributors.add(candidate.contributor)
-  if candidates.len == 0:
-    raise newException(ValueError,
-      "tool-resolution failed: provisioning contributor \"" & requested &
-      "\" has no scoop realization for package \"" &
-      useDef.packageSelector & "\"")
-  if requested.len == 0 and contributors.len > 1:
-    raise newException(ValueError,
-      "tool-resolution failed: ambiguous scoop provisioning for package \"" &
-      useDef.packageSelector & "\"; eligible contributors: " &
-      contributors.mapIt(contributorLabel(it)).join(", ") &
-      "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
-  let selected = candidates[0]
+  let contributor = selectContributor(useDef, "scoop",
+    useDef.scoopProvisioning.mapIt(it.contributor))
+  let wanted = lockedRealizationOf(useDef)
+  let matching = useDef.scoopProvisioning.filterIt(
+    it.contributor == contributor and
+      (wanted.len == 0 or it.lockIdentity == wanted))
+  if matching.len == 0:
+    refuseLockedRealizationMissing(useDef, "scoop", "")
+  let selected = matching[0]
   if selected.bucket.len == 0 or selected.app.len == 0 or
       selected.executablePath.len == 0:
     raise newException(ValueError,
@@ -3599,7 +3686,8 @@ proc scoopAcquisitionPlan*(useDef: InterfaceToolUse): ScoopAcquisitionPlan =
     declaredExecutablePath: selected.executablePath,
     requiresExecutionProfileChecksum:
       selected.requiresExecutionProfileChecksum,
-    lockIdentity: contributorLockIdentity(selected.contributor, lockIdentity))
+    lockIdentity: contributorLockIdentity(selected.contributor,
+      useDef.provisioningPin, lockIdentity))
 
 proc resolveScoopRoot(scoopOverride: string): string =
   let explicit = getEnv("SCOOP")
@@ -6197,8 +6285,31 @@ proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
                           Table[string, ProducerExecutableDirs] =
                             initTable[string, ProducerExecutableDirs]();
                         producerAuxSelectors: Table[string, ProducerAuxDirs] =
-                          initTable[string, ProducerAuxDirs]()):
+                          initTable[string, ProducerAuxDirs]();
+                        pins: openArray[ProvisioningPin] = []):
     PathOnlyBuildIdentity =
+  ## ``pins`` (M7 deliverable 3): the provisioning selections the resolver
+  ## (``repro_interface_artifacts/contribution_selection``) made from the
+  ## committed lock or an explicit curator policy. They are checked against
+  ## this artifact and stamped onto its tool uses by
+  ## ``applyProvisioningPins`` (which refuses a pin the artifact does not
+  ## carry exactly); each pinned use then provisions ONLY from its pinned
+  ## contributor, and the plan's lock identity binds the pinned contribution
+  ## fingerprint, so every profile and action fingerprint below moves with
+  ## the contribution (deliverable 4). Empty keeps the unpinned behaviour --
+  ## a unique eligible contributor, or an ambiguity refusal. A caller that
+  ## CACHES the result (``repro_cli_support``'s tool-identity cache) must
+  ## bind the pins into its cache key before passing any; today no CLI path
+  ## passes pins.
+  ##
+  ## TRUST BOUNDARY: ``pins`` are trusted. They are checked against the
+  ## artifact, but the contribution fingerprint cannot be recomputed here
+  ## and the lock is not re-read, so a forged pin with the right record
+  ## digest is accepted. Pass only pins ``contribution_selection.pinOf``
+  ## produced in this process; a pin that was persisted, cached or received
+  ## needs verification this engine can check first (see
+  ## ``ProvisioningPin``).
+  ##
   ## SC-3: ``producerAuxSelectors`` maps the ``uses:`` selectors that the
   ## cross-repo producer pre-pass materialized as LIBRARY-channel producers
   ## (consumed via the aux channels, not PATH) to their realized aux dirs.
@@ -6209,7 +6320,7 @@ proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
   result.projectName = artifact.projectInterface.projectName
   result.interfaceFingerprint = artifact.interfaceFingerprint
   let pathLookup = SidecarPathLookup()
-  for useDef in artifact.projectInterface.toolUses:
+  for useDef in applyProvisioningPins(artifact.projectInterface, pins):
     var profile = toolProfileFor(useDef, mode, pathValue, storeRoot,
       producerExecutableSelectors, producerAuxSelectors, pathLookup)
     if mode == tpmFromSource:

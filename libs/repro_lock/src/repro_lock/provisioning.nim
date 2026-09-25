@@ -40,8 +40,9 @@
 ## CAVEAT, stated rather than implied: a Reprobuild binary built BEFORE this
 ## module existed reads a v2 document carrying ``provisioning`` and ignores
 ## the key, exactly as it ignores any unknown key. Such a binary also has no
-## lock-driven provisioning selection at all (that is M7 deliverable 3), so
-## it behaves as it did before -- it does not act on a record it cannot see.
+## lock-driven provisioning selection at all (M7 deliverable 3 added it, in
+## ``repro_interface_artifacts/contribution_selection``), so it behaves as
+## it did before -- it does not act on a record it cannot see.
 ##
 ## ## Canonical encoding
 ##

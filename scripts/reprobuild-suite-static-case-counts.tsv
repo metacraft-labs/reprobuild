@@ -279,6 +279,7 @@ libs/repro_interface_artifacts/tests/test_catalog_composition_is_order_independe
 libs/repro_interface_artifacts/tests/test_contribution_fingerprint_invalidation_boundaries.nim	nim	46
 libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim	nim	6
 libs/repro_interface_artifacts/tests/test_provisioning_realization_lock_record.nim	nim	13
+libs/repro_interface_artifacts/tests/test_provisioning_selection_from_lock.nim	nim	14
 libs/repro_launch_plan/tests/t_codec_smoke.nim	nim	12
 libs/repro_local_store/tests/t_a4_p4_eviction.nim	nim	4
 libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim	nim	12
@@ -527,6 +528,7 @@ libs/repro_system_apply/tests/t_b2_pipeline.nim	nim	15
 libs/repro_system_rollback/tests/t_b3_rollback_unit.nim	nim	14
 libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	nim	3
 libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim	nim	12
+libs/repro_tool_profiles/tests/t_provisioning_pin_selects_and_keys.nim	nim	8
 libs/repro_workspace_vcs/tests/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths.nim	nim	3
 libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim	nim	4
 recipes/packages/source/adwaita-icon-theme/test_adwaita_icon_theme_source.nim	nim	5
@@ -1074,6 +1076,7 @@ tests/integration/t_docs_hooks_reflect_public_tier_only_server_gate.nim	nim	2
 tests/integration/t_e2e_cross_compilation_aarch64.nim	nim	2
 tests/integration/t_e2e_engine_shim_removed.nim	nim	2
 tests/integration/t_e2e_local_attestation_emulator_all_protocol_paths.nim	nim	10
+tests/integration/t_e2e_locked_provisioning_contributor_selection.nim	nim	16
 tests/integration/t_e2e_selectable_toolchain_fixture.nim	nim	5
 tests/integration/t_e2e_software_root_attestation_roundtrip.nim	nim	7
 tests/integration/t_e2e_variant_feature_flag_drops_tls.nim	nim	5

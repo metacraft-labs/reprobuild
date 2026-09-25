@@ -50,10 +50,15 @@ not workspace VCS state.
   (missing/unknown/duplicate fields, truncation and non-canonical spelling
   refuse). `withProvisioningRealizations` sets the records;
   `lockedRealizationFor` hands one back ONLY against the current interface
-  and contribution fingerprints. The records are NOT part of `lockIdentityOf`
-  -- safe only because no build edge consumes a record yet; the per-edge
-  invalidation on a contribution change is an OPEN obligation of the
-  deliverable that adds the first consumer (M7 D3/D4).
+  and contribution fingerprints; `lockedProvisioningClaims` hands the raw
+  records to the provisioning resolver
+  (`repro_interface_artifacts/contribution_selection`, M7 D3), which checks
+  each one against the composed catalogs before selecting from it. The
+  records are NOT part of `lockIdentityOf`, so a contribution-only refresh
+  leaves typechecking cached; the realization and build edges that select a
+  record are keyed on its contribution fingerprint instead (the resolver's
+  `ProvisioningPin`, folded into the acquisition plan's lock identity by
+  `repro_tool_profiles`, M7 D4).
   `withProvisioningCarriedForward` is how `repro lock refresh` / `repro lock
   solve --write` (`repro_lock_gen`) keep the array: carried forward
   unchanged, and a refresh refuses rather than drop an array it cannot read.

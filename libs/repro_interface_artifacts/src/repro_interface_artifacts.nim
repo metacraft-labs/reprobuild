@@ -275,6 +275,57 @@ type
     lockIdentity*: string
     location*: SourceLocation
 
+  ProvisioningPin* = object
+    ## M7 deliverable 3 -- the provisioning contribution the resolver
+    ## (``repro_interface_artifacts/contribution_selection``) selected for a
+    ## package, from the committed lock or an explicit curator policy, after
+    ## verifying it against the composed catalogs.
+    ##
+    ## RESOLUTION-TIME ONLY. It is never written by the artifact codec and
+    ## never enters ``interfaceFingerprint``: it is stamped onto a decoded
+    ## ``InterfaceToolUse`` by ``provisioning_pins.applyProvisioningPins``
+    ## immediately before tool resolution, and the acquisition planners in
+    ## ``repro_tool_profiles`` select ONLY the pinned contributor's
+    ## realizations and fold ``contributionFingerprint`` into the plan's
+    ## lock identity -- which keys the realized prefix, the tool profile
+    ## fingerprint and the typed-tool action fingerprint (deliverable 4).
+    ##
+    ## The zero value means "no pin". ANY non-zero field makes it a pin, and
+    ## a pin with a missing or malformed field REFUSES -- it never degrades
+    ## to "unpinned".
+    ##
+    ## TRUST BOUNDARY. A pin is trusted input: the engine checks it against
+    ## the consumer's artifact (contributor, record digest, realization) but
+    ## CANNOT recompute ``contributionFingerprint`` -- that needs the
+    ## provider identity, which no artifact carries -- nor re-check the
+    ## lock. A hand-built pin with the right record digest and an arbitrary
+    ## fingerprint, or naming a contributor the lock does not, is ACCEPTED
+    ## (measured). That is safe only while the one producer is
+    ## ``contribution_selection.pinOf`` over a resolution made in the SAME
+    ## process. Nothing persists a pin today (the codec does not encode it,
+    ## no cache stores it, no CLI path builds one). Any future route that
+    ## persists, transmits or caches a pin -- or reads one back -- MUST add
+    ## verification the engine can check (re-running the resolver, or a
+    ## binding to the verified lock record) before it passes that pin on.
+    packageName*: string
+    contributor*: string
+    contributionFingerprint*: string
+      ## The M7 D1 contribution fingerprint, 64 lower-case hex.
+    contributionRecordDigest*: string
+      ## ``interfaceContributionRecordDigest`` of the selected contribution
+      ## record, 64 lower-case hex -- what ties the pin to the record the
+      ## consumer's interface artifact actually carries.
+    realizationLockIdentity*: string
+      ## For a selection made BY THE COMMITTED LOCK: the declared lock
+      ## identity of the realization the lock record pins
+      ## (``realization_lock_identity``). The planners provision exactly
+      ## that realization of the contributor and refuse rather than take
+      ## another one -- a contributor may declare several (one per
+      ## platform, or a specific entry plus a catch-all), and without this
+      ## the planner's declaration-order pick could differ from the
+      ## realization the lock pins. Empty for a curator-policy or
+      ## unique-eligible selection, which pins the contributor only.
+
   InterfaceToolUse* = object
     rawConstraint*: string
     packageSelector*: string
@@ -286,6 +337,9 @@ type
     tarballProvisioning*: seq[InterfaceTarballProvisioning]
     scoopProvisioning*: seq[InterfaceScoopProvisioning]
     location*: SourceLocation
+    provisioningPin*: ProvisioningPin
+      ## Resolution-time contribution selection; see ``ProvisioningPin``.
+      ## NOT encoded, NOT fingerprinted.
 
   InterfaceProvisioningContribution* = object
     targetPackage*: string

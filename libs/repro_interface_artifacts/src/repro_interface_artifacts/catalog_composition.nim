@@ -96,13 +96,17 @@
 ##     ``contributionFingerprint`` — the latter needs a provider identity,
 ##     which is not readable from an artifact.
 ##   * It does not write, read or validate a LOCK. The lock record is M7
-##     deliverable 2 and does not exist yet. ``CatalogSelectionPolicy`` is
-##     the spec's *curator policy* — an explicit, in-memory selection input
-##     — and must not be mistaken for a lock: it is not serialised, carries
-##     no contribution fingerprint, revision, platform or capability set,
-##     and survives nothing. When a lock lands it becomes the higher-
-##     precedence selector and this policy stays the fallback the spec
-##     already allows.
+##     deliverable 2 (``repro_lock/provisioning``, written by
+##     ``contribution_lock``); reading it and checking it against this
+##     composition is M7 deliverable 3 (``contribution_selection``), which
+##     passes the lock's selections in as ``CatalogLockPin``s -- the
+##     highest-precedence selector, checked here only for the pinned
+##     CONTRIBUTOR being offered. ``CatalogSelectionPolicy`` is the spec's
+##     *curator policy* — an explicit, in-memory selection input — and must
+##     not be mistaken for a lock: it is not serialised, carries no
+##     contribution fingerprint, revision, platform or capability set, and
+##     survives nothing; its choice reaches the lock only through
+##     ``contribution_lock``.
 ##   * It does not accept a CONTRADICTORY curator policy. A policy naming
 ##     two different contributors for one package is undecidable, and
 ##     which entry wins must not depend on which was written last — an
@@ -188,9 +192,27 @@ type
   CatalogSelectionPolicy* = object
     selections*: seq[CatalogSelectionRule]
 
+  CatalogLockPin* = object
+    ## One selection pinned by the COMMITTED LOCK (M7 deliverable 3): the
+    ## contributor a ``repro.lock`` ``provisioning`` record names for a
+    ## package on the platform pair being resolved. Highest precedence --
+    ## above curator policy and above a unique eligible contribution -- and
+    ## never a fallback: a pin whose contributor offers no eligible
+    ## contribution refuses (``locked-contribution-unavailable``); it does
+    ## not fall back to policy or to the unique eligible one. Composition
+    ## checks only that the pinned CONTRIBUTOR is offered; the record's
+    ## interface, contribution fingerprint, catalog coordinate and
+    ## realization are checked by ``contribution_selection``, which is the
+    ## only caller that builds pins.
+    targetPackage*: string
+    contributor*: string
+
   CatalogSelectionReason* = enum
     csUniqueEligible = "unique-eligible"
     csCuratorPolicy = "curator-policy"
+    csLock = "lock"
+      ## Appended, so the two older reasons keep their ordinals and every
+      ## composition made without lock pins keeps its bytes.
 
   CatalogSelection* = object
     targetPackage*: string
@@ -210,6 +232,10 @@ type
     cdAmbiguousContribution = "unresolved-contribution-ambiguity"
     cdPolicySelectionUnsatisfied = "policy-selection-unsatisfied"
     cdContradictoryPolicy = "contradictory-curator-policy"
+    cdLockedContributionUnavailable = "locked-contribution-unavailable"
+      ## Appended after the M6 kinds so their ordinals -- which order the
+      ## diagnostics -- do not move.
+    cdContradictoryLock = "contradictory-lock-pins"
 
   CatalogDiagnostic* = object
     kind*: CatalogDiagnosticKind
@@ -392,9 +418,17 @@ proc coordinateGaps(coordinate: CatalogCoordinate): seq[string] =
       coordinate.interfaceArtifact & "\"")
 
 proc composeCatalogs*(imports: openArray[CatalogImport];
-                      policy: CatalogSelectionPolicy): CatalogComposition =
+                      policy: CatalogSelectionPolicy;
+                      lockPins: openArray[CatalogLockPin] = []):
+    CatalogComposition =
   ## Compose explicitly identified catalog imports into ONE deterministic
   ## resolver input, or refuse.
+  ##
+  ## Selection precedence per package (Provisioning-Contributions.md,
+  ## Resolution): a ``lockPins`` entry, else a ``policy`` rule, else the
+  ## unique eligible contribution; anything else refuses. A lock pin is
+  ## never relaxed to a lower rung. ``lockPins`` empty keeps every
+  ## composed byte exactly as before it existed.
   ##
   ## Never raises. The result is byte-identical under any permutation of
   ## ``imports`` and of the contributions inside each catalog, and does not
@@ -571,6 +605,29 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
         "entries wins is undecidable, so composition refuses rather than taking " &
         "the one written last. Keep exactly one entry per package.")
 
+  # Lock pins. Like the policy, a pin's POSITION is never a selection rule:
+  # two pins naming different contributors for one package refuse.
+  var lockOf = initTable[string, string]()
+  var lockPackages: seq[string] = @[]
+  var lockContributors = initTable[string, seq[string]]()
+  for pin in lockPins:
+    if pin.targetPackage notin lockOf:
+      lockPackages.add(pin.targetPackage)
+      lockContributors[pin.targetPackage] = @[]
+    lockOf[pin.targetPackage] = pin.contributor
+    lockContributors[pin.targetPackage].add(pin.contributor)
+  var contradictoryLock: seq[string] = @[]
+  for packageName in lockPackages:
+    let named = lockContributors[packageName].sorted(cmp).
+      deduplicate(isSorted = true)
+    if named.len > 1:
+      contradictoryLock.add(packageName)
+      refuse(cdContradictoryLock,
+        "the lock pins " & $named.len & " different contributors for " &
+        "package \"" & packageName & "\": " &
+        named.mapIt("\"" & it & "\"").join(", ") &
+        ". Which one wins is undecidable; restore the committed lock.")
+
   var packageOrder: seq[string] = @[]
   for candidate in eligible:
     if candidate.targetPackage notin packageOrder:
@@ -591,6 +648,49 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
     # sort and the ``described`` sort were each other's mask -- measured,
     # either could be deleted with the suite green -- so a refactor could
     # delete one on the strength of the tests and a later one the other.
+    if packageName in contradictoryLock:
+      continue
+    if packageName in lockOf:
+      # The lock outranks the policy and the unique-eligible rule, and is
+      # never relaxed to either of them.
+      let candidates = eligible.filterIt(it.targetPackage == packageName)
+      let wanted = candidates.filterIt(it.contributor == lockOf[packageName])
+      if wanted.len == 0:
+        refuse(cdLockedContributionUnavailable,
+          "the lock pins contributor \"" & lockOf[packageName] &
+          "\" for package \"" & packageName & "\", but no imported " &
+          "catalog offers an eligible contribution from it. Eligible " &
+          "contributors: " &
+          candidates.mapIt("\"" & it.contributor & "\"").sorted(cmp).
+            deduplicate(isSorted = true).join(", ") &
+          ". The lock is not re-selected by policy or by a unique " &
+          "eligible contribution: restore the locked catalog, or refresh " &
+          "the lock deliberately.")
+        continue
+      if wanted.len > 1:
+        var described: seq[string] = @[]
+        for candidate in wanted:
+          described.add("contributor \"" & candidate.contributor &
+            "\" from catalog " & candidate.catalogKey & " declared at " &
+            locationSpelling(candidate.location))
+        refuse(cdAmbiguousContribution,
+          "package \"" & packageName & "\" (interface " &
+          wanted[0].targetFingerprint & ") has " & $wanted.len &
+          " eligible provisioning contributions from the locked " &
+          "contributor \"" & lockOf[packageName] & "\"; import order is " &
+          "never a selection rule (Provisioning-Contributions.md, " &
+          "Resolution). Candidates: " &
+          described.sorted(cmp).deduplicate(isSorted = true).join("; ") &
+          ".")
+        continue
+      selections.add(CatalogSelection(
+        targetPackage: packageName,
+        targetInterfaceFingerprint: wanted[0].targetFingerprint,
+        contributor: wanted[0].contributor,
+        contributionRecordDigest: wanted[0].recordDigest,
+        catalogCoordinate: wanted[0].coordinate,
+        reason: csLock))
+      continue
     if packageName in contradictoryPolicy:
       # Refused above. Which of its entries "wins" is undecidable, so
       # NOTHING -- no selection and no diagnostic -- is derived from either
@@ -648,11 +748,23 @@ proc composeCatalogs*(imports: openArray[CatalogImport];
       # A contradictory package is skipped for the reason given in the
       # selection loop: ``policyOf`` would name its LAST entry.
       continue
+    if packageName in lockOf:
+      continue
     refuse(cdPolicySelectionUnsatisfied,
       "curator policy selects contributor \"" & policyOf[packageName] &
       "\" for package \"" & packageName &
       "\", but no imported catalog offers an eligible contribution from " &
       "it. Eligible contributors: <none>.")
+
+  for packageName in lockPackages:
+    if packageName in packageOrder or packageName in contradictoryLock:
+      continue
+    refuse(cdLockedContributionUnavailable,
+      "the lock pins contributor \"" & lockOf[packageName] &
+      "\" for package \"" & packageName & "\", but no imported catalog " &
+      "offers an eligible contribution for the package at all. Eligible " &
+      "contributors: <none>. The lock is not re-selected: restore the " &
+      "locked catalog, or refresh the lock deliberately.")
 
   # --- 6. Canonical serialisation ------------------------------------------
   var catalogLines: seq[string] = @[]

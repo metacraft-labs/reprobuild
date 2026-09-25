@@ -26,12 +26,11 @@
 ##
 ## ## What this file does NOT prove
 ##
-##   * Nothing about a resolver SELECTING from the lock (M7 deliverable 3):
-##     no production path reads the ``provisioning`` array yet, and the
-##     ``REPRO_PROVISIONING_CONTRIBUTOR`` pseudo-lock is untouched.
-##   * Nothing about per-edge invalidation in the engine (deliverable 4):
+##   * Nothing about a resolver SELECTING from the lock (M7 deliverable 3)
+##     or about per-edge invalidation in the engine (deliverable 4): here
 ##     "invalidates the locked realization" is asserted as the record being
-##     REFUSED on read against the current facts.
+##     REFUSED on read against the current facts. Both are exercised by
+##     ``tests/integration/t_e2e_locked_provisioning_contributor_selection``.
 ##   * Platform/ABI filtering of a realization (spec § Resolution step 4):
 ##     the platform pair and capabilities are recorded as the caller states
 ##     them.

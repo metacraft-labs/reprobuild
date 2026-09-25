@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1653,
-    "pureUnitConsolidationGroups": 50,
-    "pureUnitTests": 589,
+    "nimTestBinaries": 1656,
+    "pureUnitConsolidationGroups": 51,
+    "pureUnitTests": 590,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1664
+    "testEntries": 1667
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -274,6 +274,21 @@
       "sources": [
         "libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim",
         "libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_interface_artifacts",
+        "repro_lock",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "sources": [
+        "libs/repro_interface_artifacts/tests/test_provisioning_realization_lock_record.nim",
+        "libs/repro_interface_artifacts/tests/test_provisioning_selection_from_lock.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1100,10 +1115,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 12,
-      "integration": 772,
+      "integration": 773,
       "platform/destructive": 115,
-      "pure unit": 589,
-      "unclassified": 176
+      "pure unit": 590,
+      "unclassified": 177
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1251,9 +1266,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1653,
+    "nimTestBinaryCount": 1656,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1664
+    "testEntryCount": 1667
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10926,6 +10941,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/test_provisioning_selection_from_lock",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_lock",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/test_provisioning_selection_from_lock.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_codec_smoke",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -15541,6 +15575,24 @@
       "source": "libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_provisioning_pin_selects_and_keys",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_tool_profiles",
+      "requiresReproBinary": false,
+      "source": "libs/repro_tool_profiles/tests/t_provisioning_pin_selects_and_keys.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25018,6 +25070,26 @@
       "source": "tests/integration/t_e2e_local_attestation_emulator_all_protocol_paths.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_locked_provisioning_contributor_selection",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_lock",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_e2e_locked_provisioning_contributor_selection.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

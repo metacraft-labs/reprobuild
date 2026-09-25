@@ -236,11 +236,16 @@ type
       ## key and ONLY when non-empty, so every lock written before them
       ## re-serialises byte-identically.
       ##
-      ## Deliberately NOT exported. A record is handed out only by
+      ## Deliberately NOT exported. A record is handed out for USE only by
       ## ``lockedRealizationFor``, which takes the CURRENT interface and
-      ## contribution fingerprints and refuses a stale record, so no reader
-      ## can use a locked realization without checking it. Set it with
-      ## ``withProvisioningRealizations``.
+      ## contribution fingerprints and refuses a stale record. The one other
+      ## reader is ``lockedProvisioningClaims``, which hands the raw records
+      ## to the provisioning RESOLVER
+      ## (``repro_interface_artifacts/contribution_selection``) so it can
+      ## learn which contributor each record pins; that resolver re-checks
+      ## every record through ``requireCurrentRealization`` (the same gate)
+      ## plus the catalog coordinate and realization before selecting from
+      ## it. Set it with ``withProvisioningRealizations``.
       ##
       ## Deliberately NOT projected into ``lockIdentityOf`` either. The spec
       ## (Provisioning-Contributions.md, Locks And Snapshots) requires that
@@ -249,15 +254,16 @@ type
       ## it. The §6.2 lock identity governs EVERY action under the lock, so
       ## folding the record in would invalidate typechecking too.
       ##
-      ## OPEN OBLIGATION, stated plainly: NOTHING yet invalidates the
-      ## realization and build edges that selected a locked realization
-      ## when its contribution fingerprint changes. That is safe today ONLY
-      ## because nothing consumes the record -- no build edge selects a
-      ## provisioning realization from the lock (M7 deliverable 3). The
-      ## deliverable that makes an edge consume a record must also key that
-      ## edge on the record's contribution fingerprint (deliverables 3/4);
-      ## until then this exclusion must not be read as the invalidation
-      ## design being done.
+      ## The realization and build edges that select a locked realization
+      ## ARE keyed on its contribution fingerprint (M7 deliverables 3/4): a
+      ## resolver-selected ``ProvisioningPin`` carries it, and
+      ## ``repro_tool_profiles`` folds it into the acquisition plan's lock
+      ## identity, which keys the realized prefix, the tool profile
+      ## fingerprint and the typed-tool action fingerprint. So a
+      ## contribution-only refresh moves those keys while this identity --
+      ## and with it downstream typechecking -- stays put. A record whose
+      ## contribution no longer matches the catalogs is REFUSED by the
+      ## resolver, never re-used.
 
 # ---------------------------------------------------------------------------
 # Provenance digest (dependency-free, deterministic)
@@ -677,6 +683,19 @@ proc withProvisioningRealizations*(ld: LockedDependencies;
   ## ``serializeLockedDependencies`` refuses one that was not.
   result = ld
   result.provisioning = records
+
+proc lockedProvisioningClaims*(ld: LockedDependencies):
+    seq[LockedRealization] =
+  ## The lock's provisioning records as CLAIMS, for the provisioning
+  ## resolver only (``repro_interface_artifacts/contribution_selection
+  ## .resolveProvisioningSelections``). A claim says which contributor the
+  ## lock pins; it is not a selection. The resolver checks every claim
+  ## against the composed catalogs -- through ``requireCurrentRealization``
+  ## (interface and contribution fingerprints), the catalog coordinate and
+  ## the declared realization -- and refuses rather than select from one
+  ## that does not match. Anything else that wants a record uses
+  ## ``lockedRealizationFor``.
+  ld.provisioning
 
 proc provisioningRealizationCount*(ld: LockedDependencies): int =
   ## How many provisioning realizations the lock records. A count, not the

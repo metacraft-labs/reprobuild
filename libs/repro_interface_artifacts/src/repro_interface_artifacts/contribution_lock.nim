@@ -32,11 +32,15 @@
 ## ## What it does NOT do
 ##
 ## It does not select anything: the selection comes from
-## ``composeCatalogs`` (unique eligible contribution, or the curator policy).
+## ``composeCatalogs`` (unique eligible contribution, or the curator policy)
+## by way of ``contribution_selection.resolveProvisioningSelections``, which
+## is also where a committed lock is READ and checked (M7 deliverable 3).
+## A selection the lock itself made (``csLock``) is refused here: its
+## verified record is carried forward as it is, never re-derived.
 ## It does not filter a realization by platform or ABI (spec § Resolution
 ## step 4 is not implemented anywhere yet); ``hostPlatform`` /
 ## ``targetPlatform`` / ``capabilities`` are recorded as the caller states
-## them. And no resolver reads the lock yet -- that is M7 deliverable 3.
+## them.
 
 import std/[options, sequtils, strutils]
 
@@ -71,9 +75,9 @@ type
 proc locked*(outcome: RealizationLockOutcome): bool =
   outcome.refusals.len == 0
 
-type DeclaredRealization = object
-  kind: LockedRealizationKind
-  integrity: string
+type DeclaredRealization* = object
+  kind*: LockedRealizationKind
+  integrity*: string
 
 proc canonicalIntegrity(value: string): string =
   ## A 64-hex digest is case-insensitive, so the record spells it in lower
@@ -85,8 +89,8 @@ proc canonicalIntegrity(value: string): string =
   else:
     value
 
-proc declaredRealizations(identity: ContributionIdentity;
-                          lockIdentity: string): seq[DeclaredRealization] =
+proc declaredRealizations*(identity: ContributionIdentity;
+                           lockIdentity: string): seq[DeclaredRealization] =
   ## Every realization of the contribution whose declared lock identity is
   ## ``lockIdentity``, with the integrity evidence its family carries.
   let c = identity.contribution
@@ -120,6 +124,12 @@ proc lockSelectedRealization*(request: RealizationLockRequest;
   if c.developInterface:
     refusals.add("develop-interface: contribution \"" & c.contributor &
       "\" binds developInterface, which is forbidden in a committed lock")
+
+  if request.selection.reason == csLock:
+    refusals.add("selection-already-locked: the selection of package \"" &
+      c.targetPackage & "\" was made BY the committed lock; carry its " &
+      "verified record forward (ResolvedProvisioningSelection.lockedRecord) " &
+      "rather than re-locking it, which would lose why it was selected")
 
   let fp = contributionFingerprint(request.identity, resolver)
   result.fingerprint = fp
@@ -172,7 +182,7 @@ proc lockSelectedRealization*(request: RealizationLockRequest;
     selectedBy:
       case request.selection.reason
       of csUniqueEligible: lsrUniqueEligible
-      of csCuratorPolicy: lsrCuratorPolicy)
+      of csCuratorPolicy, csLock: lsrCuratorPolicy)
   let evidence = ContributionEvidence(
     fingerprintHex: fp.hex,
     refusals: fp.refusals,
