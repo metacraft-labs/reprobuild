@@ -1825,10 +1825,23 @@ package reprobuild:
       nimcache = "build/nimcache/repro",
       actionId = "reprobuild.apps.repro"))
 
+    # Staging pins the build environment's Python into the helper's shebang,
+    # which a POSIX host running Nix needs. Windows has no Nix for the helper
+    # to drive and provisions no Python (see env.ps1), so there the helper is
+    # copied as it is, as it was before `stage_nix_daemon.py` existed.
+    # scripts/build_apps.sh makes the same split.
+    const nixDaemonStagingCommand =
+      when defined(windows):
+        "mkdir -p build/bin && " &
+          "cp tools/reprobuild-nix-daemon/reprobuild-nix-daemon " &
+          "build/bin/reprobuild-nix-daemon && " &
+          "chmod +x build/bin/reprobuild-nix-daemon"
+      else:
+        "python3 scripts/stage_nix_daemon.py " &
+          "tools/reprobuild-nix-daemon/reprobuild-nix-daemon " &
+          "build/bin/reprobuild-nix-daemon"
     let reprobuildNixDaemon = shell(
-      command = "python3 scripts/stage_nix_daemon.py " &
-        "tools/reprobuild-nix-daemon/reprobuild-nix-daemon " &
-        "build/bin/reprobuild-nix-daemon",
+      command = nixDaemonStagingCommand,
       actionId = "reprobuild.apps.reprobuild-nix-daemon",
       extraInputs = @[
         "tools/reprobuild-nix-daemon/reprobuild-nix-daemon",
@@ -1837,8 +1850,14 @@ package reprobuild:
       extraOutputs = @[
         "build/bin/reprobuild-nix-daemon",
       ])
-    # Staging pins this realized interpreter into the helper's shebang.
-    appendRegisteredActionToolIdentityRefs(reprobuildNixDaemon.id, ["python3"])
+    # Staging pins this realized interpreter into the helper's shebang. On
+    # Windows the edge instead runs the three coreutils, and declaring them is
+    # what puts their directory on its PATH under --tool-provisioning=path.
+    when defined(windows):
+      appendRegisteredActionToolIdentityRefs(reprobuildNixDaemon.id,
+        ["mkdir", "cp", "chmod"])
+    else:
+      appendRegisteredActionToolIdentityRefs(reprobuildNixDaemon.id, ["python3"])
     reprobuildAppsActions.add(reprobuildNixDaemon)
     discard target("reprobuild-nix-daemon", reprobuildNixDaemon)
 

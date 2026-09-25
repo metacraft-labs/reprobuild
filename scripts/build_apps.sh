@@ -636,9 +636,23 @@ abort_if_failed
 # ``reprobuild.apps.reprobuild-nix-daemon`` edge. The daemon is a shipped
 # executable support artifact rather than a Nim entrypoint, so it is not
 # listed in apps/entrypoints.txt and must be staged explicitly.
-python3 scripts/stage_nix_daemon.py \
-  tools/reprobuild-nix-daemon/reprobuild-nix-daemon \
-  build/bin/reprobuild-nix-daemon
+#
+# Staging pins the build environment's Python into the helper's shebang, which
+# is what a POSIX host running Nix needs. Windows has no Nix for the helper to
+# drive and provisions no Python (env.ps1: "`python3` ... NOT provisioned by
+# default -- none is required to build repro"), so there the helper is copied
+# as it is, the way it always was. Mirrors the
+# ``reprobuild.apps.reprobuild-nix-daemon`` edge in repro.nim.
+if [ "${REPRO_HOST_PLATFORM}" = windows ]; then
+  mkdir -p build/bin
+  cp -f tools/reprobuild-nix-daemon/reprobuild-nix-daemon \
+    build/bin/reprobuild-nix-daemon
+  chmod +x build/bin/reprobuild-nix-daemon
+else
+  python3 scripts/stage_nix_daemon.py \
+    tools/reprobuild-nix-daemon/reprobuild-nix-daemon \
+    build/bin/reprobuild-nix-daemon
+fi
 verify_fresh_artifact \
   "build/bin/reprobuild-nix-daemon" "reprobuild-nix-daemon staging" ||
   abort_if_failed
