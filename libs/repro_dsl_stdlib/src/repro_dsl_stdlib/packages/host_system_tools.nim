@@ -328,3 +328,17 @@ package `tail`:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/tail",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+# `lipo` joins per-architecture Mach-O slices into one fat binary. clang calls
+# it itself whenever it is handed more than one `-arch` -- the macOS monitor
+# shim is built `-arch arm64 -arch arm64e` so it can be injected into Apple's
+# own arm64e tools -- so an edge that compiles fat needs `lipo` on its PATH.
+# Under `--tool-provisioning=path` that PATH holds only the directories the
+# project's DECLARED tools resolved into, and clang's directory need not carry
+# lipo (the 0.2.0 dry run: `clang: error: unable to execute command:
+# posix_spawn failed` / `lipo command failed`). nixpkgs ships it in cctools.
+package lipo:
+  provisioning:
+    nixPackage "nixpkgs#cctools", executablePath = "bin/lipo",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash

@@ -472,6 +472,10 @@ package reprobuild:
     # path-mode resolver would otherwise fail if clang were absent.
     when defined(macosx):
       "clang"
+      # clang shells out to `lipo` for every fat (`-arch arm64 -arch arm64e`)
+      # link, which the macOS monitor-shim edge is; see the `lipo` package in
+      # repro_dsl_stdlib/packages/host_system_tools.nim.
+      "lipo"
     "just >=1"
     # The shipped CLI is compiled with ``-d:ssl``. Model the corresponding
     # link/runtime closure explicitly so graph-built binaries receive
