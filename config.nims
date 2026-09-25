@@ -1,4 +1,4 @@
-import std/[os, strutils]
+import std/[os, strutils, compilesettings]
 
 # The directory holding THIS file, resolved independently of whatever project
 # nim happens to be compiling.
@@ -56,6 +56,53 @@ if defined(windows):
 # undef is a safe one-line guard for every ``nim c`` invocation that
 # config.nims governs (i.e. every reprobuild binary built from the repo).
 switch("undef", "nixbuild")
+
+# THE ORDER OF ``switch("path", …)`` IN THIS FILE IS THE REVERSE OF THE ORDER
+# NIM SEARCHES. ``nimblecmd.addPath`` does ``conf.searchPaths.insert(path, 0)``,
+# so every entry is PREPENDED: the LAST ``--path`` added is the FIRST one
+# ``rawFindFile`` probes, and the first one added is probed last. A block placed
+# at the top of this file therefore ends up at the BACK of the search path,
+# where it costs a miss only for the lookups that get all the way down to it.
+#
+# That is why the RunQuota block is here rather than at the bottom, which is
+# where it used to sit. Measured against the cold ``nim c`` of
+# ``apps/repro/repro.nim`` at 9a44bf28 (strace -f -e trace=newfstatat, counting
+# probes on ``*.nim`` paths): from the bottom of this file its 16 entries
+# occupied search indices 0-15 — probed FIRST by every single module lookup —
+# and absorbed 19,284 of the 94,968 raw search-path misses (20.3%) while
+# resolving 14 modules. Moving the block here moves those entries to the back
+# and removes the bulk of that cost with no change to what anything resolves to
+# (see the search-order note at the end of this file for how that is checked).
+#
+# Nothing else about the block changed: these are still RunQuota's libraries,
+# resolved from ``$RUNQUOTA_SRC`` or the sibling checkout, and the list still
+# mirrors ``runquota``'s own ``libs/`` set.
+let runquotaRoot = block:
+  let fromEnv = getEnv("RUNQUOTA_SRC")
+  if fromEnv.len > 0:
+    fromEnv
+  else:
+    ".." / "runquota"
+
+for libName in [
+  "runquota_core",
+  "runquota_codec",
+  "runquota_protocol",
+  "runquota_ipc",
+  "runquota_client",
+  "runquota_process",
+  "runquota_exec",
+  "runquota_admission",
+  "runquota_host",
+  "runquota_host_linux",
+  "runquota_host_macos",
+  "runquota_host_windows",
+  "runquota_persistence",
+  "runquota_daemon",
+  "runquota_cli_support",
+  "runquota_partition",
+]:
+  switch("path", runquotaRoot / "libs" / libName / "src")
 
 # Project-DSL-Composition M6: ``repro.nim`` ``import``s the generated
 # ``repro_tests.nim`` (data table of declared test edges) that lives
@@ -274,7 +321,9 @@ for libName in [
   "repro_test_stats",
   "repro_core",
   "repro_platform",
-  "repro_diagnostics",
+  # ``repro_diagnostics`` and ``repro_project_dsl_runtime_dll`` are NOT in this
+  # list, and the omission is deliberate rather than an oversight — see the note
+  # below the loop.
   "repro_cli_support",
   "repro_daemon_core",
   "blake3",
@@ -300,7 +349,6 @@ for libName in [
   "repro_domain_types",
   "repro_depfile",
   "repro_project_dsl",
-  "repro_project_dsl_runtime_dll",
   "repro_dsl_stdlib",
   "repro_home_intent",
   "repro_system_apply",
@@ -424,6 +472,54 @@ for libName in [
   # reprobuild-side engine library remains.
 ]:
   switch("path", "libs" / libName / "src")
+
+# TWO LIBRARIES IN ``libs/libraries.txt`` ARE ABSENT FROM THE LOOP ABOVE:
+# ``repro_diagnostics`` and ``repro_project_dsl_runtime_dll``. A ``--path`` is
+# not free — every entry is probed, and missed, by every module lookup that is
+# ordered after it — and these two supply modules that nothing imports by name.
+#
+# The evidence, re-taken at 9a44bf28 by reading every ``import`` / ``export`` /
+# ``include`` / ``from`` line in all 4,837 ``.nim`` and ``.nims`` files in this
+# repository and under every directory this file puts on ``--path``:
+#
+#   * ``repro_diagnostics`` appears in NO import statement anywhere. Its only
+#     occurrences outside its own directory are this file, ``libs/libraries.txt``,
+#     its own README, and ``scripts/validate-interface-codec-back-compat.ps1``
+#     — which builds its OWN ``--path`` list and passes
+#     ``libs\repro_diagnostics\src`` on the command line, so it does not depend
+#     on this entry either (command-line ``--path`` is processed after the
+#     configuration and therefore lands in front of everything below).
+#   * ``repro_project_dsl_runtime_dll`` is named only as a FILE PATH — by
+#     ``scripts/build_apps.sh``, ``repro.nim``'s graph edge and the suite
+#     inventory — never as a module. Its own two modules import each other as
+#     SIBLINGS (``repro_project_dsl_runtime_dll.nim`` imports
+#     ``repro_project_dsl_runtime_entry``, which sits next to it), and
+#     ``findModule`` probes the importing module's own directory before it
+#     consults the search path at all, so neither needs this entry.
+#
+# Both are still built and still linted: ``scripts/check_nim_sources.sh`` runs
+# ``nim check libs/<lib>/src/<lib>.nim`` for every row of ``libs/libraries.txt``,
+# and each compiles as its own main module, where the same sibling rule applies.
+# Checked by running it rather than by reading it — with this file as it now
+# stands, ``nim check --define:reproProviderMode libs/<lib>/src/<lib>.nim`` is
+# rc 0 for BOTH libraries. That run has to be done by hand today, because the
+# script is ``set -euo pipefail`` and aborts at row 5
+# (``repro_cli_support``, whose ``import runquota_daemon/host_config`` does not
+# resolve against either RunQuota source this host offers), so it never reaches
+# row 14.
+#
+# This was the whole of the "drop the entries that resolve nothing" lever once
+# it was re-measured. 34 of the 126 search-path entries resolve nothing for a
+# cold ``nim c`` of ``apps/repro/repro.nim`` (counted from the trace as entries
+# with zero resolving probes; the figure is attribution-sensitive because
+# ``$lib`` and ``$lib/pure`` nest), which is the figure that makes the
+# lever look large — but this file is read by EVERY compilation in the
+# repository, and all but these two are needed by some other entrypoint, test or
+# library. An entry is droppable only if it resolves nothing for ALL of them.
+#
+# If you add an ``import repro_diagnostics`` or an
+# ``import repro_project_dsl_runtime_dll``, put the name back in the list above;
+# the failure is a plain ``cannot open file``.
 
 # Incremental-Test-Runner M7: reprobuild's build engine consumes the shared
 # ``io-mon`` filesystem-monitoring library instead of its own former
@@ -697,33 +793,6 @@ block:
      fileExists(".." / "vm-harness" / "src" / "vm_harness.nim"):
     switch("define", "vmHarnessAvailable")
 
-let runquotaRoot = block:
-  let fromEnv = getEnv("RUNQUOTA_SRC")
-  if fromEnv.len > 0:
-    fromEnv
-  else:
-    ".." / "runquota"
-
-for libName in [
-  "runquota_core",
-  "runquota_codec",
-  "runquota_protocol",
-  "runquota_ipc",
-  "runquota_client",
-  "runquota_process",
-  "runquota_exec",
-  "runquota_admission",
-  "runquota_host",
-  "runquota_host_linux",
-  "runquota_host_macos",
-  "runquota_host_windows",
-  "runquota_persistence",
-  "runquota_daemon",
-  "runquota_cli_support",
-  "runquota_partition",
-]:
-  switch("path", runquotaRoot / "libs" / libName / "src")
-
 # Lib subdirectories to probe under a system prefix. The order matters:
 # `lib` covers the default + Debian-multiarch case (Debian/Ubuntu install
 # headers under `/usr/include/` but the dylib at `/usr/lib/x86_64-linux-gnu/`);
@@ -901,3 +970,99 @@ when not defined(windows) and not defined(macosx):
   if sqliteLibDir.len > 0:
     switch("passL", "-L" & sqliteLibDir)
     switch("passL", "-Wl,-rpath," & sqliteLibDir)
+
+# ---------------------------------------------------------------------------
+# THE STANDARD LIBRARY IS SEARCHED FIRST. This block must stay LAST in the
+# file: it reorders what everything above it added, and an entry added after it
+# would jump back in front.
+#
+# The problem it fixes. Nim's installed ``nim.cfg`` puts ``$lib/pure``,
+# ``$lib/core``, … on the search path before this file is read, and
+# ``nimblecmd.addPath`` PREPENDS, so every ``--path`` above lands in FRONT of
+# the standard library. Measured on the cold ``nim c`` of
+# ``apps/repro/repro.nim`` at 9a44bf28, ``$lib/pure`` sat at search index 111 of
+# 128 and ``$lib`` at 125: an ``import std/os`` walked past 111 project
+# directories, missing every one of them, before it could hit. The stdlib is
+# also the most-imported group in the tree, so it pays that walk the most times.
+#
+# The fix, in configuration only. ``--excludePath`` removes an entry from
+# ``conf.searchPaths`` (``compiler/commands.nim``, ``keepItIf(it != path)``);
+# re-adding it immediately afterwards puts it back at the front. Walking the
+# stdlib entries BACKWARDS and doing that to each one moves the whole block
+# ahead of every project path while preserving its internal order exactly.
+# Nothing is duplicated: each path is removed before it is re-added.
+#
+# WHY THIS CANNOT CHANGE WHAT AN IMPORT RESOLVES TO. Reordering a search path is
+# only safe if no module name is reachable from two entries. Checked at
+# 9a44bf28 against the real filesystem, over every ``import`` / ``export`` /
+# ``include`` / ``from`` spec in all 4,837 ``.nim`` files in this repository and
+# under every directory on the path, probing both the ``std/x`` and the bare
+# ``x`` spelling: exactly 10 specs are reachable from more than one entry, and
+# all 10 are ``results`` and ``stew/*``, where this repository's vendored
+# ``libs/results/src`` and ``libs/nim-stew/src`` shadow the two copies the Nim
+# fork ships in ``$nim/dist``. ZERO specs are ambiguous between the standard
+# library and anything else, so the block below moves the one group that can be
+# moved without deciding anything.
+#
+# That is also why the loop is keyed on ``querySetting(libPath)`` and NOT on
+# "everything under the Nim installation": ``$nim/dist/nim-stew`` and
+# ``$nim/dist/nim-results`` are exactly the 10 ambiguous entries, and hoisting
+# them would silently swap the vendored copies for the fork's.
+#
+# Re-derive the ambiguity set before extending this block — the safety property
+# is a fact about the current tree, not an invariant anything enforces.
+#
+# ONE EXPECTED, ONE-TIME ARTIFACT-HASH CHANGE, AND IT IS NOT FROM THE REORDER.
+# Adding ``std/compilesettings`` to the import at the top of this file registers
+# that module in the compiler's module graph EARLIER than the program itself
+# would (it is already in the program's 831-module closure either way, so
+# nothing is added to the binary). That shifts the module id of the three
+# modules that happened to sit after it — ``wrappers/openssl``, ``pure/net``,
+# ``pure/asyncnet`` — by one slot, which renumbers the generated ``Dl_<n>_``
+# dynlib function-pointer identifiers in their C. Measured at 9a44bf28 by
+# compiling this file's PREVIOUS contents plus only the import line: 3 of the
+# 563 generated ``.c`` files differ from the old build and NONE differs from the
+# new one, so the path reordering and the two dropped entries contribute exactly
+# zero codegen change. The build is otherwise deterministic — two cold builds of
+# the unmodified file produced byte-identical binaries.
+#
+# How far the hash change reaches, measured rather than argued. Four cold LINK
+# builds at 9a44bf28 (old twice, new, and old-plus-only-the-import):
+#
+#   * old #1 == old #2, byte for byte, from two different nimcaches — so the
+#     comparison below means something;
+#   * old-plus-only-the-import == new, byte for byte. The reordering and the
+#     two dropped entries change not one byte of the executable;
+#   * old vs new differ in 359,041 bytes, and EVERY ONE of them is in
+#     ``.symtab`` or ``.strtab``. ``.text``, ``.rodata``, ``.data``,
+#     ``.data.rel.ro`` and the relocations are identical, both binaries are the
+#     same size, the 53 ``Dl_<n>_`` symbols sit at identical addresses, and
+#     ``objcopy --strip-all`` of the two produces the SAME file.
+#
+# So the loaded program is bit-identical; what rotates is the name of a symbol
+# in the debug table.
+block stdlibFirst:
+  let libRoot = querySetting(SingleValueSetting.libPath)
+  if libRoot.len > 0:
+    var stdlibEntries: seq[string] = @[]
+    for entry in querySettingSeq(MultipleValueSetting.searchPaths):
+      if (entry == libRoot or entry.startsWith(libRoot & "/") or
+          entry.startsWith(libRoot & $DirSep)) and entry notin stdlibEntries:
+        stdlibEntries.add entry
+    # ``searchPaths`` is in probe order and each re-add prepends, so walking it
+    # backwards lands the block in front with its relative order unchanged.
+    #
+    # ``$lib`` itself is a special case, and the honest description of what
+    # happens to it is not "deduped". ``nim.cfg`` does not install it at all —
+    # its 14 ``path=`` lines are all ``$lib/<subdir>`` — the COMPILER adds the
+    # bare ``$lib``, and it does so more than once and partly AFTER this file
+    # has been evaluated. Measured at 9a44bf28 with ``nim dump``: before this
+    # block the path holds 128 entries with three copies of ``$lib``; after it,
+    # 125 entries with TWO. The ``notin`` plus ``excludePath`` collapse the two
+    # copies that exist at config time into the one hoisted to the front; the
+    # third is appended later and cannot be reached from here. So one duplicate
+    # remains, at the very back, where it costs one extra probe only for a
+    # lookup that misses everything. Do not read this loop as a deduplicator.
+    for i in countdown(stdlibEntries.high, 0):
+      switch("excludePath", stdlibEntries[i])
+      switch("path", stdlibEntries[i])
