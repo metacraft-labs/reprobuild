@@ -44,6 +44,12 @@
   All composition suites are self-contained (no external incus/network).
 - CMake benchmark targets require sibling checkouts of `../runquota` and
   `../reprobuild-cmake`; benchmark CI checks out and builds those siblings.
+- Before optimizing anything, read
+  [Profiling-For-Optimization.md](docs/agents/Profiling-For-Optimization.md):
+  what to measure, what invalidates a measurement, and why a faster version of
+  a computation is not always the same computation. Its first principle is the
+  one to internalize — ask whether a step needs to run at all before asking how
+  to make it faster.
 
 ## Boundaries
 
