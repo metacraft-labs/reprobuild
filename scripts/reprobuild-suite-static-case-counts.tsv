@@ -1609,6 +1609,7 @@ tests/unit/t_dev_env_path_ops.nim	nim	9
 tests/unit/t_electron_builder_binaries.nim	nim	5
 tests/unit/t_every_tool_profile_is_sealed.nim	nim	6
 tests/unit/t_export_plan_carries_tool_ops.nim	nim	4
+tests/unit/t_flake_lock_has_no_competing_reprobuild_pin.nim	nim	2
 tests/unit/t_flake_lock_names_no_private_input.nim	nim	10
 tests/unit/t_fribidi_dev_stub.nim	nim	1
 tests/unit/t_from_source_cargo_recognition.nim	nim	8

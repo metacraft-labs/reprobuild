@@ -3,6 +3,10 @@
 
   inputs = {
     nixos-modules.url = "github:metacraft-labs/devops-modules";
+    # This module input supplies the toolchain, not another Repro release.
+    # Follow this flake itself so consumers retain one Reprobuild pin while
+    # the module and Nixpkgs revisions remain independently pinned.
+    nixos-modules.inputs.reprobuild.follows = "";
     nixpkgs.follows = "nixos-modules/nixpkgs-unstable";
     flake-parts.follows = "nixos-modules/flake-parts";
     git-hooks.follows = "nixos-modules/git-hooks-nix";
@@ -289,7 +293,7 @@
       # environment (``6a53408``) this pin was chosen for is carried forward.
       #
       # Keep this pin aligned with the published workspace dependency.
-      url = "github:metacraft-labs/nim-stackable-hooks/6f8e9c68e654d6243fc934bc2319984a0f34d3b9";
+      url = "github:metacraft-labs/nim-stackable-hooks/512586916384f27614c2b28f6c256d33d451daa5";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -442,7 +446,7 @@
     # monitored import/restore path: an initialized local could make the JS HCR
     # transform absorb the following try and emit an orphaned finally.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=c05e0102e3e0bcb4ceae841454c998549fcc87c8";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=1812157695c0bdeefc67e914925726c66149982a";
       flake = false;
     };
     nim-csources-src = {

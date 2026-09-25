@@ -117,22 +117,12 @@ require_contains flake.nix "+ pre-commit-check.shellHook"
 # repository check instead of surfacing after a minute-long CodeTracer compile.
 trace_format_rev="bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26"
 require_contains flake.nix "github:metacraft-labs/codetracer-trace-format-nim/${trace_format_rev}"
-# 2 -> 4. The lock records TWO nodes at this rev, not one: `ct-trace-format-src`
-# reached from the root, and `ct-trace-format-src_2` reached transitively
-# through `nixos-modules`. Each node spells the rev twice (`locked` and
-# `original`), so the count is two per node.
-#
-# The second node was always resolved -- it was simply not RECORDED, because
-# the committed lock was incomplete and Nix completed it during evaluation.
-# That is why this line passed on a developer's checkout and failed in CI on
-# the same commit: CI evaluated first and counted the completed lock. The lock
-# beside this file is now complete, so both agree and neither re-resolves.
-#
-# The invariant is unchanged and still exactly as strong: ONE immutable source
-# root. Two nodes at the SAME rev satisfy it; if `nixos-modules` ever carried a
-# different trace-format rev the count would fall back to 2 and this line would
-# fail, which is the disagreement it exists to catch.
-require_count flake.lock "\"rev\": \"${trace_format_rev}\"" 4
+# The bootstrap modules follow this Repro flake, so its former nested Repro
+# release (and duplicate trace-format node) is absent. The remaining node
+# records the same immutable revision in both `locked` and `original`.
+# t_flake_lock_has_no_competing_reprobuild_pin also checks the parsed graph
+# so a differently pinned extra trace-format node cannot evade this count.
+require_count flake.lock "\"rev\": \"${trace_format_rev}\"" 2
 require_contains "${package_nix}" 'requiredModule = "${sourceRoot}/codetracer_trace_writer/span_stream.nim";'
 # ONE definition of the guarded source root, in the derivation, read back by
 # the flake through passthru -- so the dev shell and the packaged-runtime

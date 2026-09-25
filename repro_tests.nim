@@ -14418,6 +14418,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_flake_lock_has_no_competing_reprobuild_pin.nim",
+    binary: "build/test-bin/t_flake_lock_has_no_competing_reprobuild_pin",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_flake_lock_names_no_private_input.nim",
     binary: "build/test-bin/t_flake_lock_names_no_private_input",
     defines: @[],
