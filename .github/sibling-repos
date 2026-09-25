@@ -131,6 +131,15 @@ nim-stackable-hooks=512586916384f27614c2b28f6c256d33d451daa5
 runquota=dev
 nim-shm-queue=5a8e43b52fa202859658692c9f8432967f3971ea
 nim-shm-gset=c646982b354cb5b1fa8734f94b951a660419d75c
+
+# nim-shm-lease: runquota's published stats table imports its anchor on
+# WINDOWS now, not only on Linux/macOS, and the Windows release leg builds
+# `../runquota` (`just build`) outside Nix, where runquota's `config.nims`
+# finds it only as this sibling (or through SHM_LEASE_SRC, which nothing on
+# that leg sets). Without it that build stops at `cannot open file:
+# shm_lease/anchor`. Pinned to the revision runquota's own `flake.lock` pins
+# (`nodes.nim-shm-lease.locked.rev`); move it when runquota moves that pin.
+nim-shm-lease=e3254b7ba1c501de6e64dbb41c96306be5ca6058
 # `main` retired in the org branch-rename sweep; mainline is now `dev`.
 repo-workspaces=dev
 
