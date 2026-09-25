@@ -53,6 +53,7 @@
 
 import std/[json, os, strutils, unittest]
 
+import repro_dsl_stdlib/foreign_env
 import nf3_override_state_fixture
 
 suite "NF-3: a root-repo flake is reported, not refused":
@@ -109,3 +110,12 @@ suite "NF-3: a root-repo flake is reported, not refused":
       check args.code == 0
       check args.output.contains("--override-input beta-src")
       check args.output.contains("git+file://" & siblingDir(fx, "beta"))
+
+      # The repro-only bridge must apply the same bindings as the legacy hook.
+      let oldRepro = getEnv("REPROBUILD_REPRO")
+      putEnv("REPROBUILD_REPRO", fx.repro)
+      defer: putEnv("REPROBUILD_REPRO", oldRepro)
+      let bindings = workspaceFlakeOverrides(fx.ws)
+      check bindings.len == 3
+      check ("beta-src", siblingDir(fx, "beta")) in bindings
+      check workspaceFlakeOverrides(fx.ws, "path:" & fx.ws) == bindings

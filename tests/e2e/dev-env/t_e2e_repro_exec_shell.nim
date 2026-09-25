@@ -196,8 +196,112 @@ when isNixSupported:
       "M4 shell print gate requires a real fish binary; PATH has none " &
         "and `nix build nixpkgs#fish` did not provide one")
 
+proc unprovisionedProviderText(defaultMode = ""): string =
+  ## A recipe that declares a package in ``uses:``. With ``defaultMode``
+  ## empty it names no provisioning mode, so an activation that is not given
+  ## one through the environment has none to realize the package with.
+  result = "import repro_project_dsl\n\n" &
+    "package unprovisioned:\n"
+  if defaultMode.len > 0:
+    result.add("  defaultToolProvisioning \"" & defaultMode & "\"\n")
+  result.add(
+    "  uses:\n" &
+    "    \"nim >=2.2 <3.0\"\n" &
+    "  devEnv:\n" &
+    "    activity \"default\"\n" &
+    "    setWorkingDirectory \".\"\n")
+
+const UnresolvedModeWarning = "no tool provisioning mode is resolved"
+
+proc unresolvedModeWarningLine(output: string): string =
+  for line in output.splitLines:
+    if line.contains(UnresolvedModeWarning):
+      return line
+
+proc advertisedFlags(warning: string): seq[string] =
+  ## Every command-line flag the warning tells the reader to pass, spelled
+  ## so it can be handed straight back to the command: a ``--name=`` remedy
+  ## is completed with ``path``, which every surface that accepts the flag
+  ## accepts and which needs no network or store.
+  for rawToken in warning.splitWhitespace():
+    let token = rawToken.strip(chars = {'`', ',', '.', ';', ':', '(', ')',
+      '"', '\''})
+    if token.startsWith("--") and token.len > 2:
+      result.add(if token.endsWith("="): token & "path" else: token)
+
 suite "e2e_repro_exec_shell_artifact_consumers":
   when isIoMonitorSupported:
+    test "e2e_unresolved_tool_provisioning_warning_names_only_working_remedies":
+      # The warning a dev-env activation prints when ``uses:`` declares
+      # packages and no provisioning mode resolves must tell the reader what
+      # to change (Development-Environments-And-Control-API.md, "Graph-Native
+      # Development Environment Artifact Contract": consumers report, they do
+      # not recompute). A remedy that the very command which printed it then
+      # rejects is worse than no remedy: `repro exec` printed
+      # "pass --tool-provisioning=" and then refused that flag as unsupported,
+      # because CLI/exec.md and CLI/shell.md give activations no such flag —
+      # the mode reaches them through the recipe or REPRO_TOOL_PROVISIONING
+      # (Shell-Direnv-Hook.md, "Fast-Path Cache-Key Check").
+      #
+      # So every remedy the warning names is tried against each surface that
+      # prints it, and must be accepted and must silence the warning.
+      let c = prepareCase("repro-exec-unprovisioned")
+      defer: removeDir(c.tempRoot)
+      writeFile(c.projectRoot / "reprobuild.nim", unprovisionedProviderText())
+
+      var env = c.envFor()
+      if env.hasKey("REPRO_TOOL_PROVISIONING"):
+        env.del("REPRO_TOOL_PROVISIONING")
+
+      let surfaces = @[
+        (name: "exec", prefix: @["exec", c.projectRoot], suffix: @["--", "true"]),
+        (name: "shell", prefix: @["shell", "--print-env=posix", c.projectRoot],
+          suffix: newSeq[string]())
+      ]
+      for surface in surfaces:
+        checkpoint("surface: repro " & surface.name)
+        let warned = runProgram(c.reproBin, surface.prefix & surface.suffix,
+          c.repoRoot, env)
+        # Not fatal: the developer is still handed a working environment.
+        check warned.exitCode == 0
+        let warning = warned.output.unresolvedModeWarningLine()
+        check warning.len > 0
+        if warning.len == 0:
+          checkpoint(warned.output)
+          continue
+        # The warning must offer a way out, not merely describe the problem.
+        check warning.contains("defaultToolProvisioning")
+        check warning.contains("REPRO_TOOL_PROVISIONING")
+
+        for flag in warning.advertisedFlags():
+          checkpoint("advertised flag: " & flag)
+          let flagged = runProgram(c.reproBin,
+            surface.prefix & @[flag] & surface.suffix, c.repoRoot, env)
+          check not flagged.output.contains("unsupported " & surface.name &
+            " flag")
+          check flagged.exitCode == 0
+          check flagged.output.unresolvedModeWarningLine().len == 0
+
+        # The environment-variable remedy the warning names.
+        var withEnvMode = newStringTable(modeCaseSensitive)
+        for key, value in env.pairs:
+          withEnvMode[key] = value
+        withEnvMode["REPRO_TOOL_PROVISIONING"] = "path"
+        let viaEnv = runProgram(c.reproBin, surface.prefix & surface.suffix,
+          c.repoRoot, withEnvMode)
+        check viaEnv.exitCode == 0
+        check viaEnv.output.unresolvedModeWarningLine().len == 0
+
+      # The recipe remedy the warning names.
+      writeFile(c.projectRoot / "reprobuild.nim",
+        unprovisionedProviderText(defaultMode = "path"))
+      for surface in surfaces:
+        checkpoint("recipe remedy, surface: repro " & surface.name)
+        let viaRecipe = runProgram(c.reproBin, surface.prefix & surface.suffix,
+          c.repoRoot, env)
+        check viaRecipe.exitCode == 0
+        check viaRecipe.output.unresolvedModeWarningLine().len == 0
+
     test "e2e_repro_exec_uses_cached_dev_env_artifact":
       let c = prepareCase("repro-m4-exec-cache")
       defer: removeDir(c.tempRoot)

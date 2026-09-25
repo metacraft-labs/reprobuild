@@ -138,6 +138,8 @@ type
     activationScriptHash*: string    ## seal over the activation script
     activationShell*: ShellKind      ## shell that produced the script
     vars*: seq[RollbackVar]
+    hasToolOpCount*: bool           ## absent in legacy manifests
+    toolOpCount*: int               ## captured provisioning prefix in vars
 
   RollbackManifestError* = object of CatchableError
 
@@ -249,6 +251,8 @@ proc toJson*(m: RollbackManifest): JsonNode =
     newJString(m.activationScriptHash)
   result["activation_shell"] =
     newJString(shellKindToWire(m.activationShell))
+  if m.hasToolOpCount:
+    result["tool_op_count"] = newJInt(m.toolOpCount)
   var arr = newJArray()
   for v in m.vars:
     var node = newJObject()
@@ -321,6 +325,38 @@ proc fromJson*(node: JsonNode): RollbackManifest =
     else:
       v.previous = ""
     result.vars.add(v)
+  if node.hasKey("tool_op_count"):
+    if node["tool_op_count"].kind != JInt:
+      raiseManifest("rollback manifest tool_op_count must be an integer")
+    result.hasToolOpCount = true
+    result.toolOpCount = node["tool_op_count"].getInt()
+    if result.toolOpCount < 0 or result.toolOpCount > result.vars.len:
+      raiseManifest("rollback manifest tool_op_count is out of bounds")
+
+proc capturedToolExportPlan*(m: RollbackManifest): ExportPlan =
+  ## Provisioning is activation-time I/O. Replaying its recorded prefix keeps
+  ## deactivation independent of daemon availability and the current PATH.
+  if not m.hasToolOpCount or m.toolOpCount < 0 or
+      m.toolOpCount > m.vars.len:
+    raiseManifest("rollback manifest has no valid captured tool prefix")
+  for i in 0 ..< m.toolOpCount:
+    let v = m.vars[i]
+    case v.op
+    of rokSet:
+      result.add(ExportOp(kind: opSet, name: v.name, value: v.value))
+    of rokUnset:
+      result.add(ExportOp(kind: opUnset, unsetName: v.name))
+    of rokPrepend, rokAppend:
+      let kind = if v.op == rokPrepend: opPrependPath else: opAppendPath
+      if kind == opPrependPath:
+        result.add(ExportOp(kind: opPrependPath, pathName: v.name,
+          segment: v.segment, separator: v.separator))
+      else:
+        result.add(ExportOp(kind: opAppendPath, pathName: v.name,
+          segment: v.segment, separator: v.separator))
+    of rokMarker:
+      result.add(ExportOp(kind: opMarker, markerName: v.name,
+        markerValue: v.value))
 
 proc rollbackManifestPath*(artifactPath: string): string =
   artifactPath & ".rollback.json"

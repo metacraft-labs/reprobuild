@@ -30,10 +30,11 @@
 ## `flakeSiblingOverrideRef` below — a git tree for a checkout, so `.gitignore`
 ## keeps build output out of the store, and a directory copy otherwise. NF-1's
 ## `repro flake override-args` already computes that list from the workspace's
-## develop set; this helper takes it as data so the recipe can pass NF-1's
-## answer, a hand-written list, or nothing at all.
+## develop set. `useFlakeDevShell` obtains that answer automatically in a
+## workspace; explicit pairs win over it. `workspaceOverrides = false` opts
+## out when a recipe deliberately needs only its explicit overrides.
 
-import std/[os, osproc, strutils]
+import std/[json, os, osproc, strutils]
 
 import repro_core/ambient_execution
 import repro_core/paths
@@ -175,7 +176,8 @@ proc flakePrintDevEnvArgv*(nixExe, flakeRef, profilePath: string;
   ## shape is asserted by a test rather than by reading it: an override arm
   ## that silently emits nothing is the exact defect §5 records the
   ## content-pinned direnv plugin shipping.
-  result = @[nixExe, "print-dev-env"]
+  # Activation may evaluate a changed input, but must not edit source locks.
+  result = @[nixExe, "print-dev-env", "--no-write-lock-file"]
   if profilePath.len > 0:
     result.add("--profile")
     result.add(profilePath)
@@ -222,11 +224,46 @@ proc flakeDevShellOps*(projectRoot: string; flakeRef = DefaultFlakeRef;
   captureForeignEnvOps(argv, projectRoot, workDir / "print-dev-env.bash",
     separator = $PathSep)
 
+proc workspaceFlakeOverrides*(projectRoot: string; flakeRef = DefaultFlakeRef):
+    seq[(string, string)] =
+  ## Ask NF-1 for the actual develop bindings instead of duplicating its resolver.
+  var root = absolutePath(projectRoot)
+  while not fileExists(extendedPath(root / ".repro-workspace.toml")) and
+      not fileExists(extendedPath(root / ".repro" / "workspace.toml")):
+    let parent = parentDir(root)
+    if parent == root or parent.len == 0:
+      return
+    root = parent
+  var localRef = flakeRef.split('#')[0].split('?')[0]
+  if localRef.startsWith("path:"):
+    localRef = localRef[5 .. ^1]
+  elif localRef.contains(":"):
+    return
+  let flakeRoot = absolutePath(localRef, projectRoot)
+  let explicit = getEnv("REPROBUILD_REPRO")
+  let repro = if explicit.len > 0: explicit else: uncontrolledFindExe("repro")
+  if repro.len == 0:
+    raise newException(ForeignEnvCaptureError,
+      "workspace flake activation requires repro for native override resolution")
+  let probe = uncontrolledExecCmdEx(quoteShell(repro) &
+    " flake override-args --all --json --workspace-root=" & quoteShell(root) &
+    " --flake=" & quoteShell(flakeRoot), options = {poUsePath}, workingDir = projectRoot)
+  if probe.exitCode != 0:
+    raise newException(ForeignEnvCaptureError,
+      "native workspace flake override resolution failed: " & probe.output)
+  let document = parseJson(probe.output)
+  if document["schemaId"].getStr() != "reprobuild.flake-override-args.v1":
+    raise newException(ForeignEnvCaptureError,
+      "unsupported native flake override response")
+  for entry in document["overrides"]:
+    result.add((entry["input"].getStr(), entry["path"].getStr()))
+
 proc useFlakeDevShell*(flakeRef = DefaultFlakeRef;
                        overrideInputs: openArray[(string, string)] = [];
                        nixExe = ""; profile = "";
                        extraArgs: openArray[string] = [];
-                       activities: openArray[string] = []) {.dynOrStatic.} =
+                       activities: openArray[string] = [];
+                       workspaceOverrides = true) {.dynOrStatic.} =
   ## The one-liner. Activates the project's flake dev shell and contributes
   ## everything it exports to the Reprobuild dev environment.
   var projectRoot = activeProviderProjectRoot()
@@ -236,7 +273,19 @@ proc useFlakeDevShell*(flakeRef = DefaultFlakeRef;
     # here, and a wrong value would be silent, so it is named rather than
     # left implicit.
     projectRoot = getCurrentDir()
+  var resolved: seq[(string, string)]
+  if workspaceOverrides:
+    resolved = workspaceFlakeOverrides(projectRoot, flakeRef)
+  # Explicit entries win without emitting the same input twice.
+  for pair in overrideInputs:
+    var replaced = false
+    for existing in resolved.mitems:
+      if existing[0] == pair[0]:
+        existing = pair
+        replaced = true
+    if not replaced:
+      resolved.add(pair)
   applyForeignEnvOps(
-    flakeDevShellOps(projectRoot, flakeRef, overrideInputs, nixExe, profile,
+    flakeDevShellOps(projectRoot, flakeRef, resolved, nixExe, profile,
       extraArgs),
     activities)

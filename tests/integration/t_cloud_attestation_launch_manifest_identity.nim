@@ -867,22 +867,21 @@ suite "the rules this adapter refuses on":
       reached.incl e.condition
 
     block:
-      # A credential variable whose value occurs in the invocation. The
-      # environment is restored in a `finally`, because a gate that
-      # leaves a variable behind changes every case after it.
+      # A SECRET whose value occurs in the invocation. The environment
+      # is STATED rather than exported: a case that wrote into this
+      # process's environment would be a statement about the machine it
+      # runs on, and the two faults this rule shipped with were both
+      # invisible to a gate that ran with the variables unset.
       let name = "AWS_ACCESS_KEY_ID"
-      let saved = getEnv(name)
-      let had = existsEnv(name)
-      try:
-        putEnv(name, base.region)
-        let e = refuses(proc () = discard checkedCloudLaunchPlan(base))
-        check e.condition == clcLaunchPlanCarriesCredentialMaterial
-        reached.incl e.condition
-        check name in e.msg
-      finally:
-        if had: putEnv(name, saved) else: delEnv(name)
-      # …and with it unset the same plan is returned.
-      check checkedCloudLaunchPlan(base) == cloudLaunchPlan(base)
+      let leaked = fixedEnvLookup([(name, base.imageReference)])
+      let e = refuses(proc () =
+        discard checkedCloudLaunchPlan(base, leaked))
+      check e.condition == clcLaunchPlanCarriesCredentialMaterial
+      reached.incl e.condition
+      check name in e.msg
+      # …and against an empty environment the same plan is returned.
+      check checkedCloudLaunchPlan(base, fixedEnvLookup([])) ==
+        cloudLaunchPlan(base)
 
     var missing: seq[string] = @[]
     for c in CloudLaunchCondition:
@@ -927,6 +926,269 @@ suite "the rules this adapter refuses on":
       for c in CloudLaunchCondition:
         if n == $c: known = true
       check known
+
+suite "a secret and an identifier are not the same thing":
+
+  test "every declared SECRET is searched for, one at a time":
+    # The list is consumed rather than merely declared: each secret in
+    # turn is given a value the plan carries, and the plan must be
+    # refused. A name on the list that no call site reads would be
+    # green under the sweep below and red under nothing.
+    let base = baselineSpec(lbSecurityProcessorOnAws)
+    var probed = 0
+    for rawName in allCredentialEnvNames():
+      let name = $rawName
+      checkpoint(name)
+      let e = refuses(proc () =
+        discard checkedCloudLaunchPlan(base,
+          fixedEnvLookup([(name, base.imageReference)])))
+      check e.condition == clcLaunchPlanCarriesCredentialMaterial
+      check name in e.msg
+      inc probed
+    check probed == allCredentialEnvNames().len
+    check probed >= 5
+
+  test "each declared variable's KIND is pinned by name":
+    # Row c2 of this change's own mutation table came back GREEN without
+    # this case, and the reason is worth keeping: the behavioural arm
+    # below set a region variable to a NINE-character region name, which
+    # is under the search floor, so the arm passed whatever the
+    # variable's kind was. A classification asserted only through a
+    # value shorter than the floor is not asserted at all.
+    #
+    # So each name's kind is pinned directly, and the pinned set is
+    # required to be the WHOLE declared set — a variable added without a
+    # row here is red, and so is a variable that quietly changes kind.
+    const Pinned = [
+      ("AWS_ACCESS_KEY_ID", cevSecret),
+      ("AWS_SECRET_ACCESS_KEY", cevSecret),
+      ("AWS_SESSION_TOKEN", cevSecret),
+      ("AWS_SHARED_CREDENTIALS_FILE", cevSecretLocation),
+      ("AWS_WEB_IDENTITY_TOKEN_FILE", cevSecretLocation),
+      ("AWS_REGION", cevIdentifier),
+      ("AWS_DEFAULT_REGION", cevIdentifier),
+      ("AWS_PROFILE", cevIdentifier),
+      ("CLOUDSDK_AUTH_ACCESS_TOKEN", cevSecret),
+      ("GOOGLE_OAUTH_ACCESS_TOKEN", cevSecret),
+      ("GOOGLE_APPLICATION_CREDENTIALS", cevSecretLocation),
+      ("CLOUDSDK_CORE_PROJECT", cevIdentifier),
+      ("GOOGLE_CLOUD_PROJECT", cevIdentifier),
+      ("CLOUDSDK_COMPUTE_ZONE", cevIdentifier),
+      ("AZURE_CLIENT_SECRET", cevSecret),
+      ("AZURE_CLIENT_CERTIFICATE_PATH", cevSecretLocation),
+      ("AZURE_CLIENT_ID", cevIdentifier),
+      ("AZURE_TENANT_ID", cevIdentifier),
+      ("AZURE_SUBSCRIPTION_ID", cevIdentifier)]
+    let declared = allProviderEnvVars()
+    check declared.len == Pinned.len
+    for row in Pinned:
+      var found = 0
+      for v in declared:
+        if v.name == row[0]:
+          inc found
+          if v.kind != row[1]:
+            checkpoint(row[0] & " is " & $v.kind & " and is pinned " &
+              $row[1])
+          check v.kind == row[1]
+      if found != 1:
+        checkpoint(row[0] & " appears " & $found & " times in the " &
+          "declared set")
+      check found == 1
+    for v in declared:
+      var pinned = false
+      for row in Pinned:
+        if row[0] == v.name: pinned = true
+      if not pinned:
+        checkpoint(v.name & " is declared and pinned by nothing")
+      check pinned
+
+  test "no declared identifier or secret LOCATION is searched for":
+    # The behavioural half, with a value that is actually long enough to
+    # be looked for. Each variable in turn is set to a token the plan
+    # carries; an identifier or a path must leave the plan returned, and
+    # the SAME token under every secret's name must be refused — so what
+    # separates them is the kind and not the value.
+    const Token = "a-token-the-plan-carries"
+    check Token.len >= MinSecretValueLen
+    var base = baselineSpec(lbSecurityProcessorOnAws)
+    base.instanceName = Token
+    let plan = cloudLaunchPlan(base)
+    check Token in plan.join(" ")
+    var identifiers = 0
+    var locations = 0
+    var secrets = 0
+    for v in allProviderEnvVars():
+      let name = $v.name
+      checkpoint(name)
+      case v.kind
+      of cevIdentifier, cevSecretLocation:
+        check checkedCloudLaunchPlan(base,
+          fixedEnvLookup([(name, Token)])) == plan
+        if v.kind == cevIdentifier: inc identifiers else: inc locations
+      of cevSecret:
+        let e = refuses(proc () =
+          discard checkedCloudLaunchPlan(base,
+            fixedEnvLookup([(name, Token)])))
+        check e.condition == clcLaunchPlanCarriesCredentialMaterial
+        inc secrets
+    check identifiers + locations + secrets == allProviderEnvVars().len
+    check identifiers > 0
+    check locations > 0
+    check secrets > 0
+
+  test "an IDENTIFIER is NOT searched for, and this is the repair":
+    # Measured before it was repaired, on the ordinary configuration of
+    # one cloud: its default-PROJECT variable was declared a credential,
+    # and that cloud spells image references
+    # `projects/<project>/global/images/<name>` — so an operator whose
+    # own project was exported got the plan refused with a message
+    # calling a project name credential material. Both clouds are
+    # exercised here, because the same shape exists on the other one
+    # through its region variable.
+    var gcp = baselineSpec(lbSecurityProcessorOnAws)
+    gcp.provider = cpGcpCompute
+    gcp.instanceShape = "n2d-standard-4"
+    gcp.region = "us-central1-a"
+    gcp.imageReference =
+      "projects/an-operator-project/global/images/reproos"
+    gcp.subnet = "default"
+    gcp.sshKeyReference = "/tmp/ssh-keys.txt"
+    let gcpPlan = checkedCloudLaunchPlan(gcp, fixedEnvLookup([
+      ("CLOUDSDK_CORE_PROJECT", "an-operator-project")]))
+    check gcpPlan == cloudLaunchPlan(gcp)
+
+    let aws = baselineSpec(lbSecurityProcessorOnAws)
+    let awsPlan = checkedCloudLaunchPlan(aws, fixedEnvLookup([
+      ("AWS_REGION", aws.region),
+      ("AWS_DEFAULT_REGION", aws.region)]))
+    check awsPlan == cloudLaunchPlan(aws)
+
+    # …and the SAME values under a SECRET's name are refused, so the
+    # difference above is the classification and not the value.
+    let e = refuses(proc () =
+      discard checkedCloudLaunchPlan(gcp, fixedEnvLookup([
+        ("CLOUDSDK_AUTH_ACCESS_TOKEN", "an-operator-project")])))
+    check e.condition == clcLaunchPlanCarriesCredentialMaterial
+
+  test "a SECRET LOCATION is a path and not the secret":
+    # The third kind, and it has real members on all three clouds: the
+    # variable holds a path to the file the credential is in, and a
+    # legitimate plan can spell a path in the same directory — this
+    # cloud's key reference is exactly that.
+    var gcp = baselineSpec(lbSecurityProcessorOnAws)
+    gcp.provider = cpGcpCompute
+    gcp.instanceShape = "n2d-standard-4"
+    gcp.region = "us-central1-a"
+    gcp.imageReference = "projects/a-project/global/images/reproos"
+    gcp.subnet = "default"
+    gcp.sshKeyReference = "/home/an-operator/.config/keys.txt"
+    check checkedCloudLaunchPlan(gcp, fixedEnvLookup([
+      ("GOOGLE_APPLICATION_CREDENTIALS",
+       "/home/an-operator/.config/keys.txt")])) == cloudLaunchPlan(gcp)
+
+  test "the three kinds are a partition, and none of them is empty":
+    var counts: array[CloudEnvVarKind, int]
+    var names: seq[string] = @[]
+    for v in allProviderEnvVars():
+      inc counts[v.kind]
+      check v.name notin names
+      names.add v.name
+    for kind in CloudEnvVarKind:
+      if counts[kind] == 0:
+        checkpoint($kind & " has no member, so no case exercises it")
+      check counts[kind] > 0
+    # Every provider contributes at least one of each of the first two,
+    # so no kind is carried by one cloud alone.
+    for p in CloudProvider:
+      var secrets = 0
+      var locations = 0
+      var identifiers = 0
+      for v in providerEnvVarsFor(p):
+        case v.kind
+        of cevSecret: inc secrets
+        of cevSecretLocation: inc locations
+        of cevIdentifier: inc identifiers
+      checkpoint($p)
+      check secrets > 0
+      check locations > 0
+      check identifiers > 0
+    # …and the secret set is exactly what the check searches for.
+    var declaredSecrets: seq[string] = @[]
+    for v in allProviderEnvVars():
+      if v.kind == cevSecret: declaredSecrets.add v.name
+    check allCredentialEnvNames() == declaredSecrets
+
+  test "a value too short to look for is REPORTED, not used to refuse":
+    # The second fault, measured before repair: the test was a raw
+    # substring with no floor, so a one-character session token matched
+    # the `1` in `--count 1` and refused a good plan with a message
+    # about credential material.
+    #
+    # The floor is pinned by a LITERAL as well as exercised at itself.
+    # Written only in terms of the constant, halving the constant would
+    # move both cases together and leave this green — which is the
+    # state two of this module's other bounds were found in.
+    check MinSecretValueLen == 16
+    let base = baselineSpec(lbSecurityProcessorOnAws)
+    let short = checkedCloudLaunchPlanScanned(base,
+      fixedEnvLookup([("AWS_SESSION_TOKEN", "1")]))
+    check short.plan == cloudLaunchPlan(base)
+    check short.scan.unsearchable == @["AWS_SESSION_TOKEN"]
+    check short.scan.searched.len == 0
+    # It is REPORTED. A caller that printed nothing here would have
+    # turned a false refusal into a silent gap.
+    check "AWS_SESSION_TOKEN" in
+      renderUnsearchableSecretWarning(short.scan)
+    check renderUnsearchableSecretWarning(PlanSecretScan()) == ""
+
+    # At fifteen characters it is still not searched for; at sixteen it
+    # is, and the plan carrying it is refused. Both values are written
+    # as LITERAL lengths.
+    let fifteen = "abcdefghijklmno"
+    check fifteen.len == 15
+    var withFifteen = base
+    withFifteen.instanceName = fifteen
+    let below = checkedCloudLaunchPlanScanned(withFifteen,
+      fixedEnvLookup([("AWS_SESSION_TOKEN", fifteen)]))
+    check below.scan.unsearchable == @["AWS_SESSION_TOKEN"]
+
+    let sixteen = "abcdefghijklmnop"
+    check sixteen.len == 16
+    var withSixteen = base
+    withSixteen.instanceName = sixteen
+    let e = refuses(proc () =
+      discard checkedCloudLaunchPlan(withSixteen,
+        fixedEnvLookup([("AWS_SESSION_TOKEN", sixteen)])))
+    check e.condition == clcLaunchPlanCarriesCredentialMaterial
+    # …and a sixteen-character secret the plan does NOT carry is
+    # searched for and found absent, so the length is not itself the
+    # refusal.
+    let clean = checkedCloudLaunchPlanScanned(base,
+      fixedEnvLookup([("AWS_SESSION_TOKEN", sixteen)]))
+    check clean.scan.searched == @["AWS_SESSION_TOKEN"]
+    check clean.scan.unsearchable.len == 0
+
+  test "the two inherited numeric bounds are pinned by LITERALS":
+    # Both were tested only in terms of the constant when they were
+    # written, so halving either left this gate green. A bound tested
+    # under itself is not a bound.
+    check MaxLaunchValueLen == 256
+    check MaxHexWordDigits == 16
+    let base = baselineSpec(lbSecurityProcessorOnAws)
+    var atBound = base
+    atBound.instanceName = repeat('a', 256)
+    validateCloudLaunchSpec(atBound)
+    var pastBound = base
+    pastBound.instanceName = repeat('a', 257)
+    check refuses(proc () = validateCloudLaunchSpec(pastBound)).condition ==
+      clcLaunchValueIsTooLongForACommandLine
+    var wideAtBound = base
+    wideAtBound.guestPolicy = "0x" & repeat('f', 16)
+    validateCloudLaunchSpec(wideAtBound)
+    var tooWide = base
+    tooWide.guestPolicy = "0x" & repeat('f', 17)
+    check refuses(proc () = validateCloudLaunchSpec(tooWide)).condition ==
+      clcHexWordIsNotWrittenInHexadecimal
 
 suite "provenance":
 

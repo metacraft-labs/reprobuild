@@ -3,6 +3,10 @@
 
   inputs = {
     nixos-modules.url = "github:metacraft-labs/devops-modules";
+    # This module input supplies the toolchain, not another Repro release.
+    # Follow this flake itself so consumers retain one Reprobuild pin while
+    # the module and Nixpkgs revisions remain independently pinned.
+    nixos-modules.inputs.reprobuild.follows = "";
     nixpkgs.follows = "nixos-modules/nixpkgs-unstable";
     flake-parts.follows = "nixos-modules/flake-parts";
     git-hooks.follows = "nixos-modules/git-hooks-nix";
@@ -149,7 +153,11 @@
       # asFailed` blamed on the compiler. The pin carries the fix into every
       # build that has no io-mon sibling; the sibling-overridden developer
       # shells already have it. b5c7990 is the tip of io-mon's `dev`.
-      url = "github:metacraft-labs/io-mon/3b6196efc2021ba202add54a21b25f0268d70c79";
+      # Keep shim allocations out of rustc's replacement allocator: its clock
+      # reads can run under the allocator lock. b72fb8d preserves time evidence
+      # while fixing native flake activation of rustc-based environments.
+      # 0c312f2 also drops unused glibc companion libraries from the shim.
+      url = "github:metacraft-labs/io-mon/0c312f261ecbbad3931132aed4ba31167b2de202";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -284,17 +292,8 @@
       # 41ab1b9 is an ANCESTOR of 49006c3, so the explicit Windows child
       # environment (``6a53408``) this pin was chosen for is carried forward.
       #
-      # Bumped to 203a3b8: the same `ci: name the shared modules repo by the
-      # name it has now` commit as io-mon's 1c41ba8 above, and the same
-      # reasoning — one commit, no source change, retargeting this repo's own
-      # `nixos-modules` input at `metacraft-labs/devops-modules`. 203a3b8 is
-      # the tip of nim-stackable-hooks' `dev`.
-      #
-      # It also carries what the 0.1.4 release branch pinned d51b571 for (the
-      # PR #6 merge: the arm64e PAC fix in the macOS body-patch primitive and
-      # the `inlineHookTransactionCapacity()` io-mon's Windows shim calls):
-      # d51b571 is an ancestor of 203a3b8.
-      url = "github:metacraft-labs/nim-stackable-hooks/203a3b87366d321e2ea3f7f2126e88f28da48202";
+      # Keep this pin aligned with the published workspace dependency.
+      url = "github:metacraft-labs/nim-stackable-hooks/512586916384f27614c2b28f6c256d33d451daa5";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -447,7 +446,7 @@
     # monitored import/restore path: an initialized local could make the JS HCR
     # transform absorb the following try and emit an orphaned finally.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=c05e0102e3e0bcb4ceae841454c998549fcc87c8";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=1812157695c0bdeefc67e914925726c66149982a";
       flake = false;
     };
     nim-csources-src = {

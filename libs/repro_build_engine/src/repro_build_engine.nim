@@ -729,6 +729,23 @@ type
     # launches child processes directly under leases instead of spawning a
     # `repro __repro-runquota-helper` process for every action.
     inlineRunQuota*: bool
+    runQuotaQueueTimeoutMs*: int
+      ## Bound, in milliseconds, on how long this build may sit with EVERY
+      ## in-flight action queued at RunQuota -- i.e. with nothing of its own
+      ## running -- before it fails the queued actions with a diagnostic that
+      ## names them, the daemon's reason, the endpoint and the leases holding
+      ## the budget. ``0`` (the default) sets no bound. Either way the wait is
+      ## never silent: becoming blocked is announced and re-announced every
+      ## ``grantHeartbeatMs()``.
+      ##
+      ## The dev-env activation sets it (``repro exec`` & co.): its whole graph
+      ## is one small recipe compile, so being blocked means another
+      ## workspace's build holds the host budget, and waiting on that without
+      ## a word for an hour is what made every ``just`` recipe look hung.
+    runQuotaInteractive*: bool
+      ## Offer this build's leases at RunQuota's interactive priority, so a
+      ## human waiting at a prompt is served before queued batch work when
+      ## capacity frees up. Set by the dev-env activation only.
     # OPT-IN, and ``mhmNever`` by default because measurement says so. Above
     # ``mhmNever`` the engine hosts io-mon's consumer itself on the launch
     # paths it spawns (today only the RunQuota-bypass path) instead of putting
@@ -777,6 +794,32 @@ type
     statsEnabled*: bool
     suppressTrace*: bool
     skipCacheHitEvidence*: bool
+    elideCacheHitEvidencePaths*: bool
+      ## "No consumer of THIS run wants the cache-hit evidence's path
+      ## STRINGS." When true, a cache hit's `ActionResult` carries
+      ## `evidencePathCounts` (exact lengths) and empty path seqs instead of
+      ## the reconstructed strings; see `EvidencePathCounts` for what that
+      ## costs and why.
+      ##
+      ## ORTHOGONAL TO `skipCacheHitEvidence`, AND NOT A TELEMETRY FLAG.
+      ## `skipCacheHitEvidence` says the evidence is not to be reconstructed
+      ## at all, and it also picks which whole-graph fast-scan arm runs — it
+      ## has SERVING consequences. This one has none: the record that was
+      ## loaded, the inputs revalidated, the fingerprints compared and the
+      ## cache decision reached are identical either way. It is a statement
+      ## about who is going to READ the result, made by the caller that
+      ## knows — the CLI, at parse time, from `repro watch` and
+      ## `--write-report`.
+      ##
+      ## THE DEFAULT IS `false` AND THAT IS LOAD-BEARING. Every config
+      ## literal that does not mention this field keeps the full path sets,
+      ## because the failure mode of the other polarity is silent: `repro
+      ## watch` arming its watcher on an empty path set is blind to every
+      ## source file and still looks exactly like a working watcher (see
+      ## `BuildCommandOutcome.inputEvidencePaths`, which records that this
+      ## regression has already shipped once). A field whose zero value
+      ## costs a little time is recoverable; one whose zero value hangs the
+      ## watch loop is not.
     peerCacheActionFetcher*: PeerCacheActionFetcher
       ## Peer-Cache M1 (Linux-Distro-Recipe-Validation M5 wiring,
       ## 2026-06-12): when non-nil, consulted on action-cache miss to
@@ -947,6 +990,83 @@ type
       ## monitor could not have seen an entropy read, so silence proves
       ## nothing.
 
+  EvidenceContributor* = enum
+    ## DA-1f — WHO put something into this action's OBSERVED channels
+    ## (`depfileInputs`, `monitorReads`, `monitorWrites`, `monitorProbes`,
+    ## `monitorDirectoryEnumerations`).
+    ##
+    ## WHY THE CHANNELS ARE NOT ENOUGH. Those five fields are the terms of
+    ## the zero-evidence guard, whose whole question is *"did anything look at
+    ## this action?"*. Five `seq[string]`s cannot answer it, because a path
+    ## the ENGINE reconstructed, a path REPLAYED out of a cache record and a
+    ## path a monitor really observed are the same string in the same seq.
+    ## `832f5fa2` was one instance of that confusion reaching the guard;
+    ## `EvidenceCollection.engineSuppliedRootImage` was the first,
+    ## single-purpose answer to it. This set is that answer generalised, so
+    ## the NEXT contributor is marked at the point it contributes rather than
+    ## discovered by an audit.
+    ##
+    ## ATTRIBUTION, NOT SUPPRESSION. Nothing here removes a path from a
+    ## channel or from the key. The paths are all still recorded, still
+    ## hashed and still invalidate the edge. See
+    ## `../../../reprobuild-specs/Dependency-Observation-Attribution.md`
+    ## §"Attribution, not suppression" and rule 8.
+    ##
+    ## THE ZERO VALUE IS `{}`, WHICH CLAIMS NOTHING, so a consumer that asks
+    ## whether an OBSERVING contributor is PRESENT — rather than whether a
+    ## synthesising one is absent — is fail-closed against a writer that
+    ## forgot to mark itself. `depfileObservedNothing` is written that way and
+    ## is the only such consumer today.
+    ##
+    ## DO NOT READ THAT AS A PROPERTY OF THE GUARD. It is a property of ONE of
+    ## the guard's five terms. The other four — `monitorObservedNoReads` and
+    ## the `.len == 0` tests on `monitorWrites`, `monitorProbes` and
+    ## `monitorDirectoryEnumerations` — still ask whether the CHANNEL is
+    ## empty, and a set is not empty because an unmarked writer filled it.
+    ## Measured, not inferred: a probe adding one unmarked path to
+    ## `monitorReads` in `collectEvidence` suppressed the zero-evidence
+    ## diagnostic, PUBLISHED a record for an edge that observed nothing, and
+    ## served it back as a `cdHit` on the warm run. The same probe against
+    ## `depfileInputs` changed nothing. Marking a new writer is therefore
+    ## still mandatory rather than merely advisable, and converting the other
+    ## four terms is the follow-up that would make it enforced.
+    evcMonitorCapture
+      ## A `MonitorRecord` from an io-mon capture of THIS action reached
+      ## `foldOneMonitorRecord`. The only contributor that is an observation
+      ## of the action by the engine's own monitor.
+    evcToolReportedDepfile
+      ## A dependency report a TOOL wrote while doing the action's work —
+      ## `gcc -MD`, rustc's `.d`, a post-build converter emitting a
+      ## recognized format. An observation, by something other than io-mon.
+    evcRootImageReconstruction
+      ## `executedToolImagePath`: the action's own root image, resolved from
+      ## argv the way the launcher resolves it. A correct cache input and not
+      ## an observation — the launcher's exec precedes the shim's
+      ## constructor, so no record can carry it. Paired with
+      ## `EvidenceCollection.engineSuppliedRootImage`, which carries the PATH
+      ## this flag only reports the existence of.
+    evcReplayedCacheRecord
+      ## `evidenceFromRecord`: the channels were rebuilt from a PRIOR run's
+      ## recorded input list on a cache HIT. The action did not run and
+      ## nothing observed anything on this build.
+    evcDeclarationDerivedDepfile
+      ## A depfile carrying `repro_depfile.DeclarationDerivedDepfileMarker` —
+      ## `fs.unmonitorableActionDepfile` assembled its text from the recipe
+      ## author's `inputs`. Real evidence in the sense that the paths are
+      ## hashed; not an observation, because nothing looked at the action.
+    evcPostBuildConverterReport
+      ## `addPathSet(recognized = false)`: a post-build converter's
+      ## `repro-pathset` output, folded into the MONITOR's channels because
+      ## that is where its inputs/outputs/probes/enumerations belong
+      ## semantically. The converter is not io-mon and did not necessarily
+      ## observe anything — a converter may simply restate what its edge
+      ## declares.
+    evcForeignProvisionerReport
+      ## `bakForeignProvision`: the dependency list a provisioner daemon
+      ## reported for its own evaluation (class 3 — "a daemon that accounted
+      ## for its own" contribution). Derived attribution from a peer, not an
+      ## observation this engine made.
+
   PathSetEvidence* = object
     declaredInputs*: seq[string]
     declaredOutputs*: seq[string]
@@ -1001,6 +1121,84 @@ type
     entropyObservability*: EntropyObservability
       ## M6 — what the capture's backend profile says about whether entropy
       ## reads are observable at all.
+
+    provisionerReportedInputs*: seq[string]
+      ## DA-1f — the paths a FOREIGN PROVISIONER daemon reported reading
+      ## while it resolved this action's selector.
+      ##
+      ## WHY IT IS NOT `monitorReads`. It used to be. `bakForeignProvision`
+      ## built a `PathSetEvidence(monitorReads: …)` out of the
+      ## `"dependencies"` array of a JSON reply from `reprobuild-nix-daemon`
+      ## — engine-parsed data entering the MONITOR's channel, which is the
+      ## shape rule 6 forbids and the shape `832f5fa2` had just been fixed
+      ## for. It was inert only because the scheduler overwrote the whole
+      ## object with a fresh `collectEvidence` one line later, which is not a
+      ## property anything enforced.
+      ##
+      ## IT IS A REAL, AND BETTER-THAN-MONITORED, ATTRIBUTION. The action
+      ## execs nothing: it opens a unix socket and the daemon evaluates on
+      ## its behalf, so io-mon could never see these reads from here. The
+      ## daemon's `TrackingSourceAccessor` reports the paths its evaluation
+      ## actually read — class 3, "a daemon that accounted for its own"
+      ## contribution, and DERIVED rather than declared
+      ## (`Dependency-Observation-Attribution.md` §"Derived beats declared").
+      ## Keeping it and naming it is what that document calls attribution;
+      ## deleting it would have been suppression.
+      ##
+      ## IT IS NOT IN THE ACTION-CACHE KEY YET, and that is a deliberate
+      ## boundary rather than an oversight: `cacheInputPaths` does not read
+      ## this field, so no edge's fingerprint moves because of it. Keying on
+      ## it is the follow-up that makes a `flake.lock` edit re-provision, and
+      ## it re-keys every dev-env provisioning edge (rule 10), so it wants
+      ## its own change and its own drain argument.
+
+    evidenceProvenance*: set[EvidenceContributor]
+      ## DA-1f — every source that wrote into the observed channels above.
+      ## See `EvidenceContributor`. Read by `monitorObservedNothing` (the
+      ## zero-evidence guard's terms) and rendered by `repro why` /
+      ## `--write-report`, which is where "a reader cannot tell a replay from
+      ## an observation" was the whole complaint.
+
+  EvidencePathCounts* = object
+    ## The LENGTHS a cache hit's reconstructed `PathSetEvidence` would have
+    ## had, for a run in which the path STRINGS were not built at all.
+    ##
+    ## WHY IT EXISTS. Reconstructing a cache hit's evidence from its record
+    ## is O(RECORDED INPUTS), not O(actions): `evidenceFromRecord` copies
+    ## both declared seqs and then hashes, copies and accumulates one string
+    ## per entry in `record.inputs`, summed over every record the run looked
+    ## up. On a warm CMake no-op that is ~1400 strings built and dropped at
+    ## exit. Only TWO consumers ever read those strings — `repro watch`'s
+    ## watched-path set and `--write-report`'s `actions[].evidence` — and
+    ## both are decided at CLI parse time. Every OTHER reader (the per-action
+    ## log line's `evidence=depfile:<n>`, the `dependency-evidence` stats
+    ## observation) takes `.len` and nothing else. This object is what those
+    ## readers get instead, so their numbers are unchanged by the elision
+    ## rather than approximately unchanged.
+    ##
+    ## `elided` IS THE DISCRIMINANT AND ITS ZERO VALUE IS THE SAFE ONE. False
+    ## means "this result carries its real path seqs; read THEM" — which is
+    ## what an executed action, a `PathSetEvidence()` from a skipped lookup,
+    ## and every result produced before this existed all are. The counts
+    ## below are meaningless unless `elided` is true, and the accessors
+    ## (`declaredInputCount` and friends) are the only supported way to read
+    ## either half, precisely so a new count reader cannot pick the wrong one.
+    ##
+    ## THE COUNTS ARE EXACT, NOT ESTIMATED. `evidenceCountsFromRecord`
+    ## performs the same de-duplication `evidenceFromRecord` performs, by
+    ## folding the "already seen" set into the declared-path set the full
+    ## version tests against — the two sets are disjoint by construction, so
+    ## one `containsOrIncl` decides exactly what the full version's
+    ## `contains` + `addUnique` pair decides. It saves the string COPIES and
+    ## the seq growth, not the decision.
+    elided*: bool
+    declaredInputs*: int
+    declaredOutputs*: int
+    depfileInputs*: int
+    monitorReads*: int
+    monitorWrites*: int
+    monitorProbes*: int
+    diagnostics*: int
 
   MonitorEvidenceStatus* = enum
     ## M9.R.72.3 — spec-graded monitor-loss status. Implements the ladder
@@ -1153,6 +1351,14 @@ type
     runQuotaBackend*: string
     runQuotaSocket*: string
     evidence*: PathSetEvidence
+    evidencePathCounts*: EvidencePathCounts
+      ## Populated INSTEAD of `evidence` when the engine was told no consumer
+      ## of this run wants the cache-hit path strings
+      ## (`BuildEngineConfig.elideCacheHitEvidencePaths`). Left at its zero
+      ## value — `elided = false` — on every other result, which is what makes
+      ## `evidence` the thing to read for an executed action. Read both halves
+      ## through `declaredInputCount` / `depfileInputCount` / … rather than
+      ## reaching into either directly.
     strongFingerprintHex*: string
       ## M17 (``ext_repro_action``): the ACTION-CACHE KEY the lookup
       ## compared against, hex-encoded, or "" when the lookup found no
@@ -3711,11 +3917,55 @@ type
       ## cache entry on a pid, and a pid is not stable across runs.
 
 proc monitorProfileEvidenceComplete(detail: string): bool =
-  result = true
+  ## Does this `mrBackendProfile` record CLAIM that its capture's evidence is
+  ## complete? A record that does not say so has not said so.
+  ##
+  ## DA-1f — THE DEFAULT USED TO BE `true`, AND IT WAS THE WRONG ONE. Two
+  ## predicates in this file read the same record's `detail` and disagreed
+  ## about what an absent token means: this one assumed the good claim
+  ## (fail-OPEN), while `monitorProfileSupportsNonDeterminism` twelve lines
+  ## below returns `false` for a missing `supported=` (fail-CLOSED). Same
+  ## bytes, same producer, opposite defaults. This is the one that was wrong,
+  ## for four reasons, in order of weight:
+  ##
+  ## 1. The consequence is asymmetric and the asymmetry runs the other way.
+  ##    Answering `false` wrongly costs a `mesUnknownScopeLoss` — the action
+  ##    still succeeds, it just does not publish, so the price is a rebuild.
+  ##    Answering `true` wrongly publishes a record whose capture may have
+  ##    been incomplete, which is a stale hit. Failure-Semantics.md
+  ##    §General Rules: an ambiguous correctness question fails closed.
+  ## 2. An absent claim is not a claim. That is exactly the reading
+  ##    `monitorProfileSupportsNonDeterminism` already applies, and its own
+  ##    docstring gives the reason ("a profile that does not name it … cannot
+  ##    have produced the record, so its silence is not evidence"). Silence
+  ##    about completeness is not evidence of completeness either.
+  ## 3. It is this campaign's own settled rule about zero values. The
+  ##    milestones appendix records it as "when the zero value of a type is
+  ##    unsafe, the fix is to make the zero value mean the safe thing", and
+  ##    `effectiveRequiredInterest` in this same file was changed for exactly
+  ##    that reason — an unset requirement is now the STRONGEST one, not the
+  ##    weakest.
+  ## 4. IT COSTS NOTHING AGAINST ANY REAL CAPTURE, which is the difference
+  ##    between a fail-closed default and a fail-closed default that breaks
+  ##    the build. io-mon's `capabilities.backendProfileRecord` appends
+  ##    `";evidenceComplete=" & …` UNCONDITIONALLY to every profile record it
+  ##    writes, so no capture io-mon produces reaches the new default. What
+  ##    reaches it is a truncated, hand-written or foreign `detail` — which
+  ##    is precisely the case that should not be trusted.
+  ##
+  ## NOTE WHAT IS *NOT* CHANGED: io-mon's own `profileFromRecords` starts
+  ## from `defaultHooksMonitorProfile`, whose `evidenceComplete` is `true`,
+  ## so it is fail-open on the same token. That is its business — it is
+  ## describing a BACKEND, and a backend's default profile is a known-good
+  ## fact it holds locally. This predicate is describing a CAPTURE that
+  ## arrived from somewhere, and a consumer supplying its own bar rather than
+  ## inheriting the producer's is the pattern `evaluateMonitorEvidence`
+  ## already uses on the capability axis.
   for part in detail.split(';'):
     let pair = part.split("=", 1)
     if pair.len == 2 and pair[0] == "evidenceComplete":
       return pair[1] == "true"
+  false
 
 const NonDeterminismCapabilityId = "non-determinism"
   ## io-mon's `capabilityId(mcapNonDeterminism)`. Matched against both the
@@ -5626,6 +5876,14 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   ## means, silently, in the dependency set. So the decode and the fold are
   ## separated here and the fold is shared.
 
+  # DA-1f — a real monitor record reached the fold. This is the ONE
+  # contributor that means "io-mon looked at this action", and it is marked
+  # here rather than at any of the seven arms below so that no future arm can
+  # be added without it: the mark is a property of the SOURCE, not of which
+  # channel a record happens to land in. Idempotent and one OR instruction, so
+  # it is free on the 97k-record `nim c` fold.
+  evidence.evidenceProvenance.incl evcMonitorCapture
+
   # DA-2 — the `mrIpcConnect` records are what io-mon's (c)-arm loss text is
   # DERIVED FROM, so they are what `resolvePeerAttribution` re-asks io-mon
   # about. Collected only when this action has a trusted peer at all, so an
@@ -5655,6 +5913,20 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     else:
       let recordStatus = classifyEventLossDetail(record.detail)
       status = worseMonitorStatus(status, recordStatus)
+      if recordStatus == mesUnknownScopeLoss and record.detail.len > 0:
+        # Principle 2 ("name the offender") applied to the one diagnostic that
+        # could not. The summary elsewhere says an action will not be published
+        # and why in the abstract; only the detail says WHICH image or peer did
+        # it — `image=/usr/bin/cc` (SIP-protected, no drop-in) reads very
+        # differently from an IPC connect to a breakaway daemon, and the
+        # remedies are unrelated. Carried verbatim: io-mon owns the wording,
+        # and a paraphrase here would be a second thing to keep in step.
+        #
+        # Deliberately on the CLASSIFIED path only. A deferred IPC loss has
+        # not been judged yet, and naming an offender that `resolvePeerAttribution`
+        # is about to clear would be the suppression-vs-attribution mistake in
+        # reverse.
+        evidence.diagnostics.add("monitor loss: " & record.detail)
   elif record.kind == mrBackendProfile and
       not monitorProfileEvidenceComplete(record.detail):
     status = worseMonitorStatus(status, mesUnknownScopeLoss)
@@ -6170,6 +6442,31 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
 
 proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
                 pathSet: DependencyPathSet; recognized: bool) =
+  # DA-1f — mark WHO produced this path set before folding it, because after
+  # the fold the entries are indistinguishable from monitor-observed ones.
+  #
+  # `recognized` selects the CHANNEL, and the provenance follows the channel
+  # for the recognized arm only: a recognized-format report is a depfile a
+  # TOOL wrote while doing the action's work (`gcc -MD`, rustc's `.d`) — an
+  # observation, by something other than io-mon — unless its own text carries
+  # the declaration-derived generator stamp, in which case nothing looked at
+  # the action at all (see `repro_depfile.DeclarationDerivedDepfileMarker`).
+  #
+  # The `recognized = false` arm is the one rule 8 named. It puts a post-build
+  # converter's `repro-pathset` output into `monitorReads` / `monitorWrites` /
+  # `monitorProbes` — the MONITOR's channels — and downstream could not tell
+  # those entries from observations. They stay exactly where they are, in the
+  # same channels, for the reason the enumeration arm below gives: a converter
+  # -reported enumeration must land where a monitor-reported one lands or the
+  # two sources disagree about what the same observation means. What changes
+  # is that the source is now named.
+  if recognized:
+    if pathSet.declarationDerived:
+      evidence.evidenceProvenance.incl evcDeclarationDerivedDepfile
+    else:
+      evidence.evidenceProvenance.incl evcToolReportedDepfile
+  else:
+    evidence.evidenceProvenance.incl evcPostBuildConverterReport
   if recognized:
     for input in pathSet.inputs:
       evidence.depfileInputs.addUnique(seen.depfileInputs, input)
@@ -6405,6 +6702,40 @@ proc monitorObservedNoReads(col: EvidenceCollection): bool {.inline.} =
       col.evidence.monitorReads[0] == col.engineSuppliedRootImage
   else: false
 
+proc depfileObservedNothing(col: EvidenceCollection): bool {.inline.} =
+  ## DA-1f — the `depfileInputs` term of the zero-evidence guard, asked the
+  ## way `monitorObservedNoReads` asks its own: not *"is the set empty"* but
+  ## *"did anything LOOK at the action to fill it"*.
+  ##
+  ## The two producers of this channel are not the same kind of fact. A
+  ## `gcc -MD` depfile is an observation — the compiler lists the headers it
+  ## opened. A depfile `fs.unmonitorableActionDepfile` emitted is a literal
+  ## assembled from the recipe author's `inputs`; its own docstring says
+  ## "nothing looked at the action to produce it". Both land here as the same
+  ## strings, so counting the set answered the wrong question for the second
+  ## one, and a set that is 100% declaration-derived could satisfy a guard
+  ## whose subject is observation.
+  ##
+  ## THE TEST IS FOR PRESENCE OF AN OBSERVER, NOT ABSENCE OF A SYNTHESISER,
+  ## which is what keeps an unmarked contributor fail-closed: a future writer
+  ## into `depfileInputs` that forgets to mark itself reads as "nothing
+  ## observed" and costs a publish, never as "something observed".
+  ##
+  ## THE PATHS THEMSELVES ARE UNTOUCHED. They stay in the channel, in the
+  ## key, hashed and invalidating, exactly as before — attribution, not
+  ## suppression (`Dependency-Observation-Attribution.md`).
+  ##
+  ## REACHABILITY TODAY IS ZERO, AND IS THE POINT. `makeDepfilePolicy`
+  ## lowers to a recognized-format kind, which is outside
+  ## `MonitorPolicyKinds`, so an edge consuming an `unmonitorableActionDepfile`
+  ## is not one `monitorEvidenceRequired` covers and this guard never runs for
+  ## it. The hole opens the moment somebody pairs such a depfile with
+  ## `dgRecognizedFormatValidatedByMonitor`, which is a one-word edit in a
+  ## recipe and nothing would have reported it. Closing it while it costs
+  ## nothing is cheaper than discovering it as a stale hit.
+  col.evidence.depfileInputs.len == 0 or
+    evcToolReportedDepfile notin col.evidence.evidenceProvenance
+
 proc applyMonitorEvidenceStatus(action: BuildAction;
                                 status: MonitorEvidenceStatus;
                                 col: var EvidenceCollection) =
@@ -6509,7 +6840,7 @@ proc applyMonitorEvidenceStatus(action: BuildAction;
         col.evidence.monitorWrites.len == 0 and
         col.evidence.monitorProbes.len == 0 and
         col.evidence.monitorDirectoryEnumerations.len == 0 and
-        col.evidence.depfileInputs.len == 0:
+        col.depfileObservedNothing():
       col.evidence.diagnostics.add(
         zeroEvidenceDiagnostic(action.id, MonitorHasLibraryLoadFloor))
       col.disableCacheHits = true
@@ -6790,7 +7121,38 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # author owns that set and the engine adding an undeclared path to the key
   # behind their back is a different decision, with a different blast radius,
   # and it is not the one this change makes.
-  if action.dependencyPolicy.kind in MonitorPolicyKinds:
+  #
+  # AND SCOPED TO `bakProcess`, which is the half DA-1f found missing. This
+  # fold answers "which on-disk image did the LAUNCHER exec for this action",
+  # and a built-in has no launcher and execs nothing: `executeBuiltinAction`
+  # runs it in-process. `monitoredAction` already draws exactly this line —
+  # it returns early for `kind != bakProcess` because "there is no child
+  # process to interpose on" — and the two scopes have to agree, or the
+  # engine reconstructs an image for an action nothing ever ran.
+  #
+  # `bakForeignProvision` is why it matters rather than being tidiness. It
+  # carries `cacheable: true`, `dgAutomaticMonitor` and
+  # `argv: @["nix", <selector>]`, and it declares no inputs — so this fold
+  # PATH-resolved `nix` and made that binary the one non-declared entry in
+  # the key of an edge that never execs it. The action opens a unix socket
+  # and `reprobuild-nix-daemon` evaluates on its behalf; `argv[0]` there is a
+  # PROVISIONER DISCRIMINATOR (`if provisioner != "nix": raiseEngine`), not an
+  # executable name, so resolving it against `PATH` was a category error on
+  # top of an attribution one. What that action's evaluation really read is
+  # reported by the daemon and lands in `provisionerReportedInputs`.
+  #
+  # WHAT DOES NOT MOVE ONTO BUILT-INS: the zero-evidence guard itself. It
+  # asks whether the MONITOR observed anything, and no built-in is monitored
+  # by construction (`monitoredAction`'s early return means
+  # `monitorEvidenceRequired` is false for every one of them), so the guard
+  # would answer "observed nothing" for the entire class and refuse every
+  # built-in a cache record. That is not the guard firing, it is the guard
+  # being asked a question it cannot be asked. A built-in's evidence contract
+  # is its declared inputs and outputs plus whatever report it produces; the
+  # defect DA-1f found was not a missing guard but a fabricated observation,
+  # and it is removed here rather than guarded against downstream.
+  if action.dependencyPolicy.kind in MonitorPolicyKinds and
+      action.kind == bakProcess:
     let rootImage = executedToolImagePath(action, config)
     if rootImage.len > 0 and not rootImage.isVolatileMonitorPath():
       result.evidence.monitorReads.addUnique(seen.monitorReads, rootImage)
@@ -6798,6 +7160,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
       # what the MONITOR saw, and this entry is a reconstruction rather than
       # an observation. See `EvidenceCollection.engineSuppliedRootImage`.
       result.engineSuppliedRootImage = rootImage
+      result.evidence.evidenceProvenance.incl evcRootImageReconstruction
   let reports = action.reportSpecsForPolicy()
   if action.dependencyPolicy.kind in RecognizedPolicyKinds and reports.len == 0:
     result.evidence.diagnostics.add(
@@ -7286,16 +7649,151 @@ proc expandPolicyPath(action: BuildAction; path: string): string =
     start = result.find('$', start)
 
 proc ignoredInputRoots(action: BuildAction): seq[string] =
+  ## Each ignored prefix, in BOTH the spelling the recipe wrote and the
+  ## spelling the kernel reports, because those are routinely not the same
+  ## string and `isUnderAnyRoot` compares path components literally.
+  ##
+  ## On macOS `/tmp` is a symlink to `private/tmp`. A root derived from
+  ## `getTempDir()` is therefore `/tmp/...`, while every path the monitor
+  ## observes comes back already resolved as `/private/tmp/...`. Neither is
+  ## wrong and they name the same directory, but one is not a component
+  ## prefix of the other, so the ignore silently never fires.
+  ##
+  ## That is not a small loss where it happened. The provider compile's
+  ## ignore list exists to keep the SHARED provider nimcache out of the key
+  ## -- a directory reused across recipes and across sessions on purpose,
+  ## and rewritten by every compile that lands in it. With the ignore
+  ## inert, 514 nimcache paths were in the key, so the edge could not hit
+  ## on a second run of an unchanged project, and everything downstream of
+  ## it missed too. Measured: every one of those paths was recorded under
+  ## `/private/tmp`, and not one under `/tmp`.
+  ##
+  ## Resolved once per root rather than per observed path: there are a
+  ## handful of roots and tens of thousands of paths, and resolving the
+  ## latter would put a syscall on the hot comparison. A root that does not
+  ## exist yet simply contributes its literal spelling, which is what it
+  ## does today.
   for prefix in action.dependencyPolicy.ignoredInputPrefixes:
     let expanded = action.expandPolicyPath(prefix)
-    if expanded.len > 0:
-      result.add(expanded)
+    if expanded.len == 0:
+      continue
+    result.add(expanded)
+    try:
+      let resolved = expandFilename(expanded)
+      if resolved.len > 0 and resolved != expanded:
+        result.add(resolved)
+    except CatchableError:
+      discard
 
 proc isUnderAnyRoot(path: string; roots: openArray[string]): bool =
   let normalized = path.replace('\\', '/')
   for root in roots:
     let normalizedRoot = root.replace('\\', '/')
     if normalized == normalizedRoot or normalized.startsWith(normalizedRoot & "/"):
+      return true
+
+const
+  MonitorSandboxToolsPrefix = "repro-fs-snoop-sandbox-tools-"
+  CompilerWrapperScratchPrefixes = ["cc-params.", "ld-params."]
+
+proc isCompilerWrapperScratchPath(path: string): bool =
+  ## A compiler wrapper's per-invocation response file is not an input.
+  ##
+  ## The nixpkgs `cc`/`ld` wrappers stage the argument list they are about
+  ## to forward in `"${TMPDIR:-/tmp}/cc-params.XXXXXX"` (and the `ld`
+  ## equivalent), created with `mktemp`, written, read straight back, and
+  ## unlinked inside the SAME invocation. The name's random tail is new
+  ## every time, so the provider-compile edge's key carried a handful of
+  ## paths that could never repeat: measured across two consecutive warm
+  ## runs, the edge's entire input set was identical except for exactly
+  ## these, and the edge therefore missed on every run of an unchanged
+  ## project.
+  ##
+  ## `providerCompileIgnoredInputPrefixes` already excludes this edge's
+  ## other write-then-read-back scratch -- the shared provider nimcache and
+  ## the per-recipe scratch tree -- for precisely this reason, and says so:
+  ## "derived state a tool writes and reads back is not an input, and
+  ## recording it makes a warm entry miss its cache for no reason a user
+  ## can act on." These files are the same thing one level down, in the
+  ## toolchain rather than in Reprobuild, and they are missed by that list
+  ## only because they sit directly in `$TMPDIR` rather than in a directory
+  ## of their own -- which an `ignoredInputPrefixes` entry cannot name
+  ## without swallowing all of `$TMPDIR`, real inputs included.
+  ##
+  ## Matched on the BASENAME, and only with a non-empty random tail, so an
+  ## ordinary file a project happens to keep called `cc-params` or
+  ## `ld-params.conf` is untouched. As with the directory below, dropping a
+  ## genuine input from a key would serve a stale result, which is worse
+  ## than the miss being fixed; the paired test asserts both directions.
+  let name = path.replace('\\', '/').rsplit('/', 1)[^1]
+  for prefix in CompilerWrapperScratchPrefixes:
+    if name.len > prefix.len and name.startsWith(prefix):
+      return true
+
+proc isMonitorSandboxToolsPath(path: string): bool =
+  ## The monitor's OWN drop-in tool directory is engine bookkeeping, not a
+  ## project input, and it must never reach an action-cache key.
+  ##
+  ## On macOS the interpose backend cannot inject into a system-protected
+  ## platform binary, so before running a monitored action it drops
+  ## injectable copies of the shells and core utilities an action may exec
+  ## into a temporary directory and points the monitored process at it.
+  ## Unless an operator supplies a pre-built bundle, that directory is
+  ## created fresh for every monitored run and its NAME carries the
+  ## creating pid and a nanosecond timestamp:
+  ##
+  ##   <tmp>/repro-fs-snoop-sandbox-tools-<pid>-<sec>-<nsec>-<pid>/bin/sh
+  ##
+  ## Any action whose command runs a shell probes `<dir>/bin/sh`, so the
+  ## probe set of an otherwise byte-identical action carried one value that
+  ## was new on every invocation. The weak fingerprint stayed stable, so
+  ## every run landed in the SAME per-edge directory and wrote yet another
+  ## record under a fresh strong fingerprint -- the accumulation
+  ## `Action-Cache-Per-Edge-Store.md` §5.1 rules out when it requires
+  ## identical path-sets to "converge on one filename -- a rewrite, never
+  ## an accumulation". A warm `repro exec` / `repro shell` therefore re-ran
+  ## the dev-env introspection edge every single time on an unchanged
+  ## project, and no number of repeat runs could ever settle.
+  ##
+  ## The general rule is `Tool-Owned-Caches.md` §What The Cache Key May
+  ## Observe: whatever the engine allocates to back a path "is engine
+  ## bookkeeping. It MUST NOT appear in any cache key. It MAY change
+  ## between runs without invalidating anything." The dev-env cache key was
+  ## already corrected once from the other side for the same reason --
+  ## `Shell-Direnv-Hook.milestones.org` M77 records `REPRO_MONITOR_SHIM_LIB`
+  ## and `REPRO_FS_SNOOP` being DROPPED from it after the syscall-bound test
+  ## "caught them flapping under fs-snoop wrapping (build-engine
+  ## infrastructure, not dev-env contract)". This is that same
+  ## infrastructure flapping again, reaching the key through the observed
+  ## path-set instead of through an environment variable.
+  ##
+  ## Matched on a path SEGMENT rather than against a resolved root because
+  ## the directory belongs to the monitor and is created inside the
+  ## monitored run: the engine never holds its path, and the temp root it
+  ## sits under varies per host and per `TMPDIR`. An operator-supplied
+  ## bundle keeps a stable name of its own choosing and so cannot churn;
+  ## it is left alone rather than guessed at.
+  ##
+  ## The segment must match the GENERATED name exactly -- the prefix
+  ## followed by the four decimal fields the monitor appends
+  ## (`<pid>-<unix-seconds>-<nanoseconds>-<nonce>`) -- and not merely start
+  ## with the prefix. A `startsWith` test alone also swallows an ordinary
+  ## project file that happens to be named after this directory, and
+  ## dropping a genuine input from a cache key serves a stale result, which
+  ## is a worse failure than the miss being fixed here. The paired test
+  ## asserts that case directly.
+  for segment in path.replace('\\', '/').split('/'):
+    if not segment.startsWith(MonitorSandboxToolsPrefix):
+      continue
+    let fields = segment.substr(MonitorSandboxToolsPrefix.len).split('-')
+    if fields.len != 4:
+      continue
+    var allNumeric = true
+    for field in fields:
+      if field.len == 0 or not field.allCharsInSet({'0' .. '9'}):
+        allNumeric = false
+        break
+    if allNumeric:
       return true
 
 proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[string] =
@@ -7315,6 +7813,10 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   ##   dependency, and a heuristic must not overrule it (a declared
   ##   input that happens to live inside a ``/nix/store`` tool root, for
   ##   instance, would otherwise be silently dropped from the key).
+  ## * the monitor-scratch filter drops the monitor's own drop-in tool
+  ##   directory -- see ``isMonitorSandboxToolsPath``. Like the filter
+  ##   above it yields to a declaration, so an action that genuinely
+  ##   declares such a path keeps it.
   ## * S5's self-write filter drops the action's OWN declared outputs
   ##   from the OBSERVED channels only — see ``selfWrittenOutputKeys``
   ##   for why those are provably not inputs, and for the
@@ -7338,7 +7840,9 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+         path.isMonitorSandboxToolsPath() or
+         path.isCompilerWrapperScratchPath()):
       continue
     result.addUnique(seen, path)
   for input in evidence.monitorReads:
@@ -7347,7 +7851,9 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+         path.isMonitorSandboxToolsPath() or
+         path.isCompilerWrapperScratchPath()):
       continue
     result.addUnique(seen, path)
   for probe in evidence.monitorProbes:
@@ -7356,7 +7862,9 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
     if selfWritten.contains(key):
       continue
     if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
+        (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots) or
+         path.isMonitorSandboxToolsPath() or
+         path.isCompilerWrapperScratchPath()):
       continue
     result.addUnique(seen, path)
 
@@ -7637,7 +8145,35 @@ proc cacheEnumeratedDirectories(action: BuildAction;
         (path.isUnderAnyRoot(toolRoots) or path.isUnderAnyRoot(ignoredRoots)):
       continue
     result.addUnique(seen, path)
-proc evidenceFromRecord(action: BuildAction; record: ActionResultRecord): PathSetEvidence =
+proc evidenceFromRecord*(action: BuildAction;
+                         record: ActionResultRecord): PathSetEvidence =
+  ## Exported for the regression test that pins it against
+  ## `evidenceCountsFromRecord` DIRECTLY, on records the production publish
+  ## path cannot produce — same precedent, and same reason, as
+  ## `cacheInputPaths`. The two must agree on every record, not only on the
+  ## well-formed ones this engine happens to write today.
+  ##
+  ## DA-1f — EVERY SET THIS BUILDS IS A REPLAY, AND IT SAYS SO. The channels
+  ## below are rebuilt from a PREVIOUS run's recorded input list on a cache
+  ## HIT: the action did not run, no monitor was started, and nothing observed
+  ## anything on this build. Measured in the DA-1 audit: the fixed engine
+  ## reported `monitorReads = ["/bin/sh"]` for an action that observed nothing
+  ## and did not run.
+  ##
+  ## THIS IS NOT A SOUNDNESS BUG AND THE MARK IS NOT A FIX FOR ONE. No
+  ## completeness predicate consumes this object — `collectEvidence` is not
+  ## called on the hit path, so no guard can be retired by it. What reads it
+  ## is `repro why`, `--write-report` and the launch-path comparison suites,
+  ## and for those a replay that renders identically to an observation is a
+  ## reader hazard: the hit-path answer to "what did this action read" looks
+  ## like a measurement and is a recollection. `evcReplayedCacheRecord` is
+  ## what lets a reader tell them apart, and `evidenceJson` renders it.
+  ##
+  ## IT IS SET UNCONDITIONALLY, before any channel is filled, so that a record
+  ## with an EMPTY input list is still marked a replay. "No paths" and "no
+  ## paths, and also nothing looked" are different facts and the emptier one
+  ## is where the confusion is easiest.
+  result.evidenceProvenance.incl evcReplayedCacheRecord
   result.declaredInputs = action.inputs
   result.declaredOutputs = action.outputs
   var declaredInputPaths = initHashSet[string]()
@@ -7653,6 +8189,76 @@ proc evidenceFromRecord(action: BuildAction; record: ActionResultRecord): PathSe
         result.monitorReads.addUnique(seenMonitorReads, input.path)
       else:
         result.depfileInputs.addUnique(seenDepfileInputs, input.path)
+
+proc evidenceCountsFromRecord*(action: BuildAction;
+                              record: ActionResultRecord): EvidencePathCounts =
+  ## What `evidenceFromRecord` above would have COUNTED, without building any
+  ## of the strings it would have built. Every `.len` a downstream reader can
+  ## ask for is filled in here, including the ones the full version leaves at
+  ## zero (`monitorWrites` / `monitorProbes` / `diagnostics`), so no reader
+  ## has to know which fields this reconstruction populates.
+  ##
+  ## THE DE-DUPLICATION IS THE SAME DECISION, TAKEN ONCE INSTEAD OF TWICE.
+  ## The full version tests each record input against `declaredInputPaths`
+  ## and then, via `addUnique`, against a second set of the entries it has
+  ## already emitted. Those two sets are disjoint by construction — nothing
+  ## is ever added to the second that is in the first — so their UNION
+  ## answers both tests, and one `containsOrIncl` against that union both
+  ## asks and records. What is saved is the copy of each accepted path into
+  ## the result seq (and the seq's growth), not the decision, so the count
+  ## is exact for any record, including one whose `inputs` carry duplicates.
+  result.elided = true
+  result.declaredInputs = action.inputs.len
+  result.declaredOutputs = action.outputs.len
+  # Sized for the population up front. A `HashSet`'s CONTENTS do not depend
+  # on its capacity, so this changes no answer; it removes the ~12 doublings
+  # a record with tens of thousands of inputs would otherwise walk through,
+  # each of which re-seats every entry inserted so far.
+  var seen = initHashSet[string](action.inputs.len + record.inputs.len)
+  for input in action.inputs:
+    seen.incl(materialPath(action.cwd, input))
+  var undeclared = 0
+  for input in record.inputs:
+    if not seen.containsOrIncl(input.path):
+      inc undeclared
+  if action.dependencyPolicy.kind in MonitorPolicyKinds:
+    result.monitorReads = undeclared
+  else:
+    result.depfileInputs = undeclared
+
+proc evidencePathsElided*(item: ActionResult): bool =
+  ## Whether this result's path seqs were deliberately not built. The one
+  ## question a consumer of the path STRINGS has to ask before trusting an
+  ## empty seq to mean "there were none".
+  item.evidencePathCounts.elided
+
+proc declaredInputCount*(item: ActionResult): int =
+  if item.evidencePathCounts.elided: item.evidencePathCounts.declaredInputs
+  else: item.evidence.declaredInputs.len
+
+proc declaredOutputCount*(item: ActionResult): int =
+  if item.evidencePathCounts.elided: item.evidencePathCounts.declaredOutputs
+  else: item.evidence.declaredOutputs.len
+
+proc depfileInputCount*(item: ActionResult): int =
+  if item.evidencePathCounts.elided: item.evidencePathCounts.depfileInputs
+  else: item.evidence.depfileInputs.len
+
+proc monitorReadCount*(item: ActionResult): int =
+  if item.evidencePathCounts.elided: item.evidencePathCounts.monitorReads
+  else: item.evidence.monitorReads.len
+
+proc monitorWriteCount*(item: ActionResult): int =
+  if item.evidencePathCounts.elided: item.evidencePathCounts.monitorWrites
+  else: item.evidence.monitorWrites.len
+
+proc monitorProbeCount*(item: ActionResult): int =
+  if item.evidencePathCounts.elided: item.evidencePathCounts.monitorProbes
+  else: item.evidence.monitorProbes.len
+
+proc evidenceDiagnosticCount*(item: ActionResult): int =
+  if item.evidencePathCounts.elided: item.evidencePathCounts.diagnostics
+  else: item.evidence.diagnostics.len
 
 proc processCwd(action: BuildAction; process: ProcessSpec): string =
   let cwd = $process.cwd
@@ -11807,7 +12413,9 @@ type
     path*: string
     label*: string
 
-const NixDaemonRelativePaths*: array[4, string] = [
+const NixDaemonRelativePaths*: array[5, string] = [
+  # Prefer the staged helper, whose interpreter is pinned at build time.
+  "build/bin/reprobuild-nix-daemon",
   # The dev tree's CHECKED-IN helper, relative to the REPOSITORY ROOT.
   "tools/reprobuild-nix-daemon/reprobuild-nix-daemon",
   # The dev tree's BUILT helper, relative to the REPOSITORY ROOT.
@@ -11904,8 +12512,8 @@ proc nixDaemonCandidates*(cwd, exePath, envSourceRoot: string): seq[
   ## THE FULL, ORDERED CANDIDATE LIST -- pure, so it can be pinned by a test
   ## without a daemon, a socket or a build.
   ##
-  ## The first three entries are the historical ``action.cwd``-relative ones
-  ## and keep their historical labels and their historical ORDER; everything
+  ## The staged helper precedes the three historical ``action.cwd``-relative
+  ## entries, which retain their labels and relative order; everything
   ## after them is the root x relative-path product from
   ## ``nixDaemonSearchRoots`` and ``NixDaemonRelativePaths``.
   var seen = initHashSet[string]()
@@ -11915,6 +12523,8 @@ proc nixDaemonCandidates*(cwd, exePath, envSourceRoot: string): seq[
       if path.len > 0 and not seen.containsOrIncl(path):
         result.add(NixDaemonCandidate(path: path, label: labelExpr))
   if cwd.len > 0:
+    consider(cwd / "build" / "bin" / "reprobuild-nix-daemon",
+      "local staged reprobuild-nix-daemon")
     consider(cwd / "build" / "reprobuild-nix-daemon",
       "local reprobuild-nix-daemon")
     consider(cwd / "tools" / "reprobuild-nix-daemon" /
@@ -12004,7 +12614,16 @@ proc unresolvableScriptInterpreter*(path: string): string =
   finally:
     f.close()
   let interp = shebangInterpreter(first)
-  if interp.len > 0 and not fileExists(interp): interp else: ""
+  if interp.len > 0 and not fileExists(interp):
+    return interp
+  if interp.extractFilename() == "env":
+    let words = first[2 .. ^1].splitWhitespace()
+    # Diagnose the simple env shebang used by the source helper. Other env
+    # option forms remain env's responsibility.
+    if words.len == 2 and not words[1].startsWith("-") and
+        findExe(words[1]).len == 0:
+      return words[1] & " (not found on PATH)"
+  ""
 
 proc resolveNixDaemonExecutable*(cwd, exePath, envSourceRoot,
     envBin: string): string =
@@ -12317,6 +12936,7 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           sock.connectUnix(socketPath)
           connected = true
         except CatchableError:
+          sock.close()
           # Spawn daemon process detached.
           #
           # THE CANDIDATE LIST IS A PURE FUNCTION -- `nixDaemonCandidates` --
@@ -12334,8 +12954,9 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
             exePath = getAppFilename(),
             envSourceRoot = getEnv("REPROBUILD_SOURCE_ROOT"),
             envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN"))
-          discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
+          let daemon = startProcess(daemonExe, args = ["--idle-exit-ms=300000"],
             options = {poDaemon, poUsePath})
+          defer: daemon.close()
           for i in 0 .. 40:
             sleep(50)
             try:
@@ -12344,7 +12965,7 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
               connected = true
               break
             except CatchableError:
-              discard
+              sock.close()
         if not connected:
           raiseEngine("Failed to connect or spawn reprobuild-nix-daemon at " & socketPath)
         
@@ -12353,10 +12974,12 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
           "selector": selector,
           "workspaceRoot": action.cwd
         }
-        sock.send($req & "\n")
         var respLine = ""
-        sock.readLine(respLine)
-        sock.close()
+        try:
+          sock.send($req & "\n")
+          sock.readLine(respLine)
+        finally:
+          sock.close()
         
         if respLine.len == 0:
           raiseEngine("Received empty response from reprobuild-nix-daemon")
@@ -12374,19 +12997,37 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         prepareBuiltinFileOutput(receiptPath)
         writeFile(extendedPath(receiptPath), outPath)
         
-        var observedReads: seq[string] = @[]
+        # DA-1f — THE DAEMON'S REPORT IS KEPT AND IS NAMED. It used to be
+        # assigned to `monitorReads`, the MONITOR's channel, which is the
+        # shape `Dependency-Observation-Attribution.md` rule 6 forbids: a
+        # JSON reply this process parsed is not something io-mon observed,
+        # and once merged into that seq nothing downstream could separate the
+        # two. It was harmless only because the scheduler overwrote the whole
+        # `PathSetEvidence` with a fresh `collectEvidence` one line after
+        # this returns — an accident of call order, not a guard.
+        #
+        # It is not deleted, because it is the best attribution available
+        # here and better than a monitored one could be. This action execs
+        # nothing; it opens a unix socket and the daemon evaluates on its
+        # behalf, so io-mon cannot see these reads at all. The daemon's
+        # `TrackingSourceAccessor` reports what its evaluation really read —
+        # class 3, DERIVED, "a daemon that accounted for its own"
+        # contribution. Deleting it would be suppression; moving it to a
+        # channel that says who filled it is attribution.
+        var provisionerReads: seq[string] = @[]
         if resp.hasKey("dependencies"):
           for depNode in resp["dependencies"]:
             let depPath = depNode.getOrDefault("path").getStr()
             if depPath.len > 0:
-              observedReads.add(relativePath(depPath, action.cwd))
-              
+              provisionerReads.add(relativePath(depPath, action.cwd))
+
         result.status = asSucceeded
         result.exitCode = 0
         result.evidence = PathSetEvidence(
           declaredInputs: action.inputs,
           declaredOutputs: action.outputs,
-          monitorReads: observedReads
+          provisionerReportedInputs: provisionerReads,
+          evidenceProvenance: {evcForeignProvisionerReport}
         )
         return
     of bakProcess:
@@ -12918,12 +13559,30 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     warmCache.cache = cache
     warmCache.evidence = actionCacheDurableEvidence(sharedRoot / "action-cache")
 
-  proc cacheHitEvidence(action: BuildAction;
-                        record: ActionResultRecord): PathSetEvidence =
+  proc assignCacheHitEvidence(item: var ActionResult;
+                              action: BuildAction;
+                              record: ActionResultRecord) =
+    ## Fill in ONE of a cache-hit result's two evidence halves.
+    ##
+    ## Both halves are written here rather than by the call sites so the
+    ## choice between them is made in exactly one place: five scheduler and
+    ## fast-scan arms reach this, and a sixth that filled in only `evidence`
+    ## would report zero counts for a run that elided, which is the silent
+    ## shape this whole seam exists to avoid.
     if config.skipCacheHitEvidence:
-      PathSetEvidence()
+      # The zero value is ASSIGNED rather than left alone, which is what the
+      # four scheduler call sites did when this seam returned a value. On
+      # today's paths the slot is already zero — a cache hit never ran, so
+      # nothing collected evidence into it — but "already zero" is a
+      # property of the callers, and this is the one line that does not have
+      # to depend on it.
+      item.evidence = PathSetEvidence()
+      item.evidencePathCounts = EvidencePathCounts()
+      return
+    if config.elideCacheHitEvidencePaths:
+      item.evidencePathCounts = evidenceCountsFromRecord(action, record)
     else:
-      evidenceFromRecord(action, record)
+      item.evidence = evidenceFromRecord(action, record)
 
   proc publishPeerCacheBundle(weakFingerprint: ContentDigest;
                               record: ActionResultRecord) =
@@ -13196,11 +13855,19 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         finishMetadataCacheStats(metadataCache)
         fastResult.stats = stats
         return some(fastResult)
-      of hmssMissingRecord, hmssInputChanged, hmssOutputChanged:
+      of hmssMissingRecord, hmssInputChanged, hmssOutputChanged,
+          hmssPolicyNeedsContentHash:
         # `hmssOutputChanged` is a declared output that no longer matches the
         # record that claims to have produced it. Falling back to the full
         # scheduler is the fail-closed answer: it re-consults each edge and
         # re-executes the ones whose outputs were disturbed.
+        #
+        # `hmssPolicyNeedsContentHash` is a `ffpChecksum` edge: the scan
+        # compares `FileMetadata` and that policy is validated by the content
+        # hash, so the scan has no answer here and MUST NOT report one. It
+        # goes straight to the scheduler rather than falling through to the
+        # per-record arm below, which would only refuse it again at
+        # `lookupHotMetadataRecord` and then return `none` from here anyway.
         return none(BuildRunResult)
       of hmssUnavailable, hmssCorrupt:
         discard
@@ -13255,13 +13922,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       let record =
         if config.skipCacheHitEvidence: ActionResultRecord()
         else: hotRecords[i]
-      fastResult.results.add(ActionResult(
+      var item = ActionResult(
         id: action.id,
         status: asUpToDate,
         cacheDecision: cdHit,
         reason: fastNoopReuseReason(action),
-        dependencyPolicyKind: action.dependencyPolicy.kind,
-        evidence: cacheHitEvidence(action, record)))
+        dependencyPolicyKind: action.dependencyPolicy.kind)
+      assignCacheHitEvidence(item, action, record)
+      fastResult.results.add(item)
     finishStat("repro cache hit result materialize", resultMaterializeStart)
     finishMetadataCacheStats(metadataCache)
     fastResult.stats = stats
@@ -13653,12 +14321,33 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       running[index].id, message)
     running[index].processKind = rpkInlineRunQuotaFailed
 
+  # RunQuota queue-wait observability and bounds. See ``tickRunQuotaQueue``.
+  var runQuotaQueueWait = initRunQuotaQueueWait()
+  var runQuotaLastAliveMs = -1
+  var runQuotaLastLivenessProbeMs = -1
+  # ``REPRO_RUNQUOTA_QUEUE_TIMEOUT`` overrides the caller's bound in either
+  # direction (it can also bound a ``repro build``, whose default is none).
+  let effectiveRunQuotaQueueTimeoutMs =
+    runQuotaQueueTimeoutMs(config.runQuotaQueueTimeoutMs)
+
+  proc engineNowMs(): int =
+    int(monotonicNowNs() div 1_000_000'i64)
+
   proc pollInlineRunQuotaGrants(): int =
     result = -1
     if not inlineRunQuotaSessionOpen or not hasPendingInlineRunQuota():
       return
     try:
-      for grant in pollRunQuotaGrants(inlineRunQuotaSession):
+      # BOUNDED. This used to be ``pollRunQuotaGrants``, whose read blocks in
+      # ``recv`` until the daemon answers: a daemon that accepted the
+      # connection and then stopped answering froze this scheduler loop --
+      # and with it ``repro exec`` -- with nothing on screen. A short window
+      # keeps the loop turning; ``tickRunQuotaQueue`` owns the clock that
+      # tells a quiet daemon from a wedged one.
+      let polled = pollRunQuotaGrantsBounded(inlineRunQuotaSession, 20)
+      if polled.frameReceived:
+        runQuotaLastAliveMs = engineNowMs()
+      for grant in polled.grants:
         for j in 0 ..< running.len:
           if running[j].processKind != rpkInlineRunQuotaPending:
             continue
@@ -13694,6 +14383,105 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           failRunningAction(j, "runquota inline grant polling failed: " &
             err.msg)
           return j
+
+  proc pendingRunQuotaSummary(): tuple[actions: seq[string]; reason: string] =
+    for item in running:
+      if item.processKind != rpkInlineRunQuotaPending:
+        continue
+      result.actions.add(item.id)
+      let reason = item.queuedRunQuotaProcess.reason
+      if reason.len > 0 and result.reason.len == 0:
+        result.reason = reason
+
+  proc failAllPendingRunQuota(message: string): int =
+    ## Withdraw every queued lease from the daemon and fail its action with
+    ## ``message``. Returns the index of the first failed entry, for the wait
+    ## loop to reap; the others are reaped on the following iterations.
+    result = -1
+    for j in 0 ..< running.len:
+      if running[j].processKind != rpkInlineRunQuotaPending:
+        continue
+      try:
+        var queued = running[j].queuedRunQuotaProcess
+        cancelQueued(queued)
+        running[j].queuedRunQuotaProcess = queued
+      except CatchableError:
+        discard
+      failRunningAction(j, message)
+      if result < 0:
+        result = j
+
+  proc tickRunQuotaQueue(): int =
+    ## Make a RunQuota queue wait loud and bounded. Returns the index of a
+    ## running entry this tick failed, or ``-1``.
+    ##
+    ## Two distinct things can keep a queued action from starting, and both
+    ## used to be SILENT and UNBOUNDED -- observed 2026-09-24 as ``repro exec
+    ## -- echo hi`` hanging for as long as another workspace's build held the
+    ## host's RunQuota budget:
+    ##
+    ## * the daemon is alive and the candidate simply does not fit. Once every
+    ##   in-flight action of THIS build is queued (nothing of ours is making
+    ##   progress), say so -- which actions, the daemon's reason, the
+    ##   endpoint and WHICH leases hold the budget -- and repeat that every
+    ##   ``grantHeartbeatMs()``. With ``config.runQuotaQueueTimeoutMs`` set,
+    ##   fail after that long with the same facts and the remedies. It is a
+    ##   diagnosis, not a timeout that hides one;
+    ## * the daemon has stopped answering. No grant-stream frame and no reply
+    ##   to a bounded status probe for ``grantUnresponsiveMs()`` fails the
+    ##   queued actions, the same deadline ``awaitGrantLoop`` applies.
+    result = -1
+    if not inlineRunQuotaSessionOpen or not hasPendingInlineRunQuota():
+      runQuotaQueueWait = initRunQuotaQueueWait()
+      runQuotaLastAliveMs = -1
+      return
+    let now = engineNowMs()
+    if runQuotaLastAliveMs < 0:
+      # The offer that queued the candidate was itself a round trip.
+      runQuotaLastAliveMs = now
+    let silentMs = now - runQuotaLastAliveMs
+    if silentMs >= grantBoundedReadMs() and
+        (runQuotaLastLivenessProbeMs < 0 or
+         now - runQuotaLastLivenessProbeMs >= grantBoundedReadMs()):
+      runQuotaLastLivenessProbeMs = now
+      if probeRunQuotaLiveness(inlineRunQuotaSession, grantBoundedReadMs()):
+        runQuotaLastAliveMs = engineNowMs()
+    if engineNowMs() - runQuotaLastAliveMs >= grantUnresponsiveMs():
+      let pending = pendingRunQuotaSummary()
+      return failAllPendingRunQuota("runquota stopped responding while " &
+        pending.actions.join(", ") & " waited for a lease at " &
+        runQuotaEndpointText() & ": no grant-stream frame and no status " &
+        "reply for " & $grantUnresponsiveMs() & "ms (the daemon may be " &
+        "wedged or mid-restart). Retry, restart runquotad, or bypass " &
+        "RunQuota for this command with REPROBUILD_NO_RUNQUOTA=1 (unsafe).")
+    var blocked = true
+    for item in running:
+      if item.processKind != rpkInlineRunQuotaPending:
+        blocked = false
+        break
+    let verdict = stepRunQuotaQueueWait(runQuotaQueueWait, blocked, now,
+      runQuotaQueueAnnounceAfterMs, grantHeartbeatMs(),
+      effectiveRunQuotaQueueTimeoutMs)
+    case verdict
+    of rqwKeepWaiting:
+      discard
+    of rqwAnnounce, rqwHeartbeat, rqwTimedOut:
+      let pending = pendingRunQuotaSummary()
+      let holders = runQuotaLeaseHolders(inlineRunQuotaSession)
+      let waitedMs = now - runQuotaQueueWait.blockedSinceMs
+      if verdict == rqwTimedOut:
+        return failAllPendingRunQuota(runQuotaQueueTimeoutMessage(
+          pending.actions, pending.reason, runQuotaEndpointText(), holders,
+          waitedMs))
+      try:
+        stderr.writeLine(runQuotaQueueWaitMessage(pending.actions,
+          pending.reason, runQuotaEndpointText(), holders, waitedMs))
+        # Flushed: stderr is block-buffered whenever it is a pipe -- every
+        # ``just`` recipe, CI log and agent harness -- and a wait message
+        # that sits in a buffer is the silent hang it exists to prevent.
+        flushFile(stderr)
+      except IOError, OSError:
+        discard
 
   proc recordCacheLookupFacts(id: string; lookup: ActionCacheLookup) =
     ## M17: pin the ACTION-CACHE KEY and the miss reason at the only
@@ -14127,8 +14915,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           case lookup.status
           of aclHit:
             if config.rebuildMissingOutputsOnCacheHit and reusableInPlace:
-              runResult.results[idToIndex.resultIndex(id)].evidence =
-                cacheHitEvidence(action, lookup.record)
+              assignCacheHitEvidence(
+                runResult.results[idToIndex.resultIndex(id)], action,
+                lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
@@ -14155,8 +14944,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 cas.materializeActionCacheOutputs(lookup.record, action.cwd)
                 fileMetadataCache.clear()
                 finishStat("repro cache restore", restoreStart)
-              runResult.results[idToIndex.resultIndex(id)].evidence =
-                cacheHitEvidence(action, lookup.record)
+              assignCacheHitEvidence(
+                runResult.results[idToIndex.resultIndex(id)], action,
+                lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
@@ -14167,8 +14957,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               continue
           of aclHybridCutoff:
             if config.rebuildMissingOutputsOnCacheHit and reusableInPlace:
-              runResult.results[idToIndex.resultIndex(id)].evidence =
-                cacheHitEvidence(action, lookup.record)
+              assignCacheHitEvidence(
+                runResult.results[idToIndex.resultIndex(id)], action,
+                lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
@@ -14192,8 +14983,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 cas.materializeActionCacheOutputs(lookup.record, action.cwd)
                 fileMetadataCache.clear()
                 finishStat("repro cache restore", restoreStart)
-              runResult.results[idToIndex.resultIndex(id)].evidence =
-                cacheHitEvidence(action, lookup.record)
+              assignCacheHitEvidence(
+                runResult.results[idToIndex.resultIndex(id)], action,
+                lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
@@ -14551,9 +15343,23 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           if finished.status == asSucceeded:
             invalidateCachedOutputs(plan.action)
             let evidenceStart = statStart()
-            let evidence = collectEvidence(plan.action, strict = true,
+            var evidence = collectEvidence(plan.action, strict = true,
               config = addr config)
             finishStat("repro evidence collect", evidenceStart)
+            # DA-1f — the one thing the BUILT-IN knew that `collectEvidence`
+            # cannot re-derive: what a foreign provisioner daemon reported
+            # about its own evaluation. `collectEvidence` builds a fresh
+            # `PathSetEvidence` from the action and its reports, so this
+            # assignment used to discard the daemon's report entirely — which
+            # is the only reason that report's former home in `monitorReads`
+            # was inert. Carried forward explicitly, into the channel that
+            # names its source, so the attribution survives instead of
+            # depending on nobody noticing it was dropped.
+            if finished.evidence.provisionerReportedInputs.len > 0:
+              evidence.evidence.provisionerReportedInputs =
+                finished.evidence.provisionerReportedInputs
+              evidence.evidence.evidenceProvenance.incl(
+                evcForeignProvisionerReport)
             runResult.results[idx].evidence = evidence.evidence
             if not evidence.publishable:
               runResult.results[idx].status = asFailed
@@ -14791,6 +15597,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         var commands = newSeq[ReproCommandSpec](stagedInlineLaunches.len)
         for k, staged in stagedInlineLaunches:
           requests[k] = staged.action.runQuotaRequest()
+          requests[k].interactive = config.runQuotaInteractive
           commands[k] = staged.action.runQuotaCommand(config)
         var offers: seq[ReproRunQuotaOffer]
         var batchFailure = ""
@@ -14928,6 +15735,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if hasPendingInlineRunQuota() and epochTime() >= nextGrantPoll:
           runIndex = pollInlineRunQuotaGrants()
           nextGrantPoll = epochTime() + 0.025
+          if runIndex >= 0:
+            break
+          runIndex = tickRunQuotaQueue()
           if runIndex >= 0:
             break
         # In-Process-Monitor-Hosting HM-4 — settle EVERY hosted monitor whose

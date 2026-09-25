@@ -5,11 +5,15 @@
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
 
-package gzip:
-  provisioning:
-    nixPackage "nixpkgs#gzip", executablePath = "bin/gzip",
-      nixpkgsRev = CanonicalNixpkgsRev,
-      nixpkgsNarHash = CanonicalNixpkgsNarHash
+# `gzip` is defined ONCE, in `gzip.nim` (nix + the Windows PortableGit
+# channel `tar -z` needs). A second, nix-only `package gzip:` used to live
+# here, and because every recipe reaches this module through `system_tools`
+# while `gzip.nim` was imported only by the packaging producers, the
+# nix-only copy is the one a from-source recipe saw — so any Windows
+# `--tool-provisioning=tarball` build that extracts a `.tar.gz` failed tool
+# resolution on `gzip`. Re-exported so importers of this module keep it.
+import ./gzip
+export gzip
 
 package xz:
   provisioning:
@@ -34,6 +38,21 @@ package sed:
     nixPackage "nixpkgs#gnused", executablePath = "bin/sed",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: Git for Windows ships this at `usr/bin/sed.exe`. Same
+    # two channels as `sh` -- Scoop's `main/git` and the pinned
+    # PortableGit archive (one download, deduped by the store; only the
+    # `executablePath` view differs). Precedent: sh.nim, tar.nim, gzip.nim.
+    scoopApp(bucket = "main", app = "git",
+      preferredVersion = ">=2", executablePath = "usr/bin/sed.exe",
+      requiresExecutionProfileChecksum = false)
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "usr/bin/sed.exe",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
 
 package grep:
   provisioning:
@@ -220,6 +239,21 @@ package `sha256sum`:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/sha256sum",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: Git for Windows ships this at `usr/bin/sha256sum.exe`. Same
+    # two channels as `sh` -- Scoop's `main/git` and the pinned
+    # PortableGit archive (one download, deduped by the store; only the
+    # `executablePath` view differs). Precedent: sh.nim, tar.nim, gzip.nim.
+    scoopApp(bucket = "main", app = "git",
+      preferredVersion = ">=2", executablePath = "usr/bin/sha256sum.exe",
+      requiresExecutionProfileChecksum = false)
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "usr/bin/sha256sum.exe",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
 
 package `dirname`:
   provisioning:
@@ -238,24 +272,84 @@ package `chmod`:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/chmod",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: Git for Windows ships this at `usr/bin/chmod.exe`. Same
+    # two channels as `sh` -- Scoop's `main/git` and the pinned
+    # PortableGit archive (one download, deduped by the store; only the
+    # `executablePath` view differs). Precedent: sh.nim, tar.nim, gzip.nim.
+    scoopApp(bucket = "main", app = "git",
+      preferredVersion = ">=2", executablePath = "usr/bin/chmod.exe",
+      requiresExecutionProfileChecksum = false)
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "usr/bin/chmod.exe",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
 
 package `mv`:
   provisioning:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/mv",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: Git for Windows ships this at `usr/bin/mv.exe`. Same
+    # two channels as `sh` -- Scoop's `main/git` and the pinned
+    # PortableGit archive (one download, deduped by the store; only the
+    # `executablePath` view differs). Precedent: sh.nim, tar.nim, gzip.nim.
+    scoopApp(bucket = "main", app = "git",
+      preferredVersion = ">=2", executablePath = "usr/bin/mv.exe",
+      requiresExecutionProfileChecksum = false)
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "usr/bin/mv.exe",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
 
 package `cp`:
   provisioning:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/cp",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: Git for Windows ships this at `usr/bin/cp.exe`. Same
+    # two channels as `sh` -- Scoop's `main/git` and the pinned
+    # PortableGit archive (one download, deduped by the store; only the
+    # `executablePath` view differs). Precedent: sh.nim, tar.nim, gzip.nim.
+    scoopApp(bucket = "main", app = "git",
+      preferredVersion = ">=2", executablePath = "usr/bin/cp.exe",
+      requiresExecutionProfileChecksum = false)
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "usr/bin/cp.exe",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
 
 package `rm`:
   provisioning:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/rm",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: Git for Windows ships this at `usr/bin/rm.exe`. Same
+    # two channels as `sh` -- Scoop's `main/git` and the pinned
+    # PortableGit archive (one download, deduped by the store; only the
+    # `executablePath` view differs). Precedent: sh.nim, tar.nim, gzip.nim.
+    scoopApp(bucket = "main", app = "git",
+      preferredVersion = ">=2", executablePath = "usr/bin/rm.exe",
+      requiresExecutionProfileChecksum = false)
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "usr/bin/rm.exe",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
 
 package `find`:
   provisioning:
@@ -280,6 +374,21 @@ package `mkdir`:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/mkdir",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: Git for Windows ships this at `usr/bin/mkdir.exe`. Same
+    # two channels as `sh` -- Scoop's `main/git` and the pinned
+    # PortableGit archive (one download, deduped by the store; only the
+    # `executablePath` view differs). Precedent: sh.nim, tar.nim, gzip.nim.
+    scoopApp(bucket = "main", app = "git",
+      preferredVersion = ">=2", executablePath = "usr/bin/mkdir.exe",
+      requiresExecutionProfileChecksum = false)
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "usr/bin/mkdir.exe",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
 
 package `ls`:
   provisioning:
@@ -310,6 +419,21 @@ package `touch`:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/touch",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: Git for Windows ships this at `usr/bin/touch.exe`. Same
+    # two channels as `sh` -- Scoop's `main/git` and the pinned
+    # PortableGit archive (one download, deduped by the store; only the
+    # `executablePath` view differs). Precedent: sh.nim, tar.nim, gzip.nim.
+    scoopApp(bucket = "main", app = "git",
+      preferredVersion = ">=2", executablePath = "usr/bin/touch.exe",
+      requiresExecutionProfileChecksum = false)
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "usr/bin/touch.exe",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
 
 package `du`:
   provisioning:
@@ -328,3 +452,28 @@ package `tail`:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/tail",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+package `printf`:
+  ## `printf(1)`, used by from-source shell actions to write stamps and
+  ## launchers. A shell builtin too, but an action that names it as a
+  ## tool identity needs a package that resolves in every provisioning
+  ## mode, not only `path`.
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/printf",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: Git for Windows ships this at `usr/bin/printf.exe`. Same
+    # two channels as `sh` -- Scoop's `main/git` and the pinned
+    # PortableGit archive (one download, deduped by the store; only the
+    # `executablePath` view differs). Precedent: sh.nim, tar.nim, gzip.nim.
+    scoopApp(bucket = "main", app = "git",
+      preferredVersion = ">=2", executablePath = "usr/bin/printf.exe",
+      requiresExecutionProfileChecksum = false)
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "usr/bin/printf.exe",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"

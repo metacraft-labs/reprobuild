@@ -122,6 +122,15 @@ else:
     # The spec's real bar — spawn-FREE logic cost < 5 ms — is not asserted here
     # and still needs its own measurement; the M78 daemon path is where that
     # becomes observable without a per-prompt spawn.
+    #
+    # WHICH IMAGE THE SAMPLE LOADS. ``build/bin/repro`` is the thin client; the
+    # engine is ``reprobuild``. The budget assumes the client answers a
+    # confirmed no-op ITSELF (apps/repro-client, "THE ONE THING IT ANSWERS
+    # WITHOUT THE DAEMON"). When it instead handed every prompt over, each
+    # sample paid two image loads, the second the ~24 MB engine with
+    # libclingo, libstdc++ and OpenSSL behind it, and even the fastest sample
+    # sat above this p50. ``noop_fast_path_is_answered_without_loading_the_
+    # engine`` below pins the no-hand-over property deterministically.
     P50BudgetMs = 10.0
     P99BudgetMs = 50.0   # CI tolerance — see milestone note.
     MaxBudgetMs = 250.0
@@ -249,6 +258,22 @@ proc percentile(samples: seq[float]; q: float): float =
   let frac = idx - float(lo)
   samples[lo] + (samples[hi] - samples[lo]) * frac
 
+proc runExportPlain(c: ShellHookCase; env: StringTableRef):
+    tuple[output: string; exitCode: int] =
+  ## Blocking spawn of ``repro dev-env export bash`` for the non-timed cases.
+  var p = startProcess(c.reproBin,
+    args = @["dev-env", "export", "bash", "--project-root", c.projectRoot],
+    workingDir = c.repoRoot, env = env,
+    options = {poUsePath, poStdErrToStdOut})
+  defer: p.close()
+  result.output = p.outputStream.readAll()
+  result.exitCode = p.waitForExit()
+
+proc copyEnv(src: StringTableRef): StringTableRef =
+  result = newStringTable(modeCaseSensitive)
+  for k, v in src.pairs():
+    result[k] = v
+
 suite "e2e_shell_hook_noop_latency":
 
   test "noop_fast_path_meets_p50_p99_budgets":
@@ -339,3 +364,78 @@ suite "e2e_shell_hook_noop_latency":
     check p50 < P50BudgetMs
     check p99 < P99BudgetMs
     check pMax < MaxBudgetMs
+
+  test "noop_fast_path_is_answered_without_loading_the_engine":
+    ## WHAT THIS PINS, deterministically, where the timed case above can only
+    ## pin it statistically: a confirmed no-op prompt is answered by the
+    ## ``repro`` image the hook spawns, WITHOUT handing over to the
+    ## ``reprobuild`` engine. The engine is ~24 MB with libclingo, libstdc++
+    ## and OpenSSL behind it; loading it on every prompt is what put the
+    ## timed case above its budget.
+    ##
+    ## HOW: ``REPRO_FULL_CLI`` -- the override the thin client honours for its
+    ## hand-over target -- is pointed at a path that does not exist. A hand-over
+    ## then fails with the client's own exit 127. That is not a mock: every
+    ## binary here is the real graph-built one, and the variable is the real
+    ## production override; it only makes a hand-over OBSERVABLE.
+    ##
+    ## The third arm is the discriminator that keeps the first two honest: a
+    ## key that does NOT match must still hand over (127), so a client that
+    ## answered every prompt itself would fail here rather than pass.
+    let c = prepareShellHookCase("repro-m77-noop-no-engine")
+    defer:
+      try: removeDir(c.tempRoot)
+      except CatchableError: discard
+
+    let activationEnv = exportBaseEnv(c)
+    let initial = captureExportOutput(c, activationEnv)
+    if initial.exitCode != 0:
+      echo "=== initial stdout/stderr ===\n", initial.stdout
+    require initial.exitCode == 0
+    let fingerprint = readFingerprint(initial.stdout)
+    require fingerprint.len > 0
+
+    let noEngine = c.tempRoot / "no-such-dir" / "reprobuild"
+    require not fileExists(noEngine)
+
+    # 1. Trusted by REPRO_DEV_ENV_AUTO_ALLOW, key matches: answered locally.
+    let autoAllowEnv = copyEnv(activationEnv)
+    autoAllowEnv["__REPRO_APPLIED"] = fingerprint
+    autoAllowEnv["REPRO_FULL_CLI"] = noEngine
+    let autoAllow = runExportPlain(c, autoAllowEnv)
+    if autoAllow.exitCode != 0:
+      echo "=== auto-allow output ===\n", autoAllow.output
+    check autoAllow.exitCode == 0
+    check autoAllow.output == ": # " & FastPathExpectedSubstring & "\n"
+
+    # 2. Trusted by the allow file ``repro allow`` writes (the way a user
+    #    trusts a directory), key matches: answered locally. This is the arm
+    #    that proves the client derives the SAME allow-file name as the
+    #    engine; a mismatch would silently send every trusted prompt back to
+    #    the engine.
+    let allowEnv = copyEnv(activationEnv)
+    allowEnv.del("REPRO_DEV_ENV_AUTO_ALLOW")
+    var allowProc = startProcess(c.reproBin,
+      args = @["allow", c.projectRoot], workingDir = c.repoRoot,
+      env = allowEnv, options = {poUsePath, poStdErrToStdOut})
+    let allowOut = allowProc.outputStream.readAll()
+    let allowCode = allowProc.waitForExit()
+    allowProc.close()
+    if allowCode != 0:
+      echo "=== repro allow output ===\n", allowOut
+    require allowCode == 0
+    allowEnv["__REPRO_APPLIED"] = fingerprint
+    allowEnv["REPRO_FULL_CLI"] = noEngine
+    let allowed = runExportPlain(c, allowEnv)
+    if allowed.exitCode != 0:
+      echo "=== allow-file output ===\n", allowed.output
+    check allowed.exitCode == 0
+    check allowed.output.contains(FastPathExpectedSubstring)
+
+    # 3. Key does NOT match: not a confirmed no-op, so it must hand over --
+    #    and with no engine to hand to, that is the client's exit 127.
+    let staleEnv = copyEnv(autoAllowEnv)
+    staleEnv["__REPRO_APPLIED"] = "0000000000000000" & "0000000000000000"
+    let stale = runExportPlain(c, staleEnv)
+    check stale.exitCode == 127
+    check not stale.output.contains(FastPathExpectedSubstring)

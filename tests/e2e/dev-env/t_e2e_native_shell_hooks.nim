@@ -1,6 +1,7 @@
 import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
     unittest]
 
+import repro_core/cli_images
 import repro_test_support
 
 proc q(value: string): string =
@@ -199,13 +200,28 @@ proc requireNativeStats(statsPath: string) =
   check stats["stats"]["shellRenderingCacheHit"].getBool()
 
 proc reproPathWithSpaces(c: M6Case): string =
+  ## A relocated ``repro`` install whose directory contains spaces, so the
+  ## rendered hooks are proven to quote the path they invoke.
+  ##
+  ## ``repro`` is the thin daemon client: everything it does not route to the
+  ## daemon -- including ``__repro-native-shell-activate`` -- it ``execv``s to
+  ## the ENGINE image, which it resolves as a sibling in its OWN directory
+  ## (``resolveFullCli`` in ``apps/repro-client/repro_client.nim``). An
+  ## install is therefore the PAIR, and relocating the client alone produces
+  ## a ``repro`` that can only print "no reprobuild image to fall back to".
+  ## Both images are copied, not symlinked: the client names its directory
+  ## through ``getAppFilename``, which resolves a symlink back to
+  ## ``build/bin`` and would silently stop exercising the spaced path.
   let dir = c.tempRoot / "bin with spaces"
   createDir(dir)
   result = dir / addFileExt("repro", ExeExt)
-  if not fileExists(result):
-    copyFile(c.reproBin, result)
-    setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec,
-      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+  let engineSrc = parentDir(c.reproBin) / reprobuildEngineExeName()
+  let engineDst = dir / reprobuildEngineExeName()
+  for (src, dst) in [(c.reproBin, result), (engineSrc, engineDst)]:
+    if not fileExists(dst):
+      copyFile(src, dst)
+      setFilePermissions(dst, {fpUserRead, fpUserWrite, fpUserExec,
+        fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
 proc installNativeHooks(c: M6Case) =
   discard requireRepro(c, @["hooks", "ensure", "--shell", "bash"])
@@ -223,22 +239,34 @@ proc installNativeHooks(c: M6Case) =
     readFile(c.xdgConfig / "fish" / "config.fish")
 
 proc posixProbeScript(projectA, projectB: string): string =
-  "cd " & q(projectA) & "\n" &
+  # PATHRESTORED: leaving every project must give back the PATH the shell
+  # started with. Checked explicitly because the OUT line cannot see PATH:
+  # an unload that removes nothing leaves the prepended entries behind, one
+  # more copy per activation, and nothing else in this probe notices.
+  "__repro_probe_path0=$PATH\n" &
+    "cd " & q(projectA) & "\n" &
     "printf 'A:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" \"$(fixture-tool)\"\n" &
     "cd " & q(projectB) & "\n" &
     "printf 'B:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" \"$(fixture-tool)\"\n" &
     "cd " & q(parentDir(projectA)) & "\n" &
     "printf 'OUT:%s|%s|%s\\n' \"${AUX_VALUE-unset}\" \"${FIXTURE_MODE-unset}\" \"${REPRO_DEV_ENV_PROJECT_ROOT-unset}\"\n" &
+    "if [ \"$PATH\" = \"$__repro_probe_path0\" ]; then echo PATHRESTORED:yes; else printf 'PATHRESTORED:no:%s\\n' \"$PATH\"; fi\n" &
     "cd " & q(projectA) & "\n" &
     "printf 'A2:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" \"$(fixture-tool)\"\n"
 
 proc fishProbeScript(projectA, projectB: string): string =
-  "cd " & q(projectA) & "\n" &
+  # PATHRESTORED: see ``posixProbeScript``. Both sides are joined with
+  # ``string join``: fish joins a quoted PATH with ":" but a quoted list
+  # whose name does not end in PATH with spaces, so comparing the two
+  # quoted variables directly could never be equal.
+  "set -g __repro_probe_path0 (string join : $PATH)\n" &
+    "cd " & q(projectA) & "\n" &
     "printf 'A:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" (fixture-tool)\n" &
     "cd " & q(projectB) & "\n" &
     "printf 'B:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" (fixture-tool)\n" &
     "cd " & q(parentDir(projectA)) & "\n" &
     "printf 'OUT:%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\"\n" &
+    "if test (string join : $PATH) = \"$__repro_probe_path0\"; echo PATHRESTORED:yes; else; printf 'PATHRESTORED:no:%s\\n' \"$PATH\"; end\n" &
     "cd " & q(projectA) & "\n" &
     "printf 'A2:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" (fixture-tool)\n"
 
@@ -258,6 +286,7 @@ proc requireBashHook(c: M6Case) =
   requireShellValue(res.output, "B:",
     "B:beta|two|" & c.projectB & "|tool:beta:two")
   requireShellValue(res.output, "OUT:", "OUT:unset|unset|unset")
+  requireShellValue(res.output, "PATHRESTORED:", "PATHRESTORED:yes")
   requireShellValue(res.output, "A2:",
     "A2:alpha|one|" & c.projectA & "|tool:alpha:one")
   requireNativeStats(statsPath)
@@ -280,6 +309,7 @@ proc requireZshHook(c: M6Case) =
   requireShellValue(res.output, "B:",
     "B:beta|two|" & c.projectB & "|tool:beta:two")
   requireShellValue(res.output, "OUT:", "OUT:unset|unset|unset")
+  requireShellValue(res.output, "PATHRESTORED:", "PATHRESTORED:yes")
   requireShellValue(res.output, "A2:",
     "A2:alpha|one|" & c.projectA & "|tool:alpha:one")
   requireNativeStats(statsPath)
@@ -297,6 +327,7 @@ proc requireFishHook(c: M6Case; fish: string) =
   requireShellValue(res.output, "B:",
     "B:beta|two|" & c.projectB & "|tool:beta:two")
   requireShellValue(res.output, "OUT:", "OUT:||")
+  requireShellValue(res.output, "PATHRESTORED:", "PATHRESTORED:yes")
   requireShellValue(res.output, "A2:",
     "A2:alpha|one|" & c.projectA & "|tool:alpha:one")
   requireNativeStats(statsPath)

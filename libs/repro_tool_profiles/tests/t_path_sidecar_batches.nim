@@ -7,7 +7,7 @@ proc use(name: string): InterfaceToolUse =
 
 proc executable(dir, name: string): string =
   createDir(dir)
-  result = dir / (name & ExeExt)
+  result = dir / name.addFileExt(ExeExt)
   writeFile(result, "fixture bytes\n")
   setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
 

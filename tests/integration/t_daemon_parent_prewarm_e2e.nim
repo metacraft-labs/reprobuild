@@ -47,13 +47,19 @@
 
 import std/[os, osproc, strtabs, strutils, tempfiles, unittest]
 
+import repro_core/cli_images
 import repro_test_support
 
 proc repoRoot(): string =
   getCurrentDir()
 
 proc fullCliBin(): string =
-  repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
+  ## The ENGINE image, `build/bin/reprobuild`. This file was written when the
+  ## engine was `build/bin/repro`; since the thin-client rename that name is
+  ## the thin daemon client, and `REPRO_FULL_CLI` naming the thin client makes
+  ## it hand over to itself (refused with exit 127 now; an endless `execv`
+  ## loop before). `REPRO_FULL_CLI` names the engine by contract.
+  repoRoot() / "build" / "bin" / reprobuildEngineExeName()
 
 proc endpointBound(path: string): bool =
   ## `repro_test_support.runquotaEndpointReachable` answers with

@@ -393,6 +393,19 @@ else:
             normalisePath(entry.image, workDir)
       elif value is EntropyObservability:
         entries.add $value
+      elif value is set[EvidenceContributor]:
+        # DA-1f. A SET, so it is rendered sorted-by-enum-order and compared
+        # like any other field, and it is NOT vacuous on this fixture: both
+        # arms fold a real io-mon capture, so both must render
+        # `evcMonitorCapture`, and both go through the root-image fold, so
+        # both must render `evcRootImageReconstruction`. That makes this the
+        # one field where a hosting-mechanism difference in WHO filled the
+        # channels — as opposed to what is in them — would show up. The
+        # presence pin below requires `evcMonitorCapture` before the identity
+        # comparison runs, for the P6/P10 reason: two empty sets compare
+        # equal and prove nothing.
+        for contributor in value:
+          entries.add $contributor
       else:
         {.error: "renderEvidence has no rendering for a new " &
           "PathSetEvidence field of this shape. Add an arm — do NOT add " &
@@ -531,6 +544,19 @@ else:
       checkOrEcho quiescedHosted.evidence.contains("<work>/marker.txt"),
         "the hosted arm's evidence does not name the file the fixture " &
         "reads, so it is not evidence of this action:\n" &
+        quiescedHosted.evidence
+      # DA-1f, AND NOT VACUOUS FOR THE SAME REASON THE LINE ABOVE IS NOT.
+      # `evidenceProvenance` is rendered by the walk above, and rendering is
+      # not comparing: if neither arm ever marked a contributor, both would
+      # render `evidenceProvenance=[]` and the identity comparison below
+      # would pass over an empty field. Both arms fold a real io-mon capture,
+      # so `evcMonitorCapture` is REQUIRED to be there before the comparison
+      # is allowed to mean anything — and it is what reddens if
+      # `foldOneMonitorRecord` stops marking the source of its records.
+      checkOrEcho quiescedHosted.evidence.contains("evcMonitorCapture"),
+        "the hosted arm's evidence does not record that a MONITOR CAPTURE " &
+        "filled its channels, so the provenance field is empty and the " &
+        "comparison below cannot fail for a difference in it:\n" &
         quiescedHosted.evidence
 
       checkOrEcho quiescedHosted.histogram == quiescedWrapped.histogram,

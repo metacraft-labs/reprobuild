@@ -636,9 +636,9 @@ abort_if_failed
 # ``reprobuild.apps.reprobuild-nix-daemon`` edge. The daemon is a shipped
 # executable support artifact rather than a Nim entrypoint, so it is not
 # listed in apps/entrypoints.txt and must be staged explicitly.
-cp -f tools/reprobuild-nix-daemon/reprobuild-nix-daemon \
+python3 scripts/stage_nix_daemon.py \
+  tools/reprobuild-nix-daemon/reprobuild-nix-daemon \
   build/bin/reprobuild-nix-daemon
-chmod +x build/bin/reprobuild-nix-daemon
 verify_fresh_artifact \
   "build/bin/reprobuild-nix-daemon" "reprobuild-nix-daemon staging" ||
   abort_if_failed

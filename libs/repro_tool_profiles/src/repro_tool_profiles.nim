@@ -2202,17 +2202,83 @@ proc resolveZstdExe(): string =
   ## only question is whether a zstd exists.
   uncontrolledFindExe("zstd")
 
-proc resolveSevenZipExe(): string =
-  ## Look up a `7z` / `7z.exe` on PATH. Used for `.7z` archives and
-  ## `.7z.exe` (SFX) payloads. Both Scoop's `main/7zip` and the
-  ## system 7-Zip install satisfy this; on POSIX, `p7zip`'s `7z`
-  ## binary speaks the same CLI.
+const
+  # 7-Zip for the extractor bootstrap. MUST match the Windows x86_64 entry of
+  # `sevenzipCatalog` in `repro_dsl_stdlib/packages/sevenzip.nim`;
+  # `t_sevenzip_bootstrap_matches_stdlib_catalog` checks that it does. The MSI,
+  # not the `.exe` installer or a `.7z`, because `msiexec /a` unpacks it with
+  # nothing but the OS: the extractor must not need an extractor.
+  BootstrapSevenZipVersion = "26.01"
+  BootstrapSevenZipWindowsMsiUrl =
+    "https://github.com/ip7z/7zip/releases/download/26.01/7z2601-x64.msi"
+  BootstrapSevenZipWindowsMsiSha256 =
+    "a47ea8dcf8bc08e6de474cae77c828e031fa22cb528f6095defffebf11cd02f2"
+
+proc bootstrapSevenZipToolUse*(): InterfaceToolUse =
+  ## The 7-Zip that extracts `.7z` and `.7z.exe` tool archives -- git for
+  ## Windows and the bootstrap gcc among them. An ordinary tarball-provisioned
+  ## package, realized into the tool store like any other; see
+  ## `resolveSevenZipExe` for why. Windows only: no POSIX tool in the catalogs
+  ## ships as a 7z archive.
+  result = InterfaceToolUse(
+    rawConstraint: "7zip",
+    packageSelector: "7zip@" & BootstrapSevenZipVersion,
+    executableName: "7z")
+  when defined(windows):
+    result.tarballProvisioning = @[
+      InterfaceTarballProvisioning(
+        packageName: "7zip",
+        url: BootstrapSevenZipWindowsMsiUrl,
+        sha256: BootstrapSevenZipWindowsMsiSha256,
+        archiveType: "msi",
+        executablePath: "Files/7-Zip/7z.exe",
+        stripComponents: 0,
+        packageId: "7zip@" & BootstrapSevenZipVersion,
+        lockIdentity: "tarball:7zip@" & BootstrapSevenZipVersion &
+          ":sha256:" & BootstrapSevenZipWindowsMsiSha256,
+        cpu: "x86_64",
+        os: "windows")]
+
+proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
+                         writerMode = "direct"):
+    PathOnlyToolProfile
+
+proc resolveSevenZipExe(storeRoot: string): string =
+  ## The `7z` that extracts `.7z` archives and `.7z.exe` (SFX) payloads.
+  ##
+  ## On Windows, 7-Zip is realized into the tool store FIRST, as a regular
+  ## package (`bootstrapSevenZipToolUse`). This used to search `PATH` only, so
+  ## tarball provisioning -- whose point is not to depend on the host --
+  ## depended on a host 7-Zip: on a cold store without one, git for Windows
+  ## and the bootstrap gcc (both 7z archives) could not be realized
+  ## (reprobuild-specs/issues/2026-09-24-tarball-realizer-takes-7z-from-path.md).
+  ## `PATH` stays as the fallback for when the store route fails (offline with
+  ## a cold cache), and is the only route on POSIX, where `p7zip`'s `7z` or
+  ## `7zz` speaks the same CLI.
+  ##
+  ## The longer-term shape is the extractor as a dependency EDGE of the
+  ## provisioning edge that needs it
+  ## (Dependency-Provisioning-In-Build-Graph.md, section 4). Tarball
+  ## realization is not an edge yet, so this realizes it inline, the way
+  ## `ensureBootstrapToolchainEnv` realizes the bootstrap compilers.
+  var storeFailure = ""
+  when defined(windows):
+    if storeRoot.len > 0:
+      try:
+        let profile = resolveTarballTool(bootstrapSevenZipToolUse(), storeRoot)
+        if profile.resolvedExecutablePath.len > 0:
+          return profile.resolvedExecutablePath
+      except CatchableError as err:
+        storeFailure = err.msg
   for name in @["7z", "7z.exe", "7zz"]:
     let exe = findExe(name)
     if exe.len > 0:
       return exe
   raise newException(OSError,
-    "tool-resolution failed: no 7z extractor available (looked for 7z, 7z.exe, 7zz on PATH)")
+    "tool-resolution failed: no 7z extractor available (" &
+    (if storeFailure.len > 0: "realizing 7zip into the tool store failed: " &
+      storeFailure & "; " else: "") &
+    "looked for 7z, 7z.exe, 7zz on PATH)")
 
 proc removeSingleTopLevelDir(destination: string) =
   ## When a zip / 7z archive ships its payload under a single top-
@@ -2425,7 +2491,10 @@ proc mergeRustInstallerComponents(destination: string) =
 
 proc extractTarballArchive(archivePath, destination, archiveType: string;
                            stripComponents: int;
-                           declaredExecutablePath = "") =
+                           declaredExecutablePath = "";
+                           storeRoot = "") =
+  ## `storeRoot` is where an extractor this archive needs is realized from
+  ## (`resolveSevenZipExe`); empty means "search PATH only".
   validateTarEntries(archivePath, archiveType)
   createDir(extendedPath(destination))
   let lowerType = archiveType.toLowerAscii()
@@ -2520,7 +2589,8 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
     removeDir(extendedPath(staging))
     createDir(extendedPath(staging))
     try:
-      extractTarballArchive(archivePath, staging, "zip", 0)
+      extractTarballArchive(archivePath, staging, "zip", 0,
+        storeRoot = storeRoot)
       # N48: the walk is EXTENDED-LENGTH (``\\?\…``) because that is what
       # opens reliably from Nim, but the result is a CHILD PROCESS OPERAND and
       # the ``\\?\`` prefix does not survive one. Measured: MSYS2's zstd.exe
@@ -2700,11 +2770,11 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
       # tar discovery, the ``--force-local`` retry for Windows drive letters,
       # and the strip handling.
       extractTarballArchive(payloadTar, destination, "tar", stripComponents,
-        declaredExecutablePath)
+        declaredExecutablePath, storeRoot)
     finally:
       removeDir(extendedPath(staging))
   of "7z", "7z.exe":
-    let sevenZipExe = resolveSevenZipExe()
+    let sevenZipExe = resolveSevenZipExe(storeRoot)
     # `x` = extract with full paths preserved.
     # `-o<dir>` = output directory (NO space between -o and the path).
     # `-y` = assume yes for all prompts (overwrites).
@@ -2930,7 +3000,7 @@ proc unpackClosure(plan: TarballAcquisitionPlan;
     if dirExists(extendedPath(target)):
       removeDir(extendedPath(target))
     extractTarballArchive(downloaded.path, target, entryPlan.archiveType,
-      entryPlan.stripComponents, "")
+      entryPlan.stripComponents, "", storeRoot)
 
 proc toolCacheIdentity(plan: TarballAcquisitionPlan;
                        packageName, version: string): CacheEntryIdentity =
@@ -3291,7 +3361,7 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
   try:
     if not cloned:
       extractTarballArchive(downloaded.path, tempPrefix, plan.archiveType,
-        plan.stripComponents, plan.declaredExecutablePath)
+        plan.stripComponents, plan.declaredExecutablePath, storeRoot)
       # The declared closure, unpacked into the same staging prefix. After
       # the root archive because an entry lands UNDER it
       # (``node_modules/...``), and before the prune/alias/launcher steps
@@ -3687,6 +3757,124 @@ proc publishBootstrapCompilerEnv*(compilerPath: string;
   if windowsHost and getEnv("CC").len == 0:
     putEnv("CC", compilerPathForShellEnvironment(compilerPath, true))
 
+type
+  BootstrapToolchainEnvSnapshot* = object
+    ## The values the bootstrap toolchain publishes into this process's
+    ## environment, as they were BEFORE it did. See
+    ## ``snapshotBootstrapToolchainEnv``.
+    entries: seq[tuple[name: string; present: bool; value: string]]
+
+const bootstrapToolchainEnvNames = ["CC", "REPRO_BOOTSTRAP_CC",
+  "REPRO_NIM_COMPILER"]
+
+proc snapshotBootstrapToolchainEnv*(): BootstrapToolchainEnvSnapshot =
+  ## Capture ``CC``, ``REPRO_BOOTSTRAP_CC`` and ``REPRO_NIM_COMPILER`` before
+  ## ``ensureBootstrapToolchainEnv`` publishes the provider-compile toolchain.
+  ##
+  ## That toolchain is reprobuild's OWN, for compiling a recipe. It is
+  ## published through the process environment because the provider compile
+  ## runs as a child action that inherits it -- and so, unless it is taken
+  ## back, does the user's command. ``repro exec -- cargo build`` then ran
+  ## with ``CC`` pointing at the tool-store MinGW gcc, which cc-rs honours
+  ## for an MSVC target. The activation surfaces take a snapshot on entry
+  ## and ``restoreBootstrapToolchainEnv`` it before they start the user's
+  ## command, so the command sees the environment the user gave it plus the
+  ## dev-env, and nothing reprobuild used for itself.
+  for name in bootstrapToolchainEnvNames:
+    result.entries.add((name: name, present: existsEnv(name),
+      value: getEnv(name)))
+
+proc restoreBootstrapToolchainEnv*(snapshot: BootstrapToolchainEnvSnapshot) =
+  ## Undo whatever the bootstrap toolchain published since ``snapshot``.
+  for entry in snapshot.entries:
+    if entry.present:
+      putEnv(entry.name, entry.value)
+    elif existsEnv(entry.name):
+      delEnv(entry.name)
+
+when defined(windows):
+  type BootstrapToolchainError* = object of CCompilerUnusableError
+    ## The pinned recipe-compile C compiler could not be provisioned, or the
+    ## compiler named by ``REPRO_BOOTSTRAP_CC`` is unusable.
+
+  proc ensureWindowsBootstrapCCompiler(storeRoot: string) =
+    ## Publish a WORKING, PINNED C compiler for the recipe compile, or fail
+    ## saying which compiler and why. Never falls back to PATH.
+    ##
+    ## Windows has no system C compiler, and the one PATH offers is whatever
+    ## the Machine PATH happens to list first -- on the host where this was
+    ## measured (2026-09-23), FPC's 1999-era i386 gcc 2.95, which cannot find
+    ## ``stddef.h``. So:
+    ##
+    ## * ``REPRO_BOOTSTRAP_CC`` set: it is the user's (or an enclosing
+    ##   ``repro``'s) explicit choice. It is probed and kept; an unusable one
+    ##   is an error naming it. It used to be silently OVERWRITTEN here with
+    ##   the tool-store compiler, so the documented override did not work.
+    ## * otherwise the pinned winlibs gcc (``bootstrapGccToolUse``: URL +
+    ##   sha256) is realised into the tool store, probed, and published. If
+    ##   that fails the error says what failed and how to override it. It used
+    ##   to be swallowed, after which Nim picked ``gcc.exe`` off PATH without
+    ##   a word.
+    ##
+    ## Successful probes are cached under ``<storeRoot>/compiler-probes``, so
+    ## the steady-state cost is a file-existence check.
+    let probeCache = storeRoot / "compiler-probes"
+    let existing = getEnv(bootstrapCCompilerEnv)
+    if existing.len > 0:
+      if not existing.isAbsolute or not fileExists(extendedPath(existing)):
+        raise newException(BootstrapToolchainError,
+          bootstrapCCompilerEnv & "=" & existing & " does not name an " &
+          "existing file by absolute path. " & cCompilerOverrideRemedy())
+      requireUsableCCompiler(existing, bootstrapCCompilerEnv &
+        " (set in the environment)", probeCache)
+      publishBootstrapCompilerEnv(existing, true)
+      return
+    let useDef = bootstrapGccToolUse()
+    var pinned = ""
+    try:
+      let profile = resolveTarballTool(useDef, storeRoot)
+      pinned = profile.resolvedExecutablePath
+    except CatchableError as err:
+      raise newException(BootstrapToolchainError,
+        "could not provision the pinned C compiler for compiling the recipe (" &
+        useDef.packageSelector & ", " &
+        useDef.tarballProvisioning[0].url & ", sha256 " &
+        useDef.tarballProvisioning[0].sha256 & ") into the tool store at " &
+        storeRoot & ": " & err.msg & "\n  " & cCompilerOverrideRemedy())
+    if pinned.len == 0:
+      raise newException(BootstrapToolchainError,
+        "the pinned C compiler " & useDef.packageSelector & " resolved to no " &
+        "executable in the tool store at " & storeRoot & ". " &
+        cCompilerOverrideRemedy())
+    requireUsableCCompiler(pinned, "the pinned bootstrap compiler " &
+      useDef.packageSelector & " in the tool store", probeCache)
+    publishBootstrapCompilerEnv(pinned, true)
+
+proc bootstrapToolchainProvisioned*(mode: ToolProvisioningMode): bool =
+  ## Whether ``ensureBootstrapToolchainEnv`` provisions the provider-compile
+  ## toolchain under ``mode``.
+  ##
+  ## The toolchain that compiles a recipe's provider is the BOOTSTRAP's, not
+  ## the recipe's: the recipe's ``defaultToolProvisioning`` can only be read
+  ## after that compile. Gating the bootstrap on the mode therefore made it
+  ## depend on something only ``REPRO_TOOL_PROVISIONING`` or a flag could say
+  ## in advance, and a plain ``repro shell`` compiled the recipe with whatever
+  ## ``nim`` and ``gcc`` were on ``PATH`` -- on a Windows host without the DIY
+  ## ``env.ps1``, none (measured 2026-09-23). Absent a lock pin, the bootstrap
+  ## provisions Nim as a regular package whatever the mode
+  ## (reprobuild-specs/Distribution-And-Packaging.milestones.org, M5,
+  ## "pin the provider-compile toolchain", rule 2).
+  ##
+  ## Windows only, for now. Linux resolves both compilers through Nix, which
+  ## a ``path``-mode host need not have; and there is no macOS arm in
+  ## ``bootstrapNimToolUse`` (it falls through to the Linux archive). Both
+  ## keep the old gate until they have a provisioning route that works in
+  ## every mode.
+  when defined(windows):
+    true
+  else:
+    mode == tpmTarball or mode == tpmFromSource
+
 proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
                                   storeRoot: string) =
   ## MR5 — before the engine's interface-extract step shells out to
@@ -3696,8 +3884,9 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
   ## (which on Windows often is FPC's 1999-era 32-bit gcc, breaking
   ## the compile with `nimbase.h: Invalid argument`).
   ##
-  ## Only fires for tool-provisioning modes where the project's
-  ## toolUses are resolved via the engine's tool-store (`tarball` and
+  ## Which modes it fires for is ``bootstrapToolchainProvisioned``: every
+  ## mode on Windows; on other hosts only the modes that resolve the
+  ## project's toolUses through the engine's tool-store (`tarball` and
   ## `from-source`; `nix`/`scoop` arrange their toolchain separately).
   ## Linux uses the pinned Nix channel for both bootstrap compilers so Nim
   ## can be monitored; the vendor Linux Nim archive is statically linked.
@@ -3717,7 +3906,7 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
   ## 1999-era i386-target gcc; on Linux a sealed profile may have no gcc at
   ## all. Both fail while compiling Nim-generated C before the recipe graph
   ## is available.
-  if mode != tpmTarball and mode != tpmFromSource:
+  if not bootstrapToolchainProvisioned(mode):
     return
   let effectiveStoreRoot =
     if storeRoot.len > 0: storeRoot
@@ -3737,35 +3926,27 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
       # the existing PATH-based fallback in `nimCompilerPath()` still
       # runs and may succeed when the host has a usable nim/gcc.
       discard
-  when defined(windows) or defined(linux):
+  when defined(windows):
+    ensureWindowsBootstrapCCompiler(effectiveStoreRoot)
+  elif defined(linux):
     # Resolve the compiler through a pinned bootstrap channel. Linux needs
     # this in from-source mode because the sealed recipe-interface compile
     # runs before the recipe's own tool declarations are available.
     # Publish only through `$REPRO_BOOTSTRAP_CC`, which pins Nim's compiler
     # subprocess without overriding the compiler selected by package actions.
     var bootstrapGcc = ""
-    when defined(linux):
-      let existing = getEnv("REPRO_BOOTSTRAP_CC")
-      if existing.isAbsolute and fileExists(extendedPath(existing)):
-        bootstrapGcc = existing
+    let existing = getEnv("REPRO_BOOTSTRAP_CC")
+    if existing.isAbsolute and fileExists(extendedPath(existing)):
+      bootstrapGcc = existing
     if bootstrapGcc.len == 0:
       try:
-        let useDef = bootstrapGccToolUse()
-        when defined(windows):
-          let profile = resolveTarballTool(useDef, effectiveStoreRoot)
-          if profile.resolvedExecutablePath.len > 0:
-            bootstrapGcc = profile.resolvedExecutablePath
-        else:
-          let profile = resolveNixTool(useDef, effectiveStoreRoot)
-          if profile.resolvedExecutablePath.len > 0:
-            bootstrapGcc = profile.resolvedExecutablePath
+        let profile = resolveNixTool(bootstrapGccToolUse(), effectiveStoreRoot)
+        if profile.resolvedExecutablePath.len > 0:
+          bootstrapGcc = profile.resolvedExecutablePath
       except CatchableError:
         discard
     if bootstrapGcc.len > 0:
-      when defined(windows):
-        publishBootstrapCompilerEnv(bootstrapGcc, true)
-      else:
-        publishBootstrapCompilerEnv(bootstrapGcc, false)
+      publishBootstrapCompilerEnv(bootstrapGcc, false)
 
 proc blake3HexBytes*(bytes: openArray[byte]): string =
   blake3.toHex(blake3.digest(bytes))

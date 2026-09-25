@@ -1630,7 +1630,34 @@ proc evidenceShape(res: ActionResult;
     render("monitorEnvReads", ev.monitorEnvReads),
     render("entropyObservations", renderEntropyObservations(
       ev.entropyObservations)),
-    render("entropyObservability", @[$ev.entropyObservability])
+    render("entropyObservability", @[$ev.entropyObservability]),
+
+    # DA-1f — the twelfth and thirteenth fields, and the same accounting as
+    # above, per field rather than collectively:
+    #
+    #   * `provisionerReportedInputs` — VACUOUS here, and unavoidably so.
+    #     Only `bakForeignProvision` fills it, and every case in this file
+    #     runs a `bakProcess` action through a launch path; a built-in has no
+    #     launch path to compare. Rendered anyway so the field cannot be
+    #     dropped from the comparison silently, and it is NOT claimed that
+    #     the launch paths were shown to agree about it. The field's own
+    #     coverage is `tests/integration/t_nix_daemon_provisioner.nim`.
+    #
+    #   * `evidenceProvenance` — NOT vacuous, and it is a SET, so "produced"
+    #     means "not empty". Every case here folds a real capture and goes
+    #     through the root-image fold, so both `evcMonitorCapture` and
+    #     `evcRootImageReconstruction` arise on every path; the presence pin
+    #     below requires the first before the identity comparison runs. This
+    #     is the field that would catch a launch path filling the same
+    #     channels from a DIFFERENT source — which is the whole subject of
+    #     DA-1f and was, until this line, invisible to a comparison of the
+    #     channels themselves.
+    render("provisionerReportedInputs", ev.provisionerReportedInputs),
+    render("evidenceProvenance", (block:
+      var contributors: seq[string] = @[]
+      for contributor in ev.evidenceProvenance:
+        contributors.add $contributor
+      contributors))
   ].join("\n")
 
 proc shapeList(shape, field: string): seq[string] =
@@ -2916,6 +2943,34 @@ suite "every_launch_path_is_monitored":
               "so the cross-path comparison of `entropyObservations` below ",
               "is vacuous:\n", shape
           check entropyObservations.len > 0
+
+          # DA-1f — `evidenceProvenance` is the thirteenth field and gets the
+          # same treatment: rendering it is the vacuous half. Every launch
+          # path here folds a real io-mon capture, so `evcMonitorCapture` is
+          # required to be in the rendered set before the identity comparison
+          # below is allowed to mean anything about this field. Without this
+          # line the field could render `[]` on every path — because nothing
+          # marked its source — and the comparison would compare two empty
+          # sets and pass.
+          let provenance = shapeList(shape, "evidenceProvenance")
+          if "evcMonitorCapture" notin provenance:
+            echo "[", recordedEvidence[0].label,
+              "] the shared evidence shape does not record that a MONITOR ",
+              "CAPTURE filled its channels, so the cross-path comparison of ",
+              "`evidenceProvenance` below is vacuous:\n", shape
+          check "evcMonitorCapture" in provenance
+          # The reconstruction half, and the one the milestone is named for:
+          # the root image is folded on every launch path, and it must be
+          # DISTINGUISHABLE from what the capture supplied. If this stops
+          # being marked, `repro why` goes back to reporting a reconstruction
+          # as an observation on every path at once — which is invisible to a
+          # cross-path comparison by construction.
+          if "evcRootImageReconstruction" notin provenance:
+            echo "[", recordedEvidence[0].label,
+              "] the shared evidence shape does not record the root-image ",
+              "RECONSTRUCTION, although the fold runs on every launch path ",
+              "here:\n", shape
+          check "evcRootImageReconstruction" in provenance
 
           # PRIMARY ASSERTION.
           for i in 1 ..< recordedEvidence.len:

@@ -21,6 +21,14 @@ package npm:
     nixPackage "nixpkgs#nodejs", executablePath = "bin/npm",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: npm ships as part of the Node.js zip from ScoopInstaller/
+    # Main's `nodejs` app; npm.cmd lives at the prefix root alongside
+    # node.exe. The same stanza node.nim and npx.nim carry — without it a
+    # `--tool-provisioning=scoop` build that declares `npm` (every
+    # from-source-npm recipe) fails tool resolution on this one package.
+    scoopApp(bucket = "main", app = "nodejs",
+      preferredVersion = ">=20", executablePath = "npm.cmd",
+      requiresExecutionProfileChecksum = false)
     # MR2: npm ships INSIDE the Node.js tarball — there is no
     # separate upstream npm distribution. Mirror node.nim's tarball
     # url + sha256 (the engine deduplicates downloads by content hash,

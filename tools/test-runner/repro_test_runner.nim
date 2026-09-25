@@ -2461,6 +2461,32 @@ const
     ## that point a child exists, and re-spawning would risk two live
     ## groups for one case.
 
+proc supervisorExecutable(): string =
+  ## The path the runner re-executes itself through to start each case's
+  ## process-group supervisor.
+  ##
+  ## NOT ``getAppFilename()`` on Linux. That reads the ``/proc/self/exe``
+  ## LINK TEXT, and once the runner's file has been replaced on disk — an
+  ## atomic rename by any rebuild of ``build/bin`` — the text becomes
+  ## ``".../repro_test_runner (deleted)"``: a path that does not exist.
+  ## Every spawn after that fails with ENOENT, and every remaining case is a
+  ## HARNESS ERROR. That is not hypothetical. A full local suite run recorded
+  ## 10,059 harness errors out of 10,070 cases because tests that rebuild
+  ## ``.#apps`` into the same checkout replaced this binary 30 minutes in.
+  ##
+  ## Exec'ing ``/proc/self/exe`` itself goes through the kernel's reference
+  ## to the running image, which survives the unlink, and it guarantees the
+  ## supervisor speaks exactly this runner's wrapper protocol — rather than
+  ## whatever newer binary now sits at the old path.
+  ##
+  ## Elsewhere there is no ``/proc``. A replaced file on macOS leaves a
+  ## runnable binary at the path, so the spawn succeeds, but it may be a
+  ## different build of the runner; that skew is not addressed here.
+  when defined(linux):
+    "/proc/self/exe"
+  else:
+    getAppFilename()
+
 proc spawnGroupSupervisor(binary: string; args: openArray[string];
                           env: StringTableRef): TestProcess =
   when defined(posix):
@@ -2475,7 +2501,7 @@ proc spawnGroupSupervisor(binary: string; args: openArray[string];
         @[ProcessGroupWrapperFlag, paths.statusPath, binary] & @args
       env[TestOwnerEnv] = paths.ownerToken
       let process = startProcess(
-        getAppFilename(), args = wrapperArgs, env = env,
+        supervisorExecutable(), args = wrapperArgs, env = env,
         options = {poStdErrToStdOut})
       var readyLine = ""
       let waitStart = epochTime()

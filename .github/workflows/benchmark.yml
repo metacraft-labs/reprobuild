@@ -30,6 +30,9 @@ jobs:
           - platform: macos
             runner: '["self-hosted", "macos", "arm64"]'  # CIP-5: nix macOS benchmark leg → eph-macos-arm64
     runs-on: ${{ fromJSON(matrix.runner) }}
+    # Successful runs take <=72 min (linux, 68 runs) and <=30 min (macos, 31 runs);
+    # hung runs have held the single benchmark runner for 10h+. Fail them instead.
+    timeout-minutes: 120
     steps:
       # Deliberately the first step. It decides whether the two
       # github-action-benchmark steps at the end of this job can run at

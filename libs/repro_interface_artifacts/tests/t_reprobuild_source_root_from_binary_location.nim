@@ -1,6 +1,29 @@
-import std/[os, tempfiles, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_interface_artifacts
+
+import repro_dsl_stdlib/foreign_env/env_capture
+
+# Real subprocess and bash boundaries; no mocked environment or capture.
+if paramCount() == 2 and paramStr(1) == "--source-capture-child":
+  let root = paramStr(2)
+  let name = "REPROBUILD_TEST_CAPTURE_SRC"
+  doAssert getEnv(name) == root
+  clearSeededSourcePackageEnvironment()
+  doAssert not existsEnv(name)
+  doAssert not existsEnv(SeededSourceEnvironmentVar)
+  let script = "export " & name & "=" & quoteShell(root)
+  let ops = captureForeignEnvOps(
+    [findExe("bash"), "-c", "printf '%s\\n' " & quoteShell(script)],
+    root, root / "environment.bash")
+  var matched = false
+  for op in ops:
+    if op.name == name:
+      doAssert op.kind == feoSet and op.value == root
+      matched = true
+  doAssert matched
+  echo root
+  quit(0)
 
 suite "reprobuild source root from binary location":
 
@@ -112,3 +135,54 @@ suite "reprobuild source root from binary location":
     let flags = bootstrapSiblingPackagePathFlags(root / "reprobuild", root)
     check "--path:" & adapterRoot in flags
     check "--path:" & runquotaCore in flags
+
+  test "compiler source provenance crosses a real child and is absent from capture":
+    let root = createTempDir("repro-source-capture-", "")
+    defer: removeDir(root)
+    let name = "REPROBUILD_TEST_CAPTURE_SRC"
+    let oldMarker = getEnv(SeededSourceEnvironmentVar)
+    let hadMarker = existsEnv(SeededSourceEnvironmentVar)
+    let oldValue = getEnv(name)
+    let hadValue = existsEnv(name)
+    delEnv(name)
+    defer:
+      if hadValue: putEnv(name, oldValue)
+      else: delEnv(name)
+      if hadMarker: putEnv(SeededSourceEnvironmentVar, oldMarker)
+      else: delEnv(SeededSourceEnvironmentVar)
+
+    seedSourcePackageEnvironment([(name, root)])
+    check getEnv(name) == root
+    let child = execCmdEx(quoteShell(getAppFilename()) &
+      " --source-capture-child " & quoteShell(root))
+    check child.exitCode == 0
+    check child.output.strip() == root
+    # The child's cleanup must not disturb the compiler parent's closure.
+    check getEnv(name) == root
+
+  test "capture cleanup preserves explicit caller values and later overrides":
+    let root = createTempDir("repro-source-caller-", "")
+    defer: removeDir(root)
+    let name = "REPROBUILD_TEST_CAPTURE_SRC"
+    let oldMarker = getEnv(SeededSourceEnvironmentVar)
+    let hadMarker = existsEnv(SeededSourceEnvironmentVar)
+    let oldValue = getEnv(name)
+    let hadValue = existsEnv(name)
+    defer:
+      if hadValue: putEnv(name, oldValue)
+      else: delEnv(name)
+      if hadMarker: putEnv(SeededSourceEnvironmentVar, oldMarker)
+      else: delEnv(SeededSourceEnvironmentVar)
+
+    delEnv(SeededSourceEnvironmentVar)
+    putEnv(name, root)
+    seedSourcePackageEnvironment([(name, root)])
+    clearSeededSourcePackageEnvironment()
+    check getEnv(name) == root
+
+    delEnv(name)
+    seedSourcePackageEnvironment([(name, root)])
+    putEnv(name, "later-explicit-override")
+    clearSeededSourcePackageEnvironment()
+    check getEnv(name) == "later-explicit-override"
+    check not existsEnv(SeededSourceEnvironmentVar)

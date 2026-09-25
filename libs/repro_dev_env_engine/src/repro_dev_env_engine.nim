@@ -5,6 +5,7 @@ import repro_core
 import repro_dev_env_engine/cache_key as devEnvCacheKey
 import repro_hash
 import repro_interface_artifacts
+import repro_runquota
 import repro_tool_profiles
 
 type
@@ -42,6 +43,16 @@ type
     toolProvisioning*: ToolProvisioningMode
     renderShell*: bool
     statsEnabled*: bool
+    progressCallback*: BuildProgressCallback
+      ## Interactive-UX-And-Progress.md Principle 1 ("Live progress, never
+      ## silence"). The dev-env edge is the one engine invocation a user does
+      ## not type: the shell hook runs it on `cd`, and before this field
+      ## existed it had no way to say anything at all, so a cold activation
+      ## was tens of seconds of a shell that looked hung. The engine already
+      ## reports per-action state through this callback for `repro build`;
+      ## the dev-env path was simply never given one. ``nil`` keeps the old
+      ## silent behaviour, which is what every non-interactive caller
+      ## (tests, `repro shell --print-env=json`) wants.
 
   DevEnvEdgeResult* = object
     artifactPath*: string
@@ -199,9 +210,18 @@ proc engineConfig(config: DevEnvEdgeConfig): BuildEngineConfig =
     bypassRunQuota: false,
     fallbackToRunQuotaBypass: true,
     inlineRunQuota: true,
+    # A dev-env activation is a person (or a ``just`` recipe) waiting to run
+    # one command, and its graph is one small recipe compile. When another
+    # workspace's build holds the whole RunQuota budget that compile used to
+    # queue with no word and no end -- the 2026-09-24 ``repro exec`` hang.
+    # Ask to be served first when capacity frees, and give up with a
+    # diagnosis rather than waiting silently forever.
+    runQuotaInteractive: true,
+    runQuotaQueueTimeoutMs: devEnvRunQuotaQueueTimeoutMsDefault,
     suppressTrace: false,
     skipCacheHitEvidence: false)
   result.statsEnabled = config.statsEnabled
+  result.progressCallback = config.progressCallback
 
 proc commonMonitorEnv(config: DevEnvEdgeConfig): seq[string] =
   const inherited = [
@@ -350,8 +370,8 @@ proc computeDevEnvEdgeCacheKey*(config: DevEnvEdgeConfig): string =
   devEnvCacheKey.computeDevEnvEdgeCacheKey(config.projectRoot, config.activity,
     config.lockSliceId, config.developOverridesPath)
 
-proc devEnvIntrospectionIgnoredInputPrefixes*(projectRoot: string):
-    seq[string] =
+proc devEnvIntrospectionIgnoredInputPrefixes*(projectRoot: string;
+    protocolRoot = ""): seq[string] =
   ## Prefixes the dev-env introspection edge's monitor must NOT record as
   ## inputs. The same shape as `providerCompileIgnoredInputPrefixes`, and for
   ## the same reason: derived state a tool writes and reads back is not an
@@ -404,6 +424,21 @@ proc devEnvIntrospectionIgnoredInputPrefixes*(projectRoot: string):
   ## else `$HOME/.cache/nix`) rather than through Nim's `getCacheDir()`, which
   ## answers `~/Library/Caches` on macOS while `nix` keeps using `~/.cache`
   ## there.
+  ##   * the edge's OWN protocol directory (`<outDir>/dev-env-protocol`).
+  ##     The introspection edge talks to the provider binary by writing a
+  ##     request file and reading the response back out of this directory,
+  ##     so every one of its files is state this action produced in THIS
+  ##     run. They are rewritten on every invocation, which means their
+  ##     metadata is new every time: recording them made the edge depend on
+  ##     its own transcript and miss on every warm run, forever, on a
+  ##     project nothing had touched. Measured with the paths otherwise
+  ##     identical between two consecutive runs -- same names, same sizes,
+  ##     only the mtimes moved. This is the same rule S5 applies to an
+  ##     action's declared outputs (`selfWrittenOutputKeys`), reached from
+  ##     the ignore list because the transcript is scratch rather than a
+  ##     declared product.
+  if protocolRoot.len > 0:
+    result.add(absolutePath(protocolRoot))
   if projectRoot.len > 0:
     result.add(absolutePath(projectRoot) / ".repro" / "foreign-env")
   let xdgCache = getEnv("XDG_CACHE_HOME")
@@ -466,7 +501,8 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
     cacheable = true,
     weakFingerprint = weak,
     dependencyPolicy = automaticMonitorGatheringPolicy(
-      devEnvIntrospectionIgnoredInputPrefixes(config.projectRoot)))
+      devEnvIntrospectionIgnoredInputPrefixes(config.projectRoot,
+        protocolRoot)))
 
 proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
                        shellFragmentPath, navigatorStatsPath: string): BuildAction =
@@ -490,6 +526,49 @@ proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
     cacheable = true,
     weakFingerprint = weak,
     dependencyPolicy = automaticMonitorGatheringPolicy())
+
+proc devEnvNixProvisioningActions*(toolUses: openArray[InterfaceToolUse];
+    effectiveProvisioning: ToolProvisioningMode;
+    outDir, workDir: string): seq[BuildAction] =
+  ## One foreign acquisition per selector, regardless of dependency multiplicity.
+  var seen: seq[string]
+  for useDef in toolUses:
+    if effectiveProvisioning in {tpmUnspecified, tpmNix} and
+        useDef.nixProvisioning.len > 0:
+      let plan = nixAcquisitionPlan(useDef)
+      # Several dependency paths may request the same realization. Key the
+      # edge by its acquisition selector, not by the package name: distinct
+      # selectors of the same package must also have distinct receipt outputs.
+      let identity = hexDigest(fingerprintText([
+        "reprobuild.dev-env.nix-provision.v2", plan.nixSelector]))
+      if identity in seen:
+        continue
+      seen.add(identity)
+      let receiptDir = outDir / "tool-store" / "nix-provision"
+      let receiptFile = receiptDir / (identity & ".receipt")
+
+      let provAction = BuildAction(
+        # Named-Lock-Files §7.2. A foreign-provisioner edge is materialised by
+        # a provisioner Reprobuild does not own — the very case that decided
+        # design A over path-partitioning (§7.2's owner note) — and no solved
+        # package instance reaches it here.
+        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+        kind: bakForeignProvision,
+        id: "nix-provision." & identity,
+        argv: @["nix", plan.nixSelector],
+        outputs: @[receiptFile],
+        cwd: workDir,
+        commandStatsId: "repro dev-env nix provision edge",
+        cacheable: true,
+        weakFingerprint: fingerprintText([
+          "reprobuild.dev-env.nix-provision.v1",
+          useDef.packageSelector,
+          plan.nixSelector
+        ]),
+        dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor)
+      )
+      result.add(provAction)
+
 
 proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if config.modulePath.len == 0:
@@ -549,38 +628,12 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   result.providerBinaryPath = active.outDir / "provider" / "project-provider"
   result.providerArtifactPath = active.outDir / "provider-compile.rbsz"
 
-  # Construct bakForeignProvision actions for Nix tool uses
-  var provisioningActions: seq[BuildAction] = @[]
-  var provisioningReceipts: seq[string] = @[]
-  for useDef in interfaceArtifact.projectInterface.toolUses:
-    if effectiveProvisioning in {tpmUnspecified, tpmNix} and
-        useDef.nixProvisioning.len > 0:
-      let plan = nixAcquisitionPlan(useDef)
-      let receiptDir = active.outDir / "tool-store" / "nix-provision"
-      let receiptFile = receiptDir / (safeStoreSegment(useDef.packageSelector, "nix-package") & ".receipt")
-
-      let provAction = BuildAction(
-        # Named-Lock-Files §7.2. A foreign-provisioner edge is materialised by
-        # a provisioner Reprobuild does not own — the very case that decided
-        # design A over path-partitioning (§7.2's owner note) — and no solved
-        # package instance reaches it here.
-        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
-        kind: bakForeignProvision,
-        id: "nix-provision." & useDef.packageSelector,
-        argv: @["nix", plan.nixSelector],
-        outputs: @[receiptFile],
-        cwd: workDir,
-        commandStatsId: "repro dev-env nix provision edge",
-        cacheable: true,
-        weakFingerprint: fingerprintText([
-          "reprobuild.dev-env.nix-provision.v1",
-          useDef.packageSelector,
-          plan.nixSelector
-        ]),
-        dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor)
-      )
-      provisioningActions.add(provAction)
-      provisioningReceipts.add(receiptFile)
+  let provisioningActions = devEnvNixProvisioningActions(
+    interfaceArtifact.projectInterface.toolUses, effectiveProvisioning,
+    active.outDir, workDir)
+  var provisioningReceipts: seq[string]
+  for provision in provisioningActions:
+    provisioningReceipts.add(provision.outputs)
 
   var provider: ProviderCompileArtifact
   let providerPlan = providerCompilePlan(active.modulePath,

@@ -233,7 +233,7 @@ proc recordingEffector(ledger: EffectorLedger): CloudEffector =
   result = proc (effect: CloudEffect): int =
     inc ledger.calls
     ledger.lastArgv = effect.argv
-    ledger.lastEnvNames = effect.credentialEnvNames
+    ledger.lastEnvNames = effect.providerEnvNames
     0
 
 # ---------------------------------------------------------------------
@@ -271,7 +271,7 @@ suite "the seam: the dry run does not reach it and the armed path does":
   test "a dry run calls the effector zero times":
     let ledger = EffectorLedger()
     let outcome = performCloudLaunch(probeSpec(), clmDryRun,
-      recordingEffector(ledger))
+      recordingEffector(ledger), fixedEnvLookup([]))
     check ledger.calls == 0
     check outcome.effectsAttempted == 0
     check outcome.effectStatus == 0
@@ -286,9 +286,11 @@ suite "the seam: the dry run does not reach it and the armed path does":
     # satisfied by an effector that could never be called at all.
     let ledger = EffectorLedger()
     let spec = probeSpec()
-    let dry = performCloudLaunch(spec, clmDryRun, recordingEffector(ledger))
+    let dry = performCloudLaunch(spec, clmDryRun, recordingEffector(ledger),
+      fixedEnvLookup([]))
     check ledger.calls == 0
-    let armed = performCloudLaunch(spec, clmArmed, recordingEffector(ledger))
+    let armed = performCloudLaunch(spec, clmArmed, recordingEffector(ledger),
+      fixedEnvLookup([]))
     check ledger.calls == 1
     check armed.effectsAttempted == 1
     # What it was handed is exactly what the dry run returned, so the
@@ -303,8 +305,10 @@ suite "the seam: the dry run does not reach it and the armed path does":
     # dry run computes.
     let ledger = EffectorLedger()
     let spec = probeSpec()
-    let dry = performCloudLaunch(spec, clmDryRun, recordingEffector(ledger))
-    let armed = performCloudLaunch(spec, clmArmed, recordingEffector(ledger))
+    let dry = performCloudLaunch(spec, clmDryRun, recordingEffector(ledger),
+      fixedEnvLookup([]))
+    let armed = performCloudLaunch(spec, clmArmed, recordingEffector(ledger),
+      fixedEnvLookup([]))
     check dry.plan == armed.plan
     check dry.manifestText == armed.manifestText
     check dry.identity == armed.identity
@@ -317,28 +321,34 @@ suite "the seam: the dry run does not reach it and the armed path does":
     # is safe.
     var refused = false
     try:
-      discard performCloudLaunch(probeSpec(), clmArmed)
+      discard performCloudLaunch(probeSpec(), clmArmed, nil,
+        fixedEnvLookup([]))
     except CloudLaunchError as err:
       refused = err.condition == clcArmedLaunchHasNoEffector
     check refused
 
-  test "the effector is handed credential NAMES and never values":
+  test "the effector is handed provider variable NAMES and never values":
+    # The effector gets EVERY name, not only the secrets: a launch needs
+    # the project and the region as much as it needs the key, and the
+    # narrowing that belongs in this build is on what the plan is
+    # SEARCHED for, not on what the tool may read.
     let ledger = EffectorLedger()
-    let names = credentialEnvNamesFor(cpAwsEc2)
+    let names = providerEnvNamesFor(cpAwsEc2)
     check names.len > 0
+    check credentialEnvNamesFor(cpAwsEc2).len < names.len
     var saved: seq[(string, bool, string)] = @[]
     for name in names:
       saved.add (name, existsEnv(name), getEnv(name))
     try:
       for i, name in names:
-        putEnv(name, "reproos-sentinel-" & $i)
+        putEnv(name, "reproos-sentinel-value-" & $i)
       discard performCloudLaunch(probeSpec(), clmArmed,
-        recordingEffector(ledger))
+        recordingEffector(ledger), fixedEnvLookup([]))
       check ledger.calls == 1
       check ledger.lastEnvNames == names
       let everything = (ledger.lastArgv & ledger.lastEnvNames).join(" ")
       for i, _ in names:
-        check ("reproos-sentinel-" & $i) notin everything
+        check ("reproos-sentinel-value-" & $i) notin everything
     finally:
       for row in saved:
         if row[1]: putEnv(row[0], row[2]) else: delEnv(row[0])
@@ -346,6 +356,33 @@ suite "the seam: the dry run does not reach it and the armed path does":
     # polluted environment.
     for row in saved:
       check existsEnv(row[0]) == row[1]
+
+  test "this gate does not read the developer's own environment":
+    # Both of this build's first two credential-check faults were
+    # invisible to a gate that happened to run with the variables
+    # unset, and were a hard refusal on the machine of anyone who had
+    # them set. A gate whose result depends on that is not a gate. So
+    # every library call above states the environment it means, and
+    # this case pins the two ends of it: the plan is the same whatever
+    # is exported, and the check still fires when the STATED
+    # environment carries a secret.
+    let plain = checkedCloudLaunchPlan(probeSpec(), fixedEnvLookup([]))
+    let name = credentialEnvNamesFor(cpAwsEc2)[0]
+    let saved = getEnv(name)
+    let had = existsEnv(name)
+    try:
+      putEnv(name, probeSpec().imageReference)
+      check checkedCloudLaunchPlan(probeSpec(), fixedEnvLookup([])) ==
+        plain
+    finally:
+      if had: putEnv(name, saved) else: delEnv(name)
+    var refused = false
+    try:
+      discard checkedCloudLaunchPlan(probeSpec(),
+        fixedEnvLookup([(name, probeSpec().imageReference)]))
+    except CloudLaunchError as err:
+      refused = err.condition == clcLaunchPlanCarriesCredentialMaterial
+    check refused
 
 suite "the process: nothing was started":
 

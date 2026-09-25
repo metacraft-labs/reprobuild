@@ -36,9 +36,9 @@
 ##
 ##   1. **Fetch** — the shared `fetch_action` emitter.
 ##   2. **Vendor** — `emitNpmVendorAction`: fetch the build closure from the
-##      committed manifest, verify each archive's SHA-256, and rewrite the
-##      lockfile into an offline `file:` mirror so `npm ci --offline` needs
-##      no network. See `repro_project_dsl/npm_vendor`.
+##      committed manifest, verify each archive's SHA-256, and load it into
+##      a private npm cache the build installs from offline, with no
+##      network. See `repro_project_dsl/npm_vendor`.
 ##   3. **Sentinel** — the synthesis stamp carrying the binary-cache identity.
 
 import std/[options, os, strutils]
@@ -126,7 +126,7 @@ proc emitSynthesisSentinelAction(projectRoot, dslPackageName: string;
                                    BuildActionDef =
   ## The synthesis stamp every from-source sibling emits. Depends on the
   ## VENDOR step: the fetched source alone is not a buildable tree until the
-  ## offline mirror is on disk, so a sentinel settling before it would
+  ## private npm cache is populated, so a sentinel settling before it would
   ## report a synthesis that cannot build. (Replicated per convention, as
   ## every from-source sibling does — it is not shared.)
   createDir(extendedPath(parentDir(npmSentinelStampPath(projectRoot))))

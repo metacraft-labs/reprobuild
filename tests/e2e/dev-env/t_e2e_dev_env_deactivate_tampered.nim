@@ -86,6 +86,33 @@ suite "e2e_dev_env_deactivate_tampered":
     check computeActivationScriptHash(script2) !=
       manifest.activationScriptHash
 
+  test "captured_tool_prefix_round_trips_and_remains_sealed":
+    var plan: ExportPlan = @[
+      ExportOp(kind: opPrependPath, pathName: "PATH",
+        segment: "/tool store/bin", separator: ":"),
+      ExportOp(kind: opSet, name: "TOOL_ROOT", value: "/tool store"),
+      ExportOp(kind: opSet, name: "FIXTURE_MODE", value: "dev")]
+    let script = formatExportPlan(plan, skBash)
+    var manifest = buildRollbackManifest(plan, initPreActivationEnv(),
+      "captured-prefix", script, skBash)
+    manifest.hasToolOpCount = true
+    manifest.toolOpCount = 2
+    let decoded = fromJson(parseJson($toJson(manifest)))
+    var restored = capturedToolExportPlan(decoded)
+    restored.add(plan[2])
+    check computeActivationScriptHash(formatExportPlan(restored, skBash)) ==
+      decoded.activationScriptHash
+    var tampered = decoded
+    tampered.vars[0].segment = "/changed/bin"
+    var changed = capturedToolExportPlan(tampered)
+    changed.add(plan[2])
+    check computeActivationScriptHash(formatExportPlan(changed, skBash)) !=
+      decoded.activationScriptHash
+    let malformed = toJson(manifest)
+    malformed["tool_op_count"] = newJInt(4)
+    expect RollbackManifestError:
+      discard fromJson(malformed)
+
   test "noop_script_parses_under_each_shell_formatter":
     # The fallback no-op script returned on tamper MUST be a parse-
     # safe script for every shell — the hook will still ``eval`` it.
@@ -99,6 +126,56 @@ suite "e2e_dev_env_deactivate_tampered":
       check not s.contains("hide-env")
 
   when isIoMonitorSupported:
+    test "e2e_deactivation_needs_no_tool_interface_or_provisioning":
+      # Real filesystem and CLI boundary; removing the interface after export
+      # proves rollback does not resolve tools again. No resolver is mocked.
+      let c = prepareCase("repro-deact-captured-tools")
+      defer: removeDir(c.tempRoot)
+      let act = runActivate(c)
+      require act.exitCode == 0
+      let manifestPath = extractManifestPath(act.stdout)
+      require manifestPath.len > 0
+      let manifest = readRollbackManifest(manifestPath)
+      require manifest.hasToolOpCount
+      let interfacePath = parentDir(parentDir(manifestPath)) / "project-interface.rbsz"
+      require fileExists(interfacePath)
+      removeFile(interfacePath)
+      let deact = runDeactivate(c, manifestPath)
+      check deact.exitCode == 0
+      check deact.stderr.len == 0
+      check deact.stdout.contains("unset __REPRO_ACTIVE_MANIFEST")
+
+    test "e2e_deactivation_survives_cache_refresh_and_other_exports":
+      # No mocks: a changed provider input refreshes the real cached artifact.
+      let c = prepareCase("repro-deact-private-artifact")
+      defer: removeDir(c.tempRoot)
+      let first = runActivate(c)
+      require first.exitCode == 0
+      let firstManifest = extractManifestPath(first.stdout)
+      require firstManifest.len > 0
+      let originalManifest = readFile(firstManifest)
+      let firstArtifact = firstManifest[0 ..< firstManifest.len - ".rollback.json".len]
+      let originalArtifact = readFile(firstArtifact)
+      writeFile(c.projectRoot / "dev-env-value.txt", "beta\n")
+      let nested = runShell(shellCommand(@[c.reproBin, "exec", c.projectRoot,
+        "--", "sh", "-c", "test \"$AUX_VALUE\" = beta"],
+        c.envFor().envEntries), c.repoRoot)
+      require nested.code == 0
+      let second = runActivate(c)
+      require second.exitCode == 0
+      let secondManifest = extractManifestPath(second.stdout)
+      require secondManifest.len > 0
+      check firstManifest != secondManifest
+      check readFile(firstManifest) == originalManifest
+      # Keep a failing assertion from dumping raw RBDE bytes into text/JSON reports.
+      let artifactPreserved = readFile(firstArtifact) == originalArtifact
+      check artifactPreserved
+      for path in [firstManifest, secondManifest]:
+        let deact = runDeactivate(c, path)
+        check deact.exitCode == 0
+        check deact.stderr.len == 0
+        check deact.stdout.contains("unset __REPRO_ACTIVE_MANIFEST")
+
     test "e2e_tampered_manifest_hash_exits_3":
       let c = prepareCase("repro-m75-deact-tampered-manifest")
       defer: removeDir(c.tempRoot)

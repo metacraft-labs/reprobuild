@@ -163,10 +163,11 @@ suite "the engine resolves reprobuild-nix-daemon from both layouts":
   test "the candidate ORDER is the contract":
     let cands = paths(nixDaemonCandidates(
       cwd = "/w/proj", exePath = "/opt/rb/bin/repro", envSourceRoot = "/src"))
-    doAssert cands[0] == "/w/proj" / "build" / "reprobuild-nix-daemon"
-    doAssert cands[1] == "/w/proj" / "tools" / "reprobuild-nix-daemon" /
+    doAssert cands[0] == "/w/proj" / "build" / "bin" / "reprobuild-nix-daemon"
+    doAssert cands[1] == "/w/proj" / "build" / "reprobuild-nix-daemon"
+    doAssert cands[2] == "/w/proj" / "tools" / "reprobuild-nix-daemon" /
       "reprobuild-nix-daemon"
-    doAssert cands[2] == "/w" / "reprobuild-nix-daemon" / "build" /
+    doAssert cands[3] == "/w" / "reprobuild-nix-daemon" / "build" /
       "reprobuild-nix-daemon"
     # `/src` (the explicit hint) before the cwd ancestors before `/opt/rb`
     # (the install prefix) before `/opt` (the repository root a dev tree
@@ -325,3 +326,16 @@ suite "the engine resolves reprobuild-nix-daemon from both layouts":
       doAssert unresolvableScriptInterpreter(good) == ""
       doAssert resolveNixDaemonExecutable(cwd = repo, exePath = exe,
         envSourceRoot = "", envBin = good) == good
+
+  test "staged helper precedes the source helper and diagnoses missing env interpreter":
+    let repo = scratch("staged-interpreter")
+    let source = repo / "tools" / "reprobuild-nix-daemon" / "reprobuild-nix-daemon"
+    placeDaemon(source)
+    writeFile(source, "#!/usr/bin/env repro-test-absent-python-interpreter\n")
+    when defined(posix):
+      check unresolvableScriptInterpreter(source) ==
+        "repro-test-absent-python-interpreter (not found on PATH)"
+    let staged = repo / "build" / "bin" / "reprobuild-nix-daemon"
+    placeDaemon(staged)
+    for cwd in [repo, repo / "tests" / "fixture"]:
+      check resolveNixDaemonExecutable(cwd, reproBinaryPath(repo), "", "") == staged

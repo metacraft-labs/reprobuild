@@ -3381,6 +3381,64 @@ proc workspaceProducerModule(selector, consumerSourceFile: string): string =
   ## The producer module path alone. See `workspaceProducerLocation`.
   workspaceProducerLocation(selector, consumerSourceFile).modulePath
 
+const ReprobuildPackagesRootEnv* = "REPROBUILD_PACKAGES_ROOT"
+  ## Where the `reprobuild-packages` catalog checkout lives, when it is not a
+  ## workspace sibling. The daemon already forwards it
+  ## (`DaemonExplicitForwardedEnvVars`).
+
+proc reprobuildPackagesInterfaceModule*(selector, consumerSourceFile: string):
+    string =
+  ## The module that defines package ``selector`` in the `reprobuild-packages`
+  ## catalog -- ``<root>/packages/interfaces/<selector>/repro.nim`` -- WITHOUT
+  ## its ``.nim`` extension, or "" when there is none.
+  ##
+  ## Package definitions are moving out of the engine's bundled stdlib into
+  ## `reprobuild-packages` (reprobuild-specs/Provisioning-Contributions.md,
+  ## "Repository Composition"). This is what lets a plain ``uses: "<name>"``
+  ## reach one that has moved: a name the stdlib does not bundle is looked up
+  ## here, after the stdlib and before nothing.
+  ##
+  ## The checkout is found, in order:
+  ##
+  ## 1. ``$REPROBUILD_PACKAGES_ROOT``;
+  ## 2. a ``reprobuild-packages`` directory beside the consumer's project or
+  ##    any ancestor of it -- the workspace-sibling convention, walked the
+  ##    same way as `workspaceProducerLocation`;
+  ## 3. a ``reprobuild-packages`` directory beside the reprobuild checkout
+  ##    this module was compiled from.
+  ##
+  ## A found checkout that lacks the interface is not an error here; the
+  ## selector simply stays unresolved, as it would have without this lookup.
+  if selector.len == 0:
+    return
+  for ch in selector:
+    if ch == '/' or ch == '\\' or ch == '.' or ch == ':':
+      return
+  proc probe(root: string): string =
+    if root.len == 0:
+      return ""
+    let candidate = root / "packages" / "interfaces" / selector / "repro.nim"
+    if fileExists(candidate):
+      return candidate.changeFileExt("")
+    ""
+  let fromEnv = getEnv(ReprobuildPackagesRootEnv)
+  if fromEnv.len > 0:
+    return probe(fromEnv)
+  if consumerSourceFile.len > 0:
+    var dir = consumerSourceFile.parentDir
+    for _ in 0 ..< 16:
+      let parent = dir.parentDir
+      if parent.len == 0 or parent == dir:
+        break
+      let found = probe(parent / "reprobuild-packages")
+      if found.len > 0:
+        return found
+      dir = parent
+  # <reprobuild>/libs/repro_project_dsl/src/repro_project_dsl/macros_a.nim
+  let reprobuildRoot =
+    currentSourcePath().parentDir.parentDir.parentDir.parentDir.parentDir
+  probe(reprobuildRoot.parentDir / "reprobuild-packages")
+
 type
   ProducerResourceModuleDecl* = object
     ## TI2 — a producer's ``resourceModule "<path>": path "<dir>" …`` surface
@@ -3876,7 +3934,8 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       "sh",
       "shellcheck",
       "solc",
-      "sqlite3",
+      # `sqlite3` moved to reprobuild-packages; see
+      # `reprobuildPackagesInterfaceModule`.
       "stylus",
       "swc",
       "tmux",
@@ -3992,6 +4051,21 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       continue
     let producerModule = workspaceProducerModule(selector, consumerSourceFile)
     if producerModule.len == 0:
+      # Not a workspace project: the package may be defined in the
+      # `reprobuild-packages` catalog instead. It goes through the same
+      # per-selector shim below, because every catalog interface module is
+      # also named ``repro.nim``.
+      let catalogModule =
+        reprobuildPackagesInterfaceModule(selector, consumerSourceFile)
+      if catalogModule.len > 0:
+        let catalogAlias = selectorModuleName(selector) & "_packages_module"
+        var catalogSeen = false
+        for (existingAlias, _, _) in producerModules:
+          if existingAlias == catalogAlias:
+            catalogSeen = true
+            break
+        if not catalogSeen:
+          producerModules.add((catalogAlias, selector, catalogModule & ".nim"))
       continue
     if workspaceProducerDeclaresResourceType(selector, consumerSourceFile):
       # RP5a: resource producer — DO NOT import its module (driver closure).

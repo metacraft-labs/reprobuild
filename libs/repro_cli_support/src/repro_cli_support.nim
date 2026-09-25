@@ -63,6 +63,10 @@ import repro_runquota
 # ``runquotad``'s query interface. This module is the ONLY read path;
 # nothing here opens the store's database file.
 import repro_runquota/stats_query
+import runquota_daemon/host_config
+  # The host's RunQuota budget file. The daemon reads it at start; the
+  # auto-spawn below reads it only to know which flags NOT to pass, since a
+  # flag overrides the file (reprobuild-specs/RunQuota-Host-Configuration.md).
 import repro_hash
 # M4: unified Workspace-VCS evidence record + derived JSON view.
 # ``writeBuildReport`` embeds the JSON view under the new
@@ -5434,6 +5438,17 @@ proc writeLoweredGraphCache(path, modulePath, projectRoot, selectedActionId,
     pools: lowered.pools)
 
 proc evidenceJson(evidence: PathSetEvidence): JsonNode =
+  # DA-1f — `evidenceProvenance` is rendered BESIDE the path sets, not
+  # instead of anything, because this is the reader the milestone is about.
+  # The channels themselves cannot answer "did anything look at this action":
+  # a path the engine reconstructed from argv, a path replayed out of a cache
+  # record on a HIT, a path a provisioner daemon reported and a path a monitor
+  # really observed are the same string in the same array. A `repro why`
+  # reader who cannot tell a replay from an observation reads a recollection
+  # as a measurement. See `EvidenceContributor`.
+  var provenance: seq[string] = @[]
+  for contributor in evidence.evidenceProvenance:
+    provenance.add $contributor
   %*{
     "declaredInputs": jsonStringSeq(evidence.declaredInputs),
     "declaredOutputs": jsonStringSeq(evidence.declaredOutputs),
@@ -5441,6 +5456,9 @@ proc evidenceJson(evidence: PathSetEvidence): JsonNode =
     "monitorReads": jsonStringSeq(evidence.monitorReads),
     "monitorWrites": jsonStringSeq(evidence.monitorWrites),
     "monitorProbes": jsonStringSeq(evidence.monitorProbes),
+    "provisionerReportedInputs":
+      jsonStringSeq(evidence.provisionerReportedInputs),
+    "evidenceProvenance": jsonStringSeq(provenance),
     "diagnostics": jsonStringSeq(evidence.diagnostics)
   }
 
@@ -5504,6 +5522,20 @@ proc actionResultJson(item: ActionResult): JsonNode =
   # Windows: include exitCode/stdout/stderr in the build report so failed
   # actions can be diagnosed without re-running them. Without this, the JSON
   # report only carries status/cacheDecision/etc. and failures look opaque.
+  #
+  # ``actions[].evidence`` is one of exactly two readers of the cache-hit
+  # evidence's path STRINGS, and the run that writes this document is
+  # supposed to have asked the engine for them (see
+  # ``reportWillBeWritten`` in ``executeBuildTarget``). An elided result
+  # reaching here would emit ``"monitorReads": []`` for an action that read
+  # a thousand files — a document that is wrong rather than absent, and that
+  # ``repro watch``'s report-reading arm would then believe. Refuse instead.
+  if item.evidencePathsElided():
+    raise newException(ValueError,
+      "internal: build action " & item.id & " carries elided cache-hit " &
+      "evidence, but a build report that serialises evidence PATHS is " &
+      "being written. The report-persistence decision and the engine's " &
+      "`elideCacheHitEvidencePaths` have gone out of step.")
   %*{
     "id": item.id,
     "status": $item.status,
@@ -5820,12 +5852,12 @@ proc renderBuildCacheEvidence*(buildResult: BuildRunResult): string =
   result = "cache evidence:\n"
   for item in buildResult.results:
     result.add("  " & item.id &
-      " declaredInputs=" & $item.evidence.declaredInputs.len &
-      " declaredOutputs=" & $item.evidence.declaredOutputs.len &
-      " depfileInputs=" & $item.evidence.depfileInputs.len &
-      " monitorReads=" & $item.evidence.monitorReads.len &
-      " monitorWrites=" & $item.evidence.monitorWrites.len &
-      " monitorProbes=" & $item.evidence.monitorProbes.len & '\n')
+      " declaredInputs=" & $item.declaredInputCount() &
+      " declaredOutputs=" & $item.declaredOutputCount() &
+      " depfileInputs=" & $item.depfileInputCount() &
+      " monitorReads=" & $item.monitorReadCount() &
+      " monitorWrites=" & $item.monitorWriteCount() &
+      " monitorProbes=" & $item.monitorProbeCount() & '\n')
 
 proc hasFailedActions(buildResult: BuildRunResult): bool =
   for item in buildResult.results:
@@ -7831,6 +7863,39 @@ const
     ## instruments the invalidation and cache-lookup hot paths, which is
     ## exactly where a build's own overhead lives.
 
+proc cmakeRegenerationHotHitEligible*(measure: MeasureSet;
+                                      forceRebuild: bool): bool =
+  ## May the CMake regeneration edge be SERVED from its hot metadata record?
+  ##
+  ## This is a serving decision, so it reads exactly one thing: whether the
+  ## caller asked for a rebuild. ``measure`` is accepted and deliberately
+  ## never read, and the parameter is here so that fact is a testable
+  ## property rather than an absence — see ``tests/unit/t_measurement_axes``.
+  ##
+  ## It did read it. The gate used to be
+  ## ``mcCacheEvidence notin measureSet and not forceRebuild``, which put a
+  ## COLLECTION category (``MeasureCategory``'s doc comment: "each one's data
+  ## has NO consumer in the correctness path") in charge of whether a serving
+  ## path existed at all. Because ``mcCacheEvidence`` is in
+  ## ``DefaultMeasureSet``, the arm was unreachable on every default
+  ## invocation and ran only for someone who passed ``--measure=none,…`` —
+  ## i.e. the arm was enforced-and-measured precisely where nobody runs it.
+  ## Its predecessor (``reportMode == brmNone and logMode == blmQuiet``) had
+  ## the same shape and the opposite default, so the rewrite silently turned
+  ## the common case off.
+  ##
+  ## The serving preconditions are the ones inside the arm — outputs present,
+  ## a hot metadata record for this weak fingerprint and policy, the record
+  ## servable under ``unservableCacheRecordReason``, and its inputs
+  ## metadata-unchanged. All four are already tested there, and the arm's
+  ## ``ActionResult`` is byte-identical to the one the state-freshness arm
+  ## below it synthesises (same id, ``asCacheHit``, ``launched = false``,
+  ## ``cdHit``, same dependency-policy kind, no evidence) — which is itself
+  ## ungated. So no report, log line or stats observation can tell the two
+  ## apart, and there was nothing for a measurement category to protect.
+  discard measure
+  not forceRebuild
+
 proc measureCategoryNames*(): seq[string] =
   result = @[]
   for category in MeasureCategory:
@@ -8682,13 +8747,13 @@ proc recordStatsForBuildRun(runResult: BuildRunResult) =
     enqueueStatsObservation(scgDeps, "dependency-evidence", %*{
       "actionId": item.id,
       "policy": $item.dependencyPolicyKind,
-      "declaredInputs": item.evidence.declaredInputs.len,
-      "declaredOutputs": item.evidence.declaredOutputs.len,
-      "depfileInputs": item.evidence.depfileInputs.len,
-      "monitorReads": item.evidence.monitorReads.len,
-      "monitorWrites": item.evidence.monitorWrites.len,
-      "monitorProbes": item.evidence.monitorProbes.len,
-      "diagnostics": item.evidence.diagnostics.len
+      "declaredInputs": item.declaredInputCount(),
+      "declaredOutputs": item.declaredOutputCount(),
+      "depfileInputs": item.depfileInputCount(),
+      "monitorReads": item.monitorReadCount(),
+      "monitorWrites": item.monitorWriteCount(),
+      "monitorProbes": item.monitorProbeCount(),
+      "diagnostics": item.evidenceDiagnosticCount()
     })
 
 proc cliPathExists(path: string): bool =
@@ -9305,6 +9370,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
 
                         monitorHosting = mhmNever;
                         evidenceScope = esFull;
+                        wantsInputEvidencePaths = true;
                         benchmarkPath = "";
                         eventSink: BuildCommandEventSink = nil;
                         cancelCheck: BuildCancelCallback = nil;
@@ -9315,6 +9381,23 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         peerCacheInstaller: PeerCacheActionBundleInstaller =
                           nil):
     BuildCommandOutcome =
+  ## ``wantsInputEvidencePaths`` — does the CALLER intend to read
+  ## ``BuildCommandOutcome.inputEvidencePaths``? Only ``repro watch`` does;
+  ## it arms its filesystem watcher over that set and is blind without it.
+  ## The other half of the demand — ``--write-report``'s
+  ## ``actions[].evidence`` — is NOT a parameter, it is derived below from
+  ## ``reportPersistence``, so no call site can get it wrong.
+  ##
+  ## IT DEFAULTS TO ``true``, WHICH IS THE WHOLE POINT OF THE SPELLING. The
+  ## consequence of wrongly saying "no" is a watcher armed on the project
+  ## file alone — silent, and indistinguishable from a working watch loop
+  ## until an edit produces no rebuild (see
+  ## ``BuildCommandOutcome.inputEvidencePaths``). The consequence of wrongly
+  ## saying "yes" is some milliseconds. So the safe answer is the default
+  ## every call site gets for free, and ``repro build`` — the one caller
+  ## that provably reads nothing but the COUNTS — is the only one that has
+  ## to say otherwise.
+  ##
   ## ``extraNameSelectors`` carries the Named-Targets M2 name-shaped
   ## positional arguments AFTER the first positional has been folded
   ## into ``target``. They join the closure union inside
@@ -9339,6 +9422,19 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   let configureStatsDir = getEnv("REPRO_STATS_DIR")
   let statsEnabled = mcTiming in measureSet or configureStatsDir.len > 0 or
     benchmarkPath.len > 0 or statsGroupEnabled(scgTiming)
+  # The full build report is the second — and last — reader of the cache-hit
+  # evidence's path STRINGS (``actions[].evidence``). It is derived here from
+  # the same predicate the report writer itself uses further down rather than
+  # passed in, so the two cannot disagree: a run that writes the document
+  # always has the strings the document is made of.
+  #
+  # The FAILURE report is deliberately not in this union. It enumerates only
+  # failed and blocked actions and carries no ``evidence`` member at all (see
+  # ``writeBuildFailureReport``), so it reads none of these strings.
+  let reportWillBeWritten =
+    reportPersistence.requested and not reportPersistence.suppressed
+  let wantEvidencePaths = wantsInputEvidencePaths or reportWillBeWritten
+  let elideCacheHitEvidencePaths = not wantEvidencePaths
   var buildStats: BuildStats
   discard consumeInterfaceArtifactWarmStats()
   let buildTotalStart = statStart(statsEnabled)
@@ -9615,7 +9711,32 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         selectedActionId)
 
   proc collectInputEvidence(buildResult: BuildRunResult) =
+    if not wantEvidencePaths:
+      # Nobody will read ``BuildCommandOutcome.inputEvidencePaths`` on this
+      # invocation — that is the same statement that told the engine not to
+      # build the strings in the first place — so there is nothing to
+      # harvest. The two are ONE decision, made once above and read here and
+      # by the engine config, which is what keeps the empty seq below from
+      # ever being an accident.
+      return
     for item in buildResult.results:
+      # An ELIDED result's path seqs are empty because nobody asked for them,
+      # not because the action observed nothing — and the difference is
+      # invisible downstream: `repro watch` would arm its watcher on the
+      # remaining project file, report `watching paths=2`, and block forever
+      # on an edit that produces no event. That is the regression
+      # `BuildCommandOutcome.inputEvidencePaths` already records once. So
+      # reaching here with an elided result is a WIRING defect
+      # (`wantsInputEvidencePaths` said no and somebody read the paths
+      # anyway) and it says so, loudly, instead of silently returning a
+      # short list.
+      if item.evidencePathsElided():
+        raise newException(ValueError,
+          "internal: build action " & item.id & " carries elided cache-hit " &
+          "evidence, but this run is collecting input evidence PATHS. " &
+          "`executeBuildTarget(wantsInputEvidencePaths = …)` and the " &
+          "consumer of `BuildCommandOutcome.inputEvidencePaths` have gone " &
+          "out of step.")
       for group in [item.evidence.declaredInputs, item.evidence.depfileInputs,
           item.evidence.monitorReads, item.evidence.monitorProbes]:
         for path in group:
@@ -9678,6 +9799,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       publishCachedResults: publishCacheHits,
       suppressTrace: mcTrace notin measureSet,
       skipCacheHitEvidence: mcCacheEvidence notin measureSet,
+      # Cache-hit evidence PATHS: built only when a consumer of this run
+      # will read the strings (`repro watch`, `--write-report`). The counts
+      # the log line and the stats observation take are unaffected — see
+      # `EvidencePathCounts`. Wired into EVERY config whose results reach
+      # `collectInputEvidence` or `writeBuildReport`, for the reason the
+      # `monitorHosting` note above gives: these are alternative entry
+      # points into the SAME build, and a flag wired to only one of them
+      # takes effect or not depending on which path the graph happened to
+      # take.
+      elideCacheHitEvidencePaths: elideCacheHitEvidencePaths,
       cancelCallback: cancelCheck,
       peerCacheActionFetcher: peerCacheFetcher,
       peerCacheActionPublisher: peerCachePublisher,
@@ -9803,7 +9934,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         " socket=" & (if item.runQuotaSocket.len >
             0: item.runQuotaSocket else: "default") &
         " lease=" & $item.leaseId &
-        " evidence=depfile:" & $item.evidence.depfileInputs.len)
+        " evidence=depfile:" & $item.depfileInputCount())
     finishStat(buildStats, statsEnabled, "repro action log render",
       actionLogStart)
     buildResult.stats = buildStats
@@ -9835,7 +9966,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       cmakeRegenerationBuildAction(cmakeMeta, publicCliPath)
     let cmakeCacheRoot = outDir / "cmake-regeneration-cache"
     var cmakeFastHit = false
-    if mcCacheEvidence notin measureSet and not forceRebuild:
+    if cmakeRegenerationHotHitEligible(measureSet, forceRebuild):
       # The CMake regeneration action's cache lives under the shared
       # user-level action cache root, matching the runBuild() path below
       # (Provider-Compile-Tiering.md §"Cache Scope" Phase 1).
@@ -9928,6 +10059,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         buildEpoch: currentBuildEpoch(),
         suppressTrace: mcTrace notin measureSet,
         skipCacheHitEvidence: mcCacheEvidence notin measureSet,
+        # Cache-hit evidence PATHS: built only when a consumer of this run
+        # will read the strings (`repro watch`, `--write-report`). The counts
+        # the log line and the stats observation take are unaffected — see
+        # `EvidencePathCounts`. Wired into EVERY config whose results reach
+        # `collectInputEvidence` or `writeBuildReport`, for the reason the
+        # `monitorHosting` note above gives: these are alternative entry
+        # points into the SAME build, and a flag wired to only one of them
+        # takes effect or not depending on which path the graph happened to
+        # take.
+        elideCacheHitEvidencePaths: elideCacheHitEvidencePaths,
         cancelCallback: cancelCheck)
       cmakeRegenerationConfig.statsEnabled = statsEnabled
       cmakeRegenerationResult = runBuild(graph([cmakeRegenerationAction]),
@@ -10897,6 +11038,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         buildEpoch: currentBuildEpoch(),
         suppressTrace: mcTrace notin measureSet,
         skipCacheHitEvidence: mcCacheEvidence notin measureSet,
+        # Cache-hit evidence PATHS: built only when a consumer of this run
+        # will read the strings (`repro watch`, `--write-report`). The counts
+        # the log line and the stats observation take are unaffected — see
+        # `EvidencePathCounts`. Wired into EVERY config whose results reach
+        # `collectInputEvidence` or `writeBuildReport`, for the reason the
+        # `monitorHosting` note above gives: these are alternative entry
+        # points into the SAME build, and a flag wired to only one of them
+        # takes effect or not depending on which path the graph happened to
+        # take.
+        elideCacheHitEvidencePaths: elideCacheHitEvidencePaths,
         cancelCallback: cancelCheck)
       providerCompileConfig.statsEnabled = statsEnabled
       # Distinguish "running" from "checking" so a silent hang inside
@@ -11210,6 +11361,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       publishCachedResults: publishCacheHits,
       suppressTrace: mcTrace notin measureSet,
       skipCacheHitEvidence: mcCacheEvidence notin measureSet,
+      # Cache-hit evidence PATHS: built only when a consumer of this run
+      # will read the strings (`repro watch`, `--write-report`). The counts
+      # the log line and the stats observation take are unaffected — see
+      # `EvidencePathCounts`. Wired into EVERY config whose results reach
+      # `collectInputEvidence` or `writeBuildReport`, for the reason the
+      # `monitorHosting` note above gives: these are alternative entry
+      # points into the SAME build, and a flag wired to only one of them
+      # takes effect or not depending on which path the graph happened to
+      # take.
+      elideCacheHitEvidencePaths: elideCacheHitEvidencePaths,
       cancelCallback: cancelCheck)
     # S7 — ``--restore-cached-outputs`` is what makes the CAS-restore
     # configuration reachable from ``repro build`` at all. Until it existed,
@@ -11356,7 +11517,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         " socket=" & (if item.runQuotaSocket.len >
             0: item.runQuotaSocket else: "default") &
         " lease=" & $item.leaseId &
-        " evidence=depfile:" & $item.evidence.depfileInputs.len)
+        " evidence=depfile:" & $item.depfileInputCount())
     if reportPersistence.requested and not reportPersistence.suppressed:
       logSummary("buildReport: " & reportPath)
     finishStat(buildStats, statsEnabled, "repro action log render",
@@ -11758,6 +11919,9 @@ const DevelopOverridesEnvVar = "REPRO_DEVELOP_OVERRIDES_FILE"
   ## comment holding them together.
 
 proc runDevEnvIntrospectionHelper(args: openArray[string]): int =
+  # Provider compilation has finished. Its private source roots must not be
+  # mistaken for caller variables when foreign capture subtracts its baseline.
+  clearSeededSourcePackageEnvironment()
   let providerBinary = valueAfterFlag(args, "--provider-binary")
   let providerArtifactId = valueAfterFlag(args, "--provider-artifact-id")
   let projectRoot = valueAfterFlag(args, "--project-root")
@@ -12564,11 +12728,53 @@ proc runQuotaBypassedByEnv(): bool
 
 proc computePublicDevEnv(selection: DevEnvCliSelection;
                          publicCliPath: string;
-                         renderShell = false): DevEnvEdgeResult =
+                         renderShell = false;
+                         announce = false): DevEnvEdgeResult =
+  ## ``announce`` implements Interactive-UX-And-Progress.md Principle 1 for
+  ## this edge: say what is about to happen, show live per-action progress
+  ## while it happens, and end with what it did and how long it took.
+  ##
+  ## It is a parameter rather than the default because the two audiences are
+  ## genuinely different. Every INTERACTIVE surface — the shell hook's
+  ## ``dev-env export``, ``shell``, ``exec``, ``run``, ``tasks`` — has a human
+  ## waiting at a prompt, and for them silence is the defect this flag exists
+  ## to remove: a cold activation compiles the project provider and re-derives
+  ## the environment, which is tens of seconds. The remaining callers are
+  ## machine-facing (a test harness, a JSON surface a tool parses), and for
+  ## them the same lines are noise on a stream somebody is diffing. Note what
+  ## this is NOT gated on: a TTY. An agent reading a log is as entitled to
+  ## know what the tool is doing as a human is.
+  ##
+  ## Everything it writes goes to stderr. The hook `eval`s this command's
+  ## stdout, so one byte of progress there would be executed as shell code.
+  var progress = newBuildProgressRenderer(
+    if announce: configuredBuildProgressMode() else: bpmQuiet,
+    configuredBuildProgressBarStyle())
+  let activationStart = epochTime()
+  if progress.enabled:
+    stderr.writeLine("repro dev-env: preparing the environment for " &
+      selection.projectRoot)
+    stderr.flushFile()
+  var progressCallback: BuildProgressCallback = nil
+  if progress.enabled:
+    progressCallback = proc(event: BuildProgressEvent) =
+      progress.renderProgress(event)
   var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
+  let toolProvisioning = resolveToolProvisioningWithEnv(tpmUnspecified)
+  # MR5, applied to the dev-env path. `computeDevEnvEdge` may compile the
+  # recipe provider, and that compile is the SAME provider compile edge the
+  # build uses (Development-Environments-And-Control-API.md). `build`,
+  # `develop` and graph inspection all publish the tool-store nim and gcc
+  # before extracting; this path did not, so `repro exec` and `repro shell`
+  # took both from PATH -- which on a Windows host without env.ps1 holds
+  # neither, and failed with `CreateProcessW failed (2)` for `nim c` while
+  # `repro build` of the same recipe succeeded. Which modes it provisions
+  # under is `bootstrapToolchainProvisioned` (every mode on Windows).
+  ensureBootstrapToolchainEnv(toolProvisioning, resolveStoreRoot() / "tool-store")
   let monitor = publicDevEnvMonitor(publicCliPath)
-  computeDevEnvEdge(DevEnvEdgeConfig(
+  let config = DevEnvEdgeConfig(
+    progressCallback: progressCallback,
     modulePath: selection.modulePath,
     projectRoot: selection.projectRoot,
     outDir: selection.outDir,
@@ -12580,9 +12786,35 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
     activity: selection.activity,
     lockSliceId: selection.lockSliceId,
     developOverridesPath: selection.developOverridesPath,
-    toolProvisioning: resolveToolProvisioningWithEnv(tpmUnspecified),
+    toolProvisioning: toolProvisioning,
     renderShell: renderShell,
-    statsEnabled: selection.statsPath.len > 0))
+    statsEnabled: selection.statsPath.len > 0)
+  try:
+    result = computeDevEnvEdge(config)
+  except CatchableError:
+    # The caller turns this into its own diagnostic; close the progress line
+    # first so that diagnostic starts on a line of its own instead of being
+    # appended to a half-drawn one.
+    if progress.enabled:
+      progress.finishProgress()
+    raise
+  if progress.enabled:
+    progress.finishProgress()
+    # What it did, not merely that it finished. `provider compiled` versus
+    # `provider reused` is the twenty-second difference on a macOS host whose
+    # provider compile cannot be cached, and this line is where a reader first
+    # learns that the difference exists.
+    let providerWord =
+      if result.stats.providerBuildCacheHit or
+          result.stats.providerBuildSkippedFresh: "provider reused"
+      else: "provider compiled"
+    let envWord =
+      if result.stats.providerIntrospectionCacheHit: "environment reused"
+      else: "environment re-derived"
+    stderr.writeLine("repro dev-env: ready in " &
+      formatDuration(epochTime() - activationStart) & " (" & providerWord &
+      ", " & envWord & ")")
+    stderr.flushFile()
 
 proc devEnvPerformanceEvidenceJson(edge: DevEnvEdgeResult): JsonNode =
   let devStats = edge.devEnvResult.stats
@@ -13074,12 +13306,21 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
     # as a working environment that quietly provisions none of what the
     # recipe declares, which is the failure this whole surface exists to
     # remove — so it is reported rather than assumed harmless.
+    #
+    # The remedies named are only the ones every surface that reaches this
+    # line accepts. `repro shell`, `repro exec` and `repro run` take no
+    # `--tool-provisioning` flag: CLI/exec.md and CLI/shell.md
+    # list none among their decision inputs, and Shell-Direnv-Hook.md
+    # ("Fast-Path Cache-Key Check") keys the activation on the project file
+    # and "a small subset of env vars the edge consumes" — so the mode reaches
+    # an activation through the recipe or REPRO_TOOL_PROVISIONING, never a
+    # flag. Naming the flag here sent readers to a command that rejects it.
     stderr.writeLine("repro dev-env: warning: " &
       $interfaceArtifact.projectInterface.toolUses.len &
       " package(s) are declared in uses: but no tool provisioning mode is " &
       "resolved, so none of them will be on PATH. Set " &
-      "`defaultToolProvisioning` in the recipe, or pass " &
-      "--tool-provisioning=, or set REPRO_TOOL_PROVISIONING.")
+      "`defaultToolProvisioning` in the recipe, or set " &
+      "REPRO_TOOL_PROVISIONING (for example REPRO_TOOL_PROVISIONING=nix).")
     return
 
   let storeRoot = resolveStoreRoot() / "tool-store"
@@ -13720,11 +13961,13 @@ proc buildRunEdgeSessionResolver*(
 proc runReproRunCommand(args: openArray[string];
                         publicCliPath: string): int =
   let parsed = parseReproRunArgs(args)
+  let userToolchainEnv = snapshotBootstrapToolchainEnv()
   var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
   var listedTasks = inspectDevEnvTasks(parsed.selection, publicCliPath)
   if parsed.selection.statsPath.len > 0:
-    let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+    let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+    announce = true)
     writeDevEnvStats(parsed.selection.statsPath, edge, "run")
     let artifact = readDevEnvArtifact(edge.artifactPath)
     if emitDevEnvDiagnostics(artifact):
@@ -13761,7 +14004,8 @@ proc runReproRunCommand(args: openArray[string];
           "' names both a dev-env task and a run-edge; running the task. " &
           "Use 'task:" & parsed.target & "' or '<package>:" & parsed.target &
           "' to disambiguate.")
-    let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+    let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+    announce = true)
     writeDevEnvStats(parsed.selection.statsPath, edge, "run")
     let artifact = readDevEnvArtifact(edge.artifactPath)
     if emitDevEnvDiagnostics(artifact):
@@ -13774,6 +14018,7 @@ proc runReproRunCommand(args: openArray[string];
     let toolOps = devEnvToolShellOps(edge, parsed.selection)
     let producerOps = devEnvProducerActivation(artifact,
       parsed.selection.projectRoot)
+    restoreBootstrapToolchainEnv(userToolchainEnv)
     return runTaskCommand(artifact, edge.artifactPath, task,
       parsed.forwardedArgs, parsed.selection.projectRoot, producerOps, toolOps)
 
@@ -13889,7 +14134,8 @@ proc runReproTasksCommand(args: openArray[string];
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
   var listedTasks = inspectDevEnvTasks(parsed.selection, publicCliPath)
   if parsed.selection.statsPath.len > 0:
-    let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+    let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+    announce = true)
     writeDevEnvStats(parsed.selection.statsPath, edge, "tasks")
     let artifact = readDevEnvArtifact(edge.artifactPath)
     if emitDevEnvDiagnostics(artifact):
@@ -13904,7 +14150,11 @@ proc runReproTasksCommand(args: openArray[string];
 proc runReproExecCommand(args: openArray[string];
                          publicCliPath: string): int =
   let parsed = parseDevEnvExecArgs(args)
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+  # The bootstrap toolchain the edge below publishes is for compiling the
+  # recipe, not for the user's command; see `snapshotBootstrapToolchainEnv`.
+  let userToolchainEnv = snapshotBootstrapToolchainEnv()
+  let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+    announce = true)
   writeDevEnvStats(parsed.selection.statsPath, edge, "exec")
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if emitDevEnvDiagnostics(artifact):
@@ -13915,6 +14165,7 @@ proc runReproExecCommand(args: openArray[string];
   let toolOps = devEnvToolShellOps(edge, parsed.selection)
   let producerOps = devEnvProducerActivation(artifact,
     parsed.selection.projectRoot)
+  restoreBootstrapToolchainEnv(userToolchainEnv)
   return runActivatedCommand(artifact, edge.artifactPath, parsed.command,
     parsed.selection.projectRoot, producerOps, toolOps)
 
@@ -13933,7 +14184,9 @@ proc defaultInteractiveShell(): string =
 proc runReproShellCommand(args: openArray[string];
                           publicCliPath: string): int =
   let parsed = parseDevEnvShellArgs(args)
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+  let userToolchainEnv = snapshotBootstrapToolchainEnv()
+  let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+    announce = true)
   writeDevEnvStats(parsed.selection.statsPath, edge, "shell")
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if emitDevEnvDiagnostics(artifact):
@@ -13950,6 +14203,7 @@ proc runReproShellCommand(args: openArray[string];
       parsed.shellPath
     else:
       defaultInteractiveShell()
+  restoreBootstrapToolchainEnv(userToolchainEnv)
   return spawnActivatedShell(artifact, edge.artifactPath, shellPath,
     parsed.selection.projectRoot, producerOps, toolOps)
 
@@ -14180,6 +14434,14 @@ proc runDevEnvExportCommand(args: openArray[string];
     stdout.write(emitFastPathNoOpScript(parsed.shell))
     return 0
 
+  # Everything above this line is the fast path: it answers in ~70 ms and MUST
+  # stay silent, because the shell hook runs it on every prompt. Reaching this
+  # line means the opposite — the provider has to be compiled and the
+  # environment re-derived, tens of seconds on a cold workspace — so from here
+  # on the run announces itself (`announce = true` below, and
+  # Interactive-UX-And-Progress.md Principle 1 for why). This is the one
+  # engine invocation nobody typed: `cd` starts it, and before it spoke, a
+  # cold activation was 31.9 s of a shell that looked hung.
   let resolved = resolveProjectFile(parsed.projectRoot)
   if resolved.path.len == 0:
     stderr.writeLine("repro dev-env export: " & parsed.projectRoot &
@@ -14201,13 +14463,27 @@ proc runDevEnvExportCommand(args: openArray[string];
 
   let edge =
     try:
-      computePublicDevEnv(selection, publicCliPath)
+      computePublicDevEnv(selection, publicCliPath, announce = true)
     except CatchableError as err:
       stderr.writeLine("repro dev-env export: " & err.msg)
       return 1
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if not parsed.allowStale and emitDevEnvDiagnostics(artifact):
     return 1
+
+  # The edge cache is shared by exec and other shells. Keep this activation's
+  # RBDE and rollback sidecar together in a private, unique directory so an
+  # ordinary cache refresh cannot change the artifact sealed below.
+  let activationArtifactPath =
+    try:
+      let activationDir = createTempDir("activation-", "",
+        parentDir(edge.artifactPath))
+      let snapshotPath = activationDir / extractFilename(edge.artifactPath)
+      writeDevEnvArtifact(snapshotPath, artifact)
+      snapshotPath
+    except CatchableError as err:
+      stderr.writeLine("repro dev-env export: " & err.msg)
+      return 1
 
   # W2 — this surface REPORTS producer pins but does not apply them, and the
   # asymmetry with ``repro shell`` / ``exec`` / ``run`` is deliberate rather
@@ -14237,14 +14513,15 @@ proc runDevEnvExportCommand(args: openArray[string];
   # the DEFAULT activation path while `repro exec` was correct.
   var plan = shellOpsToExportPlan(
     devEnvToolShellOpsAt(edge.interfacePath, selection.outDir))
-  plan.add(devEnvArtifactToExportPlan(edge.artifactPath))
+  let toolOpCount = plan.len
+  plan.add(devEnvArtifactToExportPlan(activationArtifactPath))
   # M77 — emit the cache-key as the ``__REPRO_APPLIED`` marker. The
   # next prompt's fast path re-derives the same key from on-disk
   # inputs and compares; a match short-circuits without any build
   # engine work. Using the cache key (not the SSZ artifact ID) is what
   # makes the fast path actually fast.
   let fingerprint = candidateKey
-  let manifestPath = rollbackManifestPath(edge.artifactPath)
+  let manifestPath = rollbackManifestPath(activationArtifactPath)
   # M75 — emit the manifest path as a marker BEFORE the
   # ``__REPRO_APPLIED`` fingerprint so the hook's deactivation arm
   # can locate the manifest via ``$__REPRO_ACTIVE_MANIFEST`` on the
@@ -14264,8 +14541,10 @@ proc runDevEnvExportCommand(args: openArray[string];
         return 1
     else:
       snapshotProcessEnv()
-  let manifest = buildRollbackManifest(plan, preEnv, fingerprint,
+  var manifest = buildRollbackManifest(plan, preEnv, fingerprint,
     activationScript, parsed.shell)
+  manifest.hasToolOpCount = true
+  manifest.toolOpCount = toolOpCount
   try:
     writeRollbackManifest(manifestPath, manifest)
   except CatchableError as err:
@@ -14359,15 +14638,18 @@ proc runDevEnvDeactivateCommand(args: openArray[string]): int =
   # request a different shell's deactivation syntax, e.g. user-side
   # ``--shell=pwsh`` against a bash-activated manifest, and the hash
   # seal must compare against the activation-time shell).
-  # Recomputed, not remembered: the seal's whole point is that it derives
-  # the script again from on-disk state. The tool ops are part of the
-  # emitted script now, so they have to be part of this re-derivation too
-  # — otherwise every deactivation of a correctly-activated shell would
-  # report tampering. Addressed by path because this arm has only the
-  # artifact it was handed; the interface artifact is its sibling.
-  var rederivedPlan = shellOpsToExportPlan(
-    devEnvToolShellOpsAt(parentDir(artifactPath) / "project-interface.rbsz",
-      parentDir(artifactPath)))
+  # New manifests retain the activation-time provisioning prefix. Never
+  # provision again while leaving an environment: the daemon, mode or PATH
+  # may have changed. The complete script hash still seals these operations
+  # together with the independently decoded artifact below. Legacy manifests
+  # keep their original verification path until their next activation.
+  var rederivedPlan =
+    if manifest.hasToolOpCount:
+      capturedToolExportPlan(manifest)
+    else:
+      shellOpsToExportPlan(
+        devEnvToolShellOpsAt(parentDir(artifactPath) / "project-interface.rbsz",
+          parentDir(artifactPath)))
   rederivedPlan.add(devEnvArtifactToExportPlan(artifactPath))
   rederivedPlan.appendReproActiveManifestMarker(parsed.manifestPath)
   rederivedPlan.appendReproAppliedMarker(manifest.artifact)
@@ -14568,7 +14850,8 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
                        mode: DevSessionMode): int =
   let commandName = if mode == dsmDev: "dev" else: "up"
   var parsed = parseDevSessionArgs(args, commandName)
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath)
+  let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+    announce = true)
   let config = supervisorConfig(parsed, edge, publicCliPath, mode)
   if parsed.foreground:
     # W2 — the SAME resolver the detached arm re-creates in
@@ -14908,6 +15191,14 @@ proc renderPosixDevEnvUnload(artifact: DevEnvArtifact): string =
     result.add("  __repro_native_sep=$3\n")
     result.add("  eval \"__repro_native_value=\\${$__repro_native_var-}\"\n")
     result.add("  __repro_native_out=\n")
+    # The loop below splits the value by relying on field splitting of an
+    # UNQUOTED expansion. POSIX shells and bash do that; zsh does not (its
+    # SH_WORD_SPLIT option is off by default), so under zsh the loop saw the
+    # whole PATH as ONE part, removed nothing, and every cd out of a project
+    # left its prepended entries behind -- one more copy per activation.
+    # ``local_options`` scopes the setting to this function, so the user's
+    # interactive shell keeps its own splitting behaviour.
+    result.add("  if [ -n \"${ZSH_VERSION-}\" ]; then setopt local_options sh_word_split; fi\n")
     result.add("  __repro_native_old_ifs=$IFS\n")
     result.add("  IFS=$__repro_native_sep\n")
     result.add("  for __repro_native_part in $__repro_native_value; do\n")
@@ -16912,7 +17203,8 @@ proc runReproNativeShellActivationHelper(args: openArray[string];
     activity: "default",
     statsPath: request.statsPath)
   selection.resolveDevEnvSelection()
-  let edge = computePublicDevEnv(selection, publicCliPath, renderShell = true)
+  let edge = computePublicDevEnv(selection, publicCliPath, renderShell = true,
+    announce = true)
   writeDevEnvStats(selection.statsPath, edge, "hooks shell-native")
   let artifact = readDevEnvArtifact(edge.artifactPath)
   if emitDevEnvDiagnostics(artifact):
@@ -16945,7 +17237,8 @@ proc runReproDirenvActivationHelper(args: openArray[string];
         "unexpected direnv activation argument: " & arg)
     inc i
   selection.resolveDevEnvSelection()
-  let edge = computePublicDevEnv(selection, publicCliPath, renderShell = true)
+  let edge = computePublicDevEnv(selection, publicCliPath, renderShell = true,
+    announce = true)
   writeDevEnvStats(selection.statsPath, edge, "hooks shell-direnv")
   stdout.write(readFile(extendedPath(edge.shellFragmentPath)))
   # W2 — REPORT the workspace's declared ``uses:`` producer pins, exactly as
@@ -17821,6 +18114,53 @@ proc assembleRunquotadPoolArgs*(extraPools: openArray[BuildPool]): seq[string] =
     result.add("--pool")
     result.add(name & "=" & $seen[name])
 
+proc autoRunQuotaBudgetArgs*(host: HostConfig;
+                             extraPools: openArray[BuildPool];
+                             cpuMilli: uint32):
+    tuple[args: seq[string]; warnings: seq[string]] =
+  ## The budget flags an auto-spawned ``runquotad`` is started with.
+  ##
+  ## The daemon is host-wide: whoever spawns it sets the budget for every
+  ## workspace on the host. Measured 2026-09-23 on a 125.6 GiB workstation:
+  ## the only daemon had been auto-spawned by another workspace with the
+  ## 16 GiB default and refused a provider compile. The budget is now the
+  ## host file's (``hostConfigPath``), which the daemon reads at start and
+  ## which a flag would override. So a flag is passed only for what the file
+  ## leaves unset:
+  ##
+  ## - memory: ``REPROBUILD_RUNQUOTA_MEMORY_BYTES`` still wins as an explicit
+  ##   per-invocation override, with a warning when it disagrees with the
+  ##   file, because the daemon it spawns budgets every other workspace too.
+  ##   Otherwise the file's value, or ``DefaultAutoRunQuotaMemoryBytes``.
+  ## - cpu: ``cpuMilli`` unless the file sets ``cpu_milli``.
+  ## - pools: a convention pool the file sizes is left to the file. A pool
+  ##   the recipe declares is always passed, because the engine's in-process
+  ##   gate uses the recipe's figure and the two gates must agree (see
+  ##   ``assembleRunquotadPoolArgs``).
+  let memoryOverride = getEnv("REPROBUILD_RUNQUOTA_MEMORY_BYTES", "")
+  if memoryOverride.len > 0:
+    let memory = autoRunQuotaMemoryBytes()
+    result.args.add(["--memory-bytes", $memory])
+    if host.memoryBytes.isSome and host.memoryBytes.get != memory:
+      result.warnings.add("REPROBUILD_RUNQUOTA_MEMORY_BYTES=" & $memory &
+        " overrides memory_bytes = " & $host.memoryBytes.get & " in " &
+        host.sourcePath & "; the RunQuota daemon being started serves the " &
+        "whole host, so this budget applies to every workspace on it")
+  elif host.memoryBytes.isNone:
+    result.args.add(["--memory-bytes", $DefaultAutoRunQuotaMemoryBytes])
+  if host.cpuMilli.isNone:
+    result.args.add(["--cpu-milli", $int(cpuMilli)])
+  var recipePools = initHashSet[string]()
+  for pool in extraPools:
+    recipePools.incl(pool.name)
+  let poolArgs = assembleRunquotadPoolArgs(extraPools)
+  var i = 0
+  while i + 1 < poolArgs.len:
+    let name = poolArgs[i + 1].split("=", 1)[0]
+    if name notin host.pools or name in recipePools:
+      result.args.add([poolArgs[i], poolArgs[i + 1]])
+    i += 2
+
 var machineDaemonTrustApplied = false
 
 proc applyMachineDeclaredDaemonTrust*(): seq[DaemonCheckReport]
@@ -18036,14 +18376,12 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
   # recipe's ``buildPool("nim_pty.pty-serial", 1)`` never reaches the
   # daemon, its execute-edge lease hits ``lease request exceeds named-pool
   # budget: nim_pty.pty-serial``, and the build hangs.
-  let standardPoolArgs = assembleRunquotadPoolArgs(extraPools)
-  let memoryBytes = $autoRunQuotaMemoryBytes()
+  let budget = autoRunQuotaBudgetArgs(readHostConfig(), extraPools,
+    buildMaxParallelism() * 1000'u32)
+  for warning in budget.warnings:
+    stderr.writeLine("repro: warning: " & warning)
   when defined(windows):
-    var args = @[
-      "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
-      "--memory-bytes", memoryBytes
-    ]
-    args.add(standardPoolArgs)
+    var args = budget.args
     # Clear any stale value so the client side falls through to
     # ``defaultEndpoint`` and meets the daemon on the per-user pipe.
     putEnv("RUNQUOTA_SOCKET", "")
@@ -18053,12 +18391,8 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
       "reprobuild-runquota-" & $getCurrentProcessId())
     # fileExists excludes Unix sockets; removeFile also accepts a missing path.
     removeFile(socket)
-    var args = @[
-      "--socket", socket,
-      "--cpu-milli", $int(buildMaxParallelism() * 1000'u32),
-      "--memory-bytes", memoryBytes
-    ]
-    args.add(standardPoolArgs)
+    var args = @["--socket", socket]
+    args.add(budget.args)
     putEnv("RUNQUOTA_SOCKET", socket)
   result = startProcess(runquotad, args = args, options = {poUsePath})
   for _ in 0 ..< 300:
@@ -21473,6 +21807,17 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
 
         monitorHosting = monitorHosting,
         evidenceScope = evidenceScope,
+        # ``repro build`` returns an EXIT CODE. Nothing on this path reads
+        # ``BuildCommandOutcome.inputEvidencePaths`` — that field exists for
+        # ``repro watch``'s watcher, which has its own call site below and
+        # takes the safe default. What a build DOES read out of the cache-hit
+        # evidence is counts: ``evidence=depfile:<n>`` on each action line,
+        # ``--show=cache-evidence``, and the ``dependency-evidence`` stats
+        # observation. Those are unaffected (``EvidencePathCounts``), and
+        # ``--write-report`` — the other reader of the strings — turns the
+        # strings back on from inside ``executeBuildTarget``, so it cannot be
+        # lost by editing this list.
+        wantsInputEvidencePaths = false,
         benchmarkPath = benchmarkPath,
         eventSink = eventSink,
         cancelCheck = cancelCheck,
@@ -26119,6 +26464,16 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         measureSet = measureSet,
         reportPersistence = reportPersistence,
         restoreCachedOutputs = restoreCachedOutputs,
+        # THE WATCHER IS THE REASON THE PATHS ARE COLLECTED AT ALL. Said
+        # explicitly here even though it is the default, because this is the
+        # one call site where the default being wrong is not a slow build but
+        # a watch loop that arms on the project file, prints
+        # ``watching paths=2``, and blocks forever on edits it can no longer
+        # see. ``watchPathsFromOutcome(outcome)`` a few lines below is the
+        # consumer; ``tests/e2e/watch/
+        # t_e2e_repro_watch_arms_on_cache_hit_evidence.nim`` is what makes
+        # removing this line go red.
+        wantsInputEvidencePaths = true,
         eventSink = buildEventSink,
         cancelCheck = cancelCheck,
         extraNameSelectors = extraNameSelectors)
@@ -32272,6 +32627,21 @@ type
     succeeded*: int   ## existing checkout updated (ff / attach / merge).
     cloned*: int      ## a newly-declared repo cloned.
     forceReset*: int  ## ``--force-sync`` overwrote a divergent/dirty repo.
+    rebased*: int
+      ## ``--rebase-on-force-push`` moved a force-pushed branch onto the
+      ## rewritten remote history (``git reset --hard`` + patch-id-selective
+      ## replay of the commits the operator still owns).
+      ##
+      ## Counted SEPARATELY from ``succeeded`` because it is not an ordinary
+      ## update: the branch ref is moved onto a history that may share no
+      ## commit with the one it was on, and the pre-rewrite tip survives only
+      ## as the backup ref the executor writes. Folding it into "updated" is
+      ## precisely how a run that reset 12 checkouts reported
+      ## ``force-reset 0, skipped 0`` — the digest denied work it had done.
+      ## It is also NOT folded into ``forceReset``, whose documented meaning
+      ## is the ``--force-sync`` overwrite; the two are reached by different
+      ## flags and preserve different amounts of local work, so one counter
+      ## cannot honestly stand for both.
     noop*: int        ## already at the locked revision / nothing to do.
     skipped*: int     ## reported but deliberately not acted on.
     cloneFailed*: int ## a newly-declared repo could not be cloned.
@@ -32296,6 +32666,17 @@ proc summarize*(report: WorkspaceSyncReport): WorkspaceSyncSummary =
         ["failed", "clone_failed", "declared_branch_missing", "refused"]:
       inc result.forceReset
       continue
+    # Same shape, same reason, for the OTHER action that moves a branch onto
+    # a history it did not have: the force-push rebase. It too reports
+    # ``executionStatus = "succeeded"``, so without this test it was claimed
+    # by the switch's first arm and counted as an ordinary update. Measured:
+    # 12 repos reset onto a rewritten remote by one run, digest line
+    # ``updated 61 … force-reset 0, skipped 0`` — every one of the 12 hidden
+    # inside ``updated``.
+    if entry.action == "force_push_rebase" and entry.executionStatus notin
+        ["failed", "clone_failed", "declared_branch_missing", "refused"]:
+      inc result.rebased
+      continue
     case entry.executionStatus
     of "succeeded": inc result.succeeded
     of "cloned": inc result.cloned
@@ -32312,6 +32693,7 @@ proc toJsonNode*(summary: WorkspaceSyncSummary): JsonNode =
   result["succeeded"] = %summary.succeeded
   result["cloned"] = %summary.cloned
   result["forceReset"] = %summary.forceReset
+  result["rebased"] = %summary.rebased
   result["noop"] = %summary.noop
   result["skipped"] = %summary.skipped
   result["cloneFailed"] = %summary.cloneFailed
@@ -32409,7 +32791,14 @@ proc renderSyncSummaryLines*(report: WorkspaceSyncReport): seq[string] =
   let s = report.summarize()
   result.add("workspace sync summary: " &
     "updated " & $s.succeeded & ", cloned " & $s.cloned &
-    ", force-reset " & $s.forceReset & ", up-to-date " & $s.noop &
+    ", force-reset " & $s.forceReset &
+    # Rendered UNCONDITIONALLY, unlike ``CLONE FAILED`` below. The digest's
+    # job here is to let an operator confirm that nothing was rewritten, and
+    # a counter that is absent when it is zero cannot distinguish "zero" from
+    # "this build does not report it" — which is the reading that let 12
+    # rewritten checkouts pass unnoticed.
+    ", rebased " & $s.rebased &
+    ", up-to-date " & $s.noop &
     ", skipped " & $s.skipped &
     (if s.cloneFailed > 0: ", CLONE FAILED " & $s.cloneFailed else: "") &
     ", refused " & $s.refused &
@@ -32542,7 +32931,19 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
   ## the project name to find ``projects/<name>.toml``.
   result.workspaceRoot = ""
   result.toolProvisioning = tpmPathOnly
-  result.rebaseOnForcePush = true
+  # ``--rebase-on-force-push`` is an OPT-IN, and this default is the
+  # enforcement of that. The action it enables (``saForcePushRebase``) runs
+  # ``git reset --hard <remote>/<branch>`` before replaying anything, so a
+  # default of ``true`` made a bare ``repro sync`` a destructive command on
+  # every checkout whose remote had been rewritten — with no RA-9 preview and
+  # no confirmation, and the flag that supposedly requested it never typed.
+  # Measured on a real workspace: 12 repos reset by a run that reported
+  # ``force-reset 0, skipped 0``.
+  #
+  # The planner's refusal text has always said "run 'repro sync
+  # --rebase-on-force-push' to rebase your local commits on the new history".
+  # That sentence is only honest when the flag is what turns the rebase on.
+  result.rebaseOnForcePush = false
   var i = 0
   while i < args.len:
     let arg = args[i]
@@ -37052,15 +37453,26 @@ proc offerSafeRemedy*(description: string; remedyCommand: string;
 
 type
   ForceSyncGuardOutcome = enum
-    ## Result of the RA-16 / RA-9 destructive-command safety gate for
-    ## ``--force-sync``.
+    ## Result of the RA-16 / RA-9 destructive-command safety gate that guards
+    ## EVERY sync path which moves a branch ref off the history it is on.
     fsgNoTargets       ## no divergent/dirty repos → nothing to force, sync as normal.
     fsgConfirmed       ## the overwrite is authorized (``--yes``/``--force`` or a TTY confirm).
     fsgRefusedNonTty   ## non-TTY with no ``--yes`` → refuse cleanly (do not hang, do not overwrite).
     fsgDeclined        ## interactive operator answered "no".
 
+  DestructiveSyncKind = enum
+    ## WHICH destructive sync path a gated target is bound for. The two
+    ## differ in how much local work survives, so the preview must name them
+    ## apart — an operator who is told "OVERWRITE, discarding local changes"
+    ## about a rebase that will replay their commits learns the wrong thing,
+    ## and so does one told the reverse.
+    dskOverwrite  ## ``--force-sync``: ``git reset --hard`` + ``git clean -ffdx``.
+    dskRebase     ## ``--rebase-on-force-push``: reset onto the rewritten
+                  ## remote, then replay the patch-id-unique local commits.
+
   ForceSyncTarget = object
     repoIdx: int
+    kind: DestructiveSyncKind
     path: string
     syncCase: SyncCase
     observed: string
@@ -37068,36 +37480,70 @@ type
 
 proc forceSyncGuard(args: WorkspaceSyncArgs;
                     targets: seq[ForceSyncTarget]): ForceSyncGuardOutcome =
-  ## RA-16 ``--force-sync`` is a destructive multi-repo command, so it is
-  ## subject to the RA-9 destructive-command safety rules: PREVIEW the
+  ## THE one RA-9 destructive-command gate on the sync path: PREVIEW the
   ## per-repo effect, then CONFIRM. ``--yes``/``--force`` opts out of the
   ## prompt. In a non-interactive context (no TTY) WITHOUT the flag we
   ## REFUSE cleanly with a clear message rather than hanging on a prompt
-  ## that can never be answered. A normal sync (no ``--force-sync``) never
-  ## reaches this gate and keeps report-only-skipping divergent repos.
+  ## that can never be answered.
+  ##
+  ## It guards BOTH destructive sync paths, and that is the point of it
+  ## taking a ``kind`` rather than being ``--force-sync``-specific. It used
+  ## to gate only ``--force-sync``; ``--rebase-on-force-push`` reached
+  ## ``executeForcePushRebase``'s ``git reset --hard`` without passing any
+  ## gate at all, and (because that flag defaulted to ON) so did a bare
+  ## ``repro sync``. A second destructive path that does not route through
+  ## the chokepoint makes the chokepoint decorative, so there is now no
+  ## branch-moving sync action that can be scheduled without coming through
+  ## here.
+  ##
+  ## A plain sync with neither flag produces no targets at all and keeps
+  ## report-only-skipping divergent repos (``fsgNoTargets``).
   if targets.len == 0:
     return fsgNoTargets
-  # Preview: one line per repo we are about to OVERWRITE.
-  stderr.writeLine("repro workspace sync --force-sync will OVERWRITE " &
-    $targets.len & " checkout(s) to the locked revision (discarding local " &
-    "changes):")
+  var overwrites, rebases: seq[ForceSyncTarget]
   for t in targets:
+    if t.kind == dskOverwrite: overwrites.add(t) else: rebases.add(t)
+  proc previewLine(t: ForceSyncTarget) =
     stderr.writeLine("  " & t.path & " [" & syncCaseTag(t.syncCase) & "]" &
       (if t.observed.len > 0: " " & t.observed else: "") &
       " → " & t.expected)
+  if overwrites.len > 0:
+    stderr.writeLine("repro workspace sync --force-sync will OVERWRITE " &
+      $overwrites.len & " checkout(s) to the locked revision (discarding " &
+      "local changes):")
+    for t in overwrites: previewLine(t)
+  if rebases.len > 0:
+    # Say exactly what the rebase does to the branch, including the part an
+    # operator would not guess: the reset happens FIRST, and the pre-rewrite
+    # tip survives only as the backup ref the executor writes.
+    stderr.writeLine("repro workspace sync --rebase-on-force-push will " &
+      "RESET " & $rebases.len & " branch(es) onto their rewritten remote " &
+      "history and replay the local commits that are not already upstream " &
+      "(the pre-rewrite tip is kept as refs/repro/pre-rewrite/<branch>/<sha>):")
+    for t in rebases: previewLine(t)
   # RA-9: defer the opt-out / TTY / non-TTY decision to the shared
-  # ``confirmDestructive`` chokepoint so ``--force-sync`` refuses in a
-  # non-interactive context identically to ``remove`` and ``checkout``.
+  # ``confirmDestructive`` chokepoint so these refuse in a non-interactive
+  # context identically to ``remove`` and ``checkout``.
+  let verb =
+    if overwrites.len > 0 and rebases.len > 0: "Overwrite / rewrite"
+    elif rebases.len > 0: "Rewrite"
+    else: "Overwrite"
+  let flags =
+    if overwrites.len > 0 and rebases.len > 0:
+      "--force-sync / --rebase-on-force-push"
+    elif rebases.len > 0: "--rebase-on-force-push"
+    else: "--force-sync"
   case confirmDestructive(
-      prompt = "Overwrite the checkout(s) above? This DISCARDS local " &
-        "changes. [y/N] ",
+      prompt = verb & " the checkout(s) above? This MOVES branch refs and " &
+        "may DISCARD local work. [y/N] ",
       autoYes = args.assumeYes,
       isTty = isatty(stdin),
       flagName = "--yes",
-      refuseMessage = "refusing to --force-sync in a non-interactive " &
-        "context without --yes/--force (would discard local changes)",
+      refuseMessage = "refusing to " & flags & " in a non-interactive " &
+        "context without --yes/--force (would move branch refs and may " &
+        "discard local work)",
       declineMessage =
-        "force-sync declined; leaving divergent checkouts untouched")
+        "declined; leaving the divergent checkouts untouched")
   of ddConfirmed: fsgConfirmed
   of ddRefusedNonTty: fsgRefusedNonTty
   of ddDeclined: fsgDeclined
@@ -37598,7 +38044,13 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     observations.add(observation)
 
   # Step 4: planner.
-  let planned = planSync(resolved.repos, observations, args.rebaseOnForcePush)
+  #
+  # ``var``, not ``let``: the RA-9 destructive gate below may DOWNGRADE a
+  # ``saForcePushRebase`` decision back to a refusal when the operator does
+  # not confirm it. Rewriting the decision (rather than carrying a side
+  # table) keeps one code path responsible for reporting, counting and the
+  # exit code.
+  var planned = planSync(resolved.repos, observations, args.rebaseOnForcePush)
 
   # Step 5 (RA-5c): checkout phase. Collect every repo's mutating action
   # (clone / merge-ff / attach) into ONE graph and run it once. No-op /
@@ -37641,22 +38093,61 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     reference
   var cloneRepoIdx = initHashSet[int]()
 
-  # RA-16 ``--force-sync``: the planner SKIPS-and-reports a divergent /
-  # dirty / locally-unpublished checkout (``saNone``). With ``--force-sync``
-  # the operator opts into OVERWRITING those to the locked revision. We
-  # gather the candidate set, run them through the destructive-command
-  # safety gate ONCE (preview + confirm, or refuse cleanly in a non-TTY
-  # without ``--yes``), and only then schedule the force-reset actions. A
-  # normal sync (no flag) never enters this branch — it keeps skipping.
+  # RA-16 / RA-9 — the ONE destructive gate on the sync path.
+  #
+  # Two sync outcomes move a branch ref off the history it is on:
+  #
+  #   * ``--force-sync``              — the planner SKIPS-and-reports a
+  #     divergent / dirty / locally-unpublished / force-pushed checkout
+  #     (``saNone``), and this flag opts into OVERWRITING it to the locked
+  #     revision.
+  #   * ``--rebase-on-force-push``    — the planner emits
+  #     ``saForcePushRebase``, whose executor resets the branch onto the
+  #     rewritten remote before replaying the local commits that are not
+  #     already upstream.
+  #
+  # BOTH are gathered here and run through the destructive-command safety
+  # gate ONCE (preview + confirm, or refuse cleanly in a non-TTY without
+  # ``--yes``), and only then scheduled. The rebase used to bypass this gate
+  # entirely — and, because its flag defaulted to ON, a bare ``repro sync``
+  # did too. A plain sync with neither flag gathers no targets and keeps
+  # report-only-skipping, which is the documented behaviour.
   var forceResetRepos = initHashSet[int]()
   var forceResetTarget = initTable[int, string]()
-  if args.forceSync:
+  # Force-push rebases the operator did NOT authorize. Their decisions are
+  # rewritten into refusals below, so an unconfirmed gate leaves the checkout
+  # exactly as a refusal does: untouched, reported, and counted.
+  var deniedRebaseRepos = initHashSet[int]()
+  block destructiveGate:
     var targets: seq[ForceSyncTarget]
     for repoIdx, decision in planned.report.decisions:
+      if decision.action == saForcePushRebase:
+        # ``--rebase-on-force-push`` is what produced this decision (the
+        # planner emits ``saForcePushRebase`` only when that flag is set), so
+        # the operator has asked for it — but asking for the MODE is not the
+        # same as confirming the per-repo blast radius, which is what RA-9
+        # requires and what only this preview can show.
+        targets.add(ForceSyncTarget(
+          repoIdx: repoIdx, kind: dskRebase, path: decision.path,
+          syncCase: decision.syncCase, observed: decision.observed,
+          expected:
+            (if observations[repoIdx].remoteBranchTip.len > 0:
+               observations[repoIdx].remoteBranchTip
+             else: decision.expected)))
+        continue
+      if not args.forceSync:
+        continue
       if decision.action != saNone:
         continue
+      # ``scForcePushRebase`` belongs in this set, and its absence was a
+      # promise the tool did not keep: the planner's own refusal text for a
+      # rewritten remote ends "or discard it with 'repro sync --force-sync'",
+      # yet that case was filtered out here, so ``--force-sync`` did nothing
+      # for it and the repo stayed refused however many times the operator
+      # ran the named remedy.
       if decision.syncCase notin
-          {scDirty, scLocallyUnpublished, scDivergentFeatureBranch}:
+          {scDirty, scLocallyUnpublished, scDivergentFeatureBranch,
+           scForcePushRebase}:
         continue
       let repo = resolved.repos[repoIdx]
       # The concrete commit to reset onto: the SHA-pinned revision itself,
@@ -37681,12 +38172,37 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         continue
       forceResetTarget[repoIdx] = target
       targets.add(ForceSyncTarget(
-        repoIdx: repoIdx, path: decision.path, syncCase: decision.syncCase,
+        repoIdx: repoIdx, kind: dskOverwrite, path: decision.path,
+        syncCase: decision.syncCase,
         observed: decision.observed, expected: decision.expected))
     let guard = forceSyncGuard(args, targets)
-    if guard == fsgConfirmed:
-      for t in targets:
-        forceResetRepos.incl(t.repoIdx)
+    for t in targets:
+      if guard == fsgConfirmed:
+        if t.kind == dskOverwrite:
+          forceResetRepos.incl(t.repoIdx)
+        # A confirmed rebase needs no bookkeeping: its decision already
+        # carries ``saForcePushRebase`` and is scheduled below unchanged.
+      elif t.kind == dskRebase:
+        deniedRebaseRepos.incl(t.repoIdx)
+      # An unconfirmed OVERWRITE needs no bookkeeping either: its decision is
+      # already ``saNone`` + a refusal reason, so leaving it alone is exactly
+      # the report-only-skip the gate declined into.
+
+  # Turn every unauthorized rebase back into the refusal it would have been
+  # without ``--rebase-on-force-push``. Done on the decisions themselves, so
+  # a single code path downstream reports, counts and exit-codes it — rather
+  # than a parallel "was it gated" flag that the reporting loop could forget
+  # to consult, which is the shape of the defect being fixed.
+  for repoIdx in deniedRebaseRepos:
+    planned.report.decisions[repoIdx].action = saNone
+    planned.report.decisions[repoIdx].refusalReason =
+      "remote branch was force-pushed and the rebase onto the rewritten " &
+      "history was NOT confirmed, so '" &
+      planned.report.decisions[repoIdx].path & "' was left untouched; " &
+      "re-run with '--yes' to confirm it, or resolve it by hand"
+    planned.report.decisions[repoIdx].message =
+      "refusing to rewrite force-pushed checkout at '" &
+      planned.report.decisions[repoIdx].path & "' without confirmation"
 
   for repoIdx, decision in planned.report.decisions:
     let resolvedRepo = resolved.repos[repoIdx]

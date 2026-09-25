@@ -9,10 +9,12 @@
 ##     Spins up the daemon, executes the `bakForeignProvision` action for the local
 ##     flake, asserts that the output receipt is successfully created containing a valid
 ##     Nix store path, and ensures that the daemon exits successfully.
-##   * Scenario 3.2: Observed Dependencies Capture
+##   * Scenario 3.2: Provisioner-Reported Dependencies Capture
 ##     Asserts that the file paths read during flake evaluation (specifically `flake.nix`
-##     and `flake.lock`) are returned as observed input dependencies (`monitorReads`)
-##     within the action result's evidence.
+##     and `flake.lock`) are returned as `provisionerReportedInputs` within the action
+##     result's evidence, that `monitorReads` stays EMPTY (nothing observed this
+##     action; it execs nothing), and that the evidence records
+##     `evcForeignProvisionerReport` as the source. DA-1f.
 ##
 ## Testing Strategy:
 ##   * Pure, mock-free integration test running against the Python daemon shim
@@ -22,6 +24,7 @@ import std/[unittest, os, osproc, strutils, tempfiles]
 import repro_core
 import repro_core/dependency_gathering
 import repro_build_engine
+import repro_dev_env_engine
 import repro_interface_artifacts
 import repro_tool_profiles
 
@@ -89,6 +92,28 @@ when defined(posix):
 
 suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
 
+  test "dev env repeated uses share acquisition but distinct selectors do not":
+    let fixtureRoot = prepareFixtureRoot(findRepoRoot())
+    defer: removeDir(fixtureRoot)
+    let useDef = InterfaceToolUse(packageSelector: "sh", rawConstraint: "sh",
+      nixProvisioning: @[InterfaceNixProvisioning(
+        selector: FixtureSelector, executablePath: FixtureExecutable)])
+    var other = useDef
+    other.nixProvisioning = @[InterfaceNixProvisioning(
+      selector: ".#different-sh", executablePath: FixtureExecutable)]
+    let actions = devEnvNixProvisioningActions([useDef, useDef, other],
+      tpmNix, fixtureRoot, fixtureRoot)
+    check actions.len == 2
+    check actions[0].id != actions[1].id
+    check actions[0].outputs != actions[1].outputs
+    check actions[0].argv == @["nix", FixtureSelector]
+    let repeated = devEnvNixProvisioningActions([useDef, useDef],
+      tpmNix, fixtureRoot, fixtureRoot)
+    check repeated.len == 1
+    check repeated[0].id == actions[0].id
+    check devEnvNixProvisioningActions([useDef], tpmPathOnly,
+      fixtureRoot, fixtureRoot).len == 0
+
   when defined(posix):
     test "production provisioner rejects non-executable REPROBUILD_NIX_DAEMON_BIN":
       let repoRoot = findRepoRoot()
@@ -123,6 +148,35 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
       check "REPROBUILD_NIX_DAEMON_BIN exists but is not executable" in
         res.stderr
       check not fileExists(receiptFile)
+
+    when defined(linux):
+      test "failed daemon startup does not leak connection or process descriptors":
+        # A real false process supplies the startup failure. Every connection
+        # reaches the kernel; no mock daemon or socket is involved.
+        let previousUser = getEnv("USER")
+        let previousDaemon = getEnv("REPROBUILD_NIX_DAEMON_BIN")
+        putEnv("USER", "repro-failed-start-" & $getCurrentProcessId())
+        putEnv("REPROBUILD_NIX_DAEMON_BIN", findExe("false"))
+        defer:
+          putEnv("USER", previousUser)
+          putEnv("REPROBUILD_NIX_DAEMON_BIN", previousDaemon)
+        proc descriptorCount(): int =
+          for entry in walkDir("/proc/self/fd"):
+            inc result
+        let before = descriptorCount()
+        let action = BuildAction(
+          governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+          kind: bakForeignProvision,
+          id: "test.foreign.nix.failed-start",
+          argv: @["nix", FixtureSelector],
+          outputs: @[getTempDir() / "repro-failed-start-receipt"],
+          cwd: findRepoRoot(),
+          dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor))
+        for attempt in 0 .. 2:
+          let res = executeBuiltinAction(action)
+          check res.status == asFailed
+          check "Failed to connect or spawn" in res.stderr
+        check descriptorCount() == before
 
     test "direct all-output fallback strips provisioned loader paths":
       let repoRoot = findRepoRoot()
@@ -258,9 +312,20 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
     check fileExists(storePath / FixtureExecutable)
     checkpoint("Resolved store path: " & storePath)
 
-    # Verify observed dependencies (monitorReads) carry the actual local flake
+    # Verify the daemon-reported dependencies carry the actual local flake
     # inputs used for resolution.
-    let reads = res.evidence.monitorReads
+    #
+    # DA-1f — THE CHANNEL IS `provisionerReportedInputs`, NOT `monitorReads`,
+    # and the difference is the subject rather than a rename. These paths come
+    # out of a JSON reply this process parsed; io-mon observed none of them
+    # and could not have, because the action execs nothing — it opens a unix
+    # socket and `reprobuild-nix-daemon` evaluates on its behalf. Putting them
+    # in the monitor's channel made a derived peer attribution
+    # indistinguishable from an observation, which is the shape
+    # `reprobuild-specs/Dependency-Observation-Attribution.md` rule 7 forbids.
+    # The report is kept — it is class-3 DERIVED attribution and strictly
+    # better than anything a monitor could supply here — and it is named.
+    let reads = res.evidence.provisionerReportedInputs
     check reads.len > 0
 
     var foundFlakeNix = false
@@ -273,7 +338,17 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
 
     check foundFlakeNix
     check foundFlakeLock
-    checkpoint("Observed dependencies: " & $reads)
+    checkpoint("Provisioner-reported dependencies: " & $reads)
+
+    # THE OTHER HALF, AND THE ONE A RENAME WOULD NOT HAVE BOUGHT. The monitor
+    # channel must be EMPTY: nothing observed this action, and the engine must
+    # not claim otherwise. Re-pointing the assignment back at `monitorReads`
+    # reddens here even though every assertion above would still pass.
+    check res.evidence.monitorReads.len == 0
+    # And the report says who filled it. A set that is populated but unmarked
+    # is the state DA-1f found everywhere else in this engine.
+    check evcForeignProvisionerReport in res.evidence.evidenceProvenance
+    check evcMonitorCapture notin res.evidence.evidenceProvenance
 
     # Clean up receipt
     removeFile(receiptFile)

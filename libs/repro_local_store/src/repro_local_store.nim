@@ -375,6 +375,12 @@ type
     hmssInputChanged
     hmssCorrupt
     hmssOutputChanged
+    hmssPolicyNeedsContentHash
+      ## The probe's fingerprint policy is not one this scan can decide: its
+      ## validation criterion is the recorded CONTENT HASH, and everything on
+      ## this path compares `FileMetadata` — `{kind, sizeBytes, mtimeNs}` —
+      ## only. See `MetadataValidatedPolicies`. Not an error and not a miss:
+      ## it means "ask the per-edge lookup", which computes the hash.
 
   HotMetadataScan* = object
     status*: HotMetadataScanStatus
@@ -384,6 +390,39 @@ type
     detail*: string
 
 const
+  MetadataValidatedPolicies* = {ffpTimestamp, ffpHybrid}
+    ## THE POLICIES A METADATA-ONLY CHECK MAY DECIDE, written down ONCE.
+    ##
+    ## `ffpTimestamp`'s validation criterion IS the recorded `FileMetadata`
+    ## — `{kind, sizeBytes, mtimeNs}` — so a metadata comparison is the whole
+    ## answer. `ffpHybrid` compares metadata FIRST and only reaches for the
+    ## content hash when the metadata moved, so metadata-unchanged is a
+    ## sufficient (never a false) hit for it too.
+    ##
+    ## `ffpChecksum` is NOT here, and that is the point. Its criterion is
+    ## `FileFingerprint.localHash`, which lives OUTSIDE `metadata`: a write
+    ## that keeps the length and restores the mtime (`utimensat(2)` does it
+    ## exactly) changes the content and leaves every metadata field alone. A
+    ## metadata-only check therefore answers "unchanged" for an input that
+    ## changed, and an edge that asked to be validated by content is served
+    ## a stale artifact.
+    ##
+    ## IT IS A SHARED CONST BECAUSE IT WAS TWO COPIES AND ONE OF THEM WAS
+    ## MISSING. `lookupHotMetadataRecord` carried the set inline and refused
+    ## correctly; `scanHotIndexMetadataInputsUnchanged` — the OTHER arm of
+    ## the same whole-graph shortcut, and the one the CLI takes by default —
+    ## carried no such test at all, so a `ffpChecksum` edge whose content
+    ## changed under a preserved size and mtime came back `hmssHit` and the
+    ## whole graph was reported up to date. Measured on the engine API, same
+    ## graph and same mutation: the evidence-skipping arm returned
+    ## `asUpToDate`/`cdHit`/`launched = false` with the stale output still in
+    ## place, while the per-record arm relaunched and produced the right one.
+    ## Both arms now read this name; there is no second copy to forget.
+    ##
+    ## Spec: Incremental-Invalidation.md §"File Fingerprint Policies",
+    ## Failure-Semantics.md:11-12 (ambiguous correctness failures MUST fail
+    ## closed). Issue #382 defect 2.
+
   ActionRecordMagic = "RBAR"
   # THE VERSIONS BELOW ARE FORMAT HISTORY. The evidence epochs below define
   # which records may be read and written -- see `ActionRecordVersionEvidenceEpoch`, which
@@ -4294,71 +4333,116 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
                                           metadataCache: ptr FileMetadataCache = nil;
                                           envResolvers: openArray[EnvResolver] = []):
                                           HotMetadataScan =
-  ## Batch "are all these edges still cache hits" check, now served by
-  ## reading each probe's single authoritative `hot-records/<key>` file
-  ## instead of scanning a global index. Cost is O(probes), page-cached,
-  ## never a whole-cache scan. Result semantics match the former index
-  ## scan: hmssHit iff every probe has a matching record whose inputs are
-  ## all metadata-unchanged; hmssMissingRecord if any probe has no matching
-  ## record; hmssInputChanged if a matched record's input changed.
+  ## Batch "are all these edges still cache hits" check, served by reading
+  ## each probe's authoritative `hot-records/<key>` files instead of scanning
+  ## a global index. Cost is O(records for the probed edges), page-cached,
+  ## never a whole-cache scan.
+  ##
+  ## `hmssHit` iff, for EVERY probe, the NEWEST matching record revalidates:
+  ## its observed environment still reads the same, every recorded input's
+  ## metadata is unchanged, and its declared outputs on disk are still the
+  ## ones it describes. `hmssMissingRecord` if any probe has no matching
+  ## record (or only an unservable one); `hmssInputChanged` /
+  ## `hmssOutputChanged` name which half moved;
+  ## `hmssPolicyNeedsContentHash` if a probe asked for a policy this scan is
+  ## not entitled to decide.
+  ##
+  ## TWO THINGS THIS PROC MUST NOT DO, both of which it used to.
+  ##
+  ## 1. IT MUST NOT DECIDE A POLICY IT CANNOT CHECK. Everything below
+  ##    compares `FileMetadata`; `ffpChecksum`'s criterion is the content
+  ##    hash, which is not in `metadata`. See `MetadataValidatedPolicies` for
+  ##    the measurement. The refusal is FIRST, before any record is read: the
+  ##    scan has no answer for such a probe, so there is nothing to be gained
+  ##    by looking.
+  ##
+  ## 2. IT MUST NOT QUANTIFY OVER THE EDGE'S WHOLE HISTORY. It used to check
+  ##    EVERY matching record and fail the probe if ANY of them had a changed
+  ##    input — a ∀ where both this docstring and `lookupActionResultImpl`'s
+  ##    candidate walk say ∃. `loadRecordsForWeak` returns up to
+  ##    `MaxRecFilesPerEdge` (8) records — the edge's history — so a single
+  ##    superseded record poisoned the edge permanently. Not unsound (strictly
+  ##    stricter, so only false MISSES), but it made this whole-graph shortcut
+  ##    useless on any edge that had ever been rebuilt: measured on a zlib
+  ##    graph, this arm and the per-record arm disagreed on 31 of 37 edges,
+  ##    and agreed 300/300 only on a fresh cache with one record per edge —
+  ##    i.e. it worked in CI and nowhere else.
+  ##
+  ##    The record it now checks is the NEWEST matching one, which is exactly
+  ##    the record `readHotRecord` (and therefore the per-record arm of the
+  ##    same whole-graph shortcut) selects. That is deliberate: the two arms
+  ##    of `tryFastNoopCacheHits` are chosen by a flag the caller sets for
+  ##    reasons that have nothing to do with cache validity, so a verdict
+  ##    that depends on which one ran is the defect, whichever way it leans.
+  ##    It stays fail-closed with respect to the scheduler, whose ∃ walk over
+  ##    all candidates can only turn a miss here into a hit there.
+  ##
+  ## Issue #382 defects 1 and 2.
   if probes.len == 0:
     return HotMetadataScan(status: hmssHit)
   var checkedInputs = 0
   var totalRecords = 0
   for probeIndex, probe in probes:
+    if probe.policy notin MetadataValidatedPolicies:
+      return HotMetadataScan(status: hmssPolicyNeedsContentHash,
+        recordCount: totalRecords, checkedInputCount: checkedInputs,
+        detail: "fingerprint policy " & $probe.policy &
+          " is validated by content hash, which this metadata-only scan " &
+          "does not compute")
     let records = cache.loadRecordsForWeak(probe.weakFingerprint)
-    var matched = false
-    for record in records:
-      inc totalRecords
-      if record.weakFingerprint == probe.weakFingerprint and
-          record.policy == probe.policy:
-        matched = true
-    if not matched:
+    totalRecords += records.len
+    # NEWEST-FIRST, because `loadRecordsForWeak` yields OLDEST→NEWEST and the
+    # newest matching record is the one this scan decides on (see 2. above).
+    var newest = -1
+    for i in countdown(records.high, 0):
+      if records[i].weakFingerprint == probe.weakFingerprint and
+          records[i].policy == probe.policy:
+        newest = i
+        break
+    if newest < 0:
       return HotMetadataScan(status: hmssMissingRecord,
-        recordCount: totalRecords)
-    for record in records:
-      if record.weakFingerprint == probe.weakFingerprint and
-          record.policy == probe.policy:
-        # A record with nothing in it to check is not a hit. Reported as
-        # `hmssMissingRecord` rather than a new status because that is what it
-        # means to the caller — there is no usable record here — and it is
-        # already the status that sends the graph to the full scheduler, where
-        # the per-edge refusal states the reason. See
-        # `HotMetadataProbe.refuseRecordWithNoInputs`.
-        if probe.refuseRecordWithNoInputs and record.inputs.len == 0 and
-            record.envInputs.len == 0:
-          return HotMetadataScan(status: hmssMissingRecord,
-            recordCount: totalRecords, checkedInputCount: checkedInputs)
-        # M10 — the OBSERVED ENVIRONMENT has to be checked on this path too.
-        # It is the whole-graph "everything is already up to date" shortcut,
-        # so a record whose environment moved and is not caught HERE is served
-        # as a hit without any other check ever running. `envInputChanged`
-        # fails closed when no resolver was supplied for this probe.
-        var changedEnv = ""
-        let resolver =
-          if probeIndex < envResolvers.len: envResolvers[probeIndex]
-          else: nil
-        if envInputChanged(record, resolver, changedEnv):
+        recordCount: totalRecords, checkedInputCount: checkedInputs)
+    let record = records[newest]
+    # A record with nothing in it to check is not a hit. Reported as
+    # `hmssMissingRecord` rather than a new status because that is what it
+    # means to the caller — there is no usable record here — and it is
+    # already the status that sends the graph to the full scheduler, where
+    # the per-edge refusal states the reason. See
+    # `HotMetadataProbe.refuseRecordWithNoInputs`.
+    if probe.refuseRecordWithNoInputs and record.inputs.len == 0 and
+        record.envInputs.len == 0:
+      return HotMetadataScan(status: hmssMissingRecord,
+        recordCount: totalRecords, checkedInputCount: checkedInputs)
+    # M10 — the OBSERVED ENVIRONMENT has to be checked on this path too.
+    # It is the whole-graph "everything is already up to date" shortcut,
+    # so a record whose environment moved and is not caught HERE is served
+    # as a hit without any other check ever running. `envInputChanged`
+    # fails closed when no resolver was supplied for this probe.
+    var changedEnv = ""
+    let resolver =
+      if probeIndex < envResolvers.len: envResolvers[probeIndex]
+      else: nil
+    if envInputChanged(record, resolver, changedEnv):
+      return HotMetadataScan(status: hmssInputChanged,
+        recordCount: totalRecords, checkedInputCount: checkedInputs)
+    timedRecordedInputRevalidation:
+      for input in record.inputs:
+        inc checkedInputs
+        if fingerprintRecordedMetadata(input.path, input.metadata,
+            metadataCache) != input.metadata:
           return HotMetadataScan(status: hmssInputChanged,
             recordCount: totalRecords, checkedInputCount: checkedInputs)
-        timedRecordedInputRevalidation:
-          for input in record.inputs:
-            inc checkedInputs
-            if fingerprintRecordedMetadata(input.path, input.metadata,
-                metadataCache) != input.metadata:
-              return HotMetadataScan(status: hmssInputChanged,
-                recordCount: totalRecords, checkedInputCount: checkedInputs)
-        # Same rule as `lookupActionResultImpl`: unchanged inputs are only
-        # half the hit condition. The declared outputs on disk must still be
-        # the ones this record describes (Incremental-Invalidation.md
-        # §"Minimum check set" Step 3.3). Without this the whole-build fast
-        # path would keep accepting an artifact that was overwritten after
-        # the build produced it.
-        let outputMismatch = outputStateMismatch(record, probe.outputRoot)
-        if outputMismatch.len > 0:
-          return HotMetadataScan(status: hmssOutputChanged,
-            recordCount: totalRecords, checkedInputCount: checkedInputs,
-            detail: outputMismatch)
+    # Same rule as `lookupActionResultImpl`: unchanged inputs are only
+    # half the hit condition. The declared outputs on disk must still be
+    # the ones this record describes (Incremental-Invalidation.md
+    # §"Minimum check set" Step 3.3). Without this the whole-build fast
+    # path would keep accepting an artifact that was overwritten after
+    # the build produced it.
+    let outputMismatch = outputStateMismatch(record, probe.outputRoot)
+    if outputMismatch.len > 0:
+      return HotMetadataScan(status: hmssOutputChanged,
+        recordCount: totalRecords, checkedInputCount: checkedInputs,
+        detail: outputMismatch)
   HotMetadataScan(status: hmssHit, recordCount: totalRecords,
     checkedInputCount: checkedInputs)
 
@@ -4514,7 +4598,11 @@ proc lookupHotMetadataRecord*(cache: var ActionCache; weak: ContentDigest;
                               policy: FileFingerprintPolicy):
     Option[ActionResultRecord] =
   ## Metadata-only lookup served from the edge's single per-edge file.
-  if policy notin {ffpTimestamp, ffpHybrid}:
+  ##
+  ## The refusal below and `scanHotIndexMetadataInputsUnchanged`'s are the
+  ## SAME refusal — the two arms of one whole-graph shortcut — so they read
+  ## one shared name. They did not always; see `MetadataValidatedPolicies`.
+  if policy notin MetadataValidatedPolicies:
     return none(ActionResultRecord)
   let hot = cache.readHotRecord(weak)
   if not hot.found or hot.record.policy != policy:
