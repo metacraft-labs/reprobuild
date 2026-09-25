@@ -765,7 +765,7 @@ tests/e2e/dev-env/t_e2e_dev_env_announces_before_working.nim	nim	4
 tests/e2e/dev-env/t_e2e_dev_env_binds_materialized_producer.nim	nim	2
 tests/e2e/dev-env/t_e2e_dev_env_deactivate_per_shell.nim	nim	7
 tests/e2e/dev-env/t_e2e_dev_env_deactivate_round_trip.nim	nim	5
-tests/e2e/dev-env/t_e2e_dev_env_deactivate_tampered.nim	nim	4
+tests/e2e/dev-env/t_e2e_dev_env_deactivate_tampered.nim	nim	6
 tests/e2e/dev-env/t_e2e_dev_env_edge_cache.nim	nim	3
 tests/e2e/dev-env/t_e2e_dev_env_export_bash.nim	nim	4
 tests/e2e/dev-env/t_e2e_dev_env_export_fish.nim	nim	4

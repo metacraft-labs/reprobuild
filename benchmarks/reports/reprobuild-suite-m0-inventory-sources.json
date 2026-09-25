@@ -19937,7 +19937,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/dev-env/t_e2e_dev_env_deactivate_tampered.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

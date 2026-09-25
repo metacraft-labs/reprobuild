@@ -149,7 +149,11 @@
       # asFailed` blamed on the compiler. The pin carries the fix into every
       # build that has no io-mon sibling; the sibling-overridden developer
       # shells already have it. b5c7990 is the tip of io-mon's `dev`.
-      url = "github:metacraft-labs/io-mon/2717ce8c574ca7a4a0b8f32e7fc0381a71a325ec";
+      # Keep shim allocations out of rustc's replacement allocator: its clock
+      # reads can run under the allocator lock. b72fb8d preserves time evidence
+      # while fixing native flake activation of rustc-based environments.
+      # 0c312f2 also drops unused glibc companion libraries from the shim.
+      url = "github:metacraft-labs/io-mon/0c312f261ecbbad3931132aed4ba31167b2de202";
       flake = false;
     };
     nim-shm-gset-src = {

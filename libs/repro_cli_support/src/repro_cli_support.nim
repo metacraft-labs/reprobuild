@@ -14486,6 +14486,7 @@ proc runDevEnvExportCommand(args: openArray[string];
   # the DEFAULT activation path while `repro exec` was correct.
   var plan = shellOpsToExportPlan(
     devEnvToolShellOpsAt(edge.interfacePath, selection.outDir))
+  let toolOpCount = plan.len
   plan.add(devEnvArtifactToExportPlan(edge.artifactPath))
   # M77 — emit the cache-key as the ``__REPRO_APPLIED`` marker. The
   # next prompt's fast path re-derives the same key from on-disk
@@ -14513,8 +14514,10 @@ proc runDevEnvExportCommand(args: openArray[string];
         return 1
     else:
       snapshotProcessEnv()
-  let manifest = buildRollbackManifest(plan, preEnv, fingerprint,
+  var manifest = buildRollbackManifest(plan, preEnv, fingerprint,
     activationScript, parsed.shell)
+  manifest.hasToolOpCount = true
+  manifest.toolOpCount = toolOpCount
   try:
     writeRollbackManifest(manifestPath, manifest)
   except CatchableError as err:
@@ -14608,15 +14611,18 @@ proc runDevEnvDeactivateCommand(args: openArray[string]): int =
   # request a different shell's deactivation syntax, e.g. user-side
   # ``--shell=pwsh`` against a bash-activated manifest, and the hash
   # seal must compare against the activation-time shell).
-  # Recomputed, not remembered: the seal's whole point is that it derives
-  # the script again from on-disk state. The tool ops are part of the
-  # emitted script now, so they have to be part of this re-derivation too
-  # — otherwise every deactivation of a correctly-activated shell would
-  # report tampering. Addressed by path because this arm has only the
-  # artifact it was handed; the interface artifact is its sibling.
-  var rederivedPlan = shellOpsToExportPlan(
-    devEnvToolShellOpsAt(parentDir(artifactPath) / "project-interface.rbsz",
-      parentDir(artifactPath)))
+  # New manifests retain the activation-time provisioning prefix. Never
+  # provision again while leaving an environment: the daemon, mode or PATH
+  # may have changed. The complete script hash still seals these operations
+  # together with the independently decoded artifact below. Legacy manifests
+  # keep their original verification path until their next activation.
+  var rederivedPlan =
+    if manifest.hasToolOpCount:
+      capturedToolExportPlan(manifest)
+    else:
+      shellOpsToExportPlan(
+        devEnvToolShellOpsAt(parentDir(artifactPath) / "project-interface.rbsz",
+          parentDir(artifactPath)))
   rederivedPlan.add(devEnvArtifactToExportPlan(artifactPath))
   rederivedPlan.appendReproActiveManifestMarker(parsed.manifestPath)
   rederivedPlan.appendReproAppliedMarker(manifest.artifact)

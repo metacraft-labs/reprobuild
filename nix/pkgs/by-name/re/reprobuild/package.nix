@@ -197,6 +197,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   nativeBuildInputs = [
     just
+    python3 # scripts/build_apps.sh stages the Nix daemon through Python.
     makeWrapper
     nimFork
     # Spec-Implementation M2a: clingo is the ASP solver reprobuild's
