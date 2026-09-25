@@ -484,6 +484,20 @@ jobs:
           # file name, so running it under another one is sound.
           $orchestrator = "build\bin\repro-orchestrator.exe"
           Copy-Item -LiteralPath "build\bin\reprobuild.exe" -Destination $orchestrator -Force
+
+          # Compile the recipe with the gcc env.ps1 already provisioned. Left
+          # unset, the engine provisions the same pinned WinLibs release a
+          # SECOND time from the builtin catalog, whose entry is the release's
+          # `.7z` asset (env.ps1 fetches its `.zip`). Unpacking that needs a 7z,
+          # which the engine realizes through `msiexec /a` -- and on runners
+          # where the Windows Installer service is unreachable (win-ci-vm-001,
+          # exit 1601) the release leg died with "could not provision the
+          # pinned C compiler ... no 7z extractor available". Same release,
+          # already sha256-verified by windows/ensure-gcc.ps1; the error text
+          # itself names REPRO_BOOTSTRAP_CC as the override.
+          $bootstrapCc = (Get-Command gcc.exe -ErrorAction Stop).Source
+          & $bootstrapCc --version | Select-Object -First 1
+          $env:REPRO_BOOTSTRAP_CC = $bootstrapCc
           try {
             & ".\$orchestrator" build --tool-provisioning=path --daemon=off --no-runquota .#release
             if ($LASTEXITCODE -ne 0) {
