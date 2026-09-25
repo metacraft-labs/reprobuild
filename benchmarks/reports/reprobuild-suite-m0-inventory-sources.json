@@ -5201,7 +5201,7 @@
             "summary",
             "unit"
           ],
-          "line": 555,
+          "line": 561,
           "path": "tests/integration/t_repro_test_runner_process_group_cleanup.nim",
           "patterns": [
             "nim-c"
@@ -27841,6 +27841,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_daemon_core"
       ],
       "owner": "tests/integration",
@@ -30665,7 +30666,9 @@
       "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_core"
+      ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_repro_test_runner_process_group_cleanup.nim",
