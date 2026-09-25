@@ -43,7 +43,10 @@ when defined(macosx) or defined(linux):
     let daemon = startProcess(daemonBin, args = [
       "--socket", socketPath,
       "--cpu-milli", "16000",
-      "--memory-bytes", "17179869184"
+      "--memory-bytes", "17179869184",
+      # Test daemon: keep it out of the host-wide observation store, which
+      # it would otherwise open (and write) before it binds its socket.
+      "--no-write-stats"
     ], options = {poUsePath})
     putEnv("RUNQUOTA_SOCKET", socketPath)
     for _ in 0 ..< 200:
