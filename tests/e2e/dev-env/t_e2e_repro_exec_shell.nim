@@ -76,21 +76,19 @@ proc envFor(c: M4Case): StringTableRef =
   result["REPRO_MONITOR_SHIM_LIB"] = c.shim
 
 proc runProgram(program: string; args: openArray[string]; cwd: string;
-                env: StringTableRef = nil): tuple[exitCode: int; output: string] =
-  var process = startProcess(program,
-    args = @args,
-    workingDir = cwd,
-    env = env,
-    options = {poUsePath, poStdErrToStdOut})
-  let output =
-    if process.outputStream != nil: process.outputStream.readAll()
-    else: ""
-  let exitCode = process.waitForExit()
-  process.close()
-  (exitCode: exitCode, output: output)
+                env: StringTableRef = nil):
+    tuple[exitCode: int; output, errors: string] =
+  ## ``output`` is the child's STDOUT only; ``errors`` is its stderr. They
+  ## are kept apart because stdout is what the assertions parse -- a value
+  ## the command under ``repro exec`` printed, or a ``--print-env`` script
+  ## that gets sourced -- while every activating surface reports its
+  ## progress ("repro dev-env: preparing the environment for ...",
+  ## Interactive-UX-And-Progress.md Principle 1) on stderr.
+  let res = runProgramSplit(program, args, cwd, env)
+  (exitCode: res.code, output: res.stdout, errors: res.stderr)
 
 proc runRepro(c: M4Case; args: openArray[string]):
-    tuple[exitCode: int; output: string] =
+    tuple[exitCode: int; output, errors: string] =
   runProgram(c.reproBin, args, c.repoRoot, c.envFor())
 
 proc requireRepro(c: M4Case; args: openArray[string]): string =
@@ -98,7 +96,7 @@ proc requireRepro(c: M4Case; args: openArray[string]): string =
   if res.exitCode != 0:
     raise newException(OSError,
       "repro command failed with exit " & $res.exitCode & ": " &
-        args.join(" ") & "\n" & res.output)
+        args.join(" ") & "\n" & res.output & res.errors)
   res.output
 
 proc jsonArrayHasSuffix(node: JsonNode; suffix: string): bool =
@@ -139,7 +137,7 @@ proc posixSourceValue(path, cwd: string): string =
   ], cwd)
   if res.exitCode != 0:
     raise newException(OSError,
-      "POSIX shell source failed: " & res.output)
+      "POSIX shell source failed: " & res.output & res.errors)
   res.output.firstNonEmptyLine()
 
 proc fishQuote(value: string): string =
@@ -151,7 +149,7 @@ proc fishSourceValue(fish, path, cwd: string): string =
       "; printf '%s|%s|%s\\n' $AUX_VALUE $FIXTURE_MODE $REPRO_DEV_ENV_TASKS"
   ], cwd)
   if res.exitCode != 0:
-    raise newException(OSError, "Fish source failed: " & res.output)
+    raise newException(OSError, "Fish source failed: " & res.output & res.errors)
   res.output.firstNonEmptyLine()
 
 when defined(windows):
@@ -165,7 +163,7 @@ when defined(windows):
         "; Write-Output \"$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_TASKS\""
     ], cwd)
     if res.exitCode != 0:
-      raise newException(OSError, "PowerShell source failed: " & res.output)
+      raise newException(OSError, "PowerShell source failed: " & res.output & res.errors)
     res.output.firstNonEmptyLine()
 
 when isNixSupported:
@@ -264,10 +262,10 @@ suite "e2e_repro_exec_shell_artifact_consumers":
           c.repoRoot, env)
         # Not fatal: the developer is still handed a working environment.
         check warned.exitCode == 0
-        let warning = warned.output.unresolvedModeWarningLine()
+        let warning = (warned.output & warned.errors).unresolvedModeWarningLine()
         check warning.len > 0
         if warning.len == 0:
-          checkpoint(warned.output)
+          checkpoint(warned.output & warned.errors)
           continue
         # The warning must offer a way out, not merely describe the problem.
         check warning.contains("defaultToolProvisioning")
@@ -277,10 +275,10 @@ suite "e2e_repro_exec_shell_artifact_consumers":
           checkpoint("advertised flag: " & flag)
           let flagged = runProgram(c.reproBin,
             surface.prefix & @[flag] & surface.suffix, c.repoRoot, env)
-          check not flagged.output.contains("unsupported " & surface.name &
+          check not (flagged.output & flagged.errors).contains("unsupported " & surface.name &
             " flag")
           check flagged.exitCode == 0
-          check flagged.output.unresolvedModeWarningLine().len == 0
+          check (flagged.output & flagged.errors).unresolvedModeWarningLine().len == 0
 
         # The environment-variable remedy the warning names.
         var withEnvMode = newStringTable(modeCaseSensitive)
@@ -290,7 +288,7 @@ suite "e2e_repro_exec_shell_artifact_consumers":
         let viaEnv = runProgram(c.reproBin, surface.prefix & surface.suffix,
           c.repoRoot, withEnvMode)
         check viaEnv.exitCode == 0
-        check viaEnv.output.unresolvedModeWarningLine().len == 0
+        check (viaEnv.output & viaEnv.errors).unresolvedModeWarningLine().len == 0
 
       # The recipe remedy the warning names.
       writeFile(c.projectRoot / "reprobuild.nim",
@@ -300,7 +298,7 @@ suite "e2e_repro_exec_shell_artifact_consumers":
         let viaRecipe = runProgram(c.reproBin, surface.prefix & surface.suffix,
           c.repoRoot, env)
         check viaRecipe.exitCode == 0
-        check viaRecipe.output.unresolvedModeWarningLine().len == 0
+        check (viaRecipe.output & viaRecipe.errors).unresolvedModeWarningLine().len == 0
 
     test "e2e_repro_exec_uses_cached_dev_env_artifact":
       let c = prepareCase("repro-m4-exec-cache")
@@ -311,6 +309,8 @@ suite "e2e_repro_exec_shell_artifact_consumers":
         "exec", c.projectRoot, "--dev-env-stats=" & firstStatsPath,
         "--", "fixture-tool"
       ])
+      if first.exitCode != 0:
+        checkpoint(first.output & first.errors)
       check first.exitCode == 0
       check first.output.contains("tool:alpha:dev:build")
       let firstStats = parseJson(readFile(firstStatsPath))
