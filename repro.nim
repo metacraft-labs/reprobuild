@@ -472,10 +472,6 @@ package reprobuild:
     # path-mode resolver would otherwise fail if clang were absent.
     when defined(macosx):
       "clang"
-      # clang shells out to `lipo` for every fat (`-arch arm64 -arch arm64e`)
-      # link, which the macOS monitor-shim edge is; see the `lipo` package in
-      # repro_dsl_stdlib/packages/host_system_tools.nim.
-      "lipo"
     "just >=1"
     # The shipped CLI is compiled with ``-d:ssl``. Model the corresponding
     # link/runtime closure explicitly so graph-built binaries receive
@@ -2366,6 +2362,19 @@ package reprobuild:
           @["-arch arm64", "-arch arm64e"]
         else:
           @[]
+      # clang joins the arm64 and arm64e slices by running `lipo` itself, and
+      # it looks for `lipo` on the PATH the edge was started with. Under
+      # `--tool-provisioning=path` that PATH is composed from the declared
+      # tools' directories, and nix's clang-wrapper directory does not carry
+      # `lipo`, so every fat link here died with `clang: error: unable to
+      # execute command: posix_spawn failed` / `lipo command failed` (0.2.0
+      # dry runs 36070347140 and 36080613401). Scoped to this edge's env, the
+      # same way the i686 edges below carry their compiler's bin dir; the
+      # fallback is where Xcode's Command Line Tools install it.
+      let macosLipo = findExe("lipo")
+      let macosShimEnv = @[("PATH",
+        (if macosLipo.len > 0: macosLipo.parentDir else: "/usr/bin") &
+          $PathSep & getEnv("PATH"))]
       reprobuildTestFixturesActions.add(nim.c(
         source = ioMonSrc / "io_mon" / "shim" / "macos_interpose.nim",
         # ``-d:useMalloc``: io-mon's shim entry points REFUSE to compile
@@ -2381,6 +2390,7 @@ package reprobuild:
         paths = @[ioMonSrc, stackableHooksSrc, shmGsetSrc],
         passC = macosShimArchFlags,
         passL = macosShimArchFlags,
+        extraEnv = macosShimEnv,
         nimcache = monitorShimNimcache,
         dependencyPolicy = monitorShimPolicy,
         actionId = "reprobuild.test_fixtures.monitor_shim"))
