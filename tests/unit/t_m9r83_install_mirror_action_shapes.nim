@@ -20,6 +20,16 @@ when defined(reproProviderMode):
       arguments: projectRoot,
       namespace: "project")
 
+  proc createRecipeRoot(projectRoot: string) =
+    ## A package's project root carries the recipe its ``PackageDef`` names.
+    ## The source cache identity hashes those bytes as its provider-revision
+    ## component and refuses a root without one (``CacheKeyError``), so a
+    ## fixture root has to hold a real, non-empty ``repro.nim`` -- one per
+    ## package, naming it, so two fixture packages never share a revision.
+    createDir(projectRoot)
+    writeFile(projectRoot / "repro.nim",
+      "# fixture recipe for " & projectRoot.extractFilename & "\n")
+
   proc extractActions(fragment: GraphFragment): seq[BuildActionDef] =
     for node in fragment.nodes:
       if node.kind != gnkAction:
@@ -60,6 +70,7 @@ when defined(linux) and defined(reproProviderMode):
     let transitiveLib = scratch / "transitive" / ".repro/output/install/usr/lib"
     let library = (if ownLibrary: installedUsr / "lib" else: transitiveLib) /
       "librepro_mirror_fixture.so"
+    createRecipeRoot(projectRoot)
     createDir(inputBinary.parentDir)
     createDir(directMirror / "usr/lib")
     createDir(transitiveLib)
@@ -176,7 +187,7 @@ suite "M9.R.83 install mirror emitted action shape":
       let projectRoot = scratch / "typed-recipe"
       if dirExists(scratch):
         removeDir(scratch)
-      createDir(projectRoot)
+      createRecipeRoot(projectRoot)
       defer:
         if dirExists(scratch):
           removeDir(scratch)
@@ -250,7 +261,7 @@ suite "M9.R.83 install mirror emitted action shape":
       let projectRoot = scratch / "custom-shell-recipe"
       if dirExists(scratch):
         removeDir(scratch)
-      createDir(projectRoot)
+      createRecipeRoot(projectRoot)
       defer:
         if dirExists(scratch):
           removeDir(scratch)
@@ -352,7 +363,7 @@ suite "M9.R.83 install mirror emitted action shape":
         ## Realise ``packageName`` as its own fragment and return the ids
         ## of every action the fragment emitted.
         let projectRoot = scratch / packageName
-        createDir(projectRoot)
+        createRecipeRoot(projectRoot)
         let pkg = PackageDef(
           packageName: packageName,
           sourceFile: projectRoot / "repro.nim",
