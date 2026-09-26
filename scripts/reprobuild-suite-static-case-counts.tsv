@@ -1763,7 +1763,8 @@ tests/unit/test_dev_shell_hook_scope.py	python	6
 tests/unit/test_graph_owned_test_artifacts.py	python	23
 tests/unit/test_nix_daemon_descriptors.py	python	5
 tests/unit/test_package_root_anchor.py	python	3
-tests/unit/test_publish_surface_routing.py	python	35
+tests/unit/test_publish_surface_routing.py	python	32
+tests/unit/test_release_native_packages.py	python	7
 tests/unit/test_reprobuild_suite_inventory.py	python	90
 tests/unit/test_wrapper_default_provenance.py	python	3
 tools/catalog-harvester/tests/test_gh_releases_source.nim	nim	26

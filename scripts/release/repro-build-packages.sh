@@ -94,6 +94,43 @@ nbin="$(find "$payload/bin" -type f 2>/dev/null | wc -l | tr -d ' ')"
 [ "$nbin" -gt 0 ] || die "$topdir/bin contains no files; refusing to build an empty package"
 log "payload: $nbin file(s) in bin/"
 
+# ---------------------------------------------------------------------
+# The installed filesystem tree, shared by every ecosystem
+# ---------------------------------------------------------------------
+# The archive's bin/ holds portable LAUNCHERS that exec the real binary
+# through the bundled loader at "$(dirname "$0")/../lib". That relative
+# lookup is the archive's whole relocation contract, so the tree is
+# installed INTACT as /usr/lib/reprobuild/{bin,lib}. Spreading bin/ into
+# /usr/bin and lib/ into /usr/lib/reprobuild -- what the packages did
+# before -- points every launcher at /usr/lib/ld-linux-x86-64.so.2 with
+# /usr/lib as its library path: the bundled loader is not there, and a
+# host library directory is. The package installs and nothing runs.
+#
+# /usr/bin gets one two-line wrapper per public command. A symlink would
+# not do: the launcher resolves its OWN directory from $0, which through
+# a symlink is /usr/bin.
+stage_tree() {
+  _t="$1"
+  mkdir -p "$_t/usr/bin" "$_t/usr/lib/reprobuild"
+  cp -a "$payload/bin" "$_t/usr/lib/reprobuild/bin"
+  if [ -d "$payload/lib" ]; then
+    cp -a "$payload/lib" "$_t/usr/lib/reprobuild/lib"
+  fi
+  _ncmd=0
+  for _c in "$payload/bin"/*; do
+    _n="$(basename "$_c")"
+    # Public commands only: not the dot-prefixed `.X.real` binaries the
+    # launchers exec, and not data files that live beside them.
+    case "$_n" in .*|*.json) continue ;; esac
+    [ -f "$_c" ] && [ -x "$_c" ] || continue
+    printf '#!/bin/sh\nexec /usr/lib/reprobuild/bin/%s "$@"\n' "$_n" > "$_t/usr/bin/$_n"
+    chmod 0755 "$_t/usr/bin/$_n"
+    _ncmd=$((_ncmd + 1))
+  done
+  [ "$_ncmd" -gt 0 ] || die "no public commands in $topdir/bin; refusing to build a package that puts nothing on PATH"
+  [ -x "$_t/usr/bin/repro" ] || die "$topdir/bin has no 'repro' command"
+}
+
 want() {
   case "$ecosystem" in
     all) return 0 ;;
@@ -109,12 +146,8 @@ build_deb() {
   command -v dpkg-deb >/dev/null 2>&1 || die 'dpkg-deb not found (install dpkg-dev)'
   _root="$stage/deb"
   rm -rf "$_root"
-  mkdir -p "$_root/DEBIAN" "$_root/usr/bin" "$_root/usr/lib/reprobuild"
-
-  cp -a "$payload/bin/." "$_root/usr/bin/"
-  if [ -d "$payload/lib" ]; then
-    cp -a "$payload/lib/." "$_root/usr/lib/reprobuild/"
-  fi
+  mkdir -p "$_root/DEBIAN"
+  stage_tree "$_root"
 
   cat > "$_root/DEBIAN/control" <<CONTROL
 Package: reprobuild
@@ -144,7 +177,10 @@ build_rpm() {
   command -v rpmbuild >/dev/null 2>&1 || die 'rpmbuild not found (install rpm-build)'
   _top="$stage/rpmbuild"
   mkdir -p "$_top/SPECS" "$_top/SOURCES" "$_top/BUILD" "$_top/RPMS" "$_top/SRPMS"
-  cp "$tarball" "$_top/SOURCES/"
+  _tree="$stage/rpmtree"
+  rm -rf "$_tree"
+  stage_tree "$_tree"
+  ( cd "$_tree" && tar -cf "$_top/SOURCES/tree.tar" usr ) || die 'could not archive the rpm tree'
 
   # %define _build_id_links none: rpm 4.14+ generates /usr/lib/.build-id
   # symlinks from ELF notes and FAILS the build on a collision. Our
@@ -162,7 +198,7 @@ Release:        $release_num%{?dist}
 Summary:        Reproducible build system
 License:        Apache-2.0
 URL:            $homepage
-Source0:        $(basename "$tarball")
+Source0:        tree.tar
 BuildArch:      $rpm_arch
 # The payload is prebuilt binaries from the release tarball, so there is
 # nothing to compile here and no BuildRequires.
@@ -174,20 +210,20 @@ This package carries the same binaries as the $topdir.tar.gz
 release asset.
 
 %prep
-%setup -q -n $topdir
 
 %build
 # Nothing to build: this is a repackaging of a released binary tarball.
 
 %install
-mkdir -p %{buildroot}%{_bindir} %{buildroot}%{_libdir}/reprobuild
-cp -a bin/. %{buildroot}%{_bindir}/
-if [ -d lib ]; then cp -a lib/. %{buildroot}%{_libdir}/reprobuild/; fi
+# Literal paths, not %{_bindir}/%{_libdir}: an rpm built by Nix defines
+# those as its OWN store path, so the package would install into
+# /nix/store/...-rpm-<ver>/bin. The tree is the one every ecosystem ships.
+mkdir -p %{buildroot}
+tar -xf %{SOURCE0} -C %{buildroot}
 
 %files
-%{_bindir}/*
-%dir %{_libdir}/reprobuild
-%{_libdir}/reprobuild/*
+/usr/bin/*
+/usr/lib/reprobuild
 
 %changelog
 * Mon Jan 01 2026 $maintainer - $version-$release_num
@@ -217,11 +253,7 @@ build_arch() {
     || die 'no tar available'
   _root="$stage/arch"
   rm -rf "$_root"
-  mkdir -p "$_root/usr/bin" "$_root/usr/lib/reprobuild"
-  cp -a "$payload/bin/." "$_root/usr/bin/"
-  if [ -d "$payload/lib" ]; then
-    cp -a "$payload/lib/." "$_root/usr/lib/reprobuild/"
-  fi
+  stage_tree "$_root"
 
   # A pacman package is a tar of the payload plus a .PKGINFO. Building it
   # directly (rather than via makepkg) is what lets the release pipeline

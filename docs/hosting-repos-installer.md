@@ -8,6 +8,23 @@ M2 (`docs/release-signing.md`) made a release *verifiable*. M3 makes it
 and uploads their signed metadata, and an installer that registers the
 repository so every later upgrade is the package manager's own business.
 
+> **Publication has moved to the organisation's repositories (2026-09-26).**
+> Reprobuild has no repository hosts of its own: there is no
+> `deb.reprobuild.com`, `rpm.reprobuild.com` or `keys.reprobuild.com`. Its
+> `.deb` and `.rpm` go into `deb.metacraft-labs.com` and
+> `rpm.metacraft-labs.com`, the repositories every Metacraft product shares,
+> signed with the organisation's key
+> `3CA0 3287 4B65 1B0C F01D  FB67 7EAF 585F B9B5 9164`
+> (metacraft-specs `infrastructure/package-distribution.md` §3, §9.1).
+> `release.yml` builds the packages with `repro-build-packages.sh`, ships them
+> as release assets covered by `SHA256SUMS`, and dispatches
+> `metacraft-labs/metacraft-desktop-packages`, which adds them to both
+> repositories. The per-surface R2 buckets and `repro-publish-repos.sh`
+> targets described below are superseded. The script is kept for the
+> multi-distro installer tests, which use it to build local fixture
+> repositories. Moving the installer's defaults to the organisation hosts is
+> the next change.
+
 ## The shape
 
 ```

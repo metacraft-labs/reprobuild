@@ -210,15 +210,23 @@ make_tarball() {
   _top="reprobuild-$_v-linux-x86_64"
   _d="$WORK/tarballs/$_top"
   rm -rf "$_d"; mkdir -p "$_d/bin" "$_d/lib"
-  cat > "$_d/bin/repro" <<PAYLOAD
+  # Shaped like the release launcher: what it runs lives at
+  # "$(dirname "$0")/../lib". The version comes from there, so a package
+  # that installs bin/ and lib/ apart installs a command that cannot start,
+  # and the upgrade assertions on installed bytes fail instead of passing.
+  cat > "$_d/bin/repro" <<'PAYLOAD'
 #!/bin/sh
-case "\${1:-}" in
-  --version|-V) printf 'reprobuild %s\n' "$_v" ;;
-  *) printf 'reprobuild %s (M3 gate fixture payload)\n' "$_v" ;;
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+lib="$here/../lib/libreprofixture.so"
+[ -f "$lib" ] || { echo "repro: missing $lib" >&2; exit 127; }
+v=$(sed -n 's/^version //p' "$lib")
+case "${1:-}" in
+  --version|-V) printf 'reprobuild %s\n' "$v" ;;
+  *) printf 'reprobuild %s (M3 gate fixture payload)\n' "$v" ;;
 esac
 PAYLOAD
   chmod 0755 "$_d/bin/repro"
-  printf 'fixture runtime lib for %s\n' "$_v" > "$_d/lib/libreprofixture.so"
+  printf 'version %s\n' "$_v" > "$_d/lib/libreprofixture.so"
   ( cd "$WORK/tarballs" && tar -czf "$_top.tar.gz" "$_top" )
   echo "$WORK/tarballs/$_top.tar.gz"
 }

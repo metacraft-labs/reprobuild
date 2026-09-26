@@ -61,6 +61,26 @@
       "archive_ext": "zip"
     }
   ],
+  "packages": [
+    {
+      "$comment": [
+        "Native packages built in the publish job from one platform's archive",
+        "(scripts/release/repro-build-packages.sh) and published like any other",
+        "asset: they are in the expected set, in SHA256SUMS, and signed with the",
+        "rest. After the release is public, metacraft-labs/metacraft-desktop-packages",
+        "adds them to the organisation's repositories (deb./rpm.metacraft-labs.com).",
+        "`asset` is a template; {version} is the reprobuild.nimble version."
+      ],
+      "ecosystem": "deb",
+      "from": "linux-x86_64",
+      "asset": "reprobuild_{version}-1_amd64.deb"
+    },
+    {
+      "ecosystem": "rpm",
+      "from": "linux-x86_64",
+      "asset": "reprobuild-{version}-1.x86_64.rpm"
+    }
+  ],
   "$deliberately-absent": {
     "linux-aarch64": [
       "The runner class is real -- eph-linux-arm64 (Tart Linux guest on m3,",
