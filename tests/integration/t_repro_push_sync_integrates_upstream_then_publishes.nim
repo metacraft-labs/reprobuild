@@ -389,8 +389,14 @@ suite "RA-25 — repro push --sync integrates upstream then publishes":
 
       # The same build, at a second path: the whole bin directory, so the thin
       # client finds its engine (and the engine its DLLs) beside it.
+      #
+      # ``copyDirWithPermissions``, not ``copyDir``: on POSIX ``copyDir`` drops
+      # every mode bit, so the relocated ``repro`` could not be executed and
+      # the case died with "Permission denied" before it reached the push it
+      # exists to test. Windows has no execute bit, which is why the plain copy
+      # passed there.
       let relocatedDir = fx.scratch / "relocated-bin"
-      copyDir(fx.reproBin.parentDir, relocatedDir)
+      copyDirWithPermissions(fx.reproBin.parentDir, relocatedDir)
       let relocatedRepro = relocatedDir / fx.reproBin.extractFilename
       for path in [fx.workspaceRoot, fx.workspaceRoot / ".repro" / "manifests"]:
         let reanchored = runShell(shellCommand(@[relocatedRepro, "hooks",
