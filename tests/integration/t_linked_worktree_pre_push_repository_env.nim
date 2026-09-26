@@ -250,13 +250,6 @@ proc report(fx: Fixture): JsonNode =
 proc refsRecord(localRef, localSha, remoteRef, remoteSha: string): string =
   localRef & " " & localSha & " " & remoteRef & " " & remoteSha & "\n"
 
-proc stableLockBody(content: string): string =
-  ## The local-directory lock backend rewrites ``created_at`` on each gate.
-  ## Compare the durable repository observations, not wall-clock metadata.
-  for line in content.splitLines():
-    if not line.startsWith("created_at = "):
-      result.add(line & "\n")
-
 proc noticesText(document: JsonNode): string =
   for notice in document["notices"]:
     result.add(notice.getStr() & "\n")
@@ -533,9 +526,17 @@ suite "linked-worktree pre-push repository-local environment isolation":
       check directReport["activeBranch"].getStr() == "linked"
       check directReport["pushedBranch"].getStr() == "linked"
       check directReport["lockUpdate"]["triggerSha"].getStr() == linkedSha
-      check directReport["lockUpdate"]["kind"].getStr() == "created"
-      check stableLockBody(readFile(fx.latestLock(linkedSha))) ==
-        stableLockBody(lockBefore)
+      # The push above already wrote the record anchored at this exact commit,
+      # and this lock store has no upstream, so it is still an unpublished
+      # draft on disk. A gate that finds its expected record on disk treats it
+      # as current and does NOT rewrite it (73ffabdbe, "lock: anchor a push's
+      # record at its own commit"): a rewrite changes only ``created_at``, and
+      # that alone moves the lock's identity out from under any certificate
+      # issued against the draft. So the second run reports "already-current"
+      # and leaves the bytes untouched — which also proves the scrubbed direct
+      # dispatch computed the same trigger and record path as the real push.
+      check directReport["lockUpdate"]["kind"].getStr() == "already-current"
+      check readFile(fx.latestLock(linkedSha)) == lockBefore
 
       # Ordinary checkouts use the same protocol and retain the pre-fix result.
       let standardRefs = fx.scratch / "standard-refs.bin"
