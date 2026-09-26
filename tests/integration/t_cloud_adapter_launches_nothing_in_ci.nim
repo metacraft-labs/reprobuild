@@ -81,10 +81,21 @@ proc scratchDir(name: string): string =
 let stderrLog = (createDir(scratch); scratch / "stderr.log")
 doAssert (writeFile(stderrLog, ""); reopen(stderr, stderrLog, fmWrite))
 
+proc runAttestCommandIn(args: seq[string]): int =
+  ## The command, run against a STATED environment — the empty one.
+  ##
+  ## Every library call in this file already said which environment it
+  ## meant, and every case that went through the command still read the
+  ## process environment, so this gate was a statement about the machine
+  ## it ran on: measured, one exported variable whose value the probe
+  ## plan legitimately spells took it from 17 passing cases to 13 with
+  ## 4 failures and exit 1.
+  runAttestCommand(args, fixedEnvLookup([]))
+
 proc runCapturing(args: seq[string]): tuple[code: int; err: string] =
   flushFile(stderr)
   let before = getFileSize(stderrLog)
-  result.code = runAttestCommand(args)
+  result.code = runAttestCommandIn(args)
   flushFile(stderr)
   var f: File
   doAssert open(f, stderrLog, fmRead)
@@ -374,8 +385,38 @@ suite "the seam: the dry run does not reach it and the armed path does":
       putEnv(name, probeSpec().imageReference)
       check checkedCloudLaunchPlan(probeSpec(), fixedEnvLookup([])) ==
         plain
+      # THE MISSING HALF, added by review. The line above says a stated
+      # environment gives the same answer whatever is exported. On its
+      # own that is satisfied by a build in which nothing ever reads the
+      # process environment at all — which would make the title true for
+      # the wrong reason — and it is also satisfied while OTHER calls in
+      # this same file quietly read it, which is what was happening:
+      # two of them did, and the gate was 17/2 and exit 1 under this
+      # very export until they were repaired.
+      #
+      # So the ambient read is exercised rather than assumed: the SAME
+      # call with no environment stated refuses, here, now, with this
+      # variable set. That is what makes stating one a decision.
+      var ambientRefused = false
+      try:
+        discard checkedCloudLaunchPlan(probeSpec())
+      except CloudLaunchError as err:
+        ambientRefused =
+          err.condition == clcLaunchPlanCarriesCredentialMaterial
+      check ambientRefused
     finally:
       if had: putEnv(name, saved) else: delEnv(name)
+    # …and with that variable put back, an unstated call is fine again —
+    # but only when NO declared secret is set, because any one of them
+    # is enough to refuse. Guarding on the single variable this case
+    # exported is not enough, and getting that wrong is how review's
+    # first draft of this line failed while running under a DIFFERENT
+    # variable's export.
+    var anySecretSet = false
+    for other in allCredentialEnvNames():
+      if getEnv(other).len >= MinSecretValueLen: anySecretSet = true
+    if not anySecretSet:
+      check checkedCloudLaunchPlan(probeSpec()) == plain
     var refused = false
     try:
       discard checkedCloudLaunchPlan(probeSpec(),
@@ -408,10 +449,17 @@ suite "the process: nothing was started":
     try:
       putEnv("PATH", shimDir & ":" & savedPath)
       let ledger = EffectorLedger()
+      # The environment is STATED here too. Found by review, running
+      # this gate with one credential variable exported whose value a
+      # probe plan legitimately spells: this call and the one in the
+      # socket case next door were the two in this file that still read
+      # the process environment, and 19 passing cases became 17 with 2
+      # failures and exit 1 — the same fault the change closed at the
+      # COMMAND, surviving in two direct library calls.
       discard performCloudLaunch(probeSpec(), clmDryRun,
-        recordingEffector(ledger))
+        recordingEffector(ledger), fixedEnvLookup([]))
       check ledger.calls == 0
-      check runAttestCommand(launchArgs()) == AttestExitAccepted
+      check runAttestCommandIn(launchArgs()) == AttestExitAccepted
     finally:
       putEnv("PATH", savedPath)
     check shimInvocations() == 0
@@ -439,11 +487,12 @@ suite "the socket: none was opened":
       check withSocket == before + 1
       probe.close()
       check socketFdCount(ProcFdRoot) == before
-      # And now the measurement.
+      # And now the measurement, against a STATED environment — see the
+      # note in the process case above.
       let ledger = EffectorLedger()
       discard performCloudLaunch(probeSpec(), clmDryRun,
-        recordingEffector(ledger))
-      check runAttestCommand(launchArgs()) == AttestExitAccepted
+        recordingEffector(ledger), fixedEnvLookup([]))
+      check runAttestCommandIn(launchArgs()) == AttestExitAccepted
       check socketFdCount(ProcFdRoot) == before
 
 suite "the filesystem: only what was asked for":
@@ -451,12 +500,12 @@ suite "the filesystem: only what was asked for":
   test "a dry run writes nothing, and --out writes exactly one file":
     let observed = scratchDir("filesystem-out")
     check entriesOf(observed).len == 0
-    check runAttestCommand(launchArgs()) == AttestExitAccepted
+    check runAttestCommandIn(launchArgs()) == AttestExitAccepted
     check entriesOf(observed).len == 0
     # The control: the same command, asked to write, writes one file —
     # and it is the manifest, not a receipt for anything created.
     let outPath = observed / "reproos.attested-image.json"
-    check runAttestCommand(launchArgs() & @["--out", outPath]) ==
+    check runAttestCommandIn(launchArgs() & @["--out", outPath]) ==
       AttestExitAccepted
     check entriesOf(observed) == @["reproos.attested-image.json"]
     let parsed = parseAttestedImageManifest(readFile(outPath), outPath)
@@ -481,7 +530,7 @@ suite "the command line cannot ask for a launch":
     check refusedFlags == 8
     # And the same invocation WITHOUT any of them is accepted, so the
     # refusals above are about the flag and not about the rest of it.
-    check runAttestCommand(launchArgs()) == AttestExitAccepted
+    check runAttestCommandIn(launchArgs()) == AttestExitAccepted
 
   test "the command describes the launch it was ASKED for":
     # The hole this closes was found by mutating the command rather than
@@ -528,7 +577,7 @@ suite "the command line cannot ask for a launch":
       # out from under this list is red rather than silently unprobed.
       check replaced == 1
       check args.len == base.len
-      check runAttestCommand(args) == AttestExitUsage
+      check runAttestCommandIn(args) == AttestExitUsage
       inc probed
     # …and the set probed is the set the library says reaches a command
     # line, so a parameter added to that set without a probe is red.
@@ -538,23 +587,107 @@ suite "the command line cannot ask for a launch":
     check probed == reaching
     check probed == 6
 
-suite "nothing in this build could launch anything":
+suite "the command line still cannot launch anything":
 
-  test "no source under libs or apps calls the procedure that would":
+  test "the armed path has exactly one caller, and it is the leased one":
+    # This case used to assert that NOTHING under `libs` or `apps`
+    # called the procedure that launches. That was true and it was the
+    # reason the whole teardown substrate was a library property rather
+    # than a product one: the release, the handlers and the sweep had no
+    # caller either, so an armed launch written later would have created
+    # an instance with none of them on.
+    #
+    # The claim is therefore an ACCOUNTING now, not a zero. There is
+    # exactly ONE caller of the armed path in the shipped tree, it is
+    # the leased launch, and that procedure refuses to create anything
+    # outside a `withCloudLease` scope. A second caller appearing
+    # anywhere is red; so is the one caller disappearing.
+    const Holder = "repro_attest/cloud_lease.nim"
     var scanned = 0
-    var callSites = 0
+    var holderFiles = 0
+    var holderSites = 0
+    var elsewhereSites = 0
     var armedMentions = 0
     for root in ["libs", "apps"]:
       for path in nimSourcesUnder(repoRoot / root):
         inc scanned
-        callSites += occurrencesIn(path, "performCloudLaunch(")
-        if path.endsWith("cloud_launch.nim"): continue
+        let sites = occurrencesIn(path, "performCloudLaunch(")
+        if path.endsWith(Holder):
+          inc holderFiles
+          # ONE site, and it is the call. The declaration is next door
+          # in `cloud_launch.nim` and is spelled with a `*` before the
+          # parenthesis, so this needle does not match it — which is
+          # why the number here is one and not two.
+          holderSites += sites
+        else:
+          elsewhereSites += sites
+        if path.endsWith("cloud_launch.nim") or path.endsWith(Holder):
+          continue
         armedMentions += occurrencesIn(path, "clmArmed")
     # The instrument's floor: a walk that found almost nothing would
-    # satisfy both zeroes by having nothing to disagree with them.
+    # satisfy every count by having nothing to disagree with them.
     check scanned > 1000
-    check callSites == 0
+    check holderFiles == 1
+    check holderSites == 1
+    check elsewhereSites == 0
+    # And the mode is still named nowhere else — in particular, nowhere
+    # in the command-line surface.
     check armedMentions == 0
+
+  test "no command-line surface can reach the armed path":
+    # The claim that survives the change above, and the one an operator
+    # cares about: there is no flag that launches. The leased launch is
+    # reachable from a library caller that supplies an effector, and
+    # this build's command supplies none and names neither procedure.
+    let cli = repoRoot / "libs/repro_cli_support/src/repro_cli_support/attest.nim"
+    check fileExists(cli)
+    check occurrencesIn(cli, "performCloudLaunch(") == 0
+    check occurrencesIn(cli, "performLeasedCloudLaunch(") == 0
+    check occurrencesIn(cli, "clmArmed") == 0
+    # The control: the same reader over the same file finds the sweep,
+    # which this build DOES drive from the command line — so the three
+    # zeroes are measurements and not a path that reads nothing.
+    check occurrencesIn(cli, "reapCloudLeases(") == 1
+
+  test "the OTHER way to create one is accounted for too":
+    # The accounting above is over ONE spelling. Handing an effector the
+    # invocation directly — `effector(CloudEffect(argv: leasedLaunchPlan
+    # (…)))` — creates an instance without going near the procedure that
+    # refuses outside a lease scope, and the gates' own child helper
+    # does exactly that. So the renderers that PRODUCE a create
+    # invocation are counted as well, and a new consumer of one under
+    # `libs` or `apps` is red until somebody says why it is there.
+    #
+    # This does not make the guard total: a caller could inline the
+    # argument vector. What it removes is the cheap way past it, which
+    # is the one a next agent writing an armed launch would reach for.
+    var renderers = 0
+    var consumers: seq[string] = @[]
+    for root in ["libs", "apps"]:
+      for path in nimSourcesUnder(repoRoot / root):
+        let sites = occurrencesIn(path, "leasedLaunchPlan(") +
+                    occurrencesIn(path, "cloudLaunchPlan(")
+        if sites == 0: continue
+        renderers += sites
+        consumers.add path.extractFilename
+    consumers.sort()
+    # `cloud_launch.nim` renders it once, inside the checked wrapper;
+    # `cloud_lease.nim` rewrites that output once and hands it to the
+    # armed path; the command renders it once to PRINT it and never
+    # hands it to anything. Three files, one site each, and each one is
+    # named — the declarations do not count, because a `*` sits between
+    # the name and the parenthesis this needle ends with.
+    check consumers == @["attest.nim", "cloud_launch.nim",
+                         "cloud_lease.nim"]
+    check renderers == 3
+    # The control: the same reader, over a needle that occurs nowhere,
+    # returns nothing — so the enumeration above is a measurement.
+    var absentSites = 0
+    for root in ["libs", "apps"]:
+      for path in nimSourcesUnder(repoRoot / root):
+        absentSites += occurrencesIn(path,
+          "leasedLaunchPlan" & "NoSuch" & "Renderer(")
+    check absentSites == 0
 
   test "the scanner finds both in a file that has both":
     # The negative control. Run against THIS file, which calls the

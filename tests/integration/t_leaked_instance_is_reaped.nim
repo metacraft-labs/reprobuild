@@ -215,6 +215,74 @@ proc reaperCallSitesIn(path: string): tuple[sweep, tagSweep: int] =
   (occurrencesOf(path, "reapCloudLeases("),
    occurrencesOf(path, "reapExpiredByTag("))
 
+proc runAttestCommandIn(args: seq[string]; toolPath = ""): int =
+  ## The command, run against a STATED environment.
+  ##
+  ## Every library call in this file already said which environment it
+  ## meant, and every case that went through the command still reached
+  ## the process environment — so this gate was a statement about the
+  ## machine it ran on after all. Measured: one exported variable whose
+  ## value a plan legitimately spells (an image reference is twenty-one
+  ## characters, and the search floor is sixteen) turned this file's 40
+  ## passing cases into 37 with 3 failures and exit 1, and it is
+  ## FAIL-CLOSED, so the failure looked like a finding about the work
+  ## rather than about the room.
+  ##
+  ## `toolPath` is the search path a DESTROYING sweep is allowed to find
+  ## a provider tool on, and stating it is not a convenience: the
+  ## effector resolves the tool against the path it was given, so the
+  ## program a sweep runs is decided by this argument and not by
+  ## whatever is installed on the machine. A case that named a stand-in
+  ## and got the operator's own tool would be measuring the room again,
+  ## one layer down.
+  ##
+  ## No credential variable is ever stated: this gate is about plans and
+  ## leases, not about anybody's credentials.
+  var stated: seq[(string, string)] = @[]
+  if toolPath.len > 0:
+    stated.add ("PATH", toolPath)
+    stated.add ("HOME", getTempDir())
+  runAttestCommand(args, fixedEnvLookup(stated))
+
+let shellToolDir = findExe("rm").parentDir
+  ## Where the ordinary shell tools a stand-in provider script uses live.
+  ##
+  ## Named rather than inherited, because the effector narrows what a
+  ## provider tool can see to a STATED search path — so a script it runs
+  ## has exactly the programs the case said it may have, and a stand-in
+  ## that quietly reached for something else would fail with a message
+  ## about `rm` rather than about anything under test. That narrowing is
+  ## the behaviour, not an inconvenience.
+
+proc statedToolPath(shimDir: string): string =
+  ## The shim first, then the ordinary tools. Deliberately NOT this
+  ## process's own path: what a sweep runs must be decided by the case.
+  shimDir & ":" & shellToolDir
+
+proc withCapturedStdout(path: string;
+                        body: proc (): int): tuple[code: int; text: string] =
+  ## Run `body` with this process's standard output redirected to a
+  ## file, then put it back.
+  ##
+  ## Done with the descriptor rather than with Nim's `reopen`, because
+  ## the command under test writes through the C library and the thing
+  ## being measured is what an operator would SEE — and because the
+  ## descriptor can be restored, which `reopen` cannot portably.
+  flushFile(stdout)
+  let saved = dup(1)
+  doAssert saved >= 0
+  let fd = posix.open(path.cstring, O_WRONLY or O_CREAT or O_TRUNC, 0o644)
+  doAssert fd >= 0
+  doAssert dup2(fd, 1) >= 0
+  discard close(fd)
+  try:
+    result.code = body()
+  finally:
+    flushFile(stdout)
+    doAssert dup2(saved, 1) >= 0
+    discard close(saved)
+  result.text = readFile(path)
+
 proc refuses(body: proc ()): ref CloudLeaseError =
   try:
     body()
@@ -360,7 +428,7 @@ suite "the command writes down the launch it was ASKED for":
     writeFile(gear.root / "uki.bin", "not-a-real-unified-kernel-image")
 
     proc recordFor(args: seq[string]; at: string): CloudLease =
-      check runAttestCommand(args) == AttestExitAccepted
+      check runAttestCommandIn(args) == AttestExitAccepted
       parseCloudLease(readFile(at), at)
 
     let basePath = gear.root / "base.lease"
@@ -453,7 +521,7 @@ suite "the command writes down the launch it was ASKED for":
 
     let leasePath = gear.root / "printed.lease"
     let leasedPlanPath = gear.root / "leased.plan"
-    check runAttestCommand(base & @[
+    check runAttestCommandIn(base & @[
       "--lease-store", gear.store.root,
       "--lease-ttl-seconds", "600", "--now", "1700000000",
       "--lease-out", leasePath,
@@ -476,7 +544,7 @@ suite "the command writes down the launch it was ASKED for":
     # plan carrying none of them, so the presences above are a reading
     # and not a property of every plan this command emits.
     let plainPath = gear.root / "plain.plan"
-    check runAttestCommand(base & @["--plan-out", plainPath]) ==
+    check runAttestCommandIn(base & @["--plan-out", plainPath]) ==
       AttestExitAccepted
     let plain = readFile(plainPath)
     check "--tag-specifications" in plain
@@ -494,7 +562,7 @@ suite "the command writes down the launch it was ASKED for":
     proc manifestFor(ttl, rate, policy: string): string =
       let target = gear.root / ("m-" & ttl & "-" & rate & "-" & policy &
         ".json")
-      check runAttestCommand(@["launch",
+      check runAttestCommandIn(@["launch",
         "--provider", "aws-ec2",
         "--region", "us-east-1",
         "--instance-name", "reproos-lease-probe",
@@ -713,6 +781,10 @@ suite "a leaked instance is reaped":
     check report.events[0].decision == rdOrphaned
     check report.events[0].outcome == roReaped
     check report.events[0].instanceIds == created
+    # The control for the case next door: a sweep that really destroyed
+    # something DOES say so, so "destroyed" being absent there is a
+    # reading and not a word this renderer never emits.
+    check ("destroyed: " & created[0]) in renderReapReportText(report)
     # The instance is gone…
     check liveInstances(gear.provider).len == 0
     # …the effector was actually ASKED, so it is not gone for some other
@@ -837,11 +909,17 @@ suite "the store is a cache; the tags are the authority":
       effector)
     check early.reaped == 0
     check early.nothingToDestroy == 1
+    # Nothing was expired, so there is no event at all — which is a
+    # different statement from "an instance was looked at and left
+    # alone", and the two must not wear the same tally.
+    check early.events.len == 0
     check liveInstances(gear.provider).len == 1
     # …and after it, it does not.
     let late = reapExpiredByTag(cpAwsEc2, childSpec().region, now + 600,
       effector)
     check late.reaped == 1
+    check late.events.len == 1
+    check late.events[0].outcome == roReaped
     check liveInstances(gear.provider).len == 0
 
   test "an instance carrying no lease tag is not swept, and that is a LIMIT":
@@ -940,6 +1018,12 @@ suite "a failing destroy is not swallowed":
       effector)
     check swept.failed == 1
     check swept.reaped == 0
+    # The event, and not only the tally: a listing that failed leaves
+    # one event naming no lease, because there was no listing to read a
+    # lease identifier out of.
+    check swept.events.len == 1
+    check swept.events[0].outcome == roFailed
+    check swept.events[0].leaseId == ""
 
 suite "metering":
 
@@ -982,9 +1066,15 @@ suite "metering":
     check unique.len == 8
     check listCloudLeases(gear.store).len == 8
     # …and every one of them is spelled in the character set a provider
-    # will accept as a label value.
+    # will accept as a label value — which is the LABEL set and not the
+    # command-line set. That distinction is the repair for a case whose
+    # comment claimed this and whose body checked something seven
+    # spellings wider: `.`, `:`, `/`, `@`, `+`, `=` and upper case all
+    # pass a command line and are all refused as a label value, so the
+    # old assertion would have stayed green on an identifier no cloud
+    # would take.
     for id in ids:
-      for c in id: check c in SafeLaunchValueChars
+      for c in id: check c in ProviderLabelValueChars
 
   test "what is standing right now is a question that destroys nothing":
     let gear = freshCase("exposure")
@@ -1097,7 +1187,20 @@ suite "the invocations, and what they carry":
       check lease.ownerHost notin leaseTagValue(lease, cltOwner)
     for tag in CloudLeaseTag:
       for c in leaseTagValue(lease, tag):
-        check c in SafeLaunchValueChars
+        check c in ProviderLabelValueChars
+    # The two sets are not the same set, and this is what stops the
+    # narrower one being widened back to its neighbour: every label
+    # character is a command-line character, and at least one
+    # command-line character is not a label character.
+    check providerLabelSetIsNarrower()
+    var widerBy = 0
+    for c in SafeLaunchValueChars:
+      if c notin ProviderLabelValueChars: inc widerBy
+    # Six punctuation spellings and the twenty-six upper-case letters.
+    check widerBy == 32
+    for c in ['.', ':', '/', '@', '+', '=', 'A', 'Z']:
+      check c in SafeLaunchValueChars
+      check c notin ProviderLabelValueChars
 
 suite "the rules this substrate refuses on":
 
@@ -1180,6 +1283,45 @@ suite "the rules this substrate refuses on":
       check e.condition == cllDestroyInvocationFailed
       reached.incl e.condition
 
+    block:
+      # The identifier retry, at its bound. Every name the minting
+      # source will produce next is RESERVED, which is the same shape a
+      # source that has stopped making progress has and needs no such
+      # source — and reaching the bound is a refusal rather than a spin.
+      let crowded = freshCase("census-identifier")
+      let owner = thisProcessOwner()
+      let first = acquireCloudLease(crowded.store, childSpec(),
+        delayed(seconds = 600), now).lease
+      let serial = parseInt(first.leaseId.rsplit('-', 1)[1])
+      var reserved = 0
+      while reserved <= MaxLeaseIdentifierAttempts:
+        writeFile(recordPath(crowded.store, "rl-" & $now & "-" &
+          $owner.pid & "-" & $(serial + 1 + reserved)), "reserved")
+        inc reserved
+      var spec = childSpec()
+      spec.instanceName = "reproos-lease-probe-crowded"
+      let e = refuses(proc () =
+        discard acquireCloudLease(crowded.store, spec,
+          delayed(seconds = 600), now))
+      check e.condition == cllLeaseIdentifierCouldNotBeMinted
+      reached.incl e.condition
+
+    block:
+      # An armed launch outside a lease scope. Reached from the library
+      # rather than from a child process, because what is being asserted
+      # is the rule and not the exit path.
+      let unheld = freshCase("census-unheld")
+      let holder = acquireCloudLease(unheld.store, childSpec(),
+        delayed(seconds = 600), now, 0,
+        fakeProviderEffector(unheld.provider))
+      let e = refuses(proc () =
+        discard performLeasedCloudLaunch(holder, childSpec(),
+          fakeProviderEffector(unheld.provider), fixedEnvLookup([])))
+      check e.condition == cllArmedLaunchIsNotHeldUnderALease
+      reached.incl e.condition
+      # …and nothing was created on the way to the refusal.
+      check liveInstances(unheld.provider).len == 0
+
     var missing: seq[string] = @[]
     for c in CloudLeaseCondition:
       if c notin reached: missing.add $c
@@ -1187,7 +1329,7 @@ suite "the rules this substrate refuses on":
     var count = 0
     for c in CloudLeaseCondition:
       if c in reached: inc count
-    check count == 8
+    check count == 10
     check count == ord(high(CloudLeaseCondition)) + 1
 
   test "every rule has a site, and every site has exactly one rule":
@@ -1210,7 +1352,7 @@ suite "the rules this substrate refuses on":
         inc j
       found.add name
       i = j
-    check found.len == 8
+    check found.len == 10
     check found.len == ord(high(CloudLeaseCondition)) + 1
     for c in CloudLeaseCondition:
       var seen = 0
@@ -1220,12 +1362,20 @@ suite "the rules this substrate refuses on":
         checkpoint($c & " is raised at " & $seen & " site(s)")
       check seen == 1
 
-suite "this build reaps nothing by itself":
+suite "the reaper has exactly one driver, and it is the command":
 
-  test "no source under libs or apps drives the reaper":
-    # Symmetric with the launch side: the procedures that would destroy
-    # something exist, take an effector, and are called from nowhere in
-    # the shipped tree.
+  test "every call site under libs and apps is in the one file":
+    # This case used to assert that the reaper had NO caller anywhere in
+    # the shipped tree, and it was true — which is precisely what made
+    # the whole substrate a library rather than a safety property. A
+    # sweep nothing runs reduces the cost of a leak to "until somebody
+    # runs the sweep", and nothing bounded that.
+    #
+    # So the claim is now an ACCOUNTING rather than a zero: the sweeps
+    # are driven from exactly one file, that file is the command, and
+    # every other source under `libs` and `apps` still has none. A
+    # second driver appearing anywhere is red, and so is the driver
+    # disappearing.
     #
     # The sweep and its control go through ONE reader, and that is the
     # repair for a row of this change's own mutation table that came
@@ -1234,20 +1384,36 @@ suite "this build reaps nothing by itself":
     # expressions: blinding the LOOP left the control reading its own
     # source and passing, so the instrument was never falsified at all.
     let repoRoot = currentSourcePath().parentDir.parentDir.parentDir
+    const Driver = "repro_cli_support/attest.nim"
     var scanned = 0
-    var sweepSites = 0
-    var tagSweepSites = 0
+    var elsewhereSweep = 0
+    var elsewhereTagSweep = 0
+    var driverSweep = 0
+    var driverTagSweep = 0
+    var driverFiles = 0
     for root in ["libs", "apps"]:
       for path in walkDirRec(repoRoot / root):
         if not path.endsWith(".nim"): continue
         inc scanned
         if path.endsWith("cloud_lease.nim"): continue
         let found = reaperCallSitesIn(path)
-        sweepSites += found.sweep
-        tagSweepSites += found.tagSweep
+        if path.endsWith(Driver):
+          inc driverFiles
+          driverSweep += found.sweep
+          driverTagSweep += found.tagSweep
+        else:
+          elsewhereSweep += found.sweep
+          elsewhereTagSweep += found.tagSweep
     check scanned > 1000
-    check sweepSites == 0
-    check tagSweepSites == 0
+    # The driver exists, is exactly one file, and drives BOTH sweeps —
+    # so a build that shipped the store sweep and quietly dropped the
+    # tag sweep is red here rather than invisible.
+    check driverFiles == 1
+    check driverSweep == 1
+    check driverTagSweep == 1
+    # …and nothing else drives either.
+    check elsewhereSweep == 0
+    check elsewhereTagSweep == 0
     # The control: the SAME reader, over a file that HAS both — this
     # one — returns non-zero, so the two zeroes are measurements.
     let control = reaperCallSitesIn(currentSourcePath())
@@ -1280,8 +1446,8 @@ suite "this build reaps nothing by itself":
       check execShellCmd("aws ec2 describe-instances") == 0
       check fileExists(shimLog)          # the control fired
       removeFile(shimLog)
-      code = runAttestCommand(@["reap", "--lease-store", gear.store.root,
-        "--now", $(now + 6_000)])
+      code = runAttestCommandIn(@["reap", "--lease-store", gear.store.root,
+        "--now", $(now + 6_000)], statedToolPath(shimDir))
     finally:
       putEnv("PATH", savedPath)
     check code == AttestExitAccepted
@@ -1314,13 +1480,638 @@ suite "this build reaps nothing by itself":
 
   test "a store with nothing in it is not an error":
     let gear = freshCase("empty-store")
-    check runAttestCommand(@["reap", "--lease-store", gear.store.root]) ==
+    check runAttestCommandIn(@["reap", "--lease-store", gear.store.root]) ==
       AttestExitAccepted
     # …and a store that is not there IS, because a sweep that silently
     # scanned nothing is indistinguishable from one that found nothing.
-    check runAttestCommand(@["reap", "--lease-store",
+    check runAttestCommandIn(@["reap", "--lease-store",
       gear.root / "no-such-store"]) == AttestExitUsage
-    check runAttestCommand(@["reap"]) == AttestExitUsage
+    check runAttestCommandIn(@["reap"]) == AttestExitUsage
+
+suite "a second destroy of a machine that is already gone":
+
+  test "the three answers a destroy can give, and they are distinct":
+    # The reader, on its own, over values the providers publish. Two of
+    # the three are failures at the exit-code level and only one of
+    # them is a failure for a reaper, which is the whole point: "there
+    # is no such instance" means the machine is not billing, and that
+    # is the outcome the sweep wanted.
+    check destroyDispositionFor(cpAwsEc2, 0, "") == ddDestroyed
+    check destroyDispositionFor(cpAwsEc2, 255,
+      "An error occurred (" & AwsAbsentInstanceMarker & ") when " &
+      "calling the TerminateInstances operation") == ddAlreadyGone
+    # The narrowing, and it is the half that stops this being "swallow
+    # every failure": a refusal that is NOT the absent-instance one is
+    # still a failure, keeps the record, and is tried again.
+    check destroyDispositionFor(cpAwsEc2, 255,
+      "An error occurred (UnauthorizedOperation) when calling the " &
+      "TerminateInstances operation") == ddFailed
+    check destroyDispositionFor(cpAwsEc2, 255,
+      "Could not connect to the endpoint URL") == ddFailed
+    # The other cloud spells it in its own words, and the marker is
+    # read PER PROVIDER: one cloud's absent-instance text is not the
+    # other's, so a reader that matched either everywhere would score a
+    # foreign message as success.
+    for text in ["Could not fetch resource: - The resource " &
+                 "'projects/a-project/zones/us-central1-a/instances/x' " &
+                 "was not found",
+                 "{\"error\":{\"code\":404,\"errors\":" &
+                 "[{\"reason\":\"notFound\"}]}}"]:
+      check destroyDispositionFor(cpGcpCompute, 1, text) == ddAlreadyGone
+      check destroyDispositionFor(cpAwsEc2, 1, text) == ddFailed
+    check destroyDispositionFor(cpGcpCompute, 1,
+      "An error occurred (" & AwsAbsentInstanceMarker & ")") == ddFailed
+    # Each provider's marker set is non-empty, so neither arm is a rule
+    # with no input.
+    for cloud in MeasurableCloud:
+      check alreadyGoneMarkersFor(cloud).len > 0
+
+  test "the retry TERMINATES when the instance is already gone":
+    # The trap this arm exists for, reproduced end to end. The order
+    # this module destroys in is destroy, ledger, remove — so a crash
+    # in the middle leaves a record whose instance is gone. Without the
+    # arm the next sweep scores the refusal `failed`, KEEPS the record,
+    # and every sweep after it does the same: a permanent retry against
+    # a machine nobody is paying for, with the refusal never clearing.
+    let gear = freshCase("already-gone")
+    let effector = fakeProviderEffector(gear.provider)
+    let now = 1_700_000_000'i64
+    let holder = acquireCloudLease(gear.store, childSpec(),
+      delayed(seconds = 1), now, 0, effector, gear.ledger)
+    holder.recordInstanceCreated("i-0fixture000000000")
+    setFailureMode(gear.provider, ffmDestroyAlreadyGone)
+    let report = reapCloudLeases(gear.store, now + 600,
+      fixedOwnerLiveness(olUnknowable), effector, gear.ledger)
+    # It was ASKED — this is not the empty-discovery path wearing the
+    # same outcome.
+    check invocationsMentioning(gear.provider, "terminate-instances") == 1
+    check report.failed == 0
+    check report.nothingToDestroy == 1
+    # …and it is NOT reported as reaped, because this sweep destroyed
+    # nothing and a ledger that said otherwise would claim an action
+    # nobody took.
+    check report.reaped == 0
+    # …and the report does not SAY it destroyed it either. A line
+    # reading "destroyed" beside an outcome of nothing-to-destroy would
+    # claim an action nobody took.
+    let text = renderReapReportText(report)
+    check "outcome: nothing-to-destroy" in text
+    check "destroyed: " notin text
+    check "instance: i-0fixture000000000" in text
+    # The record is gone, so there is no next sweep to fail.
+    check listCloudLeases(gear.store).len == 0
+    requireReapSucceeded(report)
+    # The control, on the SAME store shape: a refusal that is not the
+    # absent-instance one keeps the record and refuses, so the
+    # termination above is about the message and not about this build
+    # having stopped caring.
+    let other = freshCase("still-failing")
+    let otherEffector = fakeProviderEffector(other.provider)
+    let kept = acquireCloudLease(other.store, childSpec(),
+      delayed(seconds = 1), now, 0, otherEffector, other.ledger)
+    kept.recordInstanceCreated("i-0fixture000000000")
+    setFailureMode(other.provider, ffmDestroyFails)
+    let stuck = reapCloudLeases(other.store, now + 600,
+      fixedOwnerLiveness(olUnknowable), otherEffector, other.ledger)
+    check stuck.failed == 1
+    check stuck.nothingToDestroy == 0
+    check listCloudLeases(other.store).len == 1
+    check refuses(proc () = requireReapSucceeded(stuck)).condition ==
+      cllDestroyInvocationFailed
+
+  test "the tag sweep reads the same answer the same way":
+    # A tag sweep races the holder's own teardown by construction: both
+    # are looking at the same expired instance. So "somebody got there
+    # first" is its ORDINARY outcome, and a sweeper that scored it as a
+    # failure would refuse for ever on a cloud that is already clean.
+    let gear = freshCase("tag-already-gone")
+    let effector = fakeProviderEffector(gear.provider)
+    let now = 1_700_000_000'i64
+    let holder = acquireCloudLease(gear.store, childSpec(),
+      delayed(seconds = 600), now, 0, effector, gear.ledger)
+    let created = effector(CloudEffect(
+      argv: leasedLaunchPlan(childSpec(), holder.lease, fixedEnvLookup([])),
+      providerEnvNames: providerEnvNamesFor(cpAwsEc2)))
+    holder.recordInstanceCreated(created.output.strip())
+    setFailureMode(gear.provider, ffmDestroyAlreadyGone)
+    let report = reapExpiredByTag(cpAwsEc2, childSpec().region, now + 600,
+      effector)
+    check report.failed == 0
+    check report.nothingToDestroy == 1
+    check report.reaped == 0
+    # …and the EVENT says it too, not only the tally beside it.
+    #
+    # Added by review, because a mutation written from this case's own
+    # sentence came back GREEN: setting every already-gone event's
+    # outcome to `roFailed` while leaving the counter alone changed
+    # NOTHING any check could see. Every assertion this store-less
+    # sweep had was over the summary, so the per-lease outcome — the
+    # field `renderReapReportText` prints, and the field that decides
+    # whether the line reads "destroyed:" or "instance:" — was
+    # unasserted on the third line of defence. A report that
+    # contradicted its own summary would have been invisible, which is
+    # the same "claiming an action nobody took" this module is careful
+    # about everywhere else.
+    check report.events.len == 1
+    check report.events[0].outcome == roNothingToDestroy
+    check report.events[0].decision == rdExpired
+    check report.events[0].instanceIds == @[holder.lease.providerInstanceId]
+    check "outcome: nothing-to-destroy" in renderReapReportText(report)
+    check "destroyed: " notin renderReapReportText(report)
+    # The control: the other refusal is still a failure here too, and
+    # its event says so as well — so the equality above is about the
+    # marker and not about this renderer only ever writing one word.
+    setFailureMode(gear.provider, ffmDestroyFails)
+    let failing = reapExpiredByTag(cpAwsEc2, childSpec().region,
+      now + 600, effector)
+    check failing.failed == 1
+    check failing.nothingToDestroy == 0
+    check failing.events.len == 1
+    check failing.events[0].outcome == roFailed
+    check "outcome: failed" in renderReapReportText(failing)
+
+suite "the identifier retry is BOUNDED":
+
+  test "an identifier source that cannot make progress REFUSES":
+    # The guard that stops a record being written over is `while the
+    # name is taken: mint another`, and its termination depends on the
+    # minting making progress — a property nothing asserts. Written
+    # without a bound it did not fail slowly, it did not fail at all:
+    # the caller spun inside the path that takes a hold, and a gate
+    # pointed at it stopped mid-run without reaching a check.
+    #
+    # The bound is reached here by RESERVING every name the source will
+    # produce next, which is the same shape a stuck source has and
+    # needs no stuck source.
+    let gear = freshCase("bounded-mint")
+    let now = 1_700_000_000'i64
+    let owner = thisProcessOwner()
+    # One real lease first, to learn where the serial stands.
+    let first = acquireCloudLease(gear.store, childSpec(),
+      delayed(seconds = 600), now).lease
+    let parts = first.leaseId.rsplit('-', 1)
+    check parts.len == 2
+    let serial = parseInt(parts[1])
+    var reserved = 0
+    while reserved <= MaxLeaseIdentifierAttempts:
+      writeFile(recordPath(gear.store,
+        "rl-" & $now & "-" & $owner.pid & "-" & $(serial + 1 + reserved)),
+        "reserved")
+      inc reserved
+    var spec = childSpec()
+    spec.instanceName = "reproos-lease-probe-bounded"
+    let e = refuses(proc () =
+      discard acquireCloudLease(gear.store, spec,
+        delayed(seconds = 600), now))
+    check e.condition == cllLeaseIdentifierCouldNotBeMinted
+    check $MaxLeaseIdentifierAttempts in e.msg
+    # The bound is pinned by a LITERAL as well as exercised at itself,
+    # so halving the constant does not move both ends together.
+    check MaxLeaseIdentifierAttempts == 64
+    # The control: with the reservations removed the SAME call succeeds,
+    # so the refusal is about the names being taken and not about this
+    # store.
+    for i in 0 .. reserved:
+      let path = recordPath(gear.store,
+        "rl-" & $now & "-" & $owner.pid & "-" & $(serial + 1 + i))
+      if fileExists(path): removeFile(path)
+    check acquireCloudLease(gear.store, spec, delayed(seconds = 600),
+      now).lease.leaseId.len > 0
+
+suite "the sweep this build SHIPS can destroy":
+
+  test "the shipped effector really runs the tool, and reads its answer":
+    # The effector was the missing half. Without one the reaper was a
+    # library and a printing command: `repro attest reap` could say what
+    # it would destroy and could not destroy it, so a leak cost "until
+    # somebody runs the sweep" and nothing bounded that.
+    #
+    # This drives the REAL effector — `startProcess`, a real child, its
+    # real exit status and its real output — against a program on PATH
+    # that behaves the way the provider's tool does. The substitution is
+    # at the program, not at the seam.
+    let gear = freshCase("shipped-effector")
+    let shimDir = gear.root / "bin"
+    createDir(shimDir)
+    let instances = instancesDir(gear.provider)
+    writeFile(shimDir / "aws", "#!/bin/sh\n" &
+      "if [ \"$2\" = terminate-instances ]; then\n" &
+      "  id=$(eval echo \\$$#)\n" &
+      "  if [ -e \"" & instances & "/$id\" ]; then rm -f \"" &
+      instances & "/$id\"; exit 0; fi\n" &
+      "  echo \"An error occurred (" & AwsAbsentInstanceMarker &
+      ") when calling the TerminateInstances operation\" >&2\n" &
+      "  exit 255\n" &
+      "fi\nexit 64\n")
+    setFilePermissions(shimDir / "aws",
+      {fpUserRead, fpUserWrite, fpUserExec})
+    writeFile(instances / "i-shipped-probe", "")
+    let effector = subprocessCloudLeaseEffector(
+      fixedEnvLookup([("PATH", statedToolPath(shimDir))]))
+    var lease = CloudLease(provider: cpAwsEc2, region: "us-east-1",
+      leaseId: "rl-shipped")
+    let done = effector(CloudEffect(
+      argv: destroyPlanFor(lease, "i-shipped-probe"),
+      providerEnvNames: providerEnvNamesFor(cpAwsEc2)))
+    check done.status == 0
+    check not fileExists(instances / "i-shipped-probe")
+    # The second destroy is the documented trap, and it arrives here
+    # through the real program: a non-zero status whose TEXT is the
+    # absent-instance answer.
+    let again = effector(CloudEffect(
+      argv: destroyPlanFor(lease, "i-shipped-probe"),
+      providerEnvNames: providerEnvNamesFor(cpAwsEc2)))
+    check again.status != 0
+    check AwsAbsentInstanceMarker in again.output
+    check destroyDispositionFor(cpAwsEc2, again.status, again.output) ==
+      ddAlreadyGone
+    # Standard error is part of the answer, and that is not incidental:
+    # both providers write the REASON there, and a reader that captured
+    # only standard output would see a bare exit code and could not
+    # tell "there is no such instance" from "you may not do that".
+    check again.output.len > 0
+
+    # And the effector RECORDS what it resolved. Nothing provisioned
+    # this program and nothing afterwards can say which file it was, so
+    # the resolved executable and the search path it came from travel
+    # back with the answer — the model this repository works to requires
+    # exactly that of a PATH-resolved external tool, and it matters more
+    # here than almost anywhere else because this is the program that
+    # destroys machines.
+    check done.program == shimDir / "aws"
+    check done.searchPath == statedToolPath(shimDir)
+    check again.program == done.program
+    # A tool that is not there is a FAILURE, not a silent nothing.
+    let missing = effector(CloudEffect(
+      argv: @["a-tool-this-machine-does-not-have", "x"],
+      providerEnvNames: @[]))
+    check missing.status != 0
+
+    # WHICH tool gets run is decided by the path this effector was
+    # given, and not by the one this process happens to have. That is
+    # not a nicety: the lookup that finds a program happens in the
+    # PARENT and reads the parent's own search path, so an effector
+    # that merely put `PATH` in the child's environment would run
+    # whatever the operator has installed while telling the child
+    # something else. The first draft did exactly that, and this case
+    # found it by reaching the machine's real provider tool and coming
+    # back with an authentication failure — which on a machine with no
+    # such tool would have said nothing at all.
+    let elsewhere = gear.root / "elsewhere"
+    createDir(elsewhere)
+    let ambientOnly = "reproos-lease-ambient-probe"
+    writeFile(elsewhere / ambientOnly, "#!/bin/sh\nexit 0\n")
+    setFilePermissions(elsewhere / ambientOnly,
+      {fpUserRead, fpUserWrite, fpUserExec})
+    let savedPath = getEnv("PATH")
+    try:
+      putEnv("PATH", elsewhere & ":" & savedPath)
+      # On the PROCESS path and not on the STATED one: not found.
+      check resolveOnStatedPath(ambientOnly, statedToolPath(shimDir)) == ""
+      let unreachable = effector(CloudEffect(argv: @[ambientOnly],
+        providerEnvNames: @[]))
+      check unreachable.status == 127
+      # The control: the same program IS found when the stated path is
+      # the one it is on, so the refusal above is about the path and
+      # not about the program.
+      check resolveOnStatedPath(ambientOnly, elsewhere) ==
+        elsewhere / ambientOnly
+      let reachable = subprocessCloudLeaseEffector(
+        fixedEnvLookup([("PATH", elsewhere)]))(
+          CloudEffect(argv: @[ambientOnly], providerEnvNames: @[]))
+      check reachable.status == 0
+    finally:
+      putEnv("PATH", savedPath)
+    # A program that names a directory is taken as the caller meaning
+    # that file, rather than searched for.
+    check resolveOnStatedPath(shimDir / "aws", "") == shimDir / "aws"
+
+  test "the command DESTROYS with --destroy and does not without it":
+    # Both directions, because either alone reads as the whole answer.
+    let gear = freshCase("command-destroy")
+    let shimDir = gear.root / "bin"
+    createDir(shimDir)
+    let instances = instancesDir(gear.provider)
+    let shimLog = gear.root / "shim.log"
+    writeFile(shimDir / "aws", "#!/bin/sh\n" &
+      "echo \"$@\" >> " & shimLog & "\n" &
+      "if [ \"$2\" = terminate-instances ]; then\n" &
+      "  id=$(eval echo \\$$#)\n" &
+      "  rm -f \"" & instances & "/$id\"\n  exit 0\nfi\nexit 64\n")
+    setFilePermissions(shimDir / "aws",
+      {fpUserRead, fpUserWrite, fpUserExec})
+    writeFile(instances / "i-command-destroy", "")
+    let now = 1_700_000_000'i64
+    let holder = acquireCloudLease(gear.store, childSpec(),
+      delayed(seconds = 600), now, 3_600_000)
+    holder.recordInstanceCreated("i-command-destroy")
+
+    # Without `--destroy`: the record and the instance both survive,
+    # and the tool is reachable — it is named on the stated path — so
+    # "nothing ran" is a decision and not an absence.
+    let reported = withCapturedStdout(gear.root / "report.out",
+      proc (): int = runAttestCommandIn(@["reap", "--lease-store",
+        gear.store.root, "--now", $(now + 6_000)], statedToolPath(shimDir)))
+    let reportCode = reported.code
+    let reportOut = reported.text
+    check reportCode == AttestExitAccepted
+    check not fileExists(shimLog)
+    check fileExists(instances / "i-command-destroy")
+    check listCloudLeases(gear.store).len == 1
+    # With it: the tool is run and the instance is gone.
+    let destroyed = withCapturedStdout(gear.root / "destroy.out",
+      proc (): int = runAttestCommandIn(@["reap", "--lease-store",
+        gear.store.root, "--now", $(now + 6_000), "--destroy"],
+        statedToolPath(shimDir)))
+    let destroyCode = destroyed.code
+    let destroyOut = destroyed.text
+    check destroyCode == AttestExitAccepted
+    check fileExists(shimLog)
+    check "terminate-instances" in readFile(shimLog)
+    # …and the command SAID which program it ran. A sweep that destroyed
+    # machines with an unnamed binary is not one an operator can audit.
+    check (shimDir / "aws") in destroyOut
+    check "provider-tool: " in destroyOut
+    check "provider-tool-search-path: " in destroyOut
+    # The control: the REPORTING sweep names none, because it resolved
+    # none — so the lines above are a reading and not a template.
+    check "provider-tool: " notin reportOut
+    check not fileExists(instances / "i-command-destroy")
+    check listCloudLeases(gear.store).len == 0
+
+  test "a destroying sweep REPEATS, and the gap between sweeps is capped":
+    # A sweep that runs once is not a cadence. `--sweeps` bounds the
+    # repetition so this case terminates; an operator omits it and the
+    # sweep runs until it is stopped.
+    let gear = freshCase("cadence")
+    let shimDir = gear.root / "bin"
+    createDir(shimDir)
+    let shimLog = gear.root / "shim.log"
+    writeFile(shimDir / "aws", "#!/bin/sh\necho ran >> " & shimLog &
+      "\nexit 0\n")
+    setFilePermissions(shimDir / "aws",
+      {fpUserRead, fpUserWrite, fpUserExec})
+    let now = 1_700_000_000'i64
+    # Three leases the sweep can see, none of them destroyable to
+    # nothing: each one keeps its record only if the destroy fails, and
+    # this shim succeeds, so what is being counted is the REPETITION.
+    let holder = acquireCloudLease(gear.store, childSpec(),
+      delayed(seconds = 600), now)
+    holder.recordInstanceCreated("i-cadence-probe")
+    let code = runAttestCommandIn(@["reap", "--lease-store",
+      gear.store.root, "--now", $(now + 6_000), "--destroy",
+      "--interval-seconds", "1", "--sweeps", "3"], statedToolPath(shimDir))
+    check code == AttestExitAccepted
+    # Three sweeps ran. The first destroys and removes the record; the
+    # two after it find an empty store and destroy nothing, which is
+    # what a cadence looks like when there is nothing to do.
+    check listCloudLeases(gear.store).len == 0
+    check fileExists(shimLog)
+    check readFile(shimLog).count("ran") == 1
+    # A sweep gap longer than the cap is REFUSED, because the interval
+    # is half of how long a leaked instance can keep billing and a
+    # daily sweep would make the leak findable rather than short.
+    check runAttestCommandIn(@["reap", "--lease-store", gear.store.root,
+      "--destroy", "--interval-seconds",
+      $(MaxReapIntervalSeconds + 1), "--sweeps", "1"]) == AttestExitUsage
+    # …and AT the cap it is accepted, so the refusal is a bound and not
+    # a dislike of the flag.
+    check runAttestCommandIn(@["reap", "--lease-store", gear.store.root,
+      "--destroy", "--interval-seconds", $MaxReapIntervalSeconds,
+      "--sweeps", "1"]) == AttestExitAccepted
+    # A sweep that never runs is refused too.
+    check runAttestCommandIn(@["reap", "--lease-store", gear.store.root,
+      "--destroy", "--sweeps", "0"]) == AttestExitUsage
+    # And a bare `--destroy` runs ONCE and returns. Repetition is what
+    # `--interval-seconds` asks for, and tying it to `--destroy` instead
+    # made a plain command-line invocation never come back — found here
+    # rather than by reading, by this file failing to terminate.
+    check runAttestCommandIn(@["reap", "--lease-store", gear.store.root,
+      "--now", $(now + 6_000), "--destroy"],
+      statedToolPath(shimDir)) == AttestExitAccepted
+
+  test "a sweep that could not destroy something EXITS non-zero":
+    # Whatever runs this on a cadence has to be able to tell "there was
+    # nothing to do" from "something is still running and I could not
+    # stop it". A printing sweep could not say either.
+    let gear = freshCase("sweep-failure")
+    let shimDir = gear.root / "bin"
+    createDir(shimDir)
+    writeFile(shimDir / "aws", "#!/bin/sh\n" &
+      "echo 'An error occurred (UnauthorizedOperation)' >&2\nexit 255\n")
+    setFilePermissions(shimDir / "aws",
+      {fpUserRead, fpUserWrite, fpUserExec})
+    let now = 1_700_000_000'i64
+    let holder = acquireCloudLease(gear.store, childSpec(),
+      delayed(seconds = 600), now)
+    holder.recordInstanceCreated("i-unstoppable")
+    let code = runAttestCommandIn(@["reap", "--lease-store",
+      gear.store.root, "--now", $(now + 6_000), "--destroy",
+      "--sweeps", "1"], statedToolPath(shimDir))
+    check code == AttestExitRejected
+    # The record is kept, so the next sweep tries again.
+    check listCloudLeases(gear.store).len == 1
+
+  test "the tag sweep is reachable from the command line":
+    # The sweep of last resort — no store, tags only — and it needs the
+    # cloud and the region named because it has nothing else to read
+    # them from.
+    let gear = freshCase("command-tag-sweep")
+    check runAttestCommandIn(@["reap", "--tag-sweep",
+      "--region", "us-east-1", "--sweeps", "1"]) == AttestExitUsage
+    check runAttestCommandIn(@["reap", "--tag-sweep",
+      "--provider", "aws-ec2", "--sweeps", "1"]) == AttestExitUsage
+    let shimDir = gear.root / "bin"
+    createDir(shimDir)
+    let shimLog = gear.root / "shim.log"
+    writeFile(shimDir / "aws", "#!/bin/sh\necho \"$@\" >> " & shimLog &
+      "\nexit 0\n")
+    setFilePermissions(shimDir / "aws",
+      {fpUserRead, fpUserWrite, fpUserExec})
+    let code = runAttestCommandIn(@["reap", "--tag-sweep",
+      "--provider", "aws-ec2", "--region", "us-east-1",
+      "--sweeps", "1"], statedToolPath(shimDir))
+    check code == AttestExitAccepted
+    check fileExists(shimLog)
+    check "describe-instances" in readFile(shimLog)
+    check "Name=tag-key,Values=" & $cltLeaseId in readFile(shimLog)
+
+suite "the sweep is SCHEDULED, not merely runnable":
+
+  test "the shipped units run the destroying sweep on a bounded cadence":
+    # A sweep that exists and a sweep that runs are different things.
+    # Until something activates it unattended, the cost of a leak is
+    # "until somebody runs the sweep", and the length of that interval
+    # is the thing this file is trying to turn into a number.
+    #
+    # So the schedule is an ARTIFACT in this tree and is read here,
+    # rather than a sentence in a document. Its cadence is required to
+    # be inside the bound the library states, so the two cannot drift.
+    let repoRoot = currentSourcePath().parentDir.parentDir.parentDir
+    let units = repoRoot / "recipes/cloud-lease-reaper/systemd-units"
+    let service = units / "repro-cloud-lease-reaper.service"
+    let timer = units / "repro-cloud-lease-reaper.timer"
+    check fileExists(service)
+    check fileExists(timer)
+
+    # The unit runs the DESTROYING sweep, and one sweep per activation
+    # — a unit that also looped would give the machine two answers
+    # about how often it is swept.
+    var execStart = ""
+    for line in readFile(service).splitLines:
+      if line.startsWith("ExecStart="): execStart = line["ExecStart=".len .. ^1]
+    check execStart.len > 0
+    check "attest reap" in execStart
+    check "--destroy" in execStart
+    check "--sweeps 1" in execStart
+    check "--interval-seconds" notin execStart
+    # …and it does not carry an account, a region or a credential in a
+    # file that ships in a source tree.
+    check "EnvironmentFile=" in readFile(service)
+
+    # The cadence, read off the timer and required to be inside the
+    # bound the library states. A unit that swept once a day would make
+    # a leak findable rather than short.
+    var cadence = 0
+    for line in readFile(timer).splitLines:
+      if line.startsWith("OnUnitActiveSec="):
+        let raw = line["OnUnitActiveSec=".len .. ^1].strip()
+        check raw.endsWith("s")
+        cadence = parseInt(raw[0 ..< raw.len - 1])
+    check cadence > 0
+    check cadence <= MaxReapIntervalSeconds
+    check cadence == DefaultReapIntervalSeconds
+    # It fires soon after a machine has been off, because a lease that
+    # expired while the machine was down is exactly the one still
+    # billing — and the directive that delivers that is read here, with
+    # its own number, rather than the one that merely reads as though it
+    # does.
+    #
+    # `Persistent=true` was what this asserted, and it is documented to
+    # have an effect only on a timer configured with `OnCalendar=`. On a
+    # monotonic timer it is inert, so the check was green on a line that
+    # does nothing — a rule with no reachable input, one layer out from
+    # the code. `OnBootSec=` is what actually arms the first sweep after
+    # a boot, and it is bounded by the same cap as the cadence so a unit
+    # that waited out an hour after a reboot is red.
+    var afterBoot = -1
+    for line in readFile(timer).splitLines:
+      if line.startsWith("OnBootSec="):
+        let raw = line["OnBootSec=".len .. ^1].strip()
+        check raw.endsWith("s")
+        afterBoot = parseInt(raw[0 ..< raw.len - 1])
+    check afterBoot > 0
+    check afterBoot <= MaxReapIntervalSeconds
+    check afterBoot == 60
+    # …and the inert directive is gone rather than left beside the one
+    # that works, because a reader who finds both will believe the wrong
+    # one is doing it.
+    check "Persistent=true" notin readFile(timer)
+    # The cadence is NOMINAL: a timer may fire late by its stated
+    # accuracy, so the gap a sweep is really bounded by is the sum. Read
+    # off the unit rather than assumed, and required to stay small
+    # against the cadence it perturbs.
+    var slack = -1
+    for line in readFile(timer).splitLines:
+      if line.startsWith("AccuracySec="):
+        let raw = line["AccuracySec=".len .. ^1].strip()
+        check raw.endsWith("s")
+        slack = parseInt(raw[0 ..< raw.len - 1])
+    check slack >= 0
+    check cadence + slack <= MaxReapIntervalSeconds
+    check cadence + slack == 310
+
+    # The exposure window THIS schedule buys, as the numbers it is —
+    # and they are the schedule's, not the build's ceiling. With the
+    # hold an operator gets by default: 1,800 + 300. With the longest
+    # hold this build will grant: 86,400 + 300. The build's own ceiling
+    # is larger again, because a caller may ask for a slower cadence up
+    # to the cap, and that number is pinned in the case below.
+    check worstCaseExposureSeconds(DefaultLeaseTtlSeconds, cadence) ==
+      2_100
+    check worstCaseExposureSeconds(MaxLeaseTtlSeconds, cadence) == 86_700
+    check worstCaseExposureSeconds(MaxLeaseTtlSeconds,
+      MaxReapIntervalSeconds) == 87_300
+    # On the owner's own host the record is still there, so a provably
+    # dead owner is not waited out at all and the window is ONE sweep.
+    check cadence == 300
+
+  test "the invocation the unit names is one this build ACCEPTS":
+    # A unit file is a string until something runs it, and a flag that
+    # has been renamed out from under it fails at three in the morning
+    # on somebody else's machine. So the flags the unit spells are put
+    # through the real argument parser here.
+    let repoRoot = currentSourcePath().parentDir.parentDir.parentDir
+    let service = repoRoot /
+      "recipes/cloud-lease-reaper/systemd-units/repro-cloud-lease-reaper.service"
+    var execStart = ""
+    for line in readFile(service).splitLines:
+      if line.startsWith("ExecStart="): execStart = line["ExecStart=".len .. ^1]
+    var args: seq[string] = @[]
+    var seenSubcommand = false
+    for token in execStart.splitWhitespace():
+      if token.endsWith("/repro") or token == "repro": continue
+      if token == "attest":
+        seenSubcommand = true
+        continue
+      # The store path is an expansion the service manager performs, so
+      # a real directory stands in for it here.
+      args.add (if token.startsWith("${"): scratch else: token)
+    check seenSubcommand
+    let parsed = parseAttestArgs(args)
+    check parsed.sub == ascReap
+    check parsed.reapDestroy
+    check parsed.reapSweeps == "1"
+    check parsed.leaseStore == scratch
+    # The control: a flag this build does not have is refused by the
+    # same parser, so the acceptance above is a reading.
+    var refusedUnknown = false
+    try:
+      discard parseAttestArgs(args & @["--sweep-everything"])
+    except ValueError:
+      refusedUnknown = true
+    check refusedUnknown
+
+suite "how long a leaked instance can keep billing, as a number":
+
+  test "the window is the hold plus one sweep, and both are bounded":
+    # "Reduced from unbounded to until the next sweep" is not a bound
+    # unless somebody says how long that is. Both terms are literals
+    # here as well as constants, so halving either does not move the
+    # arithmetic and the assertion together.
+    check MaxLeaseTtlSeconds == 86_400
+    check DefaultLeaseTtlSeconds == 1_800
+    check DefaultReapIntervalSeconds == 300
+    check MaxReapIntervalSeconds == 900
+    # The worst case this build can be configured into: the longest
+    # hold it will grant, plus the longest gap it will schedule.
+    check worstCaseExposureSeconds(MaxLeaseTtlSeconds,
+      MaxReapIntervalSeconds) == 87_300
+    # …and the case an operator who states nothing gets.
+    check worstCaseExposureSeconds(DefaultLeaseTtlSeconds,
+      DefaultReapIntervalSeconds) == 2_100
+    # It is a function of BOTH, so a build that stopped counting the
+    # sweep interval would be red rather than optimistic.
+    check worstCaseExposureSeconds(100, 0) == 100
+    check worstCaseExposureSeconds(100, 7) == 107
+    check worstCaseExposureSeconds(0, 7) == 7
+
+  test "a dead owner is not waited out, so the usual case is one sweep":
+    # The worst case above is the STORE-LESS one: a sweeper with only
+    # tags reaps on expiry, because it cannot read the owner's process
+    # table. A sweeper that still has the record does better, and the
+    # difference is the whole economic argument for the record.
+    let gear = freshCase("exposure-shape").store
+    let now = 1_700_000_000'i64
+    let lease = acquireCloudLease(gear, childSpec(),
+      delayed(seconds = MaxLeaseTtlSeconds), now).lease
+    # One second into a full day's hold, with the owner provably gone.
+    check reapDecision(lease, now + 1, olDead) == rdOrphaned
+    # The same lease, one second in, seen by a sweeper that cannot
+    # judge the owner: held until the deadline.
+    check reapDecision(lease, now + 1, olUnknowable) == rdHeld
+    check reapDecision(lease, now + MaxLeaseTtlSeconds, olUnknowable) ==
+      rdExpired
 
 suite "teardown":
 

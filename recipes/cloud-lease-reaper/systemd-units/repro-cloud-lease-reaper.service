@@ -1,0 +1,19 @@
+[Unit]
+Description=Destroy cloud instances whose lease has run out or whose owner is gone
+Documentation=man:repro-attest(1)
+
+[Service]
+Type=oneshot
+# The store and the search path a provider tool is found on come from a
+# file the operator writes; nothing about an account belongs in a unit
+# that ships in a source tree.
+EnvironmentFile=/etc/repro/cloud-lease-reaper.env
+# One sweep per activation. The cadence is the timer's, so it is stated
+# in exactly one place — a unit that also looped would give the same
+# machine two answers about how often it is swept.
+ExecStart=/usr/bin/repro attest reap --destroy --sweeps 1 --lease-store ${REPRO_CLOUD_LEASE_STORE}
+# A sweep that could not destroy something exits non-zero and the next
+# activation tries again. Deliberately NOT Restart=on-failure: a sweep
+# that could not reach the provider retries on the cadence rather than
+# in a tight loop.
+SuccessExitStatus=0
