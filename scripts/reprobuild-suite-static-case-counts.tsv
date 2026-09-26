@@ -1719,6 +1719,7 @@ tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
 tests/unit/t_m9r9_auto_recurse.nim	nim	20
 tests/unit/t_measurement_axes.nim	nim	15
 tests/unit/t_msi_archive_type.nim	nim	2
+tests/unit/t_nimcache_is_worktree_local.nim	nim	0
 tests/unit/t_nix_propagated_store_paths.nim	nim	5
 tests/unit/t_nonredistributable_publish_gate.nim	nim	3
 tests/unit/t_prefix_env_ops.nim	nim	4

@@ -15408,6 +15408,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_nimcache_is_worktree_local.nim",
+    binary: "build/test-bin/t_nimcache_is_worktree_local",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_nix_propagated_store_paths.nim",
     binary: "build/test-bin/t_nix_propagated_store_paths",
     defines: @[],
