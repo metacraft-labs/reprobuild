@@ -1,14 +1,10 @@
 ## t_test_edge_migration_covers_all_test_files — Test-Edges-And-Parallel-Runner
 ## M1 verification.
 ##
-## Asserts that every test file on disk under the four discovery roots used
-## by ``scripts/generate_test_edges.nim`` is COVERED by the generated
-## ``repro_tests.nim`` table:
-##
-##   * ``tests/**/t_*.nim``
-##   * ``libs/**/tests/{t_,test_}*.nim``
-##   * ``tools/**/tests/test_*.nim``
-##   * ``recipes/packages/source/**/test_*.nim``
+## Asserts that every test file on disk that ``scripts/generate_test_edges.nim``
+## would discover (its ``DeclaredSourceRoots`` walked with its
+## ``walkAcceptsSource`` rule) is COVERED by the generated ``repro_tests.nim``
+## table.
 ##
 ## If a new test file lands without re-running the generator it is not
 ## covered and this test fails, surfacing the missed regeneration before the
@@ -48,6 +44,10 @@
 
 import std/[algorithm, os, sets, strutils, unittest]
 
+# The generator's discovery rule, so the two cannot disagree about which
+# files are test sources.
+import "../../scripts/generate_test_edges"
+
 const RepoRootMarker = "repro.nim"
 const BundleRoot = "tests/bundles/"
 
@@ -65,51 +65,31 @@ proc findRepoRoot(): string =
     "cannot locate reprobuild repo root from " & currentSourcePath())
 
 proc discoverTestFilesOnDisk(repoRoot: string): HashSet[string] =
-  type PrefixMode = enum
-    pmTOnly         # ``tests/`` — only ``t_*.nim``
-    pmTOrTest       # ``libs/`` — both ``t_*.nim`` and ``test_*.nim``
-    pmTestOnly      # ``tools/`` — only ``test_*.nim`` (M66 convention)
-
-  proc accept(rel: string; mode: PrefixMode): bool =
-    if not rel.endsWith(".nim"):
-      return false
-    let stem = rel.splitFile().name
-    case mode
-    of pmTOnly:    stem.startsWith("t_")
-    of pmTOrTest:  stem.startsWith("t_") or stem.startsWith("test_")
-    of pmTestOnly: stem.startsWith("test_")
-
-  proc walk(acc: var HashSet[string]; repoRoot, dir: string; mode: PrefixMode;
-            requireTestsParent: bool) =
-    let abs = repoRoot / dir
-    if not dirExists(abs):
-      return
-    for path in walkDirRec(abs, relative = true):
-      let normalized = path.replace('\\', '/')
-      let rel = dir & "/" & normalized
-      # Mirror the generator's exclusion (scripts/generate_test_edges.nim
-      # skips ``tests/fixtures/``): those are fixture PROJECTS — sample
-      # test collections consumed BY tests — not reprobuild's own unittest
-      # binaries, so they carry no build edge. Without this the on-disk
-      # set over-reports by the fixtures' ``t_*.nim`` files.
-      if rel.startsWith("tests/fixtures/"):
-        continue
-      if requireTestsParent:
-        let parts = normalized.split('/')
-        if parts.len < 3: continue
-        if parts[1] != "tests": continue
-      if accept(normalized, mode):
-        acc.incl(rel)
-
+  ## Every test source the generator's walk would enrol: the roots in
+  ## ``DeclaredSourceRoots`` filtered by ``walkAcceptsSource`` — the
+  ## generator's own root list, skip prefixes and shape rule, imported
+  ## rather than restated.
+  ##
+  ## This used to be a hand-kept copy of four per-root predicates
+  ## (``tests/**/t_*``, ``libs/**/tests/*``, ``tools/**/tests/test_*``,
+  ## ``recipes/packages/source/**/test_*``). The generator has since moved
+  ## to one shape rule over five roots (``apps/`` added, ``test_`` accepted
+  ## under ``tests/``, any ``recipes/`` depth), so the copy reported the
+  ## sources only the new rule reaches — ``apps/repro-harvest-apt/tests/``,
+  ## ``recipes/sandbox-tools/``, ``tests/integration/test_hax_*`` — as
+  ## "declared but not on disk". What this test measures is whether
+  ## ``repro_tests.nim`` was regenerated after the tree moved, not what the
+  ## shape of a test source is; the shape has exactly one definition, and
+  ## ``--check-shape-parity`` already holds the inventory script to it.
   result = initHashSet[string]()
-  walk(result, repoRoot, "tests", pmTOnly, false)
-  walk(result, repoRoot, "libs", pmTOrTest, true)
-  walk(result, repoRoot, "tools", pmTestOnly, true)
-  # M9.N from-source recipes carry a ``test_<pkg>_source.nim`` per recipe
-  # under ``recipes/packages/source/<pkg>/``. The generator discovers
-  # them (acceptRecipesTree) and emits a build edge for each, so they
-  # belong in the on-disk set too.
-  walk(result, repoRoot, "recipes/packages/source", pmTestOnly, false)
+  for root in DeclaredSourceRoots:
+    let abs = repoRoot / root
+    if not dirExists(abs):
+      continue
+    for path in walkDirRec(abs, relative = true):
+      let rel = root & "/" & path.replace('\\', '/')
+      if walkAcceptsSource(rel):
+        result.incl(rel)
 
 proc declaredSpecSources(repoRoot: string): seq[string] =
   ## Project-DSL-Composition M6: the generated table lives in
