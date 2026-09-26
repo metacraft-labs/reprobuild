@@ -105,7 +105,12 @@ reprobuild-ct-test-runner=dev
 # that resolves io-mon from THIS file rather than from the flake -- failed
 # with "undeclared identifier: 'EvidenceScope'" in repro_build_engine.nim.
 # e2ee15a is an ancestor of 3b6196e.
-io-mon=0c312f261ecbbad3931132aed4ba31167b2de202
+#
+# Moved 0c312f2 -> a3edfab (2026-09-26, io-mon#34), matching `io-mon-src` in
+# flake.nix: the Windows shim is built with -d:noSignalHandler and fails a
+# spawn whose child the injector had to terminate. It needs
+# nim-stackable-hooks 72f5782 below. 0c312f2 is an ancestor of a3edfab.
+io-mon=a3edfabb36cf8909bacbe3cf52ab96adf8879158
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood
@@ -127,7 +132,12 @@ io-mon=0c312f261ecbbad3931132aed4ba31167b2de202
 # Moved d51b571 -> 203a3b8 (2026-09-24), then -> 5125869 (2026-09-25), each
 # time to match `nim-stackable-hooks-src` in flake.nix, as the note above
 # requires. d51b571 is an ancestor of both.
-nim-stackable-hooks=512586916384f27614c2b28f6c256d33d451daa5
+#
+# Moved 5125869 -> 72f5782 (2026-09-26, nim-stackable-hooks#8), matching
+# `nim-stackable-hooks-src` in flake.nix: a slow Windows child is no longer
+# resumed mid-injection (it is waited for, and past a hard deadline the spawn
+# fails cleanly). 5125869 is an ancestor of 72f5782.
+nim-stackable-hooks=72f578249e9d8bbca8e3705c8a41ed5085c05bf9
 runquota=dev
 nim-shm-queue=5a8e43b52fa202859658692c9f8432967f3971ea
 nim-shm-gset=c646982b354cb5b1fa8734f94b951a660419d75c

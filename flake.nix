@@ -157,7 +157,11 @@
       # reads can run under the allocator lock. b72fb8d preserves time evidence
       # while fixing native flake activation of rustc-based environments.
       # 0c312f2 also drops unused glibc companion libraries from the shim.
-      url = "github:metacraft-labs/io-mon/0c312f261ecbbad3931132aed4ba31167b2de202";
+      # Bumped to a3edfab (io-mon#34): the Windows shim no longer installs a
+      # Nim signal handler in the processes it is injected into, and a spawn
+      # whose child had to be terminated during injection now fails cleanly.
+      # Requires nim-stackable-hooks 72f5782 (below).
+      url = "github:metacraft-labs/io-mon/a3edfabb36cf8909bacbe3cf52ab96adf8879158";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -292,8 +296,13 @@
       # 41ab1b9 is an ANCESTOR of 49006c3, so the explicit Windows child
       # environment (``6a53408``) this pin was chosen for is carried forward.
       #
+      # Bumped to 72f5782 (nim-stackable-hooks#8): the Windows injector no
+      # longer resumes a slow child mid-injection. It waits while the child
+      # lives, and past a hard deadline terminates it and fails the spawn
+      # instead. 5125869 is an ancestor.
+      #
       # Keep this pin aligned with the published workspace dependency.
-      url = "github:metacraft-labs/nim-stackable-hooks/512586916384f27614c2b28f6c256d33d451daa5";
+      url = "github:metacraft-labs/nim-stackable-hooks/72f578249e9d8bbca8e3705c8a41ed5085c05bf9";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
