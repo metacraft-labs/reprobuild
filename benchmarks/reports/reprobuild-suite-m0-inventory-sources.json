@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1748,
-    "pureUnitConsolidationGroups": 49,
-    "pureUnitTests": 585,
+    "nimTestBinaries": 1746,
+    "pureUnitConsolidationGroups": 48,
+    "pureUnitTests": 584,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1760
+    "testEntries": 1758
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -91,19 +91,6 @@
       "sources": [
         "libs/repro_cli_support/tests/t_provider_compile_entry_points_publish_bootstrap_toolchain.nim",
         "libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 2,
-      "defines": [],
-      "dependencyShape": [
-        "repro_daemon_core"
-      ],
-      "owner": "libs/repro_daemon_core",
-      "sources": [
-        "libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim",
-        "libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1086,10 +1073,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 896,
+      "integration": 894,
       "platform/destructive": 115,
-      "pure unit": 585,
-      "unclassified": 153
+      "pure unit": 584,
+      "unclassified": 154
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1237,9 +1224,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1748,
+    "nimTestBinaryCount": 1746,
     "pythonTestFileCount": 12,
-    "testEntryCount": 1760
+    "testEntryCount": 1758
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -1541,7 +1528,7 @@
             "stylusPath",
             "stylusSourcePath"
           ],
-          "line": 1184,
+          "line": 1187,
           "path": "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim",
           "patterns": [
             "gcc"
@@ -1574,7 +1561,7 @@
             "stylusPath",
             "stylusSourcePath"
           ],
-          "line": 1185,
+          "line": 1188,
           "path": "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim",
           "patterns": [
             "clang"
@@ -1607,7 +1594,7 @@
             "stylusPath",
             "stylusSourcePath"
           ],
-          "line": 1195,
+          "line": 1198,
           "path": "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim",
           "patterns": [
             "cc"
@@ -1640,7 +1627,7 @@
             "stylusPath",
             "stylusSourcePath"
           ],
-          "line": 1201,
+          "line": 1204,
           "path": "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim",
           "patterns": [
             "cc"
@@ -2617,7 +2604,7 @@
             "toolPath",
             "traceEnv"
           ],
-          "line": 311,
+          "line": 314,
           "path": "tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim",
           "patterns": [
             "cc"
@@ -2650,7 +2637,7 @@
             "toolPath",
             "traceEnv"
           ],
-          "line": 759,
+          "line": 762,
           "path": "tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim",
           "patterns": [
             "cc"
@@ -2683,7 +2670,7 @@
             "toolPath",
             "traceEnv"
           ],
-          "line": 1288,
+          "line": 1291,
           "path": "tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim",
           "patterns": [
             "nim-argv"
@@ -3089,60 +3076,7 @@
           "executedVariables": [
             "clangPath",
             "codeTracerRoot",
-            "daemonBin",
-            "destPath",
-            "gccPath",
-            "pathValue",
-            "projectRoot",
-            "repoRoot",
-            "reproBin",
-            "script",
-            "socketPath",
-            "sourcePath",
-            "stylusPath",
-            "stylusSourcePath"
-          ],
-          "line": 731,
-          "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
-          "patterns": [
-            "gcc"
-          ],
-          "snippet": "let gccPath = binDir / \"gcc\""
-        },
-        {
-          "assignedCommandVariable": "clangPath",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "clangPath",
-            "codeTracerRoot",
-            "daemonBin",
-            "destPath",
-            "gccPath",
-            "pathValue",
-            "projectRoot",
-            "repoRoot",
-            "reproBin",
-            "script",
-            "socketPath",
-            "sourcePath",
-            "stylusPath",
-            "stylusSourcePath"
-          ],
-          "line": 732,
-          "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
-          "patterns": [
-            "clang"
-          ],
-          "snippet": "let clangPath = binDir / \"clang\""
-        },
-        {
-          "assignedCommandVariable": "",
-          "commandVariableExecuted": false,
-          "directExecutionLine": true,
-          "executedVariables": [
-            "clangPath",
-            "codeTracerRoot",
+            "daemon",
             "daemonBin",
             "destPath",
             "gccPath",
@@ -3159,17 +3093,18 @@
           "line": 734,
           "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
           "patterns": [
-            "cc"
+            "gcc"
           ],
-          "snippet": "discard requireSuccess(shellCommand([\"cc\", sourcePath, \"-o\", gccPath]))"
+          "snippet": "let gccPath = binDir / \"gcc\""
         },
         {
-          "assignedCommandVariable": "",
-          "commandVariableExecuted": false,
-          "directExecutionLine": true,
+          "assignedCommandVariable": "clangPath",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
           "executedVariables": [
             "clangPath",
             "codeTracerRoot",
+            "daemon",
             "daemonBin",
             "destPath",
             "gccPath",
@@ -3183,7 +3118,63 @@
             "stylusPath",
             "stylusSourcePath"
           ],
-          "line": 740,
+          "line": 735,
+          "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
+          "patterns": [
+            "clang"
+          ],
+          "snippet": "let clangPath = binDir / \"clang\""
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "clangPath",
+            "codeTracerRoot",
+            "daemon",
+            "daemonBin",
+            "destPath",
+            "gccPath",
+            "pathValue",
+            "projectRoot",
+            "repoRoot",
+            "reproBin",
+            "script",
+            "socketPath",
+            "sourcePath",
+            "stylusPath",
+            "stylusSourcePath"
+          ],
+          "line": 737,
+          "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "discard requireSuccess(shellCommand([\"cc\", sourcePath, \"-o\", gccPath]))"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "clangPath",
+            "codeTracerRoot",
+            "daemon",
+            "daemonBin",
+            "destPath",
+            "gccPath",
+            "pathValue",
+            "projectRoot",
+            "repoRoot",
+            "reproBin",
+            "script",
+            "socketPath",
+            "sourcePath",
+            "stylusPath",
+            "stylusSourcePath"
+          ],
+          "line": 743,
           "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
           "patterns": [
             "cc"
@@ -4455,7 +4446,7 @@
             "socketPath",
             "tempRoot"
           ],
-          "line": 244,
+          "line": 247,
           "path": "tests/integration/t_integration_reprobuild_sessions_share_runquota.nim",
           "patterns": [
             "nim-argv"
@@ -4473,11 +4464,13 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
+            "before",
+            "daemon",
             "daemonBin",
             "outputPath",
             "socketPath"
           ],
-          "line": 139,
+          "line": 142,
           "path": "tests/integration/t_integration_scheduler_dependency_gathering_policies.nim",
           "patterns": [
             "cc"
@@ -8960,8 +8953,8 @@
     },
     {
       "binary": "build/test-bin/t_daemon_active_session_tally",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -8971,7 +8964,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 17,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -34248,40 +34241,6 @@
       "source": "tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
-      "binary": "build/test-bin/test_hax_m2_macho_lazy_symbol_and_vtable_interception",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
-      "defines": [],
-      "language": "nim",
-      "localDependencyShape": [
-        "repro_hcr_agent"
-      ],
-      "owner": "tests/integration",
-      "requiresReproBinary": false,
-      "source": "tests/integration/test_hax_m2_macho_lazy_symbol_and_vtable_interception.nim",
-      "sourceSuiteCount": 0,
-      "staticCaseCount": 0,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
-      "binary": "build/test-bin/test_hax_m3_cli_watcher_triggers_compilation_and_patch_push",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
-      "defines": [],
-      "language": "nim",
-      "localDependencyShape": [
-        "repro_dsl_stdlib"
-      ],
-      "owner": "tests/integration",
-      "requiresReproBinary": true,
-      "source": "tests/integration/test_hax_m3_cli_watcher_triggers_compilation_and_patch_push.nim",
-      "sourceSuiteCount": 0,
-      "staticCaseCount": 0,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
