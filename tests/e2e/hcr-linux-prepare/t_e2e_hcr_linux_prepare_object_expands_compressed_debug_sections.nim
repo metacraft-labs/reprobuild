@@ -70,7 +70,7 @@ when defined(linux) and defined(amd64):
   const Gate = "e2e_hcr_linux_prepare_object_expands_compressed_debug_sections"
 
   proc reproBinary(repoRoot: string): string =
-    result = repoRoot / "build" / "bin" / "repro"
+    result = repoRoot / "build" / "bin" / "repro".addFileExt(ExeExt)
     if not fileExists(result):
       raise newException(IOError,
         Gate & " requires the built `repro` binary at " & result &

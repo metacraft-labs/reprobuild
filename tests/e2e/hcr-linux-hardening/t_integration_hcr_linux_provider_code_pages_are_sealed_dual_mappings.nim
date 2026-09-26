@@ -264,7 +264,7 @@ int main(int argc, char **argv) {
       let repoRoot = getCurrentDir()
       let workDir = repoRoot / "build" / "hcr-linux-memfd"
       createDir(workDir)
-      let repro = repoRoot / "build" / "bin" / "repro"
+      let repro = repoRoot / "build" / "bin" / "repro".addFileExt(ExeExt)
       if not fileExists(repro):
         raise newException(IOError,
           Gate & " requires the built `repro` binary at " & repro &
