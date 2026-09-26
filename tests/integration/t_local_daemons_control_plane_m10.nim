@@ -1,4 +1,4 @@
-import std/[os, osproc, strutils, tempfiles, times, unittest]
+import std/[os, osproc, sequtils, strutils, tempfiles, times, unittest]
 
 import repro_daemon_core/runtime
 
@@ -272,6 +272,47 @@ suite "Local daemons/control-plane M10 development self-restart":
     # Unrelated caller environment must NOT be serialised to disk.
     check not plist.contains(UnrelatedEnv)
     check not plist.contains("super-secret-token")
+
+  test "systemd-run carries the same runtime configuration as the plist":
+    # Regression: `systemd-run --user` starts the daemon from the user
+    # MANAGER's environment, and the Linux launcher carried none of the
+    # curated set the launchd plist above carries. A setting the daemon
+    # parent reads from its own environment was silently dropped — the
+    # observed case was `REPROBUILD_DAEMON_PARENT_PREWARM=0`, which never
+    # turned the MAC-2 prewarm off on Linux.
+    const PrewarmEnv = "REPROBUILD_DAEMON_PARENT_PREWARM"
+    const PrefixEnv = "CLINGO_PREFIX"
+    const UnrelatedEnv = "T_M10_UNRELATED_USER_SECRET"
+    const OwnerTokenEnv = "REPRO_TEST_RUNNER_OWNER_TOKEN"
+    let priors = [
+      (PrewarmEnv, existsEnv(PrewarmEnv), getEnv(PrewarmEnv)),
+      (PrefixEnv, existsEnv(PrefixEnv), getEnv(PrefixEnv)),
+      (UnrelatedEnv, existsEnv(UnrelatedEnv), getEnv(UnrelatedEnv)),
+      (OwnerTokenEnv, existsEnv(OwnerTokenEnv), getEnv(OwnerTokenEnv))]
+    defer:
+      for (key, had, value) in priors:
+        if had: putEnv(key, value) else: delEnv(key)
+    putEnv(PrewarmEnv, "0")
+    putEnv(PrefixEnv, "/nix/store/fake-clingo")
+    putEnv(UnrelatedEnv, "super-secret-token")
+    putEnv(OwnerTokenEnv, "owner-token")
+
+    let config = UserDaemonConfig(
+      endpoint: "/tmp/repro-env-systemd.sock",
+      stateDir: "/tmp/repro-env-systemd-state",
+      logPath: "/tmp/repro-env-systemd-state/daemon.log")
+    let args = systemdUserRunArgs("/tmp/repro", config)
+    let exeAt = args.find("/tmp/repro")
+    check exeAt > 0
+    let options = args[0 ..< max(exeAt, 0)]
+    check ("--setenv=" & PrewarmEnv & "=0") in options
+    check ("--setenv=" & PrefixEnv & "=/nix/store/fake-clingo") in options
+    check ("--setenv=PATH=" & getEnv("PATH")) in options
+    # The ownership marker appears exactly once, from the launch config.
+    check options.countIt(it.startsWith("--setenv=" & OwnerTokenEnv & "=")) == 1
+    for arg in args:
+      check UnrelatedEnv notin arg
+      check "super-secret-token" notin arg
 
   test "integration_daemon_dev_restart_posix":
     when defined(posix):

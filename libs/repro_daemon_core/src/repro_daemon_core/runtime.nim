@@ -2571,6 +2571,38 @@ proc systemdUnitName(config: UserDaemonConfig): string =
   "repro-daemon-" & safePathSegment(config.endpoint.extractFilename,
     "user") & ".service"
 
+proc systemdUserRunArgs*(exe: string; config: UserDaemonConfig):
+    seq[string] =
+  ## The ``systemd-run --user`` command line that starts the daemon.
+  ##
+  ## THE SAME CURATED ENVIRONMENT THE LAUNCHD PLIST CARRIES. A transient
+  ## user unit starts from the user MANAGER's environment, not from the
+  ## caller's — on NixOS that is ``PATH=<systemd>/bin`` and little else —
+  ## exactly as a launchd agent starts from launchd's. The plist has carried
+  ## reprobuild's own runtime configuration across that boundary
+  ## (``isReprobuildRuntimeEnvKey``) since the reprobuild-nix-daemon defect;
+  ## this launcher carried none of it. Everything the daemon PARENT reads from
+  ## its own environment was therefore silently the manager's default on
+  ## Linux: ``REPROBUILD_DAEMON_PARENT_PREWARM=0`` never turned the prewarm
+  ## off (t_daemon_parent_prewarm_e2e's cold arm logged a prewarm), and
+  ## ``PATH`` / ``RUNQUOTAD_BIN`` / the ``*_SRC`` roots were the manager's.
+  ## Sorted so the argv is stable for a given environment.
+  result = @["systemd-run", "--user", "--unit=" & systemdUnitName(config),
+    "--collect", "--quiet", "-p", "ExitType=cgroup"]
+  var envEntries: seq[(string, string)] = @[]
+  for key, value in envPairs():
+    if key != ReproTestRunnerOwnerTokenEnv and isReprobuildRuntimeEnvKey(key):
+      envEntries.add((key, value))
+  envEntries.sort()
+  for (key, value) in envEntries:
+    result.add("--setenv=" & key & "=" & value)
+  let processOwnerToken = processOwnerTokenForLaunch(config)
+  if processOwnerToken.len > 0:
+    result.add("--setenv=" & ReproTestRunnerOwnerTokenEnv & "=" &
+      processOwnerToken)
+  result.add(exe)
+  result.add(daemonProcessArgs(config))
+
 proc launchWithSystemdUser(exe: string; config: UserDaemonConfig): bool =
   when defined(linux):
     try:
@@ -2583,14 +2615,7 @@ proc launchWithSystemdUser(exe: string; config: UserDaemonConfig): bool =
       # freshly-forked replacement. ExitType=cgroup keeps the unit
       # active as long as any process in the cgroup is alive, so the
       # replacement keeps running and can bind the endpoint.
-      var args = @["systemd-run", "--user", "--unit=" & systemdUnitName(config),
-        "--collect", "--quiet", "-p", "ExitType=cgroup"]
-      let processOwnerToken = processOwnerTokenForLaunch(config)
-      if processOwnerToken.len > 0:
-        args.add("--setenv=" & ReproTestRunnerOwnerTokenEnv & "=" &
-          processOwnerToken)
-      args.add(exe)
-      args.add(daemonProcessArgs(config))
+      let args = systemdUserRunArgs(exe, config)
       let res = execCmdEx(quoteCommand(args))
       if res.exitCode == 0:
         logLine(config.logPath, "launch requested backend=systemd-user unit=" &
