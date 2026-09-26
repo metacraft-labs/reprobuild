@@ -29156,6 +29156,14 @@ proc runDevelopCommand*(args: openArray[string]): int =
   let compileScratchDir = outDir / "provider-work"
   # MR5 — see executeBuildTarget for the bootstrap toolchain rationale.
   ensureBootstrapToolchainEnv(mode, resolveStoreRoot() / "tool-store")
+  # The interface extraction below is a leased build edge that does NOT fall
+  # back to the RunQuota bypass, so a host without a running daemon needs the
+  # same automatic one every other edge-running command (`build`, `run`,
+  # `exec`, `graph`, `why`) starts. Without it `develop` failed before it
+  # read the recipe, with a remediation that claims the auto-spawn search
+  # had already run.
+  var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
+  defer: releaseAutoRunQuotaProcess(autoRunQuota)
   var developStats: BuildStats
   let artifact = extractInterfaceEdge(modulePath, interfacePath, stubPath,
     compileWorkDir, compileScratchDir, projectRootForModule(modulePath),
