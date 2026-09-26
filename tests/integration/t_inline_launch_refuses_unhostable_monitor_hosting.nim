@@ -241,11 +241,12 @@ when defined(linux) or defined(macosx):
   except CatchableError as err:
     runQuotaError = err.msg
 
-  ## MUST BE A TEMPLATE, NOT A PROC. ``unittest.check`` writes to
-  ## ``testStatusIMPL``, which the ``test`` template declares as a local;
-  ## inside a proc the assignment binds elsewhere and a failed ``check``
-  ## prints "Check failed" while the case still reports ``[OK]``. That has
-  ## been observed for real in this suite.
+  ## A template so a failed ``check`` names the caller's line. It no longer
+  ## has to be one for the verdict: the ``unittest`` in use routes a ``check``
+  ## compiled outside a ``test`` body to the running test's status
+  ## (``runningTestStatus``), so the ``drive*`` procs below fail their case.
+  ## Measured, not assumed: changing ``run.results.len == 1`` to ``== 2``
+  ## inside ``driveInlineRefusal`` turned that case FAIL under ``--run``.
   template checkRefused(res: ActionResult; workRoot, phrase, label: string) =
     if res.status != asFailed:
       echo "[", label, "] the action was NOT refused: status=", res.status,
@@ -273,90 +274,111 @@ when defined(linux) or defined(macosx):
     check phrase in res.stderr
     check "unmonitored" in res.stderr
 
-  suite "P3 unhostable launch paths refuse a hosted plan":
-    test "the inline RunQuota path refuses instead of running unmonitored":
-      if runQuotaError.len > 0:
-        # A FAILURE, NOT A SKIP. ``requireRunQuotaDaemonBin`` already raises
-        # when the binary is absent and ``just test`` builds it, so every
-        # way of reaching this branch is a broken fixture — and a broken
-        # fixture that reports ``[SKIPPED]`` reports a green run over the
-        # case that carries this file's whole point.
-        echo "[L3] the RunQuota fixture did not come up: ", runQuotaError,
-          "\n  Fix the fixture; do not skip the case."
-        check runQuotaError.len == 0
-      else:
-        let caseDir = tempRoot / "inline"
-        let workRoot = prepareWork(caseDir)
-        let cacheRoot = caseDir / ".repro-cache"
-        let run = runBuild(graph([monitoredShellAction("p3-inline", workRoot)]),
-          requiredHostingConfig(repoRoot, cacheRoot, mlpInlineRunQuota))
-        check run.results.len == 1
-        checkRefused(run.results[0], workRoot,
-          "inline RunQuota launch path", "L3")
-        # Nothing was hosted either — the refusal is not "hosted it after
-        # all under a different name".
-        check inProcessHostCaptureFiles(cacheRoot) == 0
-        executed.incl "inline"
-
-    test "the RunQuota helper path refuses instead of dropping its lease":
-      ## The helper path cannot host for a DIFFERENT reason — the action is
-      ## started two processes deep, by ``repro __repro-runquota-helper`` —
-      ## and its failure mode is different too: a hosted plan here would be
-      ## monitored, but launched by the engine with no RunQuota lease at
-      ## all. Refusing is the same answer for both.
-      if runQuotaError.len > 0:
-        echo "[L2] the RunQuota fixture did not come up: ", runQuotaError,
-          "\n  Fix the fixture; do not skip the case."
-        check runQuotaError.len == 0
-      else:
-        let caseDir = tempRoot / "helper"
-        let workRoot = prepareWork(caseDir)
-        let cacheRoot = caseDir / ".repro-cache"
-        let run = runBuild(graph([monitoredShellAction("p3-helper", workRoot)]),
-          requiredHostingConfig(repoRoot, cacheRoot, mlpRunQuotaHelper))
-        check run.results.len == 1
-        checkRefused(run.results[0], workRoot,
-          "RunQuota helper launch path", "L2")
-        check inProcessHostCaptureFiles(cacheRoot) == 0
-        executed.incl "helper"
-
-    test "the bypass path really hosts under the same required mode":
-      ## THE CONTROL, and it is not a formality. Every assertion above is
-      ## satisfied by an engine that refuses everything, which would close
-      ## the hazard by breaking hosting altogether. This case asks for
-      ## hosting in the same mode on the one path that CAN host and requires
-      ## it to succeed, be hosted in-process, and be monitored.
-      let caseDir = tempRoot / "bypass"
+  ## THE THREE LAUNCH-PATH CASES ARE PROCS so the coverage case at the end of
+  ## the file can drive them itself. The suite runner executes each case in
+  ## its own process (``--run suite::test``), so ``executed`` only ever holds
+  ## what ran in THIS process; a coverage case that read what the earlier
+  ## cases left behind failed every time it ran alone and measured the
+  ## execution mode instead of the cases. Each drive gets a FRESH case
+  ## directory: a second drive in the same process (a whole-binary run) must
+  ## not find the first drive's ``produced.txt`` or its action cache, which
+  ## would let the bypass control pass on a cache hit it did not host.
+  proc driveInlineRefusal() =
+    ## Test "the inline RunQuota path refuses instead of running unmonitored".
+    if runQuotaError.len > 0:
+      # A FAILURE, NOT A SKIP. ``requireRunQuotaDaemonBin`` already raises
+      # when the binary is absent and ``just test`` builds it, so every
+      # way of reaching this branch is a broken fixture — and a broken
+      # fixture that reports ``[SKIPPED]`` reports a green run over the
+      # case that carries this file's whole point.
+      echo "[L3] the RunQuota fixture did not come up: ", runQuotaError,
+        "\n  Fix the fixture; do not skip the case."
+      check runQuotaError.len == 0
+    else:
+      let caseDir = createTempDir("inline-", "", tempRoot)
       let workRoot = prepareWork(caseDir)
       let cacheRoot = caseDir / ".repro-cache"
-      let run = runBuild(graph([monitoredShellAction("p3-bypass", workRoot)]),
-        requiredHostingConfig(repoRoot, cacheRoot, mlpBypassRunQuota))
+      let run = runBuild(graph([monitoredShellAction("p3-inline", workRoot)]),
+        requiredHostingConfig(repoRoot, cacheRoot, mlpInlineRunQuota))
       check run.results.len == 1
-      let res = run.results[0]
-      if res.status != asSucceeded:
-        echo "[L1] the control action failed exit=", res.exitCode,
-          "\n  diagnostics: ", res.evidence.diagnostics.join("; "),
-          "\n  stderr: ", res.stderr
-      check res.status == asSucceeded
-      check fileExists(workRoot / ProducedName)
-      # It really was HOSTED, not merely monitored by a wrapper child.
-      check inProcessHostCaptureFiles(cacheRoot) > 0
-      # And it really was MONITORED: the child's read of the marker reached
-      # the engine's evidence.
-      check res.monitorDepfilePath.len > 0
-      check fileExists(res.monitorDepfilePath)
-      var sawMarker = false
-      for p in res.evidence.monitorReads:
-        if p == expandFilename(workRoot / MarkerName):
-          sawMarker = true
-      if not sawMarker:
-        echo "[L1] monitorReads (", res.evidence.monitorReads.len,
-          " entries) did not contain ", expandFilename(workRoot / MarkerName),
-          "\n  entries: ", res.evidence.monitorReads.join("\n            "),
-          "\n  depfileInputs: ", res.evidence.depfileInputs.join(" "),
-          "\n  diagnostics: ", res.evidence.diagnostics.join("; ")
-      check sawMarker
-      executed.incl "bypass"
+      checkRefused(run.results[0], workRoot,
+        "inline RunQuota launch path", "L3")
+      # Nothing was hosted either — the refusal is not "hosted it after
+      # all under a different name".
+      check inProcessHostCaptureFiles(cacheRoot) == 0
+      executed.incl "inline"
+
+  proc driveHelperRefusal() =
+    ## Test "the RunQuota helper path refuses instead of dropping its lease".
+    ## The helper path cannot host for a DIFFERENT reason — the action is
+    ## started two processes deep, by ``repro __repro-runquota-helper`` —
+    ## and its failure mode is different too: a hosted plan here would be
+    ## monitored, but launched by the engine with no RunQuota lease at
+    ## all. Refusing is the same answer for both.
+    if runQuotaError.len > 0:
+      echo "[L2] the RunQuota fixture did not come up: ", runQuotaError,
+        "\n  Fix the fixture; do not skip the case."
+      check runQuotaError.len == 0
+    else:
+      let caseDir = createTempDir("helper-", "", tempRoot)
+      let workRoot = prepareWork(caseDir)
+      let cacheRoot = caseDir / ".repro-cache"
+      let run = runBuild(graph([monitoredShellAction("p3-helper", workRoot)]),
+        requiredHostingConfig(repoRoot, cacheRoot, mlpRunQuotaHelper))
+      check run.results.len == 1
+      checkRefused(run.results[0], workRoot,
+        "RunQuota helper launch path", "L2")
+      check inProcessHostCaptureFiles(cacheRoot) == 0
+      executed.incl "helper"
+
+  proc driveBypassControl() =
+    ## Test "the bypass path really hosts under the same required mode".
+    ## THE CONTROL, and it is not a formality. Every assertion above is
+    ## satisfied by an engine that refuses everything, which would close
+    ## the hazard by breaking hosting altogether. This case asks for
+    ## hosting in the same mode on the one path that CAN host and requires
+    ## it to succeed, be hosted in-process, and be monitored.
+    let caseDir = createTempDir("bypass-", "", tempRoot)
+    let workRoot = prepareWork(caseDir)
+    let cacheRoot = caseDir / ".repro-cache"
+    let run = runBuild(graph([monitoredShellAction("p3-bypass", workRoot)]),
+      requiredHostingConfig(repoRoot, cacheRoot, mlpBypassRunQuota))
+    check run.results.len == 1
+    let res = run.results[0]
+    if res.status != asSucceeded:
+      echo "[L1] the control action failed exit=", res.exitCode,
+        "\n  diagnostics: ", res.evidence.diagnostics.join("; "),
+        "\n  stderr: ", res.stderr
+    check res.status == asSucceeded
+    check fileExists(workRoot / ProducedName)
+    # It really was HOSTED, not merely monitored by a wrapper child.
+    check inProcessHostCaptureFiles(cacheRoot) > 0
+    # And it really was MONITORED: the child's read of the marker reached
+    # the engine's evidence.
+    check res.monitorDepfilePath.len > 0
+    check fileExists(res.monitorDepfilePath)
+    var sawMarker = false
+    for p in res.evidence.monitorReads:
+      if p == expandFilename(workRoot / MarkerName):
+        sawMarker = true
+    if not sawMarker:
+      echo "[L1] monitorReads (", res.evidence.monitorReads.len,
+        " entries) did not contain ", expandFilename(workRoot / MarkerName),
+        "\n  entries: ", res.evidence.monitorReads.join("\n            "),
+        "\n  depfileInputs: ", res.evidence.depfileInputs.join(" "),
+        "\n  diagnostics: ", res.evidence.diagnostics.join("; ")
+    check sawMarker
+    executed.incl "bypass"
+
+  suite "P3 unhostable launch paths refuse a hosted plan":
+    test "the inline RunQuota path refuses instead of running unmonitored":
+      driveInlineRefusal()
+
+    test "the RunQuota helper path refuses instead of dropping its lease":
+      driveHelperRefusal()
+
+    test "the bypass path really hosts under the same required mode":
+      driveBypassControl()
 
     test "every launch path either hosts or has a refusal to give":
       ## The table and the diagnostic are one statement in two places, so
@@ -390,9 +412,22 @@ when defined(linux) or defined(macosx):
       ## The three cases above are the whole file. Two of them need a
       ## daemon, and a fixture failure that turned into a skip is exactly
       ## how a coverage gate reports a clean run it did not do.
+      ##
+      ## This case DRIVES all three itself, from an empty ``executed``, and
+      ## requires each to run to the end of its assertions IN THIS PROCESS.
+      ## Under the runner every case is its own process, so "the other
+      ## cases ran" can only be observed by running them here; whether each
+      ## of them also passed as its own case is the runner's report of that
+      ## case, not something one process can see of another.
       if runQuotaError.len > 0:
         echo "the RunQuota fixture did not come up: ", runQuotaError
       check runQuotaError.len == 0
+      executed.clear()
+      for (name, drive) in [("inline", driveInlineRefusal),
+                            ("helper", driveHelperRefusal),
+                            ("bypass", driveBypassControl)]:
+        checkpoint("driving the " & name & " case")
+        drive()
       for name in ["inline", "helper", "bypass"]:
         if name notin executed:
           echo "case '", name, "' did not run to the end of its assertions"

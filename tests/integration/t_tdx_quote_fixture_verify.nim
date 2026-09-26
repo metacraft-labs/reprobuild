@@ -571,6 +571,101 @@ suite "tdx quote structure":
 
 # ---------------------------------------------------------------------
 
+proc driveTdxOneBitInTheAttestationKeyBreaksTheBinding() =
+  ## The body of test
+  ##   "t_tdx_one_bit_in_the_attestation_key_breaks_the_binding"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var mutations = 0
+  for s in specimens:
+    checkpoint s.label
+    let sigAt = s.signedBytes + 4
+    let at = sigAt + EcdsaP256SignatureLen
+    let mutated = flipBit(s.raw, at + 5, 2)
+    check bitsDiffering(s.raw, mutated) == 1
+    let q = parseTdxQuote(mutated)
+    check hexOfBytes(q.attestationKey) != s.attestKeyHex
+    let binding = qeReportBindsAttestationKey(q)
+    check not binding.isBound
+    check binding.outcome == tboReportDataDisagrees
+    reachedBindingKinds.incl binding.outcome
+    # The enclave report itself is untouched and still verifies; the
+    # quote signature does not, because the key it would be checked
+    # under is the mutated one.
+    check verifyQeReportSignature(q, leafPointOf(q))
+    check not verifyQuoteSignature(q)
+    inc mutations
+  check mutations == 3
+
+proc driveTdxTheBindingComparesAllThirtyTwoDigestBytes() =
+  ## The body of test
+  ##   "t_tdx_the_binding_compares_all_thirty_two_digest_bytes"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The mutation table found this: every other negative here moves
+  # the attestation key, which moves the WHOLE digest, so a build
+  # comparing only the first sixteen bytes caught them all and the
+  # rule "all thirty-two are compared" had no input.
+  #
+  # The input it needed is the other side of the comparison. Moving a
+  # bit of the quoting enclave's report DATA at a chosen offset makes
+  # the report and the recomputed digest differ at exactly that
+  # offset and nowhere else, so a comparison that stopped early is
+  # visible by where the difference is.
+  var offsets = 0
+  for at in [0, 15, 16, 31]:
+    checkpoint "report data byte " & $at
+    for s in specimens:
+      let sigAt = s.signedBytes + 4
+      let qeAt = sigAt + EcdsaP256SignatureLen + EcdsaP256PublicKeyLen + 6
+      let mutated = flipBit(s.raw, qeAt + OffQeReportData + at, 1)
+      check bitsDiffering(s.raw, mutated) == 1
+      let q = parseTdxQuote(mutated)
+      let binding = qeReportBindsAttestationKey(q)
+      check not binding.isBound
+      check binding.outcome == tboReportDataDisagrees
+      # The digest itself did not move: only the report did.
+      check binding.computedHex == s.bindingHex
+      reachedBindingKinds.incl binding.outcome
+    inc offsets
+  check offsets == 4
+  # And the SAME construction at a byte the binding does not cover
+  # reaches the other rule, so the two halves are told apart by where
+  # the byte is and not by which case ran.
+  let s0 = specimens[0]
+  let sigAt0 = s0.signedBytes + 4
+  let qeAt0 = sigAt0 + EcdsaP256SignatureLen + EcdsaP256PublicKeyLen + 6
+  let beyond = parseTdxQuote(
+    flipBit(s0.raw, qeAt0 + OffQeReportData + 32, 1))
+  check qeReportBindsAttestationKey(beyond).outcome ==
+    tboReportDataTailNotZero
+
+proc driveTdxTheUnusedHalfOfTheEnclaveReportDataMustBeBlank() =
+  ## The body of test
+  ##   "t_tdx_the_unused_half_of_the_enclave_report_data_must_be_blank"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var mutations = 0
+  for s in specimens:
+    checkpoint s.label
+    let sigAt = s.signedBytes + 4
+    let qeAt = sigAt + EcdsaP256SignatureLen + EcdsaP256PublicKeyLen + 6
+    # Byte 32 of the report data is the first the binding does not
+    # cover. The quoting enclave's signature does cover it, so this is
+    # a mutation that breaks TWO things, and the case asserts both.
+    let at = qeAt + OffQeReportData + 32
+    let mutated = flipBit(s.raw, at, 7)
+    check bitsDiffering(s.raw, mutated) == 1
+    let q = parseTdxQuote(mutated)
+    let binding = qeReportBindsAttestationKey(q)
+    check not binding.isBound
+    check binding.outcome == tboReportDataTailNotZero
+    check "byte 32" in binding.detail
+    reachedBindingKinds.incl binding.outcome
+    check not verifyQeReportSignature(q, leafPointOf(q))
+    inc mutations
+  check mutations == 3
+
 suite "tdx quote mutations":
 
   test "t_tdx_one_bit_in_the_trust_domain_report_breaks_only_that_signature":
@@ -633,87 +728,13 @@ suite "tdx quote mutations":
     check mutations == 12
 
   test "t_tdx_one_bit_in_the_attestation_key_breaks_the_binding":
-    var mutations = 0
-    for s in specimens:
-      checkpoint s.label
-      let sigAt = s.signedBytes + 4
-      let at = sigAt + EcdsaP256SignatureLen
-      let mutated = flipBit(s.raw, at + 5, 2)
-      check bitsDiffering(s.raw, mutated) == 1
-      let q = parseTdxQuote(mutated)
-      check hexOfBytes(q.attestationKey) != s.attestKeyHex
-      let binding = qeReportBindsAttestationKey(q)
-      check not binding.isBound
-      check binding.outcome == tboReportDataDisagrees
-      reachedBindingKinds.incl binding.outcome
-      # The enclave report itself is untouched and still verifies; the
-      # quote signature does not, because the key it would be checked
-      # under is the mutated one.
-      check verifyQeReportSignature(q, leafPointOf(q))
-      check not verifyQuoteSignature(q)
-      inc mutations
-    check mutations == 3
+    driveTdxOneBitInTheAttestationKeyBreaksTheBinding()
 
   test "t_tdx_the_binding_compares_all_thirty_two_digest_bytes":
-    # The mutation table found this: every other negative here moves
-    # the attestation key, which moves the WHOLE digest, so a build
-    # comparing only the first sixteen bytes caught them all and the
-    # rule "all thirty-two are compared" had no input.
-    #
-    # The input it needed is the other side of the comparison. Moving a
-    # bit of the quoting enclave's report DATA at a chosen offset makes
-    # the report and the recomputed digest differ at exactly that
-    # offset and nowhere else, so a comparison that stopped early is
-    # visible by where the difference is.
-    var offsets = 0
-    for at in [0, 15, 16, 31]:
-      checkpoint "report data byte " & $at
-      for s in specimens:
-        let sigAt = s.signedBytes + 4
-        let qeAt = sigAt + EcdsaP256SignatureLen + EcdsaP256PublicKeyLen + 6
-        let mutated = flipBit(s.raw, qeAt + OffQeReportData + at, 1)
-        check bitsDiffering(s.raw, mutated) == 1
-        let q = parseTdxQuote(mutated)
-        let binding = qeReportBindsAttestationKey(q)
-        check not binding.isBound
-        check binding.outcome == tboReportDataDisagrees
-        # The digest itself did not move: only the report did.
-        check binding.computedHex == s.bindingHex
-        reachedBindingKinds.incl binding.outcome
-      inc offsets
-    check offsets == 4
-    # And the SAME construction at a byte the binding does not cover
-    # reaches the other rule, so the two halves are told apart by where
-    # the byte is and not by which case ran.
-    let s0 = specimens[0]
-    let sigAt0 = s0.signedBytes + 4
-    let qeAt0 = sigAt0 + EcdsaP256SignatureLen + EcdsaP256PublicKeyLen + 6
-    let beyond = parseTdxQuote(
-      flipBit(s0.raw, qeAt0 + OffQeReportData + 32, 1))
-    check qeReportBindsAttestationKey(beyond).outcome ==
-      tboReportDataTailNotZero
+    driveTdxTheBindingComparesAllThirtyTwoDigestBytes()
 
   test "t_tdx_the_unused_half_of_the_enclave_report_data_must_be_blank":
-    var mutations = 0
-    for s in specimens:
-      checkpoint s.label
-      let sigAt = s.signedBytes + 4
-      let qeAt = sigAt + EcdsaP256SignatureLen + EcdsaP256PublicKeyLen + 6
-      # Byte 32 of the report data is the first the binding does not
-      # cover. The quoting enclave's signature does cover it, so this is
-      # a mutation that breaks TWO things, and the case asserts both.
-      let at = qeAt + OffQeReportData + 32
-      let mutated = flipBit(s.raw, at, 7)
-      check bitsDiffering(s.raw, mutated) == 1
-      let q = parseTdxQuote(mutated)
-      let binding = qeReportBindsAttestationKey(q)
-      check not binding.isBound
-      check binding.outcome == tboReportDataTailNotZero
-      check "byte 32" in binding.detail
-      reachedBindingKinds.incl binding.outcome
-      check not verifyQeReportSignature(q, leafPointOf(q))
-      inc mutations
-    check mutations == 3
+    driveTdxTheUnusedHalfOfTheEnclaveReportDataMustBeBlank()
 
   test "t_tdx_every_single_byte_of_either_signature_is_covered":
     # A sweep rather than a sample, over one specimen, so a build that
@@ -738,37 +759,291 @@ suite "tdx quote mutations":
 
 # ---------------------------------------------------------------------
 
+proc driveTdxAPublishedDocumentLongerThanItDeclaresIsRefused() =
+  ## The body of test
+  ##   "t_tdx_a_published_document_longer_than_it_declares_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Not a manufactured input: `google/go-tdx-guest` appends 39 bytes
+  # of ASCII to its own fixture on purpose, and this is the rule that
+  # notices. A reader that took the declared length and ignored the
+  # remainder would accept a document carrying a second document
+  # nobody looks at.
+  check sprQuoteWhole.len == 4974
+  check sprQuoteWhole.len - SprQuoteBytes == 39
+  var marker = ""
+  for i in SprQuoteBytes ..< sprQuoteWhole.len:
+    marker.add char(sprQuoteWhole[i])
+  check marker == "\nextra bytes(only for testing purpose)\n"
+  let before = refusalsObserved
+  expectQuoteRefusal(tqeTrailingBytes):
+    discard parseTdxQuote(sprQuoteWhole)
+  check refusalsObserved == before + 1
+
+proc driveTdxIntelSOwnSampleQuoteIsRefusedForItsEncoding() =
+  ## The body of test
+  ##   "t_tdx_intel_s_own_sample_quote_is_refused_for_its_encoding"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Intel's quote-verification library ships a sample quote whose
+  # endorsement material is raw DER in root-first order rather than
+  # the textual armour in leaf-first order the kind it declares is
+  # defined to carry. Refused by the rule about the ARMOUR, and the
+  # case says so — its root being a test root is a different rule in
+  # a different module, and reaching it needs the certificates handed
+  # over directly.
+  let before = refusalsObserved
+  expectQuoteRefusal(tqeNotAPemCertificateChain):
+    discard parseTdxQuote(intelSampleQuote)
+  check refusalsObserved == before + 1
+
+proc driveTdxEveryStructuralRuleRefusesItsOwnInput() =
+  ## The body of test
+  ##   "t_tdx_every_structural_rule_refuses_its_own_input"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # One constructed input per rule, each derived from a genuine quote
+  # so that nothing but the mutated field can be what is objected to.
+  let base = sprQuote
+  let sigAt = specimens[0].signedBytes + 4
+  let qeAt = sigAt + EcdsaP256SignatureLen + EcdsaP256PublicKeyLen + 6
+  let before = refusalsObserved
+
+  expectQuoteRefusal(tqeTooShort):
+    discard parseTdxQuote(base[0 ..< 40])
+
+  var badVersion = base
+  putLe16(badVersion, OffQuoteVersion, 3'u16)
+  expectQuoteRefusal(tqeUnsupportedVersion):
+    discard parseTdxQuote(badVersion)
+
+  var badKeyType = base
+  putLe16(badKeyType, OffQuoteAttestationKeyType, 3'u16)
+  expectQuoteRefusal(tqeUnsupportedAttestationKeyType):
+    discard parseTdxQuote(badKeyType)
+
+  var badTee = base
+  putLe32(badTee, OffQuoteTeeType, 0'u32)
+  expectQuoteRefusal(tqeNotATrustDomainQuote):
+    discard parseTdxQuote(badTee)
+
+  var badReserved = base
+  badReserved[OffQuoteHeaderReserved + 1] = 0x01'u8
+  expectQuoteRefusal(tqeHeaderReservedNotZero):
+    discard parseTdxQuote(badReserved)
+
+  # The version-5 report descriptor: an unknown shape, and a declared
+  # width that disagrees with a known one.
+  var badShape = gtgV5Quote
+  putLe16(badShape, TdxQuoteHeaderLen, 1'u16)
+  expectQuoteRefusal(tqeUnsupportedBodyType):
+    discard parseTdxQuote(badShape)
+
+  var badWidth = gtgV5Quote
+  putLe32(badWidth, TdxQuoteHeaderLen + 2, uint32(TdReportLen))
+  expectQuoteRefusal(tqeBodySizeDisagreesWithItsType):
+    discard parseTdxQuote(badWidth)
+
+  # A version-5 quote whose declared report is wider than the bytes
+  # supplied. The shape has to stay a known one, so the width moves
+  # with it: shape 3 is 648 bytes and the document is truncated to
+  # less than that plus its descriptor.
+  var shortBody = gtgV5Quote[0 ..< TdxQuoteHeaderLen + 6 + 600]
+  expectQuoteRefusal(tqeBodyRunsPastTheEnd):
+    discard parseTdxQuote(shortBody)
+
+  var longSig = base
+  putLe32(longSig, specimens[0].signedBytes, 0xffff'u32)
+  expectQuoteRefusal(tqeSignatureDataRunsPastTheEnd):
+    discard parseTdxQuote(longSig)
+
+  var badQeType = base
+  putLe16(badQeType, sigAt + EcdsaP256SignatureLen +
+    EcdsaP256PublicKeyLen, 5'u16)
+  expectQuoteRefusal(tqeQeCertificationDataTypeUnsupported):
+    discard parseTdxQuote(badQeType)
+
+  var longQe = base
+  putLe32(longQe, sigAt + EcdsaP256SignatureLen +
+    EcdsaP256PublicKeyLen + 2, 0xffff'u32)
+  expectQuoteRefusal(tqeQeCertificationDataRunsPastTheEnd):
+    discard parseTdxQuote(longQe)
+
+  var shortQe = base
+  putLe32(shortQe, sigAt + EcdsaP256SignatureLen +
+    EcdsaP256PublicKeyLen + 2, 500'u32)
+  expectQuoteRefusal(tqeCertificationDataNotExactlyFilled):
+    discard parseTdxQuote(shortQe)
+
+  var longAuth = base
+  putLe16(longAuth, qeAt + SgxReportBodyLen + EcdsaP256SignatureLen,
+    0xffff'u16)
+  expectQuoteRefusal(tqeQeAuthenticationDataRunsPastTheEnd):
+    discard parseTdxQuote(longAuth)
+
+  let authLen = specimens[0].qeAuthDataHex.len div 2
+  let pckTypeAt = qeAt + SgxReportBodyLen + EcdsaP256SignatureLen + 2 +
+    authLen
+  var badPckType = base
+  putLe16(badPckType, pckTypeAt, 4'u16)
+  expectQuoteRefusal(tqePckCertificationDataTypeUnsupported):
+    discard parseTdxQuote(badPckType)
+
+  var longPck = base
+  putLe32(longPck, pckTypeAt + 2, 0xffff'u32)
+  expectQuoteRefusal(tqePckCertificationDataRunsPastTheEnd):
+    discard parseTdxQuote(longPck)
+
+  # Armour that holds one certificate rather than three. Built by
+  # truncating the chain payload at the end of its first block and
+  # restating every enclosing length, so nothing but the COUNT is
+  # wrong.
+  var oneCert = base
+  block:
+    var text = ""
+    for i in 0 ..< specimens[0].chainSizes.len: discard i
+    let q = parseTdxQuote(base)
+    var pem = ""
+    for b in q.pckChainPem: pem.add char(b)
+    let firstEnd = pem.find(PemEnd) + PemEnd.len
+    let kept = pem[0 ..< firstEnd] & "\n"
+    var rebuilt: seq[byte] = @[]
+    for i in 0 ..< pckTypeAt: rebuilt.add base[i]
+    rebuilt.add byte(PckCertificateChainDataType and 0xff'u16)
+    rebuilt.add byte((PckCertificateChainDataType shr 8) and 0xff'u16)
+    let n = uint32(kept.len)
+    rebuilt.add byte(n and 0xff'u32)
+    rebuilt.add byte((n shr 8) and 0xff'u32)
+    rebuilt.add byte((n shr 16) and 0xff'u32)
+    rebuilt.add byte((n shr 24) and 0xff'u32)
+    for c in kept: rebuilt.add byte(c)
+    # Restate the two enclosing lengths and the signature-block one.
+    let qeLen = uint32(rebuilt.len - qeAt)
+    putLe32(rebuilt, qeAt - 4, qeLen)
+    let sigLen = uint32(rebuilt.len - sigAt)
+    putLe32(rebuilt, sigAt - 4, sigLen)
+    oneCert = rebuilt
+    text = ""
+    discard text
+  expectQuoteRefusal(tqeWrongCertificateChainLength):
+    discard parseTdxQuote(oneCert)
+
+  # Armour holding no block at all, built the same way.
+  var noCert = oneCert
+  block:
+    var rebuilt: seq[byte] = @[]
+    for i in 0 ..< pckTypeAt: rebuilt.add base[i]
+    rebuilt.add byte(PckCertificateChainDataType and 0xff'u16)
+    rebuilt.add byte((PckCertificateChainDataType shr 8) and 0xff'u16)
+    let payload = "no armour here"
+    let n = uint32(payload.len)
+    rebuilt.add byte(n and 0xff'u32)
+    rebuilt.add byte((n shr 8) and 0xff'u32)
+    rebuilt.add byte((n shr 16) and 0xff'u32)
+    rebuilt.add byte((n shr 24) and 0xff'u32)
+    for c in payload: rebuilt.add byte(c)
+    putLe32(rebuilt, qeAt - 4, uint32(rebuilt.len - qeAt))
+    putLe32(rebuilt, sigAt - 4, uint32(rebuilt.len - sigAt))
+    noCert = rebuilt
+  expectQuoteRefusal(tqeNotAPemCertificateChain):
+    discard parseTdxQuote(noCert)
+
+  check refusalsObserved == before + 17
+
+proc driveTdxTheFourRulesThatShareAKindEachGetTheirOwnInput() =
+  ## The body of test
+  ##   "t_tdx_the_four_rules_that_share_a_kind_each_get_their_own_input"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Three of the eighteen kinds are raised at more than one place —
+  # the too-short rule at the version-4 prefix and again at the
+  # version-5 one, the quoting-enclave length rule at three arithmetic
+  # points, and the exactly-filled rule at two nesting levels. A case
+  # that reached one of each would leave four rules with no input
+  # while the kind census read 18 of 18, which is the shape this tree
+  # keeps being defeated by.
+  proc refusalMessage(data: seq[byte]): string =
+    ## The message a document earns, or the empty string when it is
+    ## not refused at all — which every check below would then fail
+    ## on, so a silently-accepted input cannot pass as a refusal.
+    try:
+      discard parseTdxQuote(data)
+      ""
+    except TdxQuoteError as err:
+      err.msg
+
+  let before = refusalsObserved
+  let base = sprQuote
+  let v5 = gtgV5Quote
+  let sigAt = specimens[0].signedBytes + 4
+  let qeAt = sigAt + EcdsaP256SignatureLen + EcdsaP256PublicKeyLen + 6
+
+  # The version-5 prefix: long enough for a version-4 header and a
+  # length, short of a version-5 descriptor and one.
+  var shortV5 = v5[0 ..< TdxQuoteHeaderLen + 6]
+  check shortV5.len > TdxQuoteHeaderLen + 4
+  check shortV5.len < TdxQuoteHeaderLen + 6 + 4
+  expectQuoteRefusal(tqeTooShort):
+    discard parseTdxQuote(shortV5)
+  check "a version-5 header" in refusalMessage(shortV5)
+
+  # The signature block shorter than its own fixed fields.
+  var tinySig = base[0 ..< sigAt + 10]
+  putLe32(tinySig, specimens[0].signedBytes, 10'u32)
+  expectQuoteRefusal(tqeQeCertificationDataRunsPastTheEnd):
+    discard parseTdxQuote(tinySig)
+  check "its fixed fields alone are" in refusalMessage(tinySig)
+
+  # The quoting enclave's certification data shorter than its own
+  # report, signature and length field.
+  var tinyQe = base[0 ..< qeAt + 100]
+  putLe32(tinyQe, qeAt - 4, 100'u32)
+  putLe32(tinyQe, specimens[0].signedBytes, uint32(tinyQe.len - sigAt))
+  expectQuoteRefusal(tqeQeCertificationDataRunsPastTheEnd):
+    discard parseTdxQuote(tinyQe)
+  check "its report, signature and authentication length" in refusalMessage(tinyQe)
+
+  # The INNER exactly-filled rule: the endorsement material declares
+  # fewer bytes than remain beside it, while every enclosing length
+  # still adds up.
+  let authLen = specimens[0].qeAuthDataHex.len div 2
+  let pckTypeAt = qeAt + SgxReportBodyLen + EcdsaP256SignatureLen + 2 +
+    authLen
+  var shortPck = base
+  putLe32(shortPck, pckTypeAt + 2, 100'u32)
+  expectQuoteRefusal(tqeCertificationDataNotExactlyFilled):
+    discard parseTdxQuote(shortPck)
+  check "its endorsement material declares" in refusalMessage(shortPck)
+
+  check refusalsObserved == before + 4
+
+# Every case whose outcomes the coverage case(s) below observe. The
+# suite runner executes each case in its own process (`--run
+# suite::test`), so the coverage case drives these itself rather than
+# reading what earlier cases left in process-global state.
+const QuoteDrivers: seq[(string, proc () {.nimcall.})] = @[
+  ("t_tdx_one_bit_in_the_attestation_key_breaks_the_binding",
+    driveTdxOneBitInTheAttestationKeyBreaksTheBinding),
+  ("t_tdx_the_binding_compares_all_thirty_two_digest_bytes",
+    driveTdxTheBindingComparesAllThirtyTwoDigestBytes),
+  ("t_tdx_the_unused_half_of_the_enclave_report_data_must_be_blank",
+    driveTdxTheUnusedHalfOfTheEnclaveReportDataMustBeBlank),
+  ("t_tdx_a_published_document_longer_than_it_declares_is_refused",
+    driveTdxAPublishedDocumentLongerThanItDeclaresIsRefused),
+  ("t_tdx_intel_s_own_sample_quote_is_refused_for_its_encoding",
+    driveTdxIntelSOwnSampleQuoteIsRefusedForItsEncoding),
+  ("t_tdx_every_structural_rule_refuses_its_own_input",
+    driveTdxEveryStructuralRuleRefusesItsOwnInput),
+  ("t_tdx_the_four_rules_that_share_a_kind_each_get_their_own_input",
+    driveTdxTheFourRulesThatShareAKindEachGetTheirOwnInput)]
+
 suite "tdx quote refusals":
 
   test "t_tdx_a_published_document_longer_than_it_declares_is_refused":
-    # Not a manufactured input: `google/go-tdx-guest` appends 39 bytes
-    # of ASCII to its own fixture on purpose, and this is the rule that
-    # notices. A reader that took the declared length and ignored the
-    # remainder would accept a document carrying a second document
-    # nobody looks at.
-    check sprQuoteWhole.len == 4974
-    check sprQuoteWhole.len - SprQuoteBytes == 39
-    var marker = ""
-    for i in SprQuoteBytes ..< sprQuoteWhole.len:
-      marker.add char(sprQuoteWhole[i])
-    check marker == "\nextra bytes(only for testing purpose)\n"
-    let before = refusalsObserved
-    expectQuoteRefusal(tqeTrailingBytes):
-      discard parseTdxQuote(sprQuoteWhole)
-    check refusalsObserved == before + 1
+    driveTdxAPublishedDocumentLongerThanItDeclaresIsRefused()
 
   test "t_tdx_intel_s_own_sample_quote_is_refused_for_its_encoding":
-    # Intel's quote-verification library ships a sample quote whose
-    # endorsement material is raw DER in root-first order rather than
-    # the textual armour in leaf-first order the kind it declares is
-    # defined to carry. Refused by the rule about the ARMOUR, and the
-    # case says so — its root being a test root is a different rule in
-    # a different module, and reaching it needs the certificates handed
-    # over directly.
-    let before = refusalsObserved
-    expectQuoteRefusal(tqeNotAPemCertificateChain):
-      discard parseTdxQuote(intelSampleQuote)
-    check refusalsObserved == before + 1
+    driveTdxIntelSOwnSampleQuoteIsRefusedForItsEncoding()
 
   test "t_tdx_the_impostor_quote_is_internally_valid":
     # The point of a structural negative: it must be refused for ONE
@@ -793,218 +1068,20 @@ suite "tdx quote refusals":
       sprQuote).pckChain[2])
 
   test "t_tdx_every_structural_rule_refuses_its_own_input":
-    # One constructed input per rule, each derived from a genuine quote
-    # so that nothing but the mutated field can be what is objected to.
-    let base = sprQuote
-    let sigAt = specimens[0].signedBytes + 4
-    let qeAt = sigAt + EcdsaP256SignatureLen + EcdsaP256PublicKeyLen + 6
-    let before = refusalsObserved
-
-    expectQuoteRefusal(tqeTooShort):
-      discard parseTdxQuote(base[0 ..< 40])
-
-    var badVersion = base
-    putLe16(badVersion, OffQuoteVersion, 3'u16)
-    expectQuoteRefusal(tqeUnsupportedVersion):
-      discard parseTdxQuote(badVersion)
-
-    var badKeyType = base
-    putLe16(badKeyType, OffQuoteAttestationKeyType, 3'u16)
-    expectQuoteRefusal(tqeUnsupportedAttestationKeyType):
-      discard parseTdxQuote(badKeyType)
-
-    var badTee = base
-    putLe32(badTee, OffQuoteTeeType, 0'u32)
-    expectQuoteRefusal(tqeNotATrustDomainQuote):
-      discard parseTdxQuote(badTee)
-
-    var badReserved = base
-    badReserved[OffQuoteHeaderReserved + 1] = 0x01'u8
-    expectQuoteRefusal(tqeHeaderReservedNotZero):
-      discard parseTdxQuote(badReserved)
-
-    # The version-5 report descriptor: an unknown shape, and a declared
-    # width that disagrees with a known one.
-    var badShape = gtgV5Quote
-    putLe16(badShape, TdxQuoteHeaderLen, 1'u16)
-    expectQuoteRefusal(tqeUnsupportedBodyType):
-      discard parseTdxQuote(badShape)
-
-    var badWidth = gtgV5Quote
-    putLe32(badWidth, TdxQuoteHeaderLen + 2, uint32(TdReportLen))
-    expectQuoteRefusal(tqeBodySizeDisagreesWithItsType):
-      discard parseTdxQuote(badWidth)
-
-    # A version-5 quote whose declared report is wider than the bytes
-    # supplied. The shape has to stay a known one, so the width moves
-    # with it: shape 3 is 648 bytes and the document is truncated to
-    # less than that plus its descriptor.
-    var shortBody = gtgV5Quote[0 ..< TdxQuoteHeaderLen + 6 + 600]
-    expectQuoteRefusal(tqeBodyRunsPastTheEnd):
-      discard parseTdxQuote(shortBody)
-
-    var longSig = base
-    putLe32(longSig, specimens[0].signedBytes, 0xffff'u32)
-    expectQuoteRefusal(tqeSignatureDataRunsPastTheEnd):
-      discard parseTdxQuote(longSig)
-
-    var badQeType = base
-    putLe16(badQeType, sigAt + EcdsaP256SignatureLen +
-      EcdsaP256PublicKeyLen, 5'u16)
-    expectQuoteRefusal(tqeQeCertificationDataTypeUnsupported):
-      discard parseTdxQuote(badQeType)
-
-    var longQe = base
-    putLe32(longQe, sigAt + EcdsaP256SignatureLen +
-      EcdsaP256PublicKeyLen + 2, 0xffff'u32)
-    expectQuoteRefusal(tqeQeCertificationDataRunsPastTheEnd):
-      discard parseTdxQuote(longQe)
-
-    var shortQe = base
-    putLe32(shortQe, sigAt + EcdsaP256SignatureLen +
-      EcdsaP256PublicKeyLen + 2, 500'u32)
-    expectQuoteRefusal(tqeCertificationDataNotExactlyFilled):
-      discard parseTdxQuote(shortQe)
-
-    var longAuth = base
-    putLe16(longAuth, qeAt + SgxReportBodyLen + EcdsaP256SignatureLen,
-      0xffff'u16)
-    expectQuoteRefusal(tqeQeAuthenticationDataRunsPastTheEnd):
-      discard parseTdxQuote(longAuth)
-
-    let authLen = specimens[0].qeAuthDataHex.len div 2
-    let pckTypeAt = qeAt + SgxReportBodyLen + EcdsaP256SignatureLen + 2 +
-      authLen
-    var badPckType = base
-    putLe16(badPckType, pckTypeAt, 4'u16)
-    expectQuoteRefusal(tqePckCertificationDataTypeUnsupported):
-      discard parseTdxQuote(badPckType)
-
-    var longPck = base
-    putLe32(longPck, pckTypeAt + 2, 0xffff'u32)
-    expectQuoteRefusal(tqePckCertificationDataRunsPastTheEnd):
-      discard parseTdxQuote(longPck)
-
-    # Armour that holds one certificate rather than three. Built by
-    # truncating the chain payload at the end of its first block and
-    # restating every enclosing length, so nothing but the COUNT is
-    # wrong.
-    var oneCert = base
-    block:
-      var text = ""
-      for i in 0 ..< specimens[0].chainSizes.len: discard i
-      let q = parseTdxQuote(base)
-      var pem = ""
-      for b in q.pckChainPem: pem.add char(b)
-      let firstEnd = pem.find(PemEnd) + PemEnd.len
-      let kept = pem[0 ..< firstEnd] & "\n"
-      var rebuilt: seq[byte] = @[]
-      for i in 0 ..< pckTypeAt: rebuilt.add base[i]
-      rebuilt.add byte(PckCertificateChainDataType and 0xff'u16)
-      rebuilt.add byte((PckCertificateChainDataType shr 8) and 0xff'u16)
-      let n = uint32(kept.len)
-      rebuilt.add byte(n and 0xff'u32)
-      rebuilt.add byte((n shr 8) and 0xff'u32)
-      rebuilt.add byte((n shr 16) and 0xff'u32)
-      rebuilt.add byte((n shr 24) and 0xff'u32)
-      for c in kept: rebuilt.add byte(c)
-      # Restate the two enclosing lengths and the signature-block one.
-      let qeLen = uint32(rebuilt.len - qeAt)
-      putLe32(rebuilt, qeAt - 4, qeLen)
-      let sigLen = uint32(rebuilt.len - sigAt)
-      putLe32(rebuilt, sigAt - 4, sigLen)
-      oneCert = rebuilt
-      text = ""
-      discard text
-    expectQuoteRefusal(tqeWrongCertificateChainLength):
-      discard parseTdxQuote(oneCert)
-
-    # Armour holding no block at all, built the same way.
-    var noCert = oneCert
-    block:
-      var rebuilt: seq[byte] = @[]
-      for i in 0 ..< pckTypeAt: rebuilt.add base[i]
-      rebuilt.add byte(PckCertificateChainDataType and 0xff'u16)
-      rebuilt.add byte((PckCertificateChainDataType shr 8) and 0xff'u16)
-      let payload = "no armour here"
-      let n = uint32(payload.len)
-      rebuilt.add byte(n and 0xff'u32)
-      rebuilt.add byte((n shr 8) and 0xff'u32)
-      rebuilt.add byte((n shr 16) and 0xff'u32)
-      rebuilt.add byte((n shr 24) and 0xff'u32)
-      for c in payload: rebuilt.add byte(c)
-      putLe32(rebuilt, qeAt - 4, uint32(rebuilt.len - qeAt))
-      putLe32(rebuilt, sigAt - 4, uint32(rebuilt.len - sigAt))
-      noCert = rebuilt
-    expectQuoteRefusal(tqeNotAPemCertificateChain):
-      discard parseTdxQuote(noCert)
-
-    check refusalsObserved == before + 17
+    driveTdxEveryStructuralRuleRefusesItsOwnInput()
 
   test "t_tdx_the_four_rules_that_share_a_kind_each_get_their_own_input":
-    # Three of the eighteen kinds are raised at more than one place —
-    # the too-short rule at the version-4 prefix and again at the
-    # version-5 one, the quoting-enclave length rule at three arithmetic
-    # points, and the exactly-filled rule at two nesting levels. A case
-    # that reached one of each would leave four rules with no input
-    # while the kind census read 18 of 18, which is the shape this tree
-    # keeps being defeated by.
-    proc refusalMessage(data: seq[byte]): string =
-      ## The message a document earns, or the empty string when it is
-      ## not refused at all — which every check below would then fail
-      ## on, so a silently-accepted input cannot pass as a refusal.
-      try:
-        discard parseTdxQuote(data)
-        ""
-      except TdxQuoteError as err:
-        err.msg
-
-    let before = refusalsObserved
-    let base = sprQuote
-    let v5 = gtgV5Quote
-    let sigAt = specimens[0].signedBytes + 4
-    let qeAt = sigAt + EcdsaP256SignatureLen + EcdsaP256PublicKeyLen + 6
-
-    # The version-5 prefix: long enough for a version-4 header and a
-    # length, short of a version-5 descriptor and one.
-    var shortV5 = v5[0 ..< TdxQuoteHeaderLen + 6]
-    check shortV5.len > TdxQuoteHeaderLen + 4
-    check shortV5.len < TdxQuoteHeaderLen + 6 + 4
-    expectQuoteRefusal(tqeTooShort):
-      discard parseTdxQuote(shortV5)
-    check "a version-5 header" in refusalMessage(shortV5)
-
-    # The signature block shorter than its own fixed fields.
-    var tinySig = base[0 ..< sigAt + 10]
-    putLe32(tinySig, specimens[0].signedBytes, 10'u32)
-    expectQuoteRefusal(tqeQeCertificationDataRunsPastTheEnd):
-      discard parseTdxQuote(tinySig)
-    check "its fixed fields alone are" in refusalMessage(tinySig)
-
-    # The quoting enclave's certification data shorter than its own
-    # report, signature and length field.
-    var tinyQe = base[0 ..< qeAt + 100]
-    putLe32(tinyQe, qeAt - 4, 100'u32)
-    putLe32(tinyQe, specimens[0].signedBytes, uint32(tinyQe.len - sigAt))
-    expectQuoteRefusal(tqeQeCertificationDataRunsPastTheEnd):
-      discard parseTdxQuote(tinyQe)
-    check "its report, signature and authentication length" in refusalMessage(tinyQe)
-
-    # The INNER exactly-filled rule: the endorsement material declares
-    # fewer bytes than remain beside it, while every enclosing length
-    # still adds up.
-    let authLen = specimens[0].qeAuthDataHex.len div 2
-    let pckTypeAt = qeAt + SgxReportBodyLen + EcdsaP256SignatureLen + 2 +
-      authLen
-    var shortPck = base
-    putLe32(shortPck, pckTypeAt + 2, 100'u32)
-    expectQuoteRefusal(tqeCertificationDataNotExactlyFilled):
-      discard parseTdxQuote(shortPck)
-    check "its endorsement material declares" in refusalMessage(shortPck)
-
-    check refusalsObserved == before + 4
+    driveTdxTheFourRulesThatShareAKindEachGetTheirOwnInput()
 
   test "t_tdx_every_refusal_kind_was_reached_by_some_case":
+    # Driven HERE, from reset state: the runner executes every case in
+    # its own process, so this case observes only what it runs itself.
+    reachedQuoteKinds = {}
+    reachedQuoteSites = @[]
+    reachedBindingKinds = {}
+    for (name, drive) in QuoteDrivers:
+      checkpoint("driving " & name)
+      drive()
     # The census, as a CASE. A kind that stops being reachable — because
     # its rule was deleted, or because the input that reached it was —
     # turns this red rather than going quiet.
