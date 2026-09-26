@@ -861,8 +861,15 @@ suite "the rules this adapter refuses on":
         "0x" & repeat('f', MaxHexWordDigits)
 
     block:
+      # The environment is STATED here, and that is not decoration: with
+      # no lookup given this call reads the process environment, and one
+      # exported credential variable whose value the probe plan
+      # legitimately spells makes it refuse for a DIFFERENT reason —
+      # so the no-effector rule went unreached and the census counted
+      # ten of eleven. Measured on this gate: 28 passing cases became 27
+      # with one failure under a single twenty-one character export.
       let e = refuses(proc () =
-        discard performCloudLaunch(base, clmArmed))
+        discard performCloudLaunch(base, clmArmed, nil, fixedEnvLookup([])))
       check e.condition == clcArmedLaunchHasNoEffector
       reached.incl e.condition
 
@@ -882,6 +889,21 @@ suite "the rules this adapter refuses on":
       # …and against an empty environment the same plan is returned.
       check checkedCloudLaunchPlan(base, fixedEnvLookup([])) ==
         cloudLaunchPlan(base)
+      # A plan supplied by a caller is searched TOO. The override exists
+      # for the one caller that rewrites the invocation before it is
+      # sent, and a rewrite that is not checked would be a way past the
+      # rule rather than a way to send the right bytes.
+      let rewritten = cloudLaunchPlan(base) & @["--labels",
+        "repro-lease-id=rl-probe"]
+      let f = refuses(proc () =
+        discard performCloudLaunch(base, clmDryRun, nil, leaked,
+          rewritten))
+      check f.condition == clcLaunchPlanCarriesCredentialMaterial
+      # …and the control: the same override against an empty
+      # environment comes back verbatim, so the refusal is about the
+      # secret and not about supplying a plan.
+      check performCloudLaunch(base, clmDryRun, nil, fixedEnvLookup([]),
+        rewritten).plan == rewritten
 
     var missing: seq[string] = @[]
     for c in CloudLaunchCondition:

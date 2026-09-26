@@ -78,7 +78,8 @@
 ## which is a substitute for a cloud in the same sense that a real
 ## subprocess is a substitute for a real subprocess.
 
-import std/[algorithm, exitprocs, options, os, strutils, times]
+import std/[algorithm, exitprocs, options, os, osproc, strtabs, streams,
+            strutils, times]
 
 import ./cloud_launch
 import repro_resources/lease
@@ -105,6 +106,8 @@ type
     cllRecordCarriesAFieldTwice
     cllReapHasNoEffector
     cllDestroyInvocationFailed
+    cllLeaseIdentifierCouldNotBeMinted
+    cllArmedLaunchIsNotHeldUnderALease
 
   CloudLeaseError* = object of CatchableError
     condition*: CloudLeaseCondition
@@ -140,7 +143,17 @@ const
     cllDestroyInvocationFailed:
       "a destroy invocation returned a failure; the lease record is " &
       "kept so the next sweep tries again, because a destroy whose " &
-      "error is discarded is how an instance is orphaned"]
+      "error is discarded is how an instance is orphaned",
+    cllLeaseIdentifierCouldNotBeMinted:
+      "a free lease identifier could not be minted within the attempts " &
+      "this build makes; the identifier source is not making progress " &
+      "and an unbounded retry inside the path that takes a hold is its " &
+      "own hazard",
+    cllArmedLaunchIsNotHeldUnderALease:
+      "a launch that really creates an instance was asked for outside a " &
+      "lease scope, so nothing would have been holding the teardown " &
+      "open; an instance is created only from inside the scope that " &
+      "already installed the release"]
 
 proc cloudLeaseMessagesAreDistinguishable*(): bool =
   ## No message is a substring of another, so an `in e.msg` assertion
@@ -366,6 +379,36 @@ const
     ## recipes use. There IS a default, deliberately: the alternative is
     ## a required flag, and a required flag is one somebody works around
     ## by passing the largest value that is accepted.
+
+  MaxLeaseIdentifierAttempts* = 64
+    ## How many times a free identifier is asked for before the attempt
+    ## is refused.
+    ##
+    ## A bound rather than "keep trying", because the guard that stops a
+    ## record being written over is `while the name is taken: mint
+    ## another`, and its termination depends on the minting making
+    ## progress — a property nothing asserted. Written without a bound
+    ## it did not merely fail slowly, it did not fail at all: a source
+    ## that answers with the same name spins inside the path that takes
+    ## a hold, and a gate pointed at it stops mid-run without reaching a
+    ## check. A row that goes red by deadlock measures nothing, and an
+    ## unbounded retry in a lease path is its own hazard.
+    ##
+    ## Sixty-four is far above any collision the serial can produce — it
+    ## separates two leases inside one second by construction — so
+    ## reaching this bound means the source is stuck, which is what the
+    ## refusal says.
+
+  DefaultReapIntervalSeconds* = 300
+    ## How often an unattended sweep runs when nobody states an
+    ## interval.
+
+  MaxReapIntervalSeconds* = 900
+    ## The longest gap this build will schedule between sweeps. It is
+    ## the second half of the exposure window — see
+    ## `worstCaseExposureSeconds` — so it is a bound and not a
+    ## preference: a sweep that ran once a day would make the record and
+    ## the tags findable and would not make the leak short.
 
   RecordMagic* = "reproos.cloud-lease.v1"
 
@@ -671,6 +714,81 @@ proc discoverPlanFor*(lease: CloudLease): seq[string] =
       "--filter", "labels." & $cltLeaseId & "=" & lease.leaseId,
       "--format", "value(name)"]
 
+type
+  DestroyDisposition* = enum
+    ## What came of one destroy invocation. THREE answers and not two,
+    ## and the third is the whole of this module's crash-recovery story.
+    ddDestroyed
+    ddAlreadyGone
+      ## The provider says there is no such instance. This is a SUCCESS
+      ## for a reaper: the machine is not billing, which is the only
+      ## thing the reaper wanted.
+    ddFailed
+
+const
+  AwsAbsentInstanceMarker* = "InvalidInstanceID.NotFound"
+    ## The error code that cloud's own API reference lists for "the
+    ## specified instance does not exist".
+  GcpAbsentResourceMarkers*: array[2, string] = ["was not found",
+                                                 "notFound"]
+    ## The two spellings the other cloud's answer carries for an absent
+    ## resource: the message its API puts in the body, and the machine
+    ## readable reason beside it. Its client prints the first behind
+    ## "Could not fetch resource:".
+
+proc alreadyGoneMarkersFor*(cloud: MeasurableCloud): seq[string] =
+  ## What each provider says when it is asked to destroy something that
+  ## is not there.
+  ##
+  ## ## Why this arm exists at all, and it is not defensive coding
+  ##
+  ## The order this module destroys in is: destroy, write the ledger,
+  ## remove the record. A crash between the first and the third leaves a
+  ## record whose instance is already gone, and the next sweep issues a
+  ## second destroy. If that second destroy is an ERROR, the sweep
+  ## scores it failed, KEEPS the record, and the sweep after it does the
+  ## same — a non-terminating retry against a machine nobody is paying
+  ## for, with `requireReapSucceeded` refusing for ever.
+  ##
+  ## Whether that happens is a question about the providers, and it is
+  ## answered from what they publish rather than by issuing a destroy:
+  ##
+  ##   * One documents its terminate as idempotent — "if you terminate
+  ##     an instance more than once, each call succeeds" — and then
+  ##     documents the limit in the same page: "Terminated instances
+  ##     remain visible after termination (for approximately one hour)."
+  ##     After that the identifier is not one it knows, and the
+  ##     documented answer is the error code above. So it is idempotent
+  ##     for an hour and an error afterwards, and a sweep is exactly the
+  ##     thing that arrives afterwards.
+  ##   * The other documents no idempotency for its delete at all: an
+  ##     absent resource is the ordinary not-found answer, and its
+  ##     client turns that into a non-zero exit.
+  ##
+  ## So the trap is real on both, on different clocks, and
+  ## `roNothingToDestroy` for an empty DISCOVERY is not enough: the
+  ## record path never discovers, it goes straight to the identifier it
+  ## already has. This is that arm.
+  ##
+  ## The narrowing that keeps it from becoming "swallow every failure":
+  ## only these markers are read as already-gone. A throttle, a
+  ## permission refusal or a network fault scores `ddFailed`, keeps the
+  ## record and is tried again — which is the behaviour a reaper must
+  ## keep, because those are the failures that leave a machine running.
+  case cloud
+  of mcAwsEc2: @[AwsAbsentInstanceMarker]
+  of mcGcpCompute: @GcpAbsentResourceMarkers
+
+proc destroyDispositionFor*(provider: CloudProvider; status: int;
+                            output: string): DestroyDisposition =
+  ## The single reader of a destroy's answer. One site, so the sweep and
+  ## the holder-side release cannot come to disagree about what "already
+  ## gone" looks like.
+  if status == 0: return ddDestroyed
+  for marker in alreadyGoneMarkersFor(measurableCloudFor(provider)):
+    if marker in output: return ddAlreadyGone
+  ddFailed
+
 proc destroyPlanFor*(lease: CloudLease; instanceId: string): seq[string] =
   ## How to destroy one instance. Takes the identifier rather than
   ## reading it off the lease, because the discovery above can return
@@ -736,6 +854,19 @@ type
     ## and a query that returns only an exit code has told you nothing.
     status*: int
     output*: string
+    program*: string
+      ## The executable that was actually run, as an absolute path.
+      ## Recorded rather than inferred, and recorded because this is a
+      ## PATH-resolved external tool: the model this repository works to
+      ## says such a thing must carry its resolved executable path and
+      ## its search path with it, precisely because nothing provisioned
+      ## it and nothing can say afterwards which file it was. It matters
+      ## more here than almost anywhere else — this is the program that
+      ## destroys machines.
+    searchPath*: string
+      ## The search path the resolution was made against. The other half
+      ## of the same record: a resolved path alone does not say whether
+      ## the caller got the file it meant.
 
   CloudLeaseEffector* = proc (effect: CloudEffect): CloudEffectResult {.closure.}
 
@@ -816,16 +947,26 @@ proc reapOneLease*(lease: var CloudLease; now: int64;
     result.outcome = roNothingToDestroy
   else:
     var failed = false
+    var alreadyGone = 0
     for id in ids:
       let done = effector(CloudEffect(argv: destroyPlanFor(lease, id),
         providerEnvNames: envNames))
-      if done.status != 0: failed = true
+      case destroyDispositionFor(lease.provider, done.status, done.output)
+      of ddDestroyed: discard
+      of ddAlreadyGone: inc alreadyGone
+      of ddFailed: failed = true
     if failed:
       result.outcome = roFailed
       result.leasedSeconds = leasedSecondsOf(lease, now)
       result.costMicros = costMicrosOf(lease, now)
       return
-    result.outcome = roReaped
+    # A destroy that was answered "there is no such instance" closes the
+    # hold rather than repeating for ever — see `alreadyGoneMarkersFor`.
+    # Reported as `roNothingToDestroy` and not as `roReaped`, because
+    # this sweep did not destroy it and a ledger that said otherwise
+    # would be claiming an action nobody took.
+    result.outcome = (if alreadyGone == ids.len: roNothingToDestroy
+                      else: roReaped)
   lease.state = clsDestroyed
   lease.destroyedAtUnix = now
   result.leasedSeconds = leasedSecondsOf(lease, now)
@@ -1002,13 +1143,54 @@ proc reapExpiredByTag*(provider: CloudProvider; region: string;
       argv: destroyPlanFor(stub, instance.id), providerEnvNames: envNames))
     var event = ReapEvent(leaseId: instance.leaseId, decision: rdExpired,
       instanceIds: @[instance.id])
-    if done.status == 0:
+    # The same reader as the store-driven sweep. A tag sweep races the
+    # holder's own teardown by construction — both are looking at the
+    # same expired instance — so "somebody got there first" is its
+    # ORDINARY outcome and not an error.
+    case destroyDispositionFor(provider, done.status, done.output)
+    of ddDestroyed:
       event.outcome = roReaped
       inc result.reaped
-    else:
+    of ddAlreadyGone:
+      event.outcome = roNothingToDestroy
+      inc result.nothingToDestroy
+    of ddFailed:
       event.outcome = roFailed
       inc result.failed
     result.events.add event
+
+proc renderReapReportText*(report: ReapReport): string =
+  ## What a sweep DID, as opposed to what one would do.
+  ##
+  ## A separate renderer from the plan's, because the two are different
+  ## claims and a reader must not have to work out which one they are
+  ## holding: one says "this is what would happen", the other says "this
+  ## happened". Every lease is named with its outcome, so a sweep that
+  ## destroyed nothing and a sweep that found nothing are different
+  ## output rather than the same silence.
+  for event in report.events:
+    result.add "swept: " & (if event.leaseId.len > 0: event.leaseId
+                            else: "<no lease named>") & "\n"
+    result.add "  decision: " & $event.decision & "\n"
+    result.add "  outcome: " & $event.outcome & "\n"
+    for id in event.instanceIds:
+      # Named as what it IS rather than as what was hoped for it. An
+      # instance the provider answered "there is no such instance" about
+      # is one this sweep did NOT destroy, and a report that said
+      # otherwise would claim an action nobody took — which is the same
+      # mistake the outcome above exists to avoid making.
+      result.add (if event.outcome == roReaped: "  destroyed: "
+                  else: "  instance: ") & id & "\n"
+    result.add "  leased-seconds: " & $event.leasedSeconds & "\n"
+    result.add "  cost-micros: " &
+      (if event.priced: $event.costMicros else: "unpriced") & "\n"
+  result.add "reaped: " & $report.reaped & "\n"
+  result.add "held: " & $report.held & "\n"
+  result.add "nothing-to-destroy: " & $report.nothingToDestroy & "\n"
+  result.add "failed: " & $report.failed & "\n"
+  result.add "leased-seconds: " & $report.leasedSeconds & "\n"
+  result.add "cost-micros: " & $report.costMicros & "\n"
+  result.add "unpriced: " & $report.unpriced & "\n"
 
 proc renderReapPlanText*(store: CloudLeaseStore; now: int64;
                          liveness: OwnerLivenessProbe): string =
@@ -1070,6 +1252,18 @@ type
       ## flag, so a gate can tell "never released" from "released and
       ## said nothing", and so a second attempt on a different exit path
       ## is visible rather than invisible.
+    inScope*: bool
+      ## True exactly while a `withCloudLease` scope is running around
+      ## this holder. It is what `performLeasedCloudLaunch` requires,
+      ## and it is the difference between a teardown that exists and a
+      ## teardown that is ON: outside the scope there is no `finally`,
+      ## no exit procedure and no handler, so a create issued there
+      ## would be an instance with nothing holding its release open.
+    handlersInstalled*: bool
+      ## Whether this holder is in the set the signal handler releases.
+      ## Kept per holder so installing twice is free — the scope
+      ## installs unconditionally, and a caller that also installed by
+      ## hand must not end up released twice from one signal.
 
 proc acquireCloudLease*(store: CloudLeaseStore; spec: CloudLaunchSpec;
                         policy: LeasePolicy; now: int64;
@@ -1089,11 +1283,25 @@ proc acquireCloudLease*(store: CloudLeaseStore; spec: CloudLaunchSpec;
   # two hosts whose clocks agree — the next one is minted instead, because
   # the record being overwritten would be the only local trace of an
   # instance that is already running.
+  #
+  # BOUNDED, and that is not a detail. This loop's termination depends
+  # on the minting making progress, which nothing asserts, so written
+  # as `while taken: mint again` it is an unbounded retry sitting in the
+  # path that takes a hold. A source that stops making progress then
+  # hangs the caller instead of refusing, and a hang inside a lease path
+  # is the one failure that leaves nothing behind to act on.
+  var attempts = 1
   while fileExists(recordPath(store, lease.leaseId)):
+    if attempts >= MaxLeaseIdentifierAttempts:
+      leaseFail(cllLeaseIdentifierCouldNotBeMinted,
+        $attempts & " identifiers were asked for and every one of them " &
+        "was already taken; the last was " & lease.leaseId.escape())
     lease.leaseId = newLeaseId(owner, now)
+    inc attempts
   writeCloudLease(store, lease)
   CloudLeaseHolder(store: store, lease: lease, effector: effector,
-    ledgerPath: ledgerPath, released: false, releases: 0)
+    ledgerPath: ledgerPath, released: false, releases: 0,
+    inScope: false, handlersInstalled: false)
 
 proc recordInstanceCreated*(holder: CloudLeaseHolder; instanceId: string) =
   ## The provider has answered. Written through the store immediately,
@@ -1129,26 +1337,6 @@ proc releaseCloudLease*(holder: CloudLeaseHolder; now: int64): ReapEvent =
     # Put the failure back on the disk so the next sweep sees it, and
     # leave `released` set so this process does not spin on it.
     writeCloudLease(holder.store, holder.lease)
-
-template withCloudLease*(holder: CloudLeaseHolder; body: untyped) =
-  ## Run `body` and release the lease afterwards, on EVERY path out of
-  ## it: a normal return, an exception, and a `quit` from inside it.
-  ##
-  ## The exit procedure is the half that is easy to forget and is the
-  ## half that catches `quit`, which a `finally` does not see at all.
-  ## Both reach the same idempotent release, so arriving twice is free.
-  block:
-    let h = holder
-    addExitProc(proc () {.closure.} =
-      if not h.released:
-        try:
-          discard releaseCloudLease(h, getTime().toUnix)
-        except CatchableError:
-          discard)
-    try:
-      body
-    finally:
-      discard releaseCloudLease(h, getTime().toUnix)
 
 # ---------------------------------------------------------------------
 # The two signals a process can catch — and the one it cannot
@@ -1195,10 +1383,18 @@ when defined(posix):
     ## the exit path no process observes, and it is the reaper's to
     ## answer rather than this procedure's. That division is the reason
     ## both halves exist.
+    ## Idempotent per holder. `withCloudLease` installs unconditionally
+    ## so the order cannot be got wrong, and a caller that also installs
+    ## by hand must not put the same holder in the set twice — a holder
+    ## listed twice is released twice from one signal, and the second
+    ## release is only harmless because it is idempotent, which is a
+    ## thin thing to rely on.
+    if holder == nil or holder.handlersInstalled: return
     if signalHolders.len == 0:
       discard signal(SIGTERM, releaseHeldLeasesOnSignal)
       discard signal(SIGINT, releaseHeldLeasesOnSignal)
       discard signal(SIGHUP, releaseHeldLeasesOnSignal)
+    holder.handlersInstalled = true
     signalHolders.add holder
 
   proc cloudLeaseSignalHolderCount*(): int = signalHolders.len
@@ -1208,6 +1404,260 @@ else:
     ## This platform is not one this build installs handlers on, so the
     ## reaper is the only line of defence here. Said out loud rather
     ## than left as an empty body somebody reads as coverage.
-    discard
+    if holder != nil: holder.handlersInstalled = false
 
   proc cloudLeaseSignalHolderCount*(): int = 0
+
+template withCloudLease*(holder: CloudLeaseHolder; body: untyped) =
+  ## Run `body` and release the lease afterwards, on EVERY path out of
+  ## it: a normal return, an exception, a signal, and a `quit` from
+  ## inside it.
+  ##
+  ## ## All three mechanisms, from one call
+  ##
+  ## The `finally` catches a return and an exception. The exit procedure
+  ## catches `quit`, which a `finally` does not see at all. The signal
+  ## handlers catch the two a process can be asked to stop with, which
+  ## neither of the other two sees.
+  ##
+  ## The handler install used to be a SECOND call the caller had to
+  ## remember, and had to make BEFORE the create, with nothing enforcing
+  ## either. That is not a contract, it is a trap with instructions, and
+  ## it is folded in here so the order cannot be got wrong: entering the
+  ## scope installs the handlers, and `performLeasedCloudLaunch` refuses
+  ## to create anything outside a scope. Installing twice is free, so a
+  ## caller that also installs by hand loses nothing.
+  ##
+  ## ## What the `finally` does with a teardown fault, decided
+  ##
+  ## A release can itself fail — a missing effector raises rather than
+  ## reporting. Two behaviours were available and the choice was owed
+  ## here, at the scope's first real caller:
+  ##
+  ##   * When the BODY failed, the release fault is discarded and the
+  ##     body's failure is what leaves. A teardown fault raised over a
+  ##     failing body replaces the cause with a symptom, and the cause
+  ##     is the thing somebody is debugging.
+  ##   * When the body SUCCEEDED, the release fault is raised. A missing
+  ##     effector is a programming error, and a scope that swallowed it
+  ##     would report success for a lease nothing released.
+  ##
+  ## The record is on disk either way, so neither choice loses the
+  ## instance — what is being chosen is which failure gets reported.
+  block:
+    let h = holder
+    installCloudLeaseSignalTeardown(h)
+    addExitProc(proc () {.closure.} =
+      if not h.released:
+        try:
+          discard releaseCloudLease(h, getTime().toUnix)
+        except CatchableError:
+          discard)
+    h.inScope = true
+    var releaseFault: ref CatchableError = nil
+    try:
+      body
+    finally:
+      h.inScope = false
+      try:
+        discard releaseCloudLease(h, getTime().toUnix)
+      except CatchableError as err:
+        releaseFault = err
+    # Reached only when the body did not itself raise, which is exactly
+    # the case in which the release fault is the only failure there is.
+    if releaseFault != nil:
+      raise releaseFault
+
+
+# ---------------------------------------------------------------------
+# The effector this build SHIPS
+# ---------------------------------------------------------------------
+
+const
+  ReapEffectorPassThroughEnv* = ["PATH", "HOME"]
+    ## The only variables that reach a provider tool besides the ones
+    ## the provider itself declares. A tool needs to be findable and
+    ## needs a place to read its own configuration from; everything else
+    ## in the caller's environment is withheld, so what an invocation
+    ## can see is a stated set rather than whatever the operator's shell
+    ## happened to carry.
+
+proc resolveOnStatedPath*(program, searchPath: string): string =
+  ## Where a program is, according to the `PATH` the CALLER stated.
+  ##
+  ## Written out rather than left to the operating system's own lookup,
+  ## and that is a repair rather than a preference. Handing a process
+  ## an environment that carries `PATH` does NOT decide where its
+  ## program is found: the lookup happens in the parent and reads the
+  ## PARENT's `PATH`, so a caller that stated one search path and an
+  ## effector that ran a tool from another would differ silently — and
+  ## the tool that got run is the one that destroys machines.
+  ##
+  ## Found by a gate: a case that put a stand-in first on a STATED path
+  ## reached the real tool on the developer's own path instead, and
+  ## said so by failing to authenticate. It would not have said anything
+  ## at all on a machine with no such tool installed.
+  ##
+  ## A program that already names a directory is returned as it is:
+  ## naming a path is a caller saying which file it means.
+  if program.len == 0: return ""
+  if '/' in program or '\\' in program: return program
+  for dir in searchPath.split(PathSep):
+    if dir.len == 0: continue
+    let candidate = dir / program
+    if fileExists(candidate): return candidate
+  ""
+
+proc subprocessCloudLeaseEffector*(env: CloudEnvLookup = nil):
+                                   CloudLeaseEffector =
+  ## A real effector: it starts the provider's own tool and reads its
+  ## answer.
+  ##
+  ## ## Why this exists, and what it changes
+  ##
+  ## The sweep and the release both take an effector and this build
+  ## shipped NONE, so the whole reaper was a library and a printing
+  ## command: a leaked instance was destroyed when somebody ran a sweep
+  ## by hand, and nothing could run one. An effector that cannot destroy
+  ## makes the cost of a leak "until a human notices", which is not a
+  ## bound.
+  ##
+  ## ## It is not a shell
+  ##
+  ## The invocation travels as an argument vector and is started as one,
+  ## so there is no quoting to get wrong and no metacharacter to reason
+  ## about. The tool is found on `PATH` by the operating system's own
+  ## lookup rather than by a path this build composes.
+  ##
+  ## ## Standard error is part of the answer
+  ##
+  ## Both providers write the reason an instance could not be destroyed
+  ## to standard error, and `destroyDispositionFor` reads the reason:
+  ## "there is no such instance" and "you may not do that" are the same
+  ## exit code and different outcomes. A reader that captured only
+  ## standard output would see neither.
+  let lookup = (if env == nil: processEnvLookup() else: env)
+  result = proc (effect: CloudEffect): CloudEffectResult =
+    if effect.argv.len == 0:
+      return CloudEffectResult(status: 64,
+        output: "an empty invocation was handed to the effector")
+    var table = newStringTable(modeCaseSensitive)
+    for name in ReapEffectorPassThroughEnv:
+      let value = lookup(name)
+      if value.len > 0: table[name] = value
+    for name in effect.providerEnvNames:
+      let value = lookup(name)
+      if value.len > 0: table[name] = value
+    let searchPath = (if table.hasKey("PATH"): table["PATH"] else: "")
+    let program = resolveOnStatedPath(effect.argv[0], searchPath)
+    if program.len == 0:
+      return CloudEffectResult(status: 127, searchPath: searchPath,
+        output: "the provider tool " & effect.argv[0].escape() &
+          " is not on the search path this effector was given")
+    var child: Process
+    try:
+      child = startProcess(program, args = effect.argv[1 .. ^1],
+        env = table, options = {poStdErrToStdOut})
+    except OSError, IOError:
+      # The tool is not on this machine. A failure rather than a silent
+      # nothing: a sweep that could not run its own destroy has not
+      # established that anything was destroyed.
+      return CloudEffectResult(status: 127, program: program,
+        searchPath: searchPath,
+        output: "the provider tool " & effect.argv[0].escape() &
+          " could not be started")
+    let output = child.outputStream.readAll()
+    let status = child.waitForExit()
+    child.close()
+    CloudEffectResult(status: status, output: output, program: program,
+      searchPath: searchPath)
+
+# ---------------------------------------------------------------------
+# The one path in this build that creates an instance
+# ---------------------------------------------------------------------
+
+proc requireHeldUnderALease(holder: CloudLeaseHolder; detail: string) =
+  ## The ONE site the outside-the-scope rule is raised from.
+  if holder == nil or not holder.inScope or holder.released:
+    leaseFail(cllArmedLaunchIsNotHeldUnderALease, detail)
+
+proc performLeasedCloudLaunch*(holder: CloudLeaseHolder;
+                               spec: CloudLaunchSpec;
+                               effector: CloudLeaseEffector;
+                               env: CloudEnvLookup = nil): CloudLaunchOutcome =
+  ## Create the instance this lease was taken for.
+  ##
+  ## ## Why the lease is a PARAMETER and not a convention
+  ##
+  ## The substrate next door had three lines of defence and no caller:
+  ## nothing in the shipped tree released a lease, installed a handler
+  ## or ran a sweep, so an armed launch written the obvious way would
+  ## have created an instance with none of them on. The order that has
+  ## to hold is take the lease, arm the teardown, THEN create — and an
+  ## order nothing enforces is one somebody eventually gets wrong.
+  ##
+  ## So it is enforced rather than documented. This procedure refuses a
+  ## holder that is not inside a `withCloudLease` scope, and entering
+  ## that scope is what installs the exit procedure and the signal
+  ## handlers. There is no route from here to a create that is not
+  ## already held open by a release.
+  ##
+  ## ## One renderer, one check, one identity
+  ##
+  ## Everything except the hand-over is `performCloudLaunch`'s, reached
+  ## with the plan this procedure rewrote: `leasedLaunchPlan` is the
+  ## launch invocation with the lease's tags on it, built by rewriting
+  ## the single renderer's output rather than by rendering a second one.
+  ## The invocation that is CHECKED for credential material is therefore
+  ## the invocation that is SENT.
+  ##
+  ## ## The identifier is written down before this returns
+  ##
+  ## The provider's answer names the instance, and the record is updated
+  ## with it immediately. The window between the create request and that
+  ## write is the one the write-ahead record exists for, and every
+  ## statement inside it is a second of exposure.
+  requireHeldUnderALease(holder,
+    (if holder == nil: "no lease was supplied"
+     elif holder.released: "the lease " & holder.lease.leaseId &
+       " has already been released"
+     else: "the lease " & holder.lease.leaseId &
+       " is not inside a teardown scope"))
+  let tagged = leasedLaunchPlan(spec, holder.lease, env)
+  var answer = CloudEffectResult(status: 0, output: "")
+  var adapter: CloudEffector = nil
+  if effector != nil:
+    adapter = proc (effect: CloudEffect): int =
+      answer = effector(effect)
+      answer.status
+  # `clmArmed` with a nil adapter is what reaches the no-effector
+  # refusal, at its own single site next door, rather than a second
+  # spelling of the same rule here.
+  result = performCloudLaunch(spec, clmArmed, adapter, env, tagged)
+  if result.effectStatus == 0:
+    let id = answer.output.strip()
+    if id.len > 0:
+      recordInstanceCreated(holder, id)
+
+proc worstCaseExposureSeconds*(ttlSeconds, sweepIntervalSeconds: int64):
+                               int64 =
+  ## How long a billed instance can outlive the process that created it,
+  ## as a NUMBER.
+  ##
+  ## The three lines of defence cover different exits and the worst case
+  ## is the one none of the first two see: the owner is `SIGKILL`ed, or
+  ## its whole machine goes away, so no `finally`, no exit procedure and
+  ## no handler runs. What is left is a sweep.
+  ##
+  ## A sweep that still has the record reaps a provably dead owner
+  ## IMMEDIATELY, so on the owner's own host the bound is one sweep
+  ## interval. A sweep that has only the tags — the store was lost, or
+  ## the sweeper is on another machine and cannot read the owner's
+  ## process table — reaps on EXPIRY, so the bound is the hold plus one
+  ## interval. This returns the second, because a bound is the worst
+  ## case and not the usual one.
+  ##
+  ## It is a function of two stated numbers rather than a sentence
+  ## because "reduced from unbounded to until the next sweep" is not a
+  ## bound unless somebody says how long that is.
+  ttlSeconds + sweepIntervalSeconds

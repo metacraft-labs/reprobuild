@@ -56,6 +56,17 @@ type
     ffmNone = "none"
     ffmDestroyFails = "destroy-fails"
     ffmListFails = "list-fails"
+    ffmDestroyAlreadyGone = "destroy-already-gone"
+      ## The destroy refuses with the provider's own "there is no such
+      ## instance" answer — a non-zero status carrying the documented
+      ## marker. Modelled because it is the shape that would otherwise
+      ## make a crash between destroying and recording a permanent
+      ## retry: the record still names an instance, every later sweep
+      ## goes straight to destroy, and an error keeps the record for
+      ## ever. Reproduced rather than simulated in the sense that
+      ## matters — the STATUS is non-zero and the TEXT is the one the
+      ## provider publishes, which is exactly what the reader under test
+      ## has to tell apart from a permission refusal.
 
 proc instancesDir*(p: FakeProvider): string = p.root / "instances"
 proc invocationLog*(p: FakeProvider): string = p.root / "invocations.log"
@@ -222,7 +233,14 @@ proc fakeProviderEffector*(p: FakeProvider): CloudLeaseEffector =
     if argv[0 .. 2] == @["aws", "ec2", "terminate-instances"] or
        argv[0 .. 3] == @["gcloud", "compute", "instances", "delete"]:
       if failureMode(provider) == ffmDestroyFails:
-        return CloudEffectResult(status: 255, output: "")
+        return CloudEffectResult(status: 255,
+          output: "An error occurred (UnauthorizedOperation) when " &
+            "calling the TerminateInstances operation")
+      if failureMode(provider) == ffmDestroyAlreadyGone:
+        return CloudEffectResult(status: 255,
+          output: "An error occurred (" & AwsAbsentInstanceMarker &
+            ") when calling the TerminateInstances operation: The " &
+            "instance ID 'i-0fixture000000000' does not exist")
       let id = (if argv[0] == "aws": argAfter(argv, "--instance-ids")
                 else: argv[4])
       let path = instancesDir(provider) / id
