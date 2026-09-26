@@ -18,6 +18,16 @@ when defined(reproProviderMode):
       arguments: projectRoot,
       namespace: "project")
 
+  proc createRecipeRoot(projectRoot: string) =
+    ## A package's project root carries the recipe its ``PackageDef`` names.
+    ## The source cache identity hashes those bytes as its provider-revision
+    ## component and refuses a root without one (``CacheKeyError``), so a
+    ## fixture root has to hold a real, non-empty ``repro.nim`` -- one per
+    ## package, naming it, so two fixture packages never share a revision.
+    createDir(projectRoot)
+    writeFile(projectRoot / "repro.nim",
+      "# fixture recipe for " & projectRoot.extractFilename & "\n")
+
   proc extractActions(fragment: GraphFragment): seq[BuildActionDef] =
     for node in fragment.nodes:
       if node.kind == gnkAction:
@@ -44,7 +54,7 @@ suite "library stage aliases":
       let projectRoot = scratch / "libraryAliasPkg"
       if dirExists(scratch):
         removeDir(scratch)
-      createDir(projectRoot)
+      createRecipeRoot(projectRoot)
       defer:
         if dirExists(scratch):
           removeDir(scratch)
@@ -98,7 +108,7 @@ suite "autotools multi-build action identities":
       let projectRoot = scratch / "multiBuildPkg"
       if dirExists(scratch):
         removeDir(scratch)
-      createDir(projectRoot)
+      createRecipeRoot(projectRoot)
       defer:
         if dirExists(scratch):
           removeDir(scratch)
@@ -157,7 +167,7 @@ suite "executable stage aliases":
       let projectRoot = scratch / "executableAliasPkg"
       if dirExists(scratch):
         removeDir(scratch)
-      createDir(projectRoot)
+      createRecipeRoot(projectRoot)
       defer:
         if dirExists(scratch):
           removeDir(scratch)
