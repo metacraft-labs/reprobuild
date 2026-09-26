@@ -1011,6 +1011,151 @@ suite "cose rfc 9052 public keys":
     check partial.keys.len == 3
     check partial.skipped == 1
 
+proc driveCoseSignAndSign1ContextsAreNotInterchangeable() =
+  ## The body of test
+  ##   "t_cose_sign_and_sign1_contexts_are_not_interchangeable"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The Sig_structure's first element is the reason a COSE_Sign
+  # signature cannot be replayed as a COSE_Sign1 one. Pinned as bytes
+  # against RFC 9052 §4.4, and then shown to matter.
+  let protectedBytes = hexOf(itemOf("C.2.1").content.elems[0].bytes)
+  check protectedBytes == "a10126"
+  var payload: seq[byte] = @[]
+  for ch in Payload: payload.add byte(ord(ch))
+  let one = sigStructureSign1(
+    itemOf("C.2.1").content.elems[0].bytes, [], payload)
+  let many = sigStructureSign(
+    itemOf("C.2.1").content.elems[0].bytes, [], [], payload)
+  check one != many
+  # The exact bytes, assembled from §4.4's CDDL rather than from this
+  # module's output: [ "Signature1", h'a10126', h'', 'This is the
+  # content.' ] is a 4-element array, a 10-character text string, a
+  # 3-byte string, a 0-byte string and a 20-byte string.
+  check hexOf(one) ==
+    "84" & "6a" & "5369676e617475726531" & "43" & "a10126" & "40" &
+    "54" & "546869732069732074686520636f6e74656e742e"
+  check hexOf(many) ==
+    "85" & "69" & "5369676e6174757265" & "43" & "a10126" & "40" & "40" &
+    "54" & "546869732069732074686520636f6e74656e742e"
+  check one.len == 1 + 1 + 10 + 1 + 3 + 1 + 1 + 20
+  check many.len == 1 + 1 + 9 + 1 + 3 + 1 + 1 + 1 + 20
+  # …and the signature C.2.1 publishes does not verify under the
+  # COSE_Sign framing, which is the property those bytes exist for.
+  refusesWith("C.2.1 read as a COSE_Sign body", cxeSignatureDidNotVerify):
+    let parts = sign1Parts()
+    discard verifyCoseSign(
+      encodeItem(cTag(CoseSignTag, cArray(
+        [parts[0], cMap([]), parts[2],
+         cArray([cArray([parts[0], parts[1], parts[3]])])]))),
+      KeySet.keys)
+
+proc driveCoseCriticalityRefusesByDefaultAndAcceptsWhenDeclared() =
+  ## The body of test
+  ##   "t_cose_criticality_refuses_by_default_and_accepts_when_declared"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # C.1.3 carries `crit: ["reserved"]`. A verifier that has not said
+  # it understands "reserved" MUST refuse it; the same bytes with the
+  # declaration verify. Both directions, because either alone would
+  # be satisfied by a rule that always did one thing.
+  refusesWith("C.1.3 without a declaration", cxeCritLabelNotUnderstood):
+    discard verifyCoseSign(bytesOf("C.1.3"), KeySet.keys)
+  check verifyCoseSign(bytesOf("C.1.3"), KeySet.keys,
+                       understoodCritical = Understood).len == 1
+  # Declaring a DIFFERENT label does not help, so the declaration is
+  # matched rather than merely counted.
+  refusesWith("C.1.3 with the wrong declaration",
+              cxeCritLabelNotUnderstood):
+    discard verifyCoseSign(bytesOf("C.1.3"), KeySet.keys,
+                           understoodCritical = [cText("other")])
+  # And the two examples with no `crit` verify with no declaration,
+  # so the default is not refusing everything.
+  check verifyCoseSign(bytesOf("C.1.1"), KeySet.keys).len == 1
+  check verifyCoseSign(bytesOf("C.1.2"), KeySet.keys).len == 2
+
+proc driveCoseDetachedPayloadRoundTrip() =
+  ## The body of test
+  ##   "t_cose_detached_payload_round_trip"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # RFC 9052 §4.1: a detached payload is a nil in the payload slot and
+  # the application supplies the bytes. The signature is over the
+  # payload either way, so C.2.1 with its payload removed must still
+  # verify when the payload is handed in — and must refuse when it is
+  # not.
+  var parts = sign1Parts()
+  let original = parts[2].bytes
+  parts[2] = cNull()
+  let detachedMessage = rebuiltSign1(parts)
+  refusesWith("detached, nothing supplied", cxeDetachedPayloadMissing):
+    discard verifyCoseSign1(detachedMessage, KeySet.keys)
+  let got = verifyCoseSign1(detachedMessage, KeySet.keys,
+                            detachedPayload = original,
+                            detachedPayloadSupplied = true)
+  check got.payload == original
+  # Supplying the WRONG detached payload fails the signature rather
+  # than being accepted, which is what says the supplied bytes really
+  # entered the Sig_structure.
+  var wrong = original
+  wrong[0] = wrong[0] xor 0x01'u8
+  refusesWith("detached, wrong bytes", cxeSignatureDidNotVerify):
+    discard verifyCoseSign1(detachedMessage, KeySet.keys,
+                            detachedPayload = wrong,
+                            detachedPayloadSupplied = true)
+  # And a message that carries its own payload refuses a detached one.
+  refusesWith("attached and detached at once",
+              cxeDetachedPayloadUnexpected):
+    discard verifyCoseSign1(bytesOf("C.2.1"), KeySet.keys,
+                            detachedPayload = original,
+                            detachedPayloadSupplied = true)
+
+proc driveCoseSignatureCoversEveryPartOfTheSigStructure() =
+  ## The body of test
+  ##   "t_cose_signature_covers_every_part_of_the_sig_structure"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Four mutations, each touching a DIFFERENT element of the
+  # Sig_structure, each of which must break the signature. Without
+  # these, "the signature verified" says only that some bytes were
+  # signed.
+  var parts = sign1Parts()
+  check parts.len == 4
+  # 1. the payload
+  var flipped = parts
+  var payload = parts[2].bytes
+  payload[3] = payload[3] xor 0x01'u8
+  flipped[2] = cBytes(payload)
+  refusesWith("payload bit flipped", cxeSignatureDidNotVerify):
+    discard verifyCoseSign1(rebuiltSign1(flipped), KeySet.keys)
+  # 2. the signature itself
+  flipped = parts
+  var sig = parts[3].bytes
+  sig[^1] = sig[^1] xor 0x01'u8
+  flipped[3] = cBytes(sig)
+  refusesWith("signature bit flipped", cxeSignatureDidNotVerify):
+    discard verifyCoseSign1(rebuiltSign1(flipped), KeySet.keys)
+  # 3. the protected bucket, re-spelled rather than changed. `{1: -7}`
+  #    with the -7 written in two bytes instead of one decodes to the
+  #    SAME map and is different bytes, so a verifier that re-encoded
+  #    the bucket instead of using the bytes it arrived as would
+  #    accept this. RFC 9052 §3 says that would be wrong.
+  flipped = parts
+  let respelled = @[0xa1'u8, 0x01'u8, 0x38'u8, 0x06'u8]
+  check equalValue(decodeItem(respelled), decodeItem(parts[0].bytes))
+  check respelled != parts[0].bytes
+  flipped[0] = cBytes(respelled)
+  refusesWith("protected bucket re-spelled", cxeSignatureDidNotVerify):
+    discard verifyCoseSign1(rebuiltSign1(flipped), KeySet.keys)
+  # 4. the external_aad, which is empty in every published example and
+  #    would therefore never be exercised by them.
+  refusesWith("external_aad supplied", cxeSignatureDidNotVerify):
+    discard verifyCoseSign1(bytesOf("C.2.1"), KeySet.keys,
+                            externalAad = [0x00'u8])
+  # The unmutated message still verifies in this case's own scope, so
+  # none of the four above is passing because the baseline is broken.
+  check verifyCoseSign1(bytesOf("C.2.1"), KeySet.keys).payload.len == 20
+
 suite "cose rfc 9052 signature verification":
 
   test "t_cose_appendix_c_signatures_verify":
@@ -1044,368 +1189,293 @@ suite "cose rfc 9052 signature verification":
     check CoseCurveCoordinateLen[ccP521] == 66
 
   test "t_cose_sign_and_sign1_contexts_are_not_interchangeable":
-    # The Sig_structure's first element is the reason a COSE_Sign
-    # signature cannot be replayed as a COSE_Sign1 one. Pinned as bytes
-    # against RFC 9052 §4.4, and then shown to matter.
-    let protectedBytes = hexOf(itemOf("C.2.1").content.elems[0].bytes)
-    check protectedBytes == "a10126"
-    var payload: seq[byte] = @[]
-    for ch in Payload: payload.add byte(ord(ch))
-    let one = sigStructureSign1(
-      itemOf("C.2.1").content.elems[0].bytes, [], payload)
-    let many = sigStructureSign(
-      itemOf("C.2.1").content.elems[0].bytes, [], [], payload)
-    check one != many
-    # The exact bytes, assembled from §4.4's CDDL rather than from this
-    # module's output: [ "Signature1", h'a10126', h'', 'This is the
-    # content.' ] is a 4-element array, a 10-character text string, a
-    # 3-byte string, a 0-byte string and a 20-byte string.
-    check hexOf(one) ==
-      "84" & "6a" & "5369676e617475726531" & "43" & "a10126" & "40" &
-      "54" & "546869732069732074686520636f6e74656e742e"
-    check hexOf(many) ==
-      "85" & "69" & "5369676e6174757265" & "43" & "a10126" & "40" & "40" &
-      "54" & "546869732069732074686520636f6e74656e742e"
-    check one.len == 1 + 1 + 10 + 1 + 3 + 1 + 1 + 20
-    check many.len == 1 + 1 + 9 + 1 + 3 + 1 + 1 + 1 + 20
-    # …and the signature C.2.1 publishes does not verify under the
-    # COSE_Sign framing, which is the property those bytes exist for.
-    refusesWith("C.2.1 read as a COSE_Sign body", cxeSignatureDidNotVerify):
-      let parts = sign1Parts()
-      discard verifyCoseSign(
-        encodeItem(cTag(CoseSignTag, cArray(
-          [parts[0], cMap([]), parts[2],
-           cArray([cArray([parts[0], parts[1], parts[3]])])]))),
-        KeySet.keys)
+    driveCoseSignAndSign1ContextsAreNotInterchangeable()
 
   test "t_cose_criticality_refuses_by_default_and_accepts_when_declared":
-    # C.1.3 carries `crit: ["reserved"]`. A verifier that has not said
-    # it understands "reserved" MUST refuse it; the same bytes with the
-    # declaration verify. Both directions, because either alone would
-    # be satisfied by a rule that always did one thing.
-    refusesWith("C.1.3 without a declaration", cxeCritLabelNotUnderstood):
-      discard verifyCoseSign(bytesOf("C.1.3"), KeySet.keys)
-    check verifyCoseSign(bytesOf("C.1.3"), KeySet.keys,
-                         understoodCritical = Understood).len == 1
-    # Declaring a DIFFERENT label does not help, so the declaration is
-    # matched rather than merely counted.
-    refusesWith("C.1.3 with the wrong declaration",
-                cxeCritLabelNotUnderstood):
-      discard verifyCoseSign(bytesOf("C.1.3"), KeySet.keys,
-                             understoodCritical = [cText("other")])
-    # And the two examples with no `crit` verify with no declaration,
-    # so the default is not refusing everything.
-    check verifyCoseSign(bytesOf("C.1.1"), KeySet.keys).len == 1
-    check verifyCoseSign(bytesOf("C.1.2"), KeySet.keys).len == 2
+    driveCoseCriticalityRefusesByDefaultAndAcceptsWhenDeclared()
 
   test "t_cose_detached_payload_round_trip":
-    # RFC 9052 §4.1: a detached payload is a nil in the payload slot and
-    # the application supplies the bytes. The signature is over the
-    # payload either way, so C.2.1 with its payload removed must still
-    # verify when the payload is handed in — and must refuse when it is
-    # not.
-    var parts = sign1Parts()
-    let original = parts[2].bytes
-    parts[2] = cNull()
-    let detachedMessage = rebuiltSign1(parts)
-    refusesWith("detached, nothing supplied", cxeDetachedPayloadMissing):
-      discard verifyCoseSign1(detachedMessage, KeySet.keys)
-    let got = verifyCoseSign1(detachedMessage, KeySet.keys,
-                              detachedPayload = original,
-                              detachedPayloadSupplied = true)
-    check got.payload == original
-    # Supplying the WRONG detached payload fails the signature rather
-    # than being accepted, which is what says the supplied bytes really
-    # entered the Sig_structure.
-    var wrong = original
-    wrong[0] = wrong[0] xor 0x01'u8
-    refusesWith("detached, wrong bytes", cxeSignatureDidNotVerify):
-      discard verifyCoseSign1(detachedMessage, KeySet.keys,
-                              detachedPayload = wrong,
-                              detachedPayloadSupplied = true)
-    # And a message that carries its own payload refuses a detached one.
-    refusesWith("attached and detached at once",
-                cxeDetachedPayloadUnexpected):
-      discard verifyCoseSign1(bytesOf("C.2.1"), KeySet.keys,
-                              detachedPayload = original,
-                              detachedPayloadSupplied = true)
+    driveCoseDetachedPayloadRoundTrip()
 
   test "t_cose_signature_covers_every_part_of_the_sig_structure":
-    # Four mutations, each touching a DIFFERENT element of the
-    # Sig_structure, each of which must break the signature. Without
-    # these, "the signature verified" says only that some bytes were
-    # signed.
+    driveCoseSignatureCoversEveryPartOfTheSigStructure()
+
+proc driveCoseMalformedCborNeverBecomesAVerifiedMessage() =
+  ## The body of test
+  ##   "t_cose_malformed_cbor_never_becomes_a_verified_message"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The shape this whole library exists to avoid: a parse that failed,
+  # read as "there was nothing to object to". Truncating the message
+  # and appending to it are both CBOR failures, and both must surface
+  # as refusals rather than as an empty structure that satisfies every
+  # later check.
+  let full = bytesOf("C.2.1")
+  # The baseline verifies, in this case's own scope, so none of the
+  # four refusals below can be passing because the message was already
+  # unusable.
+  check full.len == 98
+  check verifyCoseSign1(full, KeySet.keys).payload.len == 20
+  refusesWith("truncated message", cxeMalformedCbor):
+    discard verifyCoseSign1(full[0 ..< full.len - 10], KeySet.keys)
+  refusesWith("message with a byte appended", cxeMalformedCbor):
+    var extra = full
+    extra.add 0x00'u8
+    discard verifyCoseSign1(extra, KeySet.keys)
+  refusesWith("empty input", cxeMalformedCbor):
+    discard verifyCoseSign1([], KeySet.keys)
+  refusesWith("protected bucket is not CBOR", cxeMalformedCbor):
     var parts = sign1Parts()
-    check parts.len == 4
-    # 1. the payload
-    var flipped = parts
-    var payload = parts[2].bytes
-    payload[3] = payload[3] xor 0x01'u8
-    flipped[2] = cBytes(payload)
-    refusesWith("payload bit flipped", cxeSignatureDidNotVerify):
-      discard verifyCoseSign1(rebuiltSign1(flipped), KeySet.keys)
-    # 2. the signature itself
-    flipped = parts
-    var sig = parts[3].bytes
-    sig[^1] = sig[^1] xor 0x01'u8
-    flipped[3] = cBytes(sig)
-    refusesWith("signature bit flipped", cxeSignatureDidNotVerify):
-      discard verifyCoseSign1(rebuiltSign1(flipped), KeySet.keys)
-    # 3. the protected bucket, re-spelled rather than changed. `{1: -7}`
-    #    with the -7 written in two bytes instead of one decodes to the
-    #    SAME map and is different bytes, so a verifier that re-encoded
-    #    the bucket instead of using the bytes it arrived as would
-    #    accept this. RFC 9052 §3 says that would be wrong.
-    flipped = parts
-    let respelled = @[0xa1'u8, 0x01'u8, 0x38'u8, 0x06'u8]
-    check equalValue(decodeItem(respelled), decodeItem(parts[0].bytes))
-    check respelled != parts[0].bytes
-    flipped[0] = cBytes(respelled)
-    refusesWith("protected bucket re-spelled", cxeSignatureDidNotVerify):
-      discard verifyCoseSign1(rebuiltSign1(flipped), KeySet.keys)
-    # 4. the external_aad, which is empty in every published example and
-    #    would therefore never be exercised by them.
-    refusesWith("external_aad supplied", cxeSignatureDidNotVerify):
-      discard verifyCoseSign1(bytesOf("C.2.1"), KeySet.keys,
-                              externalAad = [0x00'u8])
-    # The unmutated message still verifies in this case's own scope, so
-    # none of the four above is passing because the baseline is broken.
-    check verifyCoseSign1(bytesOf("C.2.1"), KeySet.keys).payload.len == 20
+    parts[0] = cBytes([0xff'u8])
+    discard verifyCoseSign1(rebuiltSign1(parts), KeySet.keys)
+
+proc driveCoseEnvelopeRefusals() =
+  ## The body of test
+  ##   "t_cose_envelope_refusals"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var parts = sign1Parts()
+  refusesWith("tag 17", cxeWrongTag):
+    discard verifyCoseSign1(rebuiltSign1(parts, 17'u64), KeySet.keys)
+  refusesWith("untagged", cxeNotTagged):
+    discard verifyCoseSign1(encodeItem(cArray(parts)), KeySet.keys)
+  # …and untagged is accepted when the caller says so, so the refusal
+  # above is the requirement doing its job rather than a parse failure.
+  check verifyCoseSign1(encodeItem(cArray(parts)), KeySet.keys,
+                        requireTag = false).payload.len == 20
+  refusesWith("not an array", cxeNotArray):
+    discard verifyCoseSign1(encodeItem(cTag(CoseSign1Tag, cMap([]))),
+                            KeySet.keys)
+  refusesWith("three elements", cxeWrongArity):
+    discard verifyCoseSign1(rebuiltSign1(parts[0 .. 2]), KeySet.keys)
+  var broken = parts
+  broken[0] = cMap([])
+  refusesWith("protected is a map", cxeProtectedNotBytes):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+  broken = parts
+  broken[0] = cBytes(encodeItem(cArray([])))
+  refusesWith("protected holds an array", cxeProtectedNotMap):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+  broken = parts
+  broken[1] = cBytes([])
+  refusesWith("unprotected is a byte string", cxeUnprotectedNotMap):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+  broken = parts
+  broken[2] = cText("not bytes")
+  refusesWith("payload is text", cxePayloadNotBytes):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+  broken = parts
+  broken[3] = cUInt(1)
+  refusesWith("signature is an integer", cxeSignatureNotBytes):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+  broken = parts
+  broken[3] = cBytes(parts[3].bytes[0 ..< 63])
+  refusesWith("signature is 63 bytes", cxeSignatureWrongLength):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+  # An empty protected bucket is legal and so is `h'a0'`; RFC 9052 §3
+  # requires recipients to accept both. Neither verifies here, because
+  # the alg is what the bucket carried — the point is WHICH refusal.
+  broken = parts
+  broken[0] = cBytes([])
+  refusesWith("empty protected bucket", cxeNoAlgorithm):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+  broken[0] = cBytes(encodeItem(cMap([])))
+  refusesWith("zero-length map bucket", cxeNoAlgorithm):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+
+proc driveCoseHeaderRefusals() =
+  ## The body of test
+  ##   "t_cose_header_refusals"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var parts = sign1Parts()
+  check parts.len == 4
+  check verifyCoseSign1(bytesOf("C.2.1"), KeySet.keys).algorithm == caEs256
+  var broken = parts
+  broken[0] = protectedOf(cMap([cPair(cUInt(1), cText("ES256"))]))
+  refusesWith("alg is a text string", cxeAlgorithmNotInteger):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+  broken[0] = protectedOf(cMap([cPair(cUInt(1), cNegInt(7))]))
+  refusesWith("alg -8", cxeUnsupportedAlgorithm):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+  broken = parts
+  broken[1] = withEntry(parts[1], cUInt(1), cNegInt(6))
+  refusesWith("alg in both buckets", cxeDuplicateLabelAcrossBuckets):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+  broken = parts
+  broken[1] = cMap([])
+  refusesWith("no kid", cxeNoKeyIdentifier):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+  broken[1] = cMap([cPair(cUInt(4), cUInt(11))])
+  refusesWith("kid is an integer", cxeKeyIdentifierNotBytes):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+  broken[1] = cMap([cPair(cUInt(4), cBytes(kidOf("nobody")))])
+  refusesWith("unknown kid", cxeKeyNotFound):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+
+proc driveCoseCriticalityRefusals() =
+  ## The body of test
+  ##   "t_cose_criticality_refusals"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var parts = sign1Parts()
+  check parts.len == 4
+  # A `crit` that names a label the protected bucket carries AND the
+  # caller understands is accepted, so the four refusals below are the
+  # individual rules and not `crit` being refused outright.
+  check verifyCoseSign(bytesOf("C.1.3"), KeySet.keys,
+                       understoodCritical = Understood).len == 1
+  var broken = parts
+  broken[1] = withEntry(parts[1], cUInt(2), cArray([cText("x")]))
+  refusesWith("crit in the unprotected bucket", cxeCritNotProtected):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+  broken = parts
+  broken[0] = protectedOf(cMap([cPair(cUInt(1), cNegInt(6)),
+                                cPair(cUInt(2), cUInt(5))]))
+  refusesWith("crit is an integer", cxeCritNotArray):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+  broken[0] = protectedOf(cMap([cPair(cUInt(1), cNegInt(6)),
+                                cPair(cUInt(2), cArray([]))]))
+  refusesWith("crit is empty", cxeCritEmpty):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+  broken[0] = protectedOf(cMap([cPair(cUInt(1), cNegInt(6)),
+                                cPair(cUInt(2), cArray([cText("gone")]))]))
+  refusesWith("crit names an absent label",
+              cxeCritLabelNotInProtectedBucket):
+    discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys,
+                            understoodCritical = [cText("gone")])
+
+proc driveCoseMultiSignerRefusals() =
+  ## The body of test
+  ##   "t_cose_multi_signer_refusals"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var body = itemOf("C.1.1").content.elems
+  check body.len == 4
+  var broken = body
+  broken[3] = cMap([])
+  refusesWith("signatures is a map", cxeSignaturesNotArray):
+    discard verifyCoseSign(encodeItem(cTag(CoseSignTag, cArray(broken))),
+                           KeySet.keys)
+  broken[3] = cArray([])
+  refusesWith("no signatures", cxeNoSignatures):
+    discard verifyCoseSign(encodeItem(cTag(CoseSignTag, cArray(broken))),
+                           KeySet.keys)
+  broken[3] = cArray([cArray([body[3].elems[0].elems[0],
+                              body[3].elems[0].elems[1]])])
+  refusesWith("a COSE_Signature of two elements", cxeWrongArity):
+    discard verifyCoseSign(encodeItem(cTag(CoseSignTag, cArray(broken))),
+                           KeySet.keys)
+  broken[3] = cArray([cUInt(1)])
+  refusesWith("a COSE_Signature that is an integer", cxeNotArray):
+    discard verifyCoseSign(encodeItem(cTag(CoseSignTag, cArray(broken))),
+                           KeySet.keys)
+  refusesWith("a COSE_Sign body that is a map", cxeNotArray):
+    discard verifyCoseSign(encodeItem(cTag(CoseSignTag, cMap([]))),
+                           KeySet.keys)
+  refusesWith("a COSE_Sign body of three elements", cxeWrongArity):
+    discard verifyCoseSign(
+      encodeItem(cTag(CoseSignTag, cArray(body[0 .. 2]))), KeySet.keys)
+  # Every signature must verify: C.1.2 with its second signer's
+  # signature corrupted is refused even though the first is intact.
+  var two = itemOf("C.1.2").content.elems
+  var signers = two[3].elems
+  var second = signers[1].elems
+  var sig = second[2].bytes
+  sig[^1] = sig[^1] xor 0x01'u8
+  second[2] = cBytes(sig)
+  signers[1] = cArray(second)
+  two[3] = cArray(signers)
+  refusesWith("one of two signers corrupted", cxeSignatureDidNotVerify):
+    discard verifyCoseSign(encodeItem(cTag(CoseSignTag, cArray(two))),
+                           KeySet.keys)
+
+proc driveCoseKeyRefusals() =
+  ## The body of test
+  ##   "t_cose_key_refusals"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  refusesWith("key set is a map", cxeKeySetNotArray):
+    discard parseCoseKeySet(cMap([]))
+  refusesWith("key is an array", cxeKeyNotMap):
+    discard parseCoseKey(cArray([]))
+  let k = keyItem(1)
+  check parseCoseKey(k).kid == kidOf("11")
+  refusesWith("kty is OKP", cxeKeyNotEc2):
+    discard parseCoseKey(withEntry(k, cUInt(1), cUInt(1)))
+  refusesWith("no crv", cxeKeyCurveMissing):
+    discard parseCoseKey(withoutEntry(k, cNegInt(0)))
+  refusesWith("crv is X25519", cxeKeyCurveUnsupported):
+    discard parseCoseKey(withEntry(k, cNegInt(0), cUInt(4)))
+  refusesWith("crv is a text string", cxeKeyCurveUnsupported):
+    discard parseCoseKey(withEntry(k, cNegInt(0), cText("P-256")))
+  refusesWith("no x coordinate", cxeKeyCoordinateMissing):
+    discard parseCoseKey(withoutEntry(k, cNegInt(1)))
+  refusesWith("x is 31 bytes", cxeKeyCoordinateWrongLength):
+    discard parseCoseKey(withEntry(k, cNegInt(1),
+      cBytes(k.lookupInt(-2).bytes[0 ..< 31])))
+  refusesWith("kid is not a byte string", cxeKeyIdentifierNotBytes):
+    discard parseCoseKey(withEntry(k, cUInt(2), cUInt(11)))
+  # A key that restricts itself to ES384 cannot verify an ES256
+  # signature, and a P-521 key cannot be used for ES256 at all.
+  let restricted = parseCoseKey(withEntry(k, cUInt(3), cNegInt(34)))
+  check restricted.hasAlgorithm
+  check restricted.algorithm == caEs384
+  refusesWith("key restricted to ES384", cxeKeyAlgorithmRestricted):
+    discard verifyCoseSign1(bytesOf("C.2.1"), [restricted])
+  let wrongCurve = parseCoseKey(
+    withEntry(keyItem(2), cUInt(2), cBytes(kidOf("11"))))
+  check wrongCurve.curve == ccP521
+  refusesWith("P-521 key for ES256", cxeKeyCurveAlgorithmMismatch):
+    discard verifyCoseSign1(bytesOf("C.2.1"), [wrongCurve])
+  # A key the CALLER BUILT rather than one this module parsed.
+  # `parseCoseKey` cannot emit a point of the wrong width, so every
+  # case above reaches the verifier with a well-formed point — and the
+  # first non-test consumer of this module will not, because a public
+  # key that arrives in a certificate never goes through `parseCoseKey`
+  # at all. Without this case the width rule has no input, and the
+  # message path reads past the end of the buffer instead of refusing.
+  var handBuilt = keyNamed("11")
+  check handBuilt.point.len == 65
+  handBuilt.point = handBuilt.point[0 ..< 40]
+  refusesWith("a hand-built key whose point is 40 bytes",
+              cxeKeyCoordinateWrongLength):
+    discard verifyCoseSign1(bytesOf("C.2.1"), [handBuilt])
+  # The primitive declines the same key by value rather than by
+  # dereferencing it, which is the layer underneath that refusal.
+  check not ecdsaSignatureIsValid(handBuilt, caEs256, [0'u8],
+                                  newSeq[byte](64))
+  var emptyPoint = keyNamed("11")
+  emptyPoint.point = @[]
+  refusesWith("a hand-built key with no point at all",
+              cxeKeyCoordinateWrongLength):
+    discard verifyCoseSign1(bytesOf("C.2.1"), [emptyPoint])
+  check not ecdsaSignatureIsValid(emptyPoint, caEs256, [0'u8],
+                                  newSeq[byte](64))
+  # …and the same key at its published width still verifies C.2.1, so
+  # the three refusals above are about the width and not about the key.
+  check verifyCoseSign1(bytesOf("C.2.1"),
+                        [keyNamed("11")]).payload.len == 20
 
 suite "cose structural refusals":
 
   test "t_cose_malformed_cbor_never_becomes_a_verified_message":
-    # The shape this whole library exists to avoid: a parse that failed,
-    # read as "there was nothing to object to". Truncating the message
-    # and appending to it are both CBOR failures, and both must surface
-    # as refusals rather than as an empty structure that satisfies every
-    # later check.
-    let full = bytesOf("C.2.1")
-    # The baseline verifies, in this case's own scope, so none of the
-    # four refusals below can be passing because the message was already
-    # unusable.
-    check full.len == 98
-    check verifyCoseSign1(full, KeySet.keys).payload.len == 20
-    refusesWith("truncated message", cxeMalformedCbor):
-      discard verifyCoseSign1(full[0 ..< full.len - 10], KeySet.keys)
-    refusesWith("message with a byte appended", cxeMalformedCbor):
-      var extra = full
-      extra.add 0x00'u8
-      discard verifyCoseSign1(extra, KeySet.keys)
-    refusesWith("empty input", cxeMalformedCbor):
-      discard verifyCoseSign1([], KeySet.keys)
-    refusesWith("protected bucket is not CBOR", cxeMalformedCbor):
-      var parts = sign1Parts()
-      parts[0] = cBytes([0xff'u8])
-      discard verifyCoseSign1(rebuiltSign1(parts), KeySet.keys)
+    driveCoseMalformedCborNeverBecomesAVerifiedMessage()
 
   test "t_cose_envelope_refusals":
-    var parts = sign1Parts()
-    refusesWith("tag 17", cxeWrongTag):
-      discard verifyCoseSign1(rebuiltSign1(parts, 17'u64), KeySet.keys)
-    refusesWith("untagged", cxeNotTagged):
-      discard verifyCoseSign1(encodeItem(cArray(parts)), KeySet.keys)
-    # …and untagged is accepted when the caller says so, so the refusal
-    # above is the requirement doing its job rather than a parse failure.
-    check verifyCoseSign1(encodeItem(cArray(parts)), KeySet.keys,
-                          requireTag = false).payload.len == 20
-    refusesWith("not an array", cxeNotArray):
-      discard verifyCoseSign1(encodeItem(cTag(CoseSign1Tag, cMap([]))),
-                              KeySet.keys)
-    refusesWith("three elements", cxeWrongArity):
-      discard verifyCoseSign1(rebuiltSign1(parts[0 .. 2]), KeySet.keys)
-    var broken = parts
-    broken[0] = cMap([])
-    refusesWith("protected is a map", cxeProtectedNotBytes):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
-    broken = parts
-    broken[0] = cBytes(encodeItem(cArray([])))
-    refusesWith("protected holds an array", cxeProtectedNotMap):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
-    broken = parts
-    broken[1] = cBytes([])
-    refusesWith("unprotected is a byte string", cxeUnprotectedNotMap):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
-    broken = parts
-    broken[2] = cText("not bytes")
-    refusesWith("payload is text", cxePayloadNotBytes):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
-    broken = parts
-    broken[3] = cUInt(1)
-    refusesWith("signature is an integer", cxeSignatureNotBytes):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
-    broken = parts
-    broken[3] = cBytes(parts[3].bytes[0 ..< 63])
-    refusesWith("signature is 63 bytes", cxeSignatureWrongLength):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
-    # An empty protected bucket is legal and so is `h'a0'`; RFC 9052 §3
-    # requires recipients to accept both. Neither verifies here, because
-    # the alg is what the bucket carried — the point is WHICH refusal.
-    broken = parts
-    broken[0] = cBytes([])
-    refusesWith("empty protected bucket", cxeNoAlgorithm):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
-    broken[0] = cBytes(encodeItem(cMap([])))
-    refusesWith("zero-length map bucket", cxeNoAlgorithm):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+    driveCoseEnvelopeRefusals()
 
   test "t_cose_header_refusals":
-    var parts = sign1Parts()
-    check parts.len == 4
-    check verifyCoseSign1(bytesOf("C.2.1"), KeySet.keys).algorithm == caEs256
-    var broken = parts
-    broken[0] = protectedOf(cMap([cPair(cUInt(1), cText("ES256"))]))
-    refusesWith("alg is a text string", cxeAlgorithmNotInteger):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
-    broken[0] = protectedOf(cMap([cPair(cUInt(1), cNegInt(7))]))
-    refusesWith("alg -8", cxeUnsupportedAlgorithm):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
-    broken = parts
-    broken[1] = withEntry(parts[1], cUInt(1), cNegInt(6))
-    refusesWith("alg in both buckets", cxeDuplicateLabelAcrossBuckets):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
-    broken = parts
-    broken[1] = cMap([])
-    refusesWith("no kid", cxeNoKeyIdentifier):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
-    broken[1] = cMap([cPair(cUInt(4), cUInt(11))])
-    refusesWith("kid is an integer", cxeKeyIdentifierNotBytes):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
-    broken[1] = cMap([cPair(cUInt(4), cBytes(kidOf("nobody")))])
-    refusesWith("unknown kid", cxeKeyNotFound):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
+    driveCoseHeaderRefusals()
 
   test "t_cose_criticality_refusals":
-    var parts = sign1Parts()
-    check parts.len == 4
-    # A `crit` that names a label the protected bucket carries AND the
-    # caller understands is accepted, so the four refusals below are the
-    # individual rules and not `crit` being refused outright.
-    check verifyCoseSign(bytesOf("C.1.3"), KeySet.keys,
-                         understoodCritical = Understood).len == 1
-    var broken = parts
-    broken[1] = withEntry(parts[1], cUInt(2), cArray([cText("x")]))
-    refusesWith("crit in the unprotected bucket", cxeCritNotProtected):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
-    broken = parts
-    broken[0] = protectedOf(cMap([cPair(cUInt(1), cNegInt(6)),
-                                  cPair(cUInt(2), cUInt(5))]))
-    refusesWith("crit is an integer", cxeCritNotArray):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
-    broken[0] = protectedOf(cMap([cPair(cUInt(1), cNegInt(6)),
-                                  cPair(cUInt(2), cArray([]))]))
-    refusesWith("crit is empty", cxeCritEmpty):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys)
-    broken[0] = protectedOf(cMap([cPair(cUInt(1), cNegInt(6)),
-                                  cPair(cUInt(2), cArray([cText("gone")]))]))
-    refusesWith("crit names an absent label",
-                cxeCritLabelNotInProtectedBucket):
-      discard verifyCoseSign1(rebuiltSign1(broken), KeySet.keys,
-                              understoodCritical = [cText("gone")])
+    driveCoseCriticalityRefusals()
 
   test "t_cose_multi_signer_refusals":
-    var body = itemOf("C.1.1").content.elems
-    check body.len == 4
-    var broken = body
-    broken[3] = cMap([])
-    refusesWith("signatures is a map", cxeSignaturesNotArray):
-      discard verifyCoseSign(encodeItem(cTag(CoseSignTag, cArray(broken))),
-                             KeySet.keys)
-    broken[3] = cArray([])
-    refusesWith("no signatures", cxeNoSignatures):
-      discard verifyCoseSign(encodeItem(cTag(CoseSignTag, cArray(broken))),
-                             KeySet.keys)
-    broken[3] = cArray([cArray([body[3].elems[0].elems[0],
-                                body[3].elems[0].elems[1]])])
-    refusesWith("a COSE_Signature of two elements", cxeWrongArity):
-      discard verifyCoseSign(encodeItem(cTag(CoseSignTag, cArray(broken))),
-                             KeySet.keys)
-    broken[3] = cArray([cUInt(1)])
-    refusesWith("a COSE_Signature that is an integer", cxeNotArray):
-      discard verifyCoseSign(encodeItem(cTag(CoseSignTag, cArray(broken))),
-                             KeySet.keys)
-    refusesWith("a COSE_Sign body that is a map", cxeNotArray):
-      discard verifyCoseSign(encodeItem(cTag(CoseSignTag, cMap([]))),
-                             KeySet.keys)
-    refusesWith("a COSE_Sign body of three elements", cxeWrongArity):
-      discard verifyCoseSign(
-        encodeItem(cTag(CoseSignTag, cArray(body[0 .. 2]))), KeySet.keys)
-    # Every signature must verify: C.1.2 with its second signer's
-    # signature corrupted is refused even though the first is intact.
-    var two = itemOf("C.1.2").content.elems
-    var signers = two[3].elems
-    var second = signers[1].elems
-    var sig = second[2].bytes
-    sig[^1] = sig[^1] xor 0x01'u8
-    second[2] = cBytes(sig)
-    signers[1] = cArray(second)
-    two[3] = cArray(signers)
-    refusesWith("one of two signers corrupted", cxeSignatureDidNotVerify):
-      discard verifyCoseSign(encodeItem(cTag(CoseSignTag, cArray(two))),
-                             KeySet.keys)
+    driveCoseMultiSignerRefusals()
 
   test "t_cose_key_refusals":
-    refusesWith("key set is a map", cxeKeySetNotArray):
-      discard parseCoseKeySet(cMap([]))
-    refusesWith("key is an array", cxeKeyNotMap):
-      discard parseCoseKey(cArray([]))
-    let k = keyItem(1)
-    check parseCoseKey(k).kid == kidOf("11")
-    refusesWith("kty is OKP", cxeKeyNotEc2):
-      discard parseCoseKey(withEntry(k, cUInt(1), cUInt(1)))
-    refusesWith("no crv", cxeKeyCurveMissing):
-      discard parseCoseKey(withoutEntry(k, cNegInt(0)))
-    refusesWith("crv is X25519", cxeKeyCurveUnsupported):
-      discard parseCoseKey(withEntry(k, cNegInt(0), cUInt(4)))
-    refusesWith("crv is a text string", cxeKeyCurveUnsupported):
-      discard parseCoseKey(withEntry(k, cNegInt(0), cText("P-256")))
-    refusesWith("no x coordinate", cxeKeyCoordinateMissing):
-      discard parseCoseKey(withoutEntry(k, cNegInt(1)))
-    refusesWith("x is 31 bytes", cxeKeyCoordinateWrongLength):
-      discard parseCoseKey(withEntry(k, cNegInt(1),
-        cBytes(k.lookupInt(-2).bytes[0 ..< 31])))
-    refusesWith("kid is not a byte string", cxeKeyIdentifierNotBytes):
-      discard parseCoseKey(withEntry(k, cUInt(2), cUInt(11)))
-    # A key that restricts itself to ES384 cannot verify an ES256
-    # signature, and a P-521 key cannot be used for ES256 at all.
-    let restricted = parseCoseKey(withEntry(k, cUInt(3), cNegInt(34)))
-    check restricted.hasAlgorithm
-    check restricted.algorithm == caEs384
-    refusesWith("key restricted to ES384", cxeKeyAlgorithmRestricted):
-      discard verifyCoseSign1(bytesOf("C.2.1"), [restricted])
-    let wrongCurve = parseCoseKey(
-      withEntry(keyItem(2), cUInt(2), cBytes(kidOf("11"))))
-    check wrongCurve.curve == ccP521
-    refusesWith("P-521 key for ES256", cxeKeyCurveAlgorithmMismatch):
-      discard verifyCoseSign1(bytesOf("C.2.1"), [wrongCurve])
-    # A key the CALLER BUILT rather than one this module parsed.
-    # `parseCoseKey` cannot emit a point of the wrong width, so every
-    # case above reaches the verifier with a well-formed point — and the
-    # first non-test consumer of this module will not, because a public
-    # key that arrives in a certificate never goes through `parseCoseKey`
-    # at all. Without this case the width rule has no input, and the
-    # message path reads past the end of the buffer instead of refusing.
-    var handBuilt = keyNamed("11")
-    check handBuilt.point.len == 65
-    handBuilt.point = handBuilt.point[0 ..< 40]
-    refusesWith("a hand-built key whose point is 40 bytes",
-                cxeKeyCoordinateWrongLength):
-      discard verifyCoseSign1(bytesOf("C.2.1"), [handBuilt])
-    # The primitive declines the same key by value rather than by
-    # dereferencing it, which is the layer underneath that refusal.
-    check not ecdsaSignatureIsValid(handBuilt, caEs256, [0'u8],
-                                    newSeq[byte](64))
-    var emptyPoint = keyNamed("11")
-    emptyPoint.point = @[]
-    refusesWith("a hand-built key with no point at all",
-                cxeKeyCoordinateWrongLength):
-      discard verifyCoseSign1(bytesOf("C.2.1"), [emptyPoint])
-    check not ecdsaSignatureIsValid(emptyPoint, caEs256, [0'u8],
-                                    newSeq[byte](64))
-    # …and the same key at its published width still verifies C.2.1, so
-    # the three refusals above are about the width and not about the key.
-    check verifyCoseSign1(bytesOf("C.2.1"),
-                          [keyNamed("11")]).payload.len == 20
+    driveCoseKeyRefusals()
 
 
 # ---------------------------------------------------------------------
@@ -2180,9 +2250,38 @@ suite "cose ecdsa primitive against rfc 6979":
     check not ecdsaSignatureIsValid(keyFor(p384), caEs384,
                                     messageBytes(p521), signatureFor(p521))
 
+# Every case above that raises a refusal. The coverage case drives all of
+# them itself: the suite runner executes each case in its own process
+# (`--run suite::test`), so `reachedKinds` holds only what ran in THIS
+# process, and a coverage case that read what earlier cases left behind
+# would measure the execution mode rather than the verifier.
+const RefusalDrivers: seq[(string, proc () {.nimcall.})] = @[
+  ("t_cose_sign_and_sign1_contexts_are_not_interchangeable",
+    driveCoseSignAndSign1ContextsAreNotInterchangeable),
+  ("t_cose_criticality_refuses_by_default_and_accepts_when_declared",
+    driveCoseCriticalityRefusesByDefaultAndAcceptsWhenDeclared),
+  ("t_cose_detached_payload_round_trip", driveCoseDetachedPayloadRoundTrip),
+  ("t_cose_signature_covers_every_part_of_the_sig_structure",
+    driveCoseSignatureCoversEveryPartOfTheSigStructure),
+  ("t_cose_malformed_cbor_never_becomes_a_verified_message",
+    driveCoseMalformedCborNeverBecomesAVerifiedMessage),
+  ("t_cose_envelope_refusals", driveCoseEnvelopeRefusals),
+  ("t_cose_header_refusals", driveCoseHeaderRefusals),
+  ("t_cose_criticality_refusals", driveCoseCriticalityRefusals),
+  ("t_cose_multi_signer_refusals", driveCoseMultiSignerRefusals),
+  ("t_cose_key_refusals", driveCoseKeyRefusals)]
+
 suite "cose refusal coverage":
 
   test "t_cose_every_refusal_kind_is_reached":
+    # Every kind in the vocabulary must be raised by an input one of the
+    # cases above runs. The inputs are driven HERE, from an empty set, so
+    # the verdict is the same whether this case runs alone or after the
+    # others.
+    reachedKinds = {}
+    for (name, drive) in RefusalDrivers:
+      checkpoint("driving " & name)
+      drive()
     var unreached: seq[string] = @[]
     var count = 0
     for k in CoseErrorKind:

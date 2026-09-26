@@ -212,6 +212,74 @@ suite "the refusal vocabulary is one rule per site":
         if n == $k: known = true
       check known
 
+proc driveAnEntryThatAlreadyCarriedWritesIsRefused() =
+  ## The body of test
+  ##   "an entry that already carried writes is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    checkTsmGeneration(TsmGenerationReading(atOpen: 1, afterWrites: 2,
+      afterRead: 2, writesPerformed: 1), "<gate>"))
+  check e.kind == tseEntryNotFresh
+  check TsmMessage[tseEntryNotFresh] in e.msg
+
+proc driveAWriterThatLandedBetweenThisProcessSWritesIsRefused() =
+  ## The body of test
+  ##   "a writer that landed between this process's writes is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    checkTsmGeneration(TsmGenerationReading(atOpen: 0, afterWrites: 3,
+      afterRead: 3, writesPerformed: 2), "<gate>"))
+  check e.kind == tseConcurrentWriter
+  check "performed 2 write(s)" in e.msg
+  check "counter stands at 3" in e.msg
+
+proc driveAnEntryRewrittenBetweenTheWriteAndTheReadIsRefused() =
+  ## The body of test
+  ##   "an entry rewritten between the write and the read is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The one that matters most: everything else about the document is
+  # genuine, and it answers somebody else's question.
+  let e = refuses(proc () =
+    checkTsmGeneration(TsmGenerationReading(atOpen: 0, afterWrites: 1,
+      afterRead: 2, writesPerformed: 1), "<gate>"))
+  check e.kind == tseRegeneratedBetweenWriteAndRead
+  check "1 when the bound bytes had been written" in e.msg
+  check "2 when the document had been read" in e.msg
+
+proc driveTheThreeRulesAreOrderedByWhenTheEventHappened() =
+  ## The body of test
+  ##   "the three rules are ordered by when the event happened"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # A collided entry explains the other two, so an entry that was
+  # never fresh AND was raced must report the collision: naming the
+  # symptom and hiding the cause sends an operator after the wrong
+  # thing. This is the ordering defect in its own right — a rule
+  # sitting after something that consumed its input.
+  let e = refuses(proc () =
+    checkTsmGeneration(TsmGenerationReading(atOpen: 7, afterWrites: 99,
+      afterRead: 123, writesPerformed: 1), "<gate>"))
+  check e.kind == tseEntryNotFresh
+
+proc driveACounterThatMovedByExactlyTheWritesPerformedPasses() =
+  ## The body of test
+  ##   "a counter that moved by exactly the writes performed passes"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The boundary from the other side, so the rule is not satisfied by
+  # every input. Two writes, counter at two.
+  checkTsmGeneration(TsmGenerationReading(atOpen: 0, afterWrites: 2,
+    afterRead: 2, writesPerformed: 2), "<gate>")
+  # And one fewer write than the counter saw is a refusal, so the
+  # comparison is an equality rather than a floor.
+  let e = refuses(proc () =
+    checkTsmGeneration(TsmGenerationReading(atOpen: 0, afterWrites: 2,
+      afterRead: 2, writesPerformed: 1), "<gate>"))
+  check e.kind == tseConcurrentWriter
+
 suite "the counter discipline":
 
   test "a session nobody raced is accepted":
@@ -228,52 +296,40 @@ suite "the counter discipline":
     check not refused
 
   test "an entry that already carried writes is refused":
-    let e = refuses(proc () =
-      checkTsmGeneration(TsmGenerationReading(atOpen: 1, afterWrites: 2,
-        afterRead: 2, writesPerformed: 1), "<gate>"))
-    check e.kind == tseEntryNotFresh
-    check TsmMessage[tseEntryNotFresh] in e.msg
+    driveAnEntryThatAlreadyCarriedWritesIsRefused()
 
   test "a writer that landed between this process's writes is refused":
-    let e = refuses(proc () =
-      checkTsmGeneration(TsmGenerationReading(atOpen: 0, afterWrites: 3,
-        afterRead: 3, writesPerformed: 2), "<gate>"))
-    check e.kind == tseConcurrentWriter
-    check "performed 2 write(s)" in e.msg
-    check "counter stands at 3" in e.msg
+    driveAWriterThatLandedBetweenThisProcessSWritesIsRefused()
 
   test "an entry rewritten between the write and the read is refused":
-    # The one that matters most: everything else about the document is
-    # genuine, and it answers somebody else's question.
-    let e = refuses(proc () =
-      checkTsmGeneration(TsmGenerationReading(atOpen: 0, afterWrites: 1,
-        afterRead: 2, writesPerformed: 1), "<gate>"))
-    check e.kind == tseRegeneratedBetweenWriteAndRead
-    check "1 when the bound bytes had been written" in e.msg
-    check "2 when the document had been read" in e.msg
+    driveAnEntryRewrittenBetweenTheWriteAndTheReadIsRefused()
 
   test "the three rules are ordered by when the event happened":
-    # A collided entry explains the other two, so an entry that was
-    # never fresh AND was raced must report the collision: naming the
-    # symptom and hiding the cause sends an operator after the wrong
-    # thing. This is the ordering defect in its own right — a rule
-    # sitting after something that consumed its input.
-    let e = refuses(proc () =
-      checkTsmGeneration(TsmGenerationReading(atOpen: 7, afterWrites: 99,
-        afterRead: 123, writesPerformed: 1), "<gate>"))
-    check e.kind == tseEntryNotFresh
+    driveTheThreeRulesAreOrderedByWhenTheEventHappened()
 
   test "a counter that moved by exactly the writes performed passes":
-    # The boundary from the other side, so the rule is not satisfied by
-    # every input. Two writes, counter at two.
-    checkTsmGeneration(TsmGenerationReading(atOpen: 0, afterWrites: 2,
-      afterRead: 2, writesPerformed: 2), "<gate>")
-    # And one fewer write than the counter saw is a refusal, so the
-    # comparison is an equality rather than a floor.
-    let e = refuses(proc () =
-      checkTsmGeneration(TsmGenerationReading(atOpen: 0, afterWrites: 2,
-        afterRead: 2, writesPerformed: 1), "<gate>"))
-    check e.kind == tseConcurrentWriter
+    driveACounterThatMovedByExactlyTheWritesPerformedPasses()
+
+proc driveAProviderWhoseNameMerelyStartsTheSameIsRefused() =
+  ## The body of test
+  ##   "a provider whose name merely starts the same is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # A prefix match would read `sev_guest_v2` as `sev_guest` and then
+  # lift this build's offsets out of a document nobody described.
+  let e = refuses(proc () =
+    discard parseTsmProvider(SevSnpProviderName & "_v2", "<gate>"))
+  check e.kind == tseUnknownProvider
+  check SevSnpProviderName in e.msg
+  check TdxProviderName in e.msg
+
+proc driveAnEmptyProviderIsRefused() =
+  ## The body of test
+  ##   "an empty provider is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () = discard parseTsmProvider("", "<gate>"))
+  check e.kind == tseUnknownProvider
 
 suite "the provider is matched exactly":
 
@@ -287,45 +343,100 @@ suite "the provider is matched exactly":
       tsmTdx
 
   test "a provider whose name merely starts the same is refused":
-    # A prefix match would read `sev_guest_v2` as `sev_guest` and then
-    # lift this build's offsets out of a document nobody described.
-    let e = refuses(proc () =
-      discard parseTsmProvider(SevSnpProviderName & "_v2", "<gate>"))
-    check e.kind == tseUnknownProvider
-    check SevSnpProviderName in e.msg
-    check TdxProviderName in e.msg
+    driveAProviderWhoseNameMerelyStartsTheSameIsRefused()
 
   test "an empty provider is refused":
-    let e = refuses(proc () = discard parseTsmProvider("", "<gate>"))
-    check e.kind == tseUnknownProvider
+    driveAnEmptyProviderIsRefused()
+
+proc driveASourceBuiltWithoutALabelIsRefused() =
+  ## The body of test
+  ##   "a source built without a label is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    var s = UnimplementedSource()
+    initTsmSource(s, ""))
+  check e.kind == tseSourceUnlabelled
+
+proc driveASourceThatCannotSayWhetherItIsReadyIsRefused() =
+  ## The body of test
+  ##   "a source that cannot say whether it is ready is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () = discard newUnimplementedSource().sourceProbe())
+  check e.kind == tseSourceProbeUnimplemented
+  check "overrides-nothing" in e.msg
+
+proc driveASourceThatImplementsNoTransportIsRefused() =
+  ## The body of test
+  ##   "a source that implements no transport is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    discard readTsmReport(newUnimplementedSource(), boundBytes))
+  check e.kind == tseSourceReportUnimplemented
 
 suite "the base seam refuses on its own behalf":
 
   test "a source built without a label is refused":
-    let e = refuses(proc () =
-      var s = UnimplementedSource()
-      initTsmSource(s, ""))
-    check e.kind == tseSourceUnlabelled
+    driveASourceBuiltWithoutALabelIsRefused()
 
   test "a source that cannot say whether it is ready is refused":
-    let e = refuses(proc () = discard newUnimplementedSource().sourceProbe())
-    check e.kind == tseSourceProbeUnimplemented
-    check "overrides-nothing" in e.msg
+    driveASourceThatCannotSayWhetherItIsReadyIsRefused()
 
   test "a source that implements no transport is refused":
+    driveASourceThatImplementsNoTransportIsRefused()
+
+proc driveBytesOfTheWrongWidthNeverReachASource() =
+  ## The body of test
+  ##   "bytes of the wrong width never reach a source"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  for width in [0, 1, ReportDataSize - 1, ReportDataSize + 1]:
     let e = refuses(proc () =
-      discard readTsmReport(newUnimplementedSource(), boundBytes))
-    check e.kind == tseSourceReportUnimplemented
+      discard readTsmReport(newBench().source(), repeat('\x00', width)))
+    check e.kind == tseWrongReportDataWidth
+    check $width & " bytes" in e.msg
+    check $ReportDataSize in e.msg
+
+proc driveAnEmptyDocumentIsRefused() =
+  ## The body of test
+  ##   "an empty document is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let b = newBench(outblob = "")
+  let e = refuses(proc () = discard readTsmReport(b.source(), boundBytes))
+  check e.kind == tseEmptyOutblob
+
+proc driveADocumentLargerThanAnyEnvelopeWillCarryIsRefused() =
+  ## The body of test
+  ##   "a document larger than any envelope will carry is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    discard readTsmReport(newOversizeSource(), boundBytes))
+  check e.kind == tseOutblobTooLarge
+  check $(MaxTsmOutblobBytes + 1) in e.msg
+
+proc driveTheCounterIsCheckedOnEVERYSourceNotOnlyTheLiveOne() =
+  ## The body of test
+  ##   "the counter is checked on EVERY source, not only the live one"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The rule lives in the checked entry point rather than in the live
+  # source, so a source that never touches a kernel still has to
+  # account for the counter it reports. A rule that ran only where it
+  # cannot be tested is a rule nothing holds.
+  let b = newBench()
+  let e = refuses(proc () =
+    discard readTsmReport(b.source(TsmGenerationReading(atOpen: 0,
+      afterWrites: 1, afterRead: 4, writesPerformed: 1)), boundBytes))
+  check e.kind == tseRegeneratedBetweenWriteAndRead
 
 suite "the checked entry point":
 
   test "bytes of the wrong width never reach a source":
-    for width in [0, 1, ReportDataSize - 1, ReportDataSize + 1]:
-      let e = refuses(proc () =
-        discard readTsmReport(newBench().source(), repeat('\x00', width)))
-      check e.kind == tseWrongReportDataWidth
-      check $width & " bytes" in e.msg
-      check $ReportDataSize in e.msg
+    driveBytesOfTheWrongWidthNeverReachASource()
 
   test "the width that IS bound is accepted":
     # The bound from the other side: a rule satisfied by every input is
@@ -334,26 +445,24 @@ suite "the checked entry point":
     check readTsmReport(b.source(), boundBytes).outblob == "a document"
 
   test "an empty document is refused":
-    let b = newBench(outblob = "")
-    let e = refuses(proc () = discard readTsmReport(b.source(), boundBytes))
-    check e.kind == tseEmptyOutblob
+    driveAnEmptyDocumentIsRefused()
 
   test "a document larger than any envelope will carry is refused":
-    let e = refuses(proc () =
-      discard readTsmReport(newOversizeSource(), boundBytes))
-    check e.kind == tseOutblobTooLarge
-    check $(MaxTsmOutblobBytes + 1) in e.msg
+    driveADocumentLargerThanAnyEnvelopeWillCarryIsRefused()
 
   test "the counter is checked on EVERY source, not only the live one":
-    # The rule lives in the checked entry point rather than in the live
-    # source, so a source that never touches a kernel still has to
-    # account for the counter it reports. A rule that ran only where it
-    # cannot be tested is a rule nothing holds.
-    let b = newBench()
-    let e = refuses(proc () =
-      discard readTsmReport(b.source(TsmGenerationReading(atOpen: 0,
-        afterWrites: 1, afterRead: 4, writesPerformed: 1)), boundBytes))
-    check e.kind == tseRegeneratedBetweenWriteAndRead
+    driveTheCounterIsCheckedOnEVERYSourceNotOnlyTheLiveOne()
+
+proc driveACaptureWithNoDocumentOnDiskIsRefused() =
+  ## The body of test
+  ##   "a capture with no document on disk is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let b = newBench()
+  removeFile(b.outblobPath)
+  let e = refuses(proc () = discard readTsmReport(b.source(), boundBytes))
+  check e.kind == tseCapturedAttributeAbsent
+  check b.outblobPath in e.msg
 
 suite "the captured source":
 
@@ -379,11 +488,7 @@ suite "the captured source":
     check readTsmReport(b.source(), boundBytes).auxblob.isNone
 
   test "a capture with no document on disk is refused":
-    let b = newBench()
-    removeFile(b.outblobPath)
-    let e = refuses(proc () = discard readTsmReport(b.source(), boundBytes))
-    check e.kind == tseCapturedAttributeAbsent
-    check b.outblobPath in e.msg
+    driveACaptureWithNoDocumentOnDiskIsRefused()
 
   test "the probe names what is missing, and takes no document":
     let b = newBench()
@@ -392,6 +497,62 @@ suite "the captured source":
     let p = b.source().sourceProbe()
     check not p.ready
     check b.providerPath in p.detail
+
+proc driveAnAttributeThatCannotBeOpenedIsRefused() =
+  ## The body of test
+  ##   "an attribute that cannot be opened is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    discard readWholeAttribute(getTempDir() / "no-such-attribute-here",
+                               "outblob", "<gate>"))
+  check e.kind == tseAttributeUnopenable
+
+proc driveAnAttributeThatKeepsProducingBytesIsCutOff() =
+  ## The body of test
+  ##   "an attribute that keeps producing bytes is cut off"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Not the envelope's bound: this one stops a machine choosing how
+  # much memory this process takes, and it fires while reading rather
+  # than after.
+  let b = newBench()
+  writeFile(b.outblobPath, repeat('Z', MaxTsmOutblobBytes + 1))
+  let e = refuses(proc () =
+    discard readWholeAttribute(b.outblobPath, "outblob", "<gate>"))
+  check e.kind == tseAttributeOverran
+  check $MaxTsmOutblobBytes in e.msg
+
+proc driveACounterThatIsNotANumberIsRefused() =
+  ## The body of test
+  ##   "a counter that is not a number is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let b = newBench()
+  let path = b.dir / TsmGenerationAttr
+  writeFile(path, "not-a-number\n")
+  let e = refuses(proc () = discard readGeneration(path, "<gate>"))
+  check e.kind == tseGenerationNotANumber
+  check "not-a-number" in e.msg
+  # And a counter that IS a number reads, including with the newline
+  # the kernel writes.
+  writeFile(path, "17\n")
+  check readGeneration(path, "<gate>") == 17'u64
+
+proc driveAnAttributeThatCannotBeWrittenIsRefused() =
+  ## The body of test
+  ##   "an attribute that cannot be written is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let b = newBench()
+  let readOnly = b.dir / "read-only"
+  createDir(readOnly)
+  setFilePermissions(readOnly, {fpUserRead, fpUserExec})
+  let e = refuses(proc () =
+    writeAttribute(readOnly / TsmInblobAttr, boundBytes, "inblob",
+                   "<gate>"))
+  check e.kind == tseAttributeUnwritable
+  setFilePermissions(readOnly, {fpUserRead, fpUserWrite, fpUserExec})
 
 suite "the three filesystem operations":
 
@@ -407,49 +568,51 @@ suite "the three filesystem operations":
     check readWholeAttribute(b.outblobPath, "outblob", "<gate>") == payload
 
   test "an attribute that cannot be opened is refused":
-    let e = refuses(proc () =
-      discard readWholeAttribute(getTempDir() / "no-such-attribute-here",
-                                 "outblob", "<gate>"))
-    check e.kind == tseAttributeUnopenable
+    driveAnAttributeThatCannotBeOpenedIsRefused()
 
   test "an attribute that keeps producing bytes is cut off":
-    # Not the envelope's bound: this one stops a machine choosing how
-    # much memory this process takes, and it fires while reading rather
-    # than after.
-    let b = newBench()
-    writeFile(b.outblobPath, repeat('Z', MaxTsmOutblobBytes + 1))
-    let e = refuses(proc () =
-      discard readWholeAttribute(b.outblobPath, "outblob", "<gate>"))
-    check e.kind == tseAttributeOverran
-    check $MaxTsmOutblobBytes in e.msg
+    driveAnAttributeThatKeepsProducingBytesIsCutOff()
 
   test "a counter that is not a number is refused":
-    let b = newBench()
-    let path = b.dir / TsmGenerationAttr
-    writeFile(path, "not-a-number\n")
-    let e = refuses(proc () = discard readGeneration(path, "<gate>"))
-    check e.kind == tseGenerationNotANumber
-    check "not-a-number" in e.msg
-    # And a counter that IS a number reads, including with the newline
-    # the kernel writes.
-    writeFile(path, "17\n")
-    check readGeneration(path, "<gate>") == 17'u64
+    driveACounterThatIsNotANumberIsRefused()
 
   test "an attribute that cannot be written is refused":
-    let b = newBench()
-    let readOnly = b.dir / "read-only"
-    createDir(readOnly)
-    setFilePermissions(readOnly, {fpUserRead, fpUserExec})
-    let e = refuses(proc () =
-      writeAttribute(readOnly / TsmInblobAttr, boundBytes, "inblob",
-                     "<gate>"))
-    check e.kind == tseAttributeUnwritable
-    setFilePermissions(readOnly, {fpUserRead, fpUserWrite, fpUserExec})
+    driveAnAttributeThatCannotBeWrittenIsRefused()
 
   test "the bytes offered to an attribute reach it whole":
     let b = newBench()
     writeAttribute(b.dir / TsmInblobAttr, boundBytes, "inblob", "<gate>")
     check readFile(b.dir / TsmInblobAttr) == boundBytes
+
+proc driveAskingForADocumentOnSuchAMachineRefusesByNamingIt() =
+  ## The body of test
+  ##   "asking for a document on such a machine refuses by naming it"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let b = newBench()
+  let absent = b.dir / "no-such-surface"
+  check not dirExists(absent)
+  let e = refuses(proc () =
+    discard readTsmReport(newConfigfsTsmSource(root = absent), boundBytes))
+  check e.kind == tseSurfaceAbsent
+  check absent in e.msg
+
+proc driveAnEntryThatCannotBeMadeIsRefusedAndTheRootIsNamed() =
+  ## The body of test
+  ##   "an entry that cannot be made is refused, and the root is named"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The surface EXISTS and is not writable — the shape a machine is in
+  # when the guest lacks permission on the entry directory.
+  let b = newBench()
+  let root = b.dir / "surface"
+  createDir(root)
+  setFilePermissions(root, {fpUserRead, fpUserExec})
+  let e = refuses(proc () =
+    discard readTsmReport(newConfigfsTsmSource(root = root), boundBytes))
+  check e.kind == tseEntryNotCreated
+  check root in e.msg
+  setFilePermissions(root, {fpUserRead, fpUserWrite, fpUserExec})
 
 suite "the live surface, whichever kind of machine this is":
 
@@ -471,13 +634,7 @@ suite "the live surface, whichever kind of machine this is":
     check "no " & absent in p.detail
 
   test "asking for a document on such a machine refuses by naming it":
-    let b = newBench()
-    let absent = b.dir / "no-such-surface"
-    check not dirExists(absent)
-    let e = refuses(proc () =
-      discard readTsmReport(newConfigfsTsmSource(root = absent), boundBytes))
-    check e.kind == tseSurfaceAbsent
-    check absent in e.msg
+    driveAskingForADocumentOnSuchAMachineRefusesByNamingIt()
 
   test "and the default root is still the one an operator would look at":
     # What the parameterisation above must not cost: the default has to
@@ -512,17 +669,7 @@ suite "the live surface, whichever kind of machine this is":
         "trust")
 
   test "an entry that cannot be made is refused, and the root is named":
-    # The surface EXISTS and is not writable — the shape a machine is in
-    # when the guest lacks permission on the entry directory.
-    let b = newBench()
-    let root = b.dir / "surface"
-    createDir(root)
-    setFilePermissions(root, {fpUserRead, fpUserExec})
-    let e = refuses(proc () =
-      discard readTsmReport(newConfigfsTsmSource(root = root), boundBytes))
-    check e.kind == tseEntryNotCreated
-    check root in e.msg
-    setFilePermissions(root, {fpUserRead, fpUserWrite, fpUserExec})
+    driveAnEntryThatCannotBeMadeIsRefusedAndTheRootIsNamed()
 
   test "a probe on a surface that DOES exist reports ready":
     # The other side of the probe, so it is not a procedure that always
@@ -534,9 +681,65 @@ suite "the live surface, whichever kind of machine this is":
     check p.ready
     check root in p.detail
 
+# Every case above that drives an input to a refusal. Both census cases
+# drive all of them themselves: the suite runner executes each case in its
+# own process (`--run suite::test`), so `reached` holds only what ran in
+# THIS process, and a census that read what earlier cases left behind
+# would measure the execution mode rather than the transport.
+const RefusalDrivers: seq[(string, proc () {.nimcall.})] = @[
+  ("an entry that already carried writes is refused",
+    driveAnEntryThatAlreadyCarriedWritesIsRefused),
+  ("a writer that landed between this process's writes is refused",
+    driveAWriterThatLandedBetweenThisProcessSWritesIsRefused),
+  ("an entry rewritten between the write and the read is refused",
+    driveAnEntryRewrittenBetweenTheWriteAndTheReadIsRefused),
+  ("the three rules are ordered by when the event happened",
+    driveTheThreeRulesAreOrderedByWhenTheEventHappened),
+  ("a counter that moved by exactly the writes performed passes",
+    driveACounterThatMovedByExactlyTheWritesPerformedPasses),
+  ("a provider whose name merely starts the same is refused",
+    driveAProviderWhoseNameMerelyStartsTheSameIsRefused),
+  ("an empty provider is refused",
+    driveAnEmptyProviderIsRefused),
+  ("a source built without a label is refused",
+    driveASourceBuiltWithoutALabelIsRefused),
+  ("a source that cannot say whether it is ready is refused",
+    driveASourceThatCannotSayWhetherItIsReadyIsRefused),
+  ("a source that implements no transport is refused",
+    driveASourceThatImplementsNoTransportIsRefused),
+  ("bytes of the wrong width never reach a source",
+    driveBytesOfTheWrongWidthNeverReachASource),
+  ("an empty document is refused",
+    driveAnEmptyDocumentIsRefused),
+  ("a document larger than any envelope will carry is refused",
+    driveADocumentLargerThanAnyEnvelopeWillCarryIsRefused),
+  ("the counter is checked on EVERY source, not only the live one",
+    driveTheCounterIsCheckedOnEVERYSourceNotOnlyTheLiveOne),
+  ("a capture with no document on disk is refused",
+    driveACaptureWithNoDocumentOnDiskIsRefused),
+  ("an attribute that cannot be opened is refused",
+    driveAnAttributeThatCannotBeOpenedIsRefused),
+  ("an attribute that keeps producing bytes is cut off",
+    driveAnAttributeThatKeepsProducingBytesIsCutOff),
+  ("a counter that is not a number is refused",
+    driveACounterThatIsNotANumberIsRefused),
+  ("an attribute that cannot be written is refused",
+    driveAnAttributeThatCannotBeWrittenIsRefused),
+  ("asking for a document on such a machine refuses by naming it",
+    driveAskingForADocumentOnSuchAMachineRefusesByNamingIt),
+  ("an entry that cannot be made is refused, and the root is named",
+    driveAnEntryThatCannotBeMadeIsRefusedAndTheRootIsNamed)]
+
+proc driveEveryRefusal() =
+  reached = {}
+  for (name, drive) in RefusalDrivers:
+    checkpoint("driving " & name)
+    drive()
+
 suite "the census":
 
   test "every rule is either reached here or named as needing hardware":
+    driveEveryRefusal()
     # A partition, not a subtraction. A rule in neither set is a rule
     # nobody gave an input; a rule in both is a rule the live-only list
     # is lying about. Either is red.
@@ -555,6 +758,10 @@ suite "the census":
     check LiveOnly.len == 1
 
   test "the one rule with no input here, and why no device supplies one":
+    # Over the same inputs the census drives, so "not reached" is a
+    # measurement in this process rather than an empty set.
+    driveEveryRefusal()
+    check cardOf(reached) == 17
     # Named in a case rather than left to a census line, because
     # "cannot be tested" is a claim and a claim needs a sentence. The
     # claim is narrower than it looks: a short write is not beyond a

@@ -394,6 +394,50 @@ template refusesWith(where: string; want: CborErrorKind; body: untyped) =
       checkpoint(where & ": nothing was refused")
     check raised
 
+proc driveCborAppendixFEveryItemIsRefusedForItsOwnReason() =
+  ## The body of test
+  ##   "t_cbor_appendix_f_every_item_is_refused_for_its_own_reason"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var checkedItems = 0
+  for g in Corpus:
+    let want = expectedKind(g.label)
+    for it in g.items:
+      refusesWith(g.label & " / " & hexOf(it), want):
+        discard decodeItem(it)
+      inc checkedItems
+  check checkedItems == 94
+
+proc driveCborAppendixFTheSmallViewIsFailClosedToo() =
+  ## The body of test
+  ##   "t_cbor_appendix_f_the_small_view_is_fail_closed_too"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # `decode` projects onto the small `DynamicValue` view that
+  # `repro_profile_intent` reads. It must not have its own, weaker
+  # answer to "is this well-formed": every one of the 94 has to be
+  # refused there as well, with the SAME kind, because the parse is
+  # the reader's and the projection happens after it.
+  var refused = 0
+  for g in Corpus:
+    let want = expectedKind(g.label)
+    for it in g.items:
+      refusesWith("view " & hexOf(it), want):
+        discard decode(it)
+      inc refused
+  check refused == 94
+  # The projection has refusals of its own, for the WELL-FORMED items
+  # the smaller type cannot hold. They must refuse rather than
+  # approximate: a view that turned an integer key into its decimal
+  # spelling, or `undefined` into null, would be answering a question
+  # it was not asked.
+  refusesWith("an integer map key in the small view", cekBadDiagnostic):
+    discard decode([0xa1'u8, 0x00, 0x00])
+  refusesWith("undefined in the small view", cekBadDiagnostic):
+    discard decode([0xf7'u8])
+  check decodeItem([0xa1'u8, 0x00, 0x00]).entries.len == 1
+  check decodeItem([0xf7'u8]).simple == 23'u8
+
 suite "cbor rfc 8949 appendix f corpus":
 
   test "t_cbor_appendix_f_corpus_is_intact":
@@ -442,40 +486,10 @@ suite "cbor rfc 8949 appendix f corpus":
     check subkinds == 5
 
   test "t_cbor_appendix_f_every_item_is_refused_for_its_own_reason":
-    var checkedItems = 0
-    for g in Corpus:
-      let want = expectedKind(g.label)
-      for it in g.items:
-        refusesWith(g.label & " / " & hexOf(it), want):
-          discard decodeItem(it)
-        inc checkedItems
-    check checkedItems == 94
+    driveCborAppendixFEveryItemIsRefusedForItsOwnReason()
 
   test "t_cbor_appendix_f_the_small_view_is_fail_closed_too":
-    # `decode` projects onto the small `DynamicValue` view that
-    # `repro_profile_intent` reads. It must not have its own, weaker
-    # answer to "is this well-formed": every one of the 94 has to be
-    # refused there as well, with the SAME kind, because the parse is
-    # the reader's and the projection happens after it.
-    var refused = 0
-    for g in Corpus:
-      let want = expectedKind(g.label)
-      for it in g.items:
-        refusesWith("view " & hexOf(it), want):
-          discard decode(it)
-        inc refused
-    check refused == 94
-    # The projection has refusals of its own, for the WELL-FORMED items
-    # the smaller type cannot hold. They must refuse rather than
-    # approximate: a view that turned an integer key into its decimal
-    # spelling, or `undefined` into null, would be answering a question
-    # it was not asked.
-    refusesWith("an integer map key in the small view", cekBadDiagnostic):
-      discard decode([0xa1'u8, 0x00, 0x00])
-    refusesWith("undefined in the small view", cekBadDiagnostic):
-      discard decode([0xf7'u8])
-    check decodeItem([0xa1'u8, 0x00, 0x00]).entries.len == 1
-    check decodeItem([0xf7'u8]).simple == 23'u8
+    driveCborAppendixFTheSmallViewIsFailClosedToo()
 
   test "t_cbor_refusal_messages_are_distinguishable":
     # The property a caller matching on a fragment of one refusal
@@ -498,307 +512,401 @@ suite "cbor rfc 8949 appendix f corpus":
     for k in CborErrorKind:
       check CborErrorMessage[k].len > 0
 
+proc driveCborDuplicateMapKeyIsRefused() =
+  ## The body of test
+  ##   "t_cbor_duplicate_map_key_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # RFC 8949 §5.6: a map with a repeated key is well-formed and is not
+  # VALID. The input is constructed here; the RFC publishes no example.
+  refusesWith("duplicate key 1", cekDuplicateMapKey):
+    discard decodeItem([0xa2'u8, 0x01, 0x01, 0x01, 0x02])
+  # The same map with distinct keys is accepted, so the rule is not
+  # refusing every two-entry map.
+  let ok = decodeItem([0xa2'u8, 0x01, 0x01, 0x02, 0x02])
+  check ok.kind == ckMap
+  check ok.entries.len == 2
+  # Duplicate detection is on the ENCODED key, so two spellings of one
+  # key are caught: 1 as 0x01 and 1 as 0x1801 are the same key.
+  refusesWith("duplicate key, two spellings", cekDuplicateMapKey):
+    discard decodeItem([0xa2'u8, 0x01, 0x01, 0x18, 0x01, 0x02])
+  # …and it can be switched off, because RFC 8949 makes it a validity
+  # rule rather than a well-formedness one.
+  var lenient = DefaultCborOptions
+  lenient.rejectDuplicateKeys = false
+  let dup = decodeItem([0xa2'u8, 0x01, 0x01, 0x01, 0x02], lenient)
+  check dup.entries.len == 2
+
+proc driveCborDeterministicRulesAreRefusedSeparately() =
+  ## The body of test
+  ##   "t_cbor_deterministic_rules_are_refused_separately"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The three RFC 8949 §4.2.1 requirements, each with its own input
+  # and its own refusal. A single "not deterministic" answer would let
+  # any one of the three rules be deleted without a case going red.
+  refusesWith("non-preferred head", cekNonPreferredHead):
+    discard decodeItem([0x18'u8, 0x17], DeterministicCborOptions)
+  refusesWith("indefinite array", cekIndefiniteNotDeterministic):
+    discard decodeItem([0x9f'u8, 0xff], DeterministicCborOptions)
+  refusesWith("1.5 as a double", cekNonPreferredFloat):
+    discard decodeItem(
+      [0xfb'u8, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0], DeterministicCborOptions)
+  # RFC 8949 Section 4.2.1's own second float example, which narrows
+  # to binary32 but not to binary16 — a different arm of the same rule
+  # than 1.5, and the only input that reaches it.
+  let wideFloat = encodeItem(cFloat(1000000.5, cfwDouble))
+  check wideFloat.len == 9
+  refusesWith("1000000.5 as a double", cekNonPreferredFloat):
+    discard decodeItem(wideFloat, DeterministicCborOptions)
+  check hexOf(encodeDeterministic(cFloat(1000000.5, cfwDouble))) ==
+    "fa49742408"
+  refusesWith("keys out of order", cekMapKeysOutOfOrder):
+    # {2: 0, 1: 0} — well-formed, valid, and not in bytewise order.
+    discard decodeItem([0xa2'u8, 0x02, 0x00, 0x01, 0x00],
+                       DeterministicCborOptions)
+  # Each of those four inputs is accepted under the default options,
+  # so none of the four cases above is being satisfied by the input
+  # being malformed in some other way.
+  check decodeItem([0x18'u8, 0x17]).arg == 23'u64
+  check decodeItem([0x9f'u8, 0xff]).elems.len == 0
+  check decodeItem([0xfb'u8, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0]).value == 1.5
+  check decodeItem([0xa2'u8, 0x02, 0x00, 0x01, 0x00]).entries.len == 2
+  # …and the deterministic spelling of each is accepted under
+  # `DeterministicCborOptions`, so the rules are not simply refusing
+  # their whole category.
+  check decodeItem([0x17'u8], DeterministicCborOptions).arg == 23'u64
+  check decodeItem([0x80'u8], DeterministicCborOptions).elems.len == 0
+  check decodeItem([0xf9'u8, 0x3e, 0x00],
+                   DeterministicCborOptions).value == 1.5
+  check decodeItem([0xa2'u8, 0x01, 0x00, 0x02, 0x00],
+                   DeterministicCborOptions).entries.len == 2
+
+proc driveCborTruncationInsideAContainer() =
+  ## The body of test
+  ##   "t_cbor_truncation_inside_a_container"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Every container example in Appendix F.1 runs out of bytes at its
+  # FIRST element, which one rule answers. These run out later, after
+  # a nested item has consumed the bytes the container's own bound
+  # accounted for — a different rule, and one no published item
+  # reaches.
+  refusesWith("array whose second element is missing", cekTruncatedItem):
+    discard decodeItem([0x82'u8, 0x81, 0x00])
+  refusesWith("indefinite map key with no value", cekTruncatedItem):
+    discard decodeItem([0xbf'u8, 0x00])
+  # Each is one byte short of well-formed, so the refusal is about the
+  # missing byte rather than about the shape.
+  check decodeItem([0x82'u8, 0x81, 0x00, 0x00]).elems.len == 2
+  check decodeItem([0xbf'u8, 0x00, 0x00, 0xff]).entries.len == 1
+
+proc driveCborTrailingDataIsRefused() =
+  ## The body of test
+  ##   "t_cbor_trailing_data_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Appendix F's error kind 1, "too much data", which F.1 publishes no
+  # examples of because it tells a test suite to build them: "examples
+  # for well-formedness error kind 1 (too much data) can easily be
+  # formed by adding data to a well-formed encoded CBOR data item."
+  # `t_cbor_rfc8949_vectors` does that for all 81 published items;
+  # here it is one case, so this gate's own vocabulary is complete.
+  refusesWith("a byte after a complete item", cekTrailingData):
+    discard decodeItem([0x00'u8, 0x00])
+  check decodeItem([0x00'u8]).arg == 0'u64
+
+proc driveCborEncoderAndBignumRefusals() =
+  ## The body of test
+  ##   "t_cbor_encoder_and_bignum_refusals"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The refusal sites that live in the ENCODER and in the bignum
+  # conversions. Not one of them can be reached by decoding bytes, so
+  # without this case they are rules no input in this suite reaches —
+  # which is the same as not having them.
+  refusesWith("encoding a nil item", cekBadDiagnostic):
+    discard encodeItem(nil)
+  refusesWith("1.1 claimed as binary16", cekNonPreferredFloat):
+    discard encodeItem(cFloat(1.1, cfwHalf))
+  refusesWith("1.1 claimed as binary32", cekNonPreferredFloat):
+    discard encodeItem(cFloat(1.1, cfwSingle))
+  # …and the widths that DO hold the value are written, so the two
+  # above are the rule rather than a refusal of every narrow float.
+  check encodeItem(cFloat(1.5, cfwHalf)).len == 3
+  check encodeItem(cFloat(1.5, cfwSingle)).len == 5
+  var mismatched = cIndefBytes([@[1'u8], @[2'u8]])
+  mismatched.chunks = @[1]
+  refusesWith("chunk lengths that do not sum", cekBadIndefiniteChunk):
+    discard encodeItem(mismatched)
+  # …and the other direction, which is the one that matters: recorded
+  # chunk lengths summing to MORE than the payload holds. A check made
+  # after the payload has been copied only ever catches the case
+  # above; this input walks off the end of the payload before it could
+  # be reached, so the check has to come first.
+  var overlong = cIndefBytes([@[1'u8], @[2'u8]])
+  overlong.chunks = @[5]
+  refusesWith("chunk lengths past the end of the payload",
+              cekBadIndefiniteChunk):
+    discard encodeItem(overlong)
+  # A negative recorded chunk length is its own rule: it can make the
+  # lengths sum correctly and still index backwards.
+  var negativeChunk = cIndefBytes([@[1'u8], @[2'u8]])
+  negativeChunk.chunks = @[-1, 3]
+  refusesWith("a negative chunk length", cekBadIndefiniteChunk):
+    discard encodeItem(negativeChunk)
+  # The same item with its real boundaries is written, so none of the
+  # three above is a refusal of every indefinite string.
+  check hexOf(encodeItem(cIndefBytes([@[1'u8], @[2'u8]]))) ==
+    "5f41014102ff"
+  var deep = cUInt(0)
+  for _ in 0 ..< 400:
+    deep = cArray([deep])
+  refusesWith("encoding a 400-deep item", cekNestingTooDeep):
+    discard encodeItem(deep)
+  refusesWith("asInt64 of a text item", cekNotBignum):
+    discard asInt64(cText("1"))
+  refusesWith("an empty decimal literal", cekBadDiagnostic):
+    discard integerFromDecimal("")
+  refusesWith("a decimal literal with a letter in it", cekBadDiagnostic):
+    discard integerFromDecimal("12x")
+  refusesWith("a nine-byte magnitude as a uint64", cekNotBignum):
+    discard magnitudeToUint64([1'u8, 0, 0, 0, 0, 0, 0, 0, 0])
+  refusesWith("integerToDecimal of nil", cekNotBignum):
+    discard integerToDecimal(nil)
+  # `magnitudeMinusOne`'s zero guard is reachable only directly:
+  # `integerFromDecimal` answers "-0" with the integer zero before it
+  # could be called with an empty magnitude.
+  var emptyMagnitude: seq[byte] = @[]
+  refusesWith("magnitudeMinusOne on zero", cekBadDiagnostic):
+    discard magnitudeMinusOne(emptyMagnitude)
+  check integerToDecimal(integerFromDecimal("-0")) == "0"
+
+proc driveCborDiagnosticNotationRefusals() =
+  ## The body of test
+  ##   "t_cbor_diagnostic_notation_refusals"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Twenty-six malformed inputs, one per refusal site in the
+  # diagnostic-notation reader. They all raise the same KIND, so the
+  # thing being asserted is not the kind — it is that each input
+  # reaches a DIFFERENT site. The count below is what says so, and it
+  # is what stops one rule from answering for all twenty-six.
+  const Malformed = [
+    "/ a comment that never closes",
+    "[1",
+    "h'0",
+    "h'zz'",
+    "h'0'",
+    "\"\\u12\"",
+    "\"abc",
+    "\"abc\\",
+    "\"\\ud800\"",
+    "\"\\ud800\\u0041\"",
+    "\"\\udc00\"",
+    "\"\\q\"",
+    "(_ )",
+    "(_ 1)",
+    "(_ 'a', \"b\")",
+    "-",
+    "1e",
+    "-1(2)",
+    "99999999999999999999(1)",
+    "",
+    "(1)",
+    "<1",
+    "<< 1 >",
+    "simple(300)",
+    "-Infinit",
+    "1 2"]
+  var sites: seq[string] = @[]
+  for text in Malformed:
+    refusesWith("diagnostic notation " & text, cekBadDiagnostic):
+      discard parseDiagnostic(text)
+    if lastSite in sites:
+      checkpoint("input " & text & " reaches the same rule as an " &
+        "earlier one: " & lastSite)
+    check lastSite notin sites
+    sites.add lastSite
+  check Malformed.len == 26
+  check sites.len == 26
+  # And the reader accepts what it is supposed to: one value per shape
+  # the malformed inputs above are broken versions of.
+  check parseDiagnostic("/ c / [1]").elems.len == 1
+  check parseDiagnostic("h'00'").bytes.len == 1
+  check parseDiagnostic("\"\\u0041\"").text == "A"
+  check parseDiagnostic("\"\\ud800\\udd51\"").text.len == 4
+  check parseDiagnostic("(_ 'a', 'b')").bytes.len == 2
+  check parseDiagnostic("1e3").value == 1000.0
+  check parseDiagnostic("1(2)").tag == 1'u64
+  check parseDiagnostic("<< 1 >>").bytes == @[1'u8]
+  check parseDiagnostic("simple(255)").simple == 255'u8
+  check parseDiagnostic("-Infinity").value == -Inf
+
+proc driveCborNestingIsBounded() =
+  ## The body of test
+  ##   "t_cbor_nesting_is_bounded"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # A declared length is never the size of an allocation, and depth is
+  # never the size of the C stack. 400 nested one-element arrays is
+  # well-formed CBOR that this decoder refuses on purpose.
+  var deep: seq[byte] = @[]
+  for _ in 0 ..< 400:
+    deep.add 0x81'u8
+  deep.add 0x00'u8
+  refusesWith("400 deep", cekNestingTooDeep):
+    discard decodeItem(deep)
+  # 200 deep, which is inside the default bound, is accepted — so the
+  # bound is a bound and not a refusal of all nesting.
+  var shallow: seq[byte] = @[]
+  for _ in 0 ..< 200:
+    shallow.add 0x81'u8
+  shallow.add 0x00'u8
+  var item = decodeItem(shallow)
+  var depth = 0
+  while item.kind == ckArray:
+    item = item.elems[0]
+    inc depth
+  check depth == 200
+  check item.arg == 0'u64
+  # The bound is configurable, and raising it accepts the deep input —
+  # which is what says 400 was refused BY the bound rather than by
+  # something else the input happens to violate.
+  var deeper = DefaultCborOptions
+  deeper.maxDepth = 500
+  check decodeItem(deep, deeper).kind == ckArray
+
+proc driveCborAHugeDeclaredLengthCostsOneComparison() =
+  ## The body of test
+  ##   "t_cbor_a_huge_declared_length_costs_one_comparison"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # `5b ff ff ff ff ff ff ff ff 01 02 03` is in the published corpus
+  # above, where it is checked for its refusal kind. What is checked
+  # here is the thing that makes it interesting: the decoder must not
+  # try to allocate the 18446744073709551615 bytes the head declares.
+  # A decoder that did would not reach this line.
+  let huge = @[0x5b'u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+               0x01, 0x02, 0x03]
+  # The input really does declare more than it holds, by an amount no
+  # machine can allocate — asserted from the bytes rather than
+  # described, so the case is about the bound and not about a short
+  # string that happens to be refused.
+  var declared = 0'u64
+  for i in 1 .. 8:
+    declared = (declared shl 8) or uint64(huge[i])
+  check declared == high(uint64)
+  check declared > uint64(huge.len)
+  check huge.len == 12
+  refusesWith("2^64-1 byte string", cekTruncatedString):
+    discard decodeItem(huge)
+  # The same for a container's element count, which is bounded by a
+  # weaker but sound rule: an item needs at least one byte.
+  refusesWith("2^64-1 element array", cekTruncatedItem):
+    discard decodeItem([0x9b'u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                        0xff, 0xff])
+
+proc driveCborBignumAndDiagnosticRefusals() =
+  ## The body of test
+  ##   "t_cbor_bignum_and_diagnostic_refusals"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The two remaining kinds, so the vocabulary has no member that this
+  # gate never reaches.
+  refusesWith("decimal of a text item", cekNotBignum):
+    discard integerToDecimal(cText("12"))
+  refusesWith("tag 4 is not a bignum", cekNotBignum):
+    discard integerToDecimal(cTag(4, cBytes([1'u8])))
+  refusesWith("not diagnostic notation", cekBadDiagnostic):
+    discard parseDiagnostic("[1, 2")
+  refusesWith("a float has no small-view projection", cekBadDiagnostic):
+    discard decode([0xf9'u8, 0x3c, 0x00])
+  # …and the bignum conversions agree with RFC 8949 Appendix A's own
+  # decimal renderings, in both directions.
+  check integerToDecimal(decodeItem(
+    [0xc2'u8, 0x49, 1, 0, 0, 0, 0, 0, 0, 0, 0])) ==
+    "18446744073709551616"
+  check integerToDecimal(decodeItem(
+    [0xc3'u8, 0x49, 1, 0, 0, 0, 0, 0, 0, 0, 0])) ==
+    "-18446744073709551617"
+  check integerToDecimal(decodeItem(
+    [0x1b'u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])) ==
+    "18446744073709551615"
+  check integerToDecimal(decodeItem(
+    [0x3b'u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])) ==
+    "-18446744073709551616"
+  check hexOf(encodeItem(integerFromDecimal("18446744073709551616"))) ==
+    "c249010000000000000000"
+  check hexOf(encodeItem(integerFromDecimal("-18446744073709551617"))) ==
+    "c349010000000000000000"
+
 suite "cbor rules that appendix f does not publish examples for":
 
   test "t_cbor_duplicate_map_key_is_refused":
-    # RFC 8949 §5.6: a map with a repeated key is well-formed and is not
-    # VALID. The input is constructed here; the RFC publishes no example.
-    refusesWith("duplicate key 1", cekDuplicateMapKey):
-      discard decodeItem([0xa2'u8, 0x01, 0x01, 0x01, 0x02])
-    # The same map with distinct keys is accepted, so the rule is not
-    # refusing every two-entry map.
-    let ok = decodeItem([0xa2'u8, 0x01, 0x01, 0x02, 0x02])
-    check ok.kind == ckMap
-    check ok.entries.len == 2
-    # Duplicate detection is on the ENCODED key, so two spellings of one
-    # key are caught: 1 as 0x01 and 1 as 0x1801 are the same key.
-    refusesWith("duplicate key, two spellings", cekDuplicateMapKey):
-      discard decodeItem([0xa2'u8, 0x01, 0x01, 0x18, 0x01, 0x02])
-    # …and it can be switched off, because RFC 8949 makes it a validity
-    # rule rather than a well-formedness one.
-    var lenient = DefaultCborOptions
-    lenient.rejectDuplicateKeys = false
-    let dup = decodeItem([0xa2'u8, 0x01, 0x01, 0x01, 0x02], lenient)
-    check dup.entries.len == 2
+    driveCborDuplicateMapKeyIsRefused()
 
   test "t_cbor_deterministic_rules_are_refused_separately":
-    # The three RFC 8949 §4.2.1 requirements, each with its own input
-    # and its own refusal. A single "not deterministic" answer would let
-    # any one of the three rules be deleted without a case going red.
-    refusesWith("non-preferred head", cekNonPreferredHead):
-      discard decodeItem([0x18'u8, 0x17], DeterministicCborOptions)
-    refusesWith("indefinite array", cekIndefiniteNotDeterministic):
-      discard decodeItem([0x9f'u8, 0xff], DeterministicCborOptions)
-    refusesWith("1.5 as a double", cekNonPreferredFloat):
-      discard decodeItem(
-        [0xfb'u8, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0], DeterministicCborOptions)
-    # RFC 8949 Section 4.2.1's own second float example, which narrows
-    # to binary32 but not to binary16 — a different arm of the same rule
-    # than 1.5, and the only input that reaches it.
-    let wideFloat = encodeItem(cFloat(1000000.5, cfwDouble))
-    check wideFloat.len == 9
-    refusesWith("1000000.5 as a double", cekNonPreferredFloat):
-      discard decodeItem(wideFloat, DeterministicCborOptions)
-    check hexOf(encodeDeterministic(cFloat(1000000.5, cfwDouble))) ==
-      "fa49742408"
-    refusesWith("keys out of order", cekMapKeysOutOfOrder):
-      # {2: 0, 1: 0} — well-formed, valid, and not in bytewise order.
-      discard decodeItem([0xa2'u8, 0x02, 0x00, 0x01, 0x00],
-                         DeterministicCborOptions)
-    # Each of those four inputs is accepted under the default options,
-    # so none of the four cases above is being satisfied by the input
-    # being malformed in some other way.
-    check decodeItem([0x18'u8, 0x17]).arg == 23'u64
-    check decodeItem([0x9f'u8, 0xff]).elems.len == 0
-    check decodeItem([0xfb'u8, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0]).value == 1.5
-    check decodeItem([0xa2'u8, 0x02, 0x00, 0x01, 0x00]).entries.len == 2
-    # …and the deterministic spelling of each is accepted under
-    # `DeterministicCborOptions`, so the rules are not simply refusing
-    # their whole category.
-    check decodeItem([0x17'u8], DeterministicCborOptions).arg == 23'u64
-    check decodeItem([0x80'u8], DeterministicCborOptions).elems.len == 0
-    check decodeItem([0xf9'u8, 0x3e, 0x00],
-                     DeterministicCborOptions).value == 1.5
-    check decodeItem([0xa2'u8, 0x01, 0x00, 0x02, 0x00],
-                     DeterministicCborOptions).entries.len == 2
+    driveCborDeterministicRulesAreRefusedSeparately()
 
   test "t_cbor_truncation_inside_a_container":
-    # Every container example in Appendix F.1 runs out of bytes at its
-    # FIRST element, which one rule answers. These run out later, after
-    # a nested item has consumed the bytes the container's own bound
-    # accounted for — a different rule, and one no published item
-    # reaches.
-    refusesWith("array whose second element is missing", cekTruncatedItem):
-      discard decodeItem([0x82'u8, 0x81, 0x00])
-    refusesWith("indefinite map key with no value", cekTruncatedItem):
-      discard decodeItem([0xbf'u8, 0x00])
-    # Each is one byte short of well-formed, so the refusal is about the
-    # missing byte rather than about the shape.
-    check decodeItem([0x82'u8, 0x81, 0x00, 0x00]).elems.len == 2
-    check decodeItem([0xbf'u8, 0x00, 0x00, 0xff]).entries.len == 1
+    driveCborTruncationInsideAContainer()
 
   test "t_cbor_trailing_data_is_refused":
-    # Appendix F's error kind 1, "too much data", which F.1 publishes no
-    # examples of because it tells a test suite to build them: "examples
-    # for well-formedness error kind 1 (too much data) can easily be
-    # formed by adding data to a well-formed encoded CBOR data item."
-    # `t_cbor_rfc8949_vectors` does that for all 81 published items;
-    # here it is one case, so this gate's own vocabulary is complete.
-    refusesWith("a byte after a complete item", cekTrailingData):
-      discard decodeItem([0x00'u8, 0x00])
-    check decodeItem([0x00'u8]).arg == 0'u64
+    driveCborTrailingDataIsRefused()
 
   test "t_cbor_encoder_and_bignum_refusals":
-    # The refusal sites that live in the ENCODER and in the bignum
-    # conversions. Not one of them can be reached by decoding bytes, so
-    # without this case they are rules no input in this suite reaches —
-    # which is the same as not having them.
-    refusesWith("encoding a nil item", cekBadDiagnostic):
-      discard encodeItem(nil)
-    refusesWith("1.1 claimed as binary16", cekNonPreferredFloat):
-      discard encodeItem(cFloat(1.1, cfwHalf))
-    refusesWith("1.1 claimed as binary32", cekNonPreferredFloat):
-      discard encodeItem(cFloat(1.1, cfwSingle))
-    # …and the widths that DO hold the value are written, so the two
-    # above are the rule rather than a refusal of every narrow float.
-    check encodeItem(cFloat(1.5, cfwHalf)).len == 3
-    check encodeItem(cFloat(1.5, cfwSingle)).len == 5
-    var mismatched = cIndefBytes([@[1'u8], @[2'u8]])
-    mismatched.chunks = @[1]
-    refusesWith("chunk lengths that do not sum", cekBadIndefiniteChunk):
-      discard encodeItem(mismatched)
-    # …and the other direction, which is the one that matters: recorded
-    # chunk lengths summing to MORE than the payload holds. A check made
-    # after the payload has been copied only ever catches the case
-    # above; this input walks off the end of the payload before it could
-    # be reached, so the check has to come first.
-    var overlong = cIndefBytes([@[1'u8], @[2'u8]])
-    overlong.chunks = @[5]
-    refusesWith("chunk lengths past the end of the payload",
-                cekBadIndefiniteChunk):
-      discard encodeItem(overlong)
-    # A negative recorded chunk length is its own rule: it can make the
-    # lengths sum correctly and still index backwards.
-    var negativeChunk = cIndefBytes([@[1'u8], @[2'u8]])
-    negativeChunk.chunks = @[-1, 3]
-    refusesWith("a negative chunk length", cekBadIndefiniteChunk):
-      discard encodeItem(negativeChunk)
-    # The same item with its real boundaries is written, so none of the
-    # three above is a refusal of every indefinite string.
-    check hexOf(encodeItem(cIndefBytes([@[1'u8], @[2'u8]]))) ==
-      "5f41014102ff"
-    var deep = cUInt(0)
-    for _ in 0 ..< 400:
-      deep = cArray([deep])
-    refusesWith("encoding a 400-deep item", cekNestingTooDeep):
-      discard encodeItem(deep)
-    refusesWith("asInt64 of a text item", cekNotBignum):
-      discard asInt64(cText("1"))
-    refusesWith("an empty decimal literal", cekBadDiagnostic):
-      discard integerFromDecimal("")
-    refusesWith("a decimal literal with a letter in it", cekBadDiagnostic):
-      discard integerFromDecimal("12x")
-    refusesWith("a nine-byte magnitude as a uint64", cekNotBignum):
-      discard magnitudeToUint64([1'u8, 0, 0, 0, 0, 0, 0, 0, 0])
-    refusesWith("integerToDecimal of nil", cekNotBignum):
-      discard integerToDecimal(nil)
-    # `magnitudeMinusOne`'s zero guard is reachable only directly:
-    # `integerFromDecimal` answers "-0" with the integer zero before it
-    # could be called with an empty magnitude.
-    var emptyMagnitude: seq[byte] = @[]
-    refusesWith("magnitudeMinusOne on zero", cekBadDiagnostic):
-      discard magnitudeMinusOne(emptyMagnitude)
-    check integerToDecimal(integerFromDecimal("-0")) == "0"
+    driveCborEncoderAndBignumRefusals()
 
   test "t_cbor_diagnostic_notation_refusals":
-    # Twenty-six malformed inputs, one per refusal site in the
-    # diagnostic-notation reader. They all raise the same KIND, so the
-    # thing being asserted is not the kind — it is that each input
-    # reaches a DIFFERENT site. The count below is what says so, and it
-    # is what stops one rule from answering for all twenty-six.
-    const Malformed = [
-      "/ a comment that never closes",
-      "[1",
-      "h'0",
-      "h'zz'",
-      "h'0'",
-      "\"\\u12\"",
-      "\"abc",
-      "\"abc\\",
-      "\"\\ud800\"",
-      "\"\\ud800\\u0041\"",
-      "\"\\udc00\"",
-      "\"\\q\"",
-      "(_ )",
-      "(_ 1)",
-      "(_ 'a', \"b\")",
-      "-",
-      "1e",
-      "-1(2)",
-      "99999999999999999999(1)",
-      "",
-      "(1)",
-      "<1",
-      "<< 1 >",
-      "simple(300)",
-      "-Infinit",
-      "1 2"]
-    var sites: seq[string] = @[]
-    for text in Malformed:
-      refusesWith("diagnostic notation " & text, cekBadDiagnostic):
-        discard parseDiagnostic(text)
-      if lastSite in sites:
-        checkpoint("input " & text & " reaches the same rule as an " &
-          "earlier one: " & lastSite)
-      check lastSite notin sites
-      sites.add lastSite
-    check Malformed.len == 26
-    check sites.len == 26
-    # And the reader accepts what it is supposed to: one value per shape
-    # the malformed inputs above are broken versions of.
-    check parseDiagnostic("/ c / [1]").elems.len == 1
-    check parseDiagnostic("h'00'").bytes.len == 1
-    check parseDiagnostic("\"\\u0041\"").text == "A"
-    check parseDiagnostic("\"\\ud800\\udd51\"").text.len == 4
-    check parseDiagnostic("(_ 'a', 'b')").bytes.len == 2
-    check parseDiagnostic("1e3").value == 1000.0
-    check parseDiagnostic("1(2)").tag == 1'u64
-    check parseDiagnostic("<< 1 >>").bytes == @[1'u8]
-    check parseDiagnostic("simple(255)").simple == 255'u8
-    check parseDiagnostic("-Infinity").value == -Inf
+    driveCborDiagnosticNotationRefusals()
 
   test "t_cbor_nesting_is_bounded":
-    # A declared length is never the size of an allocation, and depth is
-    # never the size of the C stack. 400 nested one-element arrays is
-    # well-formed CBOR that this decoder refuses on purpose.
-    var deep: seq[byte] = @[]
-    for _ in 0 ..< 400:
-      deep.add 0x81'u8
-    deep.add 0x00'u8
-    refusesWith("400 deep", cekNestingTooDeep):
-      discard decodeItem(deep)
-    # 200 deep, which is inside the default bound, is accepted — so the
-    # bound is a bound and not a refusal of all nesting.
-    var shallow: seq[byte] = @[]
-    for _ in 0 ..< 200:
-      shallow.add 0x81'u8
-    shallow.add 0x00'u8
-    var item = decodeItem(shallow)
-    var depth = 0
-    while item.kind == ckArray:
-      item = item.elems[0]
-      inc depth
-    check depth == 200
-    check item.arg == 0'u64
-    # The bound is configurable, and raising it accepts the deep input —
-    # which is what says 400 was refused BY the bound rather than by
-    # something else the input happens to violate.
-    var deeper = DefaultCborOptions
-    deeper.maxDepth = 500
-    check decodeItem(deep, deeper).kind == ckArray
+    driveCborNestingIsBounded()
 
   test "t_cbor_a_huge_declared_length_costs_one_comparison":
-    # `5b ff ff ff ff ff ff ff ff 01 02 03` is in the published corpus
-    # above, where it is checked for its refusal kind. What is checked
-    # here is the thing that makes it interesting: the decoder must not
-    # try to allocate the 18446744073709551615 bytes the head declares.
-    # A decoder that did would not reach this line.
-    let huge = @[0x5b'u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                 0x01, 0x02, 0x03]
-    # The input really does declare more than it holds, by an amount no
-    # machine can allocate — asserted from the bytes rather than
-    # described, so the case is about the bound and not about a short
-    # string that happens to be refused.
-    var declared = 0'u64
-    for i in 1 .. 8:
-      declared = (declared shl 8) or uint64(huge[i])
-    check declared == high(uint64)
-    check declared > uint64(huge.len)
-    check huge.len == 12
-    refusesWith("2^64-1 byte string", cekTruncatedString):
-      discard decodeItem(huge)
-    # The same for a container's element count, which is bounded by a
-    # weaker but sound rule: an item needs at least one byte.
-    refusesWith("2^64-1 element array", cekTruncatedItem):
-      discard decodeItem([0x9b'u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                          0xff, 0xff])
+    driveCborAHugeDeclaredLengthCostsOneComparison()
 
   test "t_cbor_bignum_and_diagnostic_refusals":
-    # The two remaining kinds, so the vocabulary has no member that this
-    # gate never reaches.
-    refusesWith("decimal of a text item", cekNotBignum):
-      discard integerToDecimal(cText("12"))
-    refusesWith("tag 4 is not a bignum", cekNotBignum):
-      discard integerToDecimal(cTag(4, cBytes([1'u8])))
-    refusesWith("not diagnostic notation", cekBadDiagnostic):
-      discard parseDiagnostic("[1, 2")
-    refusesWith("a float has no small-view projection", cekBadDiagnostic):
-      discard decode([0xf9'u8, 0x3c, 0x00])
-    # …and the bignum conversions agree with RFC 8949 Appendix A's own
-    # decimal renderings, in both directions.
-    check integerToDecimal(decodeItem(
-      [0xc2'u8, 0x49, 1, 0, 0, 0, 0, 0, 0, 0, 0])) ==
-      "18446744073709551616"
-    check integerToDecimal(decodeItem(
-      [0xc3'u8, 0x49, 1, 0, 0, 0, 0, 0, 0, 0, 0])) ==
-      "-18446744073709551617"
-    check integerToDecimal(decodeItem(
-      [0x1b'u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])) ==
-      "18446744073709551615"
-    check integerToDecimal(decodeItem(
-      [0x3b'u8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])) ==
-      "-18446744073709551616"
-    check hexOf(encodeItem(integerFromDecimal("18446744073709551616"))) ==
-      "c249010000000000000000"
-    check hexOf(encodeItem(integerFromDecimal("-18446744073709551617"))) ==
-      "c349010000000000000000"
+    driveCborBignumAndDiagnosticRefusals()
+
+# Every case above that raises a refusal. The coverage case drives all of
+# them itself: the suite runner executes each case in its own process
+# (`--run suite::test`), so `reachedKinds` holds only what ran in THIS
+# process, and a coverage case that read what earlier cases left behind
+# would measure the execution mode rather than the decoder.
+const RefusalDrivers: seq[(string, proc () {.nimcall.})] = @[
+  ("t_cbor_appendix_f_every_item_is_refused_for_its_own_reason",
+    driveCborAppendixFEveryItemIsRefusedForItsOwnReason),
+  ("t_cbor_appendix_f_the_small_view_is_fail_closed_too",
+    driveCborAppendixFTheSmallViewIsFailClosedToo),
+  ("t_cbor_duplicate_map_key_is_refused", driveCborDuplicateMapKeyIsRefused),
+  ("t_cbor_deterministic_rules_are_refused_separately",
+    driveCborDeterministicRulesAreRefusedSeparately),
+  ("t_cbor_truncation_inside_a_container",
+    driveCborTruncationInsideAContainer),
+  ("t_cbor_trailing_data_is_refused", driveCborTrailingDataIsRefused),
+  ("t_cbor_encoder_and_bignum_refusals", driveCborEncoderAndBignumRefusals),
+  ("t_cbor_diagnostic_notation_refusals",
+    driveCborDiagnosticNotationRefusals),
+  ("t_cbor_nesting_is_bounded", driveCborNestingIsBounded),
+  ("t_cbor_a_huge_declared_length_costs_one_comparison",
+    driveCborAHugeDeclaredLengthCostsOneComparison),
+  ("t_cbor_bignum_and_diagnostic_refusals",
+    driveCborBignumAndDiagnosticRefusals)]
 
 suite "cbor refusal coverage":
 
   test "t_cbor_every_refusal_kind_is_reached":
     # The reached-refusal ratio, measured rather than argued. Every kind
-    # in the vocabulary must have been raised by a case above; a rule
-    # that no input can reach is a rule the program does not have.
+    # in the vocabulary must be raised by an input one of the cases above
+    # runs; a rule that no input can reach is a rule the program does not
+    # have. The inputs are driven HERE, from an empty set, so the verdict
+    # is the same whether this case runs alone or after the others.
+    reachedKinds = {}
+    for (name, drive) in RefusalDrivers:
+      checkpoint("driving " & name)
+      drive()
     var unreached: seq[string] = @[]
     var count = 0
     for k in CborErrorKind:
