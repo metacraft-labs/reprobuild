@@ -790,6 +790,18 @@ type
       ## field, and ``t_da1i_evidence_scope`` pins that they do not.
     dryRun*: bool
     progressCallback*: BuildProgressCallback
+    fastNoopReportsProgress*: bool
+      ## Keep the whole-graph no-op fast path available while a
+      ## ``progressCallback`` is installed, and report each reused action to
+      ## the callback as completed when that path answers.
+      ##
+      ## Without it an installed callback disables the fast path outright,
+      ## which is right for ``repro build``'s renderers but was wrong for the
+      ## dev-env activation: it renders progress so a COLD activation is not
+      ## a silent hang (Interactive-UX-And-Progress.md Principle 1), and that
+      ## same callback pushed every WARM activation off the artifact-lookup +
+      ## invalidation-check fast path the no-op benchmark gates
+      ## (Reprobuild-Dev-Environments.milestones.org, performance gates).
     cancelCallback*: BuildCancelCallback
     statsEnabled*: bool
     suppressTrace*: bool
@@ -13776,7 +13788,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       return none(BuildRunResult)
     if not config.rebuildMissingOutputsOnCacheHit:
       return none(BuildRunResult)
-    if config.progressCallback != nil:
+    if config.progressCallback != nil and not config.fastNoopReportsProgress:
       return none(BuildRunResult)
     # A forced rebuild is a request to re-execute, and `config.forceRebuild`
     # is read in exactly one place: the scheduler's per-action cache
@@ -13940,6 +13952,32 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   finishStat("repro fast noop scan", fastNoopStart)
   if fastNoop.isSome:
     runResult = fastNoop.get()
+    if config.progressCallback != nil:
+      # Only reachable with `fastNoopReportsProgress`. Every action settled
+      # at once, as a reuse, so the renderer ends on the same totals the
+      # scheduler would have reported for this graph.
+      let total = buildGraph.actions.len
+      for i, action in buildGraph.actions:
+        let item = runResult.results[i]
+        var command = ""
+        for arg in action.argv:
+          if command.len > 0:
+            command.add(" ")
+          command.add(quoteShell(arg))
+        if command.len == 0:
+          command = $action.kind & " " & action.id
+        config.progressCallback(BuildProgressEvent(
+          kind: bpkActionCompleted,
+          actionId: item.id,
+          command: command,
+          status: item.status,
+          cacheDecision: item.cacheDecision,
+          launched: false,
+          total: total,
+          completed: i + 1,
+          checked: total,
+          settled: i + 1,
+          executionPlanKnown: true))
     finishStat("repro scheduler total", totalStart)
     finishChildCpuStat()
     runResult.stats = stats
