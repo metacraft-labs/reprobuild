@@ -5401,6 +5401,17 @@ test "incomplete name" and:
         cache_path = REPO_ROOT / scratch_cache
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         self.addCleanup(cache_path.unlink, missing_ok=True)
+        # Only the disk cache is under test here, so the runner's published
+        # catalog must not be in play. `scripts/run_tests.sh` exports
+        # RUN_CATALOG_ENV before it runs this module, and `catalog_index`
+        # merges that catalog's `ok` entries OVER the disk cache. Inherited,
+        # it answers every call below with `ok` whatever the cache or the
+        # probe says: the two re-probe assertions pass without a probe, and
+        # the write-side one fails because the mocked probe is never reached.
+        run_catalog_env = mock.patch.dict(os.environ)
+        run_catalog_env.start()
+        self.addCleanup(run_catalog_env.stop)
+        os.environ.pop(inventory.RUN_CATALOG_ENV, None)
 
         key = inventory.binary_cache_key(REPO_ROOT / binary)
         self.assertIsNotNone(key)
