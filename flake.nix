@@ -1666,6 +1666,12 @@
               pkgs.sqlite
               pkgs.xxHash
               pkgs.zip
+              # The read side of `zip`. Tool provisioning extracts `.zip` and
+              # `.conda` archives with `unzip` on POSIX (`resolveZipExtractor`),
+              # and the tests that WRITE such an archive with `zip` above then
+              # need it to read it back; with only the writer present they fail
+              # with "no zip extractor available" instead of skipping.
+              pkgs.unzip
               pkgs.zlib
               pkgs.nixfmt-rfc-style
               pkgs.repomix
