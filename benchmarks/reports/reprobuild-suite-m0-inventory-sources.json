@@ -24826,7 +24826,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_cloud_adapter_launches_nothing_in_ci.nim",
       "sourceSuiteCount": 7,
-      "staticCaseCount": 17,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -27718,8 +27718,8 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_leaked_instance_is_reaped.nim",
-      "sourceSuiteCount": 14,
-      "staticCaseCount": 40,
+      "sourceSuiteCount": 19,
+      "staticCaseCount": 53,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32287,8 +32287,8 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_teardown_runs_on_failure_path.nim",
-      "sourceSuiteCount": 5,
-      "staticCaseCount": 11,
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
