@@ -2448,6 +2448,14 @@ package reprobuild:
       # dry runs 36070347140 and 36080613401). Scoped to this edge's env, the
       # same way the i686 edges below carry their compiler's bin dir; the
       # fallback is where Xcode's Command Line Tools install it.
+      #
+      # Deliberately the ambient lookup, spelled as such: `lipo` belongs to
+      # the host's Xcode Command Line Tools, so there is nothing for this
+      # repository to provision or pin, and what the probe contributes is one
+      # entry on a PATH that already has a hard-coded fallback. Spelling it
+      # `uncontrolledFindExe` is what keeps that visible to a reader and to
+      # the ambient-execution ratchet, instead of adding this file to the
+      # ratchet's baseline and relaxing it for everything else in here.
       let macosLipo = uncontrolledFindExe("lipo")
       let macosShimEnv = @[("PATH",
         (if macosLipo.len > 0: macosLipo.parentDir else: "/usr/bin") &
