@@ -66,6 +66,7 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       version: ${{ steps.plan.outputs.version }}
       expected-assets: ${{ steps.plan.outputs.expected-assets }}
+      packages: ${{ steps.plan.outputs.packages }}
     steps:
       - uses: actions/checkout@v4
 
@@ -115,18 +116,34 @@ jobs:
             const assets = platforms.map(p =>
               `reprobuild-${version}-${p.platform}-${p.arch}.${p['archive_ext']}`);
 
+            // Native packages are built in the publish job from one of the
+            // archives above, and are then ordinary members of the asset set.
+            const archiveOf = Object.fromEntries(platforms.map(p =>
+              [`${p.platform}-${p.arch}`, `reprobuild-${version}-${p.platform}-${p.arch}.${p['archive_ext']}`]));
+            const packages = (spec.packages || []).map(p => {
+              if (!archiveOf[p.from]) {
+                throw new Error(`package ${p.asset} is built from '${p.from}', which is not a platform in this release`);
+              }
+              return { ecosystem: p.ecosystem, archive: archiveOf[p.from],
+                       asset: p.asset.replaceAll('{version}', version) };
+            });
+            assets.push(...packages.map(p => p.asset));
+
             const dupes = assets.filter((a, i) => assets.indexOf(a) !== i);
             if (dupes.length) {
               core.setFailed(`.github/release-platforms.json yields duplicate asset names: ${[...new Set(dupes)].join(', ')}`);
               return;
             }
 
-            core.info(`release ${version} will consist of exactly ${assets.length} archives:`);
+            core.info(`release ${version} will consist of exactly ${assets.length} assets:`);
             for (const a of assets) core.info(`  - ${a}`);
 
             core.setOutput('matrix', JSON.stringify(platforms));
             core.setOutput('version', version);
             core.setOutput('expected-assets', assets.join('\n'));
+            // One `ecosystem archive asset` line per package: the publish job
+            // reads it with `read`, so it needs no JSON tool on the runner.
+            core.setOutput('packages', packages.map(p => `${p.ecosystem} ${p.archive} ${p.asset}`).join('\n'));
 
   build-release:
     name: ${{ matrix.os-name }} (${{ matrix.arch }}) Release Build
@@ -683,6 +700,37 @@ jobs:
           path: staging
           merge-multiple: true
 
+      # Native packages (.deb, .rpm) are carriers for the same bytes as the
+      # Linux archive, so they are built here from the archive the build leg
+      # produced, after its digest is re-checked, rather than in a build leg.
+      # Each gets a `.sha256` like the archives, so the assertion below, the
+      # SHA256SUMS manifest, signing and the draft verification all treat them
+      # as ordinary members of the release. .github/release-platforms.json's
+      # `packages` list is what declares them.
+      - name: Build native packages from the release archives
+        shell: bash
+        env:
+          PACKAGES: ${{ needs.plan.outputs.packages }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          out="$(mktemp -d)"
+          while read -r ecosystem archive asset; do
+            [ -n "${ecosystem}" ] || continue
+            (cd staging && sha256sum -c "${archive}.sha256")
+            platform_arch="${archive#"reprobuild-${VERSION}-"}"; platform_arch="${platform_arch%%.*}"
+            nix shell nixpkgs#dpkg nixpkgs#rpm -c sh scripts/release/repro-build-packages.sh \
+              --version "${VERSION}" --tarball "staging/${archive}" --out "${out}" \
+              --ecosystem "${ecosystem}" \
+              --platform "${platform_arch%-*}" --asset-arch "${platform_arch##*-}" < /dev/null
+            [ -f "${out}/${asset}" ] || {
+              echo "::error::repro-build-packages produced $(ls "${out}" | tr '\n' ' ')but not ${asset} as .github/release-platforms.json declares"
+              exit 1
+            }
+            mv "${out}/${asset}" staging/
+            (cd staging && sha256sum "${asset}" > "${asset}.sha256" && cat "${asset}.sha256")
+          done <<< "${PACKAGES}"
+
       # Belt-and-braces over the job gate: a green leg whose upload silently
       # produced nothing would otherwise still yield a short release. This
       # compares what actually landed against `plan`'s derived list, in BOTH
@@ -1008,209 +1056,40 @@ jobs:
             });
             core.info(`Published ${tag} with all ${expected.size} assets.`);
 
-      # ── M3: generate and upload the native repository metadata ─────────────
+      # ── Add the packages to the organisation's repositories ────────────────
       #
-      # This runs AFTER the release is published, on purpose. The repository
-      # metadata points at artifacts by URL; publishing an index that
-      # references assets nobody can fetch yet would make `apt update`
-      # succeed and `apt install` fail, which is the worse of the two
-      # orderings. A repository a few seconds behind a release is fine; one
-      # that is ahead of it is broken.
+      # Runs AFTER the release is public, on purpose: the publisher downloads
+      # the .deb and .rpm from this Release and verifies them against its
+      # SHA256SUMS, so they must be fetchable first. An index that is a few
+      # minutes behind a release is fine; one that names files nobody can
+      # fetch yet is broken.
       #
-      # The upload destination is a VARIABLE -- `--target` -- and that is
-      # what lets this step exist while the hosting does not. Generating
-      # signed metadata is entirely local and is covered by the M3 gate arms
-      # against a local HTTP server; pushing it to R2 needs credentials and a
-      # bucket that live outside this repository, and reprobuild.com's DNS
-      # delegation was still in flight when this was written. The same code
-      # path serves both and the only difference is the scheme in --target.
-      #
-      # It SKIPS rather than fails when either half of what it needs is
-      # absent, and says which half:
-      #
-      #   * no release signing key -> there is nothing to sign the indices
-      #     with, and an unsigned repository is worse than no repository:
-      #     apt/dnf/pacman either refuse it, or -- if a user turned the check
-      #     off to get past that -- accept anything. Skipping keeps the
-      #     "never publish something that only LOOKS signed" rule that
-      #     docs/release-signing.md sets for the artifacts.
-      #   * no REPRO_PUBLISH_TARGET -> no bucket exists to publish to.
-      #
-      # Both are `::warning::` rather than `::error::` for the same reason
-      # the signing step is: the release itself is complete and correct
-      # without them, and failing every release until external
-      # infrastructure lands would mean no releases at all.
-      - name: Generate and upload native repository metadata (apt/dnf/pacman/scoop)
-        if: success()
+      # There is one apt and one RPM repository for every Metacraft product
+      # (deb.metacraft-labs.com, rpm.metacraft-labs.com), signed with the
+      # organisation's key. metacraft-labs/metacraft-desktop-packages owns that
+      # key and the bucket credentials and regenerates the indices over every
+      # product's packages. This workflow holds neither; it only asks. See
+      # metacraft-specs infrastructure/package-distribution.md §3 and §9.1.
+      - name: Mint a token for the organisation's package publisher
+        id: packages_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+          repositories: metacraft-desktop-packages
+          # repository_dispatch requires contents: write on the target.
+          permission-contents: write
+
+      - name: Publish the packages into the organisation's repositories
         shell: bash
         env:
-          REPRO_PUBLISH_TARGET: ${{ vars.REPRO_PUBLISH_TARGET }}
-          # ONE --target CANNOT ADDRESS FIVE BUCKETS.
-          #
-          # infra's terraform/cloudflare/reprobuild-prod provisions five R2
-          # buckets -- reprobuild-{deb,rpm,arch,downloads,keys}-prod -- each
-          # bound by an R2 custom domain to one hostname and therefore served
-          # at the ROOT of it. `deb.reprobuild.com/dists/stable/InRelease`
-          # needs a bucket whose key `dists/stable/InRelease` is at its root,
-          # so a single destination with six prefixes under it addresses none
-          # of them. These are the five values `tofu output r2_buckets` emits.
-          #
-          # Each is independently optional: unset, the surface falls back to
-          # deriving a prefix under $REPRO_PUBLISH_TARGET, which is what the
-          # M3 gate uses and what this step did before.
-          REPRO_PUBLISH_TARGET_DEB: ${{ vars.REPRO_PUBLISH_TARGET_DEB }}
-          REPRO_PUBLISH_TARGET_RPM: ${{ vars.REPRO_PUBLISH_TARGET_RPM }}
-          REPRO_PUBLISH_TARGET_ARCH: ${{ vars.REPRO_PUBLISH_TARGET_ARCH }}
-          REPRO_PUBLISH_TARGET_DOWNLOADS: ${{ vars.REPRO_PUBLISH_TARGET_DOWNLOADS }}
-          REPRO_PUBLISH_TARGET_KEYS: ${{ vars.REPRO_PUBLISH_TARGET_KEYS }}
-          # The two git-backed surfaces. A Scoop bucket and a Homebrew tap are
-          # git REPOSITORIES that clients clone; R2 serves objects and cannot
-          # serve git, which is why terraform provisions no bucket for either
-          # and why the publisher refuses an object-store target for them.
-          # metacraft-labs/scoop-reprobuild and
-          # metacraft-labs/homebrew-reprobuild DO NOT EXIST YET; until they
-          # do, leave these unset and the publisher stages the manifests and
-          # says so -- see the prerequisite warning at the end of this step.
-          REPRO_PUBLISH_TARGET_SCOOP: ${{ vars.REPRO_PUBLISH_TARGET_SCOOP }}
-          REPRO_PUBLISH_TARGET_HOMEBREW: ${{ vars.REPRO_PUBLISH_TARGET_HOMEBREW }}
-          REPRO_RELEASE_SIGNING_KEY: ${{ secrets.REPRO_RELEASE_SIGNING_KEY }}
-          REPRO_RELEASE_SIGNING_KEY_ID: ${{ secrets.REPRO_RELEASE_SIGNING_KEY_ID }}
-          # rclone reads its remote from the environment, so no config file
-          # is written and no credential touches the disk. The remote name
-          # `r2` matches repro-publish-repos.sh's $REPRO_RCLONE_REMOTE default.
-          RCLONE_CONFIG_R2_TYPE: s3
-          RCLONE_CONFIG_R2_PROVIDER: Cloudflare
-          RCLONE_CONFIG_R2_ENDPOINT: ${{ vars.REPRO_R2_ENDPOINT }}
-          RCLONE_CONFIG_R2_ACCESS_KEY_ID: ${{ secrets.REPRO_R2_ACCESS_KEY_ID }}
-          RCLONE_CONFIG_R2_SECRET_ACCESS_KEY: ${{ secrets.REPRO_R2_SECRET_ACCESS_KEY }}
+          GH_TOKEN: ${{ steps.packages_token.outputs.token }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-
-          version=$(grep "^version\s*=" reprobuild.nimble | sed -E 's/version\s*=\s*"([^"]+)"/\1/')
-          echo "release version: ${version}"
-
-          if [ -z "${REPRO_PUBLISH_TARGET:-}" ]; then
-            echo "::warning::REPRO_PUBLISH_TARGET is not set, so there is no repository to publish to. Skipping repo metadata. Once the metacraft-labs/infra root terraform/cloudflare/reprobuild-prod has been applied, set the five per-surface variables from its r2_buckets output -- REPRO_PUBLISH_TARGET_DEB=r2:reprobuild-deb-prod and the same for RPM, ARCH, DOWNLOADS and KEYS -- plus REPRO_PUBLISH_TARGET=none to satisfy this check. A single REPRO_PUBLISH_TARGET writes prefixes under one destination and cannot address five buckets each served at the root of its own hostname."
-            exit 0
-          fi
-          if [ -z "${REPRO_RELEASE_SIGNING_KEY:-}" ] || [ -z "${REPRO_RELEASE_SIGNING_KEY_ID:-}" ]; then
-            echo "::warning::No release signing key is configured, so repository indices cannot be signed. Skipping repo metadata rather than publishing an UNSIGNED repository. See docs/release-signing.md."
-            exit 0
-          fi
-
-          # Ephemeral GNUPGHOME, shredded in this step. Never ~/.gnupg: the
-          # publish scripts refuse to run without GNUPGHOME set precisely so
-          # a signature can never come from whatever key a runner happened to
-          # already trust.
-          export GNUPGHOME="${RUNNER_TEMP}/gnupg-publish"
-          mkdir -p "${GNUPGHOME}"
-          chmod 700 "${GNUPGHOME}"
-          cleanup() {
-            gpgconf --kill all >/dev/null 2>&1 || true
-            find "${GNUPGHOME}" -type f -exec shred -u {} + 2>/dev/null || true
-            rm -rf "${GNUPGHOME}"
-          }
-          trap cleanup EXIT
-
-          printf '%s' "${REPRO_RELEASE_SIGNING_KEY}" | gpg --batch --quiet --import
-          keyid="${REPRO_RELEASE_SIGNING_KEY_ID}"
-
-          # Build the native packages from the SAME archives that were just
-          # published, so the .deb/.rpm/.pkg and the tarball carry identical
-          # bytes. Rebuilding from source here would produce packages that
-          # nothing has verified.
-          mkdir -p pkgs
-          linux_tarball="staging/reprobuild-${version}-linux-x86_64.tar.gz"
-          if [ -f "${linux_tarball}" ]; then
-            sh ./scripts/release/repro-build-packages.sh \
-              --version "${version}" --tarball "${linux_tarball}" \
-              --out pkgs --ecosystem all --platform linux --asset-arch x86_64
-          else
-            echo "::warning::${linux_tarball} is absent; no Linux packages will be built."
-          fi
-          # The Windows archive is NOT repackaged: the Scoop manifest points
-          # at the published .zip itself, which is what Scoop fetches and
-          # hashes.
-          win_zip="staging/reprobuild-${version}-windows-x86_64.zip"
-          if [ -f "${win_zip}" ]; then
-            cp "${win_zip}" pkgs/
-          fi
-
-          # --scoop-downloads-base IS A ROOT, NOT A RELEASE DIRECTORY.
-          #
-          # The publisher owns the version segment: it appends `/v<version>/`
-          # to this base, because that is what `repro-install.sh --method
-          # tarball` fetches and what the `downloads` bucket layout writes.
-          # This used to pass the release directory itself -- the base with
-          # the tag already appended -- so the generated
-          # URL doubled the segment --
-          # `.../releases/download/v0.1.3/v0.1.3/<asset>` -- and 404'd. Scoop
-          # carried that dead link from the start, and the Homebrew formula
-          # inherited the same base and the same dead link. Passing the root
-          # is exact for GitHub too: the appended `v<version>` IS the release
-          # tag, so the result is the canonical asset URL
-          # `https://github.com/<owner>/<repo>/releases/download/v<version>/<asset>`.
-          # The publisher now refuses a base that already ends in the version,
-          # so this cannot regress silently from either end.
-          # --fetch-existing is load-bearing: it pulls the CURRENT published
-          # pool down before adding this version. Without it, publishing
-          # 0.1.4 would DELETE 0.1.3 from the repository -- `apt upgrade`
-          # would work exactly once and every pinned install would break.
-          # --archives staging is what finally writes the `downloads` bucket.
-          # `repro-install.sh --method tarball` -- the only install path on a
-          # distribution none of apt/dnf/pacman covers -- fetches
-          # $REPRO_DOWNLOADS_URL/v<version>/{<asset>,SHA256SUMS,SHA256SUMS.asc}
-          # and terraform provisions downloads.reprobuild.com for exactly
-          # that. Nothing wrote it: the archives went to the GitHub release
-          # and stopped there, so that hostname would have resolved, served,
-          # and held nothing. staging/ is the exact bytes that were published,
-          # not a rebuild of them.
-          sh ./scripts/release/repro-publish-repos.sh \
-            --version "${version}" \
-            --packages pkgs \
-            --archives staging \
-            --key "${keyid}" \
-            --ecosystem all \
-            --repo-root "${RUNNER_TEMP}/repo" \
-            --target "${REPRO_PUBLISH_TARGET}" \
-            --fetch-existing \
-            --scoop-downloads-base "https://github.com/${GITHUB_REPOSITORY}/releases/download" \
-            --export-keyring "${RUNNER_TEMP}/reprobuild-archive-keyring.gpg" \
-            | tee "${RUNNER_TEMP}/publish.out"
-
-          # A surface that published nothing emits one machine-readable line
-          # saying so. Turning those into ::warning:: is the point: the gap
-          # used to be recorded only in infra's `git_backed_surfaces`
-          # terraform output, which renders under `tofu output` -- needing
-          # credentials this root will not have until it is applied -- so the
-          # one place it was written down was a place nobody doing a release
-          # would look.
-          #
-          # TWO MARKERS, because there are two different facts with two
-          # different remedies and two different owners, and a release can
-          # carry both at once (every release so far did):
-          #
-          #   REPRO_PUBLISH_PREREQUISITE  the surface is a git repository and
-          #                               that repository does not exist yet.
-          #                               Fixed by an org admin, once.
-          #   REPRO_PUBLISH_SKIPPED       the surface generated nothing for
-          #                               this release's artifact set -- e.g.
-          #                               homebrew on a release with no macOS
-          #                               archive. Fixed by the release, or
-          #                               accepted for this one.
-          #
-          # Collapsing them would report a release-shape problem as a missing
-          # repository, which sends the operator to the wrong remedy.
-          while IFS=$'\t' read -r _marker surface detail; do
-            case "${_marker}" in
-              REPRO_PUBLISH_PREREQUISITE)
-                echo "::warning::The ${surface} channel was NOT published: it is a git repository, not an object store, and ${detail} does not exist yet. Somebody with rights in the metacraft-labs organisation has to create it; then set REPRO_PUBLISH_TARGET_$(echo "${surface}" | tr '[:lower:]' '[:upper:]')=git:${detail}. The generated tree is in the job's ${RUNNER_TEMP}/repo/${surface}."
-                ;;
-              REPRO_PUBLISH_SKIPPED)
-                echo "::warning::The ${surface} channel published nothing for ${version}: ${detail}"
-                ;;
-            esac
-          done < "${RUNNER_TEMP}/publish.out"
-
-          echo "::notice::Published repository metadata for ${version}."
-          echo "::notice::If the trust anchor changed, scripts/install/repro-install.sh must pin its new SHA-256 (printed above as 'TRUST ANCHOR sha256')."
+          gh api --method POST repos/metacraft-labs/metacraft-desktop-packages/dispatches \
+            -f event_type=publish-release \
+            -f "client_payload[repository]=${GITHUB_REPOSITORY}" \
+            -f "client_payload[tag]=${TAG}"
+          echo "::notice::Asked metacraft-labs/metacraft-desktop-packages to add ${TAG}'s packages to deb.metacraft-labs.com and rpm.metacraft-labs.com. Follow it at https://github.com/metacraft-labs/metacraft-desktop-packages/actions/workflows/publish-release.yaml"
