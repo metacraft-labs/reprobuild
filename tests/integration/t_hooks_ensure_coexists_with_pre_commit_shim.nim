@@ -187,8 +187,10 @@ suite "RA-4 — hooks ensure coexists with pre-commit hook-impl shim":
       # re-enter us). Falsifiable: without the cleanup this file remains.
       check not fileExists(stalePath)
 
-      # The dispatcher clears the migration guard for chained hooks.
-      check readFile(dispatcher).contains("PRE_COMMIT_RUNNING_LEGACY=")
+      # The dispatcher unsets the migration guards for chained hooks (both
+      # pre-commit's and prek's; prek treats an EMPTY value as set).
+      check readFile(dispatcher).contains(
+        "unset PRE_COMMIT_RUNNING_LEGACY PREK_RUNNING_LEGACY")
 
       # ---- Run the installed dispatcher; assert NO migration abort -----
       #
