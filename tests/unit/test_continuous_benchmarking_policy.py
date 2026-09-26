@@ -375,7 +375,14 @@ class ContinuousBenchmarkingPolicyTests(unittest.TestCase):
         self.assertIn(
             'runner: \'["self-hosted", "Linux", "X64", "benchmark"]\'', workflow
         )
-        self.assertIn('runner: \'["eph-macos-arm64"]\'', workflow)
+        # Capability-label arrays, not the retired single-name `eph-*` classes:
+        # metacraft-dev-guidelines `policies/ci-workflow-standards.md`
+        # (§ Capability-label taxonomy) is authoritative, and #248 migrated
+        # this leg from `["eph-macos-arm64"]` to the equivalent array.
+        self.assertIn(
+            'runner: \'["self-hosted", "macos", "arm64"]\'', workflow
+        )
+        self.assertNotIn('"eph-macos-arm64"]', workflow)
         self.assertIn("metacraft-labs/runquota", workflow)
         self.assertIn("metacraft-labs/reprobuild-cmake", workflow)
         self.assertIn("ref: reprobuild", workflow)
