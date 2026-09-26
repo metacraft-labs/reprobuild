@@ -1217,7 +1217,7 @@ tests/integration/t_library_load_evidence_is_recorded.nim	nim	1
 tests/integration/t_linked_worktree_pre_push_repository_env.nim	nim	7
 tests/integration/t_local_daemons_control_plane_m0.nim	nim	3
 tests/integration/t_local_daemons_control_plane_m1.nim	nim	3
-tests/integration/t_local_daemons_control_plane_m10.nim	nim	6
+tests/integration/t_local_daemons_control_plane_m10.nim	nim	7
 tests/integration/t_local_daemons_control_plane_m11.nim	nim	3
 tests/integration/t_local_daemons_control_plane_m2.nim	nim	5
 tests/integration/t_local_daemons_control_plane_m3.nim	nim	2

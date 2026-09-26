@@ -27864,7 +27864,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_local_daemons_control_plane_m10.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
