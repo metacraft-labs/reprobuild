@@ -1,10 +1,17 @@
 ## Real process observations, cache decisions and output bytes. No synthetic
 ## depfiles: the child calls libc getenv under the graph-built monitor.
-import std/[os, tempfiles, unittest]
+##
+## No mocks. The RunQuota lease the engine takes for every launch is served by
+## a real ``runquotad`` this fixture starts on a private socket (unless the
+## caller bypasses RunQuota with ``REPROBUILD_NO_RUNQUOTA=1``), because the
+## assertions include that the launch was actually leased — an ambient
+## host-wide daemon is not something a test may assume.
+import std/[os, osproc, tempfiles, unittest]
 
 import repro_build_engine
 import repro_local_store
 import repro_test_support
+from repro_runquota import isRunQuotaDaemonReachable
 
 const
   ProbeName = "REPRO_TEST_INHERITED_CACHE_INPUT"
@@ -21,14 +28,46 @@ type Fixture = object
   root, work, output: string
   config: BuildEngineConfig
   saved: seq[tuple[name: string, present: bool, value: string]]
+  runQuotaDaemon: Process
+
+proc runQuotaBypassed(): bool =
+  getEnv("REPROBUILD_NO_RUNQUOTA") == "1"
+
+proc startRunQuotaDaemon(f: var Fixture) =
+  ## A private ``runquotad`` for this fixture, reached through
+  ## ``RUNQUOTA_SOCKET``. Without one the engine's lease helper dials the
+  ## host-wide default endpoint, which an unprovisioned host does not have,
+  ## and every launch fails before the child runs.
+  let socket = runquotaRendezvousDir(f.root / "runquota") / "runquota.sock"
+  f.runQuotaDaemon = startProcess(requireRunQuotaDaemonBin(ReprobuildRepoRoot),
+    args = ["--socket", socket, "--cpu-milli", "4000",
+      "--memory-bytes", "17179869184"],
+    options = {poParentStreams})
+  putEnv("RUNQUOTA_SOCKET", socket)
+  for _ in 0 ..< 400:
+    # A protocol probe rather than a file check: ``fileExists`` is false
+    # for a Unix socket, and a bound socket is not yet an accepting daemon.
+    if isRunQuotaDaemonReachable():
+      return
+    if not f.runQuotaDaemon.running:
+      break
+    sleep(25)
+  f.runQuotaDaemon.terminate()
+  discard f.runQuotaDaemon.waitForExit()
+  f.runQuotaDaemon.close()
+  f.runQuotaDaemon = nil
+  raise newException(IOError, "runquotad did not become reachable at " & socket)
 
 proc setupFixture(): Fixture =
   result.root = createTempDir("repro-inherited-env-", "")
   result.work = result.root / "work"
   result.output = result.work / "value.txt"
   createDir(result.work)
-  for name in [ProbeName, UnreadName, "REPRO_MONITOR_SHIM_LIB"]:
+  for name in [ProbeName, UnreadName, "REPRO_MONITOR_SHIM_LIB",
+               "RUNQUOTA_SOCKET"]:
     result.saved.add((name, existsEnv(name), getEnv(name)))
+  if not runQuotaBypassed():
+    result.startRunQuotaDaemon()
   let tools = prepareMonitorTools(ReprobuildRepoRoot, result.root, "inherited-env")
   putEnv("REPRO_MONITOR_SHIM_LIB", tools.shim)
   result.config = defaultBuildEngineConfig(result.root / "cache")
@@ -37,6 +76,10 @@ proc setupFixture(): Fixture =
   result.config.monitorCliArgs = tools.monitorCliArgs
 
 proc cleanup(f: Fixture) =
+  if f.runQuotaDaemon != nil:
+    f.runQuotaDaemon.terminate()
+    discard f.runQuotaDaemon.waitForExit()
+    f.runQuotaDaemon.close()
   for entry in f.saved:
     if entry.present: putEnv(entry.name, entry.value)
     else: delEnv(entry.name)
@@ -62,7 +105,7 @@ proc checkRun(f: Fixture; action: BuildAction; expected: string) =
   check res.launched
   check res.cacheDecision != cdHit
   check action.argv[2] in res.evidence.monitorEnvReads
-  if getEnv("REPROBUILD_NO_RUNQUOTA") != "1":
+  if not runQuotaBypassed():
     check res.runQuotaBackend.len > 0
     check res.runQuotaBackend != "runquota-bypass"
   check readFile(f.output) == expected

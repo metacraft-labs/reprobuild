@@ -7316,6 +7316,7 @@
       "localDependencyShape": [
         "repro_build_engine",
         "repro_local_store",
+        "repro_runquota",
         "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
