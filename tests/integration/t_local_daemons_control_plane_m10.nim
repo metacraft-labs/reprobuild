@@ -1,5 +1,6 @@
 import std/[os, osproc, strutils, tempfiles, times, unittest]
 
+import repro_core/cli_images
 import repro_daemon_core/runtime
 
 when defined(posix):
@@ -34,6 +35,14 @@ proc repoRoot(): string =
 
 proc publicReproBin(): string =
   repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
+
+proc engineReproBin(): string =
+  ## The ENGINE image, `build/bin/reprobuild` — the image a daemon is spawned
+  ## from (`repro_core/cli_images`). Since c28e63efe put the thin daemon client
+  ## on `build/bin/repro`, that name can no longer be the daemon's source
+  ## image: the thin client does not serve, it `execv`s the engine it finds
+  ## BESIDE ITSELF, and a copy in a scratch directory has none.
+  repoRoot() / "build" / "bin" / reprobuildEngineExeName()
 
 proc daemonEndpoint(tempRoot: string): string =
   "/tmp" / (tempRoot.extractFilename & ".sock")
@@ -107,8 +116,10 @@ proc appendMarker(path, marker: string) =
 
 proc copyDaemonFixture(tempRoot: string): string =
   # Executable-Consolidation M2 (commit b62edf0): the daemon image IS
-  # the public ``repro`` binary; the standalone ``repro-daemon`` was
-  # retired. ``daemon start --dev --daemon-exe=<exe>`` invokes
+  # the full CLI; the standalone ``repro-daemon`` was retired. Since
+  # c28e63efe that image is ``build/bin/reprobuild`` (``engineReproBin``),
+  # NOT ``build/bin/repro`` — copying the thin client here left a daemon
+  # that could never start, and every case below timed out waiting for it. ``daemon start --dev --daemon-exe=<exe>`` invokes
   # ``<exe> daemon serve …`` (see ``daemonProcessArgs``) so the
   # fixture path's BASENAME does not matter -- only the byte contents
   # do. Keep the ``repro-daemon`` filename for the source-image hash
@@ -117,7 +128,7 @@ proc copyDaemonFixture(tempRoot: string): string =
   let sourceDir = tempRoot / "source-bin"
   createDir(sourceDir)
   result = sourceDir / "repro-daemon"
-  copyFile(publicReproBin(), result)
+  copyFile(engineReproBin(), result)
   setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec,
     fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
