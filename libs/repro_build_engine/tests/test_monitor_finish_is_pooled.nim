@@ -372,9 +372,22 @@ else:
     ##     randomness, and `t_every_launch_path_is_monitored` records the
     ##     same limitation for the same reason.
     var lines: seq[string] = @[]
+    # ``diagnostics`` carries io-mon's loss detail VERBATIM since #181
+    # (214b41223: "monitor loss: " & record.detail, so the summary names the
+    # offender). On the descendant fixture that detail is the §4.1 grace
+    # loss, whose ``pids=<list>`` and ``run=<id>`` tokens name this run's
+    # processes and can never agree between two arms. They get exactly the
+    # blanking the record comparison above already applies to the same
+    # text (``normaliseDetail``): the pid COUNT and every other token are
+    # still compared verbatim, and a run id stays a bijection.
+    var detailNormaliser = Normaliser()
     for name, value in evidence.fieldPairs:
       var entries: seq[string] = @[]
-      when value is seq[string]:
+      when name == "diagnostics":
+        for entry in value:
+          entries.add normalisePath(detailNormaliser.normaliseDetail(entry),
+            workDir)
+      elif value is seq[string]:
         for entry in value:
           entries.add normalisePath(entry, workDir)
       elif value is seq[EntropyObservation]:
