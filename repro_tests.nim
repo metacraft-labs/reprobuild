@@ -10278,15 +10278,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "tests/integration/t_hooks_ensure_restores_dispatcher_displaced_by_prek.nim",
-    binary: "build/test-bin/t_hooks_ensure_restores_dispatcher_displaced_by_prek",
-    defines: @[],
-    requiresReproBinary: true,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny,
-    selfInterposes: false),
-  TestSpec(
     source: "tests/integration/t_hooks_ensure_installs_a_managed_pre_commit_hook.nim",
     binary: "build/test-bin/t_hooks_ensure_installs_a_managed_pre_commit_hook",
     defines: @[],
@@ -10298,6 +10289,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_hooks_ensure_reconciles_a_git_backed_workspace_root.nim",
     binary: "build/test-bin/t_hooks_ensure_reconciles_a_git_backed_workspace_root",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_hooks_ensure_restores_dispatcher_displaced_by_prek.nim",
+    binary: "build/test-bin/t_hooks_ensure_restores_dispatcher_displaced_by_prek",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

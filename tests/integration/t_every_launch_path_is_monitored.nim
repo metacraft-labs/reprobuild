@@ -579,7 +579,7 @@ type EngineSourceFile = object
 ## and no rewrite-warning template there either, so the compile-time linter
 ## does not see them at all — which is the other half of why they needed a
 ## row here.
-const SpawnPrimitives: array[43, tuple[name: string; expected: int;
+const SpawnPrimitives: array[45, tuple[name: string; expected: int;
                                        why: string]] = [
   ("startProcess", 3,
     "post-build converter, the L2 RunQuota helper, the nix daemon"),
@@ -614,6 +614,14 @@ const SpawnPrimitives: array[43, tuple[name: string; expected: int;
   ("commandSpec", 0, "runquota_process; the spec startDirect hands it"),
   ("runMonitored", 0, "io_mon's spawning host entry point"),
   ("runFsSnoopCli", 0, "io_mon's CLI wrapper around runMonitored"),
+  # io-mon #18 (pinned here by #383): the macOS SIP toolchain drop-ins. Both
+  # run `/usr/bin/xcrun -f <tool>` through `execCmdEx` in the MONITOR HOST,
+  # outside any monitored tree, so each can put an unmonitored child on the
+  # road. The engine must reach them only through io-mon's own sandbox
+  # population, never by calling them.
+  ("resolveAppleToolchainTool", 0, "io_mon: runs `xcrun -f` (macOS)"),
+  ("populateAppleToolchainDropIns", 0,
+    "io_mon: resolves each drop-in via resolveAppleToolchainTool (macOS)"),
   ("warnFindExe", 0, "the linter's rewrite template, callable by name"),
   ("warnExecCmdEx", 0, ""),
   ("warnExecProcess", 0, ""),
@@ -865,7 +873,20 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                # this repository rather than on an upstream bump.
                "extNull", "extText", "extInt", "extReal",
                "declareRunQuotaExtension", "recordRunQuotaExtensionRow",
-               "denialDeadlockTimeoutMs"]),
+               "denialDeadlockTimeoutMs",
+               # The bounded queue wait (e1c068066, "make a RunQuota queue
+               # wait loud and bounded"). Read one by one: the grant poll,
+               # the liveness probe and the lease-holder snapshot are
+               # requests over the session's EXISTING connection
+               # (`pollNextGrantBounded`, `daemonStatus`,
+               # `inspectionJson`); the rest are pure — an env-var read, a
+               # JSON-to-lines renderer, a two-field state machine and
+               # three message builders. None starts a process.
+               "pollRunQuotaGrantsBounded", "probeRunQuotaLiveness",
+               "runQuotaLeaseHolders", "summarizeRunQuotaLeaseHolders",
+               "runQuotaEndpointText", "runQuotaQueueTimeoutMs",
+               "initRunQuotaQueueWait", "stepRunQuotaQueueWait",
+               "runQuotaQueueWaitMessage", "runQuotaQueueTimeoutMessage"]),
     # THE MODULE THE ENGINE NOW HOSTS FROM. Before HM-4 this surface was six
     # names and the engine called none of them; the decomposed host API
     # (IoMon-Decomposed-Host-API DH-2) added seven more, and THIS AUDIT IS
@@ -900,7 +921,13 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     CapabilitySurface(key: "io_mon", audit: caFullSurface,
       sourceRels: @["io_mon/fs_snoop.nim", "io_mon/shim_discovery.nim"],
       spawning: @["runMonitored", "runFsSnoopCli", "startMonitor",
-                  "pollMonitor", "finishMonitor"],
+                  "pollMonitor", "finishMonitor",
+                  # io-mon #18, reported by this audit when #383 bumped the
+                  # pin. Both start `xcrun` via `execCmdEx` (macOS only, but
+                  # the classification is the union across platforms, as
+                  # for `pollMonitor` / `finishMonitor` above).
+                  "resolveAppleToolchainTool",
+                  "populateAppleToolchainDropIns"],
       inert: @["appendLauncherEventLoss", "completeness",
                "records", "monitorLifecycleCounts", "live", "hasExited",
                "rootPid",
