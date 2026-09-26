@@ -1670,6 +1670,10 @@
               pkgs.nixfmt-rfc-style
               pkgs.repomix
               pkgs.pre-commit
+              # The other hook manager the workspace's dev shells install
+              # with; the hooks-ensure integration tests drive the real
+              # tool rather than a stand-in.
+              pkgs.prek
               pkgs.shellcheck
               # Validates .github/workflows/ the way GitHub does, via
               # scripts/check_workflows.sh in `just lint`. Actions expression
