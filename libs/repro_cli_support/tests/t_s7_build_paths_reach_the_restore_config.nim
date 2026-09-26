@@ -54,6 +54,27 @@ proc cliSupportSource(): string =
   readFile(findRepoRoot() / "libs" / "repro_cli_support" / "src" /
     "repro_cli_support.nim")
 
+proc withoutStringLiterals(line: string): string =
+  ## ``line`` with the contents of every ordinary ``"..."`` literal removed
+  ## (escapes honoured), so a lexical sweep for a call does not count a
+  ## message that merely names it. Triple-quoted literals do not occur on
+  ## the lines this sweep inspects.
+  var inString = false
+  var i = 0
+  while i < line.len:
+    let ch = line[i]
+    if inString:
+      if ch == '\\':
+        inc i
+      elif ch == '"':
+        inString = false
+        result.add(ch)
+    else:
+      if ch == '"':
+        inString = true
+      result.add(ch)
+    inc i
+
 type ConfigSite = object
   ## One ``var <name> = BuildEngineConfig(`` construction.
   variableName: string
@@ -164,7 +185,10 @@ suite "S7 every build-path engine config can reach the restore configuration":
     var missing: seq[string] = @[]
     for i, raw in lines:
       let line = raw.strip()
-      if "executeBuildTarget(" notin line:
+      # A call is CODE: a mention inside a string literal (a diagnostic that
+      # names the proc, as the elided-evidence refusal does) is not a caller
+      # and cannot forward anything.
+      if "executeBuildTarget(" notin withoutStringLiterals(line):
         continue
       if line.startsWith("proc executeBuildTarget("):
         continue
