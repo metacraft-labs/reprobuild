@@ -1217,7 +1217,7 @@ tests/integration/t_library_load_evidence_is_recorded.nim	nim	1
 tests/integration/t_linked_worktree_pre_push_repository_env.nim	nim	7
 tests/integration/t_local_daemons_control_plane_m0.nim	nim	3
 tests/integration/t_local_daemons_control_plane_m1.nim	nim	3
-tests/integration/t_local_daemons_control_plane_m10.nim	nim	6
+tests/integration/t_local_daemons_control_plane_m10.nim	nim	7
 tests/integration/t_local_daemons_control_plane_m11.nim	nim	3
 tests/integration/t_local_daemons_control_plane_m2.nim	nim	5
 tests/integration/t_local_daemons_control_plane_m3.nim	nim	2
@@ -1717,6 +1717,7 @@ tests/unit/t_m9r8_dispatcher_gate.nim	nim	5
 tests/unit/t_m9r9_auto_recurse.nim	nim	20
 tests/unit/t_measurement_axes.nim	nim	15
 tests/unit/t_msi_archive_type.nim	nim	2
+tests/unit/t_nimcache_is_worktree_local.nim	nim	0
 tests/unit/t_nix_propagated_store_paths.nim	nim	5
 tests/unit/t_nonredistributable_publish_gate.nim	nim	3
 tests/unit/t_prefix_env_ops.nim	nim	4
