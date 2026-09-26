@@ -543,14 +543,21 @@ suite "e2e_codetracer_build_subset_without_tup":
       check fileExists(projectRoot / "build" / "c" / "main.tup.o")
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
 
+      # Tool identities are realized only for the tools the selected graph
+      # references (``scopedToolArtifact``, 636d688f2; kept by #312). The
+      # four actions invoke ``nim`` and ``gcc``; ``node`` is run by this test
+      # itself (``runNode``) and ``sh`` by no action since the config header
+      # became a builtin ``fs.writeText`` (cb943db45), so both stay declared
+      # in ``uses:`` but are not realized.
+      check first.contains("selected tool identities: 2/4")
       let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
-      check identity.profiles.len == 4
+      check identity.profiles.len == 2
       check identity.profiles.allIt(it.installMethod == "path")
       check identity.profiles.allIt(it.cachePortability == cpLocalOnly)
       check identity.profiles.anyIt(it.executableName == "nim")
-      check identity.profiles.anyIt(it.executableName == "node")
       check identity.profiles.anyIt(it.executableName == "gcc")
-      check identity.profiles.anyIt(it.executableName == "sh")
+      check not identity.profiles.anyIt(it.executableName == "node")
+      check not identity.profiles.anyIt(it.executableName == "sh")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
       assertAction(firstReport, "generate-config-header", "asSucceeded", true)
