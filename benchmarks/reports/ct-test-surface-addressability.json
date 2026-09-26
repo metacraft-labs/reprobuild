@@ -1,9 +1,24 @@
 {
   "caseCountDisagreements": [
     {
+      "ctTestCaseCount": 2,
+      "inventoryStaticCaseCount": 3,
+      "source": "libs/repro_cli_support/tests/t_provider_compile_entry_points_publish_bootstrap_toolchain.nim"
+    },
+    {
+      "ctTestCaseCount": 0,
+      "inventoryStaticCaseCount": 2,
+      "source": "libs/repro_dsl_stdlib/tests/t_workspace_floor_windows_tarball_arms.nim"
+    },
+    {
       "ctTestCaseCount": 4,
       "inventoryStaticCaseCount": 5,
       "source": "tests/e2e/m68/t_e2e_repro_home_depends_on_topological.nim"
+    },
+    {
+      "ctTestCaseCount": 0,
+      "inventoryStaticCaseCount": 1,
+      "source": "tests/integration/t_stdlib_python_tarball_arms_realize.nim"
     },
     {
       "ctTestCaseCount": 5,
@@ -15,15 +30,15 @@
   "counts": {
     "catalogs": 4,
     "itemsByKind": {
-      "case": 10880,
-      "suite": 2480
+      "case": 11046,
+      "suite": 2537
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 13127,
-      "python-unittest": 230
+      "nim-unittest": 13345,
+      "python-unittest": 235
     },
-    "itemsTotal": 13360,
+    "itemsTotal": 13583,
     "responseDiagnostics": {
       "info": 1,
       "warning": 35
@@ -196,32 +211,47 @@
           "startLine": 167
         }
       ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/integration/t_repro_test_runner_survives_its_binary_being_replaced.nim::repro-test-runner-survives-its-own-binary-being-replaced::cases-after-the-runner's-file-is-replaced-still-run",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/integration/t_repro_test_runner_survives_its_binary_being_replaced.nim",
+          "startLine": 122
+        },
+        {
+          "file": "tests/integration/t_repro_test_runner_survives_its_binary_being_replaced.nim",
+          "startLine": 205
+        }
+      ]
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 96.23,
-    "caseItemsInCatalog": 10880,
-    "casesAddressableThroughTheSurface": 10250,
-    "collidingIdentities": 11,
-    "distinctCaseIdentities": 10869,
+    "caseCoveragePercent": 96.25,
+    "caseItemsInCatalog": 11046,
+    "casesAddressableThroughTheSurface": 10412,
+    "collidingIdentities": 12,
+    "distinctCaseIdentities": 11034,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 1710,
-      "compared": 1712,
-      "disagree": 2
+      "agree": 1733,
+      "compared": 1738,
+      "disagree": 5
     },
-    "sourceCoveragePercent": 99.42,
-    "sourcesAddressableThroughTheSurface": 1712,
+    "sourceCoveragePercent": 99.43,
+    "sourcesAddressableThroughTheSurface": 1738,
     "sourcesNotAddressable": 10,
-    "trackedNimSuiteSources": 1722,
-    "trackedStaticCaseCount": 10652
+    "trackedNimSuiteSources": 1748,
+    "trackedStaticCaseCount": 10818
   },
   "schemaVersion": 1,
   "surface": {
     "binary": "ct-test",
-    "provenance": "metacraft-labs/codetracer 613118687, the codetracer-src revision flake.lock pins, built by this repository's dev shell (ctTestTools)",
-    "resolvedBy": "PATH:ct-test",
-    "sha256": "2c11fbf1c4405b781bbeb070a274d458920ff181b4a33868e05627742331dd85"
+    "provenance": "metacraft-labs/codetracer a9ef983ed, the codetracer-src revision flake.lock pins, built by this repository's dev shell (ctTestTools)",
+    "resolvedBy": "environment",
+    "sha256": "d626d4212fbcefac2baaf81b36f85dfd33a8014219efe92ac5a2e6fa94f1abd3"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "unaddressableSources": [
