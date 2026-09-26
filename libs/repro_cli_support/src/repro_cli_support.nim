@@ -41125,6 +41125,98 @@ proc pushOutputIsNonFastForward*(output: string): bool =
     (("is at" in low) and ("but expected" in low)) or
     ("stale info" in low)
 
+const urlUserinfoRedaction* = "<redacted>"
+  ## What replaces the ``userinfo`` component of a URL quoted into a
+  ## diagnostic. The COMPONENT, not the URL: the host and path name the backend
+  ## an operator has to reach, and withholding those is what made a push
+  ## refusal unactionable.
+
+proc redactUrlUserinfo*(text: string): string =
+  ## Replace the ``userinfo`` of every scheme-bearing URL in ``text`` with
+  ## ``urlUserinfoRedaction``, and leave every other byte alone.
+  ##
+  ## This is the WHOLE of the credential concern that used to justify dropping
+  ## a failed push's transcript. A credential reaches a git transcript by
+  ## exactly one route: baked into a remote URL as
+  ## ``<scheme>://<user>:<token>@<host>/<path>`` — a personal access token in
+  ## an ``https`` remote, or the ``x-access-token:<ghs_...>@github.com`` form a
+  ## forge's CI helper writes. Nothing ELSE in that stream is a secret, least
+  ## of all a Reprobuild managed hook's own stderr, which is this project's own
+  ## text describing this project's own refusal.
+  ##
+  ## Only ``userinfo`` goes, so the redacted URL still names the backend and
+  ## the ref — the two facts a reader needs. The scp-like SSH form
+  ## (``git@host:path``) is left intact on purpose: its ``git@`` is a LOGIN
+  ## NAME, the key never appears in the URL, and stripping it would delete a
+  ## host coordinate while protecting nothing.
+  result = newStringOfCap(text.len)
+  var i = 0
+  while i < text.len:
+    let sep = text.find("://", start = i)
+    if sep < 0:
+      result.add(text[i .. ^1])
+      return
+    # A scheme is a non-empty run of RFC 3986 scheme bytes ending at ``://``.
+    # Without one there is no URL here and ``://`` is ordinary text.
+    var schemeStart = sep
+    while schemeStart > i and text[schemeStart - 1] in
+        {'a'..'z', 'A'..'Z', '0'..'9', '+', '-', '.'}:
+      dec schemeStart
+    if schemeStart == sep:
+      result.add(text[i .. sep + 2])
+      i = sep + 3
+      continue
+    # The authority ends at the first byte that cannot continue it. Within it,
+    # ``userinfo`` runs to the LAST ``@``: RFC 3986 permits percent-encoded
+    # bytes inside ``userinfo``, so it is the final ``@`` that delimits.
+    let authorityStart = sep + 3
+    var j = authorityStart
+    var at = -1
+    while j < text.len:
+      let ch = text[j]
+      if ch == '@': at = j
+      elif ch in {'/', '?', '#', '\\', '"', '\'', '`', '<', '>', ',', ';',
+                  '(', ')', '[', ']', '{', '}', ' ', '\t', '\r', '\n'}:
+        break
+      inc j
+    result.add(text[i ..< authorityStart])
+    if at >= 0:
+      result.add(urlUserinfoRedaction)
+      result.add(text[at ..< j])
+    else:
+      result.add(text[authorityStart ..< j])
+    i = j
+
+proc pushOutputHookRefusalLines*(output: string): seq[string] =
+  ## The lines of a failed push transcript that a REPROBUILD MANAGED HOOK
+  ## wrote, rather than the transport.
+  ##
+  ## ``pushLockRef`` pushes the lock-record backend repository, and that
+  ## repository carries managed hooks of its OWN: its ``pre-push`` runs the
+  ## gate and can REFUSE. When it does, git exits non-zero having transported
+  ## nothing, which from the outside is indistinguishable from a transport
+  ## failure — and was indistinguishable in the field for hours, because the
+  ## caller printed "check backend connectivity, credentials, and branch
+  ## policy" over a stream that already said exactly what had happened.
+  ##
+  ## Managed hook output is prefixed (``repro check: `` / ``repro hooks: ``),
+  ## which is what makes it separable from the transport's. The marker is
+  ## matched ANYWHERE in the line, not only at its start, because the same
+  ## bytes arrive differently depending on which side refused: a client-side
+  ## ``pre-push`` hook's stderr passes through verbatim, while a server-side
+  ## ``pre-receive`` refusal is re-emitted by ``receive-pack`` behind a
+  ## ``remote: `` prefix. Each returned line begins AT the marker, so that
+  ## prefix is dropped without a second rule.
+  for raw in output.splitLines():
+    let line = raw.strip()
+    if line.len == 0: continue
+    var marker = -1
+    for token in ["repro check:", "repro hooks:"]:
+      let at = line.find(token)
+      if at >= 0 and (marker < 0 or at < marker): marker = at
+    if marker >= 0:
+      result.add(line[marker .. ^1])
+
 const lockPublishNonFfRetryBudget = 8
   ## RA-29: bounded re-apply attempts for a non-fast-forward (concurrent
   ## publisher) push. Because lock files are commit-addressed —
@@ -41860,9 +41952,49 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
     if not pushOutputIsNonFastForward(pushRes.output):
       # Leave the verified local lock-only ahead chain intact. A normal retry
       # will re-enter this state machine and resume it.
-      result.diagnostic = "git push " & target.remote & " HEAD:" &
-        target.branch & " failed; verified local lock-only commit retained; " &
-        "check backend connectivity, credentials, and branch policy"
+      #
+      # CLASSIFY BEFORE COMPOSING. This branch means "the push failed and it
+      # was not a lost compare-and-swap" — which is not one cause but several,
+      # and it used to name exactly ONE of them, connectivity/credentials/
+      # branch policy, over ALL of them, while dropping the child's transcript
+      # "because remotes may contain credentials".
+      #
+      # In the field the cause was this backend repository's OWN managed
+      # `pre-push` hook refusing. It had printed `repro check: error: ...` and
+      # `repro hooks: ...` lines naming the reason exactly, and this sentence
+      # was composed over them and sent an operator after a network that was
+      # never down. Attribution (Workspace-And-Develop-Mode.md) forbids
+      # precisely that: no diagnostic may be read as coming from a cause that
+      # did not produce it.
+      #
+      # So the hook refusal is reported AS a hook refusal and quoted, the
+      # transcript is passed through with URL userinfo redacted — the
+      # credential lives in a URL and nowhere else, see `redactUrlUserinfo` —
+      # and the connectivity/credentials wording is reserved for a transcript
+      # that is neither shape.
+      let attempted = "git push " & target.remote & " HEAD:" &
+        target.branch & " failed; verified local lock-only commit retained; "
+      let refusal = pushOutputHookRefusalLines(pushRes.output)
+      # One line, because a diagnostic is carried as one JSON/report field.
+      # Blank lines are dropped so the join cannot produce "... /  / ...".
+      var transcriptLines: seq[string]
+      for raw in pushRes.output.splitLines():
+        let line = raw.strip()
+        if line.len > 0: transcriptLines.add(line)
+      let transcript = redactUrlUserinfo(transcriptLines.join(" / "))
+      result.diagnostic =
+        if refusal.len > 0:
+          attempted & "REFUSED BY THE MANAGED HOOKS of the lock backend " &
+            "repository at " & repoRoot & " — this is not connectivity, " &
+            "credentials or branch policy. The hook said: " &
+            redactUrlUserinfo(refusal.join(" / ")) & ". Resolve that refusal " &
+            "in " & repoRoot & ", then re-run to publish the retained commit"
+        elif transcript.len > 0:
+          attempted & "check backend connectivity, credentials, and branch " &
+            "policy; git said: " & transcript
+        else:
+          attempted & "check backend connectivity, credentials, and branch " &
+            "policy (git wrote nothing to explain the failure)"
       return
     inc attempt
     if attempt > lockPublishNonFfRetryBudget:
