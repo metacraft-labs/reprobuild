@@ -10305,6 +10305,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_hooks_ensure_restores_dispatcher_displaced_by_prek.nim",
+    binary: "build/test-bin/t_hooks_ensure_restores_dispatcher_displaced_by_prek",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_hooks_noop_outside_initialized_workspace.nim",
     binary: "build/test-bin/t_hooks_noop_outside_initialized_workspace",
     defines: @[],
