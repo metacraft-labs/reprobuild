@@ -139,6 +139,62 @@ proc actionOutputs(action: JsonNode): seq[string] =
   for entry in node:
     result.add(entry.getStr().replace('\\', '/'))
 
+template cliInputMatchesProducer(text, producerSource, constMarker,
+                                 label: string): bool =
+  ## One (producing edge, input constant) pair: the constant's arm for this
+  ## host must be exactly the output ``nim.c`` declares for that edge. The
+  ## value is THE assertion, and the caller ``check``s it; the ``check``s
+  ## inside only localise a failure. A template rather than a proc so those
+  ## inner checks fail the enclosing test case too.
+  let edgeStart = text.find("source = \"" & producerSource & "\"")
+  checkpoint(label & ": producing edge for " & producerSource & " at " &
+    $edgeStart)
+  check edgeStart >= 0
+  let producerBinary =
+    if edgeStart < 0: ""
+    else: literalAfter(text[edgeStart .. ^1], "binary =")
+  checkpoint(label & ": producing edge declares binary = " & producerBinary)
+  check producerBinary.len > 0
+
+  let constBlock = blockAt(text, constMarker)
+  checkpoint(label & ": " & constMarker & " block:\n" & constBlock)
+  check constBlock.len > 0
+
+  # Two arms, not one. A bare literal -- which is what the constant
+  # regressed to -- yields exactly one literal here and fails on the spot,
+  # without needing a Windows host to notice.
+  let arms = stringLiterals(constBlock)
+  checkpoint(label & ": arms: " & $arms)
+  check arms.len == 2
+
+  let windowsArm = literalAfter(constBlock, "when defined(windows):")
+  let otherArm = literalAfter(constBlock, "else:")
+  checkpoint(label & ": windows arm = " & windowsArm & ", else arm = " &
+    otherArm)
+  check windowsArm.len > 0
+  check otherArm.len > 0
+  check windowsArm != otherArm
+
+  resetBuildActionRegistry()
+  resetTargetExportRegistry()
+  let producer = nimTool.c(
+    source = producerSource,
+    binary = producerBinary,
+    actionId = "t_repro_cli_input.producer.probe." & label)
+  check producer.outputs.len == 1
+  let declared =
+    if producer.outputs.len == 1: producer.outputs[0].replace('\\', '/')
+    else: ""
+  checkpoint(label & ": nim.c declares: " & declared)
+
+  # THE ASSERTION. The input the recipe spells for this host must be the
+  # output the producer declares for this host.
+  let expectedArm =
+    when defined(windows): windowsArm
+    else: otherArm
+  checkpoint(label & ": this host's arm = " & expectedArm)
+  declared.len > 0 and declared == expectedArm
+
 suite "the repro CLI input is spelled as its producer declares it":
 
   test "static: the recipe's CLI input equals what nim.c declares for that edge":
@@ -149,53 +205,19 @@ suite "the repro CLI input is spelled as its producer declares it":
     # host, and require the constant's arm for this host to be that exact
     # string. A test that merely checked for ".exe" would still pass if the
     # suffixing rule moved again.
+    #
+    # There are TWO such pairs, because there are two CLI images (see
+    # ``libs/repro_core/src/repro_core/cli_images.nim``): ``reproBinaryPath``
+    # is the thin daemon client built from ``apps/repro-client``, and
+    # ``reprobuildEngineBinaryPath`` is the engine built from ``apps/repro``.
+    # Each constant has to match the edge that produces IT; pairing the
+    # client's path with the engine's edge compares two different binaries.
     let repoRoot = findRepoRoot()
     let text = projectText(repoRoot)
-
-    let appsEdgeStart = text.find("source = \"apps/repro/repro.nim\"")
-    check appsEdgeStart >= 0
-    let producerBinary =
-      if appsEdgeStart < 0: ""
-      else: literalAfter(text[appsEdgeStart .. ^1], "binary =")
-    checkpoint("producing edge declares binary = " & producerBinary)
-    check producerBinary.len > 0
-
-    let constBlock = blockAt(text, "const reproBinaryPath")
-    checkpoint("reproBinaryPath block:\n" & constBlock)
-    check constBlock.len > 0
-
-    # Two arms, not one. A bare literal -- which is what the constant
-    # regressed to -- yields exactly one literal here and fails on the spot,
-    # without needing a Windows host to notice.
-    let arms = stringLiterals(constBlock)
-    checkpoint("reproBinaryPath arms: " & $arms)
-    check arms.len == 2
-
-    let windowsArm = literalAfter(constBlock, "when defined(windows):")
-    let otherArm = literalAfter(constBlock, "else:")
-    checkpoint("windows arm = " & windowsArm & ", else arm = " & otherArm)
-    check windowsArm.len > 0
-    check otherArm.len > 0
-    check windowsArm != otherArm
-
-    resetBuildActionRegistry()
-    resetTargetExportRegistry()
-    let producer = nimTool.c(
-      source = "apps/repro/repro.nim",
-      binary = producerBinary,
-      actionId = "t_repro_cli_input.producer.probe")
-    check producer.outputs.len == 1
-    let declared =
-      if producer.outputs.len == 1: producer.outputs[0].replace('\\', '/')
-      else: ""
-    checkpoint("nim.c declares: " & declared)
-
-    # THE ASSERTION. The input the recipe spells for this host must be the
-    # output the producer declares for this host.
-    when defined(windows):
-      check declared == windowsArm
-    else:
-      check declared == otherArm
+    check cliInputMatchesProducer(text, "apps/repro-client/repro_client.nim",
+      "const reproBinaryPath", "client")
+    check cliInputMatchesProducer(text, "apps/repro/repro.nim",
+      "const reprobuildEngineBinaryPath", "engine")
 
   test "engine: an e2e execute edge depends on the action that builds the CLI":
     # The static check pins the strings; this pins the consequence. If the two
