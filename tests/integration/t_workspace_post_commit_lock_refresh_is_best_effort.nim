@@ -69,13 +69,39 @@ proc runCmd(command: string; cwd = ""): tuple[code: int; output: string] =
 proc requireGit(command: string; cwd = ""): string =
   let res = runCmd(command, cwd)
   if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
+    # stderr, not ``checkpoint``: unittest prints checkpoints only when a
+    # check fails, and ``quit`` ends the process before any does — so a
+    # checkpoint here made a fixture failure silently end the whole binary
+    # after the last case that happened to pass.
+    stderr.writeLine("command failed: " & command & "\nexit=" & $res.code &
       "\n" & res.output)
     quit 1
   res.output
 
 proc repoRoot(): string =
   result = currentSourcePath().parentDir.parentDir.parentDir
+
+proc commitWithoutHooks(gitBin, repoPath, message: string) =
+  ## Make a fixture commit WITHOUT firing the repo's hooks.
+  ##
+  ## Every case here drives ``repro hooks dispatch post-commit`` itself, by
+  ## the exact argv the dispatcher uses, and counts what that invocation did.
+  ## But the first dispatch also installs the managed hook set into the repo
+  ## it runs in, so a plain ``git commit`` the fixture makes afterwards fires
+  ## the installed ``post-commit`` too — and that hook evaluates whichever
+  ## ``repro`` is first on the developer's PATH (``~/.nix-profile/bin/repro``
+  ## on a workstation, nothing at all on CI). On a workstation that meant a
+  ## THIRD, unrequested run appending a third log line, from a binary this
+  ## checkout did not build. Pointing ``core.hooksPath`` at an empty directory
+  ## for the one command keeps the fixture's own commits out of the
+  ## measurement without touching the hooks under test.
+  # Outside the workspace (every fixture repo sits at <scratch>/workspace/<repo>)
+  # so the empty directory is never mistaken for workspace content.
+  let noHooks = repoPath.parentDir.parentDir / "no-hooks"
+  createDir(noHooks)
+  discard requireGit(q(gitBin) & " -C " & q(repoPath) &
+    " -c core.hooksPath=" & q(noHooks) & " commit -m " & q(message))
+
 
 # Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact
 # (``reprobuild.apps.repro`` → ``build/bin/repro``, built by ``just bootstrap``
@@ -303,8 +329,7 @@ proc commitInRepo(gitBin: string; fx: M19Fixture;
   let repoPath = fx.workspaceRoot / repoDir
   writeFile(repoPath / fileName, fileName & "\n")
   discard requireGit(q(gitBin) & " -C " & q(repoPath) & " add " & q(fileName))
-  discard requireGit(q(gitBin) & " -C " & q(repoPath) &
-    " commit -m " & q("commit " & fileName))
+  commitWithoutHooks(gitBin, repoPath, "commit " & fileName)
   requireGit(q(gitBin) & " -C " & q(repoPath) & " rev-parse HEAD").strip()
 
 proc commitInLibA(gitBin: string; fx: M19Fixture; fileName: string): string =
@@ -592,8 +617,7 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       let libAPath = fx.workspaceRoot / "lib-a"
       writeFile(libAPath / "second.txt", "second commit\n")
       discard requireGit(q(gitBin) & " -C " & q(libAPath) & " add second.txt")
-      discard requireGit(q(gitBin) & " -C " & q(libAPath) &
-        " commit -m second")
+      commitWithoutHooks(gitBin, libAPath, "second")
       let secondSha = requireGit(q(gitBin) & " -C " & q(libAPath) &
         " rev-parse HEAD").strip()
 
@@ -733,8 +757,11 @@ suite "M19b — post-commit reports publication, not just the write":
       # the sequence that left 20 untracked records in one workspace's store.
       discard commitInLibA(gitBin, fx, "stranded-one.txt")
       check invokePostCommit(fx, fx.workspaceRoot / "lib-a").code == 0
+      # A fixture push, not the gate under test: keep it out of the hooks the
+      # post-commit run above installed (see ``commitWithoutHooks``).
       discard requireGit(q(gitBin) & " -C " &
-        q(fx.workspaceRoot / "lib-a") & " push origin main")
+        q(fx.workspaceRoot / "lib-a") & " -c core.hooksPath=" &
+        q(fx.scratch / "no-hooks") & " push origin main")
 
       # The next commit's post-commit run can now SEE the stranded predecessor.
       discard commitInLibA(gitBin, fx, "stranded-two.txt")
