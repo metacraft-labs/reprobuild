@@ -23068,7 +23068,17 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
   ## are sorted by ``(package, name)`` for deterministic CLI output and
   ## JSON consumers. ``packageFilter`` (if non-empty) restricts the
   ## listing to one owning package.
-  discard bypassRunQuota
+  ##
+  ## Like ``runGraphCommand`` / ``runWhyCommand`` (and the task commands
+  ## d7789837c fixed the same way), this is an inspection verb that still
+  ## RUNS the project-interface extraction edge, and that edge is leased. It
+  ## is dispatched from ``runBuildCommand`` BEFORE that proc's own
+  ## ``startAutoRunQuotaIfNeeded``, so without the call below the listing only
+  ## worked when some earlier process had left a per-user ``runquotad``
+  ## answering the default socket; on a host with none it failed with
+  ## "runquota daemon unreachable and bypass is disabled".
+  var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
+  defer: releaseAutoRunQuotaProcess(autoRunQuota)
   var effectiveMode = mode
   if effectiveMode == tpmUnspecified:
     effectiveMode = tpmPathOnly
