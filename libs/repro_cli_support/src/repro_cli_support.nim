@@ -34449,10 +34449,19 @@ method putLock*(s: GitCheckoutLockStore;
     if stagedRes.code == 0:
       rememberExpected()
       return ok()
-    let commitRes = gitRunPlain(s.identity,
+    # The same internal lock-commit context every other lock commit carries
+    # (``publishWorkspaceLock``, the canonical-path repair). Without it this
+    # commit fired the BACKEND's own managed post-commit as if an operator had
+    # committed there: a nested post-commit lock refresh inside the record
+    # store, plus the hook self-heal, which rewrote the backend's hooks as a
+    # side effect of recording a lock — so a tampered or stale backend
+    # pre-push was silently replaced before `repro push`'s hook preflight
+    # could report it.
+    let commitRes = gitRunPlainEnv(s.identity,
       ["-C", s.manifestRepoRoot, "commit", "--quiet", "-m",
        "lockstore: " & rec.key.project & "/" & rec.key.repo & "@" &
-       rec.key.sha, "--", rel])
+       rec.key.sha, "--", rel],
+      internalContext = InternalLockCommitContext)
     if commitRes.code != 0:
       return failed("git commit failed: " & commitRes.output.strip())
     rememberExpected()
