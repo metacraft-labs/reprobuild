@@ -100,6 +100,225 @@ var vectorsChecked = 0
   ## assert their own delta on it, so a loop that stopped iterating moves
   ## a number instead of going quiet.
 
+proc driveEveryLaunchShapeTheCorpusStatesADigestForReproduces() =
+  ## The body of test
+  ##   "every launch shape the corpus states a digest for reproduces"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var ran = 0
+  for v in corpus.vectors:
+    if v.kind != uvkDigest or isSkipped(v.test): continue
+    let p = parametersFor(v)
+    let got =
+      if v.seedHex.len > 0:
+        hexOfBytes(snpLaunchDigest(p, bytesOfHex(v.seedHex)))
+      else:
+        launchDigestHex(p)
+    check got == v.expected
+    if got != v.expected:
+      checkpoint(v.test & ": " & got & " against " & v.expected)
+    inc ran
+    inc vectorsChecked
+  # Two of the three declared skips state a digest; the third asserts
+  # about files. Written as the arithmetic rather than as a number, so
+  # that changing the skip list cannot leave this alone.
+  check ran == ExpectedDigestVectors - ShapesThisBuildDoesNotRun.len + 1
+
+proc driveTheFirmwareSOwnContributionReproducesAndBothRoutesAgree() =
+  ## The body of test
+  ##   "the firmware's own contribution reproduces, and both routes agree"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var ran = 0
+  for v in corpus.vectors:
+    if v.kind != uvkFirmwareHash: continue
+    check hexOfBytes(snpFirmwareDigest(firmwareFor(v))) == v.expected
+    inc ran
+    inc vectorsChecked
+  check ran == ExpectedFirmwareHashVectors
+  # Seeding the chain with that value and walking the firmware's pages
+  # are two routes to the same number. The corpus states the same
+  # digest for both, but only because upstream also has both routes;
+  # this asserts it of THIS build, on a shape the corpus does not pair.
+  let p = SevLaunchParameters(mode: slmSevSnp, firmware: amdSevFirmware,
+    vcpus: 3, vcpuSignature: cpuSignatureFor("EPYC-Milan"),
+    guestFeatures: 0x21, vmm: svkQemu, hasKernel: true,
+    cmdline: "root=/dev/vda1")
+  check hexOfBytes(snpLaunchDigest(p)) ==
+    hexOfBytes(snpLaunchDigest(p, snpFirmwareDigest(amdSevFirmware)))
+
+proc driveEveryLaunchShapeTheCorpusStatesARefusalForIsRefused() =
+  ## The body of test
+  ##   "every launch shape the corpus states a refusal for is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var ran = 0
+  for v in corpus.vectors:
+    if v.kind != uvkRefusal or isSkipped(v.test): continue
+    # Upstream's sentence is its own; what is compared is that a
+    # refusal happened and that it is about the same thing — a kernel
+    # offered to a firmware with nowhere to put its digests.
+    check "Kernel specified but OVMF" in v.expected
+    var raised = false
+    try:
+      discard launchDigest(parametersFor(v))
+    except SnpLaunchError as err:
+      raised = true
+      check err.condition in {slcKernelDigestsNoAddress,
+                              slcKernelDigestsNoRegion}
+      reachedLaunchConditions.incl err.condition
+    check raised
+    inc ran
+    inc vectorsChecked
+  check ran == ExpectedRefusalVectors
+
+proc driveTheCorpusSDistinctAnswersStayDistinct() =
+  ## The body of test
+  ##   "the corpus's distinct answers stay distinct"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # A calculator that returned a constant would satisfy a vector loop
+  # only if every vector shared one value. They do not, and the count
+  # of distinct values this build produces has to equal the count the
+  # corpus states — in both directions, so a build that collapsed two
+  # shapes onto one number is red even though each comparison passed.
+  var stated: seq[string] = @[]
+  var produced: seq[string] = @[]
+  for v in corpus.vectors:
+    if v.kind != uvkDigest or isSkipped(v.test): continue
+    stated.add v.expected
+    produced.add (if v.seedHex.len > 0:
+        hexOfBytes(snpLaunchDigest(parametersFor(v), bytesOfHex(v.seedHex)))
+      else: launchDigestHex(parametersFor(v)))
+    inc vectorsChecked
+  check stated.deduplicate.len == produced.deduplicate.len
+  check stated.sorted == produced.sorted
+  check stated.deduplicate.len == 19
+
+proc driveTheFirmwareSPageWalkIsExercisedByMoreThanOnePage() =
+  ## The body of test
+  ##   "the firmware's page walk is exercised by more than one page"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Every firmware image upstream publishes is ONE page, so the walk's
+  # per-page address, its loop and its order have no input in the
+  # corpus at all: dropping the offset from the address left every
+  # published vector green. These three images are built here and the
+  # digests are the reference implementation's, at the pinned commit.
+  var seen: seq[string] = @[]
+  for row in ReferenceWalkInputs:
+    var image: seq[byte] = @[]
+    var fills: seq[byte] = @[]
+    var i = 0
+    while i < row.fill.len:
+      fills.add byte(parseHexInt(row.fill[i .. i + 1]))
+      i += 2
+    for f in fills:
+      for _ in 0 ..< SnpPageSize: image.add f
+    image.add amdSevFirmware
+    check image.len == (fills.len + 1) * SnpPageSize
+    let got = hexOfBytes(snpFirmwareDigest(image))
+    check got == row.digest
+    if got != row.digest: checkpoint(row.name & ": " & got)
+    check got notin seen
+    seen.add got
+    inc vectorsChecked
+  check seen.len == 3
+  # And the loop agrees with the same pages folded in by hand, one at
+  # a time, at addresses this case computes itself.
+  var byHand = newSnpLaunchContext()
+  var image: seq[byte] = @[]
+  for _ in 0 ..< SnpPageSize: image.add 0'u8
+  image.add amdSevFirmware
+  let base = FourGiB - uint64(image.len)
+  for p in 0 ..< 2:
+    var page: seq[byte] = @[]
+    for i in 0 ..< SnpPageSize: page.add image[p * SnpPageSize + i]
+    byHand.update(spkNormal, base + uint64(p * SnpPageSize), sha384Of(page))
+  check hexOfBytes(byHand.ld) == ReferenceWalkInputs[0].digest
+
+proc driveEveryHypervisorHasMoreThanOneProcessorSomewhere() =
+  ## The body of test
+  ##   "every hypervisor has more than one processor somewhere"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # One of the three hypervisors appears in the corpus only at a
+  # single processor, so its rule for the processors after the first —
+  # which differ from the first in that hypervisor and in no other —
+  # had no input. This matrix gives all three of them two and four.
+  var produced: seq[string] = @[]
+  var byVmm: seq[string] = @[]
+  for row in ReferenceProcessorMatrix:
+    let got = launchDigestHex(SevLaunchParameters(mode: slmSevSnp,
+      firmware: amdSevFirmware, vcpus: row.vcpus,
+      vcpuSignature: cpuSignatureFor("EPYC-v4"), guestFeatures: 0x21,
+      vmm: vmmKindFor(row.vmm)))
+    check got == row.digest
+    if got != row.digest:
+      checkpoint(row.vmm & "/" & $row.vcpus & ": " & got)
+    produced.add got
+    if row.vmm notin byVmm: byVmm.add row.vmm
+    inc vectorsChecked
+  check produced.len == 9
+  check produced.deduplicate.len == 9
+  check byVmm.len == 3
+  # The one row this matrix shares with the PUBLISHED corpus agrees
+  # with it, which is what says the matrix was produced under the same
+  # reading of the inputs as the corpus was.
+  check ReferenceProcessorMatrix[0].vmm == "qemu"
+  check ReferenceProcessorMatrix[0].vcpus == 1
+  check ReferenceProcessorMatrix[0].digest ==
+    statedDigestFor("test_snp_without_kernel_default")
+
+proc driveAKernelAnInitialRamdiskAndACommandLineEachReachTheAnswer() =
+  ## The body of test
+  ##   "a kernel, an initial ramdisk and a command line each reach the answer"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Every kernel and every initial ramdisk the published corpus names
+  # is the null device, so a build that read NEITHER file produced
+  # every published number correctly. These four rows carry bytes, and
+  # differ from each other in one input each.
+  var produced: seq[string] = @[]
+  for row in ReferenceKernelDigests:
+    var p = SevLaunchParameters(mode: slmSevSnp, firmware: amdSevFirmware,
+      vcpus: 1, vcpuSignature: cpuSignatureFor("EPYC-v4"),
+      guestFeatures: 0x21, vmm: svkQemu, hasKernel: true,
+      cmdline: row.cmdline)
+    for c in row.kernel: p.kernel.add byte(c)
+    for c in row.initrd: p.initrd.add byte(c)
+    let got = launchDigestHex(p)
+    check got == row.digest
+    if got != row.digest: checkpoint(row.name & ": " & got)
+    produced.add got
+    inc vectorsChecked
+  check produced.len == 4
+  check produced.deduplicate.len == 4
+  check ReferenceKernelFixture.len == 40
+  check ReferenceInitrdFixture.len == 49
+
+# The cases above whose inputs build the checked-vector count.
+# The coverage case below drives every one of them itself: the suite
+# runner executes each case in its own process (`--run suite::test`),
+# so the census holds only what ran in THAT process, and a coverage
+# case that read what earlier cases left behind would measure the
+# execution mode rather than the code under test.
+const VectorDrivers: seq[(string, proc () {.nimcall.})] = @[
+  ("every launch shape the corpus states a digest for reproduces",
+    driveEveryLaunchShapeTheCorpusStatesADigestForReproduces),
+  ("the firmware's own contribution reproduces, and both routes agree",
+    driveTheFirmwareSOwnContributionReproducesAndBothRoutesAgree),
+  ("every launch shape the corpus states a refusal for is refused",
+    driveEveryLaunchShapeTheCorpusStatesARefusalForIsRefused),
+  ("the corpus's distinct answers stay distinct",
+    driveTheCorpusSDistinctAnswersStayDistinct),
+  ("the firmware's page walk is exercised by more than one page",
+    driveTheFirmwareSPageWalkIsExercisedByMoreThanOnePage),
+  ("every hypervisor has more than one processor somewhere",
+    driveEveryHypervisorHasMoreThanOneProcessorSomewhere),
+  ("a kernel, an initial ramdisk and a command line each reach the answer",
+    driveAKernelAnInitialRamdiskAndACommandLineEachReachTheAnswer)]
+
 suite "the launch-digest calculator against an independent implementation":
 
   test "the embedded corpus is the file the reference implementation publishes":
@@ -177,64 +396,13 @@ suite "the launch-digest calculator against an independent implementation":
     check cmdlines.len == 2        # an empty command line, and one with text
 
   test "every launch shape the corpus states a digest for reproduces":
-    var ran = 0
-    for v in corpus.vectors:
-      if v.kind != uvkDigest or isSkipped(v.test): continue
-      let p = parametersFor(v)
-      let got =
-        if v.seedHex.len > 0:
-          hexOfBytes(snpLaunchDigest(p, bytesOfHex(v.seedHex)))
-        else:
-          launchDigestHex(p)
-      check got == v.expected
-      if got != v.expected:
-        checkpoint(v.test & ": " & got & " against " & v.expected)
-      inc ran
-      inc vectorsChecked
-    # Two of the three declared skips state a digest; the third asserts
-    # about files. Written as the arithmetic rather than as a number, so
-    # that changing the skip list cannot leave this alone.
-    check ran == ExpectedDigestVectors - ShapesThisBuildDoesNotRun.len + 1
+    driveEveryLaunchShapeTheCorpusStatesADigestForReproduces()
 
   test "the firmware's own contribution reproduces, and both routes agree":
-    var ran = 0
-    for v in corpus.vectors:
-      if v.kind != uvkFirmwareHash: continue
-      check hexOfBytes(snpFirmwareDigest(firmwareFor(v))) == v.expected
-      inc ran
-      inc vectorsChecked
-    check ran == ExpectedFirmwareHashVectors
-    # Seeding the chain with that value and walking the firmware's pages
-    # are two routes to the same number. The corpus states the same
-    # digest for both, but only because upstream also has both routes;
-    # this asserts it of THIS build, on a shape the corpus does not pair.
-    let p = SevLaunchParameters(mode: slmSevSnp, firmware: amdSevFirmware,
-      vcpus: 3, vcpuSignature: cpuSignatureFor("EPYC-Milan"),
-      guestFeatures: 0x21, vmm: svkQemu, hasKernel: true,
-      cmdline: "root=/dev/vda1")
-    check hexOfBytes(snpLaunchDigest(p)) ==
-      hexOfBytes(snpLaunchDigest(p, snpFirmwareDigest(amdSevFirmware)))
+    driveTheFirmwareSOwnContributionReproducesAndBothRoutesAgree()
 
   test "every launch shape the corpus states a refusal for is refused":
-    var ran = 0
-    for v in corpus.vectors:
-      if v.kind != uvkRefusal or isSkipped(v.test): continue
-      # Upstream's sentence is its own; what is compared is that a
-      # refusal happened and that it is about the same thing — a kernel
-      # offered to a firmware with nowhere to put its digests.
-      check "Kernel specified but OVMF" in v.expected
-      var raised = false
-      try:
-        discard launchDigest(parametersFor(v))
-      except SnpLaunchError as err:
-        raised = true
-        check err.condition in {slcKernelDigestsNoAddress,
-                                slcKernelDigestsNoRegion}
-        reachedLaunchConditions.incl err.condition
-      check raised
-      inc ran
-      inc vectorsChecked
-    check ran == ExpectedRefusalVectors
+    driveEveryLaunchShapeTheCorpusStatesARefusalForIsRefused()
 
   test "the machine-model table agrees with upstream's in both directions":
     # Upstream's table is the authority and this build's copy is checked
@@ -334,23 +502,7 @@ suite "the launch-digest calculator against an independent implementation":
     check snpDigests.deduplicate.len == 3
 
   test "the corpus's distinct answers stay distinct":
-    # A calculator that returned a constant would satisfy a vector loop
-    # only if every vector shared one value. They do not, and the count
-    # of distinct values this build produces has to equal the count the
-    # corpus states — in both directions, so a build that collapsed two
-    # shapes onto one number is red even though each comparison passed.
-    var stated: seq[string] = @[]
-    var produced: seq[string] = @[]
-    for v in corpus.vectors:
-      if v.kind != uvkDigest or isSkipped(v.test): continue
-      stated.add v.expected
-      produced.add (if v.seedHex.len > 0:
-          hexOfBytes(snpLaunchDigest(parametersFor(v), bytesOfHex(v.seedHex)))
-        else: launchDigestHex(parametersFor(v)))
-      inc vectorsChecked
-    check stated.deduplicate.len == produced.deduplicate.len
-    check stated.sorted == produced.sorted
-    check stated.deduplicate.len == 19
+    driveTheCorpusSDistinctAnswersStayDistinct()
 
 
   test "a corpus row naming a kernel this gate has no bytes for is refused":
@@ -382,100 +534,27 @@ suite "the launch-digest calculator against an independent implementation":
     check raised
 
   test "the firmware's page walk is exercised by more than one page":
-    # Every firmware image upstream publishes is ONE page, so the walk's
-    # per-page address, its loop and its order have no input in the
-    # corpus at all: dropping the offset from the address left every
-    # published vector green. These three images are built here and the
-    # digests are the reference implementation's, at the pinned commit.
-    var seen: seq[string] = @[]
-    for row in ReferenceWalkInputs:
-      var image: seq[byte] = @[]
-      var fills: seq[byte] = @[]
-      var i = 0
-      while i < row.fill.len:
-        fills.add byte(parseHexInt(row.fill[i .. i + 1]))
-        i += 2
-      for f in fills:
-        for _ in 0 ..< SnpPageSize: image.add f
-      image.add amdSevFirmware
-      check image.len == (fills.len + 1) * SnpPageSize
-      let got = hexOfBytes(snpFirmwareDigest(image))
-      check got == row.digest
-      if got != row.digest: checkpoint(row.name & ": " & got)
-      check got notin seen
-      seen.add got
-      inc vectorsChecked
-    check seen.len == 3
-    # And the loop agrees with the same pages folded in by hand, one at
-    # a time, at addresses this case computes itself.
-    var byHand = newSnpLaunchContext()
-    var image: seq[byte] = @[]
-    for _ in 0 ..< SnpPageSize: image.add 0'u8
-    image.add amdSevFirmware
-    let base = FourGiB - uint64(image.len)
-    for p in 0 ..< 2:
-      var page: seq[byte] = @[]
-      for i in 0 ..< SnpPageSize: page.add image[p * SnpPageSize + i]
-      byHand.update(spkNormal, base + uint64(p * SnpPageSize), sha384Of(page))
-    check hexOfBytes(byHand.ld) == ReferenceWalkInputs[0].digest
+    driveTheFirmwareSPageWalkIsExercisedByMoreThanOnePage()
 
   test "every hypervisor has more than one processor somewhere":
-    # One of the three hypervisors appears in the corpus only at a
-    # single processor, so its rule for the processors after the first —
-    # which differ from the first in that hypervisor and in no other —
-    # had no input. This matrix gives all three of them two and four.
-    var produced: seq[string] = @[]
-    var byVmm: seq[string] = @[]
-    for row in ReferenceProcessorMatrix:
-      let got = launchDigestHex(SevLaunchParameters(mode: slmSevSnp,
-        firmware: amdSevFirmware, vcpus: row.vcpus,
-        vcpuSignature: cpuSignatureFor("EPYC-v4"), guestFeatures: 0x21,
-        vmm: vmmKindFor(row.vmm)))
-      check got == row.digest
-      if got != row.digest:
-        checkpoint(row.vmm & "/" & $row.vcpus & ": " & got)
-      produced.add got
-      if row.vmm notin byVmm: byVmm.add row.vmm
-      inc vectorsChecked
-    check produced.len == 9
-    check produced.deduplicate.len == 9
-    check byVmm.len == 3
-    # The one row this matrix shares with the PUBLISHED corpus agrees
-    # with it, which is what says the matrix was produced under the same
-    # reading of the inputs as the corpus was.
-    check ReferenceProcessorMatrix[0].vmm == "qemu"
-    check ReferenceProcessorMatrix[0].vcpus == 1
-    check ReferenceProcessorMatrix[0].digest ==
-      statedDigestFor("test_snp_without_kernel_default")
+    driveEveryHypervisorHasMoreThanOneProcessorSomewhere()
 
   test "a kernel, an initial ramdisk and a command line each reach the answer":
-    # Every kernel and every initial ramdisk the published corpus names
-    # is the null device, so a build that read NEITHER file produced
-    # every published number correctly. These four rows carry bytes, and
-    # differ from each other in one input each.
-    var produced: seq[string] = @[]
-    for row in ReferenceKernelDigests:
-      var p = SevLaunchParameters(mode: slmSevSnp, firmware: amdSevFirmware,
-        vcpus: 1, vcpuSignature: cpuSignatureFor("EPYC-v4"),
-        guestFeatures: 0x21, vmm: svkQemu, hasKernel: true,
-        cmdline: row.cmdline)
-      for c in row.kernel: p.kernel.add byte(c)
-      for c in row.initrd: p.initrd.add byte(c)
-      let got = launchDigestHex(p)
-      check got == row.digest
-      if got != row.digest: checkpoint(row.name & ": " & got)
-      produced.add got
-      inc vectorsChecked
-    check produced.len == 4
-    check produced.deduplicate.len == 4
-    check ReferenceKernelFixture.len == 40
-    check ReferenceInitrdFixture.len == 49
+    driveAKernelAnInitialRamdiskAndACommandLineEachReachTheAnswer()
 
   test "every vector this gate claims to have checked was computed":
     # The loops above each add to one counter. If one of them stopped
     # iterating — a filter that matched nothing, a fixture list that lost
     # an entry — this number moves and the gate is red, rather than the
     # gate passing with nothing in it.
+    # Drive every input the census is built from, HERE and from an
+    # empty census, so the verdict is the same whether this case runs
+    # alone (the runner gives each case its own process) or after
+    # the cases above.
+    vectorsChecked = 0
+    for (name, drive) in VectorDrivers:
+      checkpoint("driving " & name)
+      drive()
     check vectorsChecked ==
       2 * (ExpectedDigestVectors - ShapesThisBuildDoesNotRun.len + 1) +
       ExpectedFirmwareHashVectors + ExpectedRefusalVectors +
