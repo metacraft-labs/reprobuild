@@ -920,7 +920,15 @@ else:
       let report = parseFile(summary)
       check report{"summary"}{"total"}.getInt(-1) == 3
       check report{"summary"}{"passed"}.getInt(-1) == 0
-      check report{"summary"}{"failed"}.getInt(-1) == 3
+      # The three cases were killed by the runner's OWN shutdown, so nothing
+      # was observed about them: since af96ebd45 (#296, "A run that was cut
+      # short must not report its survivors as failures") they are ERROR
+      # with `cancelled: true`, never `failed`. This case predates that
+      # contract and still asserted the old FAIL count.
+      check report{"summary"}{"failed"}.getInt(-1) == 0
+      check report{"summary"}{"harness_errors"}.getInt(-1) == 3
+      check report{"summary"}{"cancelled"}.getInt(-1) == 3
+      check report{"summary"}{"cut_short"}.getBool(false)
       check report{"summary"}{"skipped"}.getInt(-1) == 0
 
     test "post-reap cleanup uses only exact token ownership":
@@ -1696,5 +1704,10 @@ else:
       let report = parseFile(summary)
       check report{"summary"}{"total"}.getInt(-1) == 1
       check report{"summary"}{"passed"}.getInt(-1) == 0
-      check report{"summary"}{"failed"}.getInt(-1) == 1
+      # Cancelled by the runner's shutdown, so ERROR, not FAIL — the #296
+      # contract (af96ebd45); see the SIGINT case above.
+      check report{"summary"}{"failed"}.getInt(-1) == 0
+      check report{"summary"}{"harness_errors"}.getInt(-1) == 1
+      check report{"summary"}{"cancelled"}.getInt(-1) == 1
+      check report{"summary"}{"cut_short"}.getBool(false)
       check report{"summary"}{"skipped"}.getInt(-1) == 0
