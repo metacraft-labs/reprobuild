@@ -322,9 +322,14 @@ suite "DA-1j the zero-valued requirement fails CLOSED":
   ## everything. `observedInterestCovers`'s reading of a required `{}` is the
   ## correct reading of a consumer that literally requires nothing. What was
   ## missing is that reprobuild has no such consumer: `monitorInterest` returns
-  ## `FullInterest` for every action, and an empty required set here is always
-  ## the zero value leaking, never an intent. So reprobuild normalises its OWN
-  ## required side with io-mon's OWN mapping and io-mon's contract is untouched.
+  ## the tool package's DA-6 declaration, every declaration the vocabulary
+  ## admits is a superset of `ReprobuildConsumedInterest` (compile-checked in a
+  ## `static:` block beside `declaredMonitorInterest`), and so its answer is
+  ## never empty for any action — the one narrowing that exists,
+  ## `FullInterest - {ecAmbientReads}`, is seven categories. An empty required
+  ## set here is therefore always the zero value leaking, never an intent. So
+  ## reprobuild normalises its OWN required side with io-mon's OWN mapping and
+  ## io-mon's contract is untouched.
   ##
   ## PAIRED WITH THE ACCEPTANCE CASES, for the reason stated at the top of this
   ## file: "the zero value refuses everything" would satisfy the refusal cases
@@ -370,8 +375,13 @@ suite "DA-1j the zero-valued requirement fails CLOSED":
   test "a default-constructed requirement refuses EVERY proper narrowing":
     ## THE CASE THAT PINS THE MAPPING. The two cases above are satisfied by any
     ## normalisation whose result is not a subset of `{file,proc,lib}` — mapping
-    ## the zero value to `{ecIpc}` alone would pass both while still trusting a
-    ## capture that dropped the env reads. So drop each category in turn and
+    ## the zero value to `{ecPathProbes}` alone would pass both while still
+    ## trusting a capture that dropped the env reads. (This hypothetical used to
+    ## name `{ecIpc}`, which DA-5 RETIRED: `mrIpcConnect` is ungate-able now, so
+    ## there is no such category to map to and no capture that can drop it.
+    ## `ecPathProbes` is the replacement because it has the property the
+    ## hypothetical needs — gate-able, and not `ecEnvReads`.) So drop each
+    ## category in turn and
     ## require a refusal for every one: that is only true if the zero value
     ## demands a set no proper subset of `FullInterest` covers, i.e. exactly
     ## `FullInterest` itself. Exhaustive over `EventCategory`, so a category

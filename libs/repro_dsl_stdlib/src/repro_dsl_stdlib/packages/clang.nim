@@ -158,7 +158,40 @@ package clang:
 
   executable clang:
     cli:
-      dependencyPolicy automaticMonitor
+      # DA-6 — THE CAPTURE-BREADTH DECLARATION for the clang driver: FULL
+      # CAPTURE, for gcc.nim's reasons, which apply to clang clause for clause.
+      # The full argument is written out once, at `packages/gcc.nim`'s
+      # `dependencyPolicy`, and is not duplicated here; what IS worth stating is
+      # why it transfers and where clang differs.
+      #
+      # THE CLAIM: a clang action asks io-mon for EVERY event category, ambient
+      # reads included.
+      #
+      # IT TRANSFERS because the depfile's blind spots are a property of the
+      # `.d` FORMAT, not of the compiler that writes it: `-MD` output lists the
+      # translation unit's headers and never the driver, `cc1`, `lld`, the
+      # `-fplugin=` objects, `/etc`, the failed `-I` probes, or the environment
+      # (`CPATH`, `C_INCLUDE_PATH`, `LIBRARY_PATH`, `SOURCE_DATE_EPOCH`,
+      # `TMPDIR`). So `ecProcessTree`, `ecLibraryLoads`, `ecFileReads`,
+      # `ecPathProbes` and `ecEnvReads` are each the only route by which some
+      # real input reaches the key, exactly as for gcc.
+      #
+      # WHERE CLANG DIFFERS, and it strengthens rather than weakens the case:
+      # clang's driver-to-frontend hand-off is usually IN-PROCESS
+      # (`-fintegrated-cc1`), so there is no `cc1` exec to observe and the
+      # frontend's identity arrives ONLY as `mrLibraryLoad` records for
+      # `libclang-cpp` / `libLLVM`. A narrowing of `ecLibraryLoads` would cost
+      # gcc the `-fplugin=` closure and cost clang the compiler itself.
+      #
+      # `ecEntropy` is kept for the same reason as gcc's: there is no
+      # `nonDeterminism` declaration in this block, so clang edges are
+      # `ndpUnblessed` and `applyEntropyBlessingPolicy` needs the records to
+      # withhold publication. `ecAmbientReads` is kept because `__DATE__` /
+      # `__TIME__` / `__TIMESTAMP__` are clang's too and `mrTimeRead` is their
+      # only witness. `mrIpcConnect` / `mrExternalContent` are ungate-able after
+      # DA-5.
+      dependencyPolicy automaticMonitor,
+        captureBreadth = fullCapture
 
       # The clang driver call mirrors gcc.nim's M9.R.2 surface.
       call:

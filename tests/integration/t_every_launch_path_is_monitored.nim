@@ -1472,8 +1472,16 @@ proc configFor(lp: LaunchPath; repoRoot, cacheRoot: string):
 ## file. The three anti-vacuity pins below (`PWD` in `monitorEnvReads`, a
 ## non-empty `entropyObservations`, a decided `entropyObservability`) are what
 ## keep the removal honest: they only hold while the engine really does request
-## `ecNonDeterminism`, so an engine that starts reducing it again reddens here
-## instead of quietly making four empty sets agree.
+## the categories those three fields are filled from, so an engine that starts
+## reducing them again reddens here instead of quietly making four empty sets
+## agree. Post-DA-5 those categories are `ecEnvReads` (`monitorEnvReads`, via
+## `cacheEnvInputs`) and `ecEntropy` (`entropyObservations`, via
+## `applyEntropyBlessingPolicy`); they were one bucket, `ecNonDeterminism`, when
+## this was written, which is the bundling that made no narrowing safe.
+## DA-6 lets a TOOL PACKAGE narrow the request, and neither of these two is
+## narrowable by any declaration it can make — `declaredMonitorInterest` is
+## checked against `ReprobuildConsumedInterest` in a `static:` block — so this
+## fixture, which declares nothing, still asks for all eight.
 
 proc monitoredFixtureAction(id, fixtureBin, marker, outPath, workRoot: string;
                             holdMs: int; cpuMilli: uint32): BuildAction =
