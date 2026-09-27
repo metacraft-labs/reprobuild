@@ -131,6 +131,22 @@ proc setupFixture(gitBin, slug: string; withManifest: bool): Fixture =
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
+  # The ``.repro/`` SHELL, in BOTH states, so the only thing that differs
+  # between them is the one thing the cases below vary: the manifests.
+  #
+  # It used to be absent from both, which made the "marker present" fixture a
+  # bare clone of the workspace repo rather than an initialized workspace —
+  # manifest-shaped directories and nothing else — and the case then asserted
+  # that shape IS the marker. It is not, and the cost of reading it that way
+  # was measured in the field: the lock RECORD STORE has exactly that shape
+  # (``projects/``, ``repos/``, ``locks/``, no ``.repro/``), so it too was
+  # classified as an initialized workspace, every "not a workspace" guard was
+  # skipped there, and the pre-push gate exited 1 in a repo with nothing to
+  # gate. ``hasResolvedManifestCheckout`` now requires the shell for the flat
+  # layout, which is what its own contract always said. Creating it here keeps
+  # this case testing what its name claims — manifest presence drives ok vs
+  # fail — over a fixture that is a workspace root rather than a clone of one.
+  createDir(workspaceRoot / ".repro")
   if withManifest:
     let manifestsRoot = workspaceRoot
     createDir(manifestsRoot / "projects")

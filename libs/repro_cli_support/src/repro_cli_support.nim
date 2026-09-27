@@ -44151,6 +44151,54 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
   report.timestamp = timestamp
   report.exitCode = 0
 
+  # RA-10: no-op outside an initialized workspace. The post-commit hook
+  # may be installed under a half-bootstrapped or non-workspace parent —
+  # a plain git repo, a bare ``.repro/`` with no resolved manifest
+  # checkout, or the lock RECORD STORE (a manifests checkout, which carries
+  # ``projects/``/``repos/`` and is not a workspace). We use the canonical
+  # ``isInitializedWorkspace`` marker (resolved manifest checkout OR a
+  # ``workspace.toml``) rather than a bare
+  # ``fileExists(.repro/workspace.toml)`` so a workspace that resolves
+  # from a single ``projects/*.toml`` (no metadata-only workspace.toml
+  # yet) still runs, while a genuine non-workspace skips silently. A
+  # commit must never be blocked by hook failure, so this always exits 0.
+  #
+  # ASKED BEFORE THE STAND-DOWN CHECK BELOW, and the order is load-bearing.
+  # Both arms return 0 and both leave a trace, so the ordering is invisible
+  # in the exit code and visible only in WHICH trace. "Git is mid-rebase" is
+  # a statement about a workspace this hook has work in; "this is not a
+  # workspace" is a statement about whether it has work here AT ALL, and
+  # the second answer subsumes the first. With the stand-down first, a
+  # non-workspace that merely happened to be caught mid-rebase reported
+  # ``skipped-git-operation-in-progress`` — which reads as "there is work
+  # here, deferred", invites a retry that will never behave differently,
+  # and hides the one fact an operator needs: these hooks are installed
+  # somewhere they have nothing to do. Its sibling, the ``pre-commit``
+  # flake-lock handler, already asks in this order.
+  if workspaceRoot.len == 0 or not isInitializedWorkspace(workspaceRoot):
+    # No workspace to enforce — but still leave a trace. When the walk found no
+    # workspace at all, the report is filed at the nearest ``.repro/`` shell
+    # above the repo (a half-bootstrapped parent), which is where an operator
+    # looking for one would go. Silence here is what turned this branch into a
+    # black hole in the field.
+    let reportAnchor =
+      if workspaceRoot.len > 0: workspaceRoot
+      else: enclosingReproShell(parsed.currentRepo)
+    report.workspaceRoot = reportAnchor
+    report.outcome = postCommitOutcomeTag(pcoSkippedNoWorkspace)
+    report.publication = postCommitPublicationTag(pcpNoRecord)
+    report.diagnostic =
+      if reportAnchor.len == 0:
+        "no workspace root found from --current-repo=" & parsed.currentRepo
+      else:
+        "not a workspace; nothing to enforce (no resolved manifest " &
+          "checkout at " & reportAnchor & ")"
+    if reportAnchor.len > 0:
+      writePostCommitReport(reportAnchor, report)
+      appendPostCommitLog(reportAnchor,
+        timestamp & " " & report.outcome & " " & report.diagnostic)
+    return 0
+
   # `post-commit` shares `post-checkout`'s exposure: git fires it for EVERY
   # commit a rebase, a `git am` or a sequencer run replays (observed live,
   # with `rebase-merge` + `CHERRY_PICK_HEAD` present each time). Everything
@@ -44177,39 +44225,6 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
         timestamp & " " & report.outcome & " " & report.diagnostic)
     if standDown.loud:
       stderr.writeLine("repro " & standDown.report)
-    return 0
-
-  # RA-10: no-op outside an initialized workspace. The post-commit hook
-  # may be installed under a half-bootstrapped or non-workspace parent —
-  # a plain git repo, or a bare ``.repo/`` with no resolved manifest
-  # checkout. We use the canonical ``isInitializedWorkspace`` marker
-  # (resolved manifest checkout OR a ``workspace.toml``) rather than a
-  # bare ``fileExists(.repo/workspace.toml)`` so a workspace that resolves
-  # from a single ``projects/*.toml`` (no metadata-only workspace.toml
-  # yet) still runs, while a genuine non-workspace skips silently. A
-  # commit must never be blocked by hook failure, so this always exits 0.
-  if workspaceRoot.len == 0 or not isInitializedWorkspace(workspaceRoot):
-    # No workspace to enforce — but still leave a trace. When the walk found no
-    # workspace at all, the report is filed at the nearest ``.repro/`` shell
-    # above the repo (a half-bootstrapped parent), which is where an operator
-    # looking for one would go. Silence here is what turned this branch into a
-    # black hole in the field.
-    let reportAnchor =
-      if workspaceRoot.len > 0: workspaceRoot
-      else: enclosingReproShell(parsed.currentRepo)
-    report.workspaceRoot = reportAnchor
-    report.outcome = postCommitOutcomeTag(pcoSkippedNoWorkspace)
-    report.publication = postCommitPublicationTag(pcpNoRecord)
-    report.diagnostic =
-      if reportAnchor.len == 0:
-        "no workspace root found from --current-repo=" & parsed.currentRepo
-      else:
-        "not a workspace; nothing to enforce (no resolved manifest " &
-          "checkout at " & reportAnchor & ")"
-    if reportAnchor.len > 0:
-      writePostCommitReport(reportAnchor, report)
-      appendPostCommitLog(reportAnchor,
-        timestamp & " " & report.outcome & " " & report.diagnostic)
     return 0
 
   # RA-4: fire the detached cache-ref push independently of the lock

@@ -12,12 +12,39 @@
 ## the commit/push with a fatal error.
 ##
 ## The canonical "initialized workspace" marker is the presence of a
-## *resolved manifest checkout* — a ``.repro/workspace.toml`` OR at least
-## one resolved ``projects/*.toml`` / ``variants/*.toml`` at the
-## workspace root — NOT merely a bare ``.repro/`` directory. The
-## shared predicate ``isInitializedWorkspace`` (re-exported from
-## ``repro_workspace_manifests``) backs both the hook-skip logic and any
-## init-skip logic.
+## *resolved manifest checkout* — a ``.repro/workspace.toml`` OR, inside
+## the root's ``.repro/`` shell, at least one resolved ``projects/*.toml``
+## / ``variants/*.toml`` — NOT merely a bare ``.repro/`` directory, and
+## NOT a directory that merely happens to hold manifest-shaped
+## subdirectories. The shared predicate ``isInitializedWorkspace``
+## (re-exported from ``repro_workspace_manifests``) backs both the
+## hook-skip logic and any init-skip logic.
+##
+## THE FIXTURE PART 4 EXISTS FOR. The three parents Parts 1-3 cover — a
+## plain git repo, a half-bootstrapped bare ``.repro/``, and a real
+## workspace — all passed while the field failed, because none of them is
+## the parent that actually broke: the LOCK RECORD STORE. That store is
+## the ``metacraft-manifests`` repo. It carries ``projects/``, ``repos/``
+## and ``locks/`` at its TOP LEVEL, it has no ``.repro/workspace.toml``
+## and no committed ``repro.lock``, and it is NOT a workspace — it is the
+## place a workspace's membership and lock records are kept. Classified
+## as a workspace on the strength of those directory names alone, it
+## lands in a gap nothing covers: every non-workspace guard is skipped,
+## the committed-lock fallback is gated on the same (wrong) answer so it
+## is skipped too, no project can be named, and the resolver raises. The
+## pre-push gate then exits 1 in a repo that has nothing to gate — and
+## because store publication is a STAGE of that gate, that blocks pushes
+## in every repo of the workspace. Part 4 is the falsification control
+## for exactly that: a real manifests/record-store checkout, real
+## installed managed hooks, and a real ``git push`` that must not be
+## blocked.
+##
+## TWO "DO NOTHING" ARMS, AND WHICH ONE ANSWERS. The post-commit handler
+## can also stand down because git is mid-rebase / mid-cherry-pick. Both
+## arms exit 0 and both file a report, so the ordering between them is
+## invisible in the exit code and visible only in the trace — and outside
+## a workspace the workspace answer is the true one. Part 2b pins that
+## order with a real conflicting cherry-pick.
 ##
 ## This suite is falsifiable + hermetic:
 ##   * Falsifiable — it asserts the EXACT no-op contract (exit 0, the
@@ -29,6 +56,16 @@
 ##     these checks fail.
 ##   * Hermetic — every git repo and manifest checkout lives in a fresh
 ##     tempdir; nothing touches ``$HOME`` or any shared cache.
+##
+## NO MOCKS. Every repo here is a real git repo, every hook is a real
+## managed hook installed by ``repro hooks ensure --vcs``, and Part 4's
+## push is a real ``git push`` to a real (local, bare) origin. Nothing
+## stubs the filesystem or the git boundary, so nothing can pass because
+## a stub agreed with the code under test. Part 4 pins
+## ``REPROBUILD_REPRO`` at the binary under test for the same reason: the
+## generated hook body resolves ``repro`` from that variable FIRST and
+## from ``command -v repro`` second, so a fixture that leaves it unset
+## silently exercises whatever ``repro`` happens to be on PATH.
 ##
 ## Skip rule: ``git`` missing on PATH (same convention as M17 / M18 /
 ## M19).
@@ -210,6 +247,48 @@ proc cloneAll(gitBin: string; fx: Fixture) =
 proc seedWorkspaceToml(fx: Fixture) =
   writeWorkspaceBranch(fx.workspaceRoot, project = "lib-a", branch = "main")
 
+proc seedManifestsRecordStore(gitBin: string; fx: Fixture; slug: string):
+    tuple[origin, path: string] =
+  ## A LOCK RECORD STORE checkout, built to the shape the real
+  ## ``metacraft-manifests`` repo has and nothing more: a git repo with a
+  ## push destination, carrying ``projects/``, ``repos/`` and ``locks/`` at
+  ## its TOP LEVEL, and carrying NEITHER a ``.repro/workspace.toml`` NOR a
+  ## committed ``repro.lock``. It is deliberately NOT nested under any
+  ## workspace, so the workspace walk has no ancestor to escape to and the
+  ## classification of THIS directory is the only thing that decides what
+  ## the hooks do.
+  ##
+  ## The project/repo fragments are the same ones the real workspace fixture
+  ## uses. That is the point: the store's manifest data is genuinely
+  ## resolvable — it is membership for repos that live somewhere ELSE — so
+  ## nothing here can be dismissed as malformed manifest content.
+  result.origin = fx.scratch / ("origin-" & slug & ".git")
+  result.path = fx.scratch / slug
+  discard requireGit(q(gitBin) & " init --bare -b main " & q(result.origin))
+  discard requireGit(q(gitBin) & " init -b main " & q(result.path))
+  discard requireGit(q(gitBin) & " -C " & q(result.path) &
+    " config user.email tester@example.invalid")
+  discard requireGit(q(gitBin) & " -C " & q(result.path) &
+    " config user.name \"Record Store Tester\"")
+  createDir(result.path / "projects")
+  createDir(result.path / "repos")
+  createDir(result.path / "locks")
+  writeFile(result.path / "projects" / "lib-a.toml",
+    projectTomlWith3Remotes(
+      fileUrl(fx.libA.origin), fileUrl(fx.libB.origin),
+      fileUrl(fx.libC.origin)))
+  writeFile(result.path / "repos" / "lib-a.toml", libAFragmentToml)
+  writeFile(result.path / "repos" / "lib-b.toml", libBFragmentToml)
+  writeFile(result.path / "repos" / "lib-c.toml", libCFragmentToml)
+  writeFile(result.path / "locks" / ".gitkeep", "")
+  discard requireGit(q(gitBin) & " -C " & q(result.path) & " add -A")
+  discard requireGit(q(gitBin) & " -C " & q(result.path) &
+    " commit -m \"seed record store\"")
+  discard requireGit(q(gitBin) & " -C " & q(result.path) &
+    " remote add origin " & q(result.origin))
+  discard requireGit(q(gitBin) & " -C " & q(result.path) &
+    " push origin main")
+
 proc invokeEnsure(fx: Fixture): CmdResult =
   runShell(shellCommand(@[
     fx.reproBin, "hooks", "ensure", "--vcs",
@@ -253,6 +332,38 @@ proc invokeCheckPrePush(fx: Fixture; workspaceRoot, currentRepo,
     "--pushed-refs=" & refsFile,
   ]))
 
+proc invokeEnsureAt(fx: Fixture; targetPath: string): CmdResult =
+  ## ``repro hooks ensure --vcs <path>`` — the positional form the
+  ## generated hook bodies themselves recommend, used here to install the
+  ## managed hooks into ONE repo that is not part of any workspace.
+  runShell(shellCommand(@[
+    fx.reproBin, "hooks", "ensure", "--vcs", targetPath,
+  ]))
+
+proc invokeDispatchNonBlocking(fx: Fixture; hookName, repoRoot: string;
+                               positional: openArray[string] = []): CmdResult =
+  ## Exact argv the managed pre-commit / post-commit / post-merge /
+  ## post-checkout hook bodies use: everything after ``--`` is git's own
+  ## positional argument list for that hook.
+  var argv = @[
+    fx.reproBin, "hooks", "dispatch", hookName,
+    "--repo-root", repoRoot, "--",
+  ]
+  for p in positional: argv.add(p)
+  runShell(shellCommand(argv))
+
+proc invokeCheckPrePushByWalk(fx: Fixture; currentRepo, refsFile: string):
+    CmdResult =
+  ## ``repro check --mode=pre-push`` WITHOUT ``--workspace-root``, so the
+  ## workspace walk — not the caller — decides what this repo belongs to.
+  ## That is the decision the managed hook body actually makes, and the one
+  ## that misclassified the record store in the field.
+  runShell(shellCommand(@[
+    fx.reproBin, "check", "--mode=pre-push",
+    "--current-repo=" & currentRepo,
+    "--pushed-refs=" & refsFile,
+  ]))
+
 proc postCommitReport(fx: Fixture; workspaceRoot: string): JsonNode =
   let reportPath = workspaceRoot / ".repro" / "build" / "reports" /
     "post-commit-report.json"
@@ -268,6 +379,19 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
     if gitBin.len == 0:
       skip()
     else:
+      # WHICH BUILD THE HOOKS RUN. Every generated hook body resolves
+      # ``repro`` from ``REPROBUILD_REPRO`` first and from ``command -v
+      # repro`` second, and a managed post-commit / post-checkout run
+      # re-ensures the repo's hooks — so a fixture that leaves the
+      # variable unset hands that re-ensure to whatever ``repro`` is on
+      # PATH (here: the pinned store build) and quietly rewrites the very
+      # hooks under test with THAT build's contract. Measured while adding
+      # Part 4: the store's hooks came back stamped with the pinned
+      # build's pre-push contract, the dispatcher then refused the push as
+      # a tooling mismatch, and the refusal looked exactly like the gate
+      # failure the part is about. Exported once, here, for every child
+      # process this case starts.
+      putEnv("REPROBUILD_REPRO", reproBinary())
       # ============================================================
       # Part 1 — a genuine NON-workspace: a plain git repo whose parent
       # has NO ``.repro/`` at all. Install the managed hooks against a real
@@ -351,6 +475,50 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       check ppHalf.code == 0
       check ppHalf.output.contains("not a workspace")
 
+      # Part 2b — THE SAME NON-WORKSPACE, CAUGHT MID-OPERATION. The
+      # post-commit handler has two "do nothing" arms: "git is mid-rebase,
+      # stand down" and "this is not a workspace". Both exit 0 and both
+      # leave a trace, so only the trace can tell which one fired — and
+      # only the second is the truth here. A non-workspace is not a
+      # workspace whose work is deferred; reporting a stand-down invites a
+      # retry that will never behave differently and hides the fact that
+      # these hooks are installed where they have nothing to do.
+      #
+      # Real git state, not a fabricated marker: a genuinely conflicting
+      # cherry-pick, which is what leaves ``CHERRY_PICK_HEAD`` and the
+      # sequencer behind. ``halfRepo`` has no installed hooks (the ensure
+      # above targeted the workspace's repos), so nothing fires until the
+      # dispatch below.
+      writeFile(halfRepo / "README.md", "half: side\n")
+      discard requireGit(q(gitBin) & " -C " & q(halfRepo) &
+        " checkout -q -b side")
+      discard requireGit(q(gitBin) & " -C " & q(halfRepo) & " add README.md")
+      discard requireGit(q(gitBin) & " -C " & q(halfRepo) &
+        " commit -m \"side edit\"")
+      discard requireGit(q(gitBin) & " -C " & q(halfRepo) &
+        " checkout -q main")
+      writeFile(halfRepo / "README.md", "half: main\n")
+      discard requireGit(q(gitBin) & " -C " & q(halfRepo) & " add README.md")
+      discard requireGit(q(gitBin) & " -C " & q(halfRepo) &
+        " commit -m \"main edit\"")
+      # Expected to FAIL with a conflict — that is the state under test.
+      let pick = runCmd(q(gitBin) & " -C " & q(halfRepo) &
+        " cherry-pick side")
+      check pick.code != 0
+      check fileExists(halfRepo / ".git" / "CHERRY_PICK_HEAD")
+
+      let pcHalfMid = invokeDispatchPostCommit(fx, halfRepo)
+      check pcHalfMid.code == 0
+      let halfMidReport = postCommitReport(fx, halfRoot)
+      # The marker check is asked FIRST, so the verdict is about the
+      # workspace, not about git's in-flight operation.
+      check halfMidReport["outcome"].getStr() == "skipped-no-workspace"
+      check halfMidReport["diagnostic"].getStr().contains("not a workspace")
+      check not halfMidReport["diagnostic"].getStr().contains(
+        "a git operation is in progress")
+      discard requireGit(q(gitBin) & " -C " & q(halfRepo) &
+        " cherry-pick --abort")
+
       # ============================================================
       # Part 3 — CONTRAST: a REAL initialized workspace still ENFORCES.
       # The no-op must fire ONLY for genuine non-workspaces. Here the
@@ -382,3 +550,101 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
         refsFile = realRefs)
       check ppReal.code == 0
       check not ppReal.output.contains("not a workspace")
+
+      # ============================================================
+      # Part 4 — a MANIFESTS / LOCK-RECORD-STORE checkout. See the
+      # "THE FIXTURE PART 4 EXISTS FOR" note in this file's header: this
+      # is the parent that broke in the field, and the one shape Parts
+      # 1-3 do not have. ``projects/`` + ``repos/`` + ``locks/`` at the
+      # top level, no ``.repro/workspace.toml``, no committed
+      # ``repro.lock``, not nested under any workspace.
+      #
+      # All five managed hooks must no-op with SUCCESS here, and a real
+      # ``git push`` out of it must not be blocked.
+      # ============================================================
+      let store = seedManifestsRecordStore(gitBin, fx, "manifests-store")
+
+      # The fixture is the shape the claim is about, asserted rather than
+      # assumed: manifest-shaped directories present, both workspace
+      # markers absent.
+      check dirExists(store.path / "projects")
+      check dirExists(store.path / "repos")
+      check dirExists(store.path / "locks")
+      check not fileExists(store.path / ".repro" / "workspace.toml")
+      check not fileExists(store.path / "repro.lock")
+
+      # Real managed hooks, installed by the real installer into the store
+      # repo itself. Everything below therefore exercises the hook
+      # COMMAND, not an absent hook.
+      let ensureStore = invokeEnsureAt(fx, store.path)
+      if ensureStore.code != 0:
+        checkpoint("ensure(store) output: " & ensureStore.output)
+      check ensureStore.code == 0
+      for hookName in ["pre-commit", "pre-push", "post-commit",
+                       "post-merge", "post-checkout"]:
+        check fileExists(store.path / ".git" / "hooks" / hookName)
+
+      let storeSha = requireGit(q(gitBin) & " -C " & q(store.path) &
+        " rev-parse HEAD").strip()
+
+      # (a) The pre-push GATE. Dispatched the way git dispatches it, and
+      # also as the bare ``repro check`` the dispatcher calls into — with
+      # NO ``--workspace-root``, so the walk decides. Both must exit 0
+      # with the "not a workspace" verdict. This is the falsifiable one:
+      # before the fix the walk answered "this IS a workspace", the
+      # resolver could name no project, and this exited 1 with
+      # "requires either `.repro/workspace.toml` or a <project> argument"
+      # — a blocking refusal in a repo with nothing to gate.
+      let storeRefs = fx.scratch / "store-refs.txt"
+      writeRefsFile(storeRefs, "refs/heads/main", storeSha)
+      let ppStoreCheck = invokeCheckPrePushByWalk(fx,
+        currentRepo = store.path, refsFile = storeRefs)
+      if ppStoreCheck.code != 0:
+        checkpoint("check(store) output: " & ppStoreCheck.output)
+      check ppStoreCheck.code == 0
+      check ppStoreCheck.output.contains("not a workspace")
+      check not ppStoreCheck.output.contains("requires either")
+      let ppStoreDispatch = invokeDispatchPrePush(fx, store.path, storeRefs,
+        store.origin)
+      if ppStoreDispatch.code != 0:
+        checkpoint("dispatch pre-push(store) output: " &
+          ppStoreDispatch.output)
+      check ppStoreDispatch.code == 0
+
+      # (b) The four non-blocking hooks. They exit 0 by policy whatever
+      # they decide, so the falsifiable assertion is not the code but the
+      # DISK: a no-op must leave no ``.repro/`` behind in the store. It is
+      # not tidiness — an untracked ``.repro/`` beside the store's tracked
+      # files is dirt outside ``locks/``, which is exactly what the lock
+      # publisher's dirty guard refuses, permanently, because its own next
+      # commit regenerates it.
+      check invokeDispatchNonBlocking(fx, "post-commit", store.path).code == 0
+      check invokeDispatchNonBlocking(fx, "pre-commit", store.path).code == 0
+      check invokeDispatchNonBlocking(fx, "post-merge", store.path,
+        ["0"]).code == 0
+      check invokeDispatchNonBlocking(fx, "post-checkout", store.path,
+        [storeSha, storeSha, "1"]).code == 0
+      check not dirExists(store.path / ".repro")
+
+      # (c) The whole point, end to end: a real commit and a real
+      # ``git push`` through the real installed pre-push hook.
+      # ``REPROBUILD_REPRO`` pins which build the hook body resolves (see
+      # the header note) so this cannot pass on a different binary.
+      writeFile(store.path / "locks" / "note.txt", "a record\n")
+      discard requireGit(q(gitBin) & " -C " & q(store.path) & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(store.path) &
+        " commit -m \"add a record\"")
+      let pushRes = runShell(shellCommand(
+        @[gitBin, "-C", store.path, "push", "origin", "main"],
+        @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
+      if pushRes.code != 0:
+        checkpoint("git push(store) output: " & pushRes.output)
+      check pushRes.code == 0
+      # The push actually landed — a hook that refused would have left the
+      # origin behind.
+      check requireGit(q(gitBin) & " -C " & q(store.origin) &
+        " rev-parse refs/heads/main").strip() ==
+        requireGit(q(gitBin) & " -C " & q(store.path) &
+          " rev-parse HEAD").strip()
+      # Still no workspace state manufactured inside the store.
+      check not dirExists(store.path / ".repro")
