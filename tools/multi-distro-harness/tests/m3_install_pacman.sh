@@ -86,8 +86,19 @@ DB='reprobuild'
 BIN='/usr/bin/repro'
 KEYRING_DEST='/usr/share/keyrings/reprobuild-archive-keyring.gpg'
 PACCONF='/etc/pacman.conf'
-BEGIN_MARK='# >>> reprobuild installer >>>'
-END_MARK='# <<< reprobuild installer <<<'
+BEGIN_MARK='# >>> metacraft-labs repository >>>'
+
+# The installer serves the ORGANISATION's repositories by default: one
+# source entry, one armoured key, one pacman section, shared by every
+# Metacraft product. The fixture repositories below are built by
+# repro-publish-repos.sh, which emits a BINARY keyring and a pacman
+# database named `reprobuild`, so the arm points the installer at those
+# names. The entry's file names stay the organisation's.
+REPRO_KEYRING_FILE='reprobuild-archive-keyring.gpg'
+REPRO_ARCH_REPO_NAME='reprobuild'
+REPRO_REPO_USERS_DIR='/var/lib/metacraft-labs/repository-users'
+export REPRO_KEYRING_FILE REPRO_ARCH_REPO_NAME REPRO_REPO_USERS_DIR
+END_MARK='# <<< metacraft-labs repository <<<'
 
 fails=0
 checks=0
@@ -193,7 +204,12 @@ print('wrote a distro-free pacman.conf with %d lines' % len(out))
 PYCONF
 assert_eq "$(grep -c '^\[core\]' "$CONF_MIN" || true)" '0' 'the distro-free conf has no [core]'
 assert_eq "$(grep -c '^\[extra\]' "$CONF_MIN" || true)" '0' 'the distro-free conf has no [extra]'
-assert_eq "$(grep -c '^\[options\]' "$CONF_MIN" || true)" '1' 'the distro-free conf still has [options]'
+# Every [options] section survives, however many the distro ships: pacman
+# 7.1's stock pacman.conf has two (a second one at the end of the file).
+# Non-vacuity: the source must have at least one.
+OPTS_FULL="$(grep -c '^\[options\]' "$CONF_FULL" || true)"
+assert_ne "$OPTS_FULL" '0' 'the full conf has an [options] section'
+assert_eq "$(grep -c '^\[options\]' "$CONF_MIN" || true)" "$OPTS_FULL" 'the distro-free conf keeps every [options] section'
 assert_eq "$(grep -c '^\[core\]' "$CONF_FULL" || true)" '1' 'the full conf does have [core] (so P3 runs like a real box)'
 
 # Our fenced block, captured from what the INSTALLER wrote, so swapping
@@ -507,7 +523,7 @@ step 'P1  installer FAILS CLOSED with no pinned trust anchor digest'
 set_conf "$CONF_MIN"
 pac_reset
 set +e
-env REPRO_BASE_URL="$BASE" sh "$INSTALL_SH" --method pacman >"$WORK/p1.log" 2>&1
+env REPRO_BASE_URL="$BASE" REPRO_KEYRING_SHA256='' sh "$INSTALL_SH" --method pacman >"$WORK/p1.log" 2>&1
 P1_RC=$?
 set -e
 assert_ne "$P1_RC" '0' 'P1 installer exited non-zero with no digest pinned'
