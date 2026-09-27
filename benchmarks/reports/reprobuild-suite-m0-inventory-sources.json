@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1749,
+    "nimTestBinaries": 1752,
     "pureUnitConsolidationGroups": 49,
     "pureUnitTests": 585,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1762
+    "testEntries": 1765
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1086,10 +1086,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 897,
+      "integration": 898,
       "platform/destructive": 115,
       "pure unit": 585,
-      "unclassified": 154
+      "unclassified": 156
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1237,9 +1237,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1749,
+    "nimTestBinaryCount": 1752,
     "pythonTestFileCount": 13,
-    "testEntryCount": 1762
+    "testEntryCount": 1765
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3422,7 +3422,7 @@
             "readyPath",
             "workRoot"
           ],
-          "line": 323,
+          "line": 332,
           "path": "tests/integration/t_derived_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -3440,7 +3440,7 @@
             "readyPath",
             "workRoot"
           ],
-          "line": 325,
+          "line": 334,
           "path": "tests/integration/t_derived_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -7021,6 +7021,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_da6_declared_interest_keeps_every_consumer",
+      "class": "unclassified",
+      "classificationReason": "imports `io_mon`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_core"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_da6_declared_interest_keeps_every_consumer.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_daemon_check_platform_refusal",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -9307,6 +9326,24 @@
       "source": "libs/repro_dsl_stdlib/tests/t_committed_lock_variants_are_hard.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_da6_capture_breadth_dsl_surface",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess (through `libs/repro_dsl_stdlib/tests/lock_file_compile_probe.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_da6_capture_breadth_dsl_surface.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25284,6 +25321,27 @@
       "source": "tests/integration/t_da1i_evidence_scope_reaches_io_mon.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_da6_tool_capture_breadth_declarations",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_core",
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_da6_tool_capture_breadth_declarations.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
