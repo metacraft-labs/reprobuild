@@ -130,9 +130,31 @@ proc readRecord(path: string): MonitorRecord =
 
 const
   FullInterestStamp = ";interest=file,proc,lib,nondet,ipc"
-    ## What a full-interest capture really stamps — io-mon encodes
-    ## `FullInterest` to every token rather than to the empty string, so an
-    ## older reader cannot mistake "all" for "unset".
+    ## A full-interest capture in the PRE-DA-5 vocabulary — the five tokens
+    ## every `.iomon` written before io-mon's category split carries. io-mon
+    ## still reads them, as aliases: `parseInterestTokens` expands them through
+    ## `legacyInterestExpansion` and the union is exactly `FullInterest`, so
+    ## this stamp still means "observed everything" and the cases below still
+    ## use it as the full-scope fixture. It is kept in the old spelling
+    ## deliberately — those bytes are on disk and have to keep reading as full.
+    ##
+    ## It is NOT what a capture written TODAY stamps. `interestToTokens` emits
+    ## canonical spellings only and never an alias, so a current full capture
+    ## reads `file-reads,path-probes,file-writes,proc,lib,env,entropy,ambient`.
+    ## Anything asserting on the TEXT of a refusal must go through
+    ## `interestToTokens`, not through this constant; see `NarrowedStamp`.
+  NarrowedStamp = ";interest=file,proc,lib"
+    ## The narrowing the two refusal cases below are built on: files, process
+    ## tree and library loads, with no env reads and no entropy.
+  NarrowedStampTokens = interestToTokens(parseInterestTokens("file,proc,lib"))
+    ## How a refusal SENTENCE renders `NarrowedStamp`, derived from io-mon's
+    ## own codec rather than written out. `monitorScopeRefusal` phrases the
+    ## observed side with `interestToTokens(effectiveObservedInterest(dep))`,
+    ## which emits canonical tokens for a stamp spelled in aliases — so the
+    ## sentence says `file-reads,path-probes,file-writes,proc,lib` for a stamp
+    ## that says `file,proc,lib`. Hard-coding either spelling puts a second
+    ## copy of io-mon's encoder in this file, and a copy is what went stale
+    ## when the tokens were renamed.
   ReadsOnly = MonitorEvidenceRequirement(
     interest: FullInterest, evidenceScope: esReadsOnly)
   Full = FullMonitorEvidenceRequirement
@@ -238,16 +260,21 @@ suite "DA-1j the event-interest consumer check":
     ## The same shape on the KIND axis, and the same live defect behind it:
     ## a capture asked for only some categories graded `mcComplete` without
     ## saying it had been narrowed. Note which categories are missing here —
-    ## `nondet` carries the env reads that reach the strong fingerprint, and
-    ## `ipc` carries the connects whose loss markers force a downgrade.
-    let dep = capture(";interest=file,proc,lib")
+    ## the stamp names no `env` (the reads that reach the strong fingerprint),
+    ## no `entropy` (the observations that gate cache publication) and no
+    ## `ambient`. The IPC connects whose loss markers force a downgrade are
+    ## NOT among the things this stamp could have dropped: io-mon retired the
+    ## `ecIpc` category in DA-5 and `categoryOf` now answers `none` for
+    ## `mrIpcConnect`, so no interest set can gate them away at all.
+    let dep = capture(NarrowedStamp)
     let refusal = monitorScopeRefusal(dep, Full)
     if refusal.len == 0:
-      echo "a capture stamped `interest=file,proc,lib` was accepted by a ",
+      echo "a capture stamped `", NarrowedStamp, "` was accepted by a ",
         "consumer requiring every category. The record cannot contain the ",
-        "env reads that key the action or the IPC connects that downgrade it."
+        "env reads that key the action or the entropy observations that ",
+        "gate its cache publish."
     check refusal.len > 0
-    check refusal.contains("file,proc,lib")
+    check refusal.contains(NarrowedStampTokens)
 
   test "a full-interest capture is accepted":
     check monitorScopeRefusal(capture(FullInterestStamp), Full).len == 0
@@ -310,23 +337,25 @@ suite "DA-1j the zero-valued requirement fails CLOSED":
 
   test "a default-constructed requirement refuses a narrowed capture":
     ## The defect in one line. `interest=file,proc,lib` is the narrowing
-    ## `monitorInterest`'s own doc comment enumerates as unsafe: it drops
-    ## `nondet` (the `mrEnvRead`s that reach the strong fingerprint, and the
+    ## `monitorInterest`'s own doc comment enumerates as unsafe: it drops the
+    ## `mrEnvRead`s that reach the strong fingerprint and the
     ## `mrNonDeterministic`s without which the entropy policy sees a false
-    ## clean) and `ipc` (the `mrIpcConnect`s whose synthetic loss markers force
-    ## `mcIncomplete`). A requirement nobody filled in must not trust it.
-    let dep = capture(";interest=file,proc,lib")
+    ## clean — post-DA-5 that is the `env`, `entropy` and `ambient` categories.
+    ## (The `mrIpcConnect`s whose synthetic loss markers force `mcIncomplete`
+    ## are no longer part of what a stamp can drop; DA-5 made them ungate-able.)
+    ## A requirement nobody filled in must not trust it.
+    let dep = capture(NarrowedStamp)
     let refusal = monitorScopeRefusal(dep, Zero)
     if refusal.len == 0:
       echo "a DEFAULT-CONSTRUCTED MonitorEvidenceRequirement accepted a ",
-        "capture stamped `interest=file,proc,lib`. The zero value's ",
+        "capture stamped `", NarrowedStamp, "`. The zero value's ",
         "`interest == {}` is read by `observedInterestCovers` as `{} <= ",
         "anything`, which is vacuously true, so the value a caller gets for ",
         "free trusts a capture of ARBITRARILY narrow scope. That is ",
         "fail-open on the axis where the cost of being wrong is publishing a ",
         "narrowed capture as complete evidence."
     check refusal.len > 0
-    check refusal.contains("file,proc,lib")
+    check refusal.contains(NarrowedStampTokens)
 
   test "a default-constructed requirement refuses an unnamable interest stamp":
     ## `interest=gpu` degrades to an observed `{}` on the read side, and `{} <=

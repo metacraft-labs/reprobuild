@@ -3030,21 +3030,42 @@ suite "every_launch_path_is_monitored":
       ##      `file,proc,lib` and the wrapped arm's saw everything.
       ##   2. what they tell it is what the engine asks for. `monitorInterest`
       ##      is private, so its answer is pinned here by value — and the
-      ##      value is not arbitrary: every one of these five categories
-      ##      carries a record kind this engine consumes for a cache-
+      ##      value is not arbitrary: every one of the eight categories it
+      ##      names carries a record kind this engine consumes for a cache-
       ##      correctness decision (see that proc). An engine that starts
-      ##      reducing again reddens HERE, next to the reason.
+      ##      reducing again reddens HERE, next to the reason. The pinned
+      ##      string moved with io-mon's DA-5 category split, which renamed
+      ##      six of the eight tokens and retired `ipc` as a category; the
+      ##      SET is unchanged, and the trailing aliases are the back-compat
+      ##      padding described below, not extra categories.
       ##   3. a REDUCED request really is honoured end to end. (1) and (2)
       ##      cannot show that on their own — the engine's request happens to
       ##      equal the CLI's absent-flag default, so deleting the forwarding
       ##      would leave them both green. Part 3 drives the real `repro
       ##      internal io monitor` image with `--interest file,proc,lib` and
-      ##      requires the child to see exactly that, which is red the moment
-      ##      the flag stops being parsed or stops reaching `childEnv`.
+      ##      requires the child to see the SHIM ENCODING of that request,
+      ##      which is red the moment the flag stops being parsed or stops
+      ##      reaching `childEnv`.
+      ##
+      ## THE FLAG VALUE AND THE CHILD'S VALUE ARE DIFFERENT STRINGS, and since
+      ## io-mon's DA-5 that is by design rather than by accident. One
+      ## vocabulary, two encoders: `interestToTokens` writes the depfile stamp
+      ## in CANONICAL tokens only (an over-stated claim there is accepted by a
+      ## consumer, so an alias must never be emitted), while
+      ## `interestToShimTokens` writes `REPRO_MONITOR_INTEREST` as the
+      ## canonical tokens PLUS a `legacy-padding` fence PLUS the pre-DA-5
+      ## aliases whose record kinds the request wants. A shim built before
+      ## DA-5 knows only the old spellings; handed a canonical-only value it
+      ## would gate away every file read and return a smaller capture under a
+      ## depfile claiming full scope. The padding makes an old shim
+      ## over-capture instead, and the host filter narrows the result back.
+      ## See `parseInterestFlag` and `interestToShimTokens` in io-mon.
       ##
       ## NO MOCKS: two real builds through the real engine, and one real
       ## `repro` subprocess. The oracle is a file the monitored child wrote.
-      const EngineRequest = "file,proc,lib,nondet,ipc"
+      const EngineRequest =
+        "file-reads,path-probes,file-writes,proc,lib,env,entropy,ambient," &
+        "legacy-padding,file,nondet,ipc"
       var bypass = EnumeratedLaunchPaths[0]
       for candidate in EnumeratedLaunchPaths:
         if candidate.kind == lpBypassRunQuota:
@@ -3109,6 +3130,24 @@ suite "every_launch_path_is_monitored":
       # part that is red when the CLI flag stops working; parts 1 and 2 are
       # not, because the engine's request equals the absent-flag default.
       const Reduced = "file,proc,lib"
+        ## What `--interest` is GIVEN. Deliberately the pre-DA-5 spelling: it
+        ## exercises the alias arm of `parseInterestTokens` at the same time,
+        ## and the aliases are what an operator's muscle memory and every
+        ## older script still type.
+      const ReducedSeen =
+        "file-reads,path-probes,file-writes,proc,lib,legacy-padding," &
+        "file,nondet,ipc"
+        ## What the CHILD is told for that request — `interestToShimTokens`
+        ## of the categories `Reduced` decodes to. Canonical tokens for the
+        ## three file categories plus `proc` / `lib`, then the fence, then the
+        ## legacy aliases whose kinds this request wants. `nondet` and `ipc`
+        ## appear even though the request names neither: their legacy member
+        ## kinds include `mrExternalContent` and `mrIpcConnect`, which DA-5
+        ## made ungate-able, so they are wanted by EVERY interest set. What
+        ## makes this case sharp is what is ABSENT — no `env`, `entropy` or
+        ## `ambient` — so a `--interest` that stopped being parsed (the
+        ## absent-flag default is `FullInterest`, which encodes all three)
+        ## reddens here.
       let cliRoot = interestRoot / "cli"
       createDir(cliRoot)
       let tools = monitorTools(repoRoot)
@@ -3129,12 +3168,14 @@ suite "every_launch_path_is_monitored":
       check cliCode == 0
       check fileExists(seenPath)
       let cliSeen = if fileExists(seenPath): readFile(seenPath) else: ""
-      if cliSeen != Reduced:
+      if cliSeen != ReducedSeen:
         echo "the monitor CLI was asked for `", Reduced,
-          "` and told its child `", cliSeen,
+          "` and told its child `", cliSeen, "`, not `", ReducedSeen,
           "`.\n  The `--interest` flag is not reaching io-mon's `childEnv`, ",
-          "which is exactly the discard this whole case exists for."
-      check cliSeen == Reduced
+          "which is exactly the discard this whole case exists for.",
+          "\n  (The two strings differ on purpose — see `ReducedSeen` — but ",
+          "the child's value is still a function of the flag's.)"
+      check cliSeen == ReducedSeen
 
       # AND THE ENGINE REALLY FORWARDS IT, at the one site that builds the
       # wrapped argv. Part 3 proves the CLI honours the flag and part 1
