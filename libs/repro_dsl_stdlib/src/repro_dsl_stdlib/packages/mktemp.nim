@@ -45,7 +45,37 @@ package mktemp:
 
   executable mktemp:
     cli:
-      dependencyPolicy automaticMonitor
+      # DA-6 -- THE CAPTURE-BREADTH DECLARATION for mktemp: FULL CAPTURE, for
+      # `packages/git.nim`'s reasons, which the blessing below shares.
+      #
+      # THE CLAIM: a mktemp action asks io-mon for EVERY event category.
+      #
+      # `ecEntropy` IS THE BLESSING'S OWN INPUT. `applyEntropyBlessingPolicy`
+      # applies the declaration below to the `mrNonDeterministic` RECORDS in a
+      # capture, resolved per-image against `mrProcessExec`; a narrowing here
+      # would leave the gate with zero observations and
+      # `entropyObservability == entObserved`, i.e. the "observable, and nothing
+      # observed" false clean. It would ALSO stop the mechanism telling a blessed
+      # mktemp record apart from an unblessed `uuidgen` one -- which is the one
+      # discrimination this whole file exists to support -- so the narrowing
+      # would cash the waiver in for `uuidgen` too.
+      #
+      # `ecFileWrites` and `ecPathProbes` ARE THE CHECKABLE PART OF THE CLAIM.
+      # The justification below rests on a measurement -- "every one emitted in a
+      # pid whose mrProcessExec names mktemp and whose only writes are the
+      # scratch directory the gate later removes; not one of those names appears
+      # in a declared output" -- and the records that make that statement
+      # falsifiable are write and probe records. A narrowing would leave the
+      # blessing true only as a promise.
+      #
+      # `ecAmbientReads` is kept for the reason git's is: the blessing is scoped
+      # to entropy and says nothing about clock reads, and `mrTimeRead` is the
+      # only witness of the part that is not blessed. `ecEnvReads` carries
+      # `TMPDIR`, which is the whole location contract the blessing depends on
+      # and is not in the argv. `mrIpcConnect` / `mrExternalContent` are
+      # ungate-able after DA-5.
+      dependencyPolicy automaticMonitor,
+        captureBreadth = fullCapture
 
       # THE ENTROPY BLESSING, declared here, on the tool, once -- the shape
       # `packages/nim.nim` established. Scoped to ENTROPY
