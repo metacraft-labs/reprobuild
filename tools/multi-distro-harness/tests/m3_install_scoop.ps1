@@ -73,6 +73,11 @@ $V1 = '0.1.3'
 $V2 = '0.1.4'
 $AppName = 'reprobuild'
 $BucketName = 'reprobuild'
+# The installer defaults to the organisation's bucket and armoured key. The
+# fixture bucket and keyring here are repro-publish-repos.sh's, so the arm
+# names them explicitly, exactly as the POSIX arms do.
+$env:REPRO_BUCKET_NAME = $BucketName
+$env:REPRO_KEYRING_FILE = 'reprobuild-archive-keyring.gpg'
 
 $script:checks = 0
 $script:fails = 0
