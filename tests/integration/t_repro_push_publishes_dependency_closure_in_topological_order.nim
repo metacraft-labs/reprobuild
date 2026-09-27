@@ -232,6 +232,16 @@ proc setupFixture(gitBin, slug: string): Fixture =
   result.workspaceRoot = workspaceRoot
   result.userPostCommitLog = result.scratch / "manifest-user-post-commit.log"
   writeWorkspaceBranch(workspaceRoot, project = "app", branch = "main")
+  # Central lock publication is OPT-IN (MO-14, Workspace-Manifests.md
+  # §"`publish_locks` — central publication is opt-in"). Without
+  # `[manifest] publish_locks = true` each member's gate writes its record and
+  # does NOT publish it, so the lock-published and lock-in-the-bare assertions
+  # below would be asking for something this workspace never enabled.
+  writeFile(workspaceRoot / ".repro-workspace.toml",
+    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
+    "[manifest]\n" &
+    "url = \"" & fileUrl(result.manifestBare) & "\"\n" &
+    "publish_locks = true\n")
 
 proc invokePush(fx: Fixture; fromProject = false): CmdResult =
   var argv = @[fx.reproBin, "push", "--write-report"]

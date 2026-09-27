@@ -34457,10 +34457,19 @@ method putLock*(s: GitCheckoutLockStore;
     if stagedRes.code == 0:
       rememberExpected()
       return ok()
-    let commitRes = gitRunPlain(s.identity,
+    # The same internal lock-commit context every other lock commit carries
+    # (``publishWorkspaceLock``, the canonical-path repair). Without it this
+    # commit fired the BACKEND's own managed post-commit as if an operator had
+    # committed there: a nested post-commit lock refresh inside the record
+    # store, plus the hook self-heal, which rewrote the backend's hooks as a
+    # side effect of recording a lock — so a tampered or stale backend
+    # pre-push was silently replaced before `repro push`'s hook preflight
+    # could report it.
+    let commitRes = gitRunPlainEnv(s.identity,
       ["-C", s.manifestRepoRoot, "commit", "--quiet", "-m",
        "lockstore: " & rec.key.project & "/" & rec.key.repo & "@" &
-       rec.key.sha, "--", rel])
+       rec.key.sha, "--", rel],
+      internalContext = InternalLockCommitContext)
     if commitRes.code != 0:
       return failed("git commit failed: " & commitRes.output.strip())
     rememberExpected()
@@ -43011,10 +43020,36 @@ proc enclosingWorkspaceRoot*(startPath: string): string =
   ## manifest-optional marker (MO-2, a committed ``repro.lock``) decide, and
   ## then the nearest one wins — a standalone committed-lock repo really is its
   ## own workspace, and a repo nested inside a real workspace is not.
+  ##
+  ## A directory INSIDE a workspace's own ``.repro/`` is that workspace's
+  ## state, never a workspace of its own. That matters for the manifest
+  ## checkouts a workspace keeps there — ``.repro/manifests`` and every
+  ## ``[[manifest]]`` layer such as ``.repro/manifests-public`` — because each
+  ## one carries ``projects/`` and so, taken alone, looks like "a resolved
+  ## manifest checkout". Accepting it made a push of a declared layer resolve
+  ## the layer as its own workspace, and the gate refused with the
+  ## "requires either `.repro/workspace.toml`" error instead of running the
+  ## layer checks (the public-lock visibility stage) that exist for exactly
+  ## that push. Such a candidate is skipped, so the walk reaches the
+  ## workspace that owns the ``.repro/`` it sits in.
   let ancestors = selfAndAncestors(startPath)
+  proc insideAncestorReproState(candidate: string): bool =
+    ## True when ``candidate`` lies under ``<A>/.repro/`` for an ancestor
+    ## ``A`` that is itself a workspace.
+    for owner in ancestors:
+      if owner.len >= candidate.len:
+        continue
+      let state = owner / ".repro"
+      if candidate.startsWith(state & DirSep) and
+          (fileExists(workspaceTomlPath(owner)) or
+           hasResolvedManifestCheckout(owner)):
+        return true
+    false
   for candidate in ancestors:
     if fileExists(workspaceTomlPath(candidate)) or
         hasResolvedManifestCheckout(candidate):
+      if insideAncestorReproState(candidate):
+        continue
       return candidate
   for candidate in ancestors:
     if hasCommittedLockWorkspaceMarker(candidate):
