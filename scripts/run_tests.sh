@@ -512,7 +512,17 @@ run_catalog="build/reprobuild-run-catalog.json"
 rm -f "${run_catalog}"
 
 # D6 per-test timeout plus an outer wall-clock backstop for runner wedges.
-RUNNER_TIMEOUT="${REPROBUILD_RUNNER_TIMEOUT:-4h}"
+#
+# The backstop has to be longer than a healthy test phase, or it stops being a
+# backstop and becomes the thing that ends every run. At 4h it was: a full
+# local run on 2026-09-24 (10,432 cases, 8 threads, host load ~100) needed
+# 8h17m for its test phase, and an earlier run with the 4h default was
+# SIGTERM'd after 1,187 of 10,070 planned cases -- every later case reported
+# as never run, whatever it would have done. Per-case wedges are already
+# bounded by --test-timeout's hard ceiling below (4x, i.e. 2h), so this
+# outer limit only has to catch the runner itself wedging; 24h is ~3x the
+# measured phase, leaving room for a slower or busier host.
+RUNNER_TIMEOUT="${REPROBUILD_RUNNER_TIMEOUT:-24h}"
 # ``--test-timeout`` is a *no-progress* deadline: the runner kills a case only
 # after it has produced no output AND its process group has consumed no
 # measurable CPU for N seconds. (Output alone was the old rule; it read CPU
