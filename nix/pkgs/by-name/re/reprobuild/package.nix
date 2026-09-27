@@ -87,11 +87,26 @@
     rev = "bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26";
     hash = "sha256-feW0vlgU6JTVkCLnZ1iyS2FwjXQuRCXHr3V+27oyDAw=";
   },
+  # THIS DEFAULT HAD DRIFTED 46 COMMITS BEHIND `flake.lock`, and the drift is
+  # exactly what the "Every entry mirrors a `flake.lock` pin" note above is
+  # about. It stood at 65b190ba while the lock moved twice, so a consumer who
+  # takes this file WITH its defaults — the nixpkgs path described in
+  # nix/README.md, which has no flake plumbing to override them — built a
+  # reprobuild host against an io-mon from before that project renamed the
+  # tokens it uses to describe what a capture observed. Host and monitor shim
+  # both come from this input, so they at least agreed with each other; what
+  # they disagreed with was every capture file and every other build.
+  #
+  # Nothing checks this correspondence yet, so until something does: move this
+  # rev and hash whenever `io-mon-src` in flake.nix moves. The hash is the same
+  # value the lock records as `narHash` — `fetchFromGitHub` and the flake's
+  # github fetcher produce the same store path for the same revision, which is
+  # how to confirm a bump is right rather than merely well-formed.
   ioMonSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "io-mon";
-    rev = "65b190ba5704454dd33138a2dc82fac8fbc188d6";
-    hash = "sha256-BtMWgvvEg+jONDnQIY8osCHshjwAbonB5ArZpqzmYDA=";
+    rev = "a3edfabb36cf8909bacbe3cf52ab96adf8879158";
+    hash = "sha256-v9VWYux2vUqQP0jM9t4XavF/VWCUoRZgQBwQWc2eA6Y=";
   },
   shmGsetSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
