@@ -1873,6 +1873,130 @@
               pkgs.git
             ];
           };
+
+          # The language toolchains the Mode 2/3 convention tests drive —
+          # `libs/repro_standard_provider/tests/test_<lang>_*_convention` and
+          # the `mixed/*` cross-language cases. Each case probes PATH and
+          # SKIPS without its toolchain, which is correct for a host that
+          # lacks one and wrong as the steady state of the platform the suite
+          # runs on: without this shell every one of them skips on Linux.
+          #
+          # NOT part of `devShells.default`, deliberately. That shell is what
+          # every prompt in this checkout activates (direnv / the repro shell
+          # hook) and what every CI job realises; these toolchains (GHC, Swift,
+          # .NET, GNAT, Erlang, a JDK, ...) add 12.4 GiB to its 4.9 GiB
+          # closure (x86_64-linux, measured 2026-09-27), and only the
+          # convention tests read them. They are reached through the
+          # `test-toolchains` dev-env ACTIVITY instead (see `repro.nim`'s
+          # `devEnv:`), which evaluates this shell only when selected:
+          #
+          #     repro exec --activity=test-toolchains -- just test
+          #
+          # Pins mirror `repro.nim`'s Windows fixture constants where nixpkgs
+          # carries the pinned line: Zig 0.13 (pre-1.0; the M44 fixtures were
+          # audited against it), the .NET 8.0 SDK band, JDK 21, Gradle 8,
+          # FPC 3.2.2 and Swift 5.10.1 (the nixpkgs defaults happen to be
+          # those exact versions). Go is the exception: nixpkgs has removed the
+          # end-of-life 1.23 line, so it is nixpkgs' current Go.
+          #
+          # ONE bin directory, and a curated one, rather than the packages
+          # themselves. GNAT and gfortran are cc-wrappers whose `bin/` also
+          # carries `gcc`, `g++`, `cc`, `ld`, `as`, ...; putting them on PATH
+          # would put GCC 13 (GNAT's) ahead of the dev shell's own compiler
+          # for every `nim c` in the suite. The C toolchain stays the dev
+          # shell's; only names it does not already own are linked here.
+          # gnatmake does not need the shadowed names: its wrapper passes
+          # `-B<its own bin>` to the compiler driver (verified: builds and runs
+          # an Ada hello with GCC 15 first on PATH).
+          # Packages unavailable on the current platform are dropped rather
+          # than failing the shell, so a missing one is a SKIP there too.
+          devShells.test-toolchains =
+            let
+              available = pkgs.lib.filter (p: pkgs.lib.meta.availableOn pkgs.stdenv.hostPlatform p);
+              toolchains = available (
+                [
+                  pkgs.go
+                  pkgs.rustc
+                  pkgs.cargo
+                  pkgs.gfortran
+                  pkgs.fpc
+                  pkgs.ldc
+                  pkgs.zig_0_13
+                  pkgs.meson
+                  pkgs.crystal
+                  pkgs.shards
+                  pkgs.dotnet-sdk_8
+                  pkgs.elixir
+                  pkgs.erlang
+                  pkgs.rebar3
+                  pkgs.jdk21
+                  pkgs.maven
+                  pkgs.gradle_8
+                  pkgs.ghc
+                  pkgs.cabal-install
+                  pkgs.ocaml
+                  pkgs.dune_3
+                  pkgs.php
+                  pkgs.php.packages.composer
+                  pkgs.ruby
+                  pkgs.bundler
+                  pkgs.swift
+                  pkgs.swiftpm
+                ]
+                ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.gnat ]
+              );
+              # Names the dev shell's C toolchain owns. A link under one of
+              # these would shadow it (see above).
+              shadowed = [
+                "addr2line"
+                "ar"
+                "as"
+                "c++"
+                "c++filt"
+                "cc"
+                "cpp"
+                "dwp"
+                "elfedit"
+                "g++"
+                "gcc"
+                "gprof"
+                "ld"
+                "ld.bfd"
+                "ld.gold"
+                "ld.lld"
+                "lld"
+                "nm"
+                "objcopy"
+                "objdump"
+                "ranlib"
+                "readelf"
+                "size"
+                "strings"
+                "strip"
+                "clang"
+                "clang++"
+                "clang-cpp"
+              ];
+              testToolchains = pkgs.runCommand "reprobuild-test-toolchains" { } ''
+                mkdir -p $out/bin
+                for pkg in ${pkgs.lib.escapeShellArgs toolchains}; do
+                  [ -d "$pkg/bin" ] || continue
+                  for exe in "$pkg"/bin/*; do
+                    name=$(basename "$exe")
+                    case " ${toString shadowed} " in *" $name "*) continue ;; esac
+                    # First package wins, so the list order above is priority.
+                    [ -e "$out/bin/$name" ] || ln -s "$exe" "$out/bin/$name"
+                  done
+                done
+              '';
+            in
+            pkgs.mkShellNoCC {
+              packages = [ testToolchains ];
+              # What the Windows side sets for the same fixtures; the nixpkgs
+              # gradle/maven wrappers find a JDK without it, a bare `javac`
+              # consumer may not.
+              JAVA_HOME = pkgs.jdk21.home;
+            };
         };
     };
 }

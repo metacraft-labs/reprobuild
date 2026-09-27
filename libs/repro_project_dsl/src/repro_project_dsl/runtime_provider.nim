@@ -263,13 +263,15 @@ when defined(reproProviderMode):
     resetProviderEvaluationInputRegistry()
     resetDevEnvRegistry()
     currentProviderProjectRoot = request.arguments
+    let selectedActivities = selectedActivityList(request.activity)
+    devEnvSelectedActivities = selectedActivities
     try:
       if devEnvProc != nil:
         devEnvProc()
     finally:
       currentProviderProjectRoot = ""
+      devEnvSelectedActivities.setLen(0)
 
-    let selectedActivities = selectedActivityList(request.activity)
     result = DevEnvResult(
       schemaVersion: 1'u32,
       providerArtifactId: request.providerArtifactId,

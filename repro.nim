@@ -561,6 +561,42 @@ package reprobuild:
     when not defined(windows):
       useFlakeDevShell()
 
+      # POSIX language-fixture toolchains for the Mode 2/3 convention tests
+      # (`libs/repro_standard_provider/tests/test_<lang>_*_convention` and the
+      # `mixed/*` cross-language cases): Go, Rust, GNAT, FPC, LDC, gfortran,
+      # Zig, Crystal, .NET, Elixir/Erlang, Meson, JDK/Maven/Gradle, GHC/Cabal,
+      # OCaml/dune, PHP/Composer, Ruby/Bundler, Swift. Each case probes PATH
+      # and SKIPS without its toolchain; without this activity every one of
+      # them skips on Linux, which made "skipped" the steady state of the
+      # platform the suite is run on rather than the answer for a host that
+      # lacks one tool.
+      #
+      # An ACTIVITY, not part of the default environment:
+      #
+      #     repro exec --activity=test-toolchains -- just test
+      #
+      # The default environment is what every prompt in this checkout
+      # activates and what every CI job realises; the fixture toolchains add
+      # 12.4 GiB to its 4.9 GiB closure (x86_64-linux, measured 2026-09-27)
+      # and only these tests read them. The flake keeps them in
+      # their own shell (`devShells.test-toolchains`, where the versions are
+      # pinned to mirror the Windows constants above), and it is evaluated
+      # only when the activity is selected -- `activitySelected` rather than
+      # `activities = [...]`, because the latter still runs the evaluation
+      # (and realises the closure) for `default` and then discards it.
+      #
+      # That shell is layered ON TOP of the default one: it contributes one
+      # curated bin directory to PATH (plus JAVA_HOME) and leaves the C
+      # toolchain, Nim and every *_SRC variable to the default shell above.
+      # Its own gcroot, so realising it does not unpin the default shell's.
+      activity "test-toolchains"
+      if activitySelected("test-toolchains"):
+        let root = activeProviderProjectRoot()
+        useFlakeDevShell(DefaultFlakeRef & "#test-toolchains",
+          profile = flakeForeignEnvWorkDir(
+            if root.len > 0: root else: getCurrentDir()) /
+            "flake-profile-test-toolchains")
+
     # Windows language-fixture toolchains for the 73
     # ``scripts/validate-standard-provider-*.ps1`` harnesses and their
     # Tier 2b conventions: java-maven (M40), kotlin-gradle (M41),
@@ -585,8 +621,9 @@ package reprobuild:
     # ``repro home apply``; this only finds what they installed, probe-
     # gated exactly like ``env.ps1``'s ``Test-Path`` guards.
     #
-    # Linux / macOS need none of it: the validation harness is PowerShell-
-    # only and reprobuild's flake devShell carries no language fixtures.
+    # Linux / macOS get the same toolchains from the ``test-toolchains``
+    # activity above (nixpkgs, through the flake) rather than from a DIY
+    # root; the PowerShell validation harnesses themselves are Windows-only.
     when defined(windows):
       let diyRoot = windowsDiyInstallRoot()
       let msys2Root = diyRoot / "msys2" / "msys64"

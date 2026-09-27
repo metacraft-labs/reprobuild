@@ -251,6 +251,11 @@ when defined(reproProviderMode):
   var devEnvTaskRegistry: seq[DevEnvTaskMetadata] = @[]
   var devEnvServiceRegistry: seq[DevEnvServiceMetadata] = @[]
   var devEnvDiagnosticRegistry: seq[DevEnvDiagnostic] = @[]
+  var devEnvSelectedActivities: seq[string] = @[]
+    ## The activity set the CURRENT dev-env evaluation was requested for
+    ## (`repro exec|shell --activity=…`), readable from the `devEnv:` body
+    ## through `activitySelected`. Set by `buildPackageDevEnv` around the
+    ## body, empty outside it.
 
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
@@ -1454,6 +1459,25 @@ when defined(reproProviderMode):
   proc activity*(name: string) {.dynOrStatic.} =
     addUniqueActivity(name)
 
+  proc activitySelected*(name: string): bool {.dynOrStatic.} =
+    ## Is `name` part of the activity set this dev environment is being
+    ## computed for?
+    ##
+    ## `activities = [...]` on an individual contribution already FILTERS
+    ## that contribution out of an unselected activity's result, and that is
+    ## the right tool when a contribution is cheap to compute. It is the
+    ## wrong one when computing it is the expensive part: the body still
+    ## runs, so a `useFlakeDevShell(..., activities = ["x"])` evaluates and
+    ## REALISES that flake shell for every activity, including `default` —
+    ## only to throw the result away. Branching on this instead keeps the
+    ## work out of the activities that do not want it.
+    ##
+    ## The answer is not a hidden input: the activity selection is already
+    ## part of the dev-env artifact's cache key (one artifact per activity
+    ## under `.repro/dev-env/<activity>/`) and is recorded as the
+    ## `gevActivitySelection` evaluation input of every result.
+    devEnvSelectedActivities.find(name.strip()) >= 0
+
   proc task*(name: string; command = ""; description = "";
              activities: openArray[string] = []) {.dynOrStatic.} =
     devEnvTaskRegistry.add(DevEnvTaskMetadata(
@@ -1550,6 +1574,10 @@ else:
   proc developOverridePath*(dependency: string): string {.dynOrStatic.} =
     discard dependency
     ""
+
+  proc activitySelected*(name: string): bool {.dynOrStatic.} =
+    discard name
+    false
 
 proc dirListing*(path: string): seq[string] {.dynOrStatic.} =
   if not dirExists(extendedPath(path)):

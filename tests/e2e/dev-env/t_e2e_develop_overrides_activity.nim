@@ -33,7 +33,11 @@ proc appProviderText(): string =
     "      setEnv \"FIXTURE_LIB_PATH\", \"published\"\n" &
     "    setEnv \"APP_BASE\", \"base\"\n" &
     "    setEnv \"DEBUG_ONLY\", \"enabled\", activities = [\"debug\"]\n" &
-    "    task \"debug-task\", command = \"debug-cmd\", activities = [\"debug\"]\n"
+    "    task \"debug-task\", command = \"debug-cmd\", activities = [\"debug\"]\n" &
+    # `activitySelected` lets the BODY branch on the selection, not just
+    # filter ops after the fact -- the difference is whether a costly
+    # contribution is computed at all for an activity that discards it.
+    "    setEnv \"BODY_SAW_DEBUG\", (if activitySelected(\"debug\"): \"yes\" else: \"no\")\n"
 
 proc writeAppFixture(dir: string) =
   createDir(dir)
@@ -201,9 +205,9 @@ suite "e2e_develop_overrides_activity":
       let defaultOutput = requireRepro(c, @[
         "exec", c.appRoot, "--dev-env-stats=" & defaultStats,
         "--", "sh", "-c",
-        "printf '%s|%s|%s\\n' \"$APP_BASE\" \"${DEBUG_ONLY-unset}\" \"$REPRO_DEV_ENV_TASKS\""
+        "printf '%s|%s|%s|%s\\n' \"$APP_BASE\" \"${DEBUG_ONLY-unset}\" \"$REPRO_DEV_ENV_TASKS\" \"$BODY_SAW_DEBUG\""
       ]).firstNonEmptyLine()
-      check defaultOutput == "base|unset|"
+      check defaultOutput == "base|unset||no"
       let defaultArtifactPath = artifactPathFromStats(defaultStats)
       let defaultArtifact = readDevEnvArtifact(defaultArtifactPath)
       check defaultArtifact.selectedActivities == @["default"]
@@ -215,9 +219,9 @@ suite "e2e_develop_overrides_activity":
         "exec", c.appRoot, "--activity=debug",
         "--dev-env-stats=" & debugStats,
         "--", "sh", "-c",
-        "printf '%s|%s|%s\\n' \"$APP_BASE\" \"${DEBUG_ONLY-unset}\" \"$REPRO_DEV_ENV_TASKS\""
+        "printf '%s|%s|%s|%s\\n' \"$APP_BASE\" \"${DEBUG_ONLY-unset}\" \"$REPRO_DEV_ENV_TASKS\" \"$BODY_SAW_DEBUG\""
       ]).firstNonEmptyLine()
-      check debugOutput == "base|enabled|debug-task"
+      check debugOutput == "base|enabled|debug-task|yes"
       let debugArtifactPath = artifactPathFromStats(debugStats)
       let debugArtifact = readDevEnvArtifact(debugArtifactPath)
       check debugArtifact.selectedActivities == @["debug"]

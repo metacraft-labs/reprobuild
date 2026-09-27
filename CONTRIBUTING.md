@@ -190,5 +190,11 @@ The build needs this shell:
   dev shell's `LD_LIBRARY_PATH`: the binary was linked without that RPATH, and
   `tests/integration/t_repro_runtime_dlopen_without_library_path.nim` is the
   gate that should have caught it.
+- The language-convention tests (Go, Rust, Ada, Pascal, D, Fortran, Zig,
+  .NET, JVM, Swift, ...) SKIP when their toolchain is not on `PATH`, and the
+  default dev shell deliberately does not carry them (they would triple its
+  closure). Run the suite with them through the `test-toolchains` dev-env
+  activity, which layers `devShells.test-toolchains` over the default shell:
+  `repro exec --activity=test-toolchains -- just test`.
 - The Nix-installed `repro` on `PATH` can lag your checkout. When behavior
   disagrees with the specs, check `repro --version` and prefer `./build/bin/repro`.
