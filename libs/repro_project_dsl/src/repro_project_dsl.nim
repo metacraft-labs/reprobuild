@@ -107,9 +107,17 @@ when defined(reproProviderMode):
 # usable by every DSL consumer without re-exporting the rest of
 # `dependency_gathering` and making `DependencyGatheringPolicy` ambiguous at
 # the call sites that import both `repro_core` and `repro_project_dsl`.
+#
+# DA-6 adds ``MonitorCaptureBreadth`` on the same terms and for the same
+# reason: the tool package DECLARES the capture breadth and the build engine
+# ACTS on it (``declaredMonitorInterest``), so a mirror enum per layer would
+# drift in the fail-open direction — a DSL that says "omit the ambient reads"
+# and an engine that reads a different ordinal would narrow a category some
+# consumer reads. Same symbol-by-symbol import, same reason.
 from repro_core/dependency_gathering import NonDeterminismPolicy,
-  ndpUnblessed, ndpEntropyBlessed
-export NonDeterminismPolicy
+  ndpUnblessed, ndpEntropyBlessed,
+  MonitorCaptureBreadth, mcbFullCapture, mcbOmitAmbientReads
+export NonDeterminismPolicy, MonitorCaptureBreadth
 
 include "repro_project_dsl/types"
 

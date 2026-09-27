@@ -67,10 +67,16 @@
 ## This file used to make the two arms ASK FOR THE SAME THING by opting the
 ## fixture into ``captureNonDeterminism`` / ``captureIpc``. That is no longer
 ## needed and is no longer wanted: ``repro internal io monitor`` now takes an
-## ``--interest`` flag, the engine computes its request in ONE place
-## (``monitorInterest``) that both hosting forms read, and that request is
-## every category — because each one carries a record kind a cache-correctness
-## decision consumes. Keeping the opt-in would now REMOVE a guard rather than
+## ``--interest`` flag and the engine computes its request in ONE place
+## (``monitorInterest``) that both hosting forms read. DA-6 made that request
+## the TOOL PACKAGE's declaration rather than a flat ``FullInterest``, and the
+## property this file relies on survives the change untouched — the request is
+## a function of the ACTION's policy alone, so the two hosting forms of the
+## SAME action still ask for the same thing whatever the declaration says. This
+## fixture carries no declaration, so it asks for everything, and the two
+## ``ecAmbientReads`` record kinds the arms used to differ by
+## (``mrSysctlRead`` / ``mrTimeRead``) are present in both.
+## Keeping the opt-in would now REMOVE a guard rather than
 ## add one: with both arms forced to request identical categories the
 ## comparison below cannot fail for an interest divergence, which is exactly
 ## how the original one survived this file.

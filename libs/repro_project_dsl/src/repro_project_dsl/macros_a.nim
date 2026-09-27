@@ -262,6 +262,68 @@ proc parseParam(node: NimNode): CliParamDef =
   result.sourceFile = loc.file
   result.sourceLine = loc.line
 
+proc parseCaptureBreadth(value: NimNode;
+                         fallback: MonitorCaptureBreadth):
+    MonitorCaptureBreadth =
+  ## DA-6 — parse ``captureBreadth = fullCapture`` / ``= omitAmbientReads``.
+  ##
+  ## An unrecognised word is a compile ERROR rather than a silent fallback, for
+  ## the reason ``parseNonDeterminismDecl`` below gives for the same choice: the
+  ## failure this declaration can produce is a capture that grades
+  ## ``mcComplete`` while missing evidence a consumer needed, and a misspelt
+  ## narrowing that silently inherited the enclosing scope's value would be
+  ## read by its author as "the narrowing took".
+  case identText(value).normalize
+  of "fullcapture", "full":
+    mcbFullCapture
+  of "omitambientreads", "omitambient":
+    mcbOmitAmbientReads
+  else:
+    error("captureBreadth expects fullCapture or omitAmbientReads, got: " &
+      value.repr & ". Those are the only two declarations that are true: " &
+      "io-mon's DA-5 split proved over all 256 interest sets that " &
+      "`FullInterest - {ecAmbientReads}` is the ONLY safe proper subset for " &
+      "a reprobuild edge, because every other category carries a record kind " &
+      "some consumer reads (mrEnvRead keys the action cache via " &
+      "cacheEnvInputs, mrNonDeterministic gates publication via " &
+      "applyEntropyBlessingPolicy, mrIpcConnect/mrExternalContent are not " &
+      "gate-able at all).", value)
+    fallback
+
+proc refuseRetiredCaptureIpc(node: NimNode) =
+  ## DA-6 — ``captureIpc = ...`` is refused BY NAME, and this is the only
+  ## place that can refuse it.
+  ##
+  ## The switch was already inert before DA-5, but only CONTINGENTLY: the
+  ## engine happened to ask io-mon for every category, so a recipe asking for
+  ## the IPC category got it either way. After DA-5 it is PERMANENTLY,
+  ## STRUCTURALLY inert — ``categoryOf`` answers ``none`` for
+  ## ``mrIpcConnect``, alongside ``mrExternalContent`` and the META kinds,
+  ## because the harm the gate does is that the records are not there when
+  ## ``mergeFragments`` derives its synthetic ``mrEventLoss``, and no
+  ## granularity fixes that. There is therefore no set of categories at which
+  ## either value of this switch could be honoured.
+  ##
+  ## ACCEPTING IT SILENTLY IS THE WORSE ANSWER, which is why this is an error
+  ## and not a warning. A recipe that writes ``captureIpc = true`` believes it
+  ## has widened something and a recipe that writes ``captureIpc = false``
+  ## believes it has narrowed something; both are wrong, and the previous
+  ## generation of this field spent a whole milestone carrying an ``INERT``
+  ## comment that had gone stale precisely because nothing refused it.
+  ## Measured before removing it: zero call sites outside reprobuild's own
+  ## tests, across every recipe in this workspace.
+  if node.isNil:
+    return
+  error("captureIpc has been RETIRED — delete the line. io-mon's " &
+    "`mrIpcConnect` is not gate-able at any granularity (DA-5: `categoryOf` " &
+    "answers `none` for it, as it does for `mrExternalContent` and the META " &
+    "kinds), because the harm is that the records do not exist when " &
+    "`mergeFragments` derives the synthetic `mrEventLoss` that forces " &
+    "`mcIncomplete`. So no value of this switch could ever be honoured, and " &
+    "the IPC connects an action makes are always observed. To declare how " &
+    "much of io-mon's stream a TOOL asks for, use " &
+    "`captureBreadth = fullCapture` / `= omitAmbientReads`.", node)
+
 proc parseCommandDependencyPolicy(node: NimNode;
                                   fallback = defaultDependencyPolicy()):
     BuildActionDependencyPolicy =
@@ -293,14 +355,27 @@ proc parseCommandDependencyPolicy(node: NimNode;
     let ignoredValue = namedValue(node[i], "ignoredInputPrefixes")
     if not ignoredValue.isNil:
       result.ignoredInputPrefixes = stringSeqLiteral(ignoredValue)
+    let captureBreadthValue = namedValue(node[i], "captureBreadth")
+    if not captureBreadthValue.isNil:
+      result.captureBreadth =
+        parseCaptureBreadth(captureBreadthValue, result.captureBreadth)
+    # DA-6 — `captureNonDeterminism` survives as a SPELLING of
+    # `captureBreadth`, with its scope shrunk to the part that was ever safe.
+    # `true` is "capture the non-determinism signals, ambient ones included";
+    # `false` is "exclude the ambient ones", which is the ONLY member of the
+    # old `ecNonDeterminism` bundle this flag could ever have dropped without
+    # removing evidence a consumer reads — env reads still key the action
+    # through `cacheEnvInputs` and entropy still gates publication through
+    # `applyEntropyBlessingPolicy`, and neither is at this flag's mercy any
+    # more. Absent leaves the inherited declaration alone, so no edge that
+    # never mentioned the flag changes.
     let captureNonDeterminismValue =
       namedValue(node[i], "captureNonDeterminism")
     if not captureNonDeterminismValue.isNil:
-      result.captureNonDeterminism =
-        boolLiteral(captureNonDeterminismValue, result.captureNonDeterminism)
-    let captureIpcValue = namedValue(node[i], "captureIpc")
-    if not captureIpcValue.isNil:
-      result.captureIpc = boolLiteral(captureIpcValue, result.captureIpc)
+      result.captureBreadth =
+        if boolLiteral(captureNonDeterminismValue, true): mcbFullCapture
+        else: mcbOmitAmbientReads
+    refuseRetiredCaptureIpc(namedValue(node[i], "captureIpc"))
     let suppressSeedValue = namedValue(node[i], "suppressMonitorShimSeed")
     if not suppressSeedValue.isNil:
       result.suppressMonitorShimSeed =
@@ -2461,12 +2536,19 @@ proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
     result.add("]")
 
   proc captureParts(): seq[string] =
-    # Only emit when set (default false), so a regenerated recipe that never
-    # opted in stays byte-identical to a fresh one.
-    if policy.captureNonDeterminism:
-      result.add("captureNonDeterminism = true")
-    if policy.captureIpc:
-      result.add("captureIpc = true")
+    # DA-6 — only emit when the tool declared a NARROWING, so a regenerated
+    # recipe for a tool that declared nothing stays byte-identical to a fresh
+    # one. The default (`mcbFullCapture`) is the zero value on both sides, so
+    # omitting it round-trips.
+    #
+    # It is spelled `captureBreadth = ...` rather than the
+    # `captureNonDeterminism = false` that means the same thing: generated code
+    # is read by people, and a generator that emits the legacy spelling teaches
+    # it. The parser accepts both. The VALUE is the enum member rather than the
+    # DSL word, because this text is Nim source handed to a constructor call,
+    # not a `dependencyPolicy` declaration.
+    if policy.captureBreadth == mcbOmitAmbientReads:
+      result.add("captureBreadth = mcbOmitAmbientReads")
 
   case policy.kind
   of bdpDefault:
@@ -4598,14 +4680,22 @@ proc parseInterfaceDependencyPolicy(node: NimNode;
       for path in stringSeqLiteral(depfilesValue):
         if path.len > 0 and path notin result.depfiles:
           result.depfiles.add(path)
+    # DA-6 — the same three clauses as `parseCommandDependencyPolicy`, and they
+    # have to be here too: this is the SECOND door onto a `dependencyPolicy`
+    # declaration (the artifact-level form), and a declaration honoured on one
+    # door and dropped on the other is how the interest request came to differ
+    # between the engine's two hosting paths in the first place.
+    let captureBreadthValue = namedValue(node[i], "captureBreadth")
+    if not captureBreadthValue.isNil:
+      result.captureBreadth =
+        parseCaptureBreadth(captureBreadthValue, result.captureBreadth)
     let captureNonDeterminismValue =
       namedValue(node[i], "captureNonDeterminism")
     if not captureNonDeterminismValue.isNil:
-      result.captureNonDeterminism =
-        boolLiteral(captureNonDeterminismValue, result.captureNonDeterminism)
-    let captureIpcValue = namedValue(node[i], "captureIpc")
-    if not captureIpcValue.isNil:
-      result.captureIpc = boolLiteral(captureIpcValue, result.captureIpc)
+      result.captureBreadth =
+        if boolLiteral(captureNonDeterminismValue, true): mcbFullCapture
+        else: mcbOmitAmbientReads
+    refuseRetiredCaptureIpc(namedValue(node[i], "captureIpc"))
     let suppressSeedValue = namedValue(node[i], "suppressMonitorShimSeed")
     if not suppressSeedValue.isNil:
       result.suppressMonitorShimSeed =

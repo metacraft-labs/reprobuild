@@ -793,26 +793,35 @@ type
       ## names into the processes the action starts, re-injecting our shim
       ## alongside the action's own. Requested with
       ## ``makeDepfilePolicy(..., suppressMonitorShimSeed = true)``.
-    captureNonDeterminism*: bool
-      ## **INERT — setting it changes nothing, and neither does leaving it
-      ## unset.** It used to opt this edge's automatic monitoring into
-      ## io-mon's non-determinism event category (clock/env/sysctl/entropy
-      ## reads), which the engine otherwise skipped. The engine now requests
-      ## EVERY io-mon event category for every monitored action, because the
-      ## categories it used to skip carry records it consumes for
-      ## cache-correctness decisions — see ``monitorInterest`` in
-      ## ``repro_build_engine.nim``, and ``DependencyGatheringPolicy`` in
-      ## ``repro_core/dependency_gathering.nim`` for the same note on the
-      ## field this one is lowered onto.
+    captureBreadth*: MonitorCaptureBreadth
+      ## DA-6 — the TOOL PACKAGE's declaration of how much of io-mon's event
+      ## stream this edge's action asks for. Written beside the tool's CLI
+      ## spec, where the tool is known:
       ##
-      ## Still accepted, still lowered, still round-tripped, so no recipe
-      ## that sets it breaks; a narrower request would need finer categories
-      ## from io-mon before this field could mean anything again.
-    captureIpc*: bool
-      ## **INERT — see ``captureNonDeterminism`` directly above.** It used to
-      ## opt this edge into io-mon's IPC event category; that category is now
-      ## always requested. Still accepted and lowered onto the engine
-      ## ``DependencyGatheringPolicy`` field of the same name.
+      ##   executable nim:
+      ##     cli:
+      ##       dependencyPolicy automaticMonitor,
+      ##         captureBreadth = omitAmbientReads
+      ##
+      ## and inherited by every nested ``subcmd`` exactly the way the rest of
+      ## ``dependencyPolicy`` is. Lowered onto the engine
+      ## ``DependencyGatheringPolicy`` field of the same name, where the full
+      ## rationale lives; the vocabulary itself is documented at
+      ## ``MonitorCaptureBreadth`` in
+      ## ``repro_core/dependency_gathering.nim``.
+      ##
+      ## Defaults to ``mcbFullCapture``, so a tool package that says nothing
+      ## asks for everything. A RECIPE should not set this: it knows neither
+      ## io-mon's record kinds nor which of them the tool it is calling emits.
+      ##
+      ## ``captureNonDeterminism = true`` / ``= false`` is still accepted in a
+      ## ``dependencyPolicy`` declaration as a spelling of this field
+      ## (``true`` -> ``fullCapture``, ``false`` -> ``omitAmbientReads``), so
+      ## no recipe that set it breaks — but it now MEANS something, namely the
+      ## ambient reads and nothing else. ``captureIpc`` is RETIRED and the
+      ## parser refuses it by name: ``mrIpcConnect`` is not gate-able at any
+      ## granularity after DA-5, so no value of that switch could ever be
+      ## honoured.
 
   ActionCacheFingerprintPolicy* = enum
     acfpTimestamp
