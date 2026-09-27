@@ -254,7 +254,7 @@ proc invokeCheckPrePush(fx: Fixture; workspaceRoot, currentRepo,
   ]))
 
 proc postCommitReport(fx: Fixture; workspaceRoot: string): JsonNode =
-  let reportPath = workspaceRoot / ".repro" / "workspace" /
+  let reportPath = workspaceRoot / ".repro" / "build" / "reports" /
     "post-commit-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)

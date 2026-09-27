@@ -288,7 +288,7 @@ proc invokePostCommit(fx: M19Fixture; currentRepo: string): CmdResult =
   ]))
 
 proc readPostCommitReport(fx: M19Fixture): JsonNode =
-  let reportPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "post-commit-report.json"
   check fileExists(reportPath)
   parseFile(reportPath)
@@ -336,7 +336,7 @@ proc commitInLibA(gitBin: string; fx: M19Fixture; fileName: string): string =
   commitInRepo(gitBin, fx, "lib-a", fileName)
 
 proc readPostCommitLog(fx: M19Fixture): string =
-  let logPath = fx.workspaceRoot / ".repro" / "workspace" /
+  let logPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "post-commit-lock.log"
   if not fileExists(logPath):
     return ""
@@ -614,6 +614,15 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       # changes and a different lock filename is produced. The log file
       # must carry BOTH entries while the JSON report reflects only the
       # latest invocation.
+      #
+      # THE COMMIT FIRES NO HOOKS, and that is not decoration. The first
+      # ``invokePostCommit`` above ran ``selfHealManagedHooks``, which
+      # INSTALLED this repo's managed hook set — so a plain ``git commit``
+      # here would fire a managed post-commit of its own and be a third,
+      # unrequested writer of the log read below, from whichever ``repro``
+      # that hook resolved off PATH. ``commitWithoutHooks`` points
+      # ``core.hooksPath`` at an empty directory for the one command, so the
+      # log below counts exactly the two invocations this case makes.
       let libAPath = fx.workspaceRoot / "lib-a"
       writeFile(libAPath / "second.txt", "second commit\n")
       discard requireGit(q(gitBin) & " -C " & q(libAPath) & " add second.txt")
@@ -631,13 +640,19 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       check secondReport["triggerSha"].getStr() != fx.libA.sha
       let secondTimestamp = secondReport["timestamp"].getStr()
 
-      # Log file is append-only: TWO non-empty lines, with the two distinct
-      # timestamps from the two runs.
+      # Log file is APPEND-ONLY and ordered: TWO non-empty lines, with the two
+      # distinct timestamps from the two runs. It still opens on the first run
+      # and closes on the second, which is exactly what an overwriting writer
+      # could not produce (it would leave one line, and that line would be the
+      # SECOND run's). Contrast ``post-commit-report.json`` above, which is
+      # overwritten. The count is exact because ``commitWithoutHooks`` above
+      # keeps the fixture's own commit from adding a third run.
       let logBody = readPostCommitLog(fx)
+      checkpoint("post-commit log body: " & logBody)
       let lines = logBody.splitLines().filterIt(it.len > 0)
       check lines.len == 2
       check lines[0].startsWith(firstTimestamp)
-      check lines[1].startsWith(secondTimestamp)
+      check lines[^1].startsWith(secondTimestamp)
       for line in lines:
         check line.contains(" written-local-only ")
 

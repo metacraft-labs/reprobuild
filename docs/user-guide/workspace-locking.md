@@ -512,8 +512,8 @@ make sense.
 
   Because post-commit cannot publish, it never reports a bare success for
   writing a record. Its outcome — in
-  `.repro/workspace/post-commit-lock.log` and
-  `.repro/workspace/post-commit-report.json` — says what became of the
+  `.repro/build/reports/post-commit-lock.log` and
+  `.repro/build/reports/post-commit-report.json` — says what became of the
   record:
 
   | Outcome | Meaning |

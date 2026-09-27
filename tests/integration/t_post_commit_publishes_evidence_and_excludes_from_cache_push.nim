@@ -248,7 +248,8 @@ suite "HL-6 — post-commit publishes evidence and excludes from cache push":
         check "secret work" notin readFile(path)
 
       # The FIRST post-commit recorded a genuine publish (not a throttle).
-      let logPath = ws / ".repro" / "workspace" / "post-commit-lock.log"
+      let logPath = ws / ".repro" / "build" / "reports" /
+        "post-commit-lock.log"
       check fileExists(logPath)
       let logAfter1 = readFile(logPath)
       check logAfter1.contains("evidence refreshed")

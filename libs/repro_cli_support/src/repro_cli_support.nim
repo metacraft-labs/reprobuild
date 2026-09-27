@@ -17101,9 +17101,9 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # writer refuses, no workspace.toml exists, or the workspace is
     # dirty: a commit must never be blocked by hook failure. The
     # wrapper itself logs all error paths to
-    # ``<workspace>/.repro/workspace/post-commit-lock.log`` and writes
-    # the JSON report to ``post-commit-report.json`` so the operator
-    # can introspect the latest outcome.
+    # ``<workspace>/.repro/build/reports/post-commit-lock.log`` and writes
+    # the JSON report to ``post-commit-report.json`` beside it so the
+    # operator can introspect the latest outcome.
     # Repair any managed hook a foreign installer removed or overwrote since
     # the last git operation — see ``selfHealManagedHooks``. Done BEFORE the
     # lock refresh so a repo whose ``pre-push`` was deleted by a dev-shell
@@ -43132,7 +43132,7 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
 # strictly non-blocking: post-commit MUST exit 0 even when the lock
 # writer refuses, no workspace metadata is present, the workspace is
 # dirty, or any subprocess errors. The operator-facing trace lives in
-# ``<workspaceRoot>/.repro/workspace/post-commit-lock.log`` (append-only)
+# ``<workspaceRoot>/.repro/build/reports/post-commit-lock.log`` (append-only)
 # and in ``<workspaceRoot>/.repro/build/reports/post-commit-report.json``
 # (overwritten on each run with the latest result).
 #
@@ -43383,15 +43383,57 @@ proc resolvePostCommitWorkspaceRoot(currentRepo, workspaceRoot: string): string 
     return absolutePath(workspaceRoot)
   enclosingWorkspaceRoot(currentRepo)
 
+# ---- where the commit hooks file their own diagnostics --------------------
+#
+# The CONVENTIONAL report directory, ``workspaceReportDir`` —
+# ``<workspaceRoot>/.repro/build/reports/`` — the same one every other verb's
+# ``--write-report`` artifact uses. Composed once there rather than three
+# times here: three hand-written copies of a path are three chances for one of
+# them to drift, and that is how the retired spelling below outlived its own
+# retirement.
+#
+# These writers used to spell it ``<workspaceRoot>/.repro/workspace/``.
+# `Retired-Names.md` retired exactly that:
+#
+#   ``<workspace>/.repro/workspace/<verb>-report.json``
+#     -> ``<workspace>/.repro/build/reports/<verb>-report.json``
+#   "A report is derived output, so it belongs in the disposable
+#    ``.repro/build/`` tree rather than beside the ``.repro/workspace.toml``
+#    marker."
+#
+# NOT TIDINESS. ``.repro/workspace/`` is where the DURABLE state lives — the
+# ``workspace.toml`` marker, the signing key and the issued certificates. A
+# workspace root that is itself a git checkout (the native-root layout, where
+# the manifest/lock-store repo IS the workspace root and the marker is a
+# committed file) therefore grew two untracked files beside a tracked one on
+# every commit — including on the commits where this hook correctly decided it
+# had nothing to do. The lock publisher's dirty-outside-``locks/`` guard
+# refuses on exactly that, and refused PERMANENTLY, because its own next
+# commit fires this hook again and regenerates them. One no-op hook wedged
+# lock publication for every repo in the workspace, measured in the field.
+#
+# The append-only LOGS travel with the report rather than staying behind: they
+# are the same derived diagnostic in a different shape, and splitting them
+# across a disposable and a durable tree is what produced the defect in the
+# first place. That ``.repro/build/`` is disposable means a clean may take a
+# log with it, which is the correct trade for a trace nothing reads back to
+# decide anything (CLI/README.md: "No command may read a previous report back
+# to decide what to do, and a missing report must never change behaviour").
+
+proc postCommitReportPath(workspaceRoot: string): string =
+  workspaceReportDir(workspaceRoot) / "post-commit-report.json"
+
+proc postCommitLogPath(workspaceRoot: string): string =
+  workspaceReportDir(workspaceRoot) / "post-commit-lock.log"
+
 proc writePostCommitReport(workspaceRoot: string;
                            report: PostCommitReport) =
   ## Best-effort write of the JSON report. Never raises (a failing
   ## report write is itself just logged below).
   try:
-    let reportDir = workspaceRoot / ".repro" / "workspace"
-    createDir(reportDir)
-    let reportPath = reportDir / "post-commit-report.json"
-    writeFile(reportPath, pretty(report.toJsonNode(), indent = 2) & "\n")
+    createDir(workspaceReportDir(workspaceRoot))
+    writeFile(postCommitReportPath(workspaceRoot),
+      pretty(report.toJsonNode(), indent = 2) & "\n")
   except CatchableError:
     discard
 
@@ -43399,11 +43441,9 @@ proc appendPostCommitLog(workspaceRoot, line: string) =
   ## Append a single line to ``post-commit-lock.log``. Never raises —
   ## a failed log write must not block the commit.
   try:
-    let reportDir = workspaceRoot / ".repro" / "workspace"
-    createDir(reportDir)
-    let logPath = reportDir / "post-commit-lock.log"
+    createDir(workspaceReportDir(workspaceRoot))
     var f: File
-    if open(f, logPath, fmAppend):
+    if open(f, postCommitLogPath(workspaceRoot), fmAppend):
       f.writeLine(line)
       f.close()
   except CatchableError:
@@ -43417,14 +43457,14 @@ proc preCommitLogPath*(workspaceRoot: string): string =
   ## different lock artifacts, on opposite sides of the §13.1 backend table,
   ## and interleaving them would make "did the flake refresh run for THIS
   ## commit?" a question about line ordering in a shared append-only file.
-  workspaceRoot / ".repro" / "workspace" / "pre-commit-lock.log"
+  workspaceReportDir(workspaceRoot) / "pre-commit-lock.log"
 
 proc appendPreCommitLog(workspaceRoot, line: string) =
   ## Append one line to ``pre-commit-lock.log``. Never raises — a failed log
   ## write must not fail the commit.
   if workspaceRoot.len == 0: return
   try:
-    createDir(workspaceRoot / ".repro" / "workspace")
+    createDir(workspaceReportDir(workspaceRoot))
     var f: File
     if open(f, preCommitLogPath(workspaceRoot), fmAppend):
       f.writeLine(line)
@@ -43446,7 +43486,7 @@ proc emitPostCommitWarning(tag, diagnostic, workspaceRoot: string) =
     stderr.writeLine("repro post-commit: " & tag & ": " & diagnostic)
     if workspaceRoot.len > 0:
       stderr.writeLine("repro post-commit: details in " &
-        (workspaceRoot / ".repro" / "workspace" / "post-commit-lock.log"))
+        postCommitLogPath(workspaceRoot))
   except CatchableError:
     discard
 
@@ -44387,10 +44427,17 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
     # hook is driven by git, not by an operator-supplied argv, so there
     # is no ``--write-report`` surface to consult here: it keeps writing to the
     # conventional location unconditionally.
+    #
+    # THE CONVENTIONAL LOCATION IS ``workspaceReportDir``, which is what
+    # ``reportDestination(_, _, "lock")`` hands the operator-facing
+    # ``repro workspace lock`` a few hundred lines above. This site spelled the
+    # retired ``<root>/.repro/workspace/`` by hand, so the two surfaces it
+    # claims to match wrote to two different files — and this one wrote into a
+    # durable tree that a workspace root which is its own git checkout reads as
+    # dirty. See the note over ``writePostCommitReport``.
     try:
       writeWorkspaceLockReport(outcome.report,
-        outcome.report.workspaceRoot / ".repro" / "workspace" /
-          "lock-report.json")
+        workspaceReportDir(outcome.report.workspaceRoot) / "lock-report.json")
     except CatchableError: discard
   of 2:
     # M19b mode 2. Strict M11 exit-2 = a repo in scope has uncommitted
@@ -52789,13 +52836,13 @@ proc runPushCommand*(args: openArray[string]): int =
 #
 # All three follow the M9/M10/M11 convention: parse argv, build a
 # typed report, render text lines, write the JSON artifact at
-# ``<workspaceRoot>/.repro/workspace/<command>-report.json``. Exit
+# ``<workspaceRoot>/.repro/build/reports/<command>-report.json``. Exit
 # codes are 0 on success and 1 on IO / resolve failure; there is no
 # refuse-and-report branch (these are read-only commands).
 #
 # ``--json`` mode: when set, suppress the text rendering and print
 # only the JSON report to stdout (in addition to writing it under
-# ``.repro/workspace/``). Convenient for scripts that want a single
+# ``.repro/build/reports/``). Convenient for scripts that want a single
 # parseable payload without the human-readable noise.
 
 # ---- M12 shared visibility-tag helper -------------------------------------
@@ -56102,7 +56149,7 @@ proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
   ##
   ## See the M14 block comment above for the contract. With
   ## ``--write-report`` it writes a ``branch-report.json`` artifact under
-  ## ``<workspaceRoot>/.repro/workspace/`` (or the explicit
+  ## ``<workspaceRoot>/.repro/build/reports/`` (or the explicit
   ## ``--write-report=PATH``) so a script consumer has a parseable record of
   ## what happened, in addition to the stdout-formatted text lines.
   ## Without ``--write-report`` nothing is written to disk.
@@ -57327,7 +57374,7 @@ proc runSwitchCommand*(args: openArray[string]): int =
   ##
   ## See the M15 block comment above for the contract. With ``--write-report``
   ## it writes a ``switch-report.json`` artifact under
-  ## ``<workspaceRoot>/.repro/workspace/`` (or the explicit
+  ## ``<workspaceRoot>/.repro/build/reports/`` (or the explicit
   ## ``--write-report=PATH``) so a script consumer has a parseable record of
   ## what happened, in addition to the stdout-formatted text lines.
   ## Without ``--write-report`` nothing is written to disk.

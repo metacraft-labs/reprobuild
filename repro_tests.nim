@@ -11826,6 +11826,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_post_commit_report_lands_in_the_disposable_build_tree.nim",
+    binary: "build/test-bin/t_post_commit_report_lands_in_the_disposable_build_tree",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_post_merge_hook_reconciles_local_state.nim",
     binary: "build/test-bin/t_post_merge_hook_reconciles_local_state",
     defines: @[],
