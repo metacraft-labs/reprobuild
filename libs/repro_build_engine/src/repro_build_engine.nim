@@ -1055,6 +1055,14 @@ type
     ## forgot to mark itself. `depfileObservedNothing` is written that way and
     ## is the only such consumer today.
     ##
+    ## WHICH MEMBERS COUNT AS OBSERVING IS NOT A JUDGEMENT ANY CONSUMER MAKES
+    ## FOR ITSELF. `DepfileObservingContributors` classifies every member of
+    ## this enum with an exhaustive `case`, so a member added below WILL NOT
+    ## COMPILE until it has been classified there. That is deliberately a
+    ## compile error and not a test: the alternative is a set literal a new
+    ## member is silently missing from, where the omission is
+    ## indistinguishable from a decision.
+    ##
     ## DO NOT READ THAT AS A PROPERTY OF THE GUARD. It is a property of ONE of
     ## the guard's five terms. The other four — `monitorObservedNoReads` and
     ## the `.len == 0` tests on `monitorWrites`, `monitorProbes` and
@@ -6804,6 +6812,48 @@ proc monitorObservedNoReads(col: EvidenceCollection): bool {.inline.} =
       col.evidence.monitorReads[0] == col.engineSuppliedRootImage
   else: false
 
+# DA-1f — which `EvidenceContributor`s, if present, mean something LOOKED at
+# the action to fill `depfileInputs`. `depfileObservedNothing` below asks for
+# the PRESENCE of a member of this set and never for the ABSENCE of a
+# synthesiser, and this is where that one distinction is written down.
+#
+# WHY IT IS AN EXHAUSTIVE `case` AND NOT A SET LITERAL. A literal is a place a
+# future contributor is silently omitted from, which is the exact failure mode
+# `EvidenceContributor` exists to prevent one layer down — and the omission is
+# invisible, because an omitted member is indistinguishable from a member
+# deliberately classified as non-observing. The `case` makes ADDING a
+# contributor without classifying it a COMPILE ERROR ("not all cases are
+# covered; missing: {…}"), so the decision is forced where the enum grows
+# instead of being left to a convention a test cannot grade until the state is
+# reachable.
+#
+# Measured rather than asserted: an eighth member added to
+# `EvidenceContributor` with no arm here fails `nim check` on the `case` line.
+const DepfileObservingContributors: set[EvidenceContributor] = (block:
+  var observing: set[EvidenceContributor] = {}
+  for contributor in EvidenceContributor:
+    case contributor
+    of evcToolReportedDepfile:
+      # A dependency report a TOOL wrote while doing the action's work. The
+      # only contributor to `depfileInputs` that is an OBSERVATION of this
+      # action — `gcc -MD` lists the headers it really opened.
+      observing.incl contributor
+    of evcMonitorCapture, evcRootImageReconstruction, evcReplayedCacheRecord,
+       evcDeclarationDerivedDepfile, evcPostBuildConverterReport,
+       evcForeignProvisionerReport:
+      # Not observations of THIS action's depfile channel, for three
+      # different reasons that all land in the same arm. `evcMonitorCapture`
+      # and `evcPostBuildConverterReport` do not write `depfileInputs` at all
+      # (they fill the monitor's channels, whose own terms of the guard ask
+      # their own question); `evcRootImageReconstruction`,
+      # `evcReplayedCacheRecord` and `evcDeclarationDerivedDepfile` are
+      # reconstructions, replays and declarations — real cache inputs, and
+      # nothing looked at the action to produce any of them;
+      # `evcForeignProvisionerReport` lands in
+      # `provisionerReportedInputs`, which is not a term of this guard.
+      discard
+  observing)
+
 proc depfileObservedNothing(col: EvidenceCollection): bool {.inline.} =
   ## DA-1f — the `depfileInputs` term of the zero-evidence guard, asked the
   ## way `monitorObservedNoReads` asks its own: not *"is the set empty"* but
@@ -6823,6 +6873,29 @@ proc depfileObservedNothing(col: EvidenceCollection): bool {.inline.} =
   ## into `depfileInputs` that forgets to mark itself reads as "nothing
   ## observed" and costs a publish, never as "something observed".
   ##
+  ## WHICH POLARITY THAT IS, AND WHAT GRADES IT. The caller is the
+  ## zero-evidence guard in `applyMonitorEvidenceStatus`, the only one, and
+  ## `true` there is a REFUSAL: it adds `zeroEvidenceDiagnostic`, sets
+  ## `disableCacheHits` and `cirEmptyEvidence`, so the action succeeds and
+  ## does not publish. `false` lets the publish through. For an UNMARKED
+  ## writer this returns `true` — the refusal — which is the fail-closed
+  ## answer; the absence spelling (`evcDeclarationDerivedDepfile in …`) would
+  ## return `false` and buy that writer a record it never observed.
+  ##
+  ## THE TWO SPELLINGS ARE NOT INTERCHANGEABLE ON A REACHABLE STATE, and the
+  ## 2026-09-24 review's Z1 mutation swapped them and SURVIVED at 28 OK / 0
+  ## FAILED because the suite only reached sets carrying exactly one of the
+  ## two marks, which both spellings answer identically. The state that
+  ## separates them is a depfile channel carrying BOTH — one tool-written
+  ## report folded beside one declaration-derived report on the same edge,
+  ## which `RecognizedDependencyReportSpec.outputs` being a `seq` already
+  ## expresses with no production seam. Presence-of-observer publishes it (an
+  ## observation happened, and a synthesised report standing next to it does
+  ## not unhappen it); absence-of-synthesiser refuses it. That pair is
+  ## `t_zero_evidence_edge_is_not_cacheable`'s "a tool-written depfile beside
+  ## a declaration-derived one …", and it is what makes this line's polarity
+  ## graded rather than merely documented.
+  ##
   ## THE PATHS THEMSELVES ARE UNTOUCHED. They stay in the channel, in the
   ## key, hashed and invalidating, exactly as before — attribution, not
   ## suppression (`Dependency-Observation-Attribution.md`).
@@ -6836,7 +6909,7 @@ proc depfileObservedNothing(col: EvidenceCollection): bool {.inline.} =
   ## recipe and nothing would have reported it. Closing it while it costs
   ## nothing is cheaper than discovering it as a stale hit.
   col.evidence.depfileInputs.len == 0 or
-    evcToolReportedDepfile notin col.evidence.evidenceProvenance
+    col.evidence.evidenceProvenance * DepfileObservingContributors == {}
 
 proc applyMonitorEvidenceStatus(action: BuildAction;
                                 status: MonitorEvidenceStatus;
