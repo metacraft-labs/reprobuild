@@ -115,6 +115,15 @@ suite "the engine resolves reprobuild-nix-daemon from both layouts":
     doAssert resolved == helper,
       "packaged prefix did not resolve libexec/<dist>/, got: " & resolved
 
+  test "release archive: the helper beside bin/repro is found":
+    let prefix = scratch("release-archive")
+    let exe = prefix / "bin" / "repro"
+    placeDaemon(exe)
+    let helper = prefix / "bin" / "reprobuild-nix-daemon"
+    placeDaemon(helper)
+    doAssert resolveNixDaemonExecutable(cwd = getTempDir(), exePath = exe,
+      envSourceRoot = "", envBin = "") == helper
+
   test "nothing on disk still answers the bare name for poUsePath":
     let repo = scratch("empty")
     let exe = reproBinaryPath(repo)

@@ -12691,7 +12691,7 @@ type
     path*: string
     label*: string
 
-const NixDaemonRelativePaths*: array[5, string] = [
+const NixDaemonRelativePaths*: array[6, string] = [
   # Prefer the staged helper, whose interpreter is pinned at build time.
   "build/bin/reprobuild-nix-daemon",
   # The dev tree's CHECKED-IN helper, relative to the REPOSITORY ROOT.
@@ -12709,6 +12709,8 @@ const NixDaemonRelativePaths*: array[5, string] = [
   # ``reprobuild``; a third distribution that renamed itself would need its
   # own entry, which is why the wrapper variable stays the primary route.
   "libexec/reprobuild/reprobuild-nix-daemon",
+  # Portable release archives copy build/bin into <prefix>/bin.
+  "bin/reprobuild-nix-daemon",
 ]
 
 proc nixDaemonSearchRoots*(cwd, exePath, envSourceRoot: string): seq[
