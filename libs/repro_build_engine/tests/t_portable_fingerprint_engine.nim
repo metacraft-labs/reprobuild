@@ -7,11 +7,12 @@
 ## fingerprint (while its local record, being path-bearing, differs), and an
 ## input-content change moves it.
 
-import std/[os, strutils, unittest]
+import std/[options, os, strutils, unittest]
 
 from repro_test_support import testCaseScratchSlug
 
 import repro_build_engine
+import repro_core/paths
 import repro_hash
 import repro_local_store
 
@@ -28,7 +29,7 @@ proc project(parent: string; source: string): string =
   writeFile(result / "src" / "main.c", source)
 
 proc buildIn(projectRoot, cacheRoot: string; portable: bool;
-             extraInput = ""): ActionResult =
+             extraInput = ""; sharedRoot = ""): ActionResult =
   var inputs = @[projectRoot / "src" / "main.c"]
   if extraInput.len > 0:
     inputs.add(extraInput)
@@ -47,6 +48,8 @@ proc buildIn(projectRoot, cacheRoot: string; portable: bool;
   createDir(projectRoot / "out")
   var config = defaultBuildEngineConfig(cacheRoot)
   config.maxParallelism = 1
+  if sharedRoot.len > 0:
+    config.actionCacheRoot = sharedRoot
   if portable:
     config.portableRoots = @[
       LogicalRoot(label: "project", path: projectRoot, kind: lrkTracked)]
@@ -59,7 +62,7 @@ suite "Cache-Scope P3.1 — engine records portable fingerprints":
 
   setup:
     if dirExists(TmpDir):
-      removeDir(TmpDir)
+      removeDir(extendedPath(TmpDir))
     createDir(TmpDir)
 
   test "off by default: no portable identity without portableRoots":
@@ -85,6 +88,27 @@ suite "Cache-Scope P3.1 — engine records portable fingerprints":
     check ra.portableOutputs[0].path == "project:out/result.txt"
     check ra.portableOutputs[0].digest ==
       fileContentHex(a / "out" / "result.txt")
+
+  test "P3.3: a memo recorded by one checkout is found from another":
+    let shared = absolutePath(TmpDir / "shared-cache")
+    let a = project("memo-a", "int main;\n")
+    let b = project("memo-b-at/a/different/depth", "int main;\n")
+    let ra = buildIn(a, TmpDir / "cache-ma", portable = true,
+      sharedRoot = shared)
+    require ra.portable
+    # Checkout B has not built anything. Its lookup by portable weak
+    # fingerprint recomputes the strong fingerprint from ITS files and finds
+    # the record checkout A stored.
+    let roots = @[LogicalRoot(label: "project", path: b, kind: lrkTracked)]
+    let hit = lookupMemo(shared / "portable-memo", roots, ra.portableWeakHex)
+    check hit.isSome
+    check hit.get().strongHex == ra.portableStrongHex
+    check hit.get().outputs == ra.portableOutputs
+    # A checkout whose input differs does not.
+    let c = project("memo-c", "int other;\n")
+    let rootsC = @[LogicalRoot(label: "project", path: c, kind: lrkTracked)]
+    check lookupMemo(shared / "portable-memo", rootsC,
+      ra.portableWeakHex).isNone
 
   test "an input-content change moves the portable strong fingerprint":
     let a = project("same-a", "int main;\n")

@@ -13906,6 +13906,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       let outs = portableOutputs(config.portableRoots, physicalOutputs)
       if outs.portable:
         runResult.results[idx].portableOutputs = outs.outputs
+        # P3.3: persist the memo record beside the shared action cache so
+        # any checkout of any project on this host can find it by portable
+        # weak fingerprint -> path set -> strong fingerprint. Soft-fail: a
+        # memo that cannot be written costs reuse, never the build.
+        try:
+          recordMemo(sharedRoot / "portable-memo", PortableMemoRecord(
+            weakHex: fp.weakHex, pathSet: pathSetOf(fp.inputs),
+            strongHex: fp.strongHex, outputs: outs.outputs))
+        except CatchableError as err:
+          runResult.trace(action.id, "portable-memo-write-failed", err.msg)
       else:
         fp.portable = false
         fp.reason = outs.reason
