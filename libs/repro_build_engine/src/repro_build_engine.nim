@@ -16,15 +16,16 @@ when defined(windows):
     MAXIMUM_WAIT_OBJECTS, WOHandleArray, openProcess, closeHandle,
     waitForMultipleObjects
 elif defined(posix):
-  # ``Mode`` / ``umask`` / ``dup`` / ``dup2`` / ``close`` are the
-  # In-Process-Monitor-Hosting HM-4 spawn context and nothing else. io-mon
-  # spawns with ``poParentStreams``, so a monitored child inherits THIS
-  # process's descriptors 1 and 2, and the canonical 0022 file-creation mask
-  # used to arrive through the ``/bin/sh -c 'umask 022 && …'`` wrapper the
-  # monitor CLI ran under. Both are re-established across the spawn instead —
-  # see ``beginMonitorSpawnContext``. None of the five starts a child.
+  # ``Mode`` / ``umask`` / ``dup2`` / ``close`` / ``fcntl`` and the four
+  # descriptor-flag constants are the In-Process-Monitor-Hosting HM-4 spawn
+  # context and nothing else. io-mon spawns with ``poParentStreams``, so a
+  # monitored child inherits THIS process's descriptors — 0, 1 and 2, and any
+  # other one not marked close-on-exec — and the canonical 0022 file-creation
+  # mask used to arrive through the ``/bin/sh -c 'umask 022 && …'`` wrapper
+  # the monitor CLI ran under. All of it is re-established across the spawn
+  # instead — see ``beginMonitorSpawnContext``. None of them starts a child.
   from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid, Mode, umask,
-    dup, dup2, close
+    dup2, close, fcntl, F_GETFD, F_SETFD, FD_CLOEXEC, F_DUPFD_CLOEXEC
 
 when defined(posix):
   type
@@ -11622,7 +11623,40 @@ when defined(posix):
     outFile: File
     errFile: File
     savedMask: Mode
+    madeCloseOnExec: seq[cint]
     active: bool
+
+  proc markInheritableDescriptorsCloseOnExec(): seq[cint] =
+    ## Every descriptor above 2 that THIS process holds without
+    ## ``FD_CLOEXEC`` is given it, and the ones changed are returned so
+    ## ``endMonitorSpawnContext`` can put them back exactly as they were.
+    ##
+    ## Only the flag moves; no descriptor is closed, so nothing the engine
+    ## itself is using changes under it. The descriptor table is ENUMERATED
+    ## (``/proc/self/fd`` on Linux, ``/dev/fd`` elsewhere) rather than
+    ## scanned numerically, for the reason ``runquota_process.nim`` gives: a
+    ## loop bounded by ``RLIMIT_NOFILE`` is a million ``fcntl`` calls on hosts
+    ## that raise it. A descriptor that vanishes between the listing and the
+    ## ``fcntl`` (the listing's own directory handle, for one) fails the
+    ## ``F_GETFD`` and is skipped.
+    let listing = when defined(linux): "/proc/self/fd" else: "/dev/fd"
+    var candidates: seq[cint] = @[]
+    try:
+      for kind, path in walkDir(listing, relative = true):
+        try:
+          let fd = parseInt(path)
+          if fd > 2:
+            candidates.add(cint(fd))
+        except ValueError:
+          discard
+    except OSError:
+      return
+    for fd in candidates:
+      let flags = fcntl(fd, F_GETFD)
+      if flags < 0 or (flags and FD_CLOEXEC) != 0:
+        continue
+      if fcntl(fd, F_SETFD, flags or FD_CLOEXEC) == 0:
+        result.add(fd)
 
   proc beginMonitorSpawnContext(outPath, errPath: string): MonitorSpawnContext =
     ## Re-establish, across io-mon's spawn, the three things the retired
@@ -11672,11 +11706,31 @@ when defined(posix):
     ## observed by one. A future pool tenant that opens or creates a file
     ## re-opens both questions, and it breaks by interleaving one action's
     ## output into another's.
+    ##
+    ## EVERY DESCRIPTOR ABOVE 2, which is the same parity question as stdin
+    ## one number further up. RunQuota's POSIX backend closes every inherited
+    ## descriptor above 2 between ``fork`` and ``execvp``
+    ## (``closeInheritedChildFds`` in ``runquota_process.nim``), so a wrapped
+    ## action — and the ``repro internal io monitor`` reference it is compared
+    ## against — starts with 0, 1 and 2 and nothing else. io-mon's spawn closes
+    ## nothing, so a hosted action used to start with whatever this process
+    ## held open without ``FD_CLOEXEC``: the three stdio copies saved just
+    ## below (``dup`` does not set the flag), plus anything the engine's own
+    ## parent leaked into it. The test runner hands every test process its own
+    ## pipe ends that way, and under a parallel run the other tests' too.
+    ## Those descriptors are real kernel objects inside the monitored tree —
+    ## an action that ``fstat``s or reads one sees a pipe it did not create,
+    ## and every descriptor it opens itself lands at a different number than
+    ## it would under the wrapper, which is how TP-2's evidence comparison
+    ## caught it (a ``chan=localfd role=create`` record carrying fd 22 hosted
+    ## and fd 4 wrapped). Marking them close-on-exec for the spawn window
+    ## gives the hosted child the same table the other launch paths give; the
+    ## flags are restored in ``endMonitorSpawnContext``.
     flushFile(stdout)
     flushFile(stderr)
-    result.savedIn = dup(cint(0))
-    result.savedOut = dup(cint(1))
-    result.savedErr = dup(cint(2))
+    result.savedIn = fcntl(cint(0), F_DUPFD_CLOEXEC, cint(3))
+    result.savedOut = fcntl(cint(1), F_DUPFD_CLOEXEC, cint(3))
+    result.savedErr = fcntl(cint(2), F_DUPFD_CLOEXEC, cint(3))
     if result.savedIn < 0 or result.savedOut < 0 or result.savedErr < 0:
       if result.savedIn >= 0: discard close(result.savedIn)
       if result.savedOut >= 0: discard close(result.savedOut)
@@ -11706,12 +11760,17 @@ when defined(posix):
     discard dup2(cint(getFileHandle(result.outFile)), cint(1))
     discard dup2(cint(getFileHandle(result.errFile)), cint(2))
     result.savedMask = umask(Mode(0o022))
+    result.madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
     result.active = true
 
   proc endMonitorSpawnContext(ctx: var MonitorSpawnContext) =
     if not ctx.active:
       return
     ctx.active = false
+    for fd in ctx.madeCloseOnExec:
+      let flags = fcntl(fd, F_GETFD)
+      if flags >= 0:
+        discard fcntl(fd, F_SETFD, flags and not FD_CLOEXEC)
     discard umask(ctx.savedMask)
     flushFile(stdout)
     flushFile(stderr)
