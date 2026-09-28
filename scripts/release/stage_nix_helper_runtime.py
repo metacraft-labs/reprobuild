@@ -7,6 +7,7 @@ so its existing loader paths apply to Python extensions as well.
 
 from pathlib import Path
 import shutil
+import stat
 import sys
 import sysconfig
 
@@ -30,6 +31,10 @@ def stage(package: Path) -> None:
             "config-*", "idlelib", "ensurepip",
         ),
     )
+    # Nix store directories are read-only. The extracted runtime belongs to
+    # its installer and must remain removable without a chmod repair.
+    for copied in [stdlib, *stdlib.rglob("*")]:
+        copied.chmod(copied.stat().st_mode | stat.S_IWUSR)
     extensions = Path(sysconfig.get_config_var("DESTSHARED"))
     for extension in extensions.glob("*.so"):
         target = library / extension.name
