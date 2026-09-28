@@ -114,7 +114,7 @@ reprobuild-ct-test-runner=dev
 # repairs. All four channels (flake URL, lock, this clone and package fallback)
 # select the same published revision; a sibling must not replace the repaired
 # monitor with the older runtime during a source bootstrap.
-io-mon=1cabd874115573fce23e7533b1a4b33d515afc1e
+io-mon=c29c9460f33dc26cefdf071dc2b3e6ec4ac3ae78
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood
