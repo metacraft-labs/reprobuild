@@ -2239,6 +2239,31 @@ proc bootstrapSevenZipToolUse*(): InterfaceToolUse =
         cpu: "x86_64",
         os: "windows")]
 
+proc bootstrapSevenZipStandaloneToolUse(): InterfaceToolUse =
+  ## The upstream standalone 7z decoder needs no Windows Installer service.
+  ## Only 7z and 7z SFX payloads use this bootstrap; ZIP/tar have other paths.
+  const
+    sha256 = "abcf64ae1cbafddb5395e4cdd3bdc7e3e0561d54a0c6380e3dd43bdbffe519a2"
+    packageId = "7zr@" & BootstrapSevenZipVersion
+  result = InterfaceToolUse(
+    rawConstraint: "7zr",
+    packageSelector: packageId,
+    executableName: "7zr")
+  when defined(windows):
+    result.tarballProvisioning = @[
+      InterfaceTarballProvisioning(
+        packageName: "7zr",
+        url: "https://github.com/ip7z/7zip/releases/download/26.01/7zr.exe",
+        sha256: sha256,
+        archiveType: "raw",
+        executablePath: "7zr.exe",
+        stripComponents: 0,
+        packageId: packageId,
+        lockIdentity: "tarball:" & packageId & ":sha256:" & sha256,
+        # The upstream x86 decoder runs under Windows' x64/ARM64 emulation.
+        cpu: "any",
+        os: "windows")]
+
 proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
                          writerMode = "direct"):
     PathOnlyToolProfile
@@ -2270,6 +2295,16 @@ proc resolveSevenZipExe(storeRoot: string): string =
           return profile.resolvedExecutablePath
       except CatchableError as err:
         storeFailure = err.msg
+      # Administrative MSI extraction can fail with error 1601 on service
+      # accounts even though downloading and executing a tool is permitted.
+      # Realize the pinned standalone decoder through the same verified store.
+      try:
+        let profile = resolveTarballTool(
+          bootstrapSevenZipStandaloneToolUse(), storeRoot)
+        if profile.resolvedExecutablePath.len > 0:
+          return profile.resolvedExecutablePath
+      except CatchableError as err:
+        storeFailure.add("; standalone 7zr: " & err.msg)
   for name in @["7z", "7z.exe", "7zz"]:
     let exe = findExe(name)
     if exe.len > 0:

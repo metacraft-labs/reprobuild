@@ -161,7 +161,7 @@
       # Nim signal handler in the processes it is injected into, and a spawn
       # whose child had to be terminated during injection now fails cleanly.
       # Requires nim-stackable-hooks 72f5782 (below).
-      url = "github:metacraft-labs/io-mon/a3edfabb36cf8909bacbe3cf52ab96adf8879158";
+      url = "github:metacraft-labs/io-mon/a5d96adfba31e74ca453f470b80d557366c86b94";
       flake = false;
     };
     nim-shm-gset-src = {
