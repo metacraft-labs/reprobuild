@@ -27,11 +27,20 @@
 ## BY A LIVE CAPTURE ON THIS HOST:
 ##
 ##   * "the connect record is absent" needs a capture that carries the injected
-##     `mrEventLoss` and not the `mrIpcConnect` it was derived from. Today
-##     `monitorInterest` returns `FullInterest` unconditionally, so io-mon
-##     always emits both; the shape becomes reachable the moment
-##     `DependencyGatheringPolicy.captureIpc` — which already exists as
-##     declared DSL surface — is narrowed.
+##     `mrEventLoss` and not the `mrIpcConnect` it was derived from. NO INTEREST
+##     SET CAN PRODUCE THAT SHAPE ANY MORE, and that is a fact about io-mon
+##     rather than about what this engine happens to ask for: DA-5 made
+##     `mrIpcConnect` ungate-able (`categoryOf` answers `none` for it, as it does
+##     for `mrExternalContent` and the META kinds), so the shim's gate cannot
+##     drop it whatever `--interest` says. `DependencyGatheringPolicy.captureIpc`
+##     — the route this file used to name as the way the shape becomes reachable
+##     — is RETIRED for exactly that reason (DA-6), and DA-6's one remaining
+##     narrowing is `ecAmbientReads`, which touches no kind this suite reads.
+##     The shape is therefore unreachable by CONSTRUCTION and is supplied,
+##     which is why these cases still have to exist: the code that handles an
+##     absent connect record is reachable from a capture that simply made no
+##     IPC connection, or one folded from a recognized `.iomon` report, and
+##     "unreachable through interest" is not "unreachable".
 ##   * "two records share a dedup key" needs an `mrIpcConnect` carrying a
 ##     DUPLICATED `peerstart=` token. That token is io-mon's attacker-shaped
 ##     evidence: a cooperating shim never emits it, so a real run cannot make

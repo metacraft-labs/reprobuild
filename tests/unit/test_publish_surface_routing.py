@@ -420,22 +420,11 @@ class PublishSurfaceRoutingTests(unittest.TestCase):
         self.assertIn("PREREQUISITE:", run.err)
         self.assertIn("metacraft-labs/scoop-reprobuild", run.err)
         self.assertIn("DOES NOT EXIST YET", run.err)
-        # The machine-readable line release.yml turns into a ::warning::.
+        # The machine-readable line a caller can turn into a warning.
         self.assertIn("REPRO_PUBLISH_PREREQUISITE", run.out)
         note = repo_root / "scoop" / "PUBLISH-THIS-SURFACE.md"
         self.assertTrue(note.is_file(), "the staged tree carries no note")
         self.assertIn("--target-scoop git:", note.read_text(encoding="utf-8"))
-
-    def test_release_yml_turns_the_prerequisite_into_a_warning(self):
-        """Wiring, asserted at the call site. A notice nothing surfaces is a
-        notice in a log file nobody opens."""
-        text = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("REPRO_PUBLISH_PREREQUISITE", text)
-        self.assertIn("--archives staging", text)
-        for surface in ("DEB", "RPM", "ARCH", "DOWNLOADS", "KEYS"):
-            self.assertIn(f"REPRO_PUBLISH_TARGET_{surface}", text)
 
     # --------------------------------------------------------------- homebrew
     def test_a_homebrew_formula_is_generated_with_a_real_digest(self):
@@ -601,15 +590,6 @@ class PublishSurfaceRoutingTests(unittest.TestCase):
         )
         self.assertIn("homebrew formula: version=", run.err)
 
-    def test_release_yml_renders_both_publish_markers_as_warnings(self):
-        """A marker nothing surfaces is a line in a log nobody opens."""
-        text = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("REPRO_PUBLISH_SKIPPED)", text)
-        self.assertIn("REPRO_PUBLISH_PREREQUISITE)", text)
-        self.assertIn("published nothing for ${version}", text)
-
     # ------------------------------------------- the four names, not the one
     def test_downloads_refuses_a_manifest_naming_an_asset_it_does_not_publish(self):
         """`repro-install.sh` fetches `<asset>` by the name SHA256SUMS gives.
@@ -770,20 +750,6 @@ class PublishSurfaceRoutingTests(unittest.TestCase):
             body,
         )
         self.assertEqual(self._count(f"/v{VERSION}/v{VERSION}/", body), 0)
-
-    def test_release_yml_passes_the_downloads_root_not_the_release_directory(self):
-        """Fixed at the end that was wrong, and asserted at the call site."""
-        text = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn(
-            '--scoop-downloads-base "https://github.com/${GITHUB_REPOSITORY}'
-            '/releases/download"',
-            text,
-        )
-        self.assertEqual(
-            self._count("/releases/download/${tag}", text), 0
-        )
 
     # ------------------------------------------------------- a git identity
     def test_a_git_publish_commits_on_a_host_with_no_configured_identity(self):

@@ -14,6 +14,8 @@
 #   A6  `apt-get upgrade` MOVES the box to the newer release
 #   A7  a tampered .deb is rejected by apt (hash, not size -- see below)
 #   A8  a tampered InRelease is rejected by apt
+#   A9s --uninstall KEEPS the shared repository and key while another
+#       Metacraft product still uses them, and removes the package
 #   A9  --uninstall leaves no repo registration, no keyring, no package
 #   A10 a tampered tarball is rejected THROUGH the installer's fallback
 #
@@ -69,7 +71,18 @@ V2='0.1.4'
 PKG='reprobuild'
 BIN='/usr/bin/repro'
 KEYRING_DEST='/usr/share/keyrings/reprobuild-archive-keyring.gpg'
-SOURCES_DEST='/etc/apt/sources.list.d/reprobuild.sources'
+SOURCES_DEST='/etc/apt/sources.list.d/metacraft-labs.sources'
+
+# The installer serves the ORGANISATION's repositories by default: one
+# source entry, one armoured key, one pacman section, shared by every
+# Metacraft product. The fixture repositories below are built by
+# repro-publish-repos.sh, which emits a BINARY keyring and a pacman
+# database named `reprobuild`, so the arm points the installer at those
+# names. The entry's file names stay the organisation's.
+REPRO_KEYRING_FILE='reprobuild-archive-keyring.gpg'
+REPRO_ARCH_REPO_NAME='reprobuild'
+REPRO_REPO_USERS_DIR='/var/lib/metacraft-labs/repository-users'
+export REPRO_KEYRING_FILE REPRO_ARCH_REPO_NAME REPRO_REPO_USERS_DIR
 
 fails=0
 checks=0
@@ -163,7 +176,7 @@ cleanup() {
   # A10 tarball phase installs a system trust anchor, and leaving it
   # behind is what broke A1/A2 on the second run of this arm.
   apt-get remove -y --purge "$PKG" >/dev/null 2>&1
-  rm -f /usr/share/keyrings/*reprobuild* /etc/apt/sources.list.d/*reprobuild*
+  rm -f /usr/share/keyrings/*reprobuild* /etc/apt/sources.list.d/*reprobuild* /etc/apt/sources.list.d/*metacraft-labs*
   rm -rf /var/lib/reprobuild
 }
 trap cleanup EXIT INT TERM
@@ -178,7 +191,7 @@ hide_distro_sources() {
   mkdir -p "$DISTRO_SRC_BACKUP"
   for f in /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do
     case "$f" in
-      *reprobuild*) continue ;;
+      *reprobuild*|*metacraft-labs*) continue ;;
       *'*'*) continue ;;
     esac
     [ -f "$f" ] || continue
@@ -224,11 +237,11 @@ step 'hermetic reset: remove any reprobuild state from a previous run'
 # then ASSERTED: a reset that silently did nothing would put the vacuity
 # straight back.
 apt-get remove -y --purge "$PKG" >/dev/null 2>&1 || true
-rm -f /usr/share/keyrings/*reprobuild* /etc/apt/sources.list.d/*reprobuild*
+rm -f /usr/share/keyrings/*reprobuild* /etc/apt/sources.list.d/*reprobuild* /etc/apt/sources.list.d/*metacraft-labs*
 rm -rf /var/lib/reprobuild
 assert_eq "$(find /usr/share/keyrings -name '*reprobuild*' | wc -l | tr -d ' ')" '0' \
   'reset: no reprobuild keyring on the box before the arm starts'
-assert_eq "$(find /etc/apt/sources.list.d -name '*reprobuild*' | wc -l | tr -d ' ')" '0' \
+assert_eq "$(find /etc/apt/sources.list.d -name '*reprobuild*' -o -name '*metacraft-labs*' | wc -l | tr -d ' ')" '0' \
   'reset: no reprobuild apt source on the box before the arm starts'
 assert_eq "$(installed_version)" '' 'reset: reprobuild is not installed before the arm starts'
 
@@ -256,15 +269,23 @@ make_tarball() {
   mkdir -p "$_d/bin" "$_d/lib"
   # The payload reports its own version, so the upgrade assertion can be
   # made against INSTALLED BYTES and not only against dpkg's database.
-  cat > "$_d/bin/repro" <<PAYLOAD
+  # Shaped like the release launcher: what it runs lives at
+  # "$(dirname "$0")/../lib". The version comes from there, so a package
+  # that installs bin/ and lib/ apart installs a command that cannot start,
+  # and the upgrade assertions on installed bytes fail instead of passing.
+  cat > "$_d/bin/repro" <<'PAYLOAD'
 #!/bin/sh
-case "\${1:-}" in
-  --version|-V) printf 'reprobuild %s\n' "$_v" ;;
-  *) printf 'reprobuild %s (M3 gate fixture payload)\n' "$_v" ;;
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+lib="$here/../lib/libreprofixture.so"
+[ -f "$lib" ] || { echo "repro: missing $lib" >&2; exit 127; }
+v=$(sed -n 's/^version //p' "$lib")
+case "${1:-}" in
+  --version|-V) printf 'reprobuild %s\n' "$v" ;;
+  *) printf 'reprobuild %s (M3 gate fixture payload)\n' "$v" ;;
 esac
 PAYLOAD
   chmod 0755 "$_d/bin/repro"
-  printf 'fixture runtime lib for %s\n' "$_v" > "$_d/lib/libreprofixture.so"
+  printf 'version %s\n' "$_v" > "$_d/lib/libreprofixture.so"
   ( cd "$WORK/tarballs" && tar -czf "$_top.tar.gz" "$_top" )
   echo "$WORK/tarballs/$_top.tar.gz"
 }
@@ -431,13 +452,26 @@ step 'A1  installer FAILS CLOSED with no pinned trust anchor digest'
 # same non-zero exit but a different message.
 apt_reset
 set +e
-env REPRO_BASE_URL="$BASE" sh "$INSTALL_SH" --method apt >"$WORK/a1.log" 2>&1
+env REPRO_BASE_URL="$BASE" REPRO_KEYRING_SHA256='' sh "$INSTALL_SH" --method apt >"$WORK/a1.log" 2>&1
 A1_RC=$?
 set -e
 assert_ne "$A1_RC" '0' 'A1 installer exited non-zero with no digest pinned'
 assert_matches "$WORK/a1.log" 'no trust anchor digest is pinned' 'A1 refused for the fail-closed reason'
 assert_absent "$SOURCES_DEST" 'A1 registered no apt source'
 assert_absent "$KEYRING_DEST" 'A1 installed no keyring'
+
+# A1b: the pin the installer SHIPS with is enforced. Left at its default
+# (the organisation key), the installer is served this arm's throwaway key
+# and must refuse it as a digest MISMATCH, registering nothing.
+apt_reset
+set +e
+env -u REPRO_KEYRING_SHA256 REPRO_BASE_URL="$BASE" sh "$INSTALL_SH" --method apt >"$WORK/a1b.log" 2>&1
+A1B_RC=$?
+set -e
+assert_ne "$A1B_RC" '0' 'A1b the default pin refuses a key that is not the organisation key'
+assert_matches "$WORK/a1b.log" 'trust anchor digest MISMATCH' 'A1b refused as a digest mismatch'
+assert_matches "$WORK/a1b.log" '27d3273b8e90f966d9557420aaa13446ee8b1b2c6da027137a094f5322da68fc' 'A1b the expected digest is the organisation key'
+assert_absent "$SOURCES_DEST" 'A1b registered no apt source'
 
 # =====================================================================
 step 'A2  installer REJECTS a trust anchor whose digest != the pin'
@@ -526,7 +560,7 @@ step 'A4  IDEMPOTENCE: a second identical run changes nothing (measured)'
 before_sources_sha="$(sha256sum "$SOURCES_DEST" | awk '{print $1}')"
 before_keyring_sha="$(sha256sum "$KEYRING_DEST" | awk '{print $1}')"
 before_version="$(installed_version)"
-before_src_files="$(find /etc/apt/sources.list.d -name '*reprobuild*' -type f | wc -l | tr -d ' ')"
+before_src_files="$(find /etc/apt/sources.list.d -name '*metacraft-labs*' -type f | wc -l | tr -d ' ')"
 before_keyrings="$(find /usr/share/keyrings -name '*reprobuild*' -type f | wc -l | tr -d ' ')"
 before_uris="$(grep -c '^URIs:' "$SOURCES_DEST" || true)"
 
@@ -540,12 +574,12 @@ assert_eq "$A4_RC" '0' 'A4 second installer run exited 0 (so "no change" is not 
 after_sources_sha="$(sha256sum "$SOURCES_DEST" | awk '{print $1}')"
 after_keyring_sha="$(sha256sum "$KEYRING_DEST" | awk '{print $1}')"
 after_version="$(installed_version)"
-after_src_files="$(find /etc/apt/sources.list.d -name '*reprobuild*' -type f | wc -l | tr -d ' ')"
+after_src_files="$(find /etc/apt/sources.list.d -name '*metacraft-labs*' -type f | wc -l | tr -d ' ')"
 after_keyrings="$(find /usr/share/keyrings -name '*reprobuild*' -type f | wc -l | tr -d ' ')"
 after_uris="$(grep -c '^URIs:' "$SOURCES_DEST" || true)"
 
 assert_eq "$after_src_files" "$before_src_files" 'A4 apt source file count unchanged'
-assert_eq "$after_src_files" '1'                 'A4 exactly ONE apt source file for reprobuild'
+assert_eq "$after_src_files" '1'                 'A4 exactly ONE apt source file for the shared repository'
 assert_eq "$after_uris" "$before_uris"           'A4 URIs stanza count unchanged'
 assert_eq "$after_uris" '1'                      'A4 exactly ONE URIs line (no duplicate registration)'
 assert_eq "$after_keyrings" "$before_keyrings"   'A4 keyring file count unchanged'
@@ -704,7 +738,9 @@ A8A_RC=$?
 set -e
 sed -n '1,40p' "$WORK/a8a.log"
 assert_ne "$A8A_RC" '0' 'A8a apt-get update exited non-zero on a corrupt signature packet'
-assert_matches "$WORK/a8a.log" 'is not signed\|BADSIG\|signatures were invalid\|Malformed packet' \
+# Debian 12 (apt 2.6) reports an unparseable armoured signature as
+# "Signed file isn't valid, got 'NODATA'": gpgv found no signature packet.
+assert_matches "$WORK/a8a.log" 'is not signed\|BADSIG\|signatures were invalid\|Malformed packet\|Signed file isn.t valid' \
   'A8a apt refused the repository'
 cp "$WORK/pristine.InRelease" "$INREL"
 
@@ -832,6 +868,38 @@ apt_reset
 restore_distro_sources
 
 # =====================================================================
+step 'A9s --uninstall keeps the SHARED repository while another product uses it'
+# =====================================================================
+# The source entry and the key belong to every Metacraft product. Here a
+# second product is recorded as a user of them, the way its own installer
+# records itself, and reprobuild is uninstalled: the package must go and
+# the shared entry must stay, or the other product loses its updates.
+# VACUITY: the entry and the package are asserted present first.
+run_capture "$WORK/a9s-update.log" apt-get update || true
+set +e
+env REPRO_BASE_URL="$BASE" REPRO_KEYRING_SHA256="$ANCHOR_SHA" \
+  sh "$INSTALL_SH" --method apt >"$WORK/a9s-install.log" 2>&1
+A9SI_RC=$?
+set -e
+assert_eq "$A9SI_RC" '0' 'A9s precondition: install succeeded'
+assert_file "$SOURCES_DEST" 'A9s precondition: the shared apt source exists'
+assert_file "$KEYRING_DEST" 'A9s precondition: the shared keyring exists'
+assert_file "$REPRO_REPO_USERS_DIR/$PKG" 'A9s precondition: reprobuild recorded itself as a user'
+touch "$REPRO_REPO_USERS_DIR/codetracer"
+set +e
+env REPRO_BASE_URL="$BASE" sh "$INSTALL_SH" --method apt --uninstall >"$WORK/a9s.log" 2>&1
+A9S_RC=$?
+set -e
+sed -n '1,30p' "$WORK/a9s.log"
+assert_eq "$A9S_RC" '0' 'A9s uninstaller exited 0'
+assert_eq "$(installed_version)" '' 'A9s the reprobuild package is removed'
+assert_file "$SOURCES_DEST" 'A9s the shared apt source is KEPT for the other product'
+assert_file "$KEYRING_DEST" 'A9s the shared keyring is KEPT for the other product'
+assert_absent "$REPRO_REPO_USERS_DIR/$PKG" 'A9s reprobuild is no longer recorded as a user'
+assert_matches "$WORK/a9s.log" 'still used by codetracer' 'A9s the installer says why it kept them'
+rm -f "$REPRO_REPO_USERS_DIR/codetracer"
+
+# =====================================================================
 step 'A9  --uninstall leaves NO trace'
 # =====================================================================
 # VACUITY: "all gone" is trivially true if nothing was ever there, so the
@@ -859,9 +927,9 @@ assert_eq "$(installed_version)" '' 'A9 dpkg no longer reports the package'
 assert_absent "$SOURCES_DEST" 'A9 the apt source registration'
 assert_absent "$KEYRING_DEST" 'A9 the trust anchor'
 assert_absent "$BIN"          'A9 the installed binary'
-LEFTOVER_SRC="$(find /etc/apt/sources.list.d -name '*reprobuild*' | wc -l | tr -d ' ')"
+LEFTOVER_SRC="$(find /etc/apt/sources.list.d -name '*reprobuild*' -o -name '*metacraft*' | wc -l | tr -d ' ')"
 LEFTOVER_KR="$(find /usr/share/keyrings -name '*reprobuild*' | wc -l | tr -d ' ')"
-assert_eq "$LEFTOVER_SRC" '0' 'A9 no reprobuild file left under sources.list.d'
+assert_eq "$LEFTOVER_SRC" '0' 'A9 no reprobuild or metacraft file left under sources.list.d'
 assert_eq "$LEFTOVER_KR" '0' 'A9 no reprobuild keyring left under /usr/share/keyrings'
 
 # A second uninstall must also be clean (idempotent removal).

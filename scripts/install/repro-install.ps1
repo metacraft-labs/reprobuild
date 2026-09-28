@@ -3,7 +3,7 @@
   Reprobuild installer — the PowerShell half of M3.
 
 .DESCRIPTION
-  irm https://install.reprobuild.com/pwsh | iex
+  irm https://get.reprobuild.com/pwsh | iex
   .\repro-install.ps1 -Method scoop
   .\repro-install.ps1 -Uninstall
 
@@ -57,7 +57,7 @@ param(
   # The gate does exactly that; nothing here hardcodes a hostname that
   # only resolves against the real (still-undelegated) zone.
   [string]$BaseUrl = $env:REPRO_BASE_URL,
-  [string]$Domain = $(if ($env:REPRO_DOMAIN) { $env:REPRO_DOMAIN } else { 'reprobuild.com' }),
+  [string]$Domain = $(if ($env:REPRO_REPO_DOMAIN) { $env:REPRO_REPO_DOMAIN } else { 'metacraft-labs.com' }),
   [string]$BucketUrl = $env:REPRO_BUCKET_URL,
   [string]$Prefix = '',
   [switch]$DryRun,
@@ -71,7 +71,10 @@ Set-StrictMode -Version Latest
 
 $Product = 'Reprobuild'
 $AppName = if ($env:REPRO_PKG_NAME) { $env:REPRO_PKG_NAME } else { 'reprobuild' }
-$BucketName = if ($env:REPRO_BUCKET_NAME) { $env:REPRO_BUCKET_NAME } else { 'reprobuild' }
+# The organisation's bucket, shared by every Metacraft product, as the apt
+# and RPM repositories are (metacraft-specs
+# infrastructure/package-distribution.md §3).
+$BucketName = if ($env:REPRO_BUCKET_NAME) { $env:REPRO_BUCKET_NAME } else { 'metacraft' }
 
 function Write-Log  { param([string]$m) Write-Host "[$Product installer] $m" }
 function Write-Warn { param([string]$m) Write-Host "[$Product installer] WARNING: $m" -ForegroundColor Yellow }
@@ -90,18 +93,16 @@ if ($BaseUrl) {
   $DownloadsUrl = "$b/downloads"
   $KeysUrl = "$b/keys"
 } else {
-  $ScoopBucketUrl = if ($BucketUrl) { $BucketUrl } else { "https://scoop.$Domain" }
-  $DownloadsUrl = "https://downloads.$Domain"
-  $KeysUrl = "https://keys.$Domain"
+  $ScoopBucketUrl = if ($BucketUrl) { $BucketUrl } else { 'https://github.com/metacraft-labs/scoop-metacraft' }
+  $DownloadsUrl = 'https://github.com/metacraft-labs/reprobuild/releases/download'
+  $KeysUrl = "https://deb.$Domain/keys"
 }
 
-$KeyringFile = 'reprobuild-archive-keyring.gpg'
+$KeyringFile = if ($env:REPRO_KEYRING_FILE) { $env:REPRO_KEYRING_FILE } else { 'metacraft-labs-archive-keyring.asc' }
 
-# Expected SHA-256 of the trust anchor. EMPTY on purpose, mirroring
-# scripts/release-signing/trusted-release-keys.txt and the POSIX
-# installer: reprobuild has no release key yet, so the tarball path fails
-# closed rather than trusting whatever the keyring host served.
-$KeyringSha256 = if ($env:REPRO_KEYRING_SHA256) { $env:REPRO_KEYRING_SHA256 } else { '' }
+# Expected SHA-256 of the trust anchor: the organisation key, as the POSIX
+# installer pins it (see there). Set to an empty string to fail closed.
+$KeyringSha256 = if ($null -ne $env:REPRO_KEYRING_SHA256) { $env:REPRO_KEYRING_SHA256 } else { '27d3273b8e90f966d9557420aaa13446ee8b1b2c6da027137a094f5322da68fc' }
 
 # ---------------------------------------------------------------------
 # 1. detect

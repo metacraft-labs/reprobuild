@@ -2558,9 +2558,17 @@ proc lowerDependencyPolicy(actionId, depfile: string;
         "action " & actionId & " uses iomonReportPolicy without a report path")
     result = iomonReportGatheringPolicy(merged)
   result.ignoredInputPrefixes = policy.ignoredInputPrefixes
-  # Feature 1: the two event-interest opt-ins ride onto every lowered kind.
-  result.captureNonDeterminism = policy.captureNonDeterminism
-  result.captureIpc = policy.captureIpc
+  # DA-6: the tool package's capture-breadth declaration rides onto every
+  # lowered kind, because the tool is the same tool whichever way its evidence
+  # is gathered. It matters on the three that are monitored
+  # (`dgAutomaticMonitor` and the two `…ValidatedByMonitor` kinds) and is inert
+  # on the rest, which is the right shape: a recipe that switches an edge from
+  # a depfile to automatic monitoring does not have to re-declare it.
+  #
+  # This replaces the two event-interest bools. `captureIpc` is retired (its
+  # kind is not gate-able after DA-5) and `captureNonDeterminism` survives as a
+  # DSL spelling of this field; see `MonitorCaptureBreadth`.
+  result.captureBreadth = policy.captureBreadth
   # The shim-seed opt-out rides along the same way. False unless the recipe
   # explicitly asked, so no existing edge's lowered policy changes.
   result.suppressMonitorShimSeed = policy.suppressMonitorShimSeed
@@ -4379,7 +4387,20 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 9'u16
+  LoweredGraphCacheVersion = 10'u16
+    # v10: DA-6 — the two trailing event-interest bools
+    # (``captureNonDeterminism``, ``captureIpc``) are replaced by ONE byte
+    # carrying ``MonitorCaptureBreadth``: the tool package's declaration of how
+    # much of io-mon's event stream a monitored action asks for. The layout
+    # changes by one byte, so the version has to move; and it must INVALIDATE
+    # rather than reinterpret, because the ordinals are not compatible. A v9
+    # record's first bool byte is ``captureNonDeterminism``, whose ``false``
+    # (the value almost every edge carried) has ordinal 0 — which in the new
+    # vocabulary reads as ``mcbFullCapture``, the opposite of what
+    # ``captureNonDeterminism = false`` now spells. Guessing would silently
+    # widen or narrow a warm edge's capture, and the direction it gets wrong is
+    # the one where a narrowed capture is trusted as a full one.
+    #
     # v9: Windows-Build-Correctness M6 — the lowered ``BuildAction`` now
     # carries the invoked tool's entropy blessing. The version bump
     # invalidates older entries rather than decoding them with a guessed
@@ -5076,10 +5097,10 @@ proc writeDependencyPolicy(outp: var seq[byte];
     outp.writeString($converterSpec.outputFormatName)
     outp.add(byte(ord(converterSpec.completeness)))
   outp.writeStringSeq(policy.ignoredInputPrefixes)
-  # Event-interest opt-ins (Feature 1). Appended last so the lowered-graph
-  # cache round-trip preserves them; two trailing bool bytes.
-  outp.add(byte(if policy.captureNonDeterminism: 1 else: 0))
-  outp.add(byte(if policy.captureIpc: 1 else: 0))
+  # DA-6: the tool package's capture-breadth declaration. Appended where the
+  # two event-interest bools used to be (see the v10 note on
+  # ``LoweredGraphCacheVersion``); ONE trailing enum byte.
+  outp.add(byte(ord(policy.captureBreadth)))
   # v8: the shim-seed opt-out, same trailing-bool treatment.
   outp.add(byte(if policy.suppressMonitorShimSeed: 1 else: 0))
 
@@ -5134,11 +5155,21 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int):
       DependencyFormatName(readString(bytes, pos))
     result.postBuildConverters[i].completeness = readCompleteness(bytes, pos)
   result.ignoredInputPrefixes = readStringSeq(bytes, pos)
-  # Event-interest opt-ins (Feature 1), written last by writeDependencyPolicy.
-  # The lowered-graph-cache version gate rejects any non-current record, so a
-  # v7 payload always carries these two trailing bool bytes.
-  result.captureNonDeterminism = readByteValue(bytes, pos) != 0'u8
-  result.captureIpc = readByteValue(bytes, pos) != 0'u8
+  # DA-6's capture-breadth byte, written by writeDependencyPolicy. The
+  # lowered-graph-cache version gate rejects any non-current record, so a v10
+  # payload always carries it.
+  #
+  # An out-of-range ordinal is REFUSED rather than clamped, the same way
+  # ``readCompleteness`` and the converter-output-kind read above refuse theirs.
+  # Clamping to ``mcbFullCapture`` would be the safe direction for the CAPTURE
+  # and the wrong one for the RECORD: bytes that do not decode as this
+  # vocabulary are bytes written by something whose vocabulary this build does
+  # not know, and a build that silently reinterprets them has stopped being
+  # able to say what a warm edge asked for.
+  let breadth = readByteValue(bytes, pos)
+  if breadth > byte(ord(mcbOmitAmbientReads)):
+    raiseEnvelopeError(eeMalformed, "invalid monitor capture breadth")
+  result.captureBreadth = MonitorCaptureBreadth(breadth)
   result.suppressMonitorShimSeed = readByteValue(bytes, pos) != 0'u8
 
 proc writeCacheEntryIdentity(outp: var seq[byte];
