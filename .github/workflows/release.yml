@@ -635,6 +635,41 @@ jobs:
           fi
           cat "${asset}.sha256"
 
+      # Native packages (.deb, .rpm) are carriers for the same bytes as this
+      # leg's archive, so they are built right here, from the archive just
+      # checksummed, inside the dev shell (`dev-exec`). The publish job has no
+      # dev environment at all, which is why they are not built there; and
+      # building them here means the workflow_dispatch dry run exercises them.
+      # Each gets a `.sha256`, so the publish job's asset assertion, the
+      # SHA256SUMS manifest, signing and the draft verification treat them as
+      # ordinary release members. .github/release-platforms.json's `packages`
+      # list declares them; a leg builds only those made from ITS archive.
+      - name: Build native packages from this leg's archive
+        if: matrix.os-name == 'linux'
+        shell: bash
+        env:
+          PACKAGES: ${{ needs.plan.outputs.packages }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          out="$(mktemp -d)"
+          while read -r ecosystem archive asset; do
+            [ -n "${ecosystem}" ] || continue
+            [ "${archive}" = "${ASSET_NAME}" ] || continue
+            platform_arch="${archive#"reprobuild-${VERSION}-"}"; platform_arch="${platform_arch%%.*}"
+            dev-exec nix shell nixpkgs#dpkg nixpkgs#rpm -c sh scripts/release/repro-build-packages.sh \
+              --version "${VERSION}" --tarball "${archive}" --out "${out}" \
+              --ecosystem "${ecosystem}" \
+              --platform "${platform_arch%-*}" --asset-arch "${platform_arch##*-}" < /dev/null
+            [ -f "${out}/${asset}" ] || {
+              echo "::error::repro-build-packages produced $(ls "${out}" | tr '\n' ' ')but not ${asset} as .github/release-platforms.json declares"
+              exit 1
+            }
+            mv "${out}/${asset}" .
+            sha256sum "${asset}" > "${asset}.sha256"
+            cat "${asset}.sha256"
+          done <<< "${PACKAGES}"
+
       # Publish NOTHING to the release from here. The artifact is the only
       # output of a build leg; a leg that uploads directly to the release is
       # exactly the bug this workflow was restructured to remove.
@@ -642,9 +677,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.platform }}-${{ matrix.arch }}
+          # The native packages this leg built, if any (Linux only).
           path: |
             ${{ env.ASSET_NAME }}
             ${{ env.ASSET_NAME }}.sha256
+            reprobuild_*.deb
+            reprobuild_*.deb.sha256
+            reprobuild-*.rpm
+            reprobuild-*.rpm.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -699,37 +739,6 @@ jobs:
           pattern: release-*
           path: staging
           merge-multiple: true
-
-      # Native packages (.deb, .rpm) are carriers for the same bytes as the
-      # Linux archive, so they are built here from the archive the build leg
-      # produced, after its digest is re-checked, rather than in a build leg.
-      # Each gets a `.sha256` like the archives, so the assertion below, the
-      # SHA256SUMS manifest, signing and the draft verification all treat them
-      # as ordinary members of the release. .github/release-platforms.json's
-      # `packages` list is what declares them.
-      - name: Build native packages from the release archives
-        shell: bash
-        env:
-          PACKAGES: ${{ needs.plan.outputs.packages }}
-          VERSION: ${{ needs.plan.outputs.version }}
-        run: |
-          set -euo pipefail
-          out="$(mktemp -d)"
-          while read -r ecosystem archive asset; do
-            [ -n "${ecosystem}" ] || continue
-            (cd staging && sha256sum -c "${archive}.sha256")
-            platform_arch="${archive#"reprobuild-${VERSION}-"}"; platform_arch="${platform_arch%%.*}"
-            nix shell nixpkgs#dpkg nixpkgs#rpm -c sh scripts/release/repro-build-packages.sh \
-              --version "${VERSION}" --tarball "staging/${archive}" --out "${out}" \
-              --ecosystem "${ecosystem}" \
-              --platform "${platform_arch%-*}" --asset-arch "${platform_arch##*-}" < /dev/null
-            [ -f "${out}/${asset}" ] || {
-              echo "::error::repro-build-packages produced $(ls "${out}" | tr '\n' ' ')but not ${asset} as .github/release-platforms.json declares"
-              exit 1
-            }
-            mv "${out}/${asset}" staging/
-            (cd staging && sha256sum "${asset}" > "${asset}.sha256" && cat "${asset}.sha256")
-          done <<< "${PACKAGES}"
 
       # Belt-and-braces over the job gate: a green leg whose upload silently
       # produced nothing would otherwise still yield a short release. This
