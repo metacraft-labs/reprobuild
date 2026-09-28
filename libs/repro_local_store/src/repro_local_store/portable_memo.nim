@@ -179,6 +179,27 @@ proc currentIdentity*(roots: openArray[LogicalRoot]; entry: PathSetEntry;
       return none(string)
     some(membershipHex(p))
 
+proc outputsOnDiskReason*(roots: openArray[LogicalRoot];
+                          record: PortableMemoRecord): string =
+  ## "" when every output the record names is on THIS host with the content
+  ## the record names; otherwise why not.
+  for output in record.outputs:
+    let physical = toPhysicalPath(roots, output.path)
+    if physical.isNone:
+      return "output " & output.path & " has no location on this host"
+    let p = physical.get()
+    let actual =
+      if output.directory:
+        if dirExists(extendedPath(p)): treeContentHex(p) else: ""
+      else:
+        if fileExists(extendedPath(p)): fileContentHex(p) else: ""
+    if actual.len == 0:
+      return "output " & output.path & " is missing"
+    if actual != output.digest:
+      return "output " & output.path & " does not have the content the " &
+        "record names"
+  ""
+
 proc strongForPathSet*(roots: openArray[LogicalRoot]; weakHex: string;
                        pathSet: PathSet; resolve: IdentityResolver = nil):
     Option[string] =

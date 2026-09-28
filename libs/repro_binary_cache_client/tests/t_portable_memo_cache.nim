@@ -143,20 +143,86 @@ proc publisherFor(target: MemoRemote): PortableMemoPublisher =
       let attempt = publishMemo(target, roots, record, withOutputs)
       result = if attempt.ok: "" else: attempt.reason
 
+proc lookupFor(target: MemoRemote): PortableMemoLookup =
+  result = proc (roots: seq[LogicalRoot]; weakHex: string;
+                 resolve: IdentityResolver): Option[PortableMemoRecord] =
+    {.cast(gcsafe).}:
+      result = lookupRemoteMemo(target, roots, weakHex, resolve).hit
+
+proc restorerFor(target: MemoRemote): PortableMemoRestorer =
+  result = proc (roots: seq[LogicalRoot]; record: PortableMemoRecord):
+      string =
+    {.cast(gcsafe).}:
+      result = restoreMemoOutputs(target, record, roots)
+
+proc failingRestorer(): PortableMemoRestorer =
+  result = proc (roots: seq[LogicalRoot]; record: PortableMemoRecord):
+      string =
+    "restore refused by the test"
+
+proc ensureServer() =
+  if baseUrl.len > 0:
+    return
+  if dirExists(TmpDir):
+    removeDir(extendedPath(TmpDir))
+  createDir(TmpDir)
+  let port = pickPort()
+  srvProc = startProcess(absolutePath(ServerBinary),
+    args = @["--root=" & TmpDir / "server",
+             "--listen=127.0.0.1:" & $port],
+    options = {poStdErrToStdOut})
+  doAssert waitForListener(srvProc, port), "binary cache server did not start"
+  baseUrl = "http://127.0.0.1:" & $port
+
+type ChainRun = object
+  compile, link: ActionResult
+  trace: string
+
+proc buildChain(projectRoot: string; publisher: PortableMemoPublisher = nil;
+                lookup: PortableMemoLookup = nil;
+                restorer: PortableMemoRestorer = nil): ChainRun =
+  ## compile (untagged: its record is published, its bytes are not) ->
+  ## link (tagged: record and bytes).
+  let compile = BuildAction(
+    governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+    kind: bakWriteText, id: "t-pmc-compile", deps: @[],
+    inputs: @[projectRoot / "src" / "main.c"],
+    outputs: @[projectRoot / "obj" / "main.o"],
+    cwd: projectRoot, cacheable: true, publishToBinaryCache: false,
+    actionCachePolicy: ffpTimestamp,
+    weakFingerprint: fingerprintForPayload("t-pmc-compile"),
+    builtinText: "object of " & readFile(projectRoot / "src" / "main.c"))
+  let link = BuildAction(
+    governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+    kind: bakWriteText, id: "t-pmc-link", deps: @["t-pmc-compile"],
+    inputs: @[projectRoot / "obj" / "main.o"],
+    outputs: @[projectRoot / "bin" / "app"],
+    cwd: projectRoot, cacheable: true, publishToBinaryCache: true,
+    actionCachePolicy: ffpTimestamp,
+    weakFingerprint: fingerprintForPayload("t-pmc-link"),
+    builtinText: "linked app\n")
+  createDir(projectRoot / "obj")
+  createDir(projectRoot / "bin")
+  var config = defaultBuildEngineConfig(projectRoot.parentDir / "cache")
+  config.maxParallelism = 1
+  config.portableRoots = rootsOf(projectRoot)
+  config.portableMemoPublisher = publisher
+  config.portableLookup = lookup != nil
+  config.portableMemoLookup = lookup
+  config.portableMemoRestorer = restorer
+  let run = runBuild(graph(@[compile, link], newSeq[BuildPool]()), config)
+  require run.results.len == 2
+  for r in run.results:
+    require r.status in {asSucceeded, asCacheHit, asUpToDate}
+    if r.id == "t-pmc-compile": result.compile = r
+    else: result.link = r
+  for event in run.trace:
+    result.trace.add($event & "\n")
+
 suite "Cache-Scope P3.3 — remote memoization plane":
 
   setup:
-    if baseUrl.len == 0:
-      if dirExists(TmpDir):
-        removeDir(extendedPath(TmpDir))
-      createDir(TmpDir)
-      let port = pickPort()
-      srvProc = startProcess(absolutePath(ServerBinary),
-        args = @["--root=" & TmpDir / "server",
-                 "--listen=127.0.0.1:" & $port],
-        options = {poStdErrToStdOut})
-      require waitForListener(srvProc, port)
-      baseUrl = "http://127.0.0.1:" & $port
+    ensureServer()
 
   test "the engine publishes; another checkout finds and restores it":
     let a = project("host-a", "int main;\n")
@@ -275,6 +341,66 @@ suite "Cache-Scope P3.3 — remote memoization plane":
     let without = lookupRemoteMemo(remote("multi-c2"), rootsOf(p), weak)
     require without.hit.isSome
     check without.hit.get().strongHex == first.strongHex
+
+suite "Cache-Scope P3.4 — lookup without materialization":
+
+  setup:
+    ensureServer()
+
+  test "another checkout gets the result without running or fetching the rest":
+    let a = project("chain-a", "int main;\n")
+    let built = buildChain(a, publisher = publisherFor(remote("chain-a")))
+    require built.compile.portable
+    require built.link.portable
+    check built.compile.launched
+    check built.link.launched
+
+    # Host B, elsewhere, with no local caches: nothing executes. The compile
+    # is resolved from its RECORD alone — its object file is never fetched,
+    # because the link that consumes it is served as well — and the link's
+    # output is restored.
+    let b = project("chain-b/at/another/depth", "int main;\n")
+    let served = buildChain(b, lookup = lookupFor(remote("chain-b")),
+      restorer = restorerFor(remote("chain-b")))
+    checkpoint(served.trace)
+    check not served.compile.launched
+    check not served.link.launched
+    check served.compile.status == asCacheHit
+    check served.compile.reason == "portable-resolved"
+    check served.link.status == asCacheHit
+    check served.link.reason == "portable-restored"
+    check not fileExists(b / "obj" / "main.o")
+    check readFile(b / "bin" / "app") == readFile(a / "bin" / "app")
+    check served.link.portableStrongHex == built.link.portableStrongHex
+
+  test "a source change executes the chain; nothing stale is served":
+    let a = project("chg-a", "int main;\n")
+    discard buildChain(a, publisher = publisherFor(remote("chg-a")))
+    let c = project("chg-c", "int different;\n")
+    # A stale object file from some earlier build must not key a hit either.
+    createDir(c / "obj")
+    writeFile(c / "obj" / "main.o", "object of int main;\n")
+    let run = buildChain(c, lookup = lookupFor(remote("chg-c")),
+      restorer = restorerFor(remote("chg-c")))
+    checkpoint(run.trace)
+    check run.compile.launched
+    check run.link.launched
+    check readFile(c / "obj" / "main.o") == "object of int different;\n"
+
+  test "an output that cannot be restored falls back to executing":
+    let a = project("fail-a", "int main;\n")
+    discard buildChain(a, publisher = publisherFor(remote("fail-a")))
+    let d = project("fail-d", "int main;\n")
+    let run = buildChain(d, lookup = lookupFor(remote("fail-d")),
+      restorer = failingRestorer())
+    checkpoint(run.trace)
+    # The link cannot be put in place, so it executes; that makes the
+    # compile's object file needed, which has no published bytes either.
+    check "portable-restore-failed" in run.trace
+    check run.compile.launched
+    check run.link.launched
+    check fileExists(d / "obj" / "main.o")
+    check fileExists(d / "bin" / "app")
 
 if baseUrl.len > 0:
   stopServer(srvProc)

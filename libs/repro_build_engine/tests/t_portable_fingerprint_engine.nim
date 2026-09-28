@@ -118,6 +118,37 @@ suite "Cache-Scope P3.1 — engine records portable fingerprints":
     check ra.portableWeakHex == rb.portableWeakHex
     check ra.portableStrongHex != rb.portableStrongHex
 
+  test "P3.4: a declared output directory (an install prefix) is in the record":
+    let p = project("prefix", "int main;\n")
+    createDir(p / "prefix" / "bin")
+    writeFile(p / "prefix" / "bin" / "tool", "tool bytes")
+    let action = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+      kind: bakWriteText, id: "t-pfp-mirror", deps: @[],
+      inputs: @[p / "src" / "main.c"],
+      outputs: @[p / "out" / "mirror.stamp"],
+      declaredOutputs: @[p / "prefix"],
+      cwd: p, cacheable: true, actionCachePolicy: ffpTimestamp,
+      weakFingerprint: fingerprintForPayload("t-pfp-mirror"),
+      builtinText: "stamp\n")
+    createDir(p / "out")
+    var config = defaultBuildEngineConfig(TmpDir / "cache-prefix")
+    config.maxParallelism = 1
+    config.portableRoots = @[
+      LogicalRoot(label: "project", path: p, kind: lrkTracked)]
+    let run = runBuild(graph(@[action], newSeq[BuildPool]()), config)
+    require run.results.len == 1
+    let r = run.results[0]
+    require r.portable
+    var paths: seq[string] = @[]
+    for output in r.portableOutputs:
+      paths.add(output.path)
+      if output.path == "project:prefix":
+        check output.directory
+        check output.digest == treeContentHex(p / "prefix")
+    check "project:prefix" in paths
+    check "project:out/mirror.stamp" in paths
+
   test "an input outside every logical root is reported, not shared":
     let a = project("outside", "int main;\n")
     let stray = absolutePath(TmpDir / "stray.cfg")
