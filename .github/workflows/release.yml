@@ -681,8 +681,11 @@ jobs:
             echo "smoke: REPRO_BOOTSTRAP_CC=${REPRO_BOOTSTRAP_CC}"
             bash scripts/release/smoke_release_dev_exec.sh "${PKG_NAME}"
           else
-            dev-exec bash scripts/release/check_release_source_closure.sh "${PKG_NAME}"
-            dev-exec bash scripts/release/smoke_release_dev_exec.sh "${PKG_NAME}"
+            # ONE dev-exec for both: each entry re-evaluates the flake through
+            # the nix daemon, and a dropped daemon socket on the macOS runners
+            # ("writing to file: Socket is not connected") failed the second
+            # entry of an otherwise green step.
+            dev-exec bash -c 'bash scripts/release/check_release_source_closure.sh "$1" && bash scripts/release/smoke_release_dev_exec.sh "$1"' _ "${PKG_NAME}"
           fi
 
       # Checksum at the point of production. The publish job RE-computes this

@@ -31,7 +31,10 @@ repro_bin="$pkg/bin/repro"
 [[ -f "$repro_bin" ]] || { echo "smoke_release_dev_exec: no bin/repro in $pkg" >&2; exit 1; }
 
 work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/repro-release-smoke-XXXXXX")
-trap 'rm -rf "$work"' EXIT
+# Best-effort: on Windows a helper the run started can still hold the
+# project directory open for a moment ("Device or resource busy"), and a
+# leftover temp dir must not turn a passed check into a failed step.
+trap 'rm -rf "$work" 2>/dev/null || true' EXIT
 project="$work/project"
 mkdir -p "$project"
 cat > "$project/repro.nim" <<'EOF'
