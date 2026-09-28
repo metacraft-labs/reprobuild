@@ -15675,6 +15675,173 @@ proc gitTopLevel(targetPath: string): string =
   if res.exitCode == 0:
     result = os.normalizedPath(res.output.strip())
 
+proc gitCommonDir(targetPath: string): string =
+  ## Absolute path of the repository's COMMON git directory — the main
+  ## worktree's ``.git``, which every linked worktree shares and which holds
+  ## the ``.git/config`` that carries ``core.hooksPath``.
+  ##
+  ## ``--git-common-dir`` answers relatively in the main worktree (``.git``)
+  ## and absolutely in a linked one, so the relative answer is anchored on the
+  ## worktree top level. ``--path-format=absolute`` is tried first and is NOT
+  ## trusted to succeed: it resolves the path it prints, and it fails outright
+  ## when a configured hook path underneath it does not exist.
+  let anchorDir = block:
+    let top = gitTopLevel(targetPath)
+    if top.len > 0: top else: resolveHooksTarget(targetPath)
+  var res = execCmdEx(shellCommand(@["git", "-C", anchorDir, "rev-parse",
+    "--path-format=absolute", "--git-common-dir"]),
+    env = scrubbedGitRepositoryEnv())
+  if res.exitCode == 0 and res.output.strip().len > 0 and
+      res.output.strip().isAbsolute:
+    return os.normalizedPath(res.output.strip())
+  res = execCmdEx(shellCommand(@["git", "-C", anchorDir, "rev-parse",
+    "--git-common-dir"]), env = scrubbedGitRepositoryEnv())
+  if res.exitCode != 0 or res.output.strip().len == 0:
+    return ""
+  let raw = res.output.strip()
+  result = if raw.isAbsolute: os.normalizedPath(raw)
+    else: os.normalizedPath(anchorDir / raw)
+
+proc gitMainWorktreeTop(targetPath: string): string =
+  ## Top level of the repository's MAIN worktree. ``git worktree list
+  ## --porcelain`` always names it first, which is an exact answer; the
+  ## fallback derives it from the common git directory for the git versions
+  ## and layouts where the listing is unavailable.
+  let anchorDir = block:
+    let top = gitTopLevel(targetPath)
+    if top.len > 0: top else: resolveHooksTarget(targetPath)
+  let res = execCmdEx(shellCommand(@["git", "-C", anchorDir, "worktree",
+    "list", "--porcelain"]), env = scrubbedGitRepositoryEnv())
+  if res.exitCode == 0:
+    for line in res.output.splitLines():
+      if line.startsWith("worktree "):
+        let path = line["worktree ".len .. ^1].strip()
+        if path.len > 0:
+          return os.normalizedPath(path)
+  let common = gitCommonDir(targetPath)
+  if common.len > 0 and dirExists(extendedPath(parentDir(common))):
+    return os.normalizedPath(parentDir(common))
+  ""
+
+type
+  HooksPathRepair* = object
+    ## Outcome of making a repository's ``core.hooksPath`` worktree-safe.
+    ## ``ok`` is false only when the value NEEDED rewriting and could not be
+    ## rewritten — the state in which the repo's linked worktrees are ungated
+    ## and nothing this process can do will change that.
+    ok*: bool
+    changed*: bool
+    previous*: string
+    resolved*: string
+    diagnostic*: string
+
+proc ensureWorktreeSafeHooksPath*(repoRoot: string): HooksPathRepair =
+  ## Rewrite a RELATIVE ``core.hooksPath`` into the absolute path it was
+  ## written to mean, so every worktree of the repository runs the managed
+  ## hooks.
+  ##
+  ## WHY THIS EXISTS. ``core.hooksPath`` is stored in the COMMON git
+  ## directory's ``config`` — one value shared by the main worktree and every
+  ## linked worktree — but Git resolves a relative value against the top level
+  ## of whichever worktree is running the hook. ``git-hooks.nix``'s upstream
+  ## installer, which this repository's dev shell runs on every entry, ends
+  ## with
+  ##
+  ##     common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
+  ##     common_dir=${common_dir#$GIT_WC/}
+  ##     git config --local core.hooksPath "$common_dir/hooks"
+  ##
+  ## — i.e. it deliberately relativises the path, storing ``.git/hooks``. In a
+  ## linked worktree ``<top>/.git`` is a FILE, so ``<top>/.git/hooks`` names
+  ## nothing, Git finds no hooks directory, and it runs NO HOOKS AT ALL.
+  ## Measured: ``git worktree add``, edit, ``git commit`` → exit 0 with not one
+  ## managed hook fired, no lock refreshed and no gate consulted. That is the
+  ## complete bypass ``--no-verify`` is designed to make loud, reached with no
+  ## flag; and ``ensure``'s own attempt to install there failed with "Failed to
+  ## create '<worktree>/.git/'" — it tried to ``mkdir`` a file — warned, and
+  ## installed nothing.
+  ##
+  ## An absolute value is the whole repair, and one write covers every present
+  ## and future worktree, because the config is shared. An UNSET
+  ## ``core.hooksPath`` needs no repair at all: Git's own default is
+  ## ``$GIT_COMMON_DIR/hooks``, which is already worktree-safe.
+  ##
+  ## Why rewriting is right rather than presumptuous: a relative value cannot
+  ## express "the same hooks directory for every worktree", which is the only
+  ## thing a SHARED setting can mean. Read per-worktree it names a path that
+  ## exists in exactly one of them. So the rewrite preserves the only coherent
+  ## reading of the value it replaces — the one the main worktree already gets.
+  result.ok = true
+  if repoRoot.len == 0:
+    return
+  let top = gitTopLevel(repoRoot)
+  if top.len == 0:
+    return
+  let read = execCmdEx(shellCommand(@["git", "-C", top, "config", "--get",
+    "core.hooksPath"]), env = scrubbedGitRepositoryEnv())
+  if read.exitCode != 0:
+    return
+  let current = read.output.strip()
+  if current.len == 0 or current.isAbsolute:
+    return
+  result.previous = current
+  let mainTop = gitMainWorktreeTop(top)
+  if mainTop.len == 0:
+    result.ok = false
+    result.diagnostic = "could not determine the main worktree of " & top
+    return
+  result.resolved = os.normalizedPath(mainTop / current)
+  let wrote = execCmdEx(shellCommand(@["git", "-C", top, "config", "--local",
+    "core.hooksPath", result.resolved]), env = scrubbedGitRepositoryEnv())
+  if wrote.exitCode != 0:
+    result.ok = false
+    let said = wrote.output.strip()
+    result.diagnostic =
+      if said.len > 0: said
+      else: "git config --local core.hooksPath exited " & $wrote.exitCode
+    return
+  result.changed = true
+
+proc hooksPathRepairReport*(repoRoot: string;
+    repair: HooksPathRepair): string =
+  ## One report line for a repair that moved something. Empty otherwise, so a
+  ## caller can append it unconditionally.
+  if not repair.changed:
+    return ""
+  "repro hooks: core.hooksPath in " & repoRoot & " was the relative path '" &
+    repair.previous & "', which Git resolves against each worktree's own top " &
+    "level and which therefore names nothing in a linked worktree (its " &
+    "'.git' is a file); rewrote it to " & repair.resolved &
+    " so every worktree of this repo runs the managed hooks"
+
+proc hooksPathRefusalLines*(repoRoot: string;
+    repair: HooksPathRepair): seq[string] =
+  ## The refusal an unrepairable hook path earns at the publication boundary.
+  ## It names the value, the consequence and a command, because an operator
+  ## who cannot act on a refusal reaches for ``git push --no-verify``, and that
+  ## switch cannot tell "the gate could not be installed" from "the gate says
+  ## no".
+  result.add("repro hooks: refusing to publish: this repository's managed " &
+    "hooks are not in force in all of its worktrees.")
+  result.add("repro hooks:   repository:      " & repoRoot)
+  result.add("repro hooks:   core.hooksPath:  " & repair.previous &
+    "  (a RELATIVE path)")
+  result.add("repro hooks: Git resolves a relative core.hooksPath against " &
+    "each worktree's own top")
+  result.add("repro hooks: level, and a linked worktree's '.git' is a FILE " &
+    "— so that path names")
+  result.add("repro hooks: nothing there and Git runs NO hooks at all. Every " &
+    "commit made in a")
+  result.add("repro hooks: linked worktree of this repo bypassed this gate " &
+    "silently.")
+  result.add("repro hooks: It could not be repaired here: " &
+    repair.diagnostic)
+  if repair.resolved.len > 0:
+    result.add("repro hooks: Remedy — make the shared value absolute, then " &
+      "retry the push:")
+    result.add("repro hooks:      git -C " & repoRoot &
+      " config --local core.hooksPath " & repair.resolved)
+
 proc gitHooksDir(targetPath: string): string =
   let repoRoot = gitTopLevel(targetPath)
   if repoRoot.len == 0:
@@ -15698,6 +15865,12 @@ proc gitHooksDir(targetPath: string): string =
       "could not locate Git hooks directory for " & repoRoot & ": " &
         res.output.strip())
   let raw = res.output.strip()
+  # A relative answer is `core.hooksPath` verbatim, and Git resolves it against
+  # THIS worktree's top level — so in a linked worktree it names a path under a
+  # `.git` that is a file. Every installing caller runs
+  # `ensureWorktreeSafeHooksPath` first, which is what keeps that from being
+  # the answer; joining on `repoRoot` here reproduces Git's own reading of a
+  # value that survived it.
   result = if raw.isAbsolute: os.normalizedPath(raw)
     else: os.normalizedPath(repoRoot / raw)
 
@@ -16554,6 +16727,19 @@ proc selfHealManagedHooks*(repoRoot: string): seq[string] =
   let top = gitTopLevel(repoRoot)
   if top.len == 0:
     return
+  # Repair the hook PATH before repairing the hooks. A relative
+  # `core.hooksPath` leaves every linked worktree of this repo with no hooks
+  # directory at all, and installing a perfect bundle into the main worktree's
+  # does not change that. This runs from a hook that is currently executing —
+  # i.e. in the main worktree, the only place one can still run — which is
+  # exactly where the shared config is reachable.
+  let pathRepair = ensureWorktreeSafeHooksPath(top)
+  let repairLine = hooksPathRepairReport(top, pathRepair)
+  if repairLine.len > 0:
+    result.add(repairLine)
+  if not pathRepair.ok:
+    result.add("repro hooks: could NOT make core.hooksPath worktree-safe in " &
+      top & " (it is '" & pathRepair.previous & "'): " & pathRepair.diagnostic)
   let hooksDir = gitHooksDir(top)
   for hookName in VcsHookNames:
     try:
@@ -16808,6 +16994,24 @@ proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
       # Skip repos that the operator hasn't materialized yet — same
       # rule the legacy repo-workspaces installer used.
       continue
+    # Make the hook PATH worktree-safe before writing hooks into it; see
+    # `ensureWorktreeSafeHooksPath`. A repo whose path cannot be repaired has
+    # ungated worktrees, which `ensure` must report as a FAILURE rather than
+    # count among its successes — installing the bundle the main worktree will
+    # run is not the same as installing the repo's gate.
+    let pathRepair = ensureWorktreeSafeHooksPath(repo.repoPath)
+    let repairLine = hooksPathRepairReport(repo.repoPath, pathRepair)
+    if repairLine.len > 0:
+      # stderr, not stdout: `--json` makes stdout a single JSON document, and
+      # the single-repo path's stdout carries the idempotent activation line
+      # `.envrc` consumes. An advisory that corrupted either would trade one
+      # silent failure for another.
+      stderr.writeLine(repairLine)
+    if not pathRepair.ok:
+      stderr.writeLine("repro hooks: " & repo.name &
+        ": could NOT make core.hooksPath worktree-safe (it is '" &
+        pathRepair.previous & "'): " & pathRepair.diagnostic)
+      result.exitCode = 1
     let hooksDir = gitHooksDir(repo.repoPath)
     for hookName in VcsHookNames:
       let outcome = ensureVcsHookDetailed(hooksDir, hookName)
@@ -16820,7 +17024,6 @@ proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
         hookPath: hookPath(hooksDir, hookName),
         managedPath: managedHookPath(hooksDir, hookName)))
       result.summary[tag] = result.summary.getOrDefault(tag, 0) + 1
-  result.exitCode = 0
 
 proc writeHooksEnsureReport(report: HooksEnsureReport; destination: string) =
   ## Opt-in: writes only when ``--write-report[=PATH]`` supplied a destination.
@@ -16869,6 +17072,20 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
   ## driver below; this proc handles the single-repo subset the older
   ## actions still target.
   let targetPath = parsed.targetPath
+  if action == hakEnsure or action == hakReinstall:
+    # Same repair as the workspace driver, for the single-repo path `.envrc`
+    # and the dev shell take. See `ensureWorktreeSafeHooksPath`.
+    let pathRepair = ensureWorktreeSafeHooksPath(targetPath)
+    let repairLine = hooksPathRepairReport(
+      resolveHooksTarget(targetPath), pathRepair)
+    if repairLine.len > 0:
+      stderr.writeLine(repairLine)
+    if not pathRepair.ok:
+      raise newException(ValueError,
+        "core.hooksPath for " & resolveHooksTarget(targetPath) & " is '" &
+          pathRepair.previous &
+          "', a relative path that names nothing in a linked worktree, and " &
+          "it could not be rewritten: " & pathRepair.diagnostic)
   let hooksDir = gitHooksDir(targetPath)
   let actionName =
     case action
@@ -17106,6 +17323,29 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
       return 1
     if refsBytes.len == 0:
       return 0
+    # STAND-DOWN AT THE PUBLICATION BOUNDARY. `CLI/hooks.md` § "Contract
+    # Handshake And Stand-Down" requires a hook that cannot answer to be inert
+    # AND SAY SO rather than fall through to acting. A gate that is not
+    # installed in every worktree of the repo it guards is the same failure
+    # inverted: it falls through to NOT acting, silently. So the repair runs
+    # here too — this arm is the one boundary where a refusal still reaches the
+    # operator — and when the path cannot be made worktree-safe the push is
+    # REFUSED, naming the value, the consequence and the command.
+    #
+    # Refusing rather than warning is the asymmetry the same section already
+    # sets for `pre-push`: a gate an unidentified build decides is not a gate
+    # refuses; a gate whose sibling worktrees were never gated must too, because
+    # the refs being pushed may carry exactly those commits.
+    let prePushRepoRoot =
+      if repoRoot.len > 0: repoRoot else: getCurrentDir()
+    let pathRepair = ensureWorktreeSafeHooksPath(prePushRepoRoot)
+    let repairLine = hooksPathRepairReport(prePushRepoRoot, pathRepair)
+    if repairLine.len > 0:
+      stderr.writeLine(repairLine)
+    if not pathRepair.ok:
+      for line in hooksPathRefusalLines(prePushRepoRoot, pathRepair):
+        stderr.writeLine(line)
+      return 1
     if protocol != PrePushProtocolVersion:
       let resolvedRepro = getAppFilename()
       let candidate = if repoRoot.len > 0: repoRoot else: getCurrentDir()
