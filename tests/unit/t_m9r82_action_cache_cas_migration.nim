@@ -1,3 +1,21 @@
+## DA-8. The two STRUCTURAL cases in this suite used to read RAW source text,
+## which made both of them satisfiable by a comment: delete the guarded code,
+## leave a doc comment that names it, and the audit stays green while asserting
+## nothing. Both now read through ``repro_test_support``'s stripper, and the
+## mode is chosen PER NEEDLE rather than per case — a scan is graded needle by
+## needle, and a needle on the wrong mode is either vacuous or broken while
+## both look green.
+##
+## Which mode each needle is on, and why, is recorded at each needle below.
+## The short form: every POSITIVE needle here is a code spelling (a proc
+## header, a call, an identifier), so every one of them is read from
+## ``nimSourceCodeOnly`` — comments AND literals blanked, because a
+## ``checkpoint``/``echo`` argument satisfies such a needle as readily as a
+## comment does. Every NEGATIVE needle is read from the RAW text on purpose:
+## blanking is the safe direction for a positive assertion and the UNSAFE one
+## for a negative, since a forbidden spelling hidden inside a string literal
+## would be blanked away and the negative would pass.
+
 import std/[os, strutils, tempfiles, times, unittest]
 
 import repro_build_engine
@@ -5,6 +23,7 @@ import repro_cas_store
 import repro_core
 import repro_hash
 import repro_local_store
+import repro_test_support
 
 proc asBytes(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -30,27 +49,111 @@ proc r11Path(cas: CasStore; blob: CasBlobRef): string =
 
 suite "M9.R.82 action-cache R11 CAS migration":
   test "engine restore path routes through R11 materialization helper":
-    let engineSource = readFile(
+    # NOT VACUOUS — the stripper this case now depends on is graded here, in
+    # both directions, before it is used. `when false:` is a THIRD way to write
+    # a comment (Nim only PARSES such a body, it never sem-checks it), so it
+    # reaches a lexical stripper as code; the arm that blanks it can fail in
+    # two opposite ways and BOTH of them look green from the audits below:
+    # under-blanking leaves the bypass open, and over-blanking eats the LIVE
+    # `else:` arm of a `when false:` and reddens audits for the wrong reason.
+    const WhenFalseFixture =
+      "when false:\n" &
+      "  let doc = \"\"\"\n" &
+      "collect(\"apps\", INERT_IN_LITERAL)\n" &
+      "\"\"\"\n" &
+      "  echo INERT_AFTER_LITERAL\n" &
+      "\n" &
+      "  echo INERT_AFTER_BLANK_LINE\n" &
+      "else:\n" &
+      "  echo LIVE_IN_ELSE_ARM\n" &
+      "when false: discard INERT_ONE_LINER\n" &
+      "when true:\n" &
+      "  echo LIVE_UNDER_WHEN_TRUE\n" &
+      "let s = \"when false:\"\n" &
+      "echo LIVE_AT_TOP_LEVEL\n"
+    for mode in [true, false]:
+      let read = nimSourceStripped(WhenFalseFixture, blankStrings = mode)
+      # Length and line structure are the premise every offset-anchored slice
+      # in this file rests on.
+      check read.len == WhenFalseFixture.len
+      check read.count('\n') == WhenFalseFixture.count('\n')
+      # Inert in both modes: a `when false:` body is a comment.
+      check not read.contains("INERT_IN_LITERAL")
+      check not read.contains("INERT_AFTER_LITERAL")
+      check not read.contains("INERT_AFTER_BLANK_LINE")
+      check not read.contains("INERT_ONE_LINER")
+      # Live in both modes. Getting the polarity wrong here is a false
+      # NEGATIVE, so it is pinned as hard as the blanking is.
+      check read.contains("LIVE_IN_ELSE_ARM")
+      check read.contains("LIVE_UNDER_WHEN_TRUE")
+      check read.contains("LIVE_AT_TOP_LEVEL")
+    # A `when false:` written inside a string literal is text, not a block, so
+    # it must not move the scan — checked in the mode that keeps literals.
+    check nimSourceCommentsBlanked(WhenFalseFixture).contains("when false:\"")
+
+    let engineRaw = readFile(
       "libs/repro_build_engine/src/repro_build_engine.nim")
-    check not engineSource.contains(".restoreOutputs(")
-    check engineSource.contains("materializeActionCacheOutputs")
-    check engineSource.contains(".casMaterialize(")
+    let engineCode = nimSourceCodeOnly(engineRaw)
+    check engineCode.len == engineRaw.len
+
+    # NEGATIVE needle, so it is read RAW. Blanking would hide a
+    # `.restoreOutputs(` spelled inside a string literal, which for a negative
+    # is the unsafe direction.
+    check not engineRaw.contains(".restoreOutputs(")
+
+    # CODE needles, all three, so all three are read from `engineCode`. The
+    # engine's own doc comments name this helper as a precedent (line ~3412
+    # today), so over raw text the presence check was satisfied by prose.
+    #
+    # The needle is also strengthened from "the name appears somewhere" to
+    # what the case actually claims: the helper is DECLARED, and BOTH restore
+    # arms reach it. Three whole-identifier occurrences = the declaration plus
+    # the `aclHit` and `aclHybridCutoff` call sites; a call site that stops
+    # sharing the helper drops the count even if it keeps the name in a
+    # comment. Counted as a WHOLE identifier, folded the way Nim folds one, so
+    # `materialize_action_cache_outputs` — the same symbol to the compiler —
+    # counts too.
+    check engineCode.contains("proc materializeActionCacheOutputs*(")
+    check countNimIdentifier(engineCode, "materializeActionCacheOutputs") >= 3
+    # The helper verifies through Layer-1 `casMaterialize` before touching any
+    # destination. Graded as an identifier rather than as `.casMaterialize(`
+    # because Nim has four spellings of one call and only two carry the dot.
+    check containsNimIdentifier(engineCode, "casMaterialize")
 
   test "Store file blob recording streams through R11 CAS":
-    let storeSource = readFile(
+    let storeRaw = readFile(
       "libs/repro_local_store/src/repro_local_store.nim")
+    let storeCode = nimSourceCodeOnly(storeRaw)
+    # The two readings index each other. Both blank IN PLACE and preserve
+    # length and newline positions, which is what makes it sound to locate the
+    # slice in one and cut it out of the other.
+    check storeCode.len == storeRaw.len
+
+    # THE SLICE MARKERS ARE CODE NEEDLES AND ARE LOCATED IN `storeCode`, NOT
+    # IN THE RAW TEXT. Cutting the slice out of raw text was the defect: a
+    # comment — or a string literal — that re-spells the proc header, or that
+    # contains "\nproc ", MOVES the slice, and the assertions inside it are
+    # then made about whatever the widened slice happens to contain. That is
+    # the hole site 3 of this campaign turned out to have at both of ITS
+    # markers. Locating in stripped text and cutting at the SAME offsets is
+    # sound precisely because of the length equality checked above.
     let marker = "proc storeFileBlob*(cas: var Store; path: string; sizeBytes: uint64): CasBlobRef ="
-    let start = storeSource.find(marker)
+    let start = storeCode.find(marker)
     check start >= 0
     if start >= 0:
-      let nextProc = storeSource.find("\nproc ", start + marker.len)
-      let body =
-        if nextProc >= 0: storeSource[start ..< nextProc]
-        else: storeSource[start .. ^1]
-      check body.contains("storeCasFileBlob(path, sizeBytes)")
-      check body.contains("r11CasDigest")
-      check not body.contains("readFile")
-      check not body.contains("storeBlob(payload)")
+      let nextProc = storeCode.find("\nproc ", start + marker.len)
+      let stop = if nextProc >= 0: nextProc else: storeCode.len
+      let bodyCode = storeCode[start ..< stop]
+      let bodyRaw = storeRaw[start ..< stop]
+      # POSITIVE needles: a call and an identifier, i.e. code. Read from the
+      # code-only slice.
+      check bodyCode.contains("storeCasFileBlob(path, sizeBytes)")
+      check containsNimIdentifier(bodyCode, "r11CasDigest")
+      # NEGATIVE needles: read from the RAW slice, for the same reason as the
+      # engine negative above — a forbidden spelling must not be able to hide
+      # in a literal or a comment.
+      check not bodyRaw.contains("readFile")
+      check not bodyRaw.contains("storeBlob(payload)")
 
   test "record writes R11 CAS layout and cache hit restores through helper":
     let tempRoot = createTempDir("repro-m9r82-r11-restore-", "")

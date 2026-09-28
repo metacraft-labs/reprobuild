@@ -44,9 +44,26 @@
 ## engine one covers the possibility that the wrapper drops what the recipe
 ## sets.
 
+## DA-8. The sibling-agreement case below used to read io-mon's
+## ``scripts/build_shim.sh`` RAW, and that script NAMES ``-static-libgcc`` in a
+## ``#`` comment three lines above the first invocation that passes it. So the
+## case would have stayed green over a script that had dropped the flag from
+## every one of its four ``nim c`` invocations and kept only the paragraph
+## explaining why it once needed it — which is precisely the staleness the case
+## exists to notice. It now reads through ``shellSourceCommentsBlanked``.
+##
+## MODE: COMMENTS BLANKED, LITERALS KEPT, and that is the whole point here. The
+## needle IS a literal: io-mon writes ``--passL:"-static-libgcc"`` — quoted — at
+## all four sites. A reader that blanked shell literals as well would delete the
+## subject of the assertion and the case would assert nothing in the other
+## direction. ``shellSourceCommentsBlanked`` is also the only shell reader, and
+## its documented heredoc limit errs toward blanking, i.e. toward RED, which a
+## positive assertion can survive.
+
 import std/[json, os, osproc, sequtils, strtabs, strutils, unittest]
 
 import repro_dsl_stdlib/monitor_shim_artifacts
+import repro_test_support
 
 const
   RepoMarker = "repro.nim"
@@ -70,8 +87,42 @@ proc findRepoRoot(): string =
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
 
-proc projectText(repoRoot: string): string =
-  readFile(repoRoot / RepoMarker).replace("\r\n", "\n")
+## DA-8, the SECOND instance of the same defect in this file, found while
+## converting the one above and not previously recorded.
+##
+## The static arm's scan of ``repro.nim`` was a line scan over RAW text, and it
+## is forgeable: delete the real 64-bit ``nim.c`` edge and re-spell the whole
+## block inside a ``#[ … ]#`` comment. The edge COUNT stays right (one edge
+## deleted, one comment-edge found), ``monitorEdgesOf`` reads the fake block's
+## ``binary =`` / ``passL =`` lines as edge fields, and the case goes green over
+## a recipe that no longer passes the flag anywhere.
+##
+## TWO READINGS, ONE PER NEEDLE CLASS, following the in-tree
+## ``readCatalogCode`` / ``readCatalogLiterals`` pattern:
+##
+##   * ``code`` (``nimSourceCodeOnly``) locates the STRUCTURE — ``nim.c(``,
+##     ``binary =``, ``monitorArtifactPath(``, ``actionId =``, ``passL =``.
+##     Every one of those is a code spelling, and a comment or a string
+##     constant re-spelling one of them must not be able to conjure an edge.
+##   * ``literals`` (``nimSourceCommentsBlanked``) supplies the VALUES —
+##     the ``actionId`` string and the ``passL`` argument that carries
+##     ``-static-libgcc``. Those ARE literals; blanking them would delete the
+##     subject of the assertion.
+##
+## The splice across the two is sound because both readers blank IN PLACE and
+## preserve length and every newline position, so line *i* of one is line *i* of
+## the other. That is asserted below rather than assumed.
+proc projectReadings(repoRoot: string):
+    tuple[code, literals: seq[string]] =
+  let raw = readFile(repoRoot / RepoMarker).replace("\r\n", "\n")
+  let code = nimSourceCodeOnly(raw)
+  let literals = nimSourceCommentsBlanked(raw)
+  doAssert code.len == raw.len, "code-only reading changed the length"
+  doAssert literals.len == raw.len,
+    "comments-blanked reading changed the length"
+  result = (code: code.splitLines(), literals: literals.splitLines())
+  doAssert result.code.len == result.literals.len,
+    "the two readings disagree about how many lines repro.nim has"
 
 proc literalAfter(text, marker: string): string =
   let pos = text.find(marker)
@@ -86,44 +137,51 @@ proc literalAfter(text, marker: string): string =
     return ""
   rest[open + 1 ..< close]
 
-proc fieldLine(lines: openArray[string]; first, last: int;
-    field: string): string =
-  ## The ``<field> = ...`` line inside a call block, or "" if the call does not
-  ## set it. Matched on the stripped prefix so ``extraPassL`` is never mistaken
-  ## for ``passL``.
+proc fieldLineIndex(lines: openArray[string]; first, last: int;
+    field: string): int =
+  ## The index of the ``<field> = ...`` line inside a call block, or -1 if the
+  ## call does not set it. Matched on the stripped prefix so ``extraPassL`` is
+  ## never mistaken for ``passL``. The FIELD NAME is code, so this is located in
+  ## the code reading; the caller reads the VALUE out of the literals reading at
+  ## the returned index.
   for i in first .. last:
     let stripped = lines[i].strip()
     if stripped.startsWith(field & " =") or stripped.startsWith(field & "="):
-      return stripped
-  ""
+      return i
+  -1
 
-proc monitorEdgesOf(text: string): seq[MonitorEdge] =
+proc monitorEdgesOf(code, literals: openArray[string]): seq[MonitorEdge] =
   ## Every ``nim.c(...)`` call in ``repro.nim`` that stages a Windows monitor
   ## artefact, i.e. whose ``binary`` is a ``monitorArtifactPath(...)``. Bounded
   ## backwards by the call's own ``nim.c(`` opener and forwards by its
   ## ``actionId =`` line, which all four of them set.
-  let lines = text.splitLines()
-  for i in 0 ..< lines.len:
-    let stripped = lines[i].strip()
+  ##
+  ## Structure comes from ``code``, values from ``literals`` — see the note
+  ## above ``projectReadings``. The forward bound is ``actionId =`` rather than
+  ## ``actionId = "``, because the code reading has blanked the opening quote
+  ## along with the string it opens.
+  for i in 0 ..< code.len:
+    let stripped = code[i].strip()
     if not (stripped.startsWith("binary =") and
             stripped.contains("monitorArtifactPath(")):
       continue
     var first = i
-    while first >= 0 and not lines[first].contains("nim.c("):
+    while first >= 0 and not code[first].contains("nim.c("):
       dec first
     var last = i
-    while last < lines.len and not lines[last].contains("actionId = \""):
+    while last < code.len and not code[last].strip().startsWith("actionId ="):
       inc last
-    if first < 0 or last >= lines.len:
+    if first < 0 or last >= code.len:
       # An unparsed edge stays in the result with empty fields rather than
       # being dropped. A silently shorter list is the same lie as the bug.
       result.add(MonitorEdge(actionId: "", binaryLine: stripped,
         passLLine: "", startLine: i + 1))
       continue
+    let passLAt = fieldLineIndex(code, first, last, "passL")
     result.add(MonitorEdge(
-      actionId: literalAfter(lines[last], "actionId ="),
+      actionId: literalAfter(literals[last], "actionId ="),
       binaryLine: stripped,
-      passLLine: fieldLine(lines, first, last, "passL"),
+      passLLine: if passLAt < 0: "" else: literals[passLAt].strip(),
       startLine: first + 1))
 
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
@@ -166,7 +224,8 @@ suite "every Windows monitor-artefact edge links libgcc statically":
   test "static: every monitorArtifactPath edge in repro.nim passes " &
       "-static-libgcc":
     let repoRoot = findRepoRoot()
-    let edges = monitorEdgesOf(projectText(repoRoot))
+    let readings = projectReadings(repoRoot)
+    let edges = monitorEdgesOf(readings.code, readings.literals)
 
     for edge in edges:
       checkpoint("monitor edge at repro.nim:" & $edge.startLine & " -> " &
@@ -206,9 +265,15 @@ suite "every Windows monitor-artefact edge links libgcc statically":
       checkpoint("[not applicable] no io-mon sibling at " & sibling)
       skip("no io-mon sibling checkout — ../io-mon/scripts/build_shim.sh absent")
     else:
-      let text = readFile(sibling)
-      checkpoint(sibling & " mentions " & StaticLibgcc & ": " &
-        $text.contains(StaticLibgcc))
+      let raw = readFile(sibling)
+      # Comments blanked, literals kept — see the mode note at the head of this
+      # file. The `#` paragraph above io-mon's first `nim c` names the flag, so
+      # over raw text this assertion was satisfied by that paragraph alone.
+      let text = shellSourceCommentsBlanked(raw)
+      check text.len == raw.len
+      checkpoint(sibling & " passes " & StaticLibgcc & " in code: " &
+        $text.contains(StaticLibgcc) & " (raw text, comments included: " &
+        $raw.contains(StaticLibgcc) & ")")
       check text.contains(StaticLibgcc)
 
   test "engine: every lowered monitor-artefact action carries " &
@@ -233,7 +298,8 @@ suite "every Windows monitor-artefact edge links libgcc statically":
         if not fileExists(reproBin):
           break engineArm
 
-        let edges = monitorEdgesOf(projectText(repoRoot))
+        let readings = projectReadings(repoRoot)
+        let edges = monitorEdgesOf(readings.code, readings.literals)
         check edges.len == windowsMonitorArtifactNames().len
 
         let cmd = @[
