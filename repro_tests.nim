@@ -11331,6 +11331,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_managed_hooks_gate_every_worktree_of_a_repo.nim",
+    binary: "build/test-bin/t_managed_hooks_gate_every_worktree_of_a_repo",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract.nim",
     binary: "build/test-bin/t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract",
     defines: @[],
