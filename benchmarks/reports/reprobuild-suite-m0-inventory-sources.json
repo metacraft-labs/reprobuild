@@ -28657,7 +28657,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
-        "repro_lock_store"
+        "repro_lock_store",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
@@ -29007,7 +29008,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_dsl_stdlib"
+        "repro_dsl_stdlib",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
@@ -36640,7 +36642,8 @@
         "repro_cas_store",
         "repro_core",
         "repro_hash",
-        "repro_local_store"
+        "repro_local_store",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,

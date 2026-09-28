@@ -857,6 +857,31 @@ type
       ## stats but does NOT abort the build. ``nil`` keeps the engine
       ## pure-local (legacy behaviour) — the publish hook becomes a
       ## no-op for every action regardless of the per-action flag.
+    portableRoots*: seq[LogicalRoot]
+      ## Cache-Scope P3.1: the logical roots against which each recorded
+      ## action's PORTABLE fingerprint is computed
+      ## (`repro_local_store/portable_fingerprint`). Empty — the default —
+      ## computes none: path independence is "off unless explicitly
+      ## requested" (Hermetic-Builds-And-Path-Independence.md), and it
+      ## costs a BLAKE3 pass over every observed input. The local
+      ## fingerprint and every local cache decision are unaffected.
+    portableMemoPublisher*: PortableMemoPublisher
+      ## Cache-Scope P3.3. When non-nil (and `portableRoots` is set), every
+      ## portable record is also published to the remote memoization plane.
+      ## Records are metadata (logical paths and digests) and go out for
+      ## every portable action: a downstream lookup resolves its inputs from
+      ## its upstream records without their bytes. Output BYTES go only
+      ## where the binary-cache scope publishes them — actions tagged
+      ## `publishToBinaryCache`, or every action under
+      ## `binaryCacheIntermediateScope`.
+    portableLookup*: bool
+      ## Cache-Scope P3.4. Before scheduling, resolve the graph against the
+      ## portable memo plane (the local store under the shared action-cache
+      ## root, then `portableMemoLookup`) and serve every action it can
+      ## without executing it — materializing only the outputs something
+      ## still needs. Off by default; requires `portableRoots`.
+    portableMemoLookup*: PortableMemoLookup
+    portableMemoRestorer*: PortableMemoRestorer
     binaryCacheIntermediateScope*: bool
       ## L3 PUBLISH-SCOPE. When ``true`` the target binary cache is an
       ## INTERMEDIATE cache: EVERY successful cacheable action's store
@@ -1371,6 +1396,19 @@ type
       ## `evidence` the thing to read for an executed action. Read both halves
       ## through `declaredInputCount` / `depfileInputCount` / … rather than
       ## reaching into either directly.
+    portable*: bool
+      ## Cache-Scope P3.1: whether this recorded action has a portable
+      ## identity. False when portable fingerprints are off, or when an
+      ## observed input lies under no logical root (see `portableReason`).
+    portableWeakHex*: string
+    portableStrongHex*: string
+    portableReason*: string
+    portableOutputs*: seq[PortableOutput]
+      ## Cache-Scope P3.2: the action's outputs named portably and
+      ## identified by content (file digest / tree digest), sorted by logical
+      ## path. The memo record maps `portableStrongHex` to these, which is
+      ## what lets a downstream action's portable strong fingerprint be
+      ## computed from this record without the output bytes on disk.
     strongFingerprintHex*: string
       ## M17 (``ext_repro_action``): the ACTION-CACHE KEY the lookup
       ## compared against, hex-encoded, or "" when the lookup found no
@@ -1625,6 +1663,31 @@ type
     statusCode*: int
     error*: string
     bytesUploaded*: int
+
+  PortableMemoPublisher* = proc(roots: seq[LogicalRoot];
+                                record: PortableMemoRecord;
+                                withOutputs: bool): string
+                               {.gcsafe, closure.}
+    ## Cache-Scope P3.3. Ships a portable memo record — and, when
+    ## `withOutputs`, the output bytes it names — to the remote memoization
+    ## plane (`repro_binary_cache_client/portable_memo_cache.publishMemo`).
+    ## Returns "" on success, otherwise the reason — traced, never fatal.
+
+  PortableMemoLookup* = proc(roots: seq[LogicalRoot]; weakHex: string;
+                             resolve: IdentityResolver):
+                            Option[PortableMemoRecord] {.gcsafe, closure.}
+    ## Cache-Scope P3.4. Remote half of the lookup-without-materialization
+    ## walk: the verified record whose strong fingerprint, computed HERE
+    ## (with `resolve` supplying upstream outputs by their records), matches
+    ## one published for `weakHex`
+    ## (`portable_memo_cache.lookupRemoteMemo`). Metadata only.
+
+  PortableMemoRestorer* = proc(roots: seq[LogicalRoot];
+                               record: PortableMemoRecord): string
+                              {.gcsafe, closure.}
+    ## Cache-Scope P3.4. Place a record's output bytes, verified against the
+    ## record, at this host's paths (`portable_memo_cache.restoreMemoOutputs`).
+    ## Returns "" or why nothing was placed.
 
   BinaryCachePublisher* = proc(req: BinaryCachePublishRequest):
     BinaryCachePublishResult {.gcsafe, closure.}
@@ -13839,6 +13902,175 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     config.peerCacheActionPublisher(weakFingerprint, bundleBytes)
     finishStat("repro peer-cache publish", publishStart)
 
+  proc portableEnvOf(action: BuildAction): seq[(string, string)] =
+    for entry in action.env:
+      let eq = entry.find('=')
+      if eq > 0:
+        result.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
+      else:
+        result.add((entry, ""))
+
+  proc portableDeclaredInputsOf(action: BuildAction): seq[string] =
+    for input in action.inputs:
+      result.add(materialPath(action.cwd, input))
+
+  var observationRoots: seq[LogicalRoot] = @[]
+  var observationRootsResolved = false
+  proc portableRecordRoots(): seq[LogicalRoot] =
+    ## `portableRoots` plus the monitor shim this engine injects, UNTRACKED:
+    ## every monitored process loads it, so it shows up as a read, but it is
+    ## the observation machinery — its bytes are not an input to anything the
+    ## action computes, and its location is a fact about this host.
+    if not observationRootsResolved:
+      observationRootsResolved = true
+      try:
+        let shim = resolveMonitorShimLibForInstall()
+        if shim.len > 0:
+          observationRoots.add(LogicalRoot(label: "monitor-shim",
+            path: absolutePath(shim), kind: lrkUntracked))
+      except CatchableError:
+        discard
+    config.portableRoots & observationRoots
+
+  proc portableStaticFieldsOf(action: BuildAction): seq[string] =
+    ## What the argv does not say about the action: its kind, a builtin's
+    ## payload, and the outputs it declares (sorted: a set).
+    result.add("kind=" & $action.kind)
+    result.add("builtinText=" & action.builtinText)
+    for entry in action.builtinEntries:
+      result.add("builtinEntry=" & entry)
+    var outputs: seq[string] = @[]
+    for output in action.outputs:
+      outputs.add("output=" & materialPath(action.cwd, output))
+    for output in action.declaredOutputs:
+      outputs.add("declaredOutput=" & materialPath(action.cwd, output))
+    outputs.sort()
+    result.add(outputs)
+
+  proc portableWeakOf(action: BuildAction): string =
+    ## The portable weak fingerprint: the action's STATIC description, so it
+    ## is known before the action runs (the P3.4 lookup needs exactly that).
+    portableWeakFingerprint(config.portableRoots, action.argv, action.cwd,
+      portableEnvOf(action), portableDeclaredInputsOf(action),
+      portableStaticFieldsOf(action))
+
+  proc portablePhysicalOutputsOf(action: BuildAction): seq[string] =
+    ## `outputs` plus `declaredOutputs`: an install-mirror action's outputs
+    ## are its stamp, and the package it produces — the install prefix — is
+    ## its declared output. A record that left the prefix out would not
+    ## describe the package at all.
+    var seen = initHashSet[string]()
+    for output in action.outputs & action.declaredOutputs:
+      let physical = materialPath(action.cwd, output)
+      let key = physical.replace('\\', '/')
+      if key notin seen:
+        seen.incl(key)
+        result.add(physical)
+
+  proc finishPortableRecord(idx: int; action: BuildAction;
+                            reads, probes, enumerations: seq[string]) =
+    ## The shared tail of both portable recorders: fingerprint, outputs,
+    ## local memo record, and (once per record) publication.
+    var fp = computePortableFingerprint(portableRecordRoots(), action.argv,
+      action.cwd, portableEnvOf(action), portableDeclaredInputsOf(action),
+      reads, probes, enumerations, portableStaticFieldsOf(action))
+    if fp.portable:
+      # P3.2: a record is only shareable if its RESULT can be named too.
+      let outs = portableOutputs(config.portableRoots,
+        portablePhysicalOutputsOf(action))
+      if outs.portable:
+        runResult.results[idx].portableOutputs = outs.outputs
+        # P3.3: persist the memo record beside the shared action cache so
+        # any checkout of any project on this host can find it by portable
+        # weak fingerprint -> path set -> strong fingerprint. Soft-fail: a
+        # memo that cannot be written costs reuse, never the build.
+        let memo = PortableMemoRecord(
+          weakHex: fp.weakHex, pathSet: pathSetOf(fp.inputs),
+          strongHex: fp.strongHex, outputs: outs.outputs)
+        let memoRoot = sharedRoot / "portable-memo"
+        try:
+          recordMemo(memoRoot, memo)
+        except CatchableError as err:
+          runResult.trace(action.id, "portable-memo-write-failed", err.msg)
+        let withOutputs = action.publishToBinaryCache or
+          config.binaryCacheIntermediateScope
+        # A warm build re-derives the same records; publish each once.
+        if config.portableMemoPublisher != nil and
+            not memoPublished(memoRoot, memo, withOutputs):
+          let failure =
+            try: config.portableMemoPublisher(config.portableRoots, memo,
+                                              withOutputs)
+            except CatchableError as err: err.msg
+          if failure.len > 0:
+            runResult.trace(action.id, "portable-memo-publish-failed",
+              failure)
+          else:
+            try: markMemoPublished(memoRoot, memo, withOutputs)
+            except CatchableError: discard
+            runResult.trace(action.id, "portable-memo-published",
+              "strong=" & fp.strongHex)
+      else:
+        fp.portable = false
+        fp.reason = outs.reason
+        fp.strongHex = ""
+    runResult.results[idx].portable = fp.portable
+    runResult.results[idx].portableWeakHex = fp.weakHex
+    runResult.results[idx].portableStrongHex = fp.strongHex
+    runResult.results[idx].portableReason = fp.reason
+    if fp.portable:
+      runResult.trace(action.id, "portable-fingerprint",
+        "strong=" & fp.strongHex & " inputs=" & $fp.inputs.len)
+    else:
+      runResult.trace(action.id, "portable-fingerprint-unavailable",
+        fp.reason)
+
+  proc recordPortableFingerprint(idx: int; action: BuildAction;
+                                 evidence: PathSetEvidence) =
+    ## Cache-Scope P3.1: compute the action's portable weak/strong
+    ## fingerprint over logical paths, from the SAME filtered input set
+    ## the local record uses (`cacheInputPaths`: tool roots, ignored
+    ## prefixes and the action's own writes already removed), split into
+    ## reads, probes and enumerations. Observational only in P3.1: it is
+    ## reported on the result and the trace, and changes no cache decision.
+    if config.portableRoots.len == 0:
+      return
+    let enumerations = action.cacheEnumeratedDirectories(evidence)
+    var enumerated = initHashSet[string]()
+    for path in enumerations:
+      enumerated.incl(path)
+    var probed = initHashSet[string]()
+    for path in evidence.monitorProbes:
+      probed.incl(materialPath(action.cwd, path))
+    var reads: seq[string] = @[]
+    var probes: seq[string] = @[]
+    for path in action.cacheInputPaths(evidence):
+      if path in enumerated:
+        continue
+      elif path in probed:
+        probes.add(path)
+      else:
+        reads.add(path)
+    finishPortableRecord(idx, action, reads, probes, enumerations)
+
+  proc recordPortableFromLocalHit(idx: int; action: BuildAction;
+                                  record: ActionResultRecord) =
+    ## Cache-Scope P3.4: a local cache hit's record names the inputs the
+    ## action observed when it last ran, so the portable record can be
+    ## derived without re-running it — existing local caches seed the
+    ## portable plane. A missing path was probed, a directory enumerated, a
+    ## file read. (An existing file that was only probed is identified by
+    ## content here: stricter than presence, never looser.)
+    if config.portableRoots.len == 0:
+      return
+    var reads, probes, enumerations: seq[string]
+    for input in record.inputs:
+      let path = materialPath(action.cwd, input.path)
+      case input.metadata.kind
+      of ffkMissing, ffkOther: probes.add(path)
+      of ffkRegular: reads.add(path)
+      of ffkDirectory: enumerations.add(path)
+    finishPortableRecord(idx, action, reads, probes, enumerations)
+
   proc publishBinaryCacheBundle(action: BuildAction;
                                 record: ActionResultRecord;
                                 allowMaterializedOutputs = false) =
@@ -13977,6 +14209,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # validated, materialized output. The regular scheduler already performs
     # that lookup and keeps publish failures soft.
     if config.publishCachedResults:
+      return none(BuildRunResult)
+    # Cache-Scope P3.4: portable records are derived per action from its
+    # local hit, which the whole-graph short-circuit never looks at.
+    if config.portableRoots.len > 0:
       return none(BuildRunResult)
     if not config.rebuildMissingOutputsOnCacheHit:
       return none(BuildRunResult)
@@ -14897,6 +15133,285 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     runResult.trace(id, "dynamic-deps", "loaded")
     true
 
+  # --- Cache-Scope P3.4: lookup without materialization --------------------
+  #
+  # BuildXL's cache-lookup phase, over the portable memo plane. Before
+  # anything is scheduled, walk the graph in topological order and resolve
+  # each action by its portable weak fingerprint: candidate path sets, then a
+  # strong fingerprint computed from THIS host's sources — and, for inputs
+  # another graph action produces, from that action's RESOLVED RECORD, never
+  # from whatever happens to be on disk (a previous run's stale file must not
+  # be able to key a hit). Nothing executes and nothing is fetched but
+  # metadata.
+  #
+  # Then materialize only what something still needs: the graph's sinks, and
+  # every resolved ancestor of an action that must execute. Engine deps are
+  # ordering edges, not per-file edges, so an executing action may read any
+  # ancestor's output — hence ancestors, not just direct deps. An output that
+  # cannot be put in place un-resolves its action AND its descendants, whose
+  # records were keyed on bytes a re-execution need not reproduce; the walk
+  # then repeats until it is stable. What stays resolved completes as a cache
+  # hit without launching; what does not goes through the ordinary lookup and
+  # execution below, unchanged.
+  var portableSatisfied = initTable[string, string]()
+
+  proc runPortablePrepass() =
+    if not config.portableLookup or config.portableRoots.len == 0 or
+        config.forceRebuild:
+      return
+    let roots = config.portableRoots
+    let memoRoot = sharedRoot / "portable-memo"
+    proc logicalKey(physical: string): string =
+      let lp = toLogicalPath(roots, physical)
+      if lp.kind == lpkTracked: lp.label & ":" & lp.rel else: ""
+    proc parentKey(key: string): string =
+      let colon = key.find(':')
+      let slash = key.rfind('/')
+      if slash > colon: key[0 ..< slash]
+      elif colon >= 0 and colon < key.high: key[0 .. colon]
+      else: ""
+    # Which graph action produces each logical path, and every directory
+    # above one — an enumeration there, or a read below a produced
+    # directory, depends on bytes no record states file by file.
+    var producer = initTable[string, string]()
+    var aboveProduced = initHashSet[string]()
+    for action in buildGraph.actions:
+      for physical in portablePhysicalOutputsOf(action):
+        let key = logicalKey(physical)
+        if key.len == 0:
+          continue
+        producer[key] = action.id
+        var up = parentKey(key)
+        while up.len > 0 and up notin aboveProduced:
+          aboveProduced.incl(up)
+          up = parentKey(up)
+    var order: seq[string] = @[]
+    block topo:
+      var indegree = initTable[string, int]()
+      var queue: seq[string] = @[]
+      for action in buildGraph.actions:
+        indegree[action.id] = action.deps.len
+        if action.deps.len == 0:
+          queue.add(action.id)
+      while queue.len > 0:
+        let id = queue.pop()
+        order.add(id)
+        for dependent in dependents.getOrDefault(id):
+          indegree[dependent] = indegree[dependent] - 1
+          if indegree[dependent] == 0:
+            queue.add(dependent)
+    var resolved = initTable[string, PortableMemoRecord]()
+    var producedOutputs = initTable[string, PortableOutput]()
+    var ancestorsOf = initTable[string, HashSet[string]]()
+    const Unresolved = "unresolved-upstream-output"
+      ## An identity no real input has, so a path set that names an output
+      ## of an unresolved action computes a strong fingerprint no record has.
+    proc findEntry(entries: seq[TreeEntry]; rel: string): int =
+      var lo = 0
+      var hi = entries.high
+      while lo <= hi:
+        let mid = (lo + hi) div 2
+        let c = cmp(entries[mid].rel, rel)
+        if c == 0:
+          return mid
+        elif c < 0:
+          lo = mid + 1
+        else:
+          hi = mid - 1
+      -1
+    proc makeResolver(ancestors: HashSet[string]): IdentityResolver =
+      ## Inputs another graph action produces are identified from that
+      ## action's resolved RECORD: a produced file by its digest, a path
+      ## inside a produced directory by the directory's manifest, a directory
+      ## above produced paths by its listing here plus what this action's
+      ## ancestors produce (on the producing host, nothing else had been
+      ## produced yet when this action ran). Everything else is on disk.
+      result = proc (entry: PathSetEntry): Option[string] =
+        let path = entry.path
+        if path in producer:
+          if path notin producedOutputs:
+            return some(Unresolved)
+          let o = producedOutputs[path]
+          case entry.kind
+          of pikRead:
+            return some(if o.directory: Unresolved else: o.digest)
+          of pikProbe:
+            return some("present")
+          of pikEnumeration:
+            if o.directory:
+              return some(membershipHexOfNames(childNames(o.entries, "")))
+            return some(Unresolved)
+        var up = parentKey(path)
+        while up.len > 0:
+          if up in producer:
+            if up notin producedOutputs or not producedOutputs[up].directory:
+              return some(Unresolved)
+            let o = producedOutputs[up]
+            let rel = path[up.len + 1 .. ^1]
+            let at = findEntry(o.entries, rel)
+            case entry.kind
+            of pikRead:
+              if at >= 0 and o.entries[at].kind == tekFile:
+                return some(o.entries[at].identity)
+              return some(Unresolved)
+            of pikProbe:
+              return some(if at >= 0: "present" else: "absent")
+            of pikEnumeration:
+              if at >= 0 and o.entries[at].kind == tekDirectory:
+                return some(membershipHexOfNames(childNames(o.entries, rel)))
+              return some(Unresolved)
+          up = parentKey(up)
+        if path in aboveProduced:
+          case entry.kind
+          of pikProbe:
+            return some("present")
+          of pikRead:
+            return some(Unresolved)
+          of pikEnumeration:
+            var names = initHashSet[string]()
+            let physical = toPhysicalPath(roots, path)
+            if physical.isSome and dirExists(physical.get()):
+              for kind, child in walkDir(physical.get(), relative = true):
+                names.incl(child.replace('\\', '/') &
+                  (if kind in {pcDir, pcLinkToDir}: "/" else: ""))
+            let prefix = if path.endsWith(":"): path else: path & "/"
+            for key, producerId in producer:
+              if not key.startsWith(prefix) or producerId notin ancestors:
+                continue
+              if key notin producedOutputs:
+                return some(Unresolved)
+              let rest = key[prefix.len .. ^1]
+              let slash = rest.find('/')
+              if slash >= 0:
+                names.incl(rest[0 ..< slash] & "/")
+              else:
+                names.incl(rest &
+                  (if producedOutputs[key].directory: "/" else: ""))
+            var listing: seq[string] = @[]
+            for name in names:
+              listing.add(name)
+            return some(membershipHexOfNames(listing))
+        none(string)
+
+    for id in order:
+      let action = actionsById[id]
+      var ancestors = initHashSet[string]()
+      for dep in action.deps:
+        ancestors.incl(dep)
+        for above in ancestorsOf.getOrDefault(dep):
+          ancestors.incl(above)
+      ancestorsOf[id] = ancestors
+      if not action.cacheable or action.dynamicDepsFile.len > 0:
+        continue
+      var depsResolved = true
+      for dep in action.deps:
+        if dep notin resolved:
+          depsResolved = false
+          break
+      if not depsResolved:
+        continue
+      let weak = portableWeakOf(action)
+      let resolver = makeResolver(ancestors)
+      var hit = none(PortableMemoRecord)
+      var source = "local"
+      try:
+        hit = lookupMemo(memoRoot, roots, weak, resolver)
+      except CatchableError as err:
+        runResult.trace(id, "portable-lookup-failed", err.msg)
+      if hit.isNone and config.portableMemoLookup != nil:
+        source = "remote"
+        try:
+          hit = config.portableMemoLookup(roots, weak, resolver)
+        except CatchableError as err:
+          runResult.trace(id, "portable-lookup-failed", err.msg)
+        if hit.isSome:
+          try: recordMemo(memoRoot, hit.get())
+          except CatchableError: discard
+      if hit.isNone:
+        runResult.trace(id, "portable-miss", "weak=" & weak)
+        continue
+      # The record must name exactly what this action produces here, and
+      # its directory listings must be the trees its digests name.
+      var expected: seq[string] = @[]
+      for physical in portablePhysicalOutputsOf(action):
+        expected.add(logicalKey(physical))
+      var named: seq[string] = @[]
+      for output in hit.get().outputs:
+        named.add(output.path)
+      expected.sort()
+      named.sort()
+      if expected != named or not manifestsConsistent(hit.get()):
+        runResult.trace(id, "portable-record-refused",
+          "the record names other outputs than this action declares, " &
+          "or lists a directory that is not the tree its digest names")
+        continue
+      resolved[id] = hit.get()
+      for output in hit.get().outputs:
+        producedOutputs[output.path] = output
+      runResult.trace(id, "portable-resolved",
+        source & " strong=" & hit.get().strongHex)
+
+    if resolved.len == 0:
+      return
+    var materialized = initTable[string, string]()
+    while true:
+      # Needed: resolved sinks, and resolved ancestors of anything that
+      # must execute.
+      var demanded = initHashSet[string]()
+      for i in countdown(order.high, 0):
+        let id = order[i]
+        if id notin resolved or id in demanded:
+          for dep in actionsById[id].deps:
+            demanded.incl(dep)
+      var failed = ""
+      for id in order:
+        if id notin resolved or id in materialized:
+          continue
+        let sink = dependents.getOrDefault(id).len == 0
+        if not sink and id notin demanded:
+          continue
+        let record = resolved[id]
+        if outputsOnDiskReason(roots, record).len == 0:
+          materialized[id] = "portable-outputs-present"
+          continue
+        let why =
+          if config.portableMemoRestorer == nil:
+            "no portable restorer configured"
+          else:
+            try: config.portableMemoRestorer(roots, record)
+            except CatchableError as err: err.msg
+        fileMetadataCache.clear()
+        if why.len == 0:
+          materialized[id] = "portable-restored"
+          continue
+        runResult.trace(id, "portable-restore-failed", why)
+        failed = id
+        break
+      if failed.len == 0:
+        break
+      var drop = @[failed]
+      while drop.len > 0:
+        let id = drop.pop()
+        if id in resolved:
+          resolved.del(id)
+          materialized.del(id)
+          runResult.trace(id, "portable-unresolved",
+            if id == failed: "its outputs cannot be put in place"
+            else: "an upstream action will execute instead")
+          for dependent in dependents.getOrDefault(id):
+            drop.add(dependent)
+
+    for id, record in resolved:
+      portableSatisfied[id] = materialized.getOrDefault(id,
+        "portable-resolved")
+      let idx = idToIndex.resultIndex(id)
+      runResult.results[idx].portable = true
+      runResult.results[idx].portableWeakHex = record.weakHex
+      runResult.results[idx].portableStrongHex = record.strongHex
+      runResult.results[idx].portableOutputs = record.outputs
+
+  runPortablePrepass()
+
   var completed = 0
   let runQuotaResultRoot = cacheRoot / "runquota-results"
   createDir(extendedPath(runQuotaResultRoot))
@@ -14950,6 +15465,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         action = actionsById[id]
         runResult.trace(id, "ready", "pool=" & poolName)
         runResult.trace(id, "dependency-policy", $action.dependencyPolicy.kind)
+
+        # Cache-Scope P3.4: served by the portable pre-pass — its outputs are
+        # in place, or nothing needs them. Nothing launches.
+        if portableSatisfied.hasKey(id):
+          completeSuccess(id, asCacheHit, cdHit, false, portableSatisfied[id])
+          inc completed
+          launchedAny = true
+          continue
 
         var cacheMissInputChanged = false
         # Set when the cache rejected the record because a DECLARED OUTPUT on
@@ -15148,6 +15671,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
                 lookup.record)
+              recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
+                lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
@@ -15177,6 +15702,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
                 lookup.record)
+              recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
+                lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
@@ -15189,6 +15716,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if config.rebuildMissingOutputsOnCacheHit and reusableInPlace:
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
+                lookup.record)
+              recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
                 lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
@@ -15215,6 +15744,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 finishStat("repro cache restore", restoreStart)
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
+                lookup.record)
+              recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
                 lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
@@ -15453,6 +15984,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, action.id), record)
+              recordPortableFingerprint(idx, action, evidence.evidence)
               publishPeerCacheBundle(action.weakFingerprint, record)
               publishBinaryCacheBundle(action, record)
             elif action.cacheable and evidence.disableCacheHits:
@@ -15642,6 +16174,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, plan.action.id), record)
+              recordPortableFingerprint(idx, plan.action, evidence.evidence)
               publishPeerCacheBundle(plan.action.weakFingerprint, record)
               publishBinaryCacheBundle(plan.action, record)
             elif plan.action.cacheable and evidence.disableCacheHits:
@@ -16238,6 +16771,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           finishStat("repro cache record", recordStart)
           writeActionResultRecordFile(
             dependencyEvidencePath(cacheRoot, action.id), record)
+          recordPortableFingerprint(idx, action, evidence.evidence)
           publishPeerCacheBundle(action.weakFingerprint, record)
           publishBinaryCacheBundle(action, record)
         elif action.cacheable and evidence.disableCacheHits:

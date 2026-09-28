@@ -35,11 +35,31 @@
 ## Hermetic: only local ``git init`` / ``git init --bare`` repos; no network.
 ## Skip rule: ``git`` missing on PATH.
 
+## DA-8. The STRUCTURE half below used to be four substring searches over the
+## RAW text of ``repro_cli_support.nim``, which made every one of them
+## satisfiable by a comment: revert a routed call-site to the direct git proc,
+## leave the routed line behind as prose, and the test stays green while
+## asserting nothing. They now read ``nimSourceCodeOnly`` — comments AND
+## literals blanked.
+##
+## ONE READING, NOT TWO, and the mode is picked per needle rather than per
+## file. All four needles are CODE spellings —
+## ``fetchStore.latestLockShas(resolved.projectName).shas``, two
+## ``newGitCheckoutLockStore(…)`` call shapes and
+## ``let storePub2 = publishStore.publishPending()``. Not one of them is a
+## string literal, so there is no needle here that the literals-blanked mode
+## would delete, and a second (comments-blanked) reading would add nothing
+## while giving a literal back the power to satisfy a code needle. Literals
+## have to be blanked as well as comments precisely because a ``checkpoint``
+## or ``echo`` argument in the audited file spells code just as readily as a
+## comment does.
+
 import std/[os, osproc, strutils, tables, tempfiles, unittest]
 
 import git_tool
 import repro_cli_support
 import repro_lock_store
+import repro_test_support
 
 proc q(value: string): string = quoteShell(value)
 
@@ -158,13 +178,43 @@ suite "MO-10: lock publish/read routed through LockStore, not literals":
       # git procs. Reverting a site to ``publishWorkspaceLock(identity, ...)``
       # / ``latestLockShasViaGit(identity, manifestsRoot, ...)`` removes its
       # marker below and fails this test. ----
-      let src = readFile(cliSupportSource())
-      # sync optimized-fetch read routed through the store:
-      check "fetchStore.latestLockShas(resolved.projectName).shas" in src
-      # `repro workspace lock` publish routed through the store:
-      check "newGitCheckoutLockStore(identity, outcome.report.recordStoreRoot)" in
-        src
-      # pre-push gate publish routed through the store:
-      check "newGitCheckoutLockStore(identity, report.recordStoreRoot)" in src
-      # pre-push gate offered re-publish routed through the store:
-      check "let storePub2 = publishStore.publishPending()" in src
+      # Read through the stripper, not raw. See the mode note at the head of
+      # this file: one CODE-ONLY reading, because all four needles below are
+      # code spellings.
+      let srcRaw = readFile(cliSupportSource())
+      let src = nimSourceCodeOnly(srcRaw)
+      # The premise the reading rests on, asserted rather than assumed: the
+      # reader blanks IN PLACE, so it cannot silently shorten the text and
+      # make a needle vanish for the wrong reason.
+      check src.len == srcRaw.len
+      # Named, then checked as a SET rather than as four `check <needle> in src`
+      # lines. `check` renders its operands on failure, and `src` is the whole
+      # 50k-line CLI module: four such assertions turn one missing marker into
+      # megabytes of blanked source in the log, which is how a real failure gets
+      # scrolled past. The checkpoint below says exactly which marker went.
+      const RoutedMarkers = [
+        # sync optimized-fetch read routed through the store:
+        "fetchStore.latestLockShas(resolved.projectName).shas",
+        # `repro workspace lock` publish routed through the store:
+        "newGitCheckoutLockStore(identity, outcome.report.recordStoreRoot)",
+        # pre-push gate publish routed through the store:
+        "newGitCheckoutLockStore(identity, report.recordStoreRoot)",
+        # pre-push gate offered re-publish routed through the store:
+        "let storePub2 = publishStore.publishPending()",
+      ]
+      var missingMarkers: seq[string] = @[]
+      for marker in RoutedMarkers:
+        if marker notin src:
+          missingMarkers.add(marker)
+      if missingMarkers.len > 0:
+        checkpoint("routed LockStore call-sites missing from the CODE of " &
+          cliSupportSource() & " (comments and literals blanked): " &
+          missingMarkers.join(" | "))
+        # Whether the marker is still present as PROSE is the diagnosis: it
+        # says "someone reverted the call-site and left the line in a comment"
+        # rather than "the spelling drifted".
+        for marker in missingMarkers:
+          if marker in srcRaw:
+            checkpoint("  ... but still present in raw text, i.e. in a " &
+              "comment or a string literal: " & marker)
+      check missingMarkers.len == 0
