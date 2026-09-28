@@ -62,8 +62,11 @@
 
 import std/[options, os, strutils, times]
 
+import cbor
+
 import repro_attest
 import repro_attest/cloud_lease
+import repro_attest/cose
 import repro_attest_verify
 import repro_attest_verify/fetch
 
@@ -110,6 +113,9 @@ type
     hexOnly*: bool
     trustAnchorPaths*: seq[string]
     revocationListPaths*: seq[string]
+    attestationsPath*: string
+    signerKeyPaths*: seq[string]
+    witnessedRoots*: seq[string]
     firmware*: string
     vcpus*: string
     vcpuType*: string
@@ -174,6 +180,19 @@ type
       ## not a channel ``$?`` can read, so a script could not tell this
       ## apart from a verdict backed by a manifest its operators had
       ## named in advance. Now it can.
+    aecAcceptedEvidenceBackedManifest = 5
+      ## An acceptance whose established identity was read out of a
+      ## measurement manifest the policy pinned nothing about, and which
+      ## a quorum of the rebuilders the policy admits had signed.
+      ##
+      ## Its own code rather than ``0`` or ``4``. It is not ``0``
+      ## because the operator's own list of manifest digests did not
+      ## decide it; it is not ``4`` because something DID vouch for the
+      ## document, and a script that treated "a named quorum signed
+      ## this" the same as "nobody vouched for this" could not express
+      ## the posture the evidence clause exists to offer.
+      ##
+      ## Appended, so no existing ordinal moves.
 
 const
   AttestExitAccepted* = ord(aecAccepted)
@@ -182,6 +201,8 @@ const
   AttestExitAcceptedNoRootOfTrust* = ord(aecAcceptedNoRootOfTrust)
   AttestExitAcceptedUnauthenticatedManifest* =
     ord(aecAcceptedUnauthenticatedManifest)
+  AttestExitAcceptedEvidenceBackedManifest* =
+    ord(aecAcceptedEvidenceBackedManifest)
 
 proc attestExitCodeFor*(d: VerdictDecision): AttestExitCode =
   ## The single place a verdict becomes an exit code.
@@ -196,6 +217,7 @@ proc attestExitCodeFor*(d: VerdictDecision): AttestExitCode =
   of vdAccepted: aecAccepted
   of vdAcceptedNoRootOfTrust: aecAcceptedNoRootOfTrust
   of vdAcceptedUnpinnedManifest: aecAcceptedUnauthenticatedManifest
+  of vdAcceptedEvidenceBackedManifest: aecAcceptedEvidenceBackedManifest
   of vdRejected: aecRejected
 
 proc renderAttestUsage*(): string =
@@ -285,6 +307,22 @@ repro attest verify --report-file PATH | --report-url URL [options]
                                     issuer in a bundled chain — an
                                     unasked question is not an answer of
                                     no.
+      --attestations PATH           the edge attestations published beside
+                                    the manifest: rebuilder signatures over
+                                    the claim that this configuration
+                                    produces it, and any transparency-log
+                                    inclusion proofs for that claim
+      --signer-key PATH             a COSE_Key holding one admitted
+                                    rebuilder's public key; repeatable. The
+                                    policy says which key identifiers may
+                                    count; this says what their keys are,
+                                    and the two sets must agree exactly.
+      --witnessed-root LOG:SIZE:HEX a transparency-log root this verifier
+                                    has already witnessed; repeatable. An
+                                    inclusion proof for a log with no
+                                    witnessed root here is refused, because
+                                    a proof checked against a root the same
+                                    document supplied establishes nothing.
       --json                        print the machine-readable verdict
       --out PATH                    write the verdict instead of printing it
 
@@ -359,7 +397,17 @@ Exit codes:
   4  a verdict of `accepted-against-an-unauthenticated-manifest`: it
      established an identity, out of a manifest your policy pins nothing
      about
+  5  a verdict of `accepted-against-an-evidence-backed-manifest`: it
+     established an identity, out of a manifest your policy pins nothing
+     about and a quorum of the rebuilders it admits had signed
 """
+
+proc fileBytes(path: string): seq[byte] =
+  ## A file's bytes. The CBOR reader wants bytes and `readFile` gives a
+  ## string; the conversion lives here so it has one spelling.
+  let text = readFile(path)
+  result = newSeq[byte](text.len)
+  for i in 0 ..< text.len: result[i] = byte(text[i])
 
 proc valueFor(args: openArray[string]; i: var int; flag: string): string =
   ## Accepts both ``--flag VALUE`` and ``--flag=VALUE``.
@@ -406,6 +454,12 @@ proc parseAttestArgs*(args: seq[string]): AttestCliOptions =
       result.trustAnchorPaths.add valueFor(args, i, "--trust-anchor")
     of "--revocation-list":
       result.revocationListPaths.add valueFor(args, i, "--revocation-list")
+    of "--attestations":
+      result.attestationsPath = valueFor(args, i, "--attestations")
+    of "--signer-key":
+      result.signerKeyPaths.add valueFor(args, i, "--signer-key")
+    of "--witnessed-root":
+      result.witnessedRoots.add valueFor(args, i, "--witnessed-root")
     of "--json":
       result.asJson = true
       inc i
@@ -1170,6 +1224,45 @@ proc runAttestVerify(opts: AttestCliOptions): int =
       stderr.writeLine("repro attest verify: --revocation-list " & path &
         " is not a revocation list this build reads: " & err.msg)
       return AttestExitUsage
+
+  # The build plane's evidence, and the two things the verifier supplies
+  # to judge it with. Every one of them is a REFUSAL when it cannot be
+  # read, for the reason stated above the trust store: a verifier that
+  # dropped what it could not parse would be judging against a smaller
+  # set than the one it was configured with, and would not say so.
+  if opts.attestationsPath.len > 0:
+    if not fileExists(opts.attestationsPath):
+      stderr.writeLine("repro attest verify: no edge attestations at " &
+        opts.attestationsPath)
+      return AttestExitUsage
+    req.attestationsSource = opts.attestationsPath
+    req.attestationsText = some(readFile(opts.attestationsPath))
+  for path in opts.signerKeyPaths:
+    if not fileExists(path):
+      stderr.writeLine("repro attest verify: no signer key at " & path)
+      return AttestExitUsage
+    try:
+      req.signerRoster.add QuorumSigner(
+        key: parseCoseKey(decodeItem(fileBytes(path))))
+    except CatchableError as err:
+      stderr.writeLine("repro attest verify: --signer-key " & path &
+        " is not a COSE_Key this build reads: " & err.msg)
+      return AttestExitUsage
+  for spec in opts.witnessedRoots:
+    let parts = spec.split(':')
+    if parts.len != 3:
+      stderr.writeLine("repro attest verify: --witnessed-root " &
+        spec.escape() & " must be <log-id>:<tree-size>:<root-hash>")
+      return AttestExitUsage
+    var size = 0
+    try:
+      size = parseInt(parts[1])
+    except ValueError:
+      stderr.writeLine("repro attest verify: --witnessed-root " &
+        spec.escape() & " does not state a tree size")
+      return AttestExitUsage
+    req.witnessedLogRoots.add WitnessedLogRoot(
+      logId: parts[0], treeSize: size, rootHash: parts[2])
 
   req.expectedChallengeHex = opts.challengeHex
   if opts.challengeFile.len > 0:

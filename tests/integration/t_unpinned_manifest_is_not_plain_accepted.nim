@@ -273,20 +273,38 @@ suite "an unpinned manifest is not a plain acceptance":
       v.checks
 
     let everything = checkArray({})
-    let noPin = checkArray({vcManifestPinned})
-    let noPinNoMeasurement = checkArray({vcManifestPinned, vcMeasurementMatch})
+    # "Nothing vouched for the manifest" needs the quorum row to be
+    # something other than passed, so the unauthenticated fixture skips
+    # that row too. Before the evidence posture existed, `noPin` alone
+    # was that fixture; it now describes a manifest a quorum DID vouch
+    # for, which is a different verdict and has its own name below.
+    let noPin = checkArray({vcManifestPinned, vcEvidenceQuorum})
+    let noPinNoMeasurement =
+      checkArray({vcManifestPinned, vcEvidenceQuorum, vcMeasurementMatch})
     let noMeasurement = checkArray({vcMeasurementMatch})
+    let evidenceBacked = checkArray({vcManifestPinned})
 
     # The predicate the decision and the identity block share.
     check identityRestsOnUnauthenticatedManifest(noPin)
     check not identityRestsOnUnauthenticatedManifest(everything)
     check not identityRestsOnUnauthenticatedManifest(noPinNoMeasurement)
     check not identityRestsOnUnauthenticatedManifest(noMeasurement)
+    check not identityRestsOnUnauthenticatedManifest(evidenceBacked)
+
+    # …and its complement, which is the same two rows plus a passed
+    # quorum. The pair of assertions on each fixture is what holds the
+    # two predicates exclusive rather than merely documents it.
+    check identityRestsOnEvidenceBackedManifest(evidenceBacked)
+    check not identityRestsOnEvidenceBackedManifest(noPin)
+    check not identityRestsOnEvidenceBackedManifest(everything)
+    check not identityRestsOnEvidenceBackedManifest(noPinNoMeasurement)
 
     # An unpinned manifest qualifies an acceptance only when an identity
     # was actually read out of one. Nothing pinned and nothing compared
     # is an acceptance that established no identity to qualify.
     check decisionFor(noPin, atTpm) == vdAcceptedUnpinnedManifest
+    check decisionFor(evidenceBacked, atTpm) ==
+      vdAcceptedEvidenceBackedManifest
     check decisionFor(noPinNoMeasurement, atTpm) == vdAccepted
     check decisionFor(noMeasurement, atTpm) == vdAccepted
     check decisionFor(everything, atTpm) == vdAccepted
@@ -297,6 +315,7 @@ suite "an unpinned manifest is not a plain acceptance":
     # decision says, whatever the policy pinned. Reordering the two
     # clauses would silently move a mock verdict from exit 3 to exit 4.
     check decisionFor(noPin, atMock) == vdAcceptedNoRootOfTrust
+    check decisionFor(evidenceBacked, atMock) == vdAcceptedNoRootOfTrust
     check decisionFor(everything, atMock) == vdAcceptedNoRootOfTrust
     check ord(attestExitCodeFor(decisionFor(noPin, atMock))) == 3
 
@@ -325,6 +344,8 @@ suite "an unpinned manifest is not a plain acceptance":
       AttestExitAcceptedNoRootOfTrust
     check ord(attestExitCodeFor(vdAcceptedUnpinnedManifest)) ==
       AttestExitAcceptedUnauthenticatedManifest
+    check ord(attestExitCodeFor(vdAcceptedEvidenceBackedManifest)) ==
+      AttestExitAcceptedEvidenceBackedManifest
 
     # Injective: a mapping that collapsed two decisions onto one code
     # would satisfy every "derived from the verdict" claim above and
@@ -337,7 +358,7 @@ suite "an unpinned manifest is not a plain acceptance":
       check code notin seen
       seen.add code
     check decisions == seen.len
-    check decisions >= 4
+    check decisions >= 5
 
   # -- the command line adds no opinion of its own --------------------
 
@@ -369,7 +390,8 @@ suite "an unpinned manifest is not a plain acceptance":
     # against the enum's, so a decision value added without being listed
     # here reddens rather than being quietly unsearched for.
     let identifiers = ["vdAccepted", "vdRejected", "vdAcceptedNoRootOfTrust",
-                       "vdAcceptedUnpinnedManifest"]
+                       "vdAcceptedUnpinnedManifest",
+                       "vdAcceptedEvidenceBackedManifest"]
     check identifiers.len == names.len
     var outside: seq[string] = @[]
     if start >= 0:

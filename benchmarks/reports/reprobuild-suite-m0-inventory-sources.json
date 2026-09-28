@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1749,
+    "nimTestBinaries": 1752,
     "pureUnitConsolidationGroups": 49,
     "pureUnitTests": 585,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1761
+    "testEntries": 1764
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1086,7 +1086,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 897,
+      "integration": 900,
       "platform/destructive": 115,
       "pure unit": 585,
       "unclassified": 153
@@ -1237,9 +1237,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1749,
+    "nimTestBinaryCount": 1752,
     "pythonTestFileCount": 12,
-    "testEntryCount": 1761
+    "testEntryCount": 1764
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -26112,6 +26112,43 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_edge_attestation_binding_resists_substitution",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_edge_attestation_binding_resists_substitution.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 25,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_edge_attestation_quorum_is_k_of_n",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify",
+        "repro_cli_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_edge_attestation_quorum_is_k_of_n.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 21,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -32657,6 +32694,24 @@
       "source": "tests/integration/t_tpm_quote_verifies.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_transparency_log_inclusion_against_a_witnessed_root",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_transparency_log_inclusion_against_a_witnessed_root.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
