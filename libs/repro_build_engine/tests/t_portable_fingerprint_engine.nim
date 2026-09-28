@@ -192,6 +192,23 @@ suite "Cache-Scope P3.1 — engine records portable fingerprints":
     check "project:prefix" in paths
     check "project:out/mirror.stamp" in paths
 
+  test "the monitor shim the engine injects is not an input":
+    # Every monitored process loads the shim, so it is observed as a read;
+    # it is the observation machinery, wherever this host keeps it.
+    let a = project("shim", "int main;\n")
+    let shim = absolutePath(TmpDir / "elsewhere" / "fake_monitor_shim.dll")
+    createDir(shim.parentDir)
+    writeFile(shim, "shim bytes")
+    let saved = getEnv("REPRO_MONITOR_SHIM_LIB")
+    putEnv("REPRO_MONITOR_SHIM_LIB", shim)
+    defer:
+      if saved.len > 0: putEnv("REPRO_MONITOR_SHIM_LIB", saved)
+      else: delEnv("REPRO_MONITOR_SHIM_LIB")
+    let r = buildIn(a, TmpDir / "cache-shim", portable = true,
+      extraInput = shim)
+    checkpoint(r.portableReason)
+    check r.portable
+
   test "an input outside every logical root is reported, not shared":
     let a = project("outside", "int main;\n")
     let stray = absolutePath(TmpDir / "stray.cfg")
