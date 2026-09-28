@@ -2664,6 +2664,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_portable_fingerprint.nim",
+    binary: "build/test-bin/t_portable_fingerprint",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_local_store/tests/t_store_optimise_dedup.nim",
     binary: "build/test-bin/t_store_optimise_dedup",
     defines: @[],
