@@ -5575,6 +5575,11 @@ proc actionResultJson(item: ActionResult): JsonNode =
     "launched": item.launched,
     "wouldLaunch": item.wouldLaunch,
     "cacheDecision": $item.cacheDecision,
+    # WHY a lookup missed (`input metadata changed: <path>`, `no cache record
+    # for weak fingerprint`, ...). Without it a report says only that an edge
+    # re-ran, and a warm activation that never converges cannot be diagnosed
+    # from the stats it writes.
+    "cacheMissReason": item.cacheMissReason,
     "reason": item.reason,
     "dependencyPolicyKind": $item.dependencyPolicyKind,
     "runQuotaBackend": item.runQuotaBackend,
