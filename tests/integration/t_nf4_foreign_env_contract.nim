@@ -214,6 +214,39 @@ suite "nf4_foreign_env_contract":
     sorted.sort()
     check names == sorted
 
+  test "the_nix_shell_scratch_directory_is_not_part_of_the_environment":
+    # `nix print-dev-env`'s script creates `/tmp/nix-shell.XXXXXX` on every
+    # sourcing and points NIX_BUILD_TOP / TMP / TMPDIR / TEMP / TEMPDIR at it.
+    # Absorbed, those made every activation's contribution different (a fresh
+    # random name) and left one directory behind per entry. Measured on the
+    # real reprobuild flake shell before the fix: all five present, a new
+    # directory each time, 3,975 of them accumulated on the host.
+    let baseline = @[("PATH", "/usr/bin"), ("TMPDIR", "/run/user/1000")]
+    let captured = @[
+      ("PATH", "/nix/store/aa/bin:/usr/bin"),
+      ("NIX_BUILD_TOP", "/tmp/nix-shell.Ab12Cd"),
+      ("TMP", "/tmp/nix-shell.Ab12Cd"),
+      ("TMPDIR", "/tmp/nix-shell.Ab12Cd"),
+      ("TEMP", "/tmp/nix-shell.Ab12Cd"),
+      ("TEMPDIR", "/tmp/nix-shell.Ab12Cd"),
+      ("terminfo", "/nix/store/tt/share/terminfo"),
+      ("SOME_FLAKE_VAR", "kept")]
+    let split = withoutNixShellScratch(
+      foreignEnvOpsFromDump(baseline, captured, ":"))
+    for name in NixShellScratchNames:
+      check not split.kept.hasOpFor(name)
+    # Not unset either: the caller's own TMPDIR survives, as under direnv.
+    check not split.kept.hasOpKind("TMPDIR", feoUnset)
+    check opFor(split.kept, "PATH", feoPrepend).value == "/nix/store/aa/bin"
+    check opFor(split.kept, "SOME_FLAKE_VAR", feoSet).value == "kept"
+    check split.scratchDir == "/tmp/nix-shell.Ab12Cd"
+
+    # Only a `nix-shell.*` directory is ever handed back for deletion.
+    let foreign = withoutNixShellScratch(@[ForeignEnvOp(kind: feoSet,
+      name: "NIX_BUILD_TOP", value: "/home/dev/build")])
+    check foreign.scratchDir == ""
+    check foreign.kept.len == 0
+
   test "a_nul_delimited_dump_survives_a_multi_line_value":
     # A `shellHook` may export a multi-line value. A newline-delimited dump
     # would truncate it and then silently disagree with `nix develop`.
