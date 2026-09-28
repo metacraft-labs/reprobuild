@@ -1309,6 +1309,15 @@ proc prepareMonitorTools*(repoRoot, tempRoot, cacheKey: string): MonitorTools =
 # implementation, named modes, and `t_every_launch_path_is_monitored` drives a
 # fixture through it, so a stripper that quietly returned its input is a red
 # test there rather than five audits that assert nothing everywhere.
+#
+# THERE ARE NOW TWO SUCH FIXTURES, because the two halves fail differently.
+# `t_every_launch_path_is_monitored` pins the COMMENT/LITERAL arms. The
+# `when false:` arm added below can fail in the opposite direction as well — by
+# eating the LIVE `else:` arm of a `when false:` — so it is pinned in BOTH
+# directions by the fixture at the head of
+# `tests/unit/t_m9r82_action_cache_cas_migration`'s first case, which is a
+# cheap unit binary rather than a gate that needs a monitor and a C fixture to
+# get as far as its stripper check.
 
 proc isNimIdentChar(c: char): bool =
   c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
@@ -1317,31 +1326,9 @@ proc blankRange(s: var string; a, b: int) =
   for k in max(a, 0) ..< min(b, s.len):
     if s[k] != '\n': s[k] = ' '
 
-proc nimSourceStripped*(src: string; blankStrings: bool): string =
-  ## ``src`` with every comment — and, when ``blankStrings``, every string
-  ## and character literal — replaced by spaces, preserving length and line
-  ## structure.
-  ##
-  ## Length and line structure are preserved rather than the text removed so
-  ## that a caller may index the result by the ORIGINAL offsets, report a
-  ## line number from it, or splice it line-for-line beside the raw source.
-  ##
-  ## Handles ``#`` line comments, nestable ``#[ … ]#`` block comments,
-  ## ``"…"`` / ``"""…"""`` / raw ``r"…"`` string literals and ``'c'`` char
-  ## literals — including the apostrophe of ``1'u32``, which is not one.
-  ##
-  ## KNOWN LIMIT, stated rather than hidden: ``when false:`` is NOT handled,
-  ## and it is a third way to write a comment. Nim only PARSES such a body —
-  ## measured, a ``when false:`` block referencing nothing that is declared
-  ## and importing nothing compiles — so "delete the code, leave its exact
-  ## text standing" has a spelling that reaches BOTH modes as code. It was
-  ## demonstrated against ``t_b1``'s apps-block slice: the tier-2 edge moved
-  ## out of the collection and left behind under ``when false:`` widens the
-  ## slice through the opening marker, satisfies the offset-anchored closing
-  ## marker, and supplies every literal the case then looks for — six
-  ## assertions green over a project file that no longer builds the binary.
-  ## Closing it means blanking such bodies here, which re-measures every
-  ## converted site; tracked as the next DA-8 item.
+proc nimSourceLexicallyStripped(src: string; blankStrings: bool): string =
+  ## The LEXICAL half of ``nimSourceStripped``: comments and (optionally)
+  ## literals. ``nimSourceStripped`` wraps it with the ``when false:`` arm.
   result = src
   var i = 0
   let n = src.len
@@ -1406,6 +1393,166 @@ proc nimSourceStripped*(src: string; blankStrings: bool): string =
         i = j
     else:
       inc i
+
+# ---------------------------------------------------------------------------
+# `when false:` is a THIRD way to write a comment.
+# ---------------------------------------------------------------------------
+#
+# Nim only PARSES a `when false:` body; it never sem-checks it. Measured: a
+# file whose entire `when false:` body references `BuildActionDef`, `nim.c` and
+# `collect` — none of them declared, no imports at all — compiles and runs. So
+# a `when false:` body is as inert as a comment while being CODE to a lexical
+# stripper, and "delete the code, leave its exact text standing" has a spelling
+# the comment/literal arms above do not reach. It was demonstrated against
+# `t_b1`'s apps-block slice: the tier-2 edge moved out of the collection and
+# left behind under `when false:` widened the slice through the opening marker,
+# satisfied the offset-anchored closing marker and supplied every literal the
+# case then looked for — six assertions green over a project file that no
+# longer built the binary.
+#
+# THE BODY IS LOCATED OVER THE FULLY-STRIPPED TEXT, NOT OVER THE RAW SOURCE,
+# and that is the whole reason this is a second pass rather than another arm in
+# the loop above. The body is indentation-delimited, so the scan has to be able
+# to tell a line start from a byte that merely follows a newline — and the
+# interior of a `"""…"""` literal, or of a `#[ … ]#` comment, is full of
+# newlines followed by column-0 text that is not a line start at all:
+#
+#     when false:
+#       let doc = """
+#     collect("apps", reprobuildAppsActions)
+#     """
+#
+# Over raw text a naive indentation walk ends the body at the literal's second
+# line and leaves the rest standing as code. Over the code-only strip that
+# interior is spaces, so it reads as blank lines and is swallowed by the body.
+# Locating over the code-only strip in BOTH modes also keeps the two readers'
+# blanked ranges identical up to the literal arm, which is what preserves
+# `nimSourceCodeOnly` ⊇ `nimSourceCommentsBlanked` and lets an offset found in
+# one index the other.
+#
+# POLARITY. Only the body of an exact `when false:` is blanked. `when true:`,
+# `when defined(x):`, `when not defined(x):` and — crucially — the `elif` and
+# `else` ARMS of a `when false:` are LIVE code, and blanking those would be a
+# false NEGATIVE that reddens audits for the wrong reason. The indentation walk
+# stops at the first non-blank line indented at or left of the `when` itself,
+# which is exactly where `elif` / `else` sit, so an `else:` arm and its body are
+# never entered. Graded in both directions by the fixture in
+# `t_m9r82_action_cache_cas_migration`.
+#
+# KNOWN LIMITS, stated rather than hidden, all of them in the UNDER-blanking
+# (i.e. pre-fix, no-worse) direction: `when (false):`, `when not true:`,
+# `when false and x:` and `when defined(<a symbol nothing defines>):` are not
+# recognised. A text stripper cannot decide the last one at all, and the others
+# are not idioms in this tree. `if false:` is deliberately NOT recognised: Nim
+# sem-checks that body, so it is real code, not a comment.
+
+proc nimIndentOfLine(src: string; lineStart: int):
+    tuple[indent: int; blank: bool] =
+  ## The indentation width of the line beginning at ``lineStart``, and whether
+  ## the line is whitespace-only. Tabs count as one column — Nim rejects tab
+  ## indentation anyway, so the only thing this has to get right is that a tab
+  ## is not code.
+  var k = lineStart
+  while k < src.len and src[k] in {' ', '\t'}: inc k
+  (indent: k - lineStart, blank: k >= src.len or src[k] == '\n')
+
+iterator nimWhenFalseBodies(codeOnly: string): tuple[a, b: int] =
+  ## Every ``when false:`` body in ``codeOnly``, as a HALF-OPEN ``[a, b)`` byte
+  ## range — the same convention ``blankRange`` takes, deliberately, because a
+  ## ``Slice`` here would be inclusive and blank one byte short.
+  ##
+  ## ``codeOnly`` must already have had comments AND literals blanked, so that
+  ## no ``when false:`` written inside a comment or a string literal is
+  ## reported, and no literal interior is mistaken for a line start.
+  let n = codeOnly.len
+  var i = 0
+  while i < n:
+    # `when` has to begin a STATEMENT: nothing but indentation to its left on
+    # its own line. That is also what makes its column the body's indent floor.
+    if codeOnly[i] == 'w' and i + 4 <= n and
+       (i == 0 or not isNimIdentChar(codeOnly[i - 1])) and
+       codeOnly[i ..< i + 4] == "when" and
+       (i + 4 >= n or not isNimIdentChar(codeOnly[i + 4])):
+      var lineStart = i
+      while lineStart > 0 and codeOnly[lineStart - 1] != '\n': dec lineStart
+      var onlyIndent = true
+      for k in lineStart ..< i:
+        if codeOnly[k] notin {' ', '\t'}: onlyIndent = false
+      if onlyIndent:
+        let whenCol = i - lineStart
+        var j = i + 4
+        while j < n and codeOnly[j] in {' ', '\t'}: inc j
+        let condStart = j
+        while j < n and isNimIdentChar(codeOnly[j]): inc j
+        if codeOnly[condStart ..< j] == "false":
+          var k = j
+          while k < n and codeOnly[k] in {' ', '\t'}: inc k
+          if k < n and codeOnly[k] == ':':
+            inc k
+            var afterColon = k
+            while afterColon < n and codeOnly[afterColon] in {' ', '\t'}:
+              inc afterColon
+            if afterColon < n and codeOnly[afterColon] != '\n':
+              # ONE-LINE FORM, `when false: discard`. The body is the rest of
+              # the line and nothing else — Nim does not allow a statement
+              # after the colon AND an indented block.
+              var stop = afterColon
+              while stop < n and codeOnly[stop] != '\n': inc stop
+              yield (afterColon, stop)
+              i = stop
+              continue
+            # BLOCK FORM. Everything indented strictly deeper than the `when`
+            # belongs to the body, blank lines included; the first non-blank
+            # line at or left of `whenCol` ends it, and that line is where an
+            # `elif` / `else` arm of this same `when` would sit.
+            var lineAt = afterColon
+            while lineAt < n and codeOnly[lineAt] != '\n': inc lineAt
+            if lineAt < n: inc lineAt
+            let bodyStart = lineAt
+            var bodyEnd = bodyStart
+            while lineAt < n:
+              let (indent, blank) = nimIndentOfLine(codeOnly, lineAt)
+              if not blank and indent <= whenCol:
+                break
+              var lineEnd = lineAt
+              while lineEnd < n and codeOnly[lineEnd] != '\n': inc lineEnd
+              if lineEnd < n: inc lineEnd
+              if not blank: bodyEnd = lineEnd
+              lineAt = lineEnd
+            if bodyEnd > bodyStart:
+              yield (bodyStart, bodyEnd)
+            i = max(bodyEnd, afterColon)
+            continue
+      i += 4
+    else:
+      inc i
+
+proc nimSourceStripped*(src: string; blankStrings: bool): string =
+  ## ``src`` with every comment — and, when ``blankStrings``, every string
+  ## and character literal — replaced by spaces, preserving length and line
+  ## structure. The body of a ``when false:`` block is blanked in BOTH modes,
+  ## because Nim never sem-checks one and it is therefore a comment.
+  ##
+  ## Length and line structure are preserved rather than the text removed so
+  ## that a caller may index the result by the ORIGINAL offsets, report a
+  ## line number from it, or splice it line-for-line beside the raw source.
+  ##
+  ## Handles ``#`` line comments, nestable ``#[ … ]#`` block comments,
+  ## ``"…"`` / ``"""…"""`` / raw ``r"…"`` string literals and ``'c'`` char
+  ## literals — including the apostrophe of ``1'u32``, which is not one — and
+  ## ``when false:`` bodies in both their block and one-line spellings. See
+  ## the comment block above ``nimWhenFalseBodies`` for what the last arm does
+  ## NOT cover and why every gap there errs toward leaving text standing.
+  result = nimSourceLexicallyStripped(src, blankStrings)
+  # A `when false:` body is located over the CODE-ONLY strip in both modes, so
+  # that a literal interior cannot break the indentation walk and so that both
+  # readers blank the same ranges. When `blankStrings` is already true the
+  # result IS that strip, so the second pass is skipped.
+  let located =
+    if blankStrings: result
+    else: nimSourceLexicallyStripped(src, blankStrings = true)
+  for (a, b) in nimWhenFalseBodies(located):
+    result.blankRange(a, b)
 
 proc nimSourceCodeOnly*(src: string): string =
   ## Comments AND literals blanked. The mode for a needle that is a CODE
