@@ -161,7 +161,12 @@
       # Nim signal handler in the processes it is injected into, and a spawn
       # whose child had to be terminated during injection now fails cleanly.
       # Requires nim-stackable-hooks 72f5782 (below).
-      url = "github:metacraft-labs/io-mon/a3edfabb36cf8909bacbe3cf52ab96adf8879158";
+      # Bumped to 279a17b, io-mon's `dev` tip. `src/` is BYTE-IDENTICAL to
+      # a3edfab (`git diff a3edfab origin/dev -- src/` is empty), so this
+      # changes no compiled byte; it moves the pin off a mid-history commit and
+      # onto the revision the rest of the workspace builds against, which is
+      # what keeps the four channels that name io-mon from drifting apart again.
+      url = "github:metacraft-labs/io-mon/279a17be71daca6ae4178feb4e6ef1e866a82d2a";
       flake = false;
     };
     nim-shm-gset-src = {
