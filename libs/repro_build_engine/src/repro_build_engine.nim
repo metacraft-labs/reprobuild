@@ -1386,6 +1386,12 @@ type
     portableWeakHex*: string
     portableStrongHex*: string
     portableReason*: string
+    portableOutputs*: seq[PortableOutput]
+      ## Cache-Scope P3.2: the action's outputs named portably and
+      ## identified by content (file digest / tree digest), sorted by logical
+      ## path. The memo record maps `portableStrongHex` to these, which is
+      ## what lets a downstream action's portable strong fingerprint be
+      ## computed from this record without the output bytes on disk.
     strongFingerprintHex*: string
       ## M17 (``ext_repro_action``): the ACTION-CACHE KEY the lookup
       ## compared against, hex-encoded, or "" when the lookup found no
@@ -13890,8 +13896,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var declared: seq[string] = @[]
     for input in action.inputs:
       declared.add(materialPath(action.cwd, input))
-    let fp = computePortableFingerprint(config.portableRoots, action.argv,
+    var fp = computePortableFingerprint(config.portableRoots, action.argv,
       action.cwd, env, declared, reads, probes, enumerations)
+    if fp.portable:
+      # P3.2: a record is only shareable if its RESULT can be named too.
+      var physicalOutputs: seq[string] = @[]
+      for output in action.outputs:
+        physicalOutputs.add(materialPath(action.cwd, output))
+      let outs = portableOutputs(config.portableRoots, physicalOutputs)
+      if outs.portable:
+        runResult.results[idx].portableOutputs = outs.outputs
+      else:
+        fp.portable = false
+        fp.reason = outs.reason
+        fp.strongHex = ""
     runResult.results[idx].portable = fp.portable
     runResult.results[idx].portableWeakHex = fp.weakHex
     runResult.results[idx].portableStrongHex = fp.strongHex
