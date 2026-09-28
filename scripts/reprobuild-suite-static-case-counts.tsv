@@ -213,7 +213,7 @@ libs/repro_dsl_stdlib/tests/t_packaging_engine_has_no_format_knowledge.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_packaging_launchd_renderer.nim	nim	13
 libs/repro_dsl_stdlib/tests/t_packaging_msi_authoring.nim	nim	17
 libs/repro_dsl_stdlib/tests/t_packaging_producer_tool_dependencies.nim	nim	15
-libs/repro_dsl_stdlib/tests/t_packaging_reprobuild_dist.nim	nim	25
+libs/repro_dsl_stdlib/tests/t_packaging_reprobuild_dist.nim	nim	26
 libs/repro_dsl_stdlib/tests/t_packaging_rpm_authoring.nim	nim	26
 libs/repro_dsl_stdlib/tests/t_packaging_runtime_closure.nim	nim	27
 libs/repro_dsl_stdlib/tests/t_packaging_runtime_contract_once.nim	nim	11
@@ -281,6 +281,7 @@ libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.ni
 libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
 libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim	nim	12
+libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim	nim	5
 libs/repro_interface_artifacts/tests/t_multi_package_merge.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_source_discovery.nim	nim	3
@@ -1121,6 +1122,8 @@ tests/integration/t_e2e_local_attestation_emulator_all_protocol_paths.nim	nim	10
 tests/integration/t_e2e_selectable_toolchain_fixture.nim	nim	5
 tests/integration/t_e2e_software_root_attestation_roundtrip.nim	nim	7
 tests/integration/t_e2e_variant_feature_flag_drops_tls.nim	nim	5
+tests/integration/t_edge_attestation_binding_resists_substitution.nim	nim	25
+tests/integration/t_edge_attestation_quorum_is_k_of_n.nim	nim	21
 tests/integration/t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable.nim	nim	1
 tests/integration/t_emitted_overrides_match_the_develop_set.nim	nim	1
 tests/integration/t_emulator_is_not_a_verifier_bypass.nim	nim	15
@@ -1450,11 +1453,11 @@ tests/integration/t_switch_new_branch_marks_feature_branch.nim	nim	7
 tests/integration/t_switch_stashes_and_restores_per_repo_wip.nim	nim	1
 tests/integration/t_sync_check_operate_from_committed_lock_without_manifests.nim	nim	1
 tests/integration/t_sync_clones_commit_pinned_repo.nim	nim	4
-tests/integration/t_sync_clones_newly_declared_dependency_after_pull.nim	nim	1
+tests/integration/t_sync_clones_newly_declared_dependency_after_pull.nim	nim	2
 tests/integration/t_sync_fast_forwards_feature_branch_from_its_own_upstream.nim	nim	1
 tests/integration/t_sync_ff_only_per_repo_upstream.nim	nim	2
 tests/integration/t_sync_honours_branch_and_revision_together.nim	nim	2
-tests/integration/t_sync_mainline_reconcile.nim	nim	8
+tests/integration/t_sync_mainline_reconcile.nim	nim	9
 tests/integration/t_sync_reports_partial_manifest_advance_without_rollback.nim	nim	1
 tests/integration/t_sync_resumes_after_interruption_and_force_sync_overwrites_dirty.nim	nim	1
 tests/integration/t_sync_scoped_to_named_project_touches_only_that_project.nim	nim	1
@@ -1493,6 +1496,7 @@ tests/integration/t_tpm2_evidence_composite_roundtrip.nim	nim	14
 tests/integration/t_tpm2_evidence_rejects_malformed.nim	nim	23
 tests/integration/t_tpm2_structure_vectors.nim	nim	2
 tests/integration/t_tpm_quote_verifies.nim	nim	7
+tests/integration/t_transparency_log_inclusion_against_a_witnessed_root.nim	nim	15
 tests/integration/t_tsm_report_transport.nim	nim	39
 tests/integration/t_unavailable_package_does_not_fall_through_to_path.nim	nim	1
 tests/integration/t_unavailable_package_fails_with_platform_reason.nim	nim	1

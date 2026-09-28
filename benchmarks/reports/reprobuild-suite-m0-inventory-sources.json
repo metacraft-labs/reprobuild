@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1751,
+    "nimTestBinaries": 1755,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 584,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1765
+    "testEntries": 1768
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1073,10 +1073,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 897,
+      "integration": 901,
       "platform/destructive": 115,
       "pure unit": 584,
-      "unclassified": 158
+      "unclassified": 157
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1224,9 +1224,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1751,
-    "pythonTestFileCount": 14,
-    "testEntryCount": 1765
+    "nimTestBinaryCount": 1755,
+    "pythonTestFileCount": 13,
+    "testEntryCount": 1768
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3599,7 +3599,6 @@
             "isIdent",
             "item",
             "keyword",
-            "launchPathDrives",
             "lines",
             "lowered",
             "lp",
@@ -3656,7 +3655,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1313,
+          "line": 1294,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -9019,7 +9018,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_daemon_core/tests/t_daemon_image_digest_cache.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -10012,13 +10011,14 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_dsl_stdlib",
+        "repro_interface_artifacts",
         "repro_project_dsl"
       ],
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": true,
       "source": "libs/repro_dsl_stdlib/tests/t_packaging_reprobuild_dist.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 25,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -11260,6 +11260,23 @@
       "source": "libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_installed_layout_source_roots",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -26165,6 +26182,43 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_edge_attestation_binding_resists_substitution",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_edge_attestation_binding_resists_substitution.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 25,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_edge_attestation_quorum_is_k_of_n",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify",
+        "repro_cli_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_edge_attestation_quorum_is_k_of_n.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 21,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -31975,7 +32029,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_sync_clones_newly_declared_dependency_after_pull.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32044,7 +32098,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_sync_mainline_reconcile.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32713,6 +32767,24 @@
       "source": "tests/integration/t_tpm_quote_verifies.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_transparency_log_inclusion_against_a_witnessed_root",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_transparency_log_inclusion_against_a_witnessed_root.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -37550,21 +37622,6 @@
       "source": "tests/unit/test_package_root_anchor.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
-      "binary": "",
-      "class": "unclassified",
-      "classificationReason": "imports `__future__`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
-      "defines": [],
-      "language": "python",
-      "localDependencyShape": [],
-      "owner": "tests/unit",
-      "requiresReproBinary": false,
-      "source": "tests/unit/test_prune_undeclared_test_binaries.py",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
