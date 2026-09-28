@@ -12839,6 +12839,14 @@ proc unresolvableScriptInterpreter*(path: string): string =
     let words = first[2 .. ^1].splitWhitespace()
     # Diagnose the simple env shebang used by the source helper. Other env
     # option forms remain env's responsibility.
+    #
+    # An AMBIENT lookup on purpose, and the only one in this library: `env`
+    # will resolve this name through the spawning process's PATH, so PATH is
+    # exactly the question. The answer is only ever diagnostic text -- the
+    # path it finds is never executed -- so it is pinned as a PROBE, not a
+    # launch path, in `t_every_launch_path_is_monitored`'s spawn-primitive
+    # census (whose import rule keeps `ambient_execution`'s escape hatch out
+    # of this module, hence the stdlib name).
     if words.len == 2 and not words[1].startsWith("-") and
         findExe(words[1]).len == 0:
       return words[1] & " (not found on PATH)"

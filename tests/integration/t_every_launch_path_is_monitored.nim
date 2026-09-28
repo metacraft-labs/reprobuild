@@ -608,7 +608,16 @@ const SpawnPrimitives: array[45, tuple[name: string; expected: int;
   ("uncontrolledExecProcess", 0, ""),
   ("execShellCmd", 0, ""),
   ("uncontrolledExecShellCmd", 0, ""),
-  ("findExe", 0, ""),
+  # A PROBE, not a launch path: `unresolvableScriptInterpreter` asks whether
+  # the nix daemon script's `#!/usr/bin/env <name>` resolves on PATH, so a
+  # missing interpreter is reported by name instead of as a bare spawn
+  # failure (d481a2c50). The path it finds is never executed; the daemon is
+  # started by the `startProcess` row above. The stdlib name because rule 5
+  # below keeps `ambient_execution` (and its `uncontrolledFindExe`) out of
+  # the engine. A second `findExe` is a new ambient lookup and moves this
+  # count.
+  ("findExe", 1,
+    "probe: the nix daemon script's env-shebang name on PATH; spawns nothing"),
   ("uncontrolledFindExe", 0, ""),
   ("launchProcess", 0, "runquota_process; what startDirect itself calls"),
   ("commandSpec", 0, "runquota_process; the spec startDirect hands it"),
