@@ -110,7 +110,11 @@ reprobuild-ct-test-runner=dev
 # flake.nix: the Windows shim is built with -d:noSignalHandler and fails a
 # spawn whose child the injector had to terminate. It needs
 # nim-stackable-hooks 72f5782 below. 0c312f2 is an ancestor of a3edfab.
-io-mon=a3edfabb36cf8909bacbe3cf52ab96adf8879158
+# The release candidate includes the vfork child-identity and parent-guard
+# repairs. All four channels (flake URL, lock, this clone and package fallback)
+# select the same published revision; a sibling must not replace the repaired
+# monitor with the older runtime during a source bootstrap.
+io-mon=1181bdcc53b84a14e021899a35b8108630a28b69
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood

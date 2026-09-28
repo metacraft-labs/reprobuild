@@ -162,7 +162,8 @@
       # whose child had to be terminated during injection now fails cleanly.
       # Requires nim-stackable-hooks 72f5782 (below).
       # Preserve child exec identities and the resumed parent guard across vfork.
-      url = "github:metacraft-labs/io-mon/d6465ca05f1d37f9c21db911668b3f116787a378";
+      # Keep this, the lock, sibling clone and package fallback on one revision.
+      url = "github:metacraft-labs/io-mon/1181bdcc53b84a14e021899a35b8108630a28b69";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -1404,7 +1405,12 @@
                   pkgs.swift
                   pkgs.swiftpm
                 ]
-                ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.gnat ]
+                # GNAT's bootstrap binary exists only for x86_64 Linux at
+                # this pin. Its broad meta.platforms passes availableOn, but
+                # forcing the dependency on ARM64 throws during evaluation.
+                ++ pkgs.lib.optionals (pkgs.stdenv.isLinux && pkgs.stdenv.hostPlatform.isx86_64) [
+                  pkgs.gnat
+                ]
               );
               # Names the dev shell's C toolchain owns. A link under one of
               # these would shadow it (see above).
