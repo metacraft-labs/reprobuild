@@ -790,6 +790,18 @@ type
       ## field, and ``t_da1i_evidence_scope`` pins that they do not.
     dryRun*: bool
     progressCallback*: BuildProgressCallback
+    fastNoopReportsProgress*: bool
+      ## Keep the whole-graph no-op fast path available while a
+      ## ``progressCallback`` is installed, and report each reused action to
+      ## the callback as completed when that path answers.
+      ##
+      ## Without it an installed callback disables the fast path outright,
+      ## which is right for ``repro build``'s renderers but was wrong for the
+      ## dev-env activation: it renders progress so a COLD activation is not
+      ## a silent hang (Interactive-UX-And-Progress.md Principle 1), and that
+      ## same callback pushed every WARM activation off the artifact-lookup +
+      ## invalidation-check fast path the no-op benchmark gates
+      ## (Reprobuild-Dev-Environments.milestones.org, performance gates).
     cancelCallback*: BuildCancelCallback
     statsEnabled*: bool
     suppressTrace*: bool
@@ -5753,10 +5765,22 @@ proc resolvePeerAttribution(attribution: var MonitorPeerAttribution;
   ##
   ##   1. THE RECORDS MAY NOT BE THERE AT ALL. `unmonitoredSubtreeLossDetails`
   ##      over an empty record set returns an empty seq, so an absent-text test
-  ##      forgives EVERYTHING. Unreachable while `monitorInterest` returns
-  ##      `FullInterest` unconditionally — but `DependencyGatheringPolicy`
-  ##      already carries a `captureIpc` switch, and narrowing it would silently
-  ##      turn this into a blanket exemption.
+  ##      forgives EVERYTHING. This hazard used to be stated as a narrowing
+  ##      hazard — `DependencyGatheringPolicy` carried a `captureIpc` switch and
+  ##      honouring it would have turned this into a blanket exemption — and
+  ##      THAT ROUTE IS NOW STRUCTURALLY IMPOSSIBLE: DA-5 made `mrIpcConnect`
+  ##      ungate-able (`categoryOf` answers `none`), so no interest set can
+  ##      suppress it, the switch is retired, and DA-6's one available narrowing
+  ##      (`ecAmbientReads`) touches no kind this proc reads.
+  ##
+  ##      THE HAZARD ITSELF IS NOT RETIRED, only its most reachable cause. The
+  ##      buffered set can still be empty for reasons that have nothing to do
+  ##      with interest — a capture from a run that made no IPC connection at
+  ##      all, a fold over a recognized `.iomon` report whose producer buffered
+  ##      nothing, a capture whose records were lost rather than gated — and an
+  ##      absent-text test forgives every one of them. So the difference-based
+  ##      question below is kept for its own sake, not as a guard against a
+  ##      switch that no longer exists.
   ##   2. THE DEDUP KEY CAN BE CLAIMED BY A DIFFERENT RECORD. io-mon emits the
   ##      text of the first NON-EXEMPT record per key. Without `mrProcessStart`
   ##      records nothing looks in-tree here, so a record io-mon exempted as
@@ -6172,10 +6196,22 @@ func effectiveRequiredInterest*(required: MonitorEvidenceRequirement):
   ## reached ``observedInterestCovers`` as ``{}``, where ``{} <= anything`` is
   ## vacuously true, and a requirement nobody filled in trusted a capture of
   ## arbitrarily narrow scope — a capture that may have been told not to watch
-  ## the ``mrEnvRead``s that key the action or the ``mrIpcConnect``s whose loss
-  ## markers force ``mcIncomplete``. Both axes of the requirement now fail
+  ## the ``mrEnvRead``s that key the action (``cacheEnvInputs``) or the
+  ## ``mrNonDeterministic``s that gate its publication
+  ## (``applyEntropyBlessingPolicy``). Both axes of the requirement now fail
   ## closed at zero; ``evidenceScope`` always did, because io-mon numbers
   ## ``esFull`` 0 for this very reason.
+  ##
+  ## That list USED to name "the ``mrIpcConnect``s whose loss markers force
+  ## ``mcIncomplete``" as a third example, and after DA-5 it is no longer one:
+  ## ``categoryOf`` answers ``none`` for ``mrIpcConnect`` and
+  ## ``mrExternalContent``, so NO interest set — narrow, empty, or unevaluable —
+  ## can drop them. The clause is replaced rather than merely struck out because
+  ## it was load-bearing in the argument and the argument survives: the two
+  ## examples above are gate-able, they are both read for a cache-correctness
+  ## decision, and a vacuously-satisfied requirement still trusts a capture that
+  ## dropped either one. Losing one of three illustrations does not weaken a
+  ## conclusion that needed only one.
   ##
   ## THE MAPPING IS io-mon's OWN, not a second copy of it. ``normalizeInterest``
   ## is the same function io-mon applies to a capture REQUEST on ingest, for the
@@ -6190,12 +6226,15 @@ func effectiveRequiredInterest*(required: MonitorEvidenceRequirement):
   ## reading a required ``{}`` as "asked for nothing, so nothing can be missing"
   ## is the correct answer to the question it is asked, and some other consumer
   ## may genuinely want it. What is true of REPROBUILD specifically is that it
-  ## has no such consumer: ``monitorInterest`` returns ``FullInterest`` for
-  ## every action and says at length why no narrowing is safe at this
-  ## granularity, so an empty required set on this side is always the zero value
-  ## leaking and never an intent. Normalising here costs this engine no
-  ## expressiveness it uses, and changing io-mon would cost every other consumer
-  ## a reading it may rely on.
+  ## has no such consumer: ``monitorInterest`` returns what the TOOL PACKAGE
+  ## declared, every declaration the vocabulary admits is a superset of
+  ## ``ReprobuildConsumedInterest`` (checked in a ``static:`` block beside it),
+  ## and so the answer is NEVER empty for any action. An empty required set on
+  ## this side is therefore still always the zero value leaking and never an
+  ## intent — which is the property this proc rests on, and DA-6's narrowing
+  ## does not touch it: ``FullInterest - {ecAmbientReads}`` is seven categories,
+  ## not zero. Normalising here costs this engine no expressiveness it uses, and
+  ## changing io-mon would cost every other consumer a reading it may rely on.
   normalizeInterest(required.interest)
 
 proc monitorScopeRefusal*(dep: MonitorDepFile;
@@ -8380,9 +8419,135 @@ proc dependencyEvidencePath*(cacheRoot, actionId: string): string =
   cacheRoot / "dependency-evidence" /
     (sanitizeActionId(actionId) & "-" & actionIdFileSuffix(actionId) & ".rbar")
 
-proc monitorInterest(action: BuildAction): set[EventCategory] =
+func interestConsumer*(category: EventCategory): string =
+  ## The reprobuild consumer that reads `category`'s records, named as the
+  ## symbol a reader can grep — or the empty string when there is none.
+  ##
+  ## THIS IS THE TABLE THAT MAKES A NARROWING ARGUABLE. DA-5's cardinal sin is
+  ## a capture that dropped evidence some consumer needed and still graded
+  ## `mcComplete` — a false cache hit. The rule DA-6 works under is that a
+  ## narrowing must be justified against the ACTUAL consumer that reads the
+  ## evidence, named in code, and that if the consumer cannot be named there is
+  ## no narrowing. So the consumers are named here, once, and
+  ## `ReprobuildConsumedInterest` below is derived from this answer rather than
+  ## written down beside it.
+  ##
+  ## AN EXHAUSTIVE `case`, deliberately: a category added to io-mon cannot
+  ## compile until somebody states what reads it here, and "nothing" is a
+  ## legitimate answer that has to be written rather than defaulted into.
+  ## That is the same construction io-mon uses for `categoryOf`, for the same
+  ## reason — the failure direction of a missing arm is ACCEPT.
+  case category
+  of ecFileReads: "monitorReads (the input content set, via cacheInputPaths)"
+  of ecPathProbes: "monitorProbes / monitorDirectoryEnumerations"
+  of ecFileWrites: "monitorWrites (and undeclaredSurvivingWrites)"
+  of ecProcessTree:
+    "seen.execImageByPid (pid->image attribution) and the mrProcessExec " &
+      "content-dependency arm of the fold"
+  of ecLibraryLoads: "the mrLibraryLoad arm of the fold (monitorReads)"
+  of ecEnvReads: "cacheEnvInputs — the ACTION CACHE KEY"
+  of ecEntropy: "applyEntropyBlessingPolicy — the CACHE-PUBLISH GATE"
+  of ecAmbientReads:
+    # NOTE, and it is the one negative answer in this table: swept by symbol,
+    # `mrTimeRead` and `mrSysctlRead` appear in NO executable statement
+    # anywhere in reprobuild — only in comments and in entropy-blessing
+    # justifications. Both reach `foldOneMonitorRecord` and land on its
+    # `else: discard` arm. A consumer that starts reading clock or sysctl
+    # observations has to change this arm FIRST, and the `static:` block below
+    # is what makes that not optional: the day this string is non-empty,
+    # `ecAmbientReads` joins `ReprobuildConsumedInterest` and every declaration
+    # that omits it stops compiling.
+    ""
+
+func consumedInterestFromTable(): set[EventCategory] =
+  for category in FullInterest:
+    if interestConsumer(category).len > 0:
+      result.incl(category)
+
+const ReprobuildConsumedInterest* = consumedInterestFromTable()
+  ## Every event category carrying a record kind some reprobuild consumer
+  ## reads — DERIVED from `interestConsumer`, never written down beside it.
+  ##
+  ## WHY DERIVED. A hand-written second copy of this set is the one
+  ## construction on this axis whose failure direction is ACCEPT: drop
+  ## `ecEnvReads` from a literal here and every declaration that omits it
+  ## compiles, the captures come back without the `mrEnvRead`s that key the
+  ## action, and they grade `mcComplete`. Deriving it means the only way to
+  ## make a category droppable is to delete the name of the code that reads it,
+  ## which is an edit a reviewer can see and a grep can contradict. This is the
+  ## same reason io-mon derives its legacy-alias expansions from `categoryOf`
+  ## rather than tabulating them.
+  ##
+  ## Today this is exactly `FullInterest - {ecAmbientReads}` — DA-5's safe
+  ## subset, which it proved over all 256 interest sets to be the ONLY safe
+  ## proper subset. The `static:` block below asserts that identity rather than
+  ## leaving the agreement to be noticed.
+
+func declaredMonitorInterest*(breadth: MonitorCaptureBreadth):
+                              set[EventCategory] =
+  ## The categories a tool package's `breadth` declaration asks io-mon for —
+  ## the ONE place the DA-6 vocabulary becomes an io-mon interest set.
+  ##
+  ## It is a separate, exported func rather than two lines inside
+  ## `monitorInterest` for two reasons. The `static:` block below has to be
+  ## able to enumerate every declaration the vocabulary admits and check it
+  ## against `ReprobuildConsumedInterest`, and the DA-6 grading tests have to
+  ## be able to read the mapping without a `BuildAction` in hand. A mapping
+  ## nothing can enumerate is a mapping nothing can grade.
+  case breadth
+  of mcbFullCapture: FullInterest
+  of mcbOmitAmbientReads: FullInterest - {ecAmbientReads}
+
+static:
+  # THE CHOKEPOINT. Every declaration the DA-6 vocabulary admits must still ask
+  # for every category some reprobuild consumer reads. This is what stops the
+  # tool-package declaration from being able to express the cardinal sin: there
+  # is no word a tool package can write that removes the `mrEnvRead`s keying
+  # its action or the `mrNonDeterministic`s gating its publication.
+  #
+  # Enforced at COMPILE time and not by a test, because the failure it guards
+  # is a false `mcComplete` and the cost of catching it late is a published
+  # cache entry computed from evidence nobody checked. A test can be skipped;
+  # this cannot.
+  for breadth in MonitorCaptureBreadth:
+    for category in ReprobuildConsumedInterest:
+      doAssert category in declaredMonitorInterest(breadth),
+        "MonitorCaptureBreadth." & $breadth & " omits `" &
+          interestToken(category) & "`, whose records are read by " &
+          interestConsumer(category) & ". A tool-package declaration may not " &
+          "drop a category a reprobuild consumer reads: the capture comes " &
+          "back without the evidence and still grades mcComplete, which is a " &
+          "false cache hit. If that consumer has genuinely gone away, delete " &
+          "its name from `interestConsumer` first — that is the edit a " &
+          "reviewer has to see."
+  # Both halves of the vocabulary are pinned, so neither can drift into the
+  # other. Without the first line `mcbOmitAmbientReads` could quietly become a
+  # synonym for `mcbFullCapture` and every declaration would still compile and
+  # every assertion above would still hold, leaving DA-6 asserting nothing.
+  doAssert declaredMonitorInterest(mcbOmitAmbientReads) ==
+    FullInterest - {ecAmbientReads},
+    "mcbOmitAmbientReads must drop EXACTLY the ambient reads"
+  doAssert declaredMonitorInterest(mcbFullCapture) == FullInterest,
+    "mcbFullCapture must ask for every category"
+  doAssert ReprobuildConsumedInterest == FullInterest - {ecAmbientReads},
+    "DA-5 proved the safe subset is exactly `FullInterest - {ecAmbientReads}`;" &
+      " `interestConsumer` now says otherwise. Whichever moved, the two have " &
+      "to be reconciled deliberately — a consumer appearing for the ambient " &
+      "reads retires the only narrowing this engine has, and a consumer " &
+      "disappearing from any other category is a narrowing that has to be " &
+      "argued, not noticed."
+
+proc monitorInterest*(action: BuildAction): set[EventCategory] =
   ## The event categories `action` asks io-mon for — ONE definition, read by
-  ## BOTH hosting forms, and today the answer is always `FullInterest`.
+  ## BOTH hosting forms, and the answer is the one the TOOL PACKAGE declared.
+  ##
+  ## EXPORTED as of DA-6, which is a change of visibility and not of behaviour.
+  ## While the answer was the constant `FullInterest` there was nothing here for
+  ## a test to get wrong; now that it reads a declaration off the action, a test
+  ## that cannot call it can only re-implement the lookup it is supposed to be
+  ## checking. A decision nothing can read is a decision nothing can grade —
+  ## `tests/integration/t_da6_tool_capture_breadth_declarations.nim` is the
+  ## reader.
   ##
   ## THIS IS ONE PROC BECAUSE THE TWO PATHS DIVERGING WAS A LIVE DEFECT, not
   ## because two copies of four lines offended anyone. The reduction used to be
@@ -8395,64 +8560,103 @@ proc monitorInterest(action: BuildAction): set[EventCategory] =
   ## proc, and the wrapped path forwards the answer to the CLI with
   ## `--interest`, a channel io-mon does not own and therefore cannot overwrite.
   ##
-  ## WHY THE ANSWER IS "EVERYTHING", when the reduction it replaces looked so
-  ## reasonable. The old comment said a build edge wants file/process/library
-  ## dependencies and not "the clock/env/sysctl/entropy or IPC a tool
+  ## WHY THE ANSWER USED TO BE "EVERYTHING, ALWAYS", AND WHY IT IS NOW "WHAT
+  ## THE TOOL DECLARED". The argument below is the one this proc has carried
+  ## since it was written; it is UPDATED rather than deleted, because it is
+  ## still what rules out every narrowing except one, and it is the record of
+  ## why the obvious-looking reductions are not available.
+  ##
+  ## The reduction this proc replaced said a build edge wants file/process/
+  ## library dependencies and not "the clock/env/sysctl/entropy or IPC a tool
   ## incidentally touches". That is true of what those records DESCRIBE and
-  ## false of what this engine DOES with them. io-mon's categories are
-  ## deliberately coarse — five buckets, no per-kind filtering
-  ## (io-mon/docs/contributors/event-interest-filter.md §7) — and each of the
-  ## two categories the reduction dropped carries a record kind this engine
-  ## reads to make a cache-correctness decision:
+  ## false of what this engine DOES with them. THE SHAPE OF THE PROBLEM WAS
+  ## io-mon's CATEGORIES: they were deliberately coarse — FIVE buckets, no
+  ## per-kind filtering — and a single bucket, `ecNonDeterminism`, carried four
+  ## different consumers' evidence at once:
   ##
-  ##   * `ecNonDeterminism` carries `mrEnvRead`, which lands in
-  ##     `PathSetEvidence.monitorEnvReads` and reaches the STRONG FINGERPRINT
-  ##     through `cacheEnvInputs`. Without the category, an action that reads
-  ##     `PWD` / `SOURCE_DATE_EPOCH` and produces different bytes for different
-  ##     values keys identically for all of them — the false-hit class the
-  ##     observed-env cache key exists to close.
-  ##   * `ecNonDeterminism` also carries `mrNonDeterministic`, which lands in
-  ##     `entropyObservations`. Without the category `applyEntropyBlessingPolicy`
-  ##     sees zero observations while `entropyObservability` still says
-  ##     `entObserved` — the backend-profile record is META and `recordWanted`
-  ##     never gates it — so it PUBLISHES. "Observable, and nothing observed" is
-  ##     verbatim the false clean that policy's own doc comment says it exists
-  ##     to prevent, reached by asking the monitor not to look.
-  ##   * `ecIpc` carries `mrIpcConnect` and `ecNonDeterminism` also carries
-  ##     `mrExternalContent`, and BOTH are completeness-bearing. io-mon's
-  ##     `mergeFragments` turns each out-of-tree IPC peer
-  ##     (`unmonitoredSubtreeLossDetails`) and each unpaired external content
+  ##   * `mrEnvRead`, which lands in `PathSetEvidence.monitorEnvReads` and
+  ##     reaches the STRONG FINGERPRINT through `cacheEnvInputs`. Without it, an
+  ##     action that reads `PWD` / `SOURCE_DATE_EPOCH` and produces different
+  ##     bytes for different values keys identically for all of them — the
+  ##     false-hit class the observed-env cache key exists to close.
+  ##   * `mrNonDeterministic`, which lands in `entropyObservations`. Without it
+  ##     `applyEntropyBlessingPolicy` sees zero observations while
+  ##     `entropyObservability` still says `entObserved` — the backend-profile
+  ##     record is META and `recordWanted` never gates it — so it PUBLISHES.
+  ##     "Observable, and nothing observed" is verbatim the false clean that
+  ##     policy's own doc comment says it exists to prevent, reached by asking
+  ##     the monitor not to look.
+  ##   * `mrTimeRead` / `mrSysctlRead`, which nothing in this engine reads at
+  ##     all (both land on `foldOneMonitorRecord`'s `else: discard`).
+  ##   * `mrExternalContent`, which is completeness-bearing.
+  ##
+  ## Four consumers behind one bit is why NO non-empty proper subset of the old
+  ## five categories was safe, and why this proc returned `FullInterest`
+  ## unconditionally. It also named its own preconditions for changing that:
+  ## "`mrEnvRead` and `mrNonDeterministic` split out of `ecNonDeterminism`, and
+  ## `mrIpcConnect` made ungateable like the other completeness-bearing kinds".
+  ##
+  ## ALL THREE WERE DELIVERED BY DA-5, so the FIVE buckets are now EIGHT, one
+  ## per consumer, and the completeness-bearing kinds were not re-bucketed but
+  ## made UNGATE-ABLE. What that changes, clause by clause:
+  ##
+  ##   * `ecEnvReads` and `ecEntropy` are now separate categories, and both are
+  ##     still mandatory here — for exactly the two reasons above, which did not
+  ##     become less true by being separable. They are named in
+  ##     `interestConsumer` and therefore in `ReprobuildConsumedInterest`, and
+  ##     the `static:` block above refuses any declaration that omits them.
+  ##   * `ecIpc` IS RETIRED, not renamed. `categoryOf` answers `none` for
+  ##     `mrIpcConnect` and for `mrExternalContent`, so NO interest set can drop
+  ##     them any more. The cardinal-sin paragraph this proc used to carry about
+  ##     them — `mergeFragments` deriving each out-of-tree IPC peer
+  ##     (`unmonitoredSubtreeLossDetails`) and each unpaired external-content
   ##     channel (`externalContentLossCount`) into a synthetic `mrEventLoss`,
-  ##     which is what forces `mcIncomplete` on an edge whose tree consumed
-  ##     something the monitor could not see. The shim's interest gate drops
-  ##     those records at `emitRecord` — BEFORE `mergeFragments` runs — so
-  ##     suppressing either category does not merely hide records, it turns an
-  ##     `mcIncomplete` edge into an `mcComplete` one. That is the cardinal
-  ##     sin. io-mon's own §6 ("disabling a category is a consumer choice, not
-  ##     data loss") is stated for the whole feature and is simply not true of
-  ##     these two kinds; the loss markers they generate are never gated, but
-  ##     they are also never generated.
+  ##     with the shim's gate running at `emitRecord` BEFORE that merge, so that
+  ##     suppressing the category turned an `mcIncomplete` edge into an
+  ##     `mcComplete` one — is now held BY CONSTRUCTION in io-mon rather than by
+  ##     this engine's choice of interest set. Measured before DA-5, and the
+  ##     reason it is written down: `io-mon run` graded `mcIncomplete` (1 loss,
+  ##     32 records) where `--interest file,proc,lib` graded `mcComplete` (0
+  ##     losses, 23 records) on the same command line.
+  ##   * `ecAmbientReads` (`mrTimeRead`, `mrSysctlRead`) is the ONE category
+  ##     with no consumer, and DA-5 proved over all 256 interest sets that
+  ##     `FullInterest - {ecAmbientReads}` is the ONLY safe proper subset.
   ##
-  ## So there is no reduction available at this granularity that is safe for a
-  ## reprobuild edge, and this proc says so in one place instead of three.
-  ## Narrowing it again needs io-mon to change first — `mrEnvRead` and
-  ## `mrNonDeterministic` split out of `ecNonDeterminism`, and `mrIpcConnect`
-  ## made ungateable like the other completeness-bearing kinds — and this
-  ## change deliberately does not make that call.
+  ## SO THE NARROWING THAT EXISTS IS EXACTLY ONE, AND IT IS NOT THIS PROC'S TO
+  ## MAKE. Whether a given tool's own irreproducibility is witnessed by a clock
+  ## or a sysctl read is a fact about the TOOL, and this proc does not know
+  ## which tool it is looking at — a `BuildAction` is an argv. So DA-6 moves the
+  ## decision to the tool package, where `nonDeterminism entropyBlessed`
+  ## already lives, and this proc reads the declaration off the policy the
+  ## lowering carried. `nim` declares `omitAmbientReads` (its randomness is
+  ## entropy, which is kept and blessed, and its temp names are argv-derived);
+  ## `gcc` and `clang` do not, because `__DATE__` / `__TIME__` /
+  ## `__TIMESTAMP__` are their signature irreproducibility and `mrTimeRead` is
+  ## the only record that witnesses them.
   ##
-  ## THIS IS NOT A WIDENING RELATIVE TO WHAT SHIPS. `monitorHosting` defaults to
-  ## `mhmNever`, so every action ships through the wrapped path — and the
-  ## wrapped path has been running at full interest all along, precisely because
-  ## the request the engine wrote never arrived. What changes is the HOSTED
-  ## path, which stops losing the three record kinds above.
+  ## WHAT A DECLARATION CANNOT DO. It cannot express a narrowing that drops
+  ## evidence a consumer reads — `declaredMonitorInterest` is the only mapping,
+  ## the vocabulary has two words, and the `static:` block above checks both of
+  ## them against `ReprobuildConsumedInterest` at compile time. That is the
+  ## whole guard: the point of moving the decision outwards is that the tool
+  ## knows the tool, not that the tool gets to decide what a cache key needs.
   ##
-  ## `DependencyGatheringPolicy.captureNonDeterminism` / `captureIpc` are
-  ## therefore SUBSUMED: an edge that sets either still gets what it asked for,
-  ## and an edge that sets neither now gets it too. They are left in place
-  ## rather than deleted because they are declared DSL surface with recipes and
-  ## tests behind them, and retiring a public field is its own change with its
-  ## own blast radius.
-  FullInterest
+  ## THIS IS STILL NOT A WIDENING RELATIVE TO WHAT SHIPS. `monitorHosting`
+  ## defaults to `mhmNever`, so every action ships through the wrapped path —
+  ## and the wrapped path ran at full interest all along, precisely because the
+  ## request the engine wrote never arrived. The HOSTED path stopped losing the
+  ## env-read and entropy records when this proc became the single definition,
+  ## and it still does not lose them: every declaration includes them.
+  ##
+  ## `DependencyGatheringPolicy.captureNonDeterminism` / `captureIpc` USED TO BE
+  ## SUBSUMED HERE and are now resolved rather than tolerated.
+  ## `captureNonDeterminism` survives as a DSL spelling of the declaration, with
+  ## its scope shrunk to the ambient reads — the only part of the old category
+  ## it could ever have dropped safely. `captureIpc` is RETIRED and refused by
+  ## name in the DSL parser, because `mrIpcConnect` is not gate-able at any
+  ## granularity and a switch that can never be honoured is worse than no
+  ## switch. See `MonitorCaptureBreadth` in `repro_core/dependency_gathering`.
+  declaredMonitorInterest(action.dependencyPolicy.captureBreadth)
 
 proc monitorEvidenceScope(config: BuildEngineConfig): EvidenceScope =
   ## The evidence scope `config` asks io-mon for — ONE definition, read by BOTH
@@ -13776,7 +13980,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       return none(BuildRunResult)
     if not config.rebuildMissingOutputsOnCacheHit:
       return none(BuildRunResult)
-    if config.progressCallback != nil:
+    if config.progressCallback != nil and not config.fastNoopReportsProgress:
       return none(BuildRunResult)
     # A forced rebuild is a request to re-execute, and `config.forceRebuild`
     # is read in exactly one place: the scheduler's per-action cache
@@ -13940,6 +14144,32 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   finishStat("repro fast noop scan", fastNoopStart)
   if fastNoop.isSome:
     runResult = fastNoop.get()
+    if config.progressCallback != nil:
+      # Only reachable with `fastNoopReportsProgress`. Every action settled
+      # at once, as a reuse, so the renderer ends on the same totals the
+      # scheduler would have reported for this graph.
+      let total = buildGraph.actions.len
+      for i, action in buildGraph.actions:
+        let item = runResult.results[i]
+        var command = ""
+        for arg in action.argv:
+          if command.len > 0:
+            command.add(" ")
+          command.add(quoteShell(arg))
+        if command.len == 0:
+          command = $action.kind & " " & action.id
+        config.progressCallback(BuildProgressEvent(
+          kind: bpkActionCompleted,
+          actionId: item.id,
+          command: command,
+          status: item.status,
+          cacheDecision: item.cacheDecision,
+          launched: false,
+          total: total,
+          completed: i + 1,
+          checked: total,
+          settled: i + 1,
+          executionPlanKnown: true))
     finishStat("repro scheduler total", totalStart)
     finishChildCpuStat()
     runResult.stats = stats

@@ -38,6 +38,7 @@
 when defined(posix):
   import std/[json, net, os, osproc, posix, sequtils, streams, strutils,
               tempfiles, times, unittest]
+  import repro_core/cli_images
 
   type
     ProcessRecord = object
@@ -166,11 +167,16 @@ if params.len == 0 and
     quit(98)
 
   let repro = getEnv("REPRO_ACTUAL_REPRO_BIN")
+  # The daemon's SOURCE image is the engine (`build/bin/reprobuild`), not the
+  # thin client `repro` names since c28e63efe: a copy of the thin client in a
+  # scratch directory has no engine beside it to `execv`, so a daemon started
+  # from it never answers and `daemon start` times out.
+  let engine = getEnv("REPRO_ACTUAL_ENGINE_BIN")
   let root = getEnv("REPRO_ACTUAL_DAEMON_ROOT")
   let endpoint = getEnv("REPRO_ACTUAL_DAEMON_ENDPOINT")
   createDir(root / "source")
   let sourceExe = root / "source" / "repro"
-  copyFileWithPermissions(repro, sourceExe)
+  copyFileWithPermissions(engine, sourceExe)
   when defined(macosx):
     # Give the first source image a different, still-valid ad-hoc signature.
     # Replacing it with the original signed image below changes the digest
@@ -196,7 +202,7 @@ if params.len == 0 and
 
   when defined(macosx):
     let replacement = root / "source" / "repro.next"
-    copyFileWithPermissions(repro, replacement)
+    copyFileWithPermissions(engine, replacement)
     removeFile(sourceExe)
     moveFile(replacement, sourceExe)
   else:
@@ -914,7 +920,15 @@ else:
       let report = parseFile(summary)
       check report{"summary"}{"total"}.getInt(-1) == 3
       check report{"summary"}{"passed"}.getInt(-1) == 0
-      check report{"summary"}{"failed"}.getInt(-1) == 3
+      # The three cases were killed by the runner's OWN shutdown, so nothing
+      # was observed about them: since af96ebd45 (#296, "A run that was cut
+      # short must not report its survivors as failures") they are ERROR
+      # with `cancelled: true`, never `failed`. This case predates that
+      # contract and still asserted the old FAIL count.
+      check report{"summary"}{"failed"}.getInt(-1) == 0
+      check report{"summary"}{"harness_errors"}.getInt(-1) == 3
+      check report{"summary"}{"cancelled"}.getInt(-1) == 3
+      check report{"summary"}{"cut_short"}.getBool(false)
       check report{"summary"}{"skipped"}.getInt(-1) == 0
 
     test "post-reap cleanup uses only exact token ownership":
@@ -1454,8 +1468,10 @@ else:
       let root = repoRoot()
       let runner = root / "build" / "bin" / "repro_test_runner"
       let repro = root / "build" / "bin" / addFileExt("repro", ExeExt)
+      let engine = root / "build" / "bin" / reprobuildEngineExeName()
       require fileExists(runner)
       require fileExists(repro)
+      require fileExists(engine)
 
       let scratch = createTempDir("runner-actual-daemon-", "")
       let endpoint = "/tmp/repro-owner-daemon-" &
@@ -1488,6 +1504,7 @@ else:
       putEnv("REPRO_TREE_TOKEN_FILE", tokenPath)
       putEnv("REPRO_TREE_CONTINUE_FILE", continuePath)
       putEnv("REPRO_ACTUAL_REPRO_BIN", repro)
+      putEnv("REPRO_ACTUAL_ENGINE_BIN", engine)
       putEnv("REPRO_ACTUAL_DAEMON_ROOT", scratch / "daemon")
       putEnv("REPRO_ACTUAL_DAEMON_ENDPOINT", endpoint)
       defer:
@@ -1496,6 +1513,7 @@ else:
         delEnv("REPRO_TREE_TOKEN_FILE")
         delEnv("REPRO_TREE_CONTINUE_FILE")
         delEnv("REPRO_ACTUAL_REPRO_BIN")
+        delEnv("REPRO_ACTUAL_ENGINE_BIN")
         delEnv("REPRO_ACTUAL_DAEMON_ROOT")
         delEnv("REPRO_ACTUAL_DAEMON_ENDPOINT")
 
@@ -1686,5 +1704,10 @@ else:
       let report = parseFile(summary)
       check report{"summary"}{"total"}.getInt(-1) == 1
       check report{"summary"}{"passed"}.getInt(-1) == 0
-      check report{"summary"}{"failed"}.getInt(-1) == 1
+      # Cancelled by the runner's shutdown, so ERROR, not FAIL — the #296
+      # contract (af96ebd45); see the SIGINT case above.
+      check report{"summary"}{"failed"}.getInt(-1) == 0
+      check report{"summary"}{"harness_errors"}.getInt(-1) == 1
+      check report{"summary"}{"cancelled"}.getInt(-1) == 1
+      check report{"summary"}{"cut_short"}.getBool(false)
       check report{"summary"}{"skipped"}.getInt(-1) == 0

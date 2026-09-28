@@ -1,4 +1,4 @@
-# test_hax_m3_cli_watcher_triggers_compilation_and_patch_push.nim
+# watch_patch_push_driver.nim
 #
 # Automated Integration Verification Gate for Milestone HAX-M3:
 # "Live CLI Watcher Event Loop"

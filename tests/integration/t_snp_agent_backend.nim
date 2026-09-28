@@ -369,29 +369,43 @@ suite "the driver hands over what the part produced":
     check not p.ready
     check b.outblobPath in p.detail
 
+proc driveTheOtherGenuinePartSOwnBoundBytesAreRefused() =
+  ## The body of test
+  ##   "the other genuine part's own bound bytes are refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Both values are real, both are non-zero, and they belong to two
+  # different machines.
+  let b = newBench(stringOfHex(genuineParts[0].reportHex))
+  let e = refuses(proc () =
+    discard acquireQuote(b.driverOver(), boundBytesOf(genuineParts[1])))
+  check e.condition == sbcAnswersADifferentQuestion
+  check "answers a different question" in e.msg
+  check SnpDriverName in e.msg
+
+proc driveAndSoIsASingleBitOfTheRightAnswer() =
+  ## The body of test
+  ##   "and so is a single bit of the right answer"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The bound from the other side. One bit, at the first byte and at
+  # the last, so the comparison is over the whole field rather than
+  # over a prefix of it.
+  let g = genuineParts[0]
+  let b = newBench(stringOfHex(g.reportHex))
+  for at in [0, LenReportData - 1]:
+    var asked = boundBytesOf(g)
+    asked[at] = char(uint8(asked[at]) xor 0x01'u8)
+    let e = refuses(proc () = discard acquireQuote(b.driverOver(), asked))
+    check e.condition == sbcAnswersADifferentQuestion
+
 suite "a document that answers a different question is refused":
 
   test "the other genuine part's own bound bytes are refused":
-    # Both values are real, both are non-zero, and they belong to two
-    # different machines.
-    let b = newBench(stringOfHex(genuineParts[0].reportHex))
-    let e = refuses(proc () =
-      discard acquireQuote(b.driverOver(), boundBytesOf(genuineParts[1])))
-    check e.condition == sbcAnswersADifferentQuestion
-    check "answers a different question" in e.msg
-    check SnpDriverName in e.msg
+    driveTheOtherGenuinePartSOwnBoundBytesAreRefused()
 
   test "and so is a single bit of the right answer":
-    # The bound from the other side. One bit, at the first byte and at
-    # the last, so the comparison is over the whole field rather than
-    # over a prefix of it.
-    let g = genuineParts[0]
-    let b = newBench(stringOfHex(g.reportHex))
-    for at in [0, LenReportData - 1]:
-      var asked = boundBytesOf(g)
-      asked[at] = char(uint8(asked[at]) xor 0x01'u8)
-      let e = refuses(proc () = discard acquireQuote(b.driverOver(), asked))
-      check e.condition == sbcAnswersADifferentQuestion
+    driveAndSoIsASingleBitOfTheRightAnswer()
 
   test "the request that IS the document's own answer is accepted":
     let g = genuineParts[1]
@@ -399,27 +413,89 @@ suite "a document that answers a different question is refused":
     check acquireQuote(b.driverOver(), boundBytesOf(g)).evidence.len ==
       AgentSnpReportLen
 
-suite "a document this build cannot identify is not read at its offsets":
-
-  test "a document of the wrong width is refused":
-    let g = genuineParts[0]
-    for doc in [stringOfHex(g.reportHex)[0 ..< AgentSnpReportLen - 1],
-                stringOfHex(g.reportHex) & "\x00"]:
-      let b = newBench(doc)
-      let e = refuses(proc () =
-        discard acquireQuote(b.driverOver(), boundBytesOf(g)))
-      check e.condition == sbcWrongDocumentWidth
-      check $AgentSnpReportLen in e.msg
-
-  test "a structure revision this build has no layout for is refused":
-    let g = genuineParts[0]
-    var doc = stringOfHex(g.reportHex)
-    doc[AgentSnpVersionOffset] = '\x09'
+proc driveADocumentOfTheWrongWidthIsRefused() =
+  ## The body of test
+  ##   "a document of the wrong width is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let g = genuineParts[0]
+  for doc in [stringOfHex(g.reportHex)[0 ..< AgentSnpReportLen - 1],
+              stringOfHex(g.reportHex) & "\x00"]:
     let b = newBench(doc)
     let e = refuses(proc () =
       discard acquireQuote(b.driverOver(), boundBytesOf(g)))
-    check e.condition == sbcUnsupportedRevision
-    check "revision 9" in e.msg
+    check e.condition == sbcWrongDocumentWidth
+    check $AgentSnpReportLen in e.msg
+
+proc driveAStructureRevisionThisBuildHasNoLayoutForIsRefused() =
+  ## The body of test
+  ##   "a structure revision this build has no layout for is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let g = genuineParts[0]
+  var doc = stringOfHex(g.reportHex)
+  doc[AgentSnpVersionOffset] = '\x09'
+  let b = newBench(doc)
+  let e = refuses(proc () =
+    discard acquireQuote(b.driverOver(), boundBytesOf(g)))
+  check e.condition == sbcUnsupportedRevision
+  check "revision 9" in e.msg
+
+proc driveTheOtherRootOfTrustSProviderIsRefused() =
+  ## The body of test
+  ##   "the other root of trust's provider is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let g = genuineParts[0]
+  let b = newBench(stringOfHex(g.reportHex), provider = TdxProviderName)
+  let e = refuses(proc () =
+    discard acquireQuote(b.driverOver(), boundBytesOf(g)))
+  check e.condition == sbcWrongProvider
+  check TdxProviderName in e.msg
+  check SevSnpProviderName in e.msg
+
+proc driveADocumentFromAPrivilegeLevelNobodyChoseIsRefused() =
+  ## The body of test
+  ##   "a document from a privilege level nobody chose is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let g = genuineParts[0]
+  let b = newBench(stringOfHex(g.reportHex))
+  let e = refuses(proc () =
+    discard acquireQuote(b.driverOver(level = 1), boundBytesOf(g)))
+  check e.condition == sbcWrongPrivilegeLevel
+  check "configured for level 1" in e.msg
+
+proc driveATransportRefusalReachesTheSeamAsThisDriverSRefusal() =
+  ## The body of test
+  ##   "a transport refusal reaches the seam as this driver's refusal"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The transport has its own vocabulary and it is not re-spelled
+  # here; what is asserted is that a caller catching the seam's error
+  # catches it, and that the message names the driver.
+  let g = genuineParts[0]
+  let b = newBench(stringOfHex(g.reportHex))
+  writeFile(b.providerPath, "some_other_guest\n")
+  let e = refuses(proc () =
+    discard acquireQuote(b.driverOver(), boundBytesOf(g)))
+  check e.condition == sbcTransportRefused
+  check SnpDriverName in e.msg
+  # And it is a `DriverError`, which is what the agent catches.
+  var caughtAsDriverError = false
+  try:
+    discard acquireQuote(b.driverOver(), boundBytesOf(g))
+  except DriverError:
+    caughtAsDriverError = true
+  check caughtAsDriverError
+
+suite "a document this build cannot identify is not read at its offsets":
+
+  test "a document of the wrong width is refused":
+    driveADocumentOfTheWrongWidthIsRefused()
+
+  test "a structure revision this build has no layout for is refused":
+    driveAStructureRevisionThisBuildHasNoLayoutForIsRefused()
 
   test "both revisions this build DOES have a layout for are read":
     # The other side of that bound. Revision 3 differs from 2 only in
@@ -432,54 +508,41 @@ suite "a document this build cannot identify is not read at its offsets":
       check agentSnpBoundBytes(doc) == boundBytesOf(g)
 
   test "the other root of trust's provider is refused":
-    let g = genuineParts[0]
-    let b = newBench(stringOfHex(g.reportHex), provider = TdxProviderName)
-    let e = refuses(proc () =
-      discard acquireQuote(b.driverOver(), boundBytesOf(g)))
-    check e.condition == sbcWrongProvider
-    check TdxProviderName in e.msg
-    check SevSnpProviderName in e.msg
+    driveTheOtherRootOfTrustSProviderIsRefused()
 
   test "a document from a privilege level nobody chose is refused":
-    let g = genuineParts[0]
-    let b = newBench(stringOfHex(g.reportHex))
-    let e = refuses(proc () =
-      discard acquireQuote(b.driverOver(level = 1), boundBytesOf(g)))
-    check e.condition == sbcWrongPrivilegeLevel
-    check "configured for level 1" in e.msg
+    driveADocumentFromAPrivilegeLevelNobodyChoseIsRefused()
 
   test "a transport refusal reaches the seam as this driver's refusal":
-    # The transport has its own vocabulary and it is not re-spelled
-    # here; what is asserted is that a caller catching the seam's error
-    # catches it, and that the message names the driver.
-    let g = genuineParts[0]
-    let b = newBench(stringOfHex(g.reportHex))
-    writeFile(b.providerPath, "some_other_guest\n")
+    driveATransportRefusalReachesTheSeamAsThisDriverSRefusal()
+
+proc driveADriverWithNoSourceIsRefused() =
+  ## The body of test
+  ##   "a driver with no source is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () = discard newSnpDriver(nil))
+  check e.condition == sbcNoSource
+
+proc driveAPrivilegeLevelOutsideTheRangeIsRefused() =
+  ## The body of test
+  ##   "a privilege level outside the range is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  for level in [-1, 4, 255]:
     let e = refuses(proc () =
-      discard acquireQuote(b.driverOver(), boundBytesOf(g)))
-    check e.condition == sbcTransportRefused
-    check SnpDriverName in e.msg
-    # And it is a `DriverError`, which is what the agent catches.
-    var caughtAsDriverError = false
-    try:
-      discard acquireQuote(b.driverOver(), boundBytesOf(g))
-    except DriverError:
-      caughtAsDriverError = true
-    check caughtAsDriverError
+      discard newSnpDriver(newCapturedTsmSource("/dev/null", "/dev/null"),
+                           level))
+    check e.condition == sbcPrivilegeLevelOutOfRange
+    check $level in e.msg
 
 suite "the driver refuses to be built wrong":
 
   test "a driver with no source is refused":
-    let e = refuses(proc () = discard newSnpDriver(nil))
-    check e.condition == sbcNoSource
+    driveADriverWithNoSourceIsRefused()
 
   test "a privilege level outside the range is refused":
-    for level in [-1, 4, 255]:
-      let e = refuses(proc () =
-        discard newSnpDriver(newCapturedTsmSource("/dev/null", "/dev/null"),
-                             level))
-      check e.condition == sbcPrivilegeLevelOutOfRange
-      check $level in e.msg
+    driveAPrivilegeLevelOutsideTheRangeIsRefused()
 
   test "every level in the range is accepted":
     for level in 0 .. 3:
@@ -550,102 +613,179 @@ suite "the host's certificate table becomes the envelope's chain":
     check parseSnpCertificateTable(blob).certificates[scsEndorsement] ==
       stringOfHex(g.vcekDerHex)
 
+proc driveABlobTooShortToHoldOneEntryIsRefused() =
+  ## The body of test
+  ##   "a blob too short to hold one entry is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    discard parseSnpCertificateTable(repeat('\x00',
+      SnpCertTableEntryLen - 1)))
+  check e.condition == sbcTableTooShort
+
+proc driveAnEntryWhosePayloadRunsPastTheEndIsRefused() =
+  ## The body of test
+  ##   "an entry whose payload runs past the end is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Reading it would read whatever follows the blob in memory, which
+  # is the one thing a reader of somebody else's format must not do.
+  let g = genuineParts[0]
+  let e = refuses(proc () =
+    discard parseSnpCertificateTable(certTable(
+      @[(SnpVcekGuid, stringOfHex(g.vcekDerHex)),
+        (SnpAskGuid, milanChain[0]),
+        (SnpArkGuid, milanChain[1])], skew = 1_000_000)))
+  check e.condition == sbcTableEntryRunsPastTheEnd
+  check "at offset 1000096" in e.msg
+
+proc driveATableThatNeverTerminatesIsRefused() =
+  ## The body of test
+  ##   "a table that never terminates is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The index has to fill the blob EXACTLY for this rule to be the
+  # one that fires: an index followed by payload bytes is an index
+  # whose next entry is garbage, and garbage is refused by the bounds
+  # rule one line earlier. So the fixture is a single well-formed
+  # entry, of a kind this build ignores, with no terminator after it.
+  const UnknownGuid = "11111111-2222-3333-4444-555555555555"
+  let blob = certTable(@[(UnknownGuid, "")], terminate = false)
+  check blob.len == SnpCertTableEntryLen
+  let e = refuses(proc () = discard parseSnpCertificateTable(blob))
+  check e.condition == sbcTableNotTerminated
+
+proc driveATableOfferingTwoEndorsementKeysIsRefused() =
+  ## The body of test
+  ##   "a table offering two endorsement keys is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let g = genuineParts[0]
+  let e = refuses(proc () =
+    discard parseSnpCertificateTable(certTable(
+      @[(SnpVcekGuid, stringOfHex(g.vcekDerHex)),
+        (SnpVlekGuid, stringOfHex(genuineParts[1].vcekDerHex)),
+        (SnpAskGuid, milanChain[0]),
+        (SnpArkGuid, milanChain[1])])))
+  check e.condition == sbcTwoEndorsementCertificates
+
+proc driveATableMissingAnyOneOfTheThreeIsRefusedAndNamesIt() =
+  ## The body of test
+  ##   "a table missing any one of the three is refused, and names it"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let g = genuineParts[0]
+  let all = @[(SnpVcekGuid, stringOfHex(g.vcekDerHex)),
+              (SnpAskGuid, milanChain[0]),
+              (SnpArkGuid, milanChain[1])]
+  for drop in 0 .. 2:
+    var kept: seq[(string, string)] = @[]
+    for i, entry in all:
+      if i != drop: kept.add entry
+    let e = refuses(proc () =
+      discard parseSnpCertificateTable(certTable(kept)))
+    check e.condition == sbcTableIncomplete
+    check "carries no" in e.msg
+
+proc driveAnEmptyEntryIsRefused() =
+  ## The body of test
+  ##   "an empty entry is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    discard parseSnpCertificateTable(certTable(
+      @[(SnpVcekGuid, ""), (SnpAskGuid, milanChain[0]),
+        (SnpArkGuid, milanChain[1])])))
+  check e.condition == sbcTableEntryEmpty
+
+proc driveAnEntryThatIsNeitherASequenceNorArmourIsRefused() =
+  ## The body of test
+  ##   "an entry that is neither a sequence nor armour is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    discard parseSnpCertificateTable(certTable(
+      @[(SnpVcekGuid, "not a certificate at all"),
+        (SnpAskGuid, milanChain[0]), (SnpArkGuid, milanChain[1])])))
+  check e.condition == sbcTableEntryNotACertificate
+
+proc driveArmourThatNeverClosesIsRefused() =
+  ## The body of test
+  ##   "armour that never closes is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    discard parseSnpCertificateTable(certTable(
+      @[(SnpVcekGuid, "-----BEGIN CERTIFICATE-----\nMIIB"),
+        (SnpAskGuid, milanChain[0]), (SnpArkGuid, milanChain[1])])))
+  check e.condition == sbcArmourNotClosed
+
+proc driveArmourWhoseBodyIsNotBase64IsRefused() =
+  ## The body of test
+  ##   "armour whose body is not base64 is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    discard parseSnpCertificateTable(certTable(
+      @[(SnpVcekGuid, "-----BEGIN CERTIFICATE-----\n!!!!\n" &
+                      "-----END CERTIFICATE-----"),
+        (SnpAskGuid, milanChain[0]), (SnpArkGuid, milanChain[1])])))
+  check e.condition == sbcArmourDoesNotDecode
+
+proc driveArmourThatDecodesToSomethingThatIsNotACertificate() =
+  ## The body of test
+  ##   "armour that decodes to something that is not a certificate"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    discard parseSnpCertificateTable(certTable(
+      @[(SnpVcekGuid, "-----BEGIN CERTIFICATE-----\nAAAA\n" &
+                      "-----END CERTIFICATE-----"),
+        (SnpAskGuid, milanChain[0]), (SnpArkGuid, milanChain[1])])))
+  check e.condition == sbcArmourDecodesToSomethingElse
+
+proc driveATableKeyThatIsNotSixteenBytesOfHexIsRefused() =
+  ## The body of test
+  ##   "a table key that is not sixteen bytes of hex is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () = discard guidBytes("not-a-guid"))
+  check e.condition == sbcMalformedTableKey
+
 suite "every way a certificate table can be wrong":
 
   test "a blob too short to hold one entry is refused":
-    let e = refuses(proc () =
-      discard parseSnpCertificateTable(repeat('\x00',
-        SnpCertTableEntryLen - 1)))
-    check e.condition == sbcTableTooShort
+    driveABlobTooShortToHoldOneEntryIsRefused()
 
   test "an entry whose payload runs past the end is refused":
-    # Reading it would read whatever follows the blob in memory, which
-    # is the one thing a reader of somebody else's format must not do.
-    let g = genuineParts[0]
-    let e = refuses(proc () =
-      discard parseSnpCertificateTable(certTable(
-        @[(SnpVcekGuid, stringOfHex(g.vcekDerHex)),
-          (SnpAskGuid, milanChain[0]),
-          (SnpArkGuid, milanChain[1])], skew = 1_000_000)))
-    check e.condition == sbcTableEntryRunsPastTheEnd
-    check "at offset 1000096" in e.msg
+    driveAnEntryWhosePayloadRunsPastTheEndIsRefused()
 
   test "a table that never terminates is refused":
-    # The index has to fill the blob EXACTLY for this rule to be the
-    # one that fires: an index followed by payload bytes is an index
-    # whose next entry is garbage, and garbage is refused by the bounds
-    # rule one line earlier. So the fixture is a single well-formed
-    # entry, of a kind this build ignores, with no terminator after it.
-    const UnknownGuid = "11111111-2222-3333-4444-555555555555"
-    let blob = certTable(@[(UnknownGuid, "")], terminate = false)
-    check blob.len == SnpCertTableEntryLen
-    let e = refuses(proc () = discard parseSnpCertificateTable(blob))
-    check e.condition == sbcTableNotTerminated
+    driveATableThatNeverTerminatesIsRefused()
 
   test "a table offering two endorsement keys is refused":
-    let g = genuineParts[0]
-    let e = refuses(proc () =
-      discard parseSnpCertificateTable(certTable(
-        @[(SnpVcekGuid, stringOfHex(g.vcekDerHex)),
-          (SnpVlekGuid, stringOfHex(genuineParts[1].vcekDerHex)),
-          (SnpAskGuid, milanChain[0]),
-          (SnpArkGuid, milanChain[1])])))
-    check e.condition == sbcTwoEndorsementCertificates
+    driveATableOfferingTwoEndorsementKeysIsRefused()
 
   test "a table missing any one of the three is refused, and names it":
-    let g = genuineParts[0]
-    let all = @[(SnpVcekGuid, stringOfHex(g.vcekDerHex)),
-                (SnpAskGuid, milanChain[0]),
-                (SnpArkGuid, milanChain[1])]
-    for drop in 0 .. 2:
-      var kept: seq[(string, string)] = @[]
-      for i, entry in all:
-        if i != drop: kept.add entry
-      let e = refuses(proc () =
-        discard parseSnpCertificateTable(certTable(kept)))
-      check e.condition == sbcTableIncomplete
-      check "carries no" in e.msg
+    driveATableMissingAnyOneOfTheThreeIsRefusedAndNamesIt()
 
   test "an empty entry is refused":
-    let e = refuses(proc () =
-      discard parseSnpCertificateTable(certTable(
-        @[(SnpVcekGuid, ""), (SnpAskGuid, milanChain[0]),
-          (SnpArkGuid, milanChain[1])])))
-    check e.condition == sbcTableEntryEmpty
+    driveAnEmptyEntryIsRefused()
 
   test "an entry that is neither a sequence nor armour is refused":
-    let e = refuses(proc () =
-      discard parseSnpCertificateTable(certTable(
-        @[(SnpVcekGuid, "not a certificate at all"),
-          (SnpAskGuid, milanChain[0]), (SnpArkGuid, milanChain[1])])))
-    check e.condition == sbcTableEntryNotACertificate
+    driveAnEntryThatIsNeitherASequenceNorArmourIsRefused()
 
   test "armour that never closes is refused":
-    let e = refuses(proc () =
-      discard parseSnpCertificateTable(certTable(
-        @[(SnpVcekGuid, "-----BEGIN CERTIFICATE-----\nMIIB"),
-          (SnpAskGuid, milanChain[0]), (SnpArkGuid, milanChain[1])])))
-    check e.condition == sbcArmourNotClosed
+    driveArmourThatNeverClosesIsRefused()
 
   test "armour whose body is not base64 is refused":
-    let e = refuses(proc () =
-      discard parseSnpCertificateTable(certTable(
-        @[(SnpVcekGuid, "-----BEGIN CERTIFICATE-----\n!!!!\n" &
-                        "-----END CERTIFICATE-----"),
-          (SnpAskGuid, milanChain[0]), (SnpArkGuid, milanChain[1])])))
-    check e.condition == sbcArmourDoesNotDecode
+    driveArmourWhoseBodyIsNotBase64IsRefused()
 
   test "armour that decodes to something that is not a certificate":
-    let e = refuses(proc () =
-      discard parseSnpCertificateTable(certTable(
-        @[(SnpVcekGuid, "-----BEGIN CERTIFICATE-----\nAAAA\n" &
-                        "-----END CERTIFICATE-----"),
-          (SnpAskGuid, milanChain[0]), (SnpArkGuid, milanChain[1])])))
-    check e.condition == sbcArmourDecodesToSomethingElse
+    driveArmourThatDecodesToSomethingThatIsNotACertificate()
 
   test "a table key that is not sixteen bytes of hex is refused":
-    let e = refuses(proc () = discard guidBytes("not-a-guid"))
-    check e.condition == sbcMalformedTableKey
+    driveATableKeyThatIsNotSixteenBytesOfHexIsRefused()
 
   test "the four keys this build knows are the vendor's own spellings":
     # Each is thirty-two hex digits with four separators, and each
@@ -677,6 +817,25 @@ suite "every way a certificate table can be wrong":
       "c0b406a4a8034952" & "97433fb6014cd0ae"
 
 
+proc driveAndTheCorporaThisGateUSESAreTheCorporaItPins() =
+  ## The body of test
+  ##   "and the corpora this gate USES are the corpora it pins"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The other direction: a table constrained by nothing is a list. The
+  # two reports and two endorsement certificates the cases above drive
+  # are reached THROUGH this table's accessor, so a row that drifted
+  # would move the measurements as well as the digest.
+  for g in genuineParts:
+    var pinned = false
+    for c in SnpCorpus:
+      if corpusBytes(c) == stringOfHex(g.reportHex): pinned = true
+    check pinned
+  var chainPinned = false
+  for c in SnpCorpus:
+    if corpusBytes(c) == KdsMilanChainPem: chainPinned = true
+  check chainPinned
+
 suite "provenance":
 
   test "every corpus this gate reads is the size and the bytes recorded":
@@ -696,19 +855,7 @@ suite "provenance":
     check seen == 5
 
   test "and the corpora this gate USES are the corpora it pins":
-    # The other direction: a table constrained by nothing is a list. The
-    # two reports and two endorsement certificates the cases above drive
-    # are reached THROUGH this table's accessor, so a row that drifted
-    # would move the measurements as well as the digest.
-    for g in genuineParts:
-      var pinned = false
-      for c in SnpCorpus:
-        if corpusBytes(c) == stringOfHex(g.reportHex): pinned = true
-      check pinned
-    var chainPinned = false
-    for c in SnpCorpus:
-      if corpusBytes(c) == KdsMilanChainPem: chainPinned = true
-    check chainPinned
+    driveAndTheCorporaThisGateUSESAreTheCorporaItPins()
 
   test "every corpus row names where its bytes came from":
     # The provenance obligation this gate can actually discharge: each
@@ -719,6 +866,53 @@ suite "provenance":
     # to check it is the diff.
     for c in SnpCorpus:
       check SnpCorpora[c].origin.len > 0
+
+# The cases above whose inputs build the backend-condition census.
+# The coverage case below drives every one of them itself: the suite
+# runner executes each case in its own process (`--run suite::test`),
+# so the census holds only what ran in THAT process, and a coverage
+# case that read what earlier cases left behind would measure the
+# execution mode rather than the code under test.
+const BackendRefusalDrivers: seq[(string, proc () {.nimcall.})] = @[
+  ("the other genuine part's own bound bytes are refused",
+    driveTheOtherGenuinePartSOwnBoundBytesAreRefused),
+  ("and so is a single bit of the right answer",
+    driveAndSoIsASingleBitOfTheRightAnswer),
+  ("a document of the wrong width is refused",
+    driveADocumentOfTheWrongWidthIsRefused),
+  ("a structure revision this build has no layout for is refused",
+    driveAStructureRevisionThisBuildHasNoLayoutForIsRefused),
+  ("the other root of trust's provider is refused",
+    driveTheOtherRootOfTrustSProviderIsRefused),
+  ("a document from a privilege level nobody chose is refused",
+    driveADocumentFromAPrivilegeLevelNobodyChoseIsRefused),
+  ("a transport refusal reaches the seam as this driver's refusal",
+    driveATransportRefusalReachesTheSeamAsThisDriverSRefusal),
+  ("a driver with no source is refused", driveADriverWithNoSourceIsRefused),
+  ("a privilege level outside the range is refused",
+    driveAPrivilegeLevelOutsideTheRangeIsRefused),
+  ("a blob too short to hold one entry is refused",
+    driveABlobTooShortToHoldOneEntryIsRefused),
+  ("an entry whose payload runs past the end is refused",
+    driveAnEntryWhosePayloadRunsPastTheEndIsRefused),
+  ("a table that never terminates is refused",
+    driveATableThatNeverTerminatesIsRefused),
+  ("a table offering two endorsement keys is refused",
+    driveATableOfferingTwoEndorsementKeysIsRefused),
+  ("a table missing any one of the three is refused, and names it",
+    driveATableMissingAnyOneOfTheThreeIsRefusedAndNamesIt),
+  ("an empty entry is refused", driveAnEmptyEntryIsRefused),
+  ("an entry that is neither a sequence nor armour is refused",
+    driveAnEntryThatIsNeitherASequenceNorArmourIsRefused),
+  ("armour that never closes is refused", driveArmourThatNeverClosesIsRefused),
+  ("armour whose body is not base64 is refused",
+    driveArmourWhoseBodyIsNotBase64IsRefused),
+  ("armour that decodes to something that is not a certificate",
+    driveArmourThatDecodesToSomethingThatIsNotACertificate),
+  ("a table key that is not sixteen bytes of hex is refused",
+    driveATableKeyThatIsNotSixteenBytesOfHexIsRefused),
+  ("and the corpora this gate USES are the corpora it pins",
+    driveAndTheCorporaThisGateUSESAreTheCorporaItPins)]
 
 suite "the census":
 
@@ -741,6 +935,14 @@ suite "the census":
     # Not `>=`. Under an inequality a rule reached twice pays for a rule
     # reached never, and the census cannot notice the one thing it
     # exists to notice.
+    # Drive every input the census is built from, HERE and from an
+    # empty census, so the verdict is the same whether this case runs
+    # alone (the runner gives each case its own process) or after
+    # the cases above.
+    reached = {}
+    for (name, drive) in BackendRefusalDrivers:
+      checkpoint("driving " & name)
+      drive()
     var missing: seq[string] = @[]
     for c in SnpBackendCondition:
       if c notin reached: missing.add $c

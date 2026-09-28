@@ -346,19 +346,26 @@ suite "the root set":
     check viaType.isAccepted
     check viaType.rootLine == aplMilan
 
+proc driveSnpAGenuineChainIsAccepted() =
+  ## The body of test
+  ##   "t_snp_a_genuine_chain_is_accepted"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The positive control. Without it every refusal below is consistent
+  # with a verifier that refuses everything.
+  let v = evaluateAmdChain(genuineVcek, milanAsk, milanArk, milanCrl, Now)
+  checkpoint v.detail
+  check v.isAccepted
+  check v.reason == acAccepted
+  check v.rootMatched
+  check v.rootLine == aplMilan
+  check v.revocationConsulted
+  reachedChainKinds.incl acAccepted
+
 suite "the vendor's own chains are accepted":
 
   test "t_snp_a_genuine_chain_is_accepted":
-    # The positive control. Without it every refusal below is consistent
-    # with a verifier that refuses everything.
-    let v = evaluateAmdChain(genuineVcek, milanAsk, milanArk, milanCrl, Now)
-    checkpoint v.detail
-    check v.isAccepted
-    check v.reason == acAccepted
-    check v.rootMatched
-    check v.rootLine == aplMilan
-    check v.revocationConsulted
-    reachedChainKinds.incl acAccepted
+    driveSnpAGenuineChainIsAccepted()
 
   test "t_snp_the_vendors_second_signing_key_is_rooted_at_the_same_place":
     # The vendor publishes a second signing certificate for the other
@@ -380,6 +387,55 @@ suite "the vendor's own chains are accepted":
     check VlekCommonName in EndorsementKeyCommonNames
     check VcekCommonName in EndorsementKeyCommonNames
     check EndorsementKeyCommonNames.len == 2
+
+proc driveSnpTheImpostorChainIsRefusedForItsRootAndNothingElse() =
+  ## The body of test
+  ##   "t_snp_the_impostor_chain_is_refused_for_its_root_and_nothing_else"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # THE case.
+  let v = evaluateAmdChain(impostorVcek, impostorAsk, impostorArk,
+                           milanCrl, Now)
+  checkpoint v.detail
+  check not v.isAccepted
+  assertOnlyRefusal(v, acRootIsNotAmd)
+  check not v.rootMatched
+  check not v.revocationConsulted
+  # Everything the refusal is NOT about, stated as values rather than
+  # left to the message: the chain links, the certificates are inside
+  # their windows, the leaf is the right kind of document.
+  let iVcek = parseAmdCertificate(impostorVcek)
+  let iAsk = parseAmdCertificate(impostorAsk)
+  let iArk = parseAmdCertificate(impostorArk)
+  check hexOfBytes(iVcek.issuerDn) == hexOfBytes(iAsk.subjectDn)
+  check hexOfBytes(iAsk.issuerDn) == hexOfBytes(iArk.subjectDn)
+  check hexOfBytes(iArk.issuerDn) == hexOfBytes(iArk.subjectDn)
+  check iArk.isCa and iAsk.isCa
+  check Now >= iVcek.notBefore and Now < iVcek.notAfter
+  check Now >= iAsk.notBefore and Now < iAsk.notAfter
+  check Now >= iArk.notBefore and Now < iArk.notAfter
+  check iVcek.subjectCn == VcekCommonName
+  check amdRootFor(iArk.rsaModulus, iArk.rsaExponent) < 0
+
+proc driveSnpTheRootRuleFiresWhicheverPartsAreGenuine() =
+  ## The body of test
+  ##   "t_snp_the_root_rule_fires_whichever_parts_are_genuine"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The impostor root under genuine lower links, and genuine root
+  # under impostor lower links. The first is still the root rule; the
+  # second is a DIFFERENT rule, which is what says the two are two.
+  let a = evaluateAmdChain(genuineVcek, milanAsk, impostorArk,
+                           milanCrl, Now)
+  checkpoint a.detail
+  assertOnlyRefusal(a, acRootIsNotAmd)
+
+  let b = evaluateAmdChain(impostorVcek, impostorAsk, milanArk,
+                           milanCrl, Now)
+  checkpoint b.detail
+  assertOnlyRefusal(b, acBadSignature)
+  check b.rootMatched          # the root WAS recognised, this time
+  check b.rootLine == aplMilan
 
 suite "the impostor":
 
@@ -447,215 +503,467 @@ suite "the impostor":
       hexOfBytes(genuineReport.measurement)
 
   test "t_snp_the_impostor_chain_is_refused_for_its_root_and_nothing_else":
-    # THE case.
-    let v = evaluateAmdChain(impostorVcek, impostorAsk, impostorArk,
-                             milanCrl, Now)
-    checkpoint v.detail
-    check not v.isAccepted
-    assertOnlyRefusal(v, acRootIsNotAmd)
-    check not v.rootMatched
-    check not v.revocationConsulted
-    # Everything the refusal is NOT about, stated as values rather than
-    # left to the message: the chain links, the certificates are inside
-    # their windows, the leaf is the right kind of document.
-    let iVcek = parseAmdCertificate(impostorVcek)
-    let iAsk = parseAmdCertificate(impostorAsk)
-    let iArk = parseAmdCertificate(impostorArk)
-    check hexOfBytes(iVcek.issuerDn) == hexOfBytes(iAsk.subjectDn)
-    check hexOfBytes(iAsk.issuerDn) == hexOfBytes(iArk.subjectDn)
-    check hexOfBytes(iArk.issuerDn) == hexOfBytes(iArk.subjectDn)
-    check iArk.isCa and iAsk.isCa
-    check Now >= iVcek.notBefore and Now < iVcek.notAfter
-    check Now >= iAsk.notBefore and Now < iAsk.notAfter
-    check Now >= iArk.notBefore and Now < iArk.notAfter
-    check iVcek.subjectCn == VcekCommonName
-    check amdRootFor(iArk.rsaModulus, iArk.rsaExponent) < 0
+    driveSnpTheImpostorChainIsRefusedForItsRootAndNothingElse()
 
   test "t_snp_the_root_rule_fires_whichever_parts_are_genuine":
-    # The impostor root under genuine lower links, and genuine root
-    # under impostor lower links. The first is still the root rule; the
-    # second is a DIFFERENT rule, which is what says the two are two.
-    let a = evaluateAmdChain(genuineVcek, milanAsk, impostorArk,
-                             milanCrl, Now)
-    checkpoint a.detail
-    assertOnlyRefusal(a, acRootIsNotAmd)
+    driveSnpTheRootRuleFiresWhicheverPartsAreGenuine()
 
-    let b = evaluateAmdChain(impostorVcek, impostorAsk, milanArk,
-                             milanCrl, Now)
-    checkpoint b.detail
-    assertOnlyRefusal(b, acBadSignature)
-    check b.rootMatched          # the root WAS recognised, this time
-    check b.rootLine == aplMilan
+proc driveSnpADifferentGenerationOfTheSameVendorDoesNotSubstitute() =
+  ## The body of test
+  ##   "t_snp_a_different_generation_of_the_same_vendor_does_not_substitute"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # A real vendor root, correctly pinned, correctly signed — and still
+  # not the root this chain descends from.
+  let v = evaluateAmdChain(genuineVcek, milanAsk, turinArk, turinCrl, Now)
+  checkpoint v.detail
+  assertOnlyRefusal(v, acNameMismatch)
+  let w = evaluateAmdChain(turinVcek, turinAsk, milanArk, milanCrl, Now)
+  checkpoint w.detail
+  check not w.isAccepted
+
+proc driveSnpAPinnedKeyUnderADifferentNameIsRefused() =
+  ## The body of test
+  ##   "t_snp_a_pinned_key_under_a_different_name_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The vendor's real root key, in a certificate that calls itself the
+  # other generation's root. The two names are the same length, so the
+  # document is otherwise untouched. Without this rule a genuine root
+  # could be presented as a different one, and a chain would be
+  # accepted under a generation it has nothing to do with.
+  let ark = substituteAscii(milanArk, "ARK-Milan", "ARK-Turin", 2)
+  let ask = substituteAscii(milanAsk, "ARK-Milan", "ARK-Turin", 1)
+  check ark.len == milanArk.len
+  let v = evaluateAmdChain(genuineVcek, ask, ark, milanCrl, Now)
+  checkpoint v.detail
+  assertOnlyRefusal(v, acRootNameDisagreesWithKey)
+  check v.rootMatched
+  check v.rootLine == aplMilan
+
+proc driveSnpARootThatIsNotSelfIssuedIsRefused() =
+  ## The body of test
+  ##   "t_snp_a_root_that_is_not_self_issued_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Only the root's ISSUER is renamed, so it still carries the name
+  # the intermediate points at and still holds a pinned key.
+  let ark = substituteAscii(milanArk, "ARK-Milan", "ARK-Turin", 2)
+  # Put the subject back: the issuer is the first of the two Names in
+  # a certificate body, the subject the second.
+  var patched = milanArk
+  var replaced = 0
+  for i in 0 .. patched.len - 9:
+    var hit = true
+    for j in 0 ..< 9:
+      if patched[i + j] != byte("ARK-Milan"[j]): hit = false
+    if hit:
+      inc replaced
+      if replaced == 1:
+        for j in 0 ..< 9: patched[i + j] = byte("ARK-Turin"[j])
+  check replaced == 2
+  check ark.len == patched.len
+  let v = evaluateAmdChain(genuineVcek, milanAsk, patched, milanCrl, Now)
+  checkpoint v.detail
+  assertOnlyRefusal(v, acNotSelfIssued)
 
 suite "other roots, including the vendor's other ones":
 
   test "t_snp_a_different_generation_of_the_same_vendor_does_not_substitute":
-    # A real vendor root, correctly pinned, correctly signed — and still
-    # not the root this chain descends from.
-    let v = evaluateAmdChain(genuineVcek, milanAsk, turinArk, turinCrl, Now)
-    checkpoint v.detail
-    assertOnlyRefusal(v, acNameMismatch)
-    let w = evaluateAmdChain(turinVcek, turinAsk, milanArk, milanCrl, Now)
-    checkpoint w.detail
-    check not w.isAccepted
+    driveSnpADifferentGenerationOfTheSameVendorDoesNotSubstitute()
 
   test "t_snp_a_pinned_key_under_a_different_name_is_refused":
-    # The vendor's real root key, in a certificate that calls itself the
-    # other generation's root. The two names are the same length, so the
-    # document is otherwise untouched. Without this rule a genuine root
-    # could be presented as a different one, and a chain would be
-    # accepted under a generation it has nothing to do with.
-    let ark = substituteAscii(milanArk, "ARK-Milan", "ARK-Turin", 2)
-    let ask = substituteAscii(milanAsk, "ARK-Milan", "ARK-Turin", 1)
-    check ark.len == milanArk.len
-    let v = evaluateAmdChain(genuineVcek, ask, ark, milanCrl, Now)
-    checkpoint v.detail
-    assertOnlyRefusal(v, acRootNameDisagreesWithKey)
-    check v.rootMatched
-    check v.rootLine == aplMilan
+    driveSnpAPinnedKeyUnderADifferentNameIsRefused()
 
   test "t_snp_a_root_that_is_not_self_issued_is_refused":
-    # Only the root's ISSUER is renamed, so it still carries the name
-    # the intermediate points at and still holds a pinned key.
-    let ark = substituteAscii(milanArk, "ARK-Milan", "ARK-Turin", 2)
-    # Put the subject back: the issuer is the first of the two Names in
-    # a certificate body, the subject the second.
-    var patched = milanArk
-    var replaced = 0
-    for i in 0 .. patched.len - 9:
-      var hit = true
-      for j in 0 ..< 9:
-        if patched[i + j] != byte("ARK-Milan"[j]): hit = false
-      if hit:
-        inc replaced
-        if replaced == 1:
-          for j in 0 ..< 9: patched[i + j] = byte("ARK-Turin"[j])
-    check replaced == 2
-    check ark.len == patched.len
-    let v = evaluateAmdChain(genuineVcek, milanAsk, patched, milanCrl, Now)
-    checkpoint v.detail
-    assertOnlyRefusal(v, acNotSelfIssued)
+    driveSnpARootThatIsNotSelfIssuedIsRefused()
+
+proc driveSnpAnElementThatIsNotAVendorCertificateIsRefused() =
+  ## The body of test
+  ##   "t_snp_an_element_that_is_not_a_vendor_certificate_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The algorithm identifier is compared byte for byte, so one byte of
+  # the object identifier is enough — and the refusal must SAY which
+  # rule, because a generic parse failure would hide it.
+  var patched = milanArk
+  # 1.2.840.113549.1.1.10 -> …1.11 (sha512WithRSA), same length.
+  let before = bytesOfHex("2a864886f70d01010a")
+  let after = bytesOfHex("2a864886f70d01010b")
+  patched = substituteBytes(patched, before, after, 2)
+  let v = evaluateAmdChain(genuineVcek, milanAsk, patched, milanCrl, Now)
+  checkpoint v.detail
+  assertOnlyRefusal(v, acMalformed)
+  check "RSASSA-PSS" in v.detail
+  # …and the two admitted spellings really are two, and exactly two.
+  check admittedPssAlgorithmIdentifiers().len == 2
+  check hexOfBytes(admittedPssAlgorithmIdentifiers()[0]) !=
+    hexOfBytes(admittedPssAlgorithmIdentifiers()[1])
+  check isAdmittedPssAlgorithm(admittedPssAlgorithmIdentifiers()[0])
+  check isAdmittedPssAlgorithm(admittedPssAlgorithmIdentifiers()[1])
+  check not isAdmittedPssAlgorithm(bytesOfHex("3000"))
+  var truncated = admittedPssAlgorithmIdentifiers()[0]
+  truncated.setLen(truncated.len - 1)
+  check not isAdmittedPssAlgorithm(truncated)
+
+proc driveSnpACriticalExtensionThisBuildCannotActOnIsRefused() =
+  ## The body of test
+  ##   "t_snp_a_critical_extension_this_build_cannot_act_on_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The root carries a CRITICAL key-usage extension. Renaming its
+  # object identifier to one this build does not recognise — same
+  # length, still critical — is exactly the situation RFC 5280 §4.2
+  # says to refuse rather than ignore.
+  let before = bytesOfHex("0603551d0f")     # 2.5.29.15, keyUsage
+  let after = bytesOfHex("0603551d10")      # 2.5.29.16, not recognised
+  let patched = substituteBytes(milanArk, before, after, 1)
+  let v = evaluateAmdChain(genuineVcek, milanAsk, patched, milanCrl, Now)
+  checkpoint v.detail
+  assertOnlyRefusal(v, acUnrecognisedCriticalExtension)
+  check RecognisedAmdCriticalOids.len == 2
+  check OidBasicConstraints in RecognisedAmdCriticalOids
+  check OidKeyUsage in RecognisedAmdCriticalOids
+
+proc driveSnpAKeyOfTheWrongKindForItsPositionIsRefused() =
+  ## The body of test
+  ##   "t_snp_a_key_of_the_wrong_kind_for_its_position_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let before = refusalsObserved
+  let v = evaluateAmdChain(milanAsk, milanAsk, milanArk, milanCrl, Now)
+  checkpoint v.detail
+  assertOnlyRefusal(v, acWrongKeyType)
+  let w = evaluateAmdChain(genuineVcek, genuineVcek, milanArk,
+                           milanCrl, Now)
+  checkpoint w.detail
+  assertOnlyRefusal(w, acWrongKeyType)
+  check refusalsObserved - before == 2
+
+proc driveSnpALeafThatIsNotAnEndorsementKeyIsRefused() =
+  ## The body of test
+  ##   "t_snp_a_leaf_that_is_not_an_endorsement_key_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let before = refusalsObserved
+  let patched = substituteAscii(genuineVcek, "SEV-VCEK", "SEV-XXXX", 1)
+  let v = evaluateAmdChain(patched, milanAsk, milanArk, milanCrl, Now)
+  checkpoint v.detail
+  assertOnlyRefusal(v, acLeafIsNotAnEndorsementKey)
+  check refusalsObserved - before == 1
+
+proc driveSnpALeafWithNoPlatformVersionIsRefused() =
+  ## The body of test
+  ##   "t_snp_a_leaf_with_no_platform_version_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let seenBefore = refusalsObserved
+  # The object identifier of one of the four version components,
+  # renamed to one the vendor uses only on a later generation. Same
+  # length, still a well-formed extension, simply not one of the four
+  # this build compares: …3704.1.3.8 (microcode) -> …3704.1.3.9.
+  let before = bytesOfHex("060a2b060104019c78010308")
+  let after = bytesOfHex("060a2b060104019c78010309")
+  let patched = substituteBytes(genuineVcek, before, after, 1)
+  let v = evaluateAmdChain(patched, milanAsk, milanArk, milanCrl, Now)
+  checkpoint v.detail
+  assertOnlyRefusal(v, acLeafCarriesNoPlatformVersion)
+  check refusalsObserved - seenBefore == 1
+
+proc driveSnpALeafWithNoUsableChipIdentityIsRefused() =
+  ## The body of test
+  ##   "t_snp_a_leaf_with_no_usable_chip_identity_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # A real vendor certificate, for a real part of a later generation,
+  # whose chip identity is 8 bytes rather than 64. This build binds a
+  # report to a part by that identity and cannot do it with 8 bytes,
+  # so it refuses instead of binding to a prefix.
+  #
+  # That is a genuine limitation of this build and not a property of
+  # the certificate: later parts are not supported here, and this is
+  # where a reader finds that out.
+  let cert = parseAmdCertificate(turinVcek)
+  check cert.subjectCn == VcekCommonName
+  check cert.productName == "Turin"
+  check cert.hwId.len == 8
+  check cert.hwId.len != HwIdLen
+  let v = evaluateAmdChain(turinVcek, turinAsk, turinArk, turinCrl, Now)
+  checkpoint v.detail
+  assertOnlyRefusal(v, acLeafCarriesNoChipIdentity)
+
+proc driveSnpAnIssuerWithoutTheAuthorityToIssueIsRefused() =
+  ## The body of test
+  ##   "t_snp_an_issuer_without_the_authority_to_issue_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let seenBefore = refusalsObserved
+  # basicConstraints cA, TRUE -> FALSE. One byte, inside the signed
+  # body, so the signature would break too — but this rule is reached
+  # first, which is the point of checking structure before arithmetic.
+  # BasicConstraints ::= SEQUENCE { cA BOOLEAN, pathLen INTEGER }
+  let before = bytesOfHex("30060101ff020100")
+  let after = bytesOfHex("3006010100020100")
+  let patched = substituteBytes(milanAsk, before, after, 1)
+  let v = evaluateAmdChain(genuineVcek, patched, milanArk, milanCrl, Now)
+  checkpoint v.detail
+  assertOnlyRefusal(v, acNotACertificateAuthority)
+  check refusalsObserved - seenBefore == 1
+
+proc driveSnpAChainOutsideItsValidityWindowIsRefused() =
+  ## The body of test
+  ##   "t_snp_a_chain_outside_its_validity_window_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let before = refusalsObserved
+  # Before the root existed, and after the endorsement expires.
+  let early = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
+                               milanCrl, 1_500_000_000'i64)
+  checkpoint early.detail
+  assertOnlyRefusal(early, acExpired)
+  assertOneRule(early.detail, WindowRules, "is not valid until")
+  let late = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
+                              milanCrl, 2_000_000_000'i64)
+  checkpoint late.detail
+  assertOnlyRefusal(late, acExpired)
+  assertOneRule(late.detail, WindowRules, "stopped being valid at")
+  check refusalsObserved - before == 2
+
+proc driveSnpEachSignatureInTheChainIsCheckedOnItsOwnInput() =
+  ## The body of test
+  ##   "t_snp_each_signature_in_the_chain_is_checked_on_its_own_input"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Three links, three rules, one refusal kind — so a case that
+  # asserted `acBadSignature` and stopped would be asserting "one of
+  # these three". Each link is broken ALONE, in the one place that
+  # breaks a signature and nothing else: the last byte of the
+  # signature BIT STRING, which is outside the signed body.
+  #
+  # Two of these three had no input at all before this case. Deleting
+  # the endorsement certificate's signature check, or the root's
+  # self-signature check, left all three gates green.
+  let seenBefore = refusalsObserved
+  let leaf = evaluateAmdChain(withBrokenSignature(genuineVcek), milanAsk,
+                              milanArk, milanCrl, Now)
+  checkpoint leaf.detail
+  assertOnlyRefusal(leaf, acBadSignature)
+  assertOneRule(leaf.detail, BadSignatureRules,
+                "the endorsement certificate does not verify under")
+
+  let mid = evaluateAmdChain(genuineVcek, withBrokenSignature(milanAsk),
+                             milanArk, milanCrl, Now)
+  checkpoint mid.detail
+  assertOnlyRefusal(mid, acBadSignature)
+  assertOneRule(mid.detail, BadSignatureRules,
+                "the intermediate does not verify under")
+
+  let root = evaluateAmdChain(genuineVcek, milanAsk,
+                              withBrokenSignature(milanArk), milanCrl, Now)
+  checkpoint root.detail
+  assertOnlyRefusal(root, acBadSignature)
+  assertOneRule(root.detail, BadSignatureRules,
+                "the root does not verify under its own key")
+  check refusalsObserved - seenBefore == 3
+
+  # Each input differs from the genuine one in exactly one byte, and
+  # that byte is in the signature — so nothing structural moved and
+  # the root is still the pinned one.
+  for (good, bad) in {genuineVcek: withBrokenSignature(genuineVcek),
+                      milanAsk: withBrokenSignature(milanAsk),
+                      milanArk: withBrokenSignature(milanArk)}:
+    check good.len == bad.len
+    var differing = 0
+    for i in 0 ..< good.len:
+      if good[i] != bad[i]: inc differing
+    check differing == 1
+    let g = parseAmdCertificate(good)
+    let b = parseAmdCertificate(bad)
+    check hexOfBytes(g.tbs) == hexOfBytes(b.tbs)
+  check root.rootMatched
+  check root.rootLine == aplMilan
+
+proc driveSnpTheLeafMustNameTheIntermediateItIsHanded() =
+  ## The body of test
+  ##   "t_snp_the_leaf_must_name_the_intermediate_it_is_handed"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The other half of the name link. The case above it crosses the
+  # intermediate and the root; this one crosses the endorsement
+  # certificate and the intermediate, with two genuine vendor
+  # certificates of a different generation. Without it the rule that
+  # links the leaf to the intermediate had no input: deleting it left
+  # every gate green, because the only chain that reached it was one
+  # whose leaf already named its intermediate.
+  let v = evaluateAmdChain(genuineVcek, turinAsk, turinArk, turinCrl, Now)
+  checkpoint v.detail
+  assertOnlyRefusal(v, acNameMismatch)
+  assertOneRule(v.detail, NameLinkRules, "the endorsement certificate names")
+  check parseAmdCertificate(genuineVcek).issuerCn == "SEV-Milan"
+  check parseAmdCertificate(turinAsk).subjectCn == "SEV-Turin"
+
+proc driveSnpAnIssuerWhoseKeyMayNotSignCertificatesIsRefused() =
+  ## The body of test
+  ##   "t_snp_an_issuer_whose_key_may_not_sign_certificates_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The second half of the authority rule. `basicConstraints cA` and
+  # `keyUsage keyCertSign` are two different statements and this build
+  # requires both; only the first had an input. The vendor's
+  # intermediate carries `03 02 01 04` — keyCertSign alone — and this
+  # replaces it with `03 02 01 80`, digitalSignature, the same length
+  # and still critical, still an extension this build recognises.
+  let seenBefore = refusalsObserved
+  let before = bytesOfHex("0603551d0f0101ff040403020104")
+  let after = bytesOfHex("0603551d0f0101ff040403020180")
+  let patched = substituteBytes(milanAsk, before, after, 1)
+  check patched.len == milanAsk.len
+  let v = evaluateAmdChain(genuineVcek, patched, milanArk, milanCrl, Now)
+  checkpoint v.detail
+  assertOnlyRefusal(v, acNotACertificateAuthority)
+  assertOneRule(v.detail, AuthorityRules,
+                "has a keyUsage that does not include keyCertSign")
+  # …and the cA half of the same kind names the OTHER rule.
+  let cAPatched = substituteBytes(milanAsk, bytesOfHex("30060101ff020100"),
+                                  bytesOfHex("3006010100020100"), 1)
+  let w = evaluateAmdChain(genuineVcek, cAPatched, milanArk, milanCrl, Now)
+  checkpoint w.detail
+  assertOnlyRefusal(w, acNotACertificateAuthority)
+  assertOneRule(w.detail, AuthorityRules,
+                "does not carry basicConstraints cA TRUE")
+  check refusalsObserved - seenBefore == 2
+
+proc driveSnpAChainWithNoCurrentRevocationListIsRefused() =
+  ## The body of test
+  ##   "t_snp_a_chain_with_no_current_revocation_list_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Seven ways to have no answer, all of which are the same answer —
+  # and the point of this case is that they are SEVEN and the verdict
+  # says which.
+  #
+  # Five of them are conditions inside the loop that picks a covering
+  # list, and until this gate named them they were indistinguishable:
+  # one refusal, one sentence, five rules. Deleting the issuer check,
+  # the next-update check or the has-a-next-update check left every
+  # gate green, because the list each of those cases supplied was set
+  # aside by the SIGNATURE check below them instead. A kind is not a
+  # rule; the sentence is.
+  let none = evaluateAmdChain(genuineVcek, milanAsk, milanArk, @[], Now)
+  checkpoint none.detail
+  assertOnlyRefusal(none, acNoRevocationData)
+  check "0 did not read" in none.detail
+  for r in RevocationRules: check r notin none.detail
+
+  let junk = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
+                              @[bytesOfHex("3003020101")], Now)
+  checkpoint junk.detail
+  assertOnlyRefusal(junk, acNoRevocationData)
+  check "1 did not read" in junk.detail
+  for r in RevocationRules: check r notin junk.detail
+
+  # The vendor's own list, consulted before it comes into force. The
+  # certificates are all still valid at this instant, so the only
+  # thing missing is a current answer about revocation.
+  let stale = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
+                               milanCrl, 1_700_000_000'i64)
+  checkpoint stale.detail
+  assertOnlyRefusal(stale, acNoRevocationData)
+  assertOneRule(stale.detail, RevocationRules, "one is not in force until")
+
+  # …and the other end of the same list's window, which is a
+  # DIFFERENT rule and had no input at all before this line. The
+  # vendor's list stops being current in 2026; the endorsement
+  # certificate is good until 2030, so there is an interval in which
+  # every certificate is valid and the only thing out of date is the
+  # revocation answer.
+  let expired = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
+                                 milanCrl, 1_800_000_000'i64)
+  checkpoint expired.detail
+  assertOnlyRefusal(expired, acNoRevocationData)
+  assertOneRule(expired.detail, RevocationRules,
+                "one stopped being current at")
+  let published = parseAmdCrl(milanCrl[0])
+  check 1_800_000_000'i64 >= published.nextUpdate
+  check 1_800_000_000'i64 < parseAmdCertificate(genuineVcek).notAfter
+
+  # A list that states no next update at all says nothing about
+  # whether it is still current, and that is its own rule too.
+  let openEnded = withoutNextUpdate(milanCrl[0])
+  let unread = parseAmdCrl(openEnded)
+  check not unread.hasNextUpdate
+  check unread.issuerCn == "ARK-Milan"
+  check hexOfBytes(unread.issuerDn) == hexOfBytes(published.issuerDn)
+  check unread.thisUpdate == published.thisUpdate
+  let openVerdict = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
+                                     @[openEnded], Now)
+  checkpoint openVerdict.detail
+  assertOnlyRefusal(openVerdict, acNoRevocationData)
+  assertOneRule(openVerdict.detail, RevocationRules,
+                "one states no next update at all")
+
+  # A list issued by somebody else is not an answer either, even
+  # though it reads perfectly well and is inside its own window.
+  let wrongIssuer = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
+    @[bytesOfHex(KdsTurinCrlDerHex)], Now)
+  checkpoint wrongIssuer.detail
+  assertOnlyRefusal(wrongIssuer, acNoRevocationData)
+  assertOneRule(wrongIssuer.detail, RevocationRules, "one is issued by")
+  check "ARK-Turin" in wrongIssuer.detail
+
+  # And the case the others cannot reach: a list that names the right
+  # issuer, is inside its own window, reads perfectly, and whose
+  # SIGNATURE is wrong.
+  var tampered = milanCrl[0]
+  let sigByte = tampered.len - 1
+  tampered[sigByte] = tampered[sigByte] xor 0x01'u8
+  let parsed = parseAmdCrl(tampered)
+  check parsed.issuerCn == "ARK-Milan"
+  check hexOfBytes(parsed.issuerDn) ==
+    hexOfBytes(parseAmdCertificate(milanArk).subjectDn)
+  check parsed.hasNextUpdate
+  check Now >= parsed.thisUpdate and Now < parsed.nextUpdate
+  check not parsed.signatureVerifiesUnder(parseAmdCertificate(milanArk))
+  let forged = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
+                                @[tampered], Now)
+  checkpoint forged.detail
+  assertOnlyRefusal(forged, acNoRevocationData)
+  check "0 did not read" in forged.detail
+  assertOneRule(forged.detail, RevocationRules,
+                "one carries a signature this root did not make")
+
+  # The five sentences are five: no one of them is a substring of
+  # another, which is what lets the assertions above mean one rule.
+  for a in RevocationRules:
+    for b in RevocationRules:
+      if a == b: continue
+      check a notin b
 
 suite "the rest of the chain's rules, each on its own input":
 
   test "t_snp_an_element_that_is_not_a_vendor_certificate_is_refused":
-    # The algorithm identifier is compared byte for byte, so one byte of
-    # the object identifier is enough — and the refusal must SAY which
-    # rule, because a generic parse failure would hide it.
-    var patched = milanArk
-    # 1.2.840.113549.1.1.10 -> …1.11 (sha512WithRSA), same length.
-    let before = bytesOfHex("2a864886f70d01010a")
-    let after = bytesOfHex("2a864886f70d01010b")
-    patched = substituteBytes(patched, before, after, 2)
-    let v = evaluateAmdChain(genuineVcek, milanAsk, patched, milanCrl, Now)
-    checkpoint v.detail
-    assertOnlyRefusal(v, acMalformed)
-    check "RSASSA-PSS" in v.detail
-    # …and the two admitted spellings really are two, and exactly two.
-    check admittedPssAlgorithmIdentifiers().len == 2
-    check hexOfBytes(admittedPssAlgorithmIdentifiers()[0]) !=
-      hexOfBytes(admittedPssAlgorithmIdentifiers()[1])
-    check isAdmittedPssAlgorithm(admittedPssAlgorithmIdentifiers()[0])
-    check isAdmittedPssAlgorithm(admittedPssAlgorithmIdentifiers()[1])
-    check not isAdmittedPssAlgorithm(bytesOfHex("3000"))
-    var truncated = admittedPssAlgorithmIdentifiers()[0]
-    truncated.setLen(truncated.len - 1)
-    check not isAdmittedPssAlgorithm(truncated)
+    driveSnpAnElementThatIsNotAVendorCertificateIsRefused()
 
   test "t_snp_a_critical_extension_this_build_cannot_act_on_is_refused":
-    # The root carries a CRITICAL key-usage extension. Renaming its
-    # object identifier to one this build does not recognise — same
-    # length, still critical — is exactly the situation RFC 5280 §4.2
-    # says to refuse rather than ignore.
-    let before = bytesOfHex("0603551d0f")     # 2.5.29.15, keyUsage
-    let after = bytesOfHex("0603551d10")      # 2.5.29.16, not recognised
-    let patched = substituteBytes(milanArk, before, after, 1)
-    let v = evaluateAmdChain(genuineVcek, milanAsk, patched, milanCrl, Now)
-    checkpoint v.detail
-    assertOnlyRefusal(v, acUnrecognisedCriticalExtension)
-    check RecognisedAmdCriticalOids.len == 2
-    check OidBasicConstraints in RecognisedAmdCriticalOids
-    check OidKeyUsage in RecognisedAmdCriticalOids
+    driveSnpACriticalExtensionThisBuildCannotActOnIsRefused()
 
   test "t_snp_a_key_of_the_wrong_kind_for_its_position_is_refused":
-    let before = refusalsObserved
-    let v = evaluateAmdChain(milanAsk, milanAsk, milanArk, milanCrl, Now)
-    checkpoint v.detail
-    assertOnlyRefusal(v, acWrongKeyType)
-    let w = evaluateAmdChain(genuineVcek, genuineVcek, milanArk,
-                             milanCrl, Now)
-    checkpoint w.detail
-    assertOnlyRefusal(w, acWrongKeyType)
-    check refusalsObserved - before == 2
+    driveSnpAKeyOfTheWrongKindForItsPositionIsRefused()
 
   test "t_snp_a_leaf_that_is_not_an_endorsement_key_is_refused":
-    let before = refusalsObserved
-    let patched = substituteAscii(genuineVcek, "SEV-VCEK", "SEV-XXXX", 1)
-    let v = evaluateAmdChain(patched, milanAsk, milanArk, milanCrl, Now)
-    checkpoint v.detail
-    assertOnlyRefusal(v, acLeafIsNotAnEndorsementKey)
-    check refusalsObserved - before == 1
+    driveSnpALeafThatIsNotAnEndorsementKeyIsRefused()
 
   test "t_snp_a_leaf_with_no_platform_version_is_refused":
-    let seenBefore = refusalsObserved
-    # The object identifier of one of the four version components,
-    # renamed to one the vendor uses only on a later generation. Same
-    # length, still a well-formed extension, simply not one of the four
-    # this build compares: …3704.1.3.8 (microcode) -> …3704.1.3.9.
-    let before = bytesOfHex("060a2b060104019c78010308")
-    let after = bytesOfHex("060a2b060104019c78010309")
-    let patched = substituteBytes(genuineVcek, before, after, 1)
-    let v = evaluateAmdChain(patched, milanAsk, milanArk, milanCrl, Now)
-    checkpoint v.detail
-    assertOnlyRefusal(v, acLeafCarriesNoPlatformVersion)
-    check refusalsObserved - seenBefore == 1
+    driveSnpALeafWithNoPlatformVersionIsRefused()
 
   test "t_snp_a_leaf_with_no_usable_chip_identity_is_refused":
-    # A real vendor certificate, for a real part of a later generation,
-    # whose chip identity is 8 bytes rather than 64. This build binds a
-    # report to a part by that identity and cannot do it with 8 bytes,
-    # so it refuses instead of binding to a prefix.
-    #
-    # That is a genuine limitation of this build and not a property of
-    # the certificate: later parts are not supported here, and this is
-    # where a reader finds that out.
-    let cert = parseAmdCertificate(turinVcek)
-    check cert.subjectCn == VcekCommonName
-    check cert.productName == "Turin"
-    check cert.hwId.len == 8
-    check cert.hwId.len != HwIdLen
-    let v = evaluateAmdChain(turinVcek, turinAsk, turinArk, turinCrl, Now)
-    checkpoint v.detail
-    assertOnlyRefusal(v, acLeafCarriesNoChipIdentity)
+    driveSnpALeafWithNoUsableChipIdentityIsRefused()
 
   test "t_snp_an_issuer_without_the_authority_to_issue_is_refused":
-    let seenBefore = refusalsObserved
-    # basicConstraints cA, TRUE -> FALSE. One byte, inside the signed
-    # body, so the signature would break too — but this rule is reached
-    # first, which is the point of checking structure before arithmetic.
-    # BasicConstraints ::= SEQUENCE { cA BOOLEAN, pathLen INTEGER }
-    let before = bytesOfHex("30060101ff020100")
-    let after = bytesOfHex("3006010100020100")
-    let patched = substituteBytes(milanAsk, before, after, 1)
-    let v = evaluateAmdChain(genuineVcek, patched, milanArk, milanCrl, Now)
-    checkpoint v.detail
-    assertOnlyRefusal(v, acNotACertificateAuthority)
-    check refusalsObserved - seenBefore == 1
+    driveSnpAnIssuerWithoutTheAuthorityToIssueIsRefused()
 
   test "t_snp_a_chain_outside_its_validity_window_is_refused":
-    let before = refusalsObserved
-    # Before the root existed, and after the endorsement expires.
-    let early = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
-                                 milanCrl, 1_500_000_000'i64)
-    checkpoint early.detail
-    assertOnlyRefusal(early, acExpired)
-    assertOneRule(early.detail, WindowRules, "is not valid until")
-    let late = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
-                                milanCrl, 2_000_000_000'i64)
-    checkpoint late.detail
-    assertOnlyRefusal(late, acExpired)
-    assertOneRule(late.detail, WindowRules, "stopped being valid at")
-    check refusalsObserved - before == 2
+    driveSnpAChainOutsideItsValidityWindowIsRefused()
 
   test "t_snp_both_validity_edges_are_pinned_at_adjacent_instants":
     # A single case far from a boundary passes under `<` and under `<=`
@@ -690,198 +998,16 @@ suite "the rest of the chain's rules, each on its own input":
     assertOneRule(late.detail, WindowRules, "stopped being valid at")
 
   test "t_snp_each_signature_in_the_chain_is_checked_on_its_own_input":
-    # Three links, three rules, one refusal kind — so a case that
-    # asserted `acBadSignature` and stopped would be asserting "one of
-    # these three". Each link is broken ALONE, in the one place that
-    # breaks a signature and nothing else: the last byte of the
-    # signature BIT STRING, which is outside the signed body.
-    #
-    # Two of these three had no input at all before this case. Deleting
-    # the endorsement certificate's signature check, or the root's
-    # self-signature check, left all three gates green.
-    let seenBefore = refusalsObserved
-    let leaf = evaluateAmdChain(withBrokenSignature(genuineVcek), milanAsk,
-                                milanArk, milanCrl, Now)
-    checkpoint leaf.detail
-    assertOnlyRefusal(leaf, acBadSignature)
-    assertOneRule(leaf.detail, BadSignatureRules,
-                  "the endorsement certificate does not verify under")
-
-    let mid = evaluateAmdChain(genuineVcek, withBrokenSignature(milanAsk),
-                               milanArk, milanCrl, Now)
-    checkpoint mid.detail
-    assertOnlyRefusal(mid, acBadSignature)
-    assertOneRule(mid.detail, BadSignatureRules,
-                  "the intermediate does not verify under")
-
-    let root = evaluateAmdChain(genuineVcek, milanAsk,
-                                withBrokenSignature(milanArk), milanCrl, Now)
-    checkpoint root.detail
-    assertOnlyRefusal(root, acBadSignature)
-    assertOneRule(root.detail, BadSignatureRules,
-                  "the root does not verify under its own key")
-    check refusalsObserved - seenBefore == 3
-
-    # Each input differs from the genuine one in exactly one byte, and
-    # that byte is in the signature — so nothing structural moved and
-    # the root is still the pinned one.
-    for (good, bad) in {genuineVcek: withBrokenSignature(genuineVcek),
-                        milanAsk: withBrokenSignature(milanAsk),
-                        milanArk: withBrokenSignature(milanArk)}:
-      check good.len == bad.len
-      var differing = 0
-      for i in 0 ..< good.len:
-        if good[i] != bad[i]: inc differing
-      check differing == 1
-      let g = parseAmdCertificate(good)
-      let b = parseAmdCertificate(bad)
-      check hexOfBytes(g.tbs) == hexOfBytes(b.tbs)
-    check root.rootMatched
-    check root.rootLine == aplMilan
+    driveSnpEachSignatureInTheChainIsCheckedOnItsOwnInput()
 
   test "t_snp_the_leaf_must_name_the_intermediate_it_is_handed":
-    # The other half of the name link. The case above it crosses the
-    # intermediate and the root; this one crosses the endorsement
-    # certificate and the intermediate, with two genuine vendor
-    # certificates of a different generation. Without it the rule that
-    # links the leaf to the intermediate had no input: deleting it left
-    # every gate green, because the only chain that reached it was one
-    # whose leaf already named its intermediate.
-    let v = evaluateAmdChain(genuineVcek, turinAsk, turinArk, turinCrl, Now)
-    checkpoint v.detail
-    assertOnlyRefusal(v, acNameMismatch)
-    assertOneRule(v.detail, NameLinkRules, "the endorsement certificate names")
-    check parseAmdCertificate(genuineVcek).issuerCn == "SEV-Milan"
-    check parseAmdCertificate(turinAsk).subjectCn == "SEV-Turin"
+    driveSnpTheLeafMustNameTheIntermediateItIsHanded()
 
   test "t_snp_an_issuer_whose_key_may_not_sign_certificates_is_refused":
-    # The second half of the authority rule. `basicConstraints cA` and
-    # `keyUsage keyCertSign` are two different statements and this build
-    # requires both; only the first had an input. The vendor's
-    # intermediate carries `03 02 01 04` — keyCertSign alone — and this
-    # replaces it with `03 02 01 80`, digitalSignature, the same length
-    # and still critical, still an extension this build recognises.
-    let seenBefore = refusalsObserved
-    let before = bytesOfHex("0603551d0f0101ff040403020104")
-    let after = bytesOfHex("0603551d0f0101ff040403020180")
-    let patched = substituteBytes(milanAsk, before, after, 1)
-    check patched.len == milanAsk.len
-    let v = evaluateAmdChain(genuineVcek, patched, milanArk, milanCrl, Now)
-    checkpoint v.detail
-    assertOnlyRefusal(v, acNotACertificateAuthority)
-    assertOneRule(v.detail, AuthorityRules,
-                  "has a keyUsage that does not include keyCertSign")
-    # …and the cA half of the same kind names the OTHER rule.
-    let cAPatched = substituteBytes(milanAsk, bytesOfHex("30060101ff020100"),
-                                    bytesOfHex("3006010100020100"), 1)
-    let w = evaluateAmdChain(genuineVcek, cAPatched, milanArk, milanCrl, Now)
-    checkpoint w.detail
-    assertOnlyRefusal(w, acNotACertificateAuthority)
-    assertOneRule(w.detail, AuthorityRules,
-                  "does not carry basicConstraints cA TRUE")
-    check refusalsObserved - seenBefore == 2
+    driveSnpAnIssuerWhoseKeyMayNotSignCertificatesIsRefused()
 
   test "t_snp_a_chain_with_no_current_revocation_list_is_refused":
-    # Seven ways to have no answer, all of which are the same answer —
-    # and the point of this case is that they are SEVEN and the verdict
-    # says which.
-    #
-    # Five of them are conditions inside the loop that picks a covering
-    # list, and until this gate named them they were indistinguishable:
-    # one refusal, one sentence, five rules. Deleting the issuer check,
-    # the next-update check or the has-a-next-update check left every
-    # gate green, because the list each of those cases supplied was set
-    # aside by the SIGNATURE check below them instead. A kind is not a
-    # rule; the sentence is.
-    let none = evaluateAmdChain(genuineVcek, milanAsk, milanArk, @[], Now)
-    checkpoint none.detail
-    assertOnlyRefusal(none, acNoRevocationData)
-    check "0 did not read" in none.detail
-    for r in RevocationRules: check r notin none.detail
-
-    let junk = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
-                                @[bytesOfHex("3003020101")], Now)
-    checkpoint junk.detail
-    assertOnlyRefusal(junk, acNoRevocationData)
-    check "1 did not read" in junk.detail
-    for r in RevocationRules: check r notin junk.detail
-
-    # The vendor's own list, consulted before it comes into force. The
-    # certificates are all still valid at this instant, so the only
-    # thing missing is a current answer about revocation.
-    let stale = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
-                                 milanCrl, 1_700_000_000'i64)
-    checkpoint stale.detail
-    assertOnlyRefusal(stale, acNoRevocationData)
-    assertOneRule(stale.detail, RevocationRules, "one is not in force until")
-
-    # …and the other end of the same list's window, which is a
-    # DIFFERENT rule and had no input at all before this line. The
-    # vendor's list stops being current in 2026; the endorsement
-    # certificate is good until 2030, so there is an interval in which
-    # every certificate is valid and the only thing out of date is the
-    # revocation answer.
-    let expired = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
-                                   milanCrl, 1_800_000_000'i64)
-    checkpoint expired.detail
-    assertOnlyRefusal(expired, acNoRevocationData)
-    assertOneRule(expired.detail, RevocationRules,
-                  "one stopped being current at")
-    let published = parseAmdCrl(milanCrl[0])
-    check 1_800_000_000'i64 >= published.nextUpdate
-    check 1_800_000_000'i64 < parseAmdCertificate(genuineVcek).notAfter
-
-    # A list that states no next update at all says nothing about
-    # whether it is still current, and that is its own rule too.
-    let openEnded = withoutNextUpdate(milanCrl[0])
-    let unread = parseAmdCrl(openEnded)
-    check not unread.hasNextUpdate
-    check unread.issuerCn == "ARK-Milan"
-    check hexOfBytes(unread.issuerDn) == hexOfBytes(published.issuerDn)
-    check unread.thisUpdate == published.thisUpdate
-    let openVerdict = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
-                                       @[openEnded], Now)
-    checkpoint openVerdict.detail
-    assertOnlyRefusal(openVerdict, acNoRevocationData)
-    assertOneRule(openVerdict.detail, RevocationRules,
-                  "one states no next update at all")
-
-    # A list issued by somebody else is not an answer either, even
-    # though it reads perfectly well and is inside its own window.
-    let wrongIssuer = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
-      @[bytesOfHex(KdsTurinCrlDerHex)], Now)
-    checkpoint wrongIssuer.detail
-    assertOnlyRefusal(wrongIssuer, acNoRevocationData)
-    assertOneRule(wrongIssuer.detail, RevocationRules, "one is issued by")
-    check "ARK-Turin" in wrongIssuer.detail
-
-    # And the case the others cannot reach: a list that names the right
-    # issuer, is inside its own window, reads perfectly, and whose
-    # SIGNATURE is wrong.
-    var tampered = milanCrl[0]
-    let sigByte = tampered.len - 1
-    tampered[sigByte] = tampered[sigByte] xor 0x01'u8
-    let parsed = parseAmdCrl(tampered)
-    check parsed.issuerCn == "ARK-Milan"
-    check hexOfBytes(parsed.issuerDn) ==
-      hexOfBytes(parseAmdCertificate(milanArk).subjectDn)
-    check parsed.hasNextUpdate
-    check Now >= parsed.thisUpdate and Now < parsed.nextUpdate
-    check not parsed.signatureVerifiesUnder(parseAmdCertificate(milanArk))
-    let forged = evaluateAmdChain(genuineVcek, milanAsk, milanArk,
-                                  @[tampered], Now)
-    checkpoint forged.detail
-    assertOnlyRefusal(forged, acNoRevocationData)
-    check "0 did not read" in forged.detail
-    assertOneRule(forged.detail, RevocationRules,
-                  "one carries a signature this root did not make")
-
-    # The five sentences are five: no one of them is a substring of
-    # another, which is what lets the assertions above mean one rule.
-    for a in RevocationRules:
-      for b in RevocationRules:
-        if a == b: continue
-        check a notin b
+    driveSnpAChainWithNoCurrentRevocationListIsRefused()
 
 suite "the chain as the verifier reaches it":
 
@@ -969,6 +1095,49 @@ suite "the chain as the verifier reaches it":
     check genuine.checks[vcCertificateChain].outcome == coPassed
     check AmdChainElements == 3
 
+# The cases above whose inputs build the chain-rejection census.
+# The coverage case below drives every one of them itself: the suite
+# runner executes each case in its own process (`--run suite::test`),
+# so the census holds only what ran in THAT process, and a coverage
+# case that read what earlier cases left behind would measure the
+# execution mode rather than the code under test.
+const ChainRefusalDrivers: seq[(string, proc () {.nimcall.})] = @[
+  ("t_snp_a_genuine_chain_is_accepted", driveSnpAGenuineChainIsAccepted),
+  ("t_snp_the_impostor_chain_is_refused_for_its_root_and_nothing_else",
+    driveSnpTheImpostorChainIsRefusedForItsRootAndNothingElse),
+  ("t_snp_the_root_rule_fires_whichever_parts_are_genuine",
+    driveSnpTheRootRuleFiresWhicheverPartsAreGenuine),
+  ("t_snp_a_different_generation_of_the_same_vendor_does_not_substitute",
+    driveSnpADifferentGenerationOfTheSameVendorDoesNotSubstitute),
+  ("t_snp_a_pinned_key_under_a_different_name_is_refused",
+    driveSnpAPinnedKeyUnderADifferentNameIsRefused),
+  ("t_snp_a_root_that_is_not_self_issued_is_refused",
+    driveSnpARootThatIsNotSelfIssuedIsRefused),
+  ("t_snp_an_element_that_is_not_a_vendor_certificate_is_refused",
+    driveSnpAnElementThatIsNotAVendorCertificateIsRefused),
+  ("t_snp_a_critical_extension_this_build_cannot_act_on_is_refused",
+    driveSnpACriticalExtensionThisBuildCannotActOnIsRefused),
+  ("t_snp_a_key_of_the_wrong_kind_for_its_position_is_refused",
+    driveSnpAKeyOfTheWrongKindForItsPositionIsRefused),
+  ("t_snp_a_leaf_that_is_not_an_endorsement_key_is_refused",
+    driveSnpALeafThatIsNotAnEndorsementKeyIsRefused),
+  ("t_snp_a_leaf_with_no_platform_version_is_refused",
+    driveSnpALeafWithNoPlatformVersionIsRefused),
+  ("t_snp_a_leaf_with_no_usable_chip_identity_is_refused",
+    driveSnpALeafWithNoUsableChipIdentityIsRefused),
+  ("t_snp_an_issuer_without_the_authority_to_issue_is_refused",
+    driveSnpAnIssuerWithoutTheAuthorityToIssueIsRefused),
+  ("t_snp_a_chain_outside_its_validity_window_is_refused",
+    driveSnpAChainOutsideItsValidityWindowIsRefused),
+  ("t_snp_each_signature_in_the_chain_is_checked_on_its_own_input",
+    driveSnpEachSignatureInTheChainIsCheckedOnItsOwnInput),
+  ("t_snp_the_leaf_must_name_the_intermediate_it_is_handed",
+    driveSnpTheLeafMustNameTheIntermediateItIsHanded),
+  ("t_snp_an_issuer_whose_key_may_not_sign_certificates_is_refused",
+    driveSnpAnIssuerWhoseKeyMayNotSignCertificatesIsRefused),
+  ("t_snp_a_chain_with_no_current_revocation_list_is_refused",
+    driveSnpAChainWithNoCurrentRevocationListIsRefused)]
+
 suite "snp chain refusal coverage":
 
   test "t_snp_chain_every_refusal_kind_but_one_is_reached":
@@ -994,6 +1163,14 @@ suite "snp chain refusal coverage":
     # The half that CAN be checked offline is checked below on both
     # lists, so the serial reader is given something to read and not
     # only run over nothing.
+    # Drive every input the census is built from, HERE and from an
+    # empty census, so the verdict is the same whether this case runs
+    # alone (the runner gives each case its own process) or after
+    # the cases above.
+    reachedChainKinds = {}
+    for (name, drive) in ChainRefusalDrivers:
+      checkpoint("driving " & name)
+      drive()
     var unreached: seq[string] = @[]
     var count = 0
     for k in AmdChainRejection:

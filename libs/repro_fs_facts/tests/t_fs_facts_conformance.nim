@@ -632,337 +632,386 @@ suite "F2 filesystem-facts conformance — table integrity":
 # Linking
 # ---------------------------------------------------------------------------
 
-suite "F2 filesystem-facts conformance — linking":
-  test "hardlink support matches the table on every host filesystem":
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let declared = FilesystemTable[id].hardlinks
-      let dir = caseDir(v, "hardlink")
-      let src = dir / "src.bin"
-      writeFile(extendedPath(src), "payload")
-      let attempt = attemptHardlink(src, dir / "second.bin")
-      let observed =
-        if attempt.outcome == loOk and hardlinkCount(src) >= 2: tnYes
-        else: tnNo
-      expectFact(subject, "hardlinks", declared.value, observed,
-                 "attempt=" & $attempt.outcome & " links=" &
-                 $hardlinkCount(src))
-      # The OS's own advertisement is a SECOND, independent observation.
-      # It is worth making because the two can disagree, and when they
-      # do the table is not the only thing that is wrong.
-      if v.obs.advertisedHardLinks != tnUnknown:
-        checkpoint(subject & ": OS advertises hardlinks=" &
-                   $v.obs.advertisedHardLinks)
-        check v.obs.advertisedHardLinks == observed
-      removeDir(extendedPath(dir))
+proc driveHardlinkSupportMatchesTheTableOnEveryHostFilesystem() =
+  ## The body of test
+  ##   "hardlink support matches the table on every host filesystem"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let declared = FilesystemTable[id].hardlinks
+    let dir = caseDir(v, "hardlink")
+    let src = dir / "src.bin"
+    writeFile(extendedPath(src), "payload")
+    let attempt = attemptHardlink(src, dir / "second.bin")
+    let observed =
+      if attempt.outcome == loOk and hardlinkCount(src) >= 2: tnYes
+      else: tnNo
+    expectFact(subject, "hardlinks", declared.value, observed,
+               "attempt=" & $attempt.outcome & " links=" &
+               $hardlinkCount(src))
+    # The OS's own advertisement is a SECOND, independent observation.
+    # It is worth making because the two can disagree, and when they
+    # do the table is not the only thing that is wrong.
+    if v.obs.advertisedHardLinks != tnUnknown:
+      checkpoint(subject & ": OS advertises hardlinks=" &
+                 $v.obs.advertisedHardLinks)
+      check v.obs.advertisedHardLinks == observed
+    removeDir(extendedPath(dir))
 
-  test "the maximum number of names per file matches the table":
-    # Folds in the CAS campaign's headline measurement: NTFS caps a file
-    # at 1024 TOTAL names — 1023 further links after the first, then
-    # ERROR_TOO_MANY_LINKS — and ReFS accepted 2000 with no cap in sight.
-    const LinkBudget = 4096
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let declared = FilesystemTable[id].maxNamesPerFile.value
-      if not declared.isDefinite:
-        untestedHere(subject, "maxNamesPerFile",
-                     "the declared value is `" & $declared & "`, which no " &
-                     "single observation can contradict: a host that " &
-                     "refuses at any count is consistent with it")
-        continue
-      if declared.value > LinkBudget:
-        untestedHere(subject, "maxNamesPerFile",
-                     "the declared cap (" & $declared.value & " names) " &
-                     "exceeds this suite's link budget of " & $LinkBudget &
-                     "; driving it to the boundary is not attempted here")
-        continue
-      let dir = caseDir(v, "linkcap")
-      let src = dir / "src.bin"
-      writeFile(extendedPath(src), "shared blob")
-      var created = 1  # the source's own name
-      var final = LinkAttempt(outcome: loOk)
-      while created < LinkBudget:
-        let attempt = attemptHardlink(src, dir / ("l" & $created & ".bin"))
-        if attempt.outcome != loOk:
-          final = attempt
-          break
-        created.inc
-      checkpoint(subject & ": accepted " & $created & " total names, then " &
-                 (if final.outcome == loOk: "the budget ran out"
-                  else: final.message))
-      case declared.kind
-      of qkExact:
-        expectFact(subject, "maxNamesPerFile", declared.value, int64(created),
-                   "the refusal was " & $final.outcome)
-        # A cap that presents as anything other than a per-file limit
-        # would make policy invalidate the whole pair verdict, which the
-        # CAS spec forbids.
-        check final.outcome == loLinkLimitExceeded
-        check isPerFileFallback(final)
-      of qkAtLeast:
-        if int64(created) >= declared.value:
-          record(subject, "maxNamesPerFile", coPartial,
-                 "declared >= " & $declared.value & "; " & $created &
-                 " names were accepted, so the lower bound holds. An " &
-                 "upper bound is deliberately not claimed")
-          check int64(created) >= declared.value
-        else:
-          let msg = contradictionMessage(subject, "maxNamesPerFile",
-                                         ">= " & $declared.value,
-                                         $created & " (then " &
-                                         $final.outcome & ")", "")
-          record(subject, "maxNamesPerFile", coContradiction, msg)
-          checkpoint(msg)
-          fail()
-      else: discard
-      removeDir(extendedPath(dir))
-
-  test "hardlinks to directories are refused where the table says so":
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let declared = FilesystemTable[id].hardlinksToDirectories
-      if not declared.value.isDefinite:
-        # HFS+ is the case: TN1150 forbids directory hard links, the
-        # later ADL mechanism permits them on a journaled volume to the
-        # directory's owner, and neither answer is HFS+'s property. One
-        # volume's result cannot contradict `varies`, so recording it as
-        # a pass would be exactly the confusion this ledger exists to
-        # prevent.
-        untestedHere(subject, "hardlinksToDirectories",
-                     "the declared value is `" & $declared.value &
-                     "`, which one volume's answer cannot contradict")
-        continue
-      let dir = caseDir(v, "dirlink")
-      let sub = dir / "subdir"
-      createDir(extendedPath(sub))
-      let observed =
-        if attemptDirectoryLink(sub, dir / "dirlink"): tnYes else: tnNo
-      expectFact(subject, "hardlinksToDirectories", declared.value, observed,
-                 "link against a directory")
-      removeDir(extendedPath(dir))
-
-  test "one device is one link domain where the table says so":
-    # The fact Btrfs falsifies, checked in the direction this host can
-    # supply: two directories on one filesystem that do NOT share a
-    # parent must still be able to link.
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let declared = FilesystemTable[id].oneDeviceIsOneLinkDomain
-      if not declared.value.isDefinite:
-        untestedHere(subject, "oneDeviceIsOneLinkDomain",
-                     "the declared value is `" & $declared.value &
-                     "`, which an observation on one mount cannot " &
-                     "contradict")
-        continue
-      if declared.value == tnNo:
-        untestedHere(subject, "oneDeviceIsOneLinkDomain",
-                     "contradicting `no` needs two subtrees that share a " &
-                     "device but not a link domain (a Btrfs subvolume " &
-                     "pair, a ZFS dataset pair, an APFS container). This " &
-                     "host offers none")
-        continue
-      let dir = caseDir(v, "linkdomain")
-      createDir(extendedPath(dir / "a"))
-      createDir(extendedPath(dir / "b"))
-      let src = dir / "a" / "src.bin"
-      writeFile(extendedPath(src), "payload")
-      let attempt = attemptHardlink(src, dir / "b" / "dst.bin")
-      let observed = if attempt.outcome == loOk: tnYes else: tnNo
-      expectFact(subject, "oneDeviceIsOneLinkDomain", declared.value,
-                 observed,
-                 "link across two subtrees of one mount: " & $attempt.outcome)
-      removeDir(extendedPath(dir))
-
-  test "a write through a hardlink is visible through every name":
-    # Carried from Local-CAS-Hardlink-Materialization M0. Not a table
-    # fact of its own — it is the DATA half of what
-    # ``metadataIsPerInode`` says about metadata — but it is the
-    # property the whole CAS shared-inode decision rests on, and it was
-    # prose in a milestone until now.
-    #
-    # It is ALSO the case that showed how a green case can mean nothing.
-    # This test used to end with `check volumes.len >= 1`, which is true
-    # on every host that got this far, and it recorded nothing in the
-    # ledger — so on a hardlink-less machine it printed `[OK]` and the
-    # coverage report was silent about a property nobody had checked.
-    # The fix is the one ``hardlinkApi`` already had: the ledger gets an
-    # entry either way, and an unexercised property is UNTESTED HERE with
-    # a reason rather than a pass.
-    const WriteThroughFact = "writeThroughHardlinkIsShared"
-    var exercised = 0
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      if FilesystemTable[id].hardlinks.value != tnYes:
-        untestedHere(subject, WriteThroughFact,
-                     "this filesystem declares hardlinks=" &
-                     $FilesystemTable[id].hardlinks.value &
-                     ", so there is no second name to write through")
-        continue
-      let dir = caseDir(v, "writethrough")
-      let src = dir / "src.bin"
-      writeFile(extendedPath(src), "original")
-      let dst = dir / "second.bin"
-      if attemptHardlink(src, dst).outcome != loOk:
-        untestedHere(subject, WriteThroughFact,
-                     "a second name could not be created on this host, so " &
-                     "there is no other name through which to observe the " &
-                     "write")
-        removeDir(extendedPath(dir))
-        continue
-      exercised.inc
-      writeFile(extendedPath(dst), "REWRITTEN")
-      let throughFirst = readFile(extendedPath(src))
-      let links = hardlinkCount(src)
-      checkpoint(subject & ": wrote through the second name; the " &
-                 "first now reads " & throughFirst)
-      if throughFirst == "REWRITTEN" and links == 2:
-        record(subject, WriteThroughFact, coVerified,
-               "wrote through the second name; the first name reads the " &
-               "new bytes back and the link count is " & $links)
-        check true
+proc driveTheMaximumNumberOfNamesPerFileMatchesTheTable() =
+  ## The body of test
+  ##   "the maximum number of names per file matches the table"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Folds in the CAS campaign's headline measurement: NTFS caps a file
+  # at 1024 TOTAL names — 1023 further links after the first, then
+  # ERROR_TOO_MANY_LINKS — and ReFS accepted 2000 with no cap in sight.
+  const LinkBudget = 4096
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let declared = FilesystemTable[id].maxNamesPerFile.value
+    if not declared.isDefinite:
+      untestedHere(subject, "maxNamesPerFile",
+                   "the declared value is `" & $declared & "`, which no " &
+                   "single observation can contradict: a host that " &
+                   "refuses at any count is consistent with it")
+      continue
+    if declared.value > LinkBudget:
+      untestedHere(subject, "maxNamesPerFile",
+                   "the declared cap (" & $declared.value & " names) " &
+                   "exceeds this suite's link budget of " & $LinkBudget &
+                   "; driving it to the boundary is not attempted here")
+      continue
+    let dir = caseDir(v, "linkcap")
+    let src = dir / "src.bin"
+    writeFile(extendedPath(src), "shared blob")
+    var created = 1  # the source's own name
+    var final = LinkAttempt(outcome: loOk)
+    while created < LinkBudget:
+      let attempt = attemptHardlink(src, dir / ("l" & $created & ".bin"))
+      if attempt.outcome != loOk:
+        final = attempt
+        break
+      created.inc
+    checkpoint(subject & ": accepted " & $created & " total names, then " &
+               (if final.outcome == loOk: "the budget ran out"
+                else: final.message))
+    case declared.kind
+    of qkExact:
+      expectFact(subject, "maxNamesPerFile", declared.value, int64(created),
+                 "the refusal was " & $final.outcome)
+      # A cap that presents as anything other than a per-file limit
+      # would make policy invalidate the whole pair verdict, which the
+      # CAS spec forbids.
+      check final.outcome == loLinkLimitExceeded
+      check isPerFileFallback(final)
+    of qkAtLeast:
+      if int64(created) >= declared.value:
+        record(subject, "maxNamesPerFile", coPartial,
+               "declared >= " & $declared.value & "; " & $created &
+               " names were accepted, so the lower bound holds. An " &
+               "upper bound is deliberately not claimed")
+        check int64(created) >= declared.value
       else:
-        let msg = contradictionMessage(subject, WriteThroughFact,
-          "one inode behind both names, so a write through either is " &
-          "visible through the other",
-          "the first name reads " & repr(throughFirst) & " with a link " &
-          "count of " & $links, "")
-        record(subject, WriteThroughFact, coContradiction, msg)
+        let msg = contradictionMessage(subject, "maxNamesPerFile",
+                                       ">= " & $declared.value,
+                                       $created & " (then " &
+                                       $final.outcome & ")", "")
+        record(subject, "maxNamesPerFile", coContradiction, msg)
         checkpoint(msg)
         fail()
+    else: discard
+    removeDir(extendedPath(dir))
+
+proc driveHardlinksToDirectoriesAreRefusedWhereTheTableSaysSo() =
+  ## The body of test
+  ##   "hardlinks to directories are refused where the table says so"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let declared = FilesystemTable[id].hardlinksToDirectories
+    if not declared.value.isDefinite:
+      # HFS+ is the case: TN1150 forbids directory hard links, the
+      # later ADL mechanism permits them on a journaled volume to the
+      # directory's owner, and neither answer is HFS+'s property. One
+      # volume's result cannot contradict `varies`, so recording it as
+      # a pass would be exactly the confusion this ledger exists to
+      # prevent.
+      untestedHere(subject, "hardlinksToDirectories",
+                   "the declared value is `" & $declared.value &
+                   "`, which one volume's answer cannot contradict")
+      continue
+    let dir = caseDir(v, "dirlink")
+    let sub = dir / "subdir"
+    createDir(extendedPath(sub))
+    let observed =
+      if attemptDirectoryLink(sub, dir / "dirlink"): tnYes else: tnNo
+    expectFact(subject, "hardlinksToDirectories", declared.value, observed,
+               "link against a directory")
+    removeDir(extendedPath(dir))
+
+proc driveOneDeviceIsOneLinkDomainWhereTheTableSaysSo() =
+  ## The body of test
+  ##   "one device is one link domain where the table says so"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The fact Btrfs falsifies, checked in the direction this host can
+  # supply: two directories on one filesystem that do NOT share a
+  # parent must still be able to link.
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let declared = FilesystemTable[id].oneDeviceIsOneLinkDomain
+    if not declared.value.isDefinite:
+      untestedHere(subject, "oneDeviceIsOneLinkDomain",
+                   "the declared value is `" & $declared.value &
+                   "`, which an observation on one mount cannot " &
+                   "contradict")
+      continue
+    if declared.value == tnNo:
+      untestedHere(subject, "oneDeviceIsOneLinkDomain",
+                   "contradicting `no` needs two subtrees that share a " &
+                   "device but not a link domain (a Btrfs subvolume " &
+                   "pair, a ZFS dataset pair, an APFS container). This " &
+                   "host offers none")
+      continue
+    let dir = caseDir(v, "linkdomain")
+    createDir(extendedPath(dir / "a"))
+    createDir(extendedPath(dir / "b"))
+    let src = dir / "a" / "src.bin"
+    writeFile(extendedPath(src), "payload")
+    let attempt = attemptHardlink(src, dir / "b" / "dst.bin")
+    let observed = if attempt.outcome == loOk: tnYes else: tnNo
+    expectFact(subject, "oneDeviceIsOneLinkDomain", declared.value,
+               observed,
+               "link across two subtrees of one mount: " & $attempt.outcome)
+    removeDir(extendedPath(dir))
+
+proc driveAWriteThroughAHardlinkIsVisibleThroughEveryName() =
+  ## The body of test
+  ##   "a write through a hardlink is visible through every name"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Carried from Local-CAS-Hardlink-Materialization M0. Not a table
+  # fact of its own — it is the DATA half of what
+  # ``metadataIsPerInode`` says about metadata — but it is the
+  # property the whole CAS shared-inode decision rests on, and it was
+  # prose in a milestone until now.
+  #
+  # It is ALSO the case that showed how a green case can mean nothing.
+  # This test used to end with `check volumes.len >= 1`, which is true
+  # on every host that got this far, and it recorded nothing in the
+  # ledger — so on a hardlink-less machine it printed `[OK]` and the
+  # coverage report was silent about a property nobody had checked.
+  # The fix is the one ``hardlinkApi`` already had: the ledger gets an
+  # entry either way, and an unexercised property is UNTESTED HERE with
+  # a reason rather than a pass.
+  const WriteThroughFact = "writeThroughHardlinkIsShared"
+  var exercised = 0
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    if FilesystemTable[id].hardlinks.value != tnYes:
+      untestedHere(subject, WriteThroughFact,
+                   "this filesystem declares hardlinks=" &
+                   $FilesystemTable[id].hardlinks.value &
+                   ", so there is no second name to write through")
+      continue
+    let dir = caseDir(v, "writethrough")
+    let src = dir / "src.bin"
+    writeFile(extendedPath(src), "original")
+    let dst = dir / "second.bin"
+    if attemptHardlink(src, dst).outcome != loOk:
+      untestedHere(subject, WriteThroughFact,
+                   "a second name could not be created on this host, so " &
+                   "there is no other name through which to observe the " &
+                   "write")
       removeDir(extendedPath(dir))
-    if exercised == 0:
-      # Not a pass. The ledger already carries a reason per filesystem;
-      # this is the host-level statement the report prints.
-      untestedHere("host", WriteThroughFact,
-                   "no host filesystem produced a hardlink, so the " &
-                   "shared-inode write property — which the whole CAS " &
-                   "materialisation design rests on — was NOT exercised " &
-                   "anywhere on this machine")
+      continue
+    exercised.inc
+    writeFile(extendedPath(dst), "REWRITTEN")
+    let throughFirst = readFile(extendedPath(src))
+    let links = hardlinkCount(src)
+    checkpoint(subject & ": wrote through the second name; the " &
+               "first now reads " & throughFirst)
+    if throughFirst == "REWRITTEN" and links == 2:
+      record(subject, WriteThroughFact, coVerified,
+             "wrote through the second name; the first name reads the " &
+             "new bytes back and the link count is " & $links)
+      check true
     else:
-      checkpoint("the shared-inode write property was exercised on " &
-                 $exercised & " filesystem(s)")
+      let msg = contradictionMessage(subject, WriteThroughFact,
+        "one inode behind both names, so a write through either is " &
+        "visible through the other",
+        "the first name reads " & repr(throughFirst) & " with a link " &
+        "count of " & $links, "")
+      record(subject, WriteThroughFact, coContradiction, msg)
+      checkpoint(msg)
+      fail()
+    removeDir(extendedPath(dir))
+  if exercised == 0:
+    # Not a pass. The ledger already carries a reason per filesystem;
+    # this is the host-level statement the report prints.
+    untestedHere("host", WriteThroughFact,
+                 "no host filesystem produced a hardlink, so the " &
+                 "shared-inode write property — which the whole CAS " &
+                 "materialisation design rests on — was NOT exercised " &
+                 "anywhere on this machine")
+  else:
+    checkpoint("the shared-inode write property was exercised on " &
+               $exercised & " filesystem(s)")
+
+suite "F2 filesystem-facts conformance — linking":
+  test "hardlink support matches the table on every host filesystem":
+    driveHardlinkSupportMatchesTheTableOnEveryHostFilesystem()
+
+  test "the maximum number of names per file matches the table":
+    driveTheMaximumNumberOfNamesPerFileMatchesTheTable()
+
+  test "hardlinks to directories are refused where the table says so":
+    driveHardlinksToDirectoriesAreRefusedWhereTheTableSaysSo()
+
+  test "one device is one link domain where the table says so":
+    driveOneDeviceIsOneLinkDomainWhereTheTableSaysSo()
+
+  test "a write through a hardlink is visible through every name":
+    driveAWriteThroughAHardlinkIsVisibleThroughEveryName()
 
 # ---------------------------------------------------------------------------
 # Cloning
 # ---------------------------------------------------------------------------
 
+proc driveReflinkSupportAndTheOperationThatPerformsItMatchTheTable() =
+  ## The body of test
+  ##   "reflink support and the operation that performs it match the table"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let entry = FilesystemTable[id]
+    let dir = caseDir(v, "reflink")
+    let src = dir / "src.bin"
+    var payload = newString(1 shl 16)
+    for i in 0 ..< payload.len:
+      payload[i] = char((i * 31 + 7) and 0xFF)
+    writeFile(extendedPath(src), payload)
+    let attempt = attemptReflink(src, dir / "clone.bin")
+    let bytesMatch =
+      attempt.outcome == loOk and
+      readFile(extendedPath(dir / "clone.bin")) == payload
+    let observed = if bytesMatch: tnYes else: tnNo
+    if entry.reflink.value.isDefinite:
+      expectFact(subject, "reflink", entry.reflink.value, observed,
+                 "attempt=" & $attempt.outcome)
+    else:
+      record(subject, "reflink", coPartial,
+             "the declared value is `" & $entry.reflink.value &
+             "` (feature- or version-gated), so this host's answer (" &
+             $observed & ", " & $attempt.outcome & ") cannot contradict " &
+             "it — but it is recorded")
+      check true
+    # The operation is its own fact: a filesystem that clones must be
+    # declared to clone with the primitive this OS actually issued.
+    #
+    # It is a CONDITIONAL fact — "if this filesystem clones, it clones
+    # with X" — so it is only observable where a clone happened. When
+    # no clone succeeded there is no operation to name, and mapping
+    # that to `clNone` and contradicting the row produces a FALSE
+    # contradiction on every host whose `reflink` answer is legitimately
+    # no: ZFS with `feature@block_cloning` disabled on the pool answers
+    # EOPNOTSUPP to FICLONE, which its own `reflink = varies` row
+    # already accommodates. Reported UNTESTED HERE instead, in the same
+    # shape — and for the same reason — as `cloneIsCopyOnWrite` below.
+    # Nothing is weakened: a definite `reflink = yes` that produced no
+    # clone is already contradicted by the `reflink` fact just above.
+    #
+    # The guard is narrowed to the rows where the observation genuinely
+    # cannot discriminate. A row declaring `reflink = no` PREDICTED this
+    # outcome, so `clNone` is its own predicted value and the check
+    # stays live there — that is what keeps tmpfs's `cloneOperation`
+    # verified rather than excused.
+    let observedOp = if bytesMatch: hostCloneOperation() else: clNone
+    let cloneUnobservable = not bytesMatch and entry.reflink.value != tnNo
+    if cloneUnobservable:
+      untestedHere(subject, "cloneOperation",
+                   "no clone succeeded on this host (attempt=" &
+                   $attempt.outcome & "), so there is no operation to " &
+                   "observe; the declared `" & $entry.cloneOperation.value &
+                   "` names what performs a clone WHERE one happens, and " &
+                   "this filesystem's `reflink` row (declared `" &
+                   $entry.reflink.value & "`) is where the absence is " &
+                   "judged")
+    elif entry.cloneOperation.value.isDefinite:
+      expectFact(subject, "cloneOperation", entry.cloneOperation.value,
+                 observedOp, "the OS table names " &
+                 hostOsFacts().reflinkApi.value & " for this platform")
+    else:
+      record(subject, "cloneOperation", coPartial,
+             "declared `" & $entry.cloneOperation.value & "`; observed " &
+             $observedOp)
+      check true
+    # Windows advertises block refcounting as a volume flag — an
+    # independent second opinion on the same fact.
+    if v.obs.advertisedBlockRefcounting != tnUnknown:
+      checkpoint(subject & ": OS advertises blockRefcounting=" &
+                 $v.obs.advertisedBlockRefcounting)
+      check v.obs.advertisedBlockRefcounting == observed
+    removeDir(extendedPath(dir))
+
+proc driveACloneIsCopyOnWriteWhereTheTableClaimsItIs() =
+  ## The body of test
+  ##   "a clone is copy-on-write where the table claims it is"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Carried from Local-CAS-Hardlink-Materialization M0: ReFS block
+  # cloning is genuinely copy-on-write. This is the fact the CAS
+  # probe explicitly could NOT establish — it verifies bytes, so a
+  # silently-degraded clone would read as available — and it is why
+  # a cost claim needs this suite rather than that probe.
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let declared = FilesystemTable[id].cloneIsCopyOnWrite
+    if declared.observability == obNone:
+      untestedHere(subject, "cloneIsCopyOnWrite", declared.falsifiedBy)
+      continue
+    if not declared.value.isDefinite:
+      untestedHere(subject, "cloneIsCopyOnWrite",
+                   "the declared value is `" & $declared.value & "`")
+      continue
+    let dir = caseDir(v, "cow")
+    let src = dir / "src.bin"
+    writeFile(extendedPath(src), "original payload, long enough to clone")
+    let clone = dir / "clone.bin"
+    if attemptReflink(src, clone).outcome != loOk:
+      untestedHere(subject, "cloneIsCopyOnWrite",
+                   "the clone operation did not succeed on this host, so " &
+                   "there is no clone whose write semantics to observe")
+      removeDir(extendedPath(dir))
+      continue
+    writeFile(extendedPath(clone), "REWRITTEN THROUGH THE CLONE")
+    let sourceIntact =
+      readFile(extendedPath(src)) == "original payload, long enough to clone"
+    let observed = if sourceIntact: tnYes else: tnNo
+    expectFact(subject, "cloneIsCopyOnWrite", declared.value, observed,
+               "wrote through the clone; the source " &
+               (if sourceIntact: "was unchanged"
+                else: "CHANGED — the clone shared the inode"))
+    check hardlinkCount(src) == 1
+    removeDir(extendedPath(dir))
+
 suite "F2 filesystem-facts conformance — cloning":
   test "reflink support and the operation that performs it match the table":
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let entry = FilesystemTable[id]
-      let dir = caseDir(v, "reflink")
-      let src = dir / "src.bin"
-      var payload = newString(1 shl 16)
-      for i in 0 ..< payload.len:
-        payload[i] = char((i * 31 + 7) and 0xFF)
-      writeFile(extendedPath(src), payload)
-      let attempt = attemptReflink(src, dir / "clone.bin")
-      let bytesMatch =
-        attempt.outcome == loOk and
-        readFile(extendedPath(dir / "clone.bin")) == payload
-      let observed = if bytesMatch: tnYes else: tnNo
-      if entry.reflink.value.isDefinite:
-        expectFact(subject, "reflink", entry.reflink.value, observed,
-                   "attempt=" & $attempt.outcome)
-      else:
-        record(subject, "reflink", coPartial,
-               "the declared value is `" & $entry.reflink.value &
-               "` (feature- or version-gated), so this host's answer (" &
-               $observed & ", " & $attempt.outcome & ") cannot contradict " &
-               "it — but it is recorded")
-        check true
-      # The operation is its own fact: a filesystem that clones must be
-      # declared to clone with the primitive this OS actually issued.
-      #
-      # It is a CONDITIONAL fact — "if this filesystem clones, it clones
-      # with X" — so it is only observable where a clone happened. When
-      # no clone succeeded there is no operation to name, and mapping
-      # that to `clNone` and contradicting the row produces a FALSE
-      # contradiction on every host whose `reflink` answer is legitimately
-      # no: ZFS with `feature@block_cloning` disabled on the pool answers
-      # EOPNOTSUPP to FICLONE, which its own `reflink = varies` row
-      # already accommodates. Reported UNTESTED HERE instead, in the same
-      # shape — and for the same reason — as `cloneIsCopyOnWrite` below.
-      # Nothing is weakened: a definite `reflink = yes` that produced no
-      # clone is already contradicted by the `reflink` fact just above.
-      #
-      # The guard is narrowed to the rows where the observation genuinely
-      # cannot discriminate. A row declaring `reflink = no` PREDICTED this
-      # outcome, so `clNone` is its own predicted value and the check
-      # stays live there — that is what keeps tmpfs's `cloneOperation`
-      # verified rather than excused.
-      let observedOp = if bytesMatch: hostCloneOperation() else: clNone
-      let cloneUnobservable = not bytesMatch and entry.reflink.value != tnNo
-      if cloneUnobservable:
-        untestedHere(subject, "cloneOperation",
-                     "no clone succeeded on this host (attempt=" &
-                     $attempt.outcome & "), so there is no operation to " &
-                     "observe; the declared `" & $entry.cloneOperation.value &
-                     "` names what performs a clone WHERE one happens, and " &
-                     "this filesystem's `reflink` row (declared `" &
-                     $entry.reflink.value & "`) is where the absence is " &
-                     "judged")
-      elif entry.cloneOperation.value.isDefinite:
-        expectFact(subject, "cloneOperation", entry.cloneOperation.value,
-                   observedOp, "the OS table names " &
-                   hostOsFacts().reflinkApi.value & " for this platform")
-      else:
-        record(subject, "cloneOperation", coPartial,
-               "declared `" & $entry.cloneOperation.value & "`; observed " &
-               $observedOp)
-        check true
-      # Windows advertises block refcounting as a volume flag — an
-      # independent second opinion on the same fact.
-      if v.obs.advertisedBlockRefcounting != tnUnknown:
-        checkpoint(subject & ": OS advertises blockRefcounting=" &
-                   $v.obs.advertisedBlockRefcounting)
-        check v.obs.advertisedBlockRefcounting == observed
-      removeDir(extendedPath(dir))
+    driveReflinkSupportAndTheOperationThatPerformsItMatchTheTable()
 
   test "a clone is copy-on-write where the table claims it is":
-    # Carried from Local-CAS-Hardlink-Materialization M0: ReFS block
-    # cloning is genuinely copy-on-write. This is the fact the CAS
-    # probe explicitly could NOT establish — it verifies bytes, so a
-    # silently-degraded clone would read as available — and it is why
-    # a cost claim needs this suite rather than that probe.
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let declared = FilesystemTable[id].cloneIsCopyOnWrite
-      if declared.observability == obNone:
-        untestedHere(subject, "cloneIsCopyOnWrite", declared.falsifiedBy)
-        continue
-      if not declared.value.isDefinite:
-        untestedHere(subject, "cloneIsCopyOnWrite",
-                     "the declared value is `" & $declared.value & "`")
-        continue
-      let dir = caseDir(v, "cow")
-      let src = dir / "src.bin"
-      writeFile(extendedPath(src), "original payload, long enough to clone")
-      let clone = dir / "clone.bin"
-      if attemptReflink(src, clone).outcome != loOk:
-        untestedHere(subject, "cloneIsCopyOnWrite",
-                     "the clone operation did not succeed on this host, so " &
-                     "there is no clone whose write semantics to observe")
-        removeDir(extendedPath(dir))
-        continue
-      writeFile(extendedPath(clone), "REWRITTEN THROUGH THE CLONE")
-      let sourceIntact =
-        readFile(extendedPath(src)) == "original payload, long enough to clone"
-      let observed = if sourceIntact: tnYes else: tnNo
-      expectFact(subject, "cloneIsCopyOnWrite", declared.value, observed,
-                 "wrote through the clone; the source " &
-                 (if sourceIntact: "was unchanged"
-                  else: "CHANGED — the clone shared the inode"))
-      check hardlinkCount(src) == 1
-      removeDir(extendedPath(dir))
+    driveACloneIsCopyOnWriteWhereTheTableClaimsItIs()
 
 # ---------------------------------------------------------------------------
 # Timestamps
@@ -1009,710 +1058,901 @@ proc setMtimeExact(path: string; t: times.Time) =
   else:
     setLastModificationTime(path, t)
 
+proc driveTheStoredLastWriteGranularityMatchesTheTable() =
+  ## The body of test
+  ##   "the stored last-write granularity matches the table"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Two-sided, which is what makes it a measurement rather than a
+  # gesture: a difference of exactly one granularity unit must be
+  # STORED distinctly, and a difference of one unit MINUS ONE must
+  # not. The first half falsifies a coarser claim, the second a finer
+  # one. At a declared granularity of 1 ns the second half degenerates
+  # (there is no smaller difference to try) and the entry is recorded
+  # as partial rather than verified.
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let declared = FilesystemTable[id].timestampGranularityNs.value
+    if not declared.isDefinite or declared.kind != qkExact:
+      untestedHere(subject, "timestampGranularityNs",
+                   "the declared value is `" & $declared &
+                   "`, which no round-trip can contradict")
+      continue
+    let dir = caseDir(v, "timestamps")
+    let f = dir / "stamp.bin"
+    writeFile(extendedPath(f), "t")
+    let base = fromUnix(1_000_000)
+    let g = declared.value
+
+    setMtimeExact(extendedPath(f), base)
+    let readBase = getLastModificationTime(extendedPath(f))
+    setMtimeExact(extendedPath(f),
+                  base + initDuration(nanoseconds = g))
+    let readUp = getLastModificationTime(extendedPath(f))
+    let representable = readUp != readBase
+
+    if g <= 1:
+      if representable:
+        record(subject, "timestampGranularityNs", coPartial,
+               "declared 1 ns; a 1 ns difference is stored distinctly. " &
+               "The lower half of the two-sided check does not exist at " &
+               "this granularity, so a FINER real granularity could not " &
+               "be distinguished from this one")
+        check representable
+      else:
+        let msg = contradictionMessage(subject, "timestampGranularityNs",
+          "1 ns", "coarser than 1 ns (a 1 ns difference did not survive " &
+          "the round trip)", "")
+        record(subject, "timestampGranularityNs", coContradiction, msg)
+        checkpoint(msg)
+        fail()
+    else:
+      setMtimeExact(extendedPath(f),
+                    base + initDuration(nanoseconds = g - 1))
+      let readDown = getLastModificationTime(extendedPath(f))
+      let finerNotRepresentable = readDown == readBase
+      checkpoint(subject & ": +" & $g & "ns distinct=" & $representable &
+                 ", +" & $(g - 1) & "ns collapses to base=" &
+                 $finerNotRepresentable)
+      if representable and finerNotRepresentable:
+        record(subject, "timestampGranularityNs", coVerified,
+               "declared " & $g & " ns; a " & $g & " ns difference is " &
+               "stored distinctly and a " & $(g - 1) & " ns difference " &
+               "is not")
+        check true
+      else:
+        let observedText =
+          if not representable:
+            "coarser than " & $g & " ns (a " & $g &
+            " ns difference did not survive the round trip)"
+          else:
+            "finer than " & $g & " ns (a " & $(g - 1) &
+            " ns difference DID survive the round trip)"
+        let msg = contradictionMessage(subject, "timestampGranularityNs",
+                                       $g & " ns", observedText, "")
+        record(subject, "timestampGranularityNs", coContradiction, msg)
+        checkpoint(msg)
+        fail()
+    removeDir(extendedPath(dir))
+
 suite "F2 filesystem-facts conformance — timestamps":
   test "the stored last-write granularity matches the table":
-    # Two-sided, which is what makes it a measurement rather than a
-    # gesture: a difference of exactly one granularity unit must be
-    # STORED distinctly, and a difference of one unit MINUS ONE must
-    # not. The first half falsifies a coarser claim, the second a finer
-    # one. At a declared granularity of 1 ns the second half degenerates
-    # (there is no smaller difference to try) and the entry is recorded
-    # as partial rather than verified.
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let declared = FilesystemTable[id].timestampGranularityNs.value
-      if not declared.isDefinite or declared.kind != qkExact:
-        untestedHere(subject, "timestampGranularityNs",
-                     "the declared value is `" & $declared &
-                     "`, which no round-trip can contradict")
-        continue
-      let dir = caseDir(v, "timestamps")
-      let f = dir / "stamp.bin"
-      writeFile(extendedPath(f), "t")
-      let base = fromUnix(1_000_000)
-      let g = declared.value
-
-      setMtimeExact(extendedPath(f), base)
-      let readBase = getLastModificationTime(extendedPath(f))
-      setMtimeExact(extendedPath(f),
-                    base + initDuration(nanoseconds = g))
-      let readUp = getLastModificationTime(extendedPath(f))
-      let representable = readUp != readBase
-
-      if g <= 1:
-        if representable:
-          record(subject, "timestampGranularityNs", coPartial,
-                 "declared 1 ns; a 1 ns difference is stored distinctly. " &
-                 "The lower half of the two-sided check does not exist at " &
-                 "this granularity, so a FINER real granularity could not " &
-                 "be distinguished from this one")
-          check representable
-        else:
-          let msg = contradictionMessage(subject, "timestampGranularityNs",
-            "1 ns", "coarser than 1 ns (a 1 ns difference did not survive " &
-            "the round trip)", "")
-          record(subject, "timestampGranularityNs", coContradiction, msg)
-          checkpoint(msg)
-          fail()
-      else:
-        setMtimeExact(extendedPath(f),
-                      base + initDuration(nanoseconds = g - 1))
-        let readDown = getLastModificationTime(extendedPath(f))
-        let finerNotRepresentable = readDown == readBase
-        checkpoint(subject & ": +" & $g & "ns distinct=" & $representable &
-                   ", +" & $(g - 1) & "ns collapses to base=" &
-                   $finerNotRepresentable)
-        if representable and finerNotRepresentable:
-          record(subject, "timestampGranularityNs", coVerified,
-                 "declared " & $g & " ns; a " & $g & " ns difference is " &
-                 "stored distinctly and a " & $(g - 1) & " ns difference " &
-                 "is not")
-          check true
-        else:
-          let observedText =
-            if not representable:
-              "coarser than " & $g & " ns (a " & $g &
-              " ns difference did not survive the round trip)"
-            else:
-              "finer than " & $g & " ns (a " & $(g - 1) &
-              " ns difference DID survive the round trip)"
-          let msg = contradictionMessage(subject, "timestampGranularityNs",
-                                         $g & " ns", observedText, "")
-          record(subject, "timestampGranularityNs", coContradiction, msg)
-          checkpoint(msg)
-          fail()
-      removeDir(extendedPath(dir))
+    driveTheStoredLastWriteGranularityMatchesTheTable()
 
 # ---------------------------------------------------------------------------
 # Naming
 # ---------------------------------------------------------------------------
 
-suite "F2 filesystem-facts conformance — naming":
-  test "case sensitivity matches the table":
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let declared = FilesystemTable[id].caseSensitivity
-      if not declared.value.isDefinite:
-        untestedHere(subject, "caseSensitivity",
-                     "the declared value is `" & $declared.value &
-                     "`, a format- or mount-time property that one " &
-                     "volume's answer cannot contradict")
-        continue
-      let dir = caseDir(v, "casing")
-      check tryCreateFile(dir / "CaseProbe.txt")
-      let otherCaseResolves = fileExists(extendedPath(dir / "caseprobe.txt"))
-      let observed =
-        if otherCaseResolves: caInsensitive else: caSensitive
-      expectFact(subject, "caseSensitivity", declared.value, observed,
-                 "created CaseProbe.txt; caseprobe.txt " &
-                 (if otherCaseResolves: "resolves to it"
-                  else: "does not resolve"))
-      removeDir(extendedPath(dir))
+proc driveCaseSensitivityMatchesTheTable() =
+  ## The body of test
+  ##   "case sensitivity matches the table"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let declared = FilesystemTable[id].caseSensitivity
+    if not declared.value.isDefinite:
+      untestedHere(subject, "caseSensitivity",
+                   "the declared value is `" & $declared.value &
+                   "`, a format- or mount-time property that one " &
+                   "volume's answer cannot contradict")
+      continue
+    let dir = caseDir(v, "casing")
+    check tryCreateFile(dir / "CaseProbe.txt")
+    let otherCaseResolves = fileExists(extendedPath(dir / "caseprobe.txt"))
+    let observed =
+      if otherCaseResolves: caInsensitive else: caSensitive
+    expectFact(subject, "caseSensitivity", declared.value, observed,
+               "created CaseProbe.txt; caseprobe.txt " &
+               (if otherCaseResolves: "resolves to it"
+                else: "does not resolve"))
+    removeDir(extendedPath(dir))
 
-  test "case preservation matches the table":
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let declared = FilesystemTable[id].casePreserving
-      if not declared.value.isDefinite:
-        untestedHere(subject, "casePreserving",
-                     "the declared value is `" & $declared.value & "`")
-        continue
-      let dir = caseDir(v, "casepreserve")
-      check tryCreateFile(dir / "MixedCaseName.txt")
-      let observed =
-        if entryExists(dir, "MixedCaseName.txt"): tnYes else: tnNo
-      expectFact(subject, "casePreserving", declared.value, observed,
-                 "the directory listing reports the name as created")
-      if v.obs.advertisedCasePreservedNames != tnUnknown:
-        check v.obs.advertisedCasePreservedNames == observed
-      removeDir(extendedPath(dir))
+proc driveCasePreservationMatchesTheTable() =
+  ## The body of test
+  ##   "case preservation matches the table"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let declared = FilesystemTable[id].casePreserving
+    if not declared.value.isDefinite:
+      untestedHere(subject, "casePreserving",
+                   "the declared value is `" & $declared.value & "`")
+      continue
+    let dir = caseDir(v, "casepreserve")
+    check tryCreateFile(dir / "MixedCaseName.txt")
+    let observed =
+      if entryExists(dir, "MixedCaseName.txt"): tnYes else: tnNo
+    expectFact(subject, "casePreserving", declared.value, observed,
+               "the directory listing reports the name as created")
+    if v.obs.advertisedCasePreservedNames != tnUnknown:
+      check v.obs.advertisedCasePreservedNames == observed
+    removeDir(extendedPath(dir))
 
-  test "the maximum component length matches the table":
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let declared = FilesystemTable[id].maxComponentLength.value
-      if declared.kind != qkExact:
-        untestedHere(subject, "maxComponentLength",
-                     "the declared value is `" & $declared & "`")
-        continue
-      let dir = caseDir(v, "namelen")
-      let atLimit = repeat('a', int(declared.value))
-      let overLimit = repeat('b', int(declared.value) + 1)
-      let atOk = tryCreateFile(dir / atLimit)
-      let overOk = tryCreateFile(dir / overLimit)
-      checkpoint(subject & ": " & $declared.value & " chars ok=" & $atOk &
-                 ", " & $(declared.value + 1) & " chars ok=" & $overOk)
+proc driveTheMaximumComponentLengthMatchesTheTable() =
+  ## The body of test
+  ##   "the maximum component length matches the table"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let declared = FilesystemTable[id].maxComponentLength.value
+    if declared.kind != qkExact:
+      untestedHere(subject, "maxComponentLength",
+                   "the declared value is `" & $declared & "`")
+      continue
+    let dir = caseDir(v, "namelen")
+    let atLimit = repeat('a', int(declared.value))
+    let overLimit = repeat('b', int(declared.value) + 1)
+    let atOk = tryCreateFile(dir / atLimit)
+    let overOk = tryCreateFile(dir / overLimit)
+    checkpoint(subject & ": " & $declared.value & " chars ok=" & $atOk &
+               ", " & $(declared.value + 1) & " chars ok=" & $overOk)
+    if atOk and not overOk:
+      record(subject, "maxComponentLength", coVerified,
+             "declared " & $declared.value & "; that length is accepted " &
+             "and one more is refused")
+      check true
+    else:
+      let observedText =
+        if not atOk: "refuses a component of " & $declared.value &
+                     " characters"
+        else: "accepts a component of " & $(declared.value + 1) &
+              " characters"
+      let msg = contradictionMessage(subject, "maxComponentLength",
+                                     $declared.value, observedText, "")
+      record(subject, "maxComponentLength", coContradiction, msg)
+      checkpoint(msg)
+      fail()
+    # The OS's own reported limit is a second, independent observation.
+    if v.obs.reportedMaxComponentLength >= 0:
+      checkpoint(subject & ": the OS reports a maximum component " &
+                 "length of " & $v.obs.reportedMaxComponentLength)
+      check int64(v.obs.reportedMaxComponentLength) == declared.value
+    removeDir(extendedPath(dir))
+
+proc driveTheMaximumPathLengthMatchesTheTable() =
+  ## The body of test
+  ##   "the maximum path length matches the table"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The declared Windows value (32767) is far beyond what this suite
+  # is willing to create and tear down, so it reports UNTESTED rather
+  # than passing on a lower-bound observation. The lower bound is
+  # still recorded, and the fact that a path beyond the OS default IS
+  # reachable is checked as an OS fact instead.
+  const PathBudget = 3000
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let declared = FilesystemTable[id].maxPathLength.value
+    if declared.kind != qkExact:
+      untestedHere(subject, "maxPathLength",
+                   "the declared value is `" & $declared & "`; on this " &
+                   "filesystem the whole-path bound belongs to the OS, " &
+                   "and the OS table checks it")
+      continue
+    if declared.value > PathBudget:
+      untestedHere(subject, "maxPathLength",
+                   "the declared limit (" & $declared.value &
+                   " characters) exceeds this suite's path budget of " &
+                   $PathBudget & "; driving it to the boundary would " &
+                   "create a tree this suite cannot reliably remove")
+      continue
+    let dir = caseDir(v, "pathlen")
+    let atPath = pathOfLength(dir, int(declared.value))
+    let overPath = pathOfLength(dir, int(declared.value) + 1)
+    if atPath.len == 0 or overPath.len == 0:
+      untestedHere(subject, "maxPathLength",
+                   "the scratch directory is already too long to build a " &
+                   "path of " & $declared.value & " characters under it")
+    else:
+      let atOk = tryCreateFile(atPath)
+      let overOk = tryCreateFile(overPath)
+      checkpoint(subject & ": " & $declared.value & "-char path ok=" &
+                 $atOk & ", one char longer ok=" & $overOk)
       if atOk and not overOk:
-        record(subject, "maxComponentLength", coVerified,
-               "declared " & $declared.value & "; that length is accepted " &
-               "and one more is refused")
+        record(subject, "maxPathLength", coVerified,
+               "a path of exactly " & $declared.value & " characters is " &
+               "accepted and one character more is refused")
         check true
       else:
         let observedText =
-          if not atOk: "refuses a component of " & $declared.value &
+          if not atOk: "refuses a path of " & $declared.value &
                        " characters"
-          else: "accepts a component of " & $(declared.value + 1) &
-                " characters"
-        let msg = contradictionMessage(subject, "maxComponentLength",
+          else: "accepts a path of " & $(declared.value + 1) & " characters"
+        let msg = contradictionMessage(subject, "maxPathLength",
                                        $declared.value, observedText, "")
-        record(subject, "maxComponentLength", coContradiction, msg)
+        record(subject, "maxPathLength", coContradiction, msg)
         checkpoint(msg)
         fail()
-      # The OS's own reported limit is a second, independent observation.
-      if v.obs.reportedMaxComponentLength >= 0:
-        checkpoint(subject & ": the OS reports a maximum component " &
-                   "length of " & $v.obs.reportedMaxComponentLength)
-        check int64(v.obs.reportedMaxComponentLength) == declared.value
-      removeDir(extendedPath(dir))
+    removeDir(extendedPath(dir))
+
+proc driveTheRefusedCharacterSetMatchesTheTable() =
+  ## The body of test
+  ##   "the refused character set matches the table"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Symmetric, and it has to be. Checking only that the DECLARED
+  # characters are refused passes just as happily against a row that
+  # dropped one — measured: a mutant removing '*' from NTFS's set
+  # survived the one-sided version of this test. So every candidate
+  # character is tried against every filesystem and the observation
+  # must agree with membership in BOTH directions.
+  let candidates = refusalCandidates()
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let declared = FilesystemTable[id].refusedCharacters
+    let dir = caseDir(v, "refusedchars")
+    var skipped: seq[string] = @[]
+    var tried = 0
+    if '\0' in declared.value:
+      # A NUL cannot be carried through the path API at all, so its
+      # refusal is not observable — an honest gap, not a pass.
+      skipped.add("NUL")
+    # Normalise the declared set into the same ascending, NUL-free
+    # order the candidates are tried in, so the two sides of a
+    # contradiction are directly comparable strings rather than a list
+    # of grievances.
+    var declaredSet: set[char] = {}
+    for ch in declared.value:
+      if ch != '\0':
+        declaredSet.incl(ch)
+    var declaredNormalised = ""
+    for ch in declaredSet:
+      declaredNormalised.add(ch)
+    var observedRefused = ""
+    for ch in candidates:
+      let name = "c" & ch & "n"
+      discard tryCreateFile(dir / name)
+      tried.inc
+      if not entryExists(dir, name):
+        observedRefused.add(ch)
+    checkpoint(subject & ": tried " & $tried & " candidate characters")
+    check tried >= 15
+    if declaredNormalised != observedRefused:
+      let msg = contradictionMessage(subject, "refusedCharacters",
+        "refuse exactly " & repr(declaredNormalised),
+        "refuse exactly " & repr(observedRefused),
+        "over the " & $tried & " candidate characters this suite tries")
+      record(subject, "refusedCharacters", coContradiction, msg)
+      checkpoint(msg)
+      fail()
+    elif skipped.len > 0:
+      record(subject, "refusedCharacters", coPartial,
+             "all " & $tried & " candidate characters agreed with the " &
+             "declared set in both directions; " & skipped.join(", ") &
+             " cannot be expressed through the path API and was not tried")
+      check true
+    else:
+      record(subject, "refusedCharacters", coVerified,
+             "all " & $tried & " candidate characters agreed with the " &
+             "declared set in both directions")
+      check true
+    removeDir(extendedPath(dir))
+
+suite "F2 filesystem-facts conformance — naming":
+  test "case sensitivity matches the table":
+    driveCaseSensitivityMatchesTheTable()
+
+  test "case preservation matches the table":
+    driveCasePreservationMatchesTheTable()
+
+  test "the maximum component length matches the table":
+    driveTheMaximumComponentLengthMatchesTheTable()
 
   test "the maximum path length matches the table":
-    # The declared Windows value (32767) is far beyond what this suite
-    # is willing to create and tear down, so it reports UNTESTED rather
-    # than passing on a lower-bound observation. The lower bound is
-    # still recorded, and the fact that a path beyond the OS default IS
-    # reachable is checked as an OS fact instead.
-    const PathBudget = 3000
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let declared = FilesystemTable[id].maxPathLength.value
-      if declared.kind != qkExact:
-        untestedHere(subject, "maxPathLength",
-                     "the declared value is `" & $declared & "`; on this " &
-                     "filesystem the whole-path bound belongs to the OS, " &
-                     "and the OS table checks it")
-        continue
-      if declared.value > PathBudget:
-        untestedHere(subject, "maxPathLength",
-                     "the declared limit (" & $declared.value &
-                     " characters) exceeds this suite's path budget of " &
-                     $PathBudget & "; driving it to the boundary would " &
-                     "create a tree this suite cannot reliably remove")
-        continue
-      let dir = caseDir(v, "pathlen")
-      let atPath = pathOfLength(dir, int(declared.value))
-      let overPath = pathOfLength(dir, int(declared.value) + 1)
-      if atPath.len == 0 or overPath.len == 0:
-        untestedHere(subject, "maxPathLength",
-                     "the scratch directory is already too long to build a " &
-                     "path of " & $declared.value & " characters under it")
-      else:
-        let atOk = tryCreateFile(atPath)
-        let overOk = tryCreateFile(overPath)
-        checkpoint(subject & ": " & $declared.value & "-char path ok=" &
-                   $atOk & ", one char longer ok=" & $overOk)
-        if atOk and not overOk:
-          record(subject, "maxPathLength", coVerified,
-                 "a path of exactly " & $declared.value & " characters is " &
-                 "accepted and one character more is refused")
-          check true
-        else:
-          let observedText =
-            if not atOk: "refuses a path of " & $declared.value &
-                         " characters"
-            else: "accepts a path of " & $(declared.value + 1) & " characters"
-          let msg = contradictionMessage(subject, "maxPathLength",
-                                         $declared.value, observedText, "")
-          record(subject, "maxPathLength", coContradiction, msg)
-          checkpoint(msg)
-          fail()
-      removeDir(extendedPath(dir))
+    driveTheMaximumPathLengthMatchesTheTable()
 
   test "the refused character set matches the table":
-    # Symmetric, and it has to be. Checking only that the DECLARED
-    # characters are refused passes just as happily against a row that
-    # dropped one — measured: a mutant removing '*' from NTFS's set
-    # survived the one-sided version of this test. So every candidate
-    # character is tried against every filesystem and the observation
-    # must agree with membership in BOTH directions.
-    let candidates = refusalCandidates()
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let declared = FilesystemTable[id].refusedCharacters
-      let dir = caseDir(v, "refusedchars")
-      var skipped: seq[string] = @[]
-      var tried = 0
-      if '\0' in declared.value:
-        # A NUL cannot be carried through the path API at all, so its
-        # refusal is not observable — an honest gap, not a pass.
-        skipped.add("NUL")
-      # Normalise the declared set into the same ascending, NUL-free
-      # order the candidates are tried in, so the two sides of a
-      # contradiction are directly comparable strings rather than a list
-      # of grievances.
-      var declaredSet: set[char] = {}
-      for ch in declared.value:
-        if ch != '\0':
-          declaredSet.incl(ch)
-      var declaredNormalised = ""
-      for ch in declaredSet:
-        declaredNormalised.add(ch)
-      var observedRefused = ""
-      for ch in candidates:
-        let name = "c" & ch & "n"
-        discard tryCreateFile(dir / name)
-        tried.inc
-        if not entryExists(dir, name):
-          observedRefused.add(ch)
-      checkpoint(subject & ": tried " & $tried & " candidate characters")
-      check tried >= 15
-      if declaredNormalised != observedRefused:
-        let msg = contradictionMessage(subject, "refusedCharacters",
-          "refuse exactly " & repr(declaredNormalised),
-          "refuse exactly " & repr(observedRefused),
-          "over the " & $tried & " candidate characters this suite tries")
-        record(subject, "refusedCharacters", coContradiction, msg)
-        checkpoint(msg)
-        fail()
-      elif skipped.len > 0:
-        record(subject, "refusedCharacters", coPartial,
-               "all " & $tried & " candidate characters agreed with the " &
-               "declared set in both directions; " & skipped.join(", ") &
-               " cannot be expressed through the path API and was not tried")
-        check true
-      else:
-        record(subject, "refusedCharacters", coVerified,
-               "all " & $tried & " candidate characters agreed with the " &
-               "declared set in both directions")
-        check true
-      removeDir(extendedPath(dir))
+    driveTheRefusedCharacterSetMatchesTheTable()
 
 # ---------------------------------------------------------------------------
 # Metadata
 # ---------------------------------------------------------------------------
 
+proc drivePOSIXModeBitStorageMatchesTheTable() =
+  ## The body of test
+  ##   "POSIX mode-bit storage matches the table"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let declared = FilesystemTable[id].posixModeBits
+    if not declared.value.isDefinite:
+      untestedHere(subject, "posixModeBits",
+                   "the declared value is `" & $declared.value & "`")
+      continue
+    let dir = caseDir(v, "modebits")
+    let f = dir / "mode.bin"
+    writeFile(extendedPath(f), "m")
+    let wanted = {fpUserRead, fpUserWrite, fpGroupRead}
+    setFilePermissions(extendedPath(f), wanted)
+    let got = getFilePermissions(extendedPath(f))
+    # Round-tripping an arbitrary mode is what "stores POSIX mode
+    # bits" means. Windows synthesises a mode from the read-only
+    # attribute, so it comes back with group and other bits the caller
+    # never asked for — which is the observation, not a nuisance.
+    let observed = if got == wanted: tnYes else: tnNo
+    expectFact(subject, "posixModeBits", declared.value, observed,
+               "set " & $wanted & ", read back " & $got)
+    removeDir(extendedPath(dir))
+
+proc drivePermissionAndAttributeChangesArePerInodeWhereTheTableSaysSo() =
+  ## The body of test
+  ##   "permission and attribute changes are per-inode where the table says so"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Carried from Local-CAS-Hardlink-Materialization M3, which measured
+  # that a chmod through a hardlinked OUTPUT moves the CAS BLOB's own
+  # mode. That measurement is why ``applyPermissions`` excludes the
+  # hardlink arm and why the read-only-blob guard rail was rejected.
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let declared = FilesystemTable[id].metadataIsPerInode
+    if declared.observability == obNone:
+      untestedHere(subject, "metadataIsPerInode", declared.falsifiedBy)
+      continue
+    if not declared.value.isDefinite:
+      untestedHere(subject, "metadataIsPerInode",
+                   "the declared value is `" & $declared.value & "`")
+      continue
+    let dir = caseDir(v, "perinode")
+    let src = dir / "src.bin"
+    writeFile(extendedPath(src), "payload")
+    let lnk = dir / "second.bin"
+    if attemptHardlink(src, lnk).outcome != loOk:
+      untestedHere(subject, "metadataIsPerInode",
+                   "a second name could not be created on this host, so " &
+                   "there is no other name through which to observe the " &
+                   "change")
+      removeDir(extendedPath(dir))
+      continue
+    let before = getFilePermissions(extendedPath(src))
+    setFilePermissions(extendedPath(lnk), {fpUserRead})
+    let after = getFilePermissions(extendedPath(src))
+    let observed = if after != before: tnYes else: tnNo
+    expectFact(subject, "metadataIsPerInode", declared.value, observed,
+               "changed permissions through the SECOND name; the first " &
+               "name reports " & $after & " (was " & $before & ")")
+    setFilePermissions(extendedPath(lnk), before)
+    removeDir(extendedPath(dir))
+
 suite "F2 filesystem-facts conformance — metadata":
   test "POSIX mode-bit storage matches the table":
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let declared = FilesystemTable[id].posixModeBits
-      if not declared.value.isDefinite:
-        untestedHere(subject, "posixModeBits",
-                     "the declared value is `" & $declared.value & "`")
-        continue
-      let dir = caseDir(v, "modebits")
-      let f = dir / "mode.bin"
-      writeFile(extendedPath(f), "m")
-      let wanted = {fpUserRead, fpUserWrite, fpGroupRead}
-      setFilePermissions(extendedPath(f), wanted)
-      let got = getFilePermissions(extendedPath(f))
-      # Round-tripping an arbitrary mode is what "stores POSIX mode
-      # bits" means. Windows synthesises a mode from the read-only
-      # attribute, so it comes back with group and other bits the caller
-      # never asked for — which is the observation, not a nuisance.
-      let observed = if got == wanted: tnYes else: tnNo
-      expectFact(subject, "posixModeBits", declared.value, observed,
-                 "set " & $wanted & ", read back " & $got)
-      removeDir(extendedPath(dir))
+    drivePOSIXModeBitStorageMatchesTheTable()
 
   test "permission and attribute changes are per-inode where the table says so":
-    # Carried from Local-CAS-Hardlink-Materialization M3, which measured
-    # that a chmod through a hardlinked OUTPUT moves the CAS BLOB's own
-    # mode. That measurement is why ``applyPermissions`` excludes the
-    # hardlink arm and why the read-only-blob guard rail was rejected.
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let declared = FilesystemTable[id].metadataIsPerInode
-      if declared.observability == obNone:
-        untestedHere(subject, "metadataIsPerInode", declared.falsifiedBy)
-        continue
-      if not declared.value.isDefinite:
-        untestedHere(subject, "metadataIsPerInode",
-                     "the declared value is `" & $declared.value & "`")
-        continue
-      let dir = caseDir(v, "perinode")
-      let src = dir / "src.bin"
-      writeFile(extendedPath(src), "payload")
-      let lnk = dir / "second.bin"
-      if attemptHardlink(src, lnk).outcome != loOk:
-        untestedHere(subject, "metadataIsPerInode",
-                     "a second name could not be created on this host, so " &
-                     "there is no other name through which to observe the " &
-                     "change")
-        removeDir(extendedPath(dir))
-        continue
-      let before = getFilePermissions(extendedPath(src))
-      setFilePermissions(extendedPath(lnk), {fpUserRead})
-      let after = getFilePermissions(extendedPath(src))
-      let observed = if after != before: tnYes else: tnNo
-      expectFact(subject, "metadataIsPerInode", declared.value, observed,
-                 "changed permissions through the SECOND name; the first " &
-                 "name reports " & $after & " (was " & $before & ")")
-      setFilePermissions(extendedPath(lnk), before)
-      removeDir(extendedPath(dir))
+    drivePermissionAndAttributeChangesArePerInodeWhereTheTableSaysSo()
 
 # ---------------------------------------------------------------------------
 # Atomicity and sparseness
 # ---------------------------------------------------------------------------
 
+proc driveRenameOverExistingBehavesAsTheTableDeclares() =
+  ## The body of test
+  ##   "rename-over-existing behaves as the table declares"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The marker on this fact is ``obConsequence`` and it is honest:
+  # user space can see that the destination was REPLACED rather than
+  # refused, which contradicts a ``no``, but it cannot crash the
+  # machine mid-rename to prove the window does not exist. So a
+  # declared ``yes`` is recorded PARTIAL, never verified.
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let declared = FilesystemTable[id].atomicRenameOverExisting
+    if not declared.value.isDefinite:
+      untestedHere(subject, "atomicRenameOverExisting",
+                   "the declared value is `" & $declared.value & "`")
+      continue
+    let dir = caseDir(v, "renameover")
+    let a = dir / "a.bin"
+    let b = dir / "b.bin"
+    writeFile(extendedPath(a), "AAA")
+    writeFile(extendedPath(b), "BBB")
+    var replaced = false
+    try:
+      moveFile(extendedPath(a), extendedPath(b))
+      replaced = fileExists(extendedPath(b)) and
+                 readFile(extendedPath(b)) == "AAA" and
+                 not fileExists(extendedPath(a))
+    except CatchableError, Defect:
+      replaced = false
+    let observed = if replaced: tnYes else: tnNo
+    if declared.value != observed:
+      let msg = contradictionMessage(subject, "atomicRenameOverExisting",
+        $declared.value,
+        (if replaced: "replaces the destination"
+         else: "refuses to replace an existing destination"), "")
+      record(subject, "atomicRenameOverExisting", coContradiction, msg)
+      checkpoint(msg)
+      fail()
+    else:
+      record(subject, "atomicRenameOverExisting", coPartial,
+             "the destination was " &
+             (if replaced: "replaced" else: "not replaced") &
+             ", which is consistent with `" & $declared.value &
+             "`. The ATOMICITY itself is not observable from user " &
+             "space — see the fact's own observability marker")
+      check true
+    removeDir(extendedPath(dir))
+
+proc driveSparseFileSupportMatchesTheTable() =
+  ## The body of test
+  ##   "sparse-file support matches the table"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let subject = subjectOf(v)
+    let declared = FilesystemTable[id].sparseFiles
+    if not declared.value.isDefinite:
+      untestedHere(subject, "sparseFiles",
+                   "the declared value is `" & $declared.value & "`")
+      continue
+    let dir = caseDir(v, "sparse")
+    let measurement = sparseAllocationRatio(dir)
+    if measurement.measured:
+      # A filesystem without sparse support allocates the whole
+      # extent; one with it allocates a small fraction of it.
+      let observed =
+        if measurement.allocated * 8 < measurement.logical: tnYes
+        else: tnNo
+      expectFact(subject, "sparseFiles", declared.value, observed,
+                 "a " & $measurement.logical & "-byte file occupies " &
+                 $measurement.allocated & " bytes")
+    elif v.obs.advertisedSparseFiles != tnUnknown:
+      expectFact(subject, "sparseFiles", declared.value,
+                 v.obs.advertisedSparseFiles,
+                 "from the OS's own volume-capability report")
+    else:
+      untestedHere(subject, "sparseFiles",
+                   "this platform offers neither an allocated-size " &
+                   "query nor a capability report that this suite binds")
+    removeDir(extendedPath(dir))
+
 suite "F2 filesystem-facts conformance — atomicity and sparseness":
   test "rename-over-existing behaves as the table declares":
-    # The marker on this fact is ``obConsequence`` and it is honest:
-    # user space can see that the destination was REPLACED rather than
-    # refused, which contradicts a ``no``, but it cannot crash the
-    # machine mid-rename to prove the window does not exist. So a
-    # declared ``yes`` is recorded PARTIAL, never verified.
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let declared = FilesystemTable[id].atomicRenameOverExisting
-      if not declared.value.isDefinite:
-        untestedHere(subject, "atomicRenameOverExisting",
-                     "the declared value is `" & $declared.value & "`")
-        continue
-      let dir = caseDir(v, "renameover")
-      let a = dir / "a.bin"
-      let b = dir / "b.bin"
-      writeFile(extendedPath(a), "AAA")
-      writeFile(extendedPath(b), "BBB")
-      var replaced = false
-      try:
-        moveFile(extendedPath(a), extendedPath(b))
-        replaced = fileExists(extendedPath(b)) and
-                   readFile(extendedPath(b)) == "AAA" and
-                   not fileExists(extendedPath(a))
-      except CatchableError, Defect:
-        replaced = false
-      let observed = if replaced: tnYes else: tnNo
-      if declared.value != observed:
-        let msg = contradictionMessage(subject, "atomicRenameOverExisting",
-          $declared.value,
-          (if replaced: "replaces the destination"
-           else: "refuses to replace an existing destination"), "")
-        record(subject, "atomicRenameOverExisting", coContradiction, msg)
-        checkpoint(msg)
-        fail()
-      else:
-        record(subject, "atomicRenameOverExisting", coPartial,
-               "the destination was " &
-               (if replaced: "replaced" else: "not replaced") &
-               ", which is consistent with `" & $declared.value &
-               "`. The ATOMICITY itself is not observable from user " &
-               "space — see the fact's own observability marker")
-        check true
-      removeDir(extendedPath(dir))
+    driveRenameOverExistingBehavesAsTheTableDeclares()
 
   test "sparse-file support matches the table":
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let subject = subjectOf(v)
-      let declared = FilesystemTable[id].sparseFiles
-      if not declared.value.isDefinite:
-        untestedHere(subject, "sparseFiles",
-                     "the declared value is `" & $declared.value & "`")
-        continue
-      let dir = caseDir(v, "sparse")
-      let measurement = sparseAllocationRatio(dir)
-      if measurement.measured:
-        # A filesystem without sparse support allocates the whole
-        # extent; one with it allocates a small fraction of it.
-        let observed =
-          if measurement.allocated * 8 < measurement.logical: tnYes
-          else: tnNo
-        expectFact(subject, "sparseFiles", declared.value, observed,
-                   "a " & $measurement.logical & "-byte file occupies " &
-                   $measurement.allocated & " bytes")
-      elif v.obs.advertisedSparseFiles != tnUnknown:
-        expectFact(subject, "sparseFiles", declared.value,
-                   v.obs.advertisedSparseFiles,
-                   "from the OS's own volume-capability report")
-      else:
-        untestedHere(subject, "sparseFiles",
-                     "this platform offers neither an allocated-size " &
-                     "query nor a capability report that this suite binds")
-      removeDir(extendedPath(dir))
+    driveSparseFileSupportMatchesTheTable()
 
 # ---------------------------------------------------------------------------
 # The OS table
 # ---------------------------------------------------------------------------
 
-suite "F2 filesystem-facts conformance — the OS table":
-  let osSubject = "OS " & hostOS
-  let facts = hostOsFacts()
+# The OS-table cases' subject and facts. Module-level rather than inside
+# their suite so the driver procs below — which the coverage report also
+# calls — can see them.
+let osSubject = "OS " & hostOS
+let facts = hostOsFacts()
 
-  test "path separators and the executable suffix match the table":
-    expectFact(osSubject, "pathSeparator", facts.pathSeparator.value,
-               $DirSep, "Nim's DirSep")
-    expectFact(osSubject, "pathListSeparator", facts.pathListSeparator.value,
-               $PathSep, "Nim's PathSep")
-    let observedExeSuffix = if ExeExt.len > 0: "." & ExeExt else: ""
-    expectFact(osSubject, "executableSuffix", facts.executableSuffix.value,
-               observedExeSuffix, "Nim's ExeExt")
+proc drivePathSeparatorsAndTheExecutableSuffixMatchTheTable() =
+  ## The body of test
+  ##   "path separators and the executable suffix match the table"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  expectFact(osSubject, "pathSeparator", facts.pathSeparator.value,
+             $DirSep, "Nim's DirSep")
+  expectFact(osSubject, "pathListSeparator", facts.pathListSeparator.value,
+             $PathSep, "Nim's PathSep")
+  let observedExeSuffix = if ExeExt.len > 0: "." & ExeExt else: ""
+  expectFact(osSubject, "executableSuffix", facts.executableSuffix.value,
+             observedExeSuffix, "Nim's ExeExt")
 
-  test "path lookup case sensitivity matches the table":
-    var exercised = false
-    for id in presentFilesystems():
-      let entry = FilesystemTable[id]
-      if not entry.caseSensitivity.value.isDefinite:
-        continue
-      let v = byFilesystem[id]
-      let dir = caseDir(v, "oscase")
-      check tryCreateFile(dir / "OsCaseProbe.txt")
-      let observed =
-        if fileExists(extendedPath(dir / "oscaseprobe.txt")): tnNo
-        else: tnYes
-      removeDir(extendedPath(dir))
-      if facts.pathLookupIsCaseSensitive.value.isDefinite:
-        expectFact(osSubject, "pathLookupIsCaseSensitive",
-                   facts.pathLookupIsCaseSensitive.value, observed,
-                   "observed on " & subjectOf(v))
-      else:
-        record(osSubject, "pathLookupIsCaseSensitive", coPartial,
-               "the declared value is `" &
-               $facts.pathLookupIsCaseSensitive.value &
-               "`; this volume answered " & $observed)
-        check true
-      exercised = true
-      break
-    if not exercised:
-      untestedHere(osSubject, "pathLookupIsCaseSensitive",
-                   "no host filesystem declares a definite case " &
-                   "sensitivity, so there is no volume on which the OS's " &
-                   "rule can be separated from the filesystem's")
+proc drivePathLookupCaseSensitivityMatchesTheTable() =
+  ## The body of test
+  ##   "path lookup case sensitivity matches the table"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var exercised = false
+  for id in presentFilesystems():
+    let entry = FilesystemTable[id]
+    if not entry.caseSensitivity.value.isDefinite:
+      continue
+    let v = byFilesystem[id]
+    let dir = caseDir(v, "oscase")
+    check tryCreateFile(dir / "OsCaseProbe.txt")
+    let observed =
+      if fileExists(extendedPath(dir / "oscaseprobe.txt")): tnNo
+      else: tnYes
+    removeDir(extendedPath(dir))
+    if facts.pathLookupIsCaseSensitive.value.isDefinite:
+      expectFact(osSubject, "pathLookupIsCaseSensitive",
+                 facts.pathLookupIsCaseSensitive.value, observed,
+                 "observed on " & subjectOf(v))
+    else:
+      record(osSubject, "pathLookupIsCaseSensitive", coPartial,
+             "the declared value is `" &
+             $facts.pathLookupIsCaseSensitive.value &
+             "`; this volume answered " & $observed)
+      check true
+    exercised = true
+    break
+  if not exercised:
+    untestedHere(osSubject, "pathLookupIsCaseSensitive",
+                 "no host filesystem declares a definite case " &
+                 "sensitivity, so there is no volume on which the OS's " &
+                 "rule can be separated from the filesystem's")
 
-  test "the default path limit and the prefix that lifts it match the table":
-    # Two-sided by construction: a path below the limit must work
-    # WITHOUT the prefix, and a path above it must fail without and
-    # succeed with. That is the exact property
-    # ``repro_core/paths.extendedPath`` exists to supply.
-    let declared = facts.defaultMaxPathChars.value
-    let v =
-      if volumes.len > 0: volumes[0]
-      else: HostVolume(dir: "")
-    if v.dir.len == 0 or declared.kind != qkExact:
+proc driveTheDefaultPathLimitAndThePrefixThatLiftsItMatchTheTable() =
+  ## The body of test
+  ##   "the default path limit and the prefix that lifts it match the table"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Two-sided by construction: a path below the limit must work
+  # WITHOUT the prefix, and a path above it must fail without and
+  # succeed with. That is the exact property
+  # ``repro_core/paths.extendedPath`` exists to supply.
+  let declared = facts.defaultMaxPathChars.value
+  let v =
+    if volumes.len > 0: volumes[0]
+    else: HostVolume(dir: "")
+  if v.dir.len == 0 or declared.kind != qkExact:
+    untestedHere(osSubject, "defaultMaxPathChars",
+                 "no writable volume, or the declared limit is `" &
+                 $declared & "`")
+    untestedHere(osSubject, "longPathPrefix",
+                 "the check depends on defaultMaxPathChars being driven")
+  else:
+    let dir = caseDir(v, "oslongpath")
+    # Two-sided, and it has to be: a path JUST UNDER the declared
+    # limit must work with no prefix, and one just over must not.
+    # Checking only the second half passes against any limit at all —
+    # measured: a mutant raising Windows' 260 to 4096 survived the
+    # one-sided version, because a 4186-character path fails under
+    # either claim.
+    let nearPath = pathOfLength(dir, int(declared.value) - 5)
+    let overPath = pathOfLength(dir, int(declared.value) + 60)
+    if nearPath.len == 0 or overPath.len == 0:
       untestedHere(osSubject, "defaultMaxPathChars",
-                   "no writable volume, or the declared limit is `" &
-                   $declared & "`")
+                   "the scratch directory is already too long to build a " &
+                   "path of " & $declared.value & " characters under it")
       untestedHere(osSubject, "longPathPrefix",
                    "the check depends on defaultMaxPathChars being driven")
     else:
-      let dir = caseDir(v, "oslongpath")
-      # Two-sided, and it has to be: a path JUST UNDER the declared
-      # limit must work with no prefix, and one just over must not.
-      # Checking only the second half passes against any limit at all —
-      # measured: a mutant raising Windows' 260 to 4096 survived the
-      # one-sided version, because a 4186-character path fails under
-      # either claim.
-      let nearPath = pathOfLength(dir, int(declared.value) - 5)
-      let overPath = pathOfLength(dir, int(declared.value) + 60)
-      if nearPath.len == 0 or overPath.len == 0:
-        untestedHere(osSubject, "defaultMaxPathChars",
-                     "the scratch directory is already too long to build a " &
-                     "path of " & $declared.value & " characters under it")
-        untestedHere(osSubject, "longPathPrefix",
-                     "the check depends on defaultMaxPathChars being driven")
-      else:
-        var nearOk = true
-        try:
-          writeFile(nearPath, "s")
-        except CatchableError, Defect:
-          nearOk = false
-        var overOk = true
-        try:
-          writeFile(overPath, "p")
-        except CatchableError, Defect:
-          overOk = false
-        let overPrefixedOk = tryCreateFile(overPath & ".pfx")
-        checkpoint(osSubject & ": " & $nearPath.len &
-                   "-char path with no prefix ok=" & $nearOk & "; " &
-                   $overPath.len & "-char path with no prefix ok=" & $overOk &
-                   ", with the prefix ok=" & $overPrefixedOk)
-        let observedText =
-          if not nearOk:
-            "refuses a " & $nearPath.len & "-character path, so its limit " &
-            "is BELOW " & $declared.value
-          elif overOk:
-            "accepts a " & $overPath.len & "-character path with no " &
-            "prefix, so its limit is ABOVE " & $declared.value
-          else:
-            ""
-        if observedText.len > 0:
-          let msg = contradictionMessage(osSubject, "defaultMaxPathChars",
-                                         $declared.value, observedText, "")
-          record(osSubject, "defaultMaxPathChars", coContradiction, msg)
-          record(osSubject, "longPathPrefix", coContradiction, msg)
-          checkpoint(msg)
-          fail()
+      var nearOk = true
+      try:
+        writeFile(nearPath, "s")
+      except CatchableError, Defect:
+        nearOk = false
+      var overOk = true
+      try:
+        writeFile(overPath, "p")
+      except CatchableError, Defect:
+        overOk = false
+      let overPrefixedOk = tryCreateFile(overPath & ".pfx")
+      checkpoint(osSubject & ": " & $nearPath.len &
+                 "-char path with no prefix ok=" & $nearOk & "; " &
+                 $overPath.len & "-char path with no prefix ok=" & $overOk &
+                 ", with the prefix ok=" & $overPrefixedOk)
+      let observedText =
+        if not nearOk:
+          "refuses a " & $nearPath.len & "-character path, so its limit " &
+          "is BELOW " & $declared.value
+        elif overOk:
+          "accepts a " & $overPath.len & "-character path with no " &
+          "prefix, so its limit is ABOVE " & $declared.value
         else:
-          record(osSubject, "defaultMaxPathChars", coVerified,
-                 "a " & $nearPath.len & "-character path works without a " &
-                 "prefix and a " & $overPath.len & "-character one does not")
-          check true
-          if facts.longPathPrefix.value.len == 0:
-            # A platform with no opt-in prefix: the limit is absolute,
-            # so the over-length path must fail with or without it.
-            #
-            # When it does NOT fail, the table is wrong and this is a
-            # contradiction like any other — it must be REPORTED as one,
-            # naming both values, and must leave the ledger showing a
-            # contradiction. The bare `check not overPrefixedOk` that
-            # stood here failed the run without doing either, which made
-            # mutant M26 (Windows' prefix emptied) fail for a reason the
-            # report could not explain.
-            checkpoint(osSubject & ": no long-path prefix is declared; the " &
-                       "over-length path must fail either way")
-            if overPrefixedOk:
-              let msg = contradictionMessage(osSubject, "longPathPrefix",
-                "no prefix at all (empty), so the " & $declared.value &
-                "-character limit is absolute on this platform",
-                "accept a " & $overPath.len & "-character path once " &
-                "repro_core/paths.extendedPath has been applied, so a " &
-                "prefix DOES lift the limit here", "")
-              record(osSubject, "longPathPrefix", coContradiction, msg)
-              checkpoint(msg)
-              fail()
-            else:
-              untestedHere(osSubject, "longPathPrefix",
-                           facts.longPathPrefix.falsifiedBy)
-          elif overPrefixedOk:
-            record(osSubject, "longPathPrefix", coVerified,
-                   "the same over-length path succeeds once " &
-                   repr(facts.longPathPrefix.value) & " is applied")
-            check true
-          else:
+          ""
+      if observedText.len > 0:
+        let msg = contradictionMessage(osSubject, "defaultMaxPathChars",
+                                       $declared.value, observedText, "")
+        record(osSubject, "defaultMaxPathChars", coContradiction, msg)
+        record(osSubject, "longPathPrefix", coContradiction, msg)
+        checkpoint(msg)
+        fail()
+      else:
+        record(osSubject, "defaultMaxPathChars", coVerified,
+               "a " & $nearPath.len & "-character path works without a " &
+               "prefix and a " & $overPath.len & "-character one does not")
+        check true
+        if facts.longPathPrefix.value.len == 0:
+          # A platform with no opt-in prefix: the limit is absolute,
+          # so the over-length path must fail with or without it.
+          #
+          # When it does NOT fail, the table is wrong and this is a
+          # contradiction like any other — it must be REPORTED as one,
+          # naming both values, and must leave the ledger showing a
+          # contradiction. The bare `check not overPrefixedOk` that
+          # stood here failed the run without doing either, which made
+          # mutant M26 (Windows' prefix emptied) fail for a reason the
+          # report could not explain.
+          checkpoint(osSubject & ": no long-path prefix is declared; the " &
+                     "over-length path must fail either way")
+          if overPrefixedOk:
             let msg = contradictionMessage(osSubject, "longPathPrefix",
-              repr(facts.longPathPrefix.value) & " lifts the limit",
-              "refuses a " & $overPath.len &
-              "-character path even WITH the prefix", "")
+              "no prefix at all (empty), so the " & $declared.value &
+              "-character limit is absolute on this platform",
+              "accept a " & $overPath.len & "-character path once " &
+              "repro_core/paths.extendedPath has been applied, so a " &
+              "prefix DOES lift the limit here", "")
             record(osSubject, "longPathPrefix", coContradiction, msg)
             checkpoint(msg)
             fail()
-      removeDir(extendedPath(dir))
+          else:
+            untestedHere(osSubject, "longPathPrefix",
+                         facts.longPathPrefix.falsifiedBy)
+        elif overPrefixedOk:
+          record(osSubject, "longPathPrefix", coVerified,
+                 "the same over-length path succeeds once " &
+                 repr(facts.longPathPrefix.value) & " is applied")
+          check true
+        else:
+          let msg = contradictionMessage(osSubject, "longPathPrefix",
+            repr(facts.longPathPrefix.value) & " lifts the limit",
+            "refuses a " & $overPath.len &
+            "-character path even WITH the prefix", "")
+          record(osSubject, "longPathPrefix", coContradiction, msg)
+          checkpoint(msg)
+          fail()
+    removeDir(extendedPath(dir))
+
+proc driveSymlinkCreationPrivilegeIsRecordedAgainstWhatThisHostDoes() =
+  ## The body of test
+  ##   "symlink creation privilege is recorded against what this host does"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let declared = facts.symlinkCreationIsPrivileged
+  var created = false
+  var detail = ""
+  if volumes.len > 0:
+    let dir = caseDir(volumes[0], "symlink")
+    let target = dir / "target.bin"
+    writeFile(extendedPath(target), "t")
+    try:
+      createSymlink(target, dir / "link.bin")
+      created = fileExists(dir / "link.bin") or
+                symlinkExists(dir / "link.bin")
+    except CatchableError, Defect:
+      created = false
+    detail = "createSymlink " & (if created: "succeeded" else: "was refused")
+    removeDir(extendedPath(dir))
+  if declared.value.isDefinite:
+    expectFact(osSubject, "symlinkCreationIsPrivileged", declared.value,
+               (if created: tnNo else: tnYes), detail)
+  else:
+    # The declared value is indefinite, so this host's observation
+    # constrains it without being able to falsify it in either
+    # direction — the framework's ``coPartial`` shape. ``partiallyChecked``
+    # records that outcome (and the observed detail) into the ledger the
+    # coverage report reads, which is the honest statement here; a bare
+    # ``check true`` would have claimed a verification that did not happen.
+    partiallyChecked(osSubject, "symlinkCreationIsPrivileged",
+           "the declared value is `" & $declared.value &
+           "` (Developer Mode flips it on Windows), so this host's " &
+           "answer cannot contradict it. Observed: " & detail)
+
+proc driveTheMaximumCommandLineIsDeclaredButNotDrivenHere() =
+  ## The body of test
+  ##   "the maximum command line is declared but not driven here"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Driving it means spawning a process with a 32767-character command
+  # line and one character more. That is a process launch, which
+  # `scripts/check_ambient_execution.sh` bans from new files, and the
+  # refusal surfaces as a generic CreateProcess failure rather than a
+  # distinguishable "too long" error — which is exactly what the
+  # fact's own ``obConsequence`` marker says.
+  untestedHere(osSubject, "maxCommandLineBytes",
+               hostOsFacts().maxCommandLineBytes.falsifiedBy &
+               " — not driven by this suite: it requires spawning a " &
+               "process, and the failure is not distinguishable from " &
+               "any other CreateProcess/execve refusal")
+
+proc driveTheLinkingAndCloningAPIsNamedByTheOSTableAreTheOnesThatRun() =
+  ## The body of test
+  ##   "the linking and cloning APIs named by the OS table are the ones that run"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The OS table names an API; the filesystem table says which
+  # filesystems answer it. This check closes the loop between them:
+  # every present filesystem that DECLARES the capability must actually
+  # deliver it through the named API. ``expectFact`` asserts exactly
+  # that — a declaring filesystem whose named API fails to produce a
+  # second name (or a clone) records a contradiction and fails the run,
+  # rather than being silently swallowed as "not exercised".
+  var linkExercised = false
+  var cloneExercised = false
+  for id in presentFilesystems():
+    let v = byFilesystem[id]
+    let dir = caseDir(v, "osapi")
+    let src = dir / "src.bin"
+    writeFile(extendedPath(src), "payload")
+    if FilesystemTable[id].hardlinks.value == tnYes:
+      let linked = attemptHardlink(src, dir / "second.bin").outcome == loOk and
+                   hardlinkCount(src) == 2
+      expectFact(osSubject, "hardlinkApi", tnYes,
+                 (if linked: tnYes else: tnNo),
+                 facts.hardlinkApi.value & " on " & subjectOf(v) &
+                 (if linked: " created a second name and the inode's " &
+                  "link count rose to 2"
+                  else: " did NOT create a second name with link count 2"))
+      linkExercised = true
+    if FilesystemTable[id].reflink.value == tnYes:
+      let cloned = attemptReflink(src, dir / "clone.bin").outcome == loOk
+      expectFact(osSubject, "reflinkApi", tnYes,
+                 (if cloned: tnYes else: tnNo),
+                 facts.reflinkApi.value & " on " & subjectOf(v) &
+                 (if cloned: " produced a clone of the source bytes"
+                  else: " did NOT produce a clone"))
+      cloneExercised = true
+    removeDir(extendedPath(dir))
+  checkpoint(osSubject & ": hardlinkApi=" & facts.hardlinkApi.value &
+             " exercised=" & $linkExercised & "; reflinkApi=" &
+             facts.reflinkApi.value & " exercised=" & $cloneExercised)
+  # Preserve the ledger-coverage invariant: if no present filesystem
+  # declared the capability, the API was never driven here, and the
+  # fact is recorded untested rather than left as a coverage hole.
+  if not linkExercised:
+    untestedHere(osSubject, "hardlinkApi",
+                 "no host filesystem both declares hardlinks and " &
+                 "produced one, so the named API was not exercised")
+  if not cloneExercised:
+    untestedHere(osSubject, "reflinkApi",
+                 "no host filesystem declares reflink support, so the " &
+                 "named API was not exercised")
+
+proc drivePOSIXModeBitHonouringAndOTMPFILEMatchTheTable() =
+  ## The body of test
+  ##   "POSIX mode-bit honouring and O_TMPFILE match the table"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let modeDeclared = facts.honoursPosixModeBits
+  if volumes.len > 0 and modeDeclared.value.isDefinite:
+    let dir = caseDir(volumes[0], "osmode")
+    let f = dir / "mode.bin"
+    writeFile(extendedPath(f), "m")
+    let wanted = {fpUserRead, fpUserWrite, fpGroupRead}
+    setFilePermissions(extendedPath(f), wanted)
+    let got = getFilePermissions(extendedPath(f))
+    expectFact(osSubject, "honoursPosixModeBits", modeDeclared.value,
+               (if got == wanted: tnYes else: tnNo),
+               "set " & $wanted & ", read back " & $got)
+    removeDir(extendedPath(dir))
+  else:
+    untestedHere(osSubject, "honoursPosixModeBits",
+                 "no writable volume, or the declared value is `" &
+                 $modeDeclared.value & "`")
+  when defined(linux):
+    untestedHere(osSubject, "hasOTmpfile",
+                 "O_TMPFILE is declared available on this OS but is a " &
+                 "per-filesystem capability; this suite does not bind " &
+                 "the open(2) flag")
+  else:
+    untestedHere(osSubject, "hasOTmpfile",
+                 "O_TMPFILE is a Linux open(2) flag; there is no call " &
+                 "on this OS to attempt, so `" & $facts.hasOTmpfile.value &
+                 "` cannot be contradicted here")
+
+suite "F2 filesystem-facts conformance — the OS table":
+  test "path separators and the executable suffix match the table":
+    drivePathSeparatorsAndTheExecutableSuffixMatchTheTable()
+
+  test "path lookup case sensitivity matches the table":
+    drivePathLookupCaseSensitivityMatchesTheTable()
+
+  test "the default path limit and the prefix that lifts it match the table":
+    driveTheDefaultPathLimitAndThePrefixThatLiftsItMatchTheTable()
 
   test "symlink creation privilege is recorded against what this host does":
-    let declared = facts.symlinkCreationIsPrivileged
-    var created = false
-    var detail = ""
-    if volumes.len > 0:
-      let dir = caseDir(volumes[0], "symlink")
-      let target = dir / "target.bin"
-      writeFile(extendedPath(target), "t")
-      try:
-        createSymlink(target, dir / "link.bin")
-        created = fileExists(dir / "link.bin") or
-                  symlinkExists(dir / "link.bin")
-      except CatchableError, Defect:
-        created = false
-      detail = "createSymlink " & (if created: "succeeded" else: "was refused")
-      removeDir(extendedPath(dir))
-    if declared.value.isDefinite:
-      expectFact(osSubject, "symlinkCreationIsPrivileged", declared.value,
-                 (if created: tnNo else: tnYes), detail)
-    else:
-      # The declared value is indefinite, so this host's observation
-      # constrains it without being able to falsify it in either
-      # direction — the framework's ``coPartial`` shape. ``partiallyChecked``
-      # records that outcome (and the observed detail) into the ledger the
-      # coverage report reads, which is the honest statement here; a bare
-      # ``check true`` would have claimed a verification that did not happen.
-      partiallyChecked(osSubject, "symlinkCreationIsPrivileged",
-             "the declared value is `" & $declared.value &
-             "` (Developer Mode flips it on Windows), so this host's " &
-             "answer cannot contradict it. Observed: " & detail)
+    driveSymlinkCreationPrivilegeIsRecordedAgainstWhatThisHostDoes()
 
   test "the maximum command line is declared but not driven here":
-    # Driving it means spawning a process with a 32767-character command
-    # line and one character more. That is a process launch, which
-    # `scripts/check_ambient_execution.sh` bans from new files, and the
-    # refusal surfaces as a generic CreateProcess failure rather than a
-    # distinguishable "too long" error — which is exactly what the
-    # fact's own ``obConsequence`` marker says.
-    untestedHere(osSubject, "maxCommandLineBytes",
-                 hostOsFacts().maxCommandLineBytes.falsifiedBy &
-                 " — not driven by this suite: it requires spawning a " &
-                 "process, and the failure is not distinguishable from " &
-                 "any other CreateProcess/execve refusal")
+    driveTheMaximumCommandLineIsDeclaredButNotDrivenHere()
 
   test "the linking and cloning APIs named by the OS table are the ones that run":
-    # The OS table names an API; the filesystem table says which
-    # filesystems answer it. This check closes the loop between them:
-    # every present filesystem that DECLARES the capability must actually
-    # deliver it through the named API. ``expectFact`` asserts exactly
-    # that — a declaring filesystem whose named API fails to produce a
-    # second name (or a clone) records a contradiction and fails the run,
-    # rather than being silently swallowed as "not exercised".
-    var linkExercised = false
-    var cloneExercised = false
-    for id in presentFilesystems():
-      let v = byFilesystem[id]
-      let dir = caseDir(v, "osapi")
-      let src = dir / "src.bin"
-      writeFile(extendedPath(src), "payload")
-      if FilesystemTable[id].hardlinks.value == tnYes:
-        let linked = attemptHardlink(src, dir / "second.bin").outcome == loOk and
-                     hardlinkCount(src) == 2
-        expectFact(osSubject, "hardlinkApi", tnYes,
-                   (if linked: tnYes else: tnNo),
-                   facts.hardlinkApi.value & " on " & subjectOf(v) &
-                   (if linked: " created a second name and the inode's " &
-                    "link count rose to 2"
-                    else: " did NOT create a second name with link count 2"))
-        linkExercised = true
-      if FilesystemTable[id].reflink.value == tnYes:
-        let cloned = attemptReflink(src, dir / "clone.bin").outcome == loOk
-        expectFact(osSubject, "reflinkApi", tnYes,
-                   (if cloned: tnYes else: tnNo),
-                   facts.reflinkApi.value & " on " & subjectOf(v) &
-                   (if cloned: " produced a clone of the source bytes"
-                    else: " did NOT produce a clone"))
-        cloneExercised = true
-      removeDir(extendedPath(dir))
-    checkpoint(osSubject & ": hardlinkApi=" & facts.hardlinkApi.value &
-               " exercised=" & $linkExercised & "; reflinkApi=" &
-               facts.reflinkApi.value & " exercised=" & $cloneExercised)
-    # Preserve the ledger-coverage invariant: if no present filesystem
-    # declared the capability, the API was never driven here, and the
-    # fact is recorded untested rather than left as a coverage hole.
-    if not linkExercised:
-      untestedHere(osSubject, "hardlinkApi",
-                   "no host filesystem both declares hardlinks and " &
-                   "produced one, so the named API was not exercised")
-    if not cloneExercised:
-      untestedHere(osSubject, "reflinkApi",
-                   "no host filesystem declares reflink support, so the " &
-                   "named API was not exercised")
+    driveTheLinkingAndCloningAPIsNamedByTheOSTableAreTheOnesThatRun()
 
   test "POSIX mode-bit honouring and O_TMPFILE match the table":
-    let modeDeclared = facts.honoursPosixModeBits
-    if volumes.len > 0 and modeDeclared.value.isDefinite:
-      let dir = caseDir(volumes[0], "osmode")
-      let f = dir / "mode.bin"
-      writeFile(extendedPath(f), "m")
-      let wanted = {fpUserRead, fpUserWrite, fpGroupRead}
-      setFilePermissions(extendedPath(f), wanted)
-      let got = getFilePermissions(extendedPath(f))
-      expectFact(osSubject, "honoursPosixModeBits", modeDeclared.value,
-                 (if got == wanted: tnYes else: tnNo),
-                 "set " & $wanted & ", read back " & $got)
-      removeDir(extendedPath(dir))
-    else:
-      untestedHere(osSubject, "honoursPosixModeBits",
-                   "no writable volume, or the declared value is `" &
-                   $modeDeclared.value & "`")
-    when defined(linux):
-      untestedHere(osSubject, "hasOTmpfile",
-                   "O_TMPFILE is declared available on this OS but is a " &
-                   "per-filesystem capability; this suite does not bind " &
-                   "the open(2) flag")
-    else:
-      untestedHere(osSubject, "hasOTmpfile",
-                   "O_TMPFILE is a Linux open(2) flag; there is no call " &
-                   "on this OS to attempt, so `" & $facts.hasOTmpfile.value &
-                   "` cannot be contradicted here")
+    drivePOSIXModeBitHonouringAndOTMPFILEMatchTheTable()
 
 # ---------------------------------------------------------------------------
 # The report — requirement 2 made visible
 # ---------------------------------------------------------------------------
 
+# Every case above that records an outcome in the ledger. The report
+# cases below drive ALL of them themselves, from an empty ledger: the suite
+# runner executes each case in its own process (`--run suite::test`), so the
+# ledger holds only what ran in THIS process, and a report that read what
+# earlier cases left behind would measure the execution mode — alone, it
+# saw an empty ledger and failed; and "no declared fact contradicts" passed
+# over nothing — rather than the host.
+const LedgerDrivers: seq[(string, proc () {.nimcall.})] = @[
+  ("hardlink support matches the table on every host filesystem",
+    driveHardlinkSupportMatchesTheTableOnEveryHostFilesystem),
+  ("the maximum number of names per file matches the table",
+    driveTheMaximumNumberOfNamesPerFileMatchesTheTable),
+  ("hardlinks to directories are refused where the table says so",
+    driveHardlinksToDirectoriesAreRefusedWhereTheTableSaysSo),
+  ("one device is one link domain where the table says so",
+    driveOneDeviceIsOneLinkDomainWhereTheTableSaysSo),
+  ("a write through a hardlink is visible through every name",
+    driveAWriteThroughAHardlinkIsVisibleThroughEveryName),
+  ("reflink support and the operation that performs it match the table",
+    driveReflinkSupportAndTheOperationThatPerformsItMatchTheTable),
+  ("a clone is copy-on-write where the table claims it is",
+    driveACloneIsCopyOnWriteWhereTheTableClaimsItIs),
+  ("the stored last-write granularity matches the table",
+    driveTheStoredLastWriteGranularityMatchesTheTable),
+  ("case sensitivity matches the table",
+    driveCaseSensitivityMatchesTheTable),
+  ("case preservation matches the table",
+    driveCasePreservationMatchesTheTable),
+  ("the maximum component length matches the table",
+    driveTheMaximumComponentLengthMatchesTheTable),
+  ("the maximum path length matches the table",
+    driveTheMaximumPathLengthMatchesTheTable),
+  ("the refused character set matches the table",
+    driveTheRefusedCharacterSetMatchesTheTable),
+  ("POSIX mode-bit storage matches the table",
+    drivePOSIXModeBitStorageMatchesTheTable),
+  ("permission and attribute changes are per-inode where the table says so",
+    drivePermissionAndAttributeChangesArePerInodeWhereTheTableSaysSo),
+  ("rename-over-existing behaves as the table declares",
+    driveRenameOverExistingBehavesAsTheTableDeclares),
+  ("sparse-file support matches the table",
+    driveSparseFileSupportMatchesTheTable),
+  ("path separators and the executable suffix match the table",
+    drivePathSeparatorsAndTheExecutableSuffixMatchTheTable),
+  ("path lookup case sensitivity matches the table",
+    drivePathLookupCaseSensitivityMatchesTheTable),
+  ("the default path limit and the prefix that lifts it match the table",
+    driveTheDefaultPathLimitAndThePrefixThatLiftsItMatchTheTable),
+  ("symlink creation privilege is recorded against what this host does",
+    driveSymlinkCreationPrivilegeIsRecordedAgainstWhatThisHostDoes),
+  ("the maximum command line is declared but not driven here",
+    driveTheMaximumCommandLineIsDeclaredButNotDrivenHere),
+  ("the linking and cloning APIs named by the OS table are the ones that run",
+    driveTheLinkingAndCloningAPIsNamedByTheOSTableAreTheOnesThatRun),
+  ("POSIX mode-bit honouring and O_TMPFILE match the table",
+    drivePOSIXModeBitHonouringAndOTMPFILEMatchTheTable)]
+
+proc redriveLedger() =
+  ## Empty the ledger and drive every recording case into it, so the
+  ## calling report case reads outcomes it produced itself. A driver whose
+  ## own assertions fail fails the calling case too, which is right: the
+  ## report is only as good as the observations under it.
+  ledger = @[]
+  for (name, drive) in LedgerDrivers:
+    checkpoint("driving " & name)
+    drive()
+  check LedgerDrivers.len == 24
+
 suite "F2 filesystem-facts conformance — coverage report":
   test "every fact of every filesystem the host offers was accounted for":
+    redriveLedger()
     # The guard against the suite quietly stopping short: a fact of a
     # PRESENT filesystem that no test recorded an outcome for is a
     # coverage hole, and it fails here rather than passing invisibly.
@@ -1731,6 +1971,7 @@ suite "F2 filesystem-facts conformance — coverage report":
     check holes.len == 0
 
   test "no declared fact contradicts what this host does":
+    redriveLedger()
     var contradictions: seq[string] = @[]
     for e in ledger:
       if e.outcome == coContradiction:
@@ -1740,6 +1981,7 @@ suite "F2 filesystem-facts conformance — coverage report":
     check contradictions.len == 0
 
   test "the run reports what it did NOT verify":
+    redriveLedger()
     # Requirement 2, made legible. A green run on a one-filesystem
     # machine must not read as "the table is verified", so the report
     # names the filesystems the table knows and this host does not have,

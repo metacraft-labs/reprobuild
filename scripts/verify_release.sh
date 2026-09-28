@@ -62,6 +62,47 @@ if [[ ! -f "$repro_bin" ]]; then
   exit 1
 fi
 
+# ── All platforms: the sources an installed repro compiles against ───────────
+#
+# The first compile of any project (interface extraction, then the provider)
+# imports reprobuild's own libs and a few source-only inputs. The image finds
+# them under share/repro beside its bin/ (repro_interface_artifacts.
+# ensureInstalledSourcePackageEnvironment). v0.2.0 shipped none of them and
+# every consumer died with `cannot open file: repro_interface_artifacts`.
+# This is the cheap manifest half; scripts/release/check_release_source_closure.sh
+# proves the closure is complete with `nim check`.
+echo "=== Checking installed-compile sources in $pkg_dir/share/repro ==="
+required_sources=(
+  source/libs/repro_interface_artifacts/src/repro_interface_artifacts.nim
+  source/libs/repro_project_dsl/src/repro_project_dsl.nim
+  source/libs/repro_dsl_stdlib/src/repro_dsl_stdlib/constructors.nim
+  source/libs/repro_cli_support/src/repro_cli_support.nim
+  source/libs/blake3/src/blake3/vendor/blake3.c
+  source/libs/xxh3/src/xxh3/vendor/xxhash.c
+  src/reprobuild-test-adapters/src/repro_test_adapters/test_runner.nim
+  src/reprobuild-ct-test-runner/libs/ct_incremental_adapter/src/ct_incremental_adapter.nim
+  src/io-mon/src/io_mon.nim
+  src/nim-stackable-hooks/src/stackable_hooks.nim
+  src/nim-shm-gset/src/shm_gset.nim
+  src/nim-shm-queue/src/shm_queue.nim
+  src/runquota/libs/runquota_core/src/runquota_core.nim
+  src/bearssl/bearssl.nim
+)
+missing_sources=()
+for f in "${required_sources[@]}"; do
+  if [[ -f "$pkg_dir/share/repro/$f" ]]; then
+    echo "  ok      share/repro/$f"
+  else
+    echo "  MISSING share/repro/$f"
+    missing_sources+=("$f")
+  fi
+done
+if (( ${#missing_sources[@]} > 0 )); then
+  echo "ERROR: $archive_name cannot build a project: missing from share/repro: ${missing_sources[*]}" >&2
+  echo "       Staged by scripts/release/stage_release_sources.sh." >&2
+  exit 1
+fi
+
 # ── Windows: archive self-containment ────────────────────────────────────────
 #
 # Every non-system library reprobuild uses on Windows is dlopen'd by leaf name,

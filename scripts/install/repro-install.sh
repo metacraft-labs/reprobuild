@@ -1,9 +1,9 @@
 #!/bin/sh
 # Reprobuild installer — the POSIX half of M3.
 #
-#   curl -fsSL https://install.reprobuild.com | sh
-#   curl -fsSL https://install.reprobuild.com | sh -s -- --method tarball
-#   curl -fsSL https://install.reprobuild.com | sh -s -- --uninstall
+#   curl -fsSL https://get.reprobuild.com/sh | sh
+#   curl -fsSL https://get.reprobuild.com/sh | sh -s -- --method tarball
+#   curl -fsSL https://get.reprobuild.com/sh | sh -s -- --uninstall
 #
 # detect -> verify -> register the native repo -> let the PACKAGE MANAGER
 # install. After that, `apt upgrade` / `dnf upgrade` / `pacman -Syu` move
@@ -50,6 +50,17 @@
 # as rejections. This script never re-implements that check and never
 # proceeds past a non-zero exit from it.
 #
+# ## One repository for every Metacraft product
+#
+# The apt and RPM repositories are the ORGANISATION's, not reprobuild's:
+# deb.metacraft-labs.com and rpm.metacraft-labs.com carry every Metacraft
+# product, signed with one organisation key (metacraft-specs
+# infrastructure/package-distribution.md §3, §13). So the source entry and
+# the key this script writes are SHARED: every product's installer writes
+# the same files, and installing a second product reuses them. Each
+# product records itself under $REPO_USERS_DIR, and --uninstall removes
+# the shared entry only when no other product remains.
+#
 # ## Idempotence
 #
 # Every write is to a FIXED path and is a replacement, never an append:
@@ -86,7 +97,7 @@ PKG_NAME="${REPRO_PKG_NAME:-reprobuild}"
 # Individual URLs can still be overridden one at a time, which is what a
 # mirror or an air-gapped site needs.
 # ---------------------------------------------------------------------
-REPRO_DOMAIN="${REPRO_DOMAIN:-reprobuild.com}"
+REPRO_REPO_DOMAIN="${REPRO_REPO_DOMAIN:-metacraft-labs.com}"
 
 if [ -n "${REPRO_BASE_URL:-}" ]; then
   _b="${REPRO_BASE_URL%/}"
@@ -96,43 +107,57 @@ if [ -n "${REPRO_BASE_URL:-}" ]; then
   REPRO_DOWNLOADS_URL="${REPRO_DOWNLOADS_URL:-$_b/downloads}"
   REPRO_KEYS_URL="${REPRO_KEYS_URL:-$_b/keys}"
 else
-  REPRO_DEB_URL="${REPRO_DEB_URL:-https://deb.$REPRO_DOMAIN}"
-  REPRO_RPM_URL="${REPRO_RPM_URL:-https://rpm.$REPRO_DOMAIN}"
-  REPRO_ARCH_URL="${REPRO_ARCH_URL:-https://arch.$REPRO_DOMAIN}"
-  REPRO_DOWNLOADS_URL="${REPRO_DOWNLOADS_URL:-https://downloads.$REPRO_DOMAIN}"
-  REPRO_KEYS_URL="${REPRO_KEYS_URL:-https://keys.$REPRO_DOMAIN}"
+  REPRO_DEB_URL="${REPRO_DEB_URL:-https://deb.$REPRO_REPO_DOMAIN}"
+  REPRO_RPM_URL="${REPRO_RPM_URL:-https://rpm.$REPRO_REPO_DOMAIN}"
+  # EMPTY: the organisation has no pacman repository yet, so Arch installs
+  # from the signed tarball. Setting this is how a mirror, or the gate,
+  # offers one.
+  REPRO_ARCH_URL="${REPRO_ARCH_URL:-}"
+  # Release assets are served from the GitHub Release, at the
+  # <base>/v<version>/<asset> shape this script fetches.
+  REPRO_DOWNLOADS_URL="${REPRO_DOWNLOADS_URL:-https://github.com/metacraft-labs/reprobuild/releases/download}"
+  REPRO_KEYS_URL="${REPRO_KEYS_URL:-https://deb.$REPRO_REPO_DOMAIN/keys}"
 fi
 
-KEYRING_FILE='reprobuild-archive-keyring.gpg'
+# The organisation's key, ASCII-armoured. Armoured because every consumer
+# takes it that way with no conversion: apt reads an armoured Signed-By
+# keyring when its name ends in .asc, rpm --import requires armour, and
+# pacman-key --add accepts it. So no gpg is needed on the client to use it.
+KEYRING_FILE="${REPRO_KEYRING_FILE:-metacraft-labs-archive-keyring.asc}"
 KEYRING_DEST="${REPRO_KEYRING_DEST:-/usr/share/keyrings/$KEYRING_FILE}"
 
-# The expected SHA-256 of the keyring at $REPRO_KEYS_URL/$KEYRING_FILE.
-#
-# EMPTY on purpose, exactly as scripts/release-signing/trusted-release-keys.txt
-# is empty on purpose: reprobuild has no release key yet. While it is
-# empty, release-mode installs FAIL CLOSED — the installer refuses rather
-# than trusting whatever the keyring host served. The gate runs with
-# REPRO_ALLOW_UNPINNED_KEYRING=1 and its own throwaway digest; that
-# variable is the ONLY way past this, it is never set by default, and it
-# prints a warning that names the risk.
-REPRO_KEYRING_SHA256="${REPRO_KEYRING_SHA256:-}"
+# The expected SHA-256 of the keyring at $REPRO_KEYS_URL/$KEYRING_FILE:
+# the organisation key 3CA0 3287 4B65 1B0C F01D  FB67 7EAF 585F B9B5 9164,
+# as committed in metacraft-labs/metacraft-desktop-packages keys/ and
+# uploaded from there verbatim, so its bytes do not change. Changing this
+# line is a key rotation. An empty value (a mirror that sets it so) makes
+# the installer FAIL CLOSED; REPRO_ALLOW_UNPINNED_KEYRING=1 is the only way
+# past that, it is never set by default, and it warns what it costs.
+REPRO_KEYRING_SHA256="${REPRO_KEYRING_SHA256-27d3273b8e90f966d9557420aaa13446ee8b1b2c6da027137a094f5322da68fc}"
 
 # Suite/component/repo-id the release pipeline publishes under. These
 # must agree with scripts/release/repro-publish-repos.sh; they are
 # variables here so a staging channel is a flag, not a fork.
 APT_SUITE="${REPRO_APT_SUITE:-stable}"
 APT_COMPONENT="${REPRO_APT_COMPONENT:-main}"
-RPM_REPO_ID="${REPRO_RPM_REPO_ID:-reprobuild}"
-ARCH_REPO_NAME="${REPRO_ARCH_REPO_NAME:-reprobuild}"
+RPM_REPO_ID="${REPRO_RPM_REPO_ID:-metacraft-labs}"
+ARCH_REPO_NAME="${REPRO_ARCH_REPO_NAME:-metacraft}"
 
-APT_SOURCES_DEST="${REPRO_APT_SOURCES_DEST:-/etc/apt/sources.list.d/reprobuild.sources}"
-RPM_REPO_DEST="${REPRO_RPM_REPO_DEST:-/etc/yum.repos.d/reprobuild.repo}"
+APT_SOURCES_DEST="${REPRO_APT_SOURCES_DEST:-/etc/apt/sources.list.d/metacraft-labs.sources}"
+RPM_REPO_DEST="${REPRO_RPM_REPO_DEST:-/etc/yum.repos.d/metacraft-labs.repo}"
 # The ASCII-armoured copy of the trust anchor that rpm/dnf consume. A
 # FIXED path, so a second run replaces it instead of adding another.
-RPM_KEY_ARMOURED="${REPRO_RPM_KEY_ARMOURED:-${KEYRING_DEST}.asc}"
+# The organisation's anchor is already armoured, so it is used as is.
+case "$KEYRING_DEST" in
+  *.asc) _rpm_key_default="$KEYRING_DEST" ;;
+  *)     _rpm_key_default="${KEYRING_DEST}.asc" ;;
+esac
+RPM_KEY_ARMOURED="${REPRO_RPM_KEY_ARMOURED:-$_rpm_key_default}"
 PACMAN_CONF="${REPRO_PACMAN_CONF:-/etc/pacman.conf}"
-PACMAN_BEGIN='# >>> reprobuild installer >>>'
-PACMAN_END='# <<< reprobuild installer <<<'
+PACMAN_BEGIN='# >>> metacraft-labs repository >>>'
+PACMAN_END='# <<< metacraft-labs repository <<<'
+# One file per Metacraft product that relies on the shared entry above.
+REPO_USERS_DIR="${REPRO_REPO_USERS_DIR:-/var/lib/metacraft-labs/repository-users}"
 
 TARBALL_PREFIX="${REPRO_INSTALL_PREFIX:-/usr/local}"
 # Where a tarball install records what it put down, so --uninstall can
@@ -177,12 +202,12 @@ Environment (see the comment block at the top of this file):
   REPRO_BASE_URL        Point every fetch at one base URL. This is the
                         single knob that retargets the installer at a
                         local or mirrored host.
-  REPRO_DOMAIN          Production domain (default reprobuild.com), used
-                        only when REPRO_BASE_URL is unset.
+  REPRO_REPO_DOMAIN     Repository domain (default metacraft-labs.com),
+                        used only when REPRO_BASE_URL is unset.
   REPRO_DEB_URL REPRO_RPM_URL REPRO_ARCH_URL REPRO_DOWNLOADS_URL
   REPRO_KEYS_URL        Per-ecosystem overrides.
-  REPRO_KEYRING_SHA256  Expected SHA-256 of the trust anchor. Empty in
-                        this checkout: release-mode installs fail closed.
+  REPRO_KEYRING_SHA256  Expected SHA-256 of the trust anchor (pinned to
+                        the organisation key; empty fails closed).
   REPRO_ALLOW_UNPINNED_KEYRING=1
                         Proceed with an unpinned keyring. For tests only.
   REPRO_VERIFY_SCRIPT   Path to repro-verify-release.sh (tarball method).
@@ -254,12 +279,15 @@ detect_method() {
   case " $DISTRO_ID $DISTRO_LIKE " in
     *' debian '*|*' ubuntu '*) _f='apt' ;;
     *' rhel '*|*' fedora '*|*' centos '*) _f='dnf' ;;
-    *' arch '*|*' archlinux '*) _f='pacman' ;;
+    *' arch '*|*' archlinux '*)
+      if [ -n "$REPRO_ARCH_URL" ]; then _f='pacman'
+      else log 'there is no Metacraft pacman repository yet; using the signed tarball fallback'; _f='tarball'
+      fi ;;
   esac
   if [ -z "$_f" ]; then
     if command -v apt-get >/dev/null 2>&1; then _f='apt'
     elif command -v dnf >/dev/null 2>&1 || command -v dnf5 >/dev/null 2>&1; then _f='dnf'
-    elif command -v pacman >/dev/null 2>&1; then _f='pacman'
+    elif command -v pacman >/dev/null 2>&1 && [ -n "$REPRO_ARCH_URL" ]; then _f='pacman'
     fi
   fi
   if [ -z "$_f" ]; then
@@ -348,12 +376,11 @@ This is what a substituted keyring host looks like. Do not override it."
     warn "installing an UNPINNED trust anchor (sha256=$_got) because REPRO_ALLOW_UNPINNED_KEYRING=1."
     warn "Every future upgrade on this machine will trust whatever key that was. Not for production."
   else
-    die "no trust anchor digest is pinned in this installer (REPRO_KEYRING_SHA256 is empty).
-reprobuild has no release key yet, so there is nothing to pin and this
-installer fails closed rather than trusting the keyring host blindly.
-See docs/release-signing.md. To install anyway, in a test, set
-REPRO_ALLOW_UNPINNED_KEYRING=1 and understand that you are opting out of
-the only thing that roots repository trust."
+    die "no trust anchor digest is pinned (REPRO_KEYRING_SHA256 is empty).
+This installer fails closed rather than trusting the keyring host blindly.
+To install anyway, in a test, set REPRO_ALLOW_UNPINNED_KEYRING=1 and
+understand that you are opting out of the only thing that roots
+repository trust."
   fi
 
   # Replacement, not accumulation: one file, fixed path. This is half of
@@ -362,6 +389,24 @@ the only thing that roots repository trust."
   run cp "$_kr" "$KEYRING_DEST"
   run chmod 0644 "$KEYRING_DEST"
   log "trust anchor installed at $KEYRING_DEST"
+}
+
+# ---------------------------------------------------------------------
+# the shared entry's users
+# ---------------------------------------------------------------------
+
+# The source entry and the key are shared by every Metacraft product
+# (see the header). A product that uses them says so here, and only the
+# LAST one to leave removes them: uninstalling reprobuild must not cut
+# CodeTracer off from its updates.
+claim_shared_entry()   { run mkdir -p "$REPO_USERS_DIR"; run touch "$REPO_USERS_DIR/$PKG_NAME"; }
+release_shared_entry() { run rm -f "$REPO_USERS_DIR/$PKG_NAME"; }
+other_shared_users() {
+  [ -d "$REPO_USERS_DIR" ] || return 0
+  for _u in "$REPO_USERS_DIR"/*; do
+    [ -e "$_u" ] || continue
+    [ "$(basename "$_u")" = "$PKG_NAME" ] || basename "$_u"
+  done
 }
 
 # ---------------------------------------------------------------------
@@ -417,7 +462,7 @@ remove_apt() {
   else
     log "$PKG_NAME is not installed; nothing for apt to remove"
   fi
-  run rm -f "$APT_SOURCES_DEST"
+  [ -n "$(other_shared_users)" ] || run rm -f "$APT_SOURCES_DEST"
 }
 
 register_dnf() {
@@ -438,7 +483,7 @@ register_dnf() {
   # See docs/release-signing.md.
   cat > "$RPM_REPO_DEST" <<REPO
 [$RPM_REPO_ID]
-name=Reprobuild
+name=Metacraft Labs
 baseurl=$REPRO_RPM_URL
 enabled=1
 gpgcheck=1
@@ -471,7 +516,7 @@ dnf_bin() {
 armour_keyring_to() {
   _src="$1"; _dst="$2"
   if head -c 64 "$_src" 2>/dev/null | grep -q 'BEGIN PGP PUBLIC KEY BLOCK'; then
-    cp "$_src" "$_dst"
+    [ "$_src" = "$_dst" ] || cp "$_src" "$_dst"
     return 0
   fi
   command -v gpg >/dev/null 2>&1 \
@@ -515,11 +560,12 @@ remove_dnf() {
   else
     log "$PKG_NAME is not installed; nothing for dnf to remove"
   fi
+  [ -z "$(other_shared_users)" ] || return 0
   run rm -f "$RPM_REPO_DEST" "$RPM_KEY_ARMOURED"
   # rpm keeps imported keys as pseudo-packages. Leaving ours behind
   # would mean "uninstalled" still trusts us for future signatures.
   for _k in $(rpm -qa 'gpg-pubkey*' 2>/dev/null || true); do
-    if rpm -qi "$_k" 2>/dev/null | grep -qi 'reprobuild'; then
+    if rpm -qi "$_k" 2>/dev/null | grep -qiE 'reprobuild|metacraft labs'; then
       log "removing imported rpm key $_k"
       run rpm -e --allmatches "$_k" || warn "could not remove rpm key $_k"
     fi
@@ -582,6 +628,7 @@ remove_pacman() {
   else
     log "$PKG_NAME is not installed; nothing for pacman to remove"
   fi
+  [ -z "$(other_shared_users)" ] || return 0
   if [ "$dry_run" -eq 0 ] && [ -f "$PACMAN_CONF" ]; then
     _tmpconf="$PACMAN_CONF.reprobuild.$$"
     awk -v b="$PACMAN_BEGIN" -v e="$PACMAN_END" '
@@ -686,18 +733,31 @@ directory listing is not a release policy, and guessing is worse.'
   _top="$_stage/reprobuild-$_ver-$_plat-$_arch"
   [ -d "$_top" ] || die "archive did not contain the expected top-level directory reprobuild-$_ver-$_plat-$_arch"
 
+  # The archive tree goes in INTACT under $prefix/lib/reprobuild, as the
+  # packages install it: its launchers find their loader at
+  # "$(dirname "$0")/../lib". Its lib/ carries a bundled glibc and
+  # libstdc++, and must never be spread into $prefix/lib itself, which
+  # is on the default loader path of most distributions: every program
+  # on the machine would start loading reprobuild's libc.
+  _home="$TARBALL_PREFIX/lib/reprobuild"
   : > "$TARBALL_MANIFEST"
+  rm -rf "$_home"
+  mkdir -p "$_home" "$TARBALL_PREFIX/bin"
   for _sub in bin lib; do
     [ -d "$_top/$_sub" ] || continue
-    mkdir -p "$TARBALL_PREFIX/$_sub"
-    for _f in "$_top/$_sub"/*; do
-      [ -e "$_f" ] || continue
-      _b="$(basename "$_f")"
-      cp -a "$_f" "$TARBALL_PREFIX/$_sub/$_b"
-      # Record every installed path, so --uninstall removes exactly
-      # these and never globs the prefix.
-      printf '%s\n' "$TARBALL_PREFIX/$_sub/$_b" >> "$TARBALL_MANIFEST"
-    done
+    cp -a "$_top/$_sub" "$_home/$_sub"
+  done
+  # Recorded as one directory, so --uninstall removes exactly it.
+  printf '%s\n' "$_home" >> "$TARBALL_MANIFEST"
+  for _c in "$_home/bin"/*; do
+    _b="$(basename "$_c")"
+    case "$_b" in .*|*.json) continue ;; esac
+    [ -f "$_c" ] && [ -x "$_c" ] || continue
+    printf '#!/bin/sh\nexec %s "$@"\n' "$_home/bin/$_b" > "$TARBALL_PREFIX/bin/$_b"
+    chmod 0755 "$TARBALL_PREFIX/bin/$_b"
+    # Record every installed path, so --uninstall removes exactly
+    # these and never globs the prefix.
+    printf '%s\n' "$TARBALL_PREFIX/bin/$_b" >> "$TARBALL_MANIFEST"
   done
   printf '%s\n' "$_ver" > "$(dirname "$TARBALL_MANIFEST")/version"
   log "tarball install complete under $TARBALL_PREFIX (manifest: $TARBALL_MANIFEST)"
@@ -712,7 +772,8 @@ remove_tarball() {
   fi
   while IFS= read -r _p; do
     [ -n "$_p" ] || continue
-    run rm -f "$_p"
+    # The one directory the manifest records is the intact archive tree.
+    if [ -d "$_p" ]; then run rm -rf "$_p"; else run rm -f "$_p"; fi
   done < "$TARBALL_MANIFEST"
   run rm -f "$TARBALL_MANIFEST" "$(dirname "$TARBALL_MANIFEST")/version"
   log 'tarball install removed'
@@ -732,10 +793,17 @@ uninstall_all() {
     tarball) remove_tarball ;;
     *) die "cannot uninstall with method=$method" ;;
   esac
-  # The trust anchor goes too. Leaving it means an "uninstalled" machine
-  # still trusts reprobuild's signing key for anything that re-adds the
-  # repo, which is not what a user who uninstalled asked for.
-  run rm -f "$KEYRING_DEST"
+  release_shared_entry
+  _others="$(other_shared_users | tr '\n' ' ')"
+  if [ -n "$_others" ]; then
+    log "keeping the Metacraft Labs repository and key: still used by ${_others% }"
+  else
+    # The trust anchor goes too. Leaving it means an "uninstalled" machine
+    # still trusts the signing key for anything that re-adds the repo,
+    # which is not what a user who uninstalled asked for.
+    run rm -f "$KEYRING_DEST"
+    run rmdir "$REPO_USERS_DIR" 2>/dev/null || true
+  fi
   # A tarball install alongside a package install is possible (someone
   # tried both); remove that record too rather than leaving a stale one.
   [ "$method" = 'tarball' ] || remove_tarball >/dev/null 2>&1 || true
@@ -766,6 +834,7 @@ case "$method" in
     # shellcheck disable=SC2064
     trap "rm -rf '$_tmp'" EXIT INT TERM
     install_trust_anchor "$_tmp"
+    claim_shared_entry
     case "$method" in
       apt)    register_apt;    install_apt ;;
       dnf)    register_dnf;    install_dnf ;;

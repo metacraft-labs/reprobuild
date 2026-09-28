@@ -39,7 +39,7 @@
 #
 # ## Fedora's own repositories are excluded from OUR transactions
 #
-# Every dnf call below runs with --disablerepo='*' --enablerepo=reprobuild.
+# Every dnf call below runs with --disablerepo='*' --enablerepo=metacraft-labs.
 # Not for speed: with Fedora's mirrors in scope, a mirror hiccup produces
 # the same non-zero exit as a rejected signature, and this arm would
 # report a green rejection for the wrong reason. The commands are still
@@ -72,7 +72,18 @@ V2='0.1.4'
 PKG='reprobuild'
 BIN='/usr/bin/repro'
 KEYRING_DEST='/usr/share/keyrings/reprobuild-archive-keyring.gpg'
-REPO_DEST='/etc/yum.repos.d/reprobuild.repo'
+REPO_DEST='/etc/yum.repos.d/metacraft-labs.repo'
+
+# The installer serves the ORGANISATION's repositories by default: one
+# source entry, one armoured key, one pacman section, shared by every
+# Metacraft product. The fixture repositories below are built by
+# repro-publish-repos.sh, which emits a BINARY keyring and a pacman
+# database named `reprobuild`, so the arm points the installer at those
+# names. The entry's file names stay the organisation's.
+REPRO_KEYRING_FILE='reprobuild-archive-keyring.gpg'
+REPRO_ARCH_REPO_NAME='reprobuild'
+REPRO_REPO_USERS_DIR='/var/lib/metacraft-labs/repository-users'
+export REPRO_KEYRING_FILE REPRO_ARCH_REPO_NAME REPRO_REPO_USERS_DIR
 
 fails=0
 checks=0
@@ -127,7 +138,7 @@ done
 DNF='dnf5'
 command -v dnf5 >/dev/null 2>&1 || DNF='dnf'
 # Every transaction is scoped to OUR repository; see the header.
-dnf_only() { "$DNF" -y --disablerepo='*' --enablerepo=reprobuild "$@"; }
+dnf_only() { "$DNF" -y --disablerepo='*' --enablerepo=metacraft-labs "$@"; }
 
 echo "os=${PRETTY_NAME:-?} dnf=$("$DNF" --version 2>&1 | head -1) rpm=$(rpm --version)"
 ARCH="$(rpm --eval '%{_arch}')"
@@ -210,15 +221,23 @@ make_tarball() {
   _top="reprobuild-$_v-linux-x86_64"
   _d="$WORK/tarballs/$_top"
   rm -rf "$_d"; mkdir -p "$_d/bin" "$_d/lib"
-  cat > "$_d/bin/repro" <<PAYLOAD
+  # Shaped like the release launcher: what it runs lives at
+  # "$(dirname "$0")/../lib". The version comes from there, so a package
+  # that installs bin/ and lib/ apart installs a command that cannot start,
+  # and the upgrade assertions on installed bytes fail instead of passing.
+  cat > "$_d/bin/repro" <<'PAYLOAD'
 #!/bin/sh
-case "\${1:-}" in
-  --version|-V) printf 'reprobuild %s\n' "$_v" ;;
-  *) printf 'reprobuild %s (M3 gate fixture payload)\n' "$_v" ;;
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+lib="$here/../lib/libreprofixture.so"
+[ -f "$lib" ] || { echo "repro: missing $lib" >&2; exit 127; }
+v=$(sed -n 's/^version //p' "$lib")
+case "${1:-}" in
+  --version|-V) printf 'reprobuild %s\n' "$v" ;;
+  *) printf 'reprobuild %s (M3 gate fixture payload)\n' "$v" ;;
 esac
 PAYLOAD
   chmod 0755 "$_d/bin/repro"
-  printf 'fixture runtime lib for %s\n' "$_v" > "$_d/lib/libreprofixture.so"
+  printf 'version %s\n' "$_v" > "$_d/lib/libreprofixture.so"
   ( cd "$WORK/tarballs" && tar -czf "$_top.tar.gz" "$_top" )
   echo "$WORK/tarballs/$_top.tar.gz"
 }
@@ -382,7 +401,7 @@ fi
 step 'R1  installer FAILS CLOSED with no pinned trust anchor digest'
 # =====================================================================
 set +e
-env REPRO_BASE_URL="$BASE" sh "$INSTALL_SH" --method dnf >"$WORK/r1.log" 2>&1
+env REPRO_BASE_URL="$BASE" REPRO_KEYRING_SHA256='' sh "$INSTALL_SH" --method dnf >"$WORK/r1.log" 2>&1
 R1_RC=$?
 set -e
 assert_ne "$R1_RC" '0' 'R1 installer exited non-zero with no digest pinned'
@@ -476,7 +495,7 @@ before_repo_sha="$(sha256sum "$REPO_DEST" | awk '{print $1}')"
 before_keyring_sha="$(sha256sum "$KEYRING_DEST" | awk '{print $1}')"
 before_version="$(installed_version)"
 before_nevra="$(installed_nevra)"
-before_repo_files="$(find /etc/yum.repos.d -name '*reprobuild*' -type f | wc -l | tr -d ' ')"
+before_repo_files="$(find /etc/yum.repos.d -name '*metacraft-labs*' -type f | wc -l | tr -d ' ')"
 before_keyrings="$(find /usr/share/keyrings -name '*reprobuild*' -type f | wc -l | tr -d ' ')"
 before_baseurls="$(grep -c '^baseurl=' "$REPO_DEST" || true)"
 before_rpmkeys="$(rpm -qa 'gpg-pubkey*' | wc -l | tr -d ' ')"
@@ -488,8 +507,8 @@ R4_RC=$?
 set -e
 assert_eq "$R4_RC" '0' 'R4 second installer run exited 0 (so "no change" is not "it crashed")'
 
-assert_eq "$(find /etc/yum.repos.d -name '*reprobuild*' -type f | wc -l | tr -d ' ')" "$before_repo_files" 'R4 repo file count unchanged'
-assert_eq "$(find /etc/yum.repos.d -name '*reprobuild*' -type f | wc -l | tr -d ' ')" '1' 'R4 exactly ONE dnf repo file'
+assert_eq "$(find /etc/yum.repos.d -name '*metacraft-labs*' -type f | wc -l | tr -d ' ')" "$before_repo_files" 'R4 repo file count unchanged'
+assert_eq "$(find /etc/yum.repos.d -name '*metacraft-labs*' -type f | wc -l | tr -d ' ')" '1' 'R4 exactly ONE dnf repo file'
 assert_eq "$(grep -c '^baseurl=' "$REPO_DEST" || true)" "$before_baseurls" 'R4 baseurl count unchanged'
 assert_eq "$(grep -c '^baseurl=' "$REPO_DEST" || true)" '1' 'R4 exactly ONE baseurl (no duplicate registration)'
 assert_eq "$(find /usr/share/keyrings -name '*reprobuild*' -type f | wc -l | tr -d ' ')" "$before_keyrings" 'R4 keyring count unchanged'
@@ -530,7 +549,7 @@ assert_eq "$(find "$WWW/rpm" -maxdepth 1 -name '*.rpm' | wc -l | tr -d ' ')" '2'
   'R5 the published repo carries BOTH versions'
 
 dnf_reset
-run_capture "$WORK/r5-upgrades.log" "$DNF" --disablerepo='*' --enablerepo=reprobuild list --upgrades || true
+run_capture "$WORK/r5-upgrades.log" "$DNF" --disablerepo='*' --enablerepo=metacraft-labs list --upgrades || true
 cat "$WORK/r5-upgrades.log"
 assert_matches "$WORK/r5-upgrades.log" "$PKG" 'R5 dnf lists reprobuild among available upgrades'
 assert_matches "$WORK/r5-upgrades.log" "$V2" "R5 the upgrade entry names $V2"
@@ -750,7 +769,7 @@ assert_eq "$(installed_version)" '' 'R9 rpm no longer reports the package'
 assert_absent "$REPO_DEST"    'R9 the dnf repo registration'
 assert_absent "$KEYRING_DEST" 'R9 the trust anchor'
 assert_absent "$BIN"          'R9 the installed binary'
-assert_eq "$(find /etc/yum.repos.d -name '*reprobuild*' | wc -l | tr -d ' ')" '0' \
+assert_eq "$(find /etc/yum.repos.d -name '*metacraft-labs*' | wc -l | tr -d ' ')" '0' \
   'R9 no reprobuild file left under /etc/yum.repos.d'
 assert_eq "$(find /usr/share/keyrings -name '*reprobuild*' | wc -l | tr -d ' ')" '0' \
   'R9 no reprobuild keyring left under /usr/share/keyrings'

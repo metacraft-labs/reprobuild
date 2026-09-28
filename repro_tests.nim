@@ -405,6 +405,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_da6_declared_interest_keeps_every_consumer.nim",
+    binary: "build/test-bin/t_da6_declared_interest_keeps_every_consumer",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_daemon_check_platform_refusal.nim",
     binary: "build/test-bin/t_daemon_check_platform_refusal",
     defines: @[],
@@ -1512,6 +1521,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_da6_capture_breadth_dsl_surface.nim",
+    binary: "build/test-bin/t_da6_capture_breadth_dsl_surface",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_declared_package_source_reaches_the_solver_inputs.nim",
     binary: "build/test-bin/t_declared_package_source_reaches_the_solver_inputs",
     defines: @[],
@@ -2486,6 +2504,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
     binary: "build/test-bin/t_recipe_c_compiler_selection_is_loud",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim",
+    binary: "build/test-bin/t_installed_layout_source_roots",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
@@ -9594,6 +9621,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_da6_tool_capture_breadth_declarations.nim",
+    binary: "build/test-bin/t_da6_tool_capture_breadth_declarations",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_daemon_accept_loop_survives_probe.nim",
     binary: "build/test-bin/t_daemon_accept_loop_survives_probe",
     defines: @[],
@@ -14211,24 +14247,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "tests/integration/test_hax_m2_macho_lazy_symbol_and_vtable_interception.nim",
-    binary: "build/test-bin/test_hax_m2_macho_lazy_symbol_and_vtable_interception",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny,
-    selfInterposes: false),
-  TestSpec(
-    source: "tests/integration/test_hax_m3_cli_watcher_triggers_compilation_and_patch_push.nim",
-    binary: "build/test-bin/test_hax_m3_cli_watcher_triggers_compilation_and_patch_push",
-    defines: @[],
-    requiresReproBinary: true,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny,
-    selfInterposes: false),
-  TestSpec(
     source: "tests/unit/t_action_compatibility_key.nim",
     binary: "build/test-bin/t_action_compatibility_key",
     defines: @[],
@@ -15444,6 +15462,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_nimcache_is_worktree_local.nim",
+    binary: "build/test-bin/t_nimcache_is_worktree_local",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_nix_propagated_store_paths.nim",
     binary: "build/test-bin/t_nix_propagated_store_paths",
     defines: @[],
@@ -15869,6 +15896,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_nix_daemon_descriptors.py",
   "tests/unit/test_package_root_anchor.py",
   "tests/unit/test_publish_surface_routing.py",
+  "tests/unit/test_release_native_packages.py",
   "tests/unit/test_reprobuild_suite_inventory.py",
   "tests/unit/test_wrapper_default_provenance.py"
 ]

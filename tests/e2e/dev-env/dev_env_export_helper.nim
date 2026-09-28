@@ -134,14 +134,19 @@ proc runReproExport*(c: M74Case; shell: string): CommandOutcome =
   ## CLI resolves ``fixture_provider.nim`` because we set its module
   ## path via the selector below.
   ##
-  let res = runShell(shellCommand(@[
+  ## The streams are captured APART because that is the contract under
+  ## test: the shell hook ``eval``s stdout and nothing else, while stderr is
+  ## where the activation reports progress ("preparing the environment
+  ## for …", Interactive-UX-And-Progress.md Principle 1). A merged capture
+  ## would hand the syntax checks a script the hook never evaluates.
+  let res = runShellSplit(shellCommand(@[
     c.reproBin,
     "dev-env", "export", shell,
     "--project-root", c.projectRoot
   ], c.envFor().envEntries), c.repoRoot)
   result.exitCode = res.code
-  result.stdout = res.output
-  result.stderr = ""
+  result.stdout = res.stdout
+  result.stderr = res.stderr
 
 proc shellAvailable*(name: string): bool =
   findExe(name).len > 0

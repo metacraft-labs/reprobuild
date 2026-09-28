@@ -232,240 +232,310 @@ proc flipBitAt(s: string; bit: int): string =
   result[bit div 8] =
     char(uint8(result[bit div 8]) xor (1'u8 shl (bit mod 8)))
 
+proc driveHpkeRejectsWrongRecipient() =
+  ## The body of test
+  ##   "t_hpke_rejects_wrong_recipient"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  for aead in [haAes128Gcm, haChaCha20Poly1305]:
+    let (enc, ct) = sealBase(aead, recipientOne.pk, ephemeral,
+                             info, aad, pt)
+    # The positive control, first: the refusals below are worth
+    # nothing unless the same call succeeds for the right key.
+    check openBase(aead, enc, recipientOne.sk, info, aad, ct) == pt
+    # The ciphertext body is exactly as long as the plaintext, so a
+    # wrong-but-plausible answer of the right length exists and is one
+    # XOR away. What follows is the refusal to produce it.
+    check ct.len == pt.len + aead.nt
+    check recipientOne.sk != recipientTwo.sk
+    check mustRefuseOpen("open under the other recipient's key",
+      openBase(aead, enc, recipientTwo.sk, info, aad, ct)) == RefusalTag
+  check producedPlaintexts.len == 0
+
+proc driveHpkeRejectsACorruptedEncapsulatedKey() =
+  ## The body of test
+  ##   "t_hpke_rejects_a_corrupted_encapsulated_key"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  for aead in [haAes128Gcm, haChaCha20Poly1305]:
+    let (enc, ct) = sealBase(aead, recipientOne.pk, ephemeral,
+                             info, aad, pt)
+    check enc.len == Nenc
+    var refused = 0
+    for i in 0 ..< enc.len * 8:
+      let tampered = flipBitAt(enc, i)
+      check tampered != enc
+      # EVERY single-bit corruption of the encapsulated key is refused —
+      # all 256, not one per byte. Not "decrypts differently" — refused.
+      # Bit 255 is the one worth naming: RFC 7748 has the scalar
+      # multiplication IGNORE it, so the Diffie-Hellman output is
+      # unchanged by that flip and only `kem_context` — which binds the
+      # encapsulated key as SENT — can tell the two apart.
+      check mustRefuseOpen("bit " & $i & " of enc",
+        openBase(aead, tampered, recipientOne.sk, info, aad, ct)) ==
+        RefusalTag
+      refused.inc
+    check refused == 256
+    # And the same call without the corruption still works, so the
+    # refusal is about the corruption.
+    check openBase(aead, enc, recipientOne.sk, info, aad, ct) == pt
+  check producedPlaintexts.len == 0
+
+proc driveHpkeRejectsASmallOrderEncapsulatedKeyAtTheSecret() =
+  ## The body of test
+  ##   "t_hpke_rejects_a_small_order_encapsulated_key_at_the_secret"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # A different failure from the one above, and it must stay
+  # different: this one is refused before any key is derived, because
+  # the shared secret is a value an attacker can predict.
+  for aead in [haAes128Gcm, haChaCha20Poly1305]:
+    let (enc, ct) = sealBase(aead, recipientOne.pk, ephemeral,
+                             info, aad, pt)
+    for hexPoint in SmallOrderPoints:
+      let small = hexToBytes("small-order point", hexPoint)
+      check small.len == Nenc
+      let msg = mustRefuseOpen("small-order enc " & hexPoint,
+        openBase(aead, enc = small, skR = recipientOne.sk, info = info,
+                 aad = aad, ct = ct))
+      check msg == RefusalAllZeroSecret
+      # The two refusals are not one refusal wearing two hats.
+      check msg != RefusalTag
+      check not msg.contains(RefusalTag)
+      check not RefusalTag.contains(msg)
+    check openBase(aead, enc, recipientOne.sk, info, aad, ct) == pt
+  check producedPlaintexts.len == 0
+
+proc driveHpkeRejectsTamperedCiphertextAadInfoAndSequence() =
+  ## The body of test
+  ##   "t_hpke_rejects_tampered_ciphertext_aad_info_and_sequence"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let aead = haChaCha20Poly1305
+  let (enc, ct) = sealBase(aead, recipientOne.pk, ephemeral,
+                           info, aad, pt)
+  # A flipped bit in the ciphertext body.
+  check mustRefuseOpen("body",
+    openBase(aead, enc, recipientOne.sk, info, aad,
+             flipBit(ct, 0))) == RefusalTag
+  # A flipped bit in the tag.
+  check mustRefuseOpen("tag",
+    openBase(aead, enc, recipientOne.sk, info, aad,
+             flipBit(ct, ct.len - 1))) == RefusalTag
+  # A different aad.
+  check mustRefuseOpen("aad",
+    openBase(aead, enc, recipientOne.sk, info, aad & "!", ct)) ==
+    RefusalTag
+  # A different info, which changes the key schedule rather than the
+  # AEAD inputs — and is refused all the same.
+  check mustRefuseOpen("info",
+    openBase(aead, enc, recipientOne.sk, info & "!", aad, ct)) ==
+    RefusalTag
+  # A receiver positioned at the wrong sequence number.
+  var out1 = setupBaseR(aead, enc, recipientOne.sk, info)
+  out1.setSequenceNumber(1'u64)
+  check mustRefuseOpen("sequence number",
+    out1.open(aad, ct)) == RefusalTag
+  # A ciphertext with no room for a tag.
+  check mustRefuseOpen("truncated ciphertext",
+    openBase(aead, enc, recipientOne.sk, info, aad, ct[0 ..< 5])) ==
+    RefusalCiphertextShort
+  # A refused open must not move the receiver off the message it is
+  # still waiting for, so the counter advances on success only.
+  var out2 = setupBaseR(aead, enc, recipientOne.sk, info)
+  check out2.seq == 0'u64
+  check mustRefuseOpen("body, counter must not move",
+    out2.open(aad, flipBit(ct, 0))) == RefusalTag
+  check out2.seq == 0'u64
+  check out2.open(aad, ct) == pt
+  check out2.seq == 1'u64
+  # Positive control.
+  check openBase(aead, enc, recipientOne.sk, info, aad, ct) == pt
+  check producedPlaintexts.len == 0
+
+proc driveHpkeRejectsTheWrongSenderInAuthenticatedMode() =
+  ## The body of test
+  ##   "t_hpke_rejects_the_wrong_sender_in_authenticated_mode"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let aead = haAes128Gcm
+  let (enc, ctx) = setupAuthS(aead, recipientOne.pk, ephemeral, info,
+                              sender.sk)
+  var sctx = ctx
+  let ct = sctx.seal(aad, pt)
+  # Positive control: the real sender's public key opens it.
+  var good = setupAuthR(aead, enc, recipientOne.sk, info, sender.pk)
+  check good.open(aad, ct) == pt
+  # A different sender's public key does not, and the failure is a
+  # refusal rather than a different plaintext.
+  check sender.pk != otherSender.pk
+  var bad = setupAuthR(aead, enc, recipientOne.sk, info, otherSender.pk)
+  check mustRefuseOpen("wrong sender key", bad.open(aad, ct)) == RefusalTag
+  # The shared secret really is different, which is what the tag is
+  # detecting.
+  check authDecap(enc, recipientOne.sk, sender.pk) !=
+    authDecap(enc, recipientOne.sk, otherSender.pk)
+  check producedPlaintexts.len == 0
+
 suite "hpke refuses the wrong recipient":
 
   test "t_hpke_rejects_wrong_recipient":
-    for aead in [haAes128Gcm, haChaCha20Poly1305]:
-      let (enc, ct) = sealBase(aead, recipientOne.pk, ephemeral,
-                               info, aad, pt)
-      # The positive control, first: the refusals below are worth
-      # nothing unless the same call succeeds for the right key.
-      check openBase(aead, enc, recipientOne.sk, info, aad, ct) == pt
-      # The ciphertext body is exactly as long as the plaintext, so a
-      # wrong-but-plausible answer of the right length exists and is one
-      # XOR away. What follows is the refusal to produce it.
-      check ct.len == pt.len + aead.nt
-      check recipientOne.sk != recipientTwo.sk
-      check mustRefuseOpen("open under the other recipient's key",
-        openBase(aead, enc, recipientTwo.sk, info, aad, ct)) == RefusalTag
-    check producedPlaintexts.len == 0
+    driveHpkeRejectsWrongRecipient()
 
   test "t_hpke_rejects_a_corrupted_encapsulated_key":
-    for aead in [haAes128Gcm, haChaCha20Poly1305]:
-      let (enc, ct) = sealBase(aead, recipientOne.pk, ephemeral,
-                               info, aad, pt)
-      check enc.len == Nenc
-      var refused = 0
-      for i in 0 ..< enc.len * 8:
-        let tampered = flipBitAt(enc, i)
-        check tampered != enc
-        # EVERY single-bit corruption of the encapsulated key is refused —
-        # all 256, not one per byte. Not "decrypts differently" — refused.
-        # Bit 255 is the one worth naming: RFC 7748 has the scalar
-        # multiplication IGNORE it, so the Diffie-Hellman output is
-        # unchanged by that flip and only `kem_context` — which binds the
-        # encapsulated key as SENT — can tell the two apart.
-        check mustRefuseOpen("bit " & $i & " of enc",
-          openBase(aead, tampered, recipientOne.sk, info, aad, ct)) ==
-          RefusalTag
-        refused.inc
-      check refused == 256
-      # And the same call without the corruption still works, so the
-      # refusal is about the corruption.
-      check openBase(aead, enc, recipientOne.sk, info, aad, ct) == pt
-    check producedPlaintexts.len == 0
+    driveHpkeRejectsACorruptedEncapsulatedKey()
 
   test "t_hpke_rejects_a_small_order_encapsulated_key_at_the_secret":
-    # A different failure from the one above, and it must stay
-    # different: this one is refused before any key is derived, because
-    # the shared secret is a value an attacker can predict.
-    for aead in [haAes128Gcm, haChaCha20Poly1305]:
-      let (enc, ct) = sealBase(aead, recipientOne.pk, ephemeral,
-                               info, aad, pt)
-      for hexPoint in SmallOrderPoints:
-        let small = hexToBytes("small-order point", hexPoint)
-        check small.len == Nenc
-        let msg = mustRefuseOpen("small-order enc " & hexPoint,
-          openBase(aead, enc = small, skR = recipientOne.sk, info = info,
-                   aad = aad, ct = ct))
-        check msg == RefusalAllZeroSecret
-        # The two refusals are not one refusal wearing two hats.
-        check msg != RefusalTag
-        check not msg.contains(RefusalTag)
-        check not RefusalTag.contains(msg)
-      check openBase(aead, enc, recipientOne.sk, info, aad, ct) == pt
-    check producedPlaintexts.len == 0
+    driveHpkeRejectsASmallOrderEncapsulatedKeyAtTheSecret()
 
   test "t_hpke_rejects_tampered_ciphertext_aad_info_and_sequence":
-    let aead = haChaCha20Poly1305
-    let (enc, ct) = sealBase(aead, recipientOne.pk, ephemeral,
-                             info, aad, pt)
-    # A flipped bit in the ciphertext body.
-    check mustRefuseOpen("body",
-      openBase(aead, enc, recipientOne.sk, info, aad,
-               flipBit(ct, 0))) == RefusalTag
-    # A flipped bit in the tag.
-    check mustRefuseOpen("tag",
-      openBase(aead, enc, recipientOne.sk, info, aad,
-               flipBit(ct, ct.len - 1))) == RefusalTag
-    # A different aad.
-    check mustRefuseOpen("aad",
-      openBase(aead, enc, recipientOne.sk, info, aad & "!", ct)) ==
-      RefusalTag
-    # A different info, which changes the key schedule rather than the
-    # AEAD inputs — and is refused all the same.
-    check mustRefuseOpen("info",
-      openBase(aead, enc, recipientOne.sk, info & "!", aad, ct)) ==
-      RefusalTag
-    # A receiver positioned at the wrong sequence number.
-    var out1 = setupBaseR(aead, enc, recipientOne.sk, info)
-    out1.setSequenceNumber(1'u64)
-    check mustRefuseOpen("sequence number",
-      out1.open(aad, ct)) == RefusalTag
-    # A ciphertext with no room for a tag.
-    check mustRefuseOpen("truncated ciphertext",
-      openBase(aead, enc, recipientOne.sk, info, aad, ct[0 ..< 5])) ==
-      RefusalCiphertextShort
-    # A refused open must not move the receiver off the message it is
-    # still waiting for, so the counter advances on success only.
-    var out2 = setupBaseR(aead, enc, recipientOne.sk, info)
-    check out2.seq == 0'u64
-    check mustRefuseOpen("body, counter must not move",
-      out2.open(aad, flipBit(ct, 0))) == RefusalTag
-    check out2.seq == 0'u64
-    check out2.open(aad, ct) == pt
-    check out2.seq == 1'u64
-    # Positive control.
-    check openBase(aead, enc, recipientOne.sk, info, aad, ct) == pt
-    check producedPlaintexts.len == 0
+    driveHpkeRejectsTamperedCiphertextAadInfoAndSequence()
 
   test "t_hpke_rejects_the_wrong_sender_in_authenticated_mode":
-    let aead = haAes128Gcm
-    let (enc, ctx) = setupAuthS(aead, recipientOne.pk, ephemeral, info,
-                                sender.sk)
-    var sctx = ctx
-    let ct = sctx.seal(aad, pt)
-    # Positive control: the real sender's public key opens it.
-    var good = setupAuthR(aead, enc, recipientOne.sk, info, sender.pk)
-    check good.open(aad, ct) == pt
-    # A different sender's public key does not, and the failure is a
-    # refusal rather than a different plaintext.
-    check sender.pk != otherSender.pk
-    var bad = setupAuthR(aead, enc, recipientOne.sk, info, otherSender.pk)
-    check mustRefuseOpen("wrong sender key", bad.open(aad, ct)) == RefusalTag
-    # The shared secret really is different, which is what the tag is
-    # detecting.
-    check authDecap(enc, recipientOne.sk, sender.pk) !=
-      authDecap(enc, recipientOne.sk, otherSender.pk)
-    check producedPlaintexts.len == 0
+    driveHpkeRejectsTheWrongSenderInAuthenticatedMode()
+
+proc driveHpkeRejectsKeysAndEncapsulationsOfTheWrongLength() =
+  ## The body of test
+  ##   "t_hpke_rejects_keys_and_encapsulations_of_the_wrong_length"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let short31 = repeat('\0', 31)
+  let long33 = repeat('\0', 33)
+  check mustRefuse("short scalar", dh(short31, recipientOne.pk)) ==
+    RefusalScalarLength
+  check mustRefuse("long point", dh(recipientOne.sk, long33)) ==
+    RefusalPointLength
+  check mustRefuse("short private key",
+    publicKey(repeat('\0', 16))) == RefusalPrivateKeyLength
+  check mustRefuse("short recipient key",
+    encapWithEphemeral(short31, ephemeral)) == RefusalEncapRecipient
+  check mustRefuse("short enc",
+    decap(short31, recipientOne.sk)) == RefusalDecapEnc
+  check mustRefuse("short auth recipient key",
+    authEncapWithEphemeral(short31, ephemeral, sender.sk)) ==
+    RefusalAuthEncapRecipient
+  check mustRefuse("short auth enc",
+    authDecap(short31, recipientOne.sk, sender.pk)) ==
+    RefusalAuthDecapEnc
+  check mustRefuse("short sender key",
+    authDecap(recipientOne.pk, recipientOne.sk, short31)) ==
+    RefusalAuthDecapSender
+  # A malformed ephemeral PUBLIC key is the input that reaches the
+  # kem_context width rule: everything else in the concatenation has
+  # already been length-checked, and this one has not.
+  let malformed = HpkeKeyPair(sk: ephemeral.sk, pk: ephemeral.pk[0 ..< 31])
+  check mustRefuse("malformed ephemeral public key",
+    encapWithEphemeral(recipientOne.pk, malformed)) ==
+    RefusalKemContextWidth
+  # Positive controls for all of the above.
+  check dh(recipientOne.sk, ephemeral.pk).len == Nsecret
+  check publicKey(recipientOne.sk) == recipientOne.pk
+  check encapWithEphemeral(recipientOne.pk, ephemeral).enc == ephemeral.pk
+  check decap(ephemeral.pk, recipientOne.sk).len == Nsecret
+
+proc driveHpkeRejectsASeedBelowTheFloor() =
+  ## The body of test
+  ##   "t_hpke_rejects_a_seed_below_the_floor"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  check mustRefuse("31-byte seed",
+    deriveKeyPair(repeat('\0', 31))) == RefusalSeedFloor
+  # The bound is tested AT the bound, not under it: 32 works.
+  check deriveKeyPair(repeat('\0', 32)).sk.len == Nsk
+
+proc driveHpkeRejectsInconsistentPskInputs() =
+  ## The body of test
+  ##   "t_hpke_rejects_inconsistent_psk_inputs"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let shared = repeat('\0', Nsecret)
+  check mustRefuse("psk without psk_id",
+    keySchedule(haAes128Gcm, hmPsk, shared, info, psk,
+                        DefaultPskId)) == RefusalPskWithoutId
+  check mustRefuse("psk_id without psk",
+    keySchedule(haAes128Gcm, hmPsk, shared, info, DefaultPsk,
+                        pskId)) == RefusalPskIdWithoutPsk
+  check mustRefuse("psk under base mode",
+    keySchedule(haAes128Gcm, hmBase, shared, info, psk,
+                        pskId)) == RefusalPskUnderWrongMode
+  check mustRefuse("psk under auth mode",
+    keySchedule(haAes128Gcm, hmAuth, shared, info, psk,
+                        pskId)) == RefusalPskUnderWrongMode
+  check mustRefuse("no psk under psk mode",
+    keySchedule(haAes128Gcm, hmPsk, shared, info, DefaultPsk,
+                        DefaultPskId)) == RefusalPskMissing
+  check mustRefuse("no psk under auth-psk mode",
+    keySchedule(haAes128Gcm, hmAuthPsk, shared, info, DefaultPsk,
+                        DefaultPskId)) == RefusalPskMissing
+  check mustRefuse("31-byte psk",
+    keySchedule(haAes128Gcm, hmPsk, shared, info,
+                        repeat('\0', 31), pskId)) == RefusalPskTooShort
+  # The floor is tested AT the floor: 32 is accepted.
+  check keySchedule(haAes128Gcm, hmPsk, shared, info,
+                    repeat('\0', 32), pskId).key.len == haAes128Gcm.nk
+  # …and each of the four modes is accepted with the inputs it does
+  # want, so none of the refusals above is universal.
+  check keySchedule(haAes128Gcm, hmBase, shared, info, DefaultPsk,
+                    DefaultPskId).mode == hmBase
+  check keySchedule(haAes128Gcm, hmAuth, shared, info, DefaultPsk,
+                    DefaultPskId).mode == hmAuth
+  check keySchedule(haAes128Gcm, hmPsk, shared, info, psk, pskId).mode ==
+    hmPsk
+  check keySchedule(haAes128Gcm, hmAuthPsk, shared, info, psk,
+                    pskId).mode == hmAuthPsk
+
+proc driveHpkeRejectsExportLengthsOutsideTheHkdfRange() =
+  ## The body of test
+  ##   "t_hpke_rejects_export_lengths_outside_the_hkdf_range"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var ctx = setupBaseR(
+    haAes128Gcm,
+    encapWithEphemeral(recipientOne.pk, ephemeral).enc,
+    recipientOne.sk, info)
+  check mustRefuse("negative export length",
+    ctx.exportSecret("", -1)) == RefusalExpandNegative
+  check mustRefuse("export past the ceiling",
+    ctx.exportSecret("", 255 * Nh + 1)) == RefusalExpandCeiling
+  # The bound is tested AT the bound: 255 * Nh is the largest length
+  # RFC 5869 admits, and it is produced rather than refused.
+  check ctx.exportSecret("", 255 * Nh).len == 255 * Nh
+  check ctx.exportSecret("", 0).len == 0
+
+proc driveHpkeRefusesToReuseANonceWhenTheCounterIsExhausted() =
+  ## The body of test
+  ##   "t_hpke_refuses_to_reuse_a_nonce_when_the_counter_is_exhausted"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var ctx = setupBaseR(
+    haChaCha20Poly1305,
+    encapWithEphemeral(recipientOne.pk, ephemeral).enc,
+    recipientOne.sk, info)
+  # One below the ceiling still seals, and lands exactly on it.
+  ctx.setSequenceNumber(high(uint64) - 1'u64)
+  discard ctx.seal(aad, pt)
+  check ctx.seq == high(uint64)
+  # On the ceiling it refuses, and the counter has not moved.
+  check mustRefuse("exhausted counter", ctx.seal(aad, pt)) ==
+    RefusalSeqExhausted
+  check ctx.seq == high(uint64)
 
 suite "hpke refuses malformed inputs":
 
   test "t_hpke_rejects_keys_and_encapsulations_of_the_wrong_length":
-    let short31 = repeat('\0', 31)
-    let long33 = repeat('\0', 33)
-    check mustRefuse("short scalar", dh(short31, recipientOne.pk)) ==
-      RefusalScalarLength
-    check mustRefuse("long point", dh(recipientOne.sk, long33)) ==
-      RefusalPointLength
-    check mustRefuse("short private key",
-      publicKey(repeat('\0', 16))) == RefusalPrivateKeyLength
-    check mustRefuse("short recipient key",
-      encapWithEphemeral(short31, ephemeral)) == RefusalEncapRecipient
-    check mustRefuse("short enc",
-      decap(short31, recipientOne.sk)) == RefusalDecapEnc
-    check mustRefuse("short auth recipient key",
-      authEncapWithEphemeral(short31, ephemeral, sender.sk)) ==
-      RefusalAuthEncapRecipient
-    check mustRefuse("short auth enc",
-      authDecap(short31, recipientOne.sk, sender.pk)) ==
-      RefusalAuthDecapEnc
-    check mustRefuse("short sender key",
-      authDecap(recipientOne.pk, recipientOne.sk, short31)) ==
-      RefusalAuthDecapSender
-    # A malformed ephemeral PUBLIC key is the input that reaches the
-    # kem_context width rule: everything else in the concatenation has
-    # already been length-checked, and this one has not.
-    let malformed = HpkeKeyPair(sk: ephemeral.sk, pk: ephemeral.pk[0 ..< 31])
-    check mustRefuse("malformed ephemeral public key",
-      encapWithEphemeral(recipientOne.pk, malformed)) ==
-      RefusalKemContextWidth
-    # Positive controls for all of the above.
-    check dh(recipientOne.sk, ephemeral.pk).len == Nsecret
-    check publicKey(recipientOne.sk) == recipientOne.pk
-    check encapWithEphemeral(recipientOne.pk, ephemeral).enc == ephemeral.pk
-    check decap(ephemeral.pk, recipientOne.sk).len == Nsecret
+    driveHpkeRejectsKeysAndEncapsulationsOfTheWrongLength()
 
   test "t_hpke_rejects_a_seed_below_the_floor":
-    check mustRefuse("31-byte seed",
-      deriveKeyPair(repeat('\0', 31))) == RefusalSeedFloor
-    # The bound is tested AT the bound, not under it: 32 works.
-    check deriveKeyPair(repeat('\0', 32)).sk.len == Nsk
+    driveHpkeRejectsASeedBelowTheFloor()
 
   test "t_hpke_rejects_inconsistent_psk_inputs":
-    let shared = repeat('\0', Nsecret)
-    check mustRefuse("psk without psk_id",
-      keySchedule(haAes128Gcm, hmPsk, shared, info, psk,
-                          DefaultPskId)) == RefusalPskWithoutId
-    check mustRefuse("psk_id without psk",
-      keySchedule(haAes128Gcm, hmPsk, shared, info, DefaultPsk,
-                          pskId)) == RefusalPskIdWithoutPsk
-    check mustRefuse("psk under base mode",
-      keySchedule(haAes128Gcm, hmBase, shared, info, psk,
-                          pskId)) == RefusalPskUnderWrongMode
-    check mustRefuse("psk under auth mode",
-      keySchedule(haAes128Gcm, hmAuth, shared, info, psk,
-                          pskId)) == RefusalPskUnderWrongMode
-    check mustRefuse("no psk under psk mode",
-      keySchedule(haAes128Gcm, hmPsk, shared, info, DefaultPsk,
-                          DefaultPskId)) == RefusalPskMissing
-    check mustRefuse("no psk under auth-psk mode",
-      keySchedule(haAes128Gcm, hmAuthPsk, shared, info, DefaultPsk,
-                          DefaultPskId)) == RefusalPskMissing
-    check mustRefuse("31-byte psk",
-      keySchedule(haAes128Gcm, hmPsk, shared, info,
-                          repeat('\0', 31), pskId)) == RefusalPskTooShort
-    # The floor is tested AT the floor: 32 is accepted.
-    check keySchedule(haAes128Gcm, hmPsk, shared, info,
-                      repeat('\0', 32), pskId).key.len == haAes128Gcm.nk
-    # …and each of the four modes is accepted with the inputs it does
-    # want, so none of the refusals above is universal.
-    check keySchedule(haAes128Gcm, hmBase, shared, info, DefaultPsk,
-                      DefaultPskId).mode == hmBase
-    check keySchedule(haAes128Gcm, hmAuth, shared, info, DefaultPsk,
-                      DefaultPskId).mode == hmAuth
-    check keySchedule(haAes128Gcm, hmPsk, shared, info, psk, pskId).mode ==
-      hmPsk
-    check keySchedule(haAes128Gcm, hmAuthPsk, shared, info, psk,
-                      pskId).mode == hmAuthPsk
+    driveHpkeRejectsInconsistentPskInputs()
 
   test "t_hpke_rejects_export_lengths_outside_the_hkdf_range":
-    var ctx = setupBaseR(
-      haAes128Gcm,
-      encapWithEphemeral(recipientOne.pk, ephemeral).enc,
-      recipientOne.sk, info)
-    check mustRefuse("negative export length",
-      ctx.exportSecret("", -1)) == RefusalExpandNegative
-    check mustRefuse("export past the ceiling",
-      ctx.exportSecret("", 255 * Nh + 1)) == RefusalExpandCeiling
-    # The bound is tested AT the bound: 255 * Nh is the largest length
-    # RFC 5869 admits, and it is produced rather than refused.
-    check ctx.exportSecret("", 255 * Nh).len == 255 * Nh
-    check ctx.exportSecret("", 0).len == 0
+    driveHpkeRejectsExportLengthsOutsideTheHkdfRange()
 
   test "t_hpke_refuses_to_reuse_a_nonce_when_the_counter_is_exhausted":
-    var ctx = setupBaseR(
-      haChaCha20Poly1305,
-      encapWithEphemeral(recipientOne.pk, ephemeral).enc,
-      recipientOne.sk, info)
-    # One below the ceiling still seals, and lands exactly on it.
-    ctx.setSequenceNumber(high(uint64) - 1'u64)
-    discard ctx.seal(aad, pt)
-    check ctx.seq == high(uint64)
-    # On the ceiling it refuses, and the counter has not moved.
-    check mustRefuse("exhausted counter", ctx.seal(aad, pt)) ==
-      RefusalSeqExhausted
-    check ctx.seq == high(uint64)
+    driveHpkeRefusesToReuseANonceWhenTheCounterIsExhausted()
 
   test "t_hpke_constant_time_equality_is_length_aware":
     # `aeadOpen` refuses a short ciphertext before it compares anything,
@@ -487,11 +557,43 @@ suite "hpke refuses malformed inputs":
     check not constTimeEq(tag, flipBit(tag, 7))
     check not constTimeEq(tag, flipBit(tag, 15))
 
+# Every case above that raises a refusal. The discipline case drives all
+# of them itself: the suite runner executes each case in its own process
+# (`--run suite::test`), so `refusals` and `producedPlaintexts` hold only
+# what ran in THIS process, and a case that read what earlier cases left
+# behind would measure the execution mode rather than the library.
+const RefusalDrivers: seq[(string, proc () {.nimcall.})] = @[
+  ("t_hpke_rejects_wrong_recipient", driveHpkeRejectsWrongRecipient),
+  ("t_hpke_rejects_a_corrupted_encapsulated_key",
+    driveHpkeRejectsACorruptedEncapsulatedKey),
+  ("t_hpke_rejects_a_small_order_encapsulated_key_at_the_secret",
+    driveHpkeRejectsASmallOrderEncapsulatedKeyAtTheSecret),
+  ("t_hpke_rejects_tampered_ciphertext_aad_info_and_sequence",
+    driveHpkeRejectsTamperedCiphertextAadInfoAndSequence),
+  ("t_hpke_rejects_the_wrong_sender_in_authenticated_mode",
+    driveHpkeRejectsTheWrongSenderInAuthenticatedMode),
+  ("t_hpke_rejects_keys_and_encapsulations_of_the_wrong_length",
+    driveHpkeRejectsKeysAndEncapsulationsOfTheWrongLength),
+  ("t_hpke_rejects_a_seed_below_the_floor",
+    driveHpkeRejectsASeedBelowTheFloor),
+  ("t_hpke_rejects_inconsistent_psk_inputs",
+    driveHpkeRejectsInconsistentPskInputs),
+  ("t_hpke_rejects_export_lengths_outside_the_hkdf_range",
+    driveHpkeRejectsExportLengthsOutsideTheHkdfRange),
+  ("t_hpke_refuses_to_reuse_a_nonce_when_the_counter_is_exhausted",
+    driveHpkeRefusesToReuseANonceWhenTheCounterIsExhausted)]
+
 suite "hpke refusal discipline":
 
   test "t_hpke_no_two_refusals_hide_behind_one_another":
-    # Everything above has run by now, so `refusals` holds one entry per
-    # refusal that actually fired.
+    # Every refusing case above is driven here, from empty state, so
+    # `refusals` holds one entry per refusal that actually fired in THIS
+    # process — the same verdict alone as after the others.
+    refusals = @[]
+    producedPlaintexts = @[]
+    for (name, drive) in RefusalDrivers:
+      checkpoint("driving " & name)
+      drive()
     var seen = refusals
     seen.sort()
     seen = seen.deduplicate(isSorted = true)

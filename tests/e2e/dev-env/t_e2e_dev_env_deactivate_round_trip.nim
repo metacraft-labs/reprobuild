@@ -371,14 +371,16 @@ suite "e2e_dev_env_deactivate_round_trip_bash":
 
       # Activation.
       var exportEnv = c.envFor()
-      let actRes = runShell(shellCommand(@[
+      # Streams captured apart: the hook evaluates stdout only, and stderr
+      # carries the activation's progress lines, which are not shell code.
+      let actRes = runShellSplit(shellCommand(@[
         c.reproBin,
         "dev-env", "export", "bash",
         "--project-root", c.projectRoot,
         "--pre-activation-env", preEnvFile
       ], exportEnv.envEntries), c.repoRoot)
-      let actStdout = actRes.output
-      let actStderr = ""
+      let actStdout = actRes.stdout
+      let actStderr = actRes.stderr
       let actCode = actRes.code
       if actCode != 0:
         echo "activation stdout:\n", actStdout
@@ -396,13 +398,13 @@ suite "e2e_dev_env_deactivate_round_trip_bash":
       check fileExists(manifestPath)
 
       # Deactivation.
-      let deactRes = runShell(shellCommand(@[
+      let deactRes = runShellSplit(shellCommand(@[
         c.reproBin,
         "dev-env", "deactivate", manifestPath,
         "--shell", "bash"
       ], exportEnv.envEntries), c.repoRoot)
-      let deactStdout = deactRes.output
-      let deactStderr = ""
+      let deactStdout = deactRes.stdout
+      let deactStderr = deactRes.stderr
       let deactCode = deactRes.code
       if deactCode != 0:
         echo "deactivation stdout:\n", deactStdout

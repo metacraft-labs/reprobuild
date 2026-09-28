@@ -14,6 +14,7 @@ import std/[strutils, unittest]
 
 import repro_project_dsl
 import repro_dsl_stdlib/packaging
+import repro_interface_artifacts
 import ./packaging_test_support
 
 proc reprobuildSample(targetOs = toLinux): Distribution =
@@ -185,6 +186,22 @@ suite "packaging: reprobuild's own distribution":
     check cliRoot == PrefixToken & "/share/repro/source"
     check ReprobuildSourceRootSubdir == "share/repro/source"
     check not ReprobuildSourceRootSubdir.contains(ReprobuildPackageName)
+
+  test "a release archive seeds exactly the source roots the wrapper sets":
+    # A release ARCHIVE has no wrapper: ``repro.exe`` is run directly, so
+    # the image seeds its own source roots from ``share/repro`` beside its
+    # ``bin`` (``repro_interface_artifacts.InstalledSourcePackageTrees``).
+    # That table and this wrapper list describe the SAME installed tree;
+    # if they drift, an archive and a package that ship identical bytes
+    # resolve different sources.
+    let srcPrefix = PrefixToken & "/" & ReprobuildSourceSubdir & "/"
+    var fromWrapper: seq[(string, string)] = @[]
+    for (name, value) in reprobuildToolWrapperValues(reprobuildSample()):
+      if value.startsWith(srcPrefix):
+        fromWrapper.add((name, value[srcPrefix.len .. ^1]))
+    check fromWrapper == @InstalledSourcePackageTrees
+    check InstalledSourceRootSubdir == ReprobuildSourceRootSubdir
+    check InstalledSourceTreesSubdir == ReprobuildSourceSubdir
 
   test "the cache package sets NO wrapper variables, and that is measured":
     # M1's N9. The cache package carried the CLI's whole value list

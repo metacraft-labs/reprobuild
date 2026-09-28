@@ -332,6 +332,61 @@ suite "snp report structure":
       check v.endorsedTcb.snp == s.snp
       check v.endorsedTcb.microcode == s.microcode
 
+proc driveSnpAScalarWiderThanItsCurveIsRefusedBeforeArithmetic() =
+  ## The body of test
+  ##   "t_snp_a_scalar_wider_than_its_curve_is_refused_before_arithmetic"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Byte 48 of the 72-byte field: above a P-384 scalar. A reader that
+  # took the low 48 bytes would accept this as the SAME signature,
+  # which is a malleability an audit log cannot see through.
+  for half in 0 .. 1:
+    for extra in [0, 12, 23]:
+      let offset = SnpSignatureOffset + half * SnpScalarFieldLen +
+        SnpP384ScalarLen + extra
+      check offset >= SnpSignatureOffset + SnpP384ScalarLen
+      check offset < SnpSignatureOffset + 2 * SnpScalarFieldLen
+      for s in specimens:
+        check s.report[offset] == 0'u8      # genuine padding is blank
+        let mutated = flipBit(s.report, offset, 4)
+        check bitsDiffering(s.report, mutated) == 1
+        expectReportRefusal(sreSignatureScalarTooWide):
+          discard parseSnpReport(mutated)
+
+proc driveSnpABitInTheUnusedSignatureTailIsRefused() =
+  ## The body of test
+  ##   "t_snp_a_bit_in_the_unused_signature_tail_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # 368 bytes that no signature covers and no signed prefix reaches.
+  const TailStart = SnpSignatureOffset + 2 * SnpScalarFieldLen
+  check SnpReportLen - TailStart == 368
+  for offset in [TailStart, TailStart + 100, SnpReportLen - 1]:
+    for s in specimens:
+      check s.report[offset] == 0'u8
+      let mutated = flipBit(s.report, offset, 7)
+      check bitsDiffering(s.report, mutated) == 1
+      # It would still verify: the curve never reads these bytes.
+      expectReportRefusal(sreSignatureTailNotZero):
+        discard parseSnpReport(mutated)
+
+proc driveSnpABitInAReservedSpanIsRefused() =
+  ## The body of test
+  ##   "t_snp_a_bit_in_a_reserved_span_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var spansExercised = 0
+  for span in SnpReservedSpans:
+    inc spansExercised
+    let offset = span.start
+    for s in specimens:
+      check s.report[offset] == 0'u8
+      let mutated = flipBit(s.report, offset, 1)
+      check bitsDiffering(s.report, mutated) == 1
+      expectReportRefusal(sreReservedFieldNotZero):
+        discard parseSnpReport(mutated)
+  check spansExercised == SnpReservedSpans.len
+
 suite "snp single-bit mutations":
 
   test "t_snp_bitflip_in_the_measurement_is_refused":
@@ -385,106 +440,129 @@ suite "snp single-bit mutations":
       check not verifyReportSignature(bad, pointOf(s.vcek))
 
   test "t_snp_a_scalar_wider_than_its_curve_is_refused_before_arithmetic":
-    # Byte 48 of the 72-byte field: above a P-384 scalar. A reader that
-    # took the low 48 bytes would accept this as the SAME signature,
-    # which is a malleability an audit log cannot see through.
-    for half in 0 .. 1:
-      for extra in [0, 12, 23]:
-        let offset = SnpSignatureOffset + half * SnpScalarFieldLen +
-          SnpP384ScalarLen + extra
-        check offset >= SnpSignatureOffset + SnpP384ScalarLen
-        check offset < SnpSignatureOffset + 2 * SnpScalarFieldLen
-        for s in specimens:
-          check s.report[offset] == 0'u8      # genuine padding is blank
-          let mutated = flipBit(s.report, offset, 4)
-          check bitsDiffering(s.report, mutated) == 1
-          expectReportRefusal(sreSignatureScalarTooWide):
-            discard parseSnpReport(mutated)
+    driveSnpAScalarWiderThanItsCurveIsRefusedBeforeArithmetic()
 
   test "t_snp_a_bit_in_the_unused_signature_tail_is_refused":
-    # 368 bytes that no signature covers and no signed prefix reaches.
-    const TailStart = SnpSignatureOffset + 2 * SnpScalarFieldLen
-    check SnpReportLen - TailStart == 368
-    for offset in [TailStart, TailStart + 100, SnpReportLen - 1]:
-      for s in specimens:
-        check s.report[offset] == 0'u8
-        let mutated = flipBit(s.report, offset, 7)
-        check bitsDiffering(s.report, mutated) == 1
-        # It would still verify: the curve never reads these bytes.
-        expectReportRefusal(sreSignatureTailNotZero):
-          discard parseSnpReport(mutated)
+    driveSnpABitInTheUnusedSignatureTailIsRefused()
 
   test "t_snp_a_bit_in_a_reserved_span_is_refused":
-    var spansExercised = 0
-    for span in SnpReservedSpans:
-      inc spansExercised
-      let offset = span.start
-      for s in specimens:
-        check s.report[offset] == 0'u8
-        let mutated = flipBit(s.report, offset, 1)
-        check bitsDiffering(s.report, mutated) == 1
-        expectReportRefusal(sreReservedFieldNotZero):
-          discard parseSnpReport(mutated)
-    check spansExercised == SnpReservedSpans.len
+    driveSnpABitInAReservedSpanIsRefused()
+
+proc driveSnpADocumentOfTheWrongWidthIsRefused() =
+  ## The body of test
+  ##   "t_snp_a_document_of_the_wrong_width_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let before = refusalsObserved
+  let widths = [0, 1, SnpReportLen - 1, SnpReportLen + 1, 2 * SnpReportLen]
+  for n in widths:
+    check n != SnpReportLen
+    expectReportRefusal(sreWrongLength):
+      discard parseSnpReport(newSeq[byte](n))
+  check refusalsObserved - before == widths.len
+
+proc driveSnpAnUnknownStructureRevisionIsRefused() =
+  ## The body of test
+  ##   "t_snp_an_unknown_structure_revision_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  for v in [0'u8, 1'u8, 4'u8, 255'u8]:
+    for s in specimens:
+      var mutated = s.report
+      mutated[OffVersion] = v
+      expectReportRefusal(sreUnsupportedVersion):
+        discard parseSnpReport(mutated)
+  # …and the two it does read are read.
+  check SnpSupportedVersions.len == 2
+  for s in specimens:
+    var v3 = s.report
+    v3[OffVersion] = 3'u8
+    let r = parseSnpReport(v3)
+    check r.version == 3'u32
+
+proc driveSnpTheLaterRevisionFreesExactlyThreeBytesAndNoMore() =
+  ## The body of test
+  ##   "t_snp_the_later_revision_frees_exactly_three_bytes_and_no_more"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The two revisions differ in ONE way: the later one puts three
+  # identification bytes at the head of the span the earlier one
+  # reserves. Setting the version number on a report whose bytes there
+  # are already zero does not observe that difference at all, so the
+  # difference is observed directly instead — the same three bytes,
+  # non-zero, under each revision in turn, and the FOURTH byte, which
+  # neither revision frees.
+  for s in specimens:
+    checkpoint s.label
+    for offset in [OffReserved188, OffReserved188 + 1, OffReserved188 + 2]:
+      check s.report[offset] == 0'u8
+      var v2 = s.report
+      v2[offset] = 0x5a'u8
+      check v2[OffVersion] == 2'u8
+      expectReportRefusal(sreReservedFieldNotZero):
+        discard parseSnpReport(v2)
+      var v3 = v2
+      v3[OffVersion] = 3'u8
+      let r = parseSnpReport(v3)     # the later revision reads it
+      check r.version == 3'u32
+    # The fourth byte is reserved under BOTH, which is what pins the
+    # shift at three rather than at "some".
+    var v3 = s.report
+    v3[OffVersion] = 3'u8
+    v3[OffReserved188 + 3] = 0x5a'u8
+    expectReportRefusal(sreReservedFieldNotZero):
+      discard parseSnpReport(v3)
+    var v2 = s.report
+    v2[OffReserved188 + 3] = 0x5a'u8
+    expectReportRefusal(sreReservedFieldNotZero):
+      discard parseSnpReport(v2)
+
+proc driveSnpAnUnknownSigningAlgorithmIsRefused() =
+  ## The body of test
+  ##   "t_snp_an_unknown_signing_algorithm_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let before = refusalsObserved
+  let algos = [0'u8, 2'u8, 17'u8]
+  for a in algos:
+    check uint32(a) != SnpSignatureAlgoEcdsaP384Sha384
+    for s in specimens:
+      check s.report[OffSignatureAlgo] ==
+        byte(SnpSignatureAlgoEcdsaP384Sha384)
+      var mutated = s.report
+      mutated[OffSignatureAlgo] = a
+      expectReportRefusal(sreUnsupportedSignatureAlgorithm):
+        discard parseSnpReport(mutated)
+  check refusalsObserved - before == algos.len * specimens.len
+
+proc driveSnpAForeignVersionPackingIsRefusedRatherThanMisread() =
+  ## The body of test
+  ##   "t_snp_a_foreign_version_packing_is_refused_rather_than_misread"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Bytes 2-5 of a version field are reserved in the packing this
+  # build reads and are used in a later one. Reading a later part's
+  # report under this layout would report four numbers it never
+  # stated, so it is refused instead.
+  for at in [OffCurrentTcb, OffReportedTcb, OffCommittedTcb, OffLaunchTcb]:
+    for s in specimens:
+      var mutated = s.report
+      mutated[at + 2] = 0x11'u8
+      expectReportRefusal(sreUnsupportedTcbLayout):
+        discard parseSnpReport(mutated)
+  check tcbReservedBytes(0x7308000000000003'u64) == 0'u32
+  check tcbReservedBytes(0x7308000011000003'u64) != 0'u32
 
 suite "snp structural refusals":
 
   test "t_snp_a_document_of_the_wrong_width_is_refused":
-    let before = refusalsObserved
-    let widths = [0, 1, SnpReportLen - 1, SnpReportLen + 1, 2 * SnpReportLen]
-    for n in widths:
-      check n != SnpReportLen
-      expectReportRefusal(sreWrongLength):
-        discard parseSnpReport(newSeq[byte](n))
-    check refusalsObserved - before == widths.len
+    driveSnpADocumentOfTheWrongWidthIsRefused()
 
   test "t_snp_an_unknown_structure_revision_is_refused":
-    for v in [0'u8, 1'u8, 4'u8, 255'u8]:
-      for s in specimens:
-        var mutated = s.report
-        mutated[OffVersion] = v
-        expectReportRefusal(sreUnsupportedVersion):
-          discard parseSnpReport(mutated)
-    # …and the two it does read are read.
-    check SnpSupportedVersions.len == 2
-    for s in specimens:
-      var v3 = s.report
-      v3[OffVersion] = 3'u8
-      let r = parseSnpReport(v3)
-      check r.version == 3'u32
+    driveSnpAnUnknownStructureRevisionIsRefused()
 
   test "t_snp_the_later_revision_frees_exactly_three_bytes_and_no_more":
-    # The two revisions differ in ONE way: the later one puts three
-    # identification bytes at the head of the span the earlier one
-    # reserves. Setting the version number on a report whose bytes there
-    # are already zero does not observe that difference at all, so the
-    # difference is observed directly instead — the same three bytes,
-    # non-zero, under each revision in turn, and the FOURTH byte, which
-    # neither revision frees.
-    for s in specimens:
-      checkpoint s.label
-      for offset in [OffReserved188, OffReserved188 + 1, OffReserved188 + 2]:
-        check s.report[offset] == 0'u8
-        var v2 = s.report
-        v2[offset] = 0x5a'u8
-        check v2[OffVersion] == 2'u8
-        expectReportRefusal(sreReservedFieldNotZero):
-          discard parseSnpReport(v2)
-        var v3 = v2
-        v3[OffVersion] = 3'u8
-        let r = parseSnpReport(v3)     # the later revision reads it
-        check r.version == 3'u32
-      # The fourth byte is reserved under BOTH, which is what pins the
-      # shift at three rather than at "some".
-      var v3 = s.report
-      v3[OffVersion] = 3'u8
-      v3[OffReserved188 + 3] = 0x5a'u8
-      expectReportRefusal(sreReservedFieldNotZero):
-        discard parseSnpReport(v3)
-      var v2 = s.report
-      v2[OffReserved188 + 3] = 0x5a'u8
-      expectReportRefusal(sreReservedFieldNotZero):
-        discard parseSnpReport(v2)
+    driveSnpTheLaterRevisionFreesExactlyThreeBytesAndNoMore()
 
   test "t_snp_the_signing_key_field_is_read_and_every_value_is_reachable":
     # Three named values, and the two reports carry one of them. The
@@ -517,32 +595,10 @@ suite "snp structural refusals":
     check not parseSnpReport(b).authorKeyEnabled
 
   test "t_snp_an_unknown_signing_algorithm_is_refused":
-    let before = refusalsObserved
-    let algos = [0'u8, 2'u8, 17'u8]
-    for a in algos:
-      check uint32(a) != SnpSignatureAlgoEcdsaP384Sha384
-      for s in specimens:
-        check s.report[OffSignatureAlgo] ==
-          byte(SnpSignatureAlgoEcdsaP384Sha384)
-        var mutated = s.report
-        mutated[OffSignatureAlgo] = a
-        expectReportRefusal(sreUnsupportedSignatureAlgorithm):
-          discard parseSnpReport(mutated)
-    check refusalsObserved - before == algos.len * specimens.len
+    driveSnpAnUnknownSigningAlgorithmIsRefused()
 
   test "t_snp_a_foreign_version_packing_is_refused_rather_than_misread":
-    # Bytes 2-5 of a version field are reserved in the packing this
-    # build reads and are used in a later one. Reading a later part's
-    # report under this layout would report four numbers it never
-    # stated, so it is refused instead.
-    for at in [OffCurrentTcb, OffReportedTcb, OffCommittedTcb, OffLaunchTcb]:
-      for s in specimens:
-        var mutated = s.report
-        mutated[at + 2] = 0x11'u8
-        expectReportRefusal(sreUnsupportedTcbLayout):
-          discard parseSnpReport(mutated)
-    check tcbReservedBytes(0x7308000000000003'u64) == 0'u32
-    check tcbReservedBytes(0x7308000011000003'u64) != 0'u32
+    driveSnpAForeignVersionPackingIsRefusedRatherThanMisread()
 
 suite "the curve primitive, reached the way a certificate reaches it":
 
@@ -623,9 +679,41 @@ suite "the curve primitive, reached the way a certificate reaches it":
     check CoseCurveCoordinateLen[ccP384] == SnpP384ScalarLen
     check CoseAlgorithmCurve[caEs384] == ccP384
 
+# The cases above whose inputs build the report-refusal census.
+# The coverage case below drives every one of them itself: the suite
+# runner executes each case in its own process (`--run suite::test`),
+# so the census holds only what ran in THAT process, and a coverage
+# case that read what earlier cases left behind would measure the
+# execution mode rather than the code under test.
+const ReportRefusalDrivers: seq[(string, proc () {.nimcall.})] = @[
+  ("t_snp_a_scalar_wider_than_its_curve_is_refused_before_arithmetic",
+    driveSnpAScalarWiderThanItsCurveIsRefusedBeforeArithmetic),
+  ("t_snp_a_bit_in_the_unused_signature_tail_is_refused",
+    driveSnpABitInTheUnusedSignatureTailIsRefused),
+  ("t_snp_a_bit_in_a_reserved_span_is_refused",
+    driveSnpABitInAReservedSpanIsRefused),
+  ("t_snp_a_document_of_the_wrong_width_is_refused",
+    driveSnpADocumentOfTheWrongWidthIsRefused),
+  ("t_snp_an_unknown_structure_revision_is_refused",
+    driveSnpAnUnknownStructureRevisionIsRefused),
+  ("t_snp_the_later_revision_frees_exactly_three_bytes_and_no_more",
+    driveSnpTheLaterRevisionFreesExactlyThreeBytesAndNoMore),
+  ("t_snp_an_unknown_signing_algorithm_is_refused",
+    driveSnpAnUnknownSigningAlgorithmIsRefused),
+  ("t_snp_a_foreign_version_packing_is_refused_rather_than_misread",
+    driveSnpAForeignVersionPackingIsRefusedRatherThanMisread)]
+
 suite "snp refusal coverage":
 
   test "t_snp_report_every_refusal_kind_is_reached":
+    # Drive every input the census is built from, HERE and from an
+    # empty census, so the verdict is the same whether this case runs
+    # alone (the runner gives each case its own process) or after
+    # the cases above.
+    reachedReportKinds = {}
+    for (name, drive) in ReportRefusalDrivers:
+      checkpoint("driving " & name)
+      drive()
     var unreached: seq[string] = @[]
     var count = 0
     for k in SnpReportErrorKind:

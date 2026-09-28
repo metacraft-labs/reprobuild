@@ -24,7 +24,56 @@ package sh:
 
   executable sh:
     cli:
-      dependencyPolicy automaticMonitor
+      # DA-6 -- THE CAPTURE-BREADTH DECLARATION for the shell: FULL CAPTURE, and
+      # this is the tool for which the declaration is least optional.
+      #
+      # THE CLAIM: every `sh` action asks io-mon for EVERY event category, and
+      # no narrowing is available to this package at any time, for any shell
+      # edge, for a reason that is structural rather than a matter of degree.
+      #
+      # WHY IT IS TRUE. A capture-breadth declaration is a claim about what a
+      # TOOL's process tree does. For a compiler the action and the tree
+      # coincide -- the tree under `nim` is nim, gcc and ld -- so `nim.nim` can
+      # say what nim's randomness is for and what its temp names derive from.
+      # For an INTERPRETER the tree is chosen by the SCRIPT, at run time, by
+      # someone this file has never met. `sh` guarantees NOTHING about what runs
+      # under it, so there is no category it can vouch for.
+      #
+      # This is the same argument, on the same mechanism, that this file already
+      # makes for refusing the entropy blessing below: "the engine's policy is
+      # ACTION-scoped while the evidence is PROCESS-TREE-scoped". A narrowing
+      # here would be the identical mistake one axis over -- a claim about every
+      # program a script chooses to run, made by somebody who cannot make it --
+      # and the ambient reads are exactly where it would bite, because
+      # `mrTimeRead` is what a `date > out.txt` gate emits and nothing else
+      # records.
+      #
+      # WHAT THIS COVERS THAT HAS NO PACKAGE OF ITS OWN. `nix build` is the case
+      # worth naming. A `nix build` edge is hermetic BY CONSTRUCTION, so
+      # monitoring it is near-pure overhead -- and it is also the ONLY CHECK
+      # THAT THE HERMETICITY HELD. The records that would witness a breach are
+      # precisely the ones a narrowing removes: `ecEnvReads` for `NIX_PATH` /
+      # `NIX_CONFIG` / `TMPDIR` read by the outer client, `ecFileReads` for
+      # `/etc/nix/nix.conf` and a `--impure` evaluation reaching outside the
+      # flake, `ecAmbientReads` for a clock read in the outer process, and
+      # `ecProcessTree` for the daemon hand-off. "Hermetic, therefore do not
+      # look" is the argument that makes the hermeticity unfalsifiable. And
+      # there is no `packages/nix.nim` declaration to write it on -- that file is
+      # provisioning-only, see the note at its head -- because a `nix build`
+      # edge in a recipe is a `shell()` edge, so `sh` is where its declaration
+      # lands and this is it.
+      #
+      # SCOPE. It changes what is asked for, not what is trusted (the required
+      # side is derived from the same answer), not the entropy blessing refused
+      # below, and no cache key.
+      #
+      # `shell()` NEEDS THE SAME DECLARATION SEPARATELY. It is hand-written and
+      # defaults its own `dependencyPolicy` parameter, so what is written here
+      # reaches only the GENERATED `sh(command = ...)` wrapper -- the same split
+      # route the blessing has. Both are asserted separately in
+      # `reprobuild/tests/integration/t_da6_tool_capture_breadth_declarations.nim`.
+      dependencyPolicy automaticMonitor,
+        captureBreadth = fullCapture
 
       # DELIBERATELY NOT BLESSED -- and note that a blessing written HERE
       # would not even reach the edges it would be written for.
@@ -110,7 +159,8 @@ proc shell*(command: string; args: seq[string] = @[]; actionId = "";
             actionCachePolicy = defaultActionCachePolicy();
             commandStatsId = "";
             extraEnv: openArray[(string, string)] = [];
-            dependencyPolicy = automaticMonitorPolicy()): BuildActionDef
+            dependencyPolicy = automaticMonitorPolicy(
+              captureBreadth = mcbFullCapture)): BuildActionDef
     {.discardable.} =
   ## ``extraEnv`` declares environment variables ON THIS ACTION. Two
   ## consequences, and the second is the one worth reaching for:
@@ -156,6 +206,26 @@ proc shell*(command: string; args: seq[string] = @[]; actionId = "";
   ## to build the policy object themselves; an explicit
   ## ``ignoredInputPrefixes`` on the policy is preserved and the two
   ## sets are unioned.
+  ##
+  ## DA-6 -- THE DEFAULT ``dependencyPolicy`` SPELLS THE CAPTURE-BREADTH
+  ## DECLARATION EXPLICITLY, as ``captureBreadth = mcbFullCapture``, even though
+  ## that is the field's zero value and omitting it would compile to the same
+  ## bytes. It is written for the reason the paragraph below is written: this
+  ## proc is the ONLY place a shell edge's declaration can be made, because the
+  ## ``cli:`` block above reaches only the GENERATED ``sh(...)`` wrapper, and a
+  ## default that happens to be right is indistinguishable from a default nobody
+  ## considered. The argument -- ``sh`` guarantees nothing about what runs under
+  ## it, so it can vouch for no category, and a ``nix build`` edge arrives here
+  ## rather than at ``packages/nix.nim`` -- is written out at that ``cli:``
+  ## block; read it before narrowing this.
+  ##
+  ## A CALLER MAY STILL PASS ITS OWN POLICY, and that is not a hole in the
+  ## declaration: a recipe passing ``makeDepfilePolicy(...)`` for a
+  ## ``bash -c '... cargo build ...'`` indirection is choosing a different
+  ## EVIDENCE SOURCE, not narrowing this one, and whatever breadth it carries is
+  ## still checked against ``ReprobuildConsumedInterest`` at compile time in the
+  ## engine. The vocabulary has no word for a declaration that drops evidence a
+  ## consumer reads.
   ##
   ## THIS PROC IS THE ONLY PLACE A SHELL EDGE COULD BE ENTROPY-BLESSED, and
   ## it deliberately is not: the `recordToolInvocation` call below passes no
