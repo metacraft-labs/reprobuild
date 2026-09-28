@@ -241,6 +241,9 @@ proc verifyStagedEntry*(stageDir, weakHex, pathSetHashHex, strongHex: string;
       pathSetHash(record.pathSet) != pathSetHashHex:
     return (none(PortableMemoRecord),
       "the memo record does not describe the key it was published under")
+  if not manifestsConsistent(record):
+    return (none(PortableMemoRecord),
+      "a directory listing in the memo record is not the tree its digest names")
   if requireOutputs:
     for i, output in record.outputs:
       let actual = outputDigest(stagedOutputPath(stageDir, i),

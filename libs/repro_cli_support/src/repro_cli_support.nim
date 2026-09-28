@@ -215,6 +215,7 @@ import repro_binary_cache_client/engine_publisher
 # a local miss, so this edge publishes and substitutes AROUND itself, the way
 # ``repro_profile_compile``'s build-action edges already do.
 import repro_binary_cache_client/provider_compile_cache
+import repro_cli_support/portable_cache
 import repro_binary_cache_client/caches_config as bcCachesConfig
 # Binary-Caches.md §"Client CLI Surface (`repro cache`)" — the shared
 # single-entry publish/substitute dispatch (folded out of the retired
@@ -9865,6 +9866,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # only the public-interface members tagged ``publishToBinaryCache``.
     engineConfig.binaryCacheIntermediateScope =
       bcCachesConfig.publishTargetScope() == bcCachesConfig.csIntermediate
+    # Cache-Scope P3.4: portable (cross-host) caching, when opted in.
+    wirePortableCache(engineConfig, reportProjectRoot, outDir)
     # M9.N Batch B: attach the tool-identity resolver closure once
     # the outer scope has resolved the build identity. ``nil`` is
     # the legitimate fast-path-no-identity value — the engine then
@@ -11432,6 +11435,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # release cache (default) → only tagged public-interface members.
     engineConfig.binaryCacheIntermediateScope =
       bcCachesConfig.publishTargetScope() == bcCachesConfig.csIntermediate
+    # Cache-Scope P3.4: portable (cross-host) caching, when opted in.
+    wirePortableCache(engineConfig, projectRoot, outDir)
     # M9.N Batch B: attach the tool-identity resolver closure here
     # too. ``identity`` is in scope at this site (the main inline
     # build path resolves it before reaching here); the closure
