@@ -163,7 +163,7 @@
       # Requires nim-stackable-hooks 72f5782 (below).
       # Preserve child exec identities and the resumed parent guard across vfork.
       # Keep this, the lock, sibling clone and package fallback on one revision.
-      url = "github:metacraft-labs/io-mon/d7f0453fa9160fcd6d5b1ead64165117a39cc7e9";
+      url = "github:metacraft-labs/io-mon/4b2bb3910283bac4d109012411e42ce67f9c969c";
       flake = false;
     };
     nim-shm-gset-src = {
