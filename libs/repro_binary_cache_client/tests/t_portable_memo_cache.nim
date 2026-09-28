@@ -3,8 +3,10 @@
 ##
 ## The properties: a record the ENGINE publishes from one checkout is found
 ## from a checkout at a different absolute path and its outputs restored there
-## with nothing executed; a content change misses; an entry whose bytes are not
-## the ones its record names is refused, and a host will not publish one; and
+## with nothing executed; an untagged action publishes its record (metadata,
+## for resolving downstream inputs) but not its bytes; a content change misses;
+## outputs whose bytes are not the ones their record names are refused, and a
+## host will not publish them; and
 ## several candidate path sets for one weak fingerprint are all discoverable,
 ## with a republish reusing its slot.
 
@@ -74,8 +76,8 @@ proc fingerprintForPayload(payload: string): ContentDigest =
   casDigest(payload.toOpenArrayByte(0, payload.high),
             domain = hdActionFingerprint)
 
-proc buildIn(projectRoot: string; publisher: PortableMemoPublisher):
-    tuple[result: ActionResult, trace: string] =
+proc buildIn(projectRoot: string; publisher: PortableMemoPublisher;
+             tagged = true): tuple[result: ActionResult, trace: string] =
   let action = BuildAction(
     governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakWriteText,
@@ -85,7 +87,7 @@ proc buildIn(projectRoot: string; publisher: PortableMemoPublisher):
     outputs: @[projectRoot / "out" / "result.txt"],
     cwd: projectRoot,
     cacheable: true,
-    publishToBinaryCache: true,
+    publishToBinaryCache: tagged,
     actionCachePolicy: ffpTimestamp,
     weakFingerprint: fingerprintForPayload("t-pmc-write"),
     builtinText: "built from " & readFile(projectRoot / "src" / "main.c"))
@@ -133,6 +135,14 @@ proc remote(label: string): MemoRemote =
     publishEndpoint: baseUrl, keypair: kp, canPublish: true,
     scratchRoot: TmpDir / ("scratch-" & label))
 
+proc publisherFor(target: MemoRemote): PortableMemoPublisher =
+  ## The engine hook as the CLI wires it.
+  result = proc (roots: seq[LogicalRoot]; record: PortableMemoRecord;
+                 withOutputs: bool): string =
+    {.cast(gcsafe).}:
+      let attempt = publishMemo(target, roots, record, withOutputs)
+      result = if attempt.ok: "" else: attempt.reason
+
 suite "Cache-Scope P3.3 — remote memoization plane":
 
   setup:
@@ -150,13 +160,7 @@ suite "Cache-Scope P3.3 — remote memoization plane":
 
   test "the engine publishes; another checkout finds and restores it":
     let a = project("host-a", "int main;\n")
-    let remoteA = remote("a")
-    let publisher: PortableMemoPublisher =
-      proc (roots: seq[LogicalRoot]; record: PortableMemoRecord): string =
-        {.cast(gcsafe).}:
-          let attempt = publishMemo(remoteA, roots, record)
-          result = if attempt.ok: "" else: attempt.reason
-    let built = buildIn(a, publisher)
+    let built = buildIn(a, publisherFor(remote("a")))
     require built.result.portable
     checkpoint(built.trace)
     check "portable-memo-published" in built.trace
@@ -168,23 +172,34 @@ suite "Cache-Scope P3.3 — remote memoization plane":
       built.result.portableWeakHex)
     checkpoint(found.reason)
     require found.hit.isSome
-    let hit = found.hit.get()
-    defer: discardHit(hit)
-    check hit.record.strongHex == built.result.portableStrongHex
-    check hit.record.outputs == built.result.portableOutputs
-    check restoreMemoOutputs(hit, rootsOf(b)) == ""
+    let record = found.hit.get()
+    check record.strongHex == built.result.portableStrongHex
+    check record.outputs == built.result.portableOutputs
+    # The lookup placed nothing; restoring does.
+    check not fileExists(b / "out" / "result.txt")
+    check restoreMemoOutputs(remote("b"), record, rootsOf(b)) == ""
     check readFile(b / "out" / "result.txt") ==
       readFile(a / "out" / "result.txt")
 
+  test "an untagged action publishes its record but not its bytes":
+    let a = project("meta-a", "int meta;\n")
+    let built = buildIn(a, publisherFor(remote("meta-a")), tagged = false)
+    require built.result.portable
+    check "portable-memo-published" in built.trace
+    let b = project("meta-b", "int meta;\n")
+    let found = lookupRemoteMemo(remote("meta-b"), rootsOf(b),
+      built.result.portableWeakHex)
+    require found.hit.isSome
+    # The record is enough to resolve a downstream action's inputs...
+    check found.hit.get().outputs == built.result.portableOutputs
+    # ...but there are no bytes to restore.
+    check "no outputs published" in
+      restoreMemoOutputs(remote("meta-b"), found.hit.get(), rootsOf(b))
+    check not fileExists(b / "out" / "result.txt")
+
   test "a checkout whose input differs misses":
     let a = project("miss-a", "int main;\n")
-    let remoteA = remote("miss-a")
-    let publisher: PortableMemoPublisher =
-      proc (roots: seq[LogicalRoot]; record: PortableMemoRecord): string =
-        {.cast(gcsafe).}:
-          let attempt = publishMemo(remoteA, roots, record)
-          result = if attempt.ok: "" else: attempt.reason
-    let built = buildIn(a, publisher)
+    let built = buildIn(a, publisherFor(remote("miss-a")))
     require built.result.portable
     let c = project("miss-c", "int changed;\n")
     let found = lookupRemoteMemo(remote("miss-c"), rootsOf(c),
@@ -192,7 +207,7 @@ suite "Cache-Scope P3.3 — remote memoization plane":
     check found.hit.isNone
     check found.reason.len > 0
 
-  test "an entry whose bytes are not the ones its record names is refused":
+  test "outputs whose bytes are not the ones their record names are refused":
     let a = project("tamper", "int main;\n")
     createDir(a / "out")
     writeFile(a / "out" / "x.txt", "good")
@@ -205,27 +220,26 @@ suite "Cache-Scope P3.3 — remote memoization plane":
     check not refused.ok
     check "refusing to publish" in refused.reason
     writeFile(a / "out" / "x.txt", "good")
-    # A dishonest producer stages it properly, then swaps the bytes.
+    # A dishonest producer publishes an honest record, and outputs staged
+    # properly with the bytes swapped afterwards.
+    check publishMemo(r, rootsOf(a), record, withOutputs = false).ok
     let stage = TmpDir / "tamper-stage"
-    check stageMemoEntry(record, rootsOf(a), stage) == ""
+    check stageMemoOutputs(record, rootsOf(a), stage) == ""
     writeFile(stage / StagedOutputsDir / "0", "evil")
-    let recordId = memoRecordIdentity(r, weak, pathSetHash(record.pathSet),
-      record.strongHex)
+    let outputsId = memoOutputsIdentity(r, weak,
+      pathSetHash(record.pathSet), record.strongHex)
     check publishInProcess(PublishInProcessRequest(
-      entryKeyHex: deriveCacheEntryKeyHex(recordId), prefixDir: stage,
-      identity: recordId, endpoint: baseUrl, keypair: kp)).ok
-    let slotStage = TmpDir / "tamper-slot"
-    createDir(slotStage)
-    let pathSetBytes = encodePathSet(record.pathSet)
-    writeFile(slotStage / StagedPathSetName, pathSetBytes)
-    let slotId = pathSetSlotIdentity(r, weak, 0)
-    check publishInProcess(PublishInProcessRequest(
-      entryKeyHex: deriveCacheEntryKeyHex(slotId), prefixDir: slotStage,
-      identity: slotId, endpoint: baseUrl, keypair: kp)).ok
-    let found = lookupRemoteMemo(remote("tamper-consumer"), rootsOf(a), weak)
-    check found.hit.isNone
-    checkpoint(found.reason)
-    check "not the content its record names" in found.reason
+      entryKeyHex: deriveCacheEntryKeyHex(outputsId), prefixDir: stage,
+      identity: outputsId, endpoint: baseUrl, keypair: kp)).ok
+    # The consumer finds the record, and refuses the bytes.
+    let c = project("tamper-consumer", "int main;\n")
+    let found = lookupRemoteMemo(remote("tamper-c"), rootsOf(c), weak)
+    require found.hit.isSome
+    let restored = restoreMemoOutputs(remote("tamper-c"), found.hit.get(),
+      rootsOf(c))
+    checkpoint(restored)
+    check "not the content its record names" in restored
+    check not fileExists(c / "out" / "x.txt")
 
   test "several path sets for one weak fingerprint are all discoverable":
     let p = project("multi", "int main;\n")
@@ -255,14 +269,12 @@ suite "Cache-Scope P3.3 — remote memoization plane":
     # With the header present only execution 2 matches...
     let withHeader = lookupRemoteMemo(remote("multi-c1"), rootsOf(p), weak)
     require withHeader.hit.isSome
-    check withHeader.hit.get().record.strongHex == second.strongHex
-    discardHit(withHeader.hit.get())
+    check withHeader.hit.get().strongHex == second.strongHex
     # ...and without it, execution 1 does.
     removeFile(p / "src" / "main.h")
     let without = lookupRemoteMemo(remote("multi-c2"), rootsOf(p), weak)
     require without.hit.isSome
-    check without.hit.get().record.strongHex == first.strongHex
-    discardHit(without.hit.get())
+    check without.hit.get().strongHex == first.strongHex
 
 if baseUrl.len > 0:
   stopServer(srvProc)
