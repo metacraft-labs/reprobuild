@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1750,
+    "nimTestBinaries": 1751,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 584,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1764
+    "testEntries": 1765
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1073,7 +1073,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 896,
+      "integration": 897,
       "platform/destructive": 115,
       "pure unit": 584,
       "unclassified": 158
@@ -1224,9 +1224,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1750,
+    "nimTestBinaryCount": 1751,
     "pythonTestFileCount": 14,
-    "testEntryCount": 1764
+    "testEntryCount": 1765
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3656,7 +3656,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1303,
+          "line": 1313,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -24858,7 +24858,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_cloud_adapter_launches_nothing_in_ci.nim",
       "sourceSuiteCount": 7,
-      "staticCaseCount": 17,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -27771,8 +27771,8 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_leaked_instance_is_reaped.nim",
-      "sourceSuiteCount": 14,
-      "staticCaseCount": 40,
+      "sourceSuiteCount": 19,
+      "staticCaseCount": 53,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -29142,6 +29142,24 @@
       "source": "tests/integration/t_nim_package_path_handling.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_nitro_enclave_attestation_surface",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_nitro_enclave_attestation_surface.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 27,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32343,8 +32361,8 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_teardown_runs_on_failure_path.nim",
-      "sourceSuiteCount": 5,
-      "staticCaseCount": 11,
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
