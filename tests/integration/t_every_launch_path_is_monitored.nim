@@ -991,12 +991,22 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # five were REFUSED on the first run after the engine change, each named
     # individually, and each had to be classified before the suite would go
     # green again.
+    #
+    # ``fcntl`` with ``F_GETFD`` / ``F_SETFD`` / ``FD_CLOEXEC`` /
+    # ``F_DUPFD_CLOEXEC`` replaced ``dup`` in the same spawn context, and were
+    # refused the same way when they arrived. They give the hosted child the
+    # descriptor table RunQuota's backend gives every other launch path —
+    # 0, 1 and 2 and nothing else — by marking the engine's other descriptors
+    # close-on-exec across io-mon's spawn and saving the stdio copies
+    # close-on-exec from birth. ``fcntl`` changes a descriptor flag and
+    # starts nothing; the other four are constants.
     CapabilitySurface(key: "posix", audit: caImportAllowlist,
       sourceRels: @["posix/posix.nim"],
       spawning: @[],
-      inert: @["kill", "setpgid", "umask", "dup", "dup2", "close"],
+      inert: @["kill", "setpgid", "umask", "dup2", "close", "fcntl"],
       allowedSymbols: @["Pid", "SIGKILL", "SIGTERM", "kill", "setpgid",
-                        "Mode", "umask", "dup", "dup2", "close"]),
+                        "Mode", "umask", "dup2", "close", "fcntl", "F_GETFD",
+                        "F_SETFD", "FD_CLOEXEC", "F_DUPFD_CLOEXEC"]),
     CapabilitySurface(key: "winlean", audit: caImportAllowlist,
       sourceRels: @["windows/winlean.nim"],
       spawning: @[],
