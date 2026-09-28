@@ -333,6 +333,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim",
+    binary: "build/test-bin/t_portable_memo_cache",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_binary_cache_server/tests/t_a2_p1_manifest_roundtrip.nim",
     binary: "build/test-bin/t_a2_p1_manifest_roundtrip",
     defines: @[],

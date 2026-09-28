@@ -865,6 +865,12 @@ type
       ## requested" (Hermetic-Builds-And-Path-Independence.md), and it
       ## costs a BLAKE3 pass over every observed input. The local
       ## fingerprint and every local cache decision are unaffected.
+    portableMemoPublisher*: PortableMemoPublisher
+      ## Cache-Scope P3.3. When non-nil (and `portableRoots` is set), each
+      ## portable record is also published to the remote memoization plane
+      ## — for the actions the binary-cache scope publishes: tagged
+      ## `publishToBinaryCache`, or every action under
+      ## `binaryCacheIntermediateScope`.
     binaryCacheIntermediateScope*: bool
       ## L3 PUBLISH-SCOPE. When ``true`` the target binary cache is an
       ## INTERMEDIATE cache: EVERY successful cacheable action's store
@@ -1646,6 +1652,14 @@ type
     statusCode*: int
     error*: string
     bytesUploaded*: int
+
+  PortableMemoPublisher* = proc(roots: seq[LogicalRoot];
+                                record: PortableMemoRecord): string
+                               {.gcsafe, closure.}
+    ## Cache-Scope P3.3. Ships a portable memo record, and the output bytes
+    ## it names, to the remote memoization plane
+    ## (`repro_binary_cache_client/portable_memo_cache.publishMemo`).
+    ## Returns "" on success, otherwise the reason — traced, never fatal.
 
   BinaryCachePublisher* = proc(req: BinaryCachePublishRequest):
     BinaryCachePublishResult {.gcsafe, closure.}
@@ -13910,12 +13924,25 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # any checkout of any project on this host can find it by portable
         # weak fingerprint -> path set -> strong fingerprint. Soft-fail: a
         # memo that cannot be written costs reuse, never the build.
+        let memo = PortableMemoRecord(
+          weakHex: fp.weakHex, pathSet: pathSetOf(fp.inputs),
+          strongHex: fp.strongHex, outputs: outs.outputs)
         try:
-          recordMemo(sharedRoot / "portable-memo", PortableMemoRecord(
-            weakHex: fp.weakHex, pathSet: pathSetOf(fp.inputs),
-            strongHex: fp.strongHex, outputs: outs.outputs))
+          recordMemo(sharedRoot / "portable-memo", memo)
         except CatchableError as err:
           runResult.trace(action.id, "portable-memo-write-failed", err.msg)
+        if config.portableMemoPublisher != nil and
+            (action.publishToBinaryCache or
+             config.binaryCacheIntermediateScope):
+          let failure =
+            try: config.portableMemoPublisher(config.portableRoots, memo)
+            except CatchableError as err: err.msg
+          if failure.len > 0:
+            runResult.trace(action.id, "portable-memo-publish-failed",
+              failure)
+          else:
+            runResult.trace(action.id, "portable-memo-published",
+              "strong=" & fp.strongHex)
       else:
         fp.portable = false
         fp.reason = outs.reason
