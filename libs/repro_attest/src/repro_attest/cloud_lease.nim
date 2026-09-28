@@ -1372,7 +1372,7 @@ when defined(posix):
     # genuine 127. Measured, not assumed. Restoring the default
     # disposition and re-raising gives the process the termination
     # status the convention actually describes.
-    discard signal(sig, SIG_DFL)
+    signal(sig, SIG_DFL)
     discard kill(getpid(), sig)
 
   proc installCloudLeaseSignalTeardown*(holder: CloudLeaseHolder) =
@@ -1391,9 +1391,9 @@ when defined(posix):
     ## thin thing to rely on.
     if holder == nil or holder.handlersInstalled: return
     if signalHolders.len == 0:
-      discard signal(SIGTERM, releaseHeldLeasesOnSignal)
-      discard signal(SIGINT, releaseHeldLeasesOnSignal)
-      discard signal(SIGHUP, releaseHeldLeasesOnSignal)
+      signal(SIGTERM, releaseHeldLeasesOnSignal)
+      signal(SIGINT, releaseHeldLeasesOnSignal)
+      signal(SIGHUP, releaseHeldLeasesOnSignal)
     holder.handlersInstalled = true
     signalHolders.add holder
 

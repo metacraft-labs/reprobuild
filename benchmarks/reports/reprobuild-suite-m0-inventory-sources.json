@@ -31956,7 +31956,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_sync_clones_newly_declared_dependency_after_pull.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32025,7 +32025,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_sync_mainline_reconcile.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -38090,6 +38090,9 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # of that repo's own git state and the manifest's pin for it. The M16
   # ``feature_started`` mark used to ride along here to suppress the
   # fast-forward arm on the marked branch; nothing reads it any more.
+  if emitProgress:
+    stderr.writeLine("workspace sync: checking " & $resolved.repos.len &
+      " repositories...")
   var observations: seq[RepoSyncObservation]
   for repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
@@ -38453,6 +38456,26 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         stderr.writeLine("workspace sync: [restored] " & repo.path &
           " @ locked " & lockedSha)
 
+  # When a workspace feature branch is active, attach newly cloned repos to that branch.
+  let wsBranchOpt = readWorkspaceBranch(args.workspaceRoot)
+  if wsBranchOpt.isSome and wsBranchOpt.get().len > 0:
+    let wsBranch = wsBranchOpt.get()
+    for repoIdx in cloneRepoIdx:
+      if checkoutStatus.hasKey(repoIdx) and checkoutStatus[repoIdx][0] == "cloned":
+        let repo = resolved.repos[repoIdx]
+        let repoAbs = args.workspaceRoot / repo.path
+        if dirExists(repoAbs / ".git"):
+          let rName = gitRemoteNameFor(repo)
+          let remoteRef = revParse(identity, repoAbs, "refs/remotes/" & rName & "/" & wsBranch)
+          if remoteRef.len > 0:
+            discard gitRunPlain(identity, ["-C", repoAbs, "switch", wsBranch])
+          else:
+            let localRef = revParse(identity, repoAbs, "refs/heads/" & wsBranch)
+            if localRef.len == 0:
+              discard gitRunPlain(identity, ["-C", repoAbs, "switch", "-c", wsBranch])
+            else:
+              discard gitRunPlain(identity, ["-C", repoAbs, "switch", wsBranch])
+
   for repoIdx, decision in planned.report.decisions:
     var status = ""
     var diagnostic = ""
@@ -38639,16 +38662,19 @@ proc toJsonNode*(report: MainlineSyncReport): JsonNode =
   result["repos"] = repos
   result["exitCode"] = %report.exitCode
 
-proc renderMainlineSyncTextLines*(report: MainlineSyncReport): seq[string] =
+proc renderMainlineSyncTextLines*(report: MainlineSyncReport;
+    verbose = false): seq[string] =
   var counts = initOrderedTable[string, int]()
   for e in report.repos:
-    var line = "workspace sync: " & e.path & " " & e.outcome
-    if e.branch.len > 0 and e.mainlineBranch.len > 0:
-      line.add(" " & e.branch & " <- " & e.mainlineBranch)
-    if e.diagnostic.len > 0:
-      line.add(" (" & e.diagnostic & ")")
-    result.add(line)
     counts[e.outcome] = counts.getOrDefault(e.outcome, 0) + 1
+    let isRoutine = e.outcome in ["up_to_date", "fast_forwarded"]
+    if verbose or not isRoutine:
+      var line = "workspace sync: " & e.path & " " & e.outcome
+      if e.branch.len > 0 and e.mainlineBranch.len > 0:
+        line.add(" " & e.branch & " <- " & e.mainlineBranch)
+      if e.diagnostic.len > 0:
+        line.add(" (" & e.diagnostic & ")")
+      result.add(line)
   var parts: seq[string]
   for tag, n in counts:
     parts.add($n & " " & tag)
@@ -38676,6 +38702,13 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
   let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
 
+  let emitProgress = not args.json
+  let jobsNetwork = resolveJobs(args.jobsNetwork, args.jobs,
+    SyncDefaultJobsNetwork)
+  let jobsCheckout = resolveJobs(args.jobsCheckout, args.jobs,
+    int(osproc.countProcessors()))
+  let cacheRoot = args.workspaceRoot / ".repro" / "workspace" / "engine-cache"
+
   # Fetch phase, through the engine so it runs under the bounded `vcs/fetch`
   # pool rather than opening one connection per repo.
   var fetchFailure = initTable[string, string]()
@@ -38697,10 +38730,14 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     fetchActions.add(action)
     fetchIdByPath[repo.path] = actionId
   if fetchActions.len > 0:
-    let cacheRoot = args.workspaceRoot / ".repro" / "workspace" / "engine-cache"
+    if emitProgress:
+      stderr.writeLine("workspace sync: fetching " & $fetchActions.len &
+        " repo(s) in parallel (jobs-network=" & $jobsNetwork & ") ...")
     var config = defaultBuildEngineConfig(cacheRoot)
     config.suppressTrace = true
+    config.maxParallelism = uint32(max(jobsNetwork, jobsCheckout))
     config.fallbackToRunQuotaBypass = true
+    config.runQuotaCliPath = selfSpawnIoMonitorPath()
     let res = runBuild(graph(fetchActions), config)
     var outcomeById = initTable[string, ActionResult]()
     for outcome in res.results:
@@ -38714,6 +38751,9 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
         fetchFailure[path] = diag
 
   # Observation phase: refs only, no mutation.
+  if emitProgress:
+    stderr.writeLine("workspace sync: checking " & $resolved.repos.len &
+      " repositories...")
   var observations: seq[MainlineSyncObservation]
   for repo in resolved.repos:
     let repoAbs = args.workspaceRoot / repo.path
@@ -38756,6 +38796,63 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
   let decisions = planMainlineSync(resolved.repos, observations,
     args.mainlineFlavor)
 
+  # Clone phase for missing repositories:
+  var sharedBareForClone = initTable[string, string]()
+  proc cloneReferenceFor(fetchUrl: string): string =
+    if fetchUrl.len == 0:
+      return ""
+    if sharedBareForClone.hasKey(fetchUrl):
+      return sharedBareForClone[fetchUrl]
+    let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
+    if not refreshed.ok and refreshed.diagnostic.len > 0:
+      stderr.writeLine("workspace mainline sync: shared-clone cache miss for " &
+        fetchUrl & " (cloning newly-declared repo standalone): " &
+        refreshed.diagnostic)
+    sharedBareForClone[fetchUrl] = reference
+    reference
+
+  var cloneActions: seq[BuildAction]
+  var cloneActionRepoIdx = initTable[string, int]()
+  for i, decision in decisions:
+    if decision.action == msaClone:
+      let repo = resolved.repos[i]
+      let idSeg = safeRepoIdSegment(repo.name) & "-" & $i
+      let receiptRel = ".repro" / "workspace" / "receipts" /
+        ("mainline-sync-clone-" & idSeg & ".receipt")
+      let cloneRef = cloneReferenceFor(cloneUrlFor(repo))
+      var a = gitCloneAction("workspace-mainline-sync-clone-" & idSeg, identity,
+        remoteUrl = cloneUrlFor(repo),
+        repoPath = repo.path,
+        receiptPath = receiptRel,
+        revision = decision.mainlineBranch,
+        cacheable = false,
+        referencePath = cloneRef,
+        cloneFilter = repo.cloneFilter,
+        depth = repo.depth,
+        singleBranch = repo.singleBranch)
+      a.cwd = args.workspaceRoot
+      a.pool = SyncFetchPool
+      a.poolUnits = 1'u32
+      cloneActions.add(a)
+      cloneActionRepoIdx[a.id] = i
+
+  var cloneOutcomeByRepoIdx = initTable[int, ActionResult]()
+  if cloneActions.len > 0 and not args.dryRun:
+    if emitProgress:
+      stderr.writeLine("workspace sync: cloning " & $cloneActions.len &
+        " missing repo(s) (jobs-checkout=" & $jobsCheckout & ") ...")
+    var cloneConfig = defaultBuildEngineConfig(cacheRoot)
+    cloneConfig.suppressTrace = true
+    cloneConfig.maxParallelism = uint32(max(jobsNetwork, jobsCheckout))
+    cloneConfig.fallbackToRunQuotaBypass = true
+    cloneConfig.runQuotaCliPath = selfSpawnIoMonitorPath()
+    let res = runBuild(graph(cloneActions,
+      @[pool(SyncFetchPool, uint32(jobsNetwork))]), cloneConfig)
+    for outcome in res.results:
+      if cloneActionRepoIdx.hasKey(outcome.id):
+        cloneOutcomeByRepoIdx[cloneActionRepoIdx[outcome.id]] = outcome
+
   var anyFailure = false
   var anyRefusal = false
   for i, decision in decisions:
@@ -38788,43 +38885,77 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     of msaNone:
       if decision.syncCase != mscUpToDate:
         anyRefusal = true
-    of msaFastForward:
-      # Invariant 15 — Reprobuild drives this fast-forward, so the bookkeeping
-      # hooks skip it; the run reports the final state itself.
-      let ff = gitRunPlainEnv(identity,
-        ["-C", repoAbs, "merge", "--ff-only", remoteRef],
-        internalContext = InternalDrivenOperationContext)
-      if ff.code != 0:
-        entry.outcome = "fast_forward_failed"
-        entry.diagnostic = "fast-forward to " & remoteRef & " failed: " &
-          ff.output.strip()
-        anyFailure = true
-      else:
-        entry.headAfter = revParse(identity, repoAbs, "HEAD")
-    of msaRebase, msaMerge:
-      let isRebase = decision.action == msaRebase
-      let run =
-        if isRebase:
-          gitRunPlainEnv(identity, ["-C", repoAbs, "rebase", remoteRef],
-            internalContext = InternalDrivenOperationContext)
+    of msaClone:
+      if args.dryRun:
+        entry.outcome = "missing_checkout"
+        entry.action = "clone"
+      elif cloneOutcomeByRepoIdx.hasKey(i):
+        let outcome = cloneOutcomeByRepoIdx[i]
+        if outcome.status in {asSucceeded, asCacheHit, asUpToDate}:
+          entry.outcome = "cloned"
+          entry.action = "clone"
+          entry.branch = decision.mainlineBranch
+          entry.headAfter = revParse(identity, repoAbs, "HEAD")
+          entry.message = "cloned to '" & decision.mainlineBranch & "'"
+          if emitProgress:
+            stderr.writeLine("workspace sync: [cloned] " & repo.path)
         else:
-          gitRunPlainEnv(identity,
-            ["-C", repoAbs, "merge", "--no-edit", remoteRef],
-            internalContext = InternalDrivenOperationContext)
-      if run.code != 0:
-        # The prediction was optimistic (it is an approximation for rebase).
-        # Abort so the repo is left EXACTLY as it was — the per-repo atomicity
-        # guarantee does not rest on the prediction being right.
-        discard gitRunPlain(identity,
-          ["-C", repoAbs, (if isRebase: "rebase" else: "merge"), "--abort"])
-        entry.outcome = mainlineSyncCaseTag(mscConflict)
-        entry.action = "none"
-        entry.diagnostic = (if isRebase: "rebase" else: "merge") &
-          " onto " & remoteRef & " failed and was aborted; repo is unchanged: " &
-          run.output.strip()
-        anyRefusal = true
+          entry.outcome = "clone_failed"
+          entry.action = "clone"
+          let diag =
+            if outcome.stderr.len > 0: outcome.stderr.strip()
+            elif outcome.reason.len > 0: outcome.reason
+            else: $outcome.status
+          entry.diagnostic = "clone of '" & repo.path & "' failed: " & diag
+          anyFailure = true
       else:
-        entry.headAfter = revParse(identity, repoAbs, "HEAD")
+        entry.outcome = "clone_failed"
+        entry.action = "clone"
+        entry.diagnostic = "clone was not executed"
+        anyFailure = true
+    of msaFastForward:
+      if not args.dryRun:
+        # Invariant 15 — Reprobuild drives this fast-forward, so the bookkeeping
+        # hooks skip it; the run reports the final state itself.
+        let ff = gitRunPlainEnv(identity,
+          ["-C", repoAbs, "merge", "--ff-only", remoteRef],
+          internalContext = InternalDrivenOperationContext)
+        if ff.code != 0:
+          entry.outcome = "fast_forward_failed"
+          entry.diagnostic = "fast-forward to " & remoteRef & " failed: " &
+            ff.output.strip()
+          anyFailure = true
+        else:
+          entry.headAfter = revParse(identity, repoAbs, "HEAD")
+          if emitProgress:
+            stderr.writeLine("workspace sync: [fast-forwarded] " & repo.path)
+    of msaRebase, msaMerge:
+      if not args.dryRun:
+        let isRebase = decision.action == msaRebase
+        let run =
+          if isRebase:
+            gitRunPlainEnv(identity, ["-C", repoAbs, "rebase", remoteRef],
+              internalContext = InternalDrivenOperationContext)
+          else:
+            gitRunPlainEnv(identity,
+              ["-C", repoAbs, "merge", "--no-edit", remoteRef],
+              internalContext = InternalDrivenOperationContext)
+        if run.code != 0:
+          # The prediction was optimistic (it is an approximation for rebase).
+          # Abort so the repo is left EXACTLY as it was — the per-repo atomicity
+          # guarantee does not rest on the prediction being right.
+          discard gitRunPlain(identity,
+            ["-C", repoAbs, (if isRebase: "rebase" else: "merge"), "--abort"])
+          entry.outcome = mainlineSyncCaseTag(mscConflict)
+          entry.action = "none"
+          entry.diagnostic = (if isRebase: "rebase" else: "merge") &
+            " onto " & remoteRef & " failed and was aborted; repo is unchanged: " &
+            run.output.strip()
+          anyRefusal = true
+        else:
+          entry.headAfter = revParse(identity, repoAbs, "HEAD")
+          if emitProgress:
+            stderr.writeLine("workspace sync: [" & (if isRebase: "rebased" else: "merged") & "] " & repo.path)
     result.repos.add(entry)
 
   result.exitCode =
@@ -38845,7 +38976,7 @@ proc runMainlineSyncCommand(parsed: WorkspaceSyncArgs): int =
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
-    for line in renderMainlineSyncTextLines(report):
+    for line in renderMainlineSyncTextLines(report, parsed.verbose):
       stdout.writeLine(line)
   report.exitCode
 
