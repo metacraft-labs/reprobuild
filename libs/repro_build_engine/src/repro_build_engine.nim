@@ -857,6 +857,14 @@ type
       ## stats but does NOT abort the build. ``nil`` keeps the engine
       ## pure-local (legacy behaviour) — the publish hook becomes a
       ## no-op for every action regardless of the per-action flag.
+    portableRoots*: seq[LogicalRoot]
+      ## Cache-Scope P3.1: the logical roots against which each recorded
+      ## action's PORTABLE fingerprint is computed
+      ## (`repro_local_store/portable_fingerprint`). Empty — the default —
+      ## computes none: path independence is "off unless explicitly
+      ## requested" (Hermetic-Builds-And-Path-Independence.md), and it
+      ## costs a BLAKE3 pass over every observed input. The local
+      ## fingerprint and every local cache decision are unaffected.
     binaryCacheIntermediateScope*: bool
       ## L3 PUBLISH-SCOPE. When ``true`` the target binary cache is an
       ## INTERMEDIATE cache: EVERY successful cacheable action's store
@@ -1371,6 +1379,13 @@ type
       ## `evidence` the thing to read for an executed action. Read both halves
       ## through `declaredInputCount` / `depfileInputCount` / … rather than
       ## reaching into either directly.
+    portable*: bool
+      ## Cache-Scope P3.1: whether this recorded action has a portable
+      ## identity. False when portable fingerprints are off, or when an
+      ## observed input lies under no logical root (see `portableReason`).
+    portableWeakHex*: string
+    portableStrongHex*: string
+    portableReason*: string
     strongFingerprintHex*: string
       ## M17 (``ext_repro_action``): the ACTION-CACHE KEY the lookup
       ## compared against, hex-encoded, or "" when the lookup found no
@@ -13839,6 +13854,55 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     config.peerCacheActionPublisher(weakFingerprint, bundleBytes)
     finishStat("repro peer-cache publish", publishStart)
 
+  proc recordPortableFingerprint(idx: int; action: BuildAction;
+                                 evidence: PathSetEvidence) =
+    ## Cache-Scope P3.1: compute the action's portable weak/strong
+    ## fingerprint over logical paths, from the SAME filtered input set
+    ## the local record uses (`cacheInputPaths`: tool roots, ignored
+    ## prefixes and the action's own writes already removed), split into
+    ## reads, probes and enumerations. Observational only in P3.1: it is
+    ## reported on the result and the trace, and changes no cache decision.
+    if config.portableRoots.len == 0:
+      return
+    let enumerations = action.cacheEnumeratedDirectories(evidence)
+    var enumerated = initHashSet[string]()
+    for path in enumerations:
+      enumerated.incl(path)
+    var probed = initHashSet[string]()
+    for path in evidence.monitorProbes:
+      probed.incl(materialPath(action.cwd, path))
+    var reads: seq[string] = @[]
+    var probes: seq[string] = @[]
+    for path in action.cacheInputPaths(evidence):
+      if path in enumerated:
+        continue
+      elif path in probed:
+        probes.add(path)
+      else:
+        reads.add(path)
+    var env: seq[(string, string)] = @[]
+    for entry in action.env:
+      let eq = entry.find('=')
+      if eq > 0:
+        env.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
+      else:
+        env.add((entry, ""))
+    var declared: seq[string] = @[]
+    for input in action.inputs:
+      declared.add(materialPath(action.cwd, input))
+    let fp = computePortableFingerprint(config.portableRoots, action.argv,
+      action.cwd, env, declared, reads, probes, enumerations)
+    runResult.results[idx].portable = fp.portable
+    runResult.results[idx].portableWeakHex = fp.weakHex
+    runResult.results[idx].portableStrongHex = fp.strongHex
+    runResult.results[idx].portableReason = fp.reason
+    if fp.portable:
+      runResult.trace(action.id, "portable-fingerprint",
+        "strong=" & fp.strongHex & " inputs=" & $fp.inputs.len)
+    else:
+      runResult.trace(action.id, "portable-fingerprint-unavailable",
+        fp.reason)
+
   proc publishBinaryCacheBundle(action: BuildAction;
                                 record: ActionResultRecord;
                                 allowMaterializedOutputs = false) =
@@ -15453,6 +15517,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, action.id), record)
+              recordPortableFingerprint(idx, action, evidence.evidence)
               publishPeerCacheBundle(action.weakFingerprint, record)
               publishBinaryCacheBundle(action, record)
             elif action.cacheable and evidence.disableCacheHits:
@@ -15642,6 +15707,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               finishStat("repro cache record", recordStart)
               writeActionResultRecordFile(
                 dependencyEvidencePath(cacheRoot, plan.action.id), record)
+              recordPortableFingerprint(idx, plan.action, evidence.evidence)
               publishPeerCacheBundle(plan.action.weakFingerprint, record)
               publishBinaryCacheBundle(plan.action, record)
             elif plan.action.cacheable and evidence.disableCacheHits:
@@ -16238,6 +16304,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           finishStat("repro cache record", recordStart)
           writeActionResultRecordFile(
             dependencyEvidencePath(cacheRoot, action.id), record)
+          recordPortableFingerprint(idx, action, evidence.evidence)
           publishPeerCacheBundle(action.weakFingerprint, record)
           publishBinaryCacheBundle(action, record)
         elif action.cacheable and evidence.disableCacheHits:
