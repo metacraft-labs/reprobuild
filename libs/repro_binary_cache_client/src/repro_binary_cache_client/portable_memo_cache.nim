@@ -10,36 +10,44 @@
 ## made on one host is found — and its outputs restored — on another host whose
 ## checkout sits at a different absolute path.
 ##
-## ## Two kinds of entry
+## ## Three kinds of entry
 ##
 ## The transport maps an entry key to one signed manifest and one archived
 ## prefix, and it cannot list keys. A lookup therefore has to be able to NAME
 ## every key it reads:
 ##
-## * **Record entry** — key over (weak, path-set hash, strong). The prefix holds
-##   the encoded memo record and each output's bytes. The key is a function of
-##   everything the record claims, so a republish can only ever write the same
-##   claim again.
+## * **Record entry** — key over (weak, path-set hash, strong); the prefix holds
+##   the encoded memo record and nothing else. Metadata, like BuildXL's
+##   memoization store: small, and published for every portable action, because
+##   lookup without materialization (P3.4) resolves a downstream action's inputs
+##   from its UPSTREAM records.
+## * **Outputs entry** — the same triple under another package name; the prefix
+##   holds the record again and each output's bytes. BuildXL's content store,
+##   published only where the binary-cache scope publishes bytes: tagged
+##   actions, or every action in an intermediate cache.
 ## * **Path-set slot** — key over (weak, slot number). Slot ``k`` holds one
 ##   encoded candidate path set. A publisher fills the first empty slot; a
 ##   lookup probes slots ``0, 1, …`` until the first miss.
 ##
-## The server overwrites a republished key, so two publishers racing for one
-## slot can lose a path set. That costs a cache MISS and nothing else: a slot
-## only tells a consumer which strong fingerprint to compute, and the record it
-## then reads is keyed by that computation. A publisher re-reads its slot after
-## writing it, which narrows the window to near nothing.
+## Record and outputs keys are functions of everything the record claims, so a
+## republish can only write the same claim again. The server overwrites a
+## republished key, so two publishers racing for one SLOT can lose a path set.
+## That costs a cache MISS and nothing else: a slot only tells a consumer which
+## strong fingerprint to compute, and the record it then reads is keyed by that
+## computation. A publisher re-reads its slot after writing it, which narrows
+## the window to near nothing.
 ##
 ## ## What makes a hit safe
 ##
 ## Nothing about a hit is taken on trust from the producer beyond its signature:
 ## the consumer recomputes the strong fingerprint from ITS OWN inputs (or from
 ## upstream records, for lookup without materialization), fetches the record
-## under the key that computation names, checks the record states that same
-## weak/path-set/strong triple, and checks every staged output's BLAKE3 content
-## digest against the record before anything is placed in the checkout. A
-## producer that published bytes other than the ones its record names is
-## refused, not served.
+## under the key that computation names, and checks the record states that same
+## weak/path-set/strong triple. Restoring checks every fetched output's BLAKE3
+## content digest against the record before anything is placed in the
+## checkout. A producer that published bytes other than the ones its record
+## names is refused, not served — and a host does not publish a record whose
+## outputs on its own disk do not match it.
 ##
 ## Entries are scoped to the concrete build platform, the same channel the
 ## provider-compile cache uses: the portable weak fingerprint does not hash a
@@ -65,6 +73,7 @@ const
   MemoCacheToolchain* = "reprobuild-memo"
   MemoCacheVersion* = "1"
   MemoRecordPackage* = "reprobuild-memo.record"
+  MemoOutputsPackage* = "reprobuild-memo.outputs"
   MemoPathSetPackage* = "reprobuild-memo.pathset"
   MaxPathSetSlots* = 16
     ## Candidate path sets kept per weak fingerprint. One static action
@@ -88,14 +97,8 @@ type
       ## Where fetches are staged. Each fetch uses (and removes) its own
       ## directory beneath it.
 
-  RemoteMemoHit* = object
-    record*: PortableMemoRecord
-    stagedDir*: string
-      ## The fetched prefix, outputs verified against ``record``. Owned by the
-      ## caller: ``restoreMemoOutputs`` reads it, ``discardHit`` removes it.
-
   RemoteMemoLookup* = object
-    hit*: Option[RemoteMemoHit]
+    hit*: Option[PortableMemoRecord]
     reason*: string
       ## Populated on a miss. A refused entry says why it was refused.
 
@@ -103,6 +106,7 @@ type
     ok*: bool
     reason*: string
     recordKeyHex*: string
+    outputsPublished*: bool
     slot*: int
       ## The path-set slot that makes the record discoverable; -1 if none.
 
@@ -141,10 +145,18 @@ proc memoIdentity(remote: MemoRemote; package, revision: string):
   result.addOption(enginePlatform.CachePlatformTagOptionKey,
     enginePlatform.buildPlatformTriple())
 
+proc tripleRevision(weakHex, pathSetHashHex, strongHex: string): string =
+  weakHex & "/" & pathSetHashHex & "/" & strongHex
+
 proc memoRecordIdentity*(remote: MemoRemote; weakHex, pathSetHashHex,
                          strongHex: string): CacheEntryIdentity =
   memoIdentity(remote, MemoRecordPackage,
-    weakHex & "/" & pathSetHashHex & "/" & strongHex)
+    tripleRevision(weakHex, pathSetHashHex, strongHex))
+
+proc memoOutputsIdentity*(remote: MemoRemote; weakHex, pathSetHashHex,
+                          strongHex: string): CacheEntryIdentity =
+  memoIdentity(remote, MemoOutputsPackage,
+    tripleRevision(weakHex, pathSetHashHex, strongHex))
 
 proc pathSetSlotIdentity*(remote: MemoRemote; weakHex: string; slot: int):
     CacheEntryIdentity =
@@ -183,18 +195,12 @@ proc copyOutput(src, dst: string; directory: bool) =
   else:
     copyFileWithPermissions(extendedPath(src), extendedPath(dst))
 
-proc stageMemoEntry*(record: PortableMemoRecord; roots: openArray[LogicalRoot];
-                     stageDir: string): string =
-  ## Lay out a record entry's prefix from the outputs on THIS host. Returns ""
-  ## or the reason it cannot: an output that is missing, that has no physical
-  ## location here, or whose bytes are not the ones the record names. A record
-  ## is a claim about its outputs, and this host does not publish a claim it
-  ## has not checked.
-  let record = sortedOutputs(record)
-  removeDir(extendedPath(stageDir))
-  createDir(extendedPath(stageDir))
-  writeBytes(stageDir / StagedMemoName, encodeMemo(record))
-  for i, output in record.outputs:
+proc checkOutputsOnDisk*(record: PortableMemoRecord;
+                         roots: openArray[LogicalRoot]): string =
+  ## "" when every output the record names is on THIS host with the content
+  ## the record names; otherwise why not. A record is a claim about its
+  ## outputs, and this host does not publish a claim it has not checked.
+  for output in record.outputs:
     let physical = toPhysicalPath(roots, output.path)
     if physical.isNone:
       return "output " & output.path & " has no location on this host"
@@ -204,14 +210,34 @@ proc stageMemoEntry*(record: PortableMemoRecord; roots: openArray[LogicalRoot];
     if actual.get() != output.digest:
       return "output " & output.path & " does not have the content the " &
         "record names"
-    copyOutput(physical.get(), stagedOutputPath(stageDir, i), output.directory)
   ""
 
-proc verifyStagedEntry*(stageDir, weakHex, pathSetHashHex, strongHex: string):
+proc stageMemoRecord*(record: PortableMemoRecord; stageDir: string) =
+  removeDir(extendedPath(stageDir))
+  createDir(extendedPath(stageDir))
+  writeBytes(stageDir / StagedMemoName, encodeMemo(sortedOutputs(record)))
+
+proc stageMemoOutputs*(record: PortableMemoRecord;
+                       roots: openArray[LogicalRoot]; stageDir: string):
+    string =
+  ## Lay out an outputs entry's prefix from the outputs on THIS host. Returns
+  ## "" or the reason it cannot (see ``checkOutputsOnDisk``).
+  let record = sortedOutputs(record)
+  let refusal = checkOutputsOnDisk(record, roots)
+  if refusal.len > 0:
+    return refusal
+  stageMemoRecord(record, stageDir)
+  for i, output in record.outputs:
+    copyOutput(toPhysicalPath(roots, output.path).get(),
+      stagedOutputPath(stageDir, i), output.directory)
+  ""
+
+proc verifyStagedEntry*(stageDir, weakHex, pathSetHashHex, strongHex: string;
+                        requireOutputs: bool):
     tuple[record: Option[PortableMemoRecord], reason: string] =
-  ## Decide whether a fetched record entry may be served: it must state the
-  ## triple its key names, and every staged output must carry the content its
-  ## record promises.
+  ## Decide whether a fetched entry may be used: its record must state the
+  ## triple its key names, and — for an outputs entry — every staged output
+  ## must carry the content its record promises.
   let memoPath = stageDir / StagedMemoName
   if not fileExists(extendedPath(memoPath)):
     return (none(PortableMemoRecord), "the entry carries no memo record")
@@ -225,15 +251,17 @@ proc verifyStagedEntry*(stageDir, weakHex, pathSetHashHex, strongHex: string):
       pathSetHash(record.pathSet) != pathSetHashHex:
     return (none(PortableMemoRecord),
       "the memo record does not describe the key it was published under")
-  for i, output in record.outputs:
-    let actual = outputDigest(stagedOutputPath(stageDir, i), output.directory)
-    if actual.isNone:
-      return (none(PortableMemoRecord),
-        "the entry does not carry output " & output.path)
-    if actual.get() != output.digest:
-      return (none(PortableMemoRecord),
-        "the entry's bytes for " & output.path &
-        " are not the content its record names")
+  if requireOutputs:
+    for i, output in record.outputs:
+      let actual = outputDigest(stagedOutputPath(stageDir, i),
+        output.directory)
+      if actual.isNone:
+        return (none(PortableMemoRecord),
+          "the entry does not carry output " & output.path)
+      if actual.get() != output.digest:
+        return (none(PortableMemoRecord),
+          "the entry's bytes for " & output.path &
+          " are not the content its record names")
   (some(record), "")
 
 # --- transport ---------------------------------------------------------------
@@ -244,6 +272,10 @@ proc freshDir(remote: MemoRemote; label: string): string =
              else: getTempDir()
   base / "portable-memo-remote" /
     (label & "-" & $getCurrentProcessId() & "-" & $fetchCounter)
+
+proc removeQuietly(dir: string) =
+  try: removeDir(extendedPath(dir))
+  except CatchableError: discard
 
 proc fetchEntry(remote: MemoRemote; identity: CacheEntryIdentity;
                 extractDir: string): bool =
@@ -268,8 +300,7 @@ proc fetchEntry(remote: MemoRemote; identity: CacheEntryIdentity;
   except CatchableError:
     false
   finally:
-    try: removeDir(extendedPath(store))
-    except CatchableError: discard
+    removeQuietly(store)
 
 proc publishEntry(remote: MemoRemote; identity: CacheEntryIdentity;
                   stageDir: string): tuple[ok: bool, reason: string] =
@@ -287,9 +318,7 @@ proc publishEntry(remote: MemoRemote; identity: CacheEntryIdentity;
 proc fetchPathSetSlot(remote: MemoRemote; weakHex: string; slot: int):
     Option[PathSet] =
   let dir = freshDir(remote, "slot")
-  defer:
-    try: removeDir(extendedPath(dir))
-    except CatchableError: discard
+  defer: removeQuietly(dir)
   if not fetchEntry(remote, pathSetSlotIdentity(remote, weakHex, slot), dir):
     return none(PathSet)
   try:
@@ -313,10 +342,6 @@ proc remoteCandidatePathSets*(remote: MemoRemote; weakHex: string):
 
 # --- lookup ------------------------------------------------------------------
 
-proc discardHit*(hit: RemoteMemoHit) =
-  try: removeDir(extendedPath(hit.stagedDir))
-  except CatchableError: discard
-
 proc lookupRemoteMemo*(remote: MemoRemote; roots: openArray[LogicalRoot];
                        weakHex: string; resolve: IdentityResolver = nil):
     RemoteMemoLookup =
@@ -324,7 +349,8 @@ proc lookupRemoteMemo*(remote: MemoRemote; roots: openArray[LogicalRoot];
   ## path set, compute the strong fingerprint from what is true HERE (the
   ## filesystem, or ``resolve`` — upstream records, for lookup without
   ## materialization), fetch the record that computation names, and verify it
-  ## before returning it. Executes nothing and places nothing in the checkout.
+  ## names that computation. Metadata only: executes nothing, fetches no
+  ## output bytes and places nothing in the checkout.
   let candidates = remoteCandidatePathSets(remote, weakHex)
   if candidates.len == 0:
     result.reason = "no path set published for this weak fingerprint"
@@ -336,17 +362,16 @@ proc lookupRemoteMemo*(remote: MemoRemote; roots: openArray[LogicalRoot];
       continue
     let psHash = pathSetHash(pathSet)
     let dir = freshDir(remote, "record")
+    defer: removeQuietly(dir)
     if not fetchEntry(remote,
         memoRecordIdentity(remote, weakHex, psHash, strong.get()), dir):
       continue
-    let verdict = verifyStagedEntry(dir, weakHex, psHash, strong.get())
+    let verdict = verifyStagedEntry(dir, weakHex, psHash, strong.get(),
+      requireOutputs = false)
     if verdict.record.isNone:
       refusals.add(verdict.reason)
-      try: removeDir(extendedPath(dir))
-      except CatchableError: discard
       continue
-    result.hit = some(RemoteMemoHit(record: verdict.record.get(),
-                                    stagedDir: dir))
+    result.hit = verdict.record
     return
   result.reason =
     if refusals.len > 0:
@@ -354,17 +379,32 @@ proc lookupRemoteMemo*(remote: MemoRemote; roots: openArray[LogicalRoot];
     else:
       "no candidate path set matches this host's inputs"
 
-proc restoreMemoOutputs*(hit: RemoteMemoHit; roots: openArray[LogicalRoot]):
-    string =
-  ## Place a verified hit's outputs at the paths THIS host's roots give them.
-  ## Returns "" or the reason it could not.
-  for i, output in hit.record.outputs:
+proc restoreMemoOutputs*(remote: MemoRemote; record: PortableMemoRecord;
+                         roots: openArray[LogicalRoot]): string =
+  ## Fetch a record's output bytes, check each against the record, and place
+  ## them at the paths THIS host's roots give them. Returns "" or the reason
+  ## nothing was placed — every output is verified before the first is
+  ## written, so a refusal leaves the checkout as it was.
+  let psHash = pathSetHash(record.pathSet)
+  let dir = freshDir(remote, "outputs")
+  defer: removeQuietly(dir)
+  if not fetchEntry(remote, memoOutputsIdentity(remote, record.weakHex,
+      psHash, record.strongHex), dir):
+    return "no outputs published for this record"
+  let verdict = verifyStagedEntry(dir, record.weakHex, psHash,
+    record.strongHex, requireOutputs = true)
+  if verdict.record.isNone:
+    return "outputs refused: " & verdict.reason
+  let staged = verdict.record.get()
+  var targets: seq[string] = @[]
+  for output in staged.outputs:
     let physical = toPhysicalPath(roots, output.path)
     if physical.isNone:
       return "output " & output.path & " has no location on this host"
+    targets.add(physical.get())
+  for i, output in staged.outputs:
     try:
-      copyOutput(stagedOutputPath(hit.stagedDir, i), physical.get(),
-        output.directory)
+      copyOutput(stagedOutputPath(dir, i), targets[i], output.directory)
     except CatchableError as err:
       return "cannot restore " & output.path & ": " & err.msg
   ""
@@ -372,10 +412,13 @@ proc restoreMemoOutputs*(hit: RemoteMemoHit; roots: openArray[LogicalRoot]):
 # --- publish -----------------------------------------------------------------
 
 proc publishMemo*(remote: MemoRemote; roots: openArray[LogicalRoot];
-                  record: PortableMemoRecord): MemoPublishAttempt =
-  ## Publish a record, then make it discoverable through a path-set slot.
-  ## The record goes first, so a consumer that finds a slot finds a record.
-  ## Best-effort: every failure is reported, none raises.
+                  record: PortableMemoRecord; withOutputs = true):
+    MemoPublishAttempt =
+  ## Publish a record — with its output bytes when ``withOutputs`` — then make
+  ## it discoverable through a path-set slot. Outputs go first and the slot
+  ## last, so a consumer that finds a slot finds a record, and one that finds
+  ## a record finds the bytes it was published with. Best-effort: every
+  ## failure is reported, none raises.
   result.slot = -1
   if not remote.canPublish:
     result.reason = "no publisher keypair"
@@ -385,14 +428,24 @@ proc publishMemo*(remote: MemoRemote; roots: openArray[LogicalRoot];
     record.strongHex)
   result.recordKeyHex = deriveCacheEntryKeyHex(recordId)
   let stage = freshDir(remote, "publish")
-  defer:
-    try: removeDir(extendedPath(stage))
-    except CatchableError: discard
+  defer: removeQuietly(stage)
   try:
-    let refusal = stageMemoEntry(record, roots, stage)
+    let refusal = checkOutputsOnDisk(record, roots)
     if refusal.len > 0:
       result.reason = "refusing to publish: " & refusal
       return
+    if withOutputs:
+      let staged = stageMemoOutputs(record, roots, stage)
+      if staged.len > 0:
+        result.reason = "refusing to publish: " & staged
+        return
+      let outputs = publishEntry(remote, memoOutputsIdentity(remote,
+        record.weakHex, psHash, record.strongHex), stage)
+      if not outputs.ok:
+        result.reason = outputs.reason
+        return
+      result.outputsPublished = true
+    stageMemoRecord(record, stage)
     let published = publishEntry(remote, recordId, stage)
     if not published.ok:
       result.reason = published.reason

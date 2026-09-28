@@ -866,9 +866,12 @@ type
       ## costs a BLAKE3 pass over every observed input. The local
       ## fingerprint and every local cache decision are unaffected.
     portableMemoPublisher*: PortableMemoPublisher
-      ## Cache-Scope P3.3. When non-nil (and `portableRoots` is set), each
-      ## portable record is also published to the remote memoization plane
-      ## — for the actions the binary-cache scope publishes: tagged
+      ## Cache-Scope P3.3. When non-nil (and `portableRoots` is set), every
+      ## portable record is also published to the remote memoization plane.
+      ## Records are metadata (logical paths and digests) and go out for
+      ## every portable action: a downstream lookup resolves its inputs from
+      ## its upstream records without their bytes. Output BYTES go only
+      ## where the binary-cache scope publishes them — actions tagged
       ## `publishToBinaryCache`, or every action under
       ## `binaryCacheIntermediateScope`.
     binaryCacheIntermediateScope*: bool
@@ -1654,11 +1657,12 @@ type
     bytesUploaded*: int
 
   PortableMemoPublisher* = proc(roots: seq[LogicalRoot];
-                                record: PortableMemoRecord): string
+                                record: PortableMemoRecord;
+                                withOutputs: bool): string
                                {.gcsafe, closure.}
-    ## Cache-Scope P3.3. Ships a portable memo record, and the output bytes
-    ## it names, to the remote memoization plane
-    ## (`repro_binary_cache_client/portable_memo_cache.publishMemo`).
+    ## Cache-Scope P3.3. Ships a portable memo record — and, when
+    ## `withOutputs`, the output bytes it names — to the remote memoization
+    ## plane (`repro_binary_cache_client/portable_memo_cache.publishMemo`).
     ## Returns "" on success, otherwise the reason — traced, never fatal.
 
   BinaryCachePublisher* = proc(req: BinaryCachePublishRequest):
@@ -13931,11 +13935,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           recordMemo(sharedRoot / "portable-memo", memo)
         except CatchableError as err:
           runResult.trace(action.id, "portable-memo-write-failed", err.msg)
-        if config.portableMemoPublisher != nil and
-            (action.publishToBinaryCache or
-             config.binaryCacheIntermediateScope):
+        if config.portableMemoPublisher != nil:
+          let withOutputs = action.publishToBinaryCache or
+            config.binaryCacheIntermediateScope
           let failure =
-            try: config.portableMemoPublisher(config.portableRoots, memo)
+            try: config.portableMemoPublisher(config.portableRoots, memo,
+                                              withOutputs)
             except CatchableError as err: err.msg
           if failure.len > 0:
             runResult.trace(action.id, "portable-memo-publish-failed",
