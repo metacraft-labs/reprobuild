@@ -200,17 +200,7 @@ proc checkOutputsOnDisk*(record: PortableMemoRecord;
   ## "" when every output the record names is on THIS host with the content
   ## the record names; otherwise why not. A record is a claim about its
   ## outputs, and this host does not publish a claim it has not checked.
-  for output in record.outputs:
-    let physical = toPhysicalPath(roots, output.path)
-    if physical.isNone:
-      return "output " & output.path & " has no location on this host"
-    let actual = outputDigest(physical.get(), output.directory)
-    if actual.isNone:
-      return "output " & output.path & " is missing"
-    if actual.get() != output.digest:
-      return "output " & output.path & " does not have the content the " &
-        "record names"
-  ""
+  outputsOnDiskReason(roots, record)
 
 proc stageMemoRecord*(record: PortableMemoRecord; stageDir: string) =
   removeDir(extendedPath(stageDir))
