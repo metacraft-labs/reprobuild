@@ -13914,11 +13914,27 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for input in action.inputs:
       result.add(materialPath(action.cwd, input))
 
+  proc portableStaticFieldsOf(action: BuildAction): seq[string] =
+    ## What the argv does not say about the action: its kind, a builtin's
+    ## payload, and the outputs it declares (sorted: a set).
+    result.add("kind=" & $action.kind)
+    result.add("builtinText=" & action.builtinText)
+    for entry in action.builtinEntries:
+      result.add("builtinEntry=" & entry)
+    var outputs: seq[string] = @[]
+    for output in action.outputs:
+      outputs.add("output=" & materialPath(action.cwd, output))
+    for output in action.declaredOutputs:
+      outputs.add("declaredOutput=" & materialPath(action.cwd, output))
+    outputs.sort()
+    result.add(outputs)
+
   proc portableWeakOf(action: BuildAction): string =
     ## The portable weak fingerprint: the action's STATIC description, so it
     ## is known before the action runs (the P3.4 lookup needs exactly that).
     portableWeakFingerprint(config.portableRoots, action.argv, action.cwd,
-      portableEnvOf(action), portableDeclaredInputsOf(action))
+      portableEnvOf(action), portableDeclaredInputsOf(action),
+      portableStaticFieldsOf(action))
 
   proc portablePhysicalOutputsOf(action: BuildAction): seq[string] =
     ## `outputs` plus `declaredOutputs`: an install-mirror action's outputs
@@ -13939,7 +13955,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## local memo record, and (once per record) publication.
     var fp = computePortableFingerprint(config.portableRoots, action.argv,
       action.cwd, portableEnvOf(action), portableDeclaredInputsOf(action),
-      reads, probes, enumerations)
+      reads, probes, enumerations, portableStaticFieldsOf(action))
     if fp.portable:
       # P3.2: a record is only shareable if its RESULT can be named too.
       let outs = portableOutputs(config.portableRoots,

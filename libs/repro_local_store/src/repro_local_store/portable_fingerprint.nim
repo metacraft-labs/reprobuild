@@ -111,7 +111,7 @@ type
     inputs*: seq[PortableInput]
 
 const
-  WeakDomain = "reprobuild.portable.weak.v1"
+  WeakDomain = "reprobuild.portable.weak.v2"
   StrongDomain = "reprobuild.portable.strong.v1"
   ProbePresent = "present"
   ProbeAbsent = "absent"
@@ -231,10 +231,16 @@ proc frame(text: string): string =
 proc portableWeakFingerprint*(roots: openArray[LogicalRoot];
                               argv: openArray[string]; cwd: string;
                               env: openArray[(string, string)];
-                              declaredInputs: openArray[string]): string =
+                              declaredInputs: openArray[string];
+                              staticFields: openArray[string] = []): string =
   ## The action's static description, over logical paths. Environment is
   ## sorted by name; declared inputs are logicalized and sorted, because
   ## their order carries no meaning for what the action computes.
+  ## `staticFields` carries the rest of that description — what an argv does
+  ## not say: the action kind, a builtin's payload, its declared outputs.
+  ## Without them two builtins with the same inputs (argv is empty for both)
+  ## would share one identity. Each is logicalized; their order is kept,
+  ## since the caller states it.
   var payload = frame(WeakDomain)
   payload.add(frame($argv.len))
   for arg in argv:
@@ -253,6 +259,9 @@ proc portableWeakFingerprint*(roots: openArray[LogicalRoot];
   payload.add(frame($inputs.len))
   for input in inputs:
     payload.add(frame(input))
+  payload.add(frame($staticFields.len))
+  for field in staticFields:
+    payload.add(frame(logicalizeText(roots, field)))
   blake3.digest(payload).toHex()
 
 proc portableStrongFingerprint*(weakHex: string;
@@ -279,13 +288,15 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
                                  env: openArray[(string, string)];
                                  declaredInputs: openArray[string];
                                  reads, probes, enumerations:
-                                   openArray[string]): PortableFingerprint =
+                                   openArray[string];
+                                 staticFields: openArray[string] = []):
+    PortableFingerprint =
   ## Everything at once. Deduplicates each observation class by logical path
   ## (the monitor reports repeats), drops untracked accesses, and marks the
   ## action not portable at the first access under no known root.
   result.portable = true
   result.weakHex = portableWeakFingerprint(roots, argv, cwd, env,
-    declaredInputs)
+    declaredInputs, staticFields)
   var seen: seq[string] = @[]
   template consider(physical: string; inputKind: PortableInputKind;
                     identity: untyped) =

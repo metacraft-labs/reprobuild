@@ -124,6 +124,35 @@ suite "Cache-Scope P3.1 — engine records portable fingerprints":
     check warm.portableStrongHex == cold.portableStrongHex
     check warm.portableOutputs == cold.portableOutputs
 
+  test "builtins with the same inputs but different payloads differ":
+    # argv is empty for every builtin, so the portable identity has to carry
+    # the rest of the static description: kind, payload, declared outputs.
+    let p = project("builtins", "int main;\n")
+    createDir(p / "out")
+    proc writer(id, text, output: string): BuildAction =
+      BuildAction(
+        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+        kind: bakWriteText, id: id, deps: @[],
+        inputs: @[p / "src" / "main.c"], outputs: @[p / "out" / output],
+        cwd: p, cacheable: true, actionCachePolicy: ffpTimestamp,
+        weakFingerprint: fingerprintForPayload(id), builtinText: text)
+    var config = defaultBuildEngineConfig(TmpDir / "cache-builtins")
+    config.maxParallelism = 1
+    config.portableRoots = @[
+      LogicalRoot(label: "project", path: p, kind: lrkTracked)]
+    let run = runBuild(graph(@[
+      writer("t-one", "one\n", "one.txt"),
+      writer("t-two", "two\n", "two.txt"),
+      writer("t-same-output", "one\n", "three.txt")],
+      newSeq[BuildPool]()), config)
+    require run.results.len == 3
+    for r in run.results:
+      require r.portable
+    check run.results[0].portableWeakHex != run.results[1].portableWeakHex
+    check run.results[0].portableStrongHex != run.results[1].portableStrongHex
+    # Same payload, different declared output: still different actions.
+    check run.results[0].portableWeakHex != run.results[2].portableWeakHex
+
   test "an input-content change moves the portable strong fingerprint":
     let a = project("same-a", "int main;\n")
     let b = project("same-b", "int main(void);\n")
