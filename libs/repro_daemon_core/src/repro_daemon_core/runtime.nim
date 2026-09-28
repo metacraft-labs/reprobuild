@@ -114,6 +114,19 @@ type
                                   emit: UserDaemonBuildEmit;
                                   cancelCheck: UserDaemonBuildCancelCheck):
                                   int
+  UserDaemonProjectRootResolver* = proc(request: UserDaemonBuildRequest):
+      string
+    ## The project a build request is FOR, when the request does not say.
+    ##
+    ## The engine's own client fills ``projectRoot`` from the target it parsed.
+    ## The thin client (``apps/repro-client``) cannot — it forwards the raw
+    ## argument vector and links none of the target-resolution code — so its
+    ## requests arrive with ``projectRoot`` empty, and the session record used
+    ## to fall back to the client's working directory. ``repro build
+    ## <project>`` run from anywhere else then listed the wrong project in
+    ## ``repro daemon sessions``. The resolver derives it from the request
+    ## alone (``rawArgs`` resolved against ``workingDir``); an empty answer
+    ## keeps the working-directory fallback.
   UserDaemonParentPrewarmer* = proc(request: UserDaemonBuildRequest): string
     ## Dependency-Attribution MAC-2 — warm the DAEMON PARENT's in-memory build
     ## caches for an incoming request, so the worker about to be forked
@@ -208,6 +221,7 @@ const UserDaemonLockFileName = ".repro-daemon.lock"
 
 var userDaemonBuildExecutor: UserDaemonBuildExecutor
 var userDaemonParentPrewarmer: UserDaemonParentPrewarmer
+var userDaemonProjectRootResolver: UserDaemonProjectRootResolver
 var userDaemonWatchExecutor: UserDaemonWatchExecutor
 var userDaemonSubstituteExecutor: UserDaemonSubstituteExecutor
 
@@ -216,6 +230,26 @@ proc setUserDaemonBuildExecutor*(executor: UserDaemonBuildExecutor) =
 
 proc setUserDaemonParentPrewarmer*(prewarmer: UserDaemonParentPrewarmer) =
   userDaemonParentPrewarmer = prewarmer
+
+proc setUserDaemonProjectRootResolver*(
+    resolver: UserDaemonProjectRootResolver) =
+  userDaemonProjectRootResolver = resolver
+
+proc buildRequestProjectRoot*(request: UserDaemonBuildRequest): string =
+  ## The project root a build session is recorded under: the request's own
+  ## ``projectRoot`` when it carries one, else what the registered resolver
+  ## derives from its arguments, else the client's working directory. A
+  ## resolver that raises is treated as having no answer — this names a
+  ## session, it must never refuse a build.
+  if request.projectRoot.len > 0:
+    return request.projectRoot
+  if userDaemonProjectRootResolver != nil:
+    try:
+      result = userDaemonProjectRootResolver(request)
+    except CatchableError:
+      result = ""
+  if result.len == 0:
+    result = request.workingDir
 
 var userDaemonWorkerNote: string
 
@@ -1648,11 +1682,7 @@ proc handleBuildRequest(socket: IpcConn; config: UserDaemonConfig;
     else:
       $getCurrentProcessId() & "-" & $started.toUnix & "-" &
         $started.nanosecond
-  let projectRoot =
-    if request.projectRoot.len > 0:
-      request.projectRoot
-    else:
-      request.workingDir
+  let projectRoot = buildRequestProjectRoot(request)
   var session = sessionStateAccepted(sessionId, projectRoot, started)
   sessions.add(session)
   writeSessionRecord(config, session)

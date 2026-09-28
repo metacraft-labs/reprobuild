@@ -30160,6 +30160,45 @@ const DaemonParentPrewarmEnv* = "REPROBUILD_DAEMON_PARENT_PREWARM"
 proc daemonParentPrewarmEnabled*(): bool =
   getEnv(DaemonParentPrewarmEnv, "1") != "0"
 
+proc daemonRequestProjectRoot*(rawArgs: openArray[string];
+                               workingDir: string): string =
+  ## The project a daemon-hosted ``repro build`` request is for, derived from
+  ## the request alone — the same target the worker will build: the first
+  ## positional of ``rawArgs`` (``.`` when there is none), resolved against the
+  ## request's ``workingDir``, never the daemon's own. "" when the target does
+  ## not resolve to a project file; the session record then keeps its
+  ## working-directory fallback. Read-only, so it is safe in the daemon parent
+  ## (see ``UserDaemonProjectRootResolver``).
+  var target = ""
+  var i = 0
+  while i < rawArgs.len:
+    let arg = rawArgs[i]
+    if arg in ["--work-root", "--tool-provisioning", "--action-cache-root",
+        "--daemon", "--progress", "--progress-bars", "--write-diagnostics",
+        "--show", "--measure", "--write-report", "--log", "--write-benchmark",
+        "--write-stats", "--monitor-hosting", "--evidence"]:
+      discard valueFromFlag(rawArgs, i, arg)
+    elif not arg.startsWith("-") and target.len == 0:
+      target = arg
+    inc i
+  if target.len == 0:
+    target = "."
+  var base = splitTarget(target).base
+  if base.len == 0:
+    base = "."
+  if not base.isAbsolute:
+    if workingDir.len == 0:
+      return ""
+    base = absolutePath(base, workingDir)
+  try:
+    let parsed = parseBuildTarget(base)
+    if not parsed.modulePath.isAbsolute or
+        not fileExists(extendedPath(parsed.modulePath)):
+      return ""
+    projectRootForModule(parsed.modulePath)
+  except CatchableError:
+    ""
+
 proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
                                    workingDir: string;
                                    requestEnvironment: openArray[string]):
@@ -30298,6 +30337,11 @@ proc installUserDaemonParentPrewarmer() =
   ## process-global first, which is a separate change.
   setUserDaemonParentPrewarmer(proc(request: UserDaemonBuildRequest): string =
     prewarmDaemonParentBuildCaches(request))
+  # Registered beside the prewarmer because it runs at the same point, in the
+  # same process, under the same read-only rule.
+  setUserDaemonProjectRootResolver(
+    proc(request: UserDaemonBuildRequest): string =
+      daemonRequestProjectRoot(request.rawArgs, request.workingDir))
 
 proc installUserDaemonBuildExecutor() =
   setUserDaemonBuildExecutor(proc(request: UserDaemonBuildRequest;
@@ -63316,19 +63360,15 @@ proc siblingVariantDeclarations(checkout: string):
   ## no variants emits no solver inputs at all, which is the same `none` a
   ## failed provider compile returns.
   ##
-  ## KNOWN LIMITATION, recorded rather than papered over and pinned by
-  ## `a recipe with no build: block cannot be asked` in
-  ## `t_develop_override_records_the_identity_it_replaced`: a sibling whose
-  ## recipe has neither a `build:` nor a `devEnv:` body contributes nothing,
-  ## even when it declares variants. `buildCode` (`macros_b.nim`) emits the
-  ## provider's `runPackageProvider` entry point only for a recipe with one of
-  ## those bodies, so the compiled binary runs its module init — emitting the
-  ## solver inputs — and exits without answering the protocol, and the probe
-  ## discards the emission along with the failed request. Closing it means
-  ## teaching that probe to keep inputs the provider demonstrably wrote before
-  ## the request failed, which is a change to `repro lock refresh`'s source of
-  ## truth and belongs to its own milestone. A develop sibling is a project you
-  ## build, so the shape that misses out is the rare one.
+  ## A RECIPE WITH NO `build:` OR `devEnv:` BODY IS ASKED TOO. `buildCode`
+  ## (`macros_b.nim`) emits the provider's `runPackageProvider` dispatcher
+  ## only for a recipe with one of those bodies, so such a binary cannot
+  ## answer a protocol request. It does not need to: its module init emits
+  ## the solver inputs, and since 0e7146a92 the probe runs a declaration-only
+  ## module's initialiser directly instead of sending it a request. This was
+  ## recorded here as a known limitation until then; it is now pinned the
+  ## other way round by `a recipe with no build: block is asked through its
+  ## initialiser` in `t_develop_override_records_the_identity_it_replaced`.
   result = @[]
   if checkout.len == 0:
     return
