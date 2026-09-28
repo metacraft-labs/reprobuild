@@ -79,6 +79,12 @@ suite "Cache-Scope P3.1 — engine records portable fingerprints":
     check ra.portableStrongHex.len == 64
     check ra.portableWeakHex == rb.portableWeakHex
     check ra.portableStrongHex == rb.portableStrongHex
+    # P3.2: the RESULT is named portably too, and identified by its bytes.
+    check ra.portableOutputs.len == 1
+    check ra.portableOutputs == rb.portableOutputs
+    check ra.portableOutputs[0].path == "project:out/result.txt"
+    check ra.portableOutputs[0].digest ==
+      fileContentHex(a / "out" / "result.txt")
 
   test "an input-content change moves the portable strong fingerprint":
     let a = project("same-a", "int main;\n")

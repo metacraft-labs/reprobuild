@@ -139,6 +139,67 @@ suite "portable fingerprints":
     check toLogicalPath(roots, "/w/reprobuild/libs/x.nim").label == "workspace"
     check toLogicalPath(roots, "/elsewhere/x").kind == lpkOutside
 
+  test "P3.2: identical trees at different absolute paths share an identity":
+    let a = createTempDir("repro-pfp-tree-a-", "")
+    let b = createTempDir("repro-pfp-tree-bbbbbb-", "")
+    defer:
+      removeDir(a)
+      removeDir(b)
+    for root in [a, b]:
+      createDir(root / "usr" / "bin")
+      createDir(root / "usr" / "share" / "empty")
+      writeFile(root / "usr" / "bin" / "gemini", "launcher\n")
+      writeFile(root / "usr" / "lib.js", "bundle\n")
+    check treeContentHex(a / "usr") == treeContentHex(b / "usr")
+    # Content, a rename and an empty directory each change the identity.
+    let base = treeContentHex(a / "usr")
+    writeFile(b / "usr" / "lib.js", "bundle v2\n")
+    check treeContentHex(b / "usr") != base
+    writeFile(b / "usr" / "lib.js", "bundle\n")
+    check treeContentHex(b / "usr") == base
+    moveFile(b / "usr" / "lib.js", b / "usr" / "lib2.js")
+    check treeContentHex(b / "usr") != base
+    moveFile(b / "usr" / "lib2.js", b / "usr" / "lib.js")
+    removeDir(b / "usr" / "share" / "empty")
+    check treeContentHex(b / "usr") != base
+
+  test "P3.2: outputs are named logically and identified by content":
+    let a = createTempDir("repro-pfp-out-", "")
+    defer: removeDir(a)
+    let project = checkout(a)
+    createDir(project / "out" / "usr" / "bin")
+    writeFile(project / "out" / "usr" / "bin" / "tool", "bytes\n")
+    writeFile(project / "out" / "stamp", "done\n")
+    let roots = @[LogicalRoot(label: "project", path: project,
+      kind: lrkTracked)]
+    let outs = portableOutputs(roots, [project / "out" / "stamp",
+      project / "out" / "usr"])
+    check outs.portable
+    check outs.outputs.len == 2
+    check outs.outputs[0].path == "project:out/stamp"      # sorted
+    check not outs.outputs[0].directory
+    check outs.outputs[0].digest == fileContentHex(project / "out" / "stamp")
+    check outs.outputs[1].path == "project:out/usr"
+    check outs.outputs[1].directory
+    check outs.outputs[1].digest == treeContentHex(project / "out" / "usr")
+
+  test "P3.2: an output outside every root, or missing, is not portable":
+    let a = createTempDir("repro-pfp-outbad-", "")
+    let stray = createTempDir("repro-pfp-outstray-", "")
+    defer:
+      removeDir(a)
+      removeDir(stray)
+    let project = checkout(a)
+    writeFile(stray / "x", "x")
+    let roots = @[LogicalRoot(label: "project", path: project,
+      kind: lrkTracked)]
+    let outside = portableOutputs(roots, [stray / "x"])
+    check not outside.portable
+    check "outside" in outside.reason
+    let missing = portableOutputs(roots, [project / "never-written"])
+    check not missing.portable
+    check "does not exist" in missing.reason
+
   when defined(windows):
     test "Windows paths compare case- and separator-insensitively":
       let roots = @[LogicalRoot(label: "project", path: r"M:\m\dev\pkg",

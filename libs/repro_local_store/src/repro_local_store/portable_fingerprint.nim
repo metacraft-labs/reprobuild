@@ -69,6 +69,22 @@ type
     path*: string    ## `<label>:<rel>`.
     digest*: string  ## Content / existence / membership identity (hex).
 
+  PortableOutput* = object
+    ## Cache-Scope P3.2: one output of an action, named portably. A file's
+    ## `digest` is its BLAKE3 content digest; a directory's is a tree digest
+    ## over its sorted (relative path, entry identity) pairs. This is what
+    ## lets a DOWNSTREAM action's portable strong fingerprint be computed from
+    ## an upstream memo record instead of an upstream file: a downstream read
+    ## of `project:out/x` and this output are the same logical path.
+    path*: string    ## `<label>:<rel>`.
+    digest*: string
+    directory*: bool
+
+  PortableOutputs* = object
+    portable*: bool
+    reason*: string
+    outputs*: seq[PortableOutput]
+
   PortableFingerprint* = object
     portable*: bool
     reason*: string
@@ -277,3 +293,58 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
   if result.portable:
     result.strongHex = portableStrongFingerprint(result.weakHex,
       result.inputs)
+
+const TreeDomain = "reprobuild.portable.tree.v1"
+
+proc treeContentHex*(dir: string): string =
+  ## Content identity of a directory tree: the sorted (relative path, kind,
+  ## identity) triples of every entry beneath it -- a file by its BLAKE3
+  ## content digest, a symlink by its target text, a directory by its
+  ## presence (so an empty directory still counts). Physical location plays
+  ## no part: two copies of the same tree at different absolute paths agree.
+  var entries: seq[string] = @[]
+  for path in walkDirRec(dir, yieldFilter = {pcFile, pcLinkToFile, pcDir,
+      pcLinkToDir}, relative = true, followFilter = {pcDir}):
+    let full = dir / path
+    let rel = path.replace('\\', '/')
+    let info =
+      try: getFileInfo(full, followSymlink = false)
+      except CatchableError: continue
+    case info.kind
+    of pcLinkToFile, pcLinkToDir:
+      let target =
+        try: expandSymlink(full).replace('\\', '/')
+        except CatchableError: ""
+      entries.add(frame(rel) & frame("l") & frame(target))
+    of pcDir:
+      entries.add(frame(rel) & frame("d") & frame(""))
+    of pcFile:
+      entries.add(frame(rel) & frame("f") & frame(fileContentHex(full)))
+  entries.sort()
+  blake3.digest(frame(TreeDomain) & entries.join("")).toHex()
+
+proc portableOutputs*(roots: openArray[LogicalRoot];
+                      outputs: openArray[string]): PortableOutputs =
+  ## Name each output portably and identify its bytes. An output under no
+  ## tracked root cannot be referenced by another host, so the action is not
+  ## portable; a missing output is reported the same way, since a record
+  ## promising bytes that do not exist must never be shared.
+  result.portable = true
+  for physical in outputs:
+    let logical = toLogicalPath(roots, physical)
+    if logical.kind != lpkTracked:
+      result.portable = false
+      result.reason = "output outside every tracked logical root: " &
+        physical
+      return
+    if dirExists(physical):
+      result.outputs.add(PortableOutput(path: render(logical),
+        digest: treeContentHex(physical), directory: true))
+    elif fileExists(physical):
+      result.outputs.add(PortableOutput(path: render(logical),
+        digest: fileContentHex(physical)))
+    else:
+      result.portable = false
+      result.reason = "declared output does not exist: " & physical
+      return
+  result.outputs.sort(proc (a, b: PortableOutput): int = cmp(a.path, b.path))
