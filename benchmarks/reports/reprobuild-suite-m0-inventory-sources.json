@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 584,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1768
+    "testEntries": 1769
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1076,7 +1076,7 @@
       "integration": 901,
       "platform/destructive": 115,
       "pure unit": 584,
-      "unclassified": 157
+      "unclassified": 158
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1225,8 +1225,8 @@
       }
     ],
     "nimTestBinaryCount": 1755,
-    "pythonTestFileCount": 13,
-    "testEntryCount": 1768
+    "pythonTestFileCount": 14,
+    "testEntryCount": 1769
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3599,6 +3599,7 @@
             "isIdent",
             "item",
             "keyword",
+            "launchPathDrives",
             "lines",
             "lowered",
             "lp",
@@ -3655,7 +3656,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1294,
+          "line": 1313,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -9018,7 +9019,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_daemon_core/tests/t_daemon_image_digest_cache.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -37622,6 +37623,21 @@
       "source": "tests/unit/test_package_root_anchor.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `__future__`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_prune_undeclared_test_binaries.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
