@@ -1335,6 +1335,121 @@
           # closure. It ADDS to — and does not
           # disturb — `packages.default`/`packages.reprobuild` or `just build`.
           reproPortable = bundlers.bundlers.${system}.toArx reprobuild;
+
+          # The language toolchains the Mode 2/3 convention tests drive --
+          # `libs/repro_standard_provider/tests/test_<lang>_*_convention` and
+          # the `mixed/*` cross-language cases -- for `devShells.default`.
+          # Each case probes PATH and SKIPS without its toolchain; before
+          # these were in the dev shell, every one of those cases skipped on
+          # Linux, so the conventions were never exercised on the platform
+          # the suite runs on.
+          #
+          # They are part of the DEFAULT shell, not a separate test shell: the
+          # dev shell a project declares is the one its tests run in. The cost
+          # is closure size -- they add 12.4 GiB to the shell's 4.9 GiB
+          # (x86_64-linux, measured 2026-09-27) -- a one-time store cost per
+          # pin, not a per-entry one.
+          #
+          # Pins mirror `repro.nim`'s Windows fixture constants where nixpkgs
+          # carries the pinned line: Zig 0.13 (pre-1.0; the M44 fixtures were
+          # audited against it), the .NET 8.0 SDK band, JDK 21, Gradle 8,
+          # FPC 3.2.2 and Swift 5.10.1 (the nixpkgs defaults happen to be
+          # those exact versions). Go is the exception: nixpkgs has removed
+          # the end-of-life 1.23 line, so it is nixpkgs' current Go.
+          #
+          # ONE bin directory, and a curated one, rather than the packages
+          # themselves. GNAT and gfortran are cc-wrappers whose `bin/` also
+          # carries `gcc`, `g++`, `cc`, `ld`, `as`, ...; putting them in
+          # `packages` would put GCC 13 (GNAT's) ahead of the shell's own
+          # compiler for every `nim c`. Only names the C toolchain does not
+          # own are linked. gnatmake does not need the shadowed names: its
+          # wrapper passes `-B<its own bin>` to the compiler driver (verified:
+          # builds and runs an Ada hello with GCC 15 first on PATH).
+          # Packages unavailable on the current platform are dropped rather
+          # than failing the shell, so a missing one is a SKIP there too.
+          #
+          # `repro.nim`'s `devEnv:` names the same set for the repro-native
+          # (non-flake) activation; keep the two lists in step.
+          conventionTestToolchains =
+            let
+              available = pkgs.lib.filter (p: pkgs.lib.meta.availableOn pkgs.stdenv.hostPlatform p);
+              toolchains = available (
+                [
+                  pkgs.go
+                  pkgs.rustc
+                  pkgs.cargo
+                  pkgs.gfortran
+                  pkgs.fpc
+                  pkgs.ldc
+                  pkgs.zig_0_13
+                  pkgs.meson
+                  pkgs.crystal
+                  pkgs.shards
+                  pkgs.dotnet-sdk_8
+                  pkgs.elixir
+                  pkgs.erlang
+                  pkgs.rebar3
+                  pkgs.jdk21
+                  pkgs.maven
+                  pkgs.gradle_8
+                  pkgs.ghc
+                  pkgs.cabal-install
+                  pkgs.ocaml
+                  pkgs.dune_3
+                  pkgs.php
+                  pkgs.php.packages.composer
+                  pkgs.ruby
+                  pkgs.bundler
+                  pkgs.swift
+                  pkgs.swiftpm
+                ]
+                ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.gnat ]
+              );
+              # Names the dev shell's C toolchain owns. A link under one of
+              # these would shadow it (see above).
+              shadowed = [
+                "addr2line"
+                "ar"
+                "as"
+                "c++"
+                "c++filt"
+                "cc"
+                "cpp"
+                "dwp"
+                "elfedit"
+                "g++"
+                "gcc"
+                "gprof"
+                "ld"
+                "ld.bfd"
+                "ld.gold"
+                "ld.lld"
+                "lld"
+                "nm"
+                "objcopy"
+                "objdump"
+                "ranlib"
+                "readelf"
+                "size"
+                "strings"
+                "strip"
+                "clang"
+                "clang++"
+                "clang-cpp"
+              ];
+            in
+            pkgs.runCommand "reprobuild-convention-test-toolchains" { } ''
+              mkdir -p $out/bin
+              for pkg in ${pkgs.lib.escapeShellArgs toolchains}; do
+                [ -d "$pkg/bin" ] || continue
+                for exe in "$pkg"/bin/*; do
+                  name=$(basename "$exe")
+                  case " ${toString shadowed} " in *" $name "*) continue ;; esac
+                  # First package wins, so the list order above is priority.
+                  [ -e "$out/bin/$name" ] || ln -s "$exe" "$out/bin/$name"
+                done
+              done
+            '';
         in
         {
           apps.default = reproApp;
@@ -1534,7 +1649,12 @@
             # not worth changing what the whole shell's `#include <unwind.h>`
             # resolves to. Same contract as SQLITE_PREFIX / CLINGO_PREFIX above.
             REPRO_HCR_LLVM_LIBUNWIND = pkgs.llvmPackages.libunwind;
+            # For the JVM convention fixtures (Maven / Gradle / bare javac), as
+            # the Windows `devEnv:` sets it for the same fixtures.
+            JAVA_HOME = pkgs.jdk21.home;
             packages = [
+              # See `conventionTestToolchains` above.
+              conventionTestToolchains
               runquotaTools
               # ``ct-test`` — CodeTracer's cross-language test driver. On PATH
               # so `ct-test test discover|run` is available in the dev shell

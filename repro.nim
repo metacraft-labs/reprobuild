@@ -436,6 +436,35 @@ proc pinnedToolDir(root, tool, version, probe: string): string =
   if fileExists(dir / probe) or dirExists(dir / probe):
     return dir
 
+proc loadNixFlake(): bool =
+  ## ``REPRO_LOAD_NIX_FLAKE`` from the project's ``.env`` (the same file
+  ## ``.envrc`` loads with ``dotenv_if_exists``). Absent file or absent key
+  ## means the flake is loaded. Only an explicit ``0`` / ``false`` / ``no`` /
+  ## ``off`` selects the repro-native environment.
+  var root = activeProviderProjectRoot()
+  if root.len == 0:
+    root = getCurrentDir()
+  if not fileExists(root / ".env"):
+    return true
+  # `readDevEnvFile` records the read as an evaluation input of the dev-env
+  # introspection; it exists only in the provider build, which is the only
+  # one whose answer matters here.
+  let text =
+    when defined(reproProviderMode): readDevEnvFile(".env")
+    else: readFile(root / ".env")
+  for rawLine in text.splitLines():
+    var line = rawLine.strip()
+    if line.startsWith("export "):
+      line = line["export ".len .. ^1].strip()
+    let eq = line.find('=')
+    if line.startsWith("#") or eq <= 0:
+      continue
+    if line[0 ..< eq].strip() != "REPRO_LOAD_NIX_FLAKE":
+      continue
+    let value = line[eq + 1 .. ^1].strip().strip(chars = {'"', '\''})
+    return value.toLowerAscii() notin ["0", "false", "no", "off"]
+  true
+
 package reprobuild:
   # Declare ``path``-mode tool provisioning so the engine adopts it
   # automatically. Without this, ``repro build`` refuses to run with
@@ -559,7 +588,37 @@ package reprobuild:
 
   devEnv:
     when not defined(windows):
-      useFlakeDevShell()
+      # POSIX: two ways to assemble the SAME environment, chosen per checkout
+      # by `REPRO_LOAD_NIX_FLAKE` in the project's `.env` (read here, so the
+      # choice is an observed input of this evaluation):
+      #
+      #   * `REPRO_LOAD_NIX_FLAKE=1` (the default while the native path below
+      #     is incomplete) -- activate `devShells.default` from `flake.nix`.
+      #   * `REPRO_LOAD_NIX_FLAKE=0` -- the repro-native environment,
+      #     assembled from reprobuild package descriptions.
+      #
+      # The two are meant to be equivalent: whatever the flake shell puts on
+      # PATH for the build and the suite, the native one must provide too.
+      # That includes the language toolchains the Mode 2/3 convention tests
+      # drive (Go, Rust, GNAT, FPC, LDC, gfortran, Zig, Meson, Crystal, .NET,
+      # Elixir/Erlang, JDK/Maven/Gradle, GHC/Cabal, OCaml/dune, PHP/Composer,
+      # Ruby/Bundler, Swift -- `conventionTestToolchains` in flake.nix): the
+      # default dev shell is the one the tests run in, so there is no
+      # separate test shell to enter.
+      if loadNixFlake():
+        useFlakeDevShell()
+      else:
+        # Not assembled yet. Say so loudly rather than hand back a partial
+        # environment that looks complete: the native path needs every
+        # toolchain the flake shell provides described as a reprobuild
+        # package (source-level builds, served from the shared binary cache)
+        # plus a nix provisioning adapter alongside the scoop one.
+        diagnostic("REPRO_LOAD_NIX_FLAKE=0 selects the repro-native dev " &
+          "environment, which is not assembled yet on POSIX: nothing from " &
+          "flake.nix's devShells.default (Nim fork, C toolchain, *_SRC " &
+          "inputs, the convention-test toolchains) is on PATH. Remove the " &
+          "setting from .env (or set it to 1) to load the flake shell.",
+          dedsWarning)
 
     # Windows language-fixture toolchains for the 73
     # ``scripts/validate-standard-provider-*.ps1`` harnesses and their
@@ -585,8 +644,9 @@ package reprobuild:
     # ``repro home apply``; this only finds what they installed, probe-
     # gated exactly like ``env.ps1``'s ``Test-Path`` guards.
     #
-    # Linux / macOS need none of it: the validation harness is PowerShell-
-    # only and reprobuild's flake devShell carries no language fixtures.
+    # Linux / macOS get the same toolchains from the POSIX branch above
+    # (flake.nix's `conventionTestToolchains`, in the default dev shell);
+    # the PowerShell validation harnesses themselves are Windows-only.
     when defined(windows):
       let diyRoot = windowsDiyInstallRoot()
       let msys2Root = diyRoot / "msys2" / "msys64"
