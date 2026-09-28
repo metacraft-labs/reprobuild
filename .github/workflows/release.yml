@@ -664,6 +664,21 @@ jobs:
           set -euo pipefail
           if [ "${{ matrix.os-name }}" = "windows" ]; then
             bash scripts/release/check_release_source_closure.sh "${PKG_NAME}"
+            # The recipe compile needs a C compiler. Hand it the gcc env.ps1
+            # provisioned, exactly as the `.#release` build step above does
+            # and for the same reason: left unset, the engine provisions the
+            # pinned WinLibs .7z itself, and the 7-Zip it needs for that is
+            # realized through `msiexec /a`, which exits 1601 on these
+            # service-account runners (measured on this step's first run).
+            # That is a property of the runner, not of the archive under test.
+            gcc_exe=$(command -v gcc.exe || command -v gcc || true)
+            if [ -z "${gcc_exe}" ]; then
+              echo "::error::no gcc on PATH for the Windows smoke test (env.ps1 should have provisioned it)"
+              exit 1
+            fi
+            REPRO_BOOTSTRAP_CC=$(cygpath -w "${gcc_exe}")
+            export REPRO_BOOTSTRAP_CC
+            echo "smoke: REPRO_BOOTSTRAP_CC=${REPRO_BOOTSTRAP_CC}"
             bash scripts/release/smoke_release_dev_exec.sh "${PKG_NAME}"
           else
             dev-exec bash scripts/release/check_release_source_closure.sh "${PKG_NAME}"
