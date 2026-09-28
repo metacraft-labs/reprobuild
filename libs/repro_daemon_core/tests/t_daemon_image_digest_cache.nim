@@ -184,6 +184,76 @@ suite "the memoized image digest tracks the image":
       check afterDigest != firstDigest
       check afterDigest == imageDigestHex(image)
 
+  when defined(posix):
+    test "an in-place same-size rewrite within one timestamp tick is not hidden":
+      # THE RACE THE SAME-SIZE CASE ABOVE HIT ABOUT 1 RUN IN 8, made
+      # deterministic. An in-place `writeFile` keeps the inode; equal content
+      # length keeps the size; and two writes inside one tick of the kernel's
+      # coarse mtime clock keep the mtime too. Here the tick is forced by
+      # restoring the first write's mtime to the nanosecond, so EVERY field of
+      # the stamp is identical and only the bytes differ. A memo keyed on the
+      # stamp alone answers the first digest; the image is still "fresh"
+      # (written well inside the racy window), so it must be re-hashed.
+      let root = createTempDir("repro-digest-", "")
+      defer: removeDir(root)
+      let cfg = config(root)
+      let image = root / "repro"
+      writeImage(image, "AAAAAAAAAA")
+      var before: Stat
+      check stat(image.cstring, before) == 0
+      let firstDigest = expectedDaemonRunningDigestHexForTest(cfg, image)
+
+      writeImage(image, "BBBBBBBBBB")
+      var times: array[2, Timespec]
+      times[0].tv_sec = before.st_atim.tv_sec
+      times[0].tv_nsec = before.st_atim.tv_nsec
+      times[1].tv_sec = before.st_mtim.tv_sec
+      times[1].tv_nsec = before.st_mtim.tv_nsec
+      check utimensatRaw(atFdCwd, image.cstring, addr times[0], 0) == 0
+
+      var after: Stat
+      check stat(image.cstring, after) == 0
+      # Preconditions: the stamp's every field is identical.
+      check after.st_ino == before.st_ino
+      check after.st_dev == before.st_dev
+      check after.st_size == before.st_size
+      check after.st_mtim.tv_sec == before.st_mtim.tv_sec
+      check after.st_mtim.tv_nsec == before.st_mtim.tv_nsec
+
+      let afterDigest = expectedDaemonRunningDigestHexForTest(cfg, image)
+      check afterDigest != firstDigest
+      check afterDigest == imageDigestHex(image)
+
+    test "a quiescent image IS answered from the cache":
+      # The control for the case above: a memo that never answered would pass
+      # it, and would also throw away the 16.5 ms the memo exists to save.
+      # An image last written an hour ago is past the racy window, so after
+      # one warm call the entry must be consulted. Observed directly: the
+      # entry's digest line is replaced by a sentinel and the sentinel comes
+      # back. (The sentinel is not a digest of anything; returning it proves
+      # the answer came from the entry and not from a re-hash.)
+      let root = createTempDir("repro-digest-", "")
+      defer: removeDir(root)
+      let cfg = config(root)
+      let image = root / "repro"
+      writeImage(image, "image-one")
+      setLastModificationTime(image, getTime() - initDuration(hours = 1))
+      let fresh = imageDigestHex(image)
+      check expectedDaemonRunningDigestHexForTest(cfg, image) == fresh
+      let cacheDir = cfg.stateDir / "image-digests"
+      var rewritten = 0
+      for kind, path in walkDir(cacheDir):
+        if kind == pcFile:
+          var lines = readFile(path).splitLines()
+          check lines.len >= 3
+          check lines[1] == fresh
+          lines[1] = "blake3-256:sentinel-from-the-cache-entry"
+          writeFile(path, lines.join("\n"))
+          inc rewritten
+      check rewritten == 1
+      check expectedDaemonRunningDigestHexForTest(cfg, image) ==
+        "blake3-256:sentinel-from-the-cache-entry"
+
   test "an unreadable image never answers from the cache":
     # A probe failure must not be able to make a stale daemon look current.
     # With no stamp the cache is bypassed entirely, so the answer is whatever
