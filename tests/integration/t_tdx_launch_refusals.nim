@@ -106,6 +106,112 @@ proc oneBad(index: int; edit: proc (s: var MintedSection)): string =
   edit(secs[index])
   withSections(secs)
 
+proc driveAFirmwareThatPublishesNoTrustDomainTable() =
+  ## The body of test
+  ##   "a firmware that publishes no trust-domain table"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(syntheticFirmware(wellFormedSections(),
+      payload = repeat('\xA5', 0x3000), includeMetadataEntry = false)))
+  check e.condition == tlcNoTrustDomainTable
+  check "publishes nothing about which pages" in e.msg
+
+proc driveAnEntryTooShortToHoldAPosition() =
+  ## The body of test
+  ##   "an entry too short to hold a position"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(syntheticFirmware(wellFormedSections(),
+      payload = repeat('\xA5', 0x3000), metadataEntryBytes = 2)))
+  check e.condition == tlcTablePositionTooShort
+  check "2 bytes where a position is 4" in e.msg
+
+proc driveAPositionOfZeroWhichIsTheEndOfTheImage() =
+  ## The body of test
+  ##   "a position of zero, which is the end of the image"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(syntheticFirmware(wellFormedSections(),
+      payload = repeat('\xA5', 0x3000), backOverride = 0)))
+  check e.condition == tlcTablePositionIsZero
+
+proc driveAPositionBeforeTheFrontOfTheImage() =
+  ## The body of test
+  ##   "a position before the front of the image"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(syntheticFirmware(wellFormedSections(),
+      payload = repeat('\xA5', 0x3000), backOverride = 1_000_000)))
+  check e.condition == tlcTablePositionBeforeImageFront
+
+proc driveAHeaderThatDoesNotFitBeforeTheEnd() =
+  ## The body of test
+  ##   "a header that does not fit before the end"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(syntheticFirmware(wellFormedSections(),
+      payload = repeat('\xA5', 0x3000), backOverride = 8)))
+  check e.condition == tlcDescriptorHeaderPastImageEnd
+
+proc driveFourBytesThatAreNotTheIdentifier() =
+  ## The body of test
+  ##   "four bytes that are not the identifier"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(syntheticFirmware(wellFormedSections(),
+      payload = repeat('\xA5', 0x3000), signature = "XDVF")))
+  check e.condition == tlcNotADescriptor
+
+proc driveAVersionThisBuildHasNoLayoutFor() =
+  ## The body of test
+  ##   "a version this build has no layout for"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(syntheticFirmware(wellFormedSections(),
+      payload = repeat('\xA5', 0x3000), version = 2'u32)))
+  check e.condition == tlcUnsupportedDescriptorVersion
+  check "version 2" in e.msg
+
+proc driveAStatedLengthThatIsNotHeaderPlusSections() =
+  ## The body of test
+  ##   "a stated length that is not header plus sections"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(syntheticFirmware(wellFormedSections(),
+      payload = repeat('\xA5', 0x3000), declaredLength = 999)))
+  check e.condition == tlcDescriptorLengthDisagreesWithCount
+
+proc driveATableCarryingNoSectionsAtAll() =
+  ## The body of test
+  ##   "a table carrying no sections at all"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(syntheticFirmware(wellFormedSections(),
+      payload = repeat('\xA5', 0x3000), declaredCount = 0)))
+  check e.condition == tlcDescriptorDeclaresNoSections
+
+proc driveSectionsThatRunOffTheEndOfTheImage() =
+  ## The body of test
+  ##   "sections that run off the end of the image"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Consistent header, impossible extent: a thousand sections do not
+  # fit in a two-hundred-byte image.
+  let e = refuses(proc () =
+    readingOf(syntheticFirmware(wellFormedSections(),
+      payload = repeat('\xA5', 0x3000),
+      declaredCount = 1000, declaredLength = 16 + 1000 * 32)))
+  check e.condition == tlcSectionTablePastImageEnd
+
 suite "trust-domain firmware: the table":
 
   test "the whole vocabulary is distinguishable":
@@ -113,158 +219,213 @@ suite "trust-domain firmware: the table":
     check tdxLaunchMessagesAreDistinguishable()
 
   test "a firmware that publishes no trust-domain table":
-    let e = refuses(proc () =
-      readingOf(syntheticFirmware(wellFormedSections(),
-        payload = repeat('\xA5', 0x3000), includeMetadataEntry = false)))
-    check e.condition == tlcNoTrustDomainTable
-    check "publishes nothing about which pages" in e.msg
+    driveAFirmwareThatPublishesNoTrustDomainTable()
 
   test "an entry too short to hold a position":
-    let e = refuses(proc () =
-      readingOf(syntheticFirmware(wellFormedSections(),
-        payload = repeat('\xA5', 0x3000), metadataEntryBytes = 2)))
-    check e.condition == tlcTablePositionTooShort
-    check "2 bytes where a position is 4" in e.msg
+    driveAnEntryTooShortToHoldAPosition()
 
   test "a position of zero, which is the end of the image":
-    let e = refuses(proc () =
-      readingOf(syntheticFirmware(wellFormedSections(),
-        payload = repeat('\xA5', 0x3000), backOverride = 0)))
-    check e.condition == tlcTablePositionIsZero
+    driveAPositionOfZeroWhichIsTheEndOfTheImage()
 
   test "a position before the front of the image":
-    let e = refuses(proc () =
-      readingOf(syntheticFirmware(wellFormedSections(),
-        payload = repeat('\xA5', 0x3000), backOverride = 1_000_000)))
-    check e.condition == tlcTablePositionBeforeImageFront
+    driveAPositionBeforeTheFrontOfTheImage()
 
   test "a header that does not fit before the end":
-    let e = refuses(proc () =
-      readingOf(syntheticFirmware(wellFormedSections(),
-        payload = repeat('\xA5', 0x3000), backOverride = 8)))
-    check e.condition == tlcDescriptorHeaderPastImageEnd
+    driveAHeaderThatDoesNotFitBeforeTheEnd()
 
   test "four bytes that are not the identifier":
-    let e = refuses(proc () =
-      readingOf(syntheticFirmware(wellFormedSections(),
-        payload = repeat('\xA5', 0x3000), signature = "XDVF")))
-    check e.condition == tlcNotADescriptor
+    driveFourBytesThatAreNotTheIdentifier()
 
   test "a version this build has no layout for":
-    let e = refuses(proc () =
-      readingOf(syntheticFirmware(wellFormedSections(),
-        payload = repeat('\xA5', 0x3000), version = 2'u32)))
-    check e.condition == tlcUnsupportedDescriptorVersion
-    check "version 2" in e.msg
+    driveAVersionThisBuildHasNoLayoutFor()
 
   test "a stated length that is not header plus sections":
-    let e = refuses(proc () =
-      readingOf(syntheticFirmware(wellFormedSections(),
-        payload = repeat('\xA5', 0x3000), declaredLength = 999)))
-    check e.condition == tlcDescriptorLengthDisagreesWithCount
+    driveAStatedLengthThatIsNotHeaderPlusSections()
 
   test "a table carrying no sections at all":
-    let e = refuses(proc () =
-      readingOf(syntheticFirmware(wellFormedSections(),
-        payload = repeat('\xA5', 0x3000), declaredCount = 0)))
-    check e.condition == tlcDescriptorDeclaresNoSections
+    driveATableCarryingNoSectionsAtAll()
 
   test "sections that run off the end of the image":
-    # Consistent header, impossible extent: a thousand sections do not
-    # fit in a two-hundred-byte image.
-    let e = refuses(proc () =
-      readingOf(syntheticFirmware(wellFormedSections(),
-        payload = repeat('\xA5', 0x3000),
-        declaredCount = 1000, declaredLength = 16 + 1000 * 32)))
-    check e.condition == tlcSectionTablePastImageEnd
+    driveSectionsThatRunOffTheEndOfTheImage()
+
+proc driveAKindThisBuildCannotAccountFor() =
+  ## The body of test
+  ##   "a kind this build cannot account for"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(oneBad(1, proc (s: var MintedSection) = s.kind = 9'u32)))
+  check e.condition == tlcUnknownSectionKind
+  check "names kind 9" in e.msg
+
+proc driveAnAttributeBitThisBuildHasNoRuleFor() =
+  ## The body of test
+  ##   "an attribute bit this build has no rule for"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(oneBad(1, proc (s: var MintedSection) =
+      s.attributes = 4'u32)))
+  check e.condition == tlcUnknownSectionAttributes
+
+proc driveASectionClaimingNoMemory() =
+  ## The body of test
+  ##   "a section claiming no memory"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(oneBad(2, proc (s: var MintedSection) = s.memorySize = 0)))
+  check e.condition == tlcSectionIsEmpty
+
+proc driveASectionThatDoesNotBeginOnAPageBoundary() =
+  ## The body of test
+  ##   "a section that does not begin on a page boundary"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(oneBad(2, proc (s: var MintedSection) =
+      s.memoryAddress = 0x800800'u64)))
+  check e.condition == tlcSectionNotPageAligned
+
+proc driveASectionThatIsNotAWholeNumberOfPages() =
+  ## The body of test
+  ##   "a section that is not a whole number of pages"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(oneBad(2, proc (s: var MintedSection) =
+      s.memorySize = 0x1800'u64)))
+  check e.condition == tlcSectionSizeNotWholePages
+
+proc driveMoreBytesInTheImageThanMemoryToHoldThem() =
+  ## The body of test
+  ##   "more bytes in the image than memory to hold them"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(oneBad(0, proc (s: var MintedSection) =
+      s.rawSize = 0x9000'u32)))
+  check e.condition == tlcSectionDataExceedsItsMemory
+
+proc driveBytesSaidToLieOutsideTheImage() =
+  ## The body of test
+  ##   "bytes said to lie outside the image"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(oneBad(0, proc (s: var MintedSection) =
+      s.dataOffset = 0x7FFF_0000'u32)))
+  check e.condition == tlcSectionDataOutsideImage
+
+proc driveAPositionStatedForContentsThatDoNotExist() =
+  ## The body of test
+  ##   "a position stated for contents that do not exist"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(oneBad(2, proc (s: var MintedSection) =
+      s.dataOffset = 0x10'u32)))
+  check e.condition == tlcSectionPositionWithoutContents
+
+proc driveABlankSectionThatIsAlsoFoldedIn() =
+  ## The body of test
+  ##   "a blank section that is also folded in"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(oneBad(3, proc (s: var MintedSection) =
+      s.attributes = 3'u32)))
+  check e.condition == tlcAugmentedSectionIsMeasured
+
+proc driveASectionFoldedInWithNothingToFold() =
+  ## The body of test
+  ##   "a section folded in with nothing to fold"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(oneBad(2, proc (s: var MintedSection) =
+      s.attributes = 1'u32)))
+  check e.condition == tlcMeasuredSectionHasNoContents
+
+proc driveTwoSectionsClaimingTheSameMemory() =
+  ## The body of test
+  ##   "two sections claiming the same memory"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    readingOf(oneBad(1, proc (s: var MintedSection) =
+      s.memoryAddress = 0xFFC00000'u64
+      s.memorySize = 0x2000'u64
+      s.rawSize = 0x1000'u32)))
+  check e.condition == tlcSectionsOverlap
+
+proc driveAFirmwareNoneOfWhoseSectionsAreFoldedIn() =
+  ## The body of test
+  ##   "a firmware none of whose sections are folded in"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The anti-degeneracy rule. Such a measurement is a function of
+  # addresses alone, and every firmware laid out this way produces it.
+  var secs = wellFormedSections()
+  for i in 0 ..< secs.len:
+    if (secs[i].attributes and 1'u32) != 0: secs[i].attributes = 0'u32
+  let e = refuses(proc () = readingOf(withSections(secs)))
+  check e.condition == tlcNothingIsMeasured
+
+proc driveABootVolumeThatIsNotFoldedIn() =
+  ## The body of test
+  ##   "a boot volume that is not folded in"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Distinct from the rule above, and it has to be: something else
+  # here IS folded in, so the measurement is not address-only — it
+  # simply does not cover the code the domain starts executing.
+  var secs = wellFormedSections()
+  secs[0].attributes = 0'u32
+  let e = refuses(proc () = readingOf(withSections(secs)))
+  check e.condition == tlcBootVolumeIsNotMeasured
+  check "execution begins in" in e.msg
 
 suite "trust-domain firmware: a section":
 
   test "a kind this build cannot account for":
-    let e = refuses(proc () =
-      readingOf(oneBad(1, proc (s: var MintedSection) = s.kind = 9'u32)))
-    check e.condition == tlcUnknownSectionKind
-    check "names kind 9" in e.msg
+    driveAKindThisBuildCannotAccountFor()
 
   test "an attribute bit this build has no rule for":
-    let e = refuses(proc () =
-      readingOf(oneBad(1, proc (s: var MintedSection) =
-        s.attributes = 4'u32)))
-    check e.condition == tlcUnknownSectionAttributes
+    driveAnAttributeBitThisBuildHasNoRuleFor()
 
   test "a section claiming no memory":
-    let e = refuses(proc () =
-      readingOf(oneBad(2, proc (s: var MintedSection) = s.memorySize = 0)))
-    check e.condition == tlcSectionIsEmpty
+    driveASectionClaimingNoMemory()
 
   test "a section that does not begin on a page boundary":
-    let e = refuses(proc () =
-      readingOf(oneBad(2, proc (s: var MintedSection) =
-        s.memoryAddress = 0x800800'u64)))
-    check e.condition == tlcSectionNotPageAligned
+    driveASectionThatDoesNotBeginOnAPageBoundary()
 
   test "a section that is not a whole number of pages":
-    let e = refuses(proc () =
-      readingOf(oneBad(2, proc (s: var MintedSection) =
-        s.memorySize = 0x1800'u64)))
-    check e.condition == tlcSectionSizeNotWholePages
+    driveASectionThatIsNotAWholeNumberOfPages()
 
   test "more bytes in the image than memory to hold them":
-    let e = refuses(proc () =
-      readingOf(oneBad(0, proc (s: var MintedSection) =
-        s.rawSize = 0x9000'u32)))
-    check e.condition == tlcSectionDataExceedsItsMemory
+    driveMoreBytesInTheImageThanMemoryToHoldThem()
 
   test "bytes said to lie outside the image":
-    let e = refuses(proc () =
-      readingOf(oneBad(0, proc (s: var MintedSection) =
-        s.dataOffset = 0x7FFF_0000'u32)))
-    check e.condition == tlcSectionDataOutsideImage
+    driveBytesSaidToLieOutsideTheImage()
 
   test "a position stated for contents that do not exist":
-    let e = refuses(proc () =
-      readingOf(oneBad(2, proc (s: var MintedSection) =
-        s.dataOffset = 0x10'u32)))
-    check e.condition == tlcSectionPositionWithoutContents
+    driveAPositionStatedForContentsThatDoNotExist()
 
   test "a blank section that is also folded in":
-    let e = refuses(proc () =
-      readingOf(oneBad(3, proc (s: var MintedSection) =
-        s.attributes = 3'u32)))
-    check e.condition == tlcAugmentedSectionIsMeasured
+    driveABlankSectionThatIsAlsoFoldedIn()
 
   test "a section folded in with nothing to fold":
-    let e = refuses(proc () =
-      readingOf(oneBad(2, proc (s: var MintedSection) =
-        s.attributes = 1'u32)))
-    check e.condition == tlcMeasuredSectionHasNoContents
+    driveASectionFoldedInWithNothingToFold()
 
   test "two sections claiming the same memory":
-    let e = refuses(proc () =
-      readingOf(oneBad(1, proc (s: var MintedSection) =
-        s.memoryAddress = 0xFFC00000'u64
-        s.memorySize = 0x2000'u64
-        s.rawSize = 0x1000'u32)))
-    check e.condition == tlcSectionsOverlap
+    driveTwoSectionsClaimingTheSameMemory()
 
   test "a firmware none of whose sections are folded in":
-    # The anti-degeneracy rule. Such a measurement is a function of
-    # addresses alone, and every firmware laid out this way produces it.
-    var secs = wellFormedSections()
-    for i in 0 ..< secs.len:
-      if (secs[i].attributes and 1'u32) != 0: secs[i].attributes = 0'u32
-    let e = refuses(proc () = readingOf(withSections(secs)))
-    check e.condition == tlcNothingIsMeasured
+    driveAFirmwareNoneOfWhoseSectionsAreFoldedIn()
 
   test "a boot volume that is not folded in":
-    # Distinct from the rule above, and it has to be: something else
-    # here IS folded in, so the measurement is not address-only — it
-    # simply does not cover the code the domain starts executing.
-    var secs = wellFormedSections()
-    secs[0].attributes = 0'u32
-    let e = refuses(proc () = readingOf(withSections(secs)))
-    check e.condition == tlcBootVolumeIsNotMeasured
-    check "execution begins in" in e.msg
+    driveABootVolumeThatIsNotFoldedIn()
 
   test "and the table they are one field away from IS read":
     # Every case above edits ONE field of this table. Without this, a
@@ -352,101 +513,242 @@ suite "the three dimensions no shipped firmware has":
       syntheticFirmware(wellFormedSections(), payload = payload)),
       thoExtendAfterEachPage) != base
 
+proc driveARealPlatformSLogNamesRegistersADomainDoesNotHave() =
+  ## The body of test
+  ##   "a real platform's log names registers a domain does not have"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # A GENUINE input, and nobody had to forge it: this is the measured
+  # boot this repository already commits, offered as a domain's log.
+  # A platform with a discrete security chip writes indices 0 and 7
+  # among others, and none of those is a runtime register.
+  let e = refuses(proc () =
+    discard replayTdxRegisters(parseEventLog(
+      fixtureBytes(fxGenuineTpmEventLog))))
+  check e.condition == tlcLogNamesAForeignRegister
+  check "names index 0" in e.msg
+
+proc driveAMintedLogNamingAnIndexJustPastTheWindow() =
+  ## The body of test
+  ##   "a minted log naming an index just past the window"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The edge the genuine log above does not sit on: index 5 is one
+  # past the last register, where index 0 is one before the first.
+  let e = refuses(proc () =
+    discard replayTdxRegisters(parseEventLog(
+      syntheticRegisterLog([1, 5]))))
+  check e.condition == tlcLogNamesAForeignRegister
+  check "names index 5" in e.msg
+
+proc driveALogCarryingNoLongDigestBank() =
+  ## The body of test
+  ##   "a log carrying no long-digest bank"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Minted, and it has to be: every log a real platform in this
+  # repository's corpus wrote carries all four banks, so no genuine
+  # document refuses here. Said plainly rather than implied by a name.
+  let e = refuses(proc () =
+    discard replayTdxRegisters(parseEventLog(
+      syntheticRegisterLog([1, 2], alg = Sha256AlgId))))
+  check e.condition == tlcRegisterLogHasNoSha384
+  check "no bank this build can fold" in e.msg
+
+proc driveAFoldAskedForAgainstARegisterThatDoesNotExist() =
+  ## The body of test
+  ##   "a fold asked for against a register that does not exist"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    discard foldTdxRegisters(@[
+      TdxMeasuredEvent(register: 4, digest: bytesOf(digest384("x")))]))
+  check e.condition == tlcEventNamesAForeignRegister
+  check "names register 4" in e.msg
+
+proc driveAFoldOverNothingAtAll() =
+  ## The body of test
+  ##   "a fold over nothing at all"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () = discard foldTdxRegisters(@[]))
+  check e.condition == tlcRegisterLogExtendsNothing
+
+proc driveARegisterOfTheWrongWidth() =
+  ## The body of test
+  ##   "a register of the wrong width"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    discard extendRtmr(newSeq[byte](47), bytesOf(digest384("x"))))
+  check e.condition == tlcRegisterWidth
+  check "47 bytes where a register is 48" in e.msg
+
+proc driveAValueOfTheWrongWidth() =
+  ## The body of test
+  ##   "a value of the wrong width"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    discard extendRtmr(initialRtmr(), newSeq[byte](47)))
+  check e.condition == tlcExtendedValueWidth
+  check "47 bytes where a fold takes 48" in e.msg
+
+proc driveARecordWithNoEntriesInIt() =
+  ## The body of test
+  ##   "a record with no entries in it"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # A record that folds nothing leaves every register at its reset
+  # value, which is an answer that agrees with every domain there is.
+  let e = refuses(proc () = discard readTdxMeasurementRecord("[]"))
+  check e.condition == tlcRecordIsNotReadable
+  # And a record that opens the textual shape and does not finish it.
+  let e2 = refuses(proc () =
+    discard readTdxMeasurementRecord("[{\"imr\":"))
+  check e2.condition == tlcRecordIsNotReadable
+
+proc driveARecordWhoseEntryThisBuildCannotRead() =
+  ## The body of test
+  ##   "a record whose entry this build cannot read"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    discard readTdxMeasurementRecord("""[{"imr": 0, "digest": "zz"}]"""))
+  check e.condition == tlcRecordEntryIsMalformed
+  check "entry 0" in e.msg
+
+proc driveAFoldOrderThisBuildDoesNotKnow() =
+  ## The body of test
+  ##   "a fold order this build does not know"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () = discard tdxHostOrderFor("whatever"))
+  check e.condition == tlcUnknownHostOrder
+  # Both known names are offered, so the refusal is actionable.
+  for o in TdxHostOrder:
+    check KnownTdxHostOrders[o] in e.msg
+
 suite "trust-domain runtime registers: the refusals":
 
   test "a real platform's log names registers a domain does not have":
-    # A GENUINE input, and nobody had to forge it: this is the measured
-    # boot this repository already commits, offered as a domain's log.
-    # A platform with a discrete security chip writes indices 0 and 7
-    # among others, and none of those is a runtime register.
-    let e = refuses(proc () =
-      discard replayTdxRegisters(parseEventLog(
-        fixtureBytes(fxGenuineTpmEventLog))))
-    check e.condition == tlcLogNamesAForeignRegister
-    check "names index 0" in e.msg
+    driveARealPlatformSLogNamesRegistersADomainDoesNotHave()
 
   test "a minted log naming an index just past the window":
-    # The edge the genuine log above does not sit on: index 5 is one
-    # past the last register, where index 0 is one before the first.
-    let e = refuses(proc () =
-      discard replayTdxRegisters(parseEventLog(
-        syntheticRegisterLog([1, 5]))))
-    check e.condition == tlcLogNamesAForeignRegister
-    check "names index 5" in e.msg
+    driveAMintedLogNamingAnIndexJustPastTheWindow()
 
   test "a log carrying no long-digest bank":
-    # Minted, and it has to be: every log a real platform in this
-    # repository's corpus wrote carries all four banks, so no genuine
-    # document refuses here. Said plainly rather than implied by a name.
-    let e = refuses(proc () =
-      discard replayTdxRegisters(parseEventLog(
-        syntheticRegisterLog([1, 2], alg = Sha256AlgId))))
-    check e.condition == tlcRegisterLogHasNoSha384
-    check "no bank this build can fold" in e.msg
+    driveALogCarryingNoLongDigestBank()
 
   test "a fold asked for against a register that does not exist":
-    let e = refuses(proc () =
-      discard foldTdxRegisters(@[
-        TdxMeasuredEvent(register: 4, digest: bytesOf(digest384("x")))]))
-    check e.condition == tlcEventNamesAForeignRegister
-    check "names register 4" in e.msg
+    driveAFoldAskedForAgainstARegisterThatDoesNotExist()
 
   test "a fold over nothing at all":
-    let e = refuses(proc () = discard foldTdxRegisters(@[]))
-    check e.condition == tlcRegisterLogExtendsNothing
+    driveAFoldOverNothingAtAll()
 
   test "a register of the wrong width":
-    let e = refuses(proc () =
-      discard extendRtmr(newSeq[byte](47), bytesOf(digest384("x"))))
-    check e.condition == tlcRegisterWidth
-    check "47 bytes where a register is 48" in e.msg
+    driveARegisterOfTheWrongWidth()
 
   test "a value of the wrong width":
-    let e = refuses(proc () =
-      discard extendRtmr(initialRtmr(), newSeq[byte](47)))
-    check e.condition == tlcExtendedValueWidth
-    check "47 bytes where a fold takes 48" in e.msg
+    driveAValueOfTheWrongWidth()
 
   test "a record with no entries in it":
-    # A record that folds nothing leaves every register at its reset
-    # value, which is an answer that agrees with every domain there is.
-    let e = refuses(proc () = discard readTdxMeasurementRecord("[]"))
-    check e.condition == tlcRecordIsNotReadable
-    # And a record that opens the textual shape and does not finish it.
-    let e2 = refuses(proc () =
-      discard readTdxMeasurementRecord("[{\"imr\":"))
-    check e2.condition == tlcRecordIsNotReadable
+    driveARecordWithNoEntriesInIt()
 
   test "a record whose entry this build cannot read":
-    let e = refuses(proc () =
-      discard readTdxMeasurementRecord("""[{"imr": 0, "digest": "zz"}]"""))
-    check e.condition == tlcRecordEntryIsMalformed
-    check "entry 0" in e.msg
+    driveARecordWhoseEntryThisBuildCannotRead()
 
   test "a fold order this build does not know":
-    let e = refuses(proc () = discard tdxHostOrderFor("whatever"))
-    check e.condition == tlcUnknownHostOrder
-    # Both known names are offered, so the refusal is actionable.
-    for o in TdxHostOrder:
-      check KnownTdxHostOrders[o] in e.msg
+    driveAFoldOrderThisBuildDoesNotKnow()
+
+proc driveARegisterTheRecordNeverReachedIsNotPublished() =
+  ## The body of test
+  ##   "a register the record never reached is not published"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The rule exists because forty-eight zero bytes agree with every
+  # domain that never extended that register. The log below reaches
+  # the first register and nothing else.
+  let e = refuses(proc () =
+    discard tdxExpectationFor(TdxLaunchInputs(
+      firmware: FirmwareUbuntu,
+      registerLog: syntheticRegisterLog([1, 1]),
+      order: thoExtendAfterEachPage)))
+  check e.condition == tlcPublishedRegisterIsAResetValue
+  check "runtime register 1" in e.msg
 
 suite "publishing an expectation":
 
   test "a register the record never reached is not published":
-    # The rule exists because forty-eight zero bytes agree with every
-    # domain that never extended that register. The log below reaches
-    # the first register and nothing else.
-    let e = refuses(proc () =
-      discard tdxExpectationFor(TdxLaunchInputs(
-        firmware: FirmwareUbuntu,
-        registerLog: syntheticRegisterLog([1, 1]),
-        order: thoExtendAfterEachPage)))
-    check e.condition == tlcPublishedRegisterIsAResetValue
-    check "runtime register 1" in e.msg
+    driveARegisterTheRecordNeverReachedIsNotPublished()
 
 # ---------------------------------------------------------------------
 # The census, written from the LAST case
 # ---------------------------------------------------------------------
+
+# Every case whose outcomes the coverage case(s) below observe. The
+# suite runner executes each case in its own process (`--run
+# suite::test`), so the coverage case drives these itself rather than
+# reading what earlier cases left in process-global state.
+const ConditionDrivers: seq[(string, proc () {.nimcall.})] = @[
+  ("a firmware that publishes no trust-domain table",
+    driveAFirmwareThatPublishesNoTrustDomainTable),
+  ("an entry too short to hold a position",
+    driveAnEntryTooShortToHoldAPosition),
+  ("a position of zero, which is the end of the image",
+    driveAPositionOfZeroWhichIsTheEndOfTheImage),
+  ("a position before the front of the image",
+    driveAPositionBeforeTheFrontOfTheImage),
+  ("a header that does not fit before the end",
+    driveAHeaderThatDoesNotFitBeforeTheEnd),
+  ("four bytes that are not the identifier",
+    driveFourBytesThatAreNotTheIdentifier),
+  ("a version this build has no layout for",
+    driveAVersionThisBuildHasNoLayoutFor),
+  ("a stated length that is not header plus sections",
+    driveAStatedLengthThatIsNotHeaderPlusSections),
+  ("a table carrying no sections at all", driveATableCarryingNoSectionsAtAll),
+  ("sections that run off the end of the image",
+    driveSectionsThatRunOffTheEndOfTheImage),
+  ("a kind this build cannot account for", driveAKindThisBuildCannotAccountFor),
+  ("an attribute bit this build has no rule for",
+    driveAnAttributeBitThisBuildHasNoRuleFor),
+  ("a section claiming no memory", driveASectionClaimingNoMemory),
+  ("a section that does not begin on a page boundary",
+    driveASectionThatDoesNotBeginOnAPageBoundary),
+  ("a section that is not a whole number of pages",
+    driveASectionThatIsNotAWholeNumberOfPages),
+  ("more bytes in the image than memory to hold them",
+    driveMoreBytesInTheImageThanMemoryToHoldThem),
+  ("bytes said to lie outside the image", driveBytesSaidToLieOutsideTheImage),
+  ("a position stated for contents that do not exist",
+    driveAPositionStatedForContentsThatDoNotExist),
+  ("a blank section that is also folded in",
+    driveABlankSectionThatIsAlsoFoldedIn),
+  ("a section folded in with nothing to fold",
+    driveASectionFoldedInWithNothingToFold),
+  ("two sections claiming the same memory",
+    driveTwoSectionsClaimingTheSameMemory),
+  ("a firmware none of whose sections are folded in",
+    driveAFirmwareNoneOfWhoseSectionsAreFoldedIn),
+  ("a boot volume that is not folded in", driveABootVolumeThatIsNotFoldedIn),
+  ("a real platform's log names registers a domain does not have",
+    driveARealPlatformSLogNamesRegistersADomainDoesNotHave),
+  ("a minted log naming an index just past the window",
+    driveAMintedLogNamingAnIndexJustPastTheWindow),
+  ("a log carrying no long-digest bank", driveALogCarryingNoLongDigestBank),
+  ("a fold asked for against a register that does not exist",
+    driveAFoldAskedForAgainstARegisterThatDoesNotExist),
+  ("a fold over nothing at all", driveAFoldOverNothingAtAll),
+  ("a register of the wrong width", driveARegisterOfTheWrongWidth),
+  ("a value of the wrong width", driveAValueOfTheWrongWidth),
+  ("a record with no entries in it", driveARecordWithNoEntriesInIt),
+  ("a record whose entry this build cannot read",
+    driveARecordWhoseEntryThisBuildCannotRead),
+  ("a fold order this build does not know",
+    driveAFoldOrderThisBuildDoesNotKnow),
+  ("a register the record never reached is not published",
+    driveARegisterTheRecordNeverReachedIsNotPublished)]
 
 suite "the census":
 
@@ -475,6 +777,12 @@ suite "the census":
       check known
 
   test "every rule was reached, and the count is an EQUALITY":
+    # Driven HERE, from reset state: the runner executes every case in
+    # its own process, so this case observes only what it runs itself.
+    reached = {}
+    for (name, drive) in ConditionDrivers:
+      checkpoint("driving " & name)
+      drive()
     # Not `>=`. Under an inequality a rule reached twice pays for a rule
     # reached never, and the census cannot notice the one thing it
     # exists to notice.

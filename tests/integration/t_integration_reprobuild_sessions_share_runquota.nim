@@ -144,7 +144,10 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
   let daemon = startProcess(daemonBin, args = [
     "--socket", socketPath,
     "--cpu-milli", "1000",
-    "--memory-bytes", "17179869184"
+    "--memory-bytes", "17179869184",
+    # Test daemon: keep it out of the host-wide observation store, which
+    # it would otherwise open (and write) before it binds its socket.
+    "--no-write-stats"
   ], options = {poUsePath, poStdErrToStdOut})
   putEnv("RUNQUOTA_SOCKET", socketPath)
   for _ in 0 ..< 200:
@@ -374,8 +377,11 @@ suite "integration_reprobuild_sessions_share_runquota":
       check status{"active_sessions"}.getInt() == 0
       check status{"active_leases"}.getInt() == 0
       check status{"queued_leases"}.getInt() == 0
-      # Each build session runs its provider compilation through the build engine
-      # before the public test action, so the shared daemon observes two
-      # bootstrap leases and two action leases.
-      check status{"total_granted"}.getInt() == 4
-      check status{"total_finished"}.getInt() == 4
+      # Each build session takes THREE leases from the shared daemon: the
+      # project-interface extraction edge (leased since 66bdb1887 made it a
+      # monitored build edge), the provider compilation, and the public test
+      # action. Two sessions therefore grant six. Measured: a single session of
+      # this shape against a private runquotad reports `granted 3` and its
+      # action carries `lease=3`.
+      check status{"total_granted"}.getInt() == 6
+      check status{"total_finished"}.getInt() == 6

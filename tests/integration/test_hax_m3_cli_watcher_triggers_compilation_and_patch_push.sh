@@ -190,7 +190,7 @@ echo "  [OK] Real C target binary compiled and signed: $TARGET_BIN"
 # -----------------------------------------------------------------------------
 echo "[3/5] Compiling Nim integration test driver..."
 
-DRIVER_SRC="$REPO_ROOT/tests/integration/test_hax_m3_cli_watcher_triggers_compilation_and_patch_push.nim"
+DRIVER_SRC="$REPO_ROOT/tests/fixtures/hcr/watch_patch_push_driver.nim"
 DRIVER_BIN="$WORK_DIR/test_hax_m3_driver"
 
 nim c --hints:off --warnings:off \

@@ -543,89 +543,96 @@ suite "the trust-domain baseline reproduces a measurement a machine signed":
     other.foldOrder = "per-page"
     check cloudExpectedManifest(other).tdx[0].mrtd != OperatorBQuotedMrtd
 
+proc driveEachCellSDeclarationIsCheckedAgainstItsConsequence() =
+  ## The body of test
+  ##   "each cell's declaration is checked against its consequence"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  for b in LaunchBaseline:
+    let base = baselineSpec(b)
+    let baseManifest = cloudExpectedManifest(base)
+    let baseIdentity = cloudLaunchIdentity(base)
+    let basePlan = cloudLaunchPlan(base)
+    let baseMeasurements = measurementsOf(baseManifest)
+    let surface = surfaceOf(base)
+    for p in CloudLaunchParameter:
+      let c = MutationTable[b][p]
+      if c.outcome == ceNotApplicable:
+        inc cellsDeclaredInapplicable
+        observed[b][p] = ceNotApplicable
+        # The cause, checked rather than read.
+        case c.cause
+        of naNoRoleOnThisSurface:
+          check not appliesTo(p, surface)
+        of naNoSecondValueThisBuildRecords:
+          # The only row of this kind: no cloud other than this one
+          # offers a shape that attests with this surface, so there
+          # is no coherent second provider to move to.
+          check p == clpProvider
+          var offering: seq[CloudProvider] = @[]
+          for s in CloudInstanceShapes:
+            if s.surface == surface and s.provider notin offering:
+              offering.add s.provider
+          check offering == @[base.provider]
+        of naCellIsApplicable:
+          checkpoint("a cell declared not applicable with no cause: " &
+            $b & "/" & $p)
+          check false
+        check c.note.len > 0
+        continue
+
+      inc cellsExercised
+      let m = mutatedSpec(b, p)
+      # The mutation moved the field it names…
+      checkpoint($b & " / " & $p)
+      check valueOf(base, p) != valueOf(m, p)
+      # …and moved nothing else the cell did not declare.
+      for q in CloudLaunchParameter:
+        if q == p or q in c.alsoMoves: continue
+        check valueOf(base, q) == valueOf(m, q)
+
+      let mutatedManifest = cloudExpectedManifest(m)
+      let mutatedIdentity = cloudLaunchIdentity(m)
+      let mutatedPlan = cloudLaunchPlan(m)
+      let mutatedMeasurements = measurementsOf(mutatedManifest)
+      check baseMeasurements.len == mutatedMeasurements.len
+
+      case c.outcome
+      of ceOperational:
+        check mutatedIdentity == baseIdentity
+        check mutatedMeasurements == baseMeasurements
+        check mutatedPlan != basePlan
+        observed[b][p] = ceOperational
+      of ceRecorded:
+        check mutatedIdentity != baseIdentity
+        check mutatedMeasurements == baseMeasurements
+        observed[b][p] = ceRecorded
+      of ceMeasured:
+        check mutatedIdentity != baseIdentity
+        check mutatedMeasurements != baseMeasurements
+        observed[b][p] = ceMeasured
+      of ceNotApplicable:
+        discard                      # handled above
+
+      # A parameter whose value never reaches an argument vector must
+      # leave the invocation byte-identical. This is the other half of
+      # "the plan carries no measurement input", and without it a
+      # measured parameter could be leaking into the request.
+      if not reachesTheCommandLine(p) and p != clpProvider and
+         c.alsoMoves.len == 0:
+        check mutatedPlan == basePlan
+
+      # The stale-policy clause, for every mutation that moves the
+      # identity: a policy pinned to the baseline stops accepting.
+      if c.outcome != ceOperational:
+        check manifestPinnedOutcome(baseIdentity,
+          cloudExpectedManifestText(m)) == coFailed
+        inc staleRowsChecked
+
 suite "every parameter, on every baseline, moves what its cell says":
 
   test "each cell's declaration is checked against its consequence":
-    for b in LaunchBaseline:
-      let base = baselineSpec(b)
-      let baseManifest = cloudExpectedManifest(base)
-      let baseIdentity = cloudLaunchIdentity(base)
-      let basePlan = cloudLaunchPlan(base)
-      let baseMeasurements = measurementsOf(baseManifest)
-      let surface = surfaceOf(base)
-      for p in CloudLaunchParameter:
-        let c = MutationTable[b][p]
-        if c.outcome == ceNotApplicable:
-          inc cellsDeclaredInapplicable
-          observed[b][p] = ceNotApplicable
-          # The cause, checked rather than read.
-          case c.cause
-          of naNoRoleOnThisSurface:
-            check not appliesTo(p, surface)
-          of naNoSecondValueThisBuildRecords:
-            # The only row of this kind: no cloud other than this one
-            # offers a shape that attests with this surface, so there
-            # is no coherent second provider to move to.
-            check p == clpProvider
-            var offering: seq[CloudProvider] = @[]
-            for s in CloudInstanceShapes:
-              if s.surface == surface and s.provider notin offering:
-                offering.add s.provider
-            check offering == @[base.provider]
-          of naCellIsApplicable:
-            checkpoint("a cell declared not applicable with no cause: " &
-              $b & "/" & $p)
-            check false
-          check c.note.len > 0
-          continue
-
-        inc cellsExercised
-        let m = mutatedSpec(b, p)
-        # The mutation moved the field it names…
-        checkpoint($b & " / " & $p)
-        check valueOf(base, p) != valueOf(m, p)
-        # …and moved nothing else the cell did not declare.
-        for q in CloudLaunchParameter:
-          if q == p or q in c.alsoMoves: continue
-          check valueOf(base, q) == valueOf(m, q)
-
-        let mutatedManifest = cloudExpectedManifest(m)
-        let mutatedIdentity = cloudLaunchIdentity(m)
-        let mutatedPlan = cloudLaunchPlan(m)
-        let mutatedMeasurements = measurementsOf(mutatedManifest)
-        check baseMeasurements.len == mutatedMeasurements.len
-
-        case c.outcome
-        of ceOperational:
-          check mutatedIdentity == baseIdentity
-          check mutatedMeasurements == baseMeasurements
-          check mutatedPlan != basePlan
-          observed[b][p] = ceOperational
-        of ceRecorded:
-          check mutatedIdentity != baseIdentity
-          check mutatedMeasurements == baseMeasurements
-          observed[b][p] = ceRecorded
-        of ceMeasured:
-          check mutatedIdentity != baseIdentity
-          check mutatedMeasurements != baseMeasurements
-          observed[b][p] = ceMeasured
-        of ceNotApplicable:
-          discard                      # handled above
-
-        # A parameter whose value never reaches an argument vector must
-        # leave the invocation byte-identical. This is the other half of
-        # "the plan carries no measurement input", and without it a
-        # measured parameter could be leaking into the request.
-        if not reachesTheCommandLine(p) and p != clpProvider and
-           c.alsoMoves.len == 0:
-          check mutatedPlan == basePlan
-
-        # The stale-policy clause, for every mutation that moves the
-        # identity: a policy pinned to the baseline stops accepting.
-        if c.outcome != ceOperational:
-          check manifestPinnedOutcome(baseIdentity,
-            cloudExpectedManifestText(m)) == coFailed
-          inc staleRowsChecked
+    driveEachCellSDeclarationIsCheckedAgainstItsConsequence()
 
   test "the one row that moves a second field holds its invariant":
     # `provider` cannot be moved alone: no cloud offers the other's
@@ -1210,9 +1217,28 @@ suite "provenance":
     for name in CloudFixtureName: digests.add sha256Hex(fixtureBytesOf(name))
     check digests.deduplicate.len == 4
 
+# The case above that fills the census. The census cases drive it
+# themselves: the suite runner executes each case in its own process
+# (`--run suite::test`), so the counters and `observed` hold only what ran
+# in THIS process, and a census that read what an earlier case left
+# behind would measure the execution mode rather than the table.
+const CensusDrivers: seq[(string, proc () {.nimcall.})] = @[
+  ("each cell's declaration is checked against its consequence",
+    driveEachCellSDeclarationIsCheckedAgainstItsConsequence)]
+
+proc driveTheCensus() =
+  cellsExercised = 0
+  cellsDeclaredInapplicable = 0
+  observed = default(typeof(observed))
+  staleRowsChecked = 0
+  for (name, drive) in CensusDrivers:
+    checkpoint("driving " & name)
+    drive()
+
 suite "the census over the table itself":
 
   test "every cell was reached, and the count is an EQUALITY":
+    driveTheCensus()
     check cellsExercised + cellsDeclaredInapplicable ==
       (ord(high(LaunchBaseline)) + 1) *
       (ord(high(CloudLaunchParameter)) + 1)
@@ -1221,6 +1247,7 @@ suite "the census over the table itself":
     check cellsDeclaredInapplicable == 6
 
   test "what each cell was DECLARED to move is what it MOVED":
+    driveTheCensus()
     for b in LaunchBaseline:
       for p in CloudLaunchParameter:
         checkpoint($b & " / " & $p)
@@ -1250,6 +1277,7 @@ suite "the census over the table itself":
       ord(high(CloudLaunchParameter)) + 1
 
   test "every mutation that moved the identity was put to a policy":
+    driveTheCensus()
     # The stale-policy clause is asserted per ROW, not once. This counts
     # the rows so a loop that stopped early cannot pass.
     var expected = 0

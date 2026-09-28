@@ -1100,6 +1100,45 @@ proc noteSessionRecordWritten(config: UserDaemonConfig;
     if active: inc activeSessionTally else: dec activeSessionTally
   activeSessionStateById[session.sessionId] = active
 
+proc refreshBelievedActiveSessions(config: UserDaemonConfig) =
+  ## Re-read the records THIS process believes are active, and fold any that
+  ## have left an active state.
+  ##
+  ## `writeSessionRecord` is a single write funnel only WITHIN one process.
+  ## A build or watch session is accepted by the daemon parent (which counts
+  ## it) and then run by a double-forked worker (`spawnDetachedDaemonWorker`),
+  ## and every later transition — `running`, then `succeeded`/`failed` — is
+  ## written by that worker, into the WORKER's copy of the tally. The parent
+  ## never saw a session end, so after one build it reported
+  ## `active-sessions: 1` forever and deferred every dev self-restart
+  ## (t_local_daemons_control_plane_m10
+  ## `integration_daemon_dev_restart_does_not_corrupt_state`).
+  ##
+  ## Only the believed-active records are read, so the cost is the number of
+  ## sessions in flight — not the unbounded walk of every record ever written
+  ## that the maintained tally replaced. A record that has vanished counts as
+  ## ended; one that cannot be READ keeps its last known state, because
+  ## under-reporting live work is the failure `restartCandidateReady` cannot
+  ## afford (see the note above `activeSessionCacheDir`).
+  var ended: seq[string] = @[]
+  for sessionId, active in activeSessionStateById.pairs:
+    if not active:
+      continue
+    let path = sessionRecordPath(config, sessionId)
+    var stillActive = true
+    if not fileExists(path):
+      stillActive = false
+    else:
+      try:
+        stillActive = sessionStateIsActive(readSessionRecord(path).state)
+      except CatchableError:
+        stillActive = true
+    if not stillActive:
+      ended.add(sessionId)
+  for sessionId in ended:
+    activeSessionStateById[sessionId] = false
+    dec activeSessionTally
+
 proc activeSessionTallyFor*(config: UserDaemonConfig): int =
   ## The number `statusFor` reports. O(1) after the first call.
   ##
@@ -1109,6 +1148,8 @@ proc activeSessionTallyFor*(config: UserDaemonConfig): int =
   ## terminations.
   if activeSessionCacheDir != sessionRecordsDir(config):
     primeActiveSessionTally(config)
+  else:
+    refreshBelievedActiveSessions(config)
   activeSessionTally
 
 

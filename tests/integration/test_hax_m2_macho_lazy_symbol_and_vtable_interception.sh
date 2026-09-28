@@ -191,7 +191,7 @@ echo "  [OK] Polymorphic shape shared library compiled: $SHAPE_DYLIB"
 # -----------------------------------------------------------------------------
 echo "[3/5] Compiling Nim integration test driver..."
 
-DRIVER_SRC="$REPO_ROOT/tests/integration/test_hax_m2_macho_lazy_symbol_and_vtable_interception.nim"
+DRIVER_SRC="$REPO_ROOT/tests/fixtures/hcr/dispatch_table_driver.nim"
 DRIVER_BIN="$WORK_DIR/test_hax_m2_driver"
 
 nim c --hints:off --warnings:off \

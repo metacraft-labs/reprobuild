@@ -348,6 +348,139 @@ proc runShell*(cmd: CmdSpec; cwd = getCurrentDir();
         break
       sleep(PollSleepMs)
 
+type
+  CmdSplitResult* = tuple[code: int; stdout, stderr: string]
+    ## ``runShellSplit``'s result: the child's two streams, kept apart.
+
+proc runProgramSplit*(program: string; args: openArray[string];
+                      cwd = getCurrentDir(); env: StringTableRef = nil;
+                      timeoutMs = 0): CmdSplitResult =
+  ## Run ``program`` with stdout and stderr captured SEPARATELY. ``env`` is
+  ## the child's COMPLETE environment (``nil`` inherits this process's), so
+  ## a caller can also remove variables — which ``runShellSplit``'s overlay
+  ## cannot.
+  ##
+  ## Use it whenever the command's stdout is a machine-read artifact — a
+  ## script a shell ``eval``s (``repro dev-env export``, the direnv hook
+  ## helpers, ``repro shell --print-env``), JSON, or a value a test compares
+  ## byte for byte — and stderr is the command's human channel (progress,
+  ## warnings, the activation announcement). Merging the two, as
+  ## ``runShell`` does, makes every diagnostic the CLI is ENTITLED to write
+  ## on stderr look like a corrupted script.
+  ##
+  ## Both pipes are drained concurrently by the same non-blocking poll
+  ## ``runShell`` uses (see the notes there for why it is a poll and why it
+  ## walks away once the immediate child has exited), so neither stream can
+  ## fill its pipe buffer and wedge the child while the other is read.
+  let process = startProcess(program,
+    workingDir = cwd,
+    args = @args,
+    env = env,
+    options = {poUsePath})
+  defer: process.close()
+  let deadline =
+    if timeoutMs > 0: epochTime() + float(timeoutMs) / 1000.0
+    else: 0.0
+  const PollSleepMs = 25
+  var sinks: array[2, string]
+  when defined(windows):
+    let handles = [Handle(process.outputHandle), Handle(process.errorHandle)]
+    proc drainAvailable(h: Handle; sink: var string): bool =
+      ## Read what is buffered right now; true if any byte arrived.
+      var buf {.noinit.}: array[4096, char]
+      while true:
+        var bytesAvail: int32 = 0
+        if not peekNamedPipe(h, lpTotalBytesAvail = addr bytesAvail) or
+            bytesAvail == 0:
+          return
+        var bytesRead: int32 = 0
+        let toRead = min(int(bytesAvail), buf.len).int32
+        if readFile(h, addr buf[0], toRead, addr bytesRead, nil) == 0 or
+            bytesRead == 0:
+          return
+        let prev = sink.len
+        sink.setLen(prev + bytesRead)
+        copyMem(addr sink[prev], addr buf[0], bytesRead)
+        result = true
+    result.code = -1
+    while true:
+      var progressed = false
+      for i in 0 .. 1:
+        if drainAvailable(handles[i], sinks[i]):
+          progressed = true
+      if progressed:
+        continue
+      result.code = process.peekExitCode()
+      if result.code != -1:
+        for i in 0 .. 1:
+          discard drainAvailable(handles[i], sinks[i])
+        break
+      if deadline > 0.0 and epochTime() >= deadline:
+        try: process.terminate()
+        except CatchableError, OSError: discard
+        discard process.waitForExit(5_000)
+        result.code = runShellTimedOutCode
+        break
+      sleep(PollSleepMs)
+  else:
+    let fds = [cint(process.outputHandle), cint(process.errorHandle)]
+    for fd in fds:
+      let prevFlags = fcntl(fd, F_GETFL)
+      if prevFlags != -1:
+        discard fcntl(fd, F_SETFL, prevFlags or O_NONBLOCK)
+    proc drainAvailable(fd: cint; sink: var string): bool =
+      ## Drain what is readable without blocking; true on a genuine EOF.
+      var buf {.noinit.}: array[4096, char]
+      while true:
+        let n = read(fd, addr buf[0], buf.len)
+        if n > 0:
+          let prev = sink.len
+          sink.setLen(prev + n)
+          copyMem(addr sink[prev], addr buf[0], n)
+        elif n == 0:
+          return true
+        else:
+          if errno == EINTR:
+            continue
+          return false
+    var eof = [false, false]
+    result.code = -1
+    while true:
+      for i in 0 .. 1:
+        if not eof[i]:
+          eof[i] = drainAvailable(fds[i], sinks[i])
+      if eof[0] and eof[1]:
+        result.code = process.peekExitCode()
+        if result.code == -1:
+          result.code = process.waitForExit()
+        break
+      result.code = process.peekExitCode()
+      if result.code != -1:
+        for i in 0 .. 1:
+          if not eof[i]:
+            discard drainAvailable(fds[i], sinks[i])
+        break
+      if deadline > 0.0 and epochTime() >= deadline:
+        try: process.terminate()
+        except CatchableError, OSError: discard
+        discard process.waitForExit(5_000)
+        result.code = runShellTimedOutCode
+        break
+      sleep(PollSleepMs)
+  result.stdout = sinks[0]
+  result.stderr = sinks[1]
+
+proc runShellSplit*(cmd: CmdSpec; cwd = getCurrentDir();
+                    timeoutMs = 0): CmdSplitResult =
+  ## ``runShell`` with stdout and stderr captured SEPARATELY; see
+  ## ``runProgramSplit`` for when that is required.
+  if cmd.args.len == 0:
+    raise newException(ValueError, "shellCommand returned an empty argv")
+  var envTable = newStringTable()
+  for k, v in envPairs(): envTable[k] = v
+  for entry in cmd.env: envTable[entry.name] = entry.value
+  runProgramSplit(cmd.args[0], cmd.args[1..^1], cwd, envTable, timeoutMs)
+
 proc requireSuccess*(cmd: CmdSpec; cwd = getCurrentDir()): string =
   ## Run ``cmd`` and assert exit-code 0. Returns the merged output so
   ## callers can keep chaining ``.contains("...")`` checks.

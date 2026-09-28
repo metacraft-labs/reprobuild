@@ -184,6 +184,16 @@ proc setup(gitBin, slug: string; customCoreRemote = false): Fixture =
     discard require(q(gitBin) & " -C " & q(result.core) &
       " remote rename origin publish-upstream")
   writeWorkspaceBranch(result.workspace, project = "app", branch = "main")
+  # Central lock publication is OPT-IN (MO-14, Workspace-Manifests.md
+  # §"`publish_locks` — central publication is opt-in"). Without
+  # `[manifest] publish_locks = true` a passing gate writes the record and
+  # does NOT publish it, so every "the lock reached the manifest bare" check
+  # below would be asking for something this workspace never enabled.
+  writeFile(result.workspace / ".repro-workspace.toml",
+    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
+    "[manifest]\n" &
+    "url = \"" & fileUrl(result.manifestBare) & "\"\n" &
+    "publish_locks = true\n")
   result.manifestPrePushLog = result.scratch / "manifest-pre-push.log"
   result.manifestPostCommitLog = result.scratch / "manifest-post-commit.log"
 
