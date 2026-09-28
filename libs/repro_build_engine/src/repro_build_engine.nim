@@ -13914,6 +13914,24 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for input in action.inputs:
       result.add(materialPath(action.cwd, input))
 
+  var observationRoots: seq[LogicalRoot] = @[]
+  var observationRootsResolved = false
+  proc portableRecordRoots(): seq[LogicalRoot] =
+    ## `portableRoots` plus the monitor shim this engine injects, UNTRACKED:
+    ## every monitored process loads it, so it shows up as a read, but it is
+    ## the observation machinery — its bytes are not an input to anything the
+    ## action computes, and its location is a fact about this host.
+    if not observationRootsResolved:
+      observationRootsResolved = true
+      try:
+        let shim = resolveMonitorShimLibForInstall()
+        if shim.len > 0:
+          observationRoots.add(LogicalRoot(label: "monitor-shim",
+            path: absolutePath(shim), kind: lrkUntracked))
+      except CatchableError:
+        discard
+    config.portableRoots & observationRoots
+
   proc portableStaticFieldsOf(action: BuildAction): seq[string] =
     ## What the argv does not say about the action: its kind, a builtin's
     ## payload, and the outputs it declares (sorted: a set).
@@ -13953,7 +13971,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                             reads, probes, enumerations: seq[string]) =
     ## The shared tail of both portable recorders: fingerprint, outputs,
     ## local memo record, and (once per record) publication.
-    var fp = computePortableFingerprint(config.portableRoots, action.argv,
+    var fp = computePortableFingerprint(portableRecordRoots(), action.argv,
       action.cwd, portableEnvOf(action), portableDeclaredInputsOf(action),
       reads, probes, enumerations, portableStaticFieldsOf(action))
     if fp.portable:
