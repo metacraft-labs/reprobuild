@@ -96,26 +96,33 @@ suite "portable memo store":
       removeDir(a)
       removeDir(extendedPath(store))
     let project = checkout(a, "int x;\n")
-    # Execution 1 observed only src/a.c.
-    let first = execute(project)
-    recordMemo(store, first)
-    # Execution 2 of the SAME static action also probed a header, which
-    # EXISTED then and produced different bytes.
-    writeFile(project / "src" / "a.h", "")
-    let fp2 = computePortableFingerprint(roots(project), @["cc", "a.c"],
+    # Execution 1 looked for a header and found none — an include search.
+    let fp1 = computePortableFingerprint(roots(project), @["cc", "a.c"],
       project, @[], @[], reads = @[project / "src" / "a.c"],
       probes = @[project / "src" / "a.h"], enumerations = @[])
+    let first = PortableMemoRecord(weakHex: fp1.weakHex,
+      pathSet: pathSetOf(fp1.inputs), strongHex: fp1.strongHex,
+      outputs: @[PortableOutput(path: "project:out/a.o", digest: "first")])
+    recordMemo(store, first)
+    # Execution 2 of the SAME static action found the header and read it,
+    # producing different bytes.
+    writeFile(project / "src" / "a.h", "")
+    let fp2 = computePortableFingerprint(roots(project), @["cc", "a.c"],
+      project, @[], @[],
+      reads = @[project / "src" / "a.c", project / "src" / "a.h"],
+      probes = @[], enumerations = @[])
     check fp2.weakHex == first.weakHex
     recordMemo(store, PortableMemoRecord(weakHex: fp2.weakHex,
       pathSet: pathSetOf(fp2.inputs), strongHex: fp2.strongHex,
       outputs: @[PortableOutput(path: "project:out/a.o", digest: "second")]))
     check candidatePathSets(store, first.weakHex).len == 2
-    # Now the header exists: only execution 2's path set matches.
+    # Now the header exists: execution 1's observed absence no longer holds,
+    # so only execution 2's path set matches.
     let withHeader = lookupMemo(store, roots(project), first.weakHex)
     check withHeader.isSome
     check withHeader.get().outputs[0].digest == "second"
-    # Remove it: execution 2's path set now computes a DIFFERENT strong
-    # fingerprint (probe absent), and execution 1's matches.
+    # Remove it: execution 2's read cannot be identified, and execution 1's
+    # observed absence holds again.
     removeFile(project / "src" / "a.h")
     let without = lookupMemo(store, roots(project), first.weakHex)
     check without.isSome
