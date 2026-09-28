@@ -57,7 +57,9 @@ marker="repro-release-smoke-ok"
 echo "=== repro exec in a fresh project, using only $pkg ==="
 out="$work/exec.log"
 set +e
-(cd "$project" && "$repro_bin" exec -- echo "$marker") 2>&1 | tee "$out"
+(cd "$project" && "$repro_bin" exec -- bash -c \
+  'echo "$1"; echo "seeded-source-root=${REPROBUILD_SOURCE_ROOT:-}"' _ "$marker") \
+  2>&1 | tee "$out"
 rc=${PIPESTATUS[0]}
 set -e
 if [[ $rc -ne 0 ]] || ! grep -q "^${marker}" "$out"; then
@@ -68,4 +70,19 @@ if [[ $rc -ne 0 ]] || ! grep -q "^${marker}" "$out"; then
   fi
   exit 1
 fi
-echo "=== repro exec smoke test PASSED ==="
+# Reaching the command is not enough on the BUILD HOST: a binary built here
+# still finds this checkout through the source paths compiled into it, so a
+# missing share/repro would pass. Require that the roots the command inherited
+# are the archive's own -- that is the discovery a consumer relies on.
+# (check_release_source_closure.sh proves the trees are complete.)
+seeded=$(grep -m1 '^seeded-source-root=' "$out" | tr -d '\r' | cut -d= -f2-)
+case "${seeded//\\//}" in
+  */"$(basename "$pkg")"/share/repro/source) ;;
+  *)
+    echo "smoke_release_dev_exec: ERROR: repro did not take its sources from the archive." >&2
+    echo "  REPROBUILD_SOURCE_ROOT seen by the command: '${seeded}'" >&2
+    echo "  expected: <package>/share/repro/source under $pkg" >&2
+    exit 1
+    ;;
+esac
+echo "=== repro exec smoke test PASSED (sources: ${seeded}) ==="
