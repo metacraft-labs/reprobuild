@@ -2475,6 +2475,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim",
+    binary: "build/test-bin/t_installed_layout_source_roots",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_multi_package_merge.nim",
     binary: "build/test-bin/t_multi_package_merge",
     defines: @[],
@@ -2504,15 +2513,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
     binary: "build/test-bin/t_recipe_c_compiler_selection_is_loud",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny,
-    selfInterposes: false),
-  TestSpec(
-    source: "libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim",
-    binary: "build/test-bin/t_installed_layout_source_roots",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

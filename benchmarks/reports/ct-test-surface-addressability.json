@@ -30,15 +30,15 @@
   "counts": {
     "catalogs": 4,
     "itemsByKind": {
-      "case": 11092,
-      "suite": 2552
+      "case": 11208,
+      "suite": 2574
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 13393,
+      "nim-unittest": 13531,
       "python-unittest": 248
     },
-    "itemsTotal": 13644,
+    "itemsTotal": 13782,
     "responseDiagnostics": {
       "info": 1,
       "warning": 35
@@ -229,28 +229,28 @@
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 96.26,
-    "caseItemsInCatalog": 11092,
-    "casesAddressableThroughTheSurface": 10449,
+    "caseCoveragePercent": 96.3,
+    "caseItemsInCatalog": 11208,
+    "casesAddressableThroughTheSurface": 10565,
     "collidingIdentities": 12,
-    "distinctCaseIdentities": 11080,
+    "distinctCaseIdentities": 11196,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 1736,
-      "compared": 1741,
+      "agree": 1741,
+      "compared": 1746,
       "disagree": 5
     },
     "sourceCoveragePercent": 99.49,
-    "sourcesAddressableThroughTheSurface": 1741,
+    "sourcesAddressableThroughTheSurface": 1746,
     "sourcesNotAddressable": 9,
-    "trackedNimSuiteSources": 1750,
-    "trackedStaticCaseCount": 10855
+    "trackedNimSuiteSources": 1755,
+    "trackedStaticCaseCount": 10971
   },
   "schemaVersion": 1,
   "surface": {
     "binary": "ct-test",
-    "provenance": "metacraft-labs/codetracer a9ef983ed, the codetracer-src revision flake.lock pins, built by this repository's dev environment (ctTestTools, entered through repro exec)",
-    "resolvedBy": "environment",
+    "provenance": "",
+    "resolvedBy": "PATH:ct-test",
     "sha256": "4df697d5f5929c61e71ae7baeee56ff08198cbd7961aba50f00d7ef1282e0c0d"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
