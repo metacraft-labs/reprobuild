@@ -97,6 +97,15 @@ proc setupFixture(name: string; policy: FileFingerprintPolicy): Fixture =
   # The shape `tryFastNoopCacheHits` requires to run at all.
   result.config.rebuildMissingOutputsOnCacheHit = true
   result.config.deferLocalOutputBlobs = true
+  # Launch through the engine's direct (RunQuota-bypass) path, still under the
+  # real io-monitor. The question here is the cache verdict, which RunQuota
+  # admission does not take part in; without this the cold run is handed to
+  # `repro __repro-runquota-helper`, which needs a live `runquotad` this file
+  # never starts, and fails with "No such file or directory" wherever no
+  # daemon happens to be listening on the default endpoint. The same library's
+  # `test_engine_worker_pool` and `test_monitor_finish_is_pooled` launch the
+  # same way for the same reason.
+  result.config.bypassRunQuota = true
   discard policy
 
 proc cleanup(f: Fixture) =

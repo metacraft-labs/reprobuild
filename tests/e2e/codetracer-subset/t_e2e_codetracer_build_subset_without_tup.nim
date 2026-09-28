@@ -10,13 +10,20 @@ const
   # ``dev``-branch Tup compiler flags. Keep the full-command fingerprint
   # pinned to that corrected command, and assert the flag explicitly below so
   # a future hash refresh cannot accidentally hide its removal.
-  NimJsSemanticsHash = "e64dd35563bfa374"
-  NimJsWithoutOldCaseObjectsHash = "a7cf3ce1b73f8bfa"
+  #
+  # Refreshed at a9ef983e (the revision ``flake.lock`` pins for
+  # ``codetracer-src``): CodeTracer 85c6dfe73 appended the eight
+  # ``../runquota/libs/*/src`` search paths to ``NIM_REPO_PATH_FLAGS``, which
+  # ``!nim_js`` expands through ``NIM_SELECTED``. That is the only change to a
+  # fingerprinted definition since 04d6aff3; ``!trace_object_file`` is
+  # unchanged, so its hash is too.
+  NimJsSemanticsHash = "b8d6481bcc00d87b"
+  NimJsWithoutOldCaseObjectsHash = "85e7880da3e33f69"
   TraceObjectFileSemanticsHash = "3d1a52e3befe61cf"
   CodeTracerTupSemanticsCommit =
-    "04d6aff3d012b3e768dbebba186c950637e0c2b3"
+    "a9ef983ed1e7d9a60b85034b596f55ea8b2164f5"
   PinnedTupSemanticsFixture =
-    "tests/fixtures/codetracer-subset/Tuprules-04d6aff3.tup"
+    "tests/fixtures/codetracer-subset/Tuprules-a9ef983e.tup"
 
 type
   TupRules = object
@@ -97,7 +104,10 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
   let daemon = startProcess(daemonBin, args = [
     "--socket", socketPath,
     "--cpu-milli", "16000",
-    "--memory-bytes", "17179869184"
+    "--memory-bytes", "17179869184",
+    # Test daemon: keep it out of the host-wide observation store, which
+    # it would otherwise open (and write) before it binds its socket.
+    "--no-write-stats"
   ], options = {poUsePath})
   putEnv("RUNQUOTA_SOCKET", socketPath)
   for _ in 0 ..< 200:
@@ -536,14 +546,21 @@ suite "e2e_codetracer_build_subset_without_tup":
       check fileExists(projectRoot / "build" / "c" / "main.tup.o")
       check fileExists(projectRoot / "build" / "c" / "main.with-header.o")
 
+      # Tool identities are realized only for the tools the selected graph
+      # references (``scopedToolArtifact``, 636d688f2; kept by #312). The
+      # four actions invoke ``nim`` and ``gcc``; ``node`` is run by this test
+      # itself (``runNode``) and ``sh`` by no action since the config header
+      # became a builtin ``fs.writeText`` (cb943db45), so both stay declared
+      # in ``uses:`` but are not realized.
+      check first.contains("selected tool identities: 2/4")
       let identity = readPathOnlyBuildIdentity(valueAfter(first, "toolIdentity:"))
-      check identity.profiles.len == 4
+      check identity.profiles.len == 2
       check identity.profiles.allIt(it.installMethod == "path")
       check identity.profiles.allIt(it.cachePortability == cpLocalOnly)
       check identity.profiles.anyIt(it.executableName == "nim")
-      check identity.profiles.anyIt(it.executableName == "node")
       check identity.profiles.anyIt(it.executableName == "gcc")
-      check identity.profiles.anyIt(it.executableName == "sh")
+      check not identity.profiles.anyIt(it.executableName == "node")
+      check not identity.profiles.anyIt(it.executableName == "sh")
 
       let firstReport = parseFile(valueAfter(first, "buildReport:"))
       assertAction(firstReport, "generate-config-header", "asSucceeded", true)

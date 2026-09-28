@@ -379,130 +379,214 @@ suite "the driver hands over what the quoting enclave produced":
     check not p.ready
     check b.outblobPath in p.detail
 
+proc driveEveryOtherGenuineDomainSOwnBoundBytesAreRefused() =
+  ## The body of test
+  ##   "every other genuine domain's own bound bytes are refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Twenty ordered pairs of two real domains' real bound bytes. Not
+  # a string of zeroes: a negative built from zeroes proves only that
+  # the comparison compares something.
+  var pairs = 0
+  for i, mine in genuineQuotes:
+    let b = newBench(mine.document)
+    for j, theirs in genuineQuotes:
+      if i == j: continue
+      inc pairs
+      let e = refuses(proc () =
+        discard acquireQuote(b.driverOver(), boundBytesOf(theirs)))
+      check e.condition == tbcAnswersADifferentQuestion
+      check TdxDriverName in e.msg
+  check pairs == 20
+
+proc driveAndSoIsASingleBitOfTheRightAnswer() =
+  ## The body of test
+  ##   "and so is a single bit of the right answer"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let q = genuineQuotes[0]
+  let b = newBench(q.document)
+  for at in [0, ReportDataSize - 1]:
+    var asked = boundBytesOf(q)
+    asked[at] = char(uint8(asked[at]) xor 0x01'u8)
+    let e = refuses(proc () = discard acquireQuote(b.driverOver(), asked))
+    check e.condition == tbcAnswersADifferentQuestion
+
 suite "a quote that answers a different question is refused":
 
   test "every other genuine domain's own bound bytes are refused":
-    # Twenty ordered pairs of two real domains' real bound bytes. Not
-    # a string of zeroes: a negative built from zeroes proves only that
-    # the comparison compares something.
-    var pairs = 0
-    for i, mine in genuineQuotes:
-      let b = newBench(mine.document)
-      for j, theirs in genuineQuotes:
-        if i == j: continue
-        inc pairs
-        let e = refuses(proc () =
-          discard acquireQuote(b.driverOver(), boundBytesOf(theirs)))
-        check e.condition == tbcAnswersADifferentQuestion
-        check TdxDriverName in e.msg
-    check pairs == 20
+    driveEveryOtherGenuineDomainSOwnBoundBytesAreRefused()
 
   test "and so is a single bit of the right answer":
-    let q = genuineQuotes[0]
-    let b = newBench(q.document)
-    for at in [0, ReportDataSize - 1]:
-      var asked = boundBytesOf(q)
-      asked[at] = char(uint8(asked[at]) xor 0x01'u8)
-      let e = refuses(proc () = discard acquireQuote(b.driverOver(), asked))
-      check e.condition == tbcAnswersADifferentQuestion
+    driveAndSoIsASingleBitOfTheRightAnswer()
+
+proc driveADocumentTooShortForAHeaderAndADescriptorIsRefused() =
+  ## The body of test
+  ##   "a document too short for a header and a descriptor is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () =
+    discard agentTdxReportSpan(genuineQuotes[0].document[0 ..< 50]))
+  check e.condition == tbcTooShortForADescriptor
+  check "50" in e.msg
+
+proc driveAQuoteVersionThisBuildHasNoLayoutForIsRefused() =
+  ## The body of test
+  ##   "a quote version this build has no layout for is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var doc = genuineQuotes[0].document
+  doc[AgentTdxVersionOffset] = '\x03'
+  let e = refuses(proc () = discard agentTdxReportSpan(doc))
+  check e.condition == tbcUnsupportedQuoteVersion
+  check "version 3" in e.msg
+
+proc driveAnEnclaveReportWearingATrustDomainSClothesIsRefused() =
+  ## The body of test
+  ##   "an enclave report wearing a trust domain's clothes is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Type zero is an enclave. Reading a trust domain's offsets out of
+  # one is exactly the confusion this rule exists to prevent.
+  var doc = genuineQuotes[0].document
+  for i in AgentTdxTeeTypeOffset ..< AgentTdxTeeTypeOffset + 4:
+    doc[i] = '\x00'
+  let e = refuses(proc () = discard agentTdxReportSpan(doc))
+  check e.condition == tbcNotATrustDomain
+  check "0x00000081" in e.msg
+
+proc driveAVersion5ReportShapeThisBuildDoesNotReadIsRefused() =
+  ## The body of test
+  ##   "a version-5 report shape this build does not read is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var doc = ""
+  for q in genuineQuotes:
+    if parseTdxQuote(byteSeqOf(q.document)).version == AgentTdxVersion5:
+      doc = q.document
+      break
+  check doc.len > 0
+  doc[AgentTdxBodyTypeOffset] = '\x09'
+  let e = refuses(proc () = discard agentTdxReportSpan(doc))
+  check e.condition == tbcUnsupportedReportShape
+  check "report shape 9" in e.msg
+
+proc driveAVersion5ShapeAndWidthThatDisagreeAreRefused() =
+  ## The body of test
+  ##   "a version-5 shape and width that disagree are refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var doc = ""
+  for q in genuineQuotes:
+    if parseTdxQuote(byteSeqOf(q.document)).version == AgentTdxVersion5:
+      doc = q.document
+      break
+  check doc.len > 0
+  doc[AgentTdxBodySizeOffset] = char(uint8(doc[AgentTdxBodySizeOffset]) xor
+                                     0x01'u8)
+  let e = refuses(proc () = discard agentTdxReportSpan(doc))
+  check e.condition == tbcShapeAndWidthDisagree
+
+proc driveAReportThatRunsPastTheEndOfItsDocumentIsRefused() =
+  ## The body of test
+  ##   "a report that runs past the end of its document is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Truncated one byte inside the report, so the header and the
+  # descriptor still read and only the span check can catch it.
+  let q = genuineQuotes[0]
+  let span = agentTdxReportSpan(q.document)
+  let e = refuses(proc () =
+    discard agentTdxReportSpan(q.document[0 ..< span.at + span.width - 1]))
+  check e.condition == tbcReportRunsPastTheEnd
+
+proc driveTheOtherRootOfTrustSProviderIsRefused() =
+  ## The body of test
+  ##   "the other root of trust's provider is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let q = genuineQuotes[0]
+  let b = newBench(q.document, provider = SevSnpProviderName)
+  let e = refuses(proc () =
+    discard acquireQuote(b.driverOver(), boundBytesOf(q)))
+  check e.condition == tbcWrongProvider
+  check SevSnpProviderName in e.msg
+  check TdxProviderName in e.msg
+
+proc driveAuxiliaryMaterialOfferedBesideTheQuoteIsRefused() =
+  ## The body of test
+  ##   "auxiliary material offered beside the quote is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # A trust-domain quote carries its own chain inside the signed
+  # document. Material offered beside it is material nothing signed,
+  # and bundling it would put a chain in the envelope that the quote
+  # does not answer for.
+  let q = genuineQuotes[0]
+  let b = newBench(q.document, auxblob = "a chain nobody signed")
+  let e = refuses(proc () =
+    discard acquireQuote(b.driverOver(), boundBytesOf(q)))
+  check e.condition == tbcAuxiliaryMaterialOffered
+  check "21 bytes of auxiliary material" in e.msg
+
+proc driveATransportRefusalReachesTheSeamAsThisDriverSRefusal() =
+  ## The body of test
+  ##   "a transport refusal reaches the seam as this driver's refusal"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let q = genuineQuotes[0]
+  let b = newBench(q.document)
+  writeFile(b.providerPath, "some_other_guest\n")
+  let e = refuses(proc () =
+    discard acquireQuote(b.driverOver(), boundBytesOf(q)))
+  check e.condition == tbcTransportRefused
+  check TdxDriverName in e.msg
+  var caughtAsDriverError = false
+  try:
+    discard acquireQuote(b.driverOver(), boundBytesOf(q))
+  except DriverError:
+    caughtAsDriverError = true
+  check caughtAsDriverError
+
+proc driveADriverWithNoSourceIsRefused() =
+  ## The body of test
+  ##   "a driver with no source is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let e = refuses(proc () = discard newTdxDriver(nil))
+  check e.condition == tbcNoSource
 
 suite "a document this build cannot identify is not read at its offsets":
 
   test "a document too short for a header and a descriptor is refused":
-    let e = refuses(proc () =
-      discard agentTdxReportSpan(genuineQuotes[0].document[0 ..< 50]))
-    check e.condition == tbcTooShortForADescriptor
-    check "50" in e.msg
+    driveADocumentTooShortForAHeaderAndADescriptorIsRefused()
 
   test "a quote version this build has no layout for is refused":
-    var doc = genuineQuotes[0].document
-    doc[AgentTdxVersionOffset] = '\x03'
-    let e = refuses(proc () = discard agentTdxReportSpan(doc))
-    check e.condition == tbcUnsupportedQuoteVersion
-    check "version 3" in e.msg
+    driveAQuoteVersionThisBuildHasNoLayoutForIsRefused()
 
   test "an enclave report wearing a trust domain's clothes is refused":
-    # Type zero is an enclave. Reading a trust domain's offsets out of
-    # one is exactly the confusion this rule exists to prevent.
-    var doc = genuineQuotes[0].document
-    for i in AgentTdxTeeTypeOffset ..< AgentTdxTeeTypeOffset + 4:
-      doc[i] = '\x00'
-    let e = refuses(proc () = discard agentTdxReportSpan(doc))
-    check e.condition == tbcNotATrustDomain
-    check "0x00000081" in e.msg
+    driveAnEnclaveReportWearingATrustDomainSClothesIsRefused()
 
   test "a version-5 report shape this build does not read is refused":
-    var doc = ""
-    for q in genuineQuotes:
-      if parseTdxQuote(byteSeqOf(q.document)).version == AgentTdxVersion5:
-        doc = q.document
-        break
-    check doc.len > 0
-    doc[AgentTdxBodyTypeOffset] = '\x09'
-    let e = refuses(proc () = discard agentTdxReportSpan(doc))
-    check e.condition == tbcUnsupportedReportShape
-    check "report shape 9" in e.msg
+    driveAVersion5ReportShapeThisBuildDoesNotReadIsRefused()
 
   test "a version-5 shape and width that disagree are refused":
-    var doc = ""
-    for q in genuineQuotes:
-      if parseTdxQuote(byteSeqOf(q.document)).version == AgentTdxVersion5:
-        doc = q.document
-        break
-    check doc.len > 0
-    doc[AgentTdxBodySizeOffset] = char(uint8(doc[AgentTdxBodySizeOffset]) xor
-                                       0x01'u8)
-    let e = refuses(proc () = discard agentTdxReportSpan(doc))
-    check e.condition == tbcShapeAndWidthDisagree
+    driveAVersion5ShapeAndWidthThatDisagreeAreRefused()
 
   test "a report that runs past the end of its document is refused":
-    # Truncated one byte inside the report, so the header and the
-    # descriptor still read and only the span check can catch it.
-    let q = genuineQuotes[0]
-    let span = agentTdxReportSpan(q.document)
-    let e = refuses(proc () =
-      discard agentTdxReportSpan(q.document[0 ..< span.at + span.width - 1]))
-    check e.condition == tbcReportRunsPastTheEnd
+    driveAReportThatRunsPastTheEndOfItsDocumentIsRefused()
 
   test "the other root of trust's provider is refused":
-    let q = genuineQuotes[0]
-    let b = newBench(q.document, provider = SevSnpProviderName)
-    let e = refuses(proc () =
-      discard acquireQuote(b.driverOver(), boundBytesOf(q)))
-    check e.condition == tbcWrongProvider
-    check SevSnpProviderName in e.msg
-    check TdxProviderName in e.msg
+    driveTheOtherRootOfTrustSProviderIsRefused()
 
   test "auxiliary material offered beside the quote is refused":
-    # A trust-domain quote carries its own chain inside the signed
-    # document. Material offered beside it is material nothing signed,
-    # and bundling it would put a chain in the envelope that the quote
-    # does not answer for.
-    let q = genuineQuotes[0]
-    let b = newBench(q.document, auxblob = "a chain nobody signed")
-    let e = refuses(proc () =
-      discard acquireQuote(b.driverOver(), boundBytesOf(q)))
-    check e.condition == tbcAuxiliaryMaterialOffered
-    check "21 bytes of auxiliary material" in e.msg
+    driveAuxiliaryMaterialOfferedBesideTheQuoteIsRefused()
 
   test "a transport refusal reaches the seam as this driver's refusal":
-    let q = genuineQuotes[0]
-    let b = newBench(q.document)
-    writeFile(b.providerPath, "some_other_guest\n")
-    let e = refuses(proc () =
-      discard acquireQuote(b.driverOver(), boundBytesOf(q)))
-    check e.condition == tbcTransportRefused
-    check TdxDriverName in e.msg
-    var caughtAsDriverError = false
-    try:
-      discard acquireQuote(b.driverOver(), boundBytesOf(q))
-    except DriverError:
-      caughtAsDriverError = true
-    check caughtAsDriverError
+    driveATransportRefusalReachesTheSeamAsThisDriverSRefusal()
 
   test "a driver with no source is refused":
-    let e = refuses(proc () = discard newTdxDriver(nil))
-    check e.condition == tbcNoSource
+    driveADriverWithNoSourceIsRefused()
 
 suite "provenance":
 
@@ -539,6 +623,35 @@ suite "provenance":
       check pinned
     check corpusBuffer(tcVendorSample) == notGenuine
 
+# Every case whose outcomes the coverage case(s) below observe. The
+# suite runner executes each case in its own process (`--run
+# suite::test`), so the coverage case drives these itself rather than
+# reading what earlier cases left in process-global state.
+const ConditionDrivers: seq[(string, proc () {.nimcall.})] = @[
+  ("every other genuine domain's own bound bytes are refused",
+    driveEveryOtherGenuineDomainSOwnBoundBytesAreRefused),
+  ("and so is a single bit of the right answer",
+    driveAndSoIsASingleBitOfTheRightAnswer),
+  ("a document too short for a header and a descriptor is refused",
+    driveADocumentTooShortForAHeaderAndADescriptorIsRefused),
+  ("a quote version this build has no layout for is refused",
+    driveAQuoteVersionThisBuildHasNoLayoutForIsRefused),
+  ("an enclave report wearing a trust domain's clothes is refused",
+    driveAnEnclaveReportWearingATrustDomainSClothesIsRefused),
+  ("a version-5 report shape this build does not read is refused",
+    driveAVersion5ReportShapeThisBuildDoesNotReadIsRefused),
+  ("a version-5 shape and width that disagree are refused",
+    driveAVersion5ShapeAndWidthThatDisagreeAreRefused),
+  ("a report that runs past the end of its document is refused",
+    driveAReportThatRunsPastTheEndOfItsDocumentIsRefused),
+  ("the other root of trust's provider is refused",
+    driveTheOtherRootOfTrustSProviderIsRefused),
+  ("auxiliary material offered beside the quote is refused",
+    driveAuxiliaryMaterialOfferedBesideTheQuoteIsRefused),
+  ("a transport refusal reaches the seam as this driver's refusal",
+    driveATransportRefusalReachesTheSeamAsThisDriverSRefusal),
+  ("a driver with no source is refused", driveADriverWithNoSourceIsRefused)]
+
 suite "the census":
 
   test "every rule has a site, and every site has exactly one rule":
@@ -557,6 +670,12 @@ suite "the census":
       check known
 
   test "every rule was reached, and the count is an EQUALITY":
+    # Driven HERE, from reset state: the runner executes every case in
+    # its own process, so this case observes only what it runs itself.
+    reached = {}
+    for (name, drive) in ConditionDrivers:
+      checkpoint("driving " & name)
+      drive()
     var missing: seq[string] = @[]
     for c in TdxBackendCondition:
       if c notin reached: missing.add $c

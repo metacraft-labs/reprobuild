@@ -71,7 +71,68 @@ package gcc:
 
   executable gcc:
     cli:
-      dependencyPolicy automaticMonitor
+      # DA-6 — THE CAPTURE-BREADTH DECLARATION for the gcc driver, and it is a
+      # deliberate FULL CAPTURE. Written out because "the default" and "the
+      # answer this tool needs" being the same value is a coincidence a reader
+      # should not have to assume.
+      #
+      # THE CLAIM: a gcc action asks io-mon for EVERY event category, ambient
+      # reads included, and none of the eight is droppable.
+      #
+      # WHY, AND THE TENSION THIS RESOLVES. gcc `-MD` / `-MMD` emits its own
+      # dependency list, so for a depfile-policy edge the depfile is PRIMARY and
+      # monitoring looks like duplicated work. It is not duplicated work: it is
+      # the CROSS-CHECK for what a depfile structurally cannot contain, and the
+      # obvious narrowings each delete exactly the thing that would catch gcc's
+      # own failure mode.
+      #
+      #   * THE COMPILER BINARY AND ITS PLUGINS ARE NOT IN THE DEPFILE. A `.d`
+      #     file lists the translation unit's headers. It does not list
+      #     `cc1plus`, `ld`, `as`, `collect2`, the `-fplugin=` objects, or the
+      #     shared libraries the driver loads — so `ecProcessTree` (which
+      #     supplies the `mrProcessExec` records folded as content
+      #     dependencies, and `seen.execImageByPid` for attributing everything
+      #     the driver's children do) and `ecLibraryLoads` are the ONLY route by
+      #     which a toolchain upgrade invalidates a cached object file. Drop
+      #     either and two different gcc revisions key identically.
+      #   * `/etc` IS NOT IN THE DEPFILE EITHER, nor is any spec file, and
+      #     `ecFileReads` / `ecPathProbes` are what see them. The probes matter
+      #     on their own account: an `-I` search that MISSES today and HITS
+      #     after a header is added is invalidated by the failed lookup, not by
+      #     the successful one, and a depfile records only the hit.
+      #   * `ecEnvReads` is the depfile's largest structural blind spot.
+      #     `CPATH`, `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `LIBRARY_PATH`,
+      #     `COMPILER_PATH`, `GCC_EXEC_PREFIX`, `SOURCE_DATE_EPOCH` and
+      #     `TMPDIR` all change what gcc produces and NONE of them appears in a
+      #     `.d` file or in the argv. `cacheEnvInputs` folding `mrEnvRead` into
+      #     the strong fingerprint is the only thing that puts them in the key.
+      #   * `ecEntropy` is kept because gcc is NOT entropy-blessed — there is no
+      #     `nonDeterminism` declaration in this block, so every gcc edge is
+      #     `ndpUnblessed` and an observed `mrNonDeterministic` costs the edge
+      #     its cache publication. `applyEntropyBlessingPolicy` cannot make that
+      #     call without the records.
+      #   * `ecAmbientReads` IS KEPT, and gcc is the tool that makes this
+      #     category worth keeping. `__DATE__`, `__TIME__` and `__TIMESTAMP__`
+      #     are gcc's signature irreproducibility, they are a CLOCK READ, and
+      #     `mrTimeRead` is the only record that witnesses one. Reprobuild has
+      #     no consumer for it today — both ambient kinds land on
+      #     `foldOneMonitorRecord`'s `else: discard`, and `interestConsumer` in the
+      #     engine says so in as many words — so this is not a claim that
+      #     something reads it. It is the fail-closed choice on the one tool
+      #     where the record is signal rather than noise: the price DA-5
+      #     measured for the narrowing is 2.2% of records, and paying it to keep
+      #     the witness for gcc's best-known reproducibility bug in the depfile
+      #     an operator reads is the cheaper side of that trade. The narrowing
+      #     is available and is declined, here, on the record.
+      #   * `mrIpcConnect` / `mrExternalContent` are not gate-able at all after
+      #     DA-5, so no declaration could have affected completeness grading.
+      #
+      # SCOPE. This says what gcc edges ASK FOR. It is not a statement that a
+      # gcc edge must be monitored — an edge is free to use
+      # `makeDepfilePolicy(...)` and be gathered from its `.d` file — and it
+      # changes no cache key by itself.
+      dependencyPolicy automaticMonitor,
+        captureBreadth = fullCapture
 
       # DSL-port M9.R.2 audit: extended the gcc driver call to cover the
       # common compile / link / preprocess / make-dep flag families.

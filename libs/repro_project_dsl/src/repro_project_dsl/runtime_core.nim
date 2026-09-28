@@ -255,7 +255,34 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 26'u16
+  BuildActionPayloadVersion* = 27'u16
+    ## v27: the tool package's capture-breadth declaration
+    ## (``BuildActionDependencyPolicy.captureBreadth``) — one strict sentinel
+    ## byte for the ``MonitorCaptureBreadth`` ordinal, appended last within the
+    ## dependency-policy record.
+    ##
+    ## WHY THE FIELD HAD TO BE ADDED HERE AND NOT ONLY TO THE LOWERED-GRAPH
+    ## CACHE. This payload is the transport between the DSL and the engine, and
+    ## EVERY provider graph node goes through it — ``actionPayload`` at
+    ## ``runtime_provider.nim``'s ``gnkAction`` construction, and again at
+    ## ``repro_cli_support.nim``'s ``lowerItem`` immediately before
+    ## ``lowerGraphAction`` decodes it. A declaration this codec does not carry
+    ## is therefore reset to the zero value before ``lowerDependencyPolicy``
+    ## ever sees it, so ``monitorInterest`` answers ``FullInterest`` for every
+    ## action however the tool package was written. Measured on the branch that
+    ## introduced the field, through this codec: a policy declaring
+    ## ``mcbOmitAmbientReads`` decoded as ``mcbFullCapture`` while the v25
+    ## ``suppressMonitorShimSeed`` byte beside it survived — the declaration was
+    ## expressible, compile-checked, round-tripped by the lowered-graph cache,
+    ## and still unreachable.
+    ##
+    ## v26-AND-EARLIER PAYLOADS DECODE AS ``mcbFullCapture``, which is both the
+    ## zero value and the correct legacy reading: a payload written before the
+    ## declaration existed cannot have carried a narrowing, and full capture is
+    ## the FAIL-SAFE direction — the cost of being wrong this way is records
+    ## nobody reads, and the cost of the other way is a capture narrowed by
+    ## nobody's decision that still grades ``mcComplete``.
+    ##
     ## v26: Windows-Build-Correctness M6 — appends the TOOL's entropy
     ## blessing: one strict sentinel byte for the ``NonDeterminismPolicy``
     ## ordinal followed by the length-prefixed justification string.
@@ -1639,23 +1666,35 @@ proc selectedExecutable*(packageName, executableName: string): SelectedExecutabl
 
 proc defaultDependencyPolicy*(
     ignoredInputPrefixes: openArray[string] = [];
-    captureNonDeterminism = false; captureIpc = false):
+    captureBreadth = mcbFullCapture):
     BuildActionDependencyPolicy {.dynOrStatic.} =
+  ## ``captureBreadth`` is DA-6's TOOL-PACKAGE declaration; see
+  ## ``MonitorCaptureBreadth`` in ``repro_core/dependency_gathering.nim``. It
+  ## defaults to ``mcbFullCapture``, so a tool package that says nothing asks
+  ## io-mon for everything.
+  ##
+  ## It replaces the two ``captureNonDeterminism`` / ``captureIpc`` bools these
+  ## constructors used to take. Both were inert; ``captureIpc`` is now
+  ## structurally inert (``mrIpcConnect`` is not gate-able at all after DA-5)
+  ## and is refused by name in the DSL parser, while
+  ## ``captureNonDeterminism = false`` survives THERE as a spelling of
+  ## ``captureBreadth = omitAmbientReads``. Measured before changing these
+  ## signatures: no caller anywhere in this workspace passed either bool by
+  ## name except reprobuild's own tests.
   BuildActionDependencyPolicy(
     kind: bdpDefault,
     ignoredInputPrefixes: @ignoredInputPrefixes,
-    captureNonDeterminism: captureNonDeterminism,
-    captureIpc: captureIpc)
+    captureBreadth: captureBreadth)
 
 proc automaticMonitorPolicy*(
     ignoredInputPrefixes: openArray[string] = [];
-    captureNonDeterminism = false; captureIpc = false):
+    captureBreadth = mcbFullCapture):
     BuildActionDependencyPolicy {.dynOrStatic.} =
+  ## ``captureBreadth``: see ``defaultDependencyPolicy`` above.
   BuildActionDependencyPolicy(
     kind: bdpAutomaticMonitor,
     ignoredInputPrefixes: @ignoredInputPrefixes,
-    captureNonDeterminism: captureNonDeterminism,
-    captureIpc: captureIpc)
+    captureBreadth: captureBreadth)
 
 # NOTE: a ``declaredOnlyDependencyPolicy`` constructor used to live here. It
 # produced a "track only the statically declared inputs, no runtime
@@ -1679,8 +1718,7 @@ proc automaticMonitorPolicy*(
 proc makeDepfilePolicy*(depfile = "";
                         depfiles: openArray[string] = [];
                         ignoredInputPrefixes: openArray[string] = [];
-                        captureNonDeterminism = false;
-                        captureIpc = false;
+                        captureBreadth = mcbFullCapture;
                         suppressMonitorShimSeed = false):
     BuildActionDependencyPolicy {.dynOrStatic.} =
   ## MR16: dependency-gathering policy for tools that emit one or
@@ -1709,12 +1747,10 @@ proc makeDepfilePolicy*(depfile = "";
     depfiles: merged,
     ignoredInputPrefixes: @ignoredInputPrefixes,
     suppressMonitorShimSeed: suppressMonitorShimSeed,
-    captureNonDeterminism: captureNonDeterminism,
-    captureIpc: captureIpc)
+    captureBreadth: captureBreadth)
 
 proc iomonReportPolicy*(depfile: string;
-                        captureNonDeterminism = false;
-                        captureIpc = false):
+                        captureBreadth = mcbFullCapture):
     BuildActionDependencyPolicy {.dynOrStatic.} =
   ## Dependency-gathering policy for an edge whose command PRODUCES its own
   ## io-mon ``.iomon`` dependency capture at ``depfile`` (e.g. ``ct test``
@@ -1728,8 +1764,7 @@ proc iomonReportPolicy*(depfile: string;
   BuildActionDependencyPolicy(
     kind: bdpIomonReport,
     depfiles: (if depfile.len > 0: @[depfile] else: @[]),
-    captureNonDeterminism: captureNonDeterminism,
-    captureIpc: captureIpc)
+    captureBreadth: captureBreadth)
 
 proc defaultActionCachePolicy*(): ActionCacheFingerprintPolicy {.dynOrStatic.} =
   acfpTimestamp
@@ -3366,6 +3401,17 @@ proc writeDependencyPolicy(outp: var seq[byte];
     # a legacy payload cannot be forged by trimming a current-version one
     # from the tail — see ``encodeBuildActionPayloadAtVersion``.
     outp.writeByte(if policy.suppressMonitorShimSeed: 1'u8 else: 0'u8)
+  if version >= 27'u16:
+    # v27: the tool package's capture-breadth declaration. Appended AFTER the
+    # v25 shim-seed byte, so it is again last in the policy record and a v25 or
+    # v26 reader — which stops after that byte — is unaffected.
+    #
+    # THIS IS THE BYTE THAT MAKES THE DECLARATION REACHABLE. Without it the
+    # field is dropped on the DSL->engine hop and `monitorInterest` reads the
+    # zero value for every action, so a tool package's narrowing compiles, is
+    # compile-checked against `ReprobuildConsumedInterest`, round-trips through
+    # the lowered-graph cache, and still never reaches io-mon.
+    outp.writeByte(byte(ord(policy.captureBreadth)))
 
 proc readDependencyPolicy(bytes: openArray[byte]; pos: var int; version: uint16):
     BuildActionDependencyPolicy =
@@ -3401,6 +3447,20 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int; version: uint16)
     discard readString(bytes, pos)
   if version >= 25'u16:
     result.suppressMonitorShimSeed = readByte(bytes, pos) == 1'u8
+  if version >= 27'u16:
+    # v27's capture-breadth byte. An out-of-range ordinal is REFUSED rather
+    # than clamped, matching the dependency-policy KIND check above and the
+    # lowered-graph cache's reader: bytes that do not decode as this vocabulary
+    # were written by something whose vocabulary this build does not know, and a
+    # build that reinterprets them silently has stopped being able to say what
+    # an edge asked for.
+    #
+    # A v26-or-earlier payload leaves the field at its zero value,
+    # `mcbFullCapture` — see the note on `BuildActionPayloadVersion`.
+    let breadth = readByte(bytes, pos)
+    if breadth > byte(ord(mcbOmitAmbientReads)):
+      raisePayload("invalid monitor capture breadth in build action payload")
+    result.captureBreadth = MonitorCaptureBreadth(breadth)
 
 proc writeActionCachePolicy(outp: var seq[byte];
                             policy: ActionCacheFingerprintPolicy) =

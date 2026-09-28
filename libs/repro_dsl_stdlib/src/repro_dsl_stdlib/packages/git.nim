@@ -59,7 +59,49 @@ package git:
 
   executable git:
     cli:
-      dependencyPolicy automaticMonitor
+      # DA-6 -- THE CAPTURE-BREADTH DECLARATION for git: FULL CAPTURE, and this
+      # is the BLESSED NON-DETERMINISTIC case the milestone singles out.
+      #
+      # THE CLAIM: a git action asks io-mon for EVERY event category, and the
+      # two categories it could not drop under any circumstances are the two
+      # this tool's blessing is built out of.
+      #
+      # WHY `ecEntropy` IS NON-NEGOTIABLE HERE. The blessing below is not a
+      # statement the engine reads on its own; it is applied by
+      # `applyEntropyBlessingPolicy` to the `mrNonDeterministic` RECORDS a
+      # capture carries, resolved per-image against the capture's own
+      # `mrProcessExec` records. Narrow this category away and the blessing has
+      # nothing to be applied to: the observations are empty,
+      # `entropyObservability` still says `entObserved` (the backend-profile
+      # record is META and is never gated), and the gate sees "observable, and
+      # nothing observed" -- which is exactly the false clean it exists to
+      # refuse. Note the DIRECTION: the failure is not a lost blessing, it is a
+      # gate whose input was deleted, and the same missing records would then
+      # also stop withholding publication from a gate that ran `uuidgen`. The
+      # per-image mechanism -- the whole point of which is to tell a blessed
+      # `mktemp` record apart from an unblessed `uuidgen` one -- needs BOTH
+      # `ecEntropy` and `ecProcessTree` present to work at all.
+      #
+      # WHY `ecAmbientReads` IS KEPT, on this tool of all tools. The blessing is
+      # scoped to entropy and its justification names the exception out loud: a
+      # commit object's hash depends on its author and committer TIMESTAMPS,
+      # which is a clock read. `mrTimeRead` is the only record that witnesses
+      # the part of git's non-determinism that is explicitly NOT blessed.
+      # Dropping the category would delete the evidence of the exception while
+      # keeping the waiver -- which is how a narrowly-scoped blessing turns into
+      # a broad one without anybody editing the blessing. Reprobuild has no
+      # consumer for the record today (`interestConsumer` in the engine says so,
+      # and both ambient kinds land on `foldOneMonitorRecord`'s `else: discard`);
+      # this is the fail-closed choice, taken at a measured 2.2% of records.
+      #
+      # The remaining categories are kept for the ordinary reasons: git is a
+      # content-addressed store on a filesystem, so `ecFileReads` /
+      # `ecPathProbes` / `ecFileWrites` ARE its behaviour; `ecEnvReads` carries
+      # `GIT_DIR`, `GIT_CONFIG_GLOBAL`, `GIT_AUTHOR_DATE` and `HOME`, none of
+      # which are in the argv and all of which `cacheEnvInputs` keys on; and
+      # `mrIpcConnect` / `mrExternalContent` are ungate-able after DA-5.
+      dependencyPolicy automaticMonitor,
+        captureBreadth = fullCapture
 
       # THE ENTROPY BLESSING, declared here, on the tool, once -- the shape
       # `packages/nim.nim` established. Until this block existed `package

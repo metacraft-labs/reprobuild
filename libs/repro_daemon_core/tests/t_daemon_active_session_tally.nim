@@ -35,6 +35,8 @@
 ## state and re-asking, which is what a fresh daemon process does.
 
 import std/[os, strutils, tempfiles, unittest]
+when defined(posix):
+  import std/posix
 
 import repro_daemon_core
 import repro_daemon_core/writer_identity
@@ -347,3 +349,32 @@ suite "which identity governs is encoded in the state":
     check "state=running" in body
     check ("writer=" & encodeWriterIdentity(currentWriterIdentity())) in body
     check reclaimAbandonedSessions(config) == 0
+
+  when defined(posix):
+    test "a terminal state written by a forked worker reaches the parent":
+      ## The daemon parent ACCEPTS a session (and counts it); a double-forked
+      ## worker writes every later transition, in its own address space. The
+      ## parent's in-memory tally never saw the session end, so after one
+      ## build it reported `active-sessions: 1` forever and deferred every dev
+      ## self-restart. A real `fork()` is the only faithful reproduction:
+      ## writing both states from this process is exactly the single-process
+      ## funnel the defect escaped.
+      let root = createTempDir("repro-tally-", "")
+      defer: removeDir(root)
+      let config = tempConfig(root)
+      writeSessionRecord(config, session("forked", "accepted"))
+      check activeSessionTallyFor(config) == 1
+      let pid = posix.fork()
+      if pid == 0:
+        try:
+          writeSessionRecord(config, session("forked", "running"))
+          writeSessionRecord(config, session("forked", "succeeded"))
+        except CatchableError:
+          quit(1)
+        quit(0)
+      require pid > 0
+      var status: cint
+      discard posix.waitpid(pid, status, 0)
+      check posix.WIFEXITED(status) and posix.WEXITSTATUS(status) == 0
+      check countActiveSessionRecordsFromDisk(config) == 0
+      check activeSessionTallyFor(config) == 0

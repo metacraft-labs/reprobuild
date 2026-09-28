@@ -221,6 +221,516 @@ proc snpParams(firmware: seq[byte]; vcpus = 1; hasKernel = false):
     vcpuSignature: cpuSignatureFor("EPYC-v4"), guestFeatures: 0x21,
     vmm: svkQemu, hasKernel: hasKernel, cmdline: "console=ttyS0")
 
+proc driveAnImageTooShortToCarryAFooterIsRefused() =
+  ## The body of test
+  ##   "an image too short to carry a footer is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let refusalsBefore = refusalsObserved
+  expectRefusal(slcFirmwareTooSmall):
+    discard parseOvmfImage(amdSevFirmware[0 ..< 49])
+  # And one byte longer is not, so the bound is the bound rather than
+  # an artefact of the value chosen.
+  expectRefusal(slcNoGuidFooter):
+    discard parseOvmfImage(amdSevFirmware[0 ..< 50])
+  check refusalsObserved == refusalsBefore + 2
+
+proc driveAnImageThatIsNotAWholeNumberOfPagesIsRefused() =
+  ## The body of test
+  ##   "an image that is not a whole number of pages is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var padded = newSeq[byte](SnpPageSize - 1)
+  padded.add amdSevFirmware
+  check padded.len mod SnpPageSize != 0
+  expectRefusal(slcFirmwareNotWholePages):
+    discard snpLaunchDigest(snpParams(padded))
+  # One more byte of padding makes it whole pages and it is measured,
+  # so the rule is about the remainder and not about the padding.
+  var whole = newSeq[byte](SnpPageSize)
+  whole.add amdSevFirmware
+  check snpLaunchDigest(snpParams(whole)).len == SnpDigestLen
+
+proc driveAnImageWhoseFooterIsNotTheFooterIsRefused() =
+  ## The body of test
+  ##   "an image whose footer is not the footer is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let refusalsBefore = refusalsObserved
+  var f = faithful()
+  f.footerGuid = "96b582de-1fb2-45f7-baea-a366c55a082e"   ## last digit
+  expectRefusal(slcNoGuidFooter):
+    discard parseOvmfImage(render(f))
+  check refusalsObserved == refusalsBefore + 1
+
+proc driveAFooterShorterThanAFooterIsRefused() =
+  ## The body of test
+  ##   "a footer shorter than a footer is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var f = faithful()
+  f.declaredFooterSize = OvmfEntryHeaderLen - 1
+  expectRefusal(slcFooterSizeBelowHeader):
+    discard parseOvmfImage(render(f))
+  # At exactly the header length it is an empty table, not a refusal:
+  # the edge is where it is stated to be.
+  f.declaredFooterSize = OvmfEntryHeaderLen
+  let empty = parseOvmfImage(render(f))
+  check empty.entries.len == 0
+  check not empty.hasPageList
+
+proc driveATableClaimingToStartBeforeTheImageIsRefused() =
+  ## The body of test
+  ##   "a table claiming to start before the image is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let refusalsBefore = refusalsObserved
+  var f = faithful()
+  f.declaredFooterSize = 0xffff
+  expectRefusal(slcFooterTableStartsBeforeImage):
+    discard parseOvmfImage(render(f))
+  check refusalsObserved == refusalsBefore + 1
+
+proc driveAnEntryShorterThanAnEntryHeaderIsRefused() =
+  ## The body of test
+  ##   "an entry shorter than an entry header is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let refusalsBefore = refusalsObserved
+  var f = faithful()
+  f.entries[^1].declaredSize = OvmfEntryHeaderLen - 1
+  expectRefusal(slcEntrySizeBelowHeader):
+    discard parseOvmfImage(render(f))
+  check refusalsObserved == refusalsBefore + 1
+
+proc driveAnEntryClaimingMoreBytesThanTheTableHoldsIsRefused() =
+  ## The body of test
+  ##   "an entry claiming more bytes than the table holds is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let refusalsBefore = refusalsObserved
+  var f = faithful()
+  var tableLen = 0
+  for e in f.entries: tableLen += e.value.len + OvmfEntryHeaderLen
+  f.entries[^1].declaredSize = tableLen + 1
+  # The footer still states the real table length, so the entry is
+  # overrunning the table and not the image.
+  f.declaredFooterSize = tableLen + OvmfEntryHeaderLen
+  expectRefusal(slcEntryOverrunsTable):
+    discard parseOvmfImage(render(f))
+  check refusalsObserved == refusalsBefore + 1
+
+proc driveAFirmwareThatDeclaresNoPageListCannotBeMeasured() =
+  ## The body of test
+  ##   "a firmware that declares no page list cannot be measured"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var f = faithful()
+  f.entries[f.entryIndex(OvmfSevMetadataGuid)].guid =
+    "dc886566-984a-4798-a75e-5585a7bf67cd"                ## last digit
+  let img = parseOvmfImage(render(f))
+  check not img.hasPageList
+  check img.entries.len == 5
+  expectRefusal(slcNoPageList):
+    discard snpLaunchDigest(snpParams(render(f)))
+  # The two older shapes never consult the list, so the same image
+  # measures under them. This is what says the rule belongs to the
+  # shape rather than to the reader.
+  check sevLaunchDigest(SevLaunchParameters(mode: slmSev,
+    firmware: render(f), vcpus: 1)).len == 32
+
+proc driveAPageListPointerTooShortToHoldAPositionIsRefused() =
+  ## The body of test
+  ##   "a page-list pointer too short to hold a position is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let refusalsBefore = refusalsObserved
+  var f = faithful()
+  f.entries[f.entryIndex(OvmfSevMetadataGuid)].value = @[1'u8, 2'u8, 3'u8]
+  expectRefusal(slcPageListPointerTooShort):
+    discard parseOvmfImage(render(f))
+  check refusalsObserved == refusalsBefore + 1
+
+proc driveAPageListSaidToBeginOutsideTheImageIsRefused() =
+  ## The body of test
+  ##   "a page list said to begin outside the image is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let refusalsBefore = refusalsObserved
+  var f = faithful()
+  let at = f.entryIndex(OvmfSevMetadataGuid)
+  f.entries[at].value = le32Bytes(uint64(amdSevFirmware.len + 1))
+  expectRefusal(slcPageListOutsideImage):
+    discard parseOvmfImage(render(f))
+  f.entries[at].value = le32Bytes(0)
+  expectRefusal(slcPageListOutsideImage):
+    discard parseOvmfImage(render(f))
+  check refusalsObserved == refusalsBefore + 2
+
+proc driveAPageListHeaderRunningOffTheEndOfTheImageIsRefused() =
+  ## The body of test
+  ##   "a page-list header running off the end of the image is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let refusalsBefore = refusalsObserved
+  var f = faithful()
+  f.entries[f.entryIndex(OvmfSevMetadataGuid)].value =
+    le32Bytes(uint64(SevPageListHeaderLen - 1))
+  expectRefusal(slcPageListHeaderOutsideImage):
+    discard parseOvmfImage(render(f))
+  check refusalsObserved == refusalsBefore + 1
+
+proc driveAPageListWithoutItsMarkerIsRefused() =
+  ## The body of test
+  ##   "a page list without its marker is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let refusalsBefore = refusalsObserved
+  var f = faithful()
+  f.marker = "ASEW"
+  expectRefusal(slcPageListMarker):
+    discard parseOvmfImage(render(f))
+  check refusalsObserved == refusalsBefore + 1
+
+proc driveAPageListOfAnUnknownRevisionIsRefused() =
+  ## The body of test
+  ##   "a page list of an unknown revision is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let refusalsBefore = refusalsObserved
+  var f = faithful()
+  f.revision = SevPageListRevision + 1
+  expectRefusal(slcPageListRevision):
+    discard parseOvmfImage(render(f))
+  check refusalsObserved == refusalsBefore + 1
+
+proc driveAPageListShorterThanItsOwnHeaderIsRefused() =
+  ## The body of test
+  ##   "a page list shorter than its own header is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let refusalsBefore = refusalsObserved
+  var f = faithful()
+  f.declaredPageListLen = SevPageListHeaderLen - 1
+  expectRefusal(slcPageListSizeBelowHeader):
+    discard parseOvmfImage(render(f))
+  # A length long enough to BE a list but reaching past the end of the
+  # image is a different condition, and it had no input: the two shared
+  # one value, and the sentence that value carries describes the other
+  # one. It has its own rule and its own sentence now.
+  f.declaredPageListLen = amdSevFirmware.len
+  check f.pageListAt + f.declaredPageListLen > amdSevFirmware.len
+  expectRefusal(slcPageListRunsPastImage):
+    discard parseOvmfImage(render(f))
+  # Reaching exactly the end is accepted, so the edge is the edge.
+  f.declaredPageListLen = amdSevFirmware.len - f.pageListAt
+  check parseOvmfImage(render(f)).hasPageList
+  check refusalsObserved == refusalsBefore + 2
+
+proc driveAPageListCountingMoreEntriesThanItHasRoomForIsRefused() =
+  ## The body of test
+  ##   "a page list counting more entries than it has room for is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var f = faithful()
+  f.declaredEntryCount = f.sections.len + 1
+  expectRefusal(slcPageListEntriesExceedSize):
+    discard parseOvmfImage(render(f))
+  # One fewer is not refused — it is a shorter list, which is a
+  # different thing — so the rule is about the arithmetic and not
+  # about the count disagreeing with the bytes.
+  f.declaredEntryCount = f.sections.len - 1
+  check parseOvmfImage(render(f)).sections.len == f.sections.len - 1
+
+proc driveAPageKindThisBuildCannotAccountForIsRefused() =
+  ## The body of test
+  ##   "a page kind this build cannot account for is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var f = faithful()
+  f.sections[0].kindNumber = 99
+  expectRefusal(slcUnknownPageKind):
+    discard parseOvmfImage(render(f))
+  # Every kind the enumeration declares IS accounted for, which is the
+  # other direction of the same rule: a kind added to the type and not
+  # to the reader's list would be refused on a real image.
+  for kind in OvmfSectionKinds:
+    var g = faithful()
+    g.sections[0].kindNumber = uint32(ord(kind))
+    check parseOvmfImage(render(g)).sections[0].kind == kind
+  check OvmfSectionKinds.len == 5
+  check OvmfSectionKinds.deduplicate.len == 5
+
+proc driveARegionThatIsNotWholePagesAtAPageBoundaryIsRefused() =
+  ## The body of test
+  ##   "a region that is not whole pages at a page boundary is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let refusalsBefore = refusalsObserved
+  var f = faithful()
+  f.sections[0].size = f.sections[0].size + 1
+  expectRefusal(slcRegionNotPageAligned):
+    discard parseOvmfImage(render(f))
+  f = faithful()
+  f.sections[0].gpa = f.sections[0].gpa + 1
+  expectRefusal(slcRegionNotPageAligned):
+    discard parseOvmfImage(render(f))
+  f = faithful()
+  f.sections[0].size = 0
+  expectRefusal(slcRegionNotPageAligned):
+    discard parseOvmfImage(render(f))
+
+  # -------------------------------------------------------------------
+  # The kernel's digests
+  # -------------------------------------------------------------------
+  check refusalsObserved == refusalsBefore + 3
+
+proc driveTwoConditionsAndTheyAreGenuinelyTwo() =
+  ## The body of test
+  ##   "two conditions, and they are genuinely two"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # A firmware must publish the ADDRESS the table of kernel digests
+  # goes at, and its page list must RESERVE the region that address
+  # falls in. Those are two separate statements in two separate
+  # tables, and a firmware can make either without the other.
+  #
+  # The reference implementation checks only the second one for this
+  # launch shape, and computes a number for the first — placing the
+  # table at offset zero in the page, which is not where the
+  # hypervisor would write it. This build refuses instead. It is a
+  # DELIBERATE disagreement, recorded here with its input, because a
+  # divergence nobody wrote down is a defect somebody else finds.
+  var noAddress = faithful()
+  noAddress.entries[noAddress.entryIndex(SevHashTableRvGuid)].value =
+    @[0'u8, 0, 0, 0, 0, 0, 0, 0]
+  let a = parseOvmfImage(render(noAddress))
+  check a.kernelDigestsTableGpa() == 0
+  check a.reservesKernelDigestRegion()
+  expectRefusal(slcKernelDigestsNoAddress):
+    discard snpLaunchDigest(snpParams(render(noAddress), hasKernel = true))
+
+  var noRegion = faithful()
+  noRegion.sections.delete(noRegion.sectionIndex(oskKernelDigests))
+  let b = parseOvmfImage(render(noRegion))
+  check b.kernelDigestsTableGpa() != 0
+  check not b.reservesKernelDigestRegion()
+  expectRefusal(slcKernelDigestsNoRegion):
+    discard snpLaunchDigest(snpParams(render(noRegion), hasKernel = true))
+
+  # Neither refusal fires when no kernel is offered: a launch that
+  # measures no kernel needs neither the address nor the region.
+  check snpLaunchDigest(snpParams(render(noAddress))).len == SnpDigestLen
+  check snpLaunchDigest(snpParams(render(noRegion))).len == SnpDigestLen
+
+proc driveThePublishedFirmwareWithoutADigestRegionRefusesAKernel() =
+  ## The body of test
+  ##   "the published firmware without a digest region refuses a kernel"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The same rule on a real image rather than a fabricated one: the
+  # second published fixture is the plain firmware build, and it has
+  # neither the address nor the region.
+  let img = parseOvmfImage(ovmfX64Firmware)
+  check img.kernelDigestsTableGpa() == 0
+  check not img.reservesKernelDigestRegion()
+  # This rule has TWO sites — one per launch shape — and a case that
+  # asserted the rule would be satisfied while only one of them
+  # worked. So both are exercised, and each site's sentence is
+  # required to name its own shape and NOT the other's.
+  var sentences: seq[string] = @[]
+  expectRefusal(slcKernelDigestsNoAddress):
+    try:
+      discard snpLaunchDigest(snpParams(ovmfX64Firmware, hasKernel = true))
+    except SnpLaunchError as err:
+      sentences.add err.msg
+      raise
+  expectRefusal(slcKernelDigestsNoAddress):
+    try:
+      discard sevLaunchDigest(SevLaunchParameters(mode: slmSevEs,
+        firmware: ovmfX64Firmware, vcpus: 1, hasKernel: true))
+    except SnpLaunchError as err:
+      sentences.add err.msg
+      raise
+  check sentences.len == 2
+  check sentences[0] != sentences[1]
+  check "region its page list reserves" in sentences[0]
+  check "region its page list reserves" notin sentences[1]
+  check "appended the digests to the firmware image" in sentences[1]
+  check "appended the digests to the firmware image" notin sentences[0]
+
+proc driveADigestTableThatDoesNotFitInItsPageIsRefused() =
+  ## The body of test
+  ##   "a digest table that does not fit in its page is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var f = faithful()
+  let at = f.entryIndex(SevHashTableRvGuid)
+  var value = f.entries[at].value
+  # The published address is 0x810c00; move it far enough into the
+  # page that the 176-byte table runs past the end.
+  let moved = (uint64(value[0]) or (uint64(value[1]) shl 8) or
+               (uint64(value[2]) shl 16) or (uint64(value[3]) shl 24))
+  let shifted = (moved and not 0xfff'u64) or 0xf80'u64
+  for i in 0 ..< 4:
+    value[i] = byte((shifted shr (8 * i)) and 0xff'u64)
+  f.entries[at].value = value
+  check int(shifted mod uint64(SnpPageSize)) +
+    SevDigestTablePaddedLen > SnpPageSize
+  expectRefusal(slcKernelDigestsOverflowPage):
+    discard snpLaunchDigest(snpParams(render(f), hasKernel = true))
+
+proc driveAReservedRegionThatIsNotOnePageIsRefused() =
+  ## The body of test
+  ##   "a reserved region that is not one page is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var f = faithful()
+  f.sections[f.sectionIndex(oskKernelDigests)].size = uint32(2 * SnpPageSize)
+  expectRefusal(slcKernelDigestsRegionSize):
+    discard snpLaunchDigest(snpParams(render(f), hasKernel = true))
+  # Without a kernel the same region is folded in as two zero pages
+  # rather than refused, because nothing has to fit in it.
+  check snpLaunchDigest(snpParams(render(f))).len == SnpDigestLen
+
+proc driveMoreThanOneProcessorNeedsAnAddressForTheOthers() =
+  ## The body of test
+  ##   "more than one processor needs an address for the others"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  var f = faithful()
+  f.entries[f.entryIndex(SevEsResetBlockGuid)].guid =
+    "00f771de-1a7e-4fcb-890e-68c77e2fb44f"                ## last digit
+  check parseOvmfImage(render(f)).resetVectorEip() == 0
+  expectRefusal(slcNoResetVector):
+    discard snpLaunchDigest(snpParams(render(f), vcpus = 2))
+  # One processor does not need it, and the edge is between one and
+  # two rather than somewhere else.
+  check snpLaunchDigest(snpParams(render(f), vcpus = 1)).len == SnpDigestLen
+
+proc driveAProcessorCountOutsideTheRangeIsRefusedAtBothEnds() =
+  ## The body of test
+  ##   "a processor count outside the range is refused at both ends"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  expectRefusal(slcProcessorCountOutOfRange):
+    discard snpLaunchDigest(snpParams(amdSevFirmware, vcpus = 0))
+  expectRefusal(slcProcessorCountOutOfRange):
+    discard snpLaunchDigest(snpParams(amdSevFirmware,
+      vcpus = MaxProcessors + 1))
+  # Both edges are inside, so the bound is the bound. The upper one is
+  # a real calculation over a thousand VMSA pages, not a parse.
+  check snpLaunchDigest(snpParams(amdSevFirmware, vcpus = 1)).len ==
+    SnpDigestLen
+  check snpLaunchDigest(snpParams(amdSevFirmware,
+    vcpus = MaxProcessors)).len == SnpDigestLen
+
+proc driveAHypervisorThisBuildHasNoRegisterStateForIsRefused() =
+  ## The body of test
+  ##   "a hypervisor this build has no register state for is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  expectRefusal(slcUnknownHypervisor):
+    discard vmmKindFor("cloud-hypervisor")
+  expectRefusal(slcUnknownHypervisor):
+    discard vmmKindFor("QEMU")             # the names are exact
+  # The caller-facing list and the set that is implemented, against
+  # each other in both directions. A name in the list that does not
+  # resolve, or a hypervisor the list does not offer, is a surface
+  # that lies about what this build can compute.
+  for name in KnownVmms:
+    check $vmmKindFor(name) == name
+  for k in SnpVmmKind:
+    check $k in KnownVmms
+  check KnownVmms.len == 3
+
+proc driveAProcessorModelThisBuildDoesNotKnowIsRefused() =
+  ## The body of test
+  ##   "a processor model this build does not know is refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  expectRefusal(slcUnknownProcessorModel):
+    discard cpuSignatureFor("EPYC-Bergamo")
+  expectRefusal(slcUnknownProcessorModel):
+    discard cpuSignatureFor("epyc-v4")     ## the names are exact
+  check cpuSignatureFor("EPYC-v4") != 0'u32
+
+proc driveALaunchUnderAParavisorIsRefusedByName() =
+  ## The body of test
+  ##   "a launch under a paravisor is refused by name"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let refusalsBefore = refusalsObserved
+  var f = faithful()
+  f.entries[f.entryIndex(SevEsResetBlockGuid)].guid = ParavisorInfoGuid
+  expectRefusal(slcParavisorNotMeasured):
+    discard parseOvmfImage(render(f))
+
+  # -------------------------------------------------------------------
+  # The structures, checked against themselves
+  # -------------------------------------------------------------------
+  check refusalsObserved == refusalsBefore + 1
+
+# The cases above whose inputs build the launch-condition census and the refusal count.
+# The coverage case below drives every one of them itself: the suite
+# runner executes each case in its own process (`--run suite::test`),
+# so the census holds only what ran in THAT process, and a coverage
+# case that read what earlier cases left behind would measure the
+# execution mode rather than the code under test.
+const LaunchRefusalDrivers: seq[(string, proc () {.nimcall.})] = @[
+  ("an image too short to carry a footer is refused",
+    driveAnImageTooShortToCarryAFooterIsRefused),
+  ("an image that is not a whole number of pages is refused",
+    driveAnImageThatIsNotAWholeNumberOfPagesIsRefused),
+  ("an image whose footer is not the footer is refused",
+    driveAnImageWhoseFooterIsNotTheFooterIsRefused),
+  ("a footer shorter than a footer is refused",
+    driveAFooterShorterThanAFooterIsRefused),
+  ("a table claiming to start before the image is refused",
+    driveATableClaimingToStartBeforeTheImageIsRefused),
+  ("an entry shorter than an entry header is refused",
+    driveAnEntryShorterThanAnEntryHeaderIsRefused),
+  ("an entry claiming more bytes than the table holds is refused",
+    driveAnEntryClaimingMoreBytesThanTheTableHoldsIsRefused),
+  ("a firmware that declares no page list cannot be measured",
+    driveAFirmwareThatDeclaresNoPageListCannotBeMeasured),
+  ("a page-list pointer too short to hold a position is refused",
+    driveAPageListPointerTooShortToHoldAPositionIsRefused),
+  ("a page list said to begin outside the image is refused",
+    driveAPageListSaidToBeginOutsideTheImageIsRefused),
+  ("a page-list header running off the end of the image is refused",
+    driveAPageListHeaderRunningOffTheEndOfTheImageIsRefused),
+  ("a page list without its marker is refused",
+    driveAPageListWithoutItsMarkerIsRefused),
+  ("a page list of an unknown revision is refused",
+    driveAPageListOfAnUnknownRevisionIsRefused),
+  ("a page list shorter than its own header is refused",
+    driveAPageListShorterThanItsOwnHeaderIsRefused),
+  ("a page list counting more entries than it has room for is refused",
+    driveAPageListCountingMoreEntriesThanItHasRoomForIsRefused),
+  ("a page kind this build cannot account for is refused",
+    driveAPageKindThisBuildCannotAccountForIsRefused),
+  ("a region that is not whole pages at a page boundary is refused",
+    driveARegionThatIsNotWholePagesAtAPageBoundaryIsRefused),
+  ("two conditions, and they are genuinely two",
+    driveTwoConditionsAndTheyAreGenuinelyTwo),
+  ("the published firmware without a digest region refuses a kernel",
+    driveThePublishedFirmwareWithoutADigestRegionRefusesAKernel),
+  ("a digest table that does not fit in its page is refused",
+    driveADigestTableThatDoesNotFitInItsPageIsRefused),
+  ("a reserved region that is not one page is refused",
+    driveAReservedRegionThatIsNotOnePageIsRefused),
+  ("more than one processor needs an address for the others",
+    driveMoreThanOneProcessorNeedsAnAddressForTheOthers),
+  ("a processor count outside the range is refused at both ends",
+    driveAProcessorCountOutsideTheRangeIsRefusedAtBothEnds),
+  ("a hypervisor this build has no register state for is refused",
+    driveAHypervisorThisBuildHasNoRegisterStateForIsRefused),
+  ("a processor model this build does not know is refused",
+    driveAProcessorModelThisBuildDoesNotKnowIsRefused),
+  ("a launch under a paravisor is refused by name",
+    driveALaunchUnderAParavisorIsRefusedByName)]
+
 suite "the launch-digest calculator refuses what it cannot read exactly":
 
   test "no rule's sentence is a substring of another's":
@@ -281,296 +791,71 @@ suite "the launch-digest calculator refuses what it cannot read exactly":
   # -------------------------------------------------------------------
 
   test "an image too short to carry a footer is refused":
-    let refusalsBefore = refusalsObserved
-    expectRefusal(slcFirmwareTooSmall):
-      discard parseOvmfImage(amdSevFirmware[0 ..< 49])
-    # And one byte longer is not, so the bound is the bound rather than
-    # an artefact of the value chosen.
-    expectRefusal(slcNoGuidFooter):
-      discard parseOvmfImage(amdSevFirmware[0 ..< 50])
-    check refusalsObserved == refusalsBefore + 2
+    driveAnImageTooShortToCarryAFooterIsRefused()
 
   test "an image that is not a whole number of pages is refused":
-    var padded = newSeq[byte](SnpPageSize - 1)
-    padded.add amdSevFirmware
-    check padded.len mod SnpPageSize != 0
-    expectRefusal(slcFirmwareNotWholePages):
-      discard snpLaunchDigest(snpParams(padded))
-    # One more byte of padding makes it whole pages and it is measured,
-    # so the rule is about the remainder and not about the padding.
-    var whole = newSeq[byte](SnpPageSize)
-    whole.add amdSevFirmware
-    check snpLaunchDigest(snpParams(whole)).len == SnpDigestLen
+    driveAnImageThatIsNotAWholeNumberOfPagesIsRefused()
 
   test "an image whose footer is not the footer is refused":
-    let refusalsBefore = refusalsObserved
-    var f = faithful()
-    f.footerGuid = "96b582de-1fb2-45f7-baea-a366c55a082e"   ## last digit
-    expectRefusal(slcNoGuidFooter):
-      discard parseOvmfImage(render(f))
-    check refusalsObserved == refusalsBefore + 1
+    driveAnImageWhoseFooterIsNotTheFooterIsRefused()
 
   test "a footer shorter than a footer is refused":
-    var f = faithful()
-    f.declaredFooterSize = OvmfEntryHeaderLen - 1
-    expectRefusal(slcFooterSizeBelowHeader):
-      discard parseOvmfImage(render(f))
-    # At exactly the header length it is an empty table, not a refusal:
-    # the edge is where it is stated to be.
-    f.declaredFooterSize = OvmfEntryHeaderLen
-    let empty = parseOvmfImage(render(f))
-    check empty.entries.len == 0
-    check not empty.hasPageList
+    driveAFooterShorterThanAFooterIsRefused()
 
   test "a table claiming to start before the image is refused":
-    let refusalsBefore = refusalsObserved
-    var f = faithful()
-    f.declaredFooterSize = 0xffff
-    expectRefusal(slcFooterTableStartsBeforeImage):
-      discard parseOvmfImage(render(f))
-    check refusalsObserved == refusalsBefore + 1
+    driveATableClaimingToStartBeforeTheImageIsRefused()
 
   test "an entry shorter than an entry header is refused":
-    let refusalsBefore = refusalsObserved
-    var f = faithful()
-    f.entries[^1].declaredSize = OvmfEntryHeaderLen - 1
-    expectRefusal(slcEntrySizeBelowHeader):
-      discard parseOvmfImage(render(f))
-    check refusalsObserved == refusalsBefore + 1
+    driveAnEntryShorterThanAnEntryHeaderIsRefused()
 
   test "an entry claiming more bytes than the table holds is refused":
-    let refusalsBefore = refusalsObserved
-    var f = faithful()
-    var tableLen = 0
-    for e in f.entries: tableLen += e.value.len + OvmfEntryHeaderLen
-    f.entries[^1].declaredSize = tableLen + 1
-    # The footer still states the real table length, so the entry is
-    # overrunning the table and not the image.
-    f.declaredFooterSize = tableLen + OvmfEntryHeaderLen
-    expectRefusal(slcEntryOverrunsTable):
-      discard parseOvmfImage(render(f))
+    driveAnEntryClaimingMoreBytesThanTheTableHoldsIsRefused()
 
   # -------------------------------------------------------------------
   # The list of placed pages
   # -------------------------------------------------------------------
-    check refusalsObserved == refusalsBefore + 1
 
   test "a firmware that declares no page list cannot be measured":
-    var f = faithful()
-    f.entries[f.entryIndex(OvmfSevMetadataGuid)].guid =
-      "dc886566-984a-4798-a75e-5585a7bf67cd"                ## last digit
-    let img = parseOvmfImage(render(f))
-    check not img.hasPageList
-    check img.entries.len == 5
-    expectRefusal(slcNoPageList):
-      discard snpLaunchDigest(snpParams(render(f)))
-    # The two older shapes never consult the list, so the same image
-    # measures under them. This is what says the rule belongs to the
-    # shape rather than to the reader.
-    check sevLaunchDigest(SevLaunchParameters(mode: slmSev,
-      firmware: render(f), vcpus: 1)).len == 32
+    driveAFirmwareThatDeclaresNoPageListCannotBeMeasured()
 
   test "a page-list pointer too short to hold a position is refused":
-    let refusalsBefore = refusalsObserved
-    var f = faithful()
-    f.entries[f.entryIndex(OvmfSevMetadataGuid)].value = @[1'u8, 2'u8, 3'u8]
-    expectRefusal(slcPageListPointerTooShort):
-      discard parseOvmfImage(render(f))
-    check refusalsObserved == refusalsBefore + 1
+    driveAPageListPointerTooShortToHoldAPositionIsRefused()
 
   test "a page list said to begin outside the image is refused":
-    let refusalsBefore = refusalsObserved
-    var f = faithful()
-    let at = f.entryIndex(OvmfSevMetadataGuid)
-    f.entries[at].value = le32Bytes(uint64(amdSevFirmware.len + 1))
-    expectRefusal(slcPageListOutsideImage):
-      discard parseOvmfImage(render(f))
-    f.entries[at].value = le32Bytes(0)
-    expectRefusal(slcPageListOutsideImage):
-      discard parseOvmfImage(render(f))
-    check refusalsObserved == refusalsBefore + 2
+    driveAPageListSaidToBeginOutsideTheImageIsRefused()
 
   test "a page-list header running off the end of the image is refused":
-    let refusalsBefore = refusalsObserved
-    var f = faithful()
-    f.entries[f.entryIndex(OvmfSevMetadataGuid)].value =
-      le32Bytes(uint64(SevPageListHeaderLen - 1))
-    expectRefusal(slcPageListHeaderOutsideImage):
-      discard parseOvmfImage(render(f))
-    check refusalsObserved == refusalsBefore + 1
+    driveAPageListHeaderRunningOffTheEndOfTheImageIsRefused()
 
   test "a page list without its marker is refused":
-    let refusalsBefore = refusalsObserved
-    var f = faithful()
-    f.marker = "ASEW"
-    expectRefusal(slcPageListMarker):
-      discard parseOvmfImage(render(f))
-    check refusalsObserved == refusalsBefore + 1
+    driveAPageListWithoutItsMarkerIsRefused()
 
   test "a page list of an unknown revision is refused":
-    let refusalsBefore = refusalsObserved
-    var f = faithful()
-    f.revision = SevPageListRevision + 1
-    expectRefusal(slcPageListRevision):
-      discard parseOvmfImage(render(f))
-    check refusalsObserved == refusalsBefore + 1
+    driveAPageListOfAnUnknownRevisionIsRefused()
 
   test "a page list shorter than its own header is refused":
-    let refusalsBefore = refusalsObserved
-    var f = faithful()
-    f.declaredPageListLen = SevPageListHeaderLen - 1
-    expectRefusal(slcPageListSizeBelowHeader):
-      discard parseOvmfImage(render(f))
-    # A length long enough to BE a list but reaching past the end of the
-    # image is a different condition, and it had no input: the two shared
-    # one value, and the sentence that value carries describes the other
-    # one. It has its own rule and its own sentence now.
-    f.declaredPageListLen = amdSevFirmware.len
-    check f.pageListAt + f.declaredPageListLen > amdSevFirmware.len
-    expectRefusal(slcPageListRunsPastImage):
-      discard parseOvmfImage(render(f))
-    # Reaching exactly the end is accepted, so the edge is the edge.
-    f.declaredPageListLen = amdSevFirmware.len - f.pageListAt
-    check parseOvmfImage(render(f)).hasPageList
-    check refusalsObserved == refusalsBefore + 2
+    driveAPageListShorterThanItsOwnHeaderIsRefused()
 
   test "a page list counting more entries than it has room for is refused":
-    var f = faithful()
-    f.declaredEntryCount = f.sections.len + 1
-    expectRefusal(slcPageListEntriesExceedSize):
-      discard parseOvmfImage(render(f))
-    # One fewer is not refused — it is a shorter list, which is a
-    # different thing — so the rule is about the arithmetic and not
-    # about the count disagreeing with the bytes.
-    f.declaredEntryCount = f.sections.len - 1
-    check parseOvmfImage(render(f)).sections.len == f.sections.len - 1
+    driveAPageListCountingMoreEntriesThanItHasRoomForIsRefused()
 
   test "a page kind this build cannot account for is refused":
-    var f = faithful()
-    f.sections[0].kindNumber = 99
-    expectRefusal(slcUnknownPageKind):
-      discard parseOvmfImage(render(f))
-    # Every kind the enumeration declares IS accounted for, which is the
-    # other direction of the same rule: a kind added to the type and not
-    # to the reader's list would be refused on a real image.
-    for kind in OvmfSectionKinds:
-      var g = faithful()
-      g.sections[0].kindNumber = uint32(ord(kind))
-      check parseOvmfImage(render(g)).sections[0].kind == kind
-    check OvmfSectionKinds.len == 5
-    check OvmfSectionKinds.deduplicate.len == 5
+    driveAPageKindThisBuildCannotAccountForIsRefused()
 
   test "a region that is not whole pages at a page boundary is refused":
-    let refusalsBefore = refusalsObserved
-    var f = faithful()
-    f.sections[0].size = f.sections[0].size + 1
-    expectRefusal(slcRegionNotPageAligned):
-      discard parseOvmfImage(render(f))
-    f = faithful()
-    f.sections[0].gpa = f.sections[0].gpa + 1
-    expectRefusal(slcRegionNotPageAligned):
-      discard parseOvmfImage(render(f))
-    f = faithful()
-    f.sections[0].size = 0
-    expectRefusal(slcRegionNotPageAligned):
-      discard parseOvmfImage(render(f))
-
-  # -------------------------------------------------------------------
-  # The kernel's digests
-  # -------------------------------------------------------------------
-    check refusalsObserved == refusalsBefore + 3
+    driveARegionThatIsNotWholePagesAtAPageBoundaryIsRefused()
 
   test "two conditions, and they are genuinely two":
-    # A firmware must publish the ADDRESS the table of kernel digests
-    # goes at, and its page list must RESERVE the region that address
-    # falls in. Those are two separate statements in two separate
-    # tables, and a firmware can make either without the other.
-    #
-    # The reference implementation checks only the second one for this
-    # launch shape, and computes a number for the first — placing the
-    # table at offset zero in the page, which is not where the
-    # hypervisor would write it. This build refuses instead. It is a
-    # DELIBERATE disagreement, recorded here with its input, because a
-    # divergence nobody wrote down is a defect somebody else finds.
-    var noAddress = faithful()
-    noAddress.entries[noAddress.entryIndex(SevHashTableRvGuid)].value =
-      @[0'u8, 0, 0, 0, 0, 0, 0, 0]
-    let a = parseOvmfImage(render(noAddress))
-    check a.kernelDigestsTableGpa() == 0
-    check a.reservesKernelDigestRegion()
-    expectRefusal(slcKernelDigestsNoAddress):
-      discard snpLaunchDigest(snpParams(render(noAddress), hasKernel = true))
-
-    var noRegion = faithful()
-    noRegion.sections.delete(noRegion.sectionIndex(oskKernelDigests))
-    let b = parseOvmfImage(render(noRegion))
-    check b.kernelDigestsTableGpa() != 0
-    check not b.reservesKernelDigestRegion()
-    expectRefusal(slcKernelDigestsNoRegion):
-      discard snpLaunchDigest(snpParams(render(noRegion), hasKernel = true))
-
-    # Neither refusal fires when no kernel is offered: a launch that
-    # measures no kernel needs neither the address nor the region.
-    check snpLaunchDigest(snpParams(render(noAddress))).len == SnpDigestLen
-    check snpLaunchDigest(snpParams(render(noRegion))).len == SnpDigestLen
+    driveTwoConditionsAndTheyAreGenuinelyTwo()
 
   test "the published firmware without a digest region refuses a kernel":
-    # The same rule on a real image rather than a fabricated one: the
-    # second published fixture is the plain firmware build, and it has
-    # neither the address nor the region.
-    let img = parseOvmfImage(ovmfX64Firmware)
-    check img.kernelDigestsTableGpa() == 0
-    check not img.reservesKernelDigestRegion()
-    # This rule has TWO sites — one per launch shape — and a case that
-    # asserted the rule would be satisfied while only one of them
-    # worked. So both are exercised, and each site's sentence is
-    # required to name its own shape and NOT the other's.
-    var sentences: seq[string] = @[]
-    expectRefusal(slcKernelDigestsNoAddress):
-      try:
-        discard snpLaunchDigest(snpParams(ovmfX64Firmware, hasKernel = true))
-      except SnpLaunchError as err:
-        sentences.add err.msg
-        raise
-    expectRefusal(slcKernelDigestsNoAddress):
-      try:
-        discard sevLaunchDigest(SevLaunchParameters(mode: slmSevEs,
-          firmware: ovmfX64Firmware, vcpus: 1, hasKernel: true))
-      except SnpLaunchError as err:
-        sentences.add err.msg
-        raise
-    check sentences.len == 2
-    check sentences[0] != sentences[1]
-    check "region its page list reserves" in sentences[0]
-    check "region its page list reserves" notin sentences[1]
-    check "appended the digests to the firmware image" in sentences[1]
-    check "appended the digests to the firmware image" notin sentences[0]
+    driveThePublishedFirmwareWithoutADigestRegionRefusesAKernel()
 
   test "a digest table that does not fit in its page is refused":
-    var f = faithful()
-    let at = f.entryIndex(SevHashTableRvGuid)
-    var value = f.entries[at].value
-    # The published address is 0x810c00; move it far enough into the
-    # page that the 176-byte table runs past the end.
-    let moved = (uint64(value[0]) or (uint64(value[1]) shl 8) or
-                 (uint64(value[2]) shl 16) or (uint64(value[3]) shl 24))
-    let shifted = (moved and not 0xfff'u64) or 0xf80'u64
-    for i in 0 ..< 4:
-      value[i] = byte((shifted shr (8 * i)) and 0xff'u64)
-    f.entries[at].value = value
-    check int(shifted mod uint64(SnpPageSize)) +
-      SevDigestTablePaddedLen > SnpPageSize
-    expectRefusal(slcKernelDigestsOverflowPage):
-      discard snpLaunchDigest(snpParams(render(f), hasKernel = true))
+    driveADigestTableThatDoesNotFitInItsPageIsRefused()
 
   test "a reserved region that is not one page is refused":
-    var f = faithful()
-    f.sections[f.sectionIndex(oskKernelDigests)].size = uint32(2 * SnpPageSize)
-    expectRefusal(slcKernelDigestsRegionSize):
-      discard snpLaunchDigest(snpParams(render(f), hasKernel = true))
-    # Without a kernel the same region is folded in as two zero pages
-    # rather than refused, because nothing has to fit in it.
-    check snpLaunchDigest(snpParams(render(f))).len == SnpDigestLen
+    driveAReservedRegionThatIsNotOnePageIsRefused()
 
   test "the digest table is what the hypervisor writes":
     # The table's own shape, independently of any measurement: its
@@ -604,62 +889,19 @@ suite "the launch-digest calculator refuses what it cannot read exactly":
   # -------------------------------------------------------------------
 
   test "more than one processor needs an address for the others":
-    var f = faithful()
-    f.entries[f.entryIndex(SevEsResetBlockGuid)].guid =
-      "00f771de-1a7e-4fcb-890e-68c77e2fb44f"                ## last digit
-    check parseOvmfImage(render(f)).resetVectorEip() == 0
-    expectRefusal(slcNoResetVector):
-      discard snpLaunchDigest(snpParams(render(f), vcpus = 2))
-    # One processor does not need it, and the edge is between one and
-    # two rather than somewhere else.
-    check snpLaunchDigest(snpParams(render(f), vcpus = 1)).len == SnpDigestLen
+    driveMoreThanOneProcessorNeedsAnAddressForTheOthers()
 
   test "a processor count outside the range is refused at both ends":
-    expectRefusal(slcProcessorCountOutOfRange):
-      discard snpLaunchDigest(snpParams(amdSevFirmware, vcpus = 0))
-    expectRefusal(slcProcessorCountOutOfRange):
-      discard snpLaunchDigest(snpParams(amdSevFirmware,
-        vcpus = MaxProcessors + 1))
-    # Both edges are inside, so the bound is the bound. The upper one is
-    # a real calculation over a thousand VMSA pages, not a parse.
-    check snpLaunchDigest(snpParams(amdSevFirmware, vcpus = 1)).len ==
-      SnpDigestLen
-    check snpLaunchDigest(snpParams(amdSevFirmware,
-      vcpus = MaxProcessors)).len == SnpDigestLen
+    driveAProcessorCountOutsideTheRangeIsRefusedAtBothEnds()
 
   test "a hypervisor this build has no register state for is refused":
-    expectRefusal(slcUnknownHypervisor):
-      discard vmmKindFor("cloud-hypervisor")
-    expectRefusal(slcUnknownHypervisor):
-      discard vmmKindFor("QEMU")             # the names are exact
-    # The caller-facing list and the set that is implemented, against
-    # each other in both directions. A name in the list that does not
-    # resolve, or a hypervisor the list does not offer, is a surface
-    # that lies about what this build can compute.
-    for name in KnownVmms:
-      check $vmmKindFor(name) == name
-    for k in SnpVmmKind:
-      check $k in KnownVmms
-    check KnownVmms.len == 3
+    driveAHypervisorThisBuildHasNoRegisterStateForIsRefused()
 
   test "a processor model this build does not know is refused":
-    expectRefusal(slcUnknownProcessorModel):
-      discard cpuSignatureFor("EPYC-Bergamo")
-    expectRefusal(slcUnknownProcessorModel):
-      discard cpuSignatureFor("epyc-v4")     ## the names are exact
-    check cpuSignatureFor("EPYC-v4") != 0'u32
+    driveAProcessorModelThisBuildDoesNotKnowIsRefused()
 
   test "a launch under a paravisor is refused by name":
-    let refusalsBefore = refusalsObserved
-    var f = faithful()
-    f.entries[f.entryIndex(SevEsResetBlockGuid)].guid = ParavisorInfoGuid
-    expectRefusal(slcParavisorNotMeasured):
-      discard parseOvmfImage(render(f))
-
-  # -------------------------------------------------------------------
-  # The structures, checked against themselves
-  # -------------------------------------------------------------------
-    check refusalsObserved == refusalsBefore + 1
+    driveALaunchUnderAParavisorIsRefusedByName()
 
   test "the page-info structure tiles its own length":
     var spans = @[(OffPageInfoDigestCur, SnpDigestLen),
@@ -745,6 +987,15 @@ suite "the launch-digest calculator refuses what it cannot read exactly":
     # here rather than silently absent from a report — and the
     # vocabulary is per rule, so a rule added under an existing family
     # cannot hide inside one that is already reached.
+    # Drive every input the census is built from, HERE and from an
+    # empty census, so the verdict is the same whether this case runs
+    # alone (the runner gives each case its own process) or after
+    # the cases above.
+    reachedLaunchConditions = {}
+    refusalsObserved = 0
+    for (name, drive) in LaunchRefusalDrivers:
+      checkpoint("driving " & name)
+      drive()
     var unreached: seq[string] = @[]
     for c in SnpLaunchCondition:
       if c notin reachedLaunchConditions: unreached.add $c

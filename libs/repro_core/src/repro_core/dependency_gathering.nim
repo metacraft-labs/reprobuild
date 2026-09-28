@@ -95,6 +95,74 @@ type
       ## nothing here weakens the file/library/ipc/external-content evidence
       ## that decides completeness.
 
+  MonitorCaptureBreadth* = enum
+    ## DA-6 — HOW MUCH of io-mon's event stream a monitored action asks for,
+    ## declared by the TOOL PACKAGE that knows the tool and read by
+    ## ``monitorInterest`` in ``repro_build_engine.nim``, which is the one
+    ## place that turns it into a ``set[EventCategory]``.
+    ##
+    ## THE CLAIM. A recipe writing ``nim.c(...)`` or ``gcc(...)`` knows
+    ## neither the workspace's store roots nor io-mon's record kinds, and
+    ## should declare nothing about monitoring. The tool package knows the
+    ## tool: whether it emits its own dependency list, whether its randomness
+    ## reaches its output, whether its process tree is the tool or a script's
+    ## choice. So the declaration lives beside the tool's CLI spec, exactly
+    ## where ``nonDeterminism entropyBlessed`` already lives, and inherits the
+    ## same way.
+    ##
+    ## WHY THE VOCABULARY IS TWO WORDS AND NOT A CATEGORY SET. io-mon's DA-5
+    ## split proved, over all 256 interest sets, that exactly ONE proper
+    ## subset of ``FullInterest`` is safe for a reprobuild edge:
+    ## ``FullInterest - {ecAmbientReads}``. Every other category carries a
+    ## record kind some reprobuild consumer reads — ``mrEnvRead`` keys the
+    ## action cache through ``cacheEnvInputs``, ``mrNonDeterministic`` gates
+    ## publication through ``applyEntropyBlessingPolicy``, and
+    ## ``mrIpcConnect`` / ``mrExternalContent`` are not gate-able at all
+    ## (io-mon's ``categoryOf`` answers ``none`` for them, because the harm is
+    ## that the records do not exist when ``mergeFragments`` derives its
+    ## synthetic ``mrEventLoss``). A free-form category set would let a tool
+    ## package express 254 declarations that are all the cardinal sin — a
+    ## capture that grades ``mcComplete`` while missing evidence a consumer
+    ## needed, i.e. a false cache hit. The enum can only say the two things
+    ## that are true.
+    ##
+    ## SCOPE. This decides what the monitor is ASKED for. It does not touch
+    ## the evidence SCOPE axis (``EvidenceScope``, an operator choice —
+    ## ``monitorEvidenceScope``), it does not touch the entropy blessing
+    ## (``NonDeterminismPolicy`` above; a blessing decides what an observed
+    ## ``mrNonDeterministic`` MEANS, this decides whether it is observed at
+    ## all), and it changes no action-cache key by itself.
+    ##
+    ## Kept as a plain enum declared in ``repro_core`` — not a
+    ## ``set[EventCategory]`` — so ``repro_core`` carries no io_mon
+    ## dependency, which is the same reason the two bools it replaces were
+    ## bools.
+    mcbFullCapture
+      ## Every io-mon event category. THE DEFAULT AND THE ZERO VALUE, so a
+      ## tool package that declares nothing, a test that default-constructs a
+      ## policy, and a ``seq`` grow all get the widest capture rather than the
+      ## narrowest. Fail-closed: the cost of being wrong this way is records
+      ## nobody reads, and the cost of the other way is a false ``mcComplete``.
+    mcbOmitAmbientReads
+      ## ``FullInterest - {ecAmbientReads}`` — drop ``mrTimeRead`` and
+      ## ``mrSysctlRead``, and NOTHING else. These two are the only record
+      ## kinds with no reprobuild consumer whatsoever: both land on the
+      ## ``else: discard`` arm of the fold in ``repro_build_engine.nim``
+      ## (beside the ``mrEnvRead`` and ``mrNonDeterministic`` arms that do
+      ## have one), so excluding them removes no evidence any decision reads.
+      ##
+      ## Priced live by DA-5 on a ``bash -c 'date; ls /usr'`` capture:
+      ## 135 -> 132 records (two ``mrTimeRead`` plus one ``mrSysctlRead``),
+      ## both arms ``mcComplete`` / 0 losses. A small, honest 2.2%.
+      ##
+      ## A tool package should declare this only when it can say that nothing
+      ## about the tool's own non-reproducibility is witnessed by a clock or
+      ## sysctl read. That is a real per-tool question and its answer is not
+      ## uniform: ``nim`` can say it, ``gcc`` cannot (``__DATE__`` /
+      ## ``__TIME__`` / ``__TIMESTAMP__`` are gcc's signature
+      ## irreproducibility and ``mrTimeRead`` is the only record that
+      ## witnesses them).
+
   DependencyFormatName* = distinct string
 
   ExpectedDependencyFile* = object
@@ -125,31 +193,42 @@ type
     recognizedReports*: seq[RecognizedDependencyReportSpec]
     postBuildConverters*: seq[PostBuildDependencyConverterSpec]
     ignoredInputPrefixes*: seq[string]
-    # Event-interest opt-ins for automatic monitoring. THEY NO LONGER CHANGE
-    # ANYTHING, and the reasoning that made them look safe is recorded here
-    # because it is the reasoning that has to stay dead.
-    #
-    # These used to reduce io-mon's event interest to
-    # ecFileDeps+ecProcessTree+ecLibraryLoads on the grounds that a build edge's
-    # reproducibility hinges on the files/binaries/libraries it reads and not on
-    # the clock, environment, sysctls, entropy, or IPC peers a tool happens to
-    # touch. That is true of what those records DESCRIBE and false of what the
-    # engine DOES with them: the dropped categories carry `mrEnvRead` (which
-    # reaches the action cache key), `mrNonDeterministic` (which gates cache
-    # publication), and `mrIpcConnect` / `mrExternalContent` (from which io-mon
-    # derives the event-loss markers that force `mcIncomplete`). The engine
-    # therefore asks for EVERY category, unconditionally — see `monitorInterest`
-    # in `repro_build_engine.nim`, which is the one place that decides and
-    # carries the full argument.
-    #
-    # So an edge that sets either flag gets what it asked for and an edge that
-    # sets neither gets it too. They are kept — rather than deleted — because
-    # they are declared DSL surface with recipes and tests behind them, and
-    # retiring a public field is its own change; narrowing the request again
-    # needs finer categories from io-mon first. Kept as bools (not a
-    # `set[EventCategory]`) so repro_core carries no io_mon dependency.
-    captureNonDeterminism*: bool  ## INERT: ecNonDeterminism is always requested
-    captureIpc*: bool             ## INERT: ecIpc is always requested
+    captureBreadth*: MonitorCaptureBreadth
+      ## DA-6 — the TOOL PACKAGE's declaration of how much of io-mon's event
+      ## stream this action asks for. Lowered here from
+      ## ``BuildActionDependencyPolicy.captureBreadth`` and read by
+      ## ``monitorInterest`` in ``repro_build_engine.nim``; the full argument
+      ## for the vocabulary is at ``MonitorCaptureBreadth`` above.
+      ##
+      ## THIS FIELD REPLACES TWO INERT BOOLS, and the history is worth keeping
+      ## because it is the reasoning that has to stay dead. ``captureIpc`` and
+      ## ``captureNonDeterminism`` used to reduce io-mon's event interest to
+      ## ``ecFileDeps+ecProcessTree+ecLibraryLoads`` on the grounds that a
+      ## build edge's reproducibility hinges on the files/binaries/libraries it
+      ## reads and not on the clock, environment, sysctls, entropy or IPC peers
+      ## a tool happens to touch. That is true of what those records DESCRIBE
+      ## and false of what the engine DOES with them, so both flags were
+      ## neutralised and left standing with an ``INERT`` comment.
+      ##
+      ## ``captureIpc`` IS RETIRED OUTRIGHT, not re-scoped. After DA-5
+      ## ``mrIpcConnect`` is not gate-able at ANY granularity — io-mon's
+      ## ``categoryOf`` answers ``none`` for it, alongside
+      ## ``mrExternalContent`` and the META kinds — so there is no set of
+      ## categories at which the switch could be honoured. It was
+      ## CONTINGENTLY inert (the engine happened to ask for everything); it is
+      ## now PERMANENTLY, STRUCTURALLY inert, which is a different fact and a
+      ## field that cannot ever mean anything is worse than no field: the
+      ## previous generation of it spent a whole milestone carrying a comment
+      ## that had become false without anything refusing it.
+      ##
+      ## ``captureNonDeterminism`` SURVIVES AS A DSL SPELLING OF THIS FIELD,
+      ## with its scope shrunk to the part that was ever safe — see the
+      ## ``dependencyPolicy`` parser in ``repro_project_dsl/macros_a.nim``.
+      ## ``captureNonDeterminism = true`` is ``mcbFullCapture`` and
+      ## ``captureNonDeterminism = false`` is ``mcbOmitAmbientReads``, because
+      ## the ambient reads are the only members of the old category it could
+      ## ever have dropped safely: env reads still key the action and entropy
+      ## still gates publication.
     suppressMonitorShimSeed*: bool
       ## Withhold the launch-time ``REPRO_MONITOR_SHIM_LIB`` environment seed
       ## from this action (see ``launchChildEnv`` in the build engine).

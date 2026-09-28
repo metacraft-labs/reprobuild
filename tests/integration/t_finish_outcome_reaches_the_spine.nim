@@ -55,7 +55,7 @@
 ## instead would assert the mapping and prove nothing about whether any real
 ## execution can reach it.
 
-import std/[os, osproc, streams, tables, times, unittest]
+import std/[os, osproc, streams, strutils, tables, times, unittest]
 
 import repro_runquota
 import repro_runquota/stats_query
@@ -100,6 +100,30 @@ proc startSpineDaemon(root: string): SpineDaemon =
   putEnv("RUNQUOTA_SOCKET", socketPath)
   for _ in 0 ..< 400:
     if pathPresent(socketPath):
+      # A BOUND SOCKET IS NOT A RECORDING DAEMON. `runquotad` binds its
+      # endpoint first and opens the observation store afterwards, on a
+      # thread of its own (runquota docs/database.md OS-4). A session
+      # opened in between is served and NOT recorded, so all three rows
+      # below would be missing through no fault of the finish mapping.
+      # The store line of the startup output is printed once capture has
+      # been installed. Read the startup lines up to that one (there are
+      # exactly three, whichever order a runquota revision prints them in).
+      var line = ""
+      var storeLine = ""
+      for _ in 0 ..< 3:
+        if not process.outputStream.readLine(line):
+          break
+        if line.startsWith("runquota observation store"):
+          storeLine = line
+          break
+      if not storeLine.contains("capture enabled"):
+        process.terminate()
+        discard process.waitForExit(5000)
+        process.close()
+        raise newException(OSError,
+          "runquotad bound " & socketPath & " but did not report capture " &
+            "enabled; store line: " &
+            (if storeLine.len > 0: storeLine else: "(none)"))
       return SpineDaemon(process: process, socket: socketPath)
     sleep(25)
   # THE DAEMON'S OWN WORDS, not a bare "it did not start". A startup

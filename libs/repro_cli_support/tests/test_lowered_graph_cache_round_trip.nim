@@ -60,7 +60,7 @@ suite "lowered graph cache action round trip":
       actionCachePolicy: ffpHybrid,
       dependencyPolicy: DependencyGatheringPolicy(
         kind: dgAutomaticMonitor, completeness: decComplete,
-        captureNonDeterminism: true, captureIpc: true,
+        captureBreadth: mcbOmitAmbientReads,
         suppressMonitorShimSeed: true),
       targetNames: @["zlib"],
       typedOutputs: @[EngineTypedOutput(
@@ -118,13 +118,29 @@ suite "lowered graph cache action round trip":
     check "A=B" in roundTrip.env
     check "A" notin roundTrip.envPassthrough
 
-    # Feature 1: the event-interest opt-ins on the dependency-gathering
-    # policy must survive the lowered-graph-cache round trip. Before they
-    # were serialised, a warm build decoded every action with both flags
-    # false, so an edge that opted into non-determinism / IPC capture lost
-    # that interest on any cache hit.
-    check roundTrip.dependencyPolicy.captureNonDeterminism
-    check roundTrip.dependencyPolicy.captureIpc
+    # DA-6: the TOOL PACKAGE's capture-breadth declaration must survive the
+    # lowered-graph-cache round trip, and the NON-DEFAULT value is what is
+    # pinned here because the default is the zero value and a decoder that
+    # dropped the byte entirely would still satisfy an assertion on
+    # `mcbFullCapture`.
+    #
+    # WHY IT MATTERS ON A WARM BUILD. `monitorInterest` reads this field, and
+    # `monitorEvidenceRequirement` derives the REQUIRED interest from the same
+    # answer. A warm build that decoded the wrong value therefore asks io-mon
+    # for one set and demands another: decoded too NARROW it refuses its own
+    # fresh captures (a cost), and decoded too WIDE it would demand more than
+    # the cold build did and re-capture (also a cost). Both are bounded, which
+    # is why the v10 version bump refuses a v9 record rather than guessing a
+    # byte: the ordinals are not compatible (v9's `captureNonDeterminism =
+    # false` is ordinal 0, which reads here as `mcbFullCapture` — the opposite
+    # of what that value now spells), and the failure a guess produces is a
+    # capture narrowed by nobody's decision.
+    #
+    # This replaces two assertions on `captureNonDeterminism` / `captureIpc`.
+    # `captureIpc` is retired (DA-5 made `mrIpcConnect` ungate-able, so no value
+    # of it could be honoured) and `captureNonDeterminism` is now a DSL spelling
+    # of this field.
+    check roundTrip.dependencyPolicy.captureBreadth == mcbOmitAmbientReads
 
     # Same argument for the shim-seed opt-out, with a sharper consequence: an
     # edge that must not receive `REPRO_MONITOR_SHIM_LIB` is one that performs
@@ -159,16 +175,27 @@ suite "lowered graph cache action round trip":
       id: "codec-version-test")
     var encoded = loweredGraphCacheBytesForTest(@[action])
     let versionOffset = loweredGraphCacheVersionOffsetForTest()
-    check encoded[versionOffset] == 9'u8
+    check encoded[versionOffset] == 10'u8
     check encoded[versionOffset + 1] == 0'u8
     # An older version could not carry the newer per-action fields (v5:
     # `envPassthrough`; v6: the dependency-policy event-interest opt-ins;
     # v8: the dependency-policy shim-seed opt-out; v9: the tool's entropy
-    # blessing). Decoding such a record under the current layout would
-    # silently return defaults for every action rather than failing, so the
-    # rejection below is what makes a field's absence impossible instead of
-    # invisible.
-    encoded[versionOffset] = 8'u8
+    # blessing; v10: the dependency-policy capture-breadth declaration, which
+    # REPLACED v6's two bools with one enum byte). Decoding such a record under
+    # the current layout would silently return defaults for every action rather
+    # than failing, so the rejection below is what makes a field's absence
+    # impossible instead of invisible.
+    #
+    # THE POKED VALUE IS THE IMMEDIATELY PRECEDING VERSION, which is what this
+    # case's name promises and what v10 specifically needs asserted. v10 is the
+    # first bump whose predecessor's bytes could be MISREAD rather than merely
+    # come up short: v9 wrote two bool bytes where v10 writes one enum byte, and
+    # v9's `captureNonDeterminism = false` — the value almost every edge carried
+    # — is ordinal 0, which decodes here as `mcbFullCapture`, the OPPOSITE of
+    # what that value now spells. Poking an ancient version instead would leave
+    # the one skew that can silently mis-restore a warm edge's capture unasserted
+    # by anything.
+    encoded[versionOffset] = 9'u8
     var rejected = false
     try:
       discard loweredGraphCacheActionsForTest(encoded)

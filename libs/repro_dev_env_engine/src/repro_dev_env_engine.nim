@@ -222,6 +222,9 @@ proc engineConfig(config: DevEnvEdgeConfig): BuildEngineConfig =
     skipCacheHitEvidence: false)
   result.statsEnabled = config.statsEnabled
   result.progressCallback = config.progressCallback
+  # A warm activation must stay on the no-op fast path even while it renders
+  # progress; see `BuildEngineConfig.fastNoopReportsProgress`.
+  result.fastNoopReportsProgress = true
 
 proc commonMonitorEnv(config: DevEnvEdgeConfig): seq[string] =
   const inherited = [

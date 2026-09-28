@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Pinned command-semantics extract from CodeTracer commit
-# 04d6aff3d012b3e768dbebba186c950637e0c2b3, src/Tuprules.tup.
-# Source: https://github.com/metacraft-labs/codetracer/blob/04d6aff3d012b3e768dbebba186c950637e0c2b3/src/Tuprules.tup
+# a9ef983ed1e7d9a60b85034b596f55ea8b2164f5, src/Tuprules.tup.
+# Source: https://github.com/metacraft-labs/codetracer/blob/a9ef983ed1e7d9a60b85034b596f55ea8b2164f5/src/Tuprules.tup
 #
 # This fixture contains every variable and macro definition that contributes
 # to the !nim_js and !trace_object_file command fingerprints exercised by the
@@ -57,7 +57,15 @@ NIM_REPO_PATH_FLAGS=\
 --path:$(ROOT)/../nim-everywhere/src\
 --path:$(ROOT)/../nim-acp/src\
 --path:$(ROOT)/../nim-agent-harbor/src\
---path:$(ROOT)/../nim-agents/src
+--path:$(ROOT)/../nim-agents/src\
+--path:$(ROOT)/../runquota/libs/runquota_process/src\
+--path:$(ROOT)/../runquota/libs/runquota_core/src\
+--path:$(ROOT)/../runquota/libs/runquota_host/src\
+--path:$(ROOT)/../runquota/libs/runquota_host_linux/src\
+--path:$(ROOT)/../runquota/libs/runquota_host_macos/src\
+--path:$(ROOT)/../runquota/libs/runquota_host_windows/src\
+--path:$(ROOT)/../runquota/libs/runquota_codec/src\
+--path:$(ROOT)/../runquota/libs/runquota_protocol/src
 
 NIM_DEBUG_FLAGS=\
 $(NIM_COMMON_FLAGS)\

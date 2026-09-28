@@ -258,7 +258,13 @@ suite "Local daemons/control-plane M8 graph and stats analysis":
       writeCopyProject(projectRoot, "daemonM8Graph", 2)
       discard requireSuccess(buildCommand(projectRoot, tempRoot, "work",
         ["--stats-groups=timing,cache,runquota,deps,sessions"]), repoRoot())
-      waitForStatsStore(projectRoot)
+      # No wait on `.repro/stats/observations.jsonl` here any more. That raw
+      # store was retired by M18 (404d7284b; `Retired-Names.md` §"Analytics
+      # store paths and schema ids") and a daemon-hosted build no longer
+      # writes it — `t_stats_reads_shared_store` asserts exactly that — so
+      # the wait could only time out. Nothing below reads the stats store:
+      # every view is answered from the lowered graph the (synchronous)
+      # build above left behind.
 
       let baseGraph = runGraphJson(projectRoot, tempRoot, [])
       let actionId = baseGraph{"actions"}[0]{"id"}.getStr()

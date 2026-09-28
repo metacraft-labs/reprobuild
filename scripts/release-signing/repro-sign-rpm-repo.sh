@@ -100,8 +100,11 @@ for f in $(find "$root" -maxdepth 2 -name '*.rpm' | LC_ALL=C sort); do
   # it exiting 0 having signed nothing, which would be a silently
   # unsigned release. `rpm -Kv` names the signature whether or not the
   # key is in rpm's keyring, so this assertion does not smuggle in a
-  # trust check it cannot make here.
-  if ! rpm -Kv "$f" 2>&1 | grep -qi 'openpgp.*signature'; then
+  # trust check it cannot make here. The wording differs by rpm version:
+  # rpm 6.0 prints "Header OpenPGP V4 RSA/SHA512 signature", rpm 4.x
+  # (Fedora 40's 4.19) prints "Header V4 RSA/SHA512 Signature". Both name
+  # a HEADER signature; a digest-only package matches neither.
+  if ! rpm -Kv "$f" 2>&1 | grep -qiE 'header openpgp.*signature|header v[0-9]+ [a-z0-9]+/[a-z0-9]+ signature'; then
     rs_die "$f has no OpenPGP header signature after rpmsign"
   fi
   signed=$((signed + 1))

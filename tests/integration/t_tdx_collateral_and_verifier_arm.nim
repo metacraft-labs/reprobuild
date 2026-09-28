@@ -189,6 +189,65 @@ proc bundleFor(tcbInfo, identity: string): TdxCollateralBundle =
 
 # ---------------------------------------------------------------------
 
+proc driveTdxTheDocumentReaderCannotBeReachedWithoutASignature() =
+  ## The body of test
+  ##   "t_tdx_the_document_reader_cannot_be_reached_without_a_signature"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # `VerifiedCollateral`'s payload is not exported, so a record built
+  # outside the module carries no document — and every reader refuses
+  # it by name. This is the barrier the module's header claims, and
+  # it is asserted rather than described.
+  let unsigned = VerifiedCollateral(memberName: TcbInfoMemberName)
+  check documentOf(unsigned).len == 0
+  check not unsigned.isVerified
+  var unsignedMsg = ""
+  try:
+    discard parseTdxTcbInfo(unsigned)
+  except TdxCollateralError as err:
+    unsignedMsg = err.msg
+  expectCollateralRefusal(tceDocumentDoesNotDecode):
+    discard parseTdxTcbInfo(unsigned)
+  # The KIND alone is not enough: with the payload check deleted the
+  # empty span reaches the decoder and earns the SAME kind from the
+  # rule below it. The sentence is what says which rule fired.
+  check "whose signature was never established" in unsignedMsg
+  check "only `verifyCollateral` produces one" in unsignedMsg
+  # A record that DID verify, but for the other member, is refused
+  # too: a reader that read whatever it was handed would read an
+  # enclave identity as a platform document.
+  let identity = verifyCollateral(PcsTdxQeIdentityJson,
+    EnclaveIdentityMemberName, signerKey)
+  check identity.isVerified
+  expectCollateralRefusal(tceDocumentDoesNotDecode):
+    discard parseTdxTcbInfo(identity)
+
+proc driveTdxEveryLocatingRuleRefusesItsOwnInput() =
+  ## The body of test
+  ##   "t_tdx_every_locating_rule_refuses_its_own_input"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let good = PcsTcbInfoSprJson
+  let before = refusalsObserved
+  expectCollateralRefusal(tceEmptyDocument):
+    discard signedSpanOf("", TcbInfoMemberName)
+  expectCollateralRefusal(tceSignedMemberNotFound):
+    discard signedSpanOf(good, "notAMemberOfThisDocument")
+  expectCollateralRefusal(tceSignedMemberIsNotAnObject):
+    discard signedSpanOf(good, "id")
+  expectCollateralRefusal(tceSignedMemberUnterminated):
+    discard signedSpanOf(good[0 ..< good.len div 2], TcbInfoMemberName)
+  expectCollateralRefusal(tceSignatureMemberNotFound):
+    discard detachedSignatureOf("{\"tcbInfo\":{}}")
+  expectCollateralRefusal(tceSignatureWrongWidth):
+    discard detachedSignatureOf("{\"signature\":\"abcd\"}")
+  expectCollateralRefusal(tceSignatureIsNotHexadecimal):
+    discard detachedSignatureOf("{\"signature\":" &
+      repeat("\"zz", 1) & repeat("zz", 63) & "\"}")
+  expectCollateralRefusal(tceSignatureIsNotHexadecimal):
+    discard detachedSignatureOf("{\"signature\":12345}")
+  check refusalsObserved == before + 8
+
 suite "the vendor's signature over its own collateral":
 
   test "t_tdx_collateral_messages_are_distinguishable":
@@ -280,55 +339,10 @@ suite "the vendor's signature over its own collateral":
       check not verifyCollateral(d.body, d.member, key).isVerified
 
   test "t_tdx_the_document_reader_cannot_be_reached_without_a_signature":
-    # `VerifiedCollateral`'s payload is not exported, so a record built
-    # outside the module carries no document — and every reader refuses
-    # it by name. This is the barrier the module's header claims, and
-    # it is asserted rather than described.
-    let unsigned = VerifiedCollateral(memberName: TcbInfoMemberName)
-    check documentOf(unsigned).len == 0
-    check not unsigned.isVerified
-    var unsignedMsg = ""
-    try:
-      discard parseTdxTcbInfo(unsigned)
-    except TdxCollateralError as err:
-      unsignedMsg = err.msg
-    expectCollateralRefusal(tceDocumentDoesNotDecode):
-      discard parseTdxTcbInfo(unsigned)
-    # The KIND alone is not enough: with the payload check deleted the
-    # empty span reaches the decoder and earns the SAME kind from the
-    # rule below it. The sentence is what says which rule fired.
-    check "whose signature was never established" in unsignedMsg
-    check "only `verifyCollateral` produces one" in unsignedMsg
-    # A record that DID verify, but for the other member, is refused
-    # too: a reader that read whatever it was handed would read an
-    # enclave identity as a platform document.
-    let identity = verifyCollateral(PcsTdxQeIdentityJson,
-      EnclaveIdentityMemberName, signerKey)
-    check identity.isVerified
-    expectCollateralRefusal(tceDocumentDoesNotDecode):
-      discard parseTdxTcbInfo(identity)
+    driveTdxTheDocumentReaderCannotBeReachedWithoutASignature()
 
   test "t_tdx_every_locating_rule_refuses_its_own_input":
-    let good = PcsTcbInfoSprJson
-    let before = refusalsObserved
-    expectCollateralRefusal(tceEmptyDocument):
-      discard signedSpanOf("", TcbInfoMemberName)
-    expectCollateralRefusal(tceSignedMemberNotFound):
-      discard signedSpanOf(good, "notAMemberOfThisDocument")
-    expectCollateralRefusal(tceSignedMemberIsNotAnObject):
-      discard signedSpanOf(good, "id")
-    expectCollateralRefusal(tceSignedMemberUnterminated):
-      discard signedSpanOf(good[0 ..< good.len div 2], TcbInfoMemberName)
-    expectCollateralRefusal(tceSignatureMemberNotFound):
-      discard detachedSignatureOf("{\"tcbInfo\":{}}")
-    expectCollateralRefusal(tceSignatureWrongWidth):
-      discard detachedSignatureOf("{\"signature\":\"abcd\"}")
-    expectCollateralRefusal(tceSignatureIsNotHexadecimal):
-      discard detachedSignatureOf("{\"signature\":" &
-        repeat("\"zz", 1) & repeat("zz", 63) & "\"}")
-    expectCollateralRefusal(tceSignatureIsNotHexadecimal):
-      discard detachedSignatureOf("{\"signature\":12345}")
-    check refusalsObserved == before + 8
+    driveTdxEveryLocatingRuleRefusesItsOwnInput()
 
   test "t_tdx_a_member_name_appearing_as_a_value_is_not_a_member":
     # The locator scans for the quoted name and then REQUIRES a colon
@@ -372,6 +386,55 @@ suite "the vendor's signature over its own collateral":
     check span.len > doc.find('}') - doc.find('{')
 
 # ---------------------------------------------------------------------
+
+proc driveTdxTheQuotingEnclaveMustBeTheOneTheIdentityDescribes() =
+  ## The body of test
+  ##   "t_tdx_the_quoting_enclave_must_be_the_one_the_identity_describes"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let tdQe = parseEnclaveIdentity(verifyCollateral(PcsTdxQeIdentityJson,
+    EnclaveIdentityMemberName, signerKey))
+  let sgxQe = parseEnclaveIdentity(verifyCollateral(PcsSgxQeIdentityJson,
+    EnclaveIdentityMemberName, signerKey))
+  for p in parts:
+    checkpoint p.label
+    let r = p.quote.qeReport
+    let v = quotingEnclaveMatches(tdQe, hexOfBytes(r.mrSigner),
+      int(r.isvProdId), toHex(int(r.miscSelect), 8).toLowerAscii,
+      hexOfBytes(r.attributes))
+    check v.matches
+    reachedEnclaveOutcomes.incl v.outcome
+    # The vendor's OWN identity for its other quoting enclave is a
+    # perfectly valid signed document about a different enclave, and
+    # the rule that notices has a real input because of it.
+    let w = quotingEnclaveMatches(sgxQe, hexOfBytes(r.mrSigner),
+      int(r.isvProdId), toHex(int(r.miscSelect), 8).toLowerAscii,
+      hexOfBytes(r.attributes))
+    check not w.matches
+    check w.outcome == emoMeasurerDisagrees
+    reachedEnclaveOutcomes.incl w.outcome
+  # The three other ways it can disagree, each over the genuine
+  # identity with one input moved.
+  let r = parts[0].quote.qeReport
+  let p = quotingEnclaveMatches(tdQe, hexOfBytes(r.mrSigner),
+    int(r.isvProdId) + 1, toHex(int(r.miscSelect), 8).toLowerAscii,
+    hexOfBytes(r.attributes))
+  check p.outcome == emoProductDisagrees
+  reachedEnclaveOutcomes.incl p.outcome
+  let m = quotingEnclaveMatches(tdQe, hexOfBytes(r.mrSigner),
+    int(r.isvProdId), "ffffffff", hexOfBytes(r.attributes))
+  check m.outcome == emoMiscSelectDisagrees
+  reachedEnclaveOutcomes.incl m.outcome
+  var attrs = hexOfBytes(r.attributes)
+  attrs[1] = 'a'
+  let a = quotingEnclaveMatches(tdQe, hexOfBytes(r.mrSigner),
+    int(r.isvProdId), toHex(int(r.miscSelect), 8).toLowerAscii, attrs)
+  check a.outcome == emoAttributesDisagrees
+  reachedEnclaveOutcomes.incl a.outcome
+  var missingOutcome: seq[string] = @[]
+  for k in EnclaveMatchOutcome:
+    if k notin reachedEnclaveOutcomes: missingOutcome.add $k
+  check missingOutcome.len == 0
 
 suite "what the vendor's documents say":
 
@@ -424,114 +487,391 @@ suite "what the vendor's documents say":
     check sgxQe.mrSignerHex != tdQe.mrSignerHex
 
   test "t_tdx_the_quoting_enclave_must_be_the_one_the_identity_describes":
-    let tdQe = parseEnclaveIdentity(verifyCollateral(PcsTdxQeIdentityJson,
-      EnclaveIdentityMemberName, signerKey))
-    let sgxQe = parseEnclaveIdentity(verifyCollateral(PcsSgxQeIdentityJson,
-      EnclaveIdentityMemberName, signerKey))
-    for p in parts:
-      checkpoint p.label
-      let r = p.quote.qeReport
-      let v = quotingEnclaveMatches(tdQe, hexOfBytes(r.mrSigner),
-        int(r.isvProdId), toHex(int(r.miscSelect), 8).toLowerAscii,
-        hexOfBytes(r.attributes))
-      check v.matches
-      reachedEnclaveOutcomes.incl v.outcome
-      # The vendor's OWN identity for its other quoting enclave is a
-      # perfectly valid signed document about a different enclave, and
-      # the rule that notices has a real input because of it.
-      let w = quotingEnclaveMatches(sgxQe, hexOfBytes(r.mrSigner),
-        int(r.isvProdId), toHex(int(r.miscSelect), 8).toLowerAscii,
-        hexOfBytes(r.attributes))
-      check not w.matches
-      check w.outcome == emoMeasurerDisagrees
-      reachedEnclaveOutcomes.incl w.outcome
-    # The three other ways it can disagree, each over the genuine
-    # identity with one input moved.
-    let r = parts[0].quote.qeReport
-    let p = quotingEnclaveMatches(tdQe, hexOfBytes(r.mrSigner),
-      int(r.isvProdId) + 1, toHex(int(r.miscSelect), 8).toLowerAscii,
-      hexOfBytes(r.attributes))
-    check p.outcome == emoProductDisagrees
-    reachedEnclaveOutcomes.incl p.outcome
-    let m = quotingEnclaveMatches(tdQe, hexOfBytes(r.mrSigner),
-      int(r.isvProdId), "ffffffff", hexOfBytes(r.attributes))
-    check m.outcome == emoMiscSelectDisagrees
-    reachedEnclaveOutcomes.incl m.outcome
-    var attrs = hexOfBytes(r.attributes)
-    attrs[1] = 'a'
-    let a = quotingEnclaveMatches(tdQe, hexOfBytes(r.mrSigner),
-      int(r.isvProdId), toHex(int(r.miscSelect), 8).toLowerAscii, attrs)
-    check a.outcome == emoAttributesDisagrees
-    reachedEnclaveOutcomes.incl a.outcome
-    var missingOutcome: seq[string] = @[]
-    for k in EnclaveMatchOutcome:
-      if k notin reachedEnclaveOutcomes: missingOutcome.add $k
-    check missingOutcome.len == 0
+    driveTdxTheQuotingEnclaveMustBeTheOneTheIdentityDescribes()
 
 # ---------------------------------------------------------------------
+
+proc driveTdxBothBranchesOfTheModuleRuleAreExercised() =
+  ## The body of test
+  ##   "t_tdx_both_branches_of_the_module_rule_are_exercised"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The branch is decided by one byte of the report and by nothing
+  # else, and the two branches compare different numbers of
+  # components. Both are in the corpus and both are asserted.
+  var skips: seq[int] = @[]
+  for p in parts:
+    let info = parseTdxTcbInfo(verifyCollateral(p.tcbInfoVintages[1],
+      TcbInfoMemberName, signerKey))
+    var svns: seq[int] = @[]
+    for b in p.quote.body.teeTcbSvn: svns.add int(b)
+    var comps: seq[int] = @[]
+    for c in p.platform.tcb.components: comps.add c
+    let identity = parseEnclaveIdentity(verifyCollateral(
+      PcsTdxQeIdentityJson, EnclaveIdentityMemberName, signerKey))
+    let e = evaluateTdxTcb(info, comps, p.platform.tcb.pceSvn, svns,
+      int(p.quote.qeReport.isvSvn), identity, true)
+    reachedTcbOutcomes.incl e.outcome
+    check e.skippedLeadingComponents ==
+      (if svns[TdxModuleMajorSvnIndex] > 0: 2 else: 0)
+    if e.skippedLeadingComponents notin skips:
+      skips.add e.skippedLeadingComponents
+    if svns[TdxModuleMajorSvnIndex] > 0 and e.isDetermined:
+      check e.moduleId == moduleIdFor(svns[TdxModuleMajorSvnIndex])
+      check e.moduleId == "TDX_01"
+    if svns[TdxModuleMajorSvnIndex] == 0:
+      check e.moduleId.len == 0
+  check skips.len == 2
+  check 0 in skips
+  check 2 in skips
+
+proc driveTdxEachPartGetsTheStatusTheVendorSDocumentImplies() =
+  ## The body of test
+  ##   "t_tdx_each_part_gets_the_status_the_vendor_s_document_implies"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # The values, pinned, against both vintages of the vendor's
+  # document for each part — so a build that read one of them and
+  # ignored the other is visible.
+  var evaluated = 0
+  var outcomes: seq[TdxCollateralOutcome] = @[]
+  for p in parts:
+    for vintage in p.tcbInfoVintages:
+      checkpoint p.label
+      let v = establishTdxTcbStatus(
+        bundleFor(vintage, PcsTdxQeIdentityJson), p.quote, p.platform)
+      check v.outcome == p.expectedOutcome
+      check v.status == p.expectedStatus
+      reachedCollateralOutcomes.incl v.outcome
+      if v.outcome notin outcomes: outcomes.add v.outcome
+      if v.isEstablished:
+        # A report carrying two version arrays is evaluated twice, and
+        # the second answer is reported separately. A build that
+        # evaluated one array twice would still fill both fields, so
+        # the case pins the arrays' own difference as well.
+        check p.quote.body.hasPreservedTcb
+        check v.currentStatus.len > 0
+        check v.launchStatus == TdxStatusUpToDate
+      else:
+        check v.status.len == 0
+      inc evaluated
+  check evaluated == 6
+  # Two different outcomes over three parts: a corpus in which every
+  # part answered the same way would exercise one path.
+  check outcomes.len == 2
+
+proc driveTdxFourRulesTheMutationTableFoundWithNoInput() =
+  ## The body of test
+  ##   "t_tdx_four_rules_the_mutation_table_found_with_no_input"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # Each of these held as code and was never asked a question this
+  # corpus could answer. The inputs are query points over the
+  # vendor's own genuine documents; the documents are not touched.
+  let info = parseTdxTcbInfo(verifyCollateral(PcsTcbInfoEmrJson,
+    TcbInfoMemberName, signerKey))
+  let identity = parseEnclaveIdentity(verifyCollateral(
+    PcsTdxQeIdentityJson, EnclaveIdentityMemberName, signerKey))
+  var comps: seq[int] = @[]
+  for c in parts[1].platform.tcb.components: comps.add c
+  var svns: seq[int] = @[]
+  for b in gtgV5Quote.body.teeTcbSvn: svns.add int(b)
+  let qeSvn = int(gtgV5Quote.qeReport.isvSvn)
+  let pceSvn = parts[1].platform.tcb.pceSvn
+
+  # 1. The configuration enclave's version is compared against the
+  #    level. Every part in the corpus meets it or fails the
+  #    component comparison first, so the rule had no input; the
+  #    level it would otherwise match states 13 and this asks at 12.
+  check info.levels[0].pceSvn == 13
+  check pceSvn == 13
+  let atFloor = evaluateTdxTcb(info, comps, 13, svns, qeSvn,
+    identity, true)
+  check atFloor.isDetermined
+  check atFloor.levelIndex == 0
+  let belowFloor = evaluateTdxTcb(info, comps, 12, svns, qeSvn,
+    identity, true)
+  # A different level, and a different ANSWER: three of the four this
+  # vendor publishes for this platform state 13, and the fourth —
+  # which states 5 — is out of date. So the comparison is not merely
+  # made, it decides.
+  check belowFloor.levelIndex == 3
+  check belowFloor.isDetermined
+  check atFloor.platformStatus == TdxStatusUpToDate
+  check belowFloor.platformStatus == TdxStatusOutOfDate
+  check belowFloor.status != atFloor.status
+
+  # 2. The module identity is named the way the vendor names it. The
+  #    only version in the corpus is 1, whose two hexadecimal digits
+  #    carry no letter, so a build that lower-cased the name produced
+  #    the same string. Asked at a version that does.
+  check moduleIdFor(1) == "TDX_01"
+  check moduleIdFor(10) == "TDX_0A"
+  check moduleIdFor(255) == "TDX_FF"
+  var letteredVersion = svns
+  letteredVersion[TdxModuleMajorSvnIndex] = 10
+  let lettered = evaluateTdxTcb(info, comps, pceSvn, letteredVersion,
+    qeSvn, identity, true)
+  check lettered.outcome == ttoModuleIdentityNotPublished
+  check "TDX_0A" in lettered.detail
+  reachedTcbOutcomes.incl lettered.outcome
+
+  # 3. The second version array is READ, and it is the second one.
+  #    Both arrays of both wider reports answer alike in this corpus,
+  #    so a build that evaluated the first one twice agreed with one
+  #    that evaluated both. Asked at a launch version the vendor
+  #    calls out of date and a current one it calls up to date, which
+  #    is the shape the relaunch rule exists for.
+  var launchOld = svns
+  launchOld[TdxModuleMinorSvnIndex] = 6
+  let launchVerdict = evaluateTdxTcb(info, comps, pceSvn, launchOld,
+    qeSvn, identity, true)
+  let currentVerdict = evaluateTdxTcb(info, comps, pceSvn, svns,
+    qeSvn, identity, true)
+  check launchVerdict.status == TdxStatusOutOfDate
+  check currentVerdict.status == TdxStatusUpToDate
+  check checkForRelaunch(launchVerdict.status, currentVerdict.status) ==
+    TdxStatusTdRelaunchAdvised
+  # …and reading the launch array twice would say something else.
+  check checkForRelaunch(launchVerdict.status, launchVerdict.status) ==
+    TdxStatusOutOfDate
+
+  # 3b. …and the same, THROUGH the bundle, because the rule that
+  #     reads the second array lives there and a case that evaluates
+  #     twice from here never touches it. The report is built in this
+  #     gate rather than mutated on the wire: the two arrays have to
+  #     differ in their ANSWER, and editing them in a quote's bytes
+  #     would break the signature that quote's reader checks.
+  var twoArrays = gtgV5Quote
+  twoArrays.body.teeTcbSvn[TdxModuleMinorSvnIndex] = 6'u8
+  twoArrays.body.teeTcbSvn2[TdxModuleMinorSvnIndex] = 13'u8
+  check twoArrays.body.hasPreservedTcb
+  let relaunch = establishTdxTcbStatus(
+    bundleFor(PcsTcbInfoEmrJson, PcsTdxQeIdentityJson), twoArrays,
+    platformOf(gtgV5Quote))
+  check relaunch.isEstablished
+  check relaunch.launchStatus == TdxStatusOutOfDate
+  check relaunch.currentStatus == TdxStatusUpToDate
+  check relaunch.relaunchApplied
+  check relaunch.status == TdxStatusTdRelaunchAdvised
+  reachedCollateralOutcomes.incl relaunch.outcome
+
+  # 4. The collateral signer verifies under its issuer. Nothing in
+  #    the corpus was a signer the root had not signed, so the rule
+  #    had no input; one moved bit gives it one.
+  var bentSigner = signerDer
+  bentSigner[bentSigner.len - 10] = bentSigner[bentSigner.len - 10] xor
+    0x08'u8
+  check parseCertificate(bentSigner).publicKey ==
+    parseCertificate(signerDer).publicKey
+  var b = bundleFor(PcsTcbInfoEmrJson, PcsTdxQeIdentityJson)
+  b.signerDer = bentSigner
+  let v = establishTdxTcbStatus(b, gtgV5Quote, platformOf(gtgV5Quote))
+  check v.outcome == tcoSignerChainIsNotIntels
+  check "does not verify under" in v.detail
+  reachedCollateralOutcomes.incl v.outcome
+
+proc driveTdxEveryBundleRefusalHasAnInput() =
+  ## The body of test
+  ##   "t_tdx_every_bundle_refusal_has_an_input"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  let good = parts[1]
+  var outcomes = 0
+
+  # The platform document is for a different part.
+  block:
+    let v = establishTdxTcbStatus(
+      bundleFor(PcsTcbInfoSprJson, PcsTdxQeIdentityJson),
+      good.quote, good.platform)
+    check v.outcome == tcoTcbInfoIsNotForThisPlatform
+    check "50806f000000" in v.detail
+    check "90c06f000000" in v.detail
+    reachedCollateralOutcomes.incl v.outcome
+    inc outcomes
+
+  # The identity document describes the vendor's OTHER enclave.
+  block:
+    let v = establishTdxTcbStatus(
+      bundleFor(PcsTcbInfoEmrJson, PcsSgxQeIdentityJson),
+      good.quote, good.platform)
+    check v.outcome == tcoEnclaveIdentityIsNotForTrustDomainQuoting
+    check "\"QE\"" in v.detail
+    reachedCollateralOutcomes.incl v.outcome
+    inc outcomes
+
+  # The signing chain is not the vendor's.
+  block:
+    var b = bundleFor(PcsTcbInfoEmrJson, PcsTdxQeIdentityJson)
+    b.signerIssuerDer = bytesOfHex(ImpostorRootDerHex)
+    let v = establishTdxTcbStatus(b, good.quote, good.platform)
+    check v.outcome == tcoSignerChainIsNotIntels
+    check "not the one root this build was built with" in v.detail
+    reachedCollateralOutcomes.incl v.outcome
+    inc outcomes
+
+  # A platform document the vendor's signer did not sign.
+  block:
+    var b = bundleFor(PcsTcbInfoEmrJson, PcsTdxQeIdentityJson)
+    b.tcbInfoJson = b.tcbInfoJson.replace("\"UpToDate\"", "\"OutOfDate\"")
+    check b.tcbInfoJson != PcsTcbInfoEmrJson
+    let v = establishTdxTcbStatus(b, good.quote, good.platform)
+    check v.outcome == tcoTcbInfoNotSignedByTheSigner
+    reachedCollateralOutcomes.incl v.outcome
+    inc outcomes
+
+  # An identity document the vendor's signer did not sign.
+  block:
+    var b = bundleFor(PcsTcbInfoEmrJson, PcsTdxQeIdentityJson)
+    b.enclaveIdentityJson =
+      b.enclaveIdentityJson.replace("\"UpToDate\"", "\"OutOfDate\"")
+    let v = establishTdxTcbStatus(b, good.quote, good.platform)
+    check v.outcome == tcoEnclaveIdentityNotSignedByTheSigner
+    reachedCollateralOutcomes.incl v.outcome
+    inc outcomes
+
+  # No level covers the part. A GENUINE outcome: the Sapphire Rapids
+  # part is below every level the vendor publishes for its platform,
+  # under both vintages, and this is what a verifier says about it.
+  block:
+    let v = establishTdxTcbStatus(
+      bundleFor(PcsTcbInfoSprJson, PcsTdxQeIdentityJson),
+      sprQuote, parts[0].platform)
+    check v.outcome == tcoNoLevelCoversThisPlatform
+    check "none of the 6 levels" in v.detail
+    reachedCollateralOutcomes.incl v.outcome
+    inc outcomes
+
+  # A quoting enclave the identity does not describe, reached through
+  # the bundle rather than through the rule alone.
+  block:
+    var q = good.quote
+    q.qeReport.mrSigner[0] = q.qeReport.mrSigner[0] xor 0xff'u8
+    let v = establishTdxTcbStatus(
+      bundleFor(PcsTcbInfoEmrJson, PcsTdxQeIdentityJson), q,
+      good.platform)
+    check v.outcome == tcoQuotingEnclaveDisagreesWithItsIdentity
+    reachedCollateralOutcomes.incl v.outcome
+    inc outcomes
+
+  check outcomes == 7
+
+proc driveTdxTheVendorSDocumentForTheOtherEnvironmentIsRefused() =
+  ## The body of test
+  ##   "t_tdx_the_vendor_s_document_for_the_other_environment_is_refused"
+  ## — a proc so the coverage case can drive the same inputs
+  ## again in its own process (see that case).
+  # A genuine, vendor-signed platform document whose execution
+  # environment is not a trust domain: its levels carry no
+  # trust-domain component array, so reading it as one names the
+  # field that is absent rather than guessing at a default.
+  let sgx = verifyCollateral(PcsSgxTcbInfoJson, TcbInfoMemberName,
+    signerKey)
+  check sgx.isVerified
+  let before = refusalsObserved
+  expectCollateralRefusal(tceRequiredFieldMissing):
+    discard parseTdxTcbInfo(sgx)
+  check refusalsObserved == before + 1
+  # Its own `id` says which environment it describes, and that is
+  # read out of the signed span BEFORE the reader for one environment
+  # runs — so the bundle refuses on the identity and not on a field
+  # that happens to be missing from it.
+  check statedCollateralId(sgx) == "SGX"
+  check statedCollateralId(verifyCollateral(PcsTcbInfoEmrJson,
+    TcbInfoMemberName, signerKey)) == TdxTcbInfoIdTdx
+  check statedCollateralId(VerifiedCollateral()) == ""
+  var b = bundleFor(PcsSgxTcbInfoJson, PcsTdxQeIdentityJson)
+  let verdict = establishTdxTcbStatus(b, gtgV5Quote,
+    platformOf(gtgV5Quote))
+  check verdict.outcome == tcoTcbInfoIsNotForTrustDomains
+  check "\"SGX\"" in verdict.detail
+  check "tdxtcbcomponents" notin verdict.detail
+  reachedCollateralOutcomes.incl verdict.outcome
+
+# Every case whose outcomes the coverage case(s) below observe. The
+# suite runner executes each case in its own process (`--run
+# suite::test`), so the coverage case drives these itself rather than
+# reading what earlier cases left in process-global state.
+const CensusDrivers: seq[(string, proc () {.nimcall.})] = @[
+  ("t_tdx_the_document_reader_cannot_be_reached_without_a_signature",
+    driveTdxTheDocumentReaderCannotBeReachedWithoutASignature),
+  ("t_tdx_every_locating_rule_refuses_its_own_input",
+    driveTdxEveryLocatingRuleRefusesItsOwnInput),
+  ("t_tdx_the_quoting_enclave_must_be_the_one_the_identity_describes",
+    driveTdxTheQuotingEnclaveMustBeTheOneTheIdentityDescribes),
+  ("t_tdx_both_branches_of_the_module_rule_are_exercised",
+    driveTdxBothBranchesOfTheModuleRuleAreExercised),
+  ("t_tdx_each_part_gets_the_status_the_vendor_s_document_implies",
+    driveTdxEachPartGetsTheStatusTheVendorSDocumentImplies),
+  ("t_tdx_four_rules_the_mutation_table_found_with_no_input",
+    driveTdxFourRulesTheMutationTableFoundWithNoInput),
+  ("t_tdx_every_bundle_refusal_has_an_input",
+    driveTdxEveryBundleRefusalHasAnInput),
+  ("t_tdx_the_vendor_s_document_for_the_other_environment_is_refused",
+    driveTdxTheVendorSDocumentForTheOtherEnvironmentIsRefused)]
+
+proc driveTdxTheThreeRemainingEvaluationRefusalsHaveInputs() =
+  ## The body of test
+  ##   "t_tdx_the_three_remaining_evaluation_refusals_have_inputs"
+  ## — a proc because it is the one place every census set is filled
+  ## from empty, and the two census cases at the end of this file call it
+  ## to observe that in their own process.
+  # Driven HERE, from reset state: the runner executes every case in
+  # its own process, so this case observes only what it runs itself.
+  reachedCollateralKinds = {}
+  reachedCollateralOutcomes = {}
+  reachedTcbOutcomes = {}
+  reachedEnclaveOutcomes = {}
+  reachedCollateralSites = @[]
+  for (name, drive) in CensusDrivers:
+    checkpoint("driving " & name)
+    drive()
+  # The three the case above sets aside, each given an input here so
+  # that none of them is a rule with no reachable input.
+  let info = parseTdxTcbInfo(verifyCollateral(PcsTcbInfoEmrJson,
+    TcbInfoMemberName, signerKey))
+  let identity = parseEnclaveIdentity(verifyCollateral(
+    PcsTdxQeIdentityJson, EnclaveIdentityMemberName, signerKey))
+  var comps: seq[int] = @[]
+  for c in parts[1].platform.tcb.components: comps.add c
+  var svns: seq[int] = @[]
+  for b in gtgV5Quote.body.teeTcbSvn: svns.add int(b)
+  let pceSvn = parts[1].platform.tcb.pceSvn
+
+  # A module major version for which the vendor publishes no identity.
+  var unknownModule = svns
+  unknownModule[TdxModuleMajorSvnIndex] = 9
+  let a = evaluateTdxTcb(info, comps, pceSvn, unknownModule,
+    int(gtgV5Quote.qeReport.isvSvn), identity, true)
+  check a.outcome == ttoModuleIdentityNotPublished
+  check "TDX_09" in a.detail
+  reachedTcbOutcomes.incl a.outcome
+
+  # A module minor version below every level the identity publishes.
+  var oldModule = svns
+  oldModule[TdxModuleMinorSvnIndex] = 1
+  let b = evaluateTdxTcb(info, comps, pceSvn, oldModule,
+    int(gtgV5Quote.qeReport.isvSvn), identity, true)
+  check b.outcome == ttoNoModuleLevelCoversThisVersion
+  reachedTcbOutcomes.incl b.outcome
+
+  # A quoting enclave below every level ITS identity publishes.
+  let c = evaluateTdxTcb(info, comps, pceSvn, svns, 0, identity, true)
+  check c.outcome == ttoNoEnclaveLevelCoversThisVersion
+  reachedTcbOutcomes.incl c.outcome
+
+  var missing: seq[string] = @[]
+  for k in TdxTcbOutcome:
+    if k notin reachedTcbOutcomes: missing.add $k
+  check missing.len == 0
 
 suite "the vendor's evaluation":
 
   test "t_tdx_both_branches_of_the_module_rule_are_exercised":
-    # The branch is decided by one byte of the report and by nothing
-    # else, and the two branches compare different numbers of
-    # components. Both are in the corpus and both are asserted.
-    var skips: seq[int] = @[]
-    for p in parts:
-      let info = parseTdxTcbInfo(verifyCollateral(p.tcbInfoVintages[1],
-        TcbInfoMemberName, signerKey))
-      var svns: seq[int] = @[]
-      for b in p.quote.body.teeTcbSvn: svns.add int(b)
-      var comps: seq[int] = @[]
-      for c in p.platform.tcb.components: comps.add c
-      let identity = parseEnclaveIdentity(verifyCollateral(
-        PcsTdxQeIdentityJson, EnclaveIdentityMemberName, signerKey))
-      let e = evaluateTdxTcb(info, comps, p.platform.tcb.pceSvn, svns,
-        int(p.quote.qeReport.isvSvn), identity, true)
-      reachedTcbOutcomes.incl e.outcome
-      check e.skippedLeadingComponents ==
-        (if svns[TdxModuleMajorSvnIndex] > 0: 2 else: 0)
-      if e.skippedLeadingComponents notin skips:
-        skips.add e.skippedLeadingComponents
-      if svns[TdxModuleMajorSvnIndex] > 0 and e.isDetermined:
-        check e.moduleId == moduleIdFor(svns[TdxModuleMajorSvnIndex])
-        check e.moduleId == "TDX_01"
-      if svns[TdxModuleMajorSvnIndex] == 0:
-        check e.moduleId.len == 0
-    check skips.len == 2
-    check 0 in skips
-    check 2 in skips
+    driveTdxBothBranchesOfTheModuleRuleAreExercised()
 
   test "t_tdx_each_part_gets_the_status_the_vendor_s_document_implies":
-    # The values, pinned, against both vintages of the vendor's
-    # document for each part — so a build that read one of them and
-    # ignored the other is visible.
-    var evaluated = 0
-    var outcomes: seq[TdxCollateralOutcome] = @[]
-    for p in parts:
-      for vintage in p.tcbInfoVintages:
-        checkpoint p.label
-        let v = establishTdxTcbStatus(
-          bundleFor(vintage, PcsTdxQeIdentityJson), p.quote, p.platform)
-        check v.outcome == p.expectedOutcome
-        check v.status == p.expectedStatus
-        reachedCollateralOutcomes.incl v.outcome
-        if v.outcome notin outcomes: outcomes.add v.outcome
-        if v.isEstablished:
-          # A report carrying two version arrays is evaluated twice, and
-          # the second answer is reported separately. A build that
-          # evaluated one array twice would still fill both fields, so
-          # the case pins the arrays' own difference as well.
-          check p.quote.body.hasPreservedTcb
-          check v.currentStatus.len > 0
-          check v.launchStatus == TdxStatusUpToDate
-        else:
-          check v.status.len == 0
-        inc evaluated
-    check evaluated == 6
-    # Two different outcomes over three parts: a corpus in which every
-    # part answered the same way would exercise one path.
-    check outcomes.len == 2
+    driveTdxEachPartGetsTheStatusTheVendorSDocumentImplies()
 
   test "t_tdx_the_relaunch_rule_is_the_vendor_s":
     # Reachable only for a report carrying two version arrays, and the
@@ -608,232 +948,13 @@ suite "the vendor's evaluation":
     check demoted.status == TdxStatusOutOfDate
 
   test "t_tdx_four_rules_the_mutation_table_found_with_no_input":
-    # Each of these held as code and was never asked a question this
-    # corpus could answer. The inputs are query points over the
-    # vendor's own genuine documents; the documents are not touched.
-    let info = parseTdxTcbInfo(verifyCollateral(PcsTcbInfoEmrJson,
-      TcbInfoMemberName, signerKey))
-    let identity = parseEnclaveIdentity(verifyCollateral(
-      PcsTdxQeIdentityJson, EnclaveIdentityMemberName, signerKey))
-    var comps: seq[int] = @[]
-    for c in parts[1].platform.tcb.components: comps.add c
-    var svns: seq[int] = @[]
-    for b in gtgV5Quote.body.teeTcbSvn: svns.add int(b)
-    let qeSvn = int(gtgV5Quote.qeReport.isvSvn)
-    let pceSvn = parts[1].platform.tcb.pceSvn
-
-    # 1. The configuration enclave's version is compared against the
-    #    level. Every part in the corpus meets it or fails the
-    #    component comparison first, so the rule had no input; the
-    #    level it would otherwise match states 13 and this asks at 12.
-    check info.levels[0].pceSvn == 13
-    check pceSvn == 13
-    let atFloor = evaluateTdxTcb(info, comps, 13, svns, qeSvn,
-      identity, true)
-    check atFloor.isDetermined
-    check atFloor.levelIndex == 0
-    let belowFloor = evaluateTdxTcb(info, comps, 12, svns, qeSvn,
-      identity, true)
-    # A different level, and a different ANSWER: three of the four this
-    # vendor publishes for this platform state 13, and the fourth —
-    # which states 5 — is out of date. So the comparison is not merely
-    # made, it decides.
-    check belowFloor.levelIndex == 3
-    check belowFloor.isDetermined
-    check atFloor.platformStatus == TdxStatusUpToDate
-    check belowFloor.platformStatus == TdxStatusOutOfDate
-    check belowFloor.status != atFloor.status
-
-    # 2. The module identity is named the way the vendor names it. The
-    #    only version in the corpus is 1, whose two hexadecimal digits
-    #    carry no letter, so a build that lower-cased the name produced
-    #    the same string. Asked at a version that does.
-    check moduleIdFor(1) == "TDX_01"
-    check moduleIdFor(10) == "TDX_0A"
-    check moduleIdFor(255) == "TDX_FF"
-    var letteredVersion = svns
-    letteredVersion[TdxModuleMajorSvnIndex] = 10
-    let lettered = evaluateTdxTcb(info, comps, pceSvn, letteredVersion,
-      qeSvn, identity, true)
-    check lettered.outcome == ttoModuleIdentityNotPublished
-    check "TDX_0A" in lettered.detail
-    reachedTcbOutcomes.incl lettered.outcome
-
-    # 3. The second version array is READ, and it is the second one.
-    #    Both arrays of both wider reports answer alike in this corpus,
-    #    so a build that evaluated the first one twice agreed with one
-    #    that evaluated both. Asked at a launch version the vendor
-    #    calls out of date and a current one it calls up to date, which
-    #    is the shape the relaunch rule exists for.
-    var launchOld = svns
-    launchOld[TdxModuleMinorSvnIndex] = 6
-    let launchVerdict = evaluateTdxTcb(info, comps, pceSvn, launchOld,
-      qeSvn, identity, true)
-    let currentVerdict = evaluateTdxTcb(info, comps, pceSvn, svns,
-      qeSvn, identity, true)
-    check launchVerdict.status == TdxStatusOutOfDate
-    check currentVerdict.status == TdxStatusUpToDate
-    check checkForRelaunch(launchVerdict.status, currentVerdict.status) ==
-      TdxStatusTdRelaunchAdvised
-    # …and reading the launch array twice would say something else.
-    check checkForRelaunch(launchVerdict.status, launchVerdict.status) ==
-      TdxStatusOutOfDate
-
-    # 3b. …and the same, THROUGH the bundle, because the rule that
-    #     reads the second array lives there and a case that evaluates
-    #     twice from here never touches it. The report is built in this
-    #     gate rather than mutated on the wire: the two arrays have to
-    #     differ in their ANSWER, and editing them in a quote's bytes
-    #     would break the signature that quote's reader checks.
-    var twoArrays = gtgV5Quote
-    twoArrays.body.teeTcbSvn[TdxModuleMinorSvnIndex] = 6'u8
-    twoArrays.body.teeTcbSvn2[TdxModuleMinorSvnIndex] = 13'u8
-    check twoArrays.body.hasPreservedTcb
-    let relaunch = establishTdxTcbStatus(
-      bundleFor(PcsTcbInfoEmrJson, PcsTdxQeIdentityJson), twoArrays,
-      platformOf(gtgV5Quote))
-    check relaunch.isEstablished
-    check relaunch.launchStatus == TdxStatusOutOfDate
-    check relaunch.currentStatus == TdxStatusUpToDate
-    check relaunch.relaunchApplied
-    check relaunch.status == TdxStatusTdRelaunchAdvised
-    reachedCollateralOutcomes.incl relaunch.outcome
-
-    # 4. The collateral signer verifies under its issuer. Nothing in
-    #    the corpus was a signer the root had not signed, so the rule
-    #    had no input; one moved bit gives it one.
-    var bentSigner = signerDer
-    bentSigner[bentSigner.len - 10] = bentSigner[bentSigner.len - 10] xor
-      0x08'u8
-    check parseCertificate(bentSigner).publicKey ==
-      parseCertificate(signerDer).publicKey
-    var b = bundleFor(PcsTcbInfoEmrJson, PcsTdxQeIdentityJson)
-    b.signerDer = bentSigner
-    let v = establishTdxTcbStatus(b, gtgV5Quote, platformOf(gtgV5Quote))
-    check v.outcome == tcoSignerChainIsNotIntels
-    check "does not verify under" in v.detail
-    reachedCollateralOutcomes.incl v.outcome
+    driveTdxFourRulesTheMutationTableFoundWithNoInput()
 
   test "t_tdx_every_bundle_refusal_has_an_input":
-    let good = parts[1]
-    var outcomes = 0
-
-    # The platform document is for a different part.
-    block:
-      let v = establishTdxTcbStatus(
-        bundleFor(PcsTcbInfoSprJson, PcsTdxQeIdentityJson),
-        good.quote, good.platform)
-      check v.outcome == tcoTcbInfoIsNotForThisPlatform
-      check "50806f000000" in v.detail
-      check "90c06f000000" in v.detail
-      reachedCollateralOutcomes.incl v.outcome
-      inc outcomes
-
-    # The identity document describes the vendor's OTHER enclave.
-    block:
-      let v = establishTdxTcbStatus(
-        bundleFor(PcsTcbInfoEmrJson, PcsSgxQeIdentityJson),
-        good.quote, good.platform)
-      check v.outcome == tcoEnclaveIdentityIsNotForTrustDomainQuoting
-      check "\"QE\"" in v.detail
-      reachedCollateralOutcomes.incl v.outcome
-      inc outcomes
-
-    # The signing chain is not the vendor's.
-    block:
-      var b = bundleFor(PcsTcbInfoEmrJson, PcsTdxQeIdentityJson)
-      b.signerIssuerDer = bytesOfHex(ImpostorRootDerHex)
-      let v = establishTdxTcbStatus(b, good.quote, good.platform)
-      check v.outcome == tcoSignerChainIsNotIntels
-      check "not the one root this build was built with" in v.detail
-      reachedCollateralOutcomes.incl v.outcome
-      inc outcomes
-
-    # A platform document the vendor's signer did not sign.
-    block:
-      var b = bundleFor(PcsTcbInfoEmrJson, PcsTdxQeIdentityJson)
-      b.tcbInfoJson = b.tcbInfoJson.replace("\"UpToDate\"", "\"OutOfDate\"")
-      check b.tcbInfoJson != PcsTcbInfoEmrJson
-      let v = establishTdxTcbStatus(b, good.quote, good.platform)
-      check v.outcome == tcoTcbInfoNotSignedByTheSigner
-      reachedCollateralOutcomes.incl v.outcome
-      inc outcomes
-
-    # An identity document the vendor's signer did not sign.
-    block:
-      var b = bundleFor(PcsTcbInfoEmrJson, PcsTdxQeIdentityJson)
-      b.enclaveIdentityJson =
-        b.enclaveIdentityJson.replace("\"UpToDate\"", "\"OutOfDate\"")
-      let v = establishTdxTcbStatus(b, good.quote, good.platform)
-      check v.outcome == tcoEnclaveIdentityNotSignedByTheSigner
-      reachedCollateralOutcomes.incl v.outcome
-      inc outcomes
-
-    # No level covers the part. A GENUINE outcome: the Sapphire Rapids
-    # part is below every level the vendor publishes for its platform,
-    # under both vintages, and this is what a verifier says about it.
-    block:
-      let v = establishTdxTcbStatus(
-        bundleFor(PcsTcbInfoSprJson, PcsTdxQeIdentityJson),
-        sprQuote, parts[0].platform)
-      check v.outcome == tcoNoLevelCoversThisPlatform
-      check "none of the 6 levels" in v.detail
-      reachedCollateralOutcomes.incl v.outcome
-      inc outcomes
-
-    # A quoting enclave the identity does not describe, reached through
-    # the bundle rather than through the rule alone.
-    block:
-      var q = good.quote
-      q.qeReport.mrSigner[0] = q.qeReport.mrSigner[0] xor 0xff'u8
-      let v = establishTdxTcbStatus(
-        bundleFor(PcsTcbInfoEmrJson, PcsTdxQeIdentityJson), q,
-        good.platform)
-      check v.outcome == tcoQuotingEnclaveDisagreesWithItsIdentity
-      reachedCollateralOutcomes.incl v.outcome
-      inc outcomes
-
-    check outcomes == 7
+    driveTdxEveryBundleRefusalHasAnInput()
 
   test "t_tdx_the_three_remaining_evaluation_refusals_have_inputs":
-    # The three the case above sets aside, each given an input here so
-    # that none of them is a rule with no reachable input.
-    let info = parseTdxTcbInfo(verifyCollateral(PcsTcbInfoEmrJson,
-      TcbInfoMemberName, signerKey))
-    let identity = parseEnclaveIdentity(verifyCollateral(
-      PcsTdxQeIdentityJson, EnclaveIdentityMemberName, signerKey))
-    var comps: seq[int] = @[]
-    for c in parts[1].platform.tcb.components: comps.add c
-    var svns: seq[int] = @[]
-    for b in gtgV5Quote.body.teeTcbSvn: svns.add int(b)
-    let pceSvn = parts[1].platform.tcb.pceSvn
-
-    # A module major version for which the vendor publishes no identity.
-    var unknownModule = svns
-    unknownModule[TdxModuleMajorSvnIndex] = 9
-    let a = evaluateTdxTcb(info, comps, pceSvn, unknownModule,
-      int(gtgV5Quote.qeReport.isvSvn), identity, true)
-    check a.outcome == ttoModuleIdentityNotPublished
-    check "TDX_09" in a.detail
-    reachedTcbOutcomes.incl a.outcome
-
-    # A module minor version below every level the identity publishes.
-    var oldModule = svns
-    oldModule[TdxModuleMinorSvnIndex] = 1
-    let b = evaluateTdxTcb(info, comps, pceSvn, oldModule,
-      int(gtgV5Quote.qeReport.isvSvn), identity, true)
-    check b.outcome == ttoNoModuleLevelCoversThisVersion
-    reachedTcbOutcomes.incl b.outcome
-
-    # A quoting enclave below every level ITS identity publishes.
-    let c = evaluateTdxTcb(info, comps, pceSvn, svns, 0, identity, true)
-    check c.outcome == ttoNoEnclaveLevelCoversThisVersion
-    reachedTcbOutcomes.incl c.outcome
-
-    var missing: seq[string] = @[]
-    for k in TdxTcbOutcome:
-      if k notin reachedTcbOutcomes: missing.add $k
-    check missing.len == 0
+    driveTdxTheThreeRemainingEvaluationRefusalsHaveInputs()
 
 # ---------------------------------------------------------------------
 # The verifier's trust-domain arm
@@ -1137,34 +1258,14 @@ suite "the reader is behind the signature":
     check info.levels.len == 4
 
   test "t_tdx_the_vendor_s_document_for_the_other_environment_is_refused":
-    # A genuine, vendor-signed platform document whose execution
-    # environment is not a trust domain: its levels carry no
-    # trust-domain component array, so reading it as one names the
-    # field that is absent rather than guessing at a default.
-    let sgx = verifyCollateral(PcsSgxTcbInfoJson, TcbInfoMemberName,
-      signerKey)
-    check sgx.isVerified
-    let before = refusalsObserved
-    expectCollateralRefusal(tceRequiredFieldMissing):
-      discard parseTdxTcbInfo(sgx)
-    check refusalsObserved == before + 1
-    # Its own `id` says which environment it describes, and that is
-    # read out of the signed span BEFORE the reader for one environment
-    # runs — so the bundle refuses on the identity and not on a field
-    # that happens to be missing from it.
-    check statedCollateralId(sgx) == "SGX"
-    check statedCollateralId(verifyCollateral(PcsTcbInfoEmrJson,
-      TcbInfoMemberName, signerKey)) == TdxTcbInfoIdTdx
-    check statedCollateralId(VerifiedCollateral()) == ""
-    var b = bundleFor(PcsSgxTcbInfoJson, PcsTdxQeIdentityJson)
-    let verdict = establishTdxTcbStatus(b, gtgV5Quote,
-      platformOf(gtgV5Quote))
-    check verdict.outcome == tcoTcbInfoIsNotForTrustDomains
-    check "\"SGX\"" in verdict.detail
-    check "tdxtcbcomponents" notin verdict.detail
-    reachedCollateralOutcomes.incl verdict.outcome
+    driveTdxTheVendorSDocumentForTheOtherEnvironmentIsRefused()
 
   test "t_tdx_every_collateral_refusal_kind_that_can_be_reached_was":
+    # Driven HERE, in this process: the census case above resets every
+    # reached set, drives every case that fills one, and then reaches the
+    # three evaluation refusals — the runner executes each case in its own
+    # process, so this case observes only what it runs itself.
+    driveTdxTheThreeRemainingEvaluationRefusalsHaveInputs()
     # Three kinds are NOT reached, and the reason is one reason, stated
     # once: every one of them is a rule about the SHAPE of a document
     # the vendor signed, and the reader they live in cannot be called
@@ -1189,6 +1290,11 @@ suite "the reader is behind the signature":
     writeCensus()
 
   test "t_tdx_every_outcome_that_can_be_reached_offline_was":
+    # Driven HERE, in this process: the census case above resets every
+    # reached set, drives every case that fills one, and then reaches the
+    # three evaluation refusals — the runner executes each case in its own
+    # process, so this case observes only what it runs itself.
+    driveTdxTheThreeRemainingEvaluationRefusalsHaveInputs()
     var missing: seq[string] = @[]
     for k in TdxCollateralOutcome:
       if k == tcoCollateralIsNotCurrent: continue

@@ -94,21 +94,19 @@ proc envFor(c: M7Case): StringTableRef =
   result["REPRO_MONITOR_SHIM_LIB"] = c.shim
 
 proc runProgram(program: string; args: openArray[string]; cwd: string;
-                env: StringTableRef = nil): tuple[exitCode: int; output: string] =
-  var process = startProcess(program,
-    args = @args,
-    workingDir = cwd,
-    env = env,
-    options = {poUsePath, poStdErrToStdOut})
-  let output =
-    if process.outputStream != nil: process.outputStream.readAll()
-    else: ""
-  let exitCode = process.waitForExit()
-  process.close()
-  (exitCode: exitCode, output: output)
+                env: StringTableRef = nil):
+    tuple[exitCode: int; output, errors: string] =
+  ## ``output`` is the child's STDOUT only; ``errors`` is its stderr. They
+  ## are kept apart because stdout is what the assertions parse -- a value
+  ## the command under ``repro exec`` printed, or a ``--print-env`` script
+  ## that gets sourced -- while every activating surface reports its
+  ## progress ("repro dev-env: preparing the environment for ...",
+  ## Interactive-UX-And-Progress.md Principle 1) on stderr.
+  let res = runProgramSplit(program, args, cwd, env)
+  (exitCode: res.code, output: res.stdout, errors: res.stderr)
 
 proc runRepro(c: M7Case; args: openArray[string]; cwd = ""):
-    tuple[exitCode: int; output: string] =
+    tuple[exitCode: int; output, errors: string] =
   runProgram(c.reproBin, args,
     if cwd.len > 0: cwd else: c.repoRoot, c.envFor())
 
@@ -117,7 +115,7 @@ proc requireRepro(c: M7Case; args: openArray[string]; cwd = ""): string =
   if res.exitCode != 0:
     raise newException(OSError,
       "repro command failed with exit " & $res.exitCode & ": " &
-        args.join(" ") & "\n" & res.output)
+        args.join(" ") & "\n" & res.output & res.errors)
   res.output
 
 proc firstNonEmptyLine(text: string): string =

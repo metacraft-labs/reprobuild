@@ -49,7 +49,10 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
   let daemon = startProcess(daemonBin, args = [
     "--socket", socketPath,
     "--cpu-milli", "16000",
-    "--memory-bytes", "17179869184"
+    "--memory-bytes", "17179869184",
+    # Test daemon: keep it out of the host-wide observation store, which
+    # it would otherwise open (and write) before it binds its socket.
+    "--no-write-stats"
   ], options = {poUsePath})
   putEnv("RUNQUOTA_SOCKET", socketPath)
   for _ in 0 ..< 200:
@@ -144,6 +147,23 @@ suite "m54_verified_tarball_profile":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m54-tarball", "")
       defer: removeDir(tempRoot)
+
+      # Keep every `repro build` below off the developer's shared binary
+      # cache. A realized tool prefix is substitutable by its identity
+      # (package, version, host, artifact sha256, layout -- deliberately NOT
+      # the URL), so once the good archive's prefix has been published, the
+      # corrupt-mirror project below -- which declares that SAME sha256 -- is
+      # correctly served the verified prefix with no download, and never
+      # reaches the mismatch this case exists to observe. It would also
+      # publish this fixture tool to a real, shared cache. The other tarball
+      # tests (t_tarball_prune_paths, t_msi_archive_type, ...) opt out the
+      # same way.
+      let savedCacheDisable = (existsEnv("REPRO_CACHE_DISABLE"),
+        getEnv("REPRO_CACHE_DISABLE"))
+      putEnv("REPRO_CACHE_DISABLE", "1")
+      defer:
+        if savedCacheDisable[0]: putEnv("REPRO_CACHE_DISABLE", savedCacheDisable[1])
+        else: delEnv("REPRO_CACHE_DISABLE")
 
       let reproBin = reproBinary()
 

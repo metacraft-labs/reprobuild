@@ -114,7 +114,77 @@ package nim:
 
   executable nim:
     cli:
-      dependencyPolicy automaticMonitor
+      # DA-6 — THE CAPTURE-BREADTH DECLARATION, made HERE, on the tool, once.
+      #
+      # THE CLAIM: a `nim` action asks io-mon for every event category EXCEPT
+      # `ecAmbientReads` — that is, everything but `mrTimeRead` and
+      # `mrSysctlRead`.
+      #
+      # WHY IT IS TRUE. Nothing about nim's own irreproducibility is witnessed
+      # by a clock or a sysctl read, and everything that is witnessed by
+      # something else is still captured:
+      #
+      #   * nim emits NO DEPFILE, so monitoring is the only source of this
+      #     edge's input set. `ecFileReads`, `ecPathProbes`, `ecProcessTree`
+      #     (nim drives gcc and ld, and `seen.execImageByPid` is what
+      #     attributes their records) and `ecLibraryLoads` are all kept, and
+      #     they are the reason this declaration is a narrowing of ONE
+      #     category rather than of the compile-cost bulk. The bulk is not
+      #     droppable; it is the evidence.
+      #   * `ecEnvReads` is kept because `cacheEnvInputs` folds every
+      #     `mrEnvRead` into the action's STRONG FINGERPRINT. nim reads
+      #     `NIM_*`, `XDG_CACHE_HOME`, `HOME` and `PATH`, none of which appear
+      #     in the argv; dropping the category would key one action identically
+      #     for every value of them.
+      #   * `ecEntropy` is kept, and on this tool that is the load-bearing one:
+      #     nim is ENTROPY-BLESSED (see the block directly below), and a
+      #     blessing is applied by `applyEntropyBlessingPolicy` reading the
+      #     `mrNonDeterministic` records. Narrowing this category would remove
+      #     exactly the evidence the blessing is applied TO — the blessing
+      #     would still be declared, `entropyObservability` would still say
+      #     `entObserved` (the backend-profile record is META and is never
+      #     gated) and the observations would be empty, which is verbatim the
+      #     "observable, and nothing observed" false clean the policy exists to
+      #     refuse. A declaration that narrowed it would silently un-bless nim
+      #     by making the blessing unreachable rather than by revoking it.
+      #   * `mrIpcConnect` / `mrExternalContent` are not gate-able at all
+      #     (DA-5), so nothing here can affect completeness grading.
+      #
+      # WHAT IS LEFT is the ambient pair, and for NIM specifically they witness
+      # nothing. nim's randomness is entropy (`getrandom`, blessed below) and
+      # its temp names derive from the module path and the `--out:` /
+      # `--nimcache:` arguments, all of which are in the argv and therefore in
+      # the cache key. nim has no `__DATE__` analogue reachable without a
+      # source-level `CompileDate`, and a recipe whose SOURCE embeds
+      # `CompileDate` is irreproducible in a way no interest set catches, on
+      # either side of this declaration.
+      #
+      # SCOPE AND COST. It changes what is ASKED FOR, not what is trusted: the
+      # required side is derived from the same answer
+      # (`monitorEvidenceRequirement` reads `monitorInterest`), so the two stay
+      # consistent by construction and an older capture stamped with full
+      # interest still covers this narrower requirement. It does not touch the
+      # evidence-scope axis (`--evidence`, an operator choice), it does not
+      # touch the entropy blessing, and it changes no cache KEY — the ambient
+      # records never reached a key, because both kinds land on
+      # `foldOneMonitorRecord`'s `else: discard` arm.
+      #
+      # WHAT IT IS WORTH. DA-5 priced the same narrowing live on a
+      # `bash -c 'date; ls /usr'` capture at 135 -> 132 records (2.2%), both
+      # arms `mcComplete` / 0 losses. On a `nim c` the absolute figure is what
+      # motivates it: one measured full monitored `nim c` (nim driving gcc and
+      # ld) produced 25 206 records, and 66 996 on a larger one.
+      #
+      # THIS DECLARATION DOES NOT REACH `nim.c`. The hand-written `nim.c` alias
+      # below routes its policy through `compileDependencyPolicy`, which builds
+      # a fresh value and drops whatever is written here — the same route the
+      # entropy blessing had to bypass (see `tests/t_nim_entropy_blessing.nim`'s
+      # header). So the declaration is repeated there, in code, and
+      # `reprobuild/tests/integration/t_da6_tool_capture_breadth_declarations.nim`
+      # asserts BOTH arms because one
+      # assertion would leave the other open.
+      dependencyPolicy automaticMonitor,
+        captureBreadth = omitAmbientReads
 
       # Windows-Build-Correctness M6 — the entropy blessing, declared HERE,
       # on the tool, once. Every ``nim.c(...)`` and ``nim.js(...)`` edge in
@@ -390,8 +460,29 @@ proc compileDependencyPolicy(cacheDir: string;
     # side's materialization, nim edges' keys change once — which is a
     # cache invalidation, not a correctness change, and is the same
     # principle S5 established for an action's own declared output.
-    return defaultDependencyPolicy(@[cacheDir])
-  makeDepfilePolicy(cacheDir / "nim-compile.d")
+    #
+    # DA-6 — `captureBreadth` is repeated HERE because this proc is the route a
+    # `nim.c` edge's policy actually takes, and the `dependencyPolicy` written
+    # in the `cli:` block above does not survive it: the early return two lines
+    # up hands back a caller-supplied policy untouched, and this line builds a
+    # FRESH value for the default case, so nothing the `cli:` block says
+    # reaches a `nim.c` edge. That is the same route the entropy blessing had to
+    # bypass (`tests/t_nim_entropy_blessing.nim`'s header records it), and it is
+    # why the declaration is stated twice rather than once. The ARGUMENT lives
+    # at the `cli:` block; in one line, nothing about nim's own
+    # irreproducibility is witnessed by `mrTimeRead` / `mrSysctlRead`, and every
+    # category that IS read by a consumer — file reads, probes, process tree,
+    # library loads, env reads keyed by `cacheEnvInputs`, and the entropy
+    # `applyEntropyBlessingPolicy` needs in order to apply nim's blessing at
+    # all — is kept.
+    return defaultDependencyPolicy(@[cacheDir],
+      captureBreadth = mcbOmitAmbientReads)
+  # The non-cacheable arm is a DEPFILE policy, so it is outside
+  # `MonitorPolicyKinds` and not monitored at all; the declaration rides along
+  # anyway so that an edge switched between the two arms does not silently
+  # change what it would ask for if it were.
+  makeDepfilePolicy(cacheDir / "nim-compile.d",
+    captureBreadth = mcbOmitAmbientReads)
 
 # ---------------------------------------------------------------------------
 # L3 PUBLISH-SCOPE — public-interface publishing for hand-authored
