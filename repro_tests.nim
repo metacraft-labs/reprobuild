@@ -2511,6 +2511,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim",
+    binary: "build/test-bin/t_installed_layout_source_roots",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_reprobuild_source_root_from_binary_location.nim",
     binary: "build/test-bin/t_reprobuild_source_root_from_binary_location",
     defines: @[],

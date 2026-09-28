@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1750,
+    "nimTestBinaries": 1751,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 584,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1763
+    "testEntries": 1764
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1073,7 +1073,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 896,
+      "integration": 897,
       "platform/destructive": 115,
       "pure unit": 584,
       "unclassified": 157
@@ -1224,9 +1224,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1750,
+    "nimTestBinaryCount": 1751,
     "pythonTestFileCount": 13,
-    "testEntryCount": 1763
+    "testEntryCount": 1764
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10011,13 +10011,14 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_dsl_stdlib",
+        "repro_interface_artifacts",
         "repro_project_dsl"
       ],
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": true,
       "source": "libs/repro_dsl_stdlib/tests/t_packaging_reprobuild_dist.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 25,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -11259,6 +11260,23 @@
       "source": "libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_installed_layout_source_roots",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -213,7 +213,7 @@ libs/repro_dsl_stdlib/tests/t_packaging_engine_has_no_format_knowledge.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_packaging_launchd_renderer.nim	nim	13
 libs/repro_dsl_stdlib/tests/t_packaging_msi_authoring.nim	nim	17
 libs/repro_dsl_stdlib/tests/t_packaging_producer_tool_dependencies.nim	nim	15
-libs/repro_dsl_stdlib/tests/t_packaging_reprobuild_dist.nim	nim	25
+libs/repro_dsl_stdlib/tests/t_packaging_reprobuild_dist.nim	nim	26
 libs/repro_dsl_stdlib/tests/t_packaging_rpm_authoring.nim	nim	26
 libs/repro_dsl_stdlib/tests/t_packaging_runtime_closure.nim	nim	27
 libs/repro_dsl_stdlib/tests/t_packaging_runtime_contract_once.nim	nim	11
@@ -281,6 +281,7 @@ libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.ni
 libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
 libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim	nim	12
+libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim	nim	5
 libs/repro_interface_artifacts/tests/t_multi_package_merge.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_source_discovery.nim	nim	3
