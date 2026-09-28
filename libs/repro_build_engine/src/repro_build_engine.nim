@@ -7712,11 +7712,26 @@ proc ignoredInputRoots(action: BuildAction): seq[string] =
   ## latter would put a syscall on the hot comparison. A root that does not
   ## exist yet simply contributes its literal spelling, which is what it
   ## does today.
+  ##
+  ## Only an ABSOLUTE root is resolved. ``expandFilename`` resolves a relative
+  ## path against THIS PROCESS's working directory, which is not the action's
+  ## ``cwd`` and has nothing to do with the recipe: a relative ``build/bin``
+  ## prefix became ``<engine cwd>/build/bin`` whenever the engine happened to
+  ## run where such a directory exists, adding an absolute root the recipe
+  ## never wrote. On the input side that ignores reads under an unrelated
+  ## tree; in ``honouredDerivedPrefixes`` it is a prefix disjoint from the
+  ## product, so the restore gate honoured a declaration it is meant to refuse
+  ## (``test_s7_cached_output_restore_mode``, "a derived prefix disjoint from
+  ## the product is still honoured", failed exactly when run from a checkout
+  ## with a ``build/bin``). A relative root keeps its literal spelling only,
+  ## which is what it did before symlinked spellings were added.
   for prefix in action.dependencyPolicy.ignoredInputPrefixes:
     let expanded = action.expandPolicyPath(prefix)
     if expanded.len == 0:
       continue
     result.add(expanded)
+    if not expanded.isAbsolute:
+      continue
     try:
       let resolved = expandFilename(expanded)
       if resolved.len > 0 and resolved != expanded:
@@ -12824,6 +12839,14 @@ proc unresolvableScriptInterpreter*(path: string): string =
     let words = first[2 .. ^1].splitWhitespace()
     # Diagnose the simple env shebang used by the source helper. Other env
     # option forms remain env's responsibility.
+    #
+    # An AMBIENT lookup on purpose, and the only one in this library: `env`
+    # will resolve this name through the spawning process's PATH, so PATH is
+    # exactly the question. The answer is only ever diagnostic text -- the
+    # path it finds is never executed -- so it is pinned as a PROBE, not a
+    # launch path, in `t_every_launch_path_is_monitored`'s spawn-primitive
+    # census (whose import rule keeps `ambient_execution`'s escape hatch out
+    # of this module, hence the stdlib name).
     if words.len == 2 and not words[1].startsWith("-") and
         findExe(words[1]).len == 0:
       return words[1] & " (not found on PATH)"

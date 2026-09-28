@@ -823,6 +823,24 @@ proc imageDigestCachePath(config: UserDaemonConfig; imagePath: string): string =
   config.stateDir / "image-digests" /
     (safePathSegment(imagePath, "image") & ".digest")
 
+const imageDigestRacyWindowNs = 2_000_000_000'i64
+  ## How long an image must have been untouched, before its hash began, for a
+  ## memoized digest of it to be trusted. Two seconds covers the coarsest
+  ## mtime granularity in common use (FAT's 2 s) with the Linux coarse clock's
+  ## few-millisecond lag far inside it. See ``cachedImageDigestHex``.
+
+proc nowUnixNs(): int64 =
+  let current = getTime()
+  current.toUnix * 1_000_000_000'i64 + int64(current.nanosecond)
+
+proc fileMtimeUnixNs(path: string): int64 =
+  ## 0 when unknown; callers treat 0 as "not quiescent".
+  try:
+    let written = getFileInfo(path, followSymlink = true).lastWriteTime
+    written.toUnix * 1_000_000_000'i64 + int64(written.nanosecond)
+  except OSError, IOError:
+    0
+
 proc cachedImageDigestHex(config: UserDaemonConfig; imagePath: string): string =
   ## `imageDigestHex` memoized on `fileIdentityStamp`.
   ##
@@ -851,6 +869,21 @@ proc cachedImageDigestHex(config: UserDaemonConfig; imagePath: string): string =
   ##   stamp NEVER consults the cache. A probe failure must not be able to
   ##   make a stale daemon look current, which is the one direction that
   ##   matters: the comparison exists to catch a daemon running old code.
+  ## * A stamp CANNOT separate two writes that land in one timestamp tick.
+  ##   The kernel stamps mtime from a coarse clock (a jiffy on Linux, so
+  ##   several milliseconds), so "nanosecond resolution" is the field's width,
+  ##   not its precision. An in-place rewrite of the same size within that
+  ##   tick keeps device, inode, size AND mtime, and the memo answered the
+  ##   old digest: ``t_daemon_image_digest_cache``'s same-size case failed
+  ##   about 1 run in 8, alone and in the suite. So an entry also records when
+  ##   its hash STARTED, and is trusted only for an image that was already
+  ##   quiescent then -- its mtime older than that instant by
+  ##   ``imageDigestRacyWindowNs``. That is git's "racily clean" rule: a
+  ##   write after the hash began carries an mtime no earlier than the
+  ##   hash's start minus the clock's lag, so it can never be mistaken for
+  ##   the stamp of a file that had already been still for longer than the
+  ##   window. The cost is one extra hash of a freshly rebuilt image, until
+  ##   it has sat for the window.
   ##
   ## WHY NOT ASK THE DAEMON FOR ITS OWN HASH, which looks cheaper still: the
   ## daemon's `runningHash` covers a DIFFERENT FILE. It digests the STAGED
@@ -860,21 +893,27 @@ proc cachedImageDigestHex(config: UserDaemonConfig; imagePath: string): string =
   ## digest would answer from its own init-time reading, which agrees with
   ## its own running hash by construction -- self-confirming, and a daemon
   ## that could never look stale is the failure this check exists to prevent.
+  let hashStartedNs = nowUnixNs()
   let stamp = fileIdentityStamp(imagePath)
   if stamp.len == 0:
     return imageDigestHex(imagePath)
+  let mtimeNs = fileMtimeUnixNs(imagePath)
   let cachePath = imageDigestCachePath(config, imagePath)
   try:
     let cached = readFile(cachePath).splitLines()
-    if cached.len >= 2 and cached[0] == stamp and cached[1].len > 0:
-      return cached[1]
+    if cached.len >= 3 and cached[0] == stamp and cached[1].len > 0:
+      let entryHashStartedNs = parseBiggestInt(cached[2])
+      if mtimeNs > 0 and
+          mtimeNs < entryHashStartedNs - imageDigestRacyWindowNs:
+        return cached[1]
   except CatchableError:
     discard
   result = imageDigestHex(imagePath)
   if result.len > 0:
     try:
       createDir(parentDir(cachePath))
-      atomicWriteTextFile(cachePath, stamp & "\n" & result & "\n")
+      atomicWriteTextFile(cachePath,
+        stamp & "\n" & result & "\n" & $hashStartedNs & "\n")
     except CatchableError:
       # A cache that cannot be written must not fail the build; the next
       # invocation simply re-derives. Deliberately silent for that reason.

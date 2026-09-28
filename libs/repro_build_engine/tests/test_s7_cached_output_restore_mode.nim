@@ -532,6 +532,27 @@ suite "S7 the CAS-restore configuration is reachable and gated":
       automaticMonitorGatheringPolicy(@["build/bin"])
     check overreaching.honouredDerivedPrefixes().len == 0
 
+    # And the verdict is about the ACTION, not about where the engine process
+    # happens to be running. A relative prefix was once resolved through
+    # symlinks against the PROCESS's working directory, which added an
+    # unrelated `<process cwd>/build/bin` root -- disjoint from the product,
+    # so honoured -- whenever such a directory existed there, i.e. whenever
+    # the suite ran from a checkout. Asserted from both kinds of working
+    # directory, so the case cannot pass merely because of where it ran.
+    let elsewhere = createTempDir("repro-s7-cwd", "")
+    defer: removeDir(elsewhere)
+    createDir(elsewhere / "with-build-bin" / "build" / "bin")
+    createDir(elsewhere / "without-build-bin")
+    let originalCwd = getCurrentDir()
+    for cwdName in ["with-build-bin", "without-build-bin"]:
+      setCurrentDir(elsewhere / cwdName)
+      try:
+        checkpoint("process cwd: " & cwdName)
+        check overreaching.honouredDerivedPrefixes().len == 0
+        check act.honouredDerivedPrefixes().len == 1
+      finally:
+        setCurrentDir(originalCwd)
+
   test "a hermetic action stores blobs and RESTORES a deleted output":
     ## The property the milestone is about, through the real ``runBuild``
     ## with the gate ON. If the gate blocked this, the whole feature would

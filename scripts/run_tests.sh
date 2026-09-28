@@ -82,6 +82,20 @@ source scripts/test_parallelism.sh
 # requirement is scoped to the platforms where the flake provides one.
 # REPROBUILD_SKIP_DEV_SHELL_CHECK=1 is the documented escape for a deliberately
 # different toolchain; it is not a way to silence a mistake.
+#
+# The remedy it prints is the repository's own entry point, `repro exec`,
+# which activates exactly the dev environment `repro.nim`'s `devEnv:` declares
+# (its own develop set of sibling overrides, not every same-named sibling a
+# generic flake-override plugin would substitute). The language-convention
+# toolchains are the opt-in `test-toolchains` activity, which is why the hint
+# names it: without it those cases skip rather than fail.
+repro_dev_env_hint() {
+  printf '  Run it through the repository'"'"'s dev environment:\n' >&2
+  printf '      repro exec -- just test\n' >&2
+  printf '  or, with the language-convention toolchains (Go, Rust, .NET, ...):\n' >&2
+  printf '      repro exec --activity=test-toolchains -- just test\n' >&2
+  printf '  (`./build/bin/repro` after `just bootstrap` if the installed repro lags.)\n' >&2
+}
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT) ;;
   *)
@@ -89,9 +103,9 @@ case "$(uname -s)" in
       resolved_nim="$(command -v nim 2>/dev/null || true)"
       if [[ -z "${resolved_nim}" ]]; then
         printf 'run_tests.sh: refusing: no `nim` on PATH.\n' >&2
-        printf '  This suite needs the CodeTracer Nim fork from the dev shell.\n' >&2
-        printf '  Run it as:  direnv exec . bash ./scripts/run_tests.sh\n' >&2
-        printf '  (or `nix develop` first). To override: REPROBUILD_SKIP_DEV_SHELL_CHECK=1\n' >&2
+        printf '  This suite needs the CodeTracer Nim fork from the dev environment.\n' >&2
+        repro_dev_env_hint
+        printf '  To override: REPROBUILD_SKIP_DEV_SHELL_CHECK=1\n' >&2
         exit 1
       fi
       resolved_nim_real="$(readlink -f "${resolved_nim}" 2>/dev/null || printf '%s' "${resolved_nim}")"
@@ -100,9 +114,9 @@ case "$(uname -s)" in
         printf '  resolved: %s\n' "${resolved_nim_real}" >&2
         printf '  version:  %s\n' "$("${resolved_nim}" --version 2>/dev/null | head -1)" >&2
         printf '  The suite is built and asserted against the fork; a stock Nim\n' >&2
-        printf '  compiles a different program. Run it as:\n' >&2
-        printf '      direnv exec . bash ./scripts/run_tests.sh\n' >&2
-        printf '  (or `nix develop` first). To override: REPROBUILD_SKIP_DEV_SHELL_CHECK=1\n' >&2
+        printf '  compiles a different program.\n' >&2
+        repro_dev_env_hint
+        printf '  To override: REPROBUILD_SKIP_DEV_SHELL_CHECK=1\n' >&2
         exit 1
       fi
     fi
@@ -620,6 +634,16 @@ printf 'Executing tests with %s worker(s); nested builds get REPROBUILD_MAX_PARA
 # it with their own lookup ($CT_TEST, then `ct-test`, then `ct`) precisely
 # because it must not be confused with this one. When `ct test run` gains a
 # Nim provider that can execute, this block is where that lands.
+# The runner executes every `t_*`/`test_*` executable in --bin-dir; it does
+# not read repro_tests.nim. A cold run wiped build/test-bin above, so the
+# directory holds exactly what `.#test-builds` declared. A warm run
+# (REPROBUILD_TEST_WARM_REUSE=1) kept it, and with it the binaries of tests an
+# earlier revision declared and this one no longer does -- which would
+# otherwise keep running, from stale bytes, and be counted. Reconcile the
+# directory with this revision's declaration before the runner walks it. Run on
+# both arms: on a cold run it is a no-op, and a no-op that is exercised is one
+# that is known to work.
+python3 scripts/prune_undeclared_test_binaries.py --root . --bin-dir build/test-bin >&2
 ct_test_runner="${CT_TEST_RUNNER:-}"
 if [[ -z "${ct_test_runner}" ]]; then
   ct_test_runner="$(command -v "ct-test-runner${exe_ext}" 2>/dev/null || true)"
