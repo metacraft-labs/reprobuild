@@ -553,6 +553,12 @@ jobs:
             cp -a build/bin/* "${pkg_name}/bin/"
             cp -a build/lib/* "${pkg_name}/lib/"
 
+            # The sources an installed reprobuild compiles every project
+            # against (share/repro/source + share/repro/src). Without them
+            # the archive cannot run the first compile of ANY project:
+            # cannot open file: repro_interface_artifacts.
+            bash scripts/release/stage_release_sources.sh "${pkg_name}"
+
             # Make the tree run OFF nix: raw-copied release binaries carry a
             # nix-store ELF interpreter (linux) / install names (darwin) and do
             # not bundle their runtime libs, so the tarball fails the ubuntu
@@ -564,6 +570,7 @@ jobs:
             tar -czf "${pkg_name}.tar.gz" "${pkg_name}"
             echo "ASSET_PATH=${pkg_name}.tar.gz" >> "$GITHUB_ENV"
             echo "ASSET_NAME=${pkg_name}.tar.gz" >> "$GITHUB_ENV"
+            echo "PKG_NAME=${pkg_name}" >> "$GITHUB_ENV"
           '
 
       - name: Package release assets (Windows)
@@ -577,7 +584,25 @@ jobs:
           New-Item -ItemType Directory -Force -Path "${pkg_name}\lib"
           Copy-Item -Path "build\bin\*" -Destination "${pkg_name}\bin\" -Recurse
           Copy-Item -Path "build\lib\*" -Destination "${pkg_name}\lib\" -Recurse
+          Add-Content -Path $env:GITHUB_ENV -Value "PKG_NAME=${pkg_name}"
 
+      # The sources an installed reprobuild compiles every project against
+      # (share\repro\source + share\repro\src). v0.2.0 shipped without them,
+      # and every `repro exec` / `dev-exec` from the unpacked zip died at its
+      # first compile: cannot open file: repro_interface_artifacts. The siblings
+      # resolve from the checkouts setup-dev-env cloned beside this repository
+      # (and ../nim-bearssl, cloned above). A `shell: bash` step rather than
+      # `bash` from pwsh, so it is Git for Windows' bash and never WSL's.
+      - name: Stage installed-compile sources (Windows)
+        if: matrix.os-name == 'windows'
+        shell: bash
+        run: bash scripts/release/stage_release_sources.sh "${PKG_NAME}"
+
+      - name: Compress release archive (Windows)
+        if: matrix.os-name == 'windows'
+        shell: pwsh
+        run: |
+          $pkg_name = $env:PKG_NAME
           Compress-Archive -Path "${pkg_name}" -DestinationPath "${pkg_name}.zip" -Force
           Add-Content -Path $env:GITHUB_ENV -Value "ASSET_PATH=${pkg_name}.zip"
           Add-Content -Path $env:GITHUB_ENV -Value "ASSET_NAME=${pkg_name}.zip"
@@ -618,6 +643,49 @@ jobs:
             dev-exec bash scripts/verify_release.sh "${{ env.ASSET_PATH }}"
           else
             bash scripts/verify_release.sh "${{ env.ASSET_PATH }}"
+          fi
+
+      # The checks above prove the archive STARTS. This proves it can do the
+      # first thing every consumer asks of it: compile a project's recipe and
+      # provider from the sources it ships, then run a command. v0.2.0 passed
+      # everything above and failed here on every platform (cannot open file:
+      # repro_interface_artifacts), which is how agent-harbor's Windows CI
+      # found it. Two halves: a static `nim check` of the installed-compile
+      # closure against ONLY the archive's share/repro (the build host's
+      # checkouts cannot mask a missing tree), and a real `repro exec` in a
+      # fresh project with every source-root variable scrubbed.
+      #
+      # POSIX runs under `dev-exec` for the Nim compiler; Windows has it on
+      # PATH from env.ps1.
+      - name: Verify the archive builds a project from its own sources
+        shell: bash
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.os-name }}" = "windows" ]; then
+            bash scripts/release/check_release_source_closure.sh "${PKG_NAME}"
+            # The recipe compile needs a C compiler. Hand it the gcc env.ps1
+            # provisioned, exactly as the `.#release` build step above does
+            # and for the same reason: left unset, the engine provisions the
+            # pinned WinLibs .7z itself, and the 7-Zip it needs for that is
+            # realized through `msiexec /a`, which exits 1601 on these
+            # service-account runners (measured on this step's first run).
+            # That is a property of the runner, not of the archive under test.
+            gcc_exe=$(command -v gcc.exe || command -v gcc || true)
+            if [ -z "${gcc_exe}" ]; then
+              echo "::error::no gcc on PATH for the Windows smoke test (env.ps1 should have provisioned it)"
+              exit 1
+            fi
+            REPRO_BOOTSTRAP_CC=$(cygpath -w "${gcc_exe}")
+            export REPRO_BOOTSTRAP_CC
+            echo "smoke: REPRO_BOOTSTRAP_CC=${REPRO_BOOTSTRAP_CC}"
+            bash scripts/release/smoke_release_dev_exec.sh "${PKG_NAME}"
+          else
+            # ONE dev-exec for both: each entry re-evaluates the flake through
+            # the nix daemon, and a dropped daemon socket on the macOS runners
+            # ("writing to file: Socket is not connected") failed the second
+            # entry of an otherwise green step.
+            dev-exec bash -c 'bash scripts/release/check_release_source_closure.sh "$1" && bash scripts/release/smoke_release_dev_exec.sh "$1"' _ "${PKG_NAME}"
           fi
 
       # Checksum at the point of production. The publish job RE-computes this

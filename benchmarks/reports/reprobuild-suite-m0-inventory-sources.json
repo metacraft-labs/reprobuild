@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1750,
+    "nimTestBinaries": 1755,
     "pureUnitConsolidationGroups": 48,
-    "pureUnitTests": 584,
+    "pureUnitTests": 586,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1763
+    "testEntries": 1768
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -255,7 +255,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 4,
+      "count": 5,
       "defines": [],
       "dependencyShape": [
         "repro_local_store"
@@ -265,6 +265,7 @@
         "libs/repro_local_store/tests/t_a4_p4_eviction.nim",
         "libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim",
         "libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim",
+        "libs/repro_local_store/tests/t_portable_fingerprint.nim",
         "libs/repro_local_store/tests/t_store_optimise_dedup.nim"
       ],
       "targetOs": "soAny"
@@ -285,7 +286,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 3,
+      "count": 4,
       "defines": [],
       "dependencyShape": [
         "repro_core",
@@ -294,6 +295,7 @@
       "owner": "libs/repro_local_store",
       "sources": [
         "libs/repro_local_store/tests/t_sqlite_smoke.nim",
+        "libs/repro_local_store/tests/t_portable_memo.nim",
         "libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim",
         "libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim"
       ],
@@ -1073,10 +1075,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 896,
+      "integration": 898,
       "platform/destructive": 115,
-      "pure unit": 584,
-      "unclassified": 157
+      "pure unit": 586,
+      "unclassified": 158
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1224,9 +1226,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1750,
+    "nimTestBinaryCount": 1755,
     "pythonTestFileCount": 13,
-    "testEntryCount": 1763
+    "testEntryCount": 1768
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -6789,6 +6791,28 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_portable_memo_cache",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_binary_cache_client",
+        "repro_build_engine",
+        "repro_core",
+        "repro_hash",
+        "repro_local_store",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_binary_cache_client",
+      "requiresReproBinary": false,
+      "source": "libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_r1_caches_config",
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
@@ -7448,6 +7472,27 @@
       "source": "libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_portable_fingerprint_engine",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_hash",
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -10011,13 +10056,14 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_dsl_stdlib",
+        "repro_interface_artifacts",
         "repro_project_dsl"
       ],
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": true,
       "source": "libs/repro_dsl_stdlib/tests/t_packaging_reprobuild_dist.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 25,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -11263,6 +11309,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_installed_layout_source_roots",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_multi_package_merge",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -11605,6 +11668,41 @@
       "source": "libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_portable_fingerprint",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_portable_fingerprint.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_portable_memo",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_portable_memo.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
