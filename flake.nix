@@ -161,7 +161,8 @@
       # Nim signal handler in the processes it is injected into, and a spawn
       # whose child had to be terminated during injection now fails cleanly.
       # Requires nim-stackable-hooks 72f5782 (below).
-      url = "github:metacraft-labs/io-mon/a5d96adfba31e74ca453f470b80d557366c86b94";
+      # Preserve child exec identities and the resumed parent guard across vfork.
+      url = "github:metacraft-labs/io-mon/d6465ca05f1d37f9c21db911668b3f116787a378";
       flake = false;
     };
     nim-shm-gset-src = {
