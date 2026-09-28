@@ -387,6 +387,71 @@ suite "Cache-Scope P3.4 — lookup without materialization":
     check run.link.launched
     check readFile(c / "obj" / "main.o") == "object of int different;\n"
 
+  test "reads inside a produced directory resolve from its manifest":
+    proc treeGraph(p: string): seq[BuildAction] =
+      # The source tree the builtin copies from, identical on both hosts.
+      createDir(p / "tree-src" / "sub")
+      writeFile(p / "tree-src" / "a.txt", "A\n")
+      writeFile(p / "tree-src" / "sub" / "b.txt", "B\n")
+      # Produces a directory; its only FILE output is its manifest, so a
+      # read under `tree/` can only be identified through the directory's
+      # listing in the record.
+      let tree = BuildAction(
+        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+        kind: bakPreserveTree, id: "t-pmc-tree", deps: @[],
+        inputs: @[p / "tree-src" / "a.txt", p / "tree-src" / "sub" / "b.txt"],
+        outputs: @[p / ".repro" / "preserve-tree" / "t-pmc-tree.manifest"],
+        declaredOutputs: @[p / "tree"],
+        cwd: p, cacheable: true, publishToBinaryCache: false,
+        actionCachePolicy: ffpTimestamp,
+        weakFingerprint: fingerprintForPayload("t-pmc-tree"),
+        builtinText: "tree-src\ntree",
+        builtinEntries: @["a.txt", "sub/b.txt"])
+      let use = BuildAction(
+        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+        kind: bakWriteText, id: "t-pmc-use", deps: @["t-pmc-tree"],
+        inputs: @[p / "tree" / "a.txt", p / "tree" / "sub" / "b.txt"],
+        outputs: @[p / "bin" / "use"],
+        cwd: p, cacheable: true, publishToBinaryCache: true,
+        actionCachePolicy: ffpTimestamp,
+        weakFingerprint: fingerprintForPayload("t-pmc-use"),
+        builtinText: "used the tree\n")
+      createDir(p / "bin")
+      @[tree, use]
+    proc run(p: string; publisher: PortableMemoPublisher = nil;
+             lookup: PortableMemoLookup = nil;
+             restorer: PortableMemoRestorer = nil):
+        tuple[results: seq[ActionResult], trace: string] =
+      var config = defaultBuildEngineConfig(p.parentDir / "cache")
+      config.maxParallelism = 1
+      config.portableRoots = rootsOf(p)
+      config.portableMemoPublisher = publisher
+      config.portableLookup = lookup != nil
+      config.portableMemoLookup = lookup
+      config.portableMemoRestorer = restorer
+      let built = runBuild(graph(treeGraph(p), newSeq[BuildPool]()), config)
+      for event in built.trace:
+        result.trace.add($event & "\n")
+      result.results = built.results
+
+    let a = project("tree-a", "int main;\n")
+    let first = run(a, publisher = publisherFor(remote("tree-a")))
+    checkpoint(first.trace)
+    for r in first.results:
+      require r.status == asSucceeded
+      require r.portable
+    let b = project("tree-b/elsewhere", "int main;\n")
+    let served = run(b, lookup = lookupFor(remote("tree-b")),
+      restorer = restorerFor(remote("tree-b")))
+    checkpoint(served.trace)
+    for r in served.results:
+      check not r.launched
+      check r.status == asCacheHit
+    # The directory was never fetched; the file read inside it, one level
+    # down, was identified from the tree action's record.
+    check not dirExists(b / "tree")
+    check readFile(b / "bin" / "use") == "used the tree\n"
+
   test "an output that cannot be restored falls back to executing":
     let a = project("fail-a", "int main;\n")
     discard buildChain(a, publisher = publisherFor(remote("fail-a")))

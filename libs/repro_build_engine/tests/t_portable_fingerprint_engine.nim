@@ -55,7 +55,7 @@ proc buildIn(projectRoot, cacheRoot: string; portable: bool;
       LogicalRoot(label: "project", path: projectRoot, kind: lrkTracked)]
   let run = runBuild(graph(@[action], newSeq[BuildPool]()), config)
   require run.results.len == 1
-  require run.results[0].status == asSucceeded
+  require run.results[0].status in {asSucceeded, asCacheHit, asUpToDate}
   run.results[0]
 
 suite "Cache-Scope P3.1 — engine records portable fingerprints":
@@ -109,6 +109,20 @@ suite "Cache-Scope P3.1 — engine records portable fingerprints":
     let rootsC = @[LogicalRoot(label: "project", path: c, kind: lrkTracked)]
     check lookupMemo(shared / "portable-memo", rootsC,
       ra.portableWeakHex).isNone
+
+  test "P3.4: a local cache hit yields the same portable record":
+    let p = project("warm", "int main;\n")
+    let cold = buildIn(p, TmpDir / "cache-warm", portable = true)
+    require cold.portable
+    require cold.launched
+    # The warm run is served from the local action cache, never re-running
+    # the action, and still derives the portable record from the hit.
+    let warm = buildIn(p, TmpDir / "cache-warm", portable = true)
+    check not warm.launched
+    check warm.portable
+    check warm.portableWeakHex == cold.portableWeakHex
+    check warm.portableStrongHex == cold.portableStrongHex
+    check warm.portableOutputs == cold.portableOutputs
 
   test "an input-content change moves the portable strong fingerprint":
     let a = project("same-a", "int main;\n")

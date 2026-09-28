@@ -163,6 +163,33 @@ suite "portable fingerprints":
     removeDir(b / "usr" / "share" / "empty")
     check treeContentHex(b / "usr") != base
 
+  test "P3.4: a tree's manifest answers what its disk would":
+    let a = createTempDir("repro-pfp-manifest-", "")
+    defer: removeDir(a)
+    let tree = a / "usr"
+    createDir(tree / "bin")
+    createDir(tree / "share" / "empty")
+    writeFile(tree / "bin" / "gemini", "launcher\n")
+    writeFile(tree / "lib.js", "bundle\n")
+    let entries = treeEntries(tree)
+    # The manifest IS the tree identity...
+    check treeDigestOf(entries) == treeContentHex(tree)
+    # ...and a directory's membership, at the root and below it, reads the
+    # same from the manifest as from the disk.
+    check membershipHexOfNames(childNames(entries, "")) == membershipHex(tree)
+    check membershipHexOfNames(childNames(entries, "share")) ==
+      membershipHex(tree / "share")
+    check membershipHexOfNames(childNames(entries, "share/empty")) ==
+      membershipHex(tree / "share" / "empty")
+    # A file's entry carries its content identity.
+    for entry in entries:
+      if entry.rel == "bin/gemini":
+        check entry.kind == tekFile
+        check entry.identity == fileContentHex(tree / "bin" / "gemini")
+    let outs = portableOutputs(
+      @[LogicalRoot(label: "p", path: a, kind: lrkTracked)], [tree])
+    check outs.outputs[0].entries == entries
+
   test "P3.2: outputs are named logically and identified by content":
     let a = createTempDir("repro-pfp-out-", "")
     defer: removeDir(a)

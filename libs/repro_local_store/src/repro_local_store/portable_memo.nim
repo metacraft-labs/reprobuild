@@ -115,8 +115,12 @@ proc encodeMemo*(record: PortableMemoRecord): seq[byte] =
   outputs.sort(proc (a, b: PortableOutput): int = cmp(a.path, b.path))
   var outItems: seq[CborItem] = @[]
   for output in outputs:
+    var entryItems: seq[CborItem] = @[]
+    for entry in output.entries:
+      entryItems.add(cArray([cText(entry.rel), cUInt(uint64(ord(entry.kind))),
+        cText(entry.identity)]))
     outItems.add(cArray([cText(output.path), cText(output.digest),
-      cUInt(if output.directory: 1'u64 else: 0'u64)]))
+      cUInt(if output.directory: 1'u64 else: 0'u64), cArray(entryItems)]))
   encodeDeterministic(cArray([cText(MemoTag), cText(record.weakHex),
     cArray(pathItems), cText(record.strongHex), cArray(outItems)]))
 
@@ -133,11 +137,23 @@ proc decodeMemo*(bytes: openArray[byte]): PortableMemoRecord =
   let outs = root.elems[4]
   expect(outs.kind == ckArray, "memo outputs")
   for elem in outs.elems:
-    expect(elem.kind == ckArray and elem.elems.len == 3 and
+    expect(elem.kind == ckArray and elem.elems.len in 3 .. 4 and
       elem.elems[0].kind == ckText and elem.elems[1].kind == ckText and
       elem.elems[2].kind == ckUInt, "memo output")
-    result.outputs.add(PortableOutput(path: elem.elems[0].text,
-      digest: elem.elems[1].text, directory: elem.elems[2].arg == 1))
+    var output = PortableOutput(path: elem.elems[0].text,
+      digest: elem.elems[1].text, directory: elem.elems[2].arg == 1)
+    if elem.elems.len == 4:
+      let entries = elem.elems[3]
+      expect(entries.kind == ckArray, "memo output entries")
+      for item in entries.elems:
+        expect(item.kind == ckArray and item.elems.len == 3 and
+          item.elems[0].kind == ckText and item.elems[1].kind == ckUInt and
+          item.elems[1].arg <= uint64(ord(high(TreeEntryKind))) and
+          item.elems[2].kind == ckText, "memo output entry")
+        output.entries.add(TreeEntry(rel: item.elems[0].text,
+          kind: TreeEntryKind(item.elems[1].arg),
+          identity: item.elems[2].text))
+    result.outputs.add(output)
 
 # --- identity resolution ----------------------------------------------------
 
@@ -178,6 +194,16 @@ proc currentIdentity*(roots: openArray[LogicalRoot]; entry: PathSetEntry;
     if not dirExists(p):
       return none(string)
     some(membershipHex(p))
+
+proc manifestsConsistent*(record: PortableMemoRecord): bool =
+  ## A directory output's manifest must be the tree its digest names: the
+  ## manifest is what resolves downstream reads inside the directory, so a
+  ## record whose listing disagrees with its digest is not trusted.
+  for output in record.outputs:
+    if output.directory and output.entries.len > 0 and
+        treeDigestOf(output.entries) != output.digest:
+      return false
+  true
 
 proc outputsOnDiskReason*(roots: openArray[LogicalRoot];
                           record: PortableMemoRecord): string =
@@ -235,6 +261,26 @@ proc recordMemo*(storeRoot: string; record: PortableMemoRecord) =
   atomicWrite(weakDir / psHash / (record.strongHex & ".memo"),
     encodeMemo(record))
 
+proc publishedMarker(storeRoot: string; record: PortableMemoRecord): string =
+  storeRoot / record.weakHex / pathSetHash(record.pathSet) /
+    (record.strongHex & ".published")
+
+proc memoPublished*(storeRoot: string; record: PortableMemoRecord;
+                    withOutputs: bool): bool =
+  ## Whether this host already published `record` — with its output bytes,
+  ## when `withOutputs`. A warm build re-derives the same records, and each
+  ## need go out only once.
+  let marker = publishedMarker(storeRoot, record)
+  if not fileExists(extendedPath(marker)):
+    return false
+  not withOutputs or readFile(extendedPath(marker)) == "outputs"
+
+proc markMemoPublished*(storeRoot: string; record: PortableMemoRecord;
+                        withOutputs: bool) =
+  let text = if withOutputs: "outputs" else: "record"
+  atomicWrite(publishedMarker(storeRoot, record),
+    text.toOpenArrayByte(0, text.high))
+
 proc candidatePathSets*(storeRoot, weakHex: string): seq[PathSet] =
   let weakDir = storeRoot / weakHex
   if not dirExists(extendedPath(weakDir)):
@@ -267,7 +313,8 @@ proc lookupMemo*(storeRoot: string; roots: openArray[LogicalRoot];
       try:
         let raw = readFile(extendedPath(memo))
         let record = decodeMemo(raw.toOpenArrayByte(0, raw.high))
-        if record.weakHex == weakHex and record.strongHex == strong.get():
+        if record.weakHex == weakHex and record.strongHex == strong.get() and
+            manifestsConsistent(record):
           return some(record)
       except CatchableError:
         discard

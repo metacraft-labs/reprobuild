@@ -69,6 +69,17 @@ type
     path*: string    ## `<label>:<rel>`.
     digest*: string  ## Content / existence / membership identity (hex).
 
+  TreeEntryKind* = enum
+    tekFile
+    tekDirectory
+    tekLinkToFile
+    tekLinkToDir
+
+  TreeEntry* = object
+    rel*: string            ## `/`-separated, relative to the tree root.
+    kind*: TreeEntryKind
+    identity*: string       ## A file's BLAKE3 digest, a link's target text.
+
   PortableOutput* = object
     ## Cache-Scope P3.2: one output of an action, named portably. A file's
     ## `digest` is its BLAKE3 content digest; a directory's is a tree digest
@@ -79,6 +90,11 @@ type
     path*: string    ## `<label>:<rel>`.
     digest*: string
     directory*: bool
+    entries*: seq[TreeEntry]
+      ## For a directory: every entry beneath it, sorted by `rel`. A
+      ## downstream action that reads, probes or enumerates INSIDE the
+      ## directory is identified from these without the bytes on disk — the
+      ## role of BuildXL's opaque-directory content listing.
 
   PortableOutputs* = object
     portable*: bool
@@ -188,6 +204,13 @@ proc fileContentHex*(path: string): string =
     hasher.update(buf.toOpenArray(0, n - 1))
   hasher.finalize().toHex()
 
+proc membershipHexOfNames*(names: openArray[string]): string =
+  ## Membership digest over child names already suffixed `/` for a
+  ## directory (or a link to one). Order-insensitive.
+  var sorted = @names
+  sorted.sort()
+  blake3.digest(sorted.join("\n")).toHex()
+
 proc membershipHex*(dir: string): string =
   ## Membership digest of a directory: the sorted child names, each suffixed
   ## `/` for a directory. Names only — an enumeration observes WHICH entries
@@ -199,8 +222,7 @@ proc membershipHex*(dir: string): string =
         (if kind in {pcDir, pcLinkToDir}: "/" else: ""))
   except CatchableError:
     return ""
-  names.sort()
-  blake3.digest(names.join("\n")).toHex()
+  membershipHexOfNames(names)
 
 proc frame(text: string): string =
   ## Length-prefixed so field boundaries cannot be forged by content.
@@ -296,13 +318,10 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
 
 const TreeDomain = "reprobuild.portable.tree.v1"
 
-proc treeContentHex*(dir: string): string =
-  ## Content identity of a directory tree: the sorted (relative path, kind,
-  ## identity) triples of every entry beneath it -- a file by its BLAKE3
-  ## content digest, a symlink by its target text, a directory by its
-  ## presence (so an empty directory still counts). Physical location plays
-  ## no part: two copies of the same tree at different absolute paths agree.
-  var entries: seq[string] = @[]
+proc treeEntries*(dir: string): seq[TreeEntry] =
+  ## Every entry beneath `dir`: a file with its BLAKE3 content digest, a
+  ## symlink with its target text, a directory by its presence (so an empty
+  ## directory still counts). Symlinked directories are not descended into.
   for path in walkDirRec(dir, yieldFilter = {pcFile, pcLinkToFile, pcDir,
       pcLinkToDir}, relative = true, followFilter = {pcDir}):
     let full = dir / path
@@ -315,13 +334,49 @@ proc treeContentHex*(dir: string): string =
       let target =
         try: expandSymlink(full).replace('\\', '/')
         except CatchableError: ""
-      entries.add(frame(rel) & frame("l") & frame(target))
+      let toDir = info.kind == pcLinkToDir or dirExists(full)
+      result.add(TreeEntry(rel: rel,
+        kind: if toDir: tekLinkToDir else: tekLinkToFile, identity: target))
     of pcDir:
-      entries.add(frame(rel) & frame("d") & frame(""))
+      result.add(TreeEntry(rel: rel, kind: tekDirectory))
     of pcFile:
-      entries.add(frame(rel) & frame("f") & frame(fileContentHex(full)))
-  entries.sort()
-  blake3.digest(frame(TreeDomain) & entries.join("")).toHex()
+      result.add(TreeEntry(rel: rel, kind: tekFile,
+        identity: fileContentHex(full)))
+  result.sort(proc (a, b: TreeEntry): int = cmp(a.rel, b.rel))
+
+proc treeDigestOf*(entries: openArray[TreeEntry]): string =
+  ## Content identity of a tree from its entries: the sorted (relative path,
+  ## kind, identity) triples. Physical location plays no part: two copies of
+  ## one tree at different absolute paths agree.
+  var framed: seq[string] = @[]
+  for entry in entries:
+    let tag =
+      case entry.kind
+      of tekFile: "f"
+      of tekDirectory: "d"
+      of tekLinkToFile: "l"
+      of tekLinkToDir: "L"
+    framed.add(frame(entry.rel) & frame(tag) & frame(entry.identity))
+  framed.sort()
+  blake3.digest(frame(TreeDomain) & framed.join("")).toHex()
+
+proc treeContentHex*(dir: string): string =
+  ## Content identity of a directory tree (see `treeDigestOf`).
+  treeDigestOf(treeEntries(dir))
+
+proc childNames*(entries: openArray[TreeEntry]; relDir: string): seq[string] =
+  ## The membership names of `relDir` ("" for the tree root) according to a
+  ## tree manifest, suffixed `/` for directories: what `membershipHex` would
+  ## list on disk.
+  let prefix = if relDir.len == 0: "" else: relDir & "/"
+  for entry in entries:
+    if not entry.rel.startsWith(prefix):
+      continue
+    let rest = entry.rel[prefix.len .. ^1]
+    if rest.len == 0 or '/' in rest:
+      continue
+    result.add(rest &
+      (if entry.kind in {tekDirectory, tekLinkToDir}: "/" else: ""))
 
 proc portableOutputs*(roots: openArray[LogicalRoot];
                       outputs: openArray[string]): PortableOutputs =
@@ -338,8 +393,9 @@ proc portableOutputs*(roots: openArray[LogicalRoot];
         physical
       return
     if dirExists(physical):
+      let entries = treeEntries(physical)
       result.outputs.add(PortableOutput(path: render(logical),
-        digest: treeContentHex(physical), directory: true))
+        digest: treeDigestOf(entries), directory: true, entries: entries))
     elif fileExists(physical):
       result.outputs.add(PortableOutput(path: render(logical),
         digest: fileContentHex(physical)))

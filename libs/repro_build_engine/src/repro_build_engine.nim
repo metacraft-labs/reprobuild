@@ -13933,6 +13933,63 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         seen.incl(key)
         result.add(physical)
 
+  proc finishPortableRecord(idx: int; action: BuildAction;
+                            reads, probes, enumerations: seq[string]) =
+    ## The shared tail of both portable recorders: fingerprint, outputs,
+    ## local memo record, and (once per record) publication.
+    var fp = computePortableFingerprint(config.portableRoots, action.argv,
+      action.cwd, portableEnvOf(action), portableDeclaredInputsOf(action),
+      reads, probes, enumerations)
+    if fp.portable:
+      # P3.2: a record is only shareable if its RESULT can be named too.
+      let outs = portableOutputs(config.portableRoots,
+        portablePhysicalOutputsOf(action))
+      if outs.portable:
+        runResult.results[idx].portableOutputs = outs.outputs
+        # P3.3: persist the memo record beside the shared action cache so
+        # any checkout of any project on this host can find it by portable
+        # weak fingerprint -> path set -> strong fingerprint. Soft-fail: a
+        # memo that cannot be written costs reuse, never the build.
+        let memo = PortableMemoRecord(
+          weakHex: fp.weakHex, pathSet: pathSetOf(fp.inputs),
+          strongHex: fp.strongHex, outputs: outs.outputs)
+        let memoRoot = sharedRoot / "portable-memo"
+        try:
+          recordMemo(memoRoot, memo)
+        except CatchableError as err:
+          runResult.trace(action.id, "portable-memo-write-failed", err.msg)
+        let withOutputs = action.publishToBinaryCache or
+          config.binaryCacheIntermediateScope
+        # A warm build re-derives the same records; publish each once.
+        if config.portableMemoPublisher != nil and
+            not memoPublished(memoRoot, memo, withOutputs):
+          let failure =
+            try: config.portableMemoPublisher(config.portableRoots, memo,
+                                              withOutputs)
+            except CatchableError as err: err.msg
+          if failure.len > 0:
+            runResult.trace(action.id, "portable-memo-publish-failed",
+              failure)
+          else:
+            try: markMemoPublished(memoRoot, memo, withOutputs)
+            except CatchableError: discard
+            runResult.trace(action.id, "portable-memo-published",
+              "strong=" & fp.strongHex)
+      else:
+        fp.portable = false
+        fp.reason = outs.reason
+        fp.strongHex = ""
+    runResult.results[idx].portable = fp.portable
+    runResult.results[idx].portableWeakHex = fp.weakHex
+    runResult.results[idx].portableStrongHex = fp.strongHex
+    runResult.results[idx].portableReason = fp.reason
+    if fp.portable:
+      runResult.trace(action.id, "portable-fingerprint",
+        "strong=" & fp.strongHex & " inputs=" & $fp.inputs.len)
+    else:
+      runResult.trace(action.id, "portable-fingerprint-unavailable",
+        fp.reason)
+
   proc recordPortableFingerprint(idx: int; action: BuildAction;
                                  evidence: PathSetEvidence) =
     ## Cache-Scope P3.1: compute the action's portable weak/strong
@@ -13959,53 +14016,26 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         probes.add(path)
       else:
         reads.add(path)
-    var fp = computePortableFingerprint(config.portableRoots, action.argv,
-      action.cwd, portableEnvOf(action), portableDeclaredInputsOf(action),
-      reads, probes, enumerations)
-    if fp.portable:
-      # P3.2: a record is only shareable if its RESULT can be named too.
-      let outs = portableOutputs(config.portableRoots,
-        portablePhysicalOutputsOf(action))
-      if outs.portable:
-        runResult.results[idx].portableOutputs = outs.outputs
-        # P3.3: persist the memo record beside the shared action cache so
-        # any checkout of any project on this host can find it by portable
-        # weak fingerprint -> path set -> strong fingerprint. Soft-fail: a
-        # memo that cannot be written costs reuse, never the build.
-        let memo = PortableMemoRecord(
-          weakHex: fp.weakHex, pathSet: pathSetOf(fp.inputs),
-          strongHex: fp.strongHex, outputs: outs.outputs)
-        try:
-          recordMemo(sharedRoot / "portable-memo", memo)
-        except CatchableError as err:
-          runResult.trace(action.id, "portable-memo-write-failed", err.msg)
-        if config.portableMemoPublisher != nil:
-          let withOutputs = action.publishToBinaryCache or
-            config.binaryCacheIntermediateScope
-          let failure =
-            try: config.portableMemoPublisher(config.portableRoots, memo,
-                                              withOutputs)
-            except CatchableError as err: err.msg
-          if failure.len > 0:
-            runResult.trace(action.id, "portable-memo-publish-failed",
-              failure)
-          else:
-            runResult.trace(action.id, "portable-memo-published",
-              "strong=" & fp.strongHex)
-      else:
-        fp.portable = false
-        fp.reason = outs.reason
-        fp.strongHex = ""
-    runResult.results[idx].portable = fp.portable
-    runResult.results[idx].portableWeakHex = fp.weakHex
-    runResult.results[idx].portableStrongHex = fp.strongHex
-    runResult.results[idx].portableReason = fp.reason
-    if fp.portable:
-      runResult.trace(action.id, "portable-fingerprint",
-        "strong=" & fp.strongHex & " inputs=" & $fp.inputs.len)
-    else:
-      runResult.trace(action.id, "portable-fingerprint-unavailable",
-        fp.reason)
+    finishPortableRecord(idx, action, reads, probes, enumerations)
+
+  proc recordPortableFromLocalHit(idx: int; action: BuildAction;
+                                  record: ActionResultRecord) =
+    ## Cache-Scope P3.4: a local cache hit's record names the inputs the
+    ## action observed when it last ran, so the portable record can be
+    ## derived without re-running it — existing local caches seed the
+    ## portable plane. A missing path was probed, a directory enumerated, a
+    ## file read. (An existing file that was only probed is identified by
+    ## content here: stricter than presence, never looser.)
+    if config.portableRoots.len == 0:
+      return
+    var reads, probes, enumerations: seq[string]
+    for input in record.inputs:
+      let path = materialPath(action.cwd, input.path)
+      case input.metadata.kind
+      of ffkMissing, ffkOther: probes.add(path)
+      of ffkRegular: reads.add(path)
+      of ffkDirectory: enumerations.add(path)
+    finishPortableRecord(idx, action, reads, probes, enumerations)
 
   proc publishBinaryCacheBundle(action: BuildAction;
                                 record: ActionResultRecord;
@@ -14145,6 +14175,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # validated, materialized output. The regular scheduler already performs
     # that lookup and keeps publish failures soft.
     if config.publishCachedResults:
+      return none(BuildRunResult)
+    # Cache-Scope P3.4: portable records are derived per action from its
+    # local hit, which the whole-graph short-circuit never looks at.
+    if config.portableRoots.len > 0:
       return none(BuildRunResult)
     if not config.rebuildMissingOutputsOnCacheHit:
       return none(BuildRunResult)
@@ -15133,28 +15167,106 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           if indegree[dependent] == 0:
             queue.add(dependent)
     var resolved = initTable[string, PortableMemoRecord]()
-    var produced = initTable[string, string]()
+    var producedOutputs = initTable[string, PortableOutput]()
+    var ancestorsOf = initTable[string, HashSet[string]]()
     const Unresolved = "unresolved-upstream-output"
       ## An identity no real input has, so a path set that names an output
       ## of an unresolved action computes a strong fingerprint no record has.
-    let resolver: IdentityResolver = proc (entry: PathSetEntry):
-        Option[string] =
-      if entry.path in producer:
-        if entry.path in produced:
-          return some(if entry.kind == pikProbe: "present"
-                      else: produced[entry.path])
-        return some(Unresolved)
-      if entry.path in aboveProduced:
-        return some(Unresolved)
-      var up = parentKey(entry.path)
-      while up.len > 0:
-        if up in producer:
-          return some(Unresolved)
-        up = parentKey(up)
-      none(string)
+    proc findEntry(entries: seq[TreeEntry]; rel: string): int =
+      var lo = 0
+      var hi = entries.high
+      while lo <= hi:
+        let mid = (lo + hi) div 2
+        let c = cmp(entries[mid].rel, rel)
+        if c == 0:
+          return mid
+        elif c < 0:
+          lo = mid + 1
+        else:
+          hi = mid - 1
+      -1
+    proc makeResolver(ancestors: HashSet[string]): IdentityResolver =
+      ## Inputs another graph action produces are identified from that
+      ## action's resolved RECORD: a produced file by its digest, a path
+      ## inside a produced directory by the directory's manifest, a directory
+      ## above produced paths by its listing here plus what this action's
+      ## ancestors produce (on the producing host, nothing else had been
+      ## produced yet when this action ran). Everything else is on disk.
+      result = proc (entry: PathSetEntry): Option[string] =
+        let path = entry.path
+        if path in producer:
+          if path notin producedOutputs:
+            return some(Unresolved)
+          let o = producedOutputs[path]
+          case entry.kind
+          of pikRead:
+            return some(if o.directory: Unresolved else: o.digest)
+          of pikProbe:
+            return some("present")
+          of pikEnumeration:
+            if o.directory:
+              return some(membershipHexOfNames(childNames(o.entries, "")))
+            return some(Unresolved)
+        var up = parentKey(path)
+        while up.len > 0:
+          if up in producer:
+            if up notin producedOutputs or not producedOutputs[up].directory:
+              return some(Unresolved)
+            let o = producedOutputs[up]
+            let rel = path[up.len + 1 .. ^1]
+            let at = findEntry(o.entries, rel)
+            case entry.kind
+            of pikRead:
+              if at >= 0 and o.entries[at].kind == tekFile:
+                return some(o.entries[at].identity)
+              return some(Unresolved)
+            of pikProbe:
+              return some(if at >= 0: "present" else: "absent")
+            of pikEnumeration:
+              if at >= 0 and o.entries[at].kind == tekDirectory:
+                return some(membershipHexOfNames(childNames(o.entries, rel)))
+              return some(Unresolved)
+          up = parentKey(up)
+        if path in aboveProduced:
+          case entry.kind
+          of pikProbe:
+            return some("present")
+          of pikRead:
+            return some(Unresolved)
+          of pikEnumeration:
+            var names = initHashSet[string]()
+            let physical = toPhysicalPath(roots, path)
+            if physical.isSome and dirExists(physical.get()):
+              for kind, child in walkDir(physical.get(), relative = true):
+                names.incl(child.replace('\\', '/') &
+                  (if kind in {pcDir, pcLinkToDir}: "/" else: ""))
+            let prefix = if path.endsWith(":"): path else: path & "/"
+            for key, producerId in producer:
+              if not key.startsWith(prefix) or producerId notin ancestors:
+                continue
+              if key notin producedOutputs:
+                return some(Unresolved)
+              let rest = key[prefix.len .. ^1]
+              let slash = rest.find('/')
+              if slash >= 0:
+                names.incl(rest[0 ..< slash] & "/")
+              else:
+                names.incl(rest &
+                  (if producedOutputs[key].directory: "/" else: ""))
+            var listing: seq[string] = @[]
+            for name in names:
+              listing.add(name)
+            return some(membershipHexOfNames(listing))
+        none(string)
 
     for id in order:
       let action = actionsById[id]
+      var ancestors = initHashSet[string]()
+      for dep in action.deps:
+        ancestors.incl(dep)
+        for above in ancestorsOf.getOrDefault(dep):
+          ancestors.incl(above)
+      ancestorsOf[id] = ancestors
       if not action.cacheable or action.dynamicDepsFile.len > 0:
         continue
       var depsResolved = true
@@ -15165,6 +15277,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if not depsResolved:
         continue
       let weak = portableWeakOf(action)
+      let resolver = makeResolver(ancestors)
       var hit = none(PortableMemoRecord)
       var source = "local"
       try:
@@ -15183,7 +15296,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if hit.isNone:
         runResult.trace(id, "portable-miss", "weak=" & weak)
         continue
-      # The record must name exactly what this action produces here.
+      # The record must name exactly what this action produces here, and
+      # its directory listings must be the trees its digests name.
       var expected: seq[string] = @[]
       for physical in portablePhysicalOutputsOf(action):
         expected.add(logicalKey(physical))
@@ -15192,13 +15306,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         named.add(output.path)
       expected.sort()
       named.sort()
-      if expected != named:
+      if expected != named or not manifestsConsistent(hit.get()):
         runResult.trace(id, "portable-record-refused",
-          "the record names other outputs than this action declares")
+          "the record names other outputs than this action declares, " &
+          "or lists a directory that is not the tree its digest names")
         continue
       resolved[id] = hit.get()
       for output in hit.get().outputs:
-        produced[output.path] = output.digest
+        producedOutputs[output.path] = output
       runResult.trace(id, "portable-resolved",
         source & " strong=" & hit.get().strongHex)
 
@@ -15522,6 +15637,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
                 lookup.record)
+              recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
+                lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
@@ -15551,6 +15668,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
                 lookup.record)
+              recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
+                lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
                   allowMaterializedOutputs = true)
@@ -15563,6 +15682,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if config.rebuildMissingOutputsOnCacheHit and reusableInPlace:
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
+                lookup.record)
+              recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
                 lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
@@ -15589,6 +15710,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 finishStat("repro cache restore", restoreStart)
               assignCacheHitEvidence(
                 runResult.results[idToIndex.resultIndex(id)], action,
+                lookup.record)
+              recordPortableFromLocalHit(idToIndex.resultIndex(id), action,
                 lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
