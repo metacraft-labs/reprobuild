@@ -72,9 +72,29 @@ proc runExec(c: M74Case; env: StringTableRef; name: string): CmdResult =
   var overlay: seq[tuple[name, value: string]]
   for key, value in env:
     overlay.add((name: key, value: value))
-  result = runShell(shellCommand(@[c.reproBin, "exec", c.projectRoot, "--",
-    getAppFilename(), printEnvFlag], overlay), c.repoRoot,
-    timeoutMs = 15 * 60 * 1000)
+  # ``runShell`` OVERLAYS ``overlay`` on this process's own environment, so a
+  # name deleted from ``env`` above is still inherited from here. On Linux and
+  # macOS this test normally runs inside the Nix dev shell, whose stdenv
+  # exports ``CC=gcc``; the command then printed ``CC=[gcc]`` -- the caller's
+  # own value, correctly passed through -- and case (2) failed for a reason
+  # that has nothing to do with reprobuild's toolchain leaking. Case (2)
+  # asserts about a caller that sets none of the three, so the caller has to
+  # actually set none of them: take them out of this process for the call and
+  # put them back afterwards.
+  var saved: seq[tuple[name, value: string]]
+  for toolName in toolchainNames:
+    if env.hasKey(toolName):
+      continue
+    if existsEnv(toolName):
+      saved.add((name: toolName, value: getEnv(toolName)))
+      delEnv(toolName)
+  try:
+    result = runShell(shellCommand(@[c.reproBin, "exec", c.projectRoot, "--",
+      getAppFilename(), printEnvFlag], overlay), c.repoRoot,
+      timeoutMs = 15 * 60 * 1000)
+  finally:
+    for entry in saved:
+      putEnv(entry.name, entry.value)
   let logPath = getTempDir() / ("t_e2e_repro_exec_recipe_compiler-" & name &
     "-" & $getCurrentProcessId() & ".log")
   writeFile(logPath, result.output)
