@@ -34,7 +34,7 @@ if [[ "$archive_name" == *.zip ]]; then
     powershell -NoProfile -Command \
       "Expand-Archive -LiteralPath '$(cygpath -w "$archive_path")' -DestinationPath '$(cygpath -w "$tmp_dir")' -Force"
   elif [[ -x /c/Windows/System32/tar.exe ]]; then
-    echo "    unzip not found; extracting with Windows bsdtar (System32\\tar.exe)"
+    printf '%s\n' '    unzip not found; extracting with Windows bsdtar (System32\tar.exe)'
     /c/Windows/System32/tar.exe -xf "$archive_path" -C "$tmp_dir"
   else
     echo "ERROR: cannot extract $archive_name -- no unzip, no PowerShell, no bsdtar available" >&2
@@ -101,6 +101,24 @@ if (( ${#missing_sources[@]} > 0 )); then
   echo "ERROR: $archive_name cannot build a project: missing from share/repro: ${missing_sources[*]}" >&2
   echo "       Staged by scripts/release/stage_release_sources.sh." >&2
   exit 1
+fi
+
+if [[ "$archive_name" != *.zip ]]; then
+  echo "=== Verifying the packaged Nix helper and Python runtime ==="
+  # A real short-lived Unix socket server exercises its imports and runtime
+  # with no host Python on PATH. No Nix evaluation is needed for this probe.
+  (
+    helper_scratch="$(mktemp -d /tmp/repro-helper.XXXXXX)"
+    trap 'rm -rf "$helper_scratch"' EXIT
+    helper_socket="$helper_scratch/daemon.sock"
+    env -u PYTHONHOME -u PYTHONPATH PATH=/usr/bin:/bin \
+      "$pkg_dir/bin/reprobuild-nix-daemon" \
+      --socket-path "$helper_socket" --idle-exit-ms 1
+    [[ ! -e "$helper_socket" ]] || {
+      echo "ERROR: Nix helper left its socket behind" >&2
+      exit 1
+    }
+  )
 fi
 
 # ── Windows: archive self-containment ────────────────────────────────────────

@@ -7566,44 +7566,16 @@ proc selfSpawnIoMonitorPath*(publicCliPath = ""): string =
   ""
 
 proc internalReproHelperCliPath(publicCliPath: string): string =
-  ## Path used for monitored internal helper actions. The running engine image
-  ## implements every internal verb itself, so an engine process self-spawns
-  ## its current image whatever file that image is installed as (``reprobuild``
-  ## in an ordinary install, ``.reprobuild-wrapped`` under Nix, ``bin/repro``
-  ## in a bootstrap tree). Embedded/test callers (whose ``getAppFilename`` is a
-  ## test binary) fall back to the explicit ``publicCliPath`` they pass in.
-  ##
-  ## The thin daemon client never reaches here: it does not link the engine. It
-  ## reaches the engine by ``execv`` or by a daemon request whose
-  ## ``publicCliPath`` names the engine, and in both cases the process running
-  ## this code is the engine.
-  ##
-  ## Returns "" when neither is available, and that empty string is the whole
-  ## point of this proc: the ONLY images that may be spawned with a `__repro-*`
-  ## internal verb are an image that has DECLARED itself `repro` (see
-  ## ``runningImageIsReproCli`` — the declaration, not the filename) and an
-  ## explicitly supplied CLI path. Anything else is some other program that
-  ## does not implement those verbs.
-  ##
-  ## This used to end by returning the current image regardless of its name. An
-  ## embedded caller with no `publicCliPath` — a TEST BINARY linking the engine
-  ## in-process — therefore had ITSELF spawned as `<test-binary>
-  ## __repro-extract-interface …`. A unittest binary ignores those arguments
-  ## and runs its suite, which re-enters the same code and spawns itself again:
-  ## an unbounded self-exec chain, one child per generation, that only stops
-  ## when the machine does. It also littered one scratch directory per
-  ## generation, since those are named after the pid.
-  ##
-  ## Callers must treat "" as "no image to spawn back into" and do the work
-  ## in-process; `extractInterfaceModuleArtifact` already does exactly that,
-  ## and its in-process path is the same code the helper would have run.
-  let current = os.normalizedPath(getAppFilename())
-  if runningImageIsReproCli():
-    return current
-  if publicCliPath.len > 0 and
-      spawnableWithInternalVerb(os.normalizedPath(publicCliPath)):
-    return os.normalizedPath(publicCliPath)
-  ""
+  ## Use the same guarded public image as the monitor role. In a portable
+  ## Linux release getAppFilename() names the bundled glibc loader, which
+  ## cannot execute an internal verb without the real image as its first
+  ## argument. REPRO_PUBLIC_CLI_PATH names the engine's launcher instead.
+  ## The shared guard still refuses an undeclared embedded caller's own image.
+  selfSpawnIoMonitorPath(publicCliPath)
+
+when defined(reproImageIdentityTest):
+  proc internalReproHelperCliPathForTest*(publicCliPath = ""): string =
+    internalReproHelperCliPath(publicCliPath)
 
 proc siblingTryCompileProviderPath(publicCliPath: string): string =
   ## Pre-built Tier 2a direct provider binary, normally shipped next to
