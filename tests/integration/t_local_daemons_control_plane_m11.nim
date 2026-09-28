@@ -388,6 +388,7 @@ when isNixSupported:
         tempRoot)
 
       let sessions = waitForSessionsContains(tempRoot, "\tbuild\tsucceeded")
+      checkpoint("daemon sessions:\n" & sessions)
       check sessions.contains("daemonM11Output") or sessions.contains(
         daemonProject)
 

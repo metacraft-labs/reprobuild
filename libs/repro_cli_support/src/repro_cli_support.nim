@@ -30543,6 +30543,19 @@ const DaemonParentPrewarmEnv* = "REPROBUILD_DAEMON_PARENT_PREWARM"
 proc daemonParentPrewarmEnabled*(): bool =
   getEnv(DaemonParentPrewarmEnv, "1") != "0"
 
+const DaemonRequestValueFlags = ["--tool-provisioning",
+    "--action-cache-root", "--daemon", "--progress", "--progress-bars",
+    "--write-diagnostics", "--show", "--measure", "--log", "--write-benchmark",
+    "--monitor-hosting", "--evidence"]
+  ## The ``repro build`` flags whose BARE spelling consumes the next argument,
+  ## as ``runBuildCommand``'s parser reads them — the daemon parent's two
+  ## request readers (``daemonRequestProjectRoot``,
+  ## ``daemonPrewarmTargetOutputDir``) must skip exactly these to find the
+  ## same target the worker builds. ``--write-report`` and ``--write-stats``
+  ## are NOT here: bare, both are switches (only ``=PATH`` names a path), and
+  ## listing them made a trailing ``--write-report`` raise "requires a value"
+  ## while a leading one swallowed the target.
+
 proc daemonRequestProjectRoot*(rawArgs: openArray[string];
                                workingDir: string): string =
   ## The project a daemon-hosted ``repro build`` request is for, derived from
@@ -30556,10 +30569,7 @@ proc daemonRequestProjectRoot*(rawArgs: openArray[string];
   var i = 0
   while i < rawArgs.len:
     let arg = rawArgs[i]
-    if arg in ["--work-root", "--tool-provisioning", "--action-cache-root",
-        "--daemon", "--progress", "--progress-bars", "--write-diagnostics",
-        "--show", "--measure", "--write-report", "--log", "--write-benchmark",
-        "--write-stats", "--monitor-hosting", "--evidence"]:
+    if arg == "--work-root" or arg in DaemonRequestValueFlags:
       discard valueFromFlag(rawArgs, i, arg)
     elif not arg.startsWith("-") and target.len == 0:
       target = arg
@@ -30611,10 +30621,7 @@ proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
       workRoot = valueFromFlag(rawArgs, i, "--work-root")
     elif arg == "--force-rebuild" or arg == "--rebuild" or arg == "--dry-run":
       forceRefresh = true
-    elif arg in ["--tool-provisioning", "--action-cache-root", "--daemon",
-        "--progress", "--progress-bars", "--write-diagnostics", "--show",
-        "--measure", "--write-report", "--log", "--write-benchmark",
-        "--write-stats", "--monitor-hosting", "--evidence"]:
+    elif arg in DaemonRequestValueFlags:
       discard valueFromFlag(rawArgs, i, arg)
     elif not arg.startsWith("-") and target.len == 0:
       # THE FIRST POSITIONAL IS THE TARGET, with no `build` verb to skip.
