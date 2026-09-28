@@ -7712,11 +7712,26 @@ proc ignoredInputRoots(action: BuildAction): seq[string] =
   ## latter would put a syscall on the hot comparison. A root that does not
   ## exist yet simply contributes its literal spelling, which is what it
   ## does today.
+  ##
+  ## Only an ABSOLUTE root is resolved. ``expandFilename`` resolves a relative
+  ## path against THIS PROCESS's working directory, which is not the action's
+  ## ``cwd`` and has nothing to do with the recipe: a relative ``build/bin``
+  ## prefix became ``<engine cwd>/build/bin`` whenever the engine happened to
+  ## run where such a directory exists, adding an absolute root the recipe
+  ## never wrote. On the input side that ignores reads under an unrelated
+  ## tree; in ``honouredDerivedPrefixes`` it is a prefix disjoint from the
+  ## product, so the restore gate honoured a declaration it is meant to refuse
+  ## (``test_s7_cached_output_restore_mode``, "a derived prefix disjoint from
+  ## the product is still honoured", failed exactly when run from a checkout
+  ## with a ``build/bin``). A relative root keeps its literal spelling only,
+  ## which is what it did before symlinked spellings were added.
   for prefix in action.dependencyPolicy.ignoredInputPrefixes:
     let expanded = action.expandPolicyPath(prefix)
     if expanded.len == 0:
       continue
     result.add(expanded)
+    if not expanded.isAbsolute:
+      continue
     try:
       let resolved = expandFilename(expanded)
       if resolved.len > 0 and resolved != expanded:
