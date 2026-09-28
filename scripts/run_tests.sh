@@ -610,6 +610,16 @@ printf 'Executing tests with %s worker(s); nested builds get REPROBUILD_MAX_PARA
 # it with their own lookup ($CT_TEST, then `ct-test`, then `ct`) precisely
 # because it must not be confused with this one. When `ct test run` gains a
 # Nim provider that can execute, this block is where that lands.
+# The runner executes every `t_*`/`test_*` executable in --bin-dir; it does
+# not read repro_tests.nim. A cold run wiped build/test-bin above, so the
+# directory holds exactly what `.#test-builds` declared. A warm run
+# (REPROBUILD_TEST_WARM_REUSE=1) kept it, and with it the binaries of tests an
+# earlier revision declared and this one no longer does -- which would
+# otherwise keep running, from stale bytes, and be counted. Reconcile the
+# directory with this revision's declaration before the runner walks it. Run on
+# both arms: on a cold run it is a no-op, and a no-op that is exercised is one
+# that is known to work.
+python3 scripts/prune_undeclared_test_binaries.py --root . --bin-dir build/test-bin >&2
 ct_test_runner="${CT_TEST_RUNNER:-}"
 if [[ -z "${ct_test_runner}" ]]; then
   ct_test_runner="$(command -v "ct-test-runner${exe_ext}" 2>/dev/null || true)"
