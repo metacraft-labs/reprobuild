@@ -65,14 +65,24 @@ class ReleaseWiringTests(unittest.TestCase):
         self.assertNotIn("repro-publish-repos.sh", text)
         self.assertNotIn("REPRO_PUBLISH_TARGET", text)
 
-    def test_packages_are_built_before_the_asset_set_is_asserted(self):
-        """Built after it, they would be refused as unexpected assets."""
+    def test_packages_are_built_in_the_linux_build_leg_and_uploaded(self):
+        """The publish job has no dev environment: `nix` is not on its PATH.
+
+        v0.2.1's first tag run built all three archives and then died in the
+        publish job with `nix: command not found`, because packaging had been
+        placed there. The build leg runs setup-dev-env, so packaging lives in
+        it, and the leg's artifact carries the packages to the publish job.
+        """
         text = RELEASE_YML.read_text(encoding="utf-8")
-        build = text.index("- name: Build native packages from the release archives")
-        assert_ = text.index("- name: Assert the complete, expected asset set is present")
-        sums = text.index("- name: Build SHA256SUMS")
-        self.assertLess(build, assert_)
-        self.assertLess(assert_, sums)
+        build_leg = text[text.index("\n  build-release:"):text.index("\n  publish-release:")]
+        publish = text[text.index("\n  publish-release:"):]
+        step = build_leg.index("- name: Build native packages from this leg's archive")
+        upload = build_leg.index("- name: Upload build artifact")
+        self.assertLess(step, upload)
+        self.assertIn("dev-exec nix shell", build_leg[step:upload])
+        for pattern in ("reprobuild_*.deb", "reprobuild-*.rpm"):
+            self.assertIn(pattern, build_leg[upload:])
+        self.assertNotIn("repro-build-packages.sh", publish)
 
 
 class DeclaredPackagesTests(unittest.TestCase):
