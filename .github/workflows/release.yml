@@ -763,7 +763,9 @@ jobs:
             root="$(mktemp -d)"
             case "${ecosystem}" in
               deb) dev-exec nix shell nixpkgs#dpkg -c dpkg-deb -x "${PWD}/${asset}" "${root}" < /dev/null ;;
-              rpm) (cd "${root}" && dev-exec nix shell nixpkgs#rpm nixpkgs#cpio -c sh -c 'rpm2cpio "$1" | cpio -idm --quiet' _ "${OLDPWD}/${asset}" < /dev/null) ;;
+              # Resolve dev-exec's flake from the checkout, then enter the
+              # extraction directory inside the provisioned command.
+              rpm) dev-exec nix shell nixpkgs#rpm nixpkgs#cpio -c sh -c 'cd "$1" && rpm2cpio "$2" | cpio -idm --quiet' _ "${root}" "${PWD}/${asset}" < /dev/null ;;
               *) echo "::error::no install check for ecosystem ${ecosystem}"; exit 1 ;;
             esac
             (cd "${root}/usr/lib/reprobuild" && find . -mindepth 1 | LC_ALL=C sort) > "${RUNNER_TEMP}/package.list"
