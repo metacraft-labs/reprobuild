@@ -5964,6 +5964,17 @@ proc resolvePeerAttribution(attribution: var MonitorPeerAttribution;
   attribution.pendingIpcLosses.setLen(0)
   attribution.ipcRecords.setLen(0)
 
+proc isNtDevicePath(path: string): bool =
+  ## An NT device object — `\Device\NetBT_Tcpip_{...}` (node enumerating
+  ## network interfaces), `\\.\<device>` — rather than a file. It has no
+  ## content to fingerprint and a name that is a fact about this machine's
+  ## hardware, so it is never an input. Named pipes are handled by their IPC
+  ## records (`isNamedPipeOpen`), which also carry the peer.
+  let p = path.replace('/', '\\')
+  (p.len > 8 and p[0 .. 7].toLowerAscii() == "\\device\\") or
+    (p.len > 4 and p.startsWith("\\\\.\\") and
+     not p.toLowerAscii().startsWith("\\\\.\\pipe\\"))
+
 proc withoutExtendedLengthPrefix(path: string): string =
   ## `\\?\M:\x` and `M:\x` are one file. io-mon records the spelling the
   ## program used, and one process opens a path both ways: npm's
@@ -6136,7 +6147,7 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     discard
 
   let materialized = materialPath(cwd, withoutExtendedLengthPrefix(record.path))
-  if materialized.isVolatileMonitorPath():
+  if materialized.isVolatileMonitorPath() or materialized.isNtDevicePath():
     return
   case record.kind
   of mrFileRead:
@@ -14250,7 +14261,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         result.add(physical)
 
   proc finishPortableRecord(idx: int; launched: BuildAction;
-                            reads, probes, enumerations: seq[string]) =
+                            reads, probes, enumerations: seq[string];
+                            observedEnv: seq[ObservedEnv] = @[]) =
     ## The shared tail of both portable recorders: fingerprint, outputs,
     ## local memo record, and (once per record) publication.
     ##
@@ -14261,7 +14273,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     let action = declaredActions.getOrDefault(launched.id, launched)
     var fp = computePortableFingerprint(portableRecordRoots(), action.argv,
       action.cwd, portableEnvOf(action), portableDeclaredInputsOf(action),
-      reads, probes, enumerations, portableStaticFieldsOf(action))
+      reads, probes, enumerations, portableStaticFieldsOf(action),
+      observedEnv)
     if fp.portable:
       # P3.2: a record is only shareable if its RESULT can be named too.
       let outs = portableOutputs(config.portableRoots,
@@ -14350,7 +14363,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         probes.add(path)
       else:
         reads.add(path)
-    finishPortableRecord(idx, action, reads, probes, enumerations)
+    # The OBSERVED environment, exactly as the local fingerprint takes it:
+    # a variable a process read is an input whether or not the action
+    # declared it.
+    var observed: seq[ObservedEnv] = @[]
+    for variable in action.cacheEnvInputs(evidence, unsafeAddr config):
+      observed.add(ObservedEnv(name: variable.name,
+        present: variable.present, value: variable.value))
+    finishPortableRecord(idx, action, reads, probes, enumerations, observed)
 
   proc recordFixedOutputPortable(idx: int; action: BuildAction) =
     ## A fixed-output action is not locally cacheable and leaves no local
@@ -14386,7 +14406,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       of ffkMissing, ffkOther: probes.add(path)
       of ffkRegular: reads.add(path)
       of ffkDirectory: enumerations.add(path)
-    finishPortableRecord(idx, action, reads, probes, enumerations)
+    var observed: seq[ObservedEnv] = @[]
+    for variable in record.envInputs:
+      observed.add(ObservedEnv(name: variable.name,
+        present: variable.present, value: variable.value))
+    finishPortableRecord(idx, action, reads, probes, enumerations, observed)
 
   proc publishBinaryCacheBundle(action: BuildAction;
                                 record: ActionResultRecord;
@@ -15536,14 +15560,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         else:
           hi = mid - 1
       -1
-    proc makeResolver(ancestors: HashSet[string]): IdentityResolver =
+    proc makeResolver(ancestors: HashSet[string];
+                      action: BuildAction): IdentityResolver =
       ## Inputs another graph action produces are identified from that
       ## action's resolved RECORD: a produced file by its digest, a path
       ## inside a produced directory by the directory's manifest, a directory
       ## above produced paths by its listing here plus what this action's
       ## ancestors produce (on the producing host, nothing else had been
       ## produced yet when this action ran). Everything else is on disk.
+      let launchEnv = action.actionEnvResolver(unsafeAddr config)
       result = proc (entry: PathSetEntry): Option[string] =
+        if entry.kind == pikEnvironment:
+          # What the action WOULD launch with here, the value the local
+          # fingerprint re-reads too — not the engine process's own env.
+          let name = entry.path["env:".len .. ^1]
+          let (present, value) = launchEnv(name)
+          return some(envIdentity(portableRecordRoots(), present, value))
         let path = entry.path
         if path in producer:
           if path notin producedOutputs:
@@ -15558,6 +15590,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if o.directory:
               return some(membershipHexOfNames(childNames(o.entries, "")))
             return some(Unresolved)
+          of pikEnvironment:
+            return some(Unresolved)   # answered above
         var up = parentKey(path)
         while up.len > 0:
           if up in producer:
@@ -15577,12 +15611,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               if at >= 0 and o.entries[at].kind == tekDirectory:
                 return some(membershipHexOfNames(childNames(o.entries, rel)))
               return some(Unresolved)
+            of pikEnvironment:
+              return some(Unresolved)   # answered above
           up = parentKey(up)
         if path in aboveProduced:
           case entry.kind
           of pikProbe:
             return some("present")
-          of pikRead:
+          of pikRead, pikEnvironment:
             return some(Unresolved)
           of pikEnumeration:
             var names = initHashSet[string]()
@@ -15629,7 +15665,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if not depsResolved:
         continue
       let weak = portableWeakOf(action)
-      let resolver = makeResolver(ancestors)
+      let resolver = makeResolver(ancestors, action)
       var hit = none(PortableMemoRecord)
       var source = "local"
       try:

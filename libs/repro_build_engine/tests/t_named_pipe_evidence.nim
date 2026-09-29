@@ -45,6 +45,19 @@ suite "named-pipe opens are not file inputs":
     check sawLookalike
     check sawSource
 
+  test "an NT device object is not a file input":
+    ## node enumerating network interfaces opens `\Device\NetBT_Tcpip_{...}`;
+    ## the name is a fact about this machine's hardware and has no content.
+    let cwd = getTempDir() / "t-named-pipe-evidence"
+    var evidence: PathSetEvidence
+    var seen: EvidenceSeenSets
+    discard foldMonitorRecordsEvidence(@[
+      fileRead("\\Device\\NetBT_Tcpip_{0F328C5D-3AB0-427D-9F98-4ACF621FA14E}"),
+      fileRead("\\\\.\\PhysicalDrive0"),
+      fileRead(cwd / "src" / "main.js")], cwd, evidence, seen)
+    check evidence.monitorReads.len == 1
+    check evidence.monitorReads[0].replace('\\', '/').endsWith("src/main.js")
+
   test "an extended-length spelling folds to the plain one":
     ## npm's delete-by-rename writes `\\?\...\x.DELETE.<id>` and later probes
     ## `...\x.DELETE.<id>`; as two spellings the self-write filter kept the
