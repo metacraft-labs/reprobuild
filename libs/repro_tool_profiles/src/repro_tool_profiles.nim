@@ -6298,17 +6298,18 @@ proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
   ## fingerprint, so every profile and action fingerprint below moves with
   ## the contribution (deliverable 4). Empty keeps the unpinned behaviour --
   ## a unique eligible contributor, or an ambiguity refusal. A caller that
-  ## CACHES the result (``repro_cli_support``'s tool-identity cache) must
-  ## bind the pins into its cache key before passing any; today no CLI path
-  ## passes pins.
+  ## CACHES the result must bind the pins into its cache key:
+  ## ``repro_cli_support``'s tool-identity cache does
+  ## (``toolIdentityCacheKey``), and the CLI build path passes the pins
+  ## ``buildProvisioningPins`` resolves from the committed lock.
   ##
   ## TRUST BOUNDARY: ``pins`` are trusted. They are checked against the
   ## artifact, but the contribution fingerprint cannot be recomputed here
   ## and the lock is not re-read, so a forged pin with the right record
   ## digest is accepted. Pass only pins ``contribution_selection.pinOf``
-  ## produced in this process; a pin that was persisted, cached or received
-  ## needs verification this engine can check first (see
-  ## ``ProvisioningPin``).
+  ## produced in this process -- as ``buildProvisioningPins`` does, on every
+  ## call; a pin that was persisted, cached or received needs verification
+  ## this engine can check first (see ``ProvisioningPin``).
   ##
   ## SC-3: ``producerAuxSelectors`` maps the ``uses:`` selectors that the
   ## cross-repo producer pre-pass materialized as LIBRARY-channel producers

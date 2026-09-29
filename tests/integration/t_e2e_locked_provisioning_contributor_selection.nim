@@ -26,16 +26,40 @@
 ## served from a ``file://`` URL, so "which contributor was realized" is
 ## read back from the realized executable's bytes, not inferred.
 ##
+## ## The CLI build path (``repro_cli_support``)
+##
+## The cases from "the CLI build path ..." on drive the functions ``repro
+## build`` itself calls, at the library level: ``buildProvisioningPins``
+## reads the committed ``repro.lock`` FILE from the project directory
+## (``committedProvisioningLockPath``), obtains the catalogs from the
+## installed ``ProvisioningCatalogSource``, runs the resolver and hands the
+## pins to ``warmResolveAndWriteIdentity`` -- the build path's own warm-table
+## / on-disk tool-identity cache, keyed by ``toolIdentityCacheKey`` -- which
+## realizes the locked archive. They cover: the lock selecting through that
+## path; the pins being part of the cache key (a lock moved from A to B is
+## re-resolved, never served A's cached identity); every refusal raising
+## ``ProvisioningSelectionRefused`` with the resolver's message (the build
+## lets it propagate; nothing retries unpinned); the no-lock /
+## no-record path consulting nothing and keying exactly as before; and the
+## consumer's typecheck identity (its interface fingerprint and its
+## provider-compile edge) staying put for realization-only changes while
+## the CLI cache and the realization keys move (deliverable 4).
+##
+## The catalog source is supplied BY THE TEST (``useCatalogs``). It is not a
+## mock of anything that exists: explicit catalog imports and provider
+## identities (M6 deliverables 1 and 2) have no production implementation,
+## so in a real ``repro build`` no source is installed and a lock with
+## provisioning records refuses -- which is also tested.
+##
 ## ## What this does NOT cover
 ##
-##   * The ``repro`` binary. No CLI path reads a committed lock's
-##     ``provisioning`` records and passes pins to ``toolBuildIdentity`` yet
-##     (``repro_cli_support`` calls it without pins, so an ambiguous pair
-##     still refuses there, and its tool-identity cache key does not bind
-##     pins). Discovering catalogs from published repositories (M6
-##     deliverable 2) and obtaining each offered contribution's provider
-##     identity are the caller's job here; nothing in production supplies
-##     them yet.
+##   * The ``repro`` binary itself: ``executeBuildTarget`` (which calls
+##     ``buildProvisioningPins`` then ``warmResolveAndWriteIdentity`` and
+##     ``loweredGraphCacheKey`` with the same pins), the dev-env activation
+##     and ``repro develop`` sites, and the producer runtime-tool sites are
+##     not run end to end: the binary's ``.#apps`` edge crashes on this host
+##     (``nim.exe`` STATUS_STACK_BUFFER_OVERRUN, pre-existing).
+##   * A production catalog source (M6 deliverables 1 and 2).
 ##   * Linux. Built and run on Windows only.
 ##   * Nix and Scoop realization (the tarball family is the one that
 ##     realizes on every host); their planners share ``selectContributor``
@@ -53,7 +77,10 @@ import repro_interface_artifacts/contribution_fingerprint
 import repro_interface_artifacts/contribution_lock
 import repro_interface_artifacts/contribution_selection
 import repro_interface_artifacts/provisioning_pins
+import repro_cli_support
+import repro_hash
 import repro_lock
+import repro_lock_files
 import repro_project_dsl
 import repro_tool_profiles
 
@@ -318,6 +345,88 @@ proc engineRefusal(body: proc ()): string =
     ""
   except ValueError as err:
     err.msg
+
+# ---------------------------------------------------------------------------
+# The CLI build path (``repro_cli_support``)
+# ---------------------------------------------------------------------------
+
+var catalogWorld: World
+var catalogSourceCalls = 0
+
+proc useCatalogs(w: World) =
+  ## Install ``w``'s catalogs as the CLI's ``ProvisioningCatalogSource`` --
+  ## the input M6 deliverables 1 and 2 will supply in production (see the
+  ## module docstring).
+  catalogWorld = w
+  setProvisioningCatalogSource(
+    proc (request: ProvisioningCatalogRequest): ProvisioningCatalogInputs =
+      inc catalogSourceCalls
+      ProvisioningCatalogInputs(imports: catalogWorld.imports,
+        offered: catalogWorld.offered))
+
+proc cliProject(records: seq[LockedRealization]; name: string): string =
+  ## A project directory whose committed ``repro.lock`` carries ``records``.
+  parentDir(commitLock(records, name))
+
+proc cliArtifact(w: World; consumerRoot = ""): ProjectInterfaceArtifact =
+  ## The consumer's artifact as extraction produces it for a project rooted
+  ## at ``consumerRoot``: the contributions it imports are marked imported
+  ## (``markImportedContributions``; they are declared under ``catalogs/``,
+  ## outside it).
+  var pi = w.consumer
+  let root =
+    if consumerRoot.len > 0: consumerRoot else: fixtureRoot / "consumer"
+  markImportedContributions(pi, root / "repro.nim")
+  artifactFor(pi)
+
+proc cliBuild(w: World; projectRoot, outDir: string): PathOnlyBuildIdentity =
+  ## What ``repro build`` does for the consumer: resolve the pins from the
+  ## project's committed lock, then resolve (and realize) the tool identity
+  ## through the build path's own cache.
+  let artifact = w.cliArtifact()
+  warmResolveAndWriteIdentity(artifact, outDir, tpmTarball,
+    pins = buildProvisioningPins(artifact, projectRoot)).identity
+
+proc cliRefusal(body: proc ()): string =
+  try:
+    body()
+    ""
+  except ProvisioningSelectionRefused as err:
+    err.msg
+
+proc hx(d: ContentDigest): string =
+  d.bytes.mapIt(it.toHex(2)).join().toLowerAscii()
+
+const UnpinnedKeyAtF7544a7b =
+  "4dca22f8441755fbf7bf3986f84ad518fbbcb6a4274805fe37f43c67edb7d497"
+  ## ``toolIdentityCacheKey(fixedKeyArtifact(), tpmTarball)`` computed by the
+  ## tree BEFORE lock selection reached the CLI (f7544a7b). A build with no
+  ## lock-selected pin and no imported contribution must key exactly so.
+
+proc fixedKeyArtifact(): ProjectInterfaceArtifact =
+  ## A consumer artifact made of literals only (no archive digests, which
+  ## vary per run), carrying one contribution record as its OWN.
+  let tarball = InterfaceTarballProvisioning(packageName: "lockedTool",
+    contributor: "github:example/locked-tool-catalog-a",
+    url: "https://example.invalid/locked-tool-a.tar.gz",
+    sha256: repeat('a', 64), archiveType: "tar.gz",
+    executablePath: "bin/locked-tool", stripComponents: 1,
+    packageId: "locked-tool@1.0.0", lockIdentity: "sha256:" & repeat('a', 64))
+  artifactFor(ProjectInterface(projectName: "keyFixture",
+    packageName: "keyFixture", defaultToolProvisioning: "tarball",
+    toolUses: @[InterfaceToolUse(rawConstraint: "lockedTool",
+      packageSelector: "lockedTool", executableName: "locked-tool",
+      tarballProvisioning: @[tarball])],
+    provisioningContributions: @[InterfaceProvisioningContribution(
+      targetPackage: "lockedTool", targetInterfaceFingerprint: repeat('c', 64),
+      contributor: "github:example/locked-tool-catalog-a",
+      tarballProvisioning: @[tarball])]))
+
+proc writeProjectLock(projectRoot: string; records: seq[LockedRealization]) =
+  createDir(projectRoot)
+  writeFile(projectRoot / "repro.lock",
+    serializeLockedDependencies(baseLock().withProvisioningRealizations(
+      records)))
 
 # ---------------------------------------------------------------------------
 
@@ -734,5 +843,587 @@ suite "e2e_locked_provisioning_contributor_selection":
     check "different contribution records from contributor" in engine
     w.consumer = consumerInterface(@[second, first], packages)
     check engineRefusal(proc () = discard w.build(@[])) == engine
+
+  test "the CLI build path reads the committed repro.lock and realizes the locked contributor":
+    let w = world(@[tipA1(), tipB1()])
+    w.useCatalogs()
+    let record = w.lockSelection(w.resolve(
+      policy = policyFor(ContributorA)).selectionFor(ToolPackage))
+    let project = cliProject(@[record], "cli-locked")
+    check committedProvisioningLockPath(project) == project / "repro.lock"
+    let pins = buildProvisioningPins(w.cliArtifact(), project)
+    check pins == w.resolve(claimsOf(project / "repro.lock")).pinsOf
+    check pins.len == 1
+    check pins[0].contributor == ContributorA
+    check pins[0].realizationLockIdentity == "sha256:" & archiveA1.sha256
+    # An explicit ``--lock`` binding for ``default`` governs instead of the
+    # project's own lock -- the same file the governing lock identity and
+    # the version pins read.
+    let recordB = w.lockSelection(w.resolve(
+      policy = policyFor(ContributorB)).selectionFor(ToolPackage))
+    let elsewhere = commitLock(@[recordB], "cli-bound")
+    var bindings = initLockBindings()
+    bindings.applyLockFlag(elsewhere)
+    setActiveLockBindings(bindings)
+    check committedProvisioningLockPath(project) == absolutePath(elsewhere)
+    check buildProvisioningPins(w.cliArtifact(), project)[0].contributor ==
+      ContributorB
+    resetActiveLockBindings()
+    check buildProvisioningPins(w.cliArtifact(), project)[0].contributor ==
+      ContributorA
+    let identity = w.cliBuild(project, fixtureRoot / "cli-out-locked")
+    check identity.realizedMarker == archiveA1.marker
+    check ("\ncontribution:" & record.contributionFingerprint & "\n") in
+      identity.profiles[0].lockIdentity
+    # Without a lock the CLI path pins nothing, and the two eligible
+    # contributors refuse exactly as the engine always did.
+    let unlocked = fixtureRoot / "cli-unlocked"
+    createDir(unlocked)
+    check buildProvisioningPins(w.cliArtifact(), unlocked).len == 0
+    let engine = engineRefusal(proc () =
+      discard w.cliBuild(unlocked, fixtureRoot / "cli-out-unlocked"))
+    check "ambiguous tarball provisioning" in engine
+
+  test "the CLI tool-identity cache key binds the pins: a lock moved from A to B is never served A's cached identity":
+    let w = world(@[tipA1(), tipB1()])
+    w.useCatalogs()
+    let recordA = w.lockSelection(w.resolve(
+      policy = policyFor(ContributorA)).selectionFor(ToolPackage))
+    let recordB = w.lockSelection(w.resolve(
+      policy = policyFor(ContributorB)).selectionFor(ToolPackage))
+    let project = fixtureRoot / "cli-cache"
+    let outDir = fixtureRoot / "cli-out-cache"
+    let artifact = w.cliArtifact()
+    writeProjectLock(project, @[recordA])
+    let pinsA = buildProvisioningPins(artifact, project)
+    let first = warmResolveAndWriteIdentity(artifact, outDir, tpmTarball,
+      pins = pinsA)
+    check first.identity.realizedMarker == archiveA1.marker
+    let keyA = toolIdentityCacheKey(artifact, tpmTarball, pins = pinsA)
+    check readFile(outDir / "tool-identity-cache" / "tarball.current-key").
+      strip() == keyA
+    # The same pins are served from the warm table.
+    var resolves = warmBuildCacheCounters.toolIdentityResolves
+    check warmResolveAndWriteIdentity(artifact, outDir, tpmTarball,
+      pins = pinsA).identity.realizedMarker == archiveA1.marker
+    check warmBuildCacheCounters.toolIdentityResolves == resolves
+    # The committed lock now pins B: same artifact, same outDir.
+    writeProjectLock(project, @[recordB])
+    let pinsB = buildProvisioningPins(artifact, project)
+    check pinsB[0].contributor == ContributorB
+    let keyB = toolIdentityCacheKey(artifact, tpmTarball, pins = pinsB)
+    check keyB != keyA
+    resolves = warmBuildCacheCounters.toolIdentityResolves
+    let second = warmResolveAndWriteIdentity(artifact, outDir, tpmTarball,
+      pins = pinsB)
+    check warmBuildCacheCounters.toolIdentityResolves == resolves + 1
+    check second.identity.realizedMarker == archiveB1.marker
+    check second.identity.profiles[0].profileFingerprint !=
+      first.identity.profiles[0].profileFingerprint
+    # A cold process (on-disk cache only) is not served A either.
+    forgetWarmBuildCaches()
+    check warmResolveAndWriteIdentity(artifact, outDir, tpmTarball,
+      pins = pinsB).identity.realizedMarker == archiveB1.marker
+    # Back to A: A's key again, and A's archive.
+    writeProjectLock(project, @[recordA])
+    let pinsA2 = buildProvisioningPins(artifact, project)
+    check pinsA2 == pinsA
+    check toolIdentityCacheKey(artifact, tpmTarball, pins = pinsA2) == keyA
+    forgetWarmBuildCaches()
+    check warmResolveAndWriteIdentity(artifact, outDir, tpmTarball,
+      pins = pinsA2).identity.realizedMarker == archiveA1.marker
+    check fileExists(outDir / "tool-identity-cache" / (keyA & ".rbtp"))
+    check fileExists(outDir / "tool-identity-cache" / (keyB & ".rbtp"))
+    # The lowered-graph cache key embeds the tool-identity key with the same
+    # pins, so a graph lowered under A is not served under B either.
+    proc graphKey(pins: seq[ProvisioningPin]): string =
+      loweredGraphCacheKey(artifact, tpmTarball, "provider-artifact", "", "",
+        pins = pins)
+    check graphKey(pinsA) != graphKey(pinsB)
+    check graphKey(pinsA) != graphKey(@[])
+    check graphKey(pinsA2) == graphKey(pinsA)
+    # Every field of a pin is bound; an unpinned key is a different key.
+    for field in 0 .. 4:
+      var moved = pinsA[0]
+      case field
+      of 0: moved.packageName = moved.packageName & "x"
+      of 1: moved.contributor = moved.contributor & "x"
+      of 2: moved.contributionFingerprint = repeat('0', 64)
+      of 3: moved.contributionRecordDigest = repeat('0', 64)
+      else: moved.realizationLockIdentity = "sha256:" & archiveA2.sha256
+      check toolIdentityCacheKey(artifact, tpmTarball, pins = @[moved]) != keyA
+    check toolIdentityCacheKey(artifact, tpmTarball) != keyA
+    check toolIdentityCacheKey(artifact, tpmTarball, pins = @[]) ==
+      toolIdentityCacheKey(artifact, tpmTarball)
+    # Pin order is not observable.
+    var helperPin = pinsB[0]
+    helperPin.packageName = "otherPackage"
+    check toolIdentityCacheKey(artifact, tpmTarball, pins = @[pinsA[0],
+      helperPin]) == toolIdentityCacheKey(artifact, tpmTarball,
+      pins = @[helperPin, pinsA[0]])
+
+  test "a lock refusal fails the CLI build path with the resolver's message and never falls back to an unpinned selection":
+    let w1 = world(@[tipA1(), tipB1()])
+    w1.useCatalogs()
+    let record = w1.lockSelection(w1.resolve(
+      policy = policyFor(ContributorA)).selectionFor(ToolPackage))
+    let project = cliProject(@[record], "cli-refuse")
+    let lockPath = project / "repro.lock"
+    let outDir = fixtureRoot / "cli-out-refuse"
+    check w1.cliBuild(project, outDir).realizedMarker == archiveA1.marker
+    # A publishes new content; the lock still pins the old contribution.
+    let w2 = world(@[Tip(contributor: ContributorA, remote: RemoteA,
+      revision: RevA2, archive: archiveA2, provider: ProviderA), tipB1()])
+    w2.useCatalogs()
+    let offeredNow = w2.resolve(policy = policyFor(ContributorA)).
+      selectionFor(ToolPackage).contributionFingerprint
+    let text = cliRefusal(proc () = discard w2.cliBuild(project, outDir))
+    check "provisioning selection refused" in text
+    check "contribution-changed" in text
+    check record.contributionFingerprint in text
+    check offeredNow in text
+    check lockPath in text
+    check "not relaxed to an unpinned selection" in text
+    # The locked contributor is gone; B alone would be unique-eligible.
+    let onlyB = world(@[tipB1()])
+    onlyB.useCatalogs()
+    let gone = cliRefusal(proc () =
+      discard buildProvisioningPins(onlyB.cliArtifact(), project))
+    check "locked-contribution-unavailable" in gone
+    check ContributorA in gone
+    # In production no catalog source is installed yet (M6 deliverables 1
+    # and 2): a lock with provisioning records refuses, naming why.
+    setProvisioningCatalogSource(nil)
+    check not provisioningCatalogSourceInstalled()
+    let production = cliRefusal(proc () = discard w1.cliBuild(project, outDir))
+    check "M6 deliverables 1 and 2" in production
+    check "\"" & ToolPackage & "\" -> \"" & ContributorA & "\"" in production
+    check lockPath in production
+    check "The lock is not ignored" in production
+    # The catalog source's curator policy is honoured -- and one that
+    # contradicts the committed lock refuses rather than being followed.
+    setProvisioningCatalogSource(
+      proc (request: ProvisioningCatalogRequest): ProvisioningCatalogInputs =
+        ProvisioningCatalogInputs(imports: w1.imports, offered: w1.offered,
+          policy: policyFor(ContributorB)))
+    let contradicted = cliRefusal(proc () = discard w1.cliBuild(project, outDir))
+    check "policy-contradicts-lock" in contradicted
+    check ContributorB in contradicted
+    # A failing catalog source refuses; it is not read as "no catalogs".
+    setProvisioningCatalogSource(
+      proc (request: ProvisioningCatalogRequest): ProvisioningCatalogInputs =
+        raise newException(IOError, "catalog checkout is missing"))
+    check "catalog checkout is missing" in
+      cliRefusal(proc () = discard w1.cliBuild(project, outDir))
+    # The catalog source's dependency resolver is the one used: a contribution
+    # that declares a dependency is fully bound only through it.
+    var wd = world(@[tipA1(), tipB1()])
+    let dep = ContributionDependencyRef(targetPackage: ToolPackage,
+      contributor: ContributorB,
+      targetInterfaceFingerprint:
+        wd.offered[1].contribution.targetInterfaceFingerprint)
+    wd.offered[0].dependencies = @[dep]
+    let depIdentity = wd.offered[1]
+    let depResolver: ContributionResolver =
+      proc (d: ContributionDependencyRef): Option[ContributionIdentity] {.gcsafe.} =
+        # The test's suite body is module scope; the resolver runs in this
+        # thread only.
+        {.cast(gcsafe).}:
+          result = if d == dep: some(depIdentity) else: none(ContributionIdentity)
+    let depSelection = resolveProvisioningSelections(
+      ProvisioningResolutionRequest(imports: wd.imports,
+        policy: policyFor(ContributorA), offered: wd.offered,
+        hostPlatform: Host, targetPlatform: Target), depResolver).
+      selectionFor(ToolPackage)
+    let depLocked = lockSelectedRealization(RealizationLockRequest(
+      selection: depSelection.selection, identity: depSelection.identity,
+      realizationLockIdentity: "sha256:" & archiveA1.sha256,
+      hostPlatform: Host, targetPlatform: Target, capabilities: @[]),
+      depResolver)
+    check depLocked.locked
+    let depProject = cliProject(@[depLocked.record], "cli-dependency")
+    setProvisioningCatalogSource(
+      proc (request: ProvisioningCatalogRequest): ProvisioningCatalogInputs =
+        ProvisioningCatalogInputs(imports: wd.imports, offered: wd.offered,
+          resolver: depResolver))
+    check buildProvisioningPins(wd.cliArtifact(), depProject)[0].
+      contributionFingerprint == depLocked.record.contributionFingerprint
+    setProvisioningCatalogSource(
+      proc (request: ProvisioningCatalogRequest): ProvisioningCatalogInputs =
+        ProvisioningCatalogInputs(imports: wd.imports, offered: wd.offered))
+    check "dependencies-not-fully-resolved" in cliRefusal(proc () =
+      discard buildProvisioningPins(wd.cliArtifact(), depProject))
+    # Provisioning records that cannot be read are refused, not dropped.
+    w1.useCatalogs()
+    let broken = fixtureRoot / "cli-broken"
+    createDir(broken)
+    var lines = readFile(lockPath).splitLines()
+    for i, line in lines:
+      if line.startsWith("provisioning"):
+        lines[i] = line[0 ..< line.len div 2]
+    writeFile(broken / "repro.lock", lines.join("\n"))
+    let unreadable = cliRefusal(proc () =
+      discard buildProvisioningPins(w1.cliArtifact(), broken))
+    check "cannot be read" in unreadable
+    check "they are not ignored" in unreadable
+    # TOML spellings of the key the strict reader does not read (it accepts
+    # each of these as a lock with NO provisioning record -- measured) are
+    # refused, never built unpinned.
+    let plainLock = readFile(lockPath).splitLines().filterIt(
+      not it.startsWith("provisioning")).join("\n")
+    for spelling in ["\"provisioning\" = [{ record = \"x\" }]",
+                     "'provisioning' = [{ record = \"x\" }]",
+                     "[[provisioning]]\nrecord = \"x\"",
+                     "provisioning.record = \"x\""]:
+      writeFile(broken / "repro.lock", plainLock & "\n" & spelling & "\n")
+      check parseLockedDependencies(readFile(broken / "repro.lock")).
+        lockedProvisioningClaims().len == 0
+      check "not read" in cliRefusal(proc () =
+        discard buildProvisioningPins(w1.cliArtifact(), broken))
+
+  test "with no lock, or no provisioning record for this platform pair, the CLI path consults nothing and keys as before":
+    let w = world(@[tipA1()])
+    w.useCatalogs()
+    catalogSourceCalls = 0
+    let artifact = w.cliArtifact()
+    let unpinnedKey = toolIdentityCacheKey(artifact, tpmTarball)
+    # No lock file.
+    let noLock = fixtureRoot / "cli-no-lock"
+    createDir(noLock)
+    check buildProvisioningPins(artifact, noLock).len == 0
+    # A lock without provisioning records.
+    let plain = cliProject(@[], "cli-plain")
+    check ProvisioningLockKey notin readFile(plain / "repro.lock")
+    check buildProvisioningPins(artifact, plain).len == 0
+    # Records for another platform pair only.
+    let other = if Host == "arm64-linux": "amd64-linux" else: "arm64-linux"
+    let s = w.resolve().selectionFor(ToolPackage)
+    let foreign = lockSelectedRealization(RealizationLockRequest(
+      selection: s.selection, identity: s.identity,
+      realizationLockIdentity: "sha256:" & archiveA1.sha256,
+      hostPlatform: other, targetPlatform: other, capabilities: @[]),
+      noContributionResolver)
+    check foreign.locked
+    let otherPlatform = cliProject(@[foreign.record], "cli-other-platform")
+    check ProvisioningLockKey in readFile(otherPlatform / "repro.lock")
+    check buildProvisioningPins(artifact, otherPlatform).len == 0
+    # A lock the strict reader rejects, with no provisioning line: this
+    # reader never gated a build, and still does not.
+    let malformed = fixtureRoot / "cli-malformed"
+    createDir(malformed)
+    writeFile(malformed / "repro.lock", "schema = \"not-a-lock\"\n")
+    check buildProvisioningPins(artifact, malformed).len == 0
+    # No project root and no ``--lock`` binding: no lock -- not whatever
+    # ``repro.lock`` the process's working directory happens to hold.
+    let cwdProject = cliProject(@[w.lockSelection(w.resolve().
+      selectionFor(ToolPackage))], "cli-cwd")
+    let cwd = getCurrentDir()
+    setCurrentDir(cwdProject)
+    check committedProvisioningLockPath("") == ""
+    check buildProvisioningPins(artifact, "").len == 0
+    setCurrentDir(cwd)
+    # Nothing consulted the catalogs, and the key is the unpinned one --
+    # byte for byte the key the CLI computed before this change.
+    check catalogSourceCalls == 0
+    let fixed = fixedKeyArtifact()
+    check toolIdentityCacheKey(fixed, tpmTarball) == UnpinnedKeyAtF7544a7b
+    for root in [noLock, plain, otherPlatform, malformed]:
+      check toolIdentityCacheKey(fixed, tpmTarball,
+        pins = buildProvisioningPins(fixed, root)) == UnpinnedKeyAtF7544a7b
+    for root in [noLock, plain, otherPlatform, malformed]:
+      check toolIdentityCacheKey(artifact, tpmTarball,
+        pins = buildProvisioningPins(artifact, root)) == unpinnedKey
+    # Even with no catalog source installed at all.
+    setProvisioningCatalogSource(nil)
+    check buildProvisioningPins(artifact, plain).len == 0
+    check buildProvisioningPins(artifact, otherPlatform).len == 0
+    # A cross-repo producer's runtime tools: its OWN lock governs them, and
+    # a runtime artifact carries no contributed realization, so nothing is
+    # selected there -- even under a lock with records and no catalog source.
+    var runtimeOnly = artifact
+    runtimeOnly.projectInterface.toolUses = @[InterfaceToolUse(
+      rawConstraint: ToolPackage, packageSelector: ToolPackage,
+      executableName: "locked-tool")]
+    check producerRuntimeProvisioningPins(runtimeOnly, cwdProject).len == 0
+    # A runtime use that does carry one is held to the producer's lock...
+    check "M6 deliverables 1 and 2" in cliRefusal(proc () =
+      discard producerRuntimeProvisioningPins(artifact, cwdProject))
+    for family in ["nix", "scoop"]:
+      var contributed = runtimeOnly
+      if family == "nix":
+        contributed.projectInterface.toolUses[0].nixProvisioning = @[
+          InterfaceNixProvisioning(packageName: ToolPackage,
+            contributor: ContributorA, selector: "nixpkgs#locked-tool")]
+      else:
+        contributed.projectInterface.toolUses[0].scoopProvisioning = @[
+          InterfaceScoopProvisioning(packageName: ToolPackage,
+            contributor: ContributorA, bucket: "main", app: "locked-tool")]
+      check "M6 deliverables 1 and 2" in cliRefusal(proc () =
+        discard producerRuntimeProvisioningPins(contributed, cwdProject))
+    # ...which the consumer's ``--lock`` binding does not redirect.
+    var bindings = initLockBindings()
+    bindings.applyLockFlag(plain / "repro.lock")
+    setActiveLockBindings(bindings)
+    check buildProvisioningPins(artifact, cwdProject).len == 0
+    check "M6 deliverables 1 and 2" in cliRefusal(proc () =
+      discard producerRuntimeProvisioningPins(artifact, cwdProject))
+    resetActiveLockBindings()
+    # And the unique contributor is realized, unpinned, as before.
+    let identity = warmResolveAndWriteIdentity(artifact,
+      fixtureRoot / "cli-out-plain", tpmTarball,
+      pins = buildProvisioningPins(artifact, plain)).identity
+    check identity.realizedMarker == archiveA1.marker
+    check "\ncontribution:" notin identity.profiles[0].lockIdentity
+    # The same project then gains a lock pinning the same contributor: the
+    # unpinned identity cached in this outDir is NOT served for it (cold
+    # process, on-disk cache only)...
+    w.useCatalogs()
+    let pinnedPins = buildProvisioningPins(artifact, cwdProject)
+    check pinnedPins.len == 1
+    forgetWarmBuildCaches()
+    let pinnedIdentity = warmResolveAndWriteIdentity(artifact,
+      fixtureRoot / "cli-out-plain", tpmTarball, pins = pinnedPins).identity
+    check ("\ncontribution:" & pinnedPins[0].contributionFingerprint & "\n") in
+      pinnedIdentity.profiles[0].lockIdentity
+    # ...and dropping the lock again is not served the pinned one.
+    forgetWarmBuildCaches()
+    let unpinnedAgain = warmResolveAndWriteIdentity(artifact,
+      fixtureRoot / "cli-out-plain", tpmTarball, pins = @[]).identity
+    check "\ncontribution:" notin unpinnedAgain.profiles[0].lockIdentity
+
+  test "a realization-only change keeps the consumer's typecheck identity; an interface change moves it":
+    # Deliverable 4, second half, measured in both directions. The typecheck
+    # identity is the consumer's interface fingerprint and the edge that
+    # compiles (typechecks) its recipe, keyed on it.
+    let consumerRoot = fixtureRoot / "consumer-typecheck"
+    createDir(consumerRoot)
+    let module = consumerRoot / "repro.nim"
+    writeFile(module, "import repro_project_dsl\n")
+    proc typecheck(w: World): seq[string] =
+      let artifact = w.cliArtifact(consumerRoot)
+      let plan = providerCompilePlan(module,
+        consumerRoot / "out" / "project-provider", artifact.interfaceFingerprint,
+        workDir = getCurrentDir())
+      @[hx(artifact.interfaceFingerprint), hx(plan.compileEdge.actionFingerprint),
+        hx(plan.providerArtifactId)]
+    let w1 = world(@[tipA1(), tipB1()])
+    let project1 = cliProject(@[w1.lockSelection(w1.resolve(
+      policy = policyFor(ContributorA)).selectionFor(ToolPackage))], "tc-1")
+    # (1) realization-only change of the SELECTED contributor, lock refreshed.
+    let w2 = world(@[Tip(contributor: ContributorA, remote: RemoteA,
+      revision: RevA2, archive: archiveA2, provider: ProviderA), tipB1()])
+    let project2 = cliProject(@[w2.lockSelection(w2.resolve(
+      policy = policyFor(ContributorA)).selectionFor(ToolPackage))], "tc-2")
+    # (2) the same change to the NON-selected contributor; the lock holds.
+    let w3 = world(@[tipA1(), Tip(contributor: ContributorB, remote: RemoteB,
+      revision: RevB2, archive: archiveB2, provider: ProviderB)])
+    # (3) an interface change of the target -- a second public executable,
+    # so the consumer's own use of the first is unchanged and only the
+    # imported records' target fingerprint can move it; both republish,
+    # lock refreshed.
+    var packages = registeredPackages().filterIt(it.packageName != ToolPackage)
+    var changed = findPackage(ToolPackage, registeredPackages())
+    changed.executables.add(ExecutableDef(exportName: "lockedExtra",
+      binaryName: "locked-extra"))
+    packages.add(changed)
+    let w4 = world(@[tipA1(), tipB1()], packages)
+    let project4 = cliProject(@[w4.lockSelection(w4.resolve(
+      policy = policyFor(ContributorA)).selectionFor(ToolPackage))], "tc-4")
+
+    let base = w1.typecheck()
+    check w2.typecheck() == base
+    check w3.typecheck() == base
+    let moved = w4.typecheck()
+    for i in 0 .. 2:
+      check moved[i] != base[i]
+    # The lock identity (typechecking under the lock) never moves.
+    check lockIdentityOf(readCommittedLock(project2 / "repro.lock")) ==
+      lockIdentityOf(readCommittedLock(project1 / "repro.lock"))
+    check lockIdentityOf(readCommittedLock(project4 / "repro.lock")) ==
+      lockIdentityOf(readCommittedLock(project1 / "repro.lock"))
+
+    # Realization and build keys, through the CLI path into one outDir.
+    let outDir = fixtureRoot / "cli-out-typecheck"
+    w1.useCatalogs()
+    let b1 = w1.cliBuild(project1, outDir)
+    w2.useCatalogs()
+    let b2 = w2.cliBuild(project2, outDir)
+    w3.useCatalogs()
+    let b3 = w3.cliBuild(project1, outDir)
+    check b1.realizedMarker == archiveA1.marker
+    check b2.realizedMarker == archiveA2.marker   # never A1's cached identity
+    check b2.profiles[0].selectedStorePath != b1.profiles[0].selectedStorePath
+    check b2.profiles[0].profileFingerprint != b1.profiles[0].profileFingerprint
+    check b2.actionIdentities[0].actionFingerprint !=
+      b1.actionIdentities[0].actionFingerprint
+    check b3.realizedMarker == archiveA1.marker
+    check b3.profiles[0].profileFingerprint == b1.profiles[0].profileFingerprint
+    check b3.actionIdentities[0].actionFingerprint ==
+      b1.actionIdentities[0].actionFingerprint
+    # The realization metadata the typecheck identity no longer carries is
+    # still bound where it is READ: the CLI tool-identity key moves for both
+    # realization changes although the interface fingerprint did not.
+    let pins1 = w1.resolve(claimsOf(project1 / "repro.lock")).pinsOf
+    check w3.cliArtifact().interfaceFingerprint ==
+      w1.cliArtifact().interfaceFingerprint
+    check toolIdentityCacheKey(w3.cliArtifact(), tpmTarball, pins = pins1) !=
+      toolIdentityCacheKey(w1.cliArtifact(), tpmTarball, pins = pins1)
+    check toolIdentityCacheKey(w2.cliArtifact(), tpmTarball) !=
+      toolIdentityCacheKey(w1.cliArtifact(), tpmTarball)
+    # Including a realization field the key's own tool-use field list does
+    # not name (``prunePaths``): only the imported-metadata digest binds it
+    # now that the interface fingerprint does not.
+    var pruned = w1.consumer
+    for c in pruned.provisioningContributions.mitems:
+      if c.contributor == ContributorB:
+        c.tarballProvisioning[0].prunePaths = @["share/doc"]
+    for u in pruned.toolUses.mitems:
+      for t in u.tarballProvisioning.mitems:
+        if t.contributor == ContributorB:
+          t.prunePaths = @["share/doc"]
+    var prunedWorld = w1
+    prunedWorld.consumer = pruned
+    check prunedWorld.cliArtifact().interfaceFingerprint ==
+      w1.cliArtifact().interfaceFingerprint
+    check toolIdentityCacheKey(prunedWorld.cliArtifact(), tpmTarball,
+      pins = pins1) != toolIdentityCacheKey(w1.cliArtifact(), tpmTarball,
+      pins = pins1)
+    check toolIdentityCacheKey(prunedWorld.cliArtifact(), tpmTarball) !=
+      toolIdentityCacheKey(w1.cliArtifact(), tpmTarball)
+    # The catalog direction: the same records as a project's OWN (a catalog
+    # project) still move its interface fingerprint.
+    check artifactFor(w3.consumer).interfaceFingerprint !=
+      artifactFor(w1.consumer).interfaceFingerprint
+    check artifactFor(w2.consumer).interfaceFingerprint !=
+      artifactFor(w1.consumer).interfaceFingerprint
+
+  test "an explicitly named lock that cannot be read, and records the reader does not read, refuse rather than build unpinned":
+    # Found by the M7 verifier, probing from outside. Each of these used to
+    # yield NO pin -- an unpinned build of a lock that pins a contributor.
+    let w = world(@[tipA1(), tipB1()])
+    w.useCatalogs()
+    let artifact = w.cliArtifact()
+    let record = w.lockSelection(w.resolve(
+      policy = policyFor(ContributorA)).selectionFor(ToolPackage))
+    let project = cliProject(@[record], "explicit-lock")
+    # (1) ``--lock`` naming a file that does not exist, or a directory, is
+    # missing evidence the user asked for -- not "no lock". The implicit
+    # ``<project>/repro.lock`` being absent still means no lock.
+    for bound in [fixtureRoot / "no-such-dir" / "repro.lock",
+                  fixtureRoot / "a-directory"]:
+      createDir(fixtureRoot / "a-directory")
+      var bindings = initLockBindings()
+      bindings.applyLockFlag(bound)
+      setActiveLockBindings(bindings)
+      let text = cliRefusal(proc () =
+        discard buildProvisioningPins(artifact, project))
+      resetActiveLockBindings()
+      check "provisioning selection refused" in text
+      check "cannot be read" in text
+    let empty = fixtureRoot / "explicit-lock-empty-project"
+    createDir(empty)
+    check buildProvisioningPins(artifact, empty).len == 0
+    createDir(empty / "repro.lock")
+    check buildProvisioningPins(artifact, empty).len == 0
+    # (2) A lock that exists but cannot be read refuses with the selection's
+    # own refusal, explicit or implicit (a raw I/O error used to escape).
+    when defined(windows):
+      let unreadable = fixtureRoot / "unreadable-lock"
+      createDir(unreadable)
+      copyFile(project / "repro.lock", unreadable / "repro.lock")
+      let user = getEnv("USERNAME")
+      let denied = execCmdEx("icacls " & quoteShell(unreadable / "repro.lock") &
+        " /deny " & quoteShell(user & ":(R)"))
+      check denied.exitCode == 0
+      var bindings = initLockBindings()
+      bindings.applyLockFlag(unreadable / "repro.lock")
+      setActiveLockBindings(bindings)
+      check "cannot be read" in cliRefusal(proc () =
+        discard buildProvisioningPins(artifact, empty))
+      resetActiveLockBindings()
+      check "cannot be read" in cliRefusal(proc () =
+        discard buildProvisioningPins(artifact, unreadable))
+      discard execCmdEx("icacls " & quoteShell(unreadable / "repro.lock") &
+        " /remove:d " & quoteShell(user))
+      check buildProvisioningPins(artifact, unreadable)[0].contributor ==
+        ContributorA
+    # (3) Spellings of the key the strict reader does not read refuse even
+    # BESIDE a record it does read (here one for another platform, so the
+    # read part pins nothing on this host), and escaped spellings refuse on
+    # their own.
+    let other = if Host == "arm64-linux": "amd64-linux" else: "arm64-linux"
+    let s = w.resolve(policy = policyFor(ContributorA)).selectionFor(ToolPackage)
+    let foreign = lockSelectedRealization(RealizationLockRequest(
+      selection: s.selection, identity: s.identity,
+      realizationLockIdentity: "sha256:" & archiveA1.sha256,
+      hostPlatform: other, targetPlatform: other, capabilities: @[]),
+      noContributionResolver)
+    check foreign.locked
+    # A record made on another HOST for this target is not this platform
+    # pair either: it governs nothing here, and (production, no catalog
+    # source) is not refused as though it did.
+    let crossHost = lockSelectedRealization(RealizationLockRequest(
+      selection: s.selection, identity: s.identity,
+      realizationLockIdentity: "sha256:" & archiveA1.sha256,
+      hostPlatform: other, targetPlatform: Target, capabilities: @[]),
+      noContributionResolver)
+    check crossHost.locked
+    let crossTarget = lockSelectedRealization(RealizationLockRequest(
+      selection: s.selection, identity: s.identity,
+      realizationLockIdentity: "sha256:" & archiveA1.sha256,
+      hostPlatform: Host, targetPlatform: other, capabilities: @[]),
+      noContributionResolver)
+    check crossTarget.locked
+    setProvisioningCatalogSource(nil)
+    check buildProvisioningPins(artifact,
+      cliProject(@[crossHost.record], "cross-host")).len == 0
+    check buildProvisioningPins(artifact,
+      cliProject(@[crossTarget.record], "cross-target")).len == 0
+    w.useCatalogs()
+    let lockText = readFile(project / "repro.lock")
+    let plainLock = lockText.splitLines().filterIt(
+      not it.startsWith(ProvisioningLockKey)).join("\n")
+    let hostLine = lockText.splitLines().filterIt(
+      it.startsWith(ProvisioningLockKey))[0]
+    let hostRecords = hostLine[hostLine.find('=') + 1 .. ^1].strip()
+    let foreignText = serializeLockedDependencies(
+      baseLock().withProvisioningRealizations(@[foreign.record]))
+    let foreignLine = foreignText.splitLines().filterIt(
+      it.startsWith(ProvisioningLockKey))[0]
+    let mixed = fixtureRoot / "mixed-spellings"
+    createDir(mixed)
+    for spelling in ["\"provisioning\" = " & hostRecords,
+                     "'provisioning' = " & hostRecords,
+                     "[[provisioning]]\nrecord = \"x\"",
+                     "provisioning.x = 1",
+                     "\"\\u0070rovisioning\" = " & hostRecords,
+                     "\"provisioni\\u006Eg\" = " & hostRecords,
+                     "\"\\U00000070rovisioning\" = " & hostRecords,
+                     "[[\"\\u0070rovisioning\"]]\nrecord = \"x\"",
+                     "\xEF\xBB\xBFprovisioning = " & hostRecords]:
+      for withForeign in [true, false]:
+        let body =
+          if withForeign: plainLock & "\n" & foreignLine & "\n" & spelling
+          else: plainLock & "\n" & spelling
+        writeFile(mixed / "repro.lock", body & "\n")
+        let text = cliRefusal(proc () =
+          discard buildProvisioningPins(artifact, mixed))
+        check "not read" in text
+        # ...and with no catalog source installed (production) as well.
+        setProvisioningCatalogSource(nil)
+        check "not read" in cliRefusal(proc () =
+          discard buildProvisioningPins(artifact, mixed))
+        w.useCatalogs()
+    # The writer's own form, indented or with CRLF line ends, is still read.
+    for body in [plainLock & "\n\t" & hostLine,
+                 (plainLock & "\n" & hostLine).replace("\n", "\r\n")]:
+      writeFile(mixed / "repro.lock", body & "\n")
+      check buildProvisioningPins(artifact, mixed)[0].contributor ==
+        ContributorA
+    # A key merely CONTAINING the word elsewhere in the document is not the
+    # provisioning key: an inline-table member of another key.
+    writeFile(mixed / "repro.lock", plainLock & "\n" &
+      "x = { provisioning = 1 }\n")
+    check buildProvisioningPins(artifact, mixed).len == 0
 
   removeDir(fixtureRoot)

@@ -43,10 +43,16 @@
 ## locked one, is ACCEPTED here (measured). The pin is therefore trusted
 ## input, and that is sound only while its sole producer is
 ## ``contribution_selection.pinOf`` over a resolution made in the same
-## process. No code path persists, caches or transmits a pin today. Any that
-## is added -- a cached build identity keyed on pins, a pin read back from
-## disk or received over IPC -- must carry verification this module can
-## check, or re-run the resolver, before the pin reaches
+## process. The one production caller that builds pins,
+## ``repro_cli_support.buildProvisioningPins``, re-reads the committed lock
+## and re-runs the resolver on every call and hands the pins straight to
+## ``toolBuildIdentity``. The CLI's cached build identity IS keyed on pins,
+## but only through a digest of their fields: a cache entry is found only
+## with a key recomputed from freshly resolved pins, and nothing reads a pin
+## back from a key, a cached identity or a lock-identity string. No code
+## path persists, caches or transmits a pin AS A PIN. Any that is added -- a
+## pin read back from disk or received over IPC -- must carry verification
+## this module can check, or re-run the resolver, before the pin reaches
 ## ``applyProvisioningPins``.
 
 import std/[algorithm, sequtils, strutils]

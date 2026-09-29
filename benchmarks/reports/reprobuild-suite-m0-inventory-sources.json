@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1656,
-    "pureUnitConsolidationGroups": 51,
-    "pureUnitTests": 590,
+    "nimTestBinaries": 1657,
+    "pureUnitConsolidationGroups": 52,
+    "pureUnitTests": 591,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1667
+    "testEntries": 1668
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -274,6 +274,21 @@
       "sources": [
         "libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim",
         "libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_hash",
+        "repro_interface_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "sources": [
+        "libs/repro_interface_artifacts/tests/t_runtime_tool_uses_codec.nim",
+        "libs/repro_interface_artifacts/tests/test_imported_contribution_typecheck_identity.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1117,7 +1132,7 @@
       "graph-fixture": 12,
       "integration": 773,
       "platform/destructive": 115,
-      "pure unit": 590,
+      "pure unit": 591,
       "unclassified": 177
     },
     "graphOwnedTestArtifacts": [
@@ -1266,9 +1281,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1656,
+    "nimTestBinaryCount": 1657,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1667
+    "testEntryCount": 1668
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10898,6 +10913,25 @@
       "source": "libs/repro_interface_artifacts/tests/test_contribution_fingerprint_invalidation_boundaries.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 46,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_imported_contribution_typecheck_identity",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hash",
+        "repro_interface_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/test_imported_contribution_typecheck_identity.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25080,8 +25114,11 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_cli_support",
+        "repro_hash",
         "repro_interface_artifacts",
         "repro_lock",
+        "repro_lock_files",
         "repro_project_dsl",
         "repro_tool_profiles"
       ],
@@ -25089,7 +25126,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_e2e_locked_provisioning_contributor_selection.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 16,
+      "staticCaseCount": 22,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

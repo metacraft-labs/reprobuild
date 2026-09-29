@@ -77,9 +77,11 @@
 ##
 ## TRUST BOUNDARY: the engine cannot recompute the fingerprint or re-check
 ## the lock, so a pin is trusted input. It must come from ``pinOf`` over a
-## resolution made in the same process; nothing persists a pin today, and
-## anything that ever does must add verification the engine can check (see
-## ``ProvisioningPin``).
+## resolution made in the same process. The CLI build path's caller,
+## ``repro_cli_support/provisioning_lock_selection``, does exactly that on
+## every build (and binds the pins into its tool-identity cache key only as
+## a digest); nothing persists a pin, and anything that ever does must add
+## verification the engine can check (see ``ProvisioningPin``).
 ##
 ## ## What it does NOT do
 ##

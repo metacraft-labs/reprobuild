@@ -2439,6 +2439,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/test_imported_contribution_typecheck_identity.nim",
+    binary: "build/test-bin/test_imported_contribution_typecheck_identity",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim",
     binary: "build/test-bin/test_library_codec_roundtrip",
     defines: @[],
