@@ -11844,6 +11844,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_post_commit_reports_the_hook_path_it_will_not_rewrite.nim",
+    binary: "build/test-bin/t_post_commit_reports_the_hook_path_it_will_not_rewrite",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_post_merge_hook_reconciles_local_state.nim",
     binary: "build/test-bin/t_post_merge_hook_reconciles_local_state",
     defines: @[],

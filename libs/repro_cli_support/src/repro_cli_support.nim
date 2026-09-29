@@ -15824,6 +15824,77 @@ proc hooksPathRepairReport*(repoRoot: string;
     "'.git' is a file); rewrote it to " & repair.resolved &
     " so every worktree of this repo runs the managed hooks"
 
+proc inspectWorktreeSafeHooksPath*(repoRoot: string): HooksPathRepair =
+  ## The READ-ONLY half of ``ensureWorktreeSafeHooksPath``: answer what that
+  ## repair WOULD find and what it WOULD write, and change nothing.
+  ##
+  ## ``previous`` carries the effective ``core.hooksPath`` when it is relative
+  ## (empty when the value is unset or already absolute, i.e. when there is
+  ## nothing to repair); ``resolved`` carries the absolute path it was written
+  ## to mean. ``changed`` is never set — nothing was changed. ``ok`` is false
+  ## only when a repair is NEEDED and its target cannot even be computed.
+  ##
+  ## This exists so a caller can say what is wrong without also deciding to
+  ## fix it. ``core.hooksPath`` lives in the operator's ``.git/config``; the
+  ## call sites that reach this — ``post-commit``, ``post-merge``,
+  ## ``post-checkout`` — were handed a ``git commit`` / ``merge`` / ``checkout``
+  ## and no hooks-related instruction at all. See ``selfHealManagedHooks``.
+  result.ok = true
+  if repoRoot.len == 0:
+    return
+  let top = gitTopLevel(repoRoot)
+  if top.len == 0:
+    return
+  let read = execCmdEx(shellCommand(@["git", "-C", top, "config", "--get",
+    "core.hooksPath"]), env = scrubbedGitRepositoryEnv())
+  if read.exitCode != 0:
+    return
+  let current = read.output.strip()
+  if current.len == 0 or current.isAbsolute:
+    return
+  result.previous = current
+  let mainTop = gitMainWorktreeTop(top)
+  if mainTop.len == 0:
+    result.ok = false
+    result.diagnostic = "could not determine the main worktree of " & top
+    return
+  result.resolved = os.normalizedPath(mainTop / current)
+
+proc hooksPathDiagnosisLines*(repoRoot: string;
+    finding: HooksPathRepair): seq[string] =
+  ## What a hook that will NOT rewrite the operator's shared git config says
+  ## when it finds a worktree-unsafe ``core.hooksPath``. Empty when there is
+  ## nothing wrong, so a caller can append it unconditionally.
+  ##
+  ## It has to carry everything the operator needs to act, because nothing
+  ## else in this code path will: the value, what it costs, that this hook
+  ## deliberately left it alone, two commands that fix it, and the fact that
+  ## the next push refuses until one of them is run. A diagnostic an operator
+  ## cannot act on is how a warning becomes noise, and the reflex that noise
+  ## trains is ``--no-verify``.
+  if finding.previous.len == 0:
+    return
+  result.add("repro hooks: core.hooksPath in " & repoRoot &
+    " is the relative path '" & finding.previous &
+    "', which Git resolves against each worktree's own top level and which " &
+    "therefore names nothing in a linked worktree (its '.git' is a FILE) — " &
+    "so Git runs NO managed hooks there.")
+  result.add("repro hooks:   this hook did NOT change it: core.hooksPath is " &
+    "your shared git config, not the '.git/hooks' bundle Reprobuild manages, " &
+    "and you ran no hooks command here.")
+  if finding.resolved.len > 0:
+    result.add("repro hooks:   fix it with:  repro hooks ensure --vcs " &
+      repoRoot)
+    result.add("repro hooks:   or directly:  git -C " & repoRoot &
+      " config --local core.hooksPath " & finding.resolved)
+  else:
+    result.add("repro hooks:   the absolute path it should hold could not be " &
+      "computed here: " & finding.diagnostic)
+    result.add("repro hooks:   fix it with:  repro hooks ensure --vcs " &
+      repoRoot)
+  result.add("repro hooks:   until then the publication gate refuses to " &
+    "publish from this repository.")
+
 proc hooksPathRefusalLines*(repoRoot: string;
     repair: HooksPathRepair): seq[string] =
   ## The refusal an unrepairable hook path earns at the publication boundary.
@@ -15877,10 +15948,18 @@ proc gitHooksDir(targetPath: string): string =
   let raw = res.output.strip()
   # A relative answer is `core.hooksPath` verbatim, and Git resolves it against
   # THIS worktree's top level — so in a linked worktree it names a path under a
-  # `.git` that is a file. Every installing caller runs
+  # `.git` that is a file. Every caller that INSTALLS on the operator's
+  # instruction (`hooks ensure` / `reinstall`) runs
   # `ensureWorktreeSafeHooksPath` first, which is what keeps that from being
   # the answer; joining on `repoRoot` here reproduces Git's own reading of a
   # value that survived it.
+  #
+  # `selfHealManagedHooks` deliberately does NOT repair the path first (it
+  # reports instead), and that does not reintroduce the case: a relative
+  # `core.hooksPath` means Git finds no hooks directory in a linked worktree,
+  # so no hook runs there, so nothing calls the self-heal there. Where the
+  # self-heal does run — the main worktree — the relative value and its
+  # absolute reading name the same directory.
   result = if raw.isAbsolute: os.normalizedPath(raw)
     else: os.normalizedPath(repoRoot / raw)
 
@@ -16727,6 +16806,31 @@ proc selfHealManagedHooks*(repoRoot: string): seq[string] =
   ## can slip past the gate. This needs no per-repo flake or ``.envrc`` edit,
   ## which is what makes it hold across every repo in the workspace.
   ##
+  ## Which namespace a hook may write
+  ## --------------------------------
+  ##
+  ## ``.git/hooks/*`` only. That directory is outside version control, it is
+  ## Reprobuild's to install into, and something else deletes from it on every
+  ## dev-shell entry — restoring it is the whole reason this proc runs from a
+  ## hook.
+  ##
+  ## ``core.hooksPath`` is a different category and is NOT written here, only
+  ## REPORTED (see ``hooksPathDiagnosisLines``). It is a key in the operator's
+  ## ``.git/config``, shared by every worktree and read by every tool that runs
+  ## hooks — and the three call sites that reach this proc are ``post-commit``,
+  ## ``post-merge`` and ``post-checkout``, i.e. the ones where the operator
+  ## issued ``git commit`` / ``merge`` / ``checkout`` and no hooks-related
+  ## command at all. "Your ``git commit`` silently changed a git config key"
+  ## is a surprise a commit hook has not earned.
+  ##
+  ## It is also very nearly redundant. This repository's dev shell runs
+  ## ``repro hooks ensure`` on every entry; ``repro hooks ensure`` /
+  ## ``reinstall`` repair the path whenever the operator asks for hooks; and
+  ## the pre-push gate REFUSES at the publication boundary when the path is
+  ## not worktree-safe. The one moment an unsafe value could let something
+  ## escape is already guarded by a refusal the operator sees. What the silent
+  ## rewrite added over the diagnostic was the silence.
+  ##
   ## Never raises and never blocks the git operation that invoked it: a hook
   ## that fails a commit because it could not repair a DIFFERENT hook would be
   ## a worse failure than the one it is fixing. A repair it cannot make safely
@@ -16737,19 +16841,13 @@ proc selfHealManagedHooks*(repoRoot: string): seq[string] =
   let top = gitTopLevel(repoRoot)
   if top.len == 0:
     return
-  # Repair the hook PATH before repairing the hooks. A relative
-  # `core.hooksPath` leaves every linked worktree of this repo with no hooks
-  # directory at all, and installing a perfect bundle into the main worktree's
-  # does not change that. This runs from a hook that is currently executing —
-  # i.e. in the main worktree, the only place one can still run — which is
-  # exactly where the shared config is reachable.
-  let pathRepair = ensureWorktreeSafeHooksPath(top)
-  let repairLine = hooksPathRepairReport(top, pathRepair)
-  if repairLine.len > 0:
-    result.add(repairLine)
-  if not pathRepair.ok:
-    result.add("repro hooks: could NOT make core.hooksPath worktree-safe in " &
-      top & " (it is '" & pathRepair.previous & "'): " & pathRepair.diagnostic)
+  # REPORT the hook PATH; do not rewrite it. A relative `core.hooksPath`
+  # leaves every linked worktree of this repo with no hooks directory at all,
+  # and installing a perfect bundle into the main worktree's does not change
+  # that — so it has to be SAID here. What it is not is this hook's to fix:
+  # see "Which namespace a hook may write" above.
+  for line in hooksPathDiagnosisLines(top, inspectWorktreeSafeHooksPath(top)):
+    result.add(line)
   let hooksDir = gitHooksDir(top)
   for hookName in VcsHookNames:
     try:

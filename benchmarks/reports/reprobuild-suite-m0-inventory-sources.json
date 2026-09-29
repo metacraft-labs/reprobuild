@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1766,
+    "nimTestBinaries": 1767,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 587,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1781
+    "testEntries": 1782
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1076,7 +1076,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 909,
+      "integration": 910,
       "platform/destructive": 115,
       "pure unit": 587,
       "unclassified": 159
@@ -1227,9 +1227,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1766,
+    "nimTestBinaryCount": 1767,
     "pythonTestFileCount": 15,
-    "testEntryCount": 1781
+    "testEntryCount": 1782
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -29698,6 +29698,23 @@
       "source": "tests/integration/t_post_commit_report_lands_in_the_disposable_build_tree.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_post_commit_reports_the_hook_path_it_will_not_rewrite",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_post_commit_reports_the_hook_path_it_will_not_rewrite.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
