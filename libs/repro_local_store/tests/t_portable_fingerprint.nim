@@ -107,6 +107,33 @@ suite "portable fingerprints":
     check f.strongHex == ""
     check "host.cfg" in f.reason
 
+  test "probing a directory ABOVE a root is implied, not an input":
+    ## A shell resolves a path one component at a time, probing `M:\m`, then
+    ## `M:\m\dev`, ... Each answer is "present" wherever the root exists, so
+    ## it says where this host keeps the checkout, not what the build read.
+    let a = createTempDir("repro-pfp-ancestor-", "")
+    let stray = createTempDir("repro-pfp-unrelated-", "")
+    defer:
+      removeDir(a)
+      removeDir(stray)
+    let project = checkout(a)
+    let roots = @[
+      LogicalRoot(label: "project", path: project, kind: lrkTracked)]
+    proc probing(probes: seq[string]): PortableFingerprint =
+      computePortableFingerprint(roots, @["sh", "-c", "true"], project, @[],
+        @[], reads = @[project / "src" / "main.c"], probes = probes,
+        enumerations = @[])
+    let plain = probing(@[])
+    let withAncestors = probing(@[a, a / "work", project.parentDir])
+    check withAncestors.portable
+    check withAncestors.strongHex == plain.strongHex
+    # A directory that does NOT contain a root is still outside.
+    check not probing(@[stray]).portable
+    # Nor may an ancestor be ENUMERATED portably: its listing is host-specific.
+    let enumerated = computePortableFingerprint(roots, @["sh"], project, @[],
+      @[], reads = @[], probes = @[], enumerations = @[a / "work"])
+    check not enumerated.portable
+
   test "untracked roots do not contribute":
     let a = createTempDir("repro-pfp-untracked-", "")
     defer: removeDir(a)

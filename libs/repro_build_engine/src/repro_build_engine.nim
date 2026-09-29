@@ -5955,6 +5955,31 @@ proc resolvePeerAttribution(attribution: var MonitorPeerAttribution;
   attribution.pendingIpcLosses.setLen(0)
   attribution.ipcRecords.setLen(0)
 
+proc isNamedPipeOpen(record: MonitorRecord): bool =
+  ## io-mon's classification of an open that reached a NAMED PIPE (a node /
+  ## libuv IPC channel, a daemon's pipe), emitted ON TOP OF the file record
+  ## the same open produced. The NT arm records that file record with its
+  ## `\??\` prefix stripped, so `\??\pipe\uv\<id>-<pid>` arrives as the
+  ## bare `pipe\uv\<id>-<pid>` and would otherwise be read as a RELATIVE file
+  ## under the action's cwd: a per-process name, so no two runs of the same
+  ## action would ever observe the same inputs. The IPC record carries the
+  ## very same path, so it identifies which file records were really pipes.
+  record.kind == mrIpcConnect and record.detail.startsWith("connect named-pipe")
+
+proc dropNamedPipeOpens(evidence: var PathSetEvidence;
+                        pipes: HashSet[string]) =
+  ## A pipe is a channel, not a file: its peer is graded by the IPC
+  ## attribution, and its "path" is not an input or an output.
+  if pipes.len == 0:
+    return
+  proc withoutPipes(paths: seq[string]): seq[string] =
+    for path in paths:
+      if path notin pipes:
+        result.add(path)
+  evidence.monitorReads = withoutPipes(evidence.monitorReads)
+  evidence.monitorProbes = withoutPipes(evidence.monitorProbes)
+  evidence.monitorWrites = withoutPipes(evidence.monitorWrites)
+
 proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
                           evidence: var PathSetEvidence;
                           seen: var EvidenceSeenSets;
@@ -6470,16 +6495,20 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
   # streaming read exists so a 97k-record depfile is not materialized, and
   # grading its stamps must not undo that.
   var profileRecords: seq[MonitorRecord] = @[]
+  var pipes = initHashSet[string]()
   try:
     for record in streamMonitorDepFileRecords(path,
         defaultMonitorDepFileReaderOptions()):
       if record.kind == mrBackendProfile:
         profileRecords.add(record)
+      if record.isNamedPipeOpen:
+        pipes.incl(materialPath(cwd, record.path))
       foldOneMonitorRecord(record, cwd, evidence, seen, result, attribution)
   except CatchableError:
     attribution.pendingIpcLosses.setLen(0)
     attribution.ipcRecords.setLen(0)
     raise
+  dropNamedPipeOpens(evidence, pipes)
   resolvePeerAttribution(attribution, evidence, result)
   result = worseMonitorStatus(result,
     gradeCaptureScope(profileRecords, evidence, required))
@@ -6533,10 +6562,14 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
   ## half of production does not execute.
   result = mesComplete
   var profileRecords: seq[MonitorRecord] = @[]
+  var pipes = initHashSet[string]()
   for record in records:
     if record.kind == mrBackendProfile:
       profileRecords.add(record)
+    if record.isNamedPipeOpen:
+      pipes.incl(materialPath(cwd, record.path))
     foldOneMonitorRecord(record, cwd, evidence, seen, result, attribution)
+  dropNamedPipeOpens(evidence, pipes)
   resolvePeerAttribution(attribution, evidence, result)
   result = worseMonitorStatus(result,
     gradeCaptureScope(profileRecords, evidence, required))

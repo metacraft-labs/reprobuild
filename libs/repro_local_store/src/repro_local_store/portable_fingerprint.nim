@@ -298,6 +298,20 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
   result.weakHex = portableWeakFingerprint(roots, argv, cwd, env,
     declaredInputs, staticFields)
   var seen: seq[string] = @[]
+  var rootKeys: seq[string] = @[]
+  for root in roots:
+    rootKeys.add(normalizeForCompare(root.path))
+  proc aboveARoot(physical: string): bool =
+    ## A directory that CONTAINS a root. Probing it answers "present" on
+    ## every host where the root exists at all — a shell resolving a path
+    ## component by component does exactly that — so the probe says nothing
+    ## about the build, only about where this host keeps it.
+    let key = normalizeForCompare(physical)
+    for rootKey in rootKeys:
+      if rootKey.len > key.len and rootKey.startsWith(key) and
+          (key.endsWith("/") or rootKey[key.len] == '/'):
+        return true
+    false
   template consider(physical: string; inputKind: PortableInputKind;
                     identity: untyped) =
     let logical = toLogicalPath(roots, physical)
@@ -305,6 +319,8 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
     of lpkUntracked:
       discard
     of lpkOutside:
+      if inputKind == pikProbe and aboveARoot(physical):
+        continue
       if result.portable:
         result.portable = false
         result.reason = "observed " & $inputKind & " outside every logical " &

@@ -2682,6 +2682,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_named_pipe_evidence.nim",
+    binary: "build/test-bin/t_named_pipe_evidence",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim",
     binary: "build/test-bin/t_portable_fingerprint_engine",
     defines: @[],
