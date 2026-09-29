@@ -132,10 +132,14 @@ suite "portable fingerprints":
     let strayProbe = probing(@[stray])
     check strayProbe.portable
     check strayProbe.strongHex != plain.strongHex
-    # Nor may an ancestor be ENUMERATED portably: its listing is host-specific.
+    # An ancestor's LISTING is how this host lays out everything else stored
+    # above the project; it contributes nothing, like the probe.
     let enumerated = computePortableFingerprint(roots, @["sh"], project, @[],
       @[], reads = @[], probes = @[], enumerations = @[a / "work"])
-    check not enumerated.portable
+    let bare = computePortableFingerprint(roots, @["sh"], project, @[],
+      @[], reads = @[], probes = @[], enumerations = @[])
+    check enumerated.portable
+    check enumerated.strongHex == bare.strongHex
 
   test "upward probes for fixed names agree across checkout depths":
     ## node walks up from the project for `node_modules` / `package.json`,

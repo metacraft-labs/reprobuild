@@ -693,6 +693,25 @@ suite "M6 the determinism probe: identical outputs earn the entry":
     check second.probeEvents == @["determinism-probe-verified"]
     check scenario.published(act)
 
+  test "listing a directory above the working directory does not reset it":
+    ## gemini-cli's bundle step lists the drive root, whose membership
+    ## changes with anything else stored there.
+    let scenario = setupScenario("probe-above")
+    defer: removeDir(scenario.root)
+    let act = scenarioAction(scenario, ndpUnblessed)
+    let config = defaultBuildEngineConfig(scenario.cacheRoot)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      MonitorRecord(kind: mrDirectoryEnumerate,
+        observationKind: moDirectoryEnumerate, osPid: 909, threadId: 909,
+        path: scenario.root, detail: ""),
+      entropyRead("BCryptGenRandom", "program")])
+    discard runBuild(graph([act]), config)
+    writeFile(scenario.root / "unrelated.txt", "something else on the host")
+    removeFile(scenario.outputPath)
+    let second = runBuild(graph([act]), config)
+    check second.probeEvents == @["determinism-probe-verified"]
+
   test "launch machinery with a per-launch name does not reset the probe":
     ## runquota stages a long `sh -c` program under a random name in its
     ## wrapper directory, and the shell is observed reading it. Its content
