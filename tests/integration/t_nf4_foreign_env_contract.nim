@@ -13,7 +13,7 @@
 ## functions with no boundary at all. The nix-dependent half of NF-4 lives in
 ## `tests/e2e/dev-env/t_e2e_nf4_flake_dev_shell.nim`, which runs a real `nix`.
 
-import std/[algorithm, os, osproc, streams, strutils, tempfiles, unittest]
+import std/[algorithm, os, osproc, sequtils, streams, strutils, tempfiles, unittest]
 
 import repro_dev_env_engine
 import repro_dev_env_engine/cache_key
@@ -213,6 +213,31 @@ suite "nf4_foreign_env_contract":
     var sorted = names
     sorted.sort()
     check names == sorted
+
+  test "capture_scratch_is_claimed_without_randomness":
+    # The capture runs inside the monitored introspection edge, where a single
+    # `getrandom` (std/tempfiles naming its directory) made the M6 entropy gate
+    # refuse to publish the edge. The claim is `<pid>-<n>` by atomic mkdir:
+    # unique among live processes, never shared, and never random.
+    let parent = createTempDir("repro-capture-claim-", "")
+    defer: removeDir(parent)
+    let pid = $getCurrentProcessId()
+    let a = claimCaptureScratch(parent)
+    let b = claimCaptureScratch(parent)
+    check a != b
+    check dirExists(a) and dirExists(b)
+    check a.extractFilename.startsWith("capture-" & pid & "-")
+    check b.extractFilename.startsWith("capture-" & pid & "-")
+    # A directory already sitting on the next name (a crashed run whose pid
+    # was reused) is skipped, not shared.
+    let nextN = parseInt(b.extractFilename.split('-')[^1]) + 1
+    let squatter = parent / ("capture-" & pid & "-" & $nextN)
+    createDir(squatter)
+    writeFile(squatter / "theirs", "")
+    let c = claimCaptureScratch(parent)
+    check c != squatter
+    check fileExists(squatter / "theirs")
+    check toSeq(walkDir(c)).len == 0
 
   test "the_nix_shell_scratch_directory_is_not_part_of_the_environment":
     # `nix print-dev-env`'s script creates `/tmp/nix-shell.XXXXXX` on every
