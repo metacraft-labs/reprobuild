@@ -426,7 +426,16 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
     of lpkUntracked:
       discard
     of lpkOutside:
-      if inputKind == pikProbe and aboveARoot(physical):
+      # A directory ABOVE a root: probing it is implied by the root
+      # existing, and LISTING it (gemini-cli's bundle step enumerates the
+      # drive root) observes only how this host lays out everything else it
+      # stores there. Neither is an input of the build. The residual — a
+      # tool that lists a directory above the project and acts on what it
+      # finds — is the one BuildXL leaves to mount configuration too.
+      # A READ of such a directory is a handle opened while resolving a
+      # real path (node's realpath opens every component); a directory has
+      # no content to read, so it says no more than the probe.
+      if aboveARoot(physical):
         continue
       if inputKind == pikProbe:
         let ancestorKey = ancestorProbeKey(roots, physical)

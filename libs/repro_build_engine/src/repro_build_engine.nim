@@ -14162,12 +14162,29 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var inputs = action.cacheInputPaths(evidence.evidence)
     inputs.sort()
     let transient = transientOwnWrites(evidence.evidence)
+    # A directory CONTAINING the action's working directory: its listing is
+    # how this host lays out everything else stored above the project (the
+    # drive root, a home directory), which changes with anything on the
+    # machine. Leaving it out of the key can only make two runs count as
+    # comparable; differing outputs still fail closed.
+    var cwdKey = action.cwd.replace('\\', '/')
+    when defined(windows):
+      cwdKey = cwdKey.toLowerAscii()
     for path in inputs:
       if isLaunchMachinery(path) or path.replace('\\', '/') in transient:
         continue
+      var pathKey = path.replace('\\', '/')
+      while pathKey.len > 1 and pathKey.endsWith("/"):
+        pathKey.setLen(pathKey.len - 1)
+      when defined(windows):
+        pathKey = pathKey.toLowerAscii()
+      let isDir = dirExists(extendedPath(path))
+      if isDir and cwdKey.len > pathKey.len and cwdKey.startsWith(pathKey) and
+          (pathKey.endsWith("/") or cwdKey[pathKey.len] == '/'):
+        continue
       let identity =
         if fileExists(extendedPath(path)): "f" & fileContentHex(path)
-        elif dirExists(extendedPath(path)): "d" & membershipHex(path)
+        elif isDir: "d" & membershipHex(path)
         else: "absent"
       key.add(path & "\0" & identity & "\0")
     var env = action.cacheEnvInputs(evidence.evidence, unsafeAddr config)
