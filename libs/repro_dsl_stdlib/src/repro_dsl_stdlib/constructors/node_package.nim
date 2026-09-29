@@ -199,10 +199,17 @@ proc node_package*(srcDir = "src";
   #     ceiling at the project root git finds no repository, and a script
   #     falls back exactly as it does on a source tarball;
   #   * node's OpenSSL loads the system `openssl.cnf` at startup — pointed
-  #     at an empty file under the project.
+  #     at an empty file under the project;
+  #   * npm itself reads `~/.gitconfig` (its path comes from the home
+  #     directory, not from git's variables), and node keeps a V8 compile
+  #     cache in the host temp directory — the home directory is a
+  #     project-local one, and the compile cache is off.
   if projectRoot.len > 0:
     let hermetic = projectRoot / ".repro" / "node-hermetic"
-    buildScript.add("mkdir -p \"" & q(hermetic) & "\"; ")
+    buildScript.add("mkdir -p \"" & q(hermetic / "home") & "\"; ")
+    buildScript.add("export HOME=\"" & q(hermetic / "home") &
+      "\" USERPROFILE=\"" & q(hermetic / "home") &
+      "\" NODE_DISABLE_COMPILE_CACHE=1; ")
     buildScript.add(": > \"" & q(hermetic / "openssl.cnf") & "\"; ")
     buildScript.add("export npm_config_userconfig=\"" &
       q(hermetic / "npmrc") & "\" npm_config_globalconfig=\"" &
