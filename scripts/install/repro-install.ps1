@@ -102,7 +102,7 @@ $KeyringFile = if ($env:REPRO_KEYRING_FILE) { $env:REPRO_KEYRING_FILE } else { '
 
 # Expected SHA-256 of the trust anchor: the organisation key, as the POSIX
 # installer pins it (see there). Set to an empty string to fail closed.
-$KeyringSha256 = if ($null -ne $env:REPRO_KEYRING_SHA256) { $env:REPRO_KEYRING_SHA256 } else { '27d3273b8e90f966d9557420aaa13446ee8b1b2c6da027137a094f5322da68fc' }
+$KeyringSha256 = if ($null -ne $env:REPRO_KEYRING_SHA256) { $env:REPRO_KEYRING_SHA256 } else { 'aa89db2215ce0b33e029b8302d4d94fac742b92d279f178437abe10d9b54c988' }
 
 # ---------------------------------------------------------------------
 # 1. detect
