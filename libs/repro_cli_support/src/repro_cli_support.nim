@@ -15715,6 +15715,11 @@ proc ensureWorktreeSafeHooksPath*(repoRoot: string): HooksPathRepair =
   ## thing a SHARED setting can mean. Read per-worktree it names a path that
   ## exists in exactly one of them. So the rewrite preserves the only coherent
   ## reading of the value it replaces — the one the main worktree already gets.
+  ##
+  ## SUCCESS IS THE EFFECTIVE VALUE, NOT THE WRITE'S EXIT CODE. The rewrite is
+  ## followed by a read-back in the scope Git will actually use, and ``ok``
+  ## is false unless that read returns the intended absolute path. See the note
+  ## at the read-back itself for the measurement that made this necessary.
   result.ok = true
   if repoRoot.len == 0:
     return
@@ -15743,6 +15748,67 @@ proc ensureWorktreeSafeHooksPath*(repoRoot: string): HooksPathRepair =
     result.diagnostic =
       if said.len > 0: said
       else: "git config --local core.hooksPath exited " & $wrote.exitCode
+    return
+  # THE WRITE IS NOT THE OUTCOME, so verify the outcome.
+  #
+  # ``git config --local`` exits 0 for having STORED the value. That is a
+  # different claim from "this is the value Git will use", because
+  # ``core.hooksPath`` has scopes above ``--local``: ``--worktree``, enabled
+  # per-repository by ``extensions.worktreeConfig``, outranks it.
+  #
+  # Measured on git 2.54.0, from a repo carrying the dev shell's relative
+  # value:
+  #
+  #     git config extensions.worktreeConfig true
+  #     git config --worktree core.hooksPath ".git/hooks"
+  #     git config --local    core.hooksPath "$PWD/.git/hooks"   # this repair
+  #     git config --local    --get core.hooksPath  ->  /…/app/.git/hooks
+  #     git config            --get core.hooksPath  ->  .git/hooks   ← Git's
+  #     git config --show-origin --get core.hooksPath
+  #                                 ->  file:.git/config.worktree  .git/hooks
+  #
+  # The write succeeded, the effective value never moved, no hook fires in a
+  # linked worktree — and this proc returned ``ok = true, changed = true``,
+  # whose report line says "so every worktree of this repo runs the managed
+  # hooks". A false success claim at the one place whose entire job is to be
+  # believed: ``hooksPathRefusalLines`` never fires and the publication
+  # boundary passes a push it should have refused. Trusting a write's exit
+  # code is exactly the shape of defect this repair exists to catch — a
+  # relative ``core.hooksPath`` is itself a value that LOOKS installed and is
+  # not in force.
+  #
+  # So read the effective value back in the scope Git will actually use (no
+  # scope flag — the same read this proc opened with) and require it to be
+  # what was intended. Nothing here is specific to ``worktreeConfig``: any
+  # scope, extension or future precedence rule that leaves the effective value
+  # somewhere other than where this repair put it is caught by the same check,
+  # because the check asks about the outcome rather than about a mechanism.
+  let after = execCmdEx(shellCommand(@["git", "-C", top, "config", "--get",
+    "core.hooksPath"]), env = scrubbedGitRepositoryEnv())
+  if after.exitCode != 0:
+    result.ok = false
+    result.diagnostic = "the value was written at --local scope, but reading " &
+      "it back failed (git config --get core.hooksPath exited " &
+      $after.exitCode & "), so it cannot be confirmed to be in force"
+    return
+  let effective = after.output.strip()
+  if effective != result.resolved:
+    result.ok = false
+    # Name WHERE the winning value lives when git will say. An operator who is
+    # told only "it did not take" has to rediscover the scope themselves, and
+    # the remedy in `hooksPathRefusalLines` — a ``--local`` write — is the one
+    # thing already known not to work here.
+    let origin = execCmdEx(shellCommand(@["git", "-C", top, "config",
+      "--show-origin", "--get", "core.hooksPath"]),
+      env = scrubbedGitRepositoryEnv())
+    let where =
+      if origin.exitCode == 0 and origin.output.strip().len > 0:
+        "; git reads it from " & origin.output.strip().splitWhitespace()[0]
+      else: ""
+    result.diagnostic = "the absolute path was written at --local scope, but " &
+      "the value Git uses here is still '" & effective &
+      "' — a higher-precedence scope (e.g. --worktree, enabled by " &
+      "extensions.worktreeConfig) overrides it" & where
     return
   result.changed = true
 

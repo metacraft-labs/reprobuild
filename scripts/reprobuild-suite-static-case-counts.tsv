@@ -1265,7 +1265,7 @@ tests/integration/t_m9r22b_2_apply_loopback.nim	nim	5
 tests/integration/t_macho_runtime_audit.nim	nim	15
 tests/integration/t_macro_time_shell_out_needs_no_shell_on_the_path.nim	nim	3
 tests/integration/t_managed_hook_reentry_guard_prevents_recursive_publish.nim	nim	1
-tests/integration/t_managed_hooks_gate_every_worktree_of_a_repo.nim	nim	3
+tests/integration/t_managed_hooks_gate_every_worktree_of_a_repo.nim	nim	4
 tests/integration/t_managed_hooks_refuse_a_repro_that_does_not_speak_their_contract.nim	nim	1
 tests/integration/t_managed_hooks_stand_down_during_git_operations.nim	nim	7
 tests/integration/t_manifest_cache_serves_only_the_url_it_was_cloned_for.nim	nim	4

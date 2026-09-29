@@ -28714,7 +28714,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_managed_hooks_gate_every_worktree_of_a_repo.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
