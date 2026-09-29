@@ -39,7 +39,7 @@ libs/repro_binary_cache_client/tests/t_a3_p2_cli_substitute.nim	nim	3
 libs/repro_binary_cache_client/tests/t_a3_p6_closure_walk_r4.nim	nim	1
 libs/repro_binary_cache_client/tests/t_a4_p2_sentinel_wait.nim	nim	2
 libs/repro_binary_cache_client/tests/t_client_cli_prefix_substitute.nim	nim	1
-libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim	nim	9
+libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim	nim	11
 libs/repro_binary_cache_client/tests/t_r1_caches_config.nim	nim	10
 libs/repro_binary_cache_client/tests/t_r1_client_trust.nim	nim	5
 libs/repro_binary_cache_client/tests/test_auto_credentials.nim	nim	9
@@ -73,6 +73,7 @@ libs/repro_build_engine/tests/t_m4_publisher_path_stores_output_blobs.nim	nim	8
 libs/repro_build_engine/tests/t_m9r73_session_invalidation_reaches_every_consumer.nim	nim	4
 libs/repro_build_engine/tests/t_monitor_scratch_is_not_a_cache_input.nim	nim	3
 libs/repro_build_engine/tests/t_monitor_shim_resolver_memo_keys_its_inputs.nim	nim	4
+libs/repro_build_engine/tests/t_named_pipe_evidence.nim	nim	2
 libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim	nim	14
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim	nim	10
@@ -303,7 +304,7 @@ libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entit
 libs/repro_local_store/tests/t_m8_multi_output_realize.nim	nim	6
 libs/repro_local_store/tests/t_newest_alias_and_interned_records.nim	nim	22
 libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim	nim	4
-libs/repro_local_store/tests/t_portable_fingerprint.nim	nim	13
+libs/repro_local_store/tests/t_portable_fingerprint.nim	nim	14
 libs/repro_local_store/tests/t_portable_memo.nim	nim	5
 libs/repro_local_store/tests/t_retention_gc.nim	nim	6
 libs/repro_local_store/tests/t_sqlite_smoke.nim	nim	4
@@ -475,7 +476,7 @@ libs/repro_project_dsl/tests/t_dsl_run_target_named_and_listed.nim	nim	4
 libs/repro_project_dsl/tests/t_dsl_state_group_membership.nim	nim	4
 libs/repro_project_dsl/tests/t_engine_path_expression_uses_flag_value.nim	nim	1
 libs/repro_project_dsl/tests/t_engine_typed_output_field_populated_at_action_emission.nim	nim	1
-libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim	nim	4
+libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim	nim	5
 libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim	nim	3
 libs/repro_project_dsl/tests/t_m6_non_determinism_codec.nim	nim	5
 libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim	nim	7
