@@ -660,3 +660,26 @@ suite "M6 the determinism probe: identical outputs earn the entry":
     let second = runBuild(graph([act]), config)
     check second.probeEvents.len == 0
     check not scenario.published(act)
+
+  test "launch machinery with a per-launch name does not reset the probe":
+    ## runquota stages a long `sh -c` program under a random name in its
+    ## wrapper directory, and the shell is observed reading it. Its content
+    ## is the program already in argv; its name changes on every launch.
+    let scenario = setupScenario("probe-wrapper")
+    defer: removeDir(scenario.root)
+    let wrapperDir = getTempDir() / "runquota-shell"
+    let act = scenarioAction(scenario, ndpUnblessed)
+    let config = defaultBuildEngineConfig(scenario.cacheRoot)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      fileRead(wrapperDir / "runquota-shell-AAAAAA.sh"),
+      entropyRead("BCryptGenRandom", "program")])
+    discard runBuild(graph([act]), config)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      fileRead(wrapperDir / "runquota-shell-BBBBBB.sh"),
+      entropyRead("BCryptGenRandom", "program")])
+    removeFile(scenario.outputPath)
+    let second = runBuild(graph([act]), config)
+    check second.probeEvents == @["determinism-probe-verified"]
+    check scenario.published(act)

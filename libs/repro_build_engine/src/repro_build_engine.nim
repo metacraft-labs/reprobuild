@@ -13990,6 +13990,44 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for input in action.inputs:
       result.add(materialPath(action.cwd, input))
 
+  var machineryRoots: seq[LogicalRoot] = @[]
+  var machineryRootsResolved = false
+  proc launchMachineryRoots(): seq[LogicalRoot] =
+    ## Paths every monitored launch touches that are the MACHINERY of
+    ## launching and observing, not inputs to what the action computes —
+    ## as UNTRACKED roots:
+    ##
+    ## * the monitor shim this engine injects: every monitored process loads
+    ##   it, and its location is a fact about this host;
+    ## * runquota's Windows shell-wrapper directory
+    ##   (`runquota_process.shellScriptDir`, mirrored here so an engine built
+    ##   against an older runquota still compiles): a long `sh -c` program is
+    ##   staged there under a per-launch random name, and its content is the
+    ##   program already in argv.
+    ##
+    ## Left in, either one makes no two observations of the same command
+    ## agree: the portable record of every action would be host-bound, and
+    ## the determinism probe's key would never repeat.
+    if not machineryRootsResolved:
+      machineryRootsResolved = true
+      try:
+        let shim = resolveMonitorShimLibForInstall()
+        if shim.len > 0:
+          machineryRoots.add(LogicalRoot(label: "monitor-shim",
+            path: absolutePath(shim), kind: lrkUntracked))
+      except CatchableError:
+        discard
+      machineryRoots.add(LogicalRoot(label: "runquota-shell",
+        path: getTempDir() / "runquota-shell", kind: lrkUntracked))
+    machineryRoots
+
+  proc isLaunchMachinery(path: string): bool =
+    toLogicalPath(launchMachineryRoots(), path).kind == lpkUntracked
+
+  proc portableRecordRoots(): seq[LogicalRoot] =
+    ## `portableRoots` plus the launch machinery, untracked.
+    config.portableRoots & launchMachineryRoots()
+
   proc determinismProbeAdmits(action: BuildAction;
                               evidence: EvidenceCollection): bool =
     ## Windows-Build-Correctness M6 refuses to cache an action whose tool
@@ -14017,6 +14055,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var inputs = action.cacheInputPaths(evidence.evidence)
     inputs.sort()
     for path in inputs:
+      if isLaunchMachinery(path):
+        continue
       let identity =
         if fileExists(extendedPath(path)): "f" & fileContentHex(path)
         elif dirExists(extendedPath(path)): "d" & membershipHex(path)
@@ -14066,24 +14106,6 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     except CatchableError as err:
       runResult.trace(action.id, "determinism-probe-failed", err.msg)
       false
-
-  var observationRoots: seq[LogicalRoot] = @[]
-  var observationRootsResolved = false
-  proc portableRecordRoots(): seq[LogicalRoot] =
-    ## `portableRoots` plus the monitor shim this engine injects, UNTRACKED:
-    ## every monitored process loads it, so it shows up as a read, but it is
-    ## the observation machinery — its bytes are not an input to anything the
-    ## action computes, and its location is a fact about this host.
-    if not observationRootsResolved:
-      observationRootsResolved = true
-      try:
-        let shim = resolveMonitorShimLibForInstall()
-        if shim.len > 0:
-          observationRoots.add(LogicalRoot(label: "monitor-shim",
-            path: absolutePath(shim), kind: lrkUntracked))
-      except CatchableError:
-        discard
-    config.portableRoots & observationRoots
 
   proc portableStaticFieldsOf(action: BuildAction): seq[string] =
     ## What the argv does not say about the action: its kind, a builtin's

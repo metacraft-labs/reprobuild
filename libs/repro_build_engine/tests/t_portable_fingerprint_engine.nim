@@ -209,6 +209,18 @@ suite "Cache-Scope P3.1 — engine records portable fingerprints":
     checkpoint(r.portableReason)
     check r.portable
 
+  test "runquota's per-launch shell wrapper is not an input":
+    let a = project("wrapper", "int main;\n")
+    let wrapper = getTempDir() / "runquota-shell" /
+      ("runquota-shell-t-pfp-" & $getCurrentProcessId() & ".sh")
+    createDir(wrapper.parentDir)
+    writeFile(wrapper, "echo staged program\n")
+    defer: removeFile(wrapper)
+    let r = buildIn(a, TmpDir / "cache-wrapper", portable = true,
+      extraInput = wrapper)
+    checkpoint(r.portableReason)
+    check r.portable
+
   test "an input outside every logical root is reported, not shared":
     let a = project("outside", "int main;\n")
     let stray = absolutePath(TmpDir / "stray.cfg")
