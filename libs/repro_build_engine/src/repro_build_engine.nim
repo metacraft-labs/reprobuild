@@ -14077,12 +14077,44 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         path: getTempDir() / "runquota-shell", kind: lrkUntracked))
     machineryRoots
 
+  let hostTempKey = block:
+    var key = getTempDir().replace('\\', '/')
+    while key.len > 1 and key.endsWith("/"):
+      key.setLen(key.len - 1)
+    when defined(windows): key.toLowerAscii() else: key
+
+  proc isHostTempListing(path: string): bool =
+    ## The host temp directory ITSELF — its listing, or its existence. Every
+    ## process on the machine writes into it, so its membership changes
+    ## between any two runs; gemini-cli's bundle step enumerates it. Files
+    ## BENEATH it stay ordinary inputs: projects and test fixtures do live
+    ## under temp, and their contents are real.
+    var key = path.replace('\\', '/')
+    while key.len > 1 and key.endsWith("/"):
+      key.setLen(key.len - 1)
+    when defined(windows):
+      key = key.toLowerAscii()
+    key == hostTempKey
+
   proc isLaunchMachinery(path: string): bool =
-    toLogicalPath(launchMachineryRoots(), path).kind == lpkUntracked
+    isHostTempListing(path) or
+      toLogicalPath(launchMachineryRoots(), path).kind == lpkUntracked
 
   proc portableRecordRoots(): seq[LogicalRoot] =
     ## `portableRoots` plus the launch machinery, untracked.
     config.portableRoots & launchMachineryRoots()
+
+  proc transientOwnWrites(evidence: PathSetEvidence): HashSet[string] =
+    ## Paths the action itself WROTE that no longer exist once it finished:
+    ## its temporaries. npm's delete-by-rename (`x.js.DELETE.<random>`) is
+    ## the case that showed up — written, probed, deleted, under a new random
+    ## name every run. What the action observed there was its own doing, so
+    ## it is not an input; a written file that still EXISTS is kept, because
+    ## an action that read a file and then rewrote it did consume it.
+    for path in evidence.monitorWrites:
+      if not fileExists(extendedPath(path)) and
+          not dirExists(extendedPath(path)):
+        result.incl(path.replace('\\', '/'))
 
   proc determinismProbeAdmits(action: BuildAction;
                               evidence: EvidenceCollection): bool =
@@ -14118,8 +14150,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       toHex(action.weakFingerprint.bytes) & "\0"
     var inputs = action.cacheInputPaths(evidence.evidence)
     inputs.sort()
+    let transient = transientOwnWrites(evidence.evidence)
     for path in inputs:
-      if isLaunchMachinery(path):
+      if isLaunchMachinery(path) or path.replace('\\', '/') in transient:
         continue
       let identity =
         if fileExists(extendedPath(path)): "f" & fileContentHex(path)
@@ -14146,6 +14179,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       createDir(extendedPath(probeFile.parentDir))
       if not fileExists(extendedPath(probeFile)):
         writeFile(extendedPath(probeFile), "candidate\n" & observed)
+        # What the key was made of, beside it: when a later run records a
+        # NEW candidate instead of deciding, diffing two of these names the
+        # input that moved.
+        writeFile(extendedPath(probeFile & ".inputs"),
+          key.replace('\0', '\n'))
         runResult.trace(action.id, "determinism-probe-candidate",
           "outputs recorded; the next run with the same inputs decides")
         return false
@@ -14170,6 +14208,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     except CatchableError as err:
       runResult.trace(action.id, "determinism-probe-failed", err.msg)
       false
+
+  var declaredActions = initTable[string, BuildAction]()
+    ## The graph's actions before any launch rewrites them; filled just
+    ## before scheduling. Dynamically created actions are absent and fall
+    ## back to what the recorder is handed.
 
   proc portableStaticFieldsOf(action: BuildAction): seq[string] =
     ## What the argv does not say about the action: its kind, a builtin's
@@ -14206,10 +14249,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         seen.incl(key)
         result.add(physical)
 
-  proc finishPortableRecord(idx: int; action: BuildAction;
+  proc finishPortableRecord(idx: int; launched: BuildAction;
                             reads, probes, enumerations: seq[string]) =
     ## The shared tail of both portable recorders: fingerprint, outputs,
     ## local memo record, and (once per record) publication.
+    ##
+    ## Keyed by the action AS THE GRAPH DECLARED IT, the same object the
+    ## pre-pass looks up — never the launch-time copy, which the monitor and
+    ## RunQuota rewrite with per-launch paths (the first gemini-cli run with
+    ## fixed-output fetches recorded a new weak fingerprint every build).
+    let action = declaredActions.getOrDefault(launched.id, launched)
     var fp = computePortableFingerprint(portableRecordRoots(), action.argv,
       action.cwd, portableEnvOf(action), portableDeclaredInputsOf(action),
       reads, probes, enumerations, portableStaticFieldsOf(action))
@@ -14281,17 +14330,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## reported on the result and the trace, and changes no cache decision.
     if config.portableRoots.len == 0:
       return
-    let enumerations = action.cacheEnumeratedDirectories(evidence)
+    var enumerations: seq[string] = @[]
     var enumerated = initHashSet[string]()
-    for path in enumerations:
+    for path in action.cacheEnumeratedDirectories(evidence):
       enumerated.incl(path)
+      if not isHostTempListing(path):
+        enumerations.add(path)
     var probed = initHashSet[string]()
     for path in evidence.monitorProbes:
       probed.incl(materialPath(action.cwd, path))
     var reads: seq[string] = @[]
     var probes: seq[string] = @[]
+    let transient = transientOwnWrites(evidence)
     for path in action.cacheInputPaths(evidence):
-      if path in enumerated:
+      if path in enumerated or isHostTempListing(path) or
+          path.replace('\\', '/') in transient:
         continue
       elif path in probed:
         probes.add(path)
@@ -14327,6 +14380,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var reads, probes, enumerations: seq[string]
     for input in record.inputs:
       let path = materialPath(action.cwd, input.path)
+      if isHostTempListing(path):
+        continue
       case input.metadata.kind
       of ffkMissing, ffkOther: probes.add(path)
       of ffkRegular: reads.add(path)
@@ -15674,6 +15729,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       runResult.results[idx].portableStrongHex = record.strongHex
       runResult.results[idx].portableOutputs = record.outputs
 
+  for declared in buildGraph.actions:
+    declaredActions[declared.id] = declared
   runPortablePrepass()
 
   var completed = 0
