@@ -104,6 +104,12 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     call = inlineExecCall(@["sh", "-c", script], projectRoot),
     inputs = @[],
     outputs = @[stamp],
+    # The extracted tree is what this fetch produces, and it is fixed by the
+    # hash the script verifies: a fixed-output action (Cache-Scope P3.4), so
+    # the portable lookup can resolve it — and everything built from it —
+    # without the network.
+    declaredOutputs = @[extracted],
+    fixedOutput = true,
     pool = "fetch",
     cacheable = false,
     dependencyPolicy = automaticMonitorPolicy(),
@@ -189,6 +195,13 @@ proc node_package*(srcDir = "src";
     inputs = (if vendorEdge.outputs.len > 0: @[vendorEdge.outputs[0]]
               else: @[]),
     outputs = @[],
+    # The bundle is what the install edge reads. Declared, a record can name
+    # it (so another host resolves the install without it on disk) and the
+    # determinism probe has something to compare.
+    declaredOutputs =
+      (if entry.parentDir.len > 0:
+         @[projectRoot / src / entry.parentDir.replace("\\", "/")]
+       else: @[projectRoot / src / entry]),
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "node_package.build",
