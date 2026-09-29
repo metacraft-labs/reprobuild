@@ -752,6 +752,11 @@ jobs:
           PACKAGES: ${{ needs.plan.outputs.packages }}
         run: |
           set -euo pipefail
+          # Every dev-exec resolves the flake from its working directory, so
+          # each one runs from the checkout explicitly, whatever the step's
+          # current directory happens to be.
+          checkout="${PWD}"
+          dx() { (cd "${checkout}" && dev-exec "$@"); }
           ref="$(mktemp -d)"
           tar -xzf "${ASSET_NAME}" -C "${ref}"
           top="$(find "${ref}" -mindepth 1 -maxdepth 1 -type d | head -1)"
@@ -762,8 +767,8 @@ jobs:
             [ "${archive}" = "${ASSET_NAME}" ] || continue
             root="$(mktemp -d)"
             case "${ecosystem}" in
-              deb) dev-exec nix shell nixpkgs#dpkg -c dpkg-deb -x "${PWD}/${asset}" "${root}" < /dev/null ;;
-              rpm) (cd "${root}" && dev-exec nix shell nixpkgs#rpm nixpkgs#cpio -c sh -c 'rpm2cpio "$1" | cpio -idm --quiet' _ "${OLDPWD}/${asset}" < /dev/null) ;;
+              deb) dx nix shell nixpkgs#dpkg -c dpkg-deb -x "${checkout}/${asset}" "${root}" < /dev/null ;;
+              rpm) dx nix shell nixpkgs#rpm nixpkgs#cpio -c sh -c 'cd "$2" && rpm2cpio "$1" | cpio -idm --quiet' _ "${checkout}/${asset}" "${root}" < /dev/null ;;
               *) echo "::error::no install check for ecosystem ${ecosystem}"; exit 1 ;;
             esac
             (cd "${root}/usr/lib/reprobuild" && find . -mindepth 1 | LC_ALL=C sort) > "${RUNNER_TEMP}/package.list"
@@ -776,7 +781,7 @@ jobs:
             if [ "${ecosystem}" = "deb" ]; then
               # The same two halves as the archive gate, against the tree the
               # .deb installs: it is the image a package user actually runs.
-              dev-exec bash -c 'bash scripts/release/check_release_source_closure.sh "$1" && bash scripts/release/smoke_release_dev_exec.sh "$1"' _ "${root}/usr/lib/reprobuild" < /dev/null
+              dx bash -c 'bash scripts/release/check_release_source_closure.sh "$1" && bash scripts/release/smoke_release_dev_exec.sh "$1"' _ "${root}/usr/lib/reprobuild" < /dev/null
             fi
             checked=$((checked + 1))
           done <<< "${PACKAGES}"
