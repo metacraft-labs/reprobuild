@@ -470,7 +470,7 @@ A1B_RC=$?
 set -e
 assert_ne "$A1B_RC" '0' 'A1b the default pin refuses a key that is not the organisation key'
 assert_matches "$WORK/a1b.log" 'trust anchor digest MISMATCH' 'A1b refused as a digest mismatch'
-assert_matches "$WORK/a1b.log" '27d3273b8e90f966d9557420aaa13446ee8b1b2c6da027137a094f5322da68fc' 'A1b the expected digest is the organisation key'
+assert_matches "$WORK/a1b.log" 'aa89db2215ce0b33e029b8302d4d94fac742b92d279f178437abe10d9b54c988' 'A1b the expected digest is the organisation key'
 assert_absent "$SOURCES_DEST" 'A1b registered no apt source'
 
 # =====================================================================

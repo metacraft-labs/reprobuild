@@ -14,7 +14,7 @@ repository so every later upgrade is the package manager's own business.
 > `.deb` and `.rpm` go into `deb.metacraft-labs.com` and
 > `rpm.metacraft-labs.com`, the repositories every Metacraft product shares,
 > signed with the organisation's key
-> `3CA0 3287 4B65 1B0C F01D  FB67 7EAF 585F B9B5 9164`
+> `22F8 0A4A 65B0 8E36 AEA8  9F57 E127 BF3A C4CE 1719`
 > (metacraft-specs `infrastructure/package-distribution.md` §3, §9.1).
 > `release.yml` builds the packages with `repro-build-packages.sh`, ships them
 > as release assets covered by `SHA256SUMS`, and dispatches
