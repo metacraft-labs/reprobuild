@@ -1115,7 +1115,7 @@ tests/integration/t_develop_refuses_inexact_revision_and_leaves_no_checkout.nim	
 tests/integration/t_develop_refuses_unreachable_team_backend.nim	nim	1
 tests/integration/t_develop_refuses_unreadable_backend_before_membership_degrades.nim	nim	1
 tests/integration/t_develop_refuses_unreadable_backend_of_any_kind.nim	nim	1
-tests/integration/t_develop_root_lock_outranks_a_per_repo_lock.nim	nim	1
+tests/integration/t_develop_repo_own_lock_outranks_the_root_lock.nim	nim	1
 tests/integration/t_develop_selectors_compose_in_fixed_order.nim	nim	1
 tests/integration/t_develop_set_is_union_of_all_backends.nim	nim	1
 tests/integration/t_develop_warns_and_names_omitted_personal_repos.nim	nim	1
@@ -1336,6 +1336,7 @@ tests/integration/t_pre_push_refuses_on_unreachable_team_backend.nim	nim	1
 tests/integration/t_pre_push_refuses_when_lock_publish_fails.nim	nim	1
 tests/integration/t_pre_push_requires_certificate_coverage_when_project_opts_in.nim	nim	1
 tests/integration/t_pre_push_rewrite_orphan_gate.nim	nim	5
+tests/integration/t_pre_push_verifies_the_committed_lock_and_never_rewrites_it.nim	nim	1
 tests/integration/t_pre_push_warns_and_allows_on_unreachable_personal_backend.nim	nim	1
 tests/integration/t_pre_push_writes_the_lock_record_it_demands.nim	nim	1
 tests/integration/t_pre_receive_accepts_clean_public_lock_and_stays_blind_to_private_tiers.nim	nim	1

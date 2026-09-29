@@ -9981,8 +9981,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "tests/integration/t_develop_root_lock_outranks_a_per_repo_lock.nim",
-    binary: "build/test-bin/t_develop_root_lock_outranks_a_per_repo_lock",
+    source: "tests/integration/t_develop_repo_own_lock_outranks_the_root_lock.nim",
+    binary: "build/test-bin/t_develop_repo_own_lock_outranks_the_root_lock",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -11963,6 +11963,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_pre_push_rewrite_orphan_gate.nim",
     binary: "build/test-bin/t_pre_push_rewrite_orphan_gate",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_pre_push_verifies_the_committed_lock_and_never_rewrites_it.nim",
+    binary: "build/test-bin/t_pre_push_verifies_the_committed_lock_and_never_rewrites_it",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
