@@ -3211,6 +3211,62 @@ proc hostCCompilerPath(): string =
   else:
     ""
 
+proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
+  ## The environment values the provider-compile edge DECLARES, so that the
+  ## caller's shell stops deciding what the edge is.
+  ##
+  ## WHY. The edge inherits the environment of whoever started `repro`, and
+  ## its monitor records every variable the compile reads, by value. Measured
+  ## on a one-line recipe (2026-09-28): `PATH`, `TERM`, `LANG`, `HOME`,
+  ## `LD_LIBRARY_PATH` and `CXX` were all recorded. A `repro exec` started
+  ## under `perf` (which prepends its own directories to `PATH`) recompiled
+  ## the provider with `input metadata changed: PATH`, and the next plain
+  ## entry recompiled it again to switch back. The helper read `PATH` because
+  ## it resolved `nim` and `cc` from it inside the monitored edge.
+  ##
+  ## WHAT. This process, which is not monitored, resolves the compiler and the
+  ## C compiler once, and the edge is launched with:
+  ##
+  ##   * `REPRO_NIM_COMPILER` / `REPRO_BOOTSTRAP_CC`: the resolved absolute
+  ##     paths. Both are the helper's existing overrides, so it never searches
+  ##     `PATH` itself. Their identities are already in the edge's key
+  ##     (`nimCompilerIdentity`, the `--gcc.exe` flag);
+  ##   * `PATH`: only those two directories. A compile that needs a tool
+  ##     outside them fails loudly, and nothing on the caller's `PATH` can
+  ##     shadow a tool the compile does use;
+  ##   * `TERM=dumb`, `LANG=C`: diagnostics only, pinned so a terminal or a
+  ##     locale is not a cache key;
+  ##   * `HOME`: a directory owned by this edge, so a user-level
+  ##     `~/.config/nim` cannot change the compile without being an input.
+  ##
+  ## WHAT THIS DOES NOT DO. The launcher layers declared values OVER the
+  ## inherited environment (`EnvironmentInheritanceCensus`), so this pins the
+  ## names it lists and cannot remove names it does not list. The complete
+  ## fix is a launch mode that does not inherit at all (io-mon `childEnv` and
+  ## the RunQuota spawner); until then a variable nobody declared still
+  ## reaches the compile.
+  let nim = nimCompilerPath()
+  let cc =
+    try: hostCCompilerPath()
+    except CatchableError: ""
+  var dirs: seq[string] = @[]
+  for tool in [nim, cc]:
+    if tool.len > 0 and tool.isAbsolute:
+      let dir = parentDir(tool)
+      if dir notin dirs:
+        dirs.add(dir)
+  if nim.len > 0 and nim.isAbsolute:
+    result.add("REPRO_NIM_COMPILER=" & nim)
+  if cc.len > 0 and cc.isAbsolute:
+    result.add(bootstrapCCompilerEnv & "=" & cc)
+  if dirs.len > 0:
+    result.add("PATH=" & dirs.join($PathSep))
+  result.add("TERM=dumb")
+  result.add("LANG=C")
+  if homeDir.len > 0:
+    createDir(extendedPath(homeDir))
+    result.add("HOME=" & homeDir)
+
 proc recipeCCompilerPath*(): string =
   ## The C compiler the next recipe compile (interface extractor or provider)
   ## will hand Nim via ``--gcc.exe``: the selection ``hostCCompilerFlags``

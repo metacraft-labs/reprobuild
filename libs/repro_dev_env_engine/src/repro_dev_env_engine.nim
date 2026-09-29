@@ -168,6 +168,9 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     # this helper only compiles: it never runs what it produced, so the
     # compiler's randomness has no path to an output.
     envPassthrough = ProviderCompileEnvironmentPassthrough,
+    # Declared, so the caller's shell does not decide the edge's key; see
+    # `providerCompileLaunchEnv`.
+    env = providerCompileLaunchEnv(compilerCwd / "home"),
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy = automaticMonitorGatheringPolicy(

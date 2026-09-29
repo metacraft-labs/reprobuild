@@ -5955,6 +5955,9 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     cacheable = providerCompileCacheable(plan),
     weakFingerprint = plan.compileEdge.actionFingerprint,
     envPassthrough = ProviderCompileEnvironmentPassthrough,
+    # The same edge as the dev-env engine's, so the same declared environment
+    # (see `providerCompileLaunchEnv`).
+    env = providerCompileLaunchEnv(compilerCwd / "home"),
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy = automaticMonitorGatheringPolicy(
