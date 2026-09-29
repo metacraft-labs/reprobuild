@@ -615,7 +615,8 @@ suite "M6 the determinism probe: identical outputs earn the entry":
     let probeDir = scenario.cacheRoot / "determinism-probe"
     var candidates: seq[string] = @[]
     for kind, path in walkDir(probeDir):
-      candidates.add(path)
+      if not path.endsWith(".inputs"):   # the key-material sidecar
+        candidates.add(path)
     require candidates.len == 1
     let recorded = readFile(candidates[0])
     writeFile(candidates[0], recorded.replace(
@@ -660,6 +661,37 @@ suite "M6 the determinism probe: identical outputs earn the entry":
     let second = runBuild(graph([act]), config)
     check second.probeEvents.len == 0
     check not scenario.published(act)
+
+  test "the action's own temporaries and the temp listing do not reset it":
+    ## npm's delete-by-rename writes, probes and deletes `x.DELETE.<random>`,
+    ## and node lists the host temp directory; both change on every run
+    ## without being inputs. A temporary is recognized as one because the
+    ## action WROTE it and it is gone when the action finishes.
+    let scenario = setupScenario("probe-temporaries")
+    defer: removeDir(scenario.root)
+    let act = scenarioAction(scenario, ndpUnblessed)
+    let config = defaultBuildEngineConfig(scenario.cacheRoot)
+    proc runWith(name: string): BuildRunResult =
+      let temporary = scenario.workRoot / "node_modules" / ("x.js.DELETE." & name)
+      writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+        fileRead(scenario.sourcePath),
+        MonitorRecord(kind: mrFileWrite, observationKind: moFileWrite,
+          osPid: 909, threadId: 909, path: temporary, detail: ""),
+        fileRead(temporary),
+        MonitorRecord(kind: mrDirectoryEnumerate,
+          observationKind: moDirectoryEnumerate, osPid: 909, threadId: 909,
+          path: getTempDir(), detail: ""),
+        entropyRead("BCryptGenRandom", "program")])
+      runBuild(graph([act]), config)
+    discard runWith("aaaaaa")
+    # Something else on the host touches the temp directory in between.
+    let noise = getTempDir() / ("t-m6-noise-" & $getCurrentProcessId())
+    writeFile(noise, "x")
+    defer: removeFile(noise)
+    removeFile(scenario.outputPath)
+    let second = runWith("bbbbbb")
+    check second.probeEvents == @["determinism-probe-verified"]
+    check scenario.published(act)
 
   test "launch machinery with a per-launch name does not reset the probe":
     ## runquota stages a long `sh -c` program under a random name in its
