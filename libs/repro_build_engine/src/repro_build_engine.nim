@@ -420,6 +420,15 @@ type
       ## ``repro why``, the codetracer ``repro test`` integration)
       ## identify framework-specific outputs by interface tag from
       ## this list rather than re-parsing the DSL.
+    fixedOutput*: bool
+      ## Cache-Scope P3.4 — a FIXED-OUTPUT action (BuildXL's download pip,
+      ## Nix's fixed-output derivation): its outputs are determined by
+      ## content hashes it DECLARES and VERIFIES — a tarball checked against
+      ## a sha256, a vendored closure checked against lockfile integrity —
+      ## not by what the network happened to return. It stays locally
+      ## non-cacheable (it reaches the network), but its portable record is
+      ## keyed by its static description and declared inputs alone, so the
+      ## portable lookup can resolve it without running it.
     publishToBinaryCache*: bool
       ## M9.L.4-refactor Step A. When ``true`` AND the action
       ## completes successfully AND ``cacheEntryIdentity.isSome`` AND
@@ -14224,8 +14233,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runResult.trace(action.id, "portable-memo-write-failed", err.msg)
         let withOutputs = action.publishToBinaryCache or
           config.binaryCacheIntermediateScope
-        # A warm build re-derives the same records; publish each once.
-        if config.portableMemoPublisher != nil and
+        # A warm build re-derives the same records; publish each once. A
+        # host-bound or volatile action is never offered to another host,
+        # the rule the binary-cache publisher applies.
+        let substitutable =
+          action.determinismClass.allowsCrossMachineSubstitution()
+        if not substitutable:
+          runResult.trace(action.id, "portable-memo-host-bound",
+            "determinism class " & $action.determinismClass &
+            " forbids cross-machine substitution")
+        if config.portableMemoPublisher != nil and substitutable and
             not memoPublished(memoRoot, memo, withOutputs):
           let failure =
             try: config.portableMemoPublisher(config.portableRoots, memo,
@@ -14281,6 +14298,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       else:
         reads.add(path)
     finishPortableRecord(idx, action, reads, probes, enumerations)
+
+  proc recordFixedOutputPortable(idx: int; action: BuildAction) =
+    ## A fixed-output action is not locally cacheable and leaves no local
+    ## record, but its outputs are fixed by the content hashes it declares
+    ## and verifies. Its portable record is therefore keyed by what it
+    ## DECLARES — its static description (the URLs and hashes are in its
+    ## argv) and its declared inputs' content — and not by what its tools
+    ## read from the network or the host while fetching.
+    if config.portableRoots.len == 0:
+      return
+    var reads: seq[string] = @[]
+    for input in portableDeclaredInputsOf(action):
+      if fileExists(extendedPath(input)):
+        reads.add(input)
+    finishPortableRecord(idx, action, reads, @[], @[])
 
   proc recordPortableFromLocalHit(idx: int; action: BuildAction;
                                   record: ActionResultRecord) =
@@ -15531,7 +15563,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         for above in ancestorsOf.getOrDefault(dep):
           ancestors.incl(above)
       ancestorsOf[id] = ancestors
-      if not action.cacheable or action.dynamicDepsFile.len > 0:
+      if not (action.cacheable or action.fixedOutput) or
+          action.dynamicDepsFile.len > 0:
         continue
       var depsResolved = true
       for dep in action.deps:
@@ -15548,7 +15581,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         hit = lookupMemo(memoRoot, roots, weak, resolver)
       except CatchableError as err:
         runResult.trace(id, "portable-lookup-failed", err.msg)
-      if hit.isNone and config.portableMemoLookup != nil:
+      if hit.isNone and config.portableMemoLookup != nil and
+          action.determinismClass.allowsCrossMachineSubstitution():
         source = "remote"
         try:
           hit = config.portableMemoLookup(roots, weak, resolver)
@@ -16220,6 +16254,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               publishBinaryCacheBundle(action, record)
             elif action.cacheable and evidence.disableCacheHits:
               runResult.traceCacheIneligibility(id, evidence)
+            elif action.fixedOutput:
+              recordFixedOutputPortable(idToIndex.resultIndex(id), action)
             completeSuccess(id, asSucceeded,
               runResult.results[idx].cacheDecision, true, "elevated")
           else:
@@ -16411,6 +16447,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               publishBinaryCacheBundle(plan.action, record)
             elif plan.action.cacheable and evidence.disableCacheHits:
               runResult.traceCacheIneligibility(finished.id, evidence)
+            elif plan.action.fixedOutput:
+              recordFixedOutputPortable(
+                idToIndex.resultIndex(finished.id), plan.action)
             completeSuccess(finished.id, asSucceeded,
               runResult.results[idx].cacheDecision, true, "builtin")
           else:
@@ -17009,6 +17048,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           publishBinaryCacheBundle(action, record)
         elif action.cacheable and evidence.disableCacheHits:
           runResult.traceCacheIneligibility(finished.id, evidence)
+        elif action.fixedOutput:
+          recordFixedOutputPortable(idx, action)
         completeSuccess(finished.id, asSucceeded, runResult.results[idx].cacheDecision,
           true, "exit=0")
       else:

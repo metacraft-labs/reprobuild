@@ -191,3 +191,29 @@ suite "t_engine_typed_output_payload_codec_round_trip":
       check decoded.inputs == @["src/foo.nim"]
       check decoded.outputs == @["build/test-bin/foo"]
       check decoded.commandStatsId == "range"
+
+  test "v28 carries fixedOutput; older payloads and corrupt bytes do not":
+    ## A fixed-output action may be resolved by the portable lookup on its
+    ## description alone, so the flag must round-trip, must be absent from
+    ## any payload that predates it, and must never be conjured from a
+    ## corrupt byte.
+    var action = BuildActionDef(
+      id: "fetch",
+      call: publicCliCall("pkg", "exe", "build", "pkg.exe.build", @[
+        outputArg("stamp", "fetch.stamp")]),
+      outputs: @["fetch.stamp"],
+      poolUnits: 1'u32,
+      commandStatsId: "fetch",
+      dependencyPolicy: defaultDependencyPolicy(),
+      actionCachePolicy: defaultActionCachePolicy(),
+      fixedOutput: true)
+    check decodeBuildActionPayload(encodeBuildActionPayload(action)).fixedOutput
+    check not decodeBuildActionPayload(
+      encodeBuildActionPayloadAtVersion(action, 27'u16)).fixedOutput
+    action.fixedOutput = false
+    check not decodeBuildActionPayload(encodeBuildActionPayload(action)).fixedOutput
+    # The sentinel is the payload's last byte.
+    var corrupt = encodeBuildActionPayload(action)
+    corrupt[^1] = 2'u8
+    expect BuildActionPayloadError:
+      discard decodeBuildActionPayload(corrupt)

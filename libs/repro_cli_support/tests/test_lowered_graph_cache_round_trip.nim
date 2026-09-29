@@ -74,7 +74,8 @@ suite "lowered graph cache action round trip":
       readOnlyRoots: @["/recipe/zlib/src"],
       nonDeterminism: ndpEntropyBlessed,
       nonDeterminismJustification: "temp names only",
-      requiresElevation: true)
+      requiresElevation: true,
+      fixedOutput: true)
 
     let decoded = loweredGraphActionRoundTripForTest(@[action])
     check decoded.len == 1
@@ -101,6 +102,9 @@ suite "lowered graph cache action round trip":
     check roundTrip.nonDeterminism == ndpEntropyBlessed
     check roundTrip.nonDeterminismJustification == "temp names only"
     check roundTrip.requiresElevation
+    # Cache-Scope P3.4: a fixed-output action may be resolved by the portable
+    # lookup on its description alone, so the flag must survive a warm build.
+    check roundTrip.fixedOutput
 
     # The declared/passthrough CLASSIFICATION must survive the cache, and
     # this is not a formality. Before it was serialised, a warm build
@@ -167,6 +171,8 @@ suite "lowered graph cache action round trip":
     check decoded.len == 1
     check decoded[0].nonDeterminism == ndpUnblessed
     check decoded[0].nonDeterminismJustification == ""
+    # ...and an action that is not fixed-output does not become one.
+    check not decoded[0].fixedOutput
 
   test "rejects the previous cache version instead of decoding without lock identity":
     let action = BuildAction(
@@ -175,13 +181,15 @@ suite "lowered graph cache action round trip":
       id: "codec-version-test")
     var encoded = loweredGraphCacheBytesForTest(@[action])
     let versionOffset = loweredGraphCacheVersionOffsetForTest()
-    check encoded[versionOffset] == 10'u8
+    check encoded[versionOffset] == 11'u8
     check encoded[versionOffset + 1] == 0'u8
     # An older version could not carry the newer per-action fields (v5:
     # `envPassthrough`; v6: the dependency-policy event-interest opt-ins;
     # v8: the dependency-policy shim-seed opt-out; v9: the tool's entropy
     # blessing; v10: the dependency-policy capture-breadth declaration, which
-    # REPLACED v6's two bools with one enum byte). Decoding such a record under
+    # REPLACED v6's two bools with one enum byte; v11: the fixed-output
+    # sentinel, one byte after the cache identity, whose absence would shift
+    # every later field). Decoding such a record under
     # the current layout would silently return defaults for every action rather
     # than failing, so the rejection below is what makes a field's absence
     # impossible instead of invisible.
@@ -195,7 +203,7 @@ suite "lowered graph cache action round trip":
     # what that value now spells. Poking an ancient version instead would leave
     # the one skew that can silently mis-restore a warm edge's capture unasserted
     # by anything.
-    encoded[versionOffset] = 9'u8
+    encoded[versionOffset] = 10'u8
     var rejected = false
     try:
       discard loweredGraphCacheActionsForTest(encoded)
