@@ -1,32 +1,42 @@
-## DS-1, invariant VB — the per-repo committed locks fill GAPS in the workspace
-## root's lock; they never overrule it.
+## A REPO'S OWN COMMITTED LOCK OUTRANKS THE WORKSPACE ROOT REPO'S LOCK.
 ##
-## `composeDevelopLockSet` reads the root's `repro.lock` first and then folds
-## `participatingRepoCommittedLocks`, skipping any per-repo record whose name or
-## path the root's read already supplied. Its own comment states the rule and
-## the reason:
+## This file REPLACES the assertion it used to carry ("DS-1, invariant VB — the
+## per-repo committed locks fill GAPS in the workspace root's lock; they never
+## overrule it"). That invariant was authored here, not in a spec. It cited, as
+## its authority, a comment in `composeDevelopLockSet` — "The ROOT lock wins
+## where both speak" — so the test and the code asserted each other and nothing
+## outside either one ever agreed.
 ##
-##   > The ROOT lock wins where both speak. Its entry for a repo is this
-##   > workspace's own solved pin; the repo's self-record is what that repo last
-##   > published about itself, and the two disagreeing is a lock-coherence
-##   > observation (advisory, and already reported as such), never a develop-set
-##   > failure. Gap-filling keeps the composed set a strict superset of the
-##   > pre-DS-1 read for every workspace that has a root lock.
+## The governing statement is the repository owner's: *develop sets are not
+## read from the root repo, but only from the lock file of the specific project
+## repo.* It is corroborated by what the medium is declared to hold —
+## Unified-Locking-And-Hooks.md §3, the *public* row: "the solved-graph pins for
+## **the repo's** public dependencies + **the repo's own** public coordinates" —
+## and by CLAUDE.md, which says a multi-repo workspace has no workspace-wide
+## lock file at all ("Locking is **per repo**: each participating repo commits
+## its own `repro.lock` … There is no workspace-wide lock file and no shared
+## lock index"). A repo's own coordinates are published by that repo. The
+## workspace root does not publish them on its behalf, so when the root repo's
+## lock nevertheless carries an entry for another repo, that entry is a stale
+## copy, not a competing authority.
 ##
-## "Strict superset" is the whole compatibility contract of DS-1, and it is a
-## claim about what the composer may ADD, not about what it may CHANGE. A fold
-## that let the per-repo record win would keep every workspace resolvable and
-## keep `t_develop_public_only_unchanged` green (that fixture has no per-repo
-## locks at all), while silently moving the pin of any repo whose own lock has
-## moved on — the exact repos an operator has a root lock in order to hold
-## still.
+## Measured consequence of the OLD rule, which is why this was changed: in the
+## metacraft workspace the root repo's `repro.lock` pins `reprobuild` at
+## `../dev/reprobuild-latest` — a directory that has never existed — while
+## `reprobuild/repro.lock` pins it at `reprobuild`, where the checkout is.
+## `repro develop --list --all --workspace-root=<ws>` reported `reprobuild` as
+## `absent` at the phantom path, and `--all` would have cloned it there.
 ##
-## The two disagreeing is NOT an error here, and this file asserts the
+## The two disagreeing is NOT an error, and this file still asserts the
 ## non-error outcome deliberately: `collectLockCoherence` already reports that
-## diff, advisorily
-## (`t_lock_coherence_reports_the_diff_advisory_only`), and DS-2's fatal "two
-## backends disagree" refusal is for two BACKENDS, not for one backend's two
-## files. So the run exits 0 and simply reports the root's answer.
+## diff, advisorily (`t_lock_coherence_reports_the_diff_advisory_only`), and
+## DS-2's fatal "two backends disagree" refusal is for two BACKENDS, not for one
+## backend's two files. So the run exits 0 — but it is not SILENT: CLI/develop.md
+## §"Conflicts are refused, never resolved" makes a cross-backend disagreement
+## fatal precisely so that a checkout's revision can never depend on resolution
+## order, and an undisclosed choice between two pins inside one backend is the
+## same hazard with the volume turned down. The composer therefore NAMES both
+## files, both paths and both revisions, and says which one it used.
 ##
 ## THE DISCRIMINATING FIXTURE. One workspace, two participating repos, and a
 ## root `repro.lock` that speaks about exactly one of them:
@@ -45,21 +55,25 @@
 ##
 ## Asserts, over one `repro develop --list --json` run:
 ##
-##   1. `liba` resolves at the ROOT lock's revision, state `drifted`;
-##   2. the revision `liba`'s OWN lock publishes appears NOWHERE in the output —
-##      not in a row, not in a notice, not in a backend line;
+##   1. `liba` resolves at ITS OWN lock's revision, state `at-lock`;
+##   2. the disagreement is announced, not swallowed: a notice names both files,
+##      both paths and both revisions, and says the repo's own lock was used. An
+##      overruled pin that vanishes silently is the failure this file now exists
+##      to prevent, the mirror image of what it used to assert;
 ##   3. `libb` resolves at its own record's revision, state `at-lock`: the
-##      gap-fill still happens, so (1) is not "per-repo locks were ignored";
+##      gap-fill still happens, so (1) is not "the root lock was ignored";
 ##   4. the disagreement is not fatal and not even a refusal: exit 0, two rows,
 ##      no error entries;
-##   5. the public backend's inventory line points at the ROOT lock path, which
-##      is where the pin that won came from.
+##   5. the public backend's inventory line names BOTH media — the root path and
+##      the per-repo medium — because the record count it reports is the size of
+##      the union and attributing all of it to one file sends an operator to a
+##      document that does not contain most of it.
 ##
 ## Falsifiability / mutation check. RUN against a rebuilt `repro`: change the
-## per-repo fold in `composeDevelopLockSet` from "skip a record the root already
-## supplied" to "replace it", and `develop --list` answers
+## per-repo fold in `composeDevelopLockSet` back from "replace the record the
+## root already supplied" to "skip it", and `develop --list` answers
 ##
-##     liba  public  committed-lock  <liba's own sha>  at-lock  <ws>/liba
+##     liba  public  committed-lock  <the root lock's sha>  drifted  <ws>/liba
 ##
 ## — (1) and (2) red, while (3), (4) and (5) stay green and the rest of the
 ## suite, including DS-1's primary case and `t_develop_public_only_unchanged`,
@@ -180,12 +194,13 @@ proc rowFor(report: JsonNode; name: string): ListedRow =
         path: r["path"].getStr(), state: r["state"].getStr(),
         tier: r["tier"].getStr(), backend: r["backend"].getStr())
 
-suite "DS-1: the workspace root's lock outranks a per-repo committed lock":
+suite "a repo's own committed lock outranks the workspace root repo's lock":
 
-  test "t_develop_root_lock_outranks_a_per_repo_lock":
+  test "t_develop_repo_own_lock_outranks_the_root_lock":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; this case builds real repositories and two real " &
+        "committed lock documents to compare")
     else:
       let scratch = createTempDir("ds1-root-outranks-", "")
       defer: removeDir(scratch)
@@ -221,7 +236,7 @@ suite "DS-1: the workspace root's lock outranks a per-repo committed lock":
       # That is what makes the two candidate answers for `liba` differ in STATE
       # as well as in revision: the root's pin is behind the checkout
       # (`drifted`), the repo's own pin is the checkout (`at-lock`). A composer
-      # that let the repo win therefore cannot produce this test's expected
+      # that let the ROOT win therefore cannot produce this test's expected
       # state by accident.
       check requireGit(q(gitBin) & " -C " & q(ws / "liba") &
         " rev-parse HEAD").strip() == libaOwnSha
@@ -266,16 +281,28 @@ suite "DS-1: the workspace root's lock outranks a per-repo committed lock":
         check report["exitCode"].getInt() == 0
         check report["errors"].len == 0
 
-        # ---- (1) the ROOT's pin is the one that resolves. -----------------
+        # ---- (1) the REPO'S OWN pin is the one that resolves. -------------
         let liba = rowFor(report, "liba")
         check liba.found
         if liba.found:
-          check liba.revision == libaPinnedSha
-          check liba.revision != libaOwnSha
+          check liba.revision == libaOwnSha
+          check liba.revision != libaPinnedSha
           check liba.path == os.normalizedPath(ws / "liba")
-          check liba.state == "drifted"
+          check liba.state == "at-lock"
           check liba.tier == "public"
           check liba.backend == "committed-lock"
+
+        # ---- (2) the overruled pin is ANNOUNCED, naming both answers. -----
+        var disagreement = ""
+        for n in report["notices"]:
+          if "disagree" in n.getStr(): disagreement = n.getStr()
+        check disagreement.len > 0
+        if disagreement.len > 0:
+          check "liba" in disagreement
+          check libaPinnedSha in disagreement
+          check libaOwnSha in disagreement
+          check os.normalizedPath(ws / "repro.lock") in disagreement
+          check os.normalizedPath(ws / "liba" / "repro.lock") in disagreement
 
         # ---- (3) the gap is still filled from the per-repo lock. ----------
         let libb = rowFor(report, "libb")
@@ -289,18 +316,20 @@ suite "DS-1: the workspace root's lock outranks a per-repo committed lock":
         for r in report["repos"]: names.add(r["name"].getStr())
         check names.len == 2
 
-        # ---- (5) the inventory names the medium the winning pin came from.
+        # ---- (5) the inventory names EVERY medium that answered. ----------
         var publicLocation = ""
         for b in report["backends"]:
           if b["tier"].getStr() == "public" and
               b["kind"].getStr() == "committed-lock":
             publicLocation = b["location"].getStr()
-        check publicLocation == os.normalizedPath(ws / "repro.lock")
+        check os.normalizedPath(ws / "repro.lock") in publicLocation
+        check "the in-repo repro.lock of each participating repo" in
+          publicLocation
 
-      # ---- (2) the overruled revision leaks nowhere. ----------------------
-      check libaOwnSha notin listed.output
+      # The text form says the same thing the JSON form does.
       let listedText = runCmd(q(reproBin) &
         " develop --list --tool-provisioning=path --workspace-root=" & q(ws))
       check listedText.code == 0
-      check libaPinnedSha in listedText.output
-      check libaOwnSha notin listedText.output
+      check libaOwnSha in listedText.output
+      check libaPinnedSha in listedText.output # in the disagreement notice
+      check "disagree" in listedText.output

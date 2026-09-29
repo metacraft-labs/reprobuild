@@ -73,7 +73,8 @@ nim-termctl=dev
 # recipe-interface extractor that reads codetracer/reprobuild.nim needs it on
 # the --path as `../reprobuild-test-adapters/src`. Mainline branch is `dev`
 # (the `main` branch was retired in the org branch-rename sweep).
-reprobuild-test-adapters=dev
+# Keep this revision aligned with flake.lock and repro.lock.
+reprobuild-test-adapters=72962c60f12426ba00b621fda5ab76b0f89ba912
 reprobuild-ct-test-runner=dev
 
 
