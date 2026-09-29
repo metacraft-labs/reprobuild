@@ -455,6 +455,18 @@ proc devEnvIntrospectionIgnoredInputPrefixes*(projectRoot: string;
     if home.len > 0:
       result.add(absolutePath(home) / ".cache" / "nix")
 
+const NixDevEnvEntropyJustification* =
+  "`nix` draws randomness in two places while evaluating a flake dev shell, " &
+  "measured with strace on `nix print-dev-env` (nix 2.32, 2026-09-29): " &
+  "five small getrandom calls at process start, before any evaluation " &
+  "(runtime and library seeding), and one 4-byte draw that names " &
+  "/tmp/nix-dev-env-<pid>-<random>, a directory the same process creates " &
+  "and deletes. Neither reaches the output: two runs produced " &
+  "byte-identical `print-dev-env` scripts, and with nix-shell's scratch " &
+  "variables left out of the capture the dev-env artifact is byte-identical " &
+  "across entries. This blesses ENTROPY from the `nix` image on the dev-env " &
+  "introspection edge only."
+
 proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
                                provider: ProviderCompileArtifact;
                                providerArtifactPath, providerArtifactId,
@@ -506,6 +518,12 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
     commandStatsId = "repro dev-env introspection edge",
     cacheable = true,
     weakFingerprint = weak,
+    # Dev-Env-Warm-Entry.md §4. Scoped to this edge AND to the `nix` image:
+    # entropy from anything else in the tree (recipe code in the provider
+    # included) still withholds the entry.
+    entropyBlessedImages = [EntropyBlessedTool(image: "nix",
+      spec: "Dev-Env-Warm-Entry.md §4",
+      justification: NixDevEnvEntropyJustification)],
     dependencyPolicy = automaticMonitorGatheringPolicy(
       devEnvIntrospectionIgnoredInputPrefixes(config.projectRoot,
         protocolRoot)))

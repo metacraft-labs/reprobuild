@@ -379,6 +379,19 @@ type
       ## diagnostics so ``repro why`` can answer "why did this keep caching
       ## despite reading randomness?" without the reader having to go and
       ## find the package spec.
+    entropyBlessedImages*: seq[EntropyBlessedTool]
+      ## Dev-Env-Warm-Entry.md §4 — an entropy blessing scoped to THIS action
+      ## AND one image: entropy records whose emitting image matches one of
+      ## these keys (``entropyBlessingImageKey``) are excused for this action
+      ## only.
+      ##
+      ## Narrower than both existing scopes. ``nonDeterminism`` excuses every
+      ## record in the action's tree, including code the action did not
+      ## vouch for (for the dev-env introspection edge, every recipe's
+      ## `devEnv:` body). ``EntropyBlessedTools`` excuses an image in EVERY
+      ## action that runs it, on evidence gathered for some of them. A record
+      ## from any other image in the tree still withholds the entry, so the
+      ## unanimity rule of the per-image check is unchanged.
     determinism*: Option[EdgeDeterminism]
       ## ``Edge-Determinism-And-Soft-Rebuild.md`` §2 — the edge's declared
       ## determinism class, from the tool's ``cli:`` block or a per-edge
@@ -2699,6 +2712,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              dependencyPolicy = automaticMonitorGatheringPolicy();
              nonDeterminism = ndpUnblessed;
              nonDeterminismJustification = "";
+             entropyBlessedImages: openArray[EntropyBlessedTool] = [];
              determinism = none(EdgeDeterminism);
              cacheRetention = forever();
              env: openArray[string] = [];
@@ -2758,6 +2772,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     dependencyPolicy: effectiveDependencyPolicy,
     nonDeterminism: nonDeterminism,
     nonDeterminismJustification: nonDeterminismJustification,
+    entropyBlessedImages: @entropyBlessedImages,
     # Edge-Determinism-And-Soft-Rebuild.md §2. `none` + `forever()` is the
     # unlabelled default: every existing call site keeps the exact behaviour
     # it had, writes no determinism sidecar, and takes the same cache path.
@@ -6702,9 +6717,20 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
     var blockingTools: seq[string] = @[]
     for observation in observations:
       let blessing = entropyBlessedTool(observation.image)
+      var actionBlessing = none(EntropyBlessedTool)
+      if blessing.isNone and observation.image.len > 0:
+        let key = entropyBlessingImageKey(observation.image)
+        for scoped in action.entropyBlessedImages:
+          if key.len > 0 and scoped.image == key:
+            actionBlessing = some(scoped)
+            break
       if blessing.isSome:
         excused.add(observation.source & " from " & blessing.get.image &
           " (" & observation.image & ")")
+      elif actionBlessing.isSome:
+        excused.add(observation.source & " from " & actionBlessing.get.image &
+          " (" & observation.image & "), blessed for this action only: " &
+          actionBlessing.get.justification)
       else:
         blocking.add(observation.source & " from " &
           (if observation.image.len > 0: observation.image
