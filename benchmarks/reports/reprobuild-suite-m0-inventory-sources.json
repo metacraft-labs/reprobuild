@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 587,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1780
+    "testEntries": 1781
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1079,7 +1079,7 @@
       "integration": 909,
       "platform/destructive": 115,
       "pure unit": 587,
-      "unclassified": 158
+      "unclassified": 159
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1228,8 +1228,8 @@
       }
     ],
     "nimTestBinaryCount": 1766,
-    "pythonTestFileCount": 14,
-    "testEntryCount": 1780
+    "pythonTestFileCount": 15,
+    "testEntryCount": 1781
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -37785,6 +37785,21 @@
       "source": "tests/unit/test_dev_shell_hook_scope.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `importlib.util`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_generated_artifact_merge_policy.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
