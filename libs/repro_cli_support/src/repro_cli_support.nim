@@ -32571,6 +32571,42 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # we pass the same value, and the value comes from the same composed
   # ``resolved.trunk``).
   if cloneFailures == 0:
+    # THE MARKER IS RECORDED WHETHER OR NOT THERE IS A BRANCH TO RECORD WITH
+    # IT. "This directory is an initialized workspace" is not a fact about
+    # branches, and the branch write below is the only thing that used to
+    # write the file — so an init that had no branch value left a fully
+    # working workspace with no ``.repro/workspace.toml`` at all.
+    #
+    # That is reachable rather than theoretical: ``trunk`` and
+    # ``default_revision`` are both ``Option`` fields of ``[project]``, so a
+    # manifest whose repo fragments each pin their own ``revision`` needs
+    # neither. Measured against the previous engine with exactly such a
+    # manifest — both repos cloned, exit 0, ``.repro/`` created, ``repro
+    # hooks ensure`` then installing ten hooks across two repos, and no
+    # ``workspace.toml`` anywhere. Every predicate that asks for the marker
+    # answered "not a workspace" for a workspace that plainly was one, which
+    # is why ``hasResolvedManifestCheckout`` had been weakened to accept the
+    # bare ``.repro/`` directory instead — and that weakening is what let the
+    # lock RECORD STORE back in the moment it acquired a ``.repro/`` of its
+    # own. Recording the marker here is what lets that predicate ask for the
+    # file.
+    #
+    # Only when the file is ABSENT. ``writeWorkspaceProjects`` replaces the
+    # active project SET, and an existing workspace.toml's set (composer mode,
+    # RA-6 multi-project) is authoritative — init must not narrow it to the
+    # primary. With the file absent the result is a metadata-only
+    # workspace.toml carrying just the project name; the branch write below
+    # then finds it and adds the branch, and the serializer omits a
+    # one-element ``projects`` array equal to the primary, so the file this
+    # produces for an init that DOES have a branch is byte-identical to the
+    # one the previous engine wrote.
+    if resolved.projectName.len > 0 and
+        not fileExists(workspaceTomlPath(args.workspaceRoot)):
+      try:
+        writeWorkspaceProjects(args.workspaceRoot, @[resolved.projectName])
+      except WorkspaceManifestParseError as e:
+        stderr.writeLine(
+          "workspace init: could not record the workspace marker: " & e.msg)
     let branchValue =
       if resolved.trunk.len > 0: resolved.trunk
       elif resolved.defaultRevision.len > 0: resolved.defaultRevision

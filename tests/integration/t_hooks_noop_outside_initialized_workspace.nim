@@ -648,3 +648,72 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
           " rev-parse HEAD").strip()
       # Still no workspace state manufactured inside the store.
       check not dirExists(store.path / ".repro")
+
+  test "t_workspace_init_records_the_marker_even_with_no_branch_to_record":
+    ## THE MARKER IS RECORDED WHENEVER A WORKSPACE IS ESTABLISHED.
+    ##
+    ## ``repro workspace init`` used to write ``.repro/workspace.toml`` only
+    ## when it had a BRANCH to put in it: the resolver's ``trunk``, else its
+    ## ``defaultRevision``. Both come from ``[project]`` keys that are
+    ## ``Option`` — a manifest whose repo fragments each pin their own
+    ## ``revision`` needs neither, and ``readProjectManifest`` accepts it.
+    ##
+    ## Measured against the previous engine with exactly the manifest below:
+    ## init cloned both repos and exited 0, ``.repro/`` was created (engine
+    ## cache, clone receipts, prompt cache), ``repro hooks ensure --vcs`` then
+    ## installed ten hooks across two repos — and no ``workspace.toml`` existed
+    ## anywhere. A working workspace with no marker — so every predicate that
+    ## asks for the marker answered "not a workspace" for a workspace that
+    ## plainly was one, and ``repro health``'s ``workspace`` layer reported
+    ## ``fail`` with a remedy that had already been run.
+    ##
+    ## "This directory is an initialized workspace" is not a fact about
+    ## branches, so init records it whenever it establishes one. Falsifiable:
+    ## against an engine that writes the marker only alongside a branch value,
+    ## the ``workspace.toml`` assertion below fails.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case needs real origins and a real " &
+        "`repro workspace init` that clones them")
+    else:
+      putEnv("REPROBUILD_REPRO", reproBinary())
+      let fx = setupFixture(gitBin, "init-marker")
+      defer: removeDir(fx.scratch)
+
+      # A SECOND workspace root, laid out flat, whose project manifest carries
+      # NEITHER ``default_revision`` NOR ``trunk``. Every repo fragment pins
+      # its own revision, so nothing needs a project-level default and the
+      # manifest is schema-valid exactly as written.
+      let root = fx.scratch / "branchless-workspace"
+      createDir(root / "projects")
+      createDir(root / "repos")
+      writeFile(root / "projects" / "lib-a.toml",
+        "schema = \"reprobuild.workspace.project.v1\"\n\n" &
+        "[project]\nname = \"lib-a\"\n\n" &
+        "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" &
+        fileUrl(fx.libA.origin) & "\"\n\n" &
+        "[[remote]]\nname = \"lib-b-origin\"\nfetch = \"" &
+        fileUrl(fx.libB.origin) & "\"\n\n" &
+        "includes = [\n  \"repos/lib-a.toml\",\n  \"repos/lib-b.toml\",\n]\n")
+      writeFile(root / "repos" / "lib-a.toml", libAFragmentToml)
+      writeFile(root / "repos" / "lib-b.toml", libBFragmentToml)
+      check not fileExists(root / ".repro" / "workspace.toml")
+
+      let inited = runShell(shellCommand(@[
+        fx.reproBin, "workspace", "init", "lib-a",
+        "--workspace-root=" & root,
+      ], @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
+      checkpoint("workspace init output: " & inited.output)
+      check inited.code == 0
+
+      # The init really did establish a workspace — both declared repos are
+      # checked out — so what follows is about a workspace, not about a failed
+      # command that wrote nothing for a different reason.
+      check dirExists(root / "lib-a" / ".git")
+      check dirExists(root / "lib-b" / ".git")
+
+      # THE MARKER. Falsifiable: the previous engine leaves this absent.
+      check fileExists(root / ".repro" / "workspace.toml")
+      check readWorkspaceProjects(root) == @["lib-a"]
+      check isInitializedWorkspace(root)
+      check hasResolvedManifestCheckout(root)
