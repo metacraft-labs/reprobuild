@@ -120,6 +120,14 @@ class PackagerOutputTests(unittest.TestCase):
         real.chmod(0o755)
         (root / "bin" / "macro_sourcemap_repro.json").write_text("{}\n", encoding="utf-8")
         (root / "lib" / "marker").write_text("ran\n", encoding="utf-8")
+        # The sources an installed repro compiles recipes against (#428):
+        # found at <prefix>/share/repro/source from the binary's location.
+        src = root / "share" / "repro" / "source" / "libs" / "repro_interface_artifacts" / "src"
+        src.mkdir(parents=True)
+        (src / "repro_interface_artifacts.nim").write_text("discard\n", encoding="utf-8")
+        (root / "share" / "repro" / "src").mkdir()
+        (root / "share" / "repro" / "src" / "sibling.nim").write_text("discard\n", encoding="utf-8")
+        self.archive_root = root
         self.tarball = self.work / f"{top}.tar.gz"
         with tarfile.open(self.tarball, "w:gz") as tf:
             tf.add(root, arcname=top)
@@ -139,6 +147,27 @@ class PackagerOutputTests(unittest.TestCase):
         declared = next(p["asset"] for p in _spec()["packages"] if p["ecosystem"] == "deb")
         self.assertTrue((self.out / declared.replace("{version}", VERSION)).is_file(),
                         sorted(os.listdir(self.out)))
+
+    def test_deb_installs_every_file_the_archive_carries(self):
+        """What the archive carries, the package carries.
+
+        v0.2.3's packages copied only bin/ and lib/, so share/repro (the
+        sources a recipe compile needs) never reached an apt/dnf install.
+        """
+        run = self.build("deb")
+        self.assertEqual(0, run.returncode, run.stderr)
+        deb = next(self.out.glob("*.deb"))
+        root = self.work / "installed-all"
+        subprocess.run(["dpkg-deb", "-x", str(deb), str(root)], check=True)
+        tree = root / "usr" / "lib" / "reprobuild"
+
+        def listing(base):
+            return sorted(str(p.relative_to(base)) for p in base.rglob("*"))
+
+        self.assertEqual(listing(self.archive_root), listing(tree))
+        self.assertTrue((tree / "share" / "repro" / "source" / "libs"
+                         / "repro_interface_artifacts" / "src"
+                         / "repro_interface_artifacts.nim").is_file())
 
     def test_deb_installs_the_archive_tree_intact_with_path_wrappers(self):
         run = self.build("deb")

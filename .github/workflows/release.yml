@@ -738,6 +738,50 @@ jobs:
             cat "${asset}.sha256"
           done <<< "${PACKAGES}"
 
+      # The native packages must install EXACTLY the archive's tree, and that
+      # installed tree must build a project on its own. v0.2.3's .deb/.rpm
+      # carried only bin/ and lib/: the archive gate above passed, and every
+      # apt/dnf install would still have failed its first compile. So the
+      # archive gate is re-run against what the .deb installs, and each
+      # package's file set is compared with the archive's, entry for entry.
+      - name: Verify the native packages install the archive intact
+        if: matrix.os-name == 'linux'
+        shell: bash
+        timeout-minutes: 60
+        env:
+          PACKAGES: ${{ needs.plan.outputs.packages }}
+        run: |
+          set -euo pipefail
+          ref="$(mktemp -d)"
+          tar -xzf "${ASSET_NAME}" -C "${ref}"
+          top="$(find "${ref}" -mindepth 1 -maxdepth 1 -type d | head -1)"
+          (cd "${top}" && find . -mindepth 1 | LC_ALL=C sort) > "${RUNNER_TEMP}/archive.list"
+          checked=0
+          while read -r ecosystem archive asset; do
+            [ -n "${ecosystem}" ] || continue
+            [ "${archive}" = "${ASSET_NAME}" ] || continue
+            root="$(mktemp -d)"
+            case "${ecosystem}" in
+              deb) dev-exec nix shell nixpkgs#dpkg -c dpkg-deb -x "${PWD}/${asset}" "${root}" < /dev/null ;;
+              rpm) (cd "${root}" && dev-exec nix shell nixpkgs#rpm nixpkgs#cpio -c sh -c 'rpm2cpio "$1" | cpio -idm --quiet' _ "${OLDPWD}/${asset}" < /dev/null) ;;
+              *) echo "::error::no install check for ecosystem ${ecosystem}"; exit 1 ;;
+            esac
+            (cd "${root}/usr/lib/reprobuild" && find . -mindepth 1 | LC_ALL=C sort) > "${RUNNER_TEMP}/package.list"
+            if ! diff -u "${RUNNER_TEMP}/archive.list" "${RUNNER_TEMP}/package.list" > "${RUNNER_TEMP}/package.diff"; then
+              head -40 "${RUNNER_TEMP}/package.diff"
+              echo "::error::${asset} does not install ${ASSET_NAME}'s tree intact under /usr/lib/reprobuild"
+              exit 1
+            fi
+            echo "ok  ${asset}: $(wc -l < "${RUNNER_TEMP}/package.list") entries, identical to the archive"
+            if [ "${ecosystem}" = "deb" ]; then
+              # The same two halves as the archive gate, against the tree the
+              # .deb installs: it is the image a package user actually runs.
+              dev-exec bash -c 'bash scripts/release/check_release_source_closure.sh "$1" && bash scripts/release/smoke_release_dev_exec.sh "$1"' _ "${root}/usr/lib/reprobuild" < /dev/null
+            fi
+            checked=$((checked + 1))
+          done <<< "${PACKAGES}"
+          [ "${checked}" -gt 0 ] || { echo "::error::no native package was checked for ${ASSET_NAME}"; exit 1; }
+
       # Publish NOTHING to the release from here. The artifact is the only
       # output of a build leg; a leg that uploads directly to the release is
       # exactly the bug this workflow was restructured to remove.
