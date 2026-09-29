@@ -44,3 +44,27 @@ suite "named-pipe opens are not file inputs":
     check not sawPipe
     check sawLookalike
     check sawSource
+
+  test "an extended-length spelling folds to the plain one":
+    ## npm's delete-by-rename writes `\\?\...\x.DELETE.<id>` and later probes
+    ## `...\x.DELETE.<id>`; as two spellings the self-write filter kept the
+    ## probe as an input with a new random name every run.
+    let cwd = getTempDir() / "t-named-pipe-evidence"
+    let file = cwd / "node_modules" / "x" / "index.js.DELETE.abc"
+    var evidence: PathSetEvidence
+    var seen: EvidenceSeenSets
+    discard foldMonitorRecordsEvidence(@[
+      fileRead("\\\\?\\" & file),
+      # the same named pipe in its `\\?\` spelling, beside the IPC record
+      # io-mon writes for the bare one
+      fileRead("\\\\?\\pipe\\uv\\18446744073709551615-77"),
+      pipeConnect("pipe\\uv\\18446744073709551615-77")], cwd, evidence, seen)
+    var plain, extended, pipe = false
+    for path in evidence.monitorReads:
+      if path == file: plain = true
+      if path.startsWith("\\\\?\\"): extended = true
+      if path.replace('\\', '/').endsWith("pipe/uv/18446744073709551615-77"):
+        pipe = true
+    check plain
+    check not extended
+    check not pipe
