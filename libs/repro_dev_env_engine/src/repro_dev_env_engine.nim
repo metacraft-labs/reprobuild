@@ -596,6 +596,15 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   let cacheKeyPath = config.outDir / "dev-env.rbde.cache-key"
 
   createDir(extendedPath(config.outDir))
+  # This process is the activation itself (`repro exec`, the shell hook), not
+  # a monitored action, so it may keep a stamp-validated memo of the library
+  # source fingerprint: re-hashing reprobuild's whole libs tree was most of
+  # the cost of a warm entry. Project-scoped, beside the edge's other scratch.
+  setReproLibFingerprintMemoDir(config.outDir / "lib-source-fingerprint")
+  # One walk and one stat pass of reprobuild's libs tree per computation,
+  # shared by the fingerprint and the provider freshness check.
+  beginReproLibSourcesScope()
+  defer: endReproLibSourcesScope()
   let workDir =
     if config.workDir.len > 0: config.workDir else: getCurrentDir()
   var active = config

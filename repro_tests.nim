@@ -2529,6 +2529,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_repro_lib_fingerprint_memo.nim",
+    binary: "build/test-bin/t_repro_lib_fingerprint_memo",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_provider_source_discovery.nim",
     binary: "build/test-bin/t_provider_source_discovery",
     defines: @[],

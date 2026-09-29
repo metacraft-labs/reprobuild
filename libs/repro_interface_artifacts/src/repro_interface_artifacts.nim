@@ -3973,7 +3973,7 @@ proc walkLibSourcesInto(libsRoot: string; sink: var seq[string];
       if not seen.containsOrIncl(normalized):
         sink.add(normalized)
 
-proc reproLibSources(workDir: string): seq[string] =
+proc reproLibSourcesUncached(workDir: string): seq[string] =
   var seen = initHashSet[string]()
   walkLibSourcesInto(workDir / "libs", result, seen)
   # Out-of-tree consumers compile their provider/interface recipes against an
@@ -4013,8 +4013,55 @@ proc reproLibSources(workDir: string): seq[string] =
 
   result.sort(system.cmp[string])
 
-proc reproLibSourceFingerprint(workDir: string): string =
-  let paths = reproLibSources(workDir)
+proc fileStamps(paths: openArray[string]): seq[FileStamp]
+proc immutableStorePath(path: string): bool
+
+var
+  reproLibScopeDepth = 0
+  reproLibScopeSources = initTable[string, seq[string]]()
+  reproLibScopeStamps = initTable[string, seq[FileStamp]]()
+
+proc beginReproLibSourcesScope*() =
+  ## Open a scope in which the library source LIST and its STAMPS are computed
+  ## once per root and reused.
+  ##
+  ## One warm dev-env entry walked and stat-ed reprobuild's `libs/` tree
+  ## three times: the fingerprint (twice, for the provider key and the
+  ## runtime identity) and the provider freshness check. That was ~37% of a
+  ## warm `repro exec` after the fingerprint memo (perf, 2026-09-29). Within
+  ## one computation the tree is not expected to move. If it does, the
+  ## post-execution consistency check of the provider-compile edge names the
+  ## moved inputs, as it always has. Scoped rather than process-wide so a
+  ## long-lived session (`repro dev`, `repro watch`) re-reads on every
+  ## computation.
+  inc reproLibScopeDepth
+
+proc endReproLibSourcesScope*() =
+  dec reproLibScopeDepth
+  if reproLibScopeDepth <= 0:
+    reproLibScopeDepth = 0
+    reproLibScopeSources.clear()
+    reproLibScopeStamps.clear()
+
+
+proc reproLibSources(workDir: string): seq[string] =
+  if reproLibScopeDepth == 0:
+    return reproLibSourcesUncached(workDir)
+  let key = normalizedStampPath(workDir)
+  if key notin reproLibScopeSources:
+    reproLibScopeSources[key] = reproLibSourcesUncached(workDir)
+  reproLibScopeSources[key]
+
+proc reproLibSourceStamps(workDir: string; paths: openArray[string]):
+    seq[FileStamp] =
+  if reproLibScopeDepth == 0:
+    return fileStamps(paths)
+  let key = normalizedStampPath(workDir)
+  if key notin reproLibScopeStamps:
+    reproLibScopeStamps[key] = fileStamps(paths)
+  reproLibScopeStamps[key]
+
+proc hashReproLibSources(paths: openArray[string]): string =
   var payload: seq[byte] = @[]
   payload.writeString("reprobuild.lib-sources.v1")
   for path in paths:
@@ -4023,6 +4070,102 @@ proc reproLibSourceFingerprint(workDir: string): string =
     payload.writeU64Le(uint64(content.len))
     payload.add(content)
   toHex(blake3DomainDigest(payload, hdActionFingerprint).bytes)
+
+var reproLibFingerprintMemoDir = ""
+  ## Where ``reproLibSourceFingerprint`` may keep a stamp-validated record of
+  ## its last answer. EMPTY BY DEFAULT, and set only by a caller that is not
+  ## itself a monitored action (the dev-env engine, in the process that
+  ## `repro exec` / the shell hook runs). The reason is the one that decides
+  ## whether this is sound: inside a monitored edge the record would be read
+  ## and written by the edge, becoming an observed input of the very action
+  ## whose key it helps compute.
+
+proc setReproLibFingerprintMemoDir*(dir: string) =
+  ## Opt this process into the stamp-validated fingerprint memo. See
+  ## ``reproLibSourceFingerprint``.
+  reproLibFingerprintMemoDir = dir
+
+const ReproLibFingerprintMemoSchema = "reprobuild.lib-sources-memo.v1"
+
+proc reproLibFingerprintMemoPath(memoDir, workDir: string): string =
+  memoDir / (toHex(blake3DomainDigest(
+    toBytes(normalizedStampPath(workDir)), hdActionFingerprint).bytes)[0 ..< 32] &
+    ".rbsz")
+
+proc readReproLibFingerprintMemo(path: string):
+    tuple[found: bool, stamps: seq[FileStamp], digest: string] =
+  if not fileExists(extendedPath(path)):
+    return
+  try:
+    let bytes = toBytes(readFile(extendedPath(path)))
+    var pos = 0
+    if readString(bytes, pos) != ReproLibFingerprintMemoSchema:
+      return
+    result.stamps = readFileStamps(bytes, pos)
+    result.digest = readString(bytes, pos)
+    result.found = result.digest.len > 0
+  except CatchableError:
+    result.found = false
+
+proc writeReproLibFingerprintMemo(path: string; stamps: openArray[FileStamp];
+                                  digest: string) =
+  var payload: seq[byte] = @[]
+  payload.writeString(ReproLibFingerprintMemoSchema)
+  payload.writeFileStamps(stamps)
+  payload.writeString(digest)
+  try:
+    createDir(extendedPath(parentDir(path)))
+    # Write-then-rename so a concurrent reader never sees half a record; a
+    # torn record would decode as "not found" anyway, but this keeps it from
+    # being a routine event under parallel shell entries.
+    let tmp = path & "." & $getCurrentProcessId() & ".tmp"
+    writeFile(extendedPath(tmp), toByteString(payload))
+    moveFile(extendedPath(tmp), extendedPath(path))
+  except CatchableError, OSError:
+    discard
+
+proc reproLibSourceFingerprint(workDir: string): string =
+  ## Content digest of every reprobuild library source a provider compile can
+  ## import (see ``reproLibSources``). It keys the provider-compile edge, so it
+  ## is computed on EVERY dev-env entry, before any cache lookup.
+  ##
+  ## Hashing ~1,750 files (14 MB) was 75% of the CPU of a fully warm
+  ## `repro exec` (measured 2026-09-29 with `perf`; it ran twice per entry,
+  ## once for ``frontendRuntimeIdentity`` and once for
+  ## ``providerFingerprintFor``). With a memo directory set, the answer is
+  ## reused while every source's stamp (path, kind, size, mtime) is unchanged
+  ## and the set of sources is the same: a directory walk and stats instead
+  ## of reading and hashing the tree.
+  ##
+  ## SOUNDNESS. This is exactly the check this module already trusts for the
+  ## same files: ``ProviderFreshnessCacheRecord.reproLibStamps`` decides
+  ## whether a compiled provider is fresh by comparing these stamps, so the
+  ## memo introduces no weaker assumption than the freshness check it feeds.
+  ## An immutable ``/nix/store`` root is fingerprinted by its path set alone,
+  ## as ``reproLibStampsForCache`` already does.
+  let paths = reproLibSources(workDir)
+  if reproLibFingerprintMemoDir.len == 0:
+    return hashReproLibSources(paths)
+  let stamps =
+    if immutableStorePath(workDir):
+      paths.mapIt(FileStamp(path: it, kind: fskRegular))
+    else:
+      reproLibSourceStamps(workDir, paths)
+  let memoPath = reproLibFingerprintMemoPath(reproLibFingerprintMemoDir,
+    workDir)
+  let memo = readReproLibFingerprintMemo(memoPath)
+  if memo.found and memo.stamps == stamps:
+    return memo.digest
+  result = hashReproLibSources(paths)
+  # A stamp that moved WHILE we hashed must not be recorded as the stamp of
+  # the content we read: re-stamp after hashing, and record only when nothing
+  # moved in between. Otherwise the next entry would trust a digest that
+  # describes older bytes.
+  let after =
+    if immutableStorePath(workDir): stamps
+    else: fileStamps(paths)
+  if after == stamps:
+    writeReproLibFingerprintMemo(memoPath, stamps, result)
 
 proc fileStamp(path: string): FileStamp =
   result.path = normalizedStampPath(path)
@@ -4078,7 +4221,7 @@ proc immutableStorePath(path: string): bool =
 proc reproLibStampsForCache(workDir: string): seq[FileStamp] =
   if immutableStorePath(workDir):
     return @[]
-  fileStamps(reproLibSources(workDir))
+  reproLibSourceStamps(workDir, reproLibSources(workDir))
 
 proc interfaceLiftSources(modulePath, resourceModule: string;
                           extraPaths: openArray[string] = [];
