@@ -2227,9 +2227,10 @@ proc isPublishedQuery*(repoPath, remoteName: string): GitQueryAction =
 proc extendedStatusQuery*(repoPath, trunkBranch: string;
                           queryStashes, queryFiles, queryAheadBehind,
                           queryUnmerged: bool;
-                          queryFileDetails = false): GitQueryAction =
+                          queryFileDetails = false;
+                          remoteName = "origin"): GitQueryAction =
   GitQueryAction(kind: gqkExtendedStatus, repoPath: repoPath,
-    remoteName: "origin", trunkBranch: trunkBranch,
+    remoteName: remoteName, trunkBranch: trunkBranch,
     queryStashes: queryStashes, queryFiles: queryFiles,
     queryAheadBehind: queryAheadBehind, queryUnmerged: queryUnmerged,
     queryFileDetails: queryFileDetails)
@@ -2358,8 +2359,16 @@ proc queryGitState*(query: GitQueryAction;
     # 6. Unmerged Branches
     if query.queryUnmerged:
       let trunkBranch = if query.trunkBranch.len > 0: query.trunkBranch else: "main"
+      let remoteName = if query.remoteName.len > 0: query.remoteName else: "origin"
+      let remoteRef = remoteName & "/" & trunkBranch
+      var targetRef = trunkBranch
+      let checkRemote = runGitQuery(payload,
+        ["-C", query.repoPath, "rev-parse", "--verify", "--quiet", "refs/remotes/" & remoteRef])
+      if checkRemote.exitCode == 0:
+        targetRef = remoteRef
+
       let unmergedRes = runGitQuery(payload,
-        ["-C", query.repoPath, "branch", "--no-merged", trunkBranch])
+        ["-C", query.repoPath, "branch", "--no-merged", targetRef])
       if unmergedRes.exitCode == 0:
         for rawLine in unmergedRes.output.splitLines():
           var line = rawLine.strip()
@@ -2374,7 +2383,7 @@ proc queryGitState*(query: GitQueryAction;
           # named `heads/main` makes bare `main` ambiguous). A real branch name
           # contains no whitespace or ':' and never starts with '(' (the
           # detached-HEAD note), so reject anything else as non-branch noise.
-          if line.len == 0 or line == trunkBranch: continue
+          if line.len == 0 or line == trunkBranch or line == targetRef: continue
           if line.startsWith("(") or line.contains(' ') or
              line.contains('\t') or line.contains(':'):
             continue

@@ -7835,7 +7835,9 @@ proc parseBuildProgressMode(value: string): BuildProgressMode =
         " (expected quiet, line, bar-line, lines, lines-bar, dots, simple-dots, simple-lines, or live-lines)")
 
 proc configuredBuildProgressMode(): BuildProgressMode =
-  let configured = getEnv("REPROBUILD_PROGRESS", "")
+  var configured = getEnv("REPROBUILD_PROGRESS", "")
+  if configured.len == 0:
+    configured = getEnv("REPRO_PROGRESS", "")
   if configured.len == 0:
     if getEnv("IN_AGENT_SHELL", "").len > 0:
       return bpmQuiet
@@ -32941,6 +32943,7 @@ type
     dryRun: bool         ## RA-27 ``--dry-run``: print the plan and exit WITHOUT mutating.
     json: bool           ## RA-27 ``--json``: machine surface (plan + per-repo results).
     verbose: bool        ## RA-27 ``--verbose``/``-v``: include raw tool output diagnostics.
+    progressMode: BuildProgressMode ## ``--progress=...`` progress reporting mode.
     includeTags: seq[string]
       ## RA-18 ``--tags=a,b``: only repos carrying one of these tags (plus the
       ## implicit ``default`` rule) are synced. Empty = no tag filter.
@@ -33011,6 +33014,7 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
   ## the project name to find ``projects/<name>.toml``.
   result.workspaceRoot = ""
   result.toolProvisioning = tpmPathOnly
+  result.progressMode = configuredBuildProgressMode()
   # ``--rebase-on-force-push`` is an OPT-IN, and this default is the
   # enforcement of that. The action it enables (``saForcePushRebase``) runs
   # ``git reset --hard <remote>/<branch>`` before replaying anything, so a
@@ -33100,6 +33104,9 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
       result.json = true
     elif arg == "--verbose" or arg == "-v":
       result.verbose = true
+    elif arg == "--progress" or arg.startsWith("--progress="):
+      result.progressMode = parseBuildProgressMode(
+        valueFromFlag(args, i, "--progress"))
     elif consumeReportFlag(arg, result.report):
       discard
     elif arg.startsWith("-"):
@@ -38077,15 +38084,17 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     fetchRepoIdx[fetchAction.id] = repoIdx
     fetchActions.add(fetchAction)
 
-  if optimizedFetchSkips > 0:
+  # RA-27 live progress: never a silent hang. Announce the network phase so
+  # the user/agent sees motion before the (potentially slow) parallel fetch
+  # begins. Suppressed under ``--json`` or quiet progress so the machine
+  # surface stays clean.
+  let emitProgress = not args.json and args.progressMode != bpmQuiet
+  let isTty = isatty(stderr)
+
+  if emitProgress and optimizedFetchSkips > 0:
     stderr.writeLine("workspace sync: optimized-fetch skipped " &
       $optimizedFetchSkips & " repo(s) already at the locked revision")
 
-  # RA-27 live progress: never a silent hang. Announce the network phase so
-  # the user/agent sees motion before the (potentially slow) parallel fetch
-  # begins. Suppressed under ``--json`` so the machine surface stays a single
-  # clean document on stdout (progress goes to stderr regardless).
-  let emitProgress = not args.json
   if emitProgress and refreshActions.len > 0:
     stderr.writeLine("workspace sync: warming " & $refreshActions.len &
       " shared clone(s) in parallel (jobs-network=" & $jobsNetwork & ") ...")
@@ -38199,8 +38208,17 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   if emitProgress:
     stderr.writeLine("workspace sync: checking " & $resolved.repos.len &
       " repositories...")
+    stderr.flushFile()
   var observations: seq[RepoSyncObservation]
-  for repo in resolved.repos:
+  for idx, repo in resolved.repos:
+    if emitProgress and isTty and args.progressMode in {bpmLine, bpmBarLine}:
+      stderr.write("\r\27[2Kworkspace sync: checking [" & $(idx + 1) & "/" &
+        $resolved.repos.len & "] " & repo.path & "...")
+      stderr.flushFile()
+    elif emitProgress and args.progressMode in {bpmLines, bpmLinesBar, bpmSimpleLines, bpmLiveLines}:
+      stderr.writeLine("workspace sync: checking [" & $(idx + 1) & "/" &
+        $resolved.repos.len & "] " & repo.path & "...")
+      stderr.flushFile()
     let repoPath = args.workspaceRoot / repo.path
     var repoForcePushed = initHashSet[string]()
     if forcePushes.hasKey(repo.path):
@@ -38215,6 +38233,9 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       observation.fetchFailed = true
       observation.fetchDiagnostic = fetchFailureByPath[repo.path]
     observations.add(observation)
+  if emitProgress and isTty and args.progressMode in {bpmLine, bpmBarLine}:
+    stderr.write("\r\27[2K")
+    stderr.flushFile()
 
   # Step 4: planner.
   #
@@ -38808,7 +38829,8 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
   let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
 
-  let emitProgress = not args.json
+  let emitProgress = not args.json and args.progressMode != bpmQuiet
+  let isTty = isatty(stderr)
   let jobsNetwork = resolveJobs(args.jobsNetwork, args.jobs,
     SyncDefaultJobsNetwork)
   let jobsCheckout = resolveJobs(args.jobsCheckout, args.jobs,
@@ -38860,8 +38882,17 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
   if emitProgress:
     stderr.writeLine("workspace sync: checking " & $resolved.repos.len &
       " repositories...")
+    stderr.flushFile()
   var observations: seq[MainlineSyncObservation]
-  for repo in resolved.repos:
+  for idx, repo in resolved.repos:
+    if emitProgress and isTty and args.progressMode in {bpmLine, bpmBarLine}:
+      stderr.write("\r\27[2Kworkspace sync: checking [" & $(idx + 1) & "/" &
+        $resolved.repos.len & "] " & repo.path & "...")
+      stderr.flushFile()
+    elif emitProgress and args.progressMode in {bpmLines, bpmLinesBar, bpmSimpleLines, bpmLiveLines}:
+      stderr.writeLine("workspace sync: checking [" & $(idx + 1) & "/" &
+        $resolved.repos.len & "] " & repo.path & "...")
+      stderr.flushFile()
     let repoAbs = args.workspaceRoot / repo.path
     var obs: MainlineSyncObservation
     obs.mainlineBranch = repo.branch
@@ -38898,6 +38929,9 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
           ["-C", repoAbs, "merge-tree", "--write-tree",
            obs.headSha, obs.mainlineTip]).code != 0
     observations.add(obs)
+  if emitProgress and isTty and args.progressMode in {bpmLine, bpmBarLine}:
+    stderr.write("\r\27[2K")
+    stderr.flushFile()
 
   let decisions = planMainlineSync(resolved.repos, observations,
     args.mainlineFlavor)
@@ -39091,7 +39125,7 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ## [--tool-provisioning=path|nix|tarball|scoop]
   ## [--jobs N|-j N] [--jobs-network N] [--jobs-checkout N]
   ## [--no-interleaved] [--fail-fast] [--force-sync] [--yes|--force]
-  ## [--dry-run] [--json] [--verbose|-v]``.
+  ## [--dry-run] [--json] [--verbose|-v] [--progress=...]``.
   ##
   ## RA-27 communicate-before-execute + live progress (Principle 1):
   ##   - Positional ``<project>...`` SCOPES the sync to those projects'
