@@ -171,8 +171,15 @@ proc node_package*(srcDir = "src";
   if projectRoot.len > 0:
     buildScript.add("export npm_config_cache=\"" &
       q(npmPrivateCacheDir(projectRoot)) & "\"; ")
+  # `logs_max=0`: npm otherwise writes a timestamped `_logs/<time>-debug-0.log`
+  # into the cache on every invocation and probes the older ones to rotate
+  # them. That is npm's bookkeeping, not an input, but the monitor rightly
+  # observes it, so every run of this edge would observe different paths
+  # and no two runs could ever be compared (the determinism probe) or share
+  # a portable record.
   buildScript.add("export npm_config_offline=true npm_config_audit=false " &
-    "npm_config_fund=false npm_config_update_notifier=false; ")
+    "npm_config_fund=false npm_config_update_notifier=false " &
+    "npm_config_logs_max=0; ")
   buildScript.add(extraEnvPrefix & "npm ci --no-progress; ")
   buildScript.add(extraEnvPrefix & "npm run " & bundleScript & "; ")
   let compileEdge = buildAction(
