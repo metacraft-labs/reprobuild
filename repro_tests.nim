@@ -603,6 +603,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_portable_cache_roots.nim",
+    binary: "build/test-bin/t_portable_cache_roots",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/t_fetch_token_path_independent.nim",
     binary: "build/test-bin/t_fetch_token_path_independent",
     defines: @[],
