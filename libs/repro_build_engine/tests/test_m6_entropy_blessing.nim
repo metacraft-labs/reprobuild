@@ -562,3 +562,101 @@ suite "M6 evidence classification, in isolation":
       "backend=x;capability=non-determinism;required=false;input=false;reason=r")
     check not capabilityGapIsNonDeterminism("rename",
       "backend=x;capability=rename;required=false;input=false;reason=r")
+
+suite "M6 the determinism probe: identical outputs earn the entry":
+  ## An unblessed tool that read entropy is not trusted to be deterministic,
+  ## but it can be MEASURED to be: it is not cached, so it runs again on the
+  ## next build, and when that run saw byte-identical inputs and produced
+  ## byte-identical outputs the action is cached. Any difference fails closed.
+
+  proc probeEvents(run: BuildRunResult): seq[string] =
+    for item in run.trace:
+      if item.event.startsWith("determinism-probe-"):
+        result.add(item.event)
+
+  test "a second run with identical inputs and outputs is admitted":
+    let scenario = setupScenario("probe-ok")
+    defer: removeDir(scenario.root)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      entropyRead("BCryptGenRandom", "program")])
+    let act = scenarioAction(scenario, ndpUnblessed)
+    let config = defaultBuildEngineConfig(scenario.cacheRoot)
+
+    let first = runBuild(graph([act]), config)
+    check first.results[0].status == asSucceeded
+    check not scenario.published(act)
+    check first.probeEvents == @["determinism-probe-candidate"]
+
+    removeFile(scenario.outputPath)
+    let second = runBuild(graph([act]), config)
+    check second.results[0].launched
+    check second.probeEvents == @["determinism-probe-verified"]
+    check scenario.published(act)
+
+    # The entry is usable: a third build hits it instead of re-running.
+    removeFile(scenario.outputPath)
+    let third = runBuild(graph([act]), config)
+    check third.results[0].cacheDecision == cdHit
+    check fileExists(scenario.outputPath)
+
+  test "different outputs from identical inputs fail closed, for good":
+    let scenario = setupScenario("probe-differ")
+    defer: removeDir(scenario.root)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      entropyRead("BCryptGenRandom", "program")])
+    let act = scenarioAction(scenario, ndpUnblessed)
+    let config = defaultBuildEngineConfig(scenario.cacheRoot)
+    discard runBuild(graph([act]), config)
+    # Make the first run's recorded outputs differ from what the copy will
+    # produce again: exactly what a tool whose randomness reached its output
+    # would have left behind.
+    let probeDir = scenario.cacheRoot / "determinism-probe"
+    var candidates: seq[string] = @[]
+    for kind, path in walkDir(probeDir):
+      candidates.add(path)
+    require candidates.len == 1
+    let recorded = readFile(candidates[0])
+    writeFile(candidates[0], recorded.replace(
+      recorded[recorded.rfind('\t') + 1 .. ^1], repeat('0', 64)))
+
+    removeFile(scenario.outputPath)
+    let second = runBuild(graph([act]), config)
+    check second.probeEvents == @["determinism-probe-mismatch"]
+    check not scenario.published(act)
+    # And the verdict sticks: identical outputs later do not reopen it.
+    removeFile(scenario.outputPath)
+    let third = runBuild(graph([act]), config)
+    check third.probeEvents == @["determinism-probe-refused"]
+    check not scenario.published(act)
+
+  test "an input change starts a new candidate rather than a verdict":
+    let scenario = setupScenario("probe-input")
+    defer: removeDir(scenario.root)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      entropyRead("BCryptGenRandom", "program")])
+    let act = scenarioAction(scenario, ndpUnblessed)
+    let config = defaultBuildEngineConfig(scenario.cacheRoot)
+    discard runBuild(graph([act]), config)
+    writeFile(scenario.sourcePath, "another payload\n")
+    removeFile(scenario.outputPath)
+    let second = runBuild(graph([act]), config)
+    check second.probeEvents == @["determinism-probe-candidate"]
+    check not scenario.published(act)
+
+  test "a capture that cannot see entropy is never probed":
+    ## Unobservable entropy is a gap in what was SEEN; comparing outputs
+    ## cannot close it.
+    let scenario = setupScenario("probe-blind")
+    defer: removeDir(scenario.root)
+    writeRmdf(scenario.rmdfPath, blindProfileRecords() & @[
+      fileRead(scenario.sourcePath)])
+    let act = scenarioAction(scenario, ndpUnblessed)
+    let config = defaultBuildEngineConfig(scenario.cacheRoot)
+    discard runBuild(graph([act]), config)
+    removeFile(scenario.outputPath)
+    let second = runBuild(graph([act]), config)
+    check second.probeEvents.len == 0
+    check not scenario.published(act)

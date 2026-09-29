@@ -6742,6 +6742,9 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
       "output")
     if blockingTools.len > 0:
       text.add(" (here: " & blockingTools.join(", ") & ")")
+    text.add(". Without a blessing, the determinism probe admits the " &
+      "action once a later run with byte-identical inputs produces " &
+      "byte-identical outputs (trace: determinism-probe-*)")
     text.add(". Note that caller attribution is one-way: an entropy read " &
       "reported from outside the main image is NOT evidence that the " &
       "program itself drew none. Rule: Failure-Semantics.md " &
@@ -13914,6 +13917,83 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for input in action.inputs:
       result.add(materialPath(action.cwd, input))
 
+  proc determinismProbeAdmits(action: BuildAction;
+                              evidence: EvidenceCollection): bool =
+    ## Windows-Build-Correctness M6 refuses to cache an action whose tool
+    ## read entropy unless that tool is BLESSED — a trusted claim that its
+    ## randomness cannot reach its outputs. The determinism probe earns the
+    ## same admission by MEASUREMENT instead (`nix build --check`, BuildXL's
+    ## determinism probe): an action is cached once two executions with
+    ## byte-identical inputs produced byte-identical outputs.
+    ##
+    ## No extra execution is needed. A refused action is not cached, so it
+    ## runs again on the next build, and that run is the probe. The first
+    ## run leaves a CANDIDATE (its output digests) under a key over its
+    ## inputs' CONTENT — never mtimes, which an upstream re-run changes
+    ## without changing a byte. A later run with the same key and the same
+    ## output bytes is admitted. Any difference fails closed, for that key,
+    ## for good.
+    ##
+    ## Only an action whose sole refusal is unblessed entropy is probed. A
+    ## monitor loss or an unobservable backend is a gap in what was SEEN,
+    ## which no comparison of outputs can close.
+    if evidence.cacheIneligibilityReasons != {cirUnblessedEntropy}:
+      return false
+    var key = "reprobuild.determinism-probe.v1\0" &
+      toHex(action.weakFingerprint.bytes) & "\0"
+    var inputs = action.cacheInputPaths(evidence.evidence)
+    inputs.sort()
+    for path in inputs:
+      let identity =
+        if fileExists(extendedPath(path)): "f" & fileContentHex(path)
+        elif dirExists(extendedPath(path)): "d" & membershipHex(path)
+        else: "absent"
+      key.add(path & "\0" & identity & "\0")
+    var env = action.cacheEnvInputs(evidence.evidence, unsafeAddr config)
+    env.sort(proc (a, b: EnvFingerprint): int = cmp(a.name, b.name))
+    for variable in env:
+      key.add(variable.name & "=" & $variable.present & ":" &
+        variable.value & "\0")
+    var outputs: seq[string] = @[]
+    for output in action.outputs & action.declaredOutputs:
+      let path = materialPath(action.cwd, output)
+      outputs.add(path & "\t" &
+        (if fileExists(extendedPath(path)): fileContentHex(path)
+         elif dirExists(extendedPath(path)): treeContentHex(path)
+         else: "missing"))
+    outputs.sort()
+    let observed = outputs.join("\n")
+    let probeFile = sharedRoot / "determinism-probe" /
+      toHex(casDigest(toBytes(key)).bytes)
+    try:
+      createDir(extendedPath(probeFile.parentDir))
+      if not fileExists(extendedPath(probeFile)):
+        writeFile(extendedPath(probeFile), "candidate\n" & observed)
+        runResult.trace(action.id, "determinism-probe-candidate",
+          "outputs recorded; the next run with the same inputs decides")
+        return false
+      let previous = readFile(extendedPath(probeFile))
+      let newline = previous.find('\n')
+      let verdict = if newline < 0: previous else: previous[0 ..< newline]
+      let recorded = if newline < 0: "" else: previous[newline + 1 .. ^1]
+      if verdict == "nondeterministic":
+        runResult.trace(action.id, "determinism-probe-refused",
+          "an earlier run with these inputs produced different outputs")
+        return false
+      if recorded != observed:
+        writeFile(extendedPath(probeFile), "nondeterministic\n" & recorded)
+        runResult.trace(action.id, "determinism-probe-mismatch",
+          "two runs with byte-identical inputs produced different outputs")
+        return false
+      writeFile(extendedPath(probeFile), "verified\n" & observed)
+      runResult.trace(action.id, "determinism-probe-verified",
+        "two runs with byte-identical inputs produced byte-identical " &
+        "outputs; caching despite unblessed entropy")
+      true
+    except CatchableError as err:
+      runResult.trace(action.id, "determinism-probe-failed", err.msg)
+      false
+
   var observationRoots: seq[LogicalRoot] = @[]
   var observationRootsResolved = false
   proc portableRecordRoots(): seq[LogicalRoot] =
@@ -15956,7 +16036,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # so downstream cache LOOKUPS can skip narrowly.
             registerEvidenceInvalidation(evidence)
             # Cache ineligibility withholds publication, not successful outputs.
-            if action.cacheable and not evidence.disableCacheHits:
+            if action.cacheable and (not evidence.disableCacheHits or
+                determinismProbeAdmits(action, evidence)):
               let recordStart = statStart()
               let storeOutputBlobs =
                 storeOutputBlobsFor(action, evidence.evidence)
@@ -16140,7 +16221,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # so downstream cache LOOKUPS can skip narrowly.
             registerEvidenceInvalidation(evidence)
             # Cache ineligibility withholds publication, not successful outputs.
-            if plan.action.cacheable and not evidence.disableCacheHits:
+            if plan.action.cacheable and (not evidence.disableCacheHits or
+                determinismProbeAdmits(plan.action, evidence)):
               let recordStart = statStart()
               # Peer-Cache M1: when a publisher closure is set, force
               # output-blob retention so the publisher can read the
@@ -16752,7 +16834,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # so downstream cache LOOKUPS can skip narrowly.
         registerEvidenceInvalidation(evidence)
         # Cache ineligibility withholds publication, not successful outputs.
-        if action.cacheable and not evidence.disableCacheHits:
+        if action.cacheable and (not evidence.disableCacheHits or
+            determinismProbeAdmits(action, evidence)):
           let recordStart = statStart()
           # M9.L.4-refactor Step A: force output-blob retention when
           # either the peer-cache publisher OR the binary-cache
