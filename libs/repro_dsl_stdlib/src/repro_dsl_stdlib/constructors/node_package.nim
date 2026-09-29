@@ -122,7 +122,8 @@ proc node_package*(srcDir = "src";
                    entry: string;
                    name = "";
                    destdir = "";
-                   extraEnv: seq[(string, string)] = @[]):
+                   extraEnv: seq[(string, string)] = @[];
+                   ignoreScripts = false):
     NodePackageResult =
   ## Fetch → vendor into a private cache → offline `npm ci` +
   ## `npm run <bundleScript>` →
@@ -186,7 +187,36 @@ proc node_package*(srcDir = "src";
   buildScript.add("export npm_config_offline=true npm_config_audit=false " &
     "npm_config_fund=false npm_config_update_notifier=false " &
     "npm_config_logs_max=0; ")
-  buildScript.add(extraEnvPrefix & "npm ci --no-progress; ")
+  # HERMETIC TOOL CONFIGURATION. Every one of these was observed reading
+  # HOST state on a gemini-cli build, which made the edge's result depend
+  # on the machine rather than on its inputs:
+  #   * npm reads the user's and the global `npmrc` — pointed at files under
+  #     the project that do not exist, so npm uses its defaults;
+  #   * git (a build script's `git rev-parse` for version metadata) reads
+  #     the user's and the system's config AND walks up out of the fetched
+  #     tree into whatever repository encloses the checkout — gemini-cli
+  #     shipped the PACKAGING repository's commit as its own. With the
+  #     ceiling at the project root git finds no repository, and a script
+  #     falls back exactly as it does on a source tarball;
+  #   * node's OpenSSL loads the system `openssl.cnf` at startup — pointed
+  #     at an empty file under the project.
+  if projectRoot.len > 0:
+    let hermetic = projectRoot / ".repro" / "node-hermetic"
+    buildScript.add("mkdir -p \"" & q(hermetic) & "\"; ")
+    buildScript.add(": > \"" & q(hermetic / "openssl.cnf") & "\"; ")
+    buildScript.add("export npm_config_userconfig=\"" &
+      q(hermetic / "npmrc") & "\" npm_config_globalconfig=\"" &
+      q(hermetic / "global-npmrc") & "\" GIT_CONFIG_NOSYSTEM=1 " &
+      "GIT_CONFIG_GLOBAL=\"" & q(hermetic / "gitconfig") & "\" " &
+      "GIT_CEILING_DIRECTORIES=\"" & q(projectRoot) & "\" " &
+      "OPENSSL_CONF=\"" & q(hermetic / "openssl.cnf") & "\"; ")
+  # `ignoreScripts`: skip the dependencies' install scripts. A recipe opts in
+  # only when the bundle is proven byte-identical without them — gemini-cli
+  # compiles `@github/keytar` with node-gyp there (host MSVC, a Python found
+  # by probing well-known install locations, node headers cached in the
+  # user profile), and the bundle only loads keytar optionally at run time.
+  buildScript.add(extraEnvPrefix & "npm ci --no-progress" &
+    (if ignoreScripts: " --ignore-scripts" else: "") & "; ")
   buildScript.add(extraEnvPrefix & "npm run " & bundleScript & "; ")
   let compileEdge = buildAction(
     id = "node-build-" & pkgName,
