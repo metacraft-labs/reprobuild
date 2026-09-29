@@ -1581,6 +1581,7 @@ tests/integration/t_workspace_pull_continues_past_a_failing_repo.nim	nim	1
 tests/integration/t_workspace_pull_converges_each_repo_to_manifest_revision_tracking_branch.nim	nim	2
 tests/integration/t_workspace_remotes_alignment.nim	nim	2
 tests/integration/t_workspace_remove_prompts_on_dirty_and_refuses_in_non_tty.nim	nim	4
+tests/integration/t_workspace_resolution_names_the_manifest_data_it_found.nim	nim	1
 tests/integration/t_workspace_routes_repo_sets_to_distinct_backends.nim	nim	2
 tests/integration/t_workspace_shared_clones_list_and_rewire.nim	nim	1
 tests/integration/t_workspace_status_shows_active_branch_and_drift.nim	nim	9

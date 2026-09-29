@@ -33629,6 +33629,87 @@ proc legacyMigratedWorkspaceProjectName(workspaceRoot: string): string =
   except CatchableError:
     return ""
 
+proc noNameableProjectError(workspaceRoot, opLabel: string): ref ValueError =
+  ## Interactive-UX-And-Progress.md Principle 2 -- the ONE diagnostic for
+  ## "``opLabel`` could name no project at ``workspaceRoot``". Shared by the
+  ## MO-9 ladder below and by ``repro workspace lock``'s own copy of the same
+  ## dispatch, so the two cannot drift into two different pieces of advice
+  ## about the same directory.
+  ##
+  ## WHAT WAS WRONG WITH THE ONE MESSAGE. It named the two things that were
+  ## ABSENT -- "requires either `.repro/workspace.toml` or a <project>
+  ## argument; neither was present at <root>" -- and said nothing about the
+  ## thing that was PRESENT and decisive: membership manifest data at that very
+  ## root. For the repository that reaches this most often BOTH remedies it
+  ## implies are wrong. That repository is a standalone or bare clone of the
+  ## manifests repo: the lock record store. Creating a ``workspace.toml`` there
+  ## makes the store CLAIM to be the workspace it describes, which is the route
+  ## inference Unified-Locking-And-Hooks.md Sec. 10 forbids -- and Sec. 5
+  ## records that the store's former ``manifests`` directory name already
+  ## misled "at least one implementation path" into exactly that. Passing a
+  ## ``<project>`` does not make that false claim, but it does not help
+  ## either: it makes the command operate on the store AS THOUGH it were the
+  ## workspace, doing its work inside the store repo instead of inside the
+  ## workspace these records describe.
+  ##
+  ## So that case gets its own diagnostic, and the remedy it carries is the
+  ## honest one: the command does not apply to this repository. The genuinely
+  ## empty root keeps the original sentence, because there nothing was found at
+  ## all and creating a workspace really is the answer.
+  ##
+  ## WHY THE SPLIT IS NOT ``hasResolvedManifestCheckout``, which is the
+  ## predicate the committed-lock fallback is gated on and therefore the
+  ## tempting one. Since the ``.repro/``-shell repair that predicate answers
+  ## FALSE for a bare manifests clone and TRUE for a real workspace that has
+  ## not had its metadata written yet. Keyed on it, the "this is not a
+  ## workspace" verdict would land on real workspaces and miss the store.
+  ## ``standaloneMembershipManifestCheckout`` asks the question this message
+  ## actually needs answered, and returns the evidence to quote.
+  ##
+  ## AND A COMMITTED ``repro.lock`` TAKES THE ROOT BACK OUT AGAIN. MO-2 makes
+  ## that file a workspace marker in its own right --
+  ## ``isInitializedWorkspace`` says so -- so a root carrying one IS a
+  ## workspace whatever else its listing looks like, and telling it "this is
+  ## not a workspace" would contradict the predicate every hook and gate in
+  ## the tree consults. There the original sentence is right and both of its
+  ## remedies work.
+  ##
+  ## That exclusion is also what makes the "no committed ``repro.lock``"
+  ## clause below TRUE AT BOTH RAISE SITES rather than at one of them. The
+  ## MO-9 ladder establishes it on its own: reaching its raise with no
+  ## ``.repro/`` means ``hasResolvedManifestCheckout`` was false, so the MO-2
+  ## fallback ran, and ``committedLockDerivedProject`` returns ``none`` only
+  ## when ``hasCommittedLockWorkspaceMarker`` -- a bare ``fileExists`` -- is
+  ## false. ``repro workspace lock``'s ladder carries no such fallback and
+  ## never looks at the file at all, so without this check it could reach
+  ## this message and assert the absence of a ``repro.lock`` sitting right
+  ## there in the root it is naming.
+  let manifest = standaloneMembershipManifestCheckout(workspaceRoot)
+  if manifest.len == 0 or hasCommittedLockWorkspaceMarker(workspaceRoot):
+    return newException(ValueError,
+      opLabel & " requires either `.repro/workspace.toml` or a <project> " &
+        "argument; neither was present at " & workspaceRoot)
+  newException(ValueError,
+    opLabel & ": found membership manifest data at " & workspaceRoot &
+      " (" & manifest & ") with no `.repro/` workspace shell beside it and " &
+      "no <project> argument, so nothing here names a project. That is the " &
+      "shape of a bare clone of the manifests repo -- the lock record " &
+      "store: it holds the membership and lock records FOR a workspace and " &
+      "is not a workspace itself, and with no committed `repro.lock` at " &
+      workspaceRoot & " the manifest-optional (MO-2) route to a project is " &
+      "not open here either. Do NOT hand-create `.repro/workspace.toml` " &
+      "here: that makes this checkout claim to BE the workspace it " &
+      "describes, which Unified-Locking-And-Hooks.md section 10 forbids. " &
+      "Passing a <project> does not get past this either -- it only makes " &
+      "this command operate on the store as though it were the workspace, " &
+      "doing its work inside THIS repo instead of inside the workspace " &
+      "these records describe. If this is the " &
+      "record store, " & opLabel & " does not apply to it -- run it from " &
+      "the workspace that consumes these records. If you meant THIS " &
+      "directory to become a workspace, `repro workspace init <project> " &
+      "--workspace-root " & workspaceRoot & "` is what establishes the " &
+      "`.repro/` shell that makes it one.")
+
 proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string):
     tuple[resolved: ResolvedProject; workspaceLocal: Option[WorkspaceLocal]] =
   ## MO-9 — the ONE membership-resolution ladder shared by ``sync`` / ``pull``
@@ -33676,9 +33757,7 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
       # never treat arbitrary legacy `.repo` state as canonical metadata.
       name = legacyMigratedWorkspaceProjectName(workspaceRoot)
   if name.len == 0:
-    raise newException(ValueError,
-      opLabel & " requires either `.repro/workspace.toml` or a <project> " &
-        "argument; neither was present at " & workspaceRoot)
+    raise noNameableProjectError(workspaceRoot, opLabel)
   let manifestsRoot = manifestsRoot(workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (name & ".toml")
   let variantFile = manifestsRoot / "variants" / (name & ".toml")
@@ -40800,10 +40879,13 @@ proc resolveWorkspaceLockProject(parsed: WorkspaceLockArgs):
         let recovered = resolveWorkspaceLockProject(withProject)
         return (extendWithActiveProjectSet(parsed.workspaceRoot,
           recovered.resolved), recovered.workspaceLocal)
-    raise newException(ValueError,
-      "`repro workspace lock` requires either `.repro/workspace.toml` " &
-        "or a <project> argument; neither was present at " &
-        parsed.workspaceRoot)
+    # Same question, same answer, same words -- see ``noNameableProjectError``.
+    # This ladder has no MO-2 committed-lock fallback of its own, so a bare
+    # manifests clone reaches this raise by the shorter road; the root it is
+    # raising about, and the two wrong remedies the old sentence offered for
+    # it, are identical.
+    raise noNameableProjectError(parsed.workspaceRoot,
+      "`repro workspace lock`")
   let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
   let projectFile = manifestsRoot / "projects" /
     (parsed.projectName & ".toml")

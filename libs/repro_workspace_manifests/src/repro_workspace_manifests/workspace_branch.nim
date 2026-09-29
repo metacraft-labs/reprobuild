@@ -189,20 +189,41 @@ proc isCompositionalWorkspaceToml*(workspaceRoot: string): bool =
     # own missing-project diagnostic).
     return false
 
+proc firstMembershipManifestPath*(root: string): string =
+  ## The first resolved membership manifest ``root`` itself holds -- a
+  ## ``projects/*.toml`` or a ``variants/*.toml`` -- or "" when it holds none.
+  ## An empty ``projects/``/``variants/`` is NOT a resolved checkout.
+  ## Layout-agnostic: the caller decides WHICH directory to ask about.
+  ##
+  ## It answers with the PATH rather than a yes/no because a diagnostic that
+  ## says "manifest data was found here" has to be able to show WHICH file
+  ## said so (Interactive-UX-And-Progress.md Principle 2 -- name the specific
+  ## thing at fault). ``carriesResolvedMembershipManifest`` below is this same
+  ## question asked for its emptiness, so the two cannot drift into two rules.
+  ##
+  ## The scan is ORDERED rather than first-hit, so the file a message names is
+  ## the same on every host: ``walkDir`` yields in directory order, which is
+  ## the filesystem's business and not a fact a diagnostic should depend on.
+  if root.len == 0:
+    return ""
+  for sub in ["projects", "variants"]:
+    let dir = root / sub
+    if dirExists(dir):
+      var earliest = ""
+      for kind, path in walkDir(dir):
+        if kind == pcFile and path.endsWith(".toml") and
+            (earliest.len == 0 or path < earliest):
+          earliest = path
+      if earliest.len > 0:
+        return earliest
+  ""
+
 proc carriesResolvedMembershipManifest(root: string): bool =
   ## True iff ``root`` itself holds at least one resolved membership manifest
   ## (a ``projects/*.toml`` or a ``variants/*.toml``). An empty
   ## ``projects/``/``variants/`` is NOT a resolved checkout. Layout-agnostic:
   ## the caller decides WHICH directory to ask about.
-  if root.len == 0:
-    return false
-  for sub in ["projects", "variants"]:
-    let dir = root / sub
-    if dirExists(dir):
-      for kind, path in walkDir(dir):
-        if kind == pcFile and path.endsWith(".toml"):
-          return true
-  false
+  firstMembershipManifestPath(root).len > 0
 
 proc hasResolvedManifestCheckout*(workspaceRoot: string): bool =
   ## True iff ``workspaceRoot``'s ``.repro/`` SHELL carries at least one
@@ -263,6 +284,41 @@ proc hasResolvedManifestCheckout*(workspaceRoot: string): bool =
   # symlink, or the git-checkout store backend. Unconditional — the path
   # spells the ``.repro/`` shell itself, so there is nothing to require.
   carriesResolvedMembershipManifest(workspaceRoot / ".repro" / "manifests")
+
+proc standaloneMembershipManifestCheckout*(workspaceRoot: string): string =
+  ## "" unless ``workspaceRoot`` IS a membership-manifest checkout rather than
+  ## a workspace that HAS one -- a standalone or bare clone of the manifests
+  ## repo, which is to say the LOCK RECORD STORE. Otherwise the path of the
+  ## manifest file that proves it, so a diagnostic can name the evidence
+  ## instead of asserting the conclusion.
+  ##
+  ## The line is the ``.repro/`` SHELL, exactly the line
+  ## ``hasResolvedManifestCheckout`` above draws and for the reason its note
+  ## gives: membership at the top level BESIDE a ``.repro/`` is a workspace
+  ## resolving from its own ``projects/*.toml`` before any ``workspace.toml``
+  ## was written; membership at the top level with NO ``.repro/`` at all is
+  ## the store that describes a workspace living somewhere else. In every
+  ## other respect the two are the same directory listing.
+  ##
+  ## NOTE WHICH WAY ROUND THIS IS, because the obvious reading is the wrong
+  ## one. ``hasResolvedManifestCheckout`` answers TRUE for the metadata-less
+  ## workspace and FALSE for the bare store, so this is not "that predicate
+  ## plus a detail" -- over the roots that carry membership at all it is very
+  ## nearly its negation. A caller that keys a "this is not a workspace"
+  ## verdict on ``hasResolvedManifestCheckout`` being TRUE says it of real
+  ## workspaces, and the migrated-workspace fixtures are exactly those.
+  ##
+  ## DISCLOSED LIMIT: a record store that has acquired a ``.repro/`` directory
+  ## -- from a tool that wrote state into it -- reads as the metadata-less
+  ## workspace and gets the generic diagnostic back. That is the same
+  ## ambiguity ``hasResolvedManifestCheckout`` accepts, and the managed hooks
+  ## are what keep it theoretical: RA-10 Part 4 asserts that no hook ever
+  ## manufactures a ``.repro/`` inside the store.
+  if workspaceRoot.len == 0:
+    return ""
+  if dirExists(workspaceRoot / ".repro"):
+    return ""
+  firstMembershipManifestPath(workspaceRoot)
 
 const committedLockFileName = "repro.lock"
   ## Workspace-Manifest-Optional MO-2 — the committed solved-graph lock

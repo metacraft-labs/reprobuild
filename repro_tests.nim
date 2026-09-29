@@ -14175,6 +14175,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_workspace_resolution_names_the_manifest_data_it_found.nim",
+    binary: "build/test-bin/t_workspace_resolution_names_the_manifest_data_it_found",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_workspace_routes_repo_sets_to_distinct_backends.nim",
     binary: "build/test-bin/t_workspace_routes_repo_sets_to_distinct_backends",
     defines: @[],
