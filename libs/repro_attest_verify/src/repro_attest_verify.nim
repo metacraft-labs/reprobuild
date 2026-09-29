@@ -43,13 +43,6 @@
 ##     a secret to the machine it accepted, and recording every decision
 ##     — including the ones that release nothing — in a sink this build
 ##     refuses to run without.
-##   * ``repro_attest_verify/inference`` — what a
-##     ``reproos.inference-statement.v1`` is worth: one entry point for
-##     local-test and provider-rooted statements alike, the trust class
-##     decided by which chain evaluator accepts rather than by a flag,
-##     and a signature checked under the accepted certificate's own key.
-##     It has no plaintext parameter and a ``static`` assertion stops one
-##     being added.
 ##   * ``repro_attest_verify/fetch`` — the command line's
 ##     ``--report-url``. Deliberately NOT imported by ``verify``: the
 ##     verifier proper touches no socket.
@@ -65,8 +58,6 @@ import ./repro_attest_verify/evidence
 import ./repro_attest_verify/challenge
 import ./repro_attest_verify/verify
 import ./repro_attest_verify/release
-import ./repro_attest_verify/inference
 
 export policy, verdict, x509, trust, evidence, challenge, verify, release
-export inference
 export snp_chain, snp_report, snp_tcb
