@@ -149,6 +149,28 @@ const BuiltSourcePackageRoots = [
   ("RUNQUOTA_SRC", compileTimeSourceRoot("RUNQUOTA_SRC")),
 ]
 
+const BuiltLibraryPrefixes = [
+  ## The C library prefixes of the shell that BUILT this `repro`, baked in
+  ## for the same reason as `BuiltSourcePackageRoots`: repro provisions these
+  ## libraries, so the provider compile it runs should not depend on whether
+  ## the CALLER's shell happens to export them.
+  ##
+  ## Without them, a caller whose shell lacks `BLAKE3_PREFIX` & co. fell
+  ## through to `nixPrefix`, which enumerates all of `/nix/store` and takes
+  ## the first name match. That was 11% of the CPU of a warm `repro exec`
+  ## (perf, 2026-09-29), and it is not hermetic: which store path matches
+  ## first depends on the host. An explicit caller value still wins; this is
+  ## consulted after it and before the homebrew and store-scan fallbacks.
+  ("BLAKE3_PREFIX", compileTimeSourceRoot("BLAKE3_PREFIX")),
+  ("XXHASH_PREFIX", compileTimeSourceRoot("XXHASH_PREFIX")),
+  ("CLINGO_PREFIX", compileTimeSourceRoot("CLINGO_PREFIX")),
+]
+
+proc builtLibraryPrefix(envName: string): string =
+  for entry in BuiltLibraryPrefixes:
+    if entry[0] == envName:
+      return entry[1]
+
 proc builtSourcePackageRoot(envName: string): string =
   for entry in BuiltSourcePackageRoots:
     if entry[0] == envName:
@@ -4918,7 +4940,7 @@ proc externalHashFlags(workDir = ""): seq[string] =
 
   let blake3Prefix = block:
     let direct = firstExistingPrefix(
-      [getEnv("BLAKE3_PREFIX"), "/opt/homebrew/opt/blake3",
+      [getEnv("BLAKE3_PREFIX"), builtLibraryPrefix("BLAKE3_PREFIX"), "/opt/homebrew/opt/blake3",
         "/usr/local/opt/blake3"],
       "include/blake3.h",
       ["libblake3.dylib", "libblake3.so", "libblake3.a"])
@@ -4939,7 +4961,7 @@ proc externalHashFlags(workDir = ""): seq[string] =
 
   let xxhashPrefix = block:
     let direct = firstExistingPrefix(
-      [getEnv("XXHASH_PREFIX"), "/opt/homebrew/opt/xxhash",
+      [getEnv("XXHASH_PREFIX"), builtLibraryPrefix("XXHASH_PREFIX"), "/opt/homebrew/opt/xxhash",
         "/usr/local/opt/xxhash"],
       "include/xxhash.h",
       ["libxxhash.dylib", "libxxhash.so", "libxxhash.a"])
@@ -4971,7 +4993,7 @@ proc externalHashFlags(workDir = ""): seq[string] =
   # baked dlopen find the library (verified), the rpath is what resolves it.
   let clingoPrefix = block:
     let direct = firstExistingPrefix(
-      [getEnv("CLINGO_PREFIX"), "/opt/homebrew/opt/clingo",
+      [getEnv("CLINGO_PREFIX"), builtLibraryPrefix("CLINGO_PREFIX"), "/opt/homebrew/opt/clingo",
         "/usr/local/opt/clingo"],
       "include/clingo.h",
       ["libclingo.dylib", "libclingo.so"])
