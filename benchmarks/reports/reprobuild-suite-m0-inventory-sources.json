@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1766,
+    "nimTestBinaries": 1769,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 587,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1780
+    "testEntries": 1783
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1076,7 +1076,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 909,
+      "integration": 912,
       "platform/destructive": 115,
       "pure unit": 587,
       "unclassified": 158
@@ -1227,9 +1227,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1766,
+    "nimTestBinaryCount": 1769,
     "pythonTestFileCount": 14,
-    "testEntryCount": 1780
+    "testEntryCount": 1783
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -24122,6 +24122,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_authenticated_inference_binding_mutations",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "reproAttestSoftwareRootTestTrust"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_authenticated_inference_binding_mutations.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 26,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_autotools_configure_cache",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -26166,6 +26186,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_authenticated_inference_local_and_cloud",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "reproAttestSoftwareRootTestTrust"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_e2e_authenticated_inference_local_and_cloud.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_cross_compilation_aarch64",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -26968,6 +27008,26 @@
       "source": "tests/integration/t_hpke_rfc9180_vectors.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_inference_commitment_is_hiding_and_binding",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "reproAttestSoftwareRootTestTrust"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_inference_commitment_is_hiding_and_binding.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
