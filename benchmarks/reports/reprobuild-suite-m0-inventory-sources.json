@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1657,
+    "nimTestBinaries": 1658,
     "pureUnitConsolidationGroups": 52,
     "pureUnitTests": 591,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1668
+    "testEntries": 1669
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1131,7 +1131,7 @@
     "classificationCounts": {
       "graph-fixture": 12,
       "integration": 773,
-      "platform/destructive": 115,
+      "platform/destructive": 116,
       "pure unit": 591,
       "unclassified": 177
     },
@@ -1281,9 +1281,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1657,
+    "nimTestBinaryCount": 1658,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1668
+    "testEntryCount": 1669
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -25821,6 +25821,28 @@
       "source": "tests/integration/t_hpke_rfc9180_vectors.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_in_package_realization_keys",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_hash",
+        "repro_interface_artifacts",
+        "repro_local_store",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_in_package_realization_keys.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

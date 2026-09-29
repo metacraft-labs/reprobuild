@@ -397,11 +397,20 @@ proc cliRefusal(body: proc ()): string =
 proc hx(d: ContentDigest): string =
   d.bytes.mapIt(it.toHex(2)).join().toLowerAscii()
 
-const UnpinnedKeyAtF7544a7b =
-  "4dca22f8441755fbf7bf3986f84ad518fbbcb6a4274805fe37f43c67edb7d497"
-  ## ``toolIdentityCacheKey(fixedKeyArtifact(), tpmTarball)`` computed by the
-  ## tree BEFORE lock selection reached the CLI (f7544a7b). A build with no
-  ## lock-selected pin and no imported contribution must key exactly so.
+const UnpinnedKeyV5 =
+  "1fc751f77e9581f08b7d0e160ceac70378ecb4d4e0485fae966b7985142eef22"
+  ## ``toolIdentityCacheKey(fixedKeyArtifact(), tpmTarball)`` under the v5
+  ## key. A build with no lock-selected pin and no imported contribution
+  ## must key exactly so: the pins add nothing to it.
+  ##
+  ## Until the v5 key this was
+  ## ``4dca22f8441755fbf7bf3986f84ad518fbbcb6a4274805fe37f43c67edb7d497``,
+  ## computed by the tree before lock selection reached the CLI (f7544a7b)
+  ## and unchanged through 543006de. v5 binds each tool use's realizations
+  ## whole (``toolUseRealizationDigest``) instead of through a field list
+  ## that missed eight fields of an in-package realization, which changed
+  ## every tool-identity key once (approved); this literal changed for that
+  ## reason only.
 
 proc fixedKeyArtifact(): ProjectInterfaceArtifact =
   ## A consumer artifact made of literals only (no archive digests, which
@@ -1123,13 +1132,13 @@ suite "e2e_locked_provisioning_contributor_selection":
     check buildProvisioningPins(artifact, "").len == 0
     setCurrentDir(cwd)
     # Nothing consulted the catalogs, and the key is the unpinned one --
-    # byte for byte the key the CLI computed before this change.
+    # byte for byte the pinned literal (``UnpinnedKeyV5``).
     check catalogSourceCalls == 0
     let fixed = fixedKeyArtifact()
-    check toolIdentityCacheKey(fixed, tpmTarball) == UnpinnedKeyAtF7544a7b
+    check toolIdentityCacheKey(fixed, tpmTarball) == UnpinnedKeyV5
     for root in [noLock, plain, otherPlatform, malformed]:
       check toolIdentityCacheKey(fixed, tpmTarball,
-        pins = buildProvisioningPins(fixed, root)) == UnpinnedKeyAtF7544a7b
+        pins = buildProvisioningPins(fixed, root)) == UnpinnedKeyV5
     for root in [noLock, plain, otherPlatform, malformed]:
       check toolIdentityCacheKey(artifact, tpmTarball,
         pins = buildProvisioningPins(artifact, root)) == unpinnedKey
@@ -1270,9 +1279,10 @@ suite "e2e_locked_provisioning_contributor_selection":
       toolIdentityCacheKey(w1.cliArtifact(), tpmTarball, pins = pins1)
     check toolIdentityCacheKey(w2.cliArtifact(), tpmTarball) !=
       toolIdentityCacheKey(w1.cliArtifact(), tpmTarball)
-    # Including a realization field the key's own tool-use field list does
-    # not name (``prunePaths``): only the imported-metadata digest binds it
-    # now that the interface fingerprint does not.
+    # Including a realization field the v4 key's tool-use field list did
+    # not name (``prunePaths``), which the interface fingerprint does not
+    # bind either: the imported-metadata digest binds it, and since the v5
+    # key so does the tool use's own realization digest.
     var pruned = w1.consumer
     for c in pruned.provisioningContributions.mitems:
       if c.contributor == ContributorB:

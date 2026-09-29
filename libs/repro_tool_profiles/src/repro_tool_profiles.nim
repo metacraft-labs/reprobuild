@@ -2819,6 +2819,7 @@ proc writeTarballReceipt(prefix: string; plan: TarballAcquisitionPlan;
     "archiveType": plan.archiveType,
     "stripComponents": plan.stripComponents,
     "prunePaths": plan.declaredPrunePaths,
+    "executableAlias": plan.declaredExecutableAlias,
     "declaredExecutablePath": plan.declaredExecutablePath,
     "lockIdentity": plan.lockIdentity,
     "realizationBoundary": prefix
@@ -2833,6 +2834,69 @@ proc selectedUrlFromReceipt(prefix: string): string =
     result = parseFile(path){"selectedUrl"}.getStr("existing")
   except CatchableError:
     result = "existing"
+
+proc tarballPrefixExtras(plan: TarballAcquisitionPlan): seq[string] =
+  ## The ``extra`` inputs of a tarball prefix's realization hash -- and so
+  ## of its path under ``prefixes/`` -- beyond the lock identity, the
+  ## declared executable, the URL and the digest.
+  ##
+  ## The executable alias and the prune list change the prefix's BYTES (an
+  ## extra copy of the executable; files deleted before sealing), so they
+  ## must change its path. Before they were bound here, realize found the
+  ## prefix a plan without them had left at the same path and returned it
+  ## as it was: an added alias was never created and an added prune never
+  ## applied (measured), with the tool profile and typed-tool action
+  ## fingerprints -- which key on the prefix path -- unmoved as well.
+  ##
+  ## Appended only when set, each behind its own tag (the prune list last,
+  ## so its extent is the rest of the list), following ``toolCacheIdentity``:
+  ## a package that declares neither keeps the prefix it already has, so
+  ## this does not re-realize every tarball tool once. A prefix that an
+  ## older engine realized WITH an alias or a prune at the path a plan
+  ## without them now computes is caught by ``tarballPrefixLayoutMismatch``.
+  result = @[plan.archiveType, $plan.stripComponents]
+  if plan.declaredExecutableAlias.len > 0:
+    result.add("executableAlias")
+    result.add(plan.declaredExecutableAlias)
+  if plan.declaredPrunePaths.len > 0:
+    result.add("prunePaths")
+    for prunePath in plan.declaredPrunePaths:
+      result.add(prunePath)
+
+proc tarballPrefixLayoutMismatch(prefix: string;
+                                 plan: TarballAcquisitionPlan): string =
+  ## Why the existing ``prefix`` was NOT realized with ``plan``'s alias and
+  ## prune list, from the receipt realize sealed into it; "" when it was, or
+  ## when the receipt does not say. A receipt records ``prunePaths`` since
+  ## pruning exists and ``executableAlias`` since
+  ## ``tarballPrefixExtras`` binds it, so an older engine's prefix left
+  ## where a plan without a prune now resolves is refused rather than served
+  ## with files missing. A receipt without the ``executableAlias`` key is
+  ## not evidence either way and is accepted (its only possible difference
+  ## is an extra copy of the declared executable under another name).
+  let path = tarballReceiptPath(prefix)
+  if not fileExists(extendedPath(path)):
+    return ""
+  var receipt: JsonNode
+  try:
+    receipt = parseFile(path)
+  except CatchableError:
+    return ""
+  if receipt.kind != JObject:
+    return ""
+  if receipt.hasKey("prunePaths"):
+    var recorded: seq[string] = @[]
+    for item in receipt["prunePaths"].getElems():
+      recorded.add(item.getStr())
+    if recorded != plan.declaredPrunePaths:
+      return "prunePaths [" & recorded.join(", ") & "] (the plan declares [" &
+        plan.declaredPrunePaths.join(", ") & "])"
+  if receipt.hasKey("executableAlias"):
+    let recorded = receipt["executableAlias"].getStr()
+    if recorded != plan.declaredExecutableAlias:
+      return "executableAlias \"" & recorded & "\" (the plan declares \"" &
+        plan.declaredExecutableAlias & "\")"
+  ""
 
 proc flushStoreDiagnostics() =
   ## Push a store diagnostic out of the buffer immediately.
@@ -3031,7 +3095,7 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
       plan.sha256[0 .. 15]
   let unified = unifiedPrefixPath(storeRoot, packageName, resolvedVersion,
     "tarball", plan.lockIdentity, plan.declaredExecutablePath,
-    plan.url, plan.sha256, [plan.archiveType, $plan.stripComponents])
+    plan.url, plan.sha256, tarballPrefixExtras(plan))
   let prefix = unified.absolutePath
   if dirExists(extendedPath(prefix)):
     if executableInStorePath(prefix, plan.declaredExecutablePath,
@@ -3039,6 +3103,13 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
       raise newException(OSError,
         "tool-resolution failed: existing tarball realization lacks " &
         plan.declaredExecutablePath & ": " & prefix)
+    let mismatch = tarballPrefixLayoutMismatch(prefix, plan)
+    if mismatch.len > 0:
+      raise newException(OSError,
+        "tool-resolution failed: the existing tarball realization at " &
+        prefix & " was realized with " & mismatch & "; it is not reused " &
+        "for a plan that differs. Remove the prefix (an older engine " &
+        "keyed it without the prune list and alias) and realize again.")
     return (prefix: prefix, archivePath: "",
         selectedUrl: selectedUrlFromReceipt(prefix))
 
@@ -3141,7 +3212,7 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
     discard registerInUnifiedStore(storeRoot, packageName,
       resolvedVersion, "tarball", plan.lockIdentity,
       plan.declaredExecutablePath, plan.url, plan.sha256, "directory",
-      [plan.archiveType, $plan.stripComponents], prefix,
+      tarballPrefixExtras(plan), prefix,
       [plan.declaredExecutablePath], writerMode = writerMode)
     (prefix: prefix, archivePath: downloaded.path,
       selectedUrl: downloaded.selectedUrl)

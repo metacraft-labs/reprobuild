@@ -6219,15 +6219,29 @@ proc toolIdentityCacheKey*(artifact: ProjectInterfaceArtifact;
   ## the pins are never recoverable from it, and nothing turns a cached key
   ## or identity back into a pin (see ``provisioning_lock_selection``'s
   ## trust boundary). With no pins -- every build whose lock has no
-  ## ``provisioning`` record -- the key is byte-identical to what it was.
+  ## ``provisioning`` record -- the pins add nothing to the key.
   ##
   ## ``importedProvisioningMetadataDigest`` (M7 deliverable 4): the
   ## realization metadata of IMPORTED contribution records, which
   ## ``interfaceFingerprint`` no longer carries. The tool identity is
   ## resolved FROM that metadata, so it is bound here; empty (and absent
   ## from the key) when the artifact imports no contribution.
+  ##
+  ## v5 (ReproOS M7): each tool use's realizations are bound WHOLE, through
+  ## ``toolUseRealizationDigest`` (the codec's fingerprint-mode bytes of
+  ## every Nix / tarball / Scoop entry, in declaration order, location
+  ## normalised away), instead of through a list of fields. The v4 list
+  ## missed ``packageName``, ``nixpkgsRef`` / ``nixpkgsRev`` /
+  ## ``nixpkgsNarHash``, ``executableAlias``, ``prunePaths``, ``cpu`` and
+  ## ``os``, and ``interfaceFingerprint`` omits tool-use realizations
+  ## entirely, so for a tool package's OWN realization (no contribution
+  ## record, so no ``importedProvisioningMetadataDigest`` either) a change
+  ## of only one of them was served the stale identity: another entry
+  ## selected by ``cpu`` / ``os`` was never realized, an alias never
+  ## created, a prune never applied. Every v4 key changes once (a one-time
+  ## miss, approved); nothing else about the key did.
   var payload = ""
-  payload.addCacheField("reprobuild.toolIdentityCache.v4")
+  payload.addCacheField("reprobuild.toolIdentityCache.v5")
   payload.addCacheField(mode.modeName)
   payload.addCacheField(artifact.projectInterface.projectName)
   payload.addCacheField(artifact.projectInterface.packageName)
@@ -6288,35 +6302,8 @@ proc toolIdentityCacheKey*(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(useDef.packageSelector)
     payload.addCacheField(useDef.executableName)
     payload.addCacheField(useDef.policyPath.join("/"))
-    for nix in useDef.nixProvisioning:
-      payload.addCacheField(nix.contributor)
-      payload.addCacheField(nix.selector)
-      payload.addCacheField(nix.executablePath)
-      payload.addCacheField(nix.expressionFile)
-      payload.addCacheField(nix.packageId)
-      payload.addCacheField(nix.lockIdentity)
-    for tarball in useDef.tarballProvisioning:
-      payload.addCacheField(tarball.contributor)
-      payload.addCacheField(tarball.url)
-      payload.addCacheField(tarball.mirrors.join("\n"))
-      payload.addCacheField(tarball.sha256)
-      payload.addCacheField(tarball.archiveType)
-      payload.addCacheField($tarball.stripComponents)
-      payload.addCacheField(tarball.executablePath)
-      payload.addCacheField(tarball.packageId)
-      payload.addCacheField(tarball.lockIdentity)
-    for scoop in useDef.scoopProvisioning:
-      payload.addCacheField(scoop.contributor)
-      payload.addCacheField(scoop.bucket)
-      payload.addCacheField(scoop.app)
-      payload.addCacheField(scoop.version)
-      payload.addCacheField(scoop.preferredVersion)
-      payload.addCacheField(scoop.manifestChecksum)
-      payload.addCacheField(scoop.manifestUrl)
-      payload.addCacheField(scoop.executablePath)
-      payload.addCacheField($scoop.requiresExecutionProfileChecksum)
-      payload.addCacheField(scoop.packageId)
-      payload.addCacheField(scoop.lockIdentity)
+    # Every realization the use carries, whole (see the v5 note above).
+    payload.addCacheField(toolUseRealizationDigest(useDef))
   digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
 
 proc toolIdentityRealizationsUsable(identity: PathOnlyBuildIdentity): bool =

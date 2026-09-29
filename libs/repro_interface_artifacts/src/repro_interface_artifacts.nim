@@ -637,6 +637,8 @@ const
   ImportedContributionMetadataTag =
     "reprobuild.imported-contribution-metadata.v1"
     ## Domain tag of ``importedProvisioningMetadataDigest``.
+  ToolUseRealizationsTag = "reprobuild.tool-use-realizations.v1"
+    ## Domain tag of ``toolUseRealizationDigest``.
   InterfaceExtractionCacheRecordMagic =
     "reprobuild.interfaceExtractionCache.v2"
   ProviderFreshnessCacheRecordMagic =
@@ -1267,7 +1269,8 @@ proc importedProvisioningMetadataDigest*(value: ProjectInterface): string =
   ## keyed on ``interfaceFingerprint`` must also key on this, or a
   ## realization-only change of an imported contribution would be served
   ## the stale result. ``repro_cli_support``'s tool-identity cache key is
-  ## such a reader and binds it.
+  ## such a reader and binds it. The tool uses' OWN realization lists are
+  ## bound there by ``toolUseRealizationDigest``.
   var blobs: seq[string] = @[]
   for contribution in value.provisioningContributions:
     if contribution.imported:
@@ -1283,6 +1286,48 @@ proc importedProvisioningMetadataDigest*(value: ProjectInterface): string =
   payload.writeU32Le(uint32(blobs.len))
   for blob in blobs:
     payload.writeString(blob)
+  toHex(blake3DomainDigest(payload, hdMetadataEnvelope).bytes).toLowerAscii()
+
+proc toolUseRealizationDigest*(useDef: InterfaceToolUse): string =
+  ## Every realization ``useDef`` carries, as 64 lower-case hex: the Nix,
+  ## then the tarball, then the Scoop entries, each list in declaration
+  ## order, each entry in the codec's fingerprint-mode encoding -- every
+  ## field the artifact serialises, with the source location normalised
+  ## away.
+  ##
+  ## ``interfaceFingerprint`` leaves tool-use realizations out (since v13:
+  ## a realization change is not an interface change), so anything that
+  ## RESOLVES a use and caches the result keyed on the fingerprint must bind
+  ## this as well, or a realization-only change of the tool package --
+  ## its own ``provisioning``, with no contribution record behind it -- is
+  ## served the stale result. ``repro_cli_support``'s tool-identity cache
+  ## key is such a reader and binds it (and through it the lowered-graph
+  ## key).
+  ##
+  ## Taken from the encoding rather than from a list of fields so a field
+  ## the codec gains is bound without anyone remembering to add it here:
+  ## the list this replaces had missed eight (``packageName``, the nixpkgs
+  ## ref / rev / NAR hash, ``executableAlias``, ``prunePaths``, ``cpu`` and
+  ## ``os``). Declaration order IS bound: the planners take the first
+  ## eligible entry of a family, so two orders can realize different
+  ## archives. The location is not: moving a declaration realizes nothing
+  ## different. The resolution-time ``provisioningPin`` is not either -- it
+  ## is not part of the artifact, and callers that pin bind the pins
+  ## themselves.
+  var payload: seq[byte] = @[]
+  payload.writeString(ToolUseRealizationsTag)
+  payload.writeU32Le(uint32(useDef.nixProvisioning.len))
+  for provisioning in useDef.nixProvisioning:
+    payload.writeNixProvisioning(provisioning, EnvelopeVersion,
+      forFingerprint = true)
+  payload.writeU32Le(uint32(useDef.tarballProvisioning.len))
+  for provisioning in useDef.tarballProvisioning:
+    payload.writeTarballProvisioning(provisioning, EnvelopeVersion,
+      forFingerprint = true)
+  payload.writeU32Le(uint32(useDef.scoopProvisioning.len))
+  for provisioning in useDef.scoopProvisioning:
+    payload.writeScoopProvisioning(provisioning, EnvelopeVersion,
+      forFingerprint = true)
   toHex(blake3DomainDigest(payload, hdMetadataEnvelope).bytes).toLowerAscii()
 
 proc decodeInterfacePayload*(bytes: openArray[byte];
