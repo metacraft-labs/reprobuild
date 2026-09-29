@@ -14202,6 +14202,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_workspace_sync_progress_modes.nim",
+    binary: "build/test-bin/t_workspace_sync_progress_modes",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_workspace_sync_refuses_to_classify_on_a_failed_fetch.nim",
     binary: "build/test-bin/t_workspace_sync_refuses_to_classify_on_a_failed_fetch",
     defines: @[],
