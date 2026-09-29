@@ -13,6 +13,7 @@
 import std/[net, options, os, osproc, strutils, times, unittest]
 
 import repro_build_engine
+import repro_core/edge_determinism
 import repro_core/paths
 import repro_hash
 import repro_local_store
@@ -386,6 +387,93 @@ suite "Cache-Scope P3.4 — lookup without materialization":
     check run.compile.launched
     check run.link.launched
     check readFile(c / "obj" / "main.o") == "object of int different;\n"
+
+  test "a fixed-output fetch resolves without running; a plain one runs":
+    ## A fetch reaches the network, so it is never locally cacheable. A
+    ## FIXED-OUTPUT one (its content verified against declared hashes) is
+    ## still resolvable by its record, so nothing downstream has to wait for
+    ## it — and it never runs when nothing needs its bytes.
+    proc fetchGraph(p: string; fixed: bool): seq[BuildAction] =
+      createDir(p / "upstream" / "pkg")
+      writeFile(p / "upstream" / "pkg" / "index.js", "module.exports=1\n")
+      let fetch = BuildAction(
+        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+        kind: bakPreserveTree, id: "t-pmc-fetch", deps: @[],
+        inputs: @[p / "upstream" / "pkg" / "index.js"],
+        outputs: @[p / ".repro" / "preserve-tree" / "t-pmc-fetch.manifest"],
+        declaredOutputs: @[p / "fetched"],
+        cwd: p, cacheable: false, fixedOutput: fixed,
+        publishToBinaryCache: false, actionCachePolicy: ffpTimestamp,
+        weakFingerprint: fingerprintForPayload("t-pmc-fetch"),
+        builtinText: "upstream\nfetched", builtinEntries: @["pkg/index.js"])
+      let build = BuildAction(
+        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+        kind: bakWriteText, id: "t-pmc-bundle", deps: @["t-pmc-fetch"],
+        inputs: @[p / "fetched" / "pkg" / "index.js"],
+        outputs: @[p / "bin" / "bundle.js"],
+        cwd: p, cacheable: true, publishToBinaryCache: true,
+        actionCachePolicy: ffpTimestamp,
+        weakFingerprint: fingerprintForPayload("t-pmc-bundle"),
+        builtinText: "bundled\n")
+      createDir(p / "bin")
+      @[fetch, build]
+    proc run(p: string; fixed: bool; publisher: PortableMemoPublisher = nil;
+             lookup: PortableMemoLookup = nil;
+             restorer: PortableMemoRestorer = nil):
+        tuple[results: seq[ActionResult], trace: string] =
+      var config = defaultBuildEngineConfig(p.parentDir / "cache")
+      config.maxParallelism = 1
+      config.portableRoots = rootsOf(p)
+      config.portableMemoPublisher = publisher
+      config.portableLookup = lookup != nil
+      config.portableMemoLookup = lookup
+      config.portableMemoRestorer = restorer
+      let built = runBuild(graph(fetchGraph(p, fixed), newSeq[BuildPool]()),
+        config)
+      for event in built.trace:
+        result.trace.add($event & "\n")
+      result.results = built.results
+
+    for fixed in [true, false]:
+      let tag = if fixed: "fixed" else: "plain"
+      let a = project("fetch-a-" & tag, "int main;\n")
+      let first = run(a, fixed, publisher = publisherFor(remote("fa" & tag)))
+      for r in first.results:
+        require r.status == asSucceeded
+      let b = project("fetch-b-" & tag & "/elsewhere", "int main;\n")
+      let served = run(b, fixed, lookup = lookupFor(remote("fb" & tag)),
+        restorer = restorerFor(remote("fb" & tag)))
+      checkpoint(tag & "\n" & served.trace)
+      for r in served.results:
+        if fixed:
+          check not r.launched
+        else:
+          check r.launched
+      check readFile(b / "bin" / "bundle.js") == "bundled\n"
+      # Nothing downstream needed the fetched bytes, so they never came.
+      check dirExists(b / "fetched") == not fixed
+
+  test "a host-bound action is never offered to another host":
+    let a = project("hostbound", "int main;\n")
+    var action = BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+      kind: bakWriteText, id: "t-pmc-hostbound", deps: @[],
+      inputs: @[a / "src" / "main.c"], outputs: @[a / "out" / "hb.txt"],
+      cwd: a, cacheable: true, publishToBinaryCache: true,
+      actionCachePolicy: ffpTimestamp,
+      weakFingerprint: fingerprintForPayload("t-pmc-hostbound"),
+      builtinText: "host specific\n", determinism: some(edHostBound))
+    createDir(a / "out")
+    var config = defaultBuildEngineConfig(a.parentDir / "cache")
+    config.maxParallelism = 1
+    config.portableRoots = rootsOf(a)
+    config.portableMemoPublisher = publisherFor(remote("hostbound"))
+    let run = runBuild(graph(@[action], newSeq[BuildPool]()), config)
+    var trace = ""
+    for event in run.trace:
+      trace.add($event & "\n")
+    check "portable-memo-host-bound" in trace
+    check "portable-memo-published" notin trace
 
   test "reads inside a produced directory resolve from its manifest":
     proc treeGraph(p: string): seq[BuildAction] =

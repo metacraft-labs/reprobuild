@@ -2830,6 +2830,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # successful action when the config supplies a non-nil
     # ``binaryCachePublisher`` closure.
     result.publishToBinaryCache = payload.publishToBinaryCache
+    result.fixedOutput = payload.fixedOutput
     result.cacheEntryIdentity = payload.cacheEntryIdentity
     # M9.N Batch B: propagate the convention-supplied tool-identity
     # refs through to the engine-side ``BuildAction``. The engine
@@ -4388,7 +4389,7 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 10'u16
+  LoweredGraphCacheVersion = 11'u16
     # v10: DA-6 — the two trailing event-interest bools
     # (``captureNonDeterminism``, ``captureIpc``) are replaced by ONE byte
     # carrying ``MonitorCaptureBreadth``: the tool package's declaration of how
@@ -5256,6 +5257,8 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
     outp.writeCacheEntryIdentity(action.cacheEntryIdentity.get())
   else:
     outp.add(0'u8)
+  # v11: Cache-Scope P3.4 fixed-output sentinel.
+  outp.add(if action.fixedOutput: 1'u8 else: 0'u8)
   outp.writeStringSeq(action.toolIdentityRefs)
   outp.writeU32Le(uint32(action.toolIdentityRefKinds.len))
   for kind in action.toolIdentityRefKinds:
@@ -5321,6 +5324,11 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
       "invalid lowered action identity sentinel")
   if identityByte == 1'u8:
     result.cacheEntryIdentity = some(readCacheEntryIdentity(bytes, pos))
+  let fixedByte = readByteValue(bytes, pos)
+  if fixedByte > 1'u8:
+    raiseEnvelopeError(eeMalformed,
+      "invalid lowered action fixedOutput sentinel")
+  result.fixedOutput = fixedByte == 1'u8
   result.toolIdentityRefs = readStringSeq(bytes, pos)
   let refKindCount = int(readU32Le(bytes, pos))
   result.toolIdentityRefKinds = newSeq[DepKind](refKindCount)
@@ -22194,6 +22202,7 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "cacheable": action.cacheable,
     "weakFingerprint": digestHex(action.weakFingerprint),
     "publishToBinaryCache": action.publishToBinaryCache,
+    "fixedOutput": action.fixedOutput,
     "binaryCacheKey": binaryCacheKey,
     "binaryCacheIdentityError": identityError,
     "actionCachePolicy": $action.actionCachePolicy,

@@ -954,6 +954,15 @@ type
       ## ``env`` extends rather than replaces. Empty for legacy
       ## recipes (and the v13-and-earlier payload codec round-trips
       ## the field as empty so older artifacts decode cleanly).
+    fixedOutput*: bool
+      ## Cache-Scope P3.4 — a FIXED-OUTPUT action (BuildXL's download pip,
+      ## Nix's fixed-output derivation): its outputs are determined by
+      ## content hashes it DECLARES and VERIFIES — a tarball checked against
+      ## a sha256, a vendored closure checked against lockfile integrity —
+      ## not by what the network happened to return. It stays locally
+      ## non-cacheable (it reaches the network), but its portable record is
+      ## keyed by its static description and declared inputs alone, so the
+      ## portable lookup can resolve it without running it.
     publishToBinaryCache*: bool
       ## M9.L.4-refactor Step B: passive flag the from-source
       ## conventions stamp on each install + stage-copy action so the
