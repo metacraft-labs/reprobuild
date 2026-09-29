@@ -179,6 +179,17 @@ proc currentIdentity*(roots: openArray[LogicalRoot]; entry: PathSetEntry;
     let known = resolve(entry)
     if known.isSome:
       return known
+  if entry.kind == pikEnvironment:
+    # Only the caller knows the environment the action would launch with;
+    # the looking-up process's own environment is not it.
+    return none(string)
+  if entry.path.startsWith(AncestorPrefix):
+    # A probe above the root, evaluated over the whole ancestry exactly as
+    # it was when recorded (`ancestorProbeIdentity`).
+    if entry.kind != pikProbe:
+      return none(string)
+    let identity = ancestorProbeIdentity(roots, entry.path)
+    return if identity.len > 0: some(identity) else: none(string)
   let physical = toPhysicalPath(roots, entry.path)
   if physical.isNone:
     return none(string)
@@ -194,6 +205,8 @@ proc currentIdentity*(roots: openArray[LogicalRoot]; entry: PathSetEntry;
     if not dirExists(p):
       return none(string)
     some(membershipHex(p))
+  of pikEnvironment:
+    none(string)   # answered above, and only ever by the caller's resolver
 
 proc manifestsConsistent*(record: PortableMemoRecord): bool =
   ## A directory output's manifest must be the tree its digest names: the
