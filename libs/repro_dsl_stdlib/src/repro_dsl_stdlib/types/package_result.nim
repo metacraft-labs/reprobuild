@@ -1359,11 +1359,16 @@ proc emitInstallTreeMirror*(installEdge: BuildActionDef;
     projectRoot, packageName)
   let ownManifestPath = (dstUsrRoot / m9r30PropagatedManifestName)
     .replace("\\", "/").replace("\"", "\\\"")
-  script.add(m9r14fEmitRpathPatchScript(escapedDstUsr, depMirrorLibDirs,
-    depManifestPaths = depManifestPaths,
-    ownManifestPath = ownManifestPath,
-    packageName = packageName,
-    recipesRoot = recipesRoot))
+  # Not on Windows: there is no ELF to patch, and the snippet's runtime
+  # `command -v patchelf` guard is itself an ambient-PATH lookup — whether
+  # some `patchelf` happened to be on the user's PATH decided what the
+  # mirror did, which made every Windows install mirror host-dependent.
+  when not defined(windows):
+    script.add(m9r14fEmitRpathPatchScript(escapedDstUsr, depMirrorLibDirs,
+      depManifestPaths = depManifestPaths,
+      ownManifestPath = ownManifestPath,
+      packageName = packageName,
+      recipesRoot = recipesRoot))
   script.add("touch \"" & escapedStamp & "\"; ")
   script.add(emitInstallMirrorStorePublish(recipesRoot, recipeName,
     publishVersion, dstUsrRoot))
