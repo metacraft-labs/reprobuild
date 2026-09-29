@@ -5955,6 +5955,20 @@ proc resolvePeerAttribution(attribution: var MonitorPeerAttribution;
   attribution.pendingIpcLosses.setLen(0)
   attribution.ipcRecords.setLen(0)
 
+proc withoutExtendedLengthPrefix(path: string): string =
+  ## `\\?\M:\x` and `M:\x` are one file. io-mon records the spelling the
+  ## program used, and one process opens a path both ways: npm's
+  ## delete-by-rename WRITES `\\?\...\index.js.DELETE.<id>` and later PROBES
+  ## `...\index.js.DELETE.<id>`, so the self-write filter, which compares
+  ## spellings, kept the probe as an input and every run observed new random
+  ## names. `\\?\UNC\host\share` is `\\host\share`.
+  if path.len > 8 and path.startsWith("\\\\?\\UNC\\"):
+    "\\\\" & path[8 .. ^1]
+  elif path.len > 4 and path.startsWith("\\\\?\\"):
+    path[4 .. ^1]
+  else:
+    path
+
 proc isNamedPipeOpen(record: MonitorRecord): bool =
   ## io-mon's classification of an open that reached a NAMED PIPE (a node /
   ## libuv IPC channel, a daemon's pipe), emitted ON TOP OF the file record
@@ -6112,7 +6126,7 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   else:
     discard
 
-  let materialized = materialPath(cwd, record.path)
+  let materialized = materialPath(cwd, withoutExtendedLengthPrefix(record.path))
   if materialized.isVolatileMonitorPath():
     return
   case record.kind
@@ -6502,7 +6516,7 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
       if record.kind == mrBackendProfile:
         profileRecords.add(record)
       if record.isNamedPipeOpen:
-        pipes.incl(materialPath(cwd, record.path))
+        pipes.incl(materialPath(cwd, withoutExtendedLengthPrefix(record.path)))
       foldOneMonitorRecord(record, cwd, evidence, seen, result, attribution)
   except CatchableError:
     attribution.pendingIpcLosses.setLen(0)
@@ -6567,7 +6581,7 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
     if record.kind == mrBackendProfile:
       profileRecords.add(record)
     if record.isNamedPipeOpen:
-      pipes.incl(materialPath(cwd, record.path))
+      pipes.incl(materialPath(cwd, withoutExtendedLengthPrefix(record.path)))
     foldOneMonitorRecord(record, cwd, evidence, seen, result, attribution)
   dropNamedPipeOpens(evidence, pipes)
   resolvePeerAttribution(attribution, evidence, result)
@@ -14082,6 +14096,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## monitor loss or an unobservable backend is a gap in what was SEEN,
     ## which no comparison of outputs can close.
     if evidence.cacheIneligibilityReasons != {cirUnblessedEntropy}:
+      return false
+    # The probe compares what the cache would store and restore for this
+    # action: its declared outputs. An action that declares none gives two
+    # runs nothing to compare, and "equal" would be vacuous — admitting an
+    # action whose real effects were never looked at.
+    if action.outputs.len == 0 and action.declaredOutputs.len == 0:
+      runResult.trace(action.id, "determinism-probe-refused",
+        "the action declares no outputs, so two runs cannot be compared")
       return false
     var key = "reprobuild.determinism-probe.v1\0" &
       toHex(action.weakFingerprint.bytes) & "\0"
