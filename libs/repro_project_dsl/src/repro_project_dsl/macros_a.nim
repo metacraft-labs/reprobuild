@@ -4032,10 +4032,9 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       # declared on the tool use" on every Linux smoke.
       "runquotad",
       "sh",
-      "shellcheck",
+      # `shellcheck`, `shfmt` and `prek` moved to reprobuild-packages, like
+      # `sqlite3`; see `reprobuildPackagesInterfaceModule`.
       "solc",
-      # `sqlite3` moved to reprobuild-packages; see
-      # `reprobuildPackagesInterfaceModule`.
       "stylus",
       "swc",
       "tmux",

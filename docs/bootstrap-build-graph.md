@@ -40,16 +40,44 @@ specific reason such as `input-changed`, `missing-output`, `tool-identity-drift`
 
 ## Bootstrap Compilers
 
-On Linux, `tarball` and `from-source` provisioning obtain the bootstrap Nim and
-C compiler from the pinned Nix channel. The upstream Linux Nim archive contains
-a statically linked executable, which the preload monitor cannot instrument.
-Using it for interface extraction produces incomplete dependency evidence and
-prevents that edge from being cached, even when the compile succeeds.
+Before any recipe is compiled, `repro` provisions the Nim compiler and the C
+compiler that compile it (`ensureBootstrapToolchainEnv`). It does so in every
+tool-provisioning mode, `path` included: the mode says how a recipe's `uses:`
+tools resolve, and the recipe has not been read yet. It never searches `PATH`
+for them (Distribution-And-Packaging M5, rule 2). The route depends on the
+host:
 
-An explicit `REPRO_NIM_COMPILER` remains supported for a pinned development or
-CI toolchain. It does not waive monitoring: a compiler that cannot be monitored
-still cannot produce a normally cacheable interface extraction. Windows keeps
-its pinned native Nim archive and stack-reserve adjustment.
+| Host | Nim | C compiler |
+| ---- | --- | ---------- |
+| Windows | official `nim-2.2.10_x64.zip` | pinned winlibs gcc 16.1.0 archive |
+| macOS arm64 / x86_64 | official `nim-2.2.10-macosx_{arm64,x64}.tar.xz` | Xcode Command Line Tools clang (`xcrun -f clang`, SDK from `xcrun --show-sdk-path`) |
+| Linux with Nix | pinned nixpkgs `nim` | pinned nixpkgs `gcc` |
+| Linux without Nix, other POSIX | official source archive `nim-2.2.10.tar.xz`, built once into the tool store with the C compiler | the system compiler at `/usr/bin/cc`, `/usr/bin/gcc` or `/usr/bin/clang` |
+
+Every archive is pinned by URL and sha256. On macOS the platform's own clang is
+the C compiler because the SDK's headers and frameworks are written for it (a
+nixpkgs gcc cannot reach them), and because the real clang under the developer
+directory is outside SIP and carries no hardened runtime, so the monitor
+follows it.
+
+Linux does not use the upstream Linux binary archive: its `bin/nim` is
+statically linked, which the preload monitor cannot instrument, so interface
+extraction would produce incomplete dependency evidence and never be cached.
+Building the same release from its C sources gives a dynamically linked
+compiler that the monitor observes.
+
+**A provisioning failure stops the command.** The diagnostic names what was
+being provisioned, the route, the tool store, the failure, and the remedy. It
+does not fall back to a `nim` or `gcc` on `PATH`.
+
+The sanctioned way to supply the toolchain yourself is explicit:
+`REPRO_NIM_COMPILER` (an absolute path, or a bare `nim` to use the one on
+`PATH` on purpose) and `REPRO_BOOTSTRAP_CC` (an absolute path; it is probed,
+and an unusable one is refused by name). The installed packages and the flake
+set `REPRO_NIM_COMPILER` to the Nim they ship. These overrides do not waive
+monitoring: a compiler that cannot be monitored still cannot produce a
+normally cacheable interface extraction. Windows also raises the stack reserve
+of its provisioned `nim.exe`.
 
 ## Streaming
 

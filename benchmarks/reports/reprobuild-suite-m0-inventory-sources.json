@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1783,
+    "nimTestBinaries": 1784,
     "pureUnitConsolidationGroups": 49,
-    "pureUnitTests": 592,
+    "pureUnitTests": 593,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1798
+    "testEntries": 1799
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1094,9 +1094,9 @@
     "classificationCounts": {
       "graph-fixture": 11,
       "integration": 919,
-      "platform/destructive": 117,
-      "pure unit": 592,
-      "unclassified": 159
+      "platform/destructive": 116,
+      "pure unit": 593,
+      "unclassified": 160
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1244,9 +1244,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1783,
+    "nimTestBinaryCount": 1784,
     "pythonTestFileCount": 15,
-    "testEntryCount": 1798
+    "testEntryCount": 1799
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -16379,9 +16379,28 @@
       "targetOs": "soAny"
     },
     {
-      "binary": "build/test-bin/t_bootstrap_toolchain_provisioned_in_every_mode_on_windows",
-      "class": "platform/destructive",
-      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "binary": "build/test-bin/t_bootstrap_provisioning_failure_is_a_hard_failure",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_local_store",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_tool_profiles",
+      "requiresReproBinary": false,
+      "source": "libs/repro_tool_profiles/tests/t_bootstrap_provisioning_failure_is_a_hard_failure.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_bootstrap_toolchain_provisioned_in_every_mode",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -16389,9 +16408,9 @@
       ],
       "owner": "libs/repro_tool_profiles",
       "requiresReproBinary": false,
-      "source": "libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode_on_windows.nim",
+      "source": "libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
