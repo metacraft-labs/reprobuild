@@ -774,6 +774,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_endpoint_daemon_trust.nim",
+    binary: "build/test-bin/t_endpoint_daemon_trust",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/test_m6_entropy_image_attribution.nim",
     binary: "build/test-bin/test_m6_entropy_image_attribution",
     defines: @[],

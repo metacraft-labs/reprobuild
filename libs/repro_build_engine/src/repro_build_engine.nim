@@ -26,6 +26,9 @@ elif defined(posix):
   # instead — see ``beginMonitorSpawnContext``. None of them starts a child.
   from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid, Mode, umask,
     dup2, close, fcntl, F_GETFD, F_SETFD, FD_CLOEXEC, F_DUPFD_CLOEXEC
+  # Endpoint ownership for Dev-Env-Warm-Entry.md §3 (`endpointRootOwned`).
+  # Metadata reads only; nothing here starts a child.
+  from std/posix import Stat, lstat, S_ISDIR, S_ISLNK, S_ISSOCK
 
 when defined(posix):
   type
@@ -4413,6 +4416,15 @@ type
       ## and — this matters — process-SETTABLE via `prctl(PR_SET_NAME)`. It
       ## narrows accidents, not attackers.
     daUid
+    daEndpointRoot
+      ## Dev-Env-Warm-Entry.md §3 — the ENDPOINT, not the process, is the
+      ## identity: the socket and every directory on its path are owned by
+      ## root and writable by no one else, and the kernel reports the
+      ## accepting peer as uid 0. Only root can bind such a path. Declared as
+      ## `endpoint-owner = root`. Trust from this assertion is keyed on the
+      ## endpoint and never on a pid, which is what makes it usable on a
+      ## socket-activated host, where the peer of every service is the
+      ## activator (pid 1).
       ## The peer's uid as `SO_PEERCRED` reports it. Un-forgeable: the kernel
       ## stamps it at connect time and no userspace end contributes to it.
 
@@ -4642,6 +4654,101 @@ proc trustedDaemonRegistry*(): seq[TrustedDaemonPeer] =
   ## `collectEvidence` grades an action against; the two accessors above exist
   ## so a test can ask about one origin without the other answering for it.
   derivedTrustedDaemons
+
+type
+  TrustedEndpoint* = object
+    ## Dev-Env-Warm-Entry.md §3 — a trust fact about an ENDPOINT. Produced
+    ## only by a passing `daEndpointRoot` check, re-validated at grading time,
+    ## and matched against the path a monitored client DIALLED (io-mon's
+    ## `mrIpcConnect.path`), never against a pid.
+    endpoint*: string
+      ## As declared, which is how clients dial it.
+    canonical*: string
+      ## Symlinks resolved; a client that dials the canonical spelling is the
+      ## same connection.
+    name*: string
+    contribution*: TrustedDaemonContribution
+    source*: string
+
+var endpointTrustedDaemons: seq[TrustedEndpoint]
+
+proc trustedEndpointRegistry*(): seq[TrustedEndpoint] =
+  endpointTrustedDaemons
+
+proc forgetTrustedEndpoints*() =
+  endpointTrustedDaemons.setLen(0)
+
+proc endpointRootOwned*(endpoint: string):
+    tuple[ok: bool, canonical, detail: string] =
+  ## Does only root control `endpoint`? True when every component of the path
+  ## AS DECLARED and of its symlink-resolved form is owned by uid 0, every
+  ## directory among them is writable by no one but its owner, and the final
+  ## component is a socket. Whoever can replace any component can put their
+  ## own listener at the path, so each one is checked, not just the socket.
+  ##
+  ## A sticky world-writable directory (`/tmp`) is refused like any other
+  ## group/other-writable one: the sticky bit stops deletion of a root-owned
+  ## entry, not creation of a new one at a name root has not taken yet.
+  when defined(posix):
+    proc componentOk(path: string; last: bool): string =
+      var st: Stat
+      if lstat(path.cstring, st) != 0:
+        return path & " does not exist"
+      if st.st_uid != 0:
+        return path & " is owned by uid " & $st.st_uid & ", not root"
+      if S_ISLNK(st.st_mode):
+        return ""
+      if last:
+        if not S_ISSOCK(st.st_mode):
+          return path & " is not a socket"
+        return ""
+      if not S_ISDIR(st.st_mode):
+        return path & " is not a directory"
+      if (int(st.st_mode) and 0o022) != 0:
+        return path & " is writable by group or others"
+      ""
+    proc chainOk(path: string): string =
+      if not path.isAbsolute:
+        return path & " is not absolute"
+      var prefix = "/"
+      let r = componentOk(prefix, false)
+      if r.len > 0:
+        return r
+      var parts: seq[string] = @[]
+      for part in path.split('/'):
+        if part.len > 0:
+          parts.add(part)
+      for i, part in parts:
+        prefix = (if prefix == "/": "/" & part else: prefix & "/" & part)
+        let r2 = componentOk(prefix, i == parts.high)
+        if r2.len > 0:
+          return r2
+      ""
+    let declared = chainOk(endpoint)
+    if declared.len > 0:
+      return (false, "", declared)
+    var canonical = endpoint
+    try:
+      canonical = expandFilename(endpoint)
+    except CatchableError:
+      return (false, "", "cannot resolve " & endpoint)
+    if canonical != endpoint:
+      let resolved = chainOk(canonical)
+      if resolved.len > 0:
+        return (false, "", resolved)
+    (true, canonical, "")
+  else:
+    (false, "", "endpoint ownership is not checkable on this platform")
+
+proc revalidatedTrustedEndpoints*(endpoints: openArray[TrustedEndpoint]):
+    seq[TrustedEndpoint] =
+  ## The endpoints whose ownership still holds, asked now: a directory that
+  ## has since become writable by another user drops the trust before it can
+  ## forgive anything.
+  for trusted in endpoints:
+    let now = endpointRootOwned(trusted.endpoint)
+    if now.ok and now.canonical == trusted.canonical:
+      result.add(trusted)
 
 proc revalidatedTrustedDaemons*(peers: openArray[TrustedDaemonPeer]):
     seq[TrustedDaemonPeer] =
@@ -4942,6 +5049,10 @@ type
     dcoImageMismatch
     dcoProgramMismatch
     dcoUidMismatch
+    dcoEndpointNotRootOwned
+      ## `endpoint-owner = root` was asserted and some component of the path
+      ## (or of its resolved form) is not owned by root, is writable by group
+      ## or others, or the final component is not a socket.
 
   DeclaredDaemon* = object
     ## One parsed `daemons.conf` section. A DECLARATION and nothing more: no
@@ -4976,6 +5087,7 @@ type
     program: string
     verified: set[DaemonAssertion]
     endpoint: string
+    canonicalEndpoint: string
     detail: string
 
   DaemonCheckReport* = object
@@ -5202,7 +5314,8 @@ proc checkDeclaredDaemon*(decl: DeclaredDaemon): DaemonIdentityCheck =
     result.detail = "declaration asserts nothing about the peer; " &
       "'something is listening at this path' is not a check"
     return
-  if not decl.declarationIdentifiesAProgram():
+  if not decl.declarationIdentifiesAProgram() and
+      daEndpointRoot notin decl.assertions:
     result.outcome = dcoNoProgramAssertion
     result.detail = "declaration asserts nothing that identifies the peer's " &
       "program (declare 'image' or 'program'); the §Class 3 branch is a " &
@@ -5248,6 +5361,31 @@ proc checkDeclaredDaemon*(decl: DeclaredDaemon): DaemonIdentityCheck =
     result.outcome = dcoNoPeerCredentials
     result.detail = "unix socket peer credentials are unavailable on this platform"
     return
+  if daEndpointRoot in decl.assertions:
+    # Dev-Env-Warm-Entry.md §3. The identity is the endpoint: only root can
+    # bind it, and the kernel must report the acceptor as uid 0. On a
+    # socket-activated host the acceptor is the activator (pid 1), which is
+    # why this arm establishes nothing about the pid and registers nothing
+    # keyed on it.
+    let owned = endpointRootOwned(decl.endpoint)
+    if not owned.ok:
+      result.outcome = dcoEndpointNotRootOwned
+      result.detail = "endpoint " & decl.endpoint &
+        " is not controlled by root alone: " & owned.detail
+      return
+    if result.uid != 0:
+      result.outcome = dcoUidMismatch
+      result.detail = "the peer accepting at " & decl.endpoint &
+        " runs as uid " & $result.uid & ", not root"
+      return
+    result.canonicalEndpoint = owned.canonical
+    result.verified.incl(daEndpointRoot)
+    if not decl.declarationIdentifiesAProgram():
+      result.outcome = dcoTrusted
+      result.detail = "endpoint " & decl.endpoint & " verified: root-owned " &
+        "path, peer uid 0 (endpoint-keyed; the peer pid " & $result.pid &
+        " is not trusted)"
+      return
   result.identity = processStartIdentity(result.pid)
   if result.identity.len == 0:
     result.outcome = dcoNoKernelIdentity
@@ -5361,8 +5499,23 @@ proc trustDaemonWeChecked*(kind: DeclarableDaemonKind;
   ## The type is the other reason the clauses stay. `DaemonIdentityCheck`'s
   ## zero value is `dcoNotChecked` / `pid = 0` / `verified = {}`, so an un-run
   ## check is refused three times over rather than once.
-  if check.outcome != dcoTrusted or check.pid <= 0 or
-      check.identity.len == 0 or check.verified == {}:
+  if check.outcome != dcoTrusted or check.verified == {}:
+    return false
+  if daEndpointRoot in check.verified:
+    # Dev-Env-Warm-Entry.md §3: endpoint-keyed trust. Never a pid.
+    var known = false
+    for existing in endpointTrustedDaemons:
+      if existing.endpoint == check.endpoint:
+        known = true
+    if not known:
+      endpointTrustedDaemons.add(TrustedEndpoint(
+        endpoint: check.endpoint,
+        canonical: check.canonicalEndpoint,
+        name: daemonKindName(kind),
+        contribution: class3Contribution(kind)))
+    if check.verified == {daEndpointRoot}:
+      return true
+  if check.pid <= 0 or check.identity.len == 0:
     return false
   for existing in derivedTrustedDaemons:
     if existing.pid == check.pid and existing.identity == check.identity and
@@ -5484,6 +5637,12 @@ proc parseDeclaredDaemonSections(text, source: string): seq[DeclaredDaemon] =
       of "program":
         result[current].program = value
         result[current].assertions.incl(daProgram)
+      of "endpoint-owner":
+        if value.toLowerAscii() notin ["root", "0"]:
+          raise newException(DaemonDeclarationError,
+            source & ": endpoint-owner '" & value & "' is not supported; " &
+            "only root-owned endpoints can identify a daemon by path")
+        result[current].assertions.incl(daEndpointRoot)
       of "uid":
         var parsed = 0
         try:
@@ -5496,7 +5655,7 @@ proc parseDeclaredDaemonSections(text, source: string): seq[DeclaredDaemon] =
       else:
         raise newException(DaemonDeclarationError,
           source & ": unknown key '" & event.key & "'. Known keys are " &
-          "socket, image, program, uid.")
+          "socket, image, program, uid, endpoint-owner.")
     of cfgError:
       raise newException(DaemonDeclarationError, source & ": " & event.msg)
 
@@ -5612,6 +5771,9 @@ type
     ## exemption rule and it is io-mon's.
     trusted: HashSet[uint64]
     peers: Table[uint64, TrustedDaemonPeer]
+    endpoints: seq[TrustedEndpoint]
+      ## Dev-Env-Warm-Entry.md §3 — endpoint-keyed trust, re-validated when
+      ## this attribution was built.
       ## The same trust facts keyed by pid, so an exemption can be NAMED and
       ## not merely counted (rule 3). io-mon's loss text identifies the peer by
       ## a bare pid — on Linux `recordIpcConnect` never sets `record.path` for
@@ -5631,8 +5793,8 @@ type
       ## Rule 3 — every exemption is counted, so a daemon that turns out not to
       ## deserve trust leaves a number behind rather than nothing.
 
-proc initMonitorPeerAttribution*(peers: openArray[TrustedDaemonPeer]):
-    MonitorPeerAttribution =
+proc initMonitorPeerAttribution*(peers: openArray[TrustedDaemonPeer];
+    endpoints: openArray[TrustedEndpoint] = []): MonitorPeerAttribution =
   ## Build one action's attribution state from trust FACTS, re-validating each
   ## against the kernel on the way in. Takes the facts rather than a bare pid
   ## set because both consumers need them: io-mon's parameter wants the pids,
@@ -5642,9 +5804,10 @@ proc initMonitorPeerAttribution*(peers: openArray[TrustedDaemonPeer]):
   for peer in revalidatedTrustedDaemons(peers):
     result.trusted.incl(uint64(peer.pid))
     result.peers[uint64(peer.pid)] = peer
+  result.endpoints = revalidatedTrustedEndpoints(endpoints)
 
 proc trustsAnyPeer(attribution: MonitorPeerAttribution): bool =
-  attribution.trusted.len > 0
+  attribution.trusted.len > 0 or attribution.endpoints.len > 0
 
 proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   ## M9.R.72.3 — spec-graded classification of io-mon eventLoss records.
@@ -5784,6 +5947,12 @@ type
       ## when the text does not parse. See `ipcPeerLossIdentity`.
     peer: uint64
       ## The peer pid the text names, 0 for an unknown (INET) peer.
+    path: string
+      ## The endpoint the client dialled (io-mon records it for AF_UNIX on
+      ## Linux, and for Mach services on macOS). "" when not recorded.
+    peerUid: int
+      ## The accepting peer's uid from SO_PEERCRED, or -1 when the text does
+      ## not carry one (an older io-mon, or a non-AF_UNIX peer).
 
 proc ipcPeerLossIdentity(loss: string): IpcPeerLossIdentity =
   ## Recover io-mon's dedup key, and the peer pid, from a (c)-arm loss text.
@@ -5802,7 +5971,7 @@ proc ipcPeerLossIdentity(loss: string): IpcPeerLossIdentity =
   ## "peerstart=<peerStart> path=<path>"`. `pid`, `peer` and `peerstart` are
   ## whitespace-free decimal tokens, so the first occurrence of each separator
   ## is the real one; `path` is last and may contain anything.
-  result = IpcPeerLossIdentity(key: "", peer: 0)
+  result = IpcPeerLossIdentity(key: "", peer: 0, peerUid: -1)
   if not loss.startsWith(IpcPeerLossDetailPrefix):
     return
   let rest = loss[IpcPeerLossDetailPrefix.len .. ^1]
@@ -5818,8 +5987,21 @@ proc ipcPeerLossIdentity(loss: string): IpcPeerLossIdentity =
   if not (peerAt < startAt and startAt < pathAt):
     return
   let peerText = rest[peerAt + PeerSep.len ..< startAt]
-  let peerStart = rest[startAt + PeerStartSep.len ..< pathAt]
+  var peerStart = rest[startAt + PeerStartSep.len ..< pathAt]
   let path = rest[pathAt + PathSep.len .. ^1]
+  # io-mon writes ` peeruid=<n>` between `peerstart=` and `path=` when the
+  # kernel reported one. Split it out so it never becomes part of the start
+  # time, and so the key below is the same whichever io-mon wrote the text.
+  const PeerUidSep = " peeruid="
+  let uidAt = peerStart.find(PeerUidSep)
+  if uidAt >= 0:
+    let uidText = peerStart[uidAt + PeerUidSep.len .. ^1]
+    peerStart = peerStart[0 ..< uidAt]
+    if uidText.len > 0 and uidText.allCharsInSet({'0' .. '9'}):
+      try:
+        result.peerUid = parseInt(uidText)
+      except ValueError:
+        result.peerUid = -1
   if peerText.len == 0:
     return
   var peer: uint64 = 0
@@ -5828,8 +6010,14 @@ proc ipcPeerLossIdentity(loss: string): IpcPeerLossIdentity =
       return
     peer = peer * 10 + uint64(ord(ch) - ord('0'))
   result.peer = peer
+  result.path = path
+  # Mirrors io-mon's dedup key, which carries the endpoint whenever it is
+  # known: on a socket-activated host every service's peer is pid 1, and a
+  # pid-only key would merge them.
   result.key =
-    if peer != 0: "pid:" & peerText & "@" & peerStart
+    if peer != 0:
+      "pid:" & peerText & "@" & peerStart &
+        (if path.len > 0: "|dest:" & path else: "")
     else: "dest:" & path
 
 proc resolvePeerAttribution(attribution: var MonitorPeerAttribution;
@@ -5927,6 +6115,30 @@ proc resolvePeerAttribution(attribution: var MonitorPeerAttribution;
       remainingKeys.incl(identity.key)
   for loss in attribution.pendingIpcLosses:
     let identity = ipcPeerLossIdentity(loss)
+    # Dev-Env-Warm-Entry.md §3 — endpoint-keyed trust. The loss is attributed
+    # only when the path the client DIALLED is a trusted endpoint (as declared
+    # or resolved) AND the kernel reported the acceptor as uid 0 on this very
+    # connection. io-mon keys the loss per endpoint, so another service behind
+    # the same activator pid is a separate loss that no match here reaches.
+    var endpointMatch = -1
+    if identity.key.len > 0 and identity.peerUid == 0 and
+        identity.path.len > 0:
+      for i, trusted in attribution.endpoints:
+        if identity.path == trusted.endpoint or
+            identity.path == trusted.canonical:
+          endpointMatch = i
+          break
+    if endpointMatch >= 0:
+      let trusted = attribution.endpoints[endpointMatch]
+      inc attribution.attributed
+      evidence.diagnostics.add(
+        "ipc peer attributed to daemon '" & trusted.name & "' by endpoint " &
+        trusted.endpoint & " (root-owned path, peer uid 0 on this " &
+        "connection; checked at declaration and re-validated at grading " &
+        "time) — Dependency-Observation-Attribution.md §Class 3 " &
+        class3BranchText(trusted.contribution) &
+        " (Dev-Env-Warm-Entry.md §3); forgave: " & loss)
+      continue
     let removedByTrust = identity.key.len > 0 and
       identity.key in accountedKeys and identity.key notin remainingKeys
     if not removedByTrust or identity.peer notin attribution.peers:
@@ -7236,7 +7448,8 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # wrapped/hosted monitor arm — because an edge that produces its own capture
   # talks to the same daemons as one the engine monitors, and a guard wired at
   # one of two sites is a guard half of production does not execute.
-  var attribution = initMonitorPeerAttribution(trustedDaemonRegistry())
+  var attribution = initMonitorPeerAttribution(trustedDaemonRegistry(),
+    trustedEndpointRegistry())
   # DA-1i/DA-1j — what this build demands of a capture before it trusts one.
   # Shared by BOTH fold sites below for exactly the reason `attribution` is: an
   # edge that PRODUCES its own `.iomon` is the likeliest source of a capture
