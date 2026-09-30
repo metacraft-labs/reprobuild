@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1760,
+    "nimTestBinaries": 1763,
     "pureUnitConsolidationGroups": 48,
-    "pureUnitTests": 588,
+    "pureUnitTests": 589,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1773
+    "testEntries": 1776
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -330,7 +330,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 42,
+      "count": 43,
       "defines": [],
       "dependencyShape": [
         "repro_project_dsl"
@@ -378,6 +378,7 @@
         "libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim",
         "libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim",
         "libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim",
+        "libs/repro_project_dsl/tests/t_sub_tool_refs_codec.nim",
         "libs/repro_project_dsl/tests/t_tool_identity_ref_kind_codec.nim"
       ],
       "targetOs": "soAny"
@@ -1076,9 +1077,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 902,
-      "platform/destructive": 115,
-      "pure unit": 588,
+      "integration": 903,
+      "platform/destructive": 116,
+      "pure unit": 589,
       "unclassified": 157
     },
     "graphOwnedTestArtifacts": [
@@ -1227,9 +1228,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1760,
+    "nimTestBinaryCount": 1763,
     "pythonTestFileCount": 13,
-    "testEntryCount": 1773
+    "testEntryCount": 1776
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -14919,6 +14920,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_sub_tool_refs_codec",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_sub_tool_refs_codec.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_tool_identity_ref_kind_codec",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -24779,6 +24797,28 @@
       "source": "tests/integration/t_cached_source_closure_preparation.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cargo_edge_reaches_declared_linker",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_core",
+        "repro_interface_artifacts",
+        "repro_provider_runtime",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_cargo_edge_reaches_declared_linker.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -37413,6 +37453,25 @@
       "source": "tests/unit/t_tarball_prune_paths.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tarball_refuses_binary_host_cannot_start",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_tarball_refuses_binary_host_cannot_start.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
