@@ -166,7 +166,16 @@
       # changes no compiled byte; it moves the pin off a mid-history commit and
       # onto the revision the rest of the workspace builds against, which is
       # what keeps the four channels that name io-mon from drifting apart again.
-      url = "github:metacraft-labs/io-mon/279a17be71daca6ae4178feb4e6ef1e866a82d2a";
+      # Bumped to 07cc4af (io-mon#39), io-mon's `dev` tip. This one DOES change
+      # compiled bytes, and it is the first bump since 279a17b that does:
+      # `git diff 279a17b 07cc4af -- src/` was empty for every intervening
+      # revision, and io-mon#39 is the first `src/` change since the pin. It
+      # gives the `.iomon-frag` merge path the observation-identity fold, which
+      # macOS and Windows captures never had. Leaving the pin behind would build
+      # a merge path WITHOUT the fold while io-mon's capability declaration --
+      # which this same revision moves into the supported set -- says the fold
+      # is there, i.e. an over-claim in the depfile this engine reads.
+      url = "github:metacraft-labs/io-mon/07cc4afc823a7c631d9ef9fdf4522f4d219c46a8";
       flake = false;
     };
     nim-shm-gset-src = {

@@ -116,7 +116,13 @@ reprobuild-ct-test-runner=dev
 # that all FOUR channels naming io-mon now name one revision, and that
 # revision is the workspace sibling's checkout — so the managed hook that
 # repins this lock at the sibling's HEAD has nothing left to move.
-io-mon=279a17be71daca6ae4178feb4e6ef1e866a82d2a
+# Moved 279a17b -> 07cc4af (2026-09-29, io-mon#39), again matching `io-mon-src`
+# in flake.nix and `ioMonSrc` in nix/pkgs/by-name. Unlike the previous move this
+# one is NOT src-neutral: it is the first `src/` change since 279a17b, and it
+# adds the merge-time observation-identity fold that the file/merge transport
+# (every macOS and Windows capture) previously did not have. 279a17b is an
+# ancestor of 07cc4af.
+io-mon=07cc4afc823a7c631d9ef9fdf4522f4d219c46a8
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood
