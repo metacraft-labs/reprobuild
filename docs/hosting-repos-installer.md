@@ -14,7 +14,7 @@ repository so every later upgrade is the package manager's own business.
 > `.deb` and `.rpm` go into `deb.metacraft-labs.com` and
 > `rpm.metacraft-labs.com`, the repositories every Metacraft product shares,
 > signed with the organisation's key
-> `3CA0 3287 4B65 1B0C F01D  FB67 7EAF 585F B9B5 9164`
+> `22F8 0A4A 65B0 8E36 AEA8  9F57 E127 BF3A C4CE 1719`
 > (metacraft-specs `infrastructure/package-distribution.md` §3, §9.1).
 > `release.yml` builds the packages with `repro-build-packages.sh`, ships them
 > as release assets covered by `SHA256SUMS`, and dispatches
@@ -24,6 +24,14 @@ repository so every later upgrade is the package manager's own business.
 > multi-distro installer tests, which use it to build local fixture
 > repositories. Moving the installer's defaults to the organisation hosts is
 > the next change.
+>
+> **Windows uses the organisation's Scoop bucket (2026-09-30).** The same
+> dispatch writes `bucket/reprobuild.json` in
+> `metacraft-labs/metacraft-desktop-packages` from the release's Windows zip,
+> verified against `SHA256SUMS`. `repro-install.ps1` registers it as
+> `scoop bucket add metacraft https://github.com/metacraft-labs/metacraft-desktop-packages`.
+> The `scoop-reprobuild` / `scoop-metacraft` repositories named below were
+> never created.
 
 ## The shape
 

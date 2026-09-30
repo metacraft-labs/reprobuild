@@ -77,6 +77,26 @@ nim-termctl=dev
 reprobuild-test-adapters=72962c60f12426ba00b621fda5ab76b0f89ba912
 reprobuild-ct-test-runner=dev
 
+# The reprobuild-packages catalog. A `uses:` name the stdlib does not bundle is
+# looked up in a `reprobuild-packages` checkout beside the consuming project
+# (or an ancestor), or beside this checkout -- which is where this entry puts
+# it. `sqlite3` moved there, and the move is now a compile ERROR when no
+# catalog defines it, so without this checkout every recipe this suite compiles
+# that uses sqlite3 stops: runquota's repro.nim
+# (t_b0_runquota_repro_nim_compiles), CodeTracer's (the e2e codetracer-subset
+# fixture and the `ct` build), and t_uses_resolves_sqlite3_from_real_
+# reprobuild_packages, which exists to prove the real catalog -- not the
+# fixture under tests/reprobuild-packages -- defines what consumers rely on.
+#
+# Pinned to an exact revision, like io-mon above, so the catalog content the
+# suite asserts against does not move under a commit. It is not in repro.lock:
+# the lock records `uses:` dependencies, and the catalog is not one -- nothing
+# records catalog coordinates in a lock yet (Provisioning-Contributions.md,
+# "Catalog Lookup And Provisioning"). Nor is it a flake input: no Nix-sandboxed
+# build here compiles a recipe, and $REPROBUILD_PACKAGES_ROOT in the dev shell
+# would replace the fixture catalog the lookup test walks to.
+reprobuild-packages=9d9176bff5c5aee175efcaa5d667c9ed7b9b8043
+
 
 # codetracer's incremental test engine (src/ct_test/incremental/io_mon_capture.nim
 # etc.) imports `io_mon` (including `io_mon/depfile`) and
@@ -111,11 +131,26 @@ reprobuild-ct-test-runner=dev
 # flake.nix: the Windows shim is built with -d:noSignalHandler and fails a
 # spawn whose child the injector had to terminate. It needs
 # nim-stackable-hooks 72f5782 below. 0c312f2 is an ancestor of a3edfab.
+# Moved a3edfab -> 279a17b (2026-09-28), io-mon's `dev` tip, again matching
+# `io-mon-src` in flake.nix and `ioMonSrc` in nix/pkgs/by-name. `src/` is
+# byte-identical between the two, so nothing compiled changes; the point is
+# that all FOUR channels naming io-mon now name one revision, and that
+# revision is the workspace sibling's checkout — so the managed hook that
+# repins this lock at the sibling's HEAD has nothing left to move.
+# Moved 279a17b -> 07cc4af (2026-09-29, io-mon#39), again matching `io-mon-src`
+# in flake.nix and `ioMonSrc` in nix/pkgs/by-name. Unlike the previous move this
+# one is NOT src-neutral: it is the first `src/` change since 279a17b, and it
+# adds the merge-time observation-identity fold that the file/merge transport
+# (every macOS and Windows capture) previously did not have. 279a17b is an
+# ancestor of 07cc4af.
 # The release candidate includes the vfork child-identity and parent-guard
 # repairs. All four channels (flake URL, lock, this clone and package fallback)
 # select the same published revision; a sibling must not replace the repaired
 # monitor with the older runtime during a source bootstrap.
-io-mon=31b05a5abbd5b6176f510c7cfeba7e8aa20d4064
+# Moved to e750199 (2026-09-30), io-mon's `agents` tip, which contains both
+# 53994c0 (dev + agents reconciliation) and 31b05a5 (io-mon#41). Matches
+# `io-mon-src` in flake.nix, flake.lock and `ioMonSrc` in nix/pkgs/by-name.
+io-mon=e75019940be4722fcaf11f1b239de37adae54f41
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood

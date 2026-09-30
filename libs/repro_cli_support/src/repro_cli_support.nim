@@ -146,6 +146,7 @@ import repro_cli_support/dev_env_rollback_manifest
 import repro_cli_support/dev_env_shell_hook_templates
 import repro_cli_support/home
 import repro_cli_support/selfhost as cli_selfhost
+import repro_cli_support/project_pins
 import repro_cli_support/infra
 import repro_cli_support/deploy_agent as cli_deploy_agent
 import repro_cli_support/hardware as cli_hardware
@@ -2799,8 +2800,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   # successful branch below replaces the sentinel with its real action.
   result = noScheduledAction()
   let payload = decodeBuildActionPayload(toBytes(node.payload))
+  # The tool's own sub-tools (``cli: subTools``) sit between the tool's
+  # directory and the edge's declared refs. They widen the prefix only;
+  # whether the PATH is hermetic is decided by ``toolIdentityRefs`` alone
+  # (see ``actionPathDecision``).
   let actionPathPrefix = toolPathPrefix(profiles, payload.call.packageName,
-    payload.call.executableName, payload.toolIdentityRefs)
+    payload.call.executableName,
+    payload.subToolRefs & payload.toolIdentityRefs)
   # Named-Targets M1: copy implicit-target names off the decoded
   # payload onto every constructed ``BuildAction`` at the bottom of
   # this proc. The action constructors below don't know about
@@ -2830,6 +2836,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # successful action when the config supplies a non-nil
     # ``binaryCachePublisher`` closure.
     result.publishToBinaryCache = payload.publishToBinaryCache
+    result.fixedOutput = payload.fixedOutput
     result.cacheEntryIdentity = payload.cacheEntryIdentity
     # M9.N Batch B: propagate the convention-supplied tool-identity
     # refs through to the engine-side ``BuildAction``. The engine
@@ -4388,7 +4395,7 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 10'u16
+  LoweredGraphCacheVersion = 11'u16
     # v10: DA-6 — the two trailing event-interest bools
     # (``captureNonDeterminism``, ``captureIpc``) are replaced by ONE byte
     # carrying ``MonitorCaptureBreadth``: the tool package's declaration of how
@@ -5256,6 +5263,8 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
     outp.writeCacheEntryIdentity(action.cacheEntryIdentity.get())
   else:
     outp.add(0'u8)
+  # v11: Cache-Scope P3.4 fixed-output sentinel.
+  outp.add(if action.fixedOutput: 1'u8 else: 0'u8)
   outp.writeStringSeq(action.toolIdentityRefs)
   outp.writeU32Le(uint32(action.toolIdentityRefKinds.len))
   for kind in action.toolIdentityRefKinds:
@@ -5321,6 +5330,11 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
       "invalid lowered action identity sentinel")
   if identityByte == 1'u8:
     result.cacheEntryIdentity = some(readCacheEntryIdentity(bytes, pos))
+  let fixedByte = readByteValue(bytes, pos)
+  if fixedByte > 1'u8:
+    raiseEnvelopeError(eeMalformed,
+      "invalid lowered action fixedOutput sentinel")
+  result.fixedOutput = fixedByte == 1'u8
   result.toolIdentityRefs = readStringSeq(bytes, pos)
   let refKindCount = int(readU32Le(bytes, pos))
   result.toolIdentityRefKinds = newSeq[DepKind](refKindCount)
@@ -8871,12 +8885,15 @@ proc selectedToolIdentitySelectors(snapshot: ProviderGraphSnapshot;
   ## they are never persisted or used to execute an action.
   var identity = PathOnlyBuildIdentity(projectName: "metadata-selection")
   var packageNamesByExecutable = initTable[string, seq[string]]()
+  var subToolRefsById = initTable[string, seq[string]]()
   var seenProfiles = initHashSet[string]()
   for fragment in snapshot.fragments:
     for node in fragment.nodes:
       if node.kind != gnkAction:
         continue
       let action = decodeBuildActionPayload(toBytes(node.payload))
+      if action.subToolRefs.len > 0:
+        subToolRefsById[action.id] = action.subToolRefs
       let packageName = action.call.packageName
       let executableName = action.call.executableName
       if packageName.len == 0 or executableName.len == 0:
@@ -8904,6 +8921,11 @@ proc selectedToolIdentitySelectors(snapshot: ProviderGraphSnapshot;
     selectedActionIds)
   for action in selected.actions:
     for selector in action.toolIdentityRefs:
+      if selector.len > 0:
+        result.incl(selector)
+    # A selected edge's tool keeps its own sub-tools resolvable too, so a
+    # fragment build that selects only this edge still puts them on PATH.
+    for selector in subToolRefsById.getOrDefault(action.id):
       if selector.len > 0:
         result.incl(selector)
     if action.argv.len > 0 and
@@ -21380,6 +21402,29 @@ proc repositoryNameFromUrl(url: string): string =
     value.setLen(value.len - 4)
   value
 
+proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
+    workspaceRoot: string; siblings: seq[ResolvedRepo]]
+  ## Forward declaration; defined beside ``developSetClosure``, whose closure it
+  ## computes.
+
+proc lockedDepFromCheckout(name, depAbs, root: string): LockedDep =
+  ## A locked VCS dependency observed from the checkout at ``depAbs``: its
+  ## ``HEAD`` as the revision, its canonical fetch URL, and the VCS-native
+  ## integrity of that commit. ``path`` is ``depAbs`` relative to ``root``.
+  let facts = committedLockRepoFacts(depAbs)
+  LockedDep(
+    name: name, path: relativePath(depAbs, root).replace('\\', '/'),
+    coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+      gitRef: facts.branch, revision: facts.headSha),
+    integrity: computeDepIntegrity(depAbs, facts.headSha),
+    version: "", visibility: "public", participation: "",
+    depends: @[], tags: @[])
+
+proc isGitCheckoutDir(path: string): bool =
+  dirExists(extendedPath(path)) and
+    (dirExists(extendedPath(path / ".git")) or
+     fileExists(extendedPath(path / ".git")))
+
 proc lockedDepsForWorkspace(workspaceRoot: string;
                             usesSelectors: seq[string] = @[];
                             sourceRecipeRoots: seq[string] = @[]):
@@ -21481,6 +21526,62 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
       depends: @[], tags: @[]))
     seenPaths.add(rel)
     seenNames.add(depName)
+  # The develop set declared by the workspace manifest: the transitive closure
+  # of this repo's ``depends`` edges — the same closure the pre-push gate holds
+  # clean and published (Unified-Locking-And-Hooks.md §14). A sibling can reach
+  # the build outside the solved graph (a cargo ``path`` dependency, a script
+  # reading ``../<sibling>``), so neither ``uses:`` nor the develop overrides
+  # would ever name it; the manifest edge is the declaration that does.
+  #
+  # Each sibling is OBSERVED from its checkout. One that is declared but not
+  # checked out keeps the pin the committed lock already carries; with no such
+  # pin there is nothing true to record, and the omission is said out loud
+  # rather than written as a lock that looks complete.
+  let manifest = manifestDevelopSiblings(root)
+  if manifest.resolved:
+    for sib in manifest.siblings:
+      let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
+      let rel = relativePath(depAbs, root).replace('\\', '/')
+      if rel in seenPaths or sib.name in seenNames: continue
+      if isGitCheckoutDir(depAbs):
+        siblingDeps.add(lockedDepFromCheckout(sib.name, depAbs, root))
+      else:
+        var carried = false
+        for d in existingDeps:
+          if d.path != "." and d.coordinates.kind == ckVcs and
+              (d.name == sib.name or d.path == rel):
+            siblingDeps.add(d)
+            carried = true
+            break
+        if not carried:
+          stderr.writeLine("repro lock refresh: develop-set sibling '" &
+            sib.name & "' (declared by the workspace manifest at " &
+            manifest.workspaceRoot & ") is not checked out at " & depAbs &
+            " and the committed lock carries no pin for it, so this lock " &
+            "records NO revision for it; check it out (`repro sync`) and " &
+            "refresh again")
+          continue
+      seenPaths.add(rel)
+      seenNames.add(sib.name)
+  else:
+    # No workspace membership to consult — a standalone clone, a CI checkout.
+    # The committed lock's sibling pins are the only record of the develop set
+    # here, so they are carried forward: re-observed where the checkout is
+    # present, kept verbatim where it is not. Dropping them because the
+    # siblings are not visible would silently turn a complete lock into a
+    # self-only one.
+    for d in existingDeps:
+      if d.path == "." or d.coordinates.kind != ckVcs: continue
+      if d.path in seenPaths or d.name in seenNames: continue
+      let depAbs = absolutePath(root / d.path)
+      if isGitCheckoutDir(depAbs):
+        var observed = lockedDepFromCheckout(d.name, depAbs, root)
+        observed.path = d.path
+        siblingDeps.add(observed)
+      else:
+        siblingDeps.add(d)
+      seenPaths.add(d.path)
+      seenNames.add(d.name)
   var rootDepends: seq[string] = @[]
   for d in siblingDeps: rootDepends.add(d.name)
   result.add(LockedDep(
@@ -22607,6 +22708,7 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "cacheable": action.cacheable,
     "weakFingerprint": digestHex(action.weakFingerprint),
     "publishToBinaryCache": action.publishToBinaryCache,
+    "fixedOutput": action.fixedOutput,
     "binaryCacheKey": binaryCacheKey,
     "binaryCacheIdentityError": identityError,
     "actionCachePolicy": $action.actionCachePolicy,
@@ -30820,6 +30922,31 @@ proc installUserDaemonBuildExecutor() =
       # here to that same constant -- which is the point: it is the value a
       # DIRECT build through the full CLI's prologue would have used too.
       ensureBuiltSourcePackageEnvironment()
+      # M5 rule 3 for a daemon-hosted build: the thin client routed here
+      # without reading the project's lock, so this daemon is the first
+      # reprobuild to see its pins. A project pinned to another reprobuild is
+      # DECLINED (unsupported, fallback allowed): the client then execs its
+      # engine, whose entry hands over. A pinned provider compiler is
+      # published for this request only; the restore list below takes it
+      # back.
+      let pinVerdict = daemonPinVerdict(request.workingDir)
+      if pinVerdict.decline:
+        emit(bekUnsupported, "daemon-hosted build declined: " &
+          pinVerdict.message, true, 64, "warning",
+          "{\"fallbackAllowed\":true,\"reason\":\"project-pin\"}")
+        return 64
+      if pinVerdict.providerNim.len > 0:
+        # The restore list replays in order, so the variable is recorded
+        # only when the request did not already record its pre-session value.
+        var recorded = false
+        for item in previousEnv:
+          if item.key == NimCompilerEnvVar:
+            recorded = true
+        if not recorded:
+          previousEnv.add((key: NimCompilerEnvVar,
+            value: getEnv(NimCompilerEnvVar),
+            present: existsEnv(NimCompilerEnvVar)))
+        putEnv(NimCompilerEnvVar, pinVerdict.providerNim)
       # No provider-nimcache session is derived from the run id. The daemon
       # used to give each build its own nimcache scope so two sessions in one
       # worker could not collide inside the single shared directory; the
@@ -49681,6 +49808,45 @@ proc developSetClosure(repos: seq[ResolvedRepo];
       for dep in byName[name].depends:
         if dep.len > 0 and dep notin result:
           pending.add(dep)
+
+proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
+    workspaceRoot: string; siblings: seq[ResolvedRepo]] =
+  ## The develop-set siblings of the repo at ``repoRoot`` as the enclosing
+  ## workspace MANIFEST declares them: every repo reachable from it through
+  ## ``depends`` edges (``developSetClosure``), excluding the repo itself, in
+  ## name order.
+  ##
+  ## ``resolved`` is false when there is no manifest membership to consult —
+  ## no enclosing workspace, a workspace that is the repo itself (a standalone
+  ## committed-lock repo, whose membership is DERIVED from the very lock being
+  ## refreshed and so cannot be an independent declaration), a membership that
+  ## fails to resolve, or one that does not contain this repo. The caller then
+  ## falls back to the committed lock's own pins rather than treating "could
+  ## not look" as "declares nothing".
+  result = (false, "", @[])
+  let root = absolutePath(repoRoot)
+  let ws = enclosingWorkspaceRoot(root)
+  if ws.len == 0 or cmpPaths(absolutePath(ws), root) == 0:
+    return
+  var repos: seq[ResolvedRepo]
+  try:
+    repos = resolveWorkspaceProjectShared(ws, "", "lock refresh").resolved.repos
+  except CatchableError:
+    return
+  var selfName = ""
+  for r in repos:
+    if cmpPaths(absolutePath(ws / r.path), root) == 0:
+      selfName = r.name
+      break
+  if selfName.len == 0:
+    return
+  let closure = developSetClosure(repos, selfName)
+  var siblings: seq[ResolvedRepo] = @[]
+  for r in repos:
+    if r.name != selfName and r.name in closure:
+      siblings.add(r)
+  siblings.sort(proc(a, b: ResolvedRepo): int = cmp(a.name, b.name))
+  result = (true, absolutePath(ws), siblings)
 
 proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
     pushedRepoName: string): seq[string] =
@@ -73303,6 +73469,13 @@ proc runThinApp*(programName: string): int =
   ## reads it.
   if programName == "repro":
     markRunningImageAsReproCli()
+    # M5 rules 1 and 3: the project's pins are applied BEFORE dispatch, so a
+    # hand-over passes on the caller's own argv and environment and no verb
+    # has read a recipe this image is not pinned to. See
+    # `repro_cli_support/project_pins`.
+    let pinned = applyProjectPinsAtEntry(commandLineParams())
+    if pinned.handled:
+      return pinned.exitCode
   result = runThinAppDispatch(programName)
   flushStagedFailureReport(result)
 

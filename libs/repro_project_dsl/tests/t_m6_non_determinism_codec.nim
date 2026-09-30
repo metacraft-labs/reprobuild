@@ -99,8 +99,11 @@ suite "M6 the entropy blessing round-trips through the action payload":
     # byte + its length-prefixed one-character justification (1 + 4 + 1) AND
     # by v25's `suppressMonitorShimSeed` byte — the mid-payload one. Spelling
     # both out is the assertion that would have caught the old forgery: it
-    # accounted for the first group and not for the second.
-    check encodeBuildActionPayload(action).len - v23.len == (1 + 4 + 1) + 1
+    # accounted for the first group and not for the second. Every later bump
+    # is spelled out too: v27's capture-breadth byte, v28's fixedOutput byte
+    # and v29's empty `subToolRefs` list (a u32 count of zero).
+    check encodeBuildActionPayload(action).len - v23.len ==
+      (1 + 4 + 1) + 1 + 1 + 1 + 4
 
     let decoded = decodeBuildActionPayload(v23)
     # The surrounding fields must still decode, or this would be testing a
@@ -120,7 +123,11 @@ suite "M6 the entropy blessing round-trips through the action payload":
       call: inlineExecCall(@["nim", "c"]),
       nonDeterminism: ndpEntropyBlessed,
       nonDeterminismJustification: "j")
-    var bytes = encodeBuildActionPayload(action)
+    # Encoded at v26, the version that appended the blessing, so the
+    # blessing group is the payload's tail: later bumps append after it and
+    # would move it. The decoder's strictness on the byte does not depend on
+    # the version it is read at.
+    var bytes = encodeBuildActionPayloadAtVersion(action, 26'u16)
     # The blessing byte is followed by the length-prefixed justification, so
     # it sits 5 bytes before the single justification character at the tail.
     let blessingIndex = bytes.len - 6

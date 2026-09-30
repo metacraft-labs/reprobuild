@@ -100,7 +100,7 @@ log "payload: $nbin file(s) in bin/"
 # The archive's bin/ holds portable LAUNCHERS that exec the real binary
 # through the bundled loader at "$(dirname "$0")/../lib". That relative
 # lookup is the archive's whole relocation contract, so the tree is
-# installed INTACT as /usr/lib/reprobuild/{bin,lib}. Spreading bin/ into
+# installed INTACT under /usr/lib/reprobuild (bin, lib, share, ...). Spreading bin/ into
 # /usr/bin and lib/ into /usr/lib/reprobuild -- what the packages did
 # before -- points every launcher at /usr/lib/ld-linux-x86-64.so.2 with
 # /usr/lib as its library path: the bundled loader is not there, and a
@@ -112,10 +112,13 @@ log "payload: $nbin file(s) in bin/"
 stage_tree() {
   _t="$1"
   mkdir -p "$_t/usr/bin" "$_t/usr/lib/reprobuild"
-  cp -a "$payload/bin" "$_t/usr/lib/reprobuild/bin"
-  if [ -d "$payload/lib" ]; then
-    cp -a "$payload/lib" "$_t/usr/lib/reprobuild/lib"
-  fi
+  # The WHOLE archive tree, not a list of known subdirectories. v0.2.3's
+  # archive gained share/repro/{source,src} (the Nim sources an installed
+  # repro compiles recipes against, found at <prefix>/share/repro/source
+  # from the binary's own location), and a copy of only bin/ and lib/
+  # shipped .deb/.rpm packages whose repro failed its first compile. What
+  # the archive carries, the package carries.
+  cp -a "$payload/." "$_t/usr/lib/reprobuild/"
   _ncmd=0
   for _c in "$payload/bin"/*; do
     _n="$(basename "$_c")"

@@ -161,13 +161,30 @@
       # Nim signal handler in the processes it is injected into, and a spawn
       # whose child had to be terminated during injection now fails cleanly.
       # Requires nim-stackable-hooks 72f5782 (below).
+      # Bumped to 279a17b, io-mon's `dev` tip. `src/` is BYTE-IDENTICAL to
+      # a3edfab (`git diff a3edfab origin/dev -- src/` is empty), so this
+      # changes no compiled byte; it moves the pin off a mid-history commit and
+      # onto the revision the rest of the workspace builds against, which is
+      # what keeps the four channels that name io-mon from drifting apart again.
+      # Bumped to 07cc4af (io-mon#39), io-mon's `dev` tip. This one DOES change
+      # compiled bytes, and it is the first bump since 279a17b that does:
+      # `git diff 279a17b 07cc4af -- src/` was empty for every intervening
+      # revision, and io-mon#39 is the first `src/` change since the pin. It
+      # gives the `.iomon-frag` merge path the observation-identity fold, which
+      # macOS and Windows captures never had. Leaving the pin behind would build
+      # a merge path WITHOUT the fold while io-mon's capability declaration --
+      # which this same revision moves into the supported set -- says the fold
+      # is there, i.e. an over-claim in the depfile this engine reads.
       # Preserve child exec identities and the resumed parent guard across vfork.
       # Bumped to 31b05a5 (io-mon#41): IPC connect records carry the socket
       # path and the peer uid (endpoint-keyed daemon trust), and
       # `FsSnoopRequest.isolateEnv` launches a child from its declared
       # environment alone (Dev-Env-Warm-Entry.md).
       # Keep this, the lock, sibling clone and package fallback on one revision.
-      url = "github:metacraft-labs/io-mon/e3556483eb79fc051a520e6c822cb131cd6daa3b";
+        # Bumped to e750199 (2026-09-30), io-mon's `agents` tip: it contains
+        # 53994c0 (dev's observation-identity fold + agents' vfork repairs) and
+        # 31b05a5 (io-mon#41: endpoint + peer-uid IPC records, isolated launch).
+      url = "github:metacraft-labs/io-mon/e75019940be4722fcaf11f1b239de37adae54f41";
       flake = false;
     };
     nim-shm-gset-src = {

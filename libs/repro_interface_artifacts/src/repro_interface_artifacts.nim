@@ -2880,12 +2880,17 @@ proc runCommand*(command: openArray[string];
     raise commandFailure(command, result, "")
 
 proc nimCompilerPath(): string =
-  if cachedNimCompilerPath.len > 0:
-    return cachedNimCompilerPath
+  # The explicit compiler is read BEFORE the cache, every time. It is how a
+  # project's pinned provider compiler reaches the compile
+  # (`repro_cli_support/project_pins`), and a daemon worker serves projects
+  # with different pins in one process: a cached first answer would compile
+  # the second project's provider with the first project's compiler. Only the
+  # PATH search below, which costs a probe per candidate, is cached.
   let overridePath = getEnv("REPRO_NIM_COMPILER")
   if overridePath.len > 0:
-    cachedNimCompilerPath = overridePath
     return overridePath
+  if cachedNimCompilerPath.len > 0:
+    return cachedNimCompilerPath
   proc addUnique(paths: var seq[string]; path: string) =
     if path.len == 0:
       return
@@ -6005,21 +6010,27 @@ const
     ## bug).
 
 var cachedNimCompilerIdentity = ""
+var cachedNimCompilerIdentityPath = ""
+  ## The compiler ``cachedNimCompilerIdentity`` describes. The identity is
+  ## cached per COMPILER, not per process, for the reason ``nimCompilerPath``
+  ## re-reads ``REPRO_NIM_COMPILER``.
 
 proc nimCompilerIdentity*(): string =
   ## Canonical identity of the Nim frontend used to compile providers:
   ## the resolved compiler path plus its ``--version`` banner. Feeds
   ## ``ProviderCompileActionKey`` so a compiler swap re-keys the compile
-  ## edge. Cached per process — the compiler does not change mid-run.
-  if cachedNimCompilerIdentity.len > 0:
-    return cachedNimCompilerIdentity
+  ## edge. Cached per compiler path, so one process compiling for two
+  ## projects with different pinned compilers keys each one correctly.
   let path = nimCompilerPath()
+  if cachedNimCompilerIdentity.len > 0 and cachedNimCompilerIdentityPath == path:
+    return cachedNimCompilerIdentity
   var banner = ""
   try:
     banner = runCommand(@[path, "--version"]).output.splitLines()[0].strip()
   except CatchableError:
     banner = ""
   cachedNimCompilerIdentity = path & "\n" & banner
+  cachedNimCompilerIdentityPath = path
   cachedNimCompilerIdentity
 
 proc frontendRuntimeIdentity*(workDir = getCurrentDir()): string =
