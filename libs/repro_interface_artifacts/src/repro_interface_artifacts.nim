@@ -100,9 +100,24 @@ proc sanitizeStaticExec(val: string): string =
       cleanLines.add(s)
   if cleanLines.len > 0: cleanLines[^1] else: ""
 
-const BuiltNimCompilerPath = sanitizeStaticExec(staticExec("command -v nim"))
-const BuiltCCompilerPath =
-  sanitizeStaticExec(staticExec("command -v cc || command -v gcc || true"))
+# There is deliberately no build-time Nim compiler constant. The Nim that
+# compiles a recipe is the one the bootstrap provisions
+# (``repro_tool_profiles.ensureBootstrapToolchainEnv``) or the one a caller
+# names in ``REPRO_NIM_COMPILER``; it is never a path baked in when ``repro``
+# itself was built (reprobuild-specs Distribution-And-Packaging.milestones.org,
+# M5, "pin the provider-compile toolchain", rule 2). The constant that used to
+# stand here, ``staticExec("command -v nim")``, was also an error message on
+# every Windows build: ``staticExec`` runs no shell there, so ``command`` is
+# not found and the last output line is Nim's "Requested command not found".
+#
+# ``BuiltCCompilerPath`` has the same Windows defect and so is defined only
+# where its probe can work. Windows gets its recipe-compile C compiler from the
+# bootstrap or from ``REPRO_BOOTSTRAP_CC``, never from here.
+when defined(windows):
+  const BuiltCCompilerPath = ""
+else:
+  const BuiltCCompilerPath =
+    sanitizeStaticExec(staticExec("command -v cc || command -v gcc || true"))
 
 proc compileTimeSourceRoot(name: string): string {.compileTime.} =
   ## Preserve source-only dependency roots from the environment that built
@@ -2858,12 +2873,28 @@ proc runCommand*(command: openArray[string];
     raise commandFailure(command, result, "")
 
 proc nimCompilerPath(): string =
-  if cachedNimCompilerPath.len > 0:
-    return cachedNimCompilerPath
+  ## The Nim compiler for a recipe compile.
+  ##
+  ## The ``repro`` entry points that compile a recipe run
+  ## ``ensureBootstrapToolchainEnv`` first (pinned by
+  ## ``t_provider_compile_entry_points_publish_bootstrap_toolchain``), and it
+  ## either publishes ``REPRO_NIM_COMPILER`` (a project's lock pin, the
+  ## caller's own, or the provisioned one) or stops the command. So from
+  ## those commands this returns the first arm. The ``PATH`` walk below
+  ## serves library callers that never ran the bootstrap (unit tests,
+  ## embedders); a failed provisioning does not reach it.
+  #
+  # The explicit compiler is read BEFORE the cache, every time. It is how a
+  # project's pinned provider compiler reaches the compile
+  # (`repro_cli_support/project_pins`), and a daemon worker serves projects
+  # with different pins in one process: a cached first answer would compile
+  # the second project's provider with the first project's compiler. Only the
+  # PATH search below, which costs a probe per candidate, is cached.
   let overridePath = getEnv("REPRO_NIM_COMPILER")
   if overridePath.len > 0:
-    cachedNimCompilerPath = overridePath
     return overridePath
+  if cachedNimCompilerPath.len > 0:
+    return cachedNimCompilerPath
   proc addUnique(paths: var seq[string]; path: string) =
     if path.len == 0:
       return
@@ -2885,8 +2916,6 @@ proc nimCompilerPath(): string =
     let candidate = dir / exeName
     if fileExists(extendedPath(candidate)):
       candidates.addUnique(candidate)
-  if BuiltNimCompilerPath.len > 0 and fileExists(extendedPath(BuiltNimCompilerPath)):
-    candidates.addUnique(BuiltNimCompilerPath)
   candidates.addUnique("nim")
   for candidate in candidates:
     if candidate.startsWith("/nix/store/"):
@@ -2895,11 +2924,7 @@ proc nimCompilerPath(): string =
     if looksLikeNimCompiler(candidate):
       cachedNimCompilerPath = candidate
       return candidate
-  cachedNimCompilerPath =
-    if BuiltNimCompilerPath.len > 0 and fileExists(extendedPath(BuiltNimCompilerPath)):
-      BuiltNimCompilerPath
-    else:
-      "nim"
+  cachedNimCompilerPath = "nim"
   cachedNimCompilerPath
 
 proc compiledExecutablePath(outputPath: string): string =
@@ -2989,6 +3014,14 @@ const
     ## The one knob that names the recipe-compile C compiler. Set by
     ## ``ensureBootstrapToolchainEnv`` to the pinned tool-store compiler, or by
     ## the user to override it.
+  bootstrapSdkRootEnv* = "REPRO_BOOTSTRAP_SDKROOT"
+    ## macOS only: the SDK the bootstrap's Xcode Command Line Tools clang
+    ## compiles and links against. ``ensureBootstrapToolchainEnv`` sets it next
+    ## to ``REPRO_BOOTSTRAP_CC`` when it chose that clang and ``SDKROOT`` was
+    ## unset. It is passed to the compiler as ``-isysroot`` rather than exported
+    ## as ``SDKROOT``: the recipe compile's child actions inherit this process's
+    ## environment, and an ``SDKROOT`` there would redirect every package
+    ## action's compiler (a Nix clang wrapper included) to the Xcode SDK.
   cCompilerProbeSource = """
 #include <stddef.h>
 #include <stdint.h>
@@ -3003,6 +3036,14 @@ int repro_probe(void) { return (int)(sizeof(size_t) + strlen("ok")); }
 """
 
 var cachedCCompilerProbes = initTable[string, CCompilerProbe]()
+
+proc bootstrapSysrootArgs*(): seq[string] =
+  ## The ``-isysroot`` pair for the recipe-compile C compiler, from
+  ## ``REPRO_BOOTSTRAP_SDKROOT``. Empty off macOS and when it is unset.
+  when defined(macosx):
+    let sdk = getEnv(bootstrapSdkRootEnv)
+    if sdk.len > 0:
+      result = @["-isysroot", sdk]
 
 proc cCompilerIdentity(cc: string): string =
   ## Path plus size plus mtime: what a probe verdict is keyed on. A replaced
@@ -3025,7 +3066,8 @@ proc cCompilerProbeMarkerName(identity: string): string =
     result[15 - i] = hexDigits[int((h shr (uint64(i) * 4)) and 0xF'u64)]
   result.add(".ok")
 
-proc probeCCompiler*(cc: string; cacheDir = ""): CCompilerProbe =
+proc probeCCompiler*(cc: string; cacheDir = "";
+                     extraArgs: seq[string] = @[]): CCompilerProbe =
   ## Compile a trivial translation unit that includes the standard headers
   ## Nim's generated C needs, with the host's pointer width asserted, and
   ## report whether ``cc`` can do it.
@@ -3040,7 +3082,13 @@ proc probeCCompiler*(cc: string; cacheDir = ""): CCompilerProbe =
   ## and mtime, so an activation that runs on every ``just`` recipe does not
   ## pay a compiler start-up each time. Failures are never cached: the fix is
   ## usually to the environment, and the next run must see it.
-  let identity = cCompilerIdentity(cc)
+  ##
+  ## ``extraArgs`` go on the probe's command line and into its cache key; the
+  ## macOS bootstrap passes its ``-isysroot`` here, because that is how the
+  ## recipe compile will run the compiler.
+  var identity = cCompilerIdentity(cc)
+  for arg in extraArgs:
+    identity.add("|" & arg)
   if cachedCCompilerProbes.hasKey(identity):
     return cachedCCompilerProbes[identity]
   result = CCompilerProbe(compiler: cc)
@@ -3060,7 +3108,7 @@ proc probeCCompiler*(cc: string; cacheDir = ""): CCompilerProbe =
     scratch = createTempDir("repro-cc-probe-", "")
     let source = scratch / "probe.c"
     writeFile(extendedPath(source), cCompilerProbeSource)
-    let res = runCommand(@[cc, "-c",
+    let res = runCommand(@[cc] & extraArgs & @["-c",
       "-DREPRO_PROBE_POINTER_BYTES=" & $sizeof(pointer),
       source, "-o", scratch / "probe.o"], cwd = scratch,
       raiseOnFailure = false)
@@ -3105,9 +3153,10 @@ proc cCompilerUnusableMessage*(probe: CCompilerProbe; origin: string): string =
     "\n  failure: " & detail.replace("\n", "\n    ") &
     "\n  remedy: " & cCompilerOverrideRemedy()
 
-proc requireUsableCCompiler*(cc, origin: string; cacheDir = "") =
+proc requireUsableCCompiler*(cc, origin: string; cacheDir = "";
+                             extraArgs: seq[string] = @[]) =
   ## Raise ``CCompilerUnusableError`` unless ``cc`` passes ``probeCCompiler``.
-  let probe = probeCCompiler(cc, cacheDir)
+  let probe = probeCCompiler(cc, cacheDir, extraArgs)
   if not probe.usable:
     raise newException(CCompilerUnusableError,
       cCompilerUnusableMessage(probe, origin))
@@ -3250,6 +3299,17 @@ proc hostCCompilerFlags(): seq[string] =
   result.add("--gcc.linkerexe:" & cc)
   result.add("--clang.exe:" & cc)
   result.add("--clang.linkerexe:" & cc)
+  # macOS: the bootstrap's Xcode clang needs the SDK named (see
+  # ``bootstrapSdkRootEnv``, which only the bootstrap sets, and only for that
+  # compiler). A compiler the caller named finds its SDK the way it always did.
+  if cc == getEnv(bootstrapCCompilerEnv):
+    let sysroot = bootstrapSysrootArgs()
+    if sysroot.len == 2:
+      let sdk =
+        if ' ' in sysroot[1]: "\"" & sysroot[1] & "\""
+        else: sysroot[1]
+      result.add("--passC:-isysroot " & sdk)
+      result.add("--passL:-isysroot " & sdk)
 
 proc walkLibSrcPathsInto(libsRoot: string; sink: var seq[string]) =
   ## Walks ``<libsRoot>/<name>/src`` and appends every existing entry to
@@ -5754,21 +5814,27 @@ const
     ## bug).
 
 var cachedNimCompilerIdentity = ""
+var cachedNimCompilerIdentityPath = ""
+  ## The compiler ``cachedNimCompilerIdentity`` describes. The identity is
+  ## cached per COMPILER, not per process, for the reason ``nimCompilerPath``
+  ## re-reads ``REPRO_NIM_COMPILER``.
 
 proc nimCompilerIdentity*(): string =
   ## Canonical identity of the Nim frontend used to compile providers:
   ## the resolved compiler path plus its ``--version`` banner. Feeds
   ## ``ProviderCompileActionKey`` so a compiler swap re-keys the compile
-  ## edge. Cached per process — the compiler does not change mid-run.
-  if cachedNimCompilerIdentity.len > 0:
-    return cachedNimCompilerIdentity
+  ## edge. Cached per compiler path, so one process compiling for two
+  ## projects with different pinned compilers keys each one correctly.
   let path = nimCompilerPath()
+  if cachedNimCompilerIdentity.len > 0 and cachedNimCompilerIdentityPath == path:
+    return cachedNimCompilerIdentity
   var banner = ""
   try:
     banner = runCommand(@[path, "--version"]).output.splitLines()[0].strip()
   except CatchableError:
     banner = ""
   cachedNimCompilerIdentity = path & "\n" & banner
+  cachedNimCompilerIdentityPath = path
   cachedNimCompilerIdentity
 
 proc frontendRuntimeIdentity*(workDir = getCurrentDir()): string =

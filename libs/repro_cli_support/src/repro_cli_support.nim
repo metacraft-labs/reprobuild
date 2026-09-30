@@ -146,6 +146,7 @@ import repro_cli_support/dev_env_rollback_manifest
 import repro_cli_support/dev_env_shell_hook_templates
 import repro_cli_support/home
 import repro_cli_support/selfhost as cli_selfhost
+import repro_cli_support/project_pins
 import repro_cli_support/infra
 import repro_cli_support/deploy_agent as cli_deploy_agent
 import repro_cli_support/hardware as cli_hardware
@@ -12801,7 +12802,7 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
   # took both from PATH -- which on a Windows host without env.ps1 holds
   # neither, and failed with `CreateProcessW failed (2)` for `nim c` while
   # `repro build` of the same recipe succeeded. Which modes it provisions
-  # under is `bootstrapToolchainProvisioned` (every mode on Windows).
+  # under is `bootstrapToolchainProvisioned` (every mode, on every host).
   ensureBootstrapToolchainEnv(toolProvisioning, resolveStoreRoot() / "tool-store")
   let monitor = publicDevEnvMonitor(publicCliPath)
   let config = DevEnvEdgeConfig(
@@ -18179,21 +18180,31 @@ proc autoRunQuotaEnabled(): bool =
   getEnv("REPROBUILD_AUTO_RUNQUOTA", "1").normalize notin
     ["0", "false", "no", "off"]
 
-const DefaultAutoRunQuotaMemoryBytes* = 16'u64 * 1024'u64 * 1024'u64 *
-  1024'u64
-
-proc autoRunQuotaMemoryBytes*(): uint64 =
+proc autoRunQuotaMemoryBytes*(): Option[uint64] =
+  ## ``REPROBUILD_RUNQUOTA_MEMORY_BYTES``, the per-invocation memory budget an
+  ## auto-spawned ``runquotad`` is given; ``none`` when it is not set.
+  ##
+  ## THERE IS NO DEFAULT HERE ANY MORE. This used to answer a 16 GiB constant
+  ## (``DefaultAutoRunQuotaMemoryBytes``), passed as ``--memory-bytes`` to
+  ## every daemon reprobuild spawned. The daemon is host-wide, so that
+  ## constant became every workspace's budget -- and a flag overrides both
+  ## the host file and a reload. The daemon's own default is now a share of
+  ## physical memory (75%, decided 2026-09-30 in
+  ## reprobuild-specs/RunQuota-Host-Configuration.md), which a constant here
+  ## could only make worse on every host it did not happen to fit.
   let configured = getEnv("REPROBUILD_RUNQUOTA_MEMORY_BYTES", "")
   if configured.len == 0:
-    return DefaultAutoRunQuotaMemoryBytes
+    return none(uint64)
+  var value: uint64
   try:
-    result = parseBiggestUInt(configured).uint64
+    value = parseBiggestUInt(configured).uint64
   except ValueError:
     raise newException(ValueError,
       "REPROBUILD_RUNQUOTA_MEMORY_BYTES must be a positive integer")
-  if result == 0:
+  if value == 0:
     raise newException(ValueError,
       "REPROBUILD_RUNQUOTA_MEMORY_BYTES must be a positive integer")
+  some(value)
 
 proc executableFile(path: string): bool =
   if path.len == 0 or not fileExists(path):
@@ -18643,23 +18654,23 @@ proc autoRunQuotaBudgetArgs*(host: HostConfig;
   ## - memory: ``REPROBUILD_RUNQUOTA_MEMORY_BYTES`` still wins as an explicit
   ##   per-invocation override, with a warning when it disagrees with the
   ##   file, because the daemon it spawns budgets every other workspace too.
-  ##   Otherwise the file's value, or ``DefaultAutoRunQuotaMemoryBytes``.
+  ##   Otherwise NO FLAG: the daemon takes the file's value, or its own
+  ##   default of 75% of physical memory, and a later ``runquota config set
+  ##   machine.memory_bytes`` reaches it by reload (a flag would pin it).
   ## - cpu: ``cpuMilli`` unless the file sets ``cpu_milli``.
   ## - pools: a convention pool the file sizes is left to the file. A pool
   ##   the recipe declares is always passed, because the engine's in-process
   ##   gate uses the recipe's figure and the two gates must agree (see
   ##   ``assembleRunquotadPoolArgs``).
-  let memoryOverride = getEnv("REPROBUILD_RUNQUOTA_MEMORY_BYTES", "")
-  if memoryOverride.len > 0:
-    let memory = autoRunQuotaMemoryBytes()
+  let memoryOverride = autoRunQuotaMemoryBytes()
+  if memoryOverride.isSome:
+    let memory = memoryOverride.get
     result.args.add(["--memory-bytes", $memory])
     if host.memoryBytes.isSome and host.memoryBytes.get != memory:
       result.warnings.add("REPROBUILD_RUNQUOTA_MEMORY_BYTES=" & $memory &
         " overrides memory_bytes = " & $host.memoryBytes.get & " in " &
         host.sourcePath & "; the RunQuota daemon being started serves the " &
         "whole host, so this budget applies to every workspace on it")
-  elif host.memoryBytes.isNone:
-    result.args.add(["--memory-bytes", $DefaultAutoRunQuotaMemoryBytes])
   if host.cpuMilli.isNone:
     result.args.add(["--cpu-milli", $int(cpuMilli)])
   var recipePools = initHashSet[string]()
@@ -30858,6 +30869,31 @@ proc installUserDaemonBuildExecutor() =
       # here to that same constant -- which is the point: it is the value a
       # DIRECT build through the full CLI's prologue would have used too.
       ensureBuiltSourcePackageEnvironment()
+      # M5 rule 3 for a daemon-hosted build: the thin client routed here
+      # without reading the project's lock, so this daemon is the first
+      # reprobuild to see its pins. A project pinned to another reprobuild is
+      # DECLINED (unsupported, fallback allowed): the client then execs its
+      # engine, whose entry hands over. A pinned provider compiler is
+      # published for this request only; the restore list below takes it
+      # back.
+      let pinVerdict = daemonPinVerdict(request.workingDir)
+      if pinVerdict.decline:
+        emit(bekUnsupported, "daemon-hosted build declined: " &
+          pinVerdict.message, true, 64, "warning",
+          "{\"fallbackAllowed\":true,\"reason\":\"project-pin\"}")
+        return 64
+      if pinVerdict.providerNim.len > 0:
+        # The restore list replays in order, so the variable is recorded
+        # only when the request did not already record its pre-session value.
+        var recorded = false
+        for item in previousEnv:
+          if item.key == NimCompilerEnvVar:
+            recorded = true
+        if not recorded:
+          previousEnv.add((key: NimCompilerEnvVar,
+            value: getEnv(NimCompilerEnvVar),
+            present: existsEnv(NimCompilerEnvVar)))
+        putEnv(NimCompilerEnvVar, pinVerdict.providerNim)
       # No provider-nimcache session is derived from the run id. The daemon
       # used to give each build its own nimcache scope so two sessions in one
       # worker could not collide inside the single shared directory; the
@@ -73384,6 +73420,13 @@ proc runThinApp*(programName: string): int =
   ## reads it.
   if programName == "repro":
     markRunningImageAsReproCli()
+    # M5 rules 1 and 3: the project's pins are applied BEFORE dispatch, so a
+    # hand-over passes on the caller's own argv and environment and no verb
+    # has read a recipe this image is not pinned to. See
+    # `repro_cli_support/project_pins`.
+    let pinned = applyProjectPinsAtEntry(commandLineParams())
+    if pinned.handled:
+      return pinned.exitCode
   result = runThinAppDispatch(programName)
   flushStagedFailureReport(result)
 

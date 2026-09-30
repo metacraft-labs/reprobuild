@@ -27,6 +27,7 @@ import repro_binary_cache_client/caches_config
 import repro_binary_cache_client/in_process as bcInProcess
 import repro_binary_cache_server/types as bcTypes
 import repro_project_dsl/install_mirror_resolver
+import repro_project_dsl/reprobuild_packages_catalog
 # Tarball realization is a build-graph edge (Dependency-Provisioning-In-Build-
 # Graph.md sections 2 and 4): this module builds the `bakForeignProvision`
 # edges, registers the `"tarball"` provisioner's executor with the engine, and
@@ -1088,12 +1089,30 @@ proc selectNixProvisioning(useDef: InterfaceToolUse):
       contributors.mapIt(contributorLabel(it)).join(", ") &
       "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
 
+proc noProvisioningAtAllHint(useDef: InterfaceToolUse): string =
+  ## Appended to a "does not declare provisioning" error when the tool use
+  ## carries NO realization of any kind. The usual cause is a package whose
+  ## definition was never imported when the recipe was compiled -- most often
+  ## one that lives in the `reprobuild-packages` catalog, compiled with no
+  ## catalog reachable -- so the error says how to provide one instead of
+  ## leaving the reader to guess why a well-known package has no metadata.
+  if useDef.nixProvisioning.len > 0 or useDef.tarballProvisioning.len > 0 or
+      useDef.scoopProvisioning.len > 0:
+    return ""
+  "; `" & useDef.packageSelector & "` carries no realization of any kind," &
+    " so nothing that declares one was imported when the recipe was" &
+    " compiled. If the reprobuild-packages catalog defines it" &
+    " (packages/interfaces/" & useDef.packageSelector & "/repro.nim), the" &
+    " recipe was compiled without a reachable catalog.\n" &
+    reprobuildPackagesRemedy()
+
 proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
   if useDef.nixProvisioning.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
-      "\" does not declare provisioning: nixPackage metadata")
+      "\" does not declare provisioning: nixPackage metadata" &
+      noProvisioningAtAllHint(useDef))
   let selected = selectNixProvisioning(useDef)
   if selected.selector.len == 0 or selected.executablePath.len == 0:
     raise newException(ValueError,
@@ -1891,7 +1910,8 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
-      "\" does not declare provisioning: tarball metadata")
+      "\" does not declare provisioning: tarball metadata" &
+      noProvisioningAtAllHint(useDef))
   let selected = selectTarballProvisioning(useDef, honorRequestedContributor)
   let sha256 = normalizedSha256(selected.sha256)
   if selected.url.len == 0 or selected.executablePath.len == 0:
@@ -4177,19 +4197,18 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
 # step runs BEFORE the project's `uses:` declarations are visible (the
 # manifest of "what tools the project uses" is INSIDE the recipe that
 # we are trying to compile), so the engine cannot read the project's
-# toolUses to learn which nim/gcc to use. It instead falls back to
-# `hostCCompilerPath()` (the C compiler discovered by `staticExec` at
-# the time repro.exe itself was built) and to the first `nim.exe` on
-# `$PATH`. In a clean shell with neither of those pointing at a usable
-# 64-bit gcc (e.g. when `gcc.exe` on PATH is FPC's 1999-era i386 gcc),
-# the compile fails with `nimbase.h: Invalid argument`.
+# toolUses to learn which nim/gcc to use. Left to itself it would take
+# whatever `nim` and `gcc` `$PATH` offers (in a clean Windows shell,
+# none, or FPC's 1999-era i386 gcc, which fails with `nimbase.h:
+# Invalid argument`).
 #
 # To stay self-contained without baking a dev-shell path into the
-# binary, we synthesize a hardcoded `InterfaceToolUse` record for nim
-# and one for gcc on Windows, drive them through the same
-# `resolveTarballTool` resolver that recipe-declared tools use, and
-# expose the resolved exe paths via `$REPRO_NIM_COMPILER` and `$CC` —
-# the two env vars `extractInterfaceFromModule` already honours. The
+# binary, we synthesize hardcoded `InterfaceToolUse` records for nim
+# and gcc, drive them through the same resolvers that recipe-declared
+# tools use (`bootstrapNimRoute` / `bootstrapCRoute` pick the channel
+# per host), and expose the resolved exe paths via `$REPRO_NIM_COMPILER`
+# and `$REPRO_BOOTSTRAP_CC` — the env vars `extractInterfaceFromModule`
+# already honours. A route that fails stops the command. The
 # tarball metadata (URL, sha256, executablePath) MUST stay in sync
 # with the entries in `repro_dsl_stdlib/packages/{nim,gcc}.nim`.
 # A future change can deduplicate by harvesting at compile time, but
@@ -4202,10 +4221,38 @@ const
     "https://nim-lang.org/download/nim-2.2.10_x64.zip"
   BootstrapNimTarballSha256 =
     "fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f"
-  BootstrapNimTarballLinuxUrl =
-    "https://nim-lang.org/download/nim-2.2.10-linux_x64.tar.xz"
-  BootstrapNimTarballLinuxSha256 =
-    "0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211"
+  # macOS: the official darwin archives. Their ``bin/nim`` is a dynamically
+  # linked Mach-O (arm64: ad-hoc linker signature, no hardened runtime;
+  # x86_64: unsigned), so the monitor shim loads into it like into any other
+  # non-SIP binary. Digests measured by downloading the archives on
+  # 2026-09-30; they match nim-lang.org's published ``.sha256`` files, and
+  # the nightlies release ``packages/nim.nim`` names serves the same bytes
+  # (also downloaded and hashed), so it is the mirror.
+  BootstrapNimMacosMirrorBase =
+    "https://github.com/nim-lang/nightlies/releases/download/" &
+    "2026-04-24-version-2-2-bfeb3146d1638b39f69007a4ae5a23e23ae4e5ef/"
+  BootstrapNimTarballMacosArm64Url* =
+    "https://nim-lang.org/download/nim-2.2.10-macosx_arm64.tar.xz"
+  BootstrapNimTarballMacosArm64Sha256* =
+    "9a3b012d0680d11d6163dd2f145470b090c1045f5e634f42daf119bea1cb2b5e"
+  BootstrapNimTarballMacosX64Url* =
+    "https://nim-lang.org/download/nim-2.2.10-macosx_x64.tar.xz"
+  BootstrapNimTarballMacosX64Sha256* =
+    "35df59b9bbe9f5dfcdf40a82b41037e6ac499e2ec0be6688cd3dd0e55c8bc851"
+  # Linux (and other POSIX hosts) without Nix: the official SOURCE archive,
+  # built once into the tool store with the bootstrap C compiler. It is not
+  # the vendor ``linux_x64`` binary archive on purpose: that archive's
+  # ``bin/nim`` is a STATIC ELF (``file`` says "statically linked"), which a
+  # preload monitor cannot enter, so every interface extraction it ran would
+  # be uncacheable. Building the same release from its own C sources gives a
+  # dynamically linked compiler the monitor observes, on every CPU the
+  # archive's ``build.sh`` knows (x86_64 and aarch64 included). Digest
+  # measured by downloading it on 2026-09-30; matches the published
+  # ``.sha256``.
+  BootstrapNimSourceTarballUrl* =
+    "https://nim-lang.org/download/nim-2.2.10.tar.xz"
+  BootstrapNimSourceTarballSha256* =
+    "7957b7ed004206bcf10bcc4f3b4744153878e62f2431552a9a8e9d3f40e8d5d5"
   BootstrapGccWindowsTarballUrl =
     "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.1.0posix-14.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r2.7z"
   BootstrapGccWindowsTarballSha256 =
@@ -4229,36 +4276,70 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
         lockIdentity: "tarball:nim@2.2.10:sha256:" & BootstrapNimTarballSha256,
         cpu: "x86_64",
         os: "windows")]
-  elif defined(linux):
-    # The vendor Linux archive contains a static ELF. A preload monitor cannot
-    # observe its reads, so every interface extraction would be uncacheable.
-    let nixpkgsRef = "github:NixOS/nixpkgs/" & CanonicalNixpkgsRev
-    result.packageSelector = "nim"
-    result.nixProvisioning = @[
-      InterfaceNixProvisioning(
-        packageName: "nim",
-        selector: "nixpkgs#nim",
-        executablePath: "bin/nim",
-        nixpkgsRef: nixpkgsRef,
-        nixpkgsRev: CanonicalNixpkgsRev,
-        nixpkgsNarHash: CanonicalNixpkgsNarHash,
-        packageId: "nixpkgs#nim",
-        lockIdentity: nixpkgsRef & "?narHash=" &
-          CanonicalNixpkgsNarHash & "#nim")]
-  else:
+  elif defined(macosx):
     result.tarballProvisioning = @[
       InterfaceTarballProvisioning(
         packageName: "nim",
-        url: BootstrapNimTarballLinuxUrl,
-        sha256: BootstrapNimTarballLinuxSha256,
+        url: BootstrapNimTarballMacosArm64Url,
+        mirrors: @[BootstrapNimMacosMirrorBase &
+          "nim-2.2.10-macosx_arm64.tar.xz"],
+        sha256: BootstrapNimTarballMacosArm64Sha256,
         archiveType: "tar.xz",
         executablePath: "bin/nim",
         stripComponents: 1,
         packageId: "nim@2.2.10",
-        lockIdentity: "tarball:nim@2.2.10:linux:sha256:" &
-          BootstrapNimTarballLinuxSha256,
+        lockIdentity: "tarball:nim@2.2.10:macos-aarch64:sha256:" &
+          BootstrapNimTarballMacosArm64Sha256,
+        cpu: "aarch64",
+        os: "macos"),
+      InterfaceTarballProvisioning(
+        packageName: "nim",
+        url: BootstrapNimTarballMacosX64Url,
+        mirrors: @[BootstrapNimMacosMirrorBase &
+          "nim-2.2.10-macosx_x64.tar.xz"],
+        sha256: BootstrapNimTarballMacosX64Sha256,
+        archiveType: "tar.xz",
+        executablePath: "bin/nim",
+        stripComponents: 1,
+        packageId: "nim@2.2.10",
+        lockIdentity: "tarball:nim@2.2.10:macos-x86_64:sha256:" &
+          BootstrapNimTarballMacosX64Sha256,
         cpu: "x86_64",
-        os: "linux")]
+        os: "macos")]
+  else:
+    # Two channels, chosen per host by ``bootstrapNimRoute``: the pinned
+    # nixpkgs Nim where the host has Nix (Linux only), otherwise the source
+    # archive, whose declared executable is its ``build.sh`` --
+    # ``provisionBootstrapNim`` runs it and publishes the ``bin/nim`` it
+    # builds. Neither is the vendor Linux binary archive; see
+    # ``BootstrapNimSourceTarballUrl`` for why.
+    when defined(linux):
+      # The selector the Nix channel has always resolved under; the source
+      # channel names its own (``nim-source@2.2.10``) when it is used.
+      result.packageSelector = "nim"
+      let nixpkgsRef = "github:NixOS/nixpkgs/" & CanonicalNixpkgsRev
+      result.nixProvisioning = @[
+        InterfaceNixProvisioning(
+          packageName: "nim",
+          selector: "nixpkgs#nim",
+          executablePath: "bin/nim",
+          nixpkgsRef: nixpkgsRef,
+          nixpkgsRev: CanonicalNixpkgsRev,
+          nixpkgsNarHash: CanonicalNixpkgsNarHash,
+          packageId: "nixpkgs#nim",
+          lockIdentity: nixpkgsRef & "?narHash=" &
+            CanonicalNixpkgsNarHash & "#nim")]
+    result.tarballProvisioning = @[
+      InterfaceTarballProvisioning(
+        packageName: "nim",
+        url: BootstrapNimSourceTarballUrl,
+        sha256: BootstrapNimSourceTarballSha256,
+        archiveType: "tar.xz",
+        executablePath: "build.sh",
+        stripComponents: 1,
+        packageId: "nim-source@2.2.10",
+        lockIdentity: "tarball:nim-source@2.2.10:sha256:" &
+          BootstrapNimSourceTarballSha256)]
 
 proc bootstrapGccToolUse*(): InterfaceToolUse =
   result = InterfaceToolUse(
@@ -4311,7 +4392,7 @@ proc findEditBin(): string =
         return candidate
   return ""
 
-proc bumpWindowsNimStack(nimExePath: string) =
+proc bumpWindowsNimStack*(nimExePath: string) =
   ## MR5 — Windows-only post-extract hook for the bootstrap-provisioned
   ## `nim.exe`. The upstream Nim Windows distribution ships nim.exe
   ## with the linker's default 2 MB stack reserve. The reprobuild
@@ -4381,10 +4462,11 @@ type
     entries: seq[tuple[name: string; present: bool; value: string]]
 
 const bootstrapToolchainEnvNames = ["CC", "REPRO_BOOTSTRAP_CC",
-  "REPRO_NIM_COMPILER"]
+  "REPRO_NIM_COMPILER", "REPRO_BOOTSTRAP_SDKROOT"]
 
 proc snapshotBootstrapToolchainEnv*(): BootstrapToolchainEnvSnapshot =
-  ## Capture ``CC``, ``REPRO_BOOTSTRAP_CC`` and ``REPRO_NIM_COMPILER`` before
+  ## Capture ``CC``, ``REPRO_BOOTSTRAP_CC``, ``REPRO_NIM_COMPILER`` and (macOS)
+  ## ``REPRO_BOOTSTRAP_SDKROOT`` before
   ## ``ensureBootstrapToolchainEnv`` publishes the provider-compile toolchain.
   ##
   ## That toolchain is reprobuild's OWN, for compiling a recipe. It is
@@ -4408,67 +4490,345 @@ proc restoreBootstrapToolchainEnv*(snapshot: BootstrapToolchainEnvSnapshot) =
     elif existsEnv(entry.name):
       delEnv(entry.name)
 
-when defined(windows):
-  type BootstrapToolchainError* = object of CCompilerUnusableError
-    ## The pinned recipe-compile C compiler could not be provisioned, or the
+type
+  BootstrapNimError* = object of CatchableError
+    ## The Nim compiler that compiles a recipe could not be provisioned. The
+    ## message names the package, the route, the tool store, the failure and
+    ## the remedy. Raised instead of falling back to a ``nim`` on ``PATH``.
+
+  BootstrapToolchainError* = object of CCompilerUnusableError
+    ## The recipe-compile C compiler could not be provisioned, or the
     ## compiler named by ``REPRO_BOOTSTRAP_CC`` is unusable.
 
-  proc ensureWindowsBootstrapCCompiler(storeRoot: string) =
-    ## Publish a WORKING, PINNED C compiler for the recipe compile, or fail
-    ## saying which compiler and why. Never falls back to PATH.
-    ##
-    ## Windows has no system C compiler, and the one PATH offers is whatever
-    ## the Machine PATH happens to list first -- on the host where this was
-    ## measured (2026-09-23), FPC's 1999-era i386 gcc 2.95, which cannot find
-    ## ``stddef.h``. So:
-    ##
-    ## * ``REPRO_BOOTSTRAP_CC`` set: it is the user's (or an enclosing
-    ##   ``repro``'s) explicit choice. It is probed and kept; an unusable one
-    ##   is an error naming it. It used to be silently OVERWRITTEN here with
-    ##   the tool-store compiler, so the documented override did not work.
-    ## * otherwise the pinned winlibs gcc (``bootstrapGccToolUse``: URL +
-    ##   sha256) is realised into the tool store, probed, and published. If
-    ##   that fails the error says what failed and how to override it. It used
-    ##   to be swallowed, after which Nim picked ``gcc.exe`` off PATH without
-    ##   a word.
-    ##
-    ## Successful probes are cached under ``<storeRoot>/compiler-probes``, so
-    ## the steady-state cost is a file-existence check.
-    let probeCache = storeRoot / "compiler-probes"
-    let existing = getEnv(bootstrapCCompilerEnv)
-    if existing.len > 0:
-      if not existing.isAbsolute or not fileExists(extendedPath(existing)):
-        raise newException(BootstrapToolchainError,
-          bootstrapCCompilerEnv & "=" & existing & " does not name an " &
-          "existing file by absolute path. " & cCompilerOverrideRemedy())
-      requireUsableCCompiler(existing, bootstrapCCompilerEnv &
-        " (set in the environment)", probeCache)
-      publishBootstrapCompilerEnv(existing, true)
-      return
-    let useDef = bootstrapGccToolUse()
-    var pinned = ""
+  BootstrapNimRoute* = enum
+    ## How the bootstrap obtains the Nim compiler for a recipe compile.
+    bnrArchive
+      ## The official binary archive for this host, pinned by URL and sha256
+      ## (Windows zip; macOS arm64 / x86_64 tar.xz).
+    bnrNix
+      ## The pinned nixpkgs Nim (Linux hosts that have Nix).
+    bnrSource
+      ## The official source archive, pinned by URL and sha256, built once
+      ## into the tool store with the bootstrap C compiler (Linux hosts
+      ## without Nix, and other POSIX hosts).
+
+  BootstrapCRoute* = enum
+    ## How the bootstrap obtains the C compiler for a recipe compile.
+    bcrArchive
+      ## The pinned winlibs gcc archive (Windows, which has no system C
+      ## compiler).
+    bcrNix
+      ## The pinned nixpkgs gcc (Linux hosts that have Nix).
+    bcrSystem
+      ## The host's system C compiler at its fixed location
+      ## (``bootstrapSystemCCompilers``; Linux without Nix, other POSIX).
+    bcrXcode
+      ## The Xcode Command Line Tools clang, at the path ``xcrun -f clang``
+      ## names, with the SDK ``xcrun --show-sdk-path`` names (macOS).
+
+  BootstrapCCompiler* = object
+    path*: string
+    sdkRoot*: string
+      ## macOS: the SDK the compiler is given as ``-isysroot``. Empty
+      ## elsewhere, and when ``SDKROOT`` is already set.
+
+const
+  bootstrapSystemCCompilers* = ["/usr/bin/cc", "/usr/bin/gcc",
+    "/usr/bin/clang"]
+    ## The fixed locations ``bcrSystem`` looks at, in order. Not a ``PATH``
+    ## search: this is the host's own C toolchain where the OS installs it.
+  bootstrapNimCompilerEnv* = "REPRO_NIM_COMPILER"
+    ## The caller's explicit choice of recipe-compile Nim. Any non-empty value
+    ## is honoured as given, and skips provisioning: an absolute path, or a
+    ## bare ``nim`` for a caller that wants the one on ``PATH`` on purpose.
+
+proc bootstrapHostHasNix*(): bool =
+  ## Whether this host has a Nix installation the Nix routes can use: a
+  ## ``/nix/store`` and a ``nix`` executable. The route follows from the host,
+  ## not from whether a Nix attempt happens to succeed, so a broken Nix is
+  ## reported as a broken Nix rather than quietly swapped for another route.
+  when defined(windows):
+    false
+  else:
+    if not dirExists("/nix/store"):
+      return false
+    for candidate in ["/nix/var/nix/profiles/default/bin/nix",
+                      "/run/current-system/sw/bin/nix",
+                      getHomeDir() / ".nix-profile" / "bin" / "nix"]:
+      if fileExists(candidate):
+        return true
+    uncontrolledFindExe("nix").len > 0
+
+proc bootstrapNimRoute*(): BootstrapNimRoute =
+  ## The Nim route for this host.
+  when defined(windows) or defined(macosx):
+    bnrArchive
+  elif defined(linux):
+    if bootstrapHostHasNix(): bnrNix else: bnrSource
+  else:
+    bnrSource
+
+proc bootstrapCRoute*(): BootstrapCRoute =
+  ## The C compiler route for this host.
+  ##
+  ## macOS uses the Xcode Command Line Tools clang: it is the platform's own C
+  ## toolchain, the one the SDK's headers and frameworks are written for, and
+  ## what Nim itself defaults to on darwin. A nixpkgs compiler is a different
+  ## toolchain; nixpkgs ``gcc`` in particular cannot reach the SDK frameworks
+  ## at all (``Security/SecRandom.h``, recorded in reprobuild-specs
+  ## ``issues/2026-09-29-recipe-compile-picks-nixpkgs-gcc-on-macos-...``). The
+  ## real clang under the developer directory is outside every SIP prefix and
+  ## carries no hardened runtime, so the monitor follows it (io-mon
+  ## ``resolveAppleToolchainTool`` measures exactly that).
+  when defined(windows):
+    bcrArchive
+  elif defined(macosx):
+    bcrXcode
+  elif defined(linux):
+    if bootstrapHostHasNix(): bcrNix else: bcrSystem
+  else:
+    bcrSystem
+
+proc describeBootstrapNimRoute*(route: BootstrapNimRoute): string =
+  case route
+  of bnrArchive:
     try:
-      let profile = resolveTarballTool(useDef, storeRoot)
-      pinned = profile.resolvedExecutablePath
+      let plan = tarballAcquisitionPlan(bootstrapNimToolUse())
+      "the official archive " & plan.url & " (sha256 " & plan.sha256 & ")"
     except CatchableError as err:
-      raise newException(BootstrapToolchainError,
-        "could not provision the pinned C compiler for compiling the recipe (" &
-        useDef.packageSelector & ", " &
-        useDef.tarballProvisioning[0].url & ", sha256 " &
-        useDef.tarballProvisioning[0].sha256 & ") into the tool store at " &
-        storeRoot & ": " & err.msg & "\n  " & cCompilerOverrideRemedy())
-    if pinned.len == 0:
-      raise newException(BootstrapToolchainError,
-        "the pinned C compiler " & useDef.packageSelector & " resolved to no " &
-        "executable in the tool store at " & storeRoot & ". " &
-        cCompilerOverrideRemedy())
-    requireUsableCCompiler(pinned, "the pinned bootstrap compiler " &
-      useDef.packageSelector & " in the tool store", probeCache)
-    publishBootstrapCompilerEnv(pinned, true)
+      "the official archive for this host, of which there is none: " & err.msg
+  of bnrNix:
+    "the pinned nixpkgs Nim (nixpkgs#nim at " & CanonicalNixpkgsRev &
+      "), because this host has Nix"
+  of bnrSource:
+    "the official source archive " & BootstrapNimSourceTarballUrl &
+      " (sha256 " & BootstrapNimSourceTarballSha256 & "), built with the " &
+      "bootstrap C compiler" &
+      (when defined(linux): ", because this host has no Nix" else: "")
+
+proc describeBootstrapCRoute*(route: BootstrapCRoute;
+                              systemCandidates: openArray[string]): string =
+  case route
+  of bcrArchive:
+    let useDef = bootstrapGccToolUse()
+    if useDef.tarballProvisioning.len > 0:
+      "the pinned " & useDef.packageSelector & " archive " &
+        useDef.tarballProvisioning[0].url & " (sha256 " &
+        useDef.tarballProvisioning[0].sha256 & ")"
+    else:
+      "a pinned C compiler archive, of which this host has none"
+  of bcrNix:
+    "the pinned nixpkgs gcc (nixpkgs#gcc at " & CanonicalNixpkgsRev &
+      "), because this host has Nix"
+  of bcrSystem:
+    "the host's system C compiler (the first of " &
+      systemCandidates.join(", ") & ")" &
+      (when defined(linux): ", because this host has no Nix" else: "")
+  of bcrXcode:
+    "the Xcode Command Line Tools clang (`xcrun -f clang`), the " &
+      "platform's own C toolchain"
+
+proc bootstrapNimRemedy(): string =
+  "Set " & bootstrapNimCompilerEnv & " to the Nim 2.2 compiler to use " &
+    "instead (an absolute path, or a bare `nim` to use the one on PATH on " &
+    "purpose). reprobuild does not fall back to PATH by itself: without a " &
+    "lock pin, the compiler that compiles a recipe is one it provisions " &
+    "(reprobuild-specs Distribution-And-Packaging.milestones.org, M5, rule 2)."
+
+proc indentDetail(text: string): string =
+  text.strip().replace("\n", "\n    ")
+
+when defined(macosx):
+  proc lastOutputLine(output: string): string =
+    for line in output.splitLines():
+      if line.strip().len > 0:
+        result = line.strip()
+
+  proc resolveXcodeClang(): tuple[cc, sdk: string] =
+    ## The real clang of the active developer directory, and the SDK to give
+    ## it when ``SDKROOT`` is unset. ``/usr/bin/xcrun`` is run by its fixed
+    ## path; it only answers the question, it does not compile anything.
+    let found = uncontrolledExecCmdEx("/usr/bin/xcrun -f clang",
+      options = {poStdErrToStdOut})
+    let cc = lastOutputLine(found.output)
+    if found.exitCode != 0 or cc.len == 0:
+      raise newException(OSError, "`/usr/bin/xcrun -f clang` exited " &
+        $found.exitCode & (if cc.len > 0: ": " & cc else: "") &
+        ". Install the Xcode Command Line Tools with `xcode-select --install`.")
+    if not cc.isAbsolute or not fileExists(extendedPath(cc)):
+      raise newException(OSError, "`/usr/bin/xcrun -f clang` answered " & cc &
+        ", which is not an existing absolute path")
+    for prefix in ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"]:
+      if cc.startsWith(prefix):
+        raise newException(OSError, "`/usr/bin/xcrun -f clang` answered " &
+          cc & ", a SIP-protected path the build monitor cannot follow")
+    result.cc = cc
+    if getEnv("SDKROOT").len == 0:
+      let sdk = uncontrolledExecCmdEx("/usr/bin/xcrun --show-sdk-path",
+        options = {poStdErrToStdOut})
+      let path = lastOutputLine(sdk.output)
+      if sdk.exitCode != 0 or path.len == 0 or
+          not dirExists(extendedPath(path)):
+        raise newException(OSError, "`/usr/bin/xcrun --show-sdk-path` " &
+          "exited " & $sdk.exitCode & (if path.len > 0: ": " & path else: "") &
+          ". Install the Xcode Command Line Tools with " &
+          "`xcode-select --install`, or set SDKROOT.")
+      result.sdk = path
+else:
+  proc resolveXcodeClang(): tuple[cc, sdk: string] =
+    raise newException(OSError, "the Xcode route exists only on macOS")
+
+proc provisionBootstrapCCompiler*(storeRoot: string;
+    route = bootstrapCRoute();
+    systemCandidates: seq[string] = @bootstrapSystemCCompilers):
+    BootstrapCCompiler =
+  ## Provision the recipe-compile C compiler by ``route`` and probe it, or
+  ## raise saying which route failed and why. Never looks at ``PATH``.
+  ##
+  ## Successful probes are cached under ``<storeRoot>/compiler-probes``, so
+  ## the steady-state cost is a file-existence check.
+  let origin = describeBootstrapCRoute(route, systemCandidates)
+  var cc = ""
+  var sdk = ""
+  try:
+    case route
+    of bcrArchive:
+      cc = resolveTarballTool(bootstrapGccToolUse(), storeRoot).
+        resolvedExecutablePath
+    of bcrNix:
+      cc = resolveNixTool(bootstrapGccToolUse(), storeRoot).
+        resolvedExecutablePath
+    of bcrSystem:
+      for candidate in systemCandidates:
+        if fileExists(extendedPath(candidate)):
+          cc = candidate
+          break
+      if cc.len == 0:
+        raise newException(OSError, "none of " & systemCandidates.join(", ") &
+          " exists; install the system C compiler (e.g. the distribution's " &
+          "gcc or build-essential package)")
+    of bcrXcode:
+      (cc, sdk) = resolveXcodeClang()
+    if cc.len == 0:
+      raise newException(OSError, "the route resolved no executable")
+  except CatchableError as err:
+    raise newException(BootstrapToolchainError,
+      "could not provision the C compiler that compiles the recipe" &
+      "\n  route: " & origin &
+      "\n  tool store: " & storeRoot &
+      "\n  failure: " & indentDetail(err.msg) &
+      "\n  remedy: " & cCompilerOverrideRemedy())
+  let sysroot = if sdk.len > 0: @["-isysroot", sdk] else: @[]
+  requireUsableCCompiler(cc, origin, storeRoot / "compiler-probes", sysroot)
+  BootstrapCCompiler(path: cc, sdkRoot: sdk)
+
+proc buildBootstrapNimFromSource(sourcePrefix, storeRoot, cc: string): string =
+  ## Build ``bin/nim`` from the extracted source archive at ``sourcePrefix``,
+  ## once per tool store, and return its path. The build runs the archive's
+  ## own ``build.sh`` (upstream's documented way to build its C sources) with
+  ## ``CC`` set to the bootstrap compiler, in a scratch copy holding only what
+  ## the build and the compiler need, and is moved into place whole, so a
+  ## concurrent or interrupted build never leaves a half-built compiler where
+  ## the next run would find it.
+  let id = "nim-2.2.10-" & BootstrapNimSourceTarballSha256[0 .. 15] & "-" &
+    hostCpuToken()
+  let dest = storeRoot / "bootstrap-nim" / id
+  let nimExe = dest / "bin" / "nim"
+  let marker = dest / ".repro-built"
+  if fileExists(extendedPath(marker)) and fileExists(extendedPath(nimExe)):
+    return nimExe
+  createDir(extendedPath(dest.parentDir))
+  let work = dest & ".build-" & $getCurrentProcessId()
+  if dirExists(extendedPath(work)):
+    removeDir(extendedPath(work))
+  createDir(extendedPath(work))
+  try:
+    for entry in ["build.sh", "copying.txt"]:
+      copyFile(extendedPath(sourcePrefix / entry), extendedPath(work / entry))
+    for dir in ["c_code", "lib", "config"]:
+      copyDir(extendedPath(sourcePrefix / dir), extendedPath(work / dir))
+    createDir(extendedPath(work / "bin"))
+    let env = newStringTable(modeCaseSensitive)
+    for key, value in envPairs():
+      env[key] = value
+    env["CC"] = cc
+    try:
+      stderr.writeLine("repro: building the bootstrap Nim 2.2.10 from its " &
+        "source archive with " & cc & " (once per tool store)")
+      flushFile(stderr)
+    except IOError, OSError:
+      discard
+    let res = uncontrolledExecCmdEx(quoteShell("/bin/sh") & " build.sh",
+      options = {poStdErrToStdOut}, env = env, workingDir = work)
+    let logPath = dest & ".build.log"
+    try:
+      writeFile(extendedPath(logPath), res.output)
+    except IOError, OSError:
+      discard
+    if res.exitCode != 0 or not fileExists(extendedPath(work / "bin" / "nim")):
+      var tail = res.output.strip().splitLines()
+      if tail.len > 30:
+        tail = tail[^30 .. ^1]
+      raise newException(OSError, "`sh build.sh` in the Nim source archive " &
+        "exited " & $res.exitCode & " (full log: " & logPath & "):\n" &
+        tail.join("\n"))
+    removeDir(extendedPath(work / "c_code"))
+    writeFile(extendedPath(work / ".repro-built"),
+      "source " & BootstrapNimSourceTarballUrl & "\nsha256 " &
+      BootstrapNimSourceTarballSha256 & "\ncc " & cc & "\n")
+    if dirExists(extendedPath(dest)) and not fileExists(extendedPath(marker)):
+      removeDir(extendedPath(dest))
+    try:
+      moveDir(extendedPath(work), extendedPath(dest))
+    except OSError:
+      if not fileExists(extendedPath(marker)):
+        raise
+  finally:
+    if dirExists(extendedPath(work)):
+      try: removeDir(extendedPath(work))
+      except OSError: discard
+  if not fileExists(extendedPath(nimExe)):
+    raise newException(OSError, "the source build left no " & nimExe)
+  nimExe
+
+proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
+                            cc = ""): string =
+  ## Provision the recipe-compile Nim by ``route`` and return its path, or
+  ## raise ``BootstrapNimError`` saying what, by which route, why, and what to
+  ## do. Never looks at ``PATH``. ``cc`` is the bootstrap C compiler, which
+  ## the ``bnrSource`` route builds Nim with.
+  try:
+    case route
+    of bnrArchive:
+      result = resolveTarballTool(bootstrapNimToolUse(), storeRoot).
+        resolvedExecutablePath
+    of bnrNix:
+      result = resolveNixTool(bootstrapNimToolUse(), storeRoot).
+        resolvedExecutablePath
+    of bnrSource:
+      if cc.len == 0:
+        raise newException(OSError, "there is no bootstrap C compiler to " &
+          "build it with")
+      var sourceUse = bootstrapNimToolUse()
+      sourceUse.packageSelector = "nim-source@2.2.10"
+      sourceUse.nixProvisioning = @[]
+      let materialized = materializeTarballPrefix(
+        tarballAcquisitionPlan(sourceUse), storeRoot)
+      result = buildBootstrapNimFromSource(materialized.prefix, storeRoot, cc)
+    if result.len == 0:
+      raise newException(OSError, "the route resolved no executable")
+  except CatchableError as err:
+    raise newException(BootstrapNimError,
+      "could not provision the Nim compiler that compiles the recipe" &
+      "\n  package: nim 2.2.10" &
+      "\n  route: " & describeBootstrapNimRoute(route) &
+      "\n  tool store: " & storeRoot &
+      "\n  failure: " & indentDetail(err.msg) &
+      "\n  remedy: " & bootstrapNimRemedy())
 
 proc bootstrapToolchainProvisioned*(mode: ToolProvisioningMode): bool =
   ## Whether ``ensureBootstrapToolchainEnv`` provisions the provider-compile
-  ## toolchain under ``mode``.
+  ## toolchain under ``mode``: always, on every host.
   ##
   ## The toolchain that compiles a recipe's provider is the BOOTSTRAP's, not
   ## the recipe's: the recipe's ``defaultToolProvisioning`` can only be read
@@ -4479,91 +4839,73 @@ proc bootstrapToolchainProvisioned*(mode: ToolProvisioningMode): bool =
   ## ``env.ps1``, none (measured 2026-09-23). Absent a lock pin, the bootstrap
   ## provisions Nim as a regular package whatever the mode
   ## (reprobuild-specs/Distribution-And-Packaging.milestones.org, M5,
-  ## "pin the provider-compile toolchain", rule 2).
+  ## "pin the provider-compile toolchain", rule 2). ``path`` mode is no
+  ## exception: it says how a recipe's ``uses:`` tools resolve, and the
+  ## recipe has not been read yet. A caller that wants a particular compiler
+  ## says so with ``REPRO_NIM_COMPILER`` / ``REPRO_BOOTSTRAP_CC``.
   ##
-  ## Windows only, for now. Linux resolves both compilers through Nix, which
-  ## a ``path``-mode host need not have; and there is no macOS arm in
-  ## ``bootstrapNimToolUse`` (it falls through to the Linux archive). Both
-  ## keep the old gate until they have a provisioning route that works in
-  ## every mode.
-  when defined(windows):
-    true
-  else:
-    mode == tpmTarball or mode == tpmFromSource
+  ## Linux and macOS used to keep the old gate (provision only under
+  ## ``tarball`` / ``from-source``) because they had no route that worked in
+  ## every mode: Linux resolved through Nix only, macOS had no arm at all.
+  ## ``bootstrapNimRoute`` and ``bootstrapCRoute`` are those routes.
+  discard mode
+  true
 
 proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
                                   storeRoot: string) =
   ## MR5 — before the engine's interface-extract step shells out to
-  ## `nim c`, ensure `$REPRO_NIM_COMPILER` and `$CC` point at a
-  ## reprobuild-provisioned toolchain so the step does not pick up
-  ## whatever incidental `nim.exe` / `gcc.exe` happen to be on `$PATH`
-  ## (which on Windows often is FPC's 1999-era 32-bit gcc, breaking
-  ## the compile with `nimbase.h: Invalid argument`).
+  ## `nim c`, publish `$REPRO_NIM_COMPILER` and `$REPRO_BOOTSTRAP_CC` (and,
+  ## on Windows, `$CC`) naming a toolchain reprobuild chose on purpose, or
+  ## STOP THE COMMAND saying why it could not.
   ##
-  ## Which modes it fires for is ``bootstrapToolchainProvisioned``: every
-  ## mode on Windows; on other hosts only the modes that resolve the
-  ## project's toolUses through the engine's tool-store (`tarball` and
-  ## `from-source`; `nix`/`scoop` arrange their toolchain separately).
-  ## Linux uses the pinned Nix channel for both bootstrap compilers so Nim
-  ## can be monitored; the vendor Linux Nim archive is statically linked.
+  ## * A caller's `$REPRO_BOOTSTRAP_CC` is its explicit choice: it must name
+  ##   an existing file by absolute path and pass the probe, or this raises.
+  ##   Otherwise the C compiler comes from ``bootstrapCRoute`` via
+  ##   ``provisionBootstrapCCompiler``.
+  ## * A caller's `$REPRO_NIM_COMPILER` is its explicit choice and is kept as
+  ##   given. Otherwise Nim comes from ``bootstrapNimRoute`` via
+  ##   ``provisionBootstrapNim``.
   ##
-  ## MR9 — `$CC` honors pre-set values for backward compat with callers
-  ## that pre-pin the compiler (CI, integration tests). But the
-  ## interface-extract step ALSO publishes a dedicated
-  ## `$REPRO_BOOTSTRAP_CC` pointing at the bootstrap-resolved gcc's
-  ## absolute path. `hostCCompilerPath()` in
-  ## `repro_interface_artifacts` consults that var FIRST so the nim
-  ## invocation gets `--gcc.exe:<bootstrap>` regardless of whether a
-  ## (possibly bare / PATH-relative) `$CC` was inherited from env.ps1
-  ## or a parent shell. Without this, env.ps1's `$env:CC = "gcc"`
-  ## (bare basename, not absolute) defeats the `hostCCompilerPath`
-  ## `isAbsolute(ccEnv)` check, no `--gcc.exe` flag is emitted, and
-  ## nim falls back to a PATH lookup. On Windows that can pick up FPC's
-  ## 1999-era i386-target gcc; on Linux a sealed profile may have no gcc at
-  ## all. Both fail while compiling Nim-generated C before the recipe graph
-  ## is available.
+  ## A provisioning failure raises (``BootstrapNimError``,
+  ## ``BootstrapToolchainError`` / ``CCompilerUnusableError``). It used to be
+  ## swallowed, after which ``nimCompilerPath()`` and ``hostCCompilerPath()``
+  ## took whatever `nim` / `gcc` `PATH` offered, without a word -- the silent
+  ## fallback M5 rule 2 rules out. The user decided (2026-09-30) that a
+  ## bootstrap provisioning failure is a hard failure.
+  ##
+  ## The C compiler is resolved first because the ``bnrSource`` route builds
+  ## Nim with it.
+  ##
+  ## MR9 — `$REPRO_BOOTSTRAP_CC` is the channel, not `$CC`:
+  ## `hostCCompilerPath()` in `repro_interface_artifacts` consults it FIRST
+  ## so the nim invocation gets `--gcc.exe:<bootstrap>` regardless of
+  ## whether a (possibly bare / PATH-relative) `$CC` was inherited from
+  ## env.ps1 or a parent shell. POSIX package actions stay free to select
+  ## their declared compiler, so `$CC` is published only on Windows.
   if not bootstrapToolchainProvisioned(mode):
     return
   let effectiveStoreRoot =
     if storeRoot.len > 0: storeRoot
     else: getCurrentDir() / ".repro" / "tool-store"
-  if getEnv("REPRO_NIM_COMPILER").len == 0:
-    try:
-      let useDef = bootstrapNimToolUse()
-      when defined(linux):
-        let profile = resolveNixTool(useDef, effectiveStoreRoot)
-      else:
-        let profile = resolveTarballTool(useDef, effectiveStoreRoot)
-      if profile.resolvedExecutablePath.len > 0:
-        bumpWindowsNimStack(profile.resolvedExecutablePath)
-        putEnv("REPRO_NIM_COMPILER", profile.resolvedExecutablePath)
-    except CatchableError:
-      # Silent: if bootstrap resolution fails (offline, no curl, etc.)
-      # the existing PATH-based fallback in `nimCompilerPath()` still
-      # runs and may succeed when the host has a usable nim/gcc.
-      discard
-  when defined(windows):
-    ensureWindowsBootstrapCCompiler(effectiveStoreRoot)
-  elif defined(linux):
-    # Resolve the compiler through a pinned bootstrap channel. Linux needs
-    # this in from-source mode because the sealed recipe-interface compile
-    # runs before the recipe's own tool declarations are available.
-    # Publish only through `$REPRO_BOOTSTRAP_CC`, which pins Nim's compiler
-    # subprocess without overriding the compiler selected by package actions.
-    var bootstrapGcc = ""
-    let existing = getEnv("REPRO_BOOTSTRAP_CC")
-    if existing.isAbsolute and fileExists(extendedPath(existing)):
-      bootstrapGcc = existing
-    if bootstrapGcc.len == 0:
-      try:
-        let profile = resolveNixTool(bootstrapGccToolUse(), effectiveStoreRoot)
-        if profile.resolvedExecutablePath.len > 0:
-          bootstrapGcc = profile.resolvedExecutablePath
-      except CatchableError:
-        discard
-    if bootstrapGcc.len > 0:
-      publishBootstrapCompilerEnv(bootstrapGcc, false)
-
+  let probeCache = effectiveStoreRoot / "compiler-probes"
+  var cc = getEnv(bootstrapCCompilerEnv)
+  if cc.len > 0:
+    if not cc.isAbsolute or not fileExists(extendedPath(cc)):
+      raise newException(BootstrapToolchainError,
+        bootstrapCCompilerEnv & "=" & cc & " does not name an " &
+        "existing file by absolute path. " & cCompilerOverrideRemedy())
+    requireUsableCCompiler(cc, bootstrapCCompilerEnv &
+      " (set in the environment)", probeCache, bootstrapSysrootArgs())
+  else:
+    let provisioned = provisionBootstrapCCompiler(effectiveStoreRoot)
+    cc = provisioned.path
+    if provisioned.sdkRoot.len > 0:
+      putEnv(bootstrapSdkRootEnv, provisioned.sdkRoot)
+  if getEnv(bootstrapNimCompilerEnv).len == 0:
+    let nim = provisionBootstrapNim(effectiveStoreRoot, cc = cc)
+    bumpWindowsNimStack(nim)
+    putEnv(bootstrapNimCompilerEnv, nim)
+  publishBootstrapCompilerEnv(cc, defined(windows))
 proc blake3HexBytes*(bytes: openArray[byte]): string =
   blake3.toHex(blake3.digest(bytes))
 
@@ -4717,7 +5059,8 @@ proc scoopAcquisitionPlan*(useDef: InterfaceToolUse): ScoopAcquisitionPlan =
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
-      "\" does not declare provisioning: scoopApp metadata")
+      "\" does not declare provisioning: scoopApp metadata" &
+      noProvisioningAtAllHint(useDef))
   let requested = requestedProvisioningContributor()
   var contributors: seq[string] = @[]
   var candidates: seq[InterfaceScoopProvisioning] = @[]
