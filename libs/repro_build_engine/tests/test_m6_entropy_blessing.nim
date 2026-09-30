@@ -733,7 +733,7 @@ suite "M6 the determinism probe: identical outputs earn the entry":
       let second = runBuild(graph([act]), config)
       check second.probeEvents == @["determinism-probe-verified"]
     else:
-      skip()
+      skip("the loaded-OS-library shape this case replays (System32 DLLs) exists only on Windows")
 
   test "launch machinery with a per-launch name does not reset the probe":
     ## runquota stages a long `sh -c` program under a random name in its
