@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1771,
+    "nimTestBinaries": 1773,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 587,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1786
+    "testEntries": 1788
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1076,8 +1076,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 914,
-      "platform/destructive": 115,
+      "integration": 915,
+      "platform/destructive": 116,
       "pure unit": 587,
       "unclassified": 159
     },
@@ -1227,9 +1227,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1771,
+    "nimTestBinaryCount": 1773,
     "pythonTestFileCount": 15,
-    "testEntryCount": 1786
+    "testEntryCount": 1788
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -31707,6 +31707,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_shared_bare_refresh_keeps_objects_borrowers_reference",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_shared_bare_refresh_keeps_objects_borrowers_reference.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_shared_clone_alternates_skip_redownload",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -32236,6 +32253,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_switch_stashes_and_restores_per_repo_wip.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_sync_and_hooks_help_print_usage",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_sync_and_hooks_help_print_usage.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -34546,7 +34580,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_workspace_sync_selectors_narrow_the_default_path.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

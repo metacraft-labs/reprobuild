@@ -241,7 +241,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "codetracer",
-        "rev": "cd6cf6be69c1eabcd05e5d24d06fb6b00679e20c",
+        "rev": "cbce5bb6616e9d86b0d9c58c5245f1cb01fe9e3d",
         "type": "github"
       },
       "original": {
@@ -1180,11 +1180,9 @@
     "io-mon-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1790634135,
-        "narHash": "sha256-4Jku7Y0IrC9OEBRkwiYC4F9xRHMG3YnQgUB3IW8cbxw=",
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "4b2bb3910283bac4d109012411e42ce67f9c969c",
+        "rev": "983a11326aff114f613e0d479f9d8b628a25a1f5",
         "type": "github"
       },
       "original": {
@@ -1384,11 +1382,9 @@
     "nim-stackable-hooks-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1790436736,
-        "narHash": "sha256-X8hF8RFp8Dx50Wc2Y41VJ0KV7FkQgEFAqx6R7W5yhu8=",
         "owner": "metacraft-labs",
         "repo": "nim-stackable-hooks",
-        "rev": "72f578249e9d8bbca8e3705c8a41ed5085c05bf9",
+        "rev": "71f2aae9c68132c5200b78af24f10e7c9575659f",
         "type": "github"
       },
       "original": {
@@ -2346,7 +2342,7 @@
       "locked": {
         "owner": "metacraft-labs",
         "repo": "reprobuild-test-adapters",
-        "rev": "72962c60f12426ba00b621fda5ab76b0f89ba912",
+        "rev": "d7d8145b1408f59cc6f9aac8345188ac4f13c57c",
         "type": "github"
       },
       "original": {
