@@ -891,6 +891,23 @@ type
       ## still needs. Off by default; requires `portableRoots`.
     portableMemoLookup*: PortableMemoLookup
     portableMemoRestorer*: PortableMemoRestorer
+    hermeticEnv*: bool
+      ## Hermetic-Builds-And-Path-Independence: "environment variables are
+      ## allowlisted and normalized". A process action is launched with
+      ## EXACTLY the environment the engine composes for it -- its declared
+      ## entries, its passthrough names resolved from the host, and the
+      ## host's OS-essential set (`HostEssentialEnvNames`) -- instead of that
+      ## composition layered over whatever the invoking shell carries.
+      ##
+      ## Why it matters for a key: an action is keyed on the variables it
+      ## was observed reading. `node` and `npm` read ALL of them (342 on the
+      ## measuring host, `CLAUDE_*` session ids and the cache root's own
+      ## location among them), so with inheritance two hosts building the
+      ## same thing could never agree on a key.
+      ##
+      ## The monitor is then always the wrapped `repro internal io monitor`
+      ## launch: the in-process host composes its child's environment over
+      ## the ENGINE's own, and has no way to start from nothing.
     binaryCacheIntermediateScope*: bool
       ## L3 PUBLISH-SCOPE. When ``true`` the target binary cache is an
       ## INTERMEDIATE cache: EVERY successful cacheable action's store
@@ -8130,6 +8147,36 @@ proc lookupEnv(env: openArray[string]; name: string):
         return (true, item.substr(prefix.len))
   (false, "")
 
+# What a process needs from the host merely to run on it, handed to every
+# action launched with an allowlisted environment
+# (`BuildEngineConfig.hermeticEnv`). Keyed by NAME, never by value, like a
+# passthrough: `TEMP` differs between any two hosts, and a key that bound it
+# would never be shared.
+const HostEssentialEnvNames* =
+  when defined(windows):
+    ["SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT",
+     "TEMP", "TMP", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+     "PROCESSOR_IDENTIFIER", "OS", "ProgramData", "ProgramFiles",
+     "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles",
+     "CommonProgramFiles(x86)", "CommonProgramW6432", "USERPROFILE",
+     "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "USERNAME"]
+  else:
+    ["HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TZ", "TERM",
+     "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"]
+
+proc isHostEssentialEnvName*(name: string): bool =
+  for essential in HostEssentialEnvNames:
+    when defined(windows):
+      if cmpIgnoreCase(essential, name) == 0: return true
+    else:
+      if essential == name: return true
+  false
+
+proc hostEssentialEnv(): seq[string] =
+  for name in HostEssentialEnvNames:
+    if existsEnv(name):
+      result.add(name & "=" & getEnv(name))
+
 proc actionEnvLookup*(action: BuildAction; name: string):
     tuple[present: bool, value: string] =
   result = lookupEnv(action.env, name)
@@ -8142,8 +8189,11 @@ proc actionEnvResolver*(action: BuildAction;
   ## Only names actually observed by the action enter a strong fingerprint.
   var env: seq[string]
   if action.kind == bakProcess:
-    for name, value in envPairs():
-      env.add(name & "=" & value)
+    # Under an allowlisted environment the child saw only what the engine
+    # composed for it; a host variable outside that set is UNSET to it.
+    if config == nil or not config[].hermeticEnv:
+      for name, value in envPairs():
+        env.add(name & "=" & value)
     if config != nil:
       env.add(preparedActionEnv(action, config[]))
     else:
@@ -8175,9 +8225,12 @@ proc cacheEnvInputs*(action: BuildAction; evidence: PathSetEvidence;
   var passthrough = initHashSet[string]()
   for name in action.envPassthrough:
     passthrough.incl(envNameKey(name))
+  let hermetic = config != nil and config[].hermeticEnv
   let resolve = action.actionEnvResolver(config)
   for name in names:
     if envNameKey(name) in passthrough:
+      continue
+    if hermetic and isHostEssentialEnvName(name):
       continue
     let resolved = resolve(name)
     result.add(EnvFingerprint(name: name, present: resolved.present,
@@ -10528,6 +10581,12 @@ proc launchChildEnv(action: BuildAction;
   # (``REPRO_MONITOR_SHIM_LIB`` above) and lets it "just work" — no backend
   # selection. (io-mon keeps DEBUG-only per-mechanism diagnostic toggles, but
   # those are for local A/B diagnosis, not something the engine seeds.)
+  #
+  # Under an allowlisted environment nothing is inherited, so the host's
+  # OS-essential set is handed over here -- before `action.env`, so a value
+  # the action declares (a hermetic `USERPROFILE`, say) still wins.
+  if config.hermeticEnv:
+    result.add(hostEssentialEnv())
   for entry in action.env:
     result.add(entry)
   # BuildXL `PipEnvironment.GetEffectiveEnvironmentVariables`
@@ -10814,7 +10873,8 @@ proc preparedRunQuotaCommand(action: BuildAction;
     cwd: action.cwd,
     env: deferred.env,
     stdoutLimit: config.stdoutLimit,
-    stderrLimit: config.stderrLimit)
+    stderrLimit: config.stderrLimit,
+    isolatedEnv: config.hermeticEnv)
 
 # ---------------------------------------------------------------------------
 # In-Process-Monitor-Hosting HM-4 — the engine hosts io-mon's consumer itself.
@@ -14279,6 +14339,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       outputs.add("declaredOutput=" & materialPath(action.cwd, output))
     outputs.sort()
     result.add(outputs)
+    # Passthrough is keyed by NAME (BuildXL): the value is the host's, but
+    # which variables the action was allowed to see is part of what it is.
+    var passthrough: seq[string] = @[]
+    for name in action.envPassthrough:
+      passthrough.add("passthrough=" & name)
+    if config.hermeticEnv:
+      result.add("env=allowlisted")
+      for name in HostEssentialEnvNames:
+        passthrough.add("passthrough=" & name)
+    passthrough.sort()
+    result.add(passthrough)
 
   proc portableWeakOf(action: BuildAction): string =
     ## The portable weak fingerprint: the action's STATIC description, so it
@@ -16455,7 +16526,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # silently downgraded where nothing could observe it.
         let hostMonitorInProcess = InProcessMonitorHostSupported and
           action.kind == bakProcess and
-          monitorHostingRequested(config.monitorHosting, launchPath)
+          monitorHostingRequested(config.monitorHosting, launchPath) and
+          not config.hermeticEnv
 
         let monitorPlanStart = statStart()
         let plan = monitoredAction(action, config, cacheRoot,

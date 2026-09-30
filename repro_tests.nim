@@ -450,6 +450,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_hermetic_action_env.nim",
+    binary: "build/test-bin/t_hermetic_action_env",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_declared_env_is_in_the_cache_key.nim",
     binary: "build/test-bin/t_declared_env_is_in_the_cache_key",
     defines: @[],

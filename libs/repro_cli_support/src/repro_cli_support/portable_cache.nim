@@ -85,6 +85,11 @@ proc wirePortableCache*(config: var BuildEngineConfig;
     return
   config.portableRoots = portableCacheRoots(projectRoot, workRoot)
   config.portableLookup = true
+  # A portable key is only shareable if the action cannot see the invoking
+  # shell's own variables, so portable caching launches actions with an
+  # allowlisted environment. `REPRO_HERMETIC_ENV=0` turns that off, for
+  # diagnosing an action that turns out to need something undeclared.
+  config.hermeticEnv = getEnv("REPRO_HERMETIC_ENV") != "0"
   let remote = memoRemoteFromEnv(workRoot / "portable-memo-remote")
   if remote.isNone:
     return
