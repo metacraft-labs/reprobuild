@@ -18179,21 +18179,31 @@ proc autoRunQuotaEnabled(): bool =
   getEnv("REPROBUILD_AUTO_RUNQUOTA", "1").normalize notin
     ["0", "false", "no", "off"]
 
-const DefaultAutoRunQuotaMemoryBytes* = 16'u64 * 1024'u64 * 1024'u64 *
-  1024'u64
-
-proc autoRunQuotaMemoryBytes*(): uint64 =
+proc autoRunQuotaMemoryBytes*(): Option[uint64] =
+  ## ``REPROBUILD_RUNQUOTA_MEMORY_BYTES``, the per-invocation memory budget an
+  ## auto-spawned ``runquotad`` is given; ``none`` when it is not set.
+  ##
+  ## THERE IS NO DEFAULT HERE ANY MORE. This used to answer a 16 GiB constant
+  ## (``DefaultAutoRunQuotaMemoryBytes``), passed as ``--memory-bytes`` to
+  ## every daemon reprobuild spawned. The daemon is host-wide, so that
+  ## constant became every workspace's budget -- and a flag overrides both
+  ## the host file and a reload. The daemon's own default is now a share of
+  ## physical memory (75%, decided 2026-09-30 in
+  ## reprobuild-specs/RunQuota-Host-Configuration.md), which a constant here
+  ## could only make worse on every host it did not happen to fit.
   let configured = getEnv("REPROBUILD_RUNQUOTA_MEMORY_BYTES", "")
   if configured.len == 0:
-    return DefaultAutoRunQuotaMemoryBytes
+    return none(uint64)
+  var value: uint64
   try:
-    result = parseBiggestUInt(configured).uint64
+    value = parseBiggestUInt(configured).uint64
   except ValueError:
     raise newException(ValueError,
       "REPROBUILD_RUNQUOTA_MEMORY_BYTES must be a positive integer")
-  if result == 0:
+  if value == 0:
     raise newException(ValueError,
       "REPROBUILD_RUNQUOTA_MEMORY_BYTES must be a positive integer")
+  some(value)
 
 proc executableFile(path: string): bool =
   if path.len == 0 or not fileExists(path):
@@ -18643,23 +18653,23 @@ proc autoRunQuotaBudgetArgs*(host: HostConfig;
   ## - memory: ``REPROBUILD_RUNQUOTA_MEMORY_BYTES`` still wins as an explicit
   ##   per-invocation override, with a warning when it disagrees with the
   ##   file, because the daemon it spawns budgets every other workspace too.
-  ##   Otherwise the file's value, or ``DefaultAutoRunQuotaMemoryBytes``.
+  ##   Otherwise NO FLAG: the daemon takes the file's value, or its own
+  ##   default of 75% of physical memory, and a later ``runquota config set
+  ##   machine.memory_bytes`` reaches it by reload (a flag would pin it).
   ## - cpu: ``cpuMilli`` unless the file sets ``cpu_milli``.
   ## - pools: a convention pool the file sizes is left to the file. A pool
   ##   the recipe declares is always passed, because the engine's in-process
   ##   gate uses the recipe's figure and the two gates must agree (see
   ##   ``assembleRunquotadPoolArgs``).
-  let memoryOverride = getEnv("REPROBUILD_RUNQUOTA_MEMORY_BYTES", "")
-  if memoryOverride.len > 0:
-    let memory = autoRunQuotaMemoryBytes()
+  let memoryOverride = autoRunQuotaMemoryBytes()
+  if memoryOverride.isSome:
+    let memory = memoryOverride.get
     result.args.add(["--memory-bytes", $memory])
     if host.memoryBytes.isSome and host.memoryBytes.get != memory:
       result.warnings.add("REPROBUILD_RUNQUOTA_MEMORY_BYTES=" & $memory &
         " overrides memory_bytes = " & $host.memoryBytes.get & " in " &
         host.sourcePath & "; the RunQuota daemon being started serves the " &
         "whole host, so this budget applies to every workspace on it")
-  elif host.memoryBytes.isNone:
-    result.args.add(["--memory-bytes", $DefaultAutoRunQuotaMemoryBytes])
   if host.cpuMilli.isNone:
     result.args.add(["--cpu-milli", $int(cpuMilli)])
   var recipePools = initHashSet[string]()
