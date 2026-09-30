@@ -9486,6 +9486,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_committed_lock_records_develop_set_siblings.nim",
+    binary: "build/test-bin/t_committed_lock_records_develop_set_siblings",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_committed_lock_folds_sibling_develop_deps.nim",
     binary: "build/test-bin/t_committed_lock_folds_sibling_develop_deps",
     defines: @[],
