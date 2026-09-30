@@ -97,30 +97,34 @@ import-from-derivation, which nixpkgs forbids. It therefore carries a
 literal default, and `nix build .#checks.<system>.nixpkgs-package-version-sync`
 fails the build if that literal and the nimble manifest disagree.
 
-## Syncing into the `metacraft-labs/nixpkgs` fork
+## The `metacraft-labs/nixpkgs` fork
 
-The downstream fork is [`metacraft-labs/nixpkgs`](https://github.com/metacraft-labs/nixpkgs);
-its `nixpkgs-unstable` branch is what dependents consume. Refresh the
-published package after a change here:
+The downstream fork is [`metacraft-labs/nixpkgs`](https://github.com/metacraft-labs/nixpkgs).
+It carries the latest release on standing branches named after the
+upstream channel each tracks (`nixos-unstable`, `nixpkgs-unstable`,
+`nixos-YY.MM`, `nixpkgs-YY.MM-darwin`), all generated daily from one
+commit series on its `metacraft` branch; its README explains the layout.
+Users install from there, never from this flake at `dev`.
+
+The fork does not keep a hand-edited copy of this derivation. Its
+`pkgs/by-name/re/reprobuild/update.sh <version>` copies `package.nix` and
+`nim-fork.nix` verbatim from the release tag, and regenerates its
+`pins.json` (the tag plus every `*-src` input, with `fetchFromGitHub`
+hashes) from the tag's `flake.lock`. So publishing a release there is:
 
 ```sh
-git clone --single-branch --branch nixpkgs-unstable \
-  https://github.com/metacraft-labs/nixpkgs.git
+git clone --depth=20 --branch metacraft https://github.com/metacraft-labs/nixpkgs
 cd nixpkgs
-mkdir -p pkgs/by-name/re/reprobuild
-cp /path/to/reprobuild/nix/pkgs/by-name/re/reprobuild/*.nix \
-   pkgs/by-name/re/reprobuild/
-git commit -am 'reprobuild: sync from metacraft-labs/reprobuild'
+pkgs/by-name/re/reprobuild/update.sh 0.2.6
+nix build .#reprobuild && ./result/bin/repro --version
+git commit -am 'reprobuild: 0.2.5 -> 0.2.6' && git push origin metacraft
+gh workflow run sync-channels.yml -R metacraft-labs/nixpkgs
 ```
 
-Modern nixpkgs auto-resolves `by-name/` entries, and it auto-calls only
-`package.nix` — `nim-fork.nix` stays a private helper reached through
-`callPackage ./nim-fork.nix { }`. Verify with `nix build .#reprobuild`
-from the nixpkgs root before pushing.
-
-Bumping `src.rev` (or any `*Src` rev): set the corresponding `hash` to
-`lib.fakeHash`, build, and copy the `got:` line from the failure. Each
-default mirrors a `flake.lock` entry, so bump the two together.
+`update.sh` stops if the tag's `flake.lock` has a `*-src` input the fork
+does not pass to `package.nix` yet: a new source input needs a matching
+entry there. The stale `*Src` defaults in this directory's `package.nix`
+are therefore harmless to the fork, which overrides every one of them.
 
 ## Upstream-submission status
 
