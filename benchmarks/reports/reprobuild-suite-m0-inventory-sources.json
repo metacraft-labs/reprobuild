@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 591,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1780
+    "testEntries": 1781
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1079,7 +1079,7 @@
     "classificationCounts": {
       "graph-fixture": 11,
       "integration": 905,
-      "platform/destructive": 116,
+      "platform/destructive": 117,
       "pure unit": 591,
       "unclassified": 157
     },
@@ -1230,8 +1230,8 @@
       }
     ],
     "nimTestBinaryCount": 1767,
-    "pythonTestFileCount": 13,
-    "testEntryCount": 1780
+    "pythonTestFileCount": 14,
+    "testEntryCount": 1781
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -37816,6 +37816,21 @@
       "source": "tests/unit/test_graph_owned_test_artifacts.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 23,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_install_nix_paths.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
