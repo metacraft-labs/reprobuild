@@ -38,7 +38,7 @@
   ## Idempotence
 
   Every write is a fixed location and a replacement: one bucket named
-  `reprobuild`, one Scoop app. Adding a bucket that is already present is
+  `metacraft` (shared by every Metacraft product), one Scoop app. Adding a bucket that is already present is
   detected and skipped rather than retried, so a second run does not
   produce a duplicate bucket or a second app.
 #>
@@ -93,7 +93,10 @@ if ($BaseUrl) {
   $DownloadsUrl = "$b/downloads"
   $KeysUrl = "$b/keys"
 } else {
-  $ScoopBucketUrl = if ($BucketUrl) { $BucketUrl } else { 'https://github.com/metacraft-labs/scoop-metacraft' }
+  # The organisation's Scoop bucket: bucket/ on the default branch of
+  # metacraft-desktop-packages, the repository that also publishes
+  # deb./rpm.metacraft-labs.com. Every release refreshes its manifest.
+  $ScoopBucketUrl = if ($BucketUrl) { $BucketUrl } else { 'https://github.com/metacraft-labs/metacraft-desktop-packages' }
   $DownloadsUrl = 'https://github.com/metacraft-labs/reprobuild/releases/download'
   $KeysUrl = "https://deb.$Domain/keys"
 }
@@ -102,7 +105,7 @@ $KeyringFile = if ($env:REPRO_KEYRING_FILE) { $env:REPRO_KEYRING_FILE } else { '
 
 # Expected SHA-256 of the trust anchor: the organisation key, as the POSIX
 # installer pins it (see there). Set to an empty string to fail closed.
-$KeyringSha256 = if ($null -ne $env:REPRO_KEYRING_SHA256) { $env:REPRO_KEYRING_SHA256 } else { '27d3273b8e90f966d9557420aaa13446ee8b1b2c6da027137a094f5322da68fc' }
+$KeyringSha256 = if ($null -ne $env:REPRO_KEYRING_SHA256) { $env:REPRO_KEYRING_SHA256 } else { 'aa89db2215ce0b33e029b8302d4d94fac742b92d279f178437abe10d9b54c988' }
 
 # ---------------------------------------------------------------------
 # 1. detect

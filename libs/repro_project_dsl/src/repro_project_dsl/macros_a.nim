@@ -678,6 +678,10 @@ proc parseCliScope(packageName, executableName: string; body: NimNode;
                 "declared in this cli interface)", stmt)
           if result.outputFlags.find(flagName) < 0:
             result.outputFlags.add(flagName)
+    of "subtools":
+      if not isRoot:
+        error("subTools is a property of the TOOL: declare it once, " &
+          "directly under cli:, not inside a subcmd", stmt)
     of "call", "subcmd":
       let childName =
         if head == "call": "" else: stringLiteral(stmt[1])
@@ -788,6 +792,23 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
         (ndpUnblessed, ""), cliBody,
         commands)
       discard rootCmd
+      # ``subTools "a", "b"`` — the bare-name tools this tool shells out
+      # to (cargo -> rustc and the C linker). A tool-level property, so it
+      # is read from the root scope only and copied onto every command.
+      var subTools: seq[string] = @[]
+      for rootStmt in cliBody:
+        if calleeName(rootStmt).normalize != "subtools":
+          continue
+        if rootStmt.len < 2:
+          error("subTools expects one or more tool names", rootStmt)
+        for i in 1 ..< rootStmt.len:
+          let name = stringLiteral(rootStmt[i])
+          if name.len == 0:
+            error("subTools expects string tool names", rootStmt[i])
+          if name notin subTools:
+            subTools.add(name)
+      for command in commands.mitems:
+        command.subTools = subTools
       # ``parseCliScope`` only emits non-root commands into ``commands``.
       # Existing call sites — the wrapper generator, the interface
       # artifact pipeline, etc. — expect one ``CliCommandDef`` per
@@ -2516,6 +2537,14 @@ proc parsePackageDef(name: NimNode; body: NimNode;
 proc escForCode(text: string): string =
   text.escape()
 
+
+proc escapedCodeList(items: openArray[string]): string =
+  ## ``"a", "b"`` — string literals for splicing into generated code.
+  var parts: seq[string] = @[]
+  for item in items:
+    parts.add(escForCode(item))
+  parts.join(", ")
+
 proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
   proc ignoredCode(): string =
     if policy.ignoredInputPrefixes.len == 0:
@@ -2775,7 +2804,8 @@ proc packageLiteral(pkg: PackageDef): string =
         ", nonDeterminism: " & $cmd.nonDeterminism &
         ", nonDeterminismJustification: " &
           escForCode(cmd.nonDeterminismJustification) &
-        ", outputFlags: @[")
+        ", subTools: @[" & escapedCodeList(cmd.subTools) &
+        "], outputFlags: @[")
       for ofIndex, flagName in cmd.outputFlags:
         if ofIndex > 0:
           result.add(", ")
@@ -3266,6 +3296,9 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
       "nonDeterminismJustification = " &
         escForCode(cmd.nonDeterminismJustification) & ", " &
       "dependencyPolicy = dependencyPolicy)\n")
+    if cmd.subTools.len > 0:
+      result.add("  appendRegisteredActionSubToolRefs(" & actionRef &
+        ".id, [" & escapedCodeList(cmd.subTools) & "])\n")
     # Typed-Outputs M1: bind each typed-output field by evaluating its
     # ``pathExpr`` in the call-site flag scope. The shared
     # ``emitTypedOutputBindings`` helper handles both the typed-handle

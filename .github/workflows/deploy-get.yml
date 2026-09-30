@@ -27,6 +27,9 @@ on:
       - "get/**"
       - "install-on-distributions.sh"
       - "install.ps1"
+      # /sh and /pwsh are assembled from these (get/build-get.sh).
+      - "scripts/install/repro-install.sh"
+      - "scripts/install/repro-install.ps1"
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/deploy-get.yml"

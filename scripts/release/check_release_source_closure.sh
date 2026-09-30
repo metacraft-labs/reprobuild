@@ -56,7 +56,10 @@ for d in "$src"/runquota/libs/*/src "$src"/reprobuild-ct-test-runner/libs/*/src;
 done
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/repro-closure-XXXXXX")
-trap 'rm -rf "$work"' EXIT
+# Best-effort: on Windows a helper the run started can still hold the
+# project directory open for a moment ("Device or resource busy"), and a
+# leftover temp dir must not turn a passed check into a failed step.
+trap 'rm -rf "$work" 2>/dev/null || true' EXIT
 cat > "$work/probe.nim" <<'EOF'
 import std/os
 import repro_interface_artifacts

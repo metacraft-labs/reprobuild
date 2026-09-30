@@ -255,7 +255,11 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 27'u16
+  BuildActionPayloadVersion* = 29'u16
+    ## v29: ``subToolRefs`` — the typed tool's own bare-name sub-tools
+    ## (``cli: subTools ...``), a string list appended last.
+    ## v28: Cache-Scope P3.4 — the ``fixedOutput`` edge attribute, one strict
+    ## sentinel byte appended last.
     ## v27: the tool package's capture-breadth declaration
     ## (``BuildActionDependencyPolicy.captureBreadth``) — one strict sentinel
     ## byte for the ``MonitorCaptureBreadth`` ordinal, appended last within the
@@ -1844,6 +1848,7 @@ proc buildAction*(id: string; call: PublicCliCall;
                   outputTag = "";
                   env: openArray[(string, string)] = [];
                   publishToBinaryCache = false;
+                  fixedOutput = false;
                   cacheEntryIdentity = none(CacheEntryIdentity);
                   toolIdentityRefs: openArray[string] = [];
                   toolIdentityRefKinds:
@@ -1925,6 +1930,7 @@ proc buildAction*(id: string; call: PublicCliCall;
     outputTag: outputTag,
     env: actionEnv,
     publishToBinaryCache: publishToBinaryCache,
+    fixedOutput: fixedOutput,
     cacheEntryIdentity: cacheEntryIdentity,
     toolIdentityRefs: @toolIdentityRefs,
     toolIdentityRefKinds: @toolIdentityRefKinds,
@@ -2525,6 +2531,21 @@ proc appendRegisteredActionToolIdentityRefs*(actionId: string;
             break
         if not found:
           buildActionRegistry[i].toolIdentityRefs.add(refName)
+      return
+
+proc appendRegisteredActionSubToolRefs*(actionId: string;
+                                        refs: openArray[string]) {.dynOrStatic.} =
+  ## Record the typed tool's own bare-name sub-tools (``cli: subTools``) on
+  ## an already-registered action, in declaration order, deduplicated. The
+  ## generated typed-tool wrapper calls this right after
+  ## ``recordToolInvocation``; see ``BuildActionDef.subToolRefs`` for how
+  ## these differ from ``toolIdentityRefs``. No-op when the id is absent.
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      for refName in refs:
+        if refName.len > 0 and
+            refName notin buildActionRegistry[i].subToolRefs:
+          buildActionRegistry[i].subToolRefs.add(refName)
       return
 
 proc classifyRegisteredActionToolIdentityRefs*(
@@ -3665,6 +3686,13 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
   if version >= 26'u16:
     payload.writeByte(byte(ord(action.nonDeterminism)))
     payload.writeString(action.nonDeterminismJustification)
+  # v28: Cache-Scope P3.4 — a fixed-output (declared-and-verified content)
+  # action. One strict sentinel byte.
+  if version >= 28'u16:
+    payload.writeByte(if action.fixedOutput: 1'u8 else: 0'u8)
+  # v29: the typed tool's own sub-tools (``cli: subTools``).
+  if version >= 29'u16:
+    payload.writeStringSeq(action.subToolRefs)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -3875,6 +3903,20 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     # absence of the field is absence of a blessing, never the reverse.
     result.nonDeterminism = ndpUnblessed
     result.nonDeterminismJustification = ""
+  if version >= 28'u16:
+    # P3.4 v28: strict 0-or-1, like every other sentinel here. A corrupt
+    # byte must not decode to "fixed output": that would let the portable
+    # lookup resolve a network action by its description alone.
+    let fixedByte = readByte(bytes, pos)
+    if fixedByte > 1'u8:
+      raisePayload("invalid fixedOutput sentinel in build action payload")
+    result.fixedOutput = fixedByte == 1'u8
+  else:
+    result.fixedOutput = false
+  if version >= 29'u16:
+    result.subToolRefs = readStringSeq(bytes, pos)
+  else:
+    result.subToolRefs = @[]
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

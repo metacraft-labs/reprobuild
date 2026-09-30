@@ -161,9 +161,28 @@
       # Nim signal handler in the processes it is injected into, and a spawn
       # whose child had to be terminated during injection now fails cleanly.
       # Requires nim-stackable-hooks 72f5782 (below).
+      # Bumped to 279a17b, io-mon's `dev` tip. `src/` is BYTE-IDENTICAL to
+      # a3edfab (`git diff a3edfab origin/dev -- src/` is empty), so this
+      # changes no compiled byte; it moves the pin off a mid-history commit and
+      # onto the revision the rest of the workspace builds against, which is
+      # what keeps the four channels that name io-mon from drifting apart again.
+      # Bumped to 07cc4af (io-mon#39), io-mon's `dev` tip. This one DOES change
+      # compiled bytes, and it is the first bump since 279a17b that does:
+      # `git diff 279a17b 07cc4af -- src/` was empty for every intervening
+      # revision, and io-mon#39 is the first `src/` change since the pin. It
+      # gives the `.iomon-frag` merge path the observation-identity fold, which
+      # macOS and Windows captures never had. Leaving the pin behind would build
+      # a merge path WITHOUT the fold while io-mon's capability declaration --
+      # which this same revision moves into the supported set -- says the fold
+      # is there, i.e. an over-claim in the depfile this engine reads.
       # Preserve child exec identities and the resumed parent guard across vfork.
       # Keep this, the lock, sibling clone and package fallback on one revision.
-      url = "github:metacraft-labs/io-mon/4b2bb3910283bac4d109012411e42ce67f9c969c";
+      # Bumped to 53994c0, io-mon's `dev` tip, reconciling the two pins above
+      # (07cc4af from reprobuild `dev`, 4b2bb39 from reprobuild `agents`):
+      # neither is an ancestor of the other, and 53994c0 contains both, so it
+      # keeps the observation-identity fold AND the vfork repairs. Its tree is
+      # identical to 983a113, which the agents-side lock already built against.
+      url = "github:metacraft-labs/io-mon/53994c0ca76f263ff04f046b2f99d98a038d41f3";
       flake = false;
     };
     nim-shm-gset-src = {

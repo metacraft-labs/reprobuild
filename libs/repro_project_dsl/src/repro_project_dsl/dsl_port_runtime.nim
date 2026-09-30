@@ -4370,12 +4370,16 @@ proc synthesizeCustomShellBuildActions*(packageName: string) {.dynOrStatic.} =
     script.add("\"$pc\"; fi; done; fi; done; ")
     let mirrorDeps = registeredNativeBuildDeps(packageName) &
       registeredBuildDeps(packageName) & registeredRuntimeDeps(packageName)
-    script.add(m9r14fEmitRpathPatchScript(escapedMirrorUsr,
-      installMirrorDepLibDirs(projectRoot, mirrorDeps),
-      depManifestPaths = installMirrorDepManifestPaths(projectRoot, mirrorDeps),
-      ownManifestPath = (mirrorRoot / m9r30PropagatedManifestName).replace("\\", "/"),
-      packageName = packageName,
-      recipesRoot = recipesRoot))
+    # Not on Windows — see the matching guard in `emitInstallTreeMirror`: no
+    # ELF to patch, and the snippet's `command -v patchelf` would make the
+    # mirror depend on the user's PATH.
+    when not defined(windows):
+      script.add(m9r14fEmitRpathPatchScript(escapedMirrorUsr,
+        installMirrorDepLibDirs(projectRoot, mirrorDeps),
+        depManifestPaths = installMirrorDepManifestPaths(projectRoot, mirrorDeps),
+        ownManifestPath = (mirrorRoot / m9r30PropagatedManifestName).replace("\\", "/"),
+        packageName = packageName,
+        recipesRoot = recipesRoot))
     script.add("touch \"" & escapedMirrorStamp & "\"; ")
     script.add(emitInstallMirrorStorePublish(recipesRoot, recipeName,
       publishVersion, mirrorRoot))

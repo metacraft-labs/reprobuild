@@ -562,3 +562,175 @@ suite "M6 evidence classification, in isolation":
       "backend=x;capability=non-determinism;required=false;input=false;reason=r")
     check not capabilityGapIsNonDeterminism("rename",
       "backend=x;capability=rename;required=false;input=false;reason=r")
+
+suite "M6 the determinism probe: identical outputs earn the entry":
+  ## An unblessed tool that read entropy is not trusted to be deterministic,
+  ## but it can be MEASURED to be: it is not cached, so it runs again on the
+  ## next build, and when that run saw byte-identical inputs and produced
+  ## byte-identical outputs the action is cached. Any difference fails closed.
+
+  proc probeEvents(run: BuildRunResult): seq[string] =
+    for item in run.trace:
+      if item.event.startsWith("determinism-probe-"):
+        result.add(item.event)
+
+  test "a second run with identical inputs and outputs is admitted":
+    let scenario = setupScenario("probe-ok")
+    defer: removeDir(scenario.root)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      entropyRead("BCryptGenRandom", "program")])
+    let act = scenarioAction(scenario, ndpUnblessed)
+    let config = defaultBuildEngineConfig(scenario.cacheRoot)
+
+    let first = runBuild(graph([act]), config)
+    check first.results[0].status == asSucceeded
+    check not scenario.published(act)
+    check first.probeEvents == @["determinism-probe-candidate"]
+
+    removeFile(scenario.outputPath)
+    let second = runBuild(graph([act]), config)
+    check second.results[0].launched
+    check second.probeEvents == @["determinism-probe-verified"]
+    check scenario.published(act)
+
+    # The entry is usable: a third build hits it instead of re-running.
+    removeFile(scenario.outputPath)
+    let third = runBuild(graph([act]), config)
+    check third.results[0].cacheDecision == cdHit
+    check fileExists(scenario.outputPath)
+
+  test "different outputs from identical inputs fail closed, for good":
+    let scenario = setupScenario("probe-differ")
+    defer: removeDir(scenario.root)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      entropyRead("BCryptGenRandom", "program")])
+    let act = scenarioAction(scenario, ndpUnblessed)
+    let config = defaultBuildEngineConfig(scenario.cacheRoot)
+    discard runBuild(graph([act]), config)
+    # Make the first run's recorded outputs differ from what the copy will
+    # produce again: exactly what a tool whose randomness reached its output
+    # would have left behind.
+    let probeDir = scenario.cacheRoot / "determinism-probe"
+    var candidates: seq[string] = @[]
+    for kind, path in walkDir(probeDir):
+      if not path.endsWith(".inputs"):   # the key-material sidecar
+        candidates.add(path)
+    require candidates.len == 1
+    let recorded = readFile(candidates[0])
+    writeFile(candidates[0], recorded.replace(
+      recorded[recorded.rfind('\t') + 1 .. ^1], repeat('0', 64)))
+
+    removeFile(scenario.outputPath)
+    let second = runBuild(graph([act]), config)
+    check second.probeEvents == @["determinism-probe-mismatch"]
+    check not scenario.published(act)
+    # And the verdict sticks: identical outputs later do not reopen it.
+    removeFile(scenario.outputPath)
+    let third = runBuild(graph([act]), config)
+    check third.probeEvents == @["determinism-probe-refused"]
+    check not scenario.published(act)
+
+  test "an input change starts a new candidate rather than a verdict":
+    let scenario = setupScenario("probe-input")
+    defer: removeDir(scenario.root)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      entropyRead("BCryptGenRandom", "program")])
+    let act = scenarioAction(scenario, ndpUnblessed)
+    let config = defaultBuildEngineConfig(scenario.cacheRoot)
+    discard runBuild(graph([act]), config)
+    writeFile(scenario.sourcePath, "another payload\n")
+    removeFile(scenario.outputPath)
+    let second = runBuild(graph([act]), config)
+    check second.probeEvents == @["determinism-probe-candidate"]
+    check not scenario.published(act)
+
+  test "a capture that cannot see entropy is never probed":
+    ## Unobservable entropy is a gap in what was SEEN; comparing outputs
+    ## cannot close it.
+    let scenario = setupScenario("probe-blind")
+    defer: removeDir(scenario.root)
+    writeRmdf(scenario.rmdfPath, blindProfileRecords() & @[
+      fileRead(scenario.sourcePath)])
+    let act = scenarioAction(scenario, ndpUnblessed)
+    let config = defaultBuildEngineConfig(scenario.cacheRoot)
+    discard runBuild(graph([act]), config)
+    removeFile(scenario.outputPath)
+    let second = runBuild(graph([act]), config)
+    check second.probeEvents.len == 0
+    check not scenario.published(act)
+
+  test "the action's own temporaries and the temp listing do not reset it":
+    ## npm's delete-by-rename writes, probes and deletes `x.DELETE.<random>`,
+    ## and node lists the host temp directory; both change on every run
+    ## without being inputs. A temporary is recognized as one because the
+    ## action WROTE it and it is gone when the action finishes.
+    let scenario = setupScenario("probe-temporaries")
+    defer: removeDir(scenario.root)
+    let act = scenarioAction(scenario, ndpUnblessed)
+    let config = defaultBuildEngineConfig(scenario.cacheRoot)
+    proc runWith(name: string): BuildRunResult =
+      let temporary = scenario.workRoot / "node_modules" / ("x.js.DELETE." & name)
+      writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+        fileRead(scenario.sourcePath),
+        MonitorRecord(kind: mrFileWrite, observationKind: moFileWrite,
+          osPid: 909, threadId: 909, path: temporary, detail: ""),
+        fileRead(temporary),
+        MonitorRecord(kind: mrDirectoryEnumerate,
+          observationKind: moDirectoryEnumerate, osPid: 909, threadId: 909,
+          path: getTempDir(), detail: ""),
+        entropyRead("BCryptGenRandom", "program")])
+      runBuild(graph([act]), config)
+    discard runWith("aaaaaa")
+    # Something else on the host touches the temp directory in between.
+    let noise = getTempDir() / ("t-m6-noise-" & $getCurrentProcessId())
+    writeFile(noise, "x")
+    defer: removeFile(noise)
+    removeFile(scenario.outputPath)
+    let second = runWith("bbbbbb")
+    check second.probeEvents == @["determinism-probe-verified"]
+    check scenario.published(act)
+
+  test "listing a directory above the working directory does not reset it":
+    ## gemini-cli's bundle step lists the drive root, whose membership
+    ## changes with anything else stored there.
+    let scenario = setupScenario("probe-above")
+    defer: removeDir(scenario.root)
+    let act = scenarioAction(scenario, ndpUnblessed)
+    let config = defaultBuildEngineConfig(scenario.cacheRoot)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      MonitorRecord(kind: mrDirectoryEnumerate,
+        observationKind: moDirectoryEnumerate, osPid: 909, threadId: 909,
+        path: scenario.root, detail: ""),
+      entropyRead("BCryptGenRandom", "program")])
+    discard runBuild(graph([act]), config)
+    writeFile(scenario.root / "unrelated.txt", "something else on the host")
+    removeFile(scenario.outputPath)
+    let second = runBuild(graph([act]), config)
+    check second.probeEvents == @["determinism-probe-verified"]
+
+  test "launch machinery with a per-launch name does not reset the probe":
+    ## runquota stages a long `sh -c` program under a random name in its
+    ## wrapper directory, and the shell is observed reading it. Its content
+    ## is the program already in argv; its name changes on every launch.
+    let scenario = setupScenario("probe-wrapper")
+    defer: removeDir(scenario.root)
+    let wrapperDir = getTempDir() / "runquota-shell"
+    let act = scenarioAction(scenario, ndpUnblessed)
+    let config = defaultBuildEngineConfig(scenario.cacheRoot)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      fileRead(wrapperDir / "runquota-shell-AAAAAA.sh"),
+      entropyRead("BCryptGenRandom", "program")])
+    discard runBuild(graph([act]), config)
+    writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      fileRead(wrapperDir / "runquota-shell-BBBBBB.sh"),
+      entropyRead("BCryptGenRandom", "program")])
+    removeFile(scenario.outputPath)
+    let second = runBuild(graph([act]), config)
+    check second.probeEvents == @["determinism-probe-verified"]
+    check scenario.published(act)
