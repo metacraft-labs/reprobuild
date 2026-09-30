@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1758,
+    "nimTestBinaries": 1760,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 588,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1771
+    "testEntries": 1773
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1076,7 +1076,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 901,
+      "integration": 902,
       "platform/destructive": 115,
       "pure unit": 588,
       "unclassified": 157
@@ -1227,9 +1227,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1758,
+    "nimTestBinaryCount": 1760,
     "pythonTestFileCount": 13,
-    "testEntryCount": 1771
+    "testEntryCount": 1773
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
