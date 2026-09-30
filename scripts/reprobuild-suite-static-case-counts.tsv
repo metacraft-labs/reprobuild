@@ -228,7 +228,7 @@ libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_packaging_windows_loader_closure.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_prefix_layout.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	5
-libs/repro_dsl_stdlib/tests/t_sevenzip_bootstrap_matches_stdlib_catalog.nim	nim	1
+libs/repro_dsl_stdlib/tests/t_sevenzip_bootstrap_matches_stdlib_catalog.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_shell_extra_env.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_smoke_expand_archive.nim	nim	39
@@ -1484,6 +1484,7 @@ tests/integration/t_sync_scoped_to_named_project_touches_only_that_project.nim	n
 tests/integration/t_sync_skips_fetch_when_locked_sha_already_present.nim	nim	1
 tests/integration/t_tampered_uki_detected.nim	nim	5
 tests/integration/t_tampered_uki_fails_unseal.nim	nim	6
+tests/integration/t_tarball_provisioning_cold_store_extractors.nim	nim	3
 tests/integration/t_target_triple_drives_the_microarch_host_target.nim	nim	10
 tests/integration/t_targets_are_sorted_and_deduplicated_in_the_signed_payload.nim	nim	1
 tests/integration/t_tdx_agent_backend.nim	nim	28
@@ -1772,6 +1773,7 @@ tests/unit/t_store_path_farm.nim	nim	4
 tests/unit/t_substituted_edge_does_not_go_stale.nim	nim	4
 tests/unit/t_substituted_provider_compile_is_verified.nim	nim	7
 tests/unit/t_tarball_non_redistributable.nim	nim	4
+tests/unit/t_tarball_provisioning_edges.nim	nim	8
 tests/unit/t_tarball_prune_paths.nim	nim	3
 tests/unit/t_tarball_refuses_binary_host_cannot_start.nim	nim	4
 tests/unit/t_test_execute_edge_receives_a_usable_path.nim	nim	3
