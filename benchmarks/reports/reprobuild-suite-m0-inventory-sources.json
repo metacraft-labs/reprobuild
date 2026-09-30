@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1769,
+    "nimTestBinaries": 1771,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 587,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1784
+    "testEntries": 1786
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1076,7 +1076,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 912,
+      "integration": 914,
       "platform/destructive": 115,
       "pure unit": 587,
       "unclassified": 159
@@ -1227,9 +1227,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1769,
+    "nimTestBinaryCount": 1771,
     "pythonTestFileCount": 15,
-    "testEntryCount": 1784
+    "testEntryCount": 1786
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9529,6 +9529,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_expand_archive_zip_extraction_cost",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_expand_archive_zip_extraction_cost.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_isonim_ssg_render_edge",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -10804,6 +10821,23 @@
       "source": "libs/repro_home_apply/tests/t_builtin_adapter_pre_install_runner.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_builtin_adapter_zip_extraction_cost",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_home_apply"
+      ],
+      "owner": "libs/repro_home_apply",
+      "requiresReproBinary": false,
+      "source": "libs/repro_home_apply/tests/t_builtin_adapter_zip_extraction_cost.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

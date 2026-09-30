@@ -142,7 +142,7 @@ suite "Phase F — argv assemblers (pure)":
     check argv == @["unzip", "-q", "-o",
       "/tmp/runner.zip", "-d", "/opt/actions-runner"]
 
-  test "Windows zip: exact deterministic PowerShell argv":
+  test "Windows zip: exact deterministic PowerShell argv, no Expand-Archive":
     let argv = resolveExpandArchiveArgv(
       "C:\\runner's cache\\runner.zip",
       "C:\\agent's runner", eafZip,
@@ -150,22 +150,34 @@ suite "Phase F — argv assemblers (pure)":
     check argv == @[
       "powershell",
       "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
       "-Command",
-      "$ErrorActionPreference = 'Stop'; " &
-        "$scratch = Join-Path $env:TEMP " &
-          "('repro-expand-archive-' + $PID + '.zip'); " &
-        "try { " &
-          "Copy-Item -LiteralPath " &
-            "'C:\\runner''s cache\\runner.zip' " &
-            "-Destination $scratch -Force; " &
-          "Expand-Archive -LiteralPath $scratch " &
-            "-DestinationPath 'C:\\agent''s runner' -Force " &
-        "} finally { " &
-          "if (Test-Path -LiteralPath $scratch) { " &
-            "Remove-Item -LiteralPath $scratch -Force " &
-              "-ErrorAction Stop " &
-          "} " &
-        "}"]
+      "$ProgressPreference = 'SilentlyContinue'; " &
+        "$ErrorActionPreference = 'Stop'; " &
+        "Add-Type -AssemblyName System.IO.Compression.FileSystem; " &
+        "$root = [System.IO.Directory]::CreateDirectory(" &
+          "'C:\\agent''s runner').FullName; " &
+        "$root = $root.TrimEnd([char[]]'\\/') + " &
+          "[System.IO.Path]::DirectorySeparatorChar; " &
+        "$zip = [System.IO.Compression.ZipFile]::OpenRead(" &
+          "'C:\\runner''s cache\\runner.zip'); " &
+        "try { foreach ($entry in $zip.Entries) { " &
+          "$target = [System.IO.Path]::GetFullPath(" &
+            "[System.IO.Path]::Combine($root, $entry.FullName)); " &
+          "if (-not $target.StartsWith($root, " &
+            "[System.StringComparison]::OrdinalIgnoreCase)) { " &
+            "throw ('zip entry escapes the destination: ' + " &
+              "$entry.FullName) } " &
+          "if ($entry.Name.Length -eq 0) { " &
+            "[void][System.IO.Directory]::CreateDirectory($target) " &
+          "} else { " &
+            "[void][System.IO.Directory]::CreateDirectory(" &
+              "[System.IO.Path]::GetDirectoryName($target)); " &
+            "[System.IO.Compression.ZipFileExtensions]::ExtractToFile(" &
+              "$entry, $target, $true) } " &
+        "} } finally { $zip.Dispose() }"]
 
   test "Windows zip lowering is byte-identical across real processes":
     let tempA = getTempDir() / "expand-archive-emitter-a"
@@ -180,9 +192,12 @@ suite "Phase F — argv assemblers (pure)":
     check payloadA["pid"].getInt() != payloadB["pid"].getInt()
     # Compare the complete serialized argv node, not selected substrings.
     check $payloadA["argv"] == $payloadB["argv"]
-    check payloadA["argv"].getElems().len == 4
-    let command = payloadA["argv"][3].getStr()
-    check "$PID" in command
+    check payloadA["argv"].getElems().len == 7
+    let command = payloadA["argv"][6].getStr()
+    # Nothing process- or host-specific reaches the argv: no scratch path
+    # under $env:TEMP, no process id.
+    check "$env:TEMP" notin command
+    check "$PID" notin command
     check $payloadA["pid"].getInt() notin command
     check $payloadB["pid"].getInt() notin command
     check tempA notin command

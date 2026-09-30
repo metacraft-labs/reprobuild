@@ -17,7 +17,7 @@
 ##   4. SHA-256 mismatch fails closed with `EBuiltinDigestMismatch`;
 ##      no prefix is written.
 ##   5. Zip extraction with extract_path flatten — requires a host
-##      zip tool (unzip or PowerShell's Expand-Archive). Skipped on
+##      zip tool (unzip or PowerShell). Skipped on
 ##      hosts without one.
 ##   6. Installer mode: mocked via `REPRO_TEST_BUILTIN_INSTALLER_MOCK`
 ##      so the test does not exec a real installer; asserts the argv

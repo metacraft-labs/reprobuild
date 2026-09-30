@@ -2016,6 +2016,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_expand_archive_zip_extraction_cost.nim",
+    binary: "build/test-bin/t_expand_archive_zip_extraction_cost",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_smoke_expand_archive.nim",
     binary: "build/test-bin/t_smoke_expand_archive",
     defines: @[],
@@ -2171,6 +2180,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_home_apply/tests/t_builtin_adapter.nim",
     binary: "build/test-bin/t_builtin_adapter",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_home_apply/tests/t_builtin_adapter_zip_extraction_cost.nim",
+    binary: "build/test-bin/t_builtin_adapter_zip_extraction_cost",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

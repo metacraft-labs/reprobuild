@@ -2172,7 +2172,7 @@ proc validateTarEntries(archivePath, archiveType: string) =
         "tool-resolution failed: unsafe archive entry: " & entry)
 
 proc resolveZipExtractor(): tuple[exe: string; kind: string] =
-  ## Choose a zip extractor. PowerShell's `Expand-Archive` is the
+  ## Choose a zip extractor. PowerShell (.NET's zip reader) is the
   ## native Windows path and round-trips both `\\`- and `/`-separated
   ## archives. `unzip` is the POSIX baseline. Returns a (path, kind)
   ## pair; `kind` discriminates the command line shape because they
