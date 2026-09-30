@@ -552,6 +552,7 @@ libs/repro_tool_profiles/tests/t_bootstrap_cc_override_is_honoured_and_scoped.ni
 libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode_on_windows.nim	nim	2
 libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	nim	3
 libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim	nim	12
+libs/repro_tool_profiles/tests/t_zip_extraction_cost_does_not_scale_with_progress_records.nim	nim	3
 libs/repro_workspace_vcs/tests/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths.nim	nim	3
 libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim	nim	4
 recipes/packages/source/adwaita-icon-theme/test_adwaita_icon_theme_source.nim	nim	5
