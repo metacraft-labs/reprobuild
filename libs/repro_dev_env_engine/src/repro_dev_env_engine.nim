@@ -167,10 +167,14 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     # The justification is the one already stated for the identical command:
     # this helper only compiles: it never runs what it produced, so the
     # compiler's randomness has no path to an output.
-    envPassthrough = ProviderCompileEnvironmentPassthrough,
+    envPassthrough = @ProviderCompileEnvironmentPassthrough &
+      @ProviderCompileIsolatedPassthrough,
     # Declared, so the caller's shell does not decide the edge's key; see
     # `providerCompileLaunchEnv`.
     env = providerCompileLaunchEnv(compilerCwd / "home"),
+    # Dev-Env-Warm-Entry.md §2: the compile starts from the environment
+    # declared above and nothing else, so no caller variable can be an input.
+    isolateHostEnvironment = true,
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy = automaticMonitorGatheringPolicy(

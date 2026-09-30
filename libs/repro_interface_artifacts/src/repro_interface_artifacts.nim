@@ -3266,6 +3266,23 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
   if homeDir.len > 0:
     createDir(extendedPath(homeDir))
     result.add("HOME=" & homeDir)
+  # The source roots this process resolved (baked, seeded, or a develop-mode
+  # override), declared by value: under an isolated launch the compile sees
+  # the roots repro chose and nothing a caller's shell happened to export.
+  var seenRoots: seq[string] = @[]
+  for (name, _) in BuiltSourcePackageRoots:
+    if name notin seenRoots:
+      seenRoots.add(name)
+  for (name, _) in InstalledSourcePackageTrees:
+    if name notin seenRoots:
+      seenRoots.add(name)
+  for name in ["REPROBUILD_SOURCE_ROOT", "CODETRACER_TRACE_FORMAT_NIM_SRC",
+               SeededSourceEnvironmentVar]:
+    if name notin seenRoots:
+      seenRoots.add(name)
+  for name in seenRoots:
+    if existsEnv(name):
+      result.add(name & "=" & getEnv(name))
 
 proc recipeCCompilerPath*(): string =
   ## The C compiler the next recipe compile (interface extractor or provider)
@@ -5518,6 +5535,19 @@ proc providerDynamicEnabled(): bool =
   ## runtime proc body into the per-project binary.
   let raw = getEnv("REPRO_PROVIDER_DYNAMIC").toLowerAscii()
   raw in ["1", "true", "yes", "on"]
+
+const ProviderCompileIsolatedPassthrough* = [
+  # Named, not declared by value. Under the monitor's LD_PRELOAD shim the Nim
+  # compiler's `dlopen` of pcre resolves only through it (flake.nix
+  # `devShells.default.LD_LIBRARY_PATH`; io-mon's dlopen interposition is the
+  # durable fix). Its value is still recorded when the compile reads it.
+  "LD_LIBRARY_PATH",
+  # The installed wrapper's runtime search path, read by `externalHashFlags`
+  # to bake rpaths into what the compile links.
+  "REPROBUILD_RUNTIME_LIBRARY_PATH",
+]
+  ## Names an ISOLATED provider-compile launch still takes from the host, on
+  ## top of `ProviderCompileEnvironmentPassthrough`.
 
 const ProjectDslRuntimeLibStem* = "librepro_project_dsl_runtime"
   ## The shared DSL runtime library's file stem, without the platform's

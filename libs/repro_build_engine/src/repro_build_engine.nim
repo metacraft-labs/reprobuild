@@ -382,6 +382,14 @@ type
       ## diagnostics so ``repro why`` can answer "why did this keep caching
       ## despite reading randomness?" without the reader having to go and
       ## find the package spec.
+    isolateHostEnvironment*: bool
+      ## Dev-Env-Warm-Entry.md §2 — launch the action from its DECLARED
+      ## environment alone: nothing from the engine's own environment reaches
+      ## it except what `env` declares and what `envPassthrough` names (which
+      ## is resolved from the host by name, as before). Negative-sense, so an
+      ## action that does not ask keeps the historical overlay-on-inherited
+      ## launch. Mixed into the weak fingerprint when set: an isolated launch
+      ## is a different environment from an inheriting one.
     entropyBlessedImages*: seq[EntropyBlessedTool]
       ## Dev-Env-Warm-Entry.md §4 — an entropy blessing scoped to THIS action
       ## AND one image: entropy records whose emitting image matches one of
@@ -2506,6 +2514,19 @@ proc keyedOnActionEnvironment*(fingerprint: ContentDigest;
   framed.add($text.len & "\x1f" & text & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+proc keyedOnEnvironmentIsolation*(fingerprint: ContentDigest;
+                                  isolate: bool): ContentDigest =
+  ## The IDENTITY for an inheriting action, so no existing fingerprint moves.
+  ## An isolated one is keyed apart: the same declared environment launched
+  ## with and without the host's environment underneath is not the same
+  ## launch.
+  if not isolate:
+    return fingerprint
+  var framed = "action-environment-isolated\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
 proc monitorPayloadArgIndex(argv: openArray[string]): int
 
 proc executedImageArgvIndex*(argv: openArray[string]): int =
@@ -2715,6 +2736,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              dependencyPolicy = automaticMonitorGatheringPolicy();
              nonDeterminism = ndpUnblessed;
              nonDeterminismJustification = "";
+             isolateHostEnvironment = false;
              entropyBlessedImages: openArray[EntropyBlessedTool] = [];
              determinism = none(EdgeDeterminism);
              cacheRetention = forever();
@@ -2765,7 +2787,9 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     # the two halves had never been connected.
     weakFingerprint: keyedOnGoverningLock(
       keyedOnContentAddressedToolRoot(
-        keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
+        keyedOnEnvironmentIsolation(
+          keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
+          isolateHostEnvironment),
         argv),
       governingLockIdentity),
     actionCachePolicy: actionCachePolicy,
@@ -2776,6 +2800,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     nonDeterminism: nonDeterminism,
     nonDeterminismJustification: nonDeterminismJustification,
     entropyBlessedImages: @entropyBlessedImages,
+    isolateHostEnvironment: isolateHostEnvironment,
     # Edge-Determinism-And-Soft-Rebuild.md §2. `none` + `forever()` is the
     # unlabelled default: every existing call site keeps the exact behaviour
     # it had, writes no determinism sidecar, and takes the same cache path.
@@ -8245,7 +8270,10 @@ proc lookupEnv(env: openArray[string]; name: string):
 proc actionEnvLookup*(action: BuildAction; name: string):
     tuple[present: bool, value: string] =
   result = lookupEnv(action.env, name)
-  if not result.present and action.kind == bakProcess:
+  # An isolated action never saw the engine's environment, so a name it does
+  # not declare is ABSENT for it, not the host's value.
+  if not result.present and action.kind == bakProcess and
+      not action.isolateHostEnvironment:
     result = (existsEnv(name), getEnv(name))
 
 proc actionEnvResolver*(action: BuildAction;
@@ -8254,8 +8282,11 @@ proc actionEnvResolver*(action: BuildAction;
   ## Only names actually observed by the action enter a strong fingerprint.
   var env: seq[string]
   if action.kind == bakProcess:
-    for name, value in envPairs():
-      env.add(name & "=" & value)
+    # The launch composes the child's environment exactly this way; an
+    # isolated launch starts from nothing, so neither may the snapshot.
+    if not action.isolateHostEnvironment:
+      for name, value in envPairs():
+        env.add(name & "=" & value)
     if config != nil:
       env.add(preparedActionEnv(action, config[]))
     else:
@@ -10925,6 +10956,7 @@ proc preparedRunQuotaCommand(action: BuildAction;
            else: deferred.argv),
     cwd: action.cwd,
     env: deferred.env,
+    isolateEnvironment: action.isolateHostEnvironment,
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
 
@@ -11924,7 +11956,8 @@ proc monitorHostRequest(action: BuildAction;
     interest: monitorInterest(action),
     evidenceScope: evidenceScope,
     passthroughChildStdout: true,
-    passthroughChildStderr: true)
+    passthroughChildStderr: true,
+    isolateEnv: command.isolateEnvironment)
   for entry in command.env:
     let eq = entry.find('=')
     if eq <= 0:

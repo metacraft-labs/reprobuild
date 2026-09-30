@@ -5954,10 +5954,14 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     commandStatsId = "repro provider compile edge",
     cacheable = providerCompileCacheable(plan),
     weakFingerprint = plan.compileEdge.actionFingerprint,
-    envPassthrough = ProviderCompileEnvironmentPassthrough,
+    envPassthrough = @ProviderCompileEnvironmentPassthrough &
+      @ProviderCompileIsolatedPassthrough,
     # The same edge as the dev-env engine's, so the same declared environment
     # (see `providerCompileLaunchEnv`).
     env = providerCompileLaunchEnv(compilerCwd / "home"),
+    # Dev-Env-Warm-Entry.md §2: the compile starts from the environment
+    # declared above and nothing else, so no caller variable can be an input.
+    isolateHostEnvironment = true,
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy = automaticMonitorGatheringPolicy(
