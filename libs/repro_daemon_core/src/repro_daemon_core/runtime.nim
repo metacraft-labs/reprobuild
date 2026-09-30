@@ -1062,6 +1062,20 @@ var activeSessionCacheDir = ""
 var activeSessionStateById = initTable[string, bool]()
 var activeSessionTally = 0
 
+proc abandonedRecord(session: UserDaemonSession): UserDaemonSession =
+  ## The `abandoned` rewrite of one record whose writer is provably gone.
+  ##
+  ## ONE DEFINITION, because two sites reclaim: the startup sweep
+  ## (`reclaimAbandonedSessions`) and the tally reconciliation
+  ## (`refreshBelievedActiveSessions`). A second spelling of the same rewrite
+  ## is how the two would come to disagree about what a reclaimed record
+  ## looks like, and `repro daemon sessions` reads both.
+  result = session
+  result.state = AbandonedSessionState
+  result.endedAtUnix = getTime().toUnix
+  if result.message.len == 0:
+    result.message = "writer process no longer exists"
+
 proc reclaimAbandonedSessions*(config: UserDaemonConfig): int =
   ## Rewrite every non-terminal record whose writer PROVABLY no longer exists
   ## as `abandoned`. Returns how many were reclaimed.
@@ -1099,12 +1113,8 @@ proc reclaimAbandonedSessions*(config: UserDaemonConfig): int =
       continue
     if writerLiveness(session.writer) != wlDead:
       continue
-    session.state = AbandonedSessionState
-    session.endedAtUnix = getTime().toUnix
-    if session.message.len == 0:
-      session.message = "writer process no longer exists"
     try:
-      writeSessionRecord(config, session)
+      writeSessionRecord(config, abandonedRecord(session))
       inc result
     except CatchableError:
       # A record that cannot be rewritten stays as it was; the next daemon
@@ -1160,24 +1170,67 @@ proc refreshBelievedActiveSessions(config: UserDaemonConfig) =
   ## ended; one that cannot be READ keeps its last known state, because
   ## under-reporting live work is the failure `restartCandidateReady` cannot
   ## afford (see the note above `activeSessionCacheDir`).
+  ##
+  ## A RECORD LEFT NON-TERMINAL BY A WRITER THAT DIED COUNTS AS ENDED TOO,
+  ## AND IS RECLAIMED HERE. The re-read above answers "did someone write a
+  ## terminal state?", and that is only half of how a session stops being
+  ## live work: the other half is a worker that is SIGKILLed, OOM-killed or
+  ## dies with its terminal machine, which writes nothing at all. Such a
+  ## record stays `running` on disk forever, so the re-read keeps agreeing
+  ## that it is active and the tally keeps blocking the dev self-restart --
+  ## for the whole life of the daemon process, because
+  ## `reclaimAbandonedSessions` runs only at prime/startup. Measured on this
+  ## workstation: a daemon deferring its restart 16,788 consecutive times,
+  ## and a live per-user daemon holding a tally that never came down.
+  ##
+  ## So the reconciliation happens WHERE THE ANSWER WOULD BLOCK AN ACTION
+  ## rather than only at startup. It costs nothing extra: the record has just
+  ## been read, and `writerLiveness` is one `/proc` (or `sysctl`) probe per
+  ## session in flight -- never the unbounded directory walk. The rewrite is
+  ## what makes the finding durable and shared: this process stops counting
+  ## the record, and every other process that reads `sessions/` now sees
+  ## `abandoned` instead of a lie.
+  ##
+  ## UNKNOWN IDENTITY IS STILL TREATED AS LIVE, exactly as in
+  ## `reclaimAbandonedSessions` and for the same reason: only `wlDead` is
+  ## provable, and reclaiming a record out from under a running writer would
+  ## let two builds believe they own one session.
   var ended: seq[string] = @[]
+  var abandoned: seq[UserDaemonSession] = @[]
   for sessionId, active in activeSessionStateById.pairs:
     if not active:
       continue
     let path = sessionRecordPath(config, sessionId)
-    var stillActive = true
     if not fileExists(path):
-      stillActive = false
-    else:
-      try:
-        stillActive = sessionStateIsActive(readSessionRecord(path).state)
-      except CatchableError:
-        stillActive = true
-    if not stillActive:
       ended.add(sessionId)
+      continue
+    var record: UserDaemonSession
+    try:
+      record = readSessionRecord(path)
+    except CatchableError:
+      # Keeps its last known state: see the docstring on why this direction.
+      continue
+    if not sessionStateIsActive(record.state):
+      ended.add(sessionId)
+    elif writerLiveness(record.writer) == wlDead:
+      abandoned.add(record)
   for sessionId in ended:
     activeSessionStateById[sessionId] = false
     dec activeSessionTally
+  # After the loop, never inside it: `writeSessionRecord` folds the record
+  # into `activeSessionStateById` through `noteSessionRecordWritten`, and a
+  # table must not be mutated while it is being iterated.
+  for record in abandoned:
+    try:
+      writeSessionRecord(config, abandonedRecord(record))
+    except CatchableError:
+      # The record stays as it is on disk and the next reconciliation tries
+      # again -- but this process stops counting it either way, because the
+      # writer is provably gone whether or not the rewrite landed.
+      discard
+    if activeSessionStateById.getOrDefault(record.sessionId, false):
+      activeSessionStateById[record.sessionId] = false
+      dec activeSessionTally
 
 proc activeSessionTallyFor*(config: UserDaemonConfig): int =
   ## The number `statusFor` reports. O(1) after the first call.
