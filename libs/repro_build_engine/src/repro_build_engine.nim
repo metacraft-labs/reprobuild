@@ -12607,7 +12607,16 @@ type
     ## writes the LOCK — the generated rule-set artifact — to the action's
     ## single output.
 
+  ForeignProvisionExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## Dependency-Provisioning-In-Build-Graph.md section 2: the executor of a
+    ## ``bakForeignProvision`` edge for ONE provisioner, keyed by the name the
+    ## edge carries in ``argv[0]``. ``repro_tool_profiles`` registers the
+    ## ``"tarball"`` provisioner. Indirect for the usual layering reason: the
+    ## realizer (download, verify, extract, seal into the tool store) lives
+    ## above the engine, and the engine must not depend on it.
+
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
+var foreignProvisionExecutors {.threadvar.}: Table[string, ForeignProvisionExecutor]
 var binaryCacheSubstituteExecutor {.threadvar.}: BinaryCacheSubstituteExecutor
 var metadataFetchExecutor {.threadvar.}: MetadataFetchExecutor
 var solveLockExecutor {.threadvar.}: SolveLockExecutor
@@ -12652,6 +12661,25 @@ proc registerSolveLockExecutor*(executor: SolveLockExecutor) =
 
 proc clearSolveLockExecutor*() =
   solveLockExecutor = nil
+
+proc registerForeignProvisionExecutor*(provisioner: string;
+                                       executor: ForeignProvisionExecutor) =
+  ## Register the per-thread executor for ``bakForeignProvision`` edges whose
+  ## ``argv[0]`` is ``provisioner``. Idempotent: registering again replaces.
+  if provisioner.len == 0:
+    raiseEngine("registerForeignProvisionExecutor requires a provisioner name")
+  foreignProvisionExecutors[provisioner] = executor
+
+proc clearForeignProvisionExecutor*(provisioner: string) =
+  foreignProvisionExecutors.del(provisioner)
+
+proc foreignProvisionExecutorFor*(provisioner: string): ForeignProvisionExecutor =
+  foreignProvisionExecutors.getOrDefault(provisioner, nil)
+
+proc registeredForeignProvisioners*(): seq[string] =
+  for name in foreignProvisionExecutors.keys:
+    result.add(name)
+  result.sort()
 
 proc builtinPath(action: BuildAction; path: string): string =
   materialPath(action.cwd, path)
@@ -13408,11 +13436,38 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         solveRes.runQuotaBackend else: "solve-lock"
       return
     of bakForeignProvision:
+      # ``argv[0]`` is the PROVISIONER DISCRIMINATOR, not an executable. A
+      # provisioner with a registered executor runs through it on every
+      # platform -- the tarball provisioner is one, registered by
+      # ``repro_tool_profiles`` (Dependency-Provisioning-In-Build-Graph.md
+      # section 4). Nix is the one provisioner the engine executes itself,
+      # through ``reprobuild-nix-daemon``, and it exists only where Nix does.
+      let provisionerName = if action.argv.len > 0: action.argv[0] else: ""
+      let registered = foreignProvisionExecutorFor(provisionerName)
+      if not registered.isNil:
+        let provRes = registered(action)
+        result.status = provRes.status
+        result.exitCode = provRes.exitCode
+        result.stdout = provRes.stdout
+        result.stderr = provRes.stderr
+        result.reason = provRes.reason
+        result.launched = provRes.launched
+        result.evidence = provRes.evidence
+        result.runQuotaBackend = if provRes.runQuotaBackend.len > 0:
+          provRes.runQuotaBackend else: "provision-" & provisionerName
+        return
+      if provisionerName != "nix":
+        raiseEngine("bakForeignProvision: no executor is registered for " &
+          "provisioner \"" & provisionerName & "\" (registered: " &
+          registeredForeignProvisioners().join(", ") & "): " & action.id)
       when defined(windows):
-        raiseEngine("bakForeignProvision is not supported on Windows")
+        raiseEngine("bakForeignProvision: the nix provisioner is not " &
+          "available on Windows, where Nix does not run natively; select a " &
+          "provisioner that serves Windows (tarball, scoop, from-source): " &
+          action.id)
       else:
-        # Nix evaluation daemon or scoop provisioning action
-        let provisioner = if action.argv.len > 0: action.argv[0] else: ""
+        # Nix evaluation daemon provisioning action
+        let provisioner = provisionerName
         let selector = if action.argv.len > 1: action.argv[1] else: ""
         if provisioner.len == 0 or selector.len == 0:
           raiseEngine("bakForeignProvision action requires provisioner and selector in argv: " & action.id)
