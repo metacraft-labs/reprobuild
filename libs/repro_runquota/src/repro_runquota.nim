@@ -47,6 +47,12 @@ type
     env*: seq[string]
     stdoutLimit*: int
     stderrLimit*: int
+    isolatedEnv*: bool
+      ## The child's environment is EXACTLY ``env``: nothing is inherited
+      ## from this process. Off (the zero value), ``env`` is layered over the
+      ## inherited environment, which can replace a variable but never remove
+      ## one. The build engine sets it for actions launched with an
+      ## allowlisted environment (``BuildEngineConfig.hermeticEnv``).
 
   ReproRunQuotaExecution* = object
     leaseId*: uint64
@@ -711,6 +717,30 @@ proc finishOutcome(completion: ProcessCompletion;
     # the same shape of untruth these types exist to prevent.
     cancelled()
 
+proc launchSpec(command: ReproCommandSpec): CommandSpec =
+  ## The one place a ``ReproCommandSpec`` becomes RunQuota's ``CommandSpec``.
+  ##
+  ## ``inheritEnv`` arrived in runquota 2c50aaf. A runquota older than that
+  ## cannot start a child from nothing, so there ``isolatedEnv`` degrades to
+  ## layering: the declared entries still win, and what leaks through is only
+  ## what the lookup would have seen anyway. Keys stay sound either way,
+  ## because an action is keyed on the variables it was OBSERVED reading.
+  when compiles(commandSpec(["x"], inheritEnv = false)):
+    commandSpec(
+      command.argv,
+      cwd = command.cwd,
+      env = command.env,
+      stdoutLimit = command.stdoutLimit,
+      stderrLimit = command.stderrLimit,
+      inheritEnv = not command.isolatedEnv)
+  else:
+    commandSpec(
+      command.argv,
+      cwd = command.cwd,
+      env = command.env,
+      stdoutLimit = command.stdoutLimit,
+      stderrLimit = command.stderrLimit)
+
 proc acquireCliArgs*(request: ReproResourceRequest;
                      command: ReproCommandSpec): seq[string] =
   result = @[
@@ -738,6 +768,8 @@ proc helperCliArgs*(request: ReproResourceRequest;
     "--stdout-limit", $command.stdoutLimit,
     "--stderr-limit", $command.stderrLimit
   ]
+  if command.isolatedEnv:
+    result.add("--isolated-env")
   for entry in command.env:
     result.add("--env")
     result.add(entry)
@@ -1168,12 +1200,7 @@ proc runWithRunQuota*(request: ReproResourceRequest;
     result.leaseId = lease.id.value
     try:
       lease.markStarting()
-      var child = launchProcess(commandSpec(
-        command.argv,
-        cwd = command.cwd,
-        env = command.env,
-        stdoutLimit = command.stdoutLimit,
-        stderrLimit = command.stderrLimit))
+      var child = launchProcess(launchSpec(command))
       lease.markRunning(
         childProcessId = child.info.processId,
         processGroupId = child.info.processGroupId,
@@ -1243,12 +1270,7 @@ proc startDirect*(command: ReproCommandSpec): ReproDirectRunningProcess =
   ## The shared process backend preserves argument boundaries and drains child
   ## output while the command runs, including on Windows.
   try:
-    result.child = launchProcess(commandSpec(
-      command.argv,
-      cwd = command.cwd,
-      env = command.env,
-      stdoutLimit = command.stdoutLimit,
-      stderrLimit = command.stderrLimit))
+    result.child = launchProcess(launchSpec(command))
     result.active = true
   except CatchableError as err:
     raise newException(ReproRunQuotaError, err.msg)
@@ -1389,12 +1411,7 @@ proc startGrantedWithRunQuota(session: ReproRunQuotaSession;
   var lease = lease
   try:
     lease.markStarting()
-    var child = launchProcess(commandSpec(
-      command.argv,
-      cwd = command.cwd,
-      env = command.env,
-      stdoutLimit = command.stdoutLimit,
-      stderrLimit = command.stderrLimit))
+    var child = launchProcess(launchSpec(command))
     lease.markRunning(
       childProcessId = child.info.processId,
       processGroupId = child.info.processGroupId,
@@ -2021,6 +2038,9 @@ proc runRunQuotaHelperCli*(args: openArray[string]): int =
       if i + 1 >= args.len: return 2
       command.env.add(args[i + 1])
       i += 2
+    of "--isolated-env":
+      command.isolatedEnv = true
+      i += 1
     of "--":
       if i + 1 >= args.len: return 2
       command.argv = @args[i + 1 .. ^1]
