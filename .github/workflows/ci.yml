@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, dev]
   pull_request:
+    branches-ignore: [agents]
 
 # This workflow supersedes its own older runs, on branches as well as pull
 # requests, and that is deliberate rather than merely inherited.
