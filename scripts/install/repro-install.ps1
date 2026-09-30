@@ -38,7 +38,7 @@
   ## Idempotence
 
   Every write is a fixed location and a replacement: one bucket named
-  `reprobuild`, one Scoop app. Adding a bucket that is already present is
+  `metacraft` (shared by every Metacraft product), one Scoop app. Adding a bucket that is already present is
   detected and skipped rather than retried, so a second run does not
   produce a duplicate bucket or a second app.
 #>
@@ -93,7 +93,10 @@ if ($BaseUrl) {
   $DownloadsUrl = "$b/downloads"
   $KeysUrl = "$b/keys"
 } else {
-  $ScoopBucketUrl = if ($BucketUrl) { $BucketUrl } else { 'https://github.com/metacraft-labs/scoop-metacraft' }
+  # The organisation's Scoop bucket: bucket/ on the default branch of
+  # metacraft-desktop-packages, the repository that also publishes
+  # deb./rpm.metacraft-labs.com. Every release refreshes its manifest.
+  $ScoopBucketUrl = if ($BucketUrl) { $BucketUrl } else { 'https://github.com/metacraft-labs/metacraft-desktop-packages' }
   $DownloadsUrl = 'https://github.com/metacraft-labs/reprobuild/releases/download'
   $KeysUrl = "https://deb.$Domain/keys"
 }
