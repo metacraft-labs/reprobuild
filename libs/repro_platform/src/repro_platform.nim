@@ -43,6 +43,80 @@ type
       ## ``available`` is ``false`` (no VS Build Tools detected or
       ## activation failed). Callers should merge this on top of their
       ## desired base env, allowing their own overrides to win.
+    ownedLists*: Table[string, seq[string]]
+      ## Search-list entries that belong to the MSVC / Windows SDK install,
+      ## keyed by the upper-cased list variable (``PATH``, ``LIB``,
+      ## ``INCLUDE``, ``LIBPATH``). Filled for an INHERITED activation, where
+      ## ``env`` is empty; for a fresh one it is derived from ``env`` on
+      ## demand. ``mergeActionEnvWithMsvcEnv`` appends these to an action's
+      ## own value of the same variable instead of letting either replace
+      ## the other.
+
+const
+  MsvcListKeys* = ["PATH", "LIB", "INCLUDE", "LIBPATH"]
+    ## The semicolon-separated search lists VsDevCmd extends. ``cl.exe`` /
+    ## ``link.exe`` are found through ``PATH``, and the compiler and linker
+    ## then search ``INCLUDE`` / ``LIB`` / ``LIBPATH`` — an action that
+    ## declares its own value for any of them needs the install's entries
+    ## kept, exactly as for ``PATH``.
+  MsvcRootKeys = ["VSINSTALLDIR", "VCINSTALLDIR", "VCToolsInstallDir",
+    "VCIDEInstallDir", "DevEnvDir", "WindowsSdkDir", "WindowsSdkBinPath",
+    "WindowsSdkVerBinPath", "UniversalCRTSdkDir", "ExtensionSdkDir",
+    "NETFXSDKDir", "FrameworkDir", "FrameworkDir64", "FrameworkDIR64"]
+    ## Variables whose values are install ROOTS of the MSVC toolchain and the
+    ## Windows SDK. A search-list entry is MSVC-owned iff it lies under one.
+
+proc normalizedWinPath(p: string): string =
+  ## Case-folded, backslash-separated, without a trailing separator — the
+  ## identity Windows gives a directory in a search list.
+  result = p.strip().replace('/', '\\').toLowerAscii()
+  while result.len > 3 and result[^1] == '\\':
+    result.setLen(result.len - 1)
+
+proc envLookupIgnoreCase(env: Table[string, string]; key: string): string =
+  for k, v in env.pairs:
+    if cmpIgnoreCase(k, key) == 0:
+      return v
+  ""
+
+proc msvcOwnedEntries*(value: string; roots: openArray[string]): seq[string] =
+  ## The entries of the ``;``-separated list ``value`` that lie under one of
+  ## ``roots`` (or are one), in order, deduplicated. Windows semantics on
+  ## every host: case-insensitive, ``/`` and ``\\`` equivalent, a trailing
+  ## separator ignored. ``C:\\BuildToolsX`` is not under ``C:\\BuildTools``.
+  var normRoots: seq[string] = @[]
+  for r in roots:
+    let n = normalizedWinPath(r)
+    if n.len > 0: normRoots.add(n)
+  var seen: seq[string] = @[]
+  for part in value.split(';'):
+    let n = normalizedWinPath(part)
+    if n.len == 0 or n in seen: continue
+    for r in normRoots:
+      if n == r or n.startsWith(r & "\\"):
+        seen.add(n)
+        result.add(part.strip())
+        break
+
+proc msvcRootsOf(env: Table[string, string]): seq[string] =
+  for key in MsvcRootKeys:
+    let v = envLookupIgnoreCase(env, key)
+    if v.len > 0: result.add(v)
+
+proc inheritedMsvcDevEnv*(path: string; roots: openArray[string];
+                          lib = ""; includes = ""; libpath = ""): MsvcDevEnv =
+  ## The dev env of a process that already runs INSIDE an activation (a
+  ## nested ``repro``). Nothing needs to be exported — the child inherits the
+  ## variables — but an action that declares its own ``PATH`` replaces the
+  ## inherited one, so the MSVC-owned entries of the inherited lists are
+  ## recorded to be merged back in.
+  result = MsvcDevEnv(available: true)
+  let lists = [("PATH", path), ("LIB", lib), ("INCLUDE", includes),
+    ("LIBPATH", libpath)]
+  for (key, value) in lists:
+    let owned = msvcOwnedEntries(value, roots)
+    if owned.len > 0:
+      result.ownedLists[key] = owned
 
 when defined(windows):
   var msvcDevEnvLock: Lock
@@ -219,7 +293,12 @@ when defined(windows):
     ## long`, and left the caller without the toolchain it was already
     ## standing in.
     if getEnv("VCToolsInstallDir").len > 0 and getEnv("VSINSTALLDIR").len > 0:
-      return MsvcDevEnv(available: true)
+      var roots: seq[string] = @[]
+      for key in MsvcRootKeys:
+        let v = getEnv(key)
+        if v.len > 0: roots.add(v)
+      return inheritedMsvcDevEnv(getEnv("PATH"), roots, getEnv("LIB"),
+        getEnv("INCLUDE"), getEnv("LIBPATH"))
 
     let vswhere = locateVsWhere()
     if vswhere.len == 0:
@@ -343,21 +422,70 @@ proc msvcDevEnvAsArgvStyle*(devEnv: MsvcDevEnv): seq[string] =
   for key, value in devEnv.env.pairs:
     result.add(key & "=" & value)
 
+proc ownedListFor(devEnv: MsvcDevEnv; key: string): seq[string] =
+  if devEnv.ownedLists.hasKey(key):
+    return devEnv.ownedLists[key]
+  let value = envLookupIgnoreCase(devEnv.env, key)
+  if value.len == 0: return @[]
+  msvcOwnedEntries(value, msvcRootsOf(devEnv.env))
+
+proc combineSearchList(actionValue: string; owned: seq[string]): string =
+  ## The action's entries first, in its order — its tools keep precedence —
+  ## followed by every MSVC-owned entry it does not already carry.
+  var seen: seq[string] = @[]
+  var parts: seq[string] = @[]
+  for part in actionValue.split(';'):
+    if part.len == 0: continue
+    parts.add(part)
+    seen.add(normalizedWinPath(part))
+  for entry in owned:
+    let n = normalizedWinPath(entry)
+    if n notin seen:
+      seen.add(n)
+      parts.add(entry)
+  parts.join(";")
+
+proc mergeActionEnvWithMsvcEnv*(devEnv: MsvcDevEnv;
+                                actionEnv: openArray[string]): seq[string] =
+  ## Layer the MSVC dev env under ``actionEnv`` (argv-style ``KEY=VALUE``,
+  ## consumed rightmost-wins by ``envTableFromArgvStyle`` and the runquota
+  ## helper's ``--env`` flags).
+  ##
+  ## An ordinary variable the action declares wins outright. A SEARCH LIST it
+  ## declares (``MsvcListKeys``, matched case-insensitively) is COMBINED
+  ## instead: the action's entries, then the MSVC-owned entries it lacks.
+  ## Letting the action's ``PATH`` simply replace the activated one dropped
+  ## ``cl.exe``'s directory while ``VCINSTALLDIR`` survived, and the Rust
+  ## ``cc`` crate — which reads ``VCINSTALLDIR`` as "already configured" and
+  ## then searches PATH only — failed with ``failed to find tool "cl.exe"``.
+  ## Only MSVC-owned entries are added, so an ambient directory VsDevCmd
+  ## merely passed through does not leak into an action that chose its PATH.
+  ##
+  ## Pure, and Windows-semantic on every host, so it is unit-tested anywhere.
+  if not devEnv.available:
+    return @actionEnv
+  result = msvcDevEnvAsArgvStyle(devEnv)
+  for entry in actionEnv:
+    let eq = entry.find('=')
+    if eq > 0:
+      let key = entry[0 ..< eq]
+      var listKey = ""
+      for k in MsvcListKeys:
+        if cmpIgnoreCase(k, key) == 0:
+          listKey = k
+          break
+      if listKey.len > 0:
+        let owned = ownedListFor(devEnv, listKey)
+        if owned.len > 0:
+          result.add(key & "=" & combineSearchList(entry[eq + 1 .. ^1], owned))
+          continue
+    result.add(entry)
+
 proc mergeActionEnvWithMsvc*(actionEnv: openArray[string]):
     seq[string] =
-  ## Prepend the cached MSVC dev-env diff to ``actionEnv`` so the
-  ## action's own ``KEY=VALUE`` entries win for any overlapping keys.
-  ## The argv-style env is consumed left-to-right by both
-  ## ``envTableFromArgvStyle`` (bypass path) and the runquota helper's
-  ## ``--env`` flags (which apply in argv order); duplicates with the
-  ## same key are overwritten by the rightmost entry. No-op on
-  ## non-Windows or when the MSVC env is unavailable.
+  ## ``mergeActionEnvWithMsvcEnv`` over the host's cached activation. No-op
+  ## on non-Windows hosts.
   when defined(windows):
-    let devEnv = activateMsvcDevEnv()
-    if not devEnv.available:
-      return @actionEnv
-    result = msvcDevEnvAsArgvStyle(devEnv)
-    for entry in actionEnv:
-      result.add(entry)
+    result = mergeActionEnvWithMsvcEnv(activateMsvcDevEnv(), actionEnv)
   else:
     result = @actionEnv
