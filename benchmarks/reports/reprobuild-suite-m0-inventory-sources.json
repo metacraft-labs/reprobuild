@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1780,
+    "nimTestBinaries": 1782,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 590,
-    "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1795
+    "staticallyDetectedRuntimeCompilerFlowTests": 108,
+    "testEntries": 1797
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1078,7 +1078,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 918,
+      "integration": 920,
       "platform/destructive": 117,
       "pure unit": 590,
       "unclassified": 159
@@ -1229,9 +1229,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1780,
+    "nimTestBinaryCount": 1782,
     "pythonTestFileCount": 15,
-    "testEntryCount": 1795
+    "testEntryCount": 1797
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -4669,6 +4669,27 @@
         }
       ],
       "source": "tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "parts",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "env",
+            "parts"
+          ],
+          "line": 39,
+          "path": "tests/integration/t_moved_package_without_catalog_names_where_it_looked.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "var parts = @[findExe(\"nim\").quoteShell, \"check\", \"--hints:off\","
+        }
+      ],
+      "source": "tests/integration/t_moved_package_without_catalog_names_where_it_looked.nim"
     },
     {
       "class": "integration",
@@ -29375,6 +29396,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_moved_package_without_catalog_names_where_it_looked",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_moved_package_without_catalog_names_where_it_looked.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -33347,6 +33385,24 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_uses_resolves_reprobuild_packages_interface.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_uses_resolves_sqlite3_from_real_reprobuild_packages",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,

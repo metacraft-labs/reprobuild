@@ -27,6 +27,7 @@ import repro_binary_cache_client/caches_config
 import repro_binary_cache_client/in_process as bcInProcess
 import repro_binary_cache_server/types as bcTypes
 import repro_project_dsl/install_mirror_resolver
+import repro_project_dsl/reprobuild_packages_catalog
 # repro_local_store provides the M56 unified store. Every adapter
 # (Nix / tarball / Scoop) calls `registerInUnifiedStore` after laying
 # out its realized prefix on disk so the same SQLite-backed
@@ -1082,12 +1083,30 @@ proc selectNixProvisioning(useDef: InterfaceToolUse):
       contributors.mapIt(contributorLabel(it)).join(", ") &
       "; select one through the lock or REPRO_PROVISIONING_CONTRIBUTOR")
 
+proc noProvisioningAtAllHint(useDef: InterfaceToolUse): string =
+  ## Appended to a "does not declare provisioning" error when the tool use
+  ## carries NO realization of any kind. The usual cause is a package whose
+  ## definition was never imported when the recipe was compiled -- most often
+  ## one that lives in the `reprobuild-packages` catalog, compiled with no
+  ## catalog reachable -- so the error says how to provide one instead of
+  ## leaving the reader to guess why a well-known package has no metadata.
+  if useDef.nixProvisioning.len > 0 or useDef.tarballProvisioning.len > 0 or
+      useDef.scoopProvisioning.len > 0:
+    return ""
+  "; `" & useDef.packageSelector & "` carries no realization of any kind," &
+    " so nothing that declares one was imported when the recipe was" &
+    " compiled. If the reprobuild-packages catalog defines it" &
+    " (packages/interfaces/" & useDef.packageSelector & "/repro.nim), the" &
+    " recipe was compiled without a reachable catalog.\n" &
+    reprobuildPackagesRemedy()
+
 proc nixAcquisitionPlan*(useDef: InterfaceToolUse): NixAcquisitionPlan =
   if useDef.nixProvisioning.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
-      "\" does not declare provisioning: nixPackage metadata")
+      "\" does not declare provisioning: nixPackage metadata" &
+      noProvisioningAtAllHint(useDef))
   let selected = selectNixProvisioning(useDef)
   if selected.selector.len == 0 or selected.executablePath.len == 0:
     raise newException(ValueError,
@@ -1920,7 +1939,8 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
-      "\" does not declare provisioning: tarball metadata")
+      "\" does not declare provisioning: tarball metadata" &
+      noProvisioningAtAllHint(useDef))
   let selected = selectTarballProvisioning(useDef)
   let sha256 = normalizedSha256(selected.sha256)
   if selected.url.len == 0 or selected.executablePath.len == 0:
@@ -4316,7 +4336,8 @@ proc scoopAcquisitionPlan*(useDef: InterfaceToolUse): ScoopAcquisitionPlan =
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
-      "\" does not declare provisioning: scoopApp metadata")
+      "\" does not declare provisioning: scoopApp metadata" &
+      noProvisioningAtAllHint(useDef))
   let requested = requestedProvisioningContributor()
   var contributors: seq[string] = @[]
   var candidates: seq[InterfaceScoopProvisioning] = @[]
