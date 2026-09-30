@@ -143,6 +143,15 @@ type
       ## inside the ``cli:`` block and inherited by every nested ``subcmd``
       ## exactly the way ``dependencyPolicy`` is. Defaults to
       ## ``ndpUnblessed``.
+    subTools*: seq[string]
+      ## Tools this tool itself shells out to by BARE NAME, declared once
+      ## with ``subTools "rustc", "gcc"`` directly under ``cli:``. A
+      ## ``uses:`` entry of the calling recipe that matches one of these
+      ## names has its resolved directory PREPENDED to every edge of this
+      ## tool; an unmatched name is inert. Unlike an edge's
+      ## ``toolIdentityRefs`` this is not a statement about the edge's
+      ## complete tool set, so it does not make the edge's ``PATH``
+      ## hermetic.
     nonDeterminismJustification*: string
       ## Why the blessing above is sound. Required when the policy is
       ## ``ndpEntropyBlessed`` (the macro rejects a bare blessing), carried
@@ -1002,6 +1011,15 @@ type
       ## the engine resolves them at fork time, and PATH is
       ## populated with the resolved store paths so the bare tool
       ## name finds the right binary.
+    subToolRefs*: seq[string]
+      ## The typed tool's own ``subTools`` (see ``CliCommandDef.subTools``),
+      ## copied onto each edge the tool's wrapper records. Each name that
+      ## matches a resolved ``uses:`` tool contributes that tool's
+      ## directory to the edge's ``PATH`` ahead of everything else, and
+      ## keeps the tool resolvable for a fragment build that selects only
+      ## this edge. Unlike ``toolIdentityRefs`` these do NOT opt the edge
+      ## into a hermetic ``PATH``: the tool vouches for what IT runs, not
+      ## for what the edge's build scripts may run. Payload codec v29+.
     toolIdentityRefKinds*: seq[ToolIdentityRefKind]
       ## Platform role parallel to ``toolIdentityRefs``. An empty or
       ## mismatched list preserves the legacy ``tirkBuild`` default.

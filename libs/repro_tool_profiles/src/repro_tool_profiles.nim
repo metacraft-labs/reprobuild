@@ -3581,6 +3581,99 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
       removeDir(extendedPath(tempPrefix))
     raise
 
+type
+  TarballHostLoaderMissing* = object of OSError
+    ## A tarball-realized executable names a dynamic loader (ELF
+    ## ``PT_INTERP``) that does not exist on this host, so the kernel would
+    ## refuse to start it. NixOS is the common case: a generic-Linux binary
+    ## asks for ``/lib64/ld-linux-x86-64.so.2`` and NixOS has no such file.
+    ## A distinct type so path-mode resolution can fall through to the
+    ## package's Nix channel instead of reporting the tarball failure.
+    loader*: string
+    executable*: string
+
+proc elfProgramInterpreter*(path: string): string =
+  ## The ``PT_INTERP`` string of the ELF file at ``path``, or "" when the
+  ## file is not a little-endian ELF or carries no program interpreter (a
+  ## static binary, a script, a non-ELF payload). Reads only the header,
+  ## the program-header table and the interpreter bytes.
+  var f: File
+  if not open(f, extendedPath(path), fmRead):
+    return ""
+  defer: close(f)
+  proc readAt(f: File; offset, count: int): string =
+    if offset < 0 or count <= 0 or count > 1 shl 20:
+      return ""
+    result = newString(count)
+    try:
+      f.setFilePos(offset)
+      let got = f.readBuffer(addr result[0], count)
+      result.setLen(got)
+    except CatchableError:
+      result = ""
+  proc u16(b: string; o: int): int =
+    if o + 2 > b.len: return -1
+    ord(b[o]) or (ord(b[o + 1]) shl 8)
+  proc u32(b: string; o: int): int64 =
+    if o + 4 > b.len: return -1
+    int64(ord(b[o])) or (int64(ord(b[o + 1])) shl 8) or
+      (int64(ord(b[o + 2])) shl 16) or (int64(ord(b[o + 3])) shl 24)
+  proc u64(b: string; o: int): int64 =
+    if o + 8 > b.len: return -1
+    let lo = u32(b, o)
+    let hi = u32(b, o + 4)
+    if lo < 0 or hi < 0 or hi > 0x7fff_ffff: return -1
+    lo or (hi shl 32)
+  let hdr = readAt(f, 0, 64)
+  if hdr.len < 52 or hdr[0] != char(0x7f) or hdr[1] != 'E' or
+      hdr[2] != 'L' or hdr[3] != 'F' or ord(hdr[5]) != 1:
+    return ""
+  let is64 = ord(hdr[4]) == 2
+  let phoff = if is64: u64(hdr, 32) else: u32(hdr, 28)
+  let phentsize = if is64: u16(hdr, 54) else: u16(hdr, 42)
+  let phnum = if is64: u16(hdr, 56) else: u16(hdr, 44)
+  if phoff <= 0 or phentsize < 32 or phnum <= 0:
+    return ""
+  let table = readAt(f, int(phoff), phentsize * phnum)
+  for i in 0 ..< phnum:
+    let e = i * phentsize
+    if u32(table, e) != 3: # PT_INTERP
+      continue
+    let offset = if is64: u64(table, e + 8) else: u32(table, e + 4)
+    let size = if is64: u64(table, e + 32) else: u32(table, e + 16)
+    if offset <= 0 or size <= 0 or size > 4096:
+      return ""
+    var interp = readAt(f, int(offset), int(size))
+    let nul = interp.find('\0')
+    if nul >= 0: interp.setLen(nul)
+    return interp
+  ""
+
+proc refuseUnrunnableTarballExecutable(useDef: InterfaceToolUse;
+                                       executable: string) =
+  ## Linux only: refuse a realized executable whose dynamic loader is absent
+  ## from this host. Starting it would fail with exit 127 inside whatever
+  ## action first runs it, far from the provisioning decision that caused
+  ## it; refusing here names the tool, the loader and the remedy.
+  when defined(linux):
+    let loader = elfProgramInterpreter(executable)
+    if loader.len == 0 or fileExists(loader):
+      return
+    let name =
+      if useDef.executableName.len > 0: useDef.executableName
+      else: useDef.packageSelector
+    var err = newException(TarballHostLoaderMissing,
+      "tool-resolution failed: the tarball-provisioned `" & name &
+      "` (" & executable & ") is a dynamically linked generic-Linux " &
+      "binary that needs the loader " & loader & ", which this host does " &
+      "not have (NixOS and other hosts without an FHS loader cannot run " &
+      "it). Provide `" & name & "` on PATH (e.g. from the project's dev " &
+      "shell), or use Nix provisioning: --tool-provisioning=nix or " &
+      "REPRO_TOOL_PROVISIONING=nix.")
+    err.loader = loader
+    err.executable = executable
+    raise err
+
 proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
                          writerMode = "direct"):
     PathOnlyToolProfile =
@@ -3597,6 +3690,7 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
     raise newException(OSError,
       "tool-resolution failed: tarball realization lacks " &
       plan.declaredExecutablePath)
+  refuseUnrunnableTarballExecutable(useDef, resolved)
 
   result = PathOnlyToolProfile(
     installMethod: "tarball",
@@ -6609,7 +6703,17 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
       result = resolvePathOnlyTool(useDef, pathValue, pathLookup)
     except OSError:
       if hasHostTarballProvisioning(useDef):
-        result = resolveTarballTool(useDef, storeRoot)
+        try:
+          result = resolveTarballTool(useDef, storeRoot)
+        except TarballHostLoaderMissing:
+          # The host cannot run the generic-Linux build (NixOS). The
+          # package's pinned Nix channel builds for this host, so prefer it
+          # over a binary that would only fail with exit 127 later.
+          if (defined(linux) or defined(macosx)) and
+              useDef.nixProvisioning.len > 0:
+            result = resolveNixTool(useDef, storeRoot)
+          else:
+            raise
       elif (defined(linux) or defined(macosx)) and
           useDef.nixProvisioning.len > 0:
         # Some upstreams, such as Cap'n Proto, do not publish direct

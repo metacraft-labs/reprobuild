@@ -486,6 +486,7 @@ libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim	nim	6
 libs/repro_project_dsl/tests/t_multi_package_macro.nim	nim	5
 libs/repro_project_dsl/tests/t_source_cache_identity.nim	nim	2
 libs/repro_project_dsl/tests/t_source_cache_identity_refuses_an_empty_provider_revision.nim	nim	7
+libs/repro_project_dsl/tests/t_sub_tool_refs_codec.nim	nim	2
 libs/repro_project_dsl/tests/t_tool_identity_ref_kind_codec.nim	nim	2
 libs/repro_project_dsl/tests/test_depends_on_macro.nim	nim	3
 libs/repro_project_dsl/tests/test_library_macro.nim	nim	12
@@ -1043,6 +1044,7 @@ tests/integration/t_cache_key_separates_v2_and_v3_artifacts.nim	nim	1
 tests/integration/t_cache_push_cannot_publish_a_branch.nim	nim	1
 tests/integration/t_cache_refuses_to_serve_an_unsatisfiable_floor.nim	nim	1
 tests/integration/t_cached_source_closure_preparation.nim	nim	2
+tests/integration/t_cargo_edge_reaches_declared_linker.nim	nim	1
 tests/integration/t_cas_restore_outputs_cleans_temp_on_failure.nim	nim	3
 tests/integration/t_cbor_rfc8949_malformed.nim	nim	14
 tests/integration/t_cbor_rfc8949_vectors.nim	nim	12
@@ -1756,6 +1758,7 @@ tests/unit/t_substituted_edge_does_not_go_stale.nim	nim	4
 tests/unit/t_substituted_provider_compile_is_verified.nim	nim	7
 tests/unit/t_tarball_non_redistributable.nim	nim	4
 tests/unit/t_tarball_prune_paths.nim	nim	3
+tests/unit/t_tarball_refuses_binary_host_cannot_start.nim	nim	4
 tests/unit/t_test_execute_edge_receives_a_usable_path.nim	nim	3
 tests/unit/t_test_execution_extension_is_framework_neutral.nim	nim	10
 tests/unit/t_tool_identity_key_resolves_before_it_keys.nim	nim	10

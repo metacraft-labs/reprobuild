@@ -104,6 +104,16 @@ package cargo:
 
   executable cargo:
     cli:
+      # cargo does not compile or link Rust itself. It runs ``rustc``, and
+      # ``rustc`` runs a C compiler driver (``cc``) as its linker. Both are
+      # found by BARE NAME on the edge's PATH, so they are this tool's
+      # sub-tools: a recipe that declares ``"rustc"`` and its C compiler
+      # (``"gcc"`` on Linux, ``"clang"`` on macOS) in ``uses:`` gets their
+      # resolved directories on every cargo edge's PATH. A name the recipe
+      # does not declare is inert. Tools a crate's build script runs are
+      # the recipe's to declare at the call site; they are not cargo's.
+      subTools "rustc", "gcc", "clang"
+
       # MR16: cargo + rustc emit one Make-format ``.d`` depfile per
       # crate under ``target/<profile>/deps/<crate>-<hash>.d`` (the
       # hash depends on compiler-input content so the recipe cannot

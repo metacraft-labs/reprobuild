@@ -255,7 +255,9 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 28'u16
+  BuildActionPayloadVersion* = 29'u16
+    ## v29: ``subToolRefs`` — the typed tool's own bare-name sub-tools
+    ## (``cli: subTools ...``), a string list appended last.
     ## v28: Cache-Scope P3.4 — the ``fixedOutput`` edge attribute, one strict
     ## sentinel byte appended last.
     ## v27: the tool package's capture-breadth declaration
@@ -2531,6 +2533,21 @@ proc appendRegisteredActionToolIdentityRefs*(actionId: string;
           buildActionRegistry[i].toolIdentityRefs.add(refName)
       return
 
+proc appendRegisteredActionSubToolRefs*(actionId: string;
+                                        refs: openArray[string]) {.dynOrStatic.} =
+  ## Record the typed tool's own bare-name sub-tools (``cli: subTools``) on
+  ## an already-registered action, in declaration order, deduplicated. The
+  ## generated typed-tool wrapper calls this right after
+  ## ``recordToolInvocation``; see ``BuildActionDef.subToolRefs`` for how
+  ## these differ from ``toolIdentityRefs``. No-op when the id is absent.
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      for refName in refs:
+        if refName.len > 0 and
+            refName notin buildActionRegistry[i].subToolRefs:
+          buildActionRegistry[i].subToolRefs.add(refName)
+      return
+
 proc classifyRegisteredActionToolIdentityRefs*(
     actionId: string;
     buildRefs: openArray[string];
@@ -3673,6 +3690,9 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
   # action. One strict sentinel byte.
   if version >= 28'u16:
     payload.writeByte(if action.fixedOutput: 1'u8 else: 0'u8)
+  # v29: the typed tool's own sub-tools (``cli: subTools``).
+  if version >= 29'u16:
+    payload.writeStringSeq(action.subToolRefs)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -3893,6 +3913,10 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.fixedOutput = fixedByte == 1'u8
   else:
     result.fixedOutput = false
+  if version >= 29'u16:
+    result.subToolRefs = readStringSeq(bytes, pos)
+  else:
+    result.subToolRefs = @[]
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

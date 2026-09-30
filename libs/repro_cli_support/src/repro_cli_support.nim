@@ -2799,8 +2799,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   # successful branch below replaces the sentinel with its real action.
   result = noScheduledAction()
   let payload = decodeBuildActionPayload(toBytes(node.payload))
+  # The tool's own sub-tools (``cli: subTools``) sit between the tool's
+  # directory and the edge's declared refs. They widen the prefix only;
+  # whether the PATH is hermetic is decided by ``toolIdentityRefs`` alone
+  # (see ``actionPathDecision``).
   let actionPathPrefix = toolPathPrefix(profiles, payload.call.packageName,
-    payload.call.executableName, payload.toolIdentityRefs)
+    payload.call.executableName,
+    payload.subToolRefs & payload.toolIdentityRefs)
   # Named-Targets M1: copy implicit-target names off the decoded
   # payload onto every constructed ``BuildAction`` at the bottom of
   # this proc. The action constructors below don't know about
@@ -8893,12 +8898,15 @@ proc selectedToolIdentitySelectors(snapshot: ProviderGraphSnapshot;
   ## they are never persisted or used to execute an action.
   var identity = PathOnlyBuildIdentity(projectName: "metadata-selection")
   var packageNamesByExecutable = initTable[string, seq[string]]()
+  var subToolRefsById = initTable[string, seq[string]]()
   var seenProfiles = initHashSet[string]()
   for fragment in snapshot.fragments:
     for node in fragment.nodes:
       if node.kind != gnkAction:
         continue
       let action = decodeBuildActionPayload(toBytes(node.payload))
+      if action.subToolRefs.len > 0:
+        subToolRefsById[action.id] = action.subToolRefs
       let packageName = action.call.packageName
       let executableName = action.call.executableName
       if packageName.len == 0 or executableName.len == 0:
@@ -8926,6 +8934,11 @@ proc selectedToolIdentitySelectors(snapshot: ProviderGraphSnapshot;
     selectedActionIds)
   for action in selected.actions:
     for selector in action.toolIdentityRefs:
+      if selector.len > 0:
+        result.incl(selector)
+    # A selected edge's tool keeps its own sub-tools resolvable too, so a
+    # fragment build that selects only this edge still puts them on PATH.
+    for selector in subToolRefsById.getOrDefault(action.id):
       if selector.len > 0:
         result.incl(selector)
     if action.argv.len > 0 and
