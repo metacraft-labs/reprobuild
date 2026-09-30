@@ -162,8 +162,12 @@
       # whose child had to be terminated during injection now fails cleanly.
       # Requires nim-stackable-hooks 72f5782 (below).
       # Preserve child exec identities and the resumed parent guard across vfork.
+      # Bumped to 31b05a5 (io-mon#41): IPC connect records carry the socket
+      # path and the peer uid (endpoint-keyed daemon trust), and
+      # `FsSnoopRequest.isolateEnv` launches a child from its declared
+      # environment alone (Dev-Env-Warm-Entry.md).
       # Keep this, the lock, sibling clone and package fallback on one revision.
-      url = "github:metacraft-labs/io-mon/4b2bb3910283bac4d109012411e42ce67f9c969c";
+      url = "github:metacraft-labs/io-mon/31b05a5abbd5b6176f510c7cfeba7e8aa20d4064";
       flake = false;
     };
     nim-shm-gset-src = {

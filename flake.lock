@@ -1180,17 +1180,17 @@
     "io-mon-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1790634135,
-        "narHash": "sha256-4Jku7Y0IrC9OEBRkwiYC4F9xRHMG3YnQgUB3IW8cbxw=",
+        "lastModified": 1790721535,
+        "narHash": "sha256-Pjzg6WUfD5DX4iA0gyIYpTIVjKqQRrTpPzn13L727yc=",
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "4b2bb3910283bac4d109012411e42ce67f9c969c",
+        "rev": "31b05a5abbd5b6176f510c7cfeba7e8aa20d4064",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "4b2bb3910283bac4d109012411e42ce67f9c969c",
+        "rev": "31b05a5abbd5b6176f510c7cfeba7e8aa20d4064",
         "type": "github"
       }
     },
@@ -2327,6 +2327,59 @@
         "type": "github"
       }
     },
+    "release-bearssl-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1778736497,
+        "narHash": "sha256-igLvQSJWDL6Gq+pXGrNMDhEl+srXfW0vyLFVh8r9GuY=",
+        "ref": "refs/heads/master",
+        "rev": "9a4eed052abbded2d94feaf3f5bbd95a30ec4671",
+        "revCount": 93,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/status-im/nim-bearssl"
+      },
+      "original": {
+        "rev": "9a4eed052abbded2d94feaf3f5bbd95a30ec4671",
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/status-im/nim-bearssl"
+      }
+    },
+    "release-nimcrypto-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1739624651,
+        "narHash": "sha256-Z6oaGzRiai/hLdudDb/VP6euoiEKG6T4sivucfmdFyM=",
+        "owner": "cheatfate",
+        "repo": "nimcrypto",
+        "rev": "69eec0375dd146aede41f920c702c531bfe89c6b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "cheatfate",
+        "repo": "nimcrypto",
+        "rev": "69eec0375dd146aede41f920c702c531bfe89c6b",
+        "type": "github"
+      }
+    },
+    "release-packaging-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790548385,
+        "narHash": "sha256-VOEO/EMWn3Y/MA6f4uhnsva009C6N5EZ5y37z6YMdn8=",
+        "owner": "metacraft-labs",
+        "repo": "reprobuild",
+        "rev": "a04cf4d2191086a22151f03d974fa0cd46e3533a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "repo": "reprobuild",
+        "rev": "a04cf4d2191086a22151f03d974fa0cd46e3533a",
+        "type": "github"
+      }
+    },
     "reprobuild-ct-test-runner-src": {
       "flake": false,
       "locked": {
@@ -2410,14 +2463,17 @@
           "runquota-src",
           "nixos-modules",
           "nixpkgs-unstable"
-        ]
+        ],
+        "release-bearssl-src": "release-bearssl-src",
+        "release-nimcrypto-src": "release-nimcrypto-src",
+        "release-packaging-src": "release-packaging-src"
       },
       "locked": {
-        "lastModified": 1790476504,
-        "narHash": "sha256-NWWfILeayxQ8SVSa8WfHT3fqkqYuSEMbYQAJ9uqDOzw=",
+        "lastModified": 1790721536,
+        "narHash": "sha256-KD47AShW5Y8trE9vY4WrPtk/ot6qagq3p4vhPw/mQBU=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "f4f0f93a3b93d05a48b80859df22bae32fcb5d3c",
+        "rev": "3590066e9c9dc82ca758ff2d7918f3b6f8304f35",
         "type": "github"
       },
       "original": {
