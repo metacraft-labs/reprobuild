@@ -44377,6 +44377,241 @@ proc stageRefreshedFlakeLock(repoRoot, lockPath: string):
     return (false, "`git add " & lockPath & "` could not be run: " & err.msg)
   (true, "")
 
+type
+  CommittedPinObservation = object
+    ## One sibling of a committed ``repro.lock`` as the checkout beside the
+    ## repo shows it (Unified-Locking-And-Hooks.md §13.3 / §13.5).
+    name, path: string
+    pinned: string            ## revision the lock records ("" = not carried)
+    observed: string          ## the checkout's HEAD ("" = not checked out)
+    relation: string          ## ahead / behind / diverged / unknown
+    dirty: bool
+    declared: bool            ## a manifest-declared develop-set sibling
+
+proc committedLockDepsLine(ld: LockedDependencies): string =
+  ## The ``deps = [...]`` line ``serializeLockedDependencies`` writes for
+  ## ``ld``. Splicing only this line into the existing document is what keeps
+  ## every other byte — the solve — identical (§13.3 "No solver").
+  for line in serializeLockedDependencies(ld).splitLines():
+    if line.startsWith("deps = ["): return line
+  ""
+
+proc siblingRelation(identity: GitToolIdentity; repo, pinned,
+                     observed: string): string =
+  if pinned.len == 0 or observed.len == 0: return "unknown"
+  if gitRunPlain(identity, ["-C", repo, "merge-base", "--is-ancestor",
+      pinned, observed]).code == 0:
+    return "ahead"
+  if gitRunPlain(identity, ["-C", repo, "merge-base", "--is-ancestor",
+      observed, pinned]).code == 0:
+    return "behind"
+  if gitRunPlain(identity, ["-C", repo, "cat-file", "-e",
+      pinned & "^{commit}"]).code != 0:
+    return "unknown"
+  "diverged"
+
+proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies):
+    tuple[observations: seq[CommittedPinObservation]; manifestResolved: bool;
+          workspaceRoot: string] =
+  ## Every non-root VCS entry of the committed lock plus every manifest-
+  ## declared develop-set sibling it does not carry, each observed from its
+  ## checkout. Reads only; writes nothing.
+  let root = absolutePath(repoRoot)
+  let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  var seen: seq[string] = @[]
+  proc observe(name, depAbs, pinned: string; declared: bool):
+      CommittedPinObservation =
+    result = CommittedPinObservation(name: name,
+      path: relativePath(depAbs, root).replace('\\', '/'), pinned: pinned,
+      declared: declared, relation: "unknown")
+    if not isGitCheckoutDir(depAbs): return
+    let head = gitRunPlain(identity, ["-C", depAbs, "rev-parse", "HEAD"])
+    if head.code != 0: return
+    result.observed = head.output.strip()
+    # Untracked files count: a build reads them as readily as tracked ones.
+    let status = gitRunPlain(identity, ["-C", depAbs, "status",
+      "--porcelain"])
+    result.dirty = status.code == 0 and status.output.strip().len > 0
+    if pinned.len > 0 and pinned != result.observed:
+      result.relation = siblingRelation(identity, depAbs, pinned,
+        result.observed)
+  let manifest = manifestDevelopSiblings(root)
+  result.manifestResolved = manifest.resolved
+  result.workspaceRoot = manifest.workspaceRoot
+  var declaredNames: seq[string] = @[]
+  for sib in manifest.siblings: declaredNames.add(sib.name)
+  for d in ld.deps:
+    if d.path == "." or d.coordinates.kind != ckVcs or d.path.len == 0:
+      continue
+    let depAbs = absolutePath(root / d.path)
+    result.observations.add(observe(d.name, depAbs, d.coordinates.revision,
+      d.name in declaredNames))
+    seen.add(d.name)
+    seen.add(relativePath(depAbs, root).replace('\\', '/'))
+  if manifest.resolved:
+    for sib in manifest.siblings:
+      let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
+      let rel = relativePath(depAbs, root).replace('\\', '/')
+      if sib.name in seen or rel in seen: continue
+      result.observations.add(observe(sib.name, depAbs, "", true))
+
+proc repinCommittedLockSiblings*(repoRoot: string):
+    tuple[line: string; changed: bool; lockPath: string;
+          warnings: seq[string]] =
+  ## §13.3 — the commit-path re-pin of a committed ``repro.lock``. Observation
+  ## only: existing non-root VCS entries whose checkout is present are
+  ## re-observed, missing manifest-declared siblings are added, nothing is
+  ## removed, the root revision is untouched, the solve is carried verbatim.
+  ## Writes the file only when something changed. Never raises.
+  let root = absolutePath(repoRoot)
+  result.lockPath = root / CommittedLockFileName
+  if not fileExists(extendedPath(result.lockPath)): return
+  var text, depsLine: string
+  var ld: LockedDependencies
+  try:
+    text = readFile(extendedPath(result.lockPath))
+    ld = parseLockedDependencies(text)
+  except CatchableError as err:
+    result.line = "repro-lock refused-unreadable-lock: " & err.msg
+    return
+  var originalDepsLine = ""
+  for line in text.splitLines():
+    if line.startsWith("deps = ["):
+      originalDepsLine = line
+      break
+  if originalDepsLine.len == 0:
+    result.line = "repro-lock refused-no-deps-line: " & result.lockPath &
+      " carries no `deps = [...]` line to re-pin"
+    return
+  let obs = observeCommittedLockSiblings(root, ld)
+  var moved: seq[string] = @[]
+  var added: seq[string] = @[]
+  var rootIdx = -1
+  for i, d in ld.deps:
+    if d.path == ".": rootIdx = i
+  for o in obs.observations:
+    if o.observed.len == 0: continue
+    if o.dirty:
+      result.warnings.add("sibling '" & o.name & "' (" & o.path & ") has " &
+        "uncommitted changes; repro.lock pins its HEAD " & o.observed &
+        ", which does not describe the working tree this commit was built " &
+        "against")
+    let fresh = lockedDepFromCheckout(o.name, absolutePath(root / o.path), root)
+    var found = false
+    for i in 0 ..< ld.deps.len:
+      if ld.deps[i].path == "." or ld.deps[i].coordinates.kind != ckVcs:
+        continue
+      if ld.deps[i].name == o.name or ld.deps[i].path == o.path:
+        found = true
+        var d = ld.deps[i]
+        if d.coordinates.revision != fresh.coordinates.revision or
+            d.integrity != fresh.integrity or
+            (fresh.coordinates.url.len > 0 and
+             d.coordinates.url != fresh.coordinates.url) or
+            d.coordinates.gitRef != fresh.coordinates.gitRef:
+          if d.coordinates.revision != fresh.coordinates.revision:
+            moved.add(o.name & " " & d.coordinates.revision.substr(0, 11) &
+              " -> " & fresh.coordinates.revision.substr(0, 11))
+          d.coordinates.revision = fresh.coordinates.revision
+          d.coordinates.gitRef = fresh.coordinates.gitRef
+          if fresh.coordinates.url.len > 0:
+            d.coordinates.url = fresh.coordinates.url
+          d.integrity = fresh.integrity
+          ld.deps[i] = d
+        break
+    if not found:
+      ld.deps.add(fresh)
+      added.add(o.name & " @ " & fresh.coordinates.revision.substr(0, 11))
+      if rootIdx >= 0 and o.name notin ld.deps[rootIdx].depends:
+        ld.deps[rootIdx].depends.add(o.name)
+  depsLine = committedLockDepsLine(ld)
+  if depsLine.len == 0 or depsLine == originalDepsLine:
+    result.line = "repro-lock up-to-date"
+    return
+  try:
+    writeFile(extendedPath(result.lockPath),
+      text.replace(originalDepsLine, depsLine))
+  except CatchableError as err:
+    result.line = "repro-lock write-failed: " & err.msg
+    return
+  result.changed = true
+  var parts: seq[string] = @[]
+  if moved.len > 0: parts.add("re-pinned " & moved.join(", "))
+  if added.len > 0: parts.add("added " & added.join(", "))
+  if parts.len == 0: parts.add("refreshed sibling coordinates")
+  result.line = "repro-lock " & parts.join("; ")
+
+proc verifyCommittedLockSiblingPins*(repoRoot: string):
+    tuple[examined, stale: bool; evidence, remediation, summary: string] =
+  ## §13.5 — the pre-push stage for a committed ``repro.lock``. Refuses a pin
+  ## that differs from the sibling checkout and a manifest-declared sibling
+  ## the lock does not carry. A sibling that is not checked out is not
+  ## refused: its committed pin is what CI builds.
+  let root = absolutePath(repoRoot)
+  let lockPath = root / CommittedLockFileName
+  if not fileExists(extendedPath(lockPath)): return
+  var ld: LockedDependencies
+  try:
+    ld = parseLockedDependencies(readFile(extendedPath(lockPath)))
+  except CatchableError:
+    # Not this stage's question: an unreadable lock is reported by the
+    # committed-lock integrity stage.
+    return
+  result.examined = true
+  let obs = observeCommittedLockSiblings(root, ld)
+  var bad: seq[string] = @[]
+  for o in obs.observations:
+    if o.pinned.len == 0 and o.declared:
+      bad.add(o.name & " (" & o.path & "): declared in the develop set but " &
+        "not pinned" & (if o.observed.len > 0: "; checkout at " & o.observed
+                        else: ""))
+    elif o.observed.len > 0 and o.pinned.len > 0 and o.observed != o.pinned:
+      bad.add(o.name & " (" & o.path & "): repro.lock pins " & o.pinned &
+        ", checkout is at " & o.observed & " (" & o.relation & ")")
+  if bad.len == 0: return
+  result.stale = true
+  result.evidence = bad.join("; ")
+  result.remediation = "run `repro lock refresh " & root & "`, commit " &
+    "repro.lock, then re-push (the managed pre-commit hook re-pins siblings " &
+    "on every commit once it is installed: `repro hooks ensure --vcs`)"
+  result.summary = "the committed repro.lock does not pin the sibling " &
+    "revisions this repo is being pushed against: " & result.evidence
+
+proc preCommitFlakeLock(workspaceRoot, repoRoot: string;
+    toolProvisioning: ToolProvisioningMode; timestamp: string)
+  ## NF-2's `flake.lock` refresh; defined after the dispatcher.
+
+proc preCommitReproLock(workspaceRoot, repoRoot, timestamp: string) =
+  ## §13.3 — re-pin the committed `repro.lock`'s siblings from observed state
+  ## and stage it into the commit being formed. Never blocks the commit.
+  var outcome: tuple[line: string; changed: bool; lockPath: string;
+                     warnings: seq[string]]
+  try:
+    outcome = repinCommittedLockSiblings(repoRoot)
+  except CatchableError as err:
+    appendPreCommitLog(workspaceRoot, timestamp & " repro-lock error: " &
+      err.msg)
+    return
+  for w in outcome.warnings:
+    stderr.writeLine("repro pre-commit: " & w)
+  if outcome.line.len == 0: return
+  var line = timestamp & " " & outcome.line
+  if outcome.warnings.len > 0:
+    line.add("; " & outcome.warnings.join("; "))
+  if outcome.changed:
+    stderr.writeLine("repro pre-commit: " & outcome.line)
+    let staged = stageRefreshedFlakeLock(repoRoot, outcome.lockPath)
+    if staged.ok:
+      line.add("; staged into this commit")
+    else:
+      line.add("; NOT STAGED: " & staged.diagnostic)
+      stderr.writeLine("repro pre-commit: repro.lock was re-pinned but " &
+        "could NOT be staged, so THIS COMMIT DOES NOT CARRY IT: " &
+        staged.diagnostic)
+      stderr.writeLine("repro pre-commit: remedy: `git add " &
+        outcome.lockPath & "` and `git commit --amend --no-edit`")
+  appendPreCommitLog(workspaceRoot, line)
+
 proc runPreCommitLockCommand*(args: openArray[string]): int =
   ## ``repro hooks dispatch pre-commit --repo-root=<repo>`` routes here.
   ## ALWAYS returns 0.
@@ -44398,8 +44633,12 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
   # the other 56% is the pin-vs-HEAD comparison inside
   # `refreshFlakeLockAtCommit`, which is what keeps a develop-set resolution
   # off the commit path.
-  if not fileExists(repoRoot / "flake.nix") or
-      not fileExists(repoRoot / "flake.lock"):
+  let hasFlake = fileExists(repoRoot / "flake.nix") and
+    fileExists(repoRoot / "flake.lock")
+  # §13.3 — a committed `repro.lock` is the other in-tree lock this hook
+  # maintains; its sibling pins are re-observed below, after the flake.
+  let hasReproLock = fileExists(repoRoot / CommittedLockFileName)
+  if not hasFlake and not hasReproLock:
     return 0
 
   let workspaceRoot = resolvePostCommitWorkspaceRoot(
@@ -44421,25 +44660,36 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
   # here because this hook also STAGES what it writes.
   let standDown = managedHookStandDown("pre-commit", repoRoot)
   if standDown.standDown:
-    appendPreCommitLog(workspaceRoot, timestamp & " flake-lock " &
+    appendPreCommitLog(workspaceRoot, timestamp &
+      (if hasFlake: " flake-lock" else: "") &
+      (if hasReproLock: " repro-lock" else: "") & " " &
       (if standDown.loud: "inert-git-state-unknown"
        else: "skipped-git-operation-in-progress") & ": " & standDown.report)
     if standDown.loud:
       stderr.writeLine("repro " & standDown.report)
     return 0
 
+  if hasFlake:
+    preCommitFlakeLock(workspaceRoot, repoRoot, parsed.toolProvisioning,
+      timestamp)
+  if hasReproLock:
+    preCommitReproLock(workspaceRoot, repoRoot, timestamp)
+  return 0
+
+proc preCommitFlakeLock(workspaceRoot, repoRoot: string;
+    toolProvisioning: ToolProvisioningMode; timestamp: string) =
   var outcome: tuple[line: string; changed: bool; lockPath: string]
   try:
     outcome = refreshFlakeLockAtCommit(workspaceRoot, repoRoot,
-      parsed.toolProvisioning)
+      toolProvisioning)
   except CatchableError as err:
     # Belt and braces: the refresh already downgrades its own failures, and a
     # raise reaching here would still not be a reason to reject the commit.
     appendPreCommitLog(workspaceRoot,
       timestamp & " flake-lock error: " & err.msg)
-    return 0
+    return
   if outcome.line.len == 0:
-    return 0
+    return
 
   var line = timestamp & " " & outcome.line
   if outcome.changed:
@@ -44461,7 +44711,6 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
       stderr.writeLine("repro pre-commit: remedy: `git add " &
         outcome.lockPath & "` and `git commit --amend --no-edit`")
   appendPreCommitLog(workspaceRoot, line)
-  return 0
 
 # ---- M19a: post-merge / post-checkout manifest auto-refresh ---------------
 #
@@ -50059,6 +50308,37 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     # that says something on every clean push trains people to scroll past the
     # one push where it says something else. The verdict is still in the
     # report's structured form for anyone who asks.
+
+  # ---- 3c. the committed repro.lock's sibling pins are VERIFIED ----------
+  #
+  # Unified-Locking-And-Hooks.md §13.5, "The `repro.lock` stage". CI builds
+  # the committed pins (§14.5), so a pin that differs from the sibling
+  # checkout this repo is being pushed against — or a declared develop-set
+  # sibling the lock does not carry — publishes a revision that was built
+  # against something CI will not build. Reads only; the pre-commit hook is
+  # the writer (§13.3), so a refusal here means the commit path was bypassed
+  # or a sibling moved after the commit.
+  if parsed.currentRepo.len > 0:
+    var pins: tuple[examined, stale: bool;
+                    evidence, remediation, summary: string]
+    try:
+      pins = verifyCommittedLockSiblingPins(parsed.currentRepo)
+    except CatchableError as err:
+      pins = (examined: true, stale: true,
+        evidence: "committed-lock-verify-failed: " & err.msg,
+        remediation: "investigate the repro.lock verification failure (" &
+          err.msg & "), then re-push",
+        summary: "repro.lock could not be verified against the sibling " &
+          "checkouts: " & err.msg)
+    if pins.stale:
+      result.failures.add(CheckFailure(
+        repo: currentRepoPath,
+        property: "committed_lock_sibling_pin_stale",
+        remediation: pins.remediation,
+        evidence: pins.evidence,
+        source: parsed.currentRepo / CommittedLockFileName))
+      result.exitCode = 2
+      return
 
   # ---- 4. lock currency --------------------------------------------------
   # Pick the manifest-layer root the way M11 / M12 do, then read the
@@ -62862,6 +63142,16 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
     let loaded = loadSolverInputsFile(inputsP)
     return (true, loaded.variants, loaded.packages, loaded.text, "sidecar",
       @[], @[])
+  # A recipe that declares nothing to solve (a dev-env-only `repro.nim`) still
+  # has a develop set, and its committed lock is where that set's revisions
+  # are recorded (Unified-Locking-And-Hooks.md §14.2). Its solve is the empty
+  # one, stated as such rather than refused.
+  if inputsOverride.len == 0:
+    let recipe =
+      try: resolveProjectFile(projectDir).path
+      except CatchableError: ""
+    if recipe.len > 0:
+      return (true, @[], @[], "", "recipe-without-solve", @[], @[])
   return (false, @[], @[], "", "", @[], @[])
 
 proc buildLockGenerationRequest(projectDir, inputsOverride,

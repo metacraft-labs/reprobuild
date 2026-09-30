@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1763,
+    "nimTestBinaries": 1767,
     "pureUnitConsolidationGroups": 48,
-    "pureUnitTests": 589,
+    "pureUnitTests": 591,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1776
+    "testEntries": 1780
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -330,60 +330,6 @@
       "targetOs": "soAny"
     },
     {
-      "count": 43,
-      "defines": [],
-      "dependencyShape": [
-        "repro_project_dsl"
-      ],
-      "owner": "libs/repro_project_dsl",
-      "sources": [
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_bootloader.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_package_empty.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_composition_for_loop.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_enum.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_override.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_scalar.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_seq_enum.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_executable_string_form.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_data_file.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_git.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_tarball.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_files.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_configfile.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_directory.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_managedblock_multi.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_managedblock_single.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_materialise_configfile.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_materialise_fnv_fallback.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_materialise_managedblock.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_symlink.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_helper_proc_reads_build_context.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_output_ref.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_package_empty.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_tool_provisioning_staged.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_uses_staged.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_validate.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_uses.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_expression_values.nim",
-        "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim",
-        "libs/repro_project_dsl/tests/t_dependency_lists_are_not_merged_at_serialization.nim",
-        "libs/repro_project_dsl/tests/t_dsl_bare_executable_no_body.nim",
-        "libs/repro_project_dsl/tests/t_dsl_outputs_forward_reference_error.nim",
-        "libs/repro_project_dsl/tests/t_dsl_outputs_sibling_scope_invisible_error.nim",
-        "libs/repro_project_dsl/tests/t_dsl_outputs_unknown_flag_error.nim",
-        "libs/repro_project_dsl/tests/t_dsl_platforms_resolved_form.nim",
-        "libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim",
-        "libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim",
-        "libs/repro_project_dsl/tests/t_m6_non_determinism_codec.nim",
-        "libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim",
-        "libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim",
-        "libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim",
-        "libs/repro_project_dsl/tests/t_sub_tool_refs_codec.nim",
-        "libs/repro_project_dsl/tests/t_tool_identity_ref_kind_codec.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
       "count": 41,
       "defines": [],
       "dependencyShape": [
@@ -448,6 +394,61 @@
         "libs/repro_project_dsl/tests/t_dsl_run_consumes_roundtrip.nim",
         "libs/repro_project_dsl/tests/t_dsl_run_target_named_and_listed.nim",
         "libs/repro_project_dsl/tests/t_dsl_state_group_membership.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 44,
+      "defines": [],
+      "dependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "sources": [
+        "libs/repro_project_dsl/tests/t_fetch_token_path_independent.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_bootloader.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_build_package_empty.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_composition_for_loop.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_enum.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_override.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_scalar.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_config_seq_enum.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_executable_string_form.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_data_file.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_git.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fetch_tarball.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_files.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_configfile.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_directory.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_managedblock_multi.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_managedblock_single.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_materialise_configfile.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_materialise_fnv_fallback.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_materialise_managedblock.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_fs_symlink.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_helper_proc_reads_build_context.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_output_ref.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_package_empty.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_tool_provisioning_staged.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_uses_staged.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_validate.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_uses.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_expression_values.nim",
+        "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim",
+        "libs/repro_project_dsl/tests/t_dependency_lists_are_not_merged_at_serialization.nim",
+        "libs/repro_project_dsl/tests/t_dsl_bare_executable_no_body.nim",
+        "libs/repro_project_dsl/tests/t_dsl_outputs_forward_reference_error.nim",
+        "libs/repro_project_dsl/tests/t_dsl_outputs_sibling_scope_invisible_error.nim",
+        "libs/repro_project_dsl/tests/t_dsl_outputs_unknown_flag_error.nim",
+        "libs/repro_project_dsl/tests/t_dsl_platforms_resolved_form.nim",
+        "libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim",
+        "libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim",
+        "libs/repro_project_dsl/tests/t_m6_non_determinism_codec.nim",
+        "libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim",
+        "libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim",
+        "libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim",
+        "libs/repro_project_dsl/tests/t_sub_tool_refs_codec.nim",
+        "libs/repro_project_dsl/tests/t_tool_identity_ref_kind_codec.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1077,9 +1078,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 903,
+      "integration": 905,
       "platform/destructive": 116,
-      "pure unit": 589,
+      "pure unit": 591,
       "unclassified": 157
     },
     "graphOwnedTestArtifacts": [
@@ -1228,9 +1229,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1763,
+    "nimTestBinaryCount": 1767,
     "pythonTestFileCount": 13,
-    "testEntryCount": 1776
+    "testEntryCount": 1780
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -6810,7 +6811,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 11,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -7825,7 +7826,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/test_m6_entropy_blessing.nim",
       "sourceSuiteCount": 7,
-      "staticCaseCount": 26,
+      "staticCaseCount": 27,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8626,6 +8627,24 @@
       "source": "libs/repro_cli_support/tests/t_phase_g_cli_wiring.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_portable_cache_roots",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_portable_cache_roots.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -14794,6 +14813,23 @@
       "source": "libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_fetch_token_path_independent",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_fetch_token_path_independent.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25147,6 +25183,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_commit_repins_committed_lock_siblings",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_commit_repins_committed_lock_siblings.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -29968,6 +30019,21 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_pre_push_refuses_on_unreachable_team_backend.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_pre_push_refuses_stale_committed_sibling_pin",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_pre_push_refuses_stale_committed_sibling_pin.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

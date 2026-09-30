@@ -39,7 +39,7 @@ libs/repro_binary_cache_client/tests/t_a3_p2_cli_substitute.nim	nim	3
 libs/repro_binary_cache_client/tests/t_a3_p6_closure_walk_r4.nim	nim	1
 libs/repro_binary_cache_client/tests/t_a4_p2_sentinel_wait.nim	nim	2
 libs/repro_binary_cache_client/tests/t_client_cli_prefix_substitute.nim	nim	1
-libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim	nim	11
+libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim	nim	12
 libs/repro_binary_cache_client/tests/t_r1_caches_config.nim	nim	10
 libs/repro_binary_cache_client/tests/t_r1_client_trust.nim	nim	5
 libs/repro_binary_cache_client/tests/test_auto_credentials.nim	nim	9
@@ -92,7 +92,7 @@ libs/repro_build_engine/tests/test_elevated_inline_exec_hook.nim	nim	5
 libs/repro_build_engine/tests/test_engine_worker_pool.nim	nim	5
 libs/repro_build_engine/tests/test_m10_observed_env_cache_key.nim	nim	9
 libs/repro_build_engine/tests/test_m10_observed_env_live_windows.nim	nim	2
-libs/repro_build_engine/tests/test_m6_entropy_blessing.nim	nim	26
+libs/repro_build_engine/tests/test_m6_entropy_blessing.nim	nim	27
 libs/repro_build_engine/tests/test_m6_entropy_image_attribution.nim	nim	11
 libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim	nim	14
 libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim	nim	6
@@ -136,6 +136,7 @@ libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim	nim	3
 libs/repro_cli_support/tests/t_partition_planner_degrades_gracefully_on_cold_cache.nim	nim	1
 libs/repro_cli_support/tests/t_partition_planner_reads_runquota_estimates.nim	nim	1
 libs/repro_cli_support/tests/t_phase_g_cli_wiring.nim	nim	6
+libs/repro_cli_support/tests/t_portable_cache_roots.nim	nim	2
 libs/repro_cli_support/tests/t_provider_compile_entry_points_publish_bootstrap_toolchain.nim	nim	3
 libs/repro_cli_support/tests/t_runquota_auto_spawn_defers_to_host_config.nim	nim	5
 libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	6
@@ -479,6 +480,7 @@ libs/repro_project_dsl/tests/t_engine_path_expression_uses_flag_value.nim	nim	1
 libs/repro_project_dsl/tests/t_engine_typed_output_field_populated_at_action_emission.nim	nim	1
 libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim	nim	5
 libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim	nim	3
+libs/repro_project_dsl/tests/t_fetch_token_path_independent.nim	nim	2
 libs/repro_project_dsl/tests/t_m6_non_determinism_codec.nim	nim	5
 libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim	nim	7
@@ -1063,6 +1065,7 @@ tests/integration/t_cloud_attestation_launch_manifest_identity.nim	nim	28
 tests/integration/t_cmake_fresh_configure.nim	nim	1
 tests/integration/t_cmake_install_mirror_tools.nim	nim	1
 tests/integration/t_commit_records_the_sibling_revision_the_shell_actually_used.nim	nim	3
+tests/integration/t_commit_repins_committed_lock_siblings.nim	nim	1
 tests/integration/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep.nim	nim	1
 tests/integration/t_committed_lock_folds_sibling_develop_deps.nim	nim	1
 tests/integration/t_committed_lock_pins_solved_graph_and_build_consumes_it.nim	nim	4
@@ -1337,6 +1340,7 @@ tests/integration/t_pre_push_public_only_writes_no_manifest_lock.nim	nim	1
 tests/integration/t_pre_push_publishes_only_when_publish_locks_opted_in.nim	nim	1
 tests/integration/t_pre_push_refuses_an_undeclared_depends_edge.nim	nim	1
 tests/integration/t_pre_push_refuses_on_unreachable_team_backend.nim	nim	1
+tests/integration/t_pre_push_refuses_stale_committed_sibling_pin.nim	nim	1
 tests/integration/t_pre_push_refuses_when_lock_publish_fails.nim	nim	1
 tests/integration/t_pre_push_requires_certificate_coverage_when_project_opts_in.nim	nim	1
 tests/integration/t_pre_push_rewrite_orphan_gate.nim	nim	5
