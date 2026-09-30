@@ -77,6 +77,83 @@ actually called `repro`. A bootstrap installed as, say, `repro-bootstrap`
 answers `cannot schedule the provider-compile edge … no 'repro' image to
 spawn it with`. Give it a directory of its own rather than a different name.
 
+## Without the launcher: the bootstrap hands over
+
+The launcher is optional. Whatever `repro` a host has — the native
+package's, a CI image's, `build/bin/reprobuild` from a checkout — reads the
+project's pin before it does anything else, and if the project pins a
+different reprobuild it runs that one instead:
+
+```console
+$ cd myApp && REPRO_SELFHOST_DEBUG=1 repro --version
+repro(0.2.5): …/myApp/repro.lock pins reprobuild 0.1.4; this image is 0.2.5, so it hands over to …/prefixes/reprobuild/0.1.4-0f5a178d/bin/repro
+repro(0.2.5): exec …/prefixes/reprobuild/0.1.4-0f5a178d/bin/repro (engine …/bin/reprobuild)
+repro 0.1.4
+```
+
+This is the whole job of the reprobuild a host starts with: provision the
+project's pinned reprobuild (and its compiler, below), then hand over. It
+never evaluates a recipe it is not pinned to. The rules:
+
+- The pinned image gets your argv and environment unchanged, plus
+  `REPRO_SELFHOST_RESOLVED` (the prefix it was handed), `REPRO_PUBLIC_CLI_PATH`
+  (the pinned engine) and, when the compiler is pinned, `REPRO_NIM_COMPILER`.
+  `REPRO_FULL_CLI` is removed, so nothing can route the pinned thin client
+  back to the bootstrap.
+- No hand-over when nothing is pinned, when the pinned version is the
+  running version, or when the running image *is* the pinned prefix's engine
+  (compared by file identity).
+- If a hand-over to a prefix already happened in this process tree and the
+  image running now is not that prefix, `repro` refuses with exit 72 rather
+  than looping or running the recipe with the wrong reprobuild.
+- A pinned version that is not in the store is refused with exit 70 and the
+  `repro self install` command that would put it there.
+- `repro self …` is always answered by the reprobuild you ran: it is how a
+  missing version gets installed.
+- A daemon-hosted build of a project pinned to another reprobuild is
+  declined by the daemon, and the client's engine hands over.
+
+The project is the one enclosing the working directory, as for the
+launcher.
+
+## Pinning the compiler that builds the provider
+
+The recipe (`repro.nim`) is compiled into a provider binary before it can be
+read, so the Nim compiler that does it decides what your recipe means. Pin it
+the same way, as the ordinary `nim` package with a store source and an exact
+version:
+
+```nim
+package myApp:
+  packageSource "nim", "store"
+  uses:
+    "nim ==2.2.10"
+```
+
+`repro lock refresh` records it as a `deps` entry with `coord_kind =
+"store"`, exactly like the reprobuild pin. Only a store-sourced `nim` entry
+is a pin: the bare `nim` entry most locks already carry pins nothing, and the
+provider is compiled with the bootstrap's own Nim.
+
+A pinned compiler lives in the store at `prefixes/nim/<version>-<hash>/`. It
+gets there one of two ways:
+
+- automatically, when the pinned version is the one the running reprobuild
+  fetches for itself (today `nim 2.2.10` on Windows): the bootstrap realizes
+  it on first use;
+- otherwise from a Nim distribution directory (it must contain `bin/nim` and
+  `lib/system.nim`):
+
+  ```sh
+  repro self install --package=nim --from=<nim-dir> --version=2.2.14
+  ```
+
+A pinned compiler that is neither is an error naming that command; the
+bootstrap never compiles the provider with a compiler the lock does not name.
+The pin also wins over an inherited `REPRO_NIM_COMPILER`, with a warning when
+the two differ. `repro self which --package=nim`, `repro self list
+--package=nim` and `repro store gc` treat it like the reprobuild pin.
+
 ## Installing versions into the store
 
 ```sh

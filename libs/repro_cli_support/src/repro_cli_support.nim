@@ -146,6 +146,7 @@ import repro_cli_support/dev_env_rollback_manifest
 import repro_cli_support/dev_env_shell_hook_templates
 import repro_cli_support/home
 import repro_cli_support/selfhost as cli_selfhost
+import repro_cli_support/project_pins
 import repro_cli_support/infra
 import repro_cli_support/deploy_agent as cli_deploy_agent
 import repro_cli_support/hardware as cli_hardware
@@ -30868,6 +30869,31 @@ proc installUserDaemonBuildExecutor() =
       # here to that same constant -- which is the point: it is the value a
       # DIRECT build through the full CLI's prologue would have used too.
       ensureBuiltSourcePackageEnvironment()
+      # M5 rule 3 for a daemon-hosted build: the thin client routed here
+      # without reading the project's lock, so this daemon is the first
+      # reprobuild to see its pins. A project pinned to another reprobuild is
+      # DECLINED (unsupported, fallback allowed): the client then execs its
+      # engine, whose entry hands over. A pinned provider compiler is
+      # published for this request only; the restore list below takes it
+      # back.
+      let pinVerdict = daemonPinVerdict(request.workingDir)
+      if pinVerdict.decline:
+        emit(bekUnsupported, "daemon-hosted build declined: " &
+          pinVerdict.message, true, 64, "warning",
+          "{\"fallbackAllowed\":true,\"reason\":\"project-pin\"}")
+        return 64
+      if pinVerdict.providerNim.len > 0:
+        # The restore list replays in order, so the variable is recorded
+        # only when the request did not already record its pre-session value.
+        var recorded = false
+        for item in previousEnv:
+          if item.key == NimCompilerEnvVar:
+            recorded = true
+        if not recorded:
+          previousEnv.add((key: NimCompilerEnvVar,
+            value: getEnv(NimCompilerEnvVar),
+            present: existsEnv(NimCompilerEnvVar)))
+        putEnv(NimCompilerEnvVar, pinVerdict.providerNim)
       # No provider-nimcache session is derived from the run id. The daemon
       # used to give each build its own nimcache scope so two sessions in one
       # worker could not collide inside the single shared directory; the
@@ -73394,6 +73420,13 @@ proc runThinApp*(programName: string): int =
   ## reads it.
   if programName == "repro":
     markRunningImageAsReproCli()
+    # M5 rules 1 and 3: the project's pins are applied BEFORE dispatch, so a
+    # hand-over passes on the caller's own argv and environment and no verb
+    # has read a recipe this image is not pinned to. See
+    # `repro_cli_support/project_pins`.
+    let pinned = applyProjectPinsAtEntry(commandLineParams())
+    if pinned.handled:
+      return pinned.exitCode
   result = runThinAppDispatch(programName)
   flushStagedFailureReport(result)
 
