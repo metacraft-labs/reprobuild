@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1778,
-    "pureUnitConsolidationGroups": 48,
-    "pureUnitTests": 590,
+    "nimTestBinaries": 1780,
+    "pureUnitConsolidationGroups": 49,
+    "pureUnitTests": 592,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1793
+    "testEntries": 1795
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -466,6 +466,21 @@
         "libs/repro_resources/tests/t_l3_reaper.nim",
         "libs/repro_resources/tests/t_resource_provider_lane.nim",
         "libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_local_store",
+        "repro_lock",
+        "repro_selfhost"
+      ],
+      "owner": "libs/repro_selfhost",
+      "sources": [
+        "libs/repro_selfhost/tests/t_the_pin_lives_in_the_lock.nim",
+        "libs/repro_selfhost/tests/t_the_provider_compiler_pin_lives_in_the_lock.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1080,7 +1095,7 @@
       "graph-fixture": 11,
       "integration": 916,
       "platform/destructive": 117,
-      "pure unit": 590,
+      "pure unit": 592,
       "unclassified": 159
     },
     "graphOwnedTestArtifacts": [
@@ -1229,9 +1244,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1778,
+    "nimTestBinaryCount": 1780,
     "pythonTestFileCount": 15,
-    "testEntryCount": 1793
+    "testEntryCount": 1795
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15211,6 +15226,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_the_bootstrap_hands_over_only_to_a_different_pin",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_lock",
+        "repro_selfhost"
+      ],
+      "owner": "libs/repro_selfhost",
+      "requiresReproBinary": false,
+      "source": "libs/repro_selfhost/tests/t_the_bootstrap_hands_over_only_to_a_different_pin.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_the_pin_lives_in_the_lock",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -15226,6 +15260,25 @@
       "source": "libs/repro_selfhost/tests/t_the_pin_lives_in_the_lock.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 16,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_the_provider_compiler_pin_lives_in_the_lock",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store",
+        "repro_lock",
+        "repro_selfhost"
+      ],
+      "owner": "libs/repro_selfhost",
+      "requiresReproBinary": false,
+      "source": "libs/repro_selfhost/tests/t_the_provider_compiler_pin_lives_in_the_lock.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
