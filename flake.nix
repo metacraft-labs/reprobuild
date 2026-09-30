@@ -167,7 +167,7 @@
       # `FsSnoopRequest.isolateEnv` launches a child from its declared
       # environment alone (Dev-Env-Warm-Entry.md).
       # Keep this, the lock, sibling clone and package fallback on one revision.
-      url = "github:metacraft-labs/io-mon/31b05a5abbd5b6176f510c7cfeba7e8aa20d4064";
+      url = "github:metacraft-labs/io-mon/e3556483eb79fc051a520e6c822cb131cd6daa3b";
       flake = false;
     };
     nim-shm-gset-src = {
