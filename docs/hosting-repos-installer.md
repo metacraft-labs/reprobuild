@@ -24,6 +24,14 @@ repository so every later upgrade is the package manager's own business.
 > multi-distro installer tests, which use it to build local fixture
 > repositories. Moving the installer's defaults to the organisation hosts is
 > the next change.
+>
+> **Windows uses the organisation's Scoop bucket (2026-09-30).** The same
+> dispatch writes `bucket/reprobuild.json` in
+> `metacraft-labs/metacraft-desktop-packages` from the release's Windows zip,
+> verified against `SHA256SUMS`. `repro-install.ps1` registers it as
+> `scoop bucket add metacraft https://github.com/metacraft-labs/metacraft-desktop-packages`.
+> The `scoop-reprobuild` / `scoop-metacraft` repositories named below were
+> never created.
 
 ## The shape
 
