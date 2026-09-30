@@ -63,6 +63,16 @@ type
     pikRead
     pikProbe
     pikEnumeration
+    pikEnvironment
+      ## An environment variable the action's processes READ (io-mon's
+      ## `mrEnvRead`), keyed `env:<NAME>`, identified by its logicalized
+      ## value — the portable half of the local fingerprint's observed
+      ## environment. Appended last so older records decode unchanged.
+
+  ObservedEnv* = object
+    name*: string
+    present*: bool
+    value*: string
 
   PortableInput* = object
     kind*: PortableInputKind
@@ -111,7 +121,7 @@ type
     inputs*: seq[PortableInput]
 
 const
-  WeakDomain = "reprobuild.portable.weak.v1"
+  WeakDomain = "reprobuild.portable.weak.v2"
   StrongDomain = "reprobuild.portable.strong.v1"
   ProbePresent = "present"
   ProbeAbsent = "absent"
@@ -159,6 +169,87 @@ proc toLogicalPath*(roots: openArray[LogicalRoot]; physical: string):
 proc render(path: LogicalPath): string =
   path.label & ":" & path.rel
 
+proc envInputKey*(name: string): string =
+  ## `env:<NAME>`; upper-cased on Windows, where names are case-insensitive.
+  when defined(windows): "env:" & name.toUpperAscii() else: "env:" & name
+
+const AncestorPrefix* = "^"
+  ## A logical path `^<label>:<rest>` names `<rest>` beneath ANY proper
+  ## ancestor of root `<label>` — see `ancestorProbeKey`.
+
+proc properAncestors(path: string): seq[string] =
+  var current = path.replace('\\', '/')
+  while current.len > 1 and current.endsWith("/"):
+    current.setLen(current.len - 1)
+  while true:
+    let slash = current.rfind('/')
+    if slash < 0:
+      break
+    let parent =
+      if slash == 0: "/"
+      elif slash == 2 and current.len > 1 and current[1] == ':':
+        current[0 .. 2]   # a drive root: `M:/`
+      else: current[0 ..< slash]
+    if parent == current or parent.len == 0:
+      break
+    result.add(parent)
+    if parent == "/" or (parent.len == 3 and parent[1] == ':'):
+      break
+    current = parent
+
+proc ancestorProbeKey*(roots: openArray[LogicalRoot]; physical: string):
+    string =
+  ## For a PROBE of a path under no root but beneath a proper ancestor of
+  ## a tracked root, the logical key `^<label>:<rest>`; otherwise "".
+  ##
+  ## Tools look for fixed names in every directory ABOVE the project: node
+  ## and npm walk up for `node_modules` and `package.json` and put each
+  ## ancestor's `node_modules/.bin` on PATH; a shell or node-gyp probes
+  ## well-known install locations. What such a probe learns is whether
+  ## `<rest>` exists somewhere up the tree — not at which absolute path,
+  ## which is only where this host keeps the checkout. So the probe is
+  ## keyed by `<rest>` relative to the ancestry, and its identity is
+  ## `present` if `<rest>` exists beneath ANY proper ancestor of the root
+  ## (`ancestorProbeIdentity`), computed the same way when recording and
+  ## when looking up. That over-approximates what the tool saw, in the
+  ## direction of a miss: a file anywhere up the tree on either host flips
+  ## it. Reads are never keyed this way — content outside the roots stays
+  ## non-portable.
+  let target = normalizeForCompare(physical)
+  for root in sortedByLength(roots):
+    if root.kind != lrkTracked:
+      continue
+    for ancestor in properAncestors(root.path):
+      var base = normalizeForCompare(ancestor)
+      if not base.endsWith("/"):
+        base.add("/")
+      if target.startsWith(base) and target.len > base.len:
+        var rest = target[base.len .. ^1]
+        return AncestorPrefix & root.label & ":" & rest
+  ""
+
+proc ancestorProbeIdentity*(roots: openArray[LogicalRoot]; key: string):
+    string =
+  ## The identity of an `^<label>:<rest>` key on THIS host: "present" when
+  ## `<rest>` exists beneath any proper ancestor of root `<label>`, else
+  ## "absent"; "" when the key names no root here.
+  if not key.startsWith(AncestorPrefix):
+    return ""
+  let colon = key.find(':')
+  if colon < 0:
+    return ""
+  let label = key[AncestorPrefix.len ..< colon]
+  let rest = key[colon + 1 .. ^1]
+  for root in roots:
+    if root.label == label and root.kind == lrkTracked:
+      for ancestor in properAncestors(root.path):
+        let candidate = ancestor.strip(leading = false, chars = {'/'}) & "/" &
+          rest
+        if fileExists(candidate) or dirExists(candidate):
+          return "present"
+      return "absent"
+  ""
+
 proc logicalizeText*(roots: openArray[LogicalRoot]; text: string): string =
   ## Replace every occurrence of a tracked root's physical path inside an
   ## arbitrary string (an argv element, an environment value) with
@@ -166,6 +257,11 @@ proc logicalizeText*(roots: openArray[LogicalRoot]; text: string): string =
   ## normalized so `M:\m\dev\x` and `m:/m/dev/x` logicalize identically.
   result = text.replace('\\', '/')
   for root in sortedByLength(roots):
+    # An untracked root is deliberately NOT a portable name: rewriting it
+    # would make a value's identity depend on which untracked roots the
+    # caller happened to pass.
+    if root.kind != lrkTracked:
+      continue
     let base = root.path.replace('\\', '/').strip(leading = false,
       chars = {'/'})
     if base.len == 0:
@@ -228,13 +324,29 @@ proc frame(text: string): string =
   ## Length-prefixed so field boundaries cannot be forged by content.
   $text.len & ":" & text
 
+proc envIdentity*(roots: openArray[LogicalRoot]; present: bool;
+                  value: string): string =
+  ## The identity of an observed environment variable: "unset", or the
+  ## BLAKE3 of its value with every tracked root's path logicalized — so a
+  ## value naming a path inside the project is the same on every checkout,
+  ## and one naming a host path (a PATH entry in a home directory) is not.
+  if not present:
+    return "unset"
+  blake3.digest(logicalizeText(roots, value)).toHex()
+
 proc portableWeakFingerprint*(roots: openArray[LogicalRoot];
                               argv: openArray[string]; cwd: string;
                               env: openArray[(string, string)];
-                              declaredInputs: openArray[string]): string =
+                              declaredInputs: openArray[string];
+                              staticFields: openArray[string] = []): string =
   ## The action's static description, over logical paths. Environment is
   ## sorted by name; declared inputs are logicalized and sorted, because
   ## their order carries no meaning for what the action computes.
+  ## `staticFields` carries the rest of that description — what an argv does
+  ## not say: the action kind, a builtin's payload, its declared outputs.
+  ## Without them two builtins with the same inputs (argv is empty for both)
+  ## would share one identity. Each is logicalized; their order is kept,
+  ## since the caller states it.
   var payload = frame(WeakDomain)
   payload.add(frame($argv.len))
   for arg in argv:
@@ -253,6 +365,9 @@ proc portableWeakFingerprint*(roots: openArray[LogicalRoot];
   payload.add(frame($inputs.len))
   for input in inputs:
     payload.add(frame(input))
+  payload.add(frame($staticFields.len))
+  for field in staticFields:
+    payload.add(frame(logicalizeText(roots, field)))
   blake3.digest(payload).toHex()
 
 proc portableStrongFingerprint*(weakHex: string;
@@ -279,14 +394,31 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
                                  env: openArray[(string, string)];
                                  declaredInputs: openArray[string];
                                  reads, probes, enumerations:
-                                   openArray[string]): PortableFingerprint =
+                                   openArray[string];
+                                 staticFields: openArray[string] = [];
+                                 observedEnv: openArray[ObservedEnv] = []):
+    PortableFingerprint =
   ## Everything at once. Deduplicates each observation class by logical path
   ## (the monitor reports repeats), drops untracked accesses, and marks the
   ## action not portable at the first access under no known root.
   result.portable = true
   result.weakHex = portableWeakFingerprint(roots, argv, cwd, env,
-    declaredInputs)
+    declaredInputs, staticFields)
   var seen: seq[string] = @[]
+  var rootKeys: seq[string] = @[]
+  for root in roots:
+    rootKeys.add(normalizeForCompare(root.path))
+  proc aboveARoot(physical: string): bool =
+    ## A directory that CONTAINS a root. Probing it answers "present" on
+    ## every host where the root exists at all — a shell resolving a path
+    ## component by component does exactly that — so the probe says nothing
+    ## about the build, only about where this host keeps it.
+    let key = normalizeForCompare(physical)
+    for rootKey in rootKeys:
+      if rootKey.len > key.len and rootKey.startsWith(key) and
+          (key.endsWith("/") or rootKey[key.len] == '/'):
+        return true
+    false
   template consider(physical: string; inputKind: PortableInputKind;
                     identity: untyped) =
     let logical = toLogicalPath(roots, physical)
@@ -294,6 +426,26 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
     of lpkUntracked:
       discard
     of lpkOutside:
+      # A directory ABOVE a root: probing it is implied by the root
+      # existing, and LISTING it (gemini-cli's bundle step enumerates the
+      # drive root) observes only how this host lays out everything else it
+      # stores there. Neither is an input of the build. The residual — a
+      # tool that lists a directory above the project and acts on what it
+      # finds — is the one BuildXL leaves to mount configuration too.
+      # A READ of such a directory is a handle opened while resolving a
+      # real path (node's realpath opens every component); a directory has
+      # no content to read, so it says no more than the probe.
+      if aboveARoot(physical):
+        continue
+      if inputKind == pikProbe:
+        let ancestorKey = ancestorProbeKey(roots, physical)
+        if ancestorKey.len > 0:
+          let key = $ord(pikProbe) & "|" & ancestorKey
+          if key notin seen:
+            seen.add(key)
+            result.inputs.add(PortableInput(kind: pikProbe, path: ancestorKey,
+              digest: ancestorProbeIdentity(roots, ancestorKey)))
+          continue
       if result.portable:
         result.portable = false
         result.reason = "observed " & $inputKind & " outside every logical " &
@@ -312,6 +464,12 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
        else: ProbeAbsent))
   for path in enumerations:
     consider(path, pikEnumeration, membershipHex(path))
+  for variable in observedEnv:
+    let key = envInputKey(variable.name)
+    if ($ord(pikEnvironment) & "|" & key) notin seen:
+      seen.add($ord(pikEnvironment) & "|" & key)
+      result.inputs.add(PortableInput(kind: pikEnvironment, path: key,
+        digest: envIdentity(roots, variable.present, variable.value)))
   if result.portable:
     result.strongHex = portableStrongFingerprint(result.weakHex,
       result.inputs)

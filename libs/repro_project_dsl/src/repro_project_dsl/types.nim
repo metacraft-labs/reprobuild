@@ -143,6 +143,15 @@ type
       ## inside the ``cli:`` block and inherited by every nested ``subcmd``
       ## exactly the way ``dependencyPolicy`` is. Defaults to
       ## ``ndpUnblessed``.
+    subTools*: seq[string]
+      ## Tools this tool itself shells out to by BARE NAME, declared once
+      ## with ``subTools "rustc", "gcc"`` directly under ``cli:``. A
+      ## ``uses:`` entry of the calling recipe that matches one of these
+      ## names has its resolved directory PREPENDED to every edge of this
+      ## tool; an unmatched name is inert. Unlike an edge's
+      ## ``toolIdentityRefs`` this is not a statement about the edge's
+      ## complete tool set, so it does not make the edge's ``PATH``
+      ## hermetic.
     nonDeterminismJustification*: string
       ## Why the blessing above is sound. Required when the policy is
       ## ``ndpEntropyBlessed`` (the macro rejects a bare blessing), carried
@@ -954,6 +963,15 @@ type
       ## ``env`` extends rather than replaces. Empty for legacy
       ## recipes (and the v13-and-earlier payload codec round-trips
       ## the field as empty so older artifacts decode cleanly).
+    fixedOutput*: bool
+      ## Cache-Scope P3.4 — a FIXED-OUTPUT action (BuildXL's download pip,
+      ## Nix's fixed-output derivation): its outputs are determined by
+      ## content hashes it DECLARES and VERIFIES — a tarball checked against
+      ## a sha256, a vendored closure checked against lockfile integrity —
+      ## not by what the network happened to return. It stays locally
+      ## non-cacheable (it reaches the network), but its portable record is
+      ## keyed by its static description and declared inputs alone, so the
+      ## portable lookup can resolve it without running it.
     publishToBinaryCache*: bool
       ## M9.L.4-refactor Step B: passive flag the from-source
       ## conventions stamp on each install + stage-copy action so the
@@ -993,6 +1011,15 @@ type
       ## the engine resolves them at fork time, and PATH is
       ## populated with the resolved store paths so the bare tool
       ## name finds the right binary.
+    subToolRefs*: seq[string]
+      ## The typed tool's own ``subTools`` (see ``CliCommandDef.subTools``),
+      ## copied onto each edge the tool's wrapper records. Each name that
+      ## matches a resolved ``uses:`` tool contributes that tool's
+      ## directory to the edge's ``PATH`` ahead of everything else, and
+      ## keeps the tool resolvable for a fragment build that selects only
+      ## this edge. Unlike ``toolIdentityRefs`` these do NOT opt the edge
+      ## into a hermetic ``PATH``: the tool vouches for what IT runs, not
+      ## for what the edge's build scripts may run. Payload codec v29+.
     toolIdentityRefKinds*: seq[ToolIdentityRefKind]
       ## Platform role parallel to ``toolIdentityRefs``. An empty or
       ## mismatched list preserves the legacy ``tirkBuild`` default.

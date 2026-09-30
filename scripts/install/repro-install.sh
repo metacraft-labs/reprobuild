@@ -127,13 +127,13 @@ KEYRING_FILE="${REPRO_KEYRING_FILE:-metacraft-labs-archive-keyring.asc}"
 KEYRING_DEST="${REPRO_KEYRING_DEST:-/usr/share/keyrings/$KEYRING_FILE}"
 
 # The expected SHA-256 of the keyring at $REPRO_KEYS_URL/$KEYRING_FILE:
-# the organisation key 3CA0 3287 4B65 1B0C F01D  FB67 7EAF 585F B9B5 9164,
+# the organisation key 22F8 0A4A 65B0 8E36 AEA8  9F57 E127 BF3A C4CE 1719,
 # as committed in metacraft-labs/metacraft-desktop-packages keys/ and
 # uploaded from there verbatim, so its bytes do not change. Changing this
 # line is a key rotation. An empty value (a mirror that sets it so) makes
 # the installer FAIL CLOSED; REPRO_ALLOW_UNPINNED_KEYRING=1 is the only way
 # past that, it is never set by default, and it warns what it costs.
-REPRO_KEYRING_SHA256="${REPRO_KEYRING_SHA256-27d3273b8e90f966d9557420aaa13446ee8b1b2c6da027137a094f5322da68fc}"
+REPRO_KEYRING_SHA256="${REPRO_KEYRING_SHA256-aa89db2215ce0b33e029b8302d4d94fac742b92d279f178437abe10d9b54c988}"
 
 # Suite/component/repo-id the release pipeline publishes under. These
 # must agree with scripts/release/repro-publish-repos.sh; they are
