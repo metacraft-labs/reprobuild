@@ -2749,9 +2749,42 @@ proc launchWithLaunchd(exe: string; config: UserDaemonConfig): bool =
   else:
     false
 
-proc systemdUnitName(config: UserDaemonConfig): string =
-  "repro-daemon-" & safePathSegment(config.endpoint.extractFilename,
-    "user") & ".service"
+proc systemdUnitName*(config: UserDaemonConfig): string =
+  ## The transient user unit the daemon for ``config.endpoint`` runs under.
+  ##
+  ## KEYED ON THE WHOLE ENDPOINT PATH, NOT ON ITS LAST COMPONENT. Transient
+  ## unit names are a per-user GLOBAL namespace, while endpoints are placed in
+  ## per-run scratch directories precisely BECAUSE the basename is not unique:
+  ## every one of them is some directory's ``d.sock``. Keying the unit on
+  ## ``extractFilename`` therefore discarded exactly the distinguishing part,
+  ## and ``systemd-run`` refuses a name that is already loaded -- measured:
+  ## ``Failed to start transient service unit: Unit
+  ## repro-daemon-d.sock.service was already loaded``, exit 1. Six concurrent
+  ## daemons wanted that one name; one held it and the other five took the
+  ## ``launchWithFork`` fallback, which is not a supervised unit at all: they
+  ## reparented to init and survived 11.8 days until they were reaped by hand.
+  ##
+  ## The basename is KEPT in front of the hash, because the name is also a
+  ## human interface -- it is what ``systemctl --user list-units`` shows and
+  ## what someone types to stop a daemon -- and a name that is only a hash
+  ## tells that reader nothing.
+  ##
+  ## The endpoint string is hashed VERBATIM rather than normalised. The name
+  ## has to be the same at launch and at
+  ## ``cleanupPlatformBackgroundRegistration``, and the only thing guaranteed
+  ## to be the same across those two calls is the config field itself; a
+  ## normalisation against the process's cwd is not (the launching CLI and a
+  ## later cleanup need not share one). Endpoints are absolute in every
+  ## producer (``defaultUserDaemonEndpoint``, the ``--endpoint`` flag,
+  ## per-run scratch dirs), so verbatim is also already canonical in practice.
+  ##
+  ## 16 hex characters is 64 bits of the digest: for a namespace whose
+  ## population is the handful of daemons one user runs at once, a collision
+  ## is not a risk worth a longer name. The result is bounded well under
+  ## systemd's 255-byte limit, because an AF_UNIX path is itself bounded by
+  ## ``sun_path`` (108 bytes).
+  "repro-daemon-" & safePathSegment(config.endpoint.extractFilename, "user") &
+    "-" & blake3.digest(config.endpoint).toHex()[0 ..< 16] & ".service"
 
 proc systemdUserRunArgs*(exe: string; config: UserDaemonConfig):
     seq[string] =
@@ -2811,6 +2844,29 @@ proc launchWithSystemdUser(exe: string; config: UserDaemonConfig): bool =
     false
   else:
     false
+
+proc noteSupervisionDowngrade(config: UserDaemonConfig; reason: string) =
+  ## Say, in the daemon's own log, that what is about to start is NOT a
+  ## supervised process.
+  ##
+  ## WHY THIS IS NOT JUST ANOTHER "falling back" LINE. The two launchers above
+  ## already log why the platform manager declined, and that reads as a
+  ## routine retry. It is not: the fallback changes WHO IS RESPONSIBLE FOR THE
+  ## PROCESS'S DEATH. A transient unit is stopped when the unit is stopped,
+  ## collected when it exits, and listed by ``systemctl --user``; a
+  ## ``fork()`` + ``setsid()`` child is owned by nobody, reparents to init,
+  ## and appears in no inventory. That difference is what turned an ordinary
+  ## test-fixture leak into five daemons that ran for 11.8 days. Nobody chose
+  ## the quieter supervision model, so the log has to name it.
+  ##
+  ## ``ppid=1`` is named because it is the discriminator that actually works
+  ## for finding these afterwards. Age does not: of the leaked cohort, one
+  ## daemon 369 s old with a live parent was healthy, while two aged 1.1 h and
+  ## 1.6 h with ``ppid=1`` were already orphaned.
+  logLine(config.logPath,
+    "supervision downgraded: " & reason & "; starting a detached setsid " &
+    "child instead. Nothing supervises it -- it reparents to init (ppid=1) " &
+    "and is in no manager's inventory. endpoint=" & config.endpoint)
 
 proc launchWithFork(exe: string; config: UserDaemonConfig) =
   when defined(posix):
@@ -2950,12 +3006,18 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
     when defined(macosx):
       launchedWithPlatformManager = launchWithLaunchd(exe, launchConfig)
       if not launchedWithPlatformManager:
+        noteSupervisionDowngrade(launchConfig,
+          "launchd did not take the daemon")
         launchWithFork(exe, launchConfig)
     elif defined(linux):
       launchedWithPlatformManager = launchWithSystemdUser(exe, launchConfig)
       if not launchedWithPlatformManager:
+        noteSupervisionDowngrade(launchConfig,
+          "systemd --user did not take the daemon")
         launchWithFork(exe, launchConfig)
     else:
+      noteSupervisionDowngrade(launchConfig,
+        "this platform has no background manager")
       launchWithFork(exe, launchConfig)
     if launchedWithPlatformManager:
       try:
@@ -2966,6 +3028,8 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
             err.msg & "; falling back to posix-fork")
         cleanupPlatformBackgroundRegistration(launchConfig)
         discard cleanupStaleUserDaemonDiscovery(launchConfig)
+        noteSupervisionDowngrade(launchConfig,
+          "the platform manager started a daemon that never became ready")
         launchWithFork(exe, launchConfig)
   else:
     var env = newStringTable()

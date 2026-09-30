@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1769,
+    "nimTestBinaries": 1770,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 587,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1784
+    "testEntries": 1785
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1076,7 +1076,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 912,
+      "integration": 913,
       "platform/destructive": 115,
       "pure unit": 587,
       "unclassified": 159
@@ -1227,9 +1227,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1769,
+    "nimTestBinaryCount": 1770,
     "pythonTestFileCount": 15,
-    "testEntryCount": 1784
+    "testEntryCount": 1785
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5196,9 +5196,9 @@
             "sourceExe",
             "status",
             "summary",
-            "unit"
+            "unitConfig"
           ],
-          "line": 561,
+          "line": 565,
           "path": "tests/integration/t_repro_test_runner_process_group_cleanup.nim",
           "patterns": [
             "nim-c"
@@ -9100,6 +9100,23 @@
       "source": "libs/repro_daemon_core/tests/t_daemon_image_path.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_daemon_transient_unit_name",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_daemon_core"
+      ],
+      "owner": "libs/repro_daemon_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_daemon_core/tests/t_daemon_transient_unit_name.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31015,7 +31032,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_core"
+        "repro_core",
+        "repro_daemon_core"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,

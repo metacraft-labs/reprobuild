@@ -1413,6 +1413,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_daemon_core/tests/t_daemon_transient_unit_name.nim",
+    binary: "build/test-bin/t_daemon_transient_unit_name",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_daemon_core/tests/t_daemon_writer_identity.nim",
     binary: "build/test-bin/t_daemon_writer_identity",
     defines: @[],
