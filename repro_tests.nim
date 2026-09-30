@@ -891,6 +891,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_platform/tests/test_msvc_env_merge.nim",
+    binary: "build/test-bin/test_msvc_env_merge",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim",
     binary: "build/test-bin/test_tool_identity_env_plumbing",
     defines: @[],

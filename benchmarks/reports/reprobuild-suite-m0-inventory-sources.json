@@ -3,7 +3,7 @@
     "graphOwnedHelperArtifacts": 24,
     "nimTestBinaries": 1758,
     "pureUnitConsolidationGroups": 48,
-    "pureUnitTests": 587,
+    "pureUnitTests": 588,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
     "testEntries": 1771
   },
@@ -1078,7 +1078,7 @@
       "graph-fixture": 11,
       "integration": 901,
       "platform/destructive": 115,
-      "pure unit": 587,
+      "pure unit": 588,
       "unclassified": 157
     },
     "graphOwnedTestArtifacts": [
@@ -13088,6 +13088,23 @@
       "source": "libs/repro_peer_cache/tests/t_peer_cache_tls_signed_advertisement_round_trip.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_msvc_env_merge",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_platform"
+      ],
+      "owner": "libs/repro_platform",
+      "requiresReproBinary": false,
+      "source": "libs/repro_platform/tests/test_msvc_env_merge.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
