@@ -30,15 +30,15 @@
   "counts": {
     "catalogs": 4,
     "itemsByKind": {
-      "case": 11314,
-      "suite": 2598
+      "case": 11387,
+      "suite": 2615
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 13638,
-      "python-unittest": 271
+      "nim-unittest": 13727,
+      "python-unittest": 272
     },
-    "itemsTotal": 13912,
+    "itemsTotal": 14002,
     "responseDiagnostics": {
       "info": 1,
       "warning": 35
@@ -47,6 +47,21 @@
   "discoveryScope": "auto (the surface's default: the workspace's own VCS inventory; vendored and ignored trees excluded)",
   "generatedBy": "scripts/ct_test_surface_addressability.py",
   "identityCollisions": [
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim::compressed-tool-archive-with-no-decompressor-on-path::gnu-tar-+",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim",
+          "startLine": 113
+        },
+        {
+          "file": "libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim",
+          "startLine": 133
+        }
+      ]
+    },
     {
       "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
       "id": "nim-unittest/nim/std/unittest/tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim::integration_scoop_manifest_bin_resolution::integration_scoop_manifest_bin_resolution",
@@ -229,22 +244,22 @@
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 96.33,
-    "caseItemsInCatalog": 11314,
-    "casesAddressableThroughTheSurface": 10652,
-    "collidingIdentities": 12,
-    "distinctCaseIdentities": 11302,
+    "caseCoveragePercent": 96.35,
+    "caseItemsInCatalog": 11387,
+    "casesAddressableThroughTheSurface": 10724,
+    "collidingIdentities": 13,
+    "distinctCaseIdentities": 11374,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 1760,
-      "compared": 1765,
+      "agree": 1772,
+      "compared": 1777,
       "disagree": 5
     },
-    "sourceCoveragePercent": 99.49,
-    "sourcesAddressableThroughTheSurface": 1765,
+    "sourceCoveragePercent": 99.5,
+    "sourcesAddressableThroughTheSurface": 1777,
     "sourcesNotAddressable": 9,
-    "trackedNimSuiteSources": 1774,
-    "trackedStaticCaseCount": 11058
+    "trackedNimSuiteSources": 1786,
+    "trackedStaticCaseCount": 11130
   },
   "schemaVersion": 1,
   "surface": {
