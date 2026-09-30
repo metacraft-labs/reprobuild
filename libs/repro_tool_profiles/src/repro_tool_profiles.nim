@@ -3910,7 +3910,7 @@ proc findEditBin(): string =
         return candidate
   return ""
 
-proc bumpWindowsNimStack(nimExePath: string) =
+proc bumpWindowsNimStack*(nimExePath: string) =
   ## MR5 — Windows-only post-extract hook for the bootstrap-provisioned
   ## `nim.exe`. The upstream Nim Windows distribution ships nim.exe
   ## with the linker's default 2 MB stack reserve. The reprobuild

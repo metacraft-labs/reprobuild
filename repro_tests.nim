@@ -13455,6 +13455,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_the_bootstrap_hands_over_to_the_pinned_reprobuild.nim",
+    binary: "build/test-bin/t_the_bootstrap_hands_over_to_the_pinned_reprobuild",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_the_resolving_launcher_execs_the_pinned_image.nim",
     binary: "build/test-bin/t_the_resolving_launcher_execs_the_pinned_image",
     defines: @[],

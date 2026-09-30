@@ -1501,6 +1501,7 @@ tests/integration/t_teardown_runs_on_failure_path.nim	nim	16
 tests/integration/t_test_certificate_conformance_vectors.nim	nim	1
 tests/integration/t_test_edge_migration_covers_all_test_files.nim	nim	1
 tests/integration/t_test_execute_edge_declares_repro_binary_reached_via_helper.nim	nim	4
+tests/integration/t_the_bootstrap_hands_over_to_the_pinned_reprobuild.nim	nim	7
 tests/integration/t_the_resolving_launcher_execs_the_pinned_image.nim	nim	13
 tests/integration/t_the_status_report_does_not_call_an_unpublished_row_recordable.nim	nim	1
 tests/integration/t_the_unpushed_skip_names_the_push_that_would_make_it_lockable.nim	nim	1

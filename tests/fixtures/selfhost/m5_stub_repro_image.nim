@@ -30,6 +30,35 @@ when isMainModule:
   let args = commandLineParams()
   let label = versionLabel()
 
+  # Used by the BOOTSTRAP hand-over test as well
+  # (`tests/integration/t_the_bootstrap_hands_over_to_the_pinned_reprobuild`),
+  # where the bootstrap is the real engine and this stub is the pinned image
+  # -- or, installed as `bin/nim`, the pinned provider compiler.
+  #
+  # `M5_STUB_RECORD` names a file to append one line per invocation to: this
+  # image's path and its argv. It is how that test observes that the
+  # provider compile ran THIS file as `nim`, which nothing else can show
+  # without compiling a real provider.
+  let record = getEnv("M5_STUB_RECORD")
+  if record.len > 0:
+    let f = open(record, fmAppend)
+    f.writeLine(getAppFilename() & "	" & args.join(" "))
+    f.close()
+
+  # `print-handover` is not a reprobuild verb, which is the point: an engine
+  # that answered it itself would print its usage error, so seeing these
+  # lines at all means the argv reached this image. Each argument and each
+  # variable a hand-over is specified to set or clear is printed verbatim.
+  if args.len >= 1 and args[0] == "print-handover":
+    echo "stub-repro " & label & ": handed over"
+    for i, a in args:
+      echo "argv[" & $i & "]=" & a
+    for name in ["REPRO_SELFHOST_RESOLVED", "REPRO_PUBLIC_CLI_PATH",
+                 "REPRO_FULL_CLI", "REPRO_NIM_COMPILER", "M5_HANDOVER_PROBE"]:
+      echo "env " & name & "=" & (if existsEnv(name): getEnv(name)
+                                  else: "<unset>")
+    quit(0)
+
   # `self provision` is the one verb the launcher calls whose FAILURE is part
   # of the contract under test: a pin naming a version the store has not got
   # must end as a refusal, not as a fallback. A stub that succeeded here
