@@ -2193,6 +2193,60 @@ proc resolveZipExtractor(): tuple[exe: string; kind: string] =
     (when defined(windows): "powershell + unzip" else: "unzip + powershell") &
     ")")
 
+proc powershellLiteral(value: string): string =
+  ## A PowerShell single-quoted string literal: nothing inside it is
+  ## interpolated, and the only escape is a doubled quote.
+  "'" & value.replace("'", "''") & "'"
+
+proc powershellZipExtractScript*(archivePath, destination: string): string =
+  ## The script the PowerShell zip extractor runs.
+  ##
+  ## It calls `System.IO.Compression.ZipFile.ExtractToDirectory` directly
+  ## rather than the `Expand-Archive` cmdlet. Both use the same .NET zip
+  ## reader, so path-separator handling and the refusal of entries that
+  ## escape the destination are unchanged. What differs is the per-entry
+  ## cost. Windows PowerShell 5.1's `Expand-Archive` is a script cmdlet that
+  ## writes a progress record for every entry. When the caller captures
+  ## output, as `execCmdEx` does, those records are serialized onto the
+  ## pipe. On a 4-vCPU CI VM that cost about 90 ms per entry. The
+  ## 12,000-entry MinGW toolchain zip took about 40 minutes there, and the
+  ## Go distribution zip took as long again. `ExtractToDirectory` took
+  ## 199 seconds on the same archive, on the same machine, under the same
+  ## load.
+  ##
+  ## `ExtractToDirectory` also does not care about the file extension, so the
+  ## copy of the archive to a temporary `.zip` that `Expand-Archive` required
+  ## is gone too. That copy was a second full write of every archive.
+  ##
+  ## `$ErrorActionPreference = 'Stop'` turns a .NET exception (corrupt
+  ## archive, an entry outside the destination, a file already present) into
+  ## a terminating error, and `-Command` then exits non-zero. Progress is
+  ## silenced anyway, so no module that the host loads can reintroduce the
+  ## per-record cost. The destination is always a fresh staging directory,
+  ## so `Expand-Archive -Force`'s overwrite behavior is not needed.
+  "$ProgressPreference = 'SilentlyContinue'; " &
+    "$ErrorActionPreference = 'Stop'; " &
+    "Add-Type -AssemblyName System.IO.Compression.FileSystem; " &
+    "[System.IO.Compression.ZipFile]::ExtractToDirectory(" &
+    powershellLiteral(archivePath) & ", " & powershellLiteral(destination) &
+    ")"
+
+proc zipExtractCommand*(extractor: tuple[exe: string; kind: string];
+                        archivePath, destination: string): string =
+  ## The command line that extracts a zip archive with `extractor`, as
+  ## returned by `resolveZipExtractor`.
+  case extractor.kind
+  of "powershell":
+    quoteShell(extractor.exe) &
+      " -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command " &
+      quoteShell(powershellZipExtractScript(archivePath, destination))
+  of "unzip":
+    quoteShell(extractor.exe) & " -q -o " & quoteShell(archivePath) &
+      " -d " & quoteShell(destination)
+  else:
+    raise newException(ValueError,
+      "unknown zip extractor kind: " & extractor.kind)
+
 proc resolveZstdExe(): string =
   ## A standalone ``zstd`` for decompressing ``.tar.zst`` payloads.
   ##
@@ -2545,24 +2599,8 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
         (if res.attempts.len > 0: res.attempts else: "\n" & res.output))
     mergeRustInstallerComponents(destination)
   of "zip":
-    let extractor = resolveZipExtractor()
-    let command =
-      case extractor.kind
-      of "powershell":
-        let tempZip = getTempDir() / ($getCurrentProcessId() & "-" & $getTime().toUnix & ".zip")
-        quoteShell(extractor.exe) &
-          " -NoProfile -ExecutionPolicy Bypass -Command " &
-          quoteShell(
-            "Copy-Item -LiteralPath " & quoteShell(archivePath) & " -Destination " & quoteShell(tempZip) & "; " &
-            "Expand-Archive -LiteralPath " & quoteShell(tempZip) & " -DestinationPath " & quoteShell(destination) & " -Force; " &
-            "Remove-Item -LiteralPath " & quoteShell(tempZip)
-          )
-      of "unzip":
-        quoteShell(extractor.exe) & " -q -o " & quoteShell(archivePath) &
-          " -d " & quoteShell(destination)
-      else:
-        raise newException(ValueError, "unreachable")
-    let res = execCmdEx(command)
+    let res = execCmdEx(zipExtractCommand(resolveZipExtractor(),
+      archivePath, destination))
     if res.exitCode != 0:
       raise newException(OSError,
         "tool-resolution failed: zip extraction failed for " & archivePath &
