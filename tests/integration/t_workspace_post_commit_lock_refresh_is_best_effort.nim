@@ -18,9 +18,14 @@
 ##   2. Dirty workspace → strict M11 would have refused with exit 2;
 ##      post-commit downgrades to exit 0 with
 ##      ``outcome = "no-lock-dirty-siblings"`` and writes NO lock file.
-##   3. No ``.repro/workspace.toml`` → wrapper logs
-##      ``outcome = "skipped-no-workspace"`` + exit 0 without touching
-##      the (missing) manifest layer.
+##   3. No ``.repro/workspace.toml`` → wrapper announces
+##      ``skipped-no-workspace`` ON STDERR + exit 0 without touching the
+##      (missing) manifest layer — and without CREATING anything inside the
+##      root it just declared not to be a workspace. The report writers
+##      ``createDir`` recursively, so a report filed there is how a root
+##      acquires the ``.repro/`` that ``hasResolvedManifestCheckout`` reads
+##      back as an initialized workspace; this branch may not manufacture the
+##      marker its own verdict denies.
 ##   4. Lock writer fails (manifests/ directory made non-writable) →
 ##      wrapper logs ``outcome = "no-lock-failed"`` with a diagnostic + exit 0.
 ##   5. Two consecutive invocations → log file has TWO lines, JSON
@@ -50,7 +55,8 @@
 ## Skip rule: ``git`` missing on PATH (same convention as M9 / M10 /
 ## M11 / M17 / M18).
 
-import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
+import std/[algorithm, json, os, osproc, sequtils, strutils, tempfiles,
+  unittest]
 
 when defined(posix):
   import std/posix
@@ -335,6 +341,19 @@ proc commitInRepo(gitBin: string; fx: M19Fixture;
 proc commitInLibA(gitBin: string; fx: M19Fixture; fileName: string): string =
   commitInRepo(gitBin, fx, "lib-a", fileName)
 
+proc reproShellEntries(root: string): seq[string] =
+  ## The immediate entries of ``<root>/.repro``, sorted. A hook that has
+  ## decided the root is not a workspace must not add to this set — the
+  ## report writers ``createDir`` recursively, and the directory tree they
+  ## would create is itself the workspace marker a later run misreads.
+  result = @[]
+  let shell = root / ".repro"
+  if not dirExists(shell):
+    return
+  for kind, path in walkDir(shell):
+    result.add($kind & " " & extractFilename(path))
+  sort(result)
+
 proc readPostCommitLog(fx: M19Fixture): string =
   let logPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "post-commit-lock.log"
@@ -506,8 +525,8 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       # [Workspace-RepoWorkspaces-Alignment.milestones.org RA-10; hooksRoot
       # discovery walks up for a ``.repro/`` dir]: a bare ``.repro/`` with no
       # ``workspace.toml`` and no resolved ``projects/*.toml`` is NOT a
-      # workspace). The wrapper must find that ``.repro/`` root and skip
-      # silently, writing a ``skipped-no-workspace`` report. (``setupFixture``
+      # workspace). The wrapper must announce ``skipped-no-workspace`` on
+      # stderr and write NOTHING here. (``setupFixture``
       # seeds the flat ``projects/lib-a.toml`` membership manifest; RA-10 treats
       # a single resolvable project as an initialized workspace, so we strip it
       # here to model the genuine non-workspace case this test is about.)
@@ -517,17 +536,37 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       # there is none, so create the bare marker the "non-workspace" case models.
       createDir(fx.workspaceRoot / ".repro")
 
+      # What the disclaimed root's ``.repro/`` holds BEFORE the hook runs. The
+      # fixture's own lock-store checkout lives in there, so "nothing new
+      # appeared" is the assertion, not "the shell is empty".
+      let shellBefore = reproShellEntries(fx.workspaceRoot)
+
       let res = invokePostCommit(fx, fx.workspaceRoot / "lib-a")
       check res.code == 0
 
-      let report = readPostCommitReport(fx)
-      check report["exitCode"].getInt() == 0
-      check report["outcome"].getStr() == "skipped-no-workspace"
-      check report["lockFilePath"].getStr() == ""
-      check report["project"].getStr() == ""
+      # THE VERDICT IS ANNOUNCED, AND NOTHING IS FILED IN THE
+      # NON-WORKSPACE. This case used to read the outcome out of
+      # ``<root>/.repro/build/reports/post-commit-report.json``, written into
+      # the same bare ``.repro/`` the wrapper had just declared not to be a
+      # workspace. Both writers ``createDir`` recursively, so that report is
+      # how a root acquires the ``.repro/`` that
+      # ``hasResolvedManifestCheckout`` — beside a resolved
+      # ``projects/*.toml`` — reads back as an initialized workspace: the
+      # skip branch was manufacturing the marker that makes the next run
+      # skip nothing. Git relays a commit hook's stderr, so that is where
+      # the trace goes; silence is not an option either (the branch's own
+      # note records what silence cost in the field).
+      check res.output.contains("repro post-commit:")
+      check res.output.contains("skipped-no-workspace")
+      check res.output.contains("not a workspace")
 
-      let logBody = readPostCommitLog(fx)
-      check logBody.contains("skipped-no-workspace")
+      # Nothing written inside the disclaimed root. The bare ``.repro/`` is
+      # exactly as bare as the fixture left it.
+      check not fileExists(fx.workspaceRoot / ".repro" / "build" / "reports" /
+        "post-commit-report.json")
+      check readPostCommitLog(fx) == ""
+      check not dirExists(fx.workspaceRoot / ".repro" / "build")
+      check reproShellEntries(fx.workspaceRoot) == shellBefore
 
   test "test_m19_post_commit_succeeds_when_lock_writer_fails":
     let gitBin = findExe("git")
