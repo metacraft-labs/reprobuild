@@ -16304,6 +16304,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_tool_archive_missing_decompressor_is_named",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_tool_profiles",
+      "requiresReproBinary": false,
+      "source": "libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_zip_extraction_cost_does_not_scale_with_progress_records",
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",

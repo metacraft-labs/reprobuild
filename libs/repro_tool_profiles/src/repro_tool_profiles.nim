@@ -2065,6 +2065,52 @@ proc requireHostTar(): string =
       hostTarSearchDescription() & ")")
   tar.exe
 
+proc tarDecompressorFor*(archiveType: string): string =
+  ## The external program GNU tar execs to read a compressed tar of
+  ## `archiveType`, or "" for a type it reads itself (plain `tar`) or does not
+  ## hand to tar's own decompression flags at all.
+  case archiveType.toLowerAscii()
+  of "tar.gz", "tgz": "gzip"
+  of "tar.xz", "txz": "xz"
+  of "tar.bz2", "tbz", "tbz2": "bzip2"
+  else: ""
+
+var gnuTarProbeCache {.threadvar.}: Table[string, bool]
+
+proc hostTarExecsDecompressors(tarExe: string): bool =
+  ## Whether `tarExe` decompresses `-z` / `-J` / `-j` by exec'ing an external
+  ## `gzip` / `xz` / `bzip2` from PATH. GNU tar always does; bsdtar
+  ## (libarchive — macOS `/usr/bin/tar`, Windows System32 `tar.exe`)
+  ## decompresses in-process and needs none of them. Only a tar whose
+  ## `--version` banner says GNU is treated as needing them, so a bsdtar host
+  ## is never refused for a program it would not have run.
+  if tarExe in gnuTarProbeCache:
+    return gnuTarProbeCache[tarExe]
+  let probe = uncontrolledExecCmdEx(shellCommand(@[tarExe, "--version"]))
+  result = probe.exitCode == 0 and "GNU tar" in probe.output
+  gnuTarProbeCache[tarExe] = result
+
+proc requireTarDecompressor(tarExe, archivePath, archiveType: string) =
+  ## Refuse, by name, a compressed tar archive whose decompressor `tarExe`
+  ## would have to exec and cannot find — BEFORE tar runs.
+  ##
+  ## Without this the failure surfaced as "tar listing failed" with the
+  ## missing program visible only in tar's child transcript
+  ## (`tar (child): xz: Cannot exec`), twice, because the bsdtar retry in
+  ## `runTarTwice` repeats the same exec. The lookup is on the PATH tar
+  ## inherits from this process, which is the PATH GNU tar's `execlp` uses.
+  let prog = tarDecompressorFor(archiveType)
+  if prog.len == 0 or not hostTarExecsDecompressors(tarExe):
+    return
+  if uncontrolledFindExe(prog).len > 0:
+    return
+  raise newException(OSError,
+    "tool-resolution failed: no '" & prog & "' decompressor on PATH for the " &
+    archiveType & " archive " & archivePath & ": " & tarExe &
+    " is GNU tar, which decompresses " & archiveType & " by running '" & prog &
+    "' from PATH. Remedy: install " & prog & " (or put it on PATH), or set " &
+    HostTarOverrideEnv & " to a tar that decompresses in-process (bsdtar).")
+
 type TarRunner = proc(command: string): tuple[output: string, exitCode: int]
   ## How a ``runTarTwice`` attempt actually reaches the process table. The two
   ## call sites below differ deliberately: the tarball arm runs the ``tar``
@@ -2153,6 +2199,7 @@ proc validateTarEntries(archivePath, archiveType: string) =
       raise newException(ValueError,
         "tool-resolution failed: unsupported tarball archiveType " & archiveType)
   let tarExe = requireHostTar()
+  requireTarDecompressor(tarExe, archivePath, archiveType)
   let res = runTarTwice(tarExe, ["--force-local"], tailArgs,
     proc(command: string): tuple[output: string, exitCode: int] =
       execCmdEx(command))
@@ -2589,6 +2636,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
     if stripComponents > 0:
       tailArgs.add("--strip-components=" & $stripComponents)
     let tarExe = requireHostTar()
+    requireTarDecompressor(tarExe, archivePath, archiveType)
     let res = runTarTwice(tarExe, ["--force-local"], tailArgs,
       proc(command: string): tuple[output: string, exitCode: int] =
         execCmdEx(command))
