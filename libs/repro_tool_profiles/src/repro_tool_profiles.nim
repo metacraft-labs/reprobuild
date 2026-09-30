@@ -27,6 +27,12 @@ import repro_binary_cache_client/caches_config
 import repro_binary_cache_client/in_process as bcInProcess
 import repro_binary_cache_server/types as bcTypes
 import repro_project_dsl/install_mirror_resolver
+# Tarball realization is a build-graph edge (Dependency-Provisioning-In-Build-
+# Graph.md sections 2 and 4): this module builds the `bakForeignProvision`
+# edges, registers the `"tarball"` provisioner's executor with the engine, and
+# runs the provisioning subgraph through `runBuild`.
+import repro_build_engine
+import nimcrypto/[hash, sha2]
 # repro_local_store provides the M56 unified store. Every adapter
 # (Nix / tarball / Scoop) calls `registerInUnifiedStore` after laying
 # out its realized prefix on disk so the same SQLite-backed
@@ -1778,69 +1784,30 @@ proc normalizedSha256(value: string): string =
   if result.len != 64 or result.anyIt(not (it in {'0' .. '9', 'a' .. 'f'})):
     raise newException(ValueError, "invalid sha256 digest: " & value)
 
-proc parseHexLine(output: string): string =
-  ## Scans `output` line by line for the first 64-hex-digit token. Used
-  ## to robustly parse the SHA-256 verifier's output regardless of
-  ## whether it was sha256sum/shasum/openssl/certutil's idiosyncratic
-  ## prefixing.  Also handles sha256sum's `\<digest> *<path>` form
-  ## (the leading literal backslash signals a path that itself
-  ## contains backslashes, common on Windows paths).
-  proc clean(s: string): string =
-    result = s
-    if result.startsWith("\\"):
-      result = result[1 .. ^1]
-    if result.startsWith("*"):
-      result = result[1 .. ^1]
-    result = result.replace(" ", "").toLowerAscii()
-  for line in output.splitLines:
-    let stripped = line.strip()
-    if stripped.len == 0:
-      continue
-    for token in stripped.splitWhitespace():
-      let candidate = clean(token)
-      if candidate.len == 64 and candidate.allCharsInSet(HexDigits):
-        return candidate
-    let collapsed = clean(stripped)
-    if collapsed.len == 64 and collapsed.allCharsInSet(HexDigits):
-      return collapsed
-  ""
-
 proc fileSha256Hex*(path: string): string =
-  ## Compute the SHA-256 hex digest of `path` using whichever tool the
-  ## host provides. Windows ships `certutil -hashfile <path> SHA256` as
-  ## a built-in; macOS and Linux ship one of sha256sum / shasum /
-  ## openssl. We prefer in this order:
-  ##   sha256sum → shasum → certutil (Windows) → openssl.
-  let sha256sum = findExe("sha256sum")
-  let shasum = findExe("shasum")
-  let openssl = findExe("openssl")
-  when defined(windows):
-    let certutil = findExe("certutil")
-  else:
-    let certutil = ""
-  let command =
-    if sha256sum.len > 0:
-      shellCommand(["sha256sum", path])
-    elif shasum.len > 0:
-      shellCommand(["shasum", "-a", "256", path])
-    elif certutil.len > 0:
-      shellCommand(["certutil", "-hashfile", path, "SHA256"])
-    elif openssl.len > 0:
-      shellCommand(["openssl", "dgst", "-sha256", "-r", path])
-    else:
-      raise newException(OSError,
-        "tool-resolution failed: no sha256 verifier found (tried " &
-        "sha256sum, shasum, certutil, openssl)")
-  let res = execCmdEx(command)
-  if res.exitCode != 0:
+  ## The SHA-256 hex digest of `path`, computed in-process.
+  ##
+  ## This used to shell out to whichever of sha256sum / shasum / certutil /
+  ## openssl was first on `PATH`, which made the verifier of every tarball
+  ## provisioning edge an ambient tool -- the thing
+  ## Dependency-Provisioning-In-Build-Graph.md section 4 rules out. Hashing is
+  ## not a tool the edge needs; it is arithmetic, and nimcrypto does it.
+  var f: File
+  if not open(f, extendedPath(path), fmRead):
     raise newException(OSError,
-      "tool-resolution failed: sha256 verifier exited " & $res.exitCode &
-      "\n" & res.output)
-  let parsed = parseHexLine(res.output)
-  if parsed.len == 0:
-    raise newException(OSError, "tool-resolution failed: sha256 verifier " &
-      "produced no recognizable digest in:\n" & res.output)
-  normalizedSha256(parsed)
+      "tool-resolution failed: cannot open for sha256 verification: " & path)
+  defer: close(f)
+  var ctx: sha256
+  ctx.init()
+  var buffer = newSeq[byte](1 shl 20)
+  while true:
+    let got = f.readBytes(buffer, 0, buffer.len)
+    if got <= 0:
+      break
+    ctx.update(buffer.toOpenArray(0, got - 1))
+  let digest = ctx.finish()
+  ctx.clear()
+  toLowerAscii($digest)
 
 proc hostCpuToken(): string =
   ## Host CPU as the lowercase string DSL ``tarball cpu = "..."``
@@ -1883,14 +1850,16 @@ proc hasHostTarballProvisioning(useDef: InterfaceToolUse): bool =
       return true
   false
 
-proc selectTarballProvisioning(useDef: InterfaceToolUse):
+proc selectTarballProvisioning(useDef: InterfaceToolUse;
+                               honorRequestedContributor = true):
     InterfaceTarballProvisioning =
   ## Pick the first ``tarballProvisioning`` entry that matches the host
   ## platform. ``cpu = ""`` / ``os = ""`` entries match every host and
   ## act as a catch-all when no per-platform slice is supplied. Entries
   ## are walked in declaration order so author intent is preserved
   ## (early entries beat later catch-alls).
-  let requested = requestedProvisioningContributor()
+  let requested =
+    if honorRequestedContributor: requestedProvisioningContributor() else: ""
   var contributors: seq[string] = @[]
   var candidates: seq[InterfaceTarballProvisioning] = @[]
   for provisioning in useDef.tarballProvisioning:
@@ -1915,13 +1884,15 @@ proc selectTarballProvisioning(useDef: InterfaceToolUse):
     " os=" & hostOsToken() & " (" & $useDef.tarballProvisioning.len &
     " entries; see the package's `provisioning:` block)")
 
-proc tarballAcquisitionPlan*(useDef: InterfaceToolUse): TarballAcquisitionPlan =
+proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
+                             honorRequestedContributor = true):
+    TarballAcquisitionPlan =
   if useDef.tarballProvisioning.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
       "\" requested by uses \"" & useDef.rawConstraint &
       "\" does not declare provisioning: tarball metadata")
-  let selected = selectTarballProvisioning(useDef)
+  let selected = selectTarballProvisioning(useDef, honorRequestedContributor)
   let sha256 = normalizedSha256(selected.sha256)
   if selected.url.len == 0 or selected.executablePath.len == 0:
     raise newException(ValueError,
@@ -1977,6 +1948,83 @@ proc systemToolEnv(): StringTableRef =
     if result.hasKey(override):
       result.del(override)
 
+# ---------------------------------------------------------------------------
+# The tools a tarball provisioning edge may take from the host.
+#
+# Dependency-Provisioning-In-Build-Graph.md section 4: a provisioning edge
+# never finds its own tools on the ambient PATH. Everything it needs is either
+# a provisioned package reached through a DEPENDENCY EDGE (7-Zip, zstd -- see
+# `ExtractorTools` and `tarballProvisioningEdges`), in-process code (SHA-256),
+# or one of the IRREDUCIBLE tools below, which the operating system itself
+# provides and which are therefore where provisioning has to start. Section
+# 4.1 of the spec lists them; these procs are that list.
+#
+# On Windows every one of them is named by ABSOLUTE PATH under the system
+# directory, so a same-named program earlier on PATH (Git for Windows' GNU tar,
+# a Scoop curl, a stray 7z) is never what runs.
+# ---------------------------------------------------------------------------
+
+proc windowsSystemTool*(relative: string): string =
+  ## `%SystemRoot%\System32\<relative>`. Windows only; "" elsewhere.
+  when defined(windows):
+    getEnv("SystemRoot", getEnv("WINDIR", r"C:\Windows")) / "System32" /
+      relative
+  else:
+    ""
+
+proc requireWindowsSystemTool(relative, purpose: string): string =
+  result = windowsSystemTool(relative)
+  if not fileExists(extendedPath(result)):
+    raise newException(OSError,
+      "tool-resolution failed: " & purpose & " needs the operating system's " &
+      result & ", which is not present. It is one of the tools tarball " &
+      "provisioning takes from Windows itself " &
+      "(Dependency-Provisioning-In-Build-Graph.md section 4.1).")
+
+type
+  ExtractorTools* = object
+    ## The extractors a tarball provisioning edge received from its
+    ## DEPENDENCY EDGES -- realized packages, never PATH lookups. Empty means
+    ## the edge declared no such dependency, and an archive that needs it is
+    ## refused by name rather than satisfied from the host.
+    sevenZip*: string
+    zstd*: string
+
+const
+  ExtractorRoleSevenZip* = "7z"
+  ExtractorRoleZstd* = "zstd"
+
+proc extractorRolesFor*(archiveType: string): seq[string] =
+  ## Which provisioned extractors realizing an archive of `archiveType`
+  ## needs, beyond the irreducible host tools. This is the dependency list of
+  ## a tarball provisioning edge, and the only place it is decided.
+  case archiveType.toLowerAscii()
+  of "7z", "7z.exe": @[ExtractorRoleSevenZip]
+  of "tar.zst", "tzst", "pkg.tar.zst", "conda": @[ExtractorRoleZstd]
+  else: @[]
+
+proc missingExtractor(role, archivePath: string): ref OSError =
+  newException(OSError,
+    "tool-resolution failed: extracting " & archivePath & " needs " &
+    (if role == ExtractorRoleSevenZip: "7-Zip" else: "zstd") &
+    ", and this realization was given none. An extractor is a provisioned " &
+    "package reached through a dependency edge of the provisioning edge " &
+    "(Dependency-Provisioning-In-Build-Graph.md section 4), never a program " &
+    "found on PATH; realize the archive through `resolveTarballTool`, which " &
+    "builds that edge.")
+
+proc provisioningCurl(): string =
+  ## The downloader. Windows: `System32\curl.exe` (shipped since Windows 10
+  ## 1803). Elsewhere: the host's curl -- on macOS `/usr/bin/curl`, on Linux
+  ## the base system's; see section 4.1 for why Linux cannot do better.
+  when defined(windows):
+    requireWindowsSystemTool("curl.exe", "downloading a tool archive")
+  else:
+    for candidate in ["/usr/bin/curl", "/bin/curl"]:
+      if fileExists(candidate):
+        return candidate
+    findExe("curl")
+
 proc downloadUrlToFile(url, destination: string) =
   createDir(extendedPath(parentDir(destination)))
   if url.startsWith("file://"):
@@ -1985,7 +2033,7 @@ proc downloadUrlToFile(url, destination: string) =
       raise newException(IOError, "file URL does not exist: " & url)
     copyFile(extendedPath(source), extendedPath(destination))
   elif url.startsWith("http://") or url.startsWith("https://"):
-    let curl = findExe("curl")
+    let curl = provisioningCurl()
     if curl.len == 0:
       raise newException(IOError,
         "curl is required to download archive URL: " & url)
@@ -2058,6 +2106,16 @@ proc requireHostTar(): string =
   ## the program the error names — WITHOUT flipping which tar production
   ## executes. See ``repro_core/host_tar`` for the measurement and for why
   ## the obvious ``findExe``-only fix was rejected.
+  ##
+  ## On Windows a provisioning edge takes tar from the SYSTEM DIRECTORY only
+  ## (Dependency-Provisioning-In-Build-Graph.md section 4.1): System32's
+  ## bsdtar is part of the OS, and the PATH fallback `resolveHostTar` keeps
+  ## for other callers is the ambient lookup section 4 rules out. The
+  ## explicit `REPRO_HOST_TAR` override still wins -- it names a program by
+  ## absolute path, which is a decision, not a search.
+  when defined(windows):
+    if getEnv(HostTarOverrideEnv).len == 0:
+      return requireWindowsSystemTool("tar.exe", "extracting a tar archive")
   let tar = resolveHostTar()
   if tar.exe.len == 0:
     raise newException(OSError,
@@ -2224,10 +2282,13 @@ proc resolveZipExtractor(): tuple[exe: string; kind: string] =
   ## archives. `unzip` is the POSIX baseline. Returns a (path, kind)
   ## pair; `kind` discriminates the command line shape because they
   ## are NOT interchangeable.
+  ##
+  ## Windows: the OS's own Windows PowerShell, by absolute path
+  ## (section 4.1 of Dependency-Provisioning-In-Build-Graph.md).
   when defined(windows):
-    let ps = findExe("powershell")
-    if ps.len > 0:
-      return (exe: ps, kind: "powershell")
+    return (exe: requireWindowsSystemTool(
+      r"WindowsPowerShell\v1.0\powershell.exe", "extracting a zip archive"),
+      kind: "powershell")
   let unzipExe = findExe("unzip")
   if unzipExe.len > 0:
     return (exe: unzipExe, kind: "unzip")
@@ -2294,18 +2355,9 @@ proc zipExtractCommand*(extractor: tuple[exe: string; kind: string];
     raise newException(ValueError,
       "unknown zip extractor kind: " & extractor.kind)
 
-proc resolveZstdExe(): string =
-  ## A standalone ``zstd`` for decompressing ``.tar.zst`` payloads.
-  ##
-  ## Separate from the conda arm's richer probe, which additionally looks for
-  ## a tar that speaks zstd natively so it can do the whole job in one pass.
-  ## Here the two steps are always separate — decompress, then untar — so the
-  ## only question is whether a zstd exists.
-  uncontrolledFindExe("zstd")
-
 const
-  # 7-Zip for the extractor bootstrap. MUST match the Windows x86_64 entry of
-  # `sevenzipCatalog` in `repro_dsl_stdlib/packages/sevenzip.nim`;
+  # 7-Zip for the extractor dependency edge. MUST match the Windows x86_64
+  # entry of `sevenzipCatalog` in `repro_dsl_stdlib/packages/sevenzip.nim`;
   # `t_sevenzip_bootstrap_matches_stdlib_catalog` checks that it does. The MSI,
   # not the `.exe` installer or a `.7z`, because `msiexec /a` unpacks it with
   # nothing but the OS: the extractor must not need an extractor.
@@ -2314,13 +2366,40 @@ const
     "https://github.com/ip7z/7zip/releases/download/26.01/7z2601-x64.msi"
   BootstrapSevenZipWindowsMsiSha256 =
     "a47ea8dcf8bc08e6de474cae77c828e031fa22cb528f6095defffebf11cd02f2"
+  # zstd for the extractor dependency edge of `.tar.zst` and `.conda`
+  # archives. MUST match the Windows entry of `package zstd` in
+  # `repro_dsl_stdlib/packages/zstd.nim` (checked by
+  # `t_sevenzip_bootstrap_matches_stdlib_catalog`). A zip, so the OS's own
+  # PowerShell unpacks it: again, the extractor needs no extractor.
+  BootstrapZstdVersion = "1.5.6"
+  BootstrapZstdWindowsZipUrl =
+    "https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-v1.5.6-win64.zip"
+  BootstrapZstdWindowsZipSha256 =
+    "7b4eff6719990e38aca93a4844c2e86a1935090625c4611f7e89675e999c56cc"
+
+proc bootstrapNixExtractor(attribute, executablePath: string):
+    InterfaceNixProvisioning =
+  ## The Nix arm of an extractor package on a POSIX host, pinned to the
+  ## stdlib's canonical nixpkgs revision like every other bootstrap tool.
+  let nixpkgsRef = "github:NixOS/nixpkgs/" & CanonicalNixpkgsRev
+  InterfaceNixProvisioning(
+    packageName: attribute,
+    selector: "nixpkgs#" & attribute,
+    executablePath: executablePath,
+    nixpkgsRef: nixpkgsRef,
+    nixpkgsRev: CanonicalNixpkgsRev,
+    nixpkgsNarHash: CanonicalNixpkgsNarHash,
+    packageId: "nixpkgs#" & attribute,
+    lockIdentity: nixpkgsRef & "?narHash=" & CanonicalNixpkgsNarHash & "#" &
+      attribute)
 
 proc bootstrapSevenZipToolUse*(): InterfaceToolUse =
   ## The 7-Zip that extracts `.7z` and `.7z.exe` tool archives -- git for
-  ## Windows and the bootstrap gcc among them. An ordinary tarball-provisioned
-  ## package, realized into the tool store like any other; see
-  ## `resolveSevenZipExe` for why. Windows only: no POSIX tool in the catalogs
-  ## ships as a 7z archive.
+  ## Windows and the bootstrap gcc among them. An ordinary provisioned
+  ## package: `tarballProvisioningEdges` makes it a DEPENDENCY EDGE of every
+  ## provisioning edge whose archive is a 7z (Dependency-Provisioning-In-
+  ## Build-Graph.md section 4). On Windows it is the stdlib catalog's MSI; on
+  ## POSIX, where no catalog tool ships as a 7z archive, it is Nix's `7zz`.
   result = InterfaceToolUse(
     rawConstraint: "7zip",
     packageSelector: "7zip@" & BootstrapSevenZipVersion,
@@ -2339,10 +2418,14 @@ proc bootstrapSevenZipToolUse*(): InterfaceToolUse =
           ":sha256:" & BootstrapSevenZipWindowsMsiSha256,
         cpu: "x86_64",
         os: "windows")]
+  else:
+    result.nixProvisioning = @[bootstrapNixExtractor("_7zz", "bin/7zz")]
 
-proc bootstrapSevenZipStandaloneToolUse(): InterfaceToolUse =
+proc bootstrapSevenZipStandaloneToolUse*(): InterfaceToolUse =
   ## The upstream standalone 7z decoder needs no Windows Installer service.
-  ## Only 7z and 7z SFX payloads use this bootstrap; ZIP/tar have other paths.
+  ## It is the second pinned ALTERNATIVE of the 7-Zip extractor edge, taken
+  ## when the MSI's administrative extraction fails (error 1601 on service
+  ## accounts). Only 7z and 7z SFX payloads use it; ZIP/tar have other paths.
   const
     sha256 = "abcf64ae1cbafddb5395e4cdd3bdc7e3e0561d54a0c6380e3dd43bdbffe519a2"
     packageId = "7zr@" & BootstrapSevenZipVersion
@@ -2365,56 +2448,44 @@ proc bootstrapSevenZipStandaloneToolUse(): InterfaceToolUse =
         cpu: "any",
         os: "windows")]
 
-proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
-                         writerMode = "direct"):
-    PathOnlyToolProfile
-
-proc resolveSevenZipExe(storeRoot: string): string =
-  ## The `7z` that extracts `.7z` archives and `.7z.exe` (SFX) payloads.
-  ##
-  ## On Windows, 7-Zip is realized into the tool store FIRST, as a regular
-  ## package (`bootstrapSevenZipToolUse`). This used to search `PATH` only, so
-  ## tarball provisioning -- whose point is not to depend on the host --
-  ## depended on a host 7-Zip: on a cold store without one, git for Windows
-  ## and the bootstrap gcc (both 7z archives) could not be realized
-  ## (reprobuild-specs/issues/2026-09-24-tarball-realizer-takes-7z-from-path.md).
-  ## `PATH` stays as the fallback for when the store route fails (offline with
-  ## a cold cache), and is the only route on POSIX, where `p7zip`'s `7z` or
-  ## `7zz` speaks the same CLI.
-  ##
-  ## The longer-term shape is the extractor as a dependency EDGE of the
-  ## provisioning edge that needs it
-  ## (Dependency-Provisioning-In-Build-Graph.md, section 4). Tarball
-  ## realization is not an edge yet, so this realizes it inline, the way
-  ## `ensureBootstrapToolchainEnv` realizes the bootstrap compilers.
-  var storeFailure = ""
+proc bootstrapZstdToolUse*(): InterfaceToolUse =
+  ## The zstd that decompresses `.tar.zst` (MSYS2) and `.conda` payloads, as
+  ## a provisioned package and a dependency edge of the provisioning edge
+  ## that needs it. Windows: the stdlib `zstd` package's upstream win64 zip.
+  ## POSIX: the same package's Nix arm.
+  result = InterfaceToolUse(
+    rawConstraint: "zstd",
+    packageSelector: "zstd@" & BootstrapZstdVersion,
+    executableName: "zstd")
   when defined(windows):
-    if storeRoot.len > 0:
-      try:
-        let profile = resolveTarballTool(bootstrapSevenZipToolUse(), storeRoot)
-        if profile.resolvedExecutablePath.len > 0:
-          return profile.resolvedExecutablePath
-      except CatchableError as err:
-        storeFailure = err.msg
-      # Administrative MSI extraction can fail with error 1601 on service
-      # accounts even though downloading and executing a tool is permitted.
-      # Realize the pinned standalone decoder through the same verified store.
-      try:
-        let profile = resolveTarballTool(
-          bootstrapSevenZipStandaloneToolUse(), storeRoot)
-        if profile.resolvedExecutablePath.len > 0:
-          return profile.resolvedExecutablePath
-      except CatchableError as err:
-        storeFailure.add("; standalone 7zr: " & err.msg)
-  for name in @["7z", "7z.exe", "7zz"]:
-    let exe = findExe(name)
-    if exe.len > 0:
-      return exe
-  raise newException(OSError,
-    "tool-resolution failed: no 7z extractor available (" &
-    (if storeFailure.len > 0: "realizing 7zip into the tool store failed: " &
-      storeFailure & "; " else: "") &
-    "looked for 7z, 7z.exe, 7zz on PATH)")
+    result.tarballProvisioning = @[
+      InterfaceTarballProvisioning(
+        packageName: "zstd",
+        url: BootstrapZstdWindowsZipUrl,
+        sha256: BootstrapZstdWindowsZipSha256,
+        archiveType: "zip",
+        executablePath: "zstd.exe",
+        stripComponents: 1,
+        packageId: "zstd@" & BootstrapZstdVersion,
+        lockIdentity: "tarball:zstd@" & BootstrapZstdVersion & ":sha256:" &
+          BootstrapZstdWindowsZipSha256,
+        cpu: "x86_64",
+        os: "windows")]
+  else:
+    result.nixProvisioning = @[bootstrapNixExtractor("zstd", "bin/zstd")]
+
+proc extractorToolUses*(role: string): seq[InterfaceToolUse] =
+  ## The provisioned package an extractor role is realized from, as a list
+  ## of pinned ALTERNATIVES tried in order by one edge.
+  case role
+  of ExtractorRoleSevenZip:
+    when defined(windows):
+      @[bootstrapSevenZipToolUse(), bootstrapSevenZipStandaloneToolUse()]
+    else:
+      @[bootstrapSevenZipToolUse()]
+  of ExtractorRoleZstd: @[bootstrapZstdToolUse()]
+  else:
+    raise newException(ValueError, "unknown extractor role: " & role)
 
 proc removeSingleTopLevelDir(destination: string) =
   ## When a zip / 7z archive ships its payload under a single top-
@@ -2628,9 +2699,11 @@ proc mergeRustInstallerComponents(destination: string) =
 proc extractTarballArchive(archivePath, destination, archiveType: string;
                            stripComponents: int;
                            declaredExecutablePath = "";
-                           storeRoot = "") =
-  ## `storeRoot` is where an extractor this archive needs is realized from
-  ## (`resolveSevenZipExe`); empty means "search PATH only".
+                           tools = ExtractorTools()) =
+  ## `tools` are the extractors this archive needs (`extractorRolesFor`),
+  ## realized by the provisioning edge's DEPENDENCY EDGES. An archive whose
+  ## extractor is absent from `tools` is refused; nothing here searches PATH
+  ## for one (Dependency-Provisioning-In-Build-Graph.md section 4).
   validateTarEntries(archivePath, archiveType)
   createDir(extendedPath(destination))
   let lowerType = archiveType.toLowerAscii()
@@ -2706,20 +2779,23 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
     # host tar both already exist — so the arm composes them rather than adding
     # an extractor. The outer layer recurses through this same proc so the ZIP
     # extractor discovery (PowerShell / unzip) stays in one place.
+    #
+    # The inner payload is a ``.tar.zst``, so a conda archive takes the same
+    # zstd dependency edge that arm does (``extractorRolesFor``) and recurses
+    # into it. This used to probe for a tar that "speaks zstd" -- System32's
+    # bsdtar, then ``bsdtar`` / ``tar`` on PATH -- and fall back to a ``zstd``
+    # and ``tar`` from PATH: three ambient lookups in a provisioning step.
     let staging = destination & ".conda-staging"
     removeDir(extendedPath(staging))
     createDir(extendedPath(staging))
     try:
-      extractTarballArchive(archivePath, staging, "zip", 0,
-        storeRoot = storeRoot)
-      # N48: the walk is EXTENDED-LENGTH (``\\?\…``) because that is what
+      extractTarballArchive(archivePath, staging, "zip", 0, tools = tools)
+      # N48: the walk is EXTENDED-LENGTH (``\?\…``) because that is what
       # opens reliably from Nim, but the result is a CHILD PROCESS OPERAND and
-      # the ``\\?\`` prefix does not survive one. Measured: MSYS2's zstd.exe
-      # answered ``can't stat \?M:mdevreprobuild…`` — it had eaten the prefix's
-      # backslashes along with every separator — so the conda arm could not
-      # decompress its own payload on Windows no matter what came after.
-      # ``relative = true`` keeps the extended path on the Nim side of the
-      # boundary and hands the child an ordinary one.
+      # the ``\?\`` prefix does not survive one (MSYS2's zstd.exe answered
+      # ``can't stat \?M:mdevreprobuild…``). ``relative = true`` keeps the
+      # extended path on the Nim side of the boundary and hands the child an
+      # ordinary one.
       var payload = ""
       for kind, entry in walkDir(extendedPath(staging), relative = true):
         if kind != pcFile: continue
@@ -2732,127 +2808,7 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
           "tool-resolution failed: no pkg-*.tar.zst payload inside conda " &
           "archive " & archivePath &
           " (expected the conda-forge two-member envelope)")
-      # Decompressing the payload needs a ZSTD-CAPABLE tar, which "tar" on
-      # PATH is not guaranteed to be. GNU tar shells out to a separate zstd
-      # binary and dies with "zstd: Cannot exec" when it is absent (observed
-      # with GNU tar 1.35 under MSYS); libarchive/bsdtar links libzstd and
-      # handles it directly. Windows' bundled System32\tar.exe is bsdtar —
-      # 3.8.4 reports libzstd/1.5.7 — which is why the PowerShell provisioner
-      # this replaces called that binary by absolute path rather than "tar".
-      #
-      # So probe for a tar that can actually do it instead of assuming, and
-      # fall back to piping a standalone zstd. Mirrors the strategy discovery
-      # `extractTarZst` in repro_home_apply/builtin_adapter.nim already uses.
-      # Class 2 requires the action identity to record "the search path, resolved
-      # executable path, and configured probes" — probing and discarding the
-      # answer is not class 2, it is unclassified. `probes` accumulates every
-      # candidate considered and its verdict, and every exit path below reports
-      # it, so a failure says WHICH binaries were examined and why each was
-      # rejected rather than only that nothing was found.
-      var probes: seq[string] = @[]
-
-      proc tarSpeaksZstd(exe: string): bool =
-        if exe.len == 0: return false
-        let probe = uncontrolledExecCmdEx(shellCommand(@[exe, "--version"]))
-        let firstLine =
-          if probe.output.len == 0: "<no output>"
-          else: probe.output.splitLines()[0].strip()
-        result = probe.exitCode == 0 and
-          probe.output.toLowerAscii().contains("libarchive")
-        probes.add(exe & " -> " & (if result: "libarchive (usable)"
-                                   else: "not libarchive: " & firstLine))
-
-      var zstdTar = ""
-      when defined(windows):
-        let systemTar = getEnv("WINDIR", r"C:\Windows") / "System32" / "tar.exe"
-        if fileExists(extendedPath(systemTar)):
-          if tarSpeaksZstd(systemTar):
-            zstdTar = systemTar
-        else:
-          probes.add(systemTar & " -> absent")
-      if zstdTar.len == 0:
-        for candidate in ["bsdtar", "tar"]:
-          let exe = uncontrolledFindExe(candidate)
-          if exe.len == 0:
-            probes.add(candidate & " -> not on PATH")
-            continue
-          if tarSpeaksZstd(exe):
-            zstdTar = exe
-            break
-
-      let probeTrail = "\n  probes:\n    " & probes.join("\n    ")
-
-      var res: tuple[output: string, exitCode: int]
-      var resolvedVia = ""
-      if zstdTar.len > 0:
-        resolvedVia = zstdTar
-        res = uncontrolledExecCmdEx(shellCommand(
-          @[zstdTar, "-xf", payload, "-C", destination]))
-      else:
-        let zstdExe = uncontrolledFindExe("zstd")
-        let gnuTar = uncontrolledFindExe("tar")
-        if zstdExe.len == 0 or gnuTar.len == 0:
-          raise newException(OSError,
-            "tool-resolution failed: extracting the conda payload " & payload &
-            " needs a zstd-capable tar (libarchive/bsdtar, e.g. Windows' " &
-            "System32\\tar.exe) or a standalone 'zstd' alongside tar; " &
-            "neither was found." & probeTrail &
-            "\n    zstd -> " & (if zstdExe.len == 0: "not on PATH" else: zstdExe) &
-            "\n    tar  -> " & (if gnuTar.len == 0: "not on PATH" else: gnuTar))
-        # N48 / the W13 family. This WAS one command string carrying a ``|``:
-        #
-        #   zstd -dc <payload> | tar -xf - -C <destination>
-        #
-        # handed to ``uncontrolledExecCmdEx``. That contract is
-        # ``osproc.execCmdEx`` plus ``poEvalCommand``, and on Windows
-        # ``startProcess`` gives the command line to ``CreateProcessW``
-        # VERBATIM — there is no ``cmd.exe`` and no shell anywhere in the
-        # path. The ``|`` and everything after it arrive as ORDINARY ARGV
-        # ENTRIES to the FIRST program, which rejects them; the second never
-        # runs. Measured with the identical shape elsewhere in this tree:
-        # ``git --version | git hash-object --stdin`` -> exit 129, "unknown
-        # option `stdin'".
-        #
-        # Of W13's two remedies, "make the shell explicit" is not available
-        # here: this arm exists precisely for a host whose ``tar`` cannot do
-        # zstd, which on Windows is a host with no ``sh``, and ``cmd /c``
-        # re-introduces W4's quote-stripping. So the two processes are
-        # connected here instead of by a shell. They are connected THROUGH A
-        # FILE rather than through an in-process copy loop, and that choice is
-        # deliberate: ``staging`` already exists, is already removed in the
-        # ``finally`` below, and already holds this very payload, so the
-        # decompressed tar costs one transient file in a directory whose
-        # lifetime is settled — against a second copy of the ~150-line
-        # SIGPIPE-guarded pipe loop in ``builtin_adapter``'s ``zekZstdPipe``
-        # arm, which would be a second thing to keep true. It is also the
-        # shape the two other .tar.zst call sites in this tree already use
-        # (``apt_jammy``'s ``decompressZstdToFile``, the harvester's
-        # ``msys2_source``).
-        #
-        # The consequence is stated rather than left implicit: the archive is
-        # no longer tar's STDIN, so it is now a ``-f`` operand and the
-        # ``host:path`` misreading applies to it. That is why ``--force-local``
-        # is offered below, in an attempt allowed to fail, and why the
-        # decompressed tar's path goes through ``tarOperand`` too.
-        resolvedVia = zstdExe & " then " & gnuTar
-        let payloadTar = staging / "conda-payload.tar"
-        let zstdRes = uncontrolledExecCmdEx(shellCommand(
-          @[zstdExe, "-d", "-f", "-q", "-o", payloadTar, payload]))
-        if zstdRes.exitCode != 0:
-          raise newException(OSError,
-            "tool-resolution failed: decompressing the conda payload " &
-            payload & " with " & zstdExe & " exited " & $zstdRes.exitCode &
-            probeTrail & "\n" & zstdRes.output)
-        let tarRes = runTarTwice(gnuTar, ["--force-local"],
-          ["-xf", tarOperand(payloadTar), "-C", tarOperand(destination)],
-          proc(command: string): tuple[output: string, exitCode: int] =
-            uncontrolledExecCmdEx(command))
-        res = (output: tarRes.output & tarRes.attempts,
-               exitCode: tarRes.exitCode)
-      if res.exitCode != 0:
-        raise newException(OSError,
-          "tool-resolution failed: conda payload extraction failed for " &
-          payload & " using " & resolvedVia & probeTrail & "\n" & res.output)
+      extractTarballArchive(payload, destination, "tar.zst", 0, tools = tools)
     finally:
       removeDir(extendedPath(staging))
     flattenStripComponents(destination, stripComponents)
@@ -2869,19 +2825,20 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
     # because it has a second reason to care; here the two-step form works
     # against either tar and is the shape the other ``.tar.zst`` call sites
     # in this tree already use.
-    let zstdExe = resolveZstdExe()
+    #
+    # The zstd is the provisioned package the provisioning edge's zstd
+    # dependency edge realized -- never one found on PATH.
+    let zstdExe = tools.zstd
     if zstdExe.len == 0:
-      raise newException(OSError,
-        "tool-resolution failed: extracting " & archivePath &
-        " needs a `zstd` on PATH and none was found. MSYS2 packages are " &
-        "zstd-compressed tarballs; install zstd (it ships with Git for " &
-        "Windows' MSYS runtime and with 7-Zip 22+) and retry.")
+      raise missingExtractor(ExtractorRoleZstd, archivePath)
     let staging = destination & ".zst-staging"
     removeDir(extendedPath(staging))
     createDir(extendedPath(staging))
     try:
       let payloadTar = staging / "payload.tar"
-      let zstdRes = uncontrolledExecCmdEx(shellCommand(
+      # A provisioned executable named by absolute path: a controlled
+      # execution, so `execCmdEx`, not the ambient-execution hatch.
+      let zstdRes = execCmdEx(shellCommand(
         @[zstdExe, "-d", "-f", "-q", "-o", payloadTar, archivePath]))
       if zstdRes.exitCode != 0:
         raise newException(OSError,
@@ -2891,11 +2848,15 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
       # tar discovery, the ``--force-local`` retry for Windows drive letters,
       # and the strip handling.
       extractTarballArchive(payloadTar, destination, "tar", stripComponents,
-        declaredExecutablePath, storeRoot)
+        declaredExecutablePath, tools)
     finally:
       removeDir(extendedPath(staging))
   of "7z", "7z.exe":
-    let sevenZipExe = resolveSevenZipExe(storeRoot)
+    # The 7-Zip is the provisioned package the provisioning edge's 7-Zip
+    # dependency edge realized -- never one found on PATH.
+    let sevenZipExe = tools.sevenZip
+    if sevenZipExe.len == 0:
+      raise missingExtractor(ExtractorRoleSevenZip, archivePath)
     # `x` = extract with full paths preserved.
     # `-o<dir>` = output directory (NO space between -o and the path).
     # `-y` = assume yes for all prompts (overwrites).
@@ -2939,7 +2900,13 @@ proc extractTarballArchive(archivePath, destination, archiveType: string;
       # also refuses a relative TARGETDIR.
       let nativeArchive = absolutePath(archivePath).replace('/', '\\')
       let nativeDest = absolutePath(destination).replace('/', '\\')
-      let res = execCmdEx("msiexec.exe /a " & quoteShell(nativeArchive) &
+      # By absolute path under System32: msiexec is one of the tools
+      # provisioning takes from the OS (section 4.1 of
+      # Dependency-Provisioning-In-Build-Graph.md).
+      let msiexec = requireWindowsSystemTool("msiexec.exe",
+        "extracting an MSI archive")
+      let res = execCmdEx(quoteShell(msiexec) & " /a " &
+        quoteShell(nativeArchive) &
         " /qn TARGETDIR=" & quoteShell(nativeDest))
       if res.exitCode != 0:
         raise newException(OSError,
@@ -3090,7 +3057,8 @@ proc closureManifestDigest(plan: TarballAcquisitionPlan): string =
   $blake3.digest(canonical.join("\n"))
 
 proc unpackClosure(plan: TarballAcquisitionPlan;
-                   destination, storeRoot: string) =
+                   destination, storeRoot: string;
+                   tools: ExtractorTools) =
   ## Unpack every archive the manifest names into its declared subdirectory.
   ##
   ## Runs against the STAGING prefix, before anything is sealed, so a
@@ -3121,7 +3089,7 @@ proc unpackClosure(plan: TarballAcquisitionPlan;
     if dirExists(extendedPath(target)):
       removeDir(extendedPath(target))
     extractTarballArchive(downloaded.path, target, entryPlan.archiveType,
-      entryPlan.stripComponents, "", storeRoot)
+      entryPlan.stripComponents, "", tools)
 
 proc toolCacheIdentity(plan: TarballAcquisitionPlan;
                        packageName, version: string): CacheEntryIdentity =
@@ -3416,7 +3384,8 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
     flushStoreDiagnostics()
 
 proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
-                              writerMode = "direct"):
+                              writerMode = "direct";
+                              tools = ExtractorTools()):
     tuple[prefix: string; archivePath: string; selectedUrl: string] =
   ## Materializes a tarball realization into the unified M56 layout
   ## (`<store-root>/prefixes/<package>/<version>-<hash>/`).
@@ -3482,7 +3451,7 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
   try:
     if not cloned:
       extractTarballArchive(downloaded.path, tempPrefix, plan.archiveType,
-        plan.stripComponents, plan.declaredExecutablePath, storeRoot)
+        plan.stripComponents, plan.declaredExecutablePath, tools)
       # The declared closure, unpacked into the same staging prefix. After
       # the root archive because an entry lands UNDER it
       # (``node_modules/...``), and before the prune/alias/launcher steps
@@ -3490,7 +3459,7 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
       # the same reason it skips the extraction: the sibling it matched
       # already carries the result, and the clone only matches a sibling
       # whose closure keyed the same cache entry.
-      unpackClosure(plan, tempPrefix, storeRoot)
+      unpackClosure(plan, tempPrefix, storeRoot, tools)
     # Declared prunes, applied to the temporary prefix before anything is
     # sealed — so the dropped bytes never appear under the store path, never
     # reach the receipt, and never reach the archive the publish step packs.
@@ -3709,39 +3678,24 @@ proc refuseUnrunnableTarballExecutable(useDef: InterfaceToolUse;
     err.executable = executable
     raise err
 
-proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
-                         writerMode = "direct"):
+proc tarballProfileFor(useDef: InterfaceToolUse; plan: TarballAcquisitionPlan;
+                       prefix, selectedUrl, resolved: string):
     PathOnlyToolProfile =
-  let plan = tarballAcquisitionPlan(useDef)
-  let root =
-    if storeRoot.len > 0:
-      storeRoot
-    else:
-      getCurrentDir() / ".repro" / "tool-store"
-  let materialized = materializeTarballPrefix(plan, root, writerMode)
-  let resolved = executableInStorePath(materialized.prefix,
-    plan.declaredExecutablePath, rejectSymlinks = true)
-  if resolved.len == 0:
-    raise newException(OSError,
-      "tool-resolution failed: tarball realization lacks " &
-      plan.declaredExecutablePath)
-  refuseUnrunnableTarballExecutable(useDef, resolved)
-
   result = PathOnlyToolProfile(
     installMethod: "tarball",
     packageSelector: useDef.packageSelector,
     packageId: plan.packageId,
     tarballUrl: plan.url,
     tarballMirrors: plan.mirrors,
-    tarballSelectedUrl: materialized.selectedUrl,
+    tarballSelectedUrl: selectedUrl,
     tarballSha256: plan.sha256,
     archiveType: plan.archiveType,
     stripComponents: plan.stripComponents,
     declaredExecutablePath: plan.declaredExecutablePath,
-    realizedStorePaths: @[materialized.prefix],
-    selectedStorePath: materialized.prefix,
+    realizedStorePaths: @[prefix],
+    selectedStorePath: prefix,
     lockIdentity: plan.lockIdentity,
-    realizationBoundary: materialized.prefix,
+    realizationBoundary: prefix,
     executableName: useDef.executableName,
     pathSearchList: @[parentDir(resolved)],
     resolvedExecutablePath: resolved,
@@ -3752,21 +3706,468 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
   # prefix. Mirrors the nix-resolved population so tarball-shipped libs
   # contribute to the consumer recipe's PKG_CONFIG_PATH /
   # CMAKE_PREFIX_PATH / CPATH / LIBRARY_PATH at action fork time.
-  addUniquePath(result.cmakePrefixList, materialized.prefix)
-  addUniquePath(result.pkgConfigSearchList,
-    materialized.prefix / "lib" / "pkgconfig")
-  addUniquePath(result.pkgConfigSearchList,
-    materialized.prefix / "lib64" / "pkgconfig")
-  addUniquePath(result.pkgConfigSearchList,
-    materialized.prefix / "share" / "pkgconfig")
-  addUniquePath(result.cpathList, materialized.prefix / "include")
-  addUniquePath(result.libraryPathList, materialized.prefix / "lib")
-  addUniquePath(result.libraryPathList, materialized.prefix / "lib64")
+  addUniquePath(result.cmakePrefixList, prefix)
+  addUniquePath(result.pkgConfigSearchList, prefix / "lib" / "pkgconfig")
+  addUniquePath(result.pkgConfigSearchList, prefix / "lib64" / "pkgconfig")
+  addUniquePath(result.pkgConfigSearchList, prefix / "share" / "pkgconfig")
+  addUniquePath(result.cpathList, prefix / "include")
+  addUniquePath(result.libraryPathList, prefix / "lib")
+  addUniquePath(result.libraryPathList, prefix / "lib64")
 
   result.probes = collectConfiguredProbes(resolved,
     useDef.packageSelector, useDef.executableName)
 
   refreshProfileIdentity(result)
+
+# ---------------------------------------------------------------------------
+# Tarball realization as a build-graph edge.
+#
+# Dependency-Provisioning-In-Build-Graph.md sections 2-4. Realizing a
+# tarball-provisioned package is a `bakForeignProvision` edge whose
+# provisioner is `"tarball"`:
+#
+#   * its STATIC INPUTS are the pin -- URL, mirrors, SHA-256, archive type,
+#     layout declarations, lock identity, closure manifest -- carried in the
+#     edge's `builtinText` and folded into its weak fingerprint, so the action
+#     cache serves a repeat realization and a changed pin is a miss;
+#   * its OUTPUT is a receipt naming the realized prefix and executable;
+#   * the extractors its archive needs (`extractorRolesFor`) are provisioned
+#     packages realized by their OWN provisioning edges, which are this
+#     edge's dependencies: `deps` orders them first, and their receipts are
+#     this edge's declared inputs, so re-realizing an extractor under a new
+#     pin invalidates every edge that extracted with it.
+#
+# The only tools an edge takes from the host are the irreducible OS tools of
+# section 4.1 (see `provisioningCurl`, `requireHostTar`,
+# `resolveZipExtractor`, and the msi arm).
+# ---------------------------------------------------------------------------
+
+const
+  TarballProvisionerName* = "tarball"
+  NixProvisionerName = "nix"
+  TarballProvisionEdgeSchema = "reprobuild.tarball-provision.v1"
+
+type
+  ProvisioningEdges* = object
+    ## A provisioning subgraph: the requested package's edge and, before it,
+    ## every edge it depends on. `actions` is in dependency order.
+    actions*: seq[BuildAction]
+    rootId*: string
+    rootReceipt*: string
+
+  TarballProvisionReceipt* = object
+    ## What a tarball provisioning edge wrote as its output.
+    packageSelector*: string
+    planIndex*: int
+    prefix*: string
+    executable*: string
+    selectedUrl*: string
+
+proc provisioningStateRoot*(storeRoot: string): string =
+  ## Where the provisioning subgraph keeps its receipts and its action cache.
+  ## Under the tool store it provisions into, because a receipt names a
+  ## prefix of THAT store and is meaningless against any other.
+  storeRoot / "provisioning"
+
+proc planJson(plan: TarballAcquisitionPlan): JsonNode =
+  %*{
+    "packageSelector": plan.packageSelector,
+    "packageId": plan.packageId,
+    "url": plan.url,
+    "mirrors": plan.mirrors,
+    "sha256": plan.sha256,
+    "archiveType": plan.archiveType,
+    "declaredExecutablePath": plan.declaredExecutablePath,
+    "declaredExecutableAlias": plan.declaredExecutableAlias,
+    "declaredPrunePaths": plan.declaredPrunePaths,
+    "declaredNonRedistributable": plan.declaredNonRedistributable,
+    "declaredLauncher": plan.declaredLauncher,
+    "declaredClosureManifest": plan.declaredClosureManifest,
+    "closureManifestRoot": plan.closureManifestRoot,
+    "stripComponents": plan.stripComponents,
+    "lockIdentity": plan.lockIdentity}
+
+proc jsonStrings(node: JsonNode): seq[string] =
+  if node != nil and node.kind == JArray:
+    for item in node:
+      result.add(item.getStr())
+
+proc planFromJson(node: JsonNode): TarballAcquisitionPlan =
+  TarballAcquisitionPlan(
+    packageSelector: node{"packageSelector"}.getStr(),
+    packageId: node{"packageId"}.getStr(),
+    url: node{"url"}.getStr(),
+    mirrors: jsonStrings(node{"mirrors"}),
+    sha256: node{"sha256"}.getStr(),
+    archiveType: node{"archiveType"}.getStr(),
+    declaredExecutablePath: node{"declaredExecutablePath"}.getStr(),
+    declaredExecutableAlias: node{"declaredExecutableAlias"}.getStr(),
+    declaredPrunePaths: jsonStrings(node{"declaredPrunePaths"}),
+    declaredNonRedistributable:
+      node{"declaredNonRedistributable"}.getBool(),
+    declaredLauncher: node{"declaredLauncher"}.getStr(),
+    declaredClosureManifest: node{"declaredClosureManifest"}.getStr(),
+    closureManifestRoot: node{"closureManifestRoot"}.getStr(),
+    stripComponents: node{"stripComponents"}.getInt(),
+    lockIdentity: node{"lockIdentity"}.getStr())
+
+proc provisionEdgeIdentity(provisioner, packageSelector,
+                           executablePath: string): string =
+  ## The edge's STABLE identity: which package, for which executable, on
+  ## which host -- and deliberately NOT the pin. A re-pinned package is the
+  ## same edge with a new weak fingerprint, so the action cache sees a miss
+  ## on the edge it already knows, and the edge's receipt (the input of every
+  ## consumer) changes content in place instead of moving to a new path.
+  digestHex(weakFingerprintFromText(
+    "reprobuild.provision-edge.identity.v1\0" & provisioner & "\0" &
+    packageSelector & "\0" & executablePath & "\0" & hostOsToken() & "\0" &
+    hostCpuToken()))[0 .. 31]
+
+proc safeIdSegment(value: string): string =
+  for ch in value:
+    result.add(if ch.isAlphaNumeric or ch in {'.', '-', '_', '@'}: ch
+               else: '_')
+
+type ProvisionEdgeRef = object
+  role: string
+  id: string
+  receipt: string
+  kind: string            # "tarball" | "nix"
+  executablePath: string  # nix: relative to the store path in the receipt
+
+proc addNixProvisionEdge(edges: var ProvisioningEdges; useDef: InterfaceToolUse;
+                         storeRoot: string): ProvisionEdgeRef =
+  ## A POSIX extractor package, provisioned through the Nix provisioner's
+  ## `bakForeignProvision` edge (the engine's own executor).
+  let plan = nixAcquisitionPlan(useDef)
+  let identity = provisionEdgeIdentity(NixProvisionerName,
+    useDef.packageSelector, plan.declaredExecutablePath)
+  let id = "nix-provision." & safeIdSegment(useDef.packageSelector) & "." &
+    identity[0 .. 11]
+  let receipt = provisioningStateRoot(storeRoot) / "receipts" /
+    (id & ".receipt")
+  result = ProvisionEdgeRef(id: id, receipt: receipt, kind: NixProvisionerName,
+    executablePath: plan.declaredExecutablePath)
+  for existing in edges.actions:
+    if existing.id == id:
+      return
+  var action = builtinAction(bakForeignProvision, id,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    cwd = storeRoot,
+    outputs = [receipt],
+    commandStatsId = "repro nix provision edge",
+    cacheable = true,
+    weakFingerprint = weakFingerprintFromText(
+      "reprobuild.nix-provision.v1\0" & plan.nixSelector & "\0" &
+      plan.lockIdentity))
+  action.argv = @[NixProvisionerName, plan.nixSelector]
+  edges.actions.add(action)
+
+proc addTarballProvisionEdge(edges: var ProvisioningEdges;
+                             alternatives: openArray[InterfaceToolUse];
+                             storeRoot, writerMode: string;
+                             visiting: var seq[string];
+                             extractor = false): ProvisionEdgeRef
+
+proc addExtractorEdge(edges: var ProvisioningEdges; role, storeRoot,
+                      writerMode: string;
+                      visiting: var seq[string]): ProvisionEdgeRef =
+  let uses = extractorToolUses(role)
+  var hostUses: seq[InterfaceToolUse]
+  for use in uses:
+    if hasHostTarballProvisioning(use):
+      hostUses.add(use)
+  if hostUses.len > 0:
+    result = addTarballProvisionEdge(edges, hostUses, storeRoot, writerMode,
+      visiting, extractor = true)
+  elif uses.len > 0 and uses[0].nixProvisioning.len > 0:
+    result = addNixProvisionEdge(edges, uses[0], storeRoot)
+  else:
+    raise newException(OSError,
+      "tool-resolution failed: the " & role & " extractor has no " &
+      "provisioning for host cpu=" & hostCpuToken() & " os=" & hostOsToken())
+  result.role = role
+
+proc addTarballProvisionEdge(edges: var ProvisioningEdges;
+                             alternatives: openArray[InterfaceToolUse];
+                             storeRoot, writerMode: string;
+                             visiting: var seq[string];
+                             extractor = false): ProvisionEdgeRef =
+  ## One tarball provisioning edge for the package `alternatives[0]` names.
+  ## Later entries are pinned ALTERNATIVES the executor tries in order when
+  ## an earlier one fails to realize (the 7-Zip MSI, then the standalone
+  ## decoder). Its extractor dependency edges are added first.
+  ##
+  ## An `extractor` edge's package is reprobuild's own bootstrap pin, which
+  ## has one contributor, so a contributor the user requested for THEIR
+  ## packages (`REPRO_PROVISIONING_CONTRIBUTOR`) does not filter it out.
+  if alternatives.len == 0:
+    raise newException(ValueError, "tarball provisioning edge needs a package")
+  var plans: seq[TarballAcquisitionPlan]
+  for use in alternatives:
+    plans.add(tarballAcquisitionPlan(use,
+      honorRequestedContributor = not extractor))
+  let first = alternatives[0]
+  let identity = provisionEdgeIdentity(TarballProvisionerName,
+    first.packageSelector, plans[0].declaredExecutablePath)
+  let id = "tarball-provision." & safeIdSegment(first.packageSelector) & "." &
+    identity[0 .. 11]
+  let receipt = provisioningStateRoot(storeRoot) / "receipts" /
+    (id & ".receipt")
+  result = ProvisionEdgeRef(id: id, receipt: receipt,
+    kind: TarballProvisionerName)
+  if id in visiting:
+    raise newException(ValueError,
+      "tool-resolution failed: provisioning cycle through " & id &
+      " (an extractor whose own archive needs itself)")
+  var plansNode = newJArray()
+  for plan in plans:
+    plansNode.add(planJson(plan))
+  for existing in edges.actions:
+    if existing.id == id:
+      if parseJson(existing.builtinText){"plans"} != plansNode:
+        raise newException(ValueError,
+          "tool-resolution failed: two different pins for one provisioning " &
+          "edge " & id & " in one graph")
+      return
+  var fingerprintText = TarballProvisionEdgeSchema & "\0" & storeRoot &
+    "\0" & $plansNode
+  var inputs: seq[string]
+  for plan in plans:
+    if plan.declaredClosureManifest.len > 0:
+      inputs.add(closureManifestPath(plan))
+      fingerprintText.add("\0closure:" & closureManifestDigest(plan))
+
+  var roles: seq[string]
+  for plan in plans:
+    for role in extractorRolesFor(plan.archiveType):
+      if role notin roles:
+        roles.add(role)
+  visiting.add(id)
+  var extractorNodes = newJArray()
+  var deps: seq[string]
+  for role in roles:
+    let extractor = addExtractorEdge(edges, role, storeRoot, writerMode,
+      visiting)
+    deps.add(extractor.id)
+    inputs.add(extractor.receipt)
+    fingerprintText.add("\0extractor:" & role & ":" & extractor.id)
+    extractorNodes.add(%*{"role": role, "receipt": extractor.receipt,
+      "kind": extractor.kind, "executablePath": extractor.executablePath})
+  discard visiting.pop()
+
+  var destinations: seq[string]
+  for plan in plans:
+    for url in @[plan.url] & plan.mirrors:
+      if url notin destinations:
+        destinations.add(url)
+  let text = $(%*{
+    "schema": TarballProvisionEdgeSchema,
+    "storeRoot": storeRoot,
+    "writerMode": writerMode,
+    "plans": plansNode,
+    "extractors": extractorNodes})
+  var action = builtinAction(bakForeignProvision, id,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    cwd = storeRoot,
+    deps = deps,
+    inputs = inputs,
+    outputs = [receipt],
+    commandStatsId = "repro tarball provision edge",
+    cacheable = true,
+    weakFingerprint = weakFingerprintFromText(fingerprintText),
+    text = text,
+    networkMode = netFetch,
+    netDestinations = destinations)
+  action.argv = @[TarballProvisionerName, first.packageSelector]
+  edges.actions.add(action)
+
+proc tarballProvisioningEdges*(useDef: InterfaceToolUse; storeRoot: string;
+                               writerMode = "direct"): ProvisioningEdges =
+  ## The provisioning subgraph that realizes `useDef` from its tarball pin:
+  ## the extractor edges its archive needs, then its own edge.
+  var visiting: seq[string]
+  let root = addTarballProvisionEdge(result, [useDef], storeRoot, writerMode,
+    visiting)
+  result.rootId = root.id
+  result.rootReceipt = root.receipt
+
+proc readTarballProvisionReceipt*(path: string): TarballProvisionReceipt =
+  let node = parseJson(readFile(extendedPath(path)))
+  TarballProvisionReceipt(
+    packageSelector: node{"packageSelector"}.getStr(),
+    planIndex: node{"planIndex"}.getInt(),
+    prefix: node{"prefix"}.getStr(),
+    executable: node{"executable"}.getStr(),
+    selectedUrl: node{"selectedUrl"}.getStr())
+
+proc extractorExecutable(node: JsonNode): string =
+  ## The executable a dependency edge's receipt names.
+  let receipt = node{"receipt"}.getStr()
+  if not fileExists(extendedPath(receipt)):
+    raise newException(OSError,
+      "tool-resolution failed: the " & node{"role"}.getStr() &
+      " dependency edge left no receipt at " & receipt)
+  if node{"kind"}.getStr() == NixProvisionerName:
+    result = readFile(extendedPath(receipt)).strip() /
+      node{"executablePath"}.getStr()
+  else:
+    result = readTarballProvisionReceipt(receipt).executable
+  if not fileExists(extendedPath(result)):
+    raise newException(OSError,
+      "tool-resolution failed: the " & node{"role"}.getStr() &
+      " dependency edge's receipt names " & result & ", which does not exist")
+
+var lastTarballProvisionError {.threadvar.}: ref CatchableError
+  ## The exception the tarball executor turned into a failed ActionResult,
+  ## kept so `resolveTarballTool` re-raises the realizer's own error -- its
+  ## type (`ValueError`, `OSError`, ...) and message -- rather than a
+  ## flattened copy. The executor runs inline on the scheduler's thread.
+
+proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} =
+  ## The `"tarball"` provisioner's executor: realize the pinned archive into
+  ## the tool store with the extractors the dependency edges realized, and
+  ## write the receipt.
+  result = ActionResult(id: action.id, launched: true,
+    runQuotaBackend: "provision-tarball",
+    dependencyPolicyKind: action.dependencyPolicy.kind)
+  {.cast(gcsafe).}:
+    try:
+      let spec = parseJson(action.builtinText)
+      if spec{"schema"}.getStr() != TarballProvisionEdgeSchema:
+        raise newException(ValueError,
+          "tarball provision edge carries an unknown schema: " & action.id)
+      let storeRoot = spec{"storeRoot"}.getStr()
+      let writerMode = spec{"writerMode"}.getStr("direct")
+      var tools = ExtractorTools()
+      for node in spec{"extractors"}:
+        let exe = extractorExecutable(node)
+        case node{"role"}.getStr()
+        of ExtractorRoleSevenZip: tools.sevenZip = exe
+        of ExtractorRoleZstd: tools.zstd = exe
+        else:
+          raise newException(ValueError,
+            "unknown extractor role in " & action.id)
+      var failures: seq[string]
+      var firstError: ref CatchableError = nil
+      var index = 0
+      for planNode in spec{"plans"}:
+        let plan = planFromJson(planNode)
+        try:
+          let materialized = materializeTarballPrefix(plan, storeRoot,
+            writerMode, tools)
+          let resolved = executableInStorePath(materialized.prefix,
+            plan.declaredExecutablePath, rejectSymlinks = true)
+          if resolved.len == 0:
+            raise newException(OSError,
+              "tool-resolution failed: tarball realization lacks " &
+              plan.declaredExecutablePath)
+          let receipt = action.outputs[0]
+          createDir(extendedPath(parentDir(receipt)))
+          writeFile(extendedPath(receipt), $(%*{
+            "schema": TarballProvisionEdgeSchema,
+            "packageSelector": plan.packageSelector,
+            "planIndex": index,
+            "prefix": materialized.prefix,
+            "executable": resolved,
+            "selectedUrl": materialized.selectedUrl}) & "\n")
+          result.status = asSucceeded
+          result.exitCode = 0
+          result.evidence = PathSetEvidence(declaredInputs: action.inputs,
+            declaredOutputs: action.outputs)
+          return
+        except CatchableError as err:
+          if firstError.isNil:
+            firstError = err
+          failures.add(plan.packageSelector & ": " & err.msg)
+        inc index
+      if failures.len == 1:
+        raise firstError
+      raise newException(OSError,
+        "tool-resolution failed: every pinned alternative of " & action.id &
+        " failed:\n  " & failures.join("\n  "))
+    except CatchableError as err:
+      lastTarballProvisionError = err
+      result.status = asFailed
+      result.exitCode = 1
+      result.stderr = err.msg
+
+proc registerTarballProvisioner*() =
+  ## Install the `"tarball"` executor on this thread. `resolveTarballTool`
+  ## calls it before every provisioning run, so no entry point depends on
+  ## module-initialization order to find it.
+  registerForeignProvisionExecutor(TarballProvisionerName,
+    executeTarballProvisionEdge)
+
+registerTarballProvisioner()
+
+proc provisioningEngineConfig*(storeRoot: string;
+                               forceRebuild = false): BuildEngineConfig =
+  ## The engine configuration of a provisioning subgraph. Its action cache
+  ## lives beside the receipts, under the tool store. Every edge in it is a
+  ## built-in -- nothing launches a process -- so RunQuota is not consulted.
+  let state = provisioningStateRoot(storeRoot)
+  result = defaultBuildEngineConfig(state / "scratch", state / "cache")
+  result.bypassRunQuota = true
+  result.maxParallelism = 1
+  result.forceRebuild = forceRebuild
+  result.suppressTrace = true
+
+proc runProvisioningEdges*(edges: ProvisioningEdges; storeRoot: string;
+                           forceRebuild = false): BuildRunResult =
+  registerTarballProvisioner()
+  lastTarballProvisionError = nil
+  runBuild(graph(edges.actions), provisioningEngineConfig(storeRoot,
+    forceRebuild))
+
+proc raiseProvisioningFailure(run: BuildRunResult) =
+  for item in run.results:
+    if item.status == asFailed:
+      if not lastTarballProvisionError.isNil:
+        let err = lastTarballProvisionError
+        lastTarballProvisionError = nil
+        raise err
+      raise newException(OSError,
+        "tool-resolution failed: provisioning edge " & item.id &
+        " failed: " & item.stderr)
+  for item in run.results:
+    if item.status == asBlocked:
+      raise newException(OSError,
+        "tool-resolution failed: provisioning edge " & item.id &
+        " was blocked by " & item.blockedBy)
+
+proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
+                         writerMode = "direct"):
+    PathOnlyToolProfile =
+  ## Realize a tarball-provisioned package THROUGH ITS PROVISIONING EDGE and
+  ## return its profile. See the section comment above for the edge's shape.
+  let plan = tarballAcquisitionPlan(useDef)
+  let root =
+    if storeRoot.len > 0:
+      absolutePath(storeRoot)
+    else:
+      getCurrentDir() / ".repro" / "tool-store"
+  let edges = tarballProvisioningEdges(useDef, root, writerMode)
+  var receipt: TarballProvisionReceipt
+  for attempt in 0 .. 1:
+    # A receipt restored or kept by the action cache can outlive the prefix
+    # it names -- the store is garbage-collectable and the cache does not
+    # own it. The second attempt forces the subgraph to execute, which
+    # re-realizes whatever is missing.
+    let run = runProvisioningEdges(edges, root, forceRebuild = attempt > 0)
+    raiseProvisioningFailure(run)
+    receipt = readTarballProvisionReceipt(edges.rootReceipt)
+    if receipt.executable.len > 0 and
+        fileExists(extendedPath(receipt.executable)):
+      break
+    if attempt > 0:
+      raise newException(OSError,
+        "tool-resolution failed: tarball realization lacks " &
+        plan.declaredExecutablePath & " (receipt " & edges.rootReceipt &
+        " names " & receipt.executable & ")")
+  refuseUnrunnableTarballExecutable(useDef, receipt.executable)
+  tarballProfileFor(useDef, plan, receipt.prefix, receipt.selectedUrl,
+    receipt.executable)
 
 # ---------------------------------------------------------------------------
 # MR5 -- Bootstrap toolchain resolution for the interface-extract step.
