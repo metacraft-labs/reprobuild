@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1769,
+    "nimTestBinaries": 1772,
     "pureUnitConsolidationGroups": 48,
-    "pureUnitTests": 587,
+    "pureUnitTests": 588,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1784
+    "testEntries": 1787
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1076,10 +1076,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 912,
+      "integration": 913,
       "platform/destructive": 115,
-      "pure unit": 587,
-      "unclassified": 159
+      "pure unit": 588,
+      "unclassified": 160
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1227,9 +1227,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1769,
+    "nimTestBinaryCount": 1772,
     "pythonTestFileCount": 15,
-    "testEntryCount": 1784
+    "testEntryCount": 1787
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7138,6 +7138,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_endpoint_daemon_trust",
+      "class": "unclassified",
+      "classificationReason": "binds an OS-global endpoint",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_endpoint_daemon_trust.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_engine_action_create_dyndep",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -7362,6 +7381,25 @@
       "source": "libs/repro_build_engine/tests/t_inherited_environment_cache.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_isolated_action_environment",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_isolated_action_environment.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -7827,7 +7865,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/test_m6_entropy_image_attribution.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 11,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -11413,6 +11451,24 @@
       "source": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_repro_lib_fingerprint_memo",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_repro_lib_fingerprint_memo.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -29331,7 +29387,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_nf4_foreign_env_contract.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 13,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
