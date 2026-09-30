@@ -73427,6 +73427,14 @@ proc runThinApp*(programName: string): int =
     let pinned = applyProjectPinsAtEntry(commandLineParams())
     if pinned.handled:
       return pinned.exitCode
+    # Name this engine to every process it starts (after the pin hand-over:
+    # a handed-over image names itself). A project provider is
+    # compiled against THIS engine's stdlib and speaks its protocol when it
+    # calls back into `repro` (`useFlakeDevShell`'s override resolution);
+    # without the name it could only guess from PATH, where an older release
+    # answers a verb it does not know. Overwritten, not inherited: the
+    # nearest engine is the one whose protocol its children speak.
+    putEnv("REPRO_INVOKING_CLI", stablePublicCliPath())
   result = runThinAppDispatch(programName)
   flushStagedFailureReport(result)
 

@@ -1160,6 +1160,7 @@ tests/integration/t_ext_test_execution_rows.nim	nim	3
 tests/integration/t_extension_type_lifted_and_consumed.nim	nim	1
 tests/integration/t_external_cli_store_contract_writes_and_reads.nim	nim	1
 tests/integration/t_finish_outcome_reaches_the_spine.nim	nim	1
+tests/integration/t_flake_override_resolution_uses_the_invoking_engine.nim	nim	3
 tests/integration/t_framework_field_is_present_and_filtering_works.nim	nim	1
 tests/integration/t_gate_and_sync_consume_unified_locked_deps_regardless_of_source.nim	nim	1
 tests/integration/t_gate_consumes_published_evidence_for_unclonable_private_repo.nim	nim	1

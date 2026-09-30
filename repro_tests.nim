@@ -10386,6 +10386,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_flake_override_resolution_uses_the_invoking_engine.nim",
+    binary: "build/test-bin/t_flake_override_resolution_uses_the_invoking_engine",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_framework_field_is_present_and_filtering_works.nim",
     binary: "build/test-bin/t_framework_field_is_present_and_filtering_works",
     defines: @[],
