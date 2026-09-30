@@ -459,6 +459,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_endpoint_daemon_trust.nim",
+    binary: "build/test-bin/t_endpoint_daemon_trust",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim",
     binary: "build/test-bin/t_engine_action_create_dyndep",
     defines: @[],
@@ -560,6 +569,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_build_engine/tests/t_inherited_environment_cache.nim",
     binary: "build/test-bin/t_inherited_environment_cache",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_build_engine/tests/t_isolated_action_environment.nim",
+    binary: "build/test-bin/t_isolated_action_environment",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -2540,6 +2558,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim",
     binary: "build/test-bin/t_recipe_c_compiler_selection_is_loud",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_repro_lib_fingerprint_memo.nim",
+    binary: "build/test-bin/t_repro_lib_fingerprint_memo",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

@@ -5575,6 +5575,11 @@ proc actionResultJson(item: ActionResult): JsonNode =
     "launched": item.launched,
     "wouldLaunch": item.wouldLaunch,
     "cacheDecision": $item.cacheDecision,
+    # WHY a lookup missed (`input metadata changed: <path>`, `no cache record
+    # for weak fingerprint`, ...). Without it a report says only that an edge
+    # re-ran, and a warm activation that never converges cannot be diagnosed
+    # from the stats it writes.
+    "cacheMissReason": item.cacheMissReason,
     "reason": item.reason,
     "dependencyPolicyKind": $item.dependencyPolicyKind,
     "runQuotaBackend": item.runQuotaBackend,
@@ -5949,7 +5954,14 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     commandStatsId = "repro provider compile edge",
     cacheable = providerCompileCacheable(plan),
     weakFingerprint = plan.compileEdge.actionFingerprint,
-    envPassthrough = ProviderCompileEnvironmentPassthrough,
+    envPassthrough = @ProviderCompileEnvironmentPassthrough &
+      @ProviderCompileIsolatedPassthrough,
+    # The same edge as the dev-env engine's, so the same declared environment
+    # (see `providerCompileLaunchEnv`).
+    env = providerCompileLaunchEnv(compilerCwd / "home"),
+    # Dev-Env-Warm-Entry.md §2: the compile starts from the environment
+    # declared above and nothing else, so no caller variable can be an input.
+    isolateHostEnvironment = true,
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy = automaticMonitorGatheringPolicy(
