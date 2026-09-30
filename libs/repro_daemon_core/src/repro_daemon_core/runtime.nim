@@ -1,4 +1,5 @@
-import std/[algorithm, net, options, os, osproc, strtabs, strutils, tables, times]
+import std/[algorithm, net, options, os, osproc, sets, strtabs, strutils,
+  tables, times]
 
 import repro_core
 import blake3
@@ -2323,21 +2324,63 @@ proc performDevSelfRestart(config: UserDaemonConfig;
   logLine(config.logPath, "dev restart old process exiting runId=" & runId)
   true
 
-proc runScopedLeaseReapTick(config: UserDaemonConfig) =
+type
+  LeaseReapTickState = object
+    ## Per-daemon-instance reap-tick bookkeeping, and specifically the
+    ## DE-DUPLICATION of what the tick reports.
+    ##
+    ## The tick runs every 30 s for the daemon's whole life. A condition it
+    ## cannot fix by retrying — a record whose attrs marshaller this process
+    ## does not link, a provider it cannot reach — is therefore reported on
+    ## every single tick unless something stops it, and a condition that
+    ## persists is exactly the kind that does not get fixed quickly. The live
+    ## daemon on this workstation logged the SAME sentence 141,895 times over
+    ## 60 days (62 MB of a 385 MB unrotated log). A message repeated that many
+    ## times is not a louder message, it is a quieter one: it buries every
+    ## other line in the log and trains its readers to skip it.
+    ##
+    ## So each distinct finding is logged ONCE per daemon run. A restart
+    ## re-reports (the state is per-instance, deliberately: a fresh daemon's
+    ## log should stand on its own), and a NEW finding is always reported.
+    reported: HashSet[string]
+
+proc initLeaseReapTickState(): LeaseReapTickState =
+  LeaseReapTickState(reported: initHashSet[string]())
+
+proc reportOnce(state: var LeaseReapTickState; config: UserDaemonConfig;
+                signature, message: string) =
+  if state.reported.containsOrIncl(signature):
+    return
+  logLine(config.logPath, message)
+
+proc runScopedLeaseReapTick(config: UserDaemonConfig;
+                            state: var LeaseReapTickState) =
   ## Ephemeral-State-Leases L4 (§4.2): run ONE wall-clock reap sweep against
   ## this daemon's scoped lease store. Best-effort — a reap must never wedge
   ## the event loop or crash the daemon, so all errors are logged + swallowed.
   ## The store is on disk, so this is correct on the FIRST tick after a
   ## restart (an expired record left by a prior instance is reaped here).
+  ##
+  ## A record the sweep could not reap comes back in ``report.failed`` rather
+  ## than as a raise — see ``reapOnce``'s "one unhandleable record must not
+  ## abort the sweep". The ``except`` below therefore now catches only a
+  ## WHOLE-SWEEP failure (an undecodable record aborting ``listStateRecords``,
+  ## an unreadable store root), which is equally unfixable-by-retrying and so
+  ## is deduplicated on the same terms.
   try:
     let report = runLeaseReapTick(daemonLeaseScope(config),
       overrideRoot = config.leaseStoreRoot)
     if report.reaped.len > 0:
       logLine(config.logPath, "lease reap tick reaped=" & $report.reaped.len &
-        " kept=" & $report.skipped.len & " scope=" &
+        " kept=" & $report.skipped.len &
+        " unreapable=" & $report.failed.len & " scope=" &
         (if config.systemScope: "system" else: "user"))
+    for finding in leaseReapFindingLines(report):
+      reportOnce(state, config, finding,
+        "lease reap tick (reported once per daemon run) " & finding)
   except CatchableError as err:
-    logLine(config.logPath, "lease reap tick error: " & err.msg)
+    reportOnce(state, config, "sweep\x00" & err.msg,
+      "lease reap tick error (reported once per daemon run): " & err.msg)
 
 proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
   var config = initialConfig
@@ -2420,11 +2463,12 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
   # when no client is waiting, so it cannot wedge an in-flight client).
   let leaseReapMs = leaseReapIntervalMs()
   var lastLeaseReapMs = nowUnixMs()
+  var leaseReapState = initLeaseReapTickState()
   # Run an initial sweep at startup so a restart resumes reaping immediately
   # (an expired record left by a crashed/stopped prior instance is reaped on
   # the first pass rather than after a full interval).
   if leaseReapMs > 0:
-    runScopedLeaseReapTick(config)
+    runScopedLeaseReapTick(config, leaseReapState)
 
   var shuttingDown = false
   while not shuttingDown:
@@ -2435,7 +2479,7 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
         selfRestarting = true
         return 0
     if leaseReapMs > 0 and nowUnixMs() - lastLeaseReapMs >= leaseReapMs:
-      runScopedLeaseReapTick(config)
+      runScopedLeaseReapTick(config, leaseReapState)
       lastLeaseReapMs = nowUnixMs()
     var pollMs = int(devRestartPollIntervalMs())
     if leaseReapMs > 0 and leaseReapMs < pollMs:
