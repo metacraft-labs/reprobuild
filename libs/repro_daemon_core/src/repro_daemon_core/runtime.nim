@@ -2342,6 +2342,11 @@ type
     ## So each distinct finding is logged ONCE per daemon run. A restart
     ## re-reports (the state is per-instance, deliberately: a fresh daemon's
     ## log should stand on its own), and a NEW finding is always reported.
+    ##
+    ## What counts as "distinct" is ``leaseReapFindings``' signature, NOT the
+    ## sentence logged: see its docstring for why keying on the sentence would
+    ## bring the flood back, and grow this set for the daemon's whole life, for
+    ## any failure whose message is a provider's rather than ours.
     reported: HashSet[string]
 
 proc initLeaseReapTickState(): LeaseReapTickState =
@@ -2375,9 +2380,9 @@ proc runScopedLeaseReapTick(config: UserDaemonConfig;
         " kept=" & $report.skipped.len &
         " unreapable=" & $report.failed.len & " scope=" &
         (if config.systemScope: "system" else: "user"))
-    for finding in leaseReapFindingLines(report):
-      reportOnce(state, config, finding,
-        "lease reap tick (reported once per daemon run) " & finding)
+    for finding in leaseReapFindings(report):
+      reportOnce(state, config, finding.signature,
+        "lease reap tick (reported once per daemon run) " & finding.line)
   except CatchableError as err:
     reportOnce(state, config, "sweep\x00" & err.msg,
       "lease reap tick error (reported once per daemon run): " & err.msg)
