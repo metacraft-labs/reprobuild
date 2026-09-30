@@ -11673,6 +11673,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_moved_package_without_catalog_names_where_it_looked.nim",
+    binary: "build/test-bin/t_moved_package_without_catalog_names_where_it_looked",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted.nim",
     binary: "build/test-bin/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted",
     defines: @[],
@@ -13700,6 +13709,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_uses_resolves_reprobuild_packages_interface.nim",
     binary: "build/test-bin/t_uses_resolves_reprobuild_packages_interface",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim",
+    binary: "build/test-bin/t_uses_resolves_sqlite3_from_real_reprobuild_packages",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
