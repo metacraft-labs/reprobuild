@@ -27426,6 +27426,52 @@ type
     explicitSource: bool
     report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
+proc workspaceShellFirstRoot(explicit: string): string =
+  ## The workspace root a DEVELOP-SET verb should act on: the workspace SHELL
+  ## when an ancestor carries one, otherwise the generic MO-2 marker.
+  ##
+  ## Shared with ``flakeOverrideWorkspaceRoot``, which delegates here, because
+  ## the two must agree. `repro develop --list` and `repro flake override-args`
+  ## answer the same question — which develop set backs this directory — and
+  ## they used to answer it differently: develop took the cwd VERBATIM while the
+  ## flake verbs ascended. Standing in a participating repo, `develop --list
+  ## --all` therefore described that repo as its own workspace while
+  ## `override-args --all` described the whole workspace, from one directory.
+  ##
+  ## Why the shell wins over the generic ascent, measured rather than assumed:
+  ## ``isInitializedWorkspace`` is true of a directory carrying EITHER a
+  ## workspace shell OR, by MO-2, a committed ``repro.lock``. A participating
+  ## repo of a multi-repo workspace normally has both a committed lock and
+  ## siblings one level up, so the generic ascent stops at the REPO. That is why
+  ## the shell is looked for first, and the generic marker only when no ancestor
+  ## carries one (the manifest-optional, single-repo case the marker exists for).
+  ##
+  ## This does NOT widen the develop SET. Which repos are in it remains the
+  ## pushed repo's own dependencies per its lock
+  ## (``CLI/develop.md`` §"The Develop Set Is The Repo's Own Dependencies"); this
+  ## only decides which workspace's lock sources are readable when resolving
+  ## them, which that section calls out as the separate question.
+  if explicit.len > 0:
+    return absolutePath(explicit)
+  let here = absolutePath(getCurrentDir())
+  var dir = here
+  while true:
+    if fileExists(workspaceTomlPath(dir)):
+      return dir
+    let parent = parentDir(dir)
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+  dir = here
+  while true:
+    if isInitializedWorkspace(dir):
+      return dir
+    let parent = parentDir(dir)
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+  here
+
 proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
   ## ``repro develop <pkg> [--source=PATH] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
@@ -27466,9 +27512,7 @@ proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
   if result.package.len == 0:
     raise newException(ValueError,
       "`repro develop <pkg>` requires a package name")
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  result.workspaceRoot = workspaceShellFirstRoot(result.workspaceRoot)
 
 proc resolveDevelopWorkspacePrimary(
     workspaceRoot: string): ResolvedProject =
@@ -29546,9 +29590,7 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
       "`repro develop` with no target and no selector is not a bulk " &
       "operation: pass --all/--direct/--indirect/--transitive-of, a " &
       "membership selector, or --list to query the lock set")
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  result.workspaceRoot = workspaceShellFirstRoot(result.workspaceRoot)
 
 proc looksLikeDevelopAllArgs(args: openArray[string]): bool =
   ## The L1 develop-SET form is distinguished by a set-selection flag
@@ -67119,17 +67161,10 @@ proc flakeOverrideWorkspaceRoot(explicit: string): string =
   ## ``.repro/workspace.toml`` first, and only fall back to the generic marker
   ## when no ancestor carries one (the manifest-optional, single-repo case that
   ## MO-2 marker exists for).
-  if explicit.len > 0:
-    return absolutePath(explicit)
-  var dir = absolutePath(getCurrentDir())
-  while true:
-    if fileExists(workspaceTomlPath(dir)):
-      return dir
-    let parent = parentDir(dir)
-    if parent.len == 0 or parent == dir:
-      break
-    dir = parent
-  resolveInvokedWorkspaceRoot("")
+  ## The ascent itself now lives in ``workspaceShellFirstRoot``, which
+  ## ``repro develop`` also uses. Keeping two copies is what let the two verb
+  ## families disagree about what "here" means from one directory.
+  workspaceShellFirstRoot(explicit)
 
 # ``flakeSiblingIsGitCheckout`` lives in
 # ``repro_dsl_stdlib/foreign_env/flake.nim`` beside the override-URL builder
