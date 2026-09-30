@@ -2878,17 +2878,23 @@ proc nimCompilerPath(): string =
   ## The ``repro`` entry points that compile a recipe run
   ## ``ensureBootstrapToolchainEnv`` first (pinned by
   ## ``t_provider_compile_entry_points_publish_bootstrap_toolchain``), and it
-  ## either publishes ``REPRO_NIM_COMPILER`` (the caller's own, or the
-  ## provisioned one) or stops the command. So from those commands this
-  ## returns the first arm. The ``PATH`` walk below serves library callers
-  ## that never ran the bootstrap (unit tests, embedders); a failed
-  ## provisioning does not reach it.
-  if cachedNimCompilerPath.len > 0:
-    return cachedNimCompilerPath
+  ## either publishes ``REPRO_NIM_COMPILER`` (a project's lock pin, the
+  ## caller's own, or the provisioned one) or stops the command. So from
+  ## those commands this returns the first arm. The ``PATH`` walk below
+  ## serves library callers that never ran the bootstrap (unit tests,
+  ## embedders); a failed provisioning does not reach it.
+  #
+  # The explicit compiler is read BEFORE the cache, every time. It is how a
+  # project's pinned provider compiler reaches the compile
+  # (`repro_cli_support/project_pins`), and a daemon worker serves projects
+  # with different pins in one process: a cached first answer would compile
+  # the second project's provider with the first project's compiler. Only the
+  # PATH search below, which costs a probe per candidate, is cached.
   let overridePath = getEnv("REPRO_NIM_COMPILER")
   if overridePath.len > 0:
-    cachedNimCompilerPath = overridePath
     return overridePath
+  if cachedNimCompilerPath.len > 0:
+    return cachedNimCompilerPath
   proc addUnique(paths: var seq[string]; path: string) =
     if path.len == 0:
       return
@@ -5808,21 +5814,27 @@ const
     ## bug).
 
 var cachedNimCompilerIdentity = ""
+var cachedNimCompilerIdentityPath = ""
+  ## The compiler ``cachedNimCompilerIdentity`` describes. The identity is
+  ## cached per COMPILER, not per process, for the reason ``nimCompilerPath``
+  ## re-reads ``REPRO_NIM_COMPILER``.
 
 proc nimCompilerIdentity*(): string =
   ## Canonical identity of the Nim frontend used to compile providers:
   ## the resolved compiler path plus its ``--version`` banner. Feeds
   ## ``ProviderCompileActionKey`` so a compiler swap re-keys the compile
-  ## edge. Cached per process — the compiler does not change mid-run.
-  if cachedNimCompilerIdentity.len > 0:
-    return cachedNimCompilerIdentity
+  ## edge. Cached per compiler path, so one process compiling for two
+  ## projects with different pinned compilers keys each one correctly.
   let path = nimCompilerPath()
+  if cachedNimCompilerIdentity.len > 0 and cachedNimCompilerIdentityPath == path:
+    return cachedNimCompilerIdentity
   var banner = ""
   try:
     banner = runCommand(@[path, "--version"]).output.splitLines()[0].strip()
   except CatchableError:
     banner = ""
   cachedNimCompilerIdentity = path & "\n" & banner
+  cachedNimCompilerIdentityPath = path
   cachedNimCompilerIdentity
 
 proc frontendRuntimeIdentity*(workDir = getCurrentDir()): string =

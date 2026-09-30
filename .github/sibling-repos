@@ -77,6 +77,26 @@ nim-termctl=dev
 reprobuild-test-adapters=72962c60f12426ba00b621fda5ab76b0f89ba912
 reprobuild-ct-test-runner=dev
 
+# The reprobuild-packages catalog. A `uses:` name the stdlib does not bundle is
+# looked up in a `reprobuild-packages` checkout beside the consuming project
+# (or an ancestor), or beside this checkout -- which is where this entry puts
+# it. `sqlite3` moved there, and the move is now a compile ERROR when no
+# catalog defines it, so without this checkout every recipe this suite compiles
+# that uses sqlite3 stops: runquota's repro.nim
+# (t_b0_runquota_repro_nim_compiles), CodeTracer's (the e2e codetracer-subset
+# fixture and the `ct` build), and t_uses_resolves_sqlite3_from_real_
+# reprobuild_packages, which exists to prove the real catalog -- not the
+# fixture under tests/reprobuild-packages -- defines what consumers rely on.
+#
+# Pinned to an exact revision, like io-mon above, so the catalog content the
+# suite asserts against does not move under a commit. It is not in repro.lock:
+# the lock records `uses:` dependencies, and the catalog is not one -- nothing
+# records catalog coordinates in a lock yet (Provisioning-Contributions.md,
+# "Catalog Lookup And Provisioning"). Nor is it a flake input: no Nix-sandboxed
+# build here compiles a recipe, and $REPROBUILD_PACKAGES_ROOT in the dev shell
+# would replace the fixture catalog the lookup test walks to.
+reprobuild-packages=9d9176bff5c5aee175efcaa5d667c9ed7b9b8043
+
 
 # codetracer's incremental test engine (src/ct_test/incremental/io_mon_capture.nim
 # etc.) imports `io_mon` (including `io_mon/depfile`) and
