@@ -18,7 +18,7 @@ const
   # fingerprinted definition since 04d6aff3; ``!trace_object_file`` is
   # unchanged, so its hash is too.
   #
-  # Refreshed at cbce5bb6 (the next ``codetracer-src`` pin): ``!nim_js`` gained
+  # Refreshed at 34b96d03 (the next ``codetracer-src`` pin): ``!nim_js`` gained
   # a per-rule ``--nimcache:/tmp/ct-nim-cache/%B_nim_js`` and the output-side
   # exclusion ``| $(NIM_SIDE_OUTPUTS_IGNORE)``, which tells tup to accept the
   # writes into that cache. Every other fingerprinted definition is
@@ -27,9 +27,9 @@ const
   NimJsWithoutOldCaseObjectsHash = "600a5090da25c07b"
   TraceObjectFileSemanticsHash = "3d1a52e3befe61cf"
   CodeTracerTupSemanticsCommit =
-    "cbce5bb6616e9d86b0d9c58c5245f1cb01fe9e3d"
+    "34b96d03b9436a0538e0d526a9caaf458226c63f"
   PinnedTupSemanticsFixture =
-    "tests/fixtures/codetracer-subset/Tuprules-cbce5bb6.tup"
+    "tests/fixtures/codetracer-subset/Tuprules-34b96d03.tup"
 
 type
   TupRules = object
