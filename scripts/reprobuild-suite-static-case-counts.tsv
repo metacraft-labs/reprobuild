@@ -1014,6 +1014,7 @@ tests/integration/t_an_unpushed_sibling_revision_is_not_recorded.nim	nim	2
 tests/integration/t_an_unresolvable_membership_is_not_read_as_no_overrides.nim	nim	1
 tests/integration/t_apply_if_binds_config_by_workspace_path.nim	nim	1
 tests/integration/t_arm_outside_declared_platforms_is_a_lint_error.nim	nim	1
+tests/integration/t_attestation_fixture_lifecycle.nim	nim	44
 tests/integration/t_attestation_report.nim	nim	3
 tests/integration/t_attested_image_manifest.nim	nim	4
 tests/integration/t_autotools_configure_cache.nim	nim	1
@@ -1451,11 +1452,12 @@ tests/integration/t_shared_clone_alternates_skip_redownload.nim	nim	1
 tests/integration/t_shared_clone_cache_repacks_and_bounds_growth.nim	nim	2
 tests/integration/t_shared_clone_uses_full_repo_url_for_base_remote.nim	nim	1
 tests/integration/t_shell_entry_reports_drift_over_the_applied_overrides.nim	nim	1
+tests/integration/t_signer_roster_rotation_and_revocation.nim	nim	22
 tests/integration/t_single_platform_entries_declare_platforms.nim	nim	8
 tests/integration/t_snp_agent_backend.nim	nim	42
 tests/integration/t_snp_chain_requires_amd_root.nim	nim	27
 tests/integration/t_snp_digest_vectors.nim	nim	16
-tests/integration/t_snp_evidence_reaches_the_verdict.nim	nim	19
+tests/integration/t_snp_evidence_reaches_the_verdict.nim	nim	22
 tests/integration/t_snp_expectation_reaches_the_manifest.nim	nim	12
 tests/integration/t_snp_fixture_verify.nim	nim	20
 tests/integration/t_snp_launch_refusals.nim	nim	34

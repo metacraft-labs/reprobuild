@@ -1,0 +1,32 @@
+# The artifacts a scheduled run can re-fetch unattended, and how.
+#
+# NOT every pinned artifact. Most of the corpus is reachable only
+# through a human step — a repository checked out at a pinned commit, a
+# distribution package unpacked, an archive whose member is the thing
+# that is pinned — and inventing a URL for those would produce a monitor
+# that reported failures about its own guesses. A row here is a promise
+# that one HTTP GET returns the pinned bytes after the stated
+# normalization, and nothing else.
+#
+# The complement is the interesting half and the monitor reports it: an
+# artifact with no row has no unattended refresh route, which is a fact
+# about this corpus worth knowing rather than a gap to hide.
+#
+# normalize:
+#   none      the response body IS the artifact
+#   strip-cr  the response body with carriage returns removed. One
+#             vendor serves its certificate chains CRLF and the others
+#             LF; a Nim triple-quoted literal in an LF file cannot carry
+#             the carriage returns, so the pin is of the stripped form.
+#             Applying it to all three chains is deliberate — it is a
+#             no-op on the two that are already LF, and a rule with an
+#             exception is a rule somebody gets wrong.
+#
+# name	url	normalize
+KdsMilanChainPem	https://kdsintf.amd.com/vcek/v1/Milan/cert_chain	strip-cr
+KdsMilanCrlDerHex	https://kdsintf.amd.com/vcek/v1/Milan/crl	none
+KdsGenoaChainPem	https://kdsintf.amd.com/vcek/v1/Genoa/cert_chain	strip-cr
+KdsGenoaCrlDerHex	https://kdsintf.amd.com/vcek/v1/Genoa/crl	none
+KdsTurinChainPem	https://kdsintf.amd.com/vcek/v1/Turin/cert_chain	strip-cr
+KdsTurinCrlDerHex	https://kdsintf.amd.com/vcek/v1/Turin/crl	none
+IntelSgxRootCaDerHex	https://certificates.trustedservices.intel.com/Intel_SGX_Provisioning_Certification_RootCA.cer	none
