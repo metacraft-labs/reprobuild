@@ -12969,6 +12969,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_sevenzip_extractor_falls_back_to_standalone_decoder.nim",
+    binary: "build/test-bin/t_sevenzip_extractor_falls_back_to_standalone_decoder",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_shared_bare_refresh_keeps_objects_borrowers_reference.nim",
     binary: "build/test-bin/t_shared_bare_refresh_keeps_objects_borrowers_reference",
     defines: @[],
