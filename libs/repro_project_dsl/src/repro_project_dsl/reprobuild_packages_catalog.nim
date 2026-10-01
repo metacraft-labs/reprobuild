@@ -22,7 +22,8 @@ const ReprobuildPackagesRootEnv* = "REPROBUILD_PACKAGES_ROOT"
 const ReprobuildPackagesRepositoryUrl* =
   "https://github.com/metacraft-labs/reprobuild-packages"
 
-const MovedToReprobuildPackages*: seq[string] = @["sqlite3"]
+const MovedToReprobuildPackages*: seq[string] =
+  @["sqlite3", "shellcheck", "shfmt", "prek"]
   ## Names the bundled stdlib USED to define and the catalog now defines.
   ##
   ## Before its move, a recipe's ``uses:`` of one of these always resolved:
@@ -35,6 +36,18 @@ const MovedToReprobuildPackages*: seq[string] = @["sqlite3"]
   ## says where the catalog was looked for.
   ##
   ## Add a name here in the same change that deletes it from the stdlib.
+
+const MovedPackageImportStubs*: seq[string] = @["shellcheck", "shfmt", "prek"]
+  ## Moved names whose stdlib module is still present for one release, as a
+  ## stub that fails to compile with "moved to reprobuild-packages; drop the
+  ## import and rely on uses:". A recipe that imported the module directly
+  ## (rather than naming the package in ``uses:``) would otherwise stop with
+  ## "cannot open file", which names neither the move nor the remedy.
+  ##
+  ## A stub is not a package definition: it declares no ``package`` and is
+  ## not on the bundled selector list, so a ``uses:`` line never imports it
+  ## and still reaches the catalog. Delete a name here together with its stub
+  ## module, in the release after the first release that ships the stub.
 
 type
   ReprobuildPackagesProbe* = object

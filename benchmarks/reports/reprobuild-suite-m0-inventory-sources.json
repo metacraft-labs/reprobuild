@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1791,
+    "nimTestBinaries": 1792,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 590,
-    "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1806
+    "staticallyDetectedRuntimeCompilerFlowTests": 109,
+    "testEntries": 1807
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1062,7 +1062,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 936,
+      "integration": 937,
       "platform/destructive": 116,
       "pure unit": 590,
       "unclassified": 153
@@ -1213,9 +1213,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1791,
+    "nimTestBinaryCount": 1792,
     "pythonTestFileCount": 15,
-    "testEntryCount": 1806
+    "testEntryCount": 1807
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3844,6 +3844,27 @@
         }
       ],
       "source": "tests/integration/t_extension_type_lifted_and_consumed.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "parts",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "env",
+            "parts"
+          ],
+          "line": 35,
+          "path": "tests/integration/t_import_of_a_moved_stdlib_module_names_the_new_home.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "var parts = @[findExe(\"nim\").quoteShell, \"check\", \"--hints:off\","
+        }
+      ],
+      "source": "tests/integration/t_import_of_a_moved_stdlib_module_names_the_new_home.nim"
     },
     {
       "class": "integration",
@@ -27253,6 +27274,23 @@
       "sourceSuiteCount": 3,
       "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_import_of_a_moved_stdlib_module_names_the_new_home",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_import_of_a_moved_stdlib_module_names_the_new_home.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {

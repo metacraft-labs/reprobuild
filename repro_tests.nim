@@ -10575,6 +10575,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_import_of_a_moved_stdlib_module_names_the_new_home.nim",
+    binary: "build/test-bin/t_import_of_a_moved_stdlib_module_names_the_new_home",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim",
     binary: "build/test-bin/t_infra_apply_cache_hit_preserves_present_outputs",
     defines: @[],
