@@ -53834,13 +53834,23 @@ proc detectDirenvEnvrcState(workspaceRoot: string):
   let direnvBin = resolveDirenvBin()
   if direnvBin.len == 0:
     return
-  let res = execCmdEx(quoteShell(direnvBin) & " status",
+  let res = execCmdEx(quoteShell(direnvBin) & " status --json",
     workingDir = workspaceRoot)
   if res.exitCode == 0:
-    # ``direnv status`` prints "Found RC allowed true" when the .envrc is
-    # trusted. Be liberal: any "allowed true"/"allowed: true" wins.
-    let low = res.output.toLowerAscii()
-    result.trusted = ("allowed true" in low) or ("allowed: true" in low)
+    # direnv's AllowStatus enum is 0=allowed, 1=not allowed, 2=denied.
+    # Only the FOUND RC governs this workspace. The loaded RC may belong
+    # to the shell's previous directory and must never grant it trust.
+    try:
+      let found = parseJson(res.output)["state"]["foundRC"]
+      if found.kind != JObject or
+          os.normalizedPath(found["path"].getStr()) != os.normalizedPath(envrcPath):
+        return
+      let allowed = found["allowed"]
+      result.trusted =
+        (allowed.kind == JInt and allowed.getInt() == 0) or
+        (allowed.kind == JBool and allowed.getBool())
+    except CatchableError:
+      discard  # Missing or malformed status cannot establish trust.
 
 proc gatherHealthChecks(parsed: HealthArgs):
     tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
@@ -55580,6 +55590,14 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
         "workspace branch: INCOMPLETE — '" & report.branch &
           "' was created in " & $created.len & " repo(s) and the partial " &
           "workspace is left in place; re-run the same command to finish it"
+      elif report.exitCode != 2:
+        # A clone can fail after materializing the root and other members,
+        # before the branch pass creates any feature branches. Exit 1 also
+        # covers probe failures, so do not infer whether a target exists.
+        "workspace branch: INCOMPLETE — no branch '" & report.branch &
+          "' was created in any repo; any partial workspace at " &
+          report.workspaceRoot & " is left in place; re-run the same " &
+          "command to finish it"
       else:
         "workspace branch: ABORTED — no branch '" & report.branch &
           "' was created in any repo (nothing had been created when the " &

@@ -64,13 +64,13 @@ suite "an allowlisted action environment":
 
   test "control: without it, the invoking shell's variables reach the child":
     if findExe("sh").len == 0:
-      skip()
+      skip("sh is not installed; the child environment probe needs a shell")
     else:
       check (LeakVar & "=from-the-invoking-shell") in seenBy(false)
 
   test "with it, the child sees what it declared and nothing else":
     if findExe("sh").len == 0 or not LauncherIsolates:
-      skip()
+      skip("sh is missing or the RunQuota launcher cannot isolate the environment")
     else:
       let seen = seenBy(true)
       check (LeakVar & "=<unset>") in seen
