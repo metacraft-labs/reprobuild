@@ -14342,6 +14342,32 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## `portableRoots` plus the launch machinery, untracked.
     config.portableRoots & launchMachineryRoots()
 
+  proc isOwnOutput(action: BuildAction; path: string): bool =
+    ## `path` is, or lies inside, one of the action's own outputs -- what it
+    ## PRODUCES. BuildXL: a pip's accesses to its own outputs are not inputs.
+    ## An action that writes its declared output directory observes it while
+    ## doing so (`cp` probes the tree it is filling, `mkdir -p` each parent
+    ## below it), and the portable lookup can never answer such an entry: on
+    ## any host, before the action runs, its own outputs are by definition
+    ## not there to be identified. Left in, they made gemini-cli's bundle
+    ## step unresolvable everywhere (1701 entries of 8408).
+    ##
+    ## For the PORTABLE record and the determinism probe only. The local key
+    ## keeps its narrower exact-path rule (`selfWrittenOutputKeys`).
+    var key = withoutExtendedLengthPrefix(path).replace('\\', '/')
+    when defined(windows):
+      key = key.toLowerAscii()
+    # `outputs` plus `declaredOutputs`, as `portablePhysicalOutputsOf`
+    # (defined further down) names them.
+    for output in action.outputs & action.declaredOutputs:
+      var root = materialPath(action.cwd, output).replace('\\', '/')
+      while root.len > 1 and root.endsWith("/"):
+        root.setLen(root.len - 1)
+      when defined(windows):
+        root = root.toLowerAscii()
+      if root.len > 0 and (key == root or key.startsWith(root & "/")):
+        return true
+
   proc transientOwnWrites(evidence: PathSetEvidence): HashSet[string] =
     ## Paths the action itself WROTE that no longer exist once it finished:
     ## its temporaries. npm's delete-by-rename (`x.js.DELETE.<random>`) is
@@ -14398,7 +14424,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     when defined(windows):
       cwdKey = cwdKey.toLowerAscii()
     for path in inputs:
-      if isLaunchMachinery(path) or path.replace('\\', '/') in transient:
+      if isLaunchMachinery(path) or path.replace('\\', '/') in transient or
+          isOwnOutput(action, path):
         continue
       var pathKey = path.replace('\\', '/')
       while pathKey.len > 1 and pathKey.endsWith("/"):
@@ -14604,7 +14631,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var enumerated = initHashSet[string]()
     for path in action.cacheEnumeratedDirectories(evidence):
       enumerated.incl(path)
-      if not isHostTempListing(path):
+      if not isHostTempListing(path) and not isOwnOutput(action, path):
         enumerations.add(path)
     var probed = initHashSet[string]()
     for path in evidence.monitorProbes:
@@ -14614,7 +14641,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     let transient = transientOwnWrites(evidence)
     for path in action.cacheInputPaths(evidence):
       if path in enumerated or isHostTempListing(path) or
-          path.replace('\\', '/') in transient:
+          path.replace('\\', '/') in transient or isOwnOutput(action, path):
         continue
       elif path in probed:
         probes.add(path)
