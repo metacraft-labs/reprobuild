@@ -35,10 +35,33 @@ import repro_binary_cache_client/portable_memo_cache
 proc portableCacheEnabled*(): bool =
   getEnv("REPRO_PORTABLE_CACHE", "").toLowerAscii() in ["1", "true", "yes"]
 
+proc repositoryRootOf*(projectRoot: string): string =
+  ## The nearest ancestor-or-self of `projectRoot` holding `.git` (a
+  ## directory, or a file in a worktree), or "".
+  if projectRoot.len == 0:
+    return ""
+  var dir = absolutePath(projectRoot)
+  while true:
+    if dirExists(dir / ".git") or fileExists(dir / ".git"):
+      return dir
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      return ""
+    dir = parent
+
 proc portableCacheRoots*(projectRoot, workRoot: string;
                          storeRoot = resolveStoreRoot()): seq[LogicalRoot] =
   if projectRoot.len > 0:
     result.add(LogicalRoot(label: "project", path: absolutePath(projectRoot),
+                           kind: lrkTracked))
+  # The repository the project lives in: a recipe's dependencies are
+  # provisioned into its SIBLING recipes (`<repo>/packages/source/<dep>/
+  # .repro/output/install`), and every action names them in its environment.
+  # Without this root those paths stay absolute, so the same recipe in two
+  # checkouts of the repository never agreed on a single weak fingerprint.
+  let repository = repositoryRootOf(projectRoot)
+  if repository.len > 0 and repository != absolutePath(projectRoot):
+    result.add(LogicalRoot(label: "repository", path: repository,
                            kind: lrkTracked))
   if workRoot.len > 0:
     result.add(LogicalRoot(label: "work", path: absolutePath(workRoot),
@@ -62,6 +85,11 @@ proc wirePortableCache*(config: var BuildEngineConfig;
     return
   config.portableRoots = portableCacheRoots(projectRoot, workRoot)
   config.portableLookup = true
+  # A portable key is only shareable if the action cannot see the invoking
+  # shell's own variables, so portable caching launches actions with an
+  # allowlisted environment. `REPRO_HERMETIC_ENV=0` turns that off, for
+  # diagnosing an action that turns out to need something undeclared.
+  config.hermeticEnv = getEnv("REPRO_HERMETIC_ENV") != "0"
   let remote = memoRemoteFromEnv(workRoot / "portable-memo-remote")
   if remote.isNone:
     return

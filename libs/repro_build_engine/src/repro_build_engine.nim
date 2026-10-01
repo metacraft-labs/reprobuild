@@ -421,6 +421,26 @@ type
       ## ``repro why``, the codetracer ``repro test`` integration)
       ## identify framework-specific outputs by interface tag from
       ## this list rather than re-parsing the DSL.
+    scratchDirs*: seq[string]
+      ## The action's SCRATCH directories — BuildXL's pip temp directories.
+      ## The engine empties each one before the action runs, and nothing the
+      ## action does under one is evidence: not an input, not an output.
+      ##
+      ## That is what makes a working tree an action builds in, and reads back
+      ## from, something other than an input. Without it every file such an
+      ## action wrote and then read (`npm ci` populating `node_modules`, a
+      ## bundler reading its own intermediate `dist/`) was recorded as a read,
+      ## keyed by the content the PREVIOUS run left there: absent on a
+      ## checkout where the action never ran, so no other checkout could ever
+      ## match the record (Cache-Scope P3.4). Emptied first, everything under
+      ## a scratch directory was produced by this run, so it cannot be an
+      ## input; and since nothing outside the action reads it, it is not a
+      ## product either. What the action produces goes to its declared
+      ## outputs.
+      ##
+      ## Refused (the action fails) when a scratch directory is or contains
+      ## the action's cwd, a declared input or a declared output: emptying it
+      ## would destroy what the action reads or makes.
     fixedOutput*: bool
       ## Cache-Scope P3.4 — a FIXED-OUTPUT action (BuildXL's download pip,
       ## Nix's fixed-output derivation): its outputs are determined by
@@ -892,6 +912,23 @@ type
       ## still needs. Off by default; requires `portableRoots`.
     portableMemoLookup*: PortableMemoLookup
     portableMemoRestorer*: PortableMemoRestorer
+    hermeticEnv*: bool
+      ## Hermetic-Builds-And-Path-Independence: "environment variables are
+      ## allowlisted and normalized". A process action is launched with
+      ## EXACTLY the environment the engine composes for it -- its declared
+      ## entries, its passthrough names resolved from the host, and the
+      ## host's OS-essential set (`HostEssentialEnvNames`) -- instead of that
+      ## composition layered over whatever the invoking shell carries.
+      ##
+      ## Why it matters for a key: an action is keyed on the variables it
+      ## was observed reading. `node` and `npm` read ALL of them (342 on the
+      ## measuring host, `CLAUDE_*` session ids and the cache root's own
+      ## location among them), so with inheritance two hosts building the
+      ## same thing could never agree on a key.
+      ##
+      ## The monitor is then always the wrapped `repro internal io monitor`
+      ## launch: the in-process host composes its child's environment over
+      ## the ENGINE's own, and has no way to start from nothing.
     binaryCacheIntermediateScope*: bool
       ## L3 PUBLISH-SCOPE. When ``true`` the target binary cache is an
       ## INTERMEDIATE cache: EVERY successful cacheable action's store
@@ -7302,6 +7339,126 @@ proc gradeKeyedInputSet(action: BuildAction; col: var EvidenceCollection) =
     emptyKeyedInputSetDiagnostic(action.id, observed, observed))
   col.disableCacheHits = true
 
+proc scratchKey(path: string): string =
+  ## Normalized for containment: forward slashes, no trailing separator,
+  ## case-folded on Windows (one directory, however a tool spelled it).
+  result = withoutExtendedLengthPrefix(path).replace('\\', '/')
+  while result.len > 1 and result.endsWith("/"):
+    result.setLen(result.len - 1)
+  when defined(windows):
+    result = result.toLowerAscii()
+
+proc scratchRoots*(action: BuildAction): seq[string] =
+  for dir in action.scratchDirs:
+    if dir.len > 0:
+      result.add(scratchKey(materialPath(action.cwd, dir)))
+
+proc isUnderScratch(key: string; roots: openArray[string]): bool =
+  for root in roots:
+    if key == root or key.startsWith(root & "/"):
+      return true
+
+proc dropScratchEvidence*(action: BuildAction; evidence: var PathSetEvidence) =
+  ## Removes every observation at or below one of the action's scratch
+  ## directories (`BuildAction.scratchDirs`).
+  let roots = action.scratchRoots()
+  if roots.len == 0:
+    return
+  proc keep(paths: var seq[string]) =
+    var kept: seq[string] = @[]
+    for path in paths:
+      if not isUnderScratch(scratchKey(path), roots):
+        kept.add(path)
+    paths = kept
+  keep(evidence.monitorReads)
+  keep(evidence.monitorWrites)
+  keep(evidence.monitorProbes)
+  keep(evidence.monitorDirectoryEnumerations)
+  keep(evidence.depfileInputs)
+
+proc scratchDirProblem*(action: BuildAction): string =
+  ## Why emptying the action's scratch directories would be unsafe, or "".
+  let roots = action.scratchRoots()
+  if roots.len == 0:
+    return ""
+  proc overlaps(path, what: string): string =
+    let key = scratchKey(materialPath(action.cwd, path))
+    for root in roots:
+      if key == root or key.startsWith(root & "/") or root.startsWith(key & "/"):
+        return "scratch directory '" & root & "' overlaps the action's " &
+          what & " '" & path & "'"
+    ""
+  for root in roots:
+    if root.count('/') < 2:
+      return "scratch directory '" & root & "' is too close to a " &
+        "filesystem root to empty"
+  if action.cwd.len > 0:
+    let key = scratchKey(absolutePath(action.cwd))
+    for root in roots:
+      if key == root or key.startsWith(root & "/"):
+        return "scratch directory '" & root & "' contains the action's cwd"
+  for input in action.inputs:
+    let why = overlaps(input, "declared input")
+    if why.len > 0: return why
+  for output in action.outputs & action.declaredOutputs:
+    let why = overlaps(output, "declared output")
+    if why.len > 0: return why
+  ""
+
+when defined(windows):
+  proc scratchRemoveDirectoryW(path: WideCString): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "RemoveDirectoryW".}
+  proc scratchSetFileAttributesW(path: WideCString; attrs: DWORD): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "SetFileAttributesW".}
+
+proc removeTreeNoFollow(path: string) =
+  ## Deletes `path` and everything below it WITHOUT FOLLOWING LINKS: a link
+  ## is removed, never what it points at. A scratch tree is full of them --
+  ## npm links every workspace package into `node_modules`, as a directory
+  ## junction on Windows -- and following one would delete the linked
+  ## sources. `os.removeDir` neither follows nor removes a junction (it treats
+  ## the link as a file, and Windows refuses to delete a directory link that
+  ## way), and stops at the first read-only file.
+  for kind, child in walkDir(path):
+    case kind
+    of pcDir:
+      removeTreeNoFollow(child)
+    of pcLinkToDir:
+      when defined(windows):
+        if scratchRemoveDirectoryW(newWideCString(child)) == 0:
+          raiseOSError(osLastError(), child)
+      else:
+        removeFile(child)
+    of pcFile, pcLinkToFile:
+      when defined(windows):
+        discard scratchSetFileAttributesW(newWideCString(child),
+          DWORD(0x80))   # FILE_ATTRIBUTE_NORMAL: clears read-only
+      removeFile(child)
+  when defined(windows):
+    discard scratchSetFileAttributesW(newWideCString(path), DWORD(0x80))
+    if scratchRemoveDirectoryW(newWideCString(path)) == 0:
+      raiseOSError(osLastError(), path)
+  else:
+    removeDir(path)
+
+proc resetScratchDirs*(action: BuildAction): string =
+  ## Empties the action's scratch directories before it runs; returns why it
+  ## could not, or "".
+  let problem = action.scratchDirProblem()
+  if problem.len > 0:
+    return problem
+  for dir in action.scratchDirs:
+    if dir.len == 0:
+      continue
+    let physical = extendedPath(materialPath(action.cwd, dir))
+    try:
+      if dirExists(physical):
+        removeTreeNoFollow(physical)
+      createDir(physical)
+    except CatchableError as err:
+      return "cannot empty scratch directory '" & dir & "': " & err.msg
+  ""
+
 proc collectEvidence(action: BuildAction; strict: bool;
                      hostedRecords: ptr seq[MonitorRecord] = nil;
                      config: ptr BuildEngineConfig = nil):
@@ -7723,6 +7880,10 @@ proc collectEvidence(action: BuildAction; strict: bool;
         "rewrites are errors'.")
     if offenders.len > 0:
       result.publishable = false
+  # Everything under a scratch directory is the action's own, so it leaves
+  # the evidence here, before the key is graded -- the local key, the
+  # portable record and the determinism probe all read what remains.
+  dropScratchEvidence(action, result.evidence)
   # LAST OF ALL, after every contributor to the key — the root-image fold at
   # the head of this proc included — grade the set the key is actually built
   # from. Rule 7. See `gradeKeyedInputSet`.
@@ -8146,6 +8307,36 @@ proc lookupEnv(env: openArray[string]; name: string):
         return (true, item.substr(prefix.len))
   (false, "")
 
+# What a process needs from the host merely to run on it, handed to every
+# action launched with an allowlisted environment
+# (`BuildEngineConfig.hermeticEnv`). Keyed by NAME, never by value, like a
+# passthrough: `TEMP` differs between any two hosts, and a key that bound it
+# would never be shared.
+const HostEssentialEnvNames* =
+  when defined(windows):
+    ["SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT",
+     "TEMP", "TMP", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+     "PROCESSOR_IDENTIFIER", "OS", "ProgramData", "ProgramFiles",
+     "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles",
+     "CommonProgramFiles(x86)", "CommonProgramW6432", "USERPROFILE",
+     "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "USERNAME"]
+  else:
+    ["HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TZ", "TERM",
+     "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"]
+
+proc isHostEssentialEnvName*(name: string): bool =
+  for essential in HostEssentialEnvNames:
+    when defined(windows):
+      if cmpIgnoreCase(essential, name) == 0: return true
+    else:
+      if essential == name: return true
+  false
+
+proc hostEssentialEnv(): seq[string] =
+  for name in HostEssentialEnvNames:
+    if existsEnv(name):
+      result.add(name & "=" & getEnv(name))
+
 proc actionEnvLookup*(action: BuildAction; name: string):
     tuple[present: bool, value: string] =
   result = lookupEnv(action.env, name)
@@ -8158,8 +8349,11 @@ proc actionEnvResolver*(action: BuildAction;
   ## Only names actually observed by the action enter a strong fingerprint.
   var env: seq[string]
   if action.kind == bakProcess:
-    for name, value in envPairs():
-      env.add(name & "=" & value)
+    # Under an allowlisted environment the child saw only what the engine
+    # composed for it; a host variable outside that set is UNSET to it.
+    if config == nil or not config[].hermeticEnv:
+      for name, value in envPairs():
+        env.add(name & "=" & value)
     if config != nil:
       env.add(preparedActionEnv(action, config[]))
     else:
@@ -8191,9 +8385,12 @@ proc cacheEnvInputs*(action: BuildAction; evidence: PathSetEvidence;
   var passthrough = initHashSet[string]()
   for name in action.envPassthrough:
     passthrough.incl(envNameKey(name))
+  let hermetic = config != nil and config[].hermeticEnv
   let resolve = action.actionEnvResolver(config)
   for name in names:
     if envNameKey(name) in passthrough:
+      continue
+    if hermetic and isHostEssentialEnvName(name):
       continue
     let resolved = resolve(name)
     result.add(EnvFingerprint(name: name, present: resolved.present,
@@ -10544,6 +10741,12 @@ proc launchChildEnv(action: BuildAction;
   # (``REPRO_MONITOR_SHIM_LIB`` above) and lets it "just work" — no backend
   # selection. (io-mon keeps DEBUG-only per-mechanism diagnostic toggles, but
   # those are for local A/B diagnosis, not something the engine seeds.)
+  #
+  # Under an allowlisted environment nothing is inherited, so the host's
+  # OS-essential set is handed over here -- before `action.env`, so a value
+  # the action declares (a hermetic `USERPROFILE`, say) still wins.
+  if config.hermeticEnv:
+    result.add(hostEssentialEnv())
   for entry in action.env:
     result.add(entry)
   # BuildXL `PipEnvironment.GetEffectiveEnvironmentVariables`
@@ -10830,7 +11033,8 @@ proc preparedRunQuotaCommand(action: BuildAction;
     cwd: action.cwd,
     env: deferred.env,
     stdoutLimit: config.stdoutLimit,
-    stderrLimit: config.stderrLimit)
+    stderrLimit: config.stderrLimit,
+    isolatedEnv: config.hermeticEnv)
 
 # ---------------------------------------------------------------------------
 # In-Process-Monitor-Hosting HM-4 — the engine hosts io-mon's consumer itself.
@@ -14191,13 +14395,62 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       key = key.toLowerAscii()
     key == hostTempKey
 
+  let hostSystemKey = block:
+    when defined(windows):
+      var key = getEnv("SystemRoot", "C:\\Windows").replace('\\', '/')
+      while key.len > 1 and key.endsWith("/"):
+        key.setLen(key.len - 1)
+      key.toLowerAscii()
+    else:
+      ""
+
+  proc isHostSystemPath(path: string): bool =
+    ## Beneath the host OS directory — the root the CLI's portable roots
+    ## already mark untracked. Which system DLLs a process loads varies
+    ## between two runs of the same command (the loader pulls in
+    ## `apphelp.dll`, `cmdext.dll`, ... only sometimes), so for the
+    ## determinism probe they are not inputs to compare on; differing
+    ## outputs still fail closed.
+    if hostSystemKey.len == 0:
+      return false
+    var key = path.replace('\\', '/')
+    when defined(windows):
+      key = key.toLowerAscii()
+    key == hostSystemKey or key.startsWith(hostSystemKey & "/")
+
   proc isLaunchMachinery(path: string): bool =
-    isHostTempListing(path) or
+    isHostTempListing(path) or isHostSystemPath(path) or
       toLogicalPath(launchMachineryRoots(), path).kind == lpkUntracked
 
   proc portableRecordRoots(): seq[LogicalRoot] =
     ## `portableRoots` plus the launch machinery, untracked.
     config.portableRoots & launchMachineryRoots()
+
+  proc isOwnOutput(action: BuildAction; path: string): bool =
+    ## `path` is, or lies inside, one of the action's own outputs -- what it
+    ## PRODUCES. BuildXL: a pip's accesses to its own outputs are not inputs.
+    ## An action that writes its declared output directory observes it while
+    ## doing so (`cp` probes the tree it is filling, `mkdir -p` each parent
+    ## below it), and the portable lookup can never answer such an entry: on
+    ## any host, before the action runs, its own outputs are by definition
+    ## not there to be identified. Left in, they made gemini-cli's bundle
+    ## step unresolvable everywhere (1701 entries of 8408).
+    ##
+    ## For the PORTABLE record and the determinism probe only. The local key
+    ## keeps its narrower exact-path rule (`selfWrittenOutputKeys`).
+    var key = withoutExtendedLengthPrefix(path).replace('\\', '/')
+    when defined(windows):
+      key = key.toLowerAscii()
+    # `outputs` plus `declaredOutputs`, as `portablePhysicalOutputsOf`
+    # (defined further down) names them.
+    for output in action.outputs & action.declaredOutputs:
+      var root = materialPath(action.cwd, output).replace('\\', '/')
+      while root.len > 1 and root.endsWith("/"):
+        root.setLen(root.len - 1)
+      when defined(windows):
+        root = root.toLowerAscii()
+      if root.len > 0 and (key == root or key.startsWith(root & "/")):
+        return true
 
   proc transientOwnWrites(evidence: PathSetEvidence): HashSet[string] =
     ## Paths the action itself WROTE that no longer exist once it finished:
@@ -14255,7 +14508,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     when defined(windows):
       cwdKey = cwdKey.toLowerAscii()
     for path in inputs:
-      if isLaunchMachinery(path) or path.replace('\\', '/') in transient:
+      if isLaunchMachinery(path) or path.replace('\\', '/') in transient or
+          isOwnOutput(action, path):
         continue
       var pathKey = path.replace('\\', '/')
       while pathKey.len > 1 and pathKey.endsWith("/"):
@@ -14338,8 +14592,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       outputs.add("output=" & materialPath(action.cwd, output))
     for output in action.declaredOutputs:
       outputs.add("declaredOutput=" & materialPath(action.cwd, output))
+    for dir in action.scratchDirs:
+      outputs.add("scratch=" & materialPath(action.cwd, dir))
     outputs.sort()
     result.add(outputs)
+    # Passthrough is keyed by NAME (BuildXL): the value is the host's, but
+    # which variables the action was allowed to see is part of what it is.
+    var passthrough: seq[string] = @[]
+    for name in action.envPassthrough:
+      passthrough.add("passthrough=" & name)
+    if config.hermeticEnv:
+      result.add("env=allowlisted")
+      for name in HostEssentialEnvNames:
+        passthrough.add("passthrough=" & name)
+    passthrough.sort()
+    result.add(passthrough)
 
   proc portableWeakOf(action: BuildAction): string =
     ## The portable weak fingerprint: the action's STATIC description, so it
@@ -14448,7 +14715,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var enumerated = initHashSet[string]()
     for path in action.cacheEnumeratedDirectories(evidence):
       enumerated.incl(path)
-      if not isHostTempListing(path):
+      if not isHostTempListing(path) and not isOwnOutput(action, path):
         enumerations.add(path)
     var probed = initHashSet[string]()
     for path in evidence.monitorProbes:
@@ -14458,7 +14725,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     let transient = transientOwnWrites(evidence)
     for path in action.cacheInputPaths(evidence):
       if path in enumerated or isHostTempListing(path) or
-          path.replace('\\', '/') in transient:
+          path.replace('\\', '/') in transient or isOwnOutput(action, path):
         continue
       elif path in probed:
         probes.add(path)
@@ -16516,7 +16783,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # silently downgraded where nothing could observe it.
         let hostMonitorInProcess = InProcessMonitorHostSupported and
           action.kind == bakProcess and
-          monitorHostingRequested(config.monitorHosting, launchPath)
+          monitorHostingRequested(config.monitorHosting, launchPath) and
+          not config.hermeticEnv
+
+        if action.scratchDirs.len > 0:
+          let scratchProblem = action.resetScratchDirs()
+          if scratchProblem.len > 0:
+            statuses[id] = asFailed
+            let idx = idToIndex.resultIndex(id)
+            runResult.results[idx].status = asFailed
+            runResult.results[idx].stderr = scratchProblem
+            runResult.trace(id, "failed", scratchProblem)
+            blockClosure(id, id)
+            emitProgress(bpkActionCompleted, id)
+            completed = terminalCount()
+            launchedAny = true
+            continue
 
         let monitorPlanStart = statStart()
         let plan = monitoredAction(action, config, cacheRoot,
