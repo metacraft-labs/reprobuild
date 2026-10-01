@@ -195,14 +195,19 @@ proc currentIdentity*(roots: openArray[LogicalRoot]; entry: PathSetEntry;
     return none(string)
   let p = physical.get()
   case entry.kind
+  # Existence is asked in the extended-length form: a path past MAX_PATH
+  # otherwise reads as absent, so the same file was "present" under a short
+  # checkout path and "absent" under a longer one.
   of pikRead:
-    if not fileExists(p):
+    if not fileExists(extendedPath(p)):
       return none(string)
     some(fileContentHex(p))
   of pikProbe:
-    some(if fileExists(p) or dirExists(p): "present" else: "absent")
+    some(if fileExists(extendedPath(p)) or dirExists(extendedPath(p)):
+           "present"
+         else: "absent")
   of pikEnumeration:
-    if not dirExists(p):
+    if not dirExists(extendedPath(p)):
       return none(string)
     some(membershipHex(p))
   of pikEnvironment:
@@ -278,19 +283,34 @@ proc publishedMarker(storeRoot: string; record: PortableMemoRecord): string =
   storeRoot / record.weakHex / pathSetHash(record.pathSet) /
     (record.strongHex & ".published")
 
+proc memoContentHex(record: PortableMemoRecord): string =
+  blake3.digest(encodeMemo(record)).toHex()
+
 proc memoPublished*(storeRoot: string; record: PortableMemoRecord;
                     withOutputs: bool): bool =
-  ## Whether this host already published `record` — with its output bytes,
-  ## when `withOutputs`. A warm build re-derives the same records, and each
-  ## need go out only once.
+  ## Whether this host already published `record` — THIS content of it, with
+  ## its output bytes when `withOutputs`. A warm build re-derives the same
+  ## records, and each need go out only once.
+  ##
+  ## The marker names the content it was written for. Records are named by
+  ## their keys, and one key can come to describe different outputs: a
+  ## fetch whose tree a later action used to mutate was recorded with the
+  ## mutated tree, and the record re-derived once that stopped is a CORRECTION
+  ## under the same name. A marker that only said "published" kept the stale
+  ## one on the remote for good. (A marker from before the content was named
+  ## reads as unpublished, which costs one re-publish.)
   let marker = publishedMarker(storeRoot, record)
   if not fileExists(extendedPath(marker)):
     return false
-  not withOutputs or readFile(extendedPath(marker)) == "outputs"
+  let held = readFile(extendedPath(marker)).split(' ')
+  if held.len != 2 or held[1] != memoContentHex(record):
+    return false
+  not withOutputs or held[0] == "outputs"
 
 proc markMemoPublished*(storeRoot: string; record: PortableMemoRecord;
                         withOutputs: bool) =
-  let text = if withOutputs: "outputs" else: "record"
+  let text = (if withOutputs: "outputs" else: "record") & " " &
+    memoContentHex(record)
   atomicWrite(publishedMarker(storeRoot, record),
     text.toOpenArrayByte(0, text.high))
 

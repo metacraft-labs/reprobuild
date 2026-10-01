@@ -2860,6 +2860,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # actions that don't opt in) reduce to no-op enforcement,
     # preserving pre-M9.R.75 behaviour byte-for-byte.
     result.declaredOutputs = payload.declaredOutputs
+    result.scratchDirs = payload.scratchDirs
     result.readOnlyRoots = payload.readOnlyRoots
   let actionCachePolicy =
     case payload.actionCachePolicy
@@ -4395,7 +4396,11 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 11'u16
+  LoweredGraphCacheVersion = 12'u16
+    # v12: ``BuildAction.scratchDirs``, a string list after
+    # ``requiresElevation``. A v11 cache would decode every action with no
+    # scratch directories, and the engine would then neither empty them nor
+    # leave their contents out of the key.
     # v10: DA-6 — the two trailing event-interest bools
     # (``captureNonDeterminism``, ``captureIpc``) are replaced by ONE byte
     # carrying ``MonitorCaptureBreadth``: the tool package's declaration of how
@@ -5273,6 +5278,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeStringSeq(action.declaredOutputs)
   outp.writeStringSeq(action.readOnlyRoots)
   outp.add(if action.requiresElevation: 1'u8 else: 0'u8)
+  outp.writeStringSeq(action.scratchDirs)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -5352,6 +5358,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
     raiseEnvelopeError(eeMalformed,
       "invalid lowered action elevation sentinel")
   result.requiresElevation = elevationByte == 1'u8
+  result.scratchDirs = readStringSeq(bytes, pos)
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)
@@ -5498,10 +5505,10 @@ proc evidenceJson(evidence: PathSetEvidence): JsonNode =
   %*{
     "declaredInputs": jsonStringSeq(evidence.declaredInputs),
     "declaredOutputs": jsonStringSeq(evidence.declaredOutputs),
-    "depfileInputs": jsonStringSeq(evidence.depfileInputs),
-    "monitorReads": jsonStringSeq(evidence.monitorReads),
-    "monitorWrites": jsonStringSeq(evidence.monitorWrites),
-    "monitorProbes": jsonStringSeq(evidence.monitorProbes),
+    "depfileInputs": jsonStringSeq(evidence.depfileInputs.paths),
+    "monitorReads": jsonStringSeq(evidence.monitorReads.paths),
+    "monitorWrites": jsonStringSeq(evidence.monitorWrites.paths),
+    "monitorProbes": jsonStringSeq(evidence.monitorProbes.paths),
     "provisionerReportedInputs":
       jsonStringSeq(evidence.provisionerReportedInputs),
     "evidenceProvenance": jsonStringSeq(provenance),
@@ -5554,8 +5561,8 @@ proc fileSizeOrZero(path: string): BiggestInt =
 
 proc evidenceInputCount(evidence: PathSetEvidence): int =
   var seen: seq[string] = @[]
-  for group in [evidence.declaredInputs, evidence.depfileInputs,
-      evidence.monitorReads, evidence.monitorProbes]:
+  for group in [evidence.declaredInputs, evidence.depfileInputs.paths,
+      evidence.monitorReads.paths, evidence.monitorProbes.paths]:
     for path in group:
       if path.len > 0 and seen.find(path) < 0:
         seen.add(path)
@@ -9777,8 +9784,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           "`executeBuildTarget(wantsInputEvidencePaths = …)` and the " &
           "consumer of `BuildCommandOutcome.inputEvidencePaths` have gone " &
           "out of step.")
-      for group in [item.evidence.declaredInputs, item.evidence.depfileInputs,
-          item.evidence.monitorReads, item.evidence.monitorProbes]:
+      for group in [item.evidence.declaredInputs,
+          item.evidence.depfileInputs.paths,
+          item.evidence.monitorReads.paths,
+          item.evidence.monitorProbes.paths]:
         for path in group:
           collectedInputEvidence.add(path)
 
@@ -17433,17 +17442,21 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     inc i
   case hookName
   of "pre-commit":
-    # NF-2 — refresh the repo's `flake.lock` from the sibling revisions the
-    # overrides actually used, and STAGE it, so the lock is one of the files
-    # of the revision being formed (§13.1).
+    # NF-2 / §13.3 — refresh the repo's `flake.lock` and re-pin its committed
+    # `repro.lock` from the sibling revisions actually checked out, and STAGE
+    # them, so the locks are files of the revision being formed (§13.1).
     #
-    # Never blocks the commit. A non-zero status here ABORTS `git commit`, and
-    # nothing this hook does is a reason to reject a developer's work: a dirty
-    # sibling skips the refresh (Workspace-And-Develop-Mode.md §"Reproducibility
-    # And `repro check`" says the lock must not be updated, not that the commit
-    # must be refused), and every other failure is a tooling fault. The PUSH is
-    # where a stale pin is refused (NF-3), because that is the boundary where a
-    # wrong pin can reach somebody else.
+    # A non-zero status here ABORTS `git commit`, and it is returned for ONE
+    # reason: the re-pin would move a sibling's pin BACKWARD — the checkout is
+    # behind the pin, has diverged from it, or lacks the pinned commit — and
+    # `REPRO_ALLOW_PIN_REGRESSION` does not name that sibling (§13.3, "A pin
+    # never moves backward silently"). Nothing else this hook meets is a reason
+    # to reject a developer's work: a dirty sibling skips the flake refresh
+    # (Workspace-And-Develop-Mode.md §"Reproducibility And `repro check`" says
+    # the lock must not be updated, not that the commit must be refused), and
+    # every other failure is a tooling fault, logged. The PUSH is where a stale
+    # pin is refused (NF-3, §13.5), because that is the boundary where a wrong
+    # pin can reach somebody else.
     #
     # No `selfHealManagedHooks` here, deliberately. `post-commit` fires for the
     # same commit moments later and already re-asserts the hook set; doing it
@@ -22719,6 +22732,7 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "weakFingerprint": digestHex(action.weakFingerprint),
     "publishToBinaryCache": action.publishToBinaryCache,
     "fixedOutput": action.fixedOutput,
+    "scratchDirs": action.scratchDirs,
     "binaryCacheKey": binaryCacheKey,
     "binaryCacheIdentityError": identityError,
     "actionCachePolicy": $action.actionCachePolicy,
@@ -45146,9 +45160,335 @@ proc probePostCommitPublication(identity: GitToolIdentity;
          "@{u}"]).code == 0:
       inc result.stranded
 
+# ---- A pin never moves backward silently ----------------------------------
+#
+# Unified-Locking-And-Hooks.md §13.3 ("A pin never moves backward silently")
+# and Nix-Flake-Coexistence.md §3.2 ("Rule, at commit") / §4 ("Regressions").
+#
+# The commit-time re-pin of `repro.lock` and the `flake.lock` refresh both
+# relate each observed sibling revision to the revision the lock pins NOW, in
+# the sibling's own history:
+#
+#   * ahead      — the pin is an ancestor of HEAD: the pin advances, as always;
+#   * behind     — HEAD is an ancestor of the pin;
+#   * diverged   — neither contains the other (a rebase, a force-push, a
+#                  rewritten history, another branch);
+#   * unprovable — the pinned commit is absent from the checkout, so the
+#                  direction cannot be decided.
+#
+# The last three would move a published pin backward (or sideways, which drops
+# the pin's own commits just the same), so the commit is REFUSED unless the
+# committer names the sibling in `REPRO_ALLOW_PIN_REGRESSION` for that one
+# commit. A sibling behind its pin almost always means a stale checkout rather
+# than a chosen downgrade, and a hook that re-pinned it silently would turn "my
+# checkout is old" into "the published lock is old" for every consumer.
+#
+# Both locks answer through the classifier, the refusal text and the variable
+# below, so the two refreshes cannot grow different opinions about what a
+# regression is or how to allow one.
+
+const PinRegressionAllowEnv* = "REPRO_ALLOW_PIN_REGRESSION"
+  ## `REPRO_ALLOW_PIN_REGRESSION=<sibling>[,<sibling>…] git commit …`. An
+  ## environment variable rather than a flag because the hook runs inside
+  ## `git commit`: nobody invokes it, so a flag would have nowhere to go.
+
+type
+  SiblingPinRelation* = enum
+    ## Where a sibling checkout's HEAD stands against the revision a lock pins.
+    sprAt          ## HEAD is the pinned revision
+    sprAhead       ## the pin is an ancestor of HEAD — advancing is automatic
+    sprBehind      ## HEAD is an ancestor of the pin — a regression
+    sprDiverged    ## neither contains the other — a regression
+    sprUnprovable  ## the pinned commit is not in the checkout — a regression
+    sprUnknown     ## HEAD differs but git could not compute the direction
+
+  PinRegression* = object
+    ## One sibling whose re-pin would move its pin backward.
+    lock*: string        ## "repro.lock" or "flake.lock"
+    sibling*: string     ## the name the lock uses (repro.lock entry, flake input)
+    repo*: string        ## the workspace repo checked out for it
+    path*: string        ## that checkout
+    relation*: SiblingPinRelation
+    aheadBy*: int        ## commits only in the checkout
+    behindBy*: int       ## commits only in the pin
+    pinned*: string      ## the revision the lock pins now
+    observed*: string    ## the checkout's HEAD
+
+  PinRegressionAllowance* = object
+    ## `REPRO_ALLOW_PIN_REGRESSION`, parsed.
+    names*: seq[string]     ## sibling / input names, in the order given
+    rejected*: seq[string]  ## values that cannot name a sibling (wildcards)
+
+  FlakeCommitRefresh* = object
+    ## What the commit-path `flake.lock` refresh did, for the hook.
+    line*: string                ## the `pre-commit-lock.log` line
+    changed*: bool               ## flake.lock was rewritten and must be staged
+    lockPath*: string
+    refused*: seq[PinRegression] ## regressions that refuse this commit
+    allowed*: seq[PinRegression] ## regressions recorded because they were named
+    allowanceUsed*: seq[string]  ## named inputs that really were regressing
+    examined*: seq[string]       ## every flake input name the refresh considered
+
+proc shortRev(rev: string): string =
+  if rev.len >= 12: rev[0 ..< 12] else: rev
+
+proc pinRegressionShellWord(value: string): string =
+  ## ``value`` as one shell word: bare when it needs no quoting — sibling
+  ## names and comma-separated lists of them, which is what these messages
+  ## quote — and single-quoted otherwise.
+  const bare = {'a'..'z', 'A'..'Z', '0'..'9', '-', '_', '.', ',', '/', '+',
+                '@', ':', '%', '='}
+  if value.len > 0 and value.allCharsInSet(bare): value
+  else: quoteShell(value)
+
+proc isPinRegression*(relation: SiblingPinRelation): bool =
+  relation in {sprBehind, sprDiverged, sprUnprovable}
+
+proc siblingPinRelationTag*(relation: SiblingPinRelation): string =
+  case relation
+  of sprAt: "at"
+  of sprAhead: "ahead"
+  of sprBehind: "behind"
+  of sprDiverged: "diverged"
+  of sprUnprovable: "unprovable"
+  of sprUnknown: "unknown"
+
+proc parsePinRegressionAllowance*(raw: string): PinRegressionAllowance =
+  ## Split `REPRO_ALLOW_PIN_REGRESSION` on commas. Whitespace around a name and
+  ## empty items are ignored. There is deliberately NO wildcard — every
+  ## downgrade is a separate decision — so a value carrying glob characters
+  ## names nothing and is reported rather than matched.
+  for item in raw.split(','):
+    let name = item.strip()
+    if name.len == 0: continue
+    if name.contains({'*', '?', '['}):
+      if name notin result.rejected: result.rejected.add(name)
+      continue
+    if name notin result.names: result.names.add(name)
+
+proc classifySiblingPin*(identity: GitToolIdentity;
+    dir, pinnedRev, headRev: string):
+    tuple[relation: SiblingPinRelation; aheadBy, behindBy: int;
+          detail: string] =
+  ## Where the checkout at ``dir`` (HEAD ``headRev``) stands relative to
+  ## ``pinnedRev``, with the distance in commits.
+  ##
+  ## The AT/not-at half is a string comparison and always answerable. Only the
+  ## DIRECTION needs history. A pinned commit this checkout does not have is
+  ## its own answer (`unprovable`), because it is ordinary and has a remedy — a
+  ## fetch — whereas every other reason the direction cannot be computed (an
+  ## unreadable HEAD, a failing or unparseable `git rev-list`) is a malfunction
+  ## that can only be investigated.
+  if headRev.len > 0 and headRev == pinnedRev:
+    return (relation: sprAt, aheadBy: 0, behindBy: 0, detail: "")
+  if headRev.len == 0:
+    return (relation: sprUnknown, aheadBy: 0, behindBy: 0, detail:
+      "the checkout's HEAD could not be read")
+  let present = gitRunPlain(identity,
+    ["-C", dir, "cat-file", "-e", pinnedRev & "^{commit}"])
+  if present.code != 0:
+    return (relation: sprUnprovable, aheadBy: 0, behindBy: 0, detail:
+      "the pinned revision " & shortRev(pinnedRev) & " is not present in " &
+      dir & ", so this sibling cannot be classified until it is fetched — " &
+      "nothing local can say where a checkout stands relative to a revision " &
+      "it does not have")
+  let counts = gitRunPlain(identity,
+    ["-C", dir, "rev-list", "--left-right", "--count",
+     pinnedRev & "..." & headRev])
+  if counts.code != 0:
+    return (relation: sprUnknown, aheadBy: 0, behindBy: 0, detail:
+      "`git rev-list --left-right --count` failed in " & dir & " (" &
+      counts.output.strip() & ")")
+  let fields = counts.output.strip().splitWhitespace()
+  if fields.len != 2:
+    return (relation: sprUnknown, aheadBy: 0, behindBy: 0, detail:
+      "`git rev-list --left-right --count` answered '" &
+      counts.output.strip() & "', which is not two counts")
+  var onlyPin, onlyHead: int
+  try:
+    onlyPin = parseInt(fields[0])
+    onlyHead = parseInt(fields[1])
+  except ValueError:
+    return (relation: sprUnknown, aheadBy: 0, behindBy: 0, detail:
+      "`git rev-list --left-right --count` answered '" &
+      counts.output.strip() & "', which is not two counts")
+  if onlyPin == 0 and onlyHead > 0:
+    return (relation: sprAhead, aheadBy: onlyHead, behindBy: 0, detail: "")
+  if onlyHead == 0 and onlyPin > 0:
+    return (relation: sprBehind, aheadBy: 0, behindBy: onlyPin, detail: "")
+  (relation: sprDiverged, aheadBy: onlyHead, behindBy: onlyPin, detail: "")
+
+proc pinRegressionSubject*(r: PinRegression): string =
+  if r.lock == "flake.lock":
+    "flake.lock input '" & r.sibling & "'" &
+      (if r.repo.len > 0 and r.repo != r.sibling:
+         " (sibling '" & r.repo & "')"
+       else: "")
+  else:
+    r.lock & " sibling '" & r.sibling & "'"
+
+proc pinRegressionDistance*(r: PinRegression): string =
+  ## The relation and its distance, in the words the spec uses.
+  case r.relation
+  of sprBehind:
+    "behind by " & $r.behindBy & " commit(s)"
+  of sprDiverged:
+    "diverged: " & $r.aheadBy & " and " & $r.behindBy & " commits apart (" &
+      $r.aheadBy & " only in the checkout, " & $r.behindBy &
+      " only in the pin)"
+  of sprUnprovable:
+    "pinned commit " & r.pinned & " not present in " & r.path
+  of sprAhead:
+    "ahead by " & $r.aheadBy & " commit(s)"
+  of sprAt:
+    "at the pin"
+  of sprUnknown:
+    "relation unknown"
+
+proc pinRegressionLogFragment*(r: PinRegression): string =
+  r.sibling & " " & pinRegressionDistance(r) & " (pinned " & r.pinned &
+    ", observed " & r.observed & ")"
+
+proc pinRegressionAllowedLine*(r: PinRegression;
+    via = PinRegressionAllowEnv): string =
+  ## The one line an allowed regression leaves in the commit's output and in
+  ## `pre-commit-lock.log`: which sibling, from which revision to which, and
+  ## what allowed it.
+  "allowed pin regression (" & via & "): " &
+    pinRegressionSubject(r) & " moved BACKWARD from " & r.pinned & " to " &
+    r.observed & " — " & pinRegressionDistance(r)
+
+proc pinRegressionSyncCommand*(workspaceRoot, repo: string): string =
+  ## `repro ws sync <project> --workspace-root=<ws>` for a project of this
+  ## workspace that contributes ``repo`` — the primary project first, then the
+  ## rest of the active set. A positional names a PROJECT, never a repo
+  ## (CLI/sync.md), so a repo no resolvable project contributes falls back to
+  ## syncing the whole workspace, which still runs where it is printed.
+  if workspaceRoot.len == 0: return ""
+  let root = absolutePath(workspaceRoot)
+  var candidates: seq[string]
+  try:
+    let recorded =
+      readWorkspaceLocal(absolutePath(workspaceTomlPath(root))).workspace.project
+    if recorded.len > 0: candidates.add(recorded)
+  except CatchableError:
+    discard
+  for p in activeProjectSetOrEmpty(root):
+    if p notin candidates: candidates.add(p)
+  for p in candidates:
+    var resolved: ResolvedProject
+    try:
+      resolved = resolveWorkspaceProjectByName(root, p)
+    except CatchableError:
+      continue
+    for r in resolved.repos:
+      if r.name == repo:
+        return "repro ws sync " & quoteShell(p) & " --workspace-root=" &
+          quoteShell(root)
+  "repro ws sync --workspace-root=" & quoteShell(root)
+
+proc pinRegressionForwardCommands*(r: PinRegression; workspaceRoot: string;
+    identity: GitToolIdentity): seq[string] =
+  ## The commands that bring the checkout forward, most precise first. Every
+  ## element is one command line that runs where the refusal is printed.
+  let sync = pinRegressionSyncCommand(workspaceRoot, r.repo)
+  case r.relation
+  of sprBehind:
+    # The upstream the checkout's branch tracks when it already contains the
+    # pin, so the checkout lands on the same line the pin came from; the pinned
+    # commit itself otherwise, which is always a fast-forward for a checkout
+    # that is behind it.
+    var target = r.pinned
+    let up = gitRunPlain(identity, ["-C", r.path, "rev-parse",
+      "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    if up.code == 0 and up.output.strip().len > 0 and
+        gitRunPlain(identity, ["-C", r.path, "merge-base", "--is-ancestor",
+          r.pinned, "@{u}"]).code == 0:
+      target = up.output.strip()
+    result.add("git -C " & quoteShell(r.path) & " merge --ff-only " &
+      quoteShell(target))
+    if sync.len > 0: result.add(sync)
+  of sprDiverged:
+    # `repro ws sync` also migrates a force-pushed or rewritten history, the
+    # common reason a checkout diverges from a pin somebody else published.
+    if sync.len > 0: result.add(sync)
+  of sprUnprovable:
+    result.add("git -C " & quoteShell(r.path) & " fetch --all")
+    if sync.len > 0: result.add(sync)
+  else:
+    discard
+
+proc renderPinRegressionRefusal*(refused: openArray[PinRegression];
+    workspaceRoot: string; identity: GitToolIdentity): seq[string] =
+  ## The refusal, one line per element (the caller prefixes each). It names
+  ## every regressing sibling with its relation, distance and both revisions,
+  ## then the usual course (bring the checkout forward) and the deliberate one
+  ## (`REPRO_ALLOW_PIN_REGRESSION`), with when each is appropriate.
+  result.add("REFUSED: this commit would move " & $refused.len &
+    " pinned sibling revision(s) BACKWARD. The commit was not made, and " &
+    "nothing was written or staged.")
+  var names: seq[string]
+  for r in refused:
+    if r.sibling notin names: names.add(r.sibling)
+    if r.relation == sprUnprovable:
+      # The distance already names the pinned commit and the checkout.
+      result.add("  " & pinRegressionSubject(r) & ": " &
+        pinRegressionDistance(r) & " — observed " & r.observed)
+    else:
+      result.add("  " & pinRegressionSubject(r) & ": " &
+        pinRegressionDistance(r) & " — pinned " & r.pinned & ", observed " &
+        r.observed & " (checkout " & r.path & ")")
+    let forward = pinRegressionForwardCommands(r, workspaceRoot, identity)
+    for i, cmd in forward:
+      let lead =
+        if i > 0: "or bring the whole project up to date"
+        elif r.relation == sprUnprovable:
+          "fetch it so the direction can be decided"
+        else: "bring the checkout forward"
+      result.add("      " & lead & ": `" & cmd & "`")
+    let dropped = "git -C " & quoteShell(r.path) & " log --oneline " &
+      r.observed & ".." & r.pinned
+    if r.relation == sprUnprovable:
+      result.add("      once fetched, `" & dropped & "` lists what this " &
+        "commit would drop from the published lock")
+    else:
+      result.add("      what this commit would drop from the published " &
+        "lock: `" & dropped & "`")
+  result.add("The usual case is a stale checkout: bring it forward as above, " &
+    "then commit again.")
+  result.add("If the downgrade is deliberate, re-run the same commit with " &
+    "the sibling(s) named in " & PinRegressionAllowEnv & ", for example: `" &
+    PinRegressionAllowEnv & "=" & pinRegressionShellWord(names.join(",")) &
+    " git commit`")
+  result.add("  That is appropriate when you are intentionally reverting a " &
+    "dependency upgrade, committing a known-good older pin while bisecting, " &
+    "deliberately tracking another branch of the sibling, or when the " &
+    "sibling's history was rewritten and the observed revision is the " &
+    "intended replacement of the old pin.")
+  result.add("  It is NOT appropriate when you have not pulled, or do not " &
+    "know why the sibling is behind: read what the commit would drop first.")
+
+proc pinRegressionAllowanceNotes*(allowance: PinRegressionAllowance;
+    used, examined: openArray[string]): seq[string] =
+  ## A name in `REPRO_ALLOW_PIN_REGRESSION` that allowed nothing is ignored
+  ## with a note, so a typo or a stale export is visible rather than inert.
+  for v in allowance.rejected:
+    result.add(PinRegressionAllowEnv & " value '" & v & "' names no " &
+      "sibling: there is no wildcard, so name each sibling whose pin may " &
+      "move backward. Ignored.")
+  for name in allowance.names:
+    if name in used: continue
+    if name in examined:
+      result.add(PinRegressionAllowEnv & " names '" & name & "', which this " &
+        "commit does not move backward. Ignored.")
+    else:
+      result.add(PinRegressionAllowEnv & " names '" & name & "', which is " &
+        "neither a repro.lock sibling nor a flake.lock input this commit " &
+        "examined. Ignored.")
+
 proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
-  toolProvisioning: ToolProvisioningMode):
-  tuple[line: string; changed: bool; lockPath: string]
+  toolProvisioning: ToolProvisioningMode;
+  allowRegression: seq[string] = @[]; mayWrite = true): FlakeCommitRefresh
   ## NF-2 — forward declaration. The implementation lives beside the rest of
   ## the flake-coexistence code far below (it needs the NF-1 override-set
   ## machinery); the commit hook that drives it is here.
@@ -45157,6 +45497,11 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   ## caller has to STAGE the file when — and only when — it was rewritten, and
   ## deciding that by matching a diagnostic string would make the staging step
   ## depend on the wording of a log line.
+  ##
+  ## ``refused`` lists the inputs whose pin this commit would move backward
+  ## (§3.2 "Rule, at commit"); when it is non-empty nothing was written.
+  ## ``mayWrite = false`` classifies and reports without writing, for a commit
+  ## the `repro.lock` re-pin is already refusing.
 
 proc runPostCommitLockCommand*(args: openArray[string]): int =
   ## ``repro hooks dispatch post-commit --repo-root=<repo>`` (and the
@@ -45591,13 +45936,20 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
 # loop closes: the refreshed lock is staged into the commit being formed, and
 # the resulting revision states "when this was made, the siblings were at X".
 #
-# ## The one thing a pre-commit hook must never do
+# ## The one reason a pre-commit hook fails
 #
-# Fail. A non-zero status aborts `git commit`. Nothing here is a reason to
+# A non-zero status aborts `git commit`, and almost nothing here is a reason to
 # reject a developer's work — not a dirty sibling (the inherited policy skips
 # the refresh, it does not refuse the commit), not an unreadable manifest, not
-# a missing `git`. Every path below returns 0 and says what happened in
-# `pre-commit-lock.log`. The PUSH is where a stale pin is refused (NF-3).
+# a missing `git`. Those paths return 0 and say what happened in
+# `pre-commit-lock.log`; the PUSH is where a stale pin is refused (NF-3).
+#
+# The exception is a re-pin that would move a pin BACKWARD (§3.2 "Rule, at
+# commit"; Unified-Locking-And-Hooks.md §13.3): a sibling behind its pin,
+# diverged from it, or missing the pinned commit refuses the commit unless
+# `REPRO_ALLOW_PIN_REGRESSION` names it. Committing a downgrade is a different
+# act from testing one, and a stale checkout must not become a stale published
+# lock.
 
 proc stageRefreshedFlakeLock(repoRoot, lockPath: string):
     tuple[ok: bool; diagnostic: string] =
@@ -45680,9 +46032,310 @@ proc stageRefreshedFlakeLock(repoRoot, lockPath: string):
     return (false, "`git add " & lockPath & "` could not be run: " & err.msg)
   (true, "")
 
+type
+  CommittedPinObservation = object
+    ## One sibling of a committed ``repro.lock`` as the checkout beside the
+    ## repo shows it (Unified-Locking-And-Hooks.md §13.3 / §13.5).
+    name, path: string
+    pinned: string            ## revision the lock records ("" = not carried)
+    observed: string          ## the checkout's HEAD ("" = not checked out)
+    relation: SiblingPinRelation
+      ## where HEAD stands against ``pinned`` (`sprUnknown` when either is
+      ## missing, since there is nothing to relate)
+    aheadBy, behindBy: int    ## the distance, when the direction is known
+    detail: string            ## why an `unknown` relation is unknown
+    dirty: bool
+    declared: bool            ## a manifest-declared develop-set sibling
+
+proc committedLockDepsLine(ld: LockedDependencies): string =
+  ## The ``deps = [...]`` line ``serializeLockedDependencies`` writes for
+  ## ``ld``. Splicing only this line into the existing document is what keeps
+  ## every other byte — the solve — identical (§13.3 "No solver").
+  for line in serializeLockedDependencies(ld).splitLines():
+    if line.startsWith("deps = ["): return line
+  ""
+
+proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies):
+    tuple[observations: seq[CommittedPinObservation]; manifestResolved: bool;
+          workspaceRoot: string] =
+  ## Every non-root VCS entry of the committed lock plus every manifest-
+  ## declared develop-set sibling it does not carry, each observed from its
+  ## checkout and related to its pin by ``classifySiblingPin``. Reads only;
+  ## writes nothing.
+  let root = absolutePath(repoRoot)
+  let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  var seen: seq[string] = @[]
+  proc observe(name, depAbs, pinned: string; declared: bool):
+      CommittedPinObservation =
+    result = CommittedPinObservation(name: name,
+      path: relativePath(depAbs, root).replace('\\', '/'), pinned: pinned,
+      declared: declared, relation: sprUnknown)
+    if not isGitCheckoutDir(depAbs): return
+    let head = gitRunPlain(identity, ["-C", depAbs, "rev-parse", "HEAD"])
+    if head.code != 0: return
+    result.observed = head.output.strip()
+    # Untracked files count: a build reads them as readily as tracked ones.
+    let status = gitRunPlain(identity, ["-C", depAbs, "status",
+      "--porcelain"])
+    result.dirty = status.code == 0 and status.output.strip().len > 0
+    if pinned.len > 0:
+      let verdict = classifySiblingPin(identity, depAbs, pinned,
+        result.observed)
+      result.relation = verdict.relation
+      result.aheadBy = verdict.aheadBy
+      result.behindBy = verdict.behindBy
+      result.detail = verdict.detail
+  let manifest = manifestDevelopSiblings(root)
+  result.manifestResolved = manifest.resolved
+  result.workspaceRoot = manifest.workspaceRoot
+  var declaredNames: seq[string] = @[]
+  for sib in manifest.siblings: declaredNames.add(sib.name)
+  for d in ld.deps:
+    if d.path == "." or d.coordinates.kind != ckVcs or d.path.len == 0:
+      continue
+    let depAbs = absolutePath(root / d.path)
+    result.observations.add(observe(d.name, depAbs, d.coordinates.revision,
+      d.name in declaredNames))
+    seen.add(d.name)
+    seen.add(relativePath(depAbs, root).replace('\\', '/'))
+  if manifest.resolved:
+    for sib in manifest.siblings:
+      let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
+      let rel = relativePath(depAbs, root).replace('\\', '/')
+      if sib.name in seen or rel in seen: continue
+      result.observations.add(observe(sib.name, depAbs, "", true))
+
+type
+  CommittedLockRepinPlan = object
+    ## What the §13.3 re-pin of a committed ``repro.lock`` would write.
+    ##
+    ## PLANNED first and APPLIED second, so that a commit refused by either
+    ## committed lock — this one or `flake.lock` — writes and stages neither:
+    ## a refused commit leaves the working tree and the index as it found them.
+    lockPath: string
+    text: string              ## the lock as read
+    originalDepsLine: string
+    depsLine: string          ## the re-pinned `deps = [...]` line
+    changed: bool             ## `depsLine` differs from the original
+    line: string              ## the log verdict, without its timestamp
+    warnings: seq[string]
+    refused: seq[PinRegression]
+      ## siblings whose pin would move backward and were not named in
+      ## `REPRO_ALLOW_PIN_REGRESSION`; their entries are left untouched
+    allowed: seq[PinRegression]
+      ## siblings whose pin moves backward because the variable named them
+    examined: seq[string]     ## every sibling name this re-pin considered
+
+proc planCommittedLockRepin(repoRoot: string;
+    allowRegression: openArray[string]): CommittedLockRepinPlan =
+  ## §13.3 — the commit-path re-pin of a committed ``repro.lock``, computed
+  ## but not written. Observation only: existing non-root VCS entries whose
+  ## checkout is present are re-observed, missing manifest-declared siblings
+  ## are added, nothing is removed, the root revision is untouched, the solve
+  ## is carried verbatim.
+  ##
+  ## A pin never moves backward silently: an entry whose checkout is behind
+  ## its pin, has diverged from it, or lacks the pinned commit is REFUSED
+  ## unless ``allowRegression`` names it, and a refused entry is left exactly
+  ## as it is. An entry whose direction cannot be computed at all (a git
+  ## failure) is left alone and said to be, without refusing — a malfunction
+  ## is not a regression.
+  let root = absolutePath(repoRoot)
+  result.lockPath = root / CommittedLockFileName
+  if not fileExists(extendedPath(result.lockPath)): return
+  var ld: LockedDependencies
+  try:
+    result.text = readFile(extendedPath(result.lockPath))
+    ld = parseLockedDependencies(result.text)
+  except CatchableError as err:
+    result.line = "repro-lock refused-unreadable-lock: " & err.msg
+    return
+  for line in result.text.splitLines():
+    if line.startsWith("deps = ["):
+      result.originalDepsLine = line
+      break
+  if result.originalDepsLine.len == 0:
+    result.line = "repro-lock refused-no-deps-line: " & result.lockPath &
+      " carries no `deps = [...]` line to re-pin"
+    return
+  let obs = observeCommittedLockSiblings(root, ld)
+  var moved: seq[string] = @[]
+  var added: seq[string] = @[]
+  var rootIdx = -1
+  for i, d in ld.deps:
+    if d.path == ".": rootIdx = i
+  for o in obs.observations:
+    if o.name notin result.examined: result.examined.add(o.name)
+    if o.observed.len == 0: continue
+    if o.dirty:
+      result.warnings.add("sibling '" & o.name & "' (" & o.path & ") has " &
+        "uncommitted changes; repro.lock pins its HEAD " & o.observed &
+        ", which does not describe the working tree this commit was built " &
+        "against")
+    let depAbs = absolutePath(root / o.path)
+    let fresh = lockedDepFromCheckout(o.name, depAbs, root)
+    var found = false
+    for i in 0 ..< ld.deps.len:
+      if ld.deps[i].path == "." or ld.deps[i].coordinates.kind != ckVcs:
+        continue
+      if ld.deps[i].name == o.name or ld.deps[i].path == o.path:
+        found = true
+        var d = ld.deps[i]
+        let pinned = d.coordinates.revision
+        if pinned.len > 0 and pinned != fresh.coordinates.revision and
+            o.relation != sprAhead:
+          if o.relation.isPinRegression:
+            let reg = PinRegression(lock: CommittedLockFileName,
+              sibling: o.name, repo: o.name, path: depAbs,
+              relation: o.relation, aheadBy: o.aheadBy, behindBy: o.behindBy,
+              pinned: pinned, observed: fresh.coordinates.revision)
+            if o.name notin allowRegression:
+              result.refused.add(reg)
+              break
+            result.allowed.add(reg)
+          else:
+            result.warnings.add("sibling '" & o.name & "' (" & o.path &
+              "): repro.lock pins " & pinned & " and the checkout is at " &
+              fresh.coordinates.revision & ", but which of the two is newer " &
+              "could not be determined (" & o.detail & "), so the pin was " &
+              "left alone")
+            break
+        if d.coordinates.revision != fresh.coordinates.revision or
+            d.integrity != fresh.integrity or
+            (fresh.coordinates.url.len > 0 and
+             d.coordinates.url != fresh.coordinates.url) or
+            d.coordinates.gitRef != fresh.coordinates.gitRef:
+          if d.coordinates.revision != fresh.coordinates.revision:
+            moved.add(o.name & " " & d.coordinates.revision.substr(0, 11) &
+              " -> " & fresh.coordinates.revision.substr(0, 11))
+          d.coordinates.revision = fresh.coordinates.revision
+          d.coordinates.gitRef = fresh.coordinates.gitRef
+          if fresh.coordinates.url.len > 0:
+            d.coordinates.url = fresh.coordinates.url
+          d.integrity = fresh.integrity
+          ld.deps[i] = d
+        break
+    if not found:
+      ld.deps.add(fresh)
+      added.add(o.name & " @ " & fresh.coordinates.revision.substr(0, 11))
+      if rootIdx >= 0 and o.name notin ld.deps[rootIdx].depends:
+        ld.deps[rootIdx].depends.add(o.name)
+  result.depsLine = committedLockDepsLine(ld)
+  if result.depsLine.len == 0 or result.depsLine == result.originalDepsLine:
+    result.depsLine = result.originalDepsLine
+    result.line = "repro-lock up-to-date"
+  else:
+    result.changed = true
+    var parts: seq[string] = @[]
+    if moved.len > 0: parts.add("re-pinned " & moved.join(", "))
+    if added.len > 0: parts.add("added " & added.join(", "))
+    if parts.len == 0: parts.add("refreshed sibling coordinates")
+    result.line = "repro-lock " & parts.join("; ")
+  if result.refused.len > 0:
+    var parts: seq[string] = @[]
+    for r in result.refused: parts.add(pinRegressionLogFragment(r))
+    result.line = "repro-lock refused-pin-regression: " & parts.join("; ")
+
+proc applyCommittedLockRepin(plan: CommittedLockRepinPlan):
+    tuple[ok: bool; line: string] =
+  ## Write a planned re-pin. The file is opened only when a byte changes, so
+  ## most commits — and every `commit --amend` over unmoved siblings — leave
+  ## it untouched.
+  if not plan.changed: return (true, plan.line)
+  try:
+    writeFile(extendedPath(plan.lockPath),
+      plan.text.replace(plan.originalDepsLine, plan.depsLine))
+  except CatchableError as err:
+    return (false, "repro-lock write-failed: " & err.msg)
+  (true, plan.line)
+
+proc verifyCommittedLockSiblingPins*(repoRoot: string):
+    tuple[examined, stale: bool; evidence, remediation, summary: string] =
+  ## §13.5 — the pre-push stage for a committed ``repro.lock``. Refuses a pin
+  ## that differs from the sibling checkout and a manifest-declared sibling
+  ## the lock does not carry. A sibling that is not checked out is not
+  ## refused: its committed pin is what CI builds.
+  let root = absolutePath(repoRoot)
+  let lockPath = root / CommittedLockFileName
+  if not fileExists(extendedPath(lockPath)): return
+  var ld: LockedDependencies
+  try:
+    ld = parseLockedDependencies(readFile(extendedPath(lockPath)))
+  except CatchableError:
+    # Not this stage's question: an unreadable lock is reported by the
+    # committed-lock integrity stage.
+    return
+  result.examined = true
+  let obs = observeCommittedLockSiblings(root, ld)
+  var bad: seq[string] = @[]
+  for o in obs.observations:
+    if o.pinned.len == 0 and o.declared:
+      bad.add(o.name & " (" & o.path & "): declared in the develop set but " &
+        "not pinned" & (if o.observed.len > 0: "; checkout at " & o.observed
+                        else: ""))
+    elif o.observed.len > 0 and o.pinned.len > 0 and o.observed != o.pinned:
+      bad.add(o.name & " (" & o.path & "): repro.lock pins " & o.pinned &
+        ", checkout is at " & o.observed & " (" &
+        siblingPinRelationTag(o.relation) & ")")
+  if bad.len == 0: return
+  result.stale = true
+  result.evidence = bad.join("; ")
+  result.remediation = "run `repro lock refresh " & root & "`, commit " &
+    "repro.lock, then re-push (the managed pre-commit hook re-pins siblings " &
+    "on every commit once it is installed: `repro hooks ensure --vcs`)"
+  result.summary = "the committed repro.lock does not pin the sibling " &
+    "revisions this repo is being pushed against: " & result.evidence
+
+proc preCommitFlakeLock(workspaceRoot, repoRoot: string;
+    toolProvisioning: ToolProvisioningMode; timestamp: string;
+    allowRegression: seq[string]; mayWrite: bool): FlakeCommitRefresh
+  ## NF-2's `flake.lock` refresh; defined after the dispatcher.
+
+proc preCommitReproLock(workspaceRoot, repoRoot, timestamp: string;
+    plan: CommittedLockRepinPlan; apply: bool) =
+  ## §13.3 — report the planned `repro.lock` re-pin and, when ``apply`` (no
+  ## lock refuses this commit), write it and stage it into the commit being
+  ## formed. Never raises.
+  for w in plan.warnings:
+    stderr.writeLine("repro pre-commit: " & w)
+  if plan.line.len == 0: return
+  var line = timestamp & " "
+  if plan.refused.len > 0:
+    line.add(plan.line)
+  elif not apply:
+    # This lock had nothing to refuse, but `flake.lock` refused the commit:
+    # a refused commit writes nothing, so neither lock is touched.
+    line.add("repro-lock not-written-commit-refused" &
+      (if plan.changed: " (would have: " & plan.line & ")" else: ""))
+  else:
+    let applied = applyCommittedLockRepin(plan)
+    line.add(applied.line)
+    if applied.ok and plan.changed:
+      stderr.writeLine("repro pre-commit: " & plan.line)
+      let staged = stageRefreshedFlakeLock(repoRoot, plan.lockPath)
+      if staged.ok:
+        line.add("; staged into this commit")
+      else:
+        line.add("; NOT STAGED: " & staged.diagnostic)
+        stderr.writeLine("repro pre-commit: repro.lock was re-pinned but " &
+          "could NOT be staged, so THIS COMMIT DOES NOT CARRY IT: " &
+          staged.diagnostic)
+        stderr.writeLine("repro pre-commit: remedy: `git add " &
+          plan.lockPath & "` and `git commit --amend --no-edit`")
+  if plan.warnings.len > 0:
+    line.add("; " & plan.warnings.join("; "))
+  appendPreCommitLog(workspaceRoot, line)
+
 proc runPreCommitLockCommand*(args: openArray[string]): int =
   ## ``repro hooks dispatch pre-commit --repo-root=<repo>`` routes here.
-  ## ALWAYS returns 0.
+  ##
+  ## Returns 0 — the commit proceeds — on every path but one. A re-pin that
+  ## would move a sibling's pin BACKWARD (the checkout is behind the pin, has
+  ## diverged from it, or lacks the pinned commit) returns 1, and git refuses
+  ## the commit, unless ``REPRO_ALLOW_PIN_REGRESSION`` names that sibling
+  ## (Unified-Locking-And-Hooks.md §13.3, Nix-Flake-Coexistence.md §3.2). Every
+  ## other failure is logged to ``pre-commit-lock.log`` and the commit
+  ## proceeds.
   let parsed = parsePostCommitArgs(args)
   let timestamp = isoTimestampNow()
   # The managed hook body cd's to the repo root before dispatching, so an
@@ -45701,8 +46354,12 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
   # the other 56% is the pin-vs-HEAD comparison inside
   # `refreshFlakeLockAtCommit`, which is what keeps a develop-set resolution
   # off the commit path.
-  if not fileExists(repoRoot / "flake.nix") or
-      not fileExists(repoRoot / "flake.lock"):
+  let hasFlake = fileExists(repoRoot / "flake.nix") and
+    fileExists(repoRoot / "flake.lock")
+  # §13.3 — a committed `repro.lock` is the other in-tree lock this hook
+  # maintains; its sibling pins are re-observed below.
+  let hasReproLock = fileExists(repoRoot / CommittedLockFileName)
+  if not hasFlake and not hasReproLock:
     return 0
 
   let workspaceRoot = resolvePostCommitWorkspaceRoot(
@@ -45721,35 +46378,111 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
   # declines to touch it for `repro.lock` — "writing a lock into a working
   # tree its owner has not finished with is how a hook breaks somebody else's
   # rebase". `flake.lock` inherits that verbatim, and the stakes are higher
-  # here because this hook also STAGES what it writes.
+  # here because this hook also STAGES what it writes. It also stands down
+  # BEFORE the regression rule: replaying commits that already exist must not
+  # be refused (§13.3).
   let standDown = managedHookStandDown("pre-commit", repoRoot)
   if standDown.standDown:
-    appendPreCommitLog(workspaceRoot, timestamp & " flake-lock " &
+    appendPreCommitLog(workspaceRoot, timestamp &
+      (if hasFlake: " flake-lock" else: "") &
+      (if hasReproLock: " repro-lock" else: "") & " " &
       (if standDown.loud: "inert-git-state-unknown"
        else: "skipped-git-operation-in-progress") & ": " & standDown.report)
     if standDown.loud:
       stderr.writeLine("repro " & standDown.report)
     return 0
 
-  var outcome: tuple[line: string; changed: bool; lockPath: string]
+  # (2) A pin never moves backward silently. The `repro.lock` re-pin is
+  # PLANNED first (a few local git queries per sibling), the `flake.lock`
+  # refresh runs knowing whether it may write, and only when neither lock
+  # refuses is anything written — so a refused commit leaves the tree and the
+  # index exactly as it found them, and every regression in both locks is
+  # reported in one refusal rather than one per attempt.
+  let allowance = parsePinRegressionAllowance(getEnv(PinRegressionAllowEnv))
+  var reproPlan: CommittedLockRepinPlan
+  var reproPlanned = false
+  if hasReproLock:
+    try:
+      reproPlan = planCommittedLockRepin(repoRoot, allowance.names)
+      reproPlanned = true
+    except CatchableError as err:
+      appendPreCommitLog(workspaceRoot, timestamp & " repro-lock error: " &
+        err.msg)
+  let reproRefuses = reproPlanned and reproPlan.refused.len > 0
+  var flake: FlakeCommitRefresh
+  if hasFlake:
+    flake = preCommitFlakeLock(workspaceRoot, repoRoot,
+      parsed.toolProvisioning, timestamp, allowance.names,
+      mayWrite = not reproRefuses)
+  let refused = reproRefuses or flake.refused.len > 0
+  if reproPlanned:
+    preCommitReproLock(workspaceRoot, repoRoot, timestamp, reproPlan,
+      apply = not refused)
+
+  var used, examined: seq[string]
+  var allowedRegressions: seq[PinRegression]
+  if reproPlanned:
+    for n in reproPlan.examined: examined.add(n)
+    for r in reproPlan.allowed: allowedRegressions.add(r)
+  for n in flake.examined: examined.add(n)
+  for r in flake.allowed: allowedRegressions.add(r)
+  for r in allowedRegressions: used.add(r.sibling)
+  # A named input that regressed counts as used even when nothing was written
+  # for it (a refused commit, an unpublished revision): the note is for names
+  # that matched no regression at all.
+  for n in flake.allowanceUsed: used.add(n)
+  if not refused:
+    # The downgrade is visible afterwards, not just permitted.
+    for r in allowedRegressions:
+      let announced = pinRegressionAllowedLine(r)
+      stderr.writeLine("repro pre-commit: " & announced)
+      appendPreCommitLog(workspaceRoot, timestamp &
+        (if r.lock == "flake.lock": " flake-lock " else: " repro-lock ") &
+        announced)
+  for note in pinRegressionAllowanceNotes(allowance, used, examined):
+    stderr.writeLine("repro pre-commit: note: " & note)
+    appendPreCommitLog(workspaceRoot, timestamp &
+      " pin-regression-allowance note: " & note)
+  if not refused:
+    return 0
+
+  var regressions: seq[PinRegression]
+  if reproPlanned:
+    for r in reproPlan.refused: regressions.add(r)
+  for r in flake.refused: regressions.add(r)
+  var identity: GitToolIdentity
   try:
-    outcome = refreshFlakeLockAtCommit(workspaceRoot, repoRoot,
-      parsed.toolProvisioning)
+    identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  except CatchableError:
+    # Both refreshes already resolved git to get this far; were it to vanish
+    # now, the refusal still stands and only the upstream name is lost.
+    discard
+  for line in renderPinRegressionRefusal(regressions, workspaceRoot,
+      identity):
+    stderr.writeLine("repro pre-commit: " & line)
+  return 1
+
+proc preCommitFlakeLock(workspaceRoot, repoRoot: string;
+    toolProvisioning: ToolProvisioningMode; timestamp: string;
+    allowRegression: seq[string]; mayWrite: bool): FlakeCommitRefresh =
+  try:
+    result = refreshFlakeLockAtCommit(workspaceRoot, repoRoot,
+      toolProvisioning, allowRegression, mayWrite)
   except CatchableError as err:
     # Belt and braces: the refresh already downgrades its own failures, and a
     # raise reaching here would still not be a reason to reject the commit.
     appendPreCommitLog(workspaceRoot,
       timestamp & " flake-lock error: " & err.msg)
-    return 0
-  if outcome.line.len == 0:
-    return 0
+    return
+  if result.line.len == 0:
+    return
 
-  var line = timestamp & " " & outcome.line
-  if outcome.changed:
+  var line = timestamp & " " & result.line
+  if result.changed:
     # (2) STAGE it. Without this the refresh would be a working-tree
     # modification the developer has to notice and commit separately — which
     # is the post-commit behaviour §13.1 rejects, reproduced one hook earlier.
-    let staged = stageRefreshedFlakeLock(repoRoot, outcome.lockPath)
+    let staged = stageRefreshedFlakeLock(repoRoot, result.lockPath)
     if staged.ok:
       line.add("; staged into this commit")
     else:
@@ -45762,9 +46495,8 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
         "NOT be staged, so THIS COMMIT DOES NOT CARRY IT: " &
         staged.diagnostic)
       stderr.writeLine("repro pre-commit: remedy: `git add " &
-        outcome.lockPath & "` and `git commit --amend --no-edit`")
+        result.lockPath & "` and `git commit --amend --no-edit`")
   appendPreCommitLog(workspaceRoot, line)
-  return 0
 
 # ---- M19a: post-merge / post-checkout manifest auto-refresh ---------------
 #
@@ -51363,6 +52095,37 @@ proc executeCheckPrePush(parsed: CheckArgs): CheckReport =
     # one push where it says something else. The verdict is still in the
     # report's structured form for anyone who asks.
 
+  # ---- 3c. the committed repro.lock's sibling pins are VERIFIED ----------
+  #
+  # Unified-Locking-And-Hooks.md §13.5, "The `repro.lock` stage". CI builds
+  # the committed pins (§14.5), so a pin that differs from the sibling
+  # checkout this repo is being pushed against — or a declared develop-set
+  # sibling the lock does not carry — publishes a revision that was built
+  # against something CI will not build. Reads only; the pre-commit hook is
+  # the writer (§13.3), so a refusal here means the commit path was bypassed
+  # or a sibling moved after the commit.
+  if parsed.currentRepo.len > 0:
+    var pins: tuple[examined, stale: bool;
+                    evidence, remediation, summary: string]
+    try:
+      pins = verifyCommittedLockSiblingPins(parsed.currentRepo)
+    except CatchableError as err:
+      pins = (examined: true, stale: true,
+        evidence: "committed-lock-verify-failed: " & err.msg,
+        remediation: "investigate the repro.lock verification failure (" &
+          err.msg & "), then re-push",
+        summary: "repro.lock could not be verified against the sibling " &
+          "checkouts: " & err.msg)
+    if pins.stale:
+      result.failures.add(CheckFailure(
+        repo: currentRepoPath,
+        property: "committed_lock_sibling_pin_stale",
+        remediation: pins.remediation,
+        evidence: pins.evidence,
+        source: parsed.currentRepo / CommittedLockFileName))
+      result.exitCode = 2
+      return
+
   # ---- 4. lock currency --------------------------------------------------
   # Pick the manifest-layer root the way M11 / M12 do, then read the
   # latest locked SHA per repo path. If the locked map covers every
@@ -54847,13 +55610,23 @@ proc detectDirenvEnvrcState(workspaceRoot: string):
   let direnvBin = resolveDirenvBin()
   if direnvBin.len == 0:
     return
-  let res = execCmdEx(quoteShell(direnvBin) & " status",
+  let res = execCmdEx(quoteShell(direnvBin) & " status --json",
     workingDir = workspaceRoot)
   if res.exitCode == 0:
-    # ``direnv status`` prints "Found RC allowed true" when the .envrc is
-    # trusted. Be liberal: any "allowed true"/"allowed: true" wins.
-    let low = res.output.toLowerAscii()
-    result.trusted = ("allowed true" in low) or ("allowed: true" in low)
+    # direnv's AllowStatus enum is 0=allowed, 1=not allowed, 2=denied.
+    # Only the FOUND RC governs this workspace. The loaded RC may belong
+    # to the shell's previous directory and must never grant it trust.
+    try:
+      let found = parseJson(res.output)["state"]["foundRC"]
+      if found.kind != JObject or
+          os.normalizedPath(found["path"].getStr()) != os.normalizedPath(envrcPath):
+        return
+      let allowed = found["allowed"]
+      result.trusted =
+        (allowed.kind == JInt and allowed.getInt() == 0) or
+        (allowed.kind == JBool and allowed.getBool())
+    except CatchableError:
+      discard  # Missing or malformed status cannot establish trust.
 
 proc gatherHealthChecks(parsed: HealthArgs):
     tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
@@ -56593,6 +57366,14 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
         "workspace branch: INCOMPLETE — '" & report.branch &
           "' was created in " & $created.len & " repo(s) and the partial " &
           "workspace is left in place; re-run the same command to finish it"
+      elif report.exitCode != 2:
+        # A clone can fail after materializing the root and other members,
+        # before the branch pass creates any feature branches. Exit 1 also
+        # covers probe failures, so do not infer whether a target exists.
+        "workspace branch: INCOMPLETE — no branch '" & report.branch &
+          "' was created in any repo; any partial workspace at " &
+          report.workspaceRoot & " is left in place; re-run the same " &
+          "command to finish it"
       else:
         "workspace branch: ABORTED — no branch '" & report.branch &
           "' was created in any repo (nothing had been created when the " &
@@ -64165,6 +64946,16 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
     let loaded = loadSolverInputsFile(inputsP)
     return (true, loaded.variants, loaded.packages, loaded.text, "sidecar",
       @[], @[])
+  # A recipe that declares nothing to solve (a dev-env-only `repro.nim`) still
+  # has a develop set, and its committed lock is where that set's revisions
+  # are recorded (Unified-Locking-And-Hooks.md §14.2). Its solve is the empty
+  # one, stated as such rather than refused.
+  if inputsOverride.len == 0:
+    let recipe =
+      try: resolveProjectFile(projectDir).path
+      except CatchableError: ""
+    if recipe.len > 0:
+      return (true, @[], @[], "", "recipe-without-solve", @[], @[])
   return (false, @[], @[], "", "", @[], @[])
 
 proc buildLockGenerationRequest(projectDir, inputsOverride,
@@ -67725,8 +68516,16 @@ proc flakePinRelationTag*(relation: FlakePinRelation): string =
   of fprUnknown: "unknown"
   of fprUnpinned: "unpinned"
 
-proc shortRev(rev: string): string =
-  if rev.len >= 12: rev[0 ..< 12] else: rev
+proc siblingPinRelationOf*(relation: FlakePinRelation): SiblingPinRelation =
+  ## The shared classification a flake row maps to (`unfetched` is the flake
+  ## report's name for `unprovable`). `unpinned` has no pin to regress from.
+  case relation
+  of fprAt: sprAt
+  of fprAhead: sprAhead
+  of fprBehind: sprBehind
+  of fprDiverged: sprDiverged
+  of fprUnfetched: sprUnprovable
+  of fprUnknown, fprUnpinned: sprUnknown
 
 proc flakeLockPinnedRevisions*(lockText: string):
     tuple[ok: bool; diagnostic: string;
@@ -67888,44 +68687,21 @@ proc flakeClassifyPin(identity: GitToolIdentity;
   ##
   ## Both are NOT-RECORDABLE (`flakeRowIsRecordable`); they are told apart so
   ## the operator is handed a fetch rather than a mystery.
-  if headRev.len > 0 and headRev == pinnedRev:
-    return (relation: fprAt, aheadBy: 0, behindBy: 0, detail: "")
-  if headRev.len == 0:
-    return (relation: fprUnknown, aheadBy: 0, behindBy: 0, detail:
-      "the checkout's HEAD could not be read")
-  let present = gitRunPlain(identity,
-    ["-C", dir, "cat-file", "-e", pinnedRev & "^{commit}"])
-  if present.code != 0:
-    return (relation: fprUnfetched, aheadBy: 0, behindBy: 0, detail:
-      "the pinned revision " & shortRev(pinnedRev) & " is not present in " &
-      dir & ", so this sibling cannot be classified until it is fetched — " &
-      "nothing local can say where a checkout stands relative to a revision " &
-      "it does not have")
-  let counts = gitRunPlain(identity,
-    ["-C", dir, "rev-list", "--left-right", "--count",
-     pinnedRev & "..." & headRev])
-  if counts.code != 0:
-    return (relation: fprUnknown, aheadBy: 0, behindBy: 0, detail:
-      "`git rev-list --left-right --count` failed in " & dir & " (" &
-      counts.output.strip() & ")")
-  let fields = counts.output.strip().splitWhitespace()
-  if fields.len != 2:
-    return (relation: fprUnknown, aheadBy: 0, behindBy: 0, detail:
-      "`git rev-list --left-right --count` answered '" &
-      counts.output.strip() & "', which is not two counts")
-  var onlyPin, onlyHead: int
-  try:
-    onlyPin = parseInt(fields[0])
-    onlyHead = parseInt(fields[1])
-  except ValueError:
-    return (relation: fprUnknown, aheadBy: 0, behindBy: 0, detail:
-      "`git rev-list --left-right --count` answered '" &
-      counts.output.strip() & "', which is not two counts")
-  if onlyPin == 0 and onlyHead > 0:
-    return (relation: fprAhead, aheadBy: onlyHead, behindBy: 0, detail: "")
-  if onlyHead == 0 and onlyPin > 0:
-    return (relation: fprBehind, aheadBy: 0, behindBy: onlyPin, detail: "")
-  (relation: fprDiverged, aheadBy: onlyHead, behindBy: onlyPin, detail: "")
+  ##
+  ## The classification itself is `classifySiblingPin`'s — the one the
+  ## `repro.lock` re-pin uses too — so the two committed locks cannot disagree
+  ## about where a sibling stands (Unified-Locking-And-Hooks.md §13.3).
+  let verdict = classifySiblingPin(identity, dir, pinnedRev, headRev)
+  let relation =
+    case verdict.relation
+    of sprAt: fprAt
+    of sprAhead: fprAhead
+    of sprBehind: fprBehind
+    of sprDiverged: fprDiverged
+    of sprUnprovable: fprUnfetched
+    of sprUnknown: fprUnknown
+  (relation: relation, aheadBy: verdict.aheadBy, behindBy: verdict.behindBy,
+   detail: verdict.detail)
 
 proc flakePushTarget(identity: GitToolIdentity;
     dir, headRev: string): tuple[remote, branch: string] =
@@ -68266,15 +69042,18 @@ proc flakeRowIsRecordable*(row: FlakeOverrideStateRow): bool =
   ##     built the newer revision, and the commit must say so.
   ##   * AT — yes, and it moves nothing: the pin already names that revision, so
   ##     the rewrite is a no-op and the file is not opened for writing at all.
-  ##   * DIVERGED — yes. There are commits on this checkout that the pin does
-  ##     not have, which is the ahead case with a fork in it; the operator is
-  ##     developing on a branch that left the pin's line, and the lock has to
-  ##     name what was built.
+  ##   * DIVERGED — **no** (owner-decided 2026-09-30, §4 "Regressions"). The
+  ##     checkout has commits the pin lacks, but the pin also has commits the
+  ##     checkout lacks — after a rebase, a force-push, a rewritten history or a
+  ##     switch to another branch — and recording HEAD would drop those from
+  ##     the published lock as surely as a downgrade does. It is recorded only
+  ##     when `REPRO_ALLOW_PIN_REGRESSION` names the input.
   ##   * BEHIND — **no.** Recording it files a downgrade nobody chose. A sibling
   ##     behind its pin almost always means the checkout is stale rather than
   ##     that anyone chose to go back (§3.2), and this refresh runs on the
   ##     commit path where nobody is being asked. It stays available as an
-  ##     explicit request — `repro flake refresh-lock --record-downgrade` —
+  ##     explicit request — `REPRO_ALLOW_PIN_REGRESSION=<input>` on the commit
+  ##     or the verb, or `repro flake refresh-lock --record-downgrade` —
   ##     because deliberately testing an older dependency is legitimate.
   ##   * UNFETCHED / UNKNOWN — **no.** Not because the answer is bad but because
   ##     there is no answer: recording `HEAD` here would file whichever
@@ -68296,7 +69075,7 @@ proc flakeRowIsRecordable*(row: FlakeOverrideStateRow): bool =
   ## Withholding is per INPUT and never per refresh: a workspace normally has
   ## siblings drifting in different directions at once, and one behind-pin
   ## sibling must not suppress the recording of an unrelated ahead one.
-  row.relation notin {fprBehind, fprUnfetched, fprUnknown} and
+  row.relation notin {fprBehind, fprDiverged, fprUnfetched, fprUnknown} and
     not row.unpublished
 
 proc flakeRefreshLockCommand(flakeRoot, workspaceRoot: string): string =
@@ -68343,6 +69122,14 @@ proc flakeReconcileCommands(row: FlakeOverrideStateRow;
     # answers a question rather than closing a gap, and it is first for that
     # reason: after it, the row classifies and its real remedy is knowable.
     @["git -C " & row.path & " fetch --all"]
+  of fprDiverged:
+    # The refresh does not record a diverged sibling on its own any more
+    # (§4 "Regressions"), so naming it alone would print a command that exits
+    # 3 and changes nothing. The checkout is brought onto the pin's line first
+    # — `repro ws sync` also migrates a force-pushed or rewritten history —
+    # after which the row is ahead or at its pin and the refresh records it.
+    @[pinRegressionSyncCommand(workspaceRoot, row.repo),
+      flakeRefreshLockCommand(flakeRoot, workspaceRoot)]
   else:
     @[flakeRefreshLockCommand(flakeRoot, workspaceRoot)]
 
@@ -68384,6 +69171,11 @@ proc flakeReconcileAlternative(row: FlakeOverrideStateRow;
   elif row.relation == fprBehind:
     "repro flake refresh-lock --flake=" & flakeRoot &
       " --workspace-root=" & workspaceRoot & " --record-downgrade"
+  elif row.relation == fprDiverged:
+    # Recording an unrelated revision deliberately is the same stated decision
+    # a downgrade is, spelled with the same variable the commit path takes.
+    PinRegressionAllowEnv & "=" & pinRegressionShellWord(row.input) & " " &
+      flakeRefreshLockCommand(flakeRoot, workspaceRoot)
   else:
     ""
 
@@ -69195,6 +69987,22 @@ type
       ## The repos whose working trees were probed for uncommitted work.
       ## Reported on every outcome so the SCOPE of the inherited policy is
       ## observable rather than inferred.
+    refused*: seq[PinRegression]
+      ## Inputs whose pin the refresh would move BACKWARD (behind, diverged,
+      ## or a pinned commit absent from the checkout) and that
+      ## `REPRO_ALLOW_PIN_REGRESSION` did not name. Filled only when the
+      ## caller asks for regressions to refuse (the commit path); when it is
+      ## non-empty nothing was written (§3.2 "Rule, at commit").
+    allowed*: seq[PinRegression]
+      ## Inputs whose pin DID move backward because it was asked for — named
+      ## in `REPRO_ALLOW_PIN_REGRESSION`, or a behind row under the verb's
+      ## `--record-downgrade`. Only rows actually rewritten are listed.
+    allowanceUsed*: seq[string]
+      ## Every input `REPRO_ALLOW_PIN_REGRESSION` named that really was
+      ## regressing, whether or not it ended up written (a refused commit
+      ## writes nothing; an unpublished revision or a pin `flake.nix` states is
+      ## still withheld). The hook's "names nothing that regresses" note must
+      ## not fire for these.
     exitCode*: int
 
 proc flakeRefreshDirtyScope(workspaceRoot, currentRepo: string;
@@ -69324,6 +70132,16 @@ proc flakeWithheldNotice(row: FlakeOverrideStateRow;
       flakeReconcileCommand(row, flakeRoot, workspaceRoot) &
       "` — or, to record the downgrade deliberately, `" &
       flakeReconcileAlternative(row, flakeRoot, workspaceRoot) & "`")
+  of fprDiverged:
+    result.add("Recording this checkout's HEAD would replace the pin with a " &
+      "revision that lacks the pin's own commits — the history was rebased, " &
+      "force-pushed or rewritten, or the checkout is on another branch — so " &
+      "the pin was LEFT ALONE. This is a warning, not an error: nothing was " &
+      "written for this input and no operation was refused. From " &
+      flakeRoot & " run: `" &
+      flakeReconcileCommands(row, flakeRoot, workspaceRoot).join("` then `") &
+      "` — or, to record this revision deliberately, `" &
+      flakeReconcileAlternative(row, flakeRoot, workspaceRoot) & "`")
   else:
     result.add("A pin that cannot be classified must not be filed: recording " &
       "this checkout's HEAD would commit to whichever direction happened to " &
@@ -69337,10 +70155,23 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     selectorArgs: openArray[string]; suffixes: openArray[string];
     toolProvisioning: ToolProvisioningMode;
     recordDowngrade = false;
-    label = flakeRefreshLockLabel): FlakeLockRefreshOutcome =
+    label = flakeRefreshLockLabel;
+    allowRegression: seq[string] = @[];
+    refuseRegressions = false;
+    mayWrite = true): FlakeLockRefreshOutcome =
   ## The whole NF-2 refresh, from "which inputs are overridden" to "the bytes
   ## on disk". Shared verbatim by the operator verb and the commit hook so the
   ## two cannot diverge.
+  ##
+  ## A pin never moves backward on its own (Nix-Flake-Coexistence.md §4,
+  ## "Regressions"): a row that is behind its pin, has diverged from it, or
+  ## whose pinned commit is absent is recorded only when ``allowRegression``
+  ## names its input (`REPRO_ALLOW_PIN_REGRESSION`), or — for a behind row —
+  ## under the verb's ``recordDowngrade``. Otherwise the commit hook
+  ## (``refuseRegressions``) gets it back in ``refused`` with NOTHING written,
+  ## and the verb withholds that input and writes the rest. ``mayWrite =
+  ## false`` computes and reports everything without writing, for a commit
+  ## the `repro.lock` re-pin is already refusing.
   result.tag = "unknown"
   result.lockPath = flakeRoot / "flake.lock"
 
@@ -69462,10 +70293,15 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   # its pin, `io-mon` 4 — and the push gate then refused the push over a lock
   # this very hook had written. One half wrote what the other half rejected.
   #
-  # The shape is the DIRTY-SIBLING shape, deliberately, because the situation is
-  # the same one: the refresh is skipped, the lock stays as it was, the commit
-  # is unaffected, and NF-3's pre-push gate refuses the PUSH. Refusing the
-  # commit would be new behaviour the policy does not ask for.
+  # The first fix gave this the DIRTY-SIBLING shape: skip the input, leave the
+  # lock, let the commit proceed, and refuse at the push. §3.2's "Rule, at
+  # commit" (owner-decided 2026-09-30) replaced that for the three relations
+  # that would move a pin backward — behind, diverged, and a pinned commit
+  # absent from the checkout: on the commit path (`refuseRegressions`) they
+  # come back in `refused` and NOTHING is written, and the commit is refused
+  # unless `REPRO_ALLOW_PIN_REGRESSION` names the input. The operator verb keeps
+  # the per-input withholding. A direction git cannot compute (`unknown`) is not
+  # a regression and is still merely withheld.
   #
   # The classification is `flakeOverrideStateReport`'s — the same derivation the
   # ambient §3.2 report and the pre-push gate use — over the SAME lock bytes
@@ -69485,19 +70321,52 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   flakeAnnotatePublication(state, identity)
 
   var revisions: seq[tuple[input, rev: string]]
+  var allowedCandidates: seq[PinRegression]
   for row in state.rows:
     # ``row.siblingRev`` is the revision the BINDER observed, in the pass that
     # decided this input is substituted at all — so the pin filed here and the
     # revision the dev shell was given cannot be two different answers.
-    #
-    # `--record-downgrade` is unaffected by the publication axis, and does not
-    # need to be guarded against it: a BEHIND row's `HEAD` is an ancestor of the
-    # pin, so it is reachable from a remote whenever the pin is, and
-    # `flakeAnnotatePublication` does not ask the question there for exactly
-    # that reason.
-    let permitted = flakeRowIsRecordable(row) or
-      (recordDowngrade and row.relation == fprBehind)
-    if permitted:
+    let relation = siblingPinRelationOf(row.relation)
+    if relation.isPinRegression:
+      # §4 "Regressions": behind, diverged, or a pinned commit this checkout
+      # does not have. Recording HEAD would move the pin backward — or
+      # sideways, dropping the pin's own commits just the same — so it is
+      # recorded only when somebody asked for it by name.
+      let regression = PinRegression(lock: "flake.lock", sibling: row.input,
+        repo: row.repo, path: row.path, relation: relation,
+        aheadBy: row.aheadBy, behindBy: row.behindBy, pinned: row.pinnedRev,
+        observed: row.siblingRev)
+      if row.input in allowRegression and
+          row.input notin result.allowanceUsed:
+        result.allowanceUsed.add(row.input)
+      if row.input in allowRegression or
+          (recordDowngrade and row.relation == fprBehind):
+        # Asked for — but a pin must still name content other people can
+        # obtain. A BEHIND row's HEAD is an ancestor of the pin, so it is
+        # reachable whenever the pin is; a DIVERGED row was annotated above;
+        # an UNFETCHED row never is (`flakeAnnotatePublication`), so it is
+        # asked here, where it is about to be written.
+        var candidate = row
+        if row.relation == fprUnfetched:
+          let verdict = flakeClassifyPublication(identity, row.path,
+            row.siblingRev)
+          candidate.unpublished = verdict.unpublished
+          candidate.publicationDetail = verdict.detail
+          candidate.pushRemote = verdict.remote
+          candidate.pushBranch = verdict.branch
+        if candidate.unpublished:
+          result.withheld.add(flakeWithheldNotice(candidate, flakeRoot,
+            workspaceRoot))
+          continue
+        revisions.add((input: row.input, rev: row.siblingRev))
+        allowedCandidates.add(regression)
+        continue
+      if refuseRegressions:
+        result.refused.add(regression)
+        continue
+      result.withheld.add(flakeWithheldNotice(row, flakeRoot, workspaceRoot))
+      continue
+    if flakeRowIsRecordable(row):
       revisions.add((input: row.input, rev: row.siblingRev))
       continue
     result.withheld.add(flakeWithheldNotice(row, flakeRoot, workspaceRoot))
@@ -69508,6 +70377,23 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   # milestone is about.
   for w in result.withheld:
     stderr.writeLine(label & ": WARNING: " & w)
+
+  if result.refused.len > 0:
+    # §3.2 "Rule, at commit": the commit is refused, so NOTHING is written —
+    # not even the inputs that would have advanced. The refusal itself is
+    # rendered by the caller, together with any `repro.lock` regression, so a
+    # commit refused for both locks says so once.
+    result.tag = "refused-pin-regression"
+    var parts: seq[string]
+    for r in result.refused: parts.add(pinRegressionLogFragment(r))
+    result.diagnostic = "flake.lock NOT refreshed and the commit REFUSED: " &
+      parts.join("; ") &
+      (if result.withheld.len > 0:
+         "; WITHHELD: " & result.withheld.join(" | ")
+       else: "") &
+      "; dirt-scope: " & result.dirtyScope.join(",")
+    result.exitCode = flakeRefreshWithheldExit
+    return
 
   let refreshed = refreshFlakeLockText(lockText, revisions, flakeRoot)
   for n in refreshed.notices: result.notices.add(n)
@@ -69542,9 +70428,10 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
       result.diagnostic = result.withheld.join(" | ") & "; dirt-scope: " &
         result.dirtyScope.join(",")
       # The lock is NOT correct afterwards — see `flakeRefreshWithheldExit`.
-      # The COMMIT path is unaffected by this: it reaches this refresh through
-      # `refreshFlakeLockAtCommit`, whose return tuple carries no exit code at
-      # all, and `runPreCommitLockCommand` returns a literal 0 on every path.
+      # The COMMIT path does not read this status: it reaches this refresh
+      # through `refreshFlakeLockAtCommit`, which carries no exit code, and the
+      # only reason `runPreCommitLockCommand` refuses a commit is a pin
+      # regression (`refused`, above) — never a withheld input.
       result.exitCode = flakeRefreshWithheldExit
       return
     result.tag = "up-to-date"
@@ -69552,6 +70439,18 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
       "revision(s) for all " & $bound.len &
       " overridden input(s); not touched; dirt-scope: " &
       result.dirtyScope.join(",")
+    return
+  if not mayWrite:
+    # The `repro.lock` re-pin is refusing this commit, and a refused commit
+    # writes nothing — so this refresh reports what it WOULD have recorded and
+    # leaves the file alone.
+    var wouldMove: seq[string]
+    for r in refreshed.rewrites:
+      wouldMove.add(r.input & ": " & r.oldRev & " -> " & r.newRev)
+    result.tag = "not-written-commit-refused"
+    result.diagnostic = "flake.lock NOT refreshed because the commit is " &
+      "refused for a repro.lock pin regression; it would have recorded " &
+      wouldMove.join("; ") & "; dirt-scope: " & result.dirtyScope.join(",")
     return
   try:
     writeFile(result.lockPath, refreshed.text)
@@ -69563,6 +70462,14 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     return
   result.changed = true
   result.tag = "refreshed"
+  # Only the regressions that were actually written are reported as allowed:
+  # a row the rewrite declined (a pin `flake.nix` states by revision) did not
+  # move, and must not be announced as having moved.
+  for candidate in allowedCandidates:
+    for r in result.rewrites:
+      if r.input == candidate.sibling:
+        result.allowed.add(candidate)
+        break
   var moved: seq[string]
   for r in result.rewrites:
     moved.add(r.input & ": " & r.oldRev & " -> " & r.newRev &
@@ -69604,6 +70511,14 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
   ##
   ## 3 is distinct from 2 because a caller's response differs: an environment
   ## fault is worth retrying, a decision is not.
+  ##
+  ## A pin never moves backward on its own here either (Nix-Flake-Coexistence
+  ## .md §4, "Regressions"): an input whose sibling is behind its pin, has
+  ## diverged from it, or lacks the pinned commit is withheld (status 3)
+  ## unless ``REPRO_ALLOW_PIN_REGRESSION`` names that input — the same
+  ## variable, with the same meaning, as on the commit path — or, for a behind
+  ## input, unless ``--record-downgrade`` is given. Each regression recorded
+  ## that way is announced on stderr.
   var
     flakeDir = ""
     stripSpec = ""
@@ -69664,8 +70579,10 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
     if stripGiven: parseCommaList(stripSpec)
     else: defaultFlakeInputStripSuffixes
   let workspaceRoot = flakeOverrideWorkspaceRoot(explicitRoot)
+  let allowance = parsePinRegressionAllowance(getEnv(PinRegressionAllowEnv))
   let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo,
-    passthrough, suffixes, toolProvisioning, recordDowngrade)
+    passthrough, suffixes, toolProvisioning, recordDowngrade,
+    allowRegression = allowance.names)
   if asJson:
     var rewrites = newJArray()
     for r in outcome.rewrites:
@@ -69675,6 +70592,12 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
     for n in outcome.notices: notices.add(%n)
     var blocked = newJArray()
     for b in outcome.blockedBy: blocked.add(%b)
+    var allowed = newJArray()
+    for r in outcome.allowed:
+      allowed.add(%*{"input": r.sibling, "repo": r.repo,
+                     "relation": siblingPinRelationTag(r.relation),
+                     "from": r.pinned, "to": r.observed,
+                     "aheadBy": r.aheadBy, "behindBy": r.behindBy})
     stdout.writeLine(pretty(%*{
       "schemaId": "reprobuild.flake-refresh-lock.v1",
       "workspaceRoot": workspaceRoot,
@@ -69686,23 +70609,34 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
       "blockedBy": blocked,
       "withheld": %outcome.withheld,
       "recordDowngrade": recordDowngrade,
+      "allowedRegressions": allowed,
       "dirtyScope": %outcome.dirtyScope,
       "notices": notices,
       "diagnostic": outcome.diagnostic}, indent = 2))
   else:
     for n in outcome.notices:
       stderr.writeLine(flakeRefreshLockLabel & ": " & n)
+    for r in outcome.allowed:
+      stderr.writeLine(flakeRefreshLockLabel & ": " &
+        pinRegressionAllowedLine(r,
+          if r.sibling in allowance.names: PinRegressionAllowEnv
+          else: "--record-downgrade"))
     stderr.writeLine(flakeRefreshLockLabel & ": " & outcome.tag & ": " &
       outcome.diagnostic)
   outcome.exitCode
 
 proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
-    toolProvisioning: ToolProvisioningMode):
-    tuple[line: string; changed: bool; lockPath: string] =
+    toolProvisioning: ToolProvisioningMode;
+    allowRegression: seq[string] = @[]; mayWrite = true):
+    FlakeCommitRefresh =
   ## The commit-path entry point, driven by the managed `pre-commit` hook
   ## (§13.1: an in-tree lock is written "as part of forming the revision").
   ## Returns one log line, whether the file was rewritten, and the lock's path
-  ## so the caller can stage it. Never raises and never blocks the commit.
+  ## so the caller can stage it. Never raises. It blocks the commit for one
+  ## reason only: ``refused`` names the inputs whose pin it would move BACKWARD
+  ## and that ``allowRegression`` (`REPRO_ALLOW_PIN_REGRESSION`) did not name
+  ## (Nix-Flake-Coexistence.md §3.2 "Rule, at commit"); the caller refuses the
+  ## commit on them, and nothing was written.
   ##
   ## ## The cheap negative, and why it is not a shortcut around correctness
   ##
@@ -69745,6 +70679,7 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       result.line = "flake-lock refused-unreadable-flake: " &
         declared.refusals.join("; ")
       return
+    result.examined = declared.names
     # Where each candidate repo's checkout would be. The manifest is consulted
     # because a repo's PATH is not always its NAME, and a scan keyed on the
     # name alone would silently miss exactly those.
@@ -69798,13 +70733,17 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
       let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot,
         currentRepo, @["--all"], defaultFlakeInputStripSuffixes,
         toolProvisioning, recordDowngrade = false,
-        label = flakePreCommitLabel)
+        label = flakePreCommitLabel, allowRegression = allowRegression,
+        refuseRegressions = true, mayWrite = mayWrite)
       result.line = "flake-lock " & outcome.tag &
         " (the workspace membership at " & workspaceRoot &
         " could not be resolved — " & membershipFailure &
         " — so the fast pre-filter could not locate any sibling checkout and " &
         "handed over): " & outcome.diagnostic
       result.changed = outcome.changed
+      result.refused = outcome.refused
+      result.allowed = outcome.allowed
+      result.allowanceUsed = outcome.allowanceUsed
       return
     let lockText = readFile(lockPath)
     let doc = parseJson(lockText)
@@ -69856,9 +70795,13 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot,
       currentRepo, @["--all"], defaultFlakeInputStripSuffixes,
       toolProvisioning, recordDowngrade = false,
-      label = flakePreCommitLabel)
+      label = flakePreCommitLabel, allowRegression = allowRegression,
+      refuseRegressions = true, mayWrite = mayWrite)
     result.line = "flake-lock " & outcome.tag & ": " & outcome.diagnostic
     result.changed = outcome.changed
+    result.refused = outcome.refused
+    result.allowed = outcome.allowed
+    result.allowanceUsed = outcome.allowanceUsed
   except CatchableError as err:
     # Best-effort, exactly like every other commit-path action: say what went
     # wrong and let the commit stand.
@@ -72150,16 +73093,26 @@ proc runThinAppDispatch(programName: string): int =
   # recipe owns its own directory and needs no session to separate it from
   # its siblings, and a second invocation reuses the first's directory
   # instead of starting cold under a fresh token.
+  let args = normalizeWorkspaceNamespaceAlias(
+    normalizeInternalArgs(commandLineParams()))
+  # The CLI's own directory goes on PATH so what it spawns finds the DLLs
+  # staged beside it -- EXCEPT under `internal io monitor`, whose child is
+  # the build action itself. The action's PATH is what it declared; with this
+  # prepend every monitored action on Windows also searched the engine's
+  # `bin` for each command it ran, recorded those probes as inputs, and so
+  # keyed itself on where the engine is installed. The monitor needs no
+  # PATH for its own DLLs: the loader searches the application directory
+  # first.
+  let monitoringAnAction = args.len >= internalIoMonitorArgs.len and
+    args[0 ..< internalIoMonitorArgs.len] == internalIoMonitorArgs
   when defined(windows):
     let appDir = parentDir(getAppFilename())
-    if appDir.len > 0:
+    if appDir.len > 0 and not monitoringAnAction:
       let pathEnv = getEnv("PATH")
       if pathEnv.len > 0:
         putEnv("PATH", appDir & ";" & pathEnv)
       else:
         putEnv("PATH", appDir)
-  let args = normalizeWorkspaceNamespaceAlias(
-    normalizeInternalArgs(commandLineParams()))
   let publicCliPath = stablePublicCliPath()
   if programName == "repro" and args.len > 0 and
       args[0] == BrokerModeFlag:
@@ -73521,6 +74474,14 @@ proc runThinApp*(programName: string): int =
     let pinned = applyProjectPinsAtEntry(commandLineParams())
     if pinned.handled:
       return pinned.exitCode
+    # Name this engine to every process it starts (after the pin hand-over:
+    # a handed-over image names itself). A project provider is
+    # compiled against THIS engine's stdlib and speaks its protocol when it
+    # calls back into `repro` (`useFlakeDevShell`'s override resolution);
+    # without the name it could only guess from PATH, where an older release
+    # answers a verb it does not know. Overwritten, not inherited: the
+    # nearest engine is the one whose protocol its children speak.
+    putEnv("REPRO_INVOKING_CLI", stablePublicCliPath())
   result = runThinAppDispatch(programName)
   flushStagedFailureReport(result)
 

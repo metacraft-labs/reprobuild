@@ -308,30 +308,45 @@ proc publishEntry(remote: MemoRemote; identity: CacheEntryIdentity;
   else:
     (false, "publish failed (status " & $res.statusCode & "): " & res.error)
 
+type
+  SlotState = enum
+    ssMissing   ## nothing published there: the slot is free
+    ssCorrupt   ## occupied, but its path set does not decode
+    ssPresent
+
+  SlotRead = object
+    state: SlotState
+    pathSet: PathSet
+
 proc fetchPathSetSlot(remote: MemoRemote; weakHex: string; slot: int):
-    Option[PathSet] =
+    SlotRead =
+  ## An EMPTY path set is a legitimate one — a fixed-output fetch with no
+  ## declared inputs is keyed by its description alone — so "occupied but
+  ## unreadable" is its own state rather than an empty value. (It was once
+  ## the empty value, and every such record was published, confirmed by its
+  ## publisher, and then never offered to a lookup.)
   let dir = freshDir(remote, "slot")
   defer: removeQuietly(dir)
   if not fetchEntry(remote, pathSetSlotIdentity(remote, weakHex, slot), dir):
-    return none(PathSet)
+    return SlotRead(state: ssMissing)
   try:
     let raw = readFile(extendedPath(dir / StagedPathSetName))
-    some(decodePathSet(raw.toOpenArrayByte(0, raw.high)))
+    SlotRead(state: ssPresent,
+      pathSet: decodePathSet(raw.toOpenArrayByte(0, raw.high)))
   except CatchableError:
-    # A slot that exists but does not decode is occupied, not free: report
-    # an empty path set, which matches nothing a publisher would write.
-    some(newSeq[PathSetEntry]())
+    SlotRead(state: ssCorrupt)
 
 proc remoteCandidatePathSets*(remote: MemoRemote; weakHex: string):
     seq[PathSet] =
   ## Every candidate path set published for ``weakHex``: slots are filled in
-  ## order, so the first missing slot ends the walk.
+  ## order, so the first missing slot ends the walk. A corrupt slot is
+  ## skipped, never trusted and never treated as free.
   for slot in 0 ..< MaxPathSetSlots:
-    let pathSet = fetchPathSetSlot(remote, weakHex, slot)
-    if pathSet.isNone:
-      break
-    if pathSet.get().len > 0:
-      result.add(pathSet.get())
+    let read = fetchPathSetSlot(remote, weakHex, slot)
+    case read.state
+    of ssMissing: break
+    of ssCorrupt: continue
+    of ssPresent: result.add(read.pathSet)
 
 # --- lookup ------------------------------------------------------------------
 
@@ -449,8 +464,8 @@ proc publishMemo*(remote: MemoRemote; roots: openArray[LogicalRoot];
     writeBytes(stage / StagedPathSetName, encodePathSet(record.pathSet))
     for slot in 0 ..< MaxPathSetSlots:
       let held = fetchPathSetSlot(remote, record.weakHex, slot)
-      if held.isSome:
-        if pathSetHash(held.get()) == psHash:
+      if held.state != ssMissing:
+        if held.state == ssPresent and pathSetHash(held.pathSet) == psHash:
           result.ok = true
           result.slot = slot
           return
@@ -463,7 +478,8 @@ proc publishMemo*(remote: MemoRemote; roots: openArray[LogicalRoot];
       # Another publisher may have taken the same free slot a moment
       # earlier or later; only a slot that reads back as ours counts.
       let confirm = fetchPathSetSlot(remote, record.weakHex, slot)
-      if confirm.isSome and pathSetHash(confirm.get()) == psHash:
+      if confirm.state == ssPresent and
+          pathSetHash(confirm.pathSet) == psHash:
         result.ok = true
         result.slot = slot
         return
