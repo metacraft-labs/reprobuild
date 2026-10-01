@@ -192,8 +192,18 @@ proc node_package*(srcDir = "src";
   for (k, v) in extraEnv:
     extraEnvPrefix.add(k & "=\"" & q(v) & "\" ")
   var buildScript = "set -e; mkdir -p \"" & q(workTree) & "\"; " &
-    "cp -R \"" & q(src) & "/.\" \"" & q(workTree) & "/\"; " &
-    "cd \"" & q(workTree) & "\"; "
+    "cp -R \"" & q(src) & "/.\" \"" & q(workTree) & "/\"; "
+  # A committed lock (`NpmBuildClosureLockName`) replaces upstream's in the
+  # WORK TREE, so `npm ci` installs the lock the vendored closure was
+  # generated from -- and the fetched tree, the fetch's own output, is left
+  # as the fetch made it.
+  let overrideLock =
+    if projectRoot.len > 0: npmBuildClosureLockPath(projectRoot) else: ""
+  let hasOverrideLock = overrideLock.len > 0 and fileExists(overrideLock)
+  if hasOverrideLock:
+    buildScript.add("cp -f \"" & q(overrideLock) & "\" \"" &
+      q(workTree / "package-lock.json") & "\"; ")
+  buildScript.add("cd \"" & q(workTree) & "\"; ")
   if projectRoot.len > 0:
     buildScript.add("export npm_config_cache=\"" &
       q(npmPrivateCacheDir(projectRoot)) & "\"; ")
@@ -262,7 +272,8 @@ proc node_package*(srcDir = "src";
     call = inlineExecCall(@["sh", "-c", buildScript], projectRoot),
     deps = (if vendorEdge.id.len > 0: @[vendorEdge.id] else: @[]),
     inputs = (if vendorEdge.outputs.len > 0: @[vendorEdge.outputs[0]]
-              else: @[]),
+              else: @[]) &
+             (if hasOverrideLock: @[overrideLock] else: @[]),
     outputs = @[],
     # The bundle is what the install edge reads. Declared, a record can name
     # it (so another host resolves the install without it on disk) and the
