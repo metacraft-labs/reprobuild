@@ -175,7 +175,8 @@
       # a merge path WITHOUT the fold while io-mon's capability declaration --
       # which this same revision moves into the supported set -- says the fold
       # is there, i.e. an over-claim in the depfile this engine reads.
-      url = "github:metacraft-labs/io-mon/07cc4afc823a7c631d9ef9fdf4522f4d219c46a8";
+      # Aligned with the fetched dev mainline for workspace publication (2026-10-01).
+      url = "github:metacraft-labs/io-mon/2d07041f60443dda8ead16454ec5f9e69e35753f";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -316,7 +317,8 @@
       # instead. 5125869 is an ancestor.
       #
       # Keep this pin aligned with the published workspace dependency.
-      url = "github:metacraft-labs/nim-stackable-hooks/72f578249e9d8bbca8e3705c8a41ed5085c05bf9";
+      # Aligned with the fetched dev mainline for workspace publication (2026-10-01).
+      url = "github:metacraft-labs/nim-stackable-hooks/eec6e3a5f652e68332be0979782c2ff37d426612";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
