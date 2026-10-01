@@ -31,7 +31,10 @@ repro_bin="$pkg/bin/repro"
 [[ -f "$repro_bin" ]] || { echo "smoke_release_dev_exec: no bin/repro in $pkg" >&2; exit 1; }
 
 work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/repro-release-smoke-XXXXXX")
-trap 'rm -rf "$work"' EXIT
+# Best-effort: on Windows a helper the run started can still hold the
+# project directory open for a moment ("Device or resource busy"), and a
+# leftover temp dir must not turn a passed check into a failed step.
+trap 'rm -rf "$work" 2>/dev/null || true' EXIT
 project="$work/project"
 mkdir -p "$project"
 cat > "$project/repro.nim" <<'EOF'
@@ -56,12 +59,25 @@ for v in "${scrub[@]}"; do unset "$v"; done
 marker="repro-release-smoke-ok"
 echo "=== repro exec in a fresh project, using only $pkg ==="
 out="$work/exec.log"
+# Output goes to a FILE, not through `| tee`: a helper that outlives
+# `repro exec` (on Windows, an msiexec it spawned) keeps a pipe's write end
+# open, so a failed exec that printed its error at once still held the step
+# for its whole 60-minute timeout. Bounded as well, for the same reason.
+bound=()
+if command -v timeout >/dev/null 2>&1; then
+  bound=(timeout --kill-after=60 "${REPRO_SMOKE_TIMEOUT_SECONDS:-2700}")
+fi
 set +e
-(cd "$project" && "$repro_bin" exec -- bash -c \
+(cd "$project" && "${bound[@]}" "$repro_bin" exec -- bash -c \
   'echo "$1"; echo "seeded-source-root=${REPROBUILD_SOURCE_ROOT:-}"' _ "$marker") \
-  2>&1 | tee "$out"
-rc=${PIPESTATUS[0]}
+  > "$out" 2>&1 < /dev/null
+rc=$?
 set -e
+cat "$out"
+if [[ $rc -eq 124 || $rc -eq 137 ]]; then
+  echo "smoke_release_dev_exec: ERROR: repro exec did not finish within ${REPRO_SMOKE_TIMEOUT_SECONDS:-2700}s." >&2
+  exit 1
+fi
 if [[ $rc -ne 0 ]] || ! grep -q "^${marker}" "$out"; then
   echo "smoke_release_dev_exec: ERROR: the packaged repro could not run a command in a fresh project (exit $rc)." >&2
   if grep -q "cannot open file" "$out"; then

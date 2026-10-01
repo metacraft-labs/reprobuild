@@ -250,6 +250,16 @@ proc emitNpmVendorAction*(projectRoot, packageName: string;
     deps = if fetchActionId.len > 0: @[fetchActionId] else: @[],
     inputs = inputs,
     outputs = @[stamp],
+    # What this action produces, fixed by what it declares and verifies — the
+    # manifest's archives against their lockfile integrity, the committed
+    # lock — so it is a fixed-output action (Cache-Scope P3.4): the portable
+    # lookup resolves it without the network. The overridden lock is named
+    # on its own because it lands INSIDE the fetched tree: without it, a
+    # downstream read of that file would be identified by the fetch's
+    # (upstream) copy instead of the one `npm ci` actually installed.
+    declaredOutputs = (if hasOverrideLock: @[npmCache, lockfile]
+                       else: @[npmCache]),
+    fixedOutput = true,
     pool = "fetch",
     cacheable = false,
     dependencyPolicy = automaticMonitorPolicy(),

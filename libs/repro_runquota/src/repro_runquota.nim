@@ -47,6 +47,10 @@ type
     env*: seq[string]
     stdoutLimit*: int
     stderrLimit*: int
+    isolateEnvironment*: bool
+      ## Launch from `env` alone (runquota_process
+      ## `CommandSpec.isolateEnvironment`); carried through the helper's argv
+      ## as `--isolate-env`.
 
   ReproRunQuotaExecution* = object
     leaseId*: uint64
@@ -741,6 +745,8 @@ proc helperCliArgs*(request: ReproResourceRequest;
   for entry in command.env:
     result.add("--env")
     result.add(entry)
+  if command.isolateEnvironment:
+    result.add("--isolate-env")
   result.add("--")
   result.add(command.argv)
 
@@ -1173,7 +1179,8 @@ proc runWithRunQuota*(request: ReproResourceRequest;
         cwd = command.cwd,
         env = command.env,
         stdoutLimit = command.stdoutLimit,
-        stderrLimit = command.stderrLimit))
+        stderrLimit = command.stderrLimit,
+        isolateEnvironment = command.isolateEnvironment))
       lease.markRunning(
         childProcessId = child.info.processId,
         processGroupId = child.info.processGroupId,
@@ -1248,7 +1255,8 @@ proc startDirect*(command: ReproCommandSpec): ReproDirectRunningProcess =
       cwd = command.cwd,
       env = command.env,
       stdoutLimit = command.stdoutLimit,
-      stderrLimit = command.stderrLimit))
+      stderrLimit = command.stderrLimit,
+      isolateEnvironment = command.isolateEnvironment))
     result.active = true
   except CatchableError as err:
     raise newException(ReproRunQuotaError, err.msg)
@@ -1394,7 +1402,8 @@ proc startGrantedWithRunQuota(session: ReproRunQuotaSession;
       cwd = command.cwd,
       env = command.env,
       stdoutLimit = command.stdoutLimit,
-      stderrLimit = command.stderrLimit))
+      stderrLimit = command.stderrLimit,
+      isolateEnvironment = command.isolateEnvironment))
     lease.markRunning(
       childProcessId = child.info.processId,
       processGroupId = child.info.processGroupId,
@@ -2021,6 +2030,9 @@ proc runRunQuotaHelperCli*(args: openArray[string]): int =
       if i + 1 >= args.len: return 2
       command.env.add(args[i + 1])
       i += 2
+    of "--isolate-env":
+      command.isolateEnvironment = true
+      i += 1
     of "--":
       if i + 1 >= args.len: return 2
       command.argv = @args[i + 1 .. ^1]

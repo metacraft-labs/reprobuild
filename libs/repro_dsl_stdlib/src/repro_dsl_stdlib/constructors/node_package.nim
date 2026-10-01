@@ -104,6 +104,12 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     call = inlineExecCall(@["sh", "-c", script], projectRoot),
     inputs = @[],
     outputs = @[stamp],
+    # The extracted tree is what this fetch produces, and it is fixed by the
+    # hash the script verifies: a fixed-output action (Cache-Scope P3.4), so
+    # the portable lookup can resolve it — and everything built from it —
+    # without the network.
+    declaredOutputs = @[extracted],
+    fixedOutput = true,
     pool = "fetch",
     cacheable = false,
     dependencyPolicy = automaticMonitorPolicy(),
@@ -116,7 +122,8 @@ proc node_package*(srcDir = "src";
                    entry: string;
                    name = "";
                    destdir = "";
-                   extraEnv: seq[(string, string)] = @[]):
+                   extraEnv: seq[(string, string)] = @[];
+                   ignoreScripts = false):
     NodePackageResult =
   ## Fetch → vendor into a private cache → offline `npm ci` +
   ## `npm run <bundleScript>` →
@@ -171,9 +178,52 @@ proc node_package*(srcDir = "src";
   if projectRoot.len > 0:
     buildScript.add("export npm_config_cache=\"" &
       q(npmPrivateCacheDir(projectRoot)) & "\"; ")
+  # `logs_max=0`: npm otherwise writes a timestamped `_logs/<time>-debug-0.log`
+  # into the cache on every invocation and probes the older ones to rotate
+  # them. That is npm's bookkeeping, not an input, but the monitor rightly
+  # observes it, so every run of this edge would observe different paths
+  # and no two runs could ever be compared (the determinism probe) or share
+  # a portable record.
   buildScript.add("export npm_config_offline=true npm_config_audit=false " &
-    "npm_config_fund=false npm_config_update_notifier=false; ")
-  buildScript.add(extraEnvPrefix & "npm ci --no-progress; ")
+    "npm_config_fund=false npm_config_update_notifier=false " &
+    "npm_config_logs_max=0; ")
+  # HERMETIC TOOL CONFIGURATION. Every one of these was observed reading
+  # HOST state on a gemini-cli build, which made the edge's result depend
+  # on the machine rather than on its inputs:
+  #   * npm reads the user's and the global `npmrc` — pointed at files under
+  #     the project that do not exist, so npm uses its defaults;
+  #   * git (a build script's `git rev-parse` for version metadata) reads
+  #     the user's and the system's config AND walks up out of the fetched
+  #     tree into whatever repository encloses the checkout — gemini-cli
+  #     shipped the PACKAGING repository's commit as its own. With the
+  #     ceiling at the project root git finds no repository, and a script
+  #     falls back exactly as it does on a source tarball;
+  #   * node's OpenSSL loads the system `openssl.cnf` at startup — pointed
+  #     at an empty file under the project;
+  #   * npm itself reads `~/.gitconfig` (its path comes from the home
+  #     directory, not from git's variables), and node keeps a V8 compile
+  #     cache in the host temp directory — the home directory is a
+  #     project-local one, and the compile cache is off.
+  if projectRoot.len > 0:
+    let hermetic = projectRoot / ".repro" / "node-hermetic"
+    buildScript.add("mkdir -p \"" & q(hermetic / "home") & "\"; ")
+    buildScript.add("export HOME=\"" & q(hermetic / "home") &
+      "\" USERPROFILE=\"" & q(hermetic / "home") &
+      "\" NODE_DISABLE_COMPILE_CACHE=1; ")
+    buildScript.add(": > \"" & q(hermetic / "openssl.cnf") & "\"; ")
+    buildScript.add("export npm_config_userconfig=\"" &
+      q(hermetic / "npmrc") & "\" npm_config_globalconfig=\"" &
+      q(hermetic / "global-npmrc") & "\" GIT_CONFIG_NOSYSTEM=1 " &
+      "GIT_CONFIG_GLOBAL=\"" & q(hermetic / "gitconfig") & "\" " &
+      "GIT_CEILING_DIRECTORIES=\"" & q(projectRoot) & "\" " &
+      "OPENSSL_CONF=\"" & q(hermetic / "openssl.cnf") & "\"; ")
+  # `ignoreScripts`: skip the dependencies' install scripts. A recipe opts in
+  # only when the bundle is proven byte-identical without them — gemini-cli
+  # compiles `@github/keytar` with node-gyp there (host MSVC, a Python found
+  # by probing well-known install locations, node headers cached in the
+  # user profile), and the bundle only loads keytar optionally at run time.
+  buildScript.add(extraEnvPrefix & "npm ci --no-progress" &
+    (if ignoreScripts: " --ignore-scripts" else: "") & "; ")
   buildScript.add(extraEnvPrefix & "npm run " & bundleScript & "; ")
   let compileEdge = buildAction(
     id = "node-build-" & pkgName,
@@ -182,6 +232,13 @@ proc node_package*(srcDir = "src";
     inputs = (if vendorEdge.outputs.len > 0: @[vendorEdge.outputs[0]]
               else: @[]),
     outputs = @[],
+    # The bundle is what the install edge reads. Declared, a record can name
+    # it (so another host resolves the install without it on disk) and the
+    # determinism probe has something to compare.
+    declaredOutputs =
+      (if entry.parentDir.len > 0:
+         @[projectRoot / src / entry.parentDir.replace("\\", "/")]
+       else: @[projectRoot / src / entry]),
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "node_package.build",

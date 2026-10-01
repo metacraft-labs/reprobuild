@@ -38,7 +38,7 @@
 ## baseline does not survive is reported as a plain `setEnv`, which is the
 ## conservative answer.
 
-import std/[algorithm, os, osproc, streams, strtabs, strutils, tables, tempfiles]
+import std/[algorithm, os, osproc, streams, strtabs, strutils, tables]
 
 import repro_core/ambient_execution
 import repro_core/paths
@@ -307,6 +307,32 @@ proc runCaptureCommand*(argv: openArray[string]; workingDir: string;
     process.close()
   (readAndRemove(stdoutPath), readAndRemove(stderrPath), code)
 
+var captureScratchCounter = 0
+
+proc claimCaptureScratch*(parent: string): string =
+  ## A private scratch directory for one capture, named WITHOUT randomness.
+  ##
+  ## `std/tempfiles.createTempDir` draws its name from the OS random source.
+  ## This runs inside the project provider, which runs inside the monitored
+  ## dev-env introspection edge, and one `getrandom` there was enough for the
+  ## M6 entropy gate to refuse to publish the edge (measured: `project-provider`
+  ## was the only non-`nix` entropy source the edge reported, and this was its
+  ## only entropy-drawing call). So every entry re-ran `nix print-dev-env`.
+  ##
+  ## Uniqueness does not need randomness here. `<pid>-<n>` is unique among
+  ## live processes, and `existsOrCreateDir` is a single `mkdir(2)`, atomic
+  ## against a concurrent claimant. A directory left by a crashed process
+  ## whose pid was later reused is skipped rather than shared. The directory
+  ## is private, lives under the project's foreign-env scratch tree (excluded
+  ## from the edge's inputs), and is removed after the capture, so its name
+  ## never reaches an output.
+  let pid = $getCurrentProcessId()
+  while true:
+    inc captureScratchCounter
+    let candidate = parent / ("capture-" & pid & "-" & $captureScratchCounter)
+    if not existsOrCreateDir(extendedPath(candidate)):
+      return candidate
+
 proc captureForeignEnvOps*(argv: openArray[string]; workingDir, scriptPath: string;
                            captureShell = "";
                            separator = $PathSep;
@@ -334,7 +360,7 @@ proc captureForeignEnvOps*(argv: openArray[string]; workingDir, scriptPath: stri
     if baseline.len > 0: @baseline else: currentEnvironmentPairs()
   let baselineEnv = environmentTable(baselinePairs)
   createDir(extendedPath(parentDir(scriptPath)))
-  let scratch = createTempDir("capture-", "", parentDir(scriptPath))
+  let scratch = claimCaptureScratch(parentDir(scriptPath))
   defer: removeDir(extendedPath(scratch))
   let privateScript = scratch / "environment.bash"
   let produced = runCaptureCommand(argv, workingDir,

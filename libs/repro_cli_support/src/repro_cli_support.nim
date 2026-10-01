@@ -146,6 +146,7 @@ import repro_cli_support/dev_env_rollback_manifest
 import repro_cli_support/dev_env_shell_hook_templates
 import repro_cli_support/home
 import repro_cli_support/selfhost as cli_selfhost
+import repro_cli_support/project_pins
 import repro_cli_support/infra
 import repro_cli_support/deploy_agent as cli_deploy_agent
 import repro_cli_support/hardware as cli_hardware
@@ -2799,8 +2800,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   # successful branch below replaces the sentinel with its real action.
   result = noScheduledAction()
   let payload = decodeBuildActionPayload(toBytes(node.payload))
+  # The tool's own sub-tools (``cli: subTools``) sit between the tool's
+  # directory and the edge's declared refs. They widen the prefix only;
+  # whether the PATH is hermetic is decided by ``toolIdentityRefs`` alone
+  # (see ``actionPathDecision``).
   let actionPathPrefix = toolPathPrefix(profiles, payload.call.packageName,
-    payload.call.executableName, payload.toolIdentityRefs)
+    payload.call.executableName,
+    payload.subToolRefs & payload.toolIdentityRefs)
   # Named-Targets M1: copy implicit-target names off the decoded
   # payload onto every constructed ``BuildAction`` at the bottom of
   # this proc. The action constructors below don't know about
@@ -2830,6 +2836,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # successful action when the config supplies a non-nil
     # ``binaryCachePublisher`` closure.
     result.publishToBinaryCache = payload.publishToBinaryCache
+    result.fixedOutput = payload.fixedOutput
     result.cacheEntryIdentity = payload.cacheEntryIdentity
     # M9.N Batch B: propagate the convention-supplied tool-identity
     # refs through to the engine-side ``BuildAction``. The engine
@@ -4388,7 +4395,7 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 10'u16
+  LoweredGraphCacheVersion = 11'u16
     # v10: DA-6 — the two trailing event-interest bools
     # (``captureNonDeterminism``, ``captureIpc``) are replaced by ONE byte
     # carrying ``MonitorCaptureBreadth``: the tool package's declaration of how
@@ -5256,6 +5263,8 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
     outp.writeCacheEntryIdentity(action.cacheEntryIdentity.get())
   else:
     outp.add(0'u8)
+  # v11: Cache-Scope P3.4 fixed-output sentinel.
+  outp.add(if action.fixedOutput: 1'u8 else: 0'u8)
   outp.writeStringSeq(action.toolIdentityRefs)
   outp.writeU32Le(uint32(action.toolIdentityRefKinds.len))
   for kind in action.toolIdentityRefKinds:
@@ -5321,6 +5330,11 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
       "invalid lowered action identity sentinel")
   if identityByte == 1'u8:
     result.cacheEntryIdentity = some(readCacheEntryIdentity(bytes, pos))
+  let fixedByte = readByteValue(bytes, pos)
+  if fixedByte > 1'u8:
+    raiseEnvelopeError(eeMalformed,
+      "invalid lowered action fixedOutput sentinel")
+  result.fixedOutput = fixedByte == 1'u8
   result.toolIdentityRefs = readStringSeq(bytes, pos)
   let refKindCount = int(readU32Le(bytes, pos))
   result.toolIdentityRefKinds = newSeq[DepKind](refKindCount)
@@ -5575,6 +5589,11 @@ proc actionResultJson(item: ActionResult): JsonNode =
     "launched": item.launched,
     "wouldLaunch": item.wouldLaunch,
     "cacheDecision": $item.cacheDecision,
+    # WHY a lookup missed (`input metadata changed: <path>`, `no cache record
+    # for weak fingerprint`, ...). Without it a report says only that an edge
+    # re-ran, and a warm activation that never converges cannot be diagnosed
+    # from the stats it writes.
+    "cacheMissReason": item.cacheMissReason,
     "reason": item.reason,
     "dependencyPolicyKind": $item.dependencyPolicyKind,
     "runQuotaBackend": item.runQuotaBackend,
@@ -5949,7 +5968,14 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     commandStatsId = "repro provider compile edge",
     cacheable = providerCompileCacheable(plan),
     weakFingerprint = plan.compileEdge.actionFingerprint,
-    envPassthrough = ProviderCompileEnvironmentPassthrough,
+    envPassthrough = @ProviderCompileEnvironmentPassthrough &
+      @ProviderCompileIsolatedPassthrough,
+    # The same edge as the dev-env engine's, so the same declared environment
+    # (see `providerCompileLaunchEnv`).
+    env = providerCompileLaunchEnv(compilerCwd / "home"),
+    # Dev-Env-Warm-Entry.md §2: the compile starts from the environment
+    # declared above and nothing else, so no caller variable can be an input.
+    isolateHostEnvironment = true,
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy = automaticMonitorGatheringPolicy(
@@ -8859,12 +8885,15 @@ proc selectedToolIdentitySelectors(snapshot: ProviderGraphSnapshot;
   ## they are never persisted or used to execute an action.
   var identity = PathOnlyBuildIdentity(projectName: "metadata-selection")
   var packageNamesByExecutable = initTable[string, seq[string]]()
+  var subToolRefsById = initTable[string, seq[string]]()
   var seenProfiles = initHashSet[string]()
   for fragment in snapshot.fragments:
     for node in fragment.nodes:
       if node.kind != gnkAction:
         continue
       let action = decodeBuildActionPayload(toBytes(node.payload))
+      if action.subToolRefs.len > 0:
+        subToolRefsById[action.id] = action.subToolRefs
       let packageName = action.call.packageName
       let executableName = action.call.executableName
       if packageName.len == 0 or executableName.len == 0:
@@ -8892,6 +8921,11 @@ proc selectedToolIdentitySelectors(snapshot: ProviderGraphSnapshot;
     selectedActionIds)
   for action in selected.actions:
     for selector in action.toolIdentityRefs:
+      if selector.len > 0:
+        result.incl(selector)
+    # A selected edge's tool keeps its own sub-tools resolvable too, so a
+    # fragment build that selects only this edge still puts them on PATH.
+    for selector in subToolRefsById.getOrDefault(action.id):
       if selector.len > 0:
         result.incl(selector)
     if action.argv.len > 0 and
@@ -12780,7 +12814,7 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
   # took both from PATH -- which on a Windows host without env.ps1 holds
   # neither, and failed with `CreateProcessW failed (2)` for `nim c` while
   # `repro build` of the same recipe succeeded. Which modes it provisions
-  # under is `bootstrapToolchainProvisioned` (every mode on Windows).
+  # under is `bootstrapToolchainProvisioned` (every mode, on every host).
   ensureBootstrapToolchainEnv(toolProvisioning, resolveStoreRoot() / "tool-store")
   let monitor = publicDevEnvMonitor(publicCliPath)
   let config = DevEnvEdgeConfig(
@@ -17252,6 +17286,21 @@ proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
       echo "  " & k & ": " & $report.summary[k]
   report.exitCode
 
+const HooksUsage = """usage: repro hooks <ensure|reinstall|uninstall> [--vcs] [--shell-direnv]
+                   [--shell=bash|zsh|fish|pwsh] [--workspace-root=PATH]
+                   [--json] [--write-report[=PATH]] [PATH]
+
+  ensure      install or repair the managed hooks (idempotent)
+  reinstall   rewrite the managed hooks from scratch
+  uninstall   remove the managed hooks
+
+  --vcs            the managed git hooks of every workspace repo
+                   (or of the repo at PATH)
+  --shell-direnv   the direnv .envrc activation block
+  --shell=NAME     a native shell activation hook
+With no selector flag both --vcs and --shell-direnv are implied.
+"""
+
 proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
   if args.len == 0:
     raise newException(ValueError,
@@ -17600,6 +17649,14 @@ proc runHooksCommand(args: openArray[string]): int =
       if args.len > 1: args[1 .. ^1]
       else: @[]
     return runCachePushCommand(cacheArgs)
+  if args.len > 0 and (args[0] == "help" or "--help" in args or
+      "-h" in args):
+    # An explicit help request prints usage to stdout and exits 0 (the
+    # convention ``wantsHelp`` documents). It used to reach the flag parser
+    # and fail as "unsupported hooks flag: --help". Bare ``repro hooks`` keeps
+    # its error: it names a missing action, not a request for help.
+    stdout.write(HooksUsage)
+    return 0
   let parsed = parseHooksCommand(args)
   case parsed.action
   of hakEnsure:
@@ -18135,21 +18192,31 @@ proc autoRunQuotaEnabled(): bool =
   getEnv("REPROBUILD_AUTO_RUNQUOTA", "1").normalize notin
     ["0", "false", "no", "off"]
 
-const DefaultAutoRunQuotaMemoryBytes* = 16'u64 * 1024'u64 * 1024'u64 *
-  1024'u64
-
-proc autoRunQuotaMemoryBytes*(): uint64 =
+proc autoRunQuotaMemoryBytes*(): Option[uint64] =
+  ## ``REPROBUILD_RUNQUOTA_MEMORY_BYTES``, the per-invocation memory budget an
+  ## auto-spawned ``runquotad`` is given; ``none`` when it is not set.
+  ##
+  ## THERE IS NO DEFAULT HERE ANY MORE. This used to answer a 16 GiB constant
+  ## (``DefaultAutoRunQuotaMemoryBytes``), passed as ``--memory-bytes`` to
+  ## every daemon reprobuild spawned. The daemon is host-wide, so that
+  ## constant became every workspace's budget -- and a flag overrides both
+  ## the host file and a reload. The daemon's own default is now a share of
+  ## physical memory (75%, decided 2026-09-30 in
+  ## reprobuild-specs/RunQuota-Host-Configuration.md), which a constant here
+  ## could only make worse on every host it did not happen to fit.
   let configured = getEnv("REPROBUILD_RUNQUOTA_MEMORY_BYTES", "")
   if configured.len == 0:
-    return DefaultAutoRunQuotaMemoryBytes
+    return none(uint64)
+  var value: uint64
   try:
-    result = parseBiggestUInt(configured).uint64
+    value = parseBiggestUInt(configured).uint64
   except ValueError:
     raise newException(ValueError,
       "REPROBUILD_RUNQUOTA_MEMORY_BYTES must be a positive integer")
-  if result == 0:
+  if value == 0:
     raise newException(ValueError,
       "REPROBUILD_RUNQUOTA_MEMORY_BYTES must be a positive integer")
+  some(value)
 
 proc executableFile(path: string): bool =
   if path.len == 0 or not fileExists(path):
@@ -18599,23 +18666,23 @@ proc autoRunQuotaBudgetArgs*(host: HostConfig;
   ## - memory: ``REPROBUILD_RUNQUOTA_MEMORY_BYTES`` still wins as an explicit
   ##   per-invocation override, with a warning when it disagrees with the
   ##   file, because the daemon it spawns budgets every other workspace too.
-  ##   Otherwise the file's value, or ``DefaultAutoRunQuotaMemoryBytes``.
+  ##   Otherwise NO FLAG: the daemon takes the file's value, or its own
+  ##   default of 75% of physical memory, and a later ``runquota config set
+  ##   machine.memory_bytes`` reaches it by reload (a flag would pin it).
   ## - cpu: ``cpuMilli`` unless the file sets ``cpu_milli``.
   ## - pools: a convention pool the file sizes is left to the file. A pool
   ##   the recipe declares is always passed, because the engine's in-process
   ##   gate uses the recipe's figure and the two gates must agree (see
   ##   ``assembleRunquotadPoolArgs``).
-  let memoryOverride = getEnv("REPROBUILD_RUNQUOTA_MEMORY_BYTES", "")
-  if memoryOverride.len > 0:
-    let memory = autoRunQuotaMemoryBytes()
+  let memoryOverride = autoRunQuotaMemoryBytes()
+  if memoryOverride.isSome:
+    let memory = memoryOverride.get
     result.args.add(["--memory-bytes", $memory])
     if host.memoryBytes.isSome and host.memoryBytes.get != memory:
       result.warnings.add("REPROBUILD_RUNQUOTA_MEMORY_BYTES=" & $memory &
         " overrides memory_bytes = " & $host.memoryBytes.get & " in " &
         host.sourcePath & "; the RunQuota daemon being started serves the " &
         "whole host, so this budget applies to every workspace on it")
-  elif host.memoryBytes.isNone:
-    result.args.add(["--memory-bytes", $DefaultAutoRunQuotaMemoryBytes])
   if host.cpuMilli.isNone:
     result.args.add(["--cpu-milli", $int(cpuMilli)])
   var recipePools = initHashSet[string]()
@@ -21345,6 +21412,29 @@ proc repositoryNameFromUrl(url: string): string =
     value.setLen(value.len - 4)
   value
 
+proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
+    workspaceRoot: string; siblings: seq[ResolvedRepo]]
+  ## Forward declaration; defined beside ``developSetClosure``, whose closure it
+  ## computes.
+
+proc lockedDepFromCheckout(name, depAbs, root: string): LockedDep =
+  ## A locked VCS dependency observed from the checkout at ``depAbs``: its
+  ## ``HEAD`` as the revision, its canonical fetch URL, and the VCS-native
+  ## integrity of that commit. ``path`` is ``depAbs`` relative to ``root``.
+  let facts = committedLockRepoFacts(depAbs)
+  LockedDep(
+    name: name, path: relativePath(depAbs, root).replace('\\', '/'),
+    coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+      gitRef: facts.branch, revision: facts.headSha),
+    integrity: computeDepIntegrity(depAbs, facts.headSha),
+    version: "", visibility: "public", participation: "",
+    depends: @[], tags: @[])
+
+proc isGitCheckoutDir(path: string): bool =
+  dirExists(extendedPath(path)) and
+    (dirExists(extendedPath(path / ".git")) or
+     fileExists(extendedPath(path / ".git")))
+
 proc lockedDepsForWorkspace(workspaceRoot: string;
                             usesSelectors: seq[string] = @[];
                             sourceRecipeRoots: seq[string] = @[]):
@@ -21446,6 +21536,62 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
       depends: @[], tags: @[]))
     seenPaths.add(rel)
     seenNames.add(depName)
+  # The develop set declared by the workspace manifest: the transitive closure
+  # of this repo's ``depends`` edges — the same closure the pre-push gate holds
+  # clean and published (Unified-Locking-And-Hooks.md §14). A sibling can reach
+  # the build outside the solved graph (a cargo ``path`` dependency, a script
+  # reading ``../<sibling>``), so neither ``uses:`` nor the develop overrides
+  # would ever name it; the manifest edge is the declaration that does.
+  #
+  # Each sibling is OBSERVED from its checkout. One that is declared but not
+  # checked out keeps the pin the committed lock already carries; with no such
+  # pin there is nothing true to record, and the omission is said out loud
+  # rather than written as a lock that looks complete.
+  let manifest = manifestDevelopSiblings(root)
+  if manifest.resolved:
+    for sib in manifest.siblings:
+      let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
+      let rel = relativePath(depAbs, root).replace('\\', '/')
+      if rel in seenPaths or sib.name in seenNames: continue
+      if isGitCheckoutDir(depAbs):
+        siblingDeps.add(lockedDepFromCheckout(sib.name, depAbs, root))
+      else:
+        var carried = false
+        for d in existingDeps:
+          if d.path != "." and d.coordinates.kind == ckVcs and
+              (d.name == sib.name or d.path == rel):
+            siblingDeps.add(d)
+            carried = true
+            break
+        if not carried:
+          stderr.writeLine("repro lock refresh: develop-set sibling '" &
+            sib.name & "' (declared by the workspace manifest at " &
+            manifest.workspaceRoot & ") is not checked out at " & depAbs &
+            " and the committed lock carries no pin for it, so this lock " &
+            "records NO revision for it; check it out (`repro sync`) and " &
+            "refresh again")
+          continue
+      seenPaths.add(rel)
+      seenNames.add(sib.name)
+  else:
+    # No workspace membership to consult — a standalone clone, a CI checkout.
+    # The committed lock's sibling pins are the only record of the develop set
+    # here, so they are carried forward: re-observed where the checkout is
+    # present, kept verbatim where it is not. Dropping them because the
+    # siblings are not visible would silently turn a complete lock into a
+    # self-only one.
+    for d in existingDeps:
+      if d.path == "." or d.coordinates.kind != ckVcs: continue
+      if d.path in seenPaths or d.name in seenNames: continue
+      let depAbs = absolutePath(root / d.path)
+      if isGitCheckoutDir(depAbs):
+        var observed = lockedDepFromCheckout(d.name, depAbs, root)
+        observed.path = d.path
+        siblingDeps.add(observed)
+      else:
+        siblingDeps.add(d)
+      seenPaths.add(d.path)
+      seenNames.add(d.name)
   var rootDepends: seq[string] = @[]
   for d in siblingDeps: rootDepends.add(d.name)
   result.add(LockedDep(
@@ -22572,6 +22718,7 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "cacheable": action.cacheable,
     "weakFingerprint": digestHex(action.weakFingerprint),
     "publishToBinaryCache": action.publishToBinaryCache,
+    "fixedOutput": action.fixedOutput,
     "binaryCacheKey": binaryCacheKey,
     "binaryCacheIdentityError": identityError,
     "actionCachePolicy": $action.actionCachePolicy,
@@ -27279,6 +27426,52 @@ type
     explicitSource: bool
     report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
+proc workspaceShellFirstRoot(explicit: string): string =
+  ## The workspace root a DEVELOP-SET verb should act on: the workspace SHELL
+  ## when an ancestor carries one, otherwise the generic MO-2 marker.
+  ##
+  ## Shared with ``flakeOverrideWorkspaceRoot``, which delegates here, because
+  ## the two must agree. `repro develop --list` and `repro flake override-args`
+  ## answer the same question — which develop set backs this directory — and
+  ## they used to answer it differently: develop took the cwd VERBATIM while the
+  ## flake verbs ascended. Standing in a participating repo, `develop --list
+  ## --all` therefore described that repo as its own workspace while
+  ## `override-args --all` described the whole workspace, from one directory.
+  ##
+  ## Why the shell wins over the generic ascent, measured rather than assumed:
+  ## ``isInitializedWorkspace`` is true of a directory carrying EITHER a
+  ## workspace shell OR, by MO-2, a committed ``repro.lock``. A participating
+  ## repo of a multi-repo workspace normally has both a committed lock and
+  ## siblings one level up, so the generic ascent stops at the REPO. That is why
+  ## the shell is looked for first, and the generic marker only when no ancestor
+  ## carries one (the manifest-optional, single-repo case the marker exists for).
+  ##
+  ## This does NOT widen the develop SET. Which repos are in it remains the
+  ## pushed repo's own dependencies per its lock
+  ## (``CLI/develop.md`` §"The Develop Set Is The Repo's Own Dependencies"); this
+  ## only decides which workspace's lock sources are readable when resolving
+  ## them, which that section calls out as the separate question.
+  if explicit.len > 0:
+    return absolutePath(explicit)
+  let here = absolutePath(getCurrentDir())
+  var dir = here
+  while true:
+    if fileExists(workspaceTomlPath(dir)):
+      return dir
+    let parent = parentDir(dir)
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+  dir = here
+  while true:
+    if isInitializedWorkspace(dir):
+      return dir
+    let parent = parentDir(dir)
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+  here
+
 proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
   ## ``repro develop <pkg> [--source=PATH] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
@@ -27319,9 +27512,7 @@ proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
   if result.package.len == 0:
     raise newException(ValueError,
       "`repro develop <pkg>` requires a package name")
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  result.workspaceRoot = workspaceShellFirstRoot(result.workspaceRoot)
 
 proc resolveDevelopWorkspacePrimary(
     workspaceRoot: string): ResolvedProject =
@@ -29399,9 +29590,7 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
       "`repro develop` with no target and no selector is not a bulk " &
       "operation: pass --all/--direct/--indirect/--transitive-of, a " &
       "membership selector, or --list to query the lock set")
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  result.workspaceRoot = workspaceShellFirstRoot(result.workspaceRoot)
 
 proc looksLikeDevelopAllArgs(args: openArray[string]): bool =
   ## The L1 develop-SET form is distinguished by a set-selection flag
@@ -30543,6 +30732,55 @@ const DaemonParentPrewarmEnv* = "REPROBUILD_DAEMON_PARENT_PREWARM"
 proc daemonParentPrewarmEnabled*(): bool =
   getEnv(DaemonParentPrewarmEnv, "1") != "0"
 
+const DaemonRequestValueFlags = ["--tool-provisioning",
+    "--action-cache-root", "--daemon", "--progress", "--progress-bars",
+    "--write-diagnostics", "--show", "--measure", "--log", "--write-benchmark",
+    "--monitor-hosting", "--evidence"]
+  ## The ``repro build`` flags whose BARE spelling consumes the next argument,
+  ## as ``runBuildCommand``'s parser reads them — the daemon parent's two
+  ## request readers (``daemonRequestProjectRoot``,
+  ## ``daemonPrewarmTargetOutputDir``) must skip exactly these to find the
+  ## same target the worker builds. ``--write-report`` and ``--write-stats``
+  ## are NOT here: bare, both are switches (only ``=PATH`` names a path), and
+  ## listing them made a trailing ``--write-report`` raise "requires a value"
+  ## while a leading one swallowed the target.
+
+proc daemonRequestProjectRoot*(rawArgs: openArray[string];
+                               workingDir: string): string =
+  ## The project a daemon-hosted ``repro build`` request is for, derived from
+  ## the request alone — the same target the worker will build: the first
+  ## positional of ``rawArgs`` (``.`` when there is none), resolved against the
+  ## request's ``workingDir``, never the daemon's own. "" when the target does
+  ## not resolve to a project file; the session record then keeps its
+  ## working-directory fallback. Read-only, so it is safe in the daemon parent
+  ## (see ``UserDaemonProjectRootResolver``).
+  var target = ""
+  var i = 0
+  while i < rawArgs.len:
+    let arg = rawArgs[i]
+    if arg == "--work-root" or arg in DaemonRequestValueFlags:
+      discard valueFromFlag(rawArgs, i, arg)
+    elif not arg.startsWith("-") and target.len == 0:
+      target = arg
+    inc i
+  if target.len == 0:
+    target = "."
+  var base = splitTarget(target).base
+  if base.len == 0:
+    base = "."
+  if not base.isAbsolute:
+    if workingDir.len == 0:
+      return ""
+    base = absolutePath(base, workingDir)
+  try:
+    let parsed = parseBuildTarget(base)
+    if not parsed.modulePath.isAbsolute or
+        not fileExists(extendedPath(parsed.modulePath)):
+      return ""
+    projectRootForModule(parsed.modulePath)
+  except CatchableError:
+    ""
+
 proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
                                    workingDir: string;
                                    requestEnvironment: openArray[string]):
@@ -30572,10 +30810,7 @@ proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
       workRoot = valueFromFlag(rawArgs, i, "--work-root")
     elif arg == "--force-rebuild" or arg == "--rebuild" or arg == "--dry-run":
       forceRefresh = true
-    elif arg in ["--tool-provisioning", "--action-cache-root", "--daemon",
-        "--progress", "--progress-bars", "--write-diagnostics", "--show",
-        "--measure", "--write-report", "--log", "--write-benchmark",
-        "--write-stats", "--monitor-hosting", "--evidence"]:
+    elif arg in DaemonRequestValueFlags:
       discard valueFromFlag(rawArgs, i, arg)
     elif not arg.startsWith("-") and target.len == 0:
       # THE FIRST POSITIONAL IS THE TARGET, with no `build` verb to skip.
@@ -30681,6 +30916,11 @@ proc installUserDaemonParentPrewarmer() =
   ## process-global first, which is a separate change.
   setUserDaemonParentPrewarmer(proc(request: UserDaemonBuildRequest): string =
     prewarmDaemonParentBuildCaches(request))
+  # Registered beside the prewarmer because it runs at the same point, in the
+  # same process, under the same read-only rule.
+  setUserDaemonProjectRootResolver(
+    proc(request: UserDaemonBuildRequest): string =
+      daemonRequestProjectRoot(request.rawArgs, request.workingDir))
 
 proc installUserDaemonBuildExecutor() =
   setUserDaemonBuildExecutor(proc(request: UserDaemonBuildRequest;
@@ -30734,6 +30974,31 @@ proc installUserDaemonBuildExecutor() =
       # here to that same constant -- which is the point: it is the value a
       # DIRECT build through the full CLI's prologue would have used too.
       ensureBuiltSourcePackageEnvironment()
+      # M5 rule 3 for a daemon-hosted build: the thin client routed here
+      # without reading the project's lock, so this daemon is the first
+      # reprobuild to see its pins. A project pinned to another reprobuild is
+      # DECLINED (unsupported, fallback allowed): the client then execs its
+      # engine, whose entry hands over. A pinned provider compiler is
+      # published for this request only; the restore list below takes it
+      # back.
+      let pinVerdict = daemonPinVerdict(request.workingDir)
+      if pinVerdict.decline:
+        emit(bekUnsupported, "daemon-hosted build declined: " &
+          pinVerdict.message, true, 64, "warning",
+          "{\"fallbackAllowed\":true,\"reason\":\"project-pin\"}")
+        return 64
+      if pinVerdict.providerNim.len > 0:
+        # The restore list replays in order, so the variable is recorded
+        # only when the request did not already record its pre-session value.
+        var recorded = false
+        for item in previousEnv:
+          if item.key == NimCompilerEnvVar:
+            recorded = true
+        if not recorded:
+          previousEnv.add((key: NimCompilerEnvVar,
+            value: getEnv(NimCompilerEnvVar),
+            present: existsEnv(NimCompilerEnvVar)))
+        putEnv(NimCompilerEnvVar, pinVerdict.providerNim)
       # No provider-nimcache session is derived from the run id. The daemon
       # used to give each build its own nimcache scope so two sessions in one
       # worker could not collide inside the single shared directory; the
@@ -33807,35 +34072,82 @@ proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs): ResolvedProject =
   resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
     "`repro workspace sync`").resolved
 
-proc resolveNamedProjectOrVariant(workspaceRoot, name: string): ResolvedProject =
-  ## RA-27 scoped sync: resolve ONE named project (or variant) from the
-  ## manifest layer so its repo set can scope the participating set. An
-  ## unknown name is a clear, actionable error (Principle 2) naming where
-  ## we looked — the spec's "unknown project name → clear error".
+proc repoPassedAsProjectMessage(name: string): string =
+  "'" & name & "' is a repo, not a project: a positional argument to " &
+    "`repro sync` names a project (or variant, or repo-set). To sync " &
+    "only this repo, run `repro sync --only=" & name & "` (--only takes " &
+    "a comma-separated list; --filter takes a glob)"
+
+proc refuseRepoPassedAsProject(workspaceRoot: string;
+                               scopeProjects: openArray[string]) =
+  ## Up-front form of the refusal in ``resolveNamedProjectOrVariant``, for the
+  ## paths that resolve a positional BEFORE any participating set exists: a
+  ## workspace with no recorded metadata (the positional is the resolution
+  ## target) and ``--mainline`` (which resolves from the first positional).
+  ## Both would otherwise answer with the generic "no repo-set, project or
+  ## variant named" text. A name is refused only when no project, variant or
+  ## repo-set by that name exists AND a repo fragment does, so every name that
+  ## resolved before still resolves identically.
+  let root = manifestsRoot(workspaceRoot)
+  for name in scopeProjects:
+    if fileExists(root / "projects" / (name & ".toml")) or
+        fileExists(root / "variants" / (name & ".toml")) or
+        fileExists(root / repoSetsDirName / (name & ".toml")):
+      continue
+    if fileExists(root / "repos" / (name & ".toml")):
+      raise newException(ValueError, repoPassedAsProjectMessage(name))
+
+proc resolveNamedProjectOrVariant(workspaceRoot, name: string;
+    participatingRepos: openArray[string] = []): ResolvedProject =
+  ## RA-27 scoped sync: resolve ONE named project (or variant, or repo-set)
+  ## from the manifest layer so its repo set can scope the participating set.
+  ## The rungs and their order match ``resolveWorkspaceProjectShared``, so a
+  ## name the workspace's own resolution accepts is never refused here.
+  ##
+  ## An unknown name is a clear, actionable error (Principle 2) naming where
+  ## we looked. When the name is not a project but IS a repo participating in
+  ## this workspace, the error names the spelling that does what was meant —
+  ## ``--only=<repo>`` — rather than the generic unknown-project text: the
+  ## documented way to scope a force-push migration used to be ``repro ws sync
+  ## <repo>``, which never worked. The positional is deliberately NOT
+  ## reinterpreted as a repo selector: several names are both a project and a
+  ## repo, and a word whose meaning flips the day a manifest defines a project
+  ## by that name would silently widen the sweep (CLI/sync.md, Summary).
   let manifestsRoot = manifestsRoot(workspaceRoot)
   let projectFile = manifestsRoot / "projects" / (name & ".toml")
   let variantFile = manifestsRoot / "variants" / (name & ".toml")
+  let repoSetFile = manifestsRoot / repoSetsDirName / (name & ".toml")
   if fileExists(projectFile):
     return resolveProject(projectFile)
   if fileExists(variantFile):
     return resolveVariant(variantFile)
+  if fileExists(repoSetFile):
+    return resolveRepoSet(repoSetFile)
+  if name in participatingRepos or
+      fileExists(manifestsRoot / "repos" / (name & ".toml")):
+    raise newException(ValueError, repoPassedAsProjectMessage(name))
   raise newException(ValueError,
     "unknown project '" & name & "' passed to `repro workspace sync` " &
-      "(no `projects/" & name & ".toml` or `variants/" & name &
-      ".toml` under '" & manifestsRoot &
+      "(no `projects/" & name & ".toml`, `variants/" & name &
+      ".toml` or `" & repoSetsDirName & "/" & name & ".toml` under '" &
+      manifestsRoot &
       "'); run `repro workspace sync` with no project to sync the whole " &
-      "workspace, or pass a known project name")
+      "workspace, pass a known project name, or select repos with " &
+      "--only / --filter")
 
 proc scopeRepoPathSet(workspaceRoot: string;
-    scopeProjects: openArray[string]): HashSet[string] =
+    scopeProjects: openArray[string];
+    participatingRepos: openArray[string] = []): HashSet[string] =
   ## The union of repo ``path`` values declared by the named projects.
   ## ``executeWorkspaceSync`` filters the workspace's participating repo
   ## set to this union — the resolver already knows project→repos, so a
   ## scoped sync is exactly "keep only repos that belong to a named
-  ## project". An unknown name raises (see ``resolveNamedProjectOrVariant``).
+  ## project". An unknown name raises (see ``resolveNamedProjectOrVariant``);
+  ## ``participatingRepos`` lets that error recognise a repo name.
   result = initHashSet[string]()
   for name in scopeProjects:
-    let proj = resolveNamedProjectOrVariant(workspaceRoot, name)
+    let proj = resolveNamedProjectOrVariant(workspaceRoot, name,
+      participatingRepos)
     for repo in proj.repos:
       result.incl(repo.path)
 
@@ -38318,7 +38630,11 @@ proc narrowSyncRepoSet(args: WorkspaceSyncArgs;
   ## there is no longer a place to apply two of them.
   result = repos
   if args.scopeProjects.len > 0:
-    let scopePaths = scopeRepoPathSet(workspaceRoot, args.scopeProjects)
+    var repoNames: seq[string]
+    for repo in repos:
+      repoNames.add(repo.name)
+    let scopePaths = scopeRepoPathSet(workspaceRoot, args.scopeProjects,
+      repoNames)
     var kept: seq[ResolvedRepo]
     for repo in result:
       if repo.path in scopePaths:
@@ -39639,6 +39955,38 @@ proc runMainlineSyncCommand(parsed: WorkspaceSyncArgs): int =
       stdout.writeLine(line)
   report.exitCode
 
+const WorkspaceSyncUsage = """usage: repro sync [<project>...] [options]
+       repro workspace sync [<project>...] [options]
+
+Fetch every selected repo and fast-forward it toward its own current-branch
+upstream; clone declared repos that are missing. A <project> positional (a
+project, variant or repo-set name) scopes the sync to that project's repos.
+To scope to individual repos use --only / --except / --filter.
+
+selection:
+  --only=a,b            only the named repos (exact names)
+  --except=a,b          drop the named repos
+  --filter=GLOB         repos whose name matches GLOB
+  --tags=t,-u           by manifest tag (a leading '-' excludes)
+reconciliation:
+  --mainline            reconcile toward each repo's manifest-declared branch
+  --rebase | --merge    how --mainline integrates a diverged branch
+  --rebase-on-force-push
+                        replay local commits onto a rewritten upstream
+  --force-sync          overwrite divergent/dirty checkouts (confirms)
+  --yes, --force        skip the --force-sync confirmation
+execution:
+  --jobs N, -j N        default parallelism for fetch and checkout
+  --jobs-network N      parallel fetches (default 8)
+  --jobs-checkout N     parallel checkouts (default: CPU count)
+  --dry-run             print the plan and exit; mutates nothing
+  --json                one machine-readable document on stdout
+  --write-report[=PATH] persist the report as sync-report.json
+  --verbose, -v         include raw per-repo tool output
+  --workspace-root=PATH operate on another workspace
+  --tool-provisioning=path|nix|tarball|scoop
+"""
+
 proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ## ``repro workspace sync [<project>...] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop]
@@ -39693,7 +40041,14 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
   ##         (``dirty`` or ``locally_unpublished``). The operator has
   ##         manual work to do. Distinct from exit-1 ("sync blew up")
   ##         so scripts can tell the two apart.
+  if "--help" in args or "-h" in args:
+    # Explicit help prints usage to stdout and exits 0 (``wantsHelp``
+    # convention). It used to be refused as "unsupported `repro workspace
+    # sync` flag: --help".
+    stdout.write(WorkspaceSyncUsage)
+    return 0
   let parsed = parseWorkspaceSyncArgs(args)
+  refuseRepoPassedAsProject(parsed.workspaceRoot, parsed.scopeProjects)
   # ``--mainline`` reconciles toward each repo's manifest-declared branch
   # instead of its own upstream. Different target, different decision table,
   # so a separate executor — see the block comment above it.
@@ -49505,6 +49860,45 @@ proc developSetClosure(repos: seq[ResolvedRepo];
       for dep in byName[name].depends:
         if dep.len > 0 and dep notin result:
           pending.add(dep)
+
+proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
+    workspaceRoot: string; siblings: seq[ResolvedRepo]] =
+  ## The develop-set siblings of the repo at ``repoRoot`` as the enclosing
+  ## workspace MANIFEST declares them: every repo reachable from it through
+  ## ``depends`` edges (``developSetClosure``), excluding the repo itself, in
+  ## name order.
+  ##
+  ## ``resolved`` is false when there is no manifest membership to consult —
+  ## no enclosing workspace, a workspace that is the repo itself (a standalone
+  ## committed-lock repo, whose membership is DERIVED from the very lock being
+  ## refreshed and so cannot be an independent declaration), a membership that
+  ## fails to resolve, or one that does not contain this repo. The caller then
+  ## falls back to the committed lock's own pins rather than treating "could
+  ## not look" as "declares nothing".
+  result = (false, "", @[])
+  let root = absolutePath(repoRoot)
+  let ws = enclosingWorkspaceRoot(root)
+  if ws.len == 0 or cmpPaths(absolutePath(ws), root) == 0:
+    return
+  var repos: seq[ResolvedRepo]
+  try:
+    repos = resolveWorkspaceProjectShared(ws, "", "lock refresh").resolved.repos
+  except CatchableError:
+    return
+  var selfName = ""
+  for r in repos:
+    if cmpPaths(absolutePath(ws / r.path), root) == 0:
+      selfName = r.name
+      break
+  if selfName.len == 0:
+    return
+  let closure = developSetClosure(repos, selfName)
+  var siblings: seq[ResolvedRepo] = @[]
+  for r in repos:
+    if r.name != selfName and r.name in closure:
+      siblings.add(r)
+  siblings.sort(proc(a, b: ResolvedRepo): int = cmp(a.name, b.name))
+  result = (true, absolutePath(ws), siblings)
 
 proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
     pushedRepoName: string): seq[string] =
@@ -64370,19 +64764,15 @@ proc siblingVariantDeclarations(checkout: string):
   ## no variants emits no solver inputs at all, which is the same `none` a
   ## failed provider compile returns.
   ##
-  ## KNOWN LIMITATION, recorded rather than papered over and pinned by
-  ## `a recipe with no build: block cannot be asked` in
-  ## `t_develop_override_records_the_identity_it_replaced`: a sibling whose
-  ## recipe has neither a `build:` nor a `devEnv:` body contributes nothing,
-  ## even when it declares variants. `buildCode` (`macros_b.nim`) emits the
-  ## provider's `runPackageProvider` entry point only for a recipe with one of
-  ## those bodies, so the compiled binary runs its module init — emitting the
-  ## solver inputs — and exits without answering the protocol, and the probe
-  ## discards the emission along with the failed request. Closing it means
-  ## teaching that probe to keep inputs the provider demonstrably wrote before
-  ## the request failed, which is a change to `repro lock refresh`'s source of
-  ## truth and belongs to its own milestone. A develop sibling is a project you
-  ## build, so the shape that misses out is the rare one.
+  ## A RECIPE WITH NO `build:` OR `devEnv:` BODY IS ASKED TOO. `buildCode`
+  ## (`macros_b.nim`) emits the provider's `runPackageProvider` dispatcher
+  ## only for a recipe with one of those bodies, so such a binary cannot
+  ## answer a protocol request. It does not need to: its module init emits
+  ## the solver inputs, and since 0e7146a92 the probe runs a declaration-only
+  ## module's initialiser directly instead of sending it a request. This was
+  ## recorded here as a known limitation until then; it is now pinned the
+  ## other way round by `a recipe with no build: block is asked through its
+  ## initialiser` in `t_develop_override_records_the_identity_it_replaced`.
   result = @[]
   if checkout.len == 0:
     return
@@ -66771,17 +67161,10 @@ proc flakeOverrideWorkspaceRoot(explicit: string): string =
   ## ``.repro/workspace.toml`` first, and only fall back to the generic marker
   ## when no ancestor carries one (the manifest-optional, single-repo case that
   ## MO-2 marker exists for).
-  if explicit.len > 0:
-    return absolutePath(explicit)
-  var dir = absolutePath(getCurrentDir())
-  while true:
-    if fileExists(workspaceTomlPath(dir)):
-      return dir
-    let parent = parentDir(dir)
-    if parent.len == 0 or parent == dir:
-      break
-    dir = parent
-  resolveInvokedWorkspaceRoot("")
+  ## The ascent itself now lives in ``workspaceShellFirstRoot``, which
+  ## ``repro develop`` also uses. Keeping two copies is what let the two verb
+  ## families disagree about what "here" means from one directory.
+  workspaceShellFirstRoot(explicit)
 
 # ``flakeSiblingIsGitCheckout`` lives in
 # ``repro_dsl_stdlib/foreign_env/flake.nim`` beside the override-URL builder
@@ -73131,6 +73514,13 @@ proc runThinApp*(programName: string): int =
   ## reads it.
   if programName == "repro":
     markRunningImageAsReproCli()
+    # M5 rules 1 and 3: the project's pins are applied BEFORE dispatch, so a
+    # hand-over passes on the caller's own argv and environment and no verb
+    # has read a recipe this image is not pinned to. See
+    # `repro_cli_support/project_pins`.
+    let pinned = applyProjectPinsAtEntry(commandLineParams())
+    if pinned.handled:
+      return pinned.exitCode
   result = runThinAppDispatch(programName)
   flushStagedFailureReport(result)
 

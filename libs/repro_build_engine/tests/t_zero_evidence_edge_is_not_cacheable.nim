@@ -171,7 +171,9 @@ type Fixture = object
   rmdfPath: string
   runLogPath: string
   observedPath: string
+  secondObservedPath: string
   makeDepfilePath: string
+  secondDepfilePath: string
   pathSetPath: string
 
 proc runCount(f: Fixture): int =
@@ -196,9 +198,14 @@ proc makeFixture(name: string): Fixture =
     rmdfPath: workRoot / "observed.iomon",
     runLogPath: workRoot / "runs.log",
     observedPath: workRoot / "observed.txt",
+    secondObservedPath: workRoot / "observed-2.txt",
     makeDepfilePath: workRoot / "deps.d",
+    secondDepfilePath: workRoot / "extra-deps.d",
     pathSetPath: workRoot / "converted.pathset")
   writeFile(result.observedPath, "generation-1\n")
+  # The second prerequisite exists for the same reason the first does: a
+  # missing prerequisite is a different failure than the ones under test.
+  writeFile(result.secondObservedPath, "generation-1\n")
 
 proc writeRmdf(f: Fixture; records: seq[MonitorRecord]) =
   ## io-mon's own canonical encoder, so the production reader validates
@@ -361,6 +368,68 @@ proc reportValidatedByMonitorEdge(f: Fixture; id: string;
           formatName: DependencyFormatName(MakeDepfileFormatName),
           outputs: @[ExpectedDependencyFile(
             logicalName: "deps", path: f.makeDepfilePath, required: true)],
+          completeness: decComplete)]),
+    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+  result.monitorDepfile = f.rmdfPath
+
+proc twoReportsValidatedByMonitorEdge(f: Fixture; id: string;
+                                      firstHeader, secondHeader: string;
+                                      rootImage = RootImage): BuildAction =
+  ## THE STATE THAT SEPARATES THE TWO SPELLINGS OF `depfileObservedNothing`,
+  ## and it needs no production seam to reach: one edge, one recognized report
+  ## spec, TWO declared depfiles — because
+  ## `RecognizedDependencyReportSpec.outputs` is a `seq` and `collectEvidence`
+  ## calls `addPathSet(recognized = true)` once per resolved file, folding
+  ## every one of them into the SAME `PathSetEvidence`. So one edge's
+  ## `evidenceProvenance` can carry `evcToolReportedDepfile` AND
+  ## `evcDeclarationDerivedDepfile` at once.
+  ##
+  ## WHY THAT MATTERS. `addPathSet` marks exactly one of the two per file, so
+  ## a single-depfile edge only ever reaches a set with one of them, and "is
+  ## the observer present" and "is the synthesiser absent" answer such a set
+  ## IDENTICALLY. The 2026-09-24 review's Z1 mutation swapped them and
+  ## survived 28 OK / 0 FAILED for precisely that reason. A mixed set is where
+  ## they disagree: presence-of-observer publishes (something did look at the
+  ## action; a synthesised report standing beside the observation does not
+  ## unhappen it), absence-of-synthesiser refuses.
+  ##
+  ## `firstHeader` / `secondHeader` are the COMMENT LINES written into the two
+  ## depfiles, and they are the ONLY thing the caller varies between its two
+  ## arms: the rules under them, the declared report spec, the capture and the
+  ## edge are identical either way. Each depfile names its own prerequisite so
+  ## that a fold that did not happen is visible in `depfileInputs` rather than
+  ## absorbed by a deduplication. The generator stamp is a comment exactly as
+  ## `unmonitorableActionDepfileText` writes it; the round trip against that
+  ## REAL writer's output is
+  ## `tests/unit/t_unmonitorable_action_depfile_guards.nim`, so this needle
+  ## cannot drift from what the DSL emits without something reddening.
+  ##
+  ## The capture stays empty, so the other four terms of the guard are true
+  ## and the publish turns on this term alone.
+  result = action(id,
+    [rootImage, "-c", "echo ran >> " & f.runLogPath &
+      "; printf '" & firstHeader & "out: " & f.observedPath & "\\n' > " &
+      f.makeDepfilePath &
+      "; printf '" & secondHeader & "out: " & f.secondObservedPath &
+      "\\n' > " & f.secondDepfilePath],
+    cwd = f.workRoot,
+    inputs = [],
+    outputs = [],
+    cacheable = true,
+    weakFingerprint = weak(id),
+    actionCachePolicy = ffpHybrid,
+    dependencyPolicy = DependencyGatheringPolicy(
+      kind: dgRecognizedFormatValidatedByMonitor,
+      completeness: decComplete,
+      recognizedReports: @[
+        RecognizedDependencyReportSpec(
+          formatName: DependencyFormatName(MakeDepfileFormatName),
+          outputs: @[
+            ExpectedDependencyFile(
+              logicalName: "deps", path: f.makeDepfilePath, required: true),
+            ExpectedDependencyFile(
+              logicalName: "extra-deps", path: f.secondDepfilePath,
+              required: true)],
           completeness: decComplete)]),
     governingLockIdentity = lockIdentityOutsideSolvedGraph())
   result.monitorDepfile = f.rmdfPath
@@ -1399,6 +1468,101 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
           r0.evidence.evidenceProvenance
         check not diagnosed.contains("no observation of any kind")
         check f.hasRecord(patched)
+
+  test "a tool-written depfile beside a declaration-derived one is still an observation":
+    ## DA-1f Z1 — THE POLARITY OF `depfileObservedNothing`, which every case
+    ## above this one leaves ungraded.
+    ##
+    ## WHAT WAS OWED. The 2026-09-24 review inverted the predicate from a
+    ## presence test into an absence test —
+    ##
+    ##   -  evcToolReportedDepfile notin col.evidence.evidenceProvenance
+    ##   +  evcDeclarationDerivedDepfile in col.evidence.evidenceProvenance
+    ##
+    ## — and got *28 OK / 0 FAILED*. The mutation SURVIVED. The reason is that
+    ## `addPathSet` marks exactly one of the two contributors per depfile, so
+    ## every case above reaches a provenance set carrying exactly one of them,
+    ## and on such a set "an observer is present" and "no synthesiser is
+    ## present" are the SAME BOOLEAN. The suite could not tell the fail-closed
+    ## construction the milestone claims from the fail-open convention it says
+    ## it is not.
+    ##
+    ## WHICH POLARITY IS THE SAFE ONE, TRACED RATHER THAN ASSUMED. The
+    ## predicate has exactly one caller — the fifth term of the zero-evidence
+    ## guard in `applyMonitorEvidenceStatus` — and `true` there is the
+    ## REFUSAL: `zeroEvidenceDiagnostic`, `disableCacheHits`,
+    ## `cirEmptyEvidence`, so the action succeeds and publishes nothing.
+    ## `false` lets the record through. The shipped presence test answers
+    ## `true` for an UNMARKED writer (the fail-closed answer, a lost hit); the
+    ## absence spelling answers `false` and buys that writer a record for an
+    ## action nothing observed.
+    ##
+    ## WHY THIS STATE AND NOT A NEW PRODUCTION SEAM. The unmarked state the
+    ## review looked for is unreachable — `addPathSet` is the only collect-path
+    ## writer into `depfileInputs` and it always marks one of the two — and
+    ## punching a hole in production so a test can reach it would trade a
+    ## grading gap for a real one. The state where the two spellings DISAGREE
+    ## is not the unmarked one: it is the set carrying BOTH marks, and
+    ## `RecognizedDependencyReportSpec.outputs` being a `seq` already reaches
+    ## it through production types alone. `collectEvidence` folds every
+    ## resolved report file into the same `PathSetEvidence`, so an edge that
+    ## declares one `gcc -MD`-style depfile and one
+    ## `fs.unmonitorableActionDepfile` gets both contributors — which is also
+    ## the recipe an author writes when a compile edge has extra inputs no
+    ## tool reports.
+    ##
+    ## THE PAIR, and this time the two arms are a REFUSAL and an ACCEPTANCE of
+    ## the same shape rather than of two shapes: two declared depfiles either
+    ## way, same edge, same empty capture, and only whether ONE of the two
+    ## comments carries the generator stamp differs.
+    ##
+    ##   * both declaration-derived → nothing observed → no publish. Both
+    ##     spellings agree here, which is what makes this the control: it
+    ##     stays green under the mutation and proves the acceptance below is
+    ##     not simply an edge that publishes unconditionally.
+    ##   * one tool-written, one declaration-derived → something observed →
+    ##     PUBLISH. This is the arm the mutation reddens.
+    const DeclarationDerivedHeader =
+      "# generated by unmonitorableActionDepfile - this action is not\\n"
+    const ToolWrittenHeader =
+      "# generated by a tool that opened these files\\n"
+    for observationPresent in [false, true]:
+      let name = "da1f-z1-" &
+        (if observationPresent: "mixed" else: "both-declared")
+      let f = makeFixture(name)
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord()])
+      let act = f.twoReportsValidatedByMonitorEdge("da1f/z1/" & name,
+        firstHeader =
+          (if observationPresent: ToolWrittenHeader
+           else: DeclarationDerivedHeader),
+        secondHeader = DeclarationDerivedHeader)
+      let first = runBuild(graph([act]), testConfig(f.cacheRoot))
+      let r0 = first.byId(act.id)
+      checkpoint(name & ": depfileInputs=" & $r0.evidence.depfileInputs &
+        " provenance=" & $r0.evidence.evidenceProvenance &
+        " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+      check r0.status == asSucceeded
+
+      # THE DENOMINATOR. Both reports really were resolved and folded, so the
+      # arms below are comparing two provenance sets over the same channel
+      # and not one fold against a fold that never happened.
+      check f.observedPath in r0.evidence.depfileInputs
+      check f.secondObservedPath in r0.evidence.depfileInputs
+      check evcDeclarationDerivedDepfile in r0.evidence.evidenceProvenance
+
+      let diagnosed = r0.evidence.diagnostics.join(" ")
+      if observationPresent:
+        # THE MIXED SET — the only state in this file where the presence and
+        # absence spellings disagree. `evcToolReportedDepfile` is what makes
+        # it mixed, and it is asserted rather than inferred from the publish.
+        check evcToolReportedDepfile in r0.evidence.evidenceProvenance
+        check not diagnosed.contains("no observation of any kind")
+        check f.hasRecord(act)
+      else:
+        check evcToolReportedDepfile notin r0.evidence.evidenceProvenance
+        check diagnosed.contains("no observation of any kind")
+        check not f.hasRecord(act)
 
 suite "DA-1f: a backend profile that claims nothing is not a claim of completeness":
   ## ITEM 5 — the asymmetry, settled. `monitorProfileEvidenceComplete` used to

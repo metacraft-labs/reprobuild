@@ -26,6 +26,9 @@ elif defined(posix):
   # instead — see ``beginMonitorSpawnContext``. None of them starts a child.
   from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid, Mode, umask,
     dup2, close, fcntl, F_GETFD, F_SETFD, FD_CLOEXEC, F_DUPFD_CLOEXEC
+  # Endpoint ownership for Dev-Env-Warm-Entry.md §3 (`endpointRootOwned`).
+  # Metadata reads only; nothing here starts a child.
+  from std/posix import Stat, lstat, S_ISDIR, S_ISLNK, S_ISSOCK
 
 when defined(posix):
   type
@@ -379,6 +382,27 @@ type
       ## diagnostics so ``repro why`` can answer "why did this keep caching
       ## despite reading randomness?" without the reader having to go and
       ## find the package spec.
+    isolateHostEnvironment*: bool
+      ## Dev-Env-Warm-Entry.md §2 — launch the action from its DECLARED
+      ## environment alone: nothing from the engine's own environment reaches
+      ## it except what `env` declares and what `envPassthrough` names (which
+      ## is resolved from the host by name, as before). Negative-sense, so an
+      ## action that does not ask keeps the historical overlay-on-inherited
+      ## launch. Mixed into the weak fingerprint when set: an isolated launch
+      ## is a different environment from an inheriting one.
+    entropyBlessedImages*: seq[EntropyBlessedTool]
+      ## Dev-Env-Warm-Entry.md §4 — an entropy blessing scoped to THIS action
+      ## AND one image: entropy records whose emitting image matches one of
+      ## these keys (``entropyBlessingImageKey``) are excused for this action
+      ## only.
+      ##
+      ## Narrower than both existing scopes. ``nonDeterminism`` excuses every
+      ## record in the action's tree, including code the action did not
+      ## vouch for (for the dev-env introspection edge, every recipe's
+      ## `devEnv:` body). ``EntropyBlessedTools`` excuses an image in EVERY
+      ## action that runs it, on evidence gathered for some of them. A record
+      ## from any other image in the tree still withholds the entry, so the
+      ## unanimity rule of the per-image check is unchanged.
     determinism*: Option[EdgeDeterminism]
       ## ``Edge-Determinism-And-Soft-Rebuild.md`` §2 — the edge's declared
       ## determinism class, from the tool's ``cli:`` block or a per-edge
@@ -421,6 +445,15 @@ type
       ## ``repro why``, the codetracer ``repro test`` integration)
       ## identify framework-specific outputs by interface tag from
       ## this list rather than re-parsing the DSL.
+    fixedOutput*: bool
+      ## Cache-Scope P3.4 — a FIXED-OUTPUT action (BuildXL's download pip,
+      ## Nix's fixed-output derivation): its outputs are determined by
+      ## content hashes it DECLARES and VERIFIES — a tarball checked against
+      ## a sha256, a vendored closure checked against lockfile integrity —
+      ## not by what the network happened to return. It stays locally
+      ## non-cacheable (it reaches the network), but its portable record is
+      ## keyed by its static description and declared inputs alone, so the
+      ## portable lookup can resolve it without running it.
     publishToBinaryCache*: bool
       ## M9.L.4-refactor Step A. When ``true`` AND the action
       ## completes successfully AND ``cacheEntryIdentity.isSome`` AND
@@ -1055,6 +1088,14 @@ type
     ## synthesising one is absent — is fail-closed against a writer that
     ## forgot to mark itself. `depfileObservedNothing` is written that way and
     ## is the only such consumer today.
+    ##
+    ## WHICH MEMBERS COUNT AS OBSERVING IS NOT A JUDGEMENT ANY CONSUMER MAKES
+    ## FOR ITSELF. `DepfileObservingContributors` classifies every member of
+    ## this enum with an exhaustive `case`, so a member added below WILL NOT
+    ## COMPILE until it has been classified there. That is deliberately a
+    ## compile error and not a test: the alternative is a set literal a new
+    ## member is silently missing from, where the omission is
+    ## indistinguishable from a decision.
     ##
     ## DO NOT READ THAT AS A PROPERTY OF THE GUARD. It is a property of ONE of
     ## the guard's five terms. The other four — `monitorObservedNoReads` and
@@ -2490,6 +2531,19 @@ proc keyedOnActionEnvironment*(fingerprint: ContentDigest;
   framed.add($text.len & "\x1f" & text & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+proc keyedOnEnvironmentIsolation*(fingerprint: ContentDigest;
+                                  isolate: bool): ContentDigest =
+  ## The IDENTITY for an inheriting action, so no existing fingerprint moves.
+  ## An isolated one is keyed apart: the same declared environment launched
+  ## with and without the host's environment underneath is not the same
+  ## launch.
+  if not isolate:
+    return fingerprint
+  var framed = "action-environment-isolated\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
 proc monitorPayloadArgIndex(argv: openArray[string]): int
 
 proc executedImageArgvIndex*(argv: openArray[string]): int =
@@ -2699,6 +2753,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              dependencyPolicy = automaticMonitorGatheringPolicy();
              nonDeterminism = ndpUnblessed;
              nonDeterminismJustification = "";
+             isolateHostEnvironment = false;
+             entropyBlessedImages: openArray[EntropyBlessedTool] = [];
              determinism = none(EdgeDeterminism);
              cacheRetention = forever();
              env: openArray[string] = [];
@@ -2748,7 +2804,9 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     # the two halves had never been connected.
     weakFingerprint: keyedOnGoverningLock(
       keyedOnContentAddressedToolRoot(
-        keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
+        keyedOnEnvironmentIsolation(
+          keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
+          isolateHostEnvironment),
         argv),
       governingLockIdentity),
     actionCachePolicy: actionCachePolicy,
@@ -2758,6 +2816,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     dependencyPolicy: effectiveDependencyPolicy,
     nonDeterminism: nonDeterminism,
     nonDeterminismJustification: nonDeterminismJustification,
+    entropyBlessedImages: @entropyBlessedImages,
+    isolateHostEnvironment: isolateHostEnvironment,
     # Edge-Determinism-And-Soft-Rebuild.md §2. `none` + `forever()` is the
     # unlabelled default: every existing call site keeps the exact behaviour
     # it had, writes no determinism sidecar, and takes the same cache path.
@@ -4398,6 +4458,15 @@ type
       ## and — this matters — process-SETTABLE via `prctl(PR_SET_NAME)`. It
       ## narrows accidents, not attackers.
     daUid
+    daEndpointRoot
+      ## Dev-Env-Warm-Entry.md §3 — the ENDPOINT, not the process, is the
+      ## identity: the socket and every directory on its path are owned by
+      ## root and writable by no one else, and the kernel reports the
+      ## accepting peer as uid 0. Only root can bind such a path. Declared as
+      ## `endpoint-owner = root`. Trust from this assertion is keyed on the
+      ## endpoint and never on a pid, which is what makes it usable on a
+      ## socket-activated host, where the peer of every service is the
+      ## activator (pid 1).
       ## The peer's uid as `SO_PEERCRED` reports it. Un-forgeable: the kernel
       ## stamps it at connect time and no userspace end contributes to it.
 
@@ -4627,6 +4696,101 @@ proc trustedDaemonRegistry*(): seq[TrustedDaemonPeer] =
   ## `collectEvidence` grades an action against; the two accessors above exist
   ## so a test can ask about one origin without the other answering for it.
   derivedTrustedDaemons
+
+type
+  TrustedEndpoint* = object
+    ## Dev-Env-Warm-Entry.md §3 — a trust fact about an ENDPOINT. Produced
+    ## only by a passing `daEndpointRoot` check, re-validated at grading time,
+    ## and matched against the path a monitored client DIALLED (io-mon's
+    ## `mrIpcConnect.path`), never against a pid.
+    endpoint*: string
+      ## As declared, which is how clients dial it.
+    canonical*: string
+      ## Symlinks resolved; a client that dials the canonical spelling is the
+      ## same connection.
+    name*: string
+    contribution*: TrustedDaemonContribution
+    source*: string
+
+var endpointTrustedDaemons: seq[TrustedEndpoint]
+
+proc trustedEndpointRegistry*(): seq[TrustedEndpoint] =
+  endpointTrustedDaemons
+
+proc forgetTrustedEndpoints*() =
+  endpointTrustedDaemons.setLen(0)
+
+proc endpointRootOwned*(endpoint: string):
+    tuple[ok: bool, canonical, detail: string] =
+  ## Does only root control `endpoint`? True when every component of the path
+  ## AS DECLARED and of its symlink-resolved form is owned by uid 0, every
+  ## directory among them is writable by no one but its owner, and the final
+  ## component is a socket. Whoever can replace any component can put their
+  ## own listener at the path, so each one is checked, not just the socket.
+  ##
+  ## A sticky world-writable directory (`/tmp`) is refused like any other
+  ## group/other-writable one: the sticky bit stops deletion of a root-owned
+  ## entry, not creation of a new one at a name root has not taken yet.
+  when defined(posix):
+    proc componentOk(path: string; last: bool): string =
+      var st: Stat
+      if lstat(path.cstring, st) != 0:
+        return path & " does not exist"
+      if st.st_uid != 0:
+        return path & " is owned by uid " & $st.st_uid & ", not root"
+      if S_ISLNK(st.st_mode):
+        return ""
+      if last:
+        if not S_ISSOCK(st.st_mode):
+          return path & " is not a socket"
+        return ""
+      if not S_ISDIR(st.st_mode):
+        return path & " is not a directory"
+      if (int(st.st_mode) and 0o022) != 0:
+        return path & " is writable by group or others"
+      ""
+    proc chainOk(path: string): string =
+      if not path.isAbsolute:
+        return path & " is not absolute"
+      var prefix = "/"
+      let r = componentOk(prefix, false)
+      if r.len > 0:
+        return r
+      var parts: seq[string] = @[]
+      for part in path.split('/'):
+        if part.len > 0:
+          parts.add(part)
+      for i, part in parts:
+        prefix = (if prefix == "/": "/" & part else: prefix & "/" & part)
+        let r2 = componentOk(prefix, i == parts.high)
+        if r2.len > 0:
+          return r2
+      ""
+    let declared = chainOk(endpoint)
+    if declared.len > 0:
+      return (false, "", declared)
+    var canonical = endpoint
+    try:
+      canonical = expandFilename(endpoint)
+    except CatchableError:
+      return (false, "", "cannot resolve " & endpoint)
+    if canonical != endpoint:
+      let resolved = chainOk(canonical)
+      if resolved.len > 0:
+        return (false, "", resolved)
+    (true, canonical, "")
+  else:
+    (false, "", "endpoint ownership is not checkable on this platform")
+
+proc revalidatedTrustedEndpoints*(endpoints: openArray[TrustedEndpoint]):
+    seq[TrustedEndpoint] =
+  ## The endpoints whose ownership still holds, asked now: a directory that
+  ## has since become writable by another user drops the trust before it can
+  ## forgive anything.
+  for trusted in endpoints:
+    let now = endpointRootOwned(trusted.endpoint)
+    if now.ok and now.canonical == trusted.canonical:
+      result.add(trusted)
 
 proc revalidatedTrustedDaemons*(peers: openArray[TrustedDaemonPeer]):
     seq[TrustedDaemonPeer] =
@@ -4927,6 +5091,10 @@ type
     dcoImageMismatch
     dcoProgramMismatch
     dcoUidMismatch
+    dcoEndpointNotRootOwned
+      ## `endpoint-owner = root` was asserted and some component of the path
+      ## (or of its resolved form) is not owned by root, is writable by group
+      ## or others, or the final component is not a socket.
 
   DeclaredDaemon* = object
     ## One parsed `daemons.conf` section. A DECLARATION and nothing more: no
@@ -4961,6 +5129,7 @@ type
     program: string
     verified: set[DaemonAssertion]
     endpoint: string
+    canonicalEndpoint: string
     detail: string
 
   DaemonCheckReport* = object
@@ -5187,7 +5356,8 @@ proc checkDeclaredDaemon*(decl: DeclaredDaemon): DaemonIdentityCheck =
     result.detail = "declaration asserts nothing about the peer; " &
       "'something is listening at this path' is not a check"
     return
-  if not decl.declarationIdentifiesAProgram():
+  if not decl.declarationIdentifiesAProgram() and
+      daEndpointRoot notin decl.assertions:
     result.outcome = dcoNoProgramAssertion
     result.detail = "declaration asserts nothing that identifies the peer's " &
       "program (declare 'image' or 'program'); the §Class 3 branch is a " &
@@ -5233,6 +5403,31 @@ proc checkDeclaredDaemon*(decl: DeclaredDaemon): DaemonIdentityCheck =
     result.outcome = dcoNoPeerCredentials
     result.detail = "unix socket peer credentials are unavailable on this platform"
     return
+  if daEndpointRoot in decl.assertions:
+    # Dev-Env-Warm-Entry.md §3. The identity is the endpoint: only root can
+    # bind it, and the kernel must report the acceptor as uid 0. On a
+    # socket-activated host the acceptor is the activator (pid 1), which is
+    # why this arm establishes nothing about the pid and registers nothing
+    # keyed on it.
+    let owned = endpointRootOwned(decl.endpoint)
+    if not owned.ok:
+      result.outcome = dcoEndpointNotRootOwned
+      result.detail = "endpoint " & decl.endpoint &
+        " is not controlled by root alone: " & owned.detail
+      return
+    if result.uid != 0:
+      result.outcome = dcoUidMismatch
+      result.detail = "the peer accepting at " & decl.endpoint &
+        " runs as uid " & $result.uid & ", not root"
+      return
+    result.canonicalEndpoint = owned.canonical
+    result.verified.incl(daEndpointRoot)
+    if not decl.declarationIdentifiesAProgram():
+      result.outcome = dcoTrusted
+      result.detail = "endpoint " & decl.endpoint & " verified: root-owned " &
+        "path, peer uid 0 (endpoint-keyed; the peer pid " & $result.pid &
+        " is not trusted)"
+      return
   result.identity = processStartIdentity(result.pid)
   if result.identity.len == 0:
     result.outcome = dcoNoKernelIdentity
@@ -5346,8 +5541,23 @@ proc trustDaemonWeChecked*(kind: DeclarableDaemonKind;
   ## The type is the other reason the clauses stay. `DaemonIdentityCheck`'s
   ## zero value is `dcoNotChecked` / `pid = 0` / `verified = {}`, so an un-run
   ## check is refused three times over rather than once.
-  if check.outcome != dcoTrusted or check.pid <= 0 or
-      check.identity.len == 0 or check.verified == {}:
+  if check.outcome != dcoTrusted or check.verified == {}:
+    return false
+  if daEndpointRoot in check.verified:
+    # Dev-Env-Warm-Entry.md §3: endpoint-keyed trust. Never a pid.
+    var known = false
+    for existing in endpointTrustedDaemons:
+      if existing.endpoint == check.endpoint:
+        known = true
+    if not known:
+      endpointTrustedDaemons.add(TrustedEndpoint(
+        endpoint: check.endpoint,
+        canonical: check.canonicalEndpoint,
+        name: daemonKindName(kind),
+        contribution: class3Contribution(kind)))
+    if check.verified == {daEndpointRoot}:
+      return true
+  if check.pid <= 0 or check.identity.len == 0:
     return false
   for existing in derivedTrustedDaemons:
     if existing.pid == check.pid and existing.identity == check.identity and
@@ -5469,6 +5679,12 @@ proc parseDeclaredDaemonSections(text, source: string): seq[DeclaredDaemon] =
       of "program":
         result[current].program = value
         result[current].assertions.incl(daProgram)
+      of "endpoint-owner":
+        if value.toLowerAscii() notin ["root", "0"]:
+          raise newException(DaemonDeclarationError,
+            source & ": endpoint-owner '" & value & "' is not supported; " &
+            "only root-owned endpoints can identify a daemon by path")
+        result[current].assertions.incl(daEndpointRoot)
       of "uid":
         var parsed = 0
         try:
@@ -5481,7 +5697,7 @@ proc parseDeclaredDaemonSections(text, source: string): seq[DeclaredDaemon] =
       else:
         raise newException(DaemonDeclarationError,
           source & ": unknown key '" & event.key & "'. Known keys are " &
-          "socket, image, program, uid.")
+          "socket, image, program, uid, endpoint-owner.")
     of cfgError:
       raise newException(DaemonDeclarationError, source & ": " & event.msg)
 
@@ -5597,6 +5813,9 @@ type
     ## exemption rule and it is io-mon's.
     trusted: HashSet[uint64]
     peers: Table[uint64, TrustedDaemonPeer]
+    endpoints: seq[TrustedEndpoint]
+      ## Dev-Env-Warm-Entry.md §3 — endpoint-keyed trust, re-validated when
+      ## this attribution was built.
       ## The same trust facts keyed by pid, so an exemption can be NAMED and
       ## not merely counted (rule 3). io-mon's loss text identifies the peer by
       ## a bare pid — on Linux `recordIpcConnect` never sets `record.path` for
@@ -5616,8 +5835,8 @@ type
       ## Rule 3 — every exemption is counted, so a daemon that turns out not to
       ## deserve trust leaves a number behind rather than nothing.
 
-proc initMonitorPeerAttribution*(peers: openArray[TrustedDaemonPeer]):
-    MonitorPeerAttribution =
+proc initMonitorPeerAttribution*(peers: openArray[TrustedDaemonPeer];
+    endpoints: openArray[TrustedEndpoint] = []): MonitorPeerAttribution =
   ## Build one action's attribution state from trust FACTS, re-validating each
   ## against the kernel on the way in. Takes the facts rather than a bare pid
   ## set because both consumers need them: io-mon's parameter wants the pids,
@@ -5627,9 +5846,10 @@ proc initMonitorPeerAttribution*(peers: openArray[TrustedDaemonPeer]):
   for peer in revalidatedTrustedDaemons(peers):
     result.trusted.incl(uint64(peer.pid))
     result.peers[uint64(peer.pid)] = peer
+  result.endpoints = revalidatedTrustedEndpoints(endpoints)
 
 proc trustsAnyPeer(attribution: MonitorPeerAttribution): bool =
-  attribution.trusted.len > 0
+  attribution.trusted.len > 0 or attribution.endpoints.len > 0
 
 proc classifyEventLossDetail*(detail: string): MonitorEvidenceStatus =
   ## M9.R.72.3 — spec-graded classification of io-mon eventLoss records.
@@ -5769,6 +5989,12 @@ type
       ## when the text does not parse. See `ipcPeerLossIdentity`.
     peer: uint64
       ## The peer pid the text names, 0 for an unknown (INET) peer.
+    path: string
+      ## The endpoint the client dialled (io-mon records it for AF_UNIX on
+      ## Linux, and for Mach services on macOS). "" when not recorded.
+    peerUid: int
+      ## The accepting peer's uid from SO_PEERCRED, or -1 when the text does
+      ## not carry one (an older io-mon, or a non-AF_UNIX peer).
 
 proc ipcPeerLossIdentity(loss: string): IpcPeerLossIdentity =
   ## Recover io-mon's dedup key, and the peer pid, from a (c)-arm loss text.
@@ -5787,7 +6013,7 @@ proc ipcPeerLossIdentity(loss: string): IpcPeerLossIdentity =
   ## "peerstart=<peerStart> path=<path>"`. `pid`, `peer` and `peerstart` are
   ## whitespace-free decimal tokens, so the first occurrence of each separator
   ## is the real one; `path` is last and may contain anything.
-  result = IpcPeerLossIdentity(key: "", peer: 0)
+  result = IpcPeerLossIdentity(key: "", peer: 0, peerUid: -1)
   if not loss.startsWith(IpcPeerLossDetailPrefix):
     return
   let rest = loss[IpcPeerLossDetailPrefix.len .. ^1]
@@ -5803,8 +6029,21 @@ proc ipcPeerLossIdentity(loss: string): IpcPeerLossIdentity =
   if not (peerAt < startAt and startAt < pathAt):
     return
   let peerText = rest[peerAt + PeerSep.len ..< startAt]
-  let peerStart = rest[startAt + PeerStartSep.len ..< pathAt]
+  var peerStart = rest[startAt + PeerStartSep.len ..< pathAt]
   let path = rest[pathAt + PathSep.len .. ^1]
+  # io-mon writes ` peeruid=<n>` between `peerstart=` and `path=` when the
+  # kernel reported one. Split it out so it never becomes part of the start
+  # time, and so the key below is the same whichever io-mon wrote the text.
+  const PeerUidSep = " peeruid="
+  let uidAt = peerStart.find(PeerUidSep)
+  if uidAt >= 0:
+    let uidText = peerStart[uidAt + PeerUidSep.len .. ^1]
+    peerStart = peerStart[0 ..< uidAt]
+    if uidText.len > 0 and uidText.allCharsInSet({'0' .. '9'}):
+      try:
+        result.peerUid = parseInt(uidText)
+      except ValueError:
+        result.peerUid = -1
   if peerText.len == 0:
     return
   var peer: uint64 = 0
@@ -5813,8 +6052,14 @@ proc ipcPeerLossIdentity(loss: string): IpcPeerLossIdentity =
       return
     peer = peer * 10 + uint64(ord(ch) - ord('0'))
   result.peer = peer
+  result.path = path
+  # Mirrors io-mon's dedup key, which carries the endpoint whenever it is
+  # known: on a socket-activated host every service's peer is pid 1, and a
+  # pid-only key would merge them.
   result.key =
-    if peer != 0: "pid:" & peerText & "@" & peerStart
+    if peer != 0:
+      "pid:" & peerText & "@" & peerStart &
+        (if path.len > 0: "|dest:" & path else: "")
     else: "dest:" & path
 
 proc resolvePeerAttribution(attribution: var MonitorPeerAttribution;
@@ -5912,6 +6157,30 @@ proc resolvePeerAttribution(attribution: var MonitorPeerAttribution;
       remainingKeys.incl(identity.key)
   for loss in attribution.pendingIpcLosses:
     let identity = ipcPeerLossIdentity(loss)
+    # Dev-Env-Warm-Entry.md §3 — endpoint-keyed trust. The loss is attributed
+    # only when the path the client DIALLED is a trusted endpoint (as declared
+    # or resolved) AND the kernel reported the acceptor as uid 0 on this very
+    # connection. io-mon keys the loss per endpoint, so another service behind
+    # the same activator pid is a separate loss that no match here reaches.
+    var endpointMatch = -1
+    if identity.key.len > 0 and identity.peerUid == 0 and
+        identity.path.len > 0:
+      for i, trusted in attribution.endpoints:
+        if identity.path == trusted.endpoint or
+            identity.path == trusted.canonical:
+          endpointMatch = i
+          break
+    if endpointMatch >= 0:
+      let trusted = attribution.endpoints[endpointMatch]
+      inc attribution.attributed
+      evidence.diagnostics.add(
+        "ipc peer attributed to daemon '" & trusted.name & "' by endpoint " &
+        trusted.endpoint & " (root-owned path, peer uid 0 on this " &
+        "connection; checked at declaration and re-validated at grading " &
+        "time) — Dependency-Observation-Attribution.md §Class 3 " &
+        class3BranchText(trusted.contribution) &
+        " (Dev-Env-Warm-Entry.md §3); forgave: " & loss)
+      continue
     let removedByTrust = identity.key.len > 0 and
       identity.key in accountedKeys and identity.key notin remainingKeys
     if not removedByTrust or identity.peer notin attribution.peers:
@@ -5947,6 +6216,56 @@ proc resolvePeerAttribution(attribution: var MonitorPeerAttribution;
         milestone & loss)
   attribution.pendingIpcLosses.setLen(0)
   attribution.ipcRecords.setLen(0)
+
+proc isNtDevicePath(path: string): bool =
+  ## An NT device object — `\Device\NetBT_Tcpip_{...}` (node enumerating
+  ## network interfaces), `\\.\<device>` — rather than a file. It has no
+  ## content to fingerprint and a name that is a fact about this machine's
+  ## hardware, so it is never an input. Named pipes are handled by their IPC
+  ## records (`isNamedPipeOpen`), which also carry the peer.
+  let p = path.replace('/', '\\')
+  (p.len > 8 and p[0 .. 7].toLowerAscii() == "\\device\\") or
+    (p.len > 4 and p.startsWith("\\\\.\\") and
+     not p.toLowerAscii().startsWith("\\\\.\\pipe\\"))
+
+proc withoutExtendedLengthPrefix(path: string): string =
+  ## `\\?\M:\x` and `M:\x` are one file. io-mon records the spelling the
+  ## program used, and one process opens a path both ways: npm's
+  ## delete-by-rename WRITES `\\?\...\index.js.DELETE.<id>` and later PROBES
+  ## `...\index.js.DELETE.<id>`, so the self-write filter, which compares
+  ## spellings, kept the probe as an input and every run observed new random
+  ## names. `\\?\UNC\host\share` is `\\host\share`.
+  if path.len > 8 and path.startsWith("\\\\?\\UNC\\"):
+    "\\\\" & path[8 .. ^1]
+  elif path.len > 4 and path.startsWith("\\\\?\\"):
+    path[4 .. ^1]
+  else:
+    path
+
+proc isNamedPipeOpen(record: MonitorRecord): bool =
+  ## io-mon's classification of an open that reached a NAMED PIPE (a node /
+  ## libuv IPC channel, a daemon's pipe), emitted ON TOP OF the file record
+  ## the same open produced. The NT arm records that file record with its
+  ## `\??\` prefix stripped, so `\??\pipe\uv\<id>-<pid>` arrives as the
+  ## bare `pipe\uv\<id>-<pid>` and would otherwise be read as a RELATIVE file
+  ## under the action's cwd: a per-process name, so no two runs of the same
+  ## action would ever observe the same inputs. The IPC record carries the
+  ## very same path, so it identifies which file records were really pipes.
+  record.kind == mrIpcConnect and record.detail.startsWith("connect named-pipe")
+
+proc dropNamedPipeOpens(evidence: var PathSetEvidence;
+                        pipes: HashSet[string]) =
+  ## A pipe is a channel, not a file: its peer is graded by the IPC
+  ## attribution, and its "path" is not an input or an output.
+  if pipes.len == 0:
+    return
+  proc withoutPipes(paths: seq[string]): seq[string] =
+    for path in paths:
+      if path notin pipes:
+        result.add(path)
+  evidence.monitorReads = withoutPipes(evidence.monitorReads)
+  evidence.monitorProbes = withoutPipes(evidence.monitorProbes)
+  evidence.monitorWrites = withoutPipes(evidence.monitorWrites)
 
 proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
                           evidence: var PathSetEvidence;
@@ -6080,8 +6399,8 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   else:
     discard
 
-  let materialized = materialPath(cwd, record.path)
-  if materialized.isVolatileMonitorPath():
+  let materialized = materialPath(cwd, withoutExtendedLengthPrefix(record.path))
+  if materialized.isVolatileMonitorPath() or materialized.isNtDevicePath():
     return
   case record.kind
   of mrFileRead:
@@ -6463,16 +6782,20 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
   # streaming read exists so a 97k-record depfile is not materialized, and
   # grading its stamps must not undo that.
   var profileRecords: seq[MonitorRecord] = @[]
+  var pipes = initHashSet[string]()
   try:
     for record in streamMonitorDepFileRecords(path,
         defaultMonitorDepFileReaderOptions()):
       if record.kind == mrBackendProfile:
         profileRecords.add(record)
+      if record.isNamedPipeOpen:
+        pipes.incl(materialPath(cwd, withoutExtendedLengthPrefix(record.path)))
       foldOneMonitorRecord(record, cwd, evidence, seen, result, attribution)
   except CatchableError:
     attribution.pendingIpcLosses.setLen(0)
     attribution.ipcRecords.setLen(0)
     raise
+  dropNamedPipeOpens(evidence, pipes)
   resolvePeerAttribution(attribution, evidence, result)
   result = worseMonitorStatus(result,
     gradeCaptureScope(profileRecords, evidence, required))
@@ -6526,10 +6849,14 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
   ## half of production does not execute.
   result = mesComplete
   var profileRecords: seq[MonitorRecord] = @[]
+  var pipes = initHashSet[string]()
   for record in records:
     if record.kind == mrBackendProfile:
       profileRecords.add(record)
+    if record.isNamedPipeOpen:
+      pipes.incl(materialPath(cwd, withoutExtendedLengthPrefix(record.path)))
     foldOneMonitorRecord(record, cwd, evidence, seen, result, attribution)
+  dropNamedPipeOpens(evidence, pipes)
   resolvePeerAttribution(attribution, evidence, result)
   result = worseMonitorStatus(result,
     gradeCaptureScope(profileRecords, evidence, required))
@@ -6702,9 +7029,20 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
     var blockingTools: seq[string] = @[]
     for observation in observations:
       let blessing = entropyBlessedTool(observation.image)
+      var actionBlessing = none(EntropyBlessedTool)
+      if blessing.isNone and observation.image.len > 0:
+        let key = entropyBlessingImageKey(observation.image)
+        for scoped in action.entropyBlessedImages:
+          if key.len > 0 and scoped.image == key:
+            actionBlessing = some(scoped)
+            break
       if blessing.isSome:
         excused.add(observation.source & " from " & blessing.get.image &
           " (" & observation.image & ")")
+      elif actionBlessing.isSome:
+        excused.add(observation.source & " from " & actionBlessing.get.image &
+          " (" & observation.image & "), blessed for this action only: " &
+          actionBlessing.get.justification)
       else:
         blocking.add(observation.source & " from " &
           (if observation.image.len > 0: observation.image
@@ -6743,6 +7081,9 @@ proc applyEntropyBlessingPolicy(action: BuildAction;
       "output")
     if blockingTools.len > 0:
       text.add(" (here: " & blockingTools.join(", ") & ")")
+    text.add(". Without a blessing, the determinism probe admits the " &
+      "action once a later run with byte-identical inputs produces " &
+      "byte-identical outputs (trace: determinism-probe-*)")
     text.add(". Note that caller attribution is one-way: an entropy read " &
       "reported from outside the main image is NOT evidence that the " &
       "program itself drew none. Rule: Failure-Semantics.md " &
@@ -6805,6 +7146,48 @@ proc monitorObservedNoReads(col: EvidenceCollection): bool {.inline.} =
       col.evidence.monitorReads[0] == col.engineSuppliedRootImage
   else: false
 
+# DA-1f — which `EvidenceContributor`s, if present, mean something LOOKED at
+# the action to fill `depfileInputs`. `depfileObservedNothing` below asks for
+# the PRESENCE of a member of this set and never for the ABSENCE of a
+# synthesiser, and this is where that one distinction is written down.
+#
+# WHY IT IS AN EXHAUSTIVE `case` AND NOT A SET LITERAL. A literal is a place a
+# future contributor is silently omitted from, which is the exact failure mode
+# `EvidenceContributor` exists to prevent one layer down — and the omission is
+# invisible, because an omitted member is indistinguishable from a member
+# deliberately classified as non-observing. The `case` makes ADDING a
+# contributor without classifying it a COMPILE ERROR ("not all cases are
+# covered; missing: {…}"), so the decision is forced where the enum grows
+# instead of being left to a convention a test cannot grade until the state is
+# reachable.
+#
+# Measured rather than asserted: an eighth member added to
+# `EvidenceContributor` with no arm here fails `nim check` on the `case` line.
+const DepfileObservingContributors: set[EvidenceContributor] = (block:
+  var observing: set[EvidenceContributor] = {}
+  for contributor in EvidenceContributor:
+    case contributor
+    of evcToolReportedDepfile:
+      # A dependency report a TOOL wrote while doing the action's work. The
+      # only contributor to `depfileInputs` that is an OBSERVATION of this
+      # action — `gcc -MD` lists the headers it really opened.
+      observing.incl contributor
+    of evcMonitorCapture, evcRootImageReconstruction, evcReplayedCacheRecord,
+       evcDeclarationDerivedDepfile, evcPostBuildConverterReport,
+       evcForeignProvisionerReport:
+      # Not observations of THIS action's depfile channel, for three
+      # different reasons that all land in the same arm. `evcMonitorCapture`
+      # and `evcPostBuildConverterReport` do not write `depfileInputs` at all
+      # (they fill the monitor's channels, whose own terms of the guard ask
+      # their own question); `evcRootImageReconstruction`,
+      # `evcReplayedCacheRecord` and `evcDeclarationDerivedDepfile` are
+      # reconstructions, replays and declarations — real cache inputs, and
+      # nothing looked at the action to produce any of them;
+      # `evcForeignProvisionerReport` lands in
+      # `provisionerReportedInputs`, which is not a term of this guard.
+      discard
+  observing)
+
 proc depfileObservedNothing(col: EvidenceCollection): bool {.inline.} =
   ## DA-1f — the `depfileInputs` term of the zero-evidence guard, asked the
   ## way `monitorObservedNoReads` asks its own: not *"is the set empty"* but
@@ -6824,6 +7207,29 @@ proc depfileObservedNothing(col: EvidenceCollection): bool {.inline.} =
   ## into `depfileInputs` that forgets to mark itself reads as "nothing
   ## observed" and costs a publish, never as "something observed".
   ##
+  ## WHICH POLARITY THAT IS, AND WHAT GRADES IT. The caller is the
+  ## zero-evidence guard in `applyMonitorEvidenceStatus`, the only one, and
+  ## `true` there is a REFUSAL: it adds `zeroEvidenceDiagnostic`, sets
+  ## `disableCacheHits` and `cirEmptyEvidence`, so the action succeeds and
+  ## does not publish. `false` lets the publish through. For an UNMARKED
+  ## writer this returns `true` — the refusal — which is the fail-closed
+  ## answer; the absence spelling (`evcDeclarationDerivedDepfile in …`) would
+  ## return `false` and buy that writer a record it never observed.
+  ##
+  ## THE TWO SPELLINGS ARE NOT INTERCHANGEABLE ON A REACHABLE STATE, and the
+  ## 2026-09-24 review's Z1 mutation swapped them and SURVIVED at 28 OK / 0
+  ## FAILED because the suite only reached sets carrying exactly one of the
+  ## two marks, which both spellings answer identically. The state that
+  ## separates them is a depfile channel carrying BOTH — one tool-written
+  ## report folded beside one declaration-derived report on the same edge,
+  ## which `RecognizedDependencyReportSpec.outputs` being a `seq` already
+  ## expresses with no production seam. Presence-of-observer publishes it (an
+  ## observation happened, and a synthesised report standing next to it does
+  ## not unhappen it); absence-of-synthesiser refuses it. That pair is
+  ## `t_zero_evidence_edge_is_not_cacheable`'s "a tool-written depfile beside
+  ## a declaration-derived one …", and it is what makes this line's polarity
+  ## graded rather than merely documented.
+  ##
   ## THE PATHS THEMSELVES ARE UNTOUCHED. They stay in the channel, in the
   ## key, hashed and invalidating, exactly as before — attribution, not
   ## suppression (`Dependency-Observation-Attribution.md`).
@@ -6837,7 +7243,7 @@ proc depfileObservedNothing(col: EvidenceCollection): bool {.inline.} =
   ## recipe and nothing would have reported it. Closing it while it costs
   ## nothing is cheaper than discovering it as a stale hit.
   col.evidence.depfileInputs.len == 0 or
-    evcToolReportedDepfile notin col.evidence.evidenceProvenance
+    col.evidence.evidenceProvenance * DepfileObservingContributors == {}
 
 proc applyMonitorEvidenceStatus(action: BuildAction;
                                 status: MonitorEvidenceStatus;
@@ -7210,7 +7616,8 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # wrapped/hosted monitor arm — because an edge that produces its own capture
   # talks to the same daemons as one the engine monitors, and a guard wired at
   # one of two sites is a guard half of production does not execute.
-  var attribution = initMonitorPeerAttribution(trustedDaemonRegistry())
+  var attribution = initMonitorPeerAttribution(trustedDaemonRegistry(),
+    trustedEndpointRegistry())
   # DA-1i/DA-1j — what this build demands of a capture before it trusts one.
   # Shared by BOTH fold sites below for exactly the reason `attribution` is: an
   # edge that PRODUCES its own `.iomon` is the likeliest source of a capture
@@ -8006,7 +8413,10 @@ proc lookupEnv(env: openArray[string]; name: string):
 proc actionEnvLookup*(action: BuildAction; name: string):
     tuple[present: bool, value: string] =
   result = lookupEnv(action.env, name)
-  if not result.present and action.kind == bakProcess:
+  # An isolated action never saw the engine's environment, so a name it does
+  # not declare is ABSENT for it, not the host's value.
+  if not result.present and action.kind == bakProcess and
+      not action.isolateHostEnvironment:
     result = (existsEnv(name), getEnv(name))
 
 proc actionEnvResolver*(action: BuildAction;
@@ -8015,8 +8425,11 @@ proc actionEnvResolver*(action: BuildAction;
   ## Only names actually observed by the action enter a strong fingerprint.
   var env: seq[string]
   if action.kind == bakProcess:
-    for name, value in envPairs():
-      env.add(name & "=" & value)
+    # The launch composes the child's environment exactly this way; an
+    # isolated launch starts from nothing, so neither may the snapshot.
+    if not action.isolateHostEnvironment:
+      for name, value in envPairs():
+        env.add(name & "=" & value)
     if config != nil:
       env.add(preparedActionEnv(action, config[]))
     else:
@@ -10686,6 +11099,7 @@ proc preparedRunQuotaCommand(action: BuildAction;
            else: deferred.argv),
     cwd: action.cwd,
     env: deferred.env,
+    isolateEnvironment: action.isolateHostEnvironment,
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit)
 
@@ -11685,7 +12099,8 @@ proc monitorHostRequest(action: BuildAction;
     interest: monitorInterest(action),
     evidenceScope: evidenceScope,
     passthroughChildStdout: true,
-    passthroughChildStderr: true)
+    passthroughChildStderr: true,
+    isolateEnv: command.isolateEnvironment)
   for entry in command.env:
     let eq = entry.find('=')
     if eq <= 0:
@@ -12464,7 +12879,16 @@ type
     ## writes the LOCK — the generated rule-set artifact — to the action's
     ## single output.
 
+  ForeignProvisionExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## Dependency-Provisioning-In-Build-Graph.md section 2: the executor of a
+    ## ``bakForeignProvision`` edge for ONE provisioner, keyed by the name the
+    ## edge carries in ``argv[0]``. ``repro_tool_profiles`` registers the
+    ## ``"tarball"`` provisioner. Indirect for the usual layering reason: the
+    ## realizer (download, verify, extract, seal into the tool store) lives
+    ## above the engine, and the engine must not depend on it.
+
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
+var foreignProvisionExecutors {.threadvar.}: Table[string, ForeignProvisionExecutor]
 var binaryCacheSubstituteExecutor {.threadvar.}: BinaryCacheSubstituteExecutor
 var metadataFetchExecutor {.threadvar.}: MetadataFetchExecutor
 var solveLockExecutor {.threadvar.}: SolveLockExecutor
@@ -12509,6 +12933,25 @@ proc registerSolveLockExecutor*(executor: SolveLockExecutor) =
 
 proc clearSolveLockExecutor*() =
   solveLockExecutor = nil
+
+proc registerForeignProvisionExecutor*(provisioner: string;
+                                       executor: ForeignProvisionExecutor) =
+  ## Register the per-thread executor for ``bakForeignProvision`` edges whose
+  ## ``argv[0]`` is ``provisioner``. Idempotent: registering again replaces.
+  if provisioner.len == 0:
+    raiseEngine("registerForeignProvisionExecutor requires a provisioner name")
+  foreignProvisionExecutors[provisioner] = executor
+
+proc clearForeignProvisionExecutor*(provisioner: string) =
+  foreignProvisionExecutors.del(provisioner)
+
+proc foreignProvisionExecutorFor*(provisioner: string): ForeignProvisionExecutor =
+  foreignProvisionExecutors.getOrDefault(provisioner, nil)
+
+proc registeredForeignProvisioners*(): seq[string] =
+  for name in foreignProvisionExecutors.keys:
+    result.add(name)
+  result.sort()
 
 proc builtinPath(action: BuildAction; path: string): string =
   materialPath(action.cwd, path)
@@ -13265,11 +13708,38 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         solveRes.runQuotaBackend else: "solve-lock"
       return
     of bakForeignProvision:
+      # ``argv[0]`` is the PROVISIONER DISCRIMINATOR, not an executable. A
+      # provisioner with a registered executor runs through it on every
+      # platform -- the tarball provisioner is one, registered by
+      # ``repro_tool_profiles`` (Dependency-Provisioning-In-Build-Graph.md
+      # section 4). Nix is the one provisioner the engine executes itself,
+      # through ``reprobuild-nix-daemon``, and it exists only where Nix does.
+      let provisionerName = if action.argv.len > 0: action.argv[0] else: ""
+      let registered = foreignProvisionExecutorFor(provisionerName)
+      if not registered.isNil:
+        let provRes = registered(action)
+        result.status = provRes.status
+        result.exitCode = provRes.exitCode
+        result.stdout = provRes.stdout
+        result.stderr = provRes.stderr
+        result.reason = provRes.reason
+        result.launched = provRes.launched
+        result.evidence = provRes.evidence
+        result.runQuotaBackend = if provRes.runQuotaBackend.len > 0:
+          provRes.runQuotaBackend else: "provision-" & provisionerName
+        return
+      if provisionerName != "nix":
+        raiseEngine("bakForeignProvision: no executor is registered for " &
+          "provisioner \"" & provisionerName & "\" (registered: " &
+          registeredForeignProvisioners().join(", ") & "): " & action.id)
       when defined(windows):
-        raiseEngine("bakForeignProvision is not supported on Windows")
+        raiseEngine("bakForeignProvision: the nix provisioner is not " &
+          "available on Windows, where Nix does not run natively; select a " &
+          "provisioner that serves Windows (tarball, scoop, from-source): " &
+          action.id)
       else:
-        # Nix evaluation daemon or scoop provisioning action
-        let provisioner = if action.argv.len > 0: action.argv[0] else: ""
+        # Nix evaluation daemon provisioning action
+        let provisioner = provisionerName
         let selector = if action.argv.len > 1: action.argv[1] else: ""
         if provisioner.len == 0 or selector.len == 0:
           raiseEngine("bakForeignProvision action requires provisioner and selector in argv: " & action.id)
@@ -13998,11 +14468,212 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for input in action.inputs:
       result.add(materialPath(action.cwd, input))
 
+  var machineryRoots: seq[LogicalRoot] = @[]
+  var machineryRootsResolved = false
+  proc launchMachineryRoots(): seq[LogicalRoot] =
+    ## Paths every monitored launch touches that are the MACHINERY of
+    ## launching and observing, not inputs to what the action computes —
+    ## as UNTRACKED roots:
+    ##
+    ## * the monitor shim this engine injects: every monitored process loads
+    ##   it, and its location is a fact about this host;
+    ## * runquota's Windows shell-wrapper directory
+    ##   (`runquota_process.shellScriptDir`, mirrored here so an engine built
+    ##   against an older runquota still compiles): a long `sh -c` program is
+    ##   staged there under a per-launch random name, and its content is the
+    ##   program already in argv.
+    ##
+    ## Left in, either one makes no two observations of the same command
+    ## agree: the portable record of every action would be host-bound, and
+    ## the determinism probe's key would never repeat.
+    if not machineryRootsResolved:
+      machineryRootsResolved = true
+      try:
+        let shim = resolveMonitorShimLibForInstall()
+        if shim.len > 0:
+          machineryRoots.add(LogicalRoot(label: "monitor-shim",
+            path: absolutePath(shim), kind: lrkUntracked))
+      except CatchableError:
+        discard
+      machineryRoots.add(LogicalRoot(label: "runquota-shell",
+        path: getTempDir() / "runquota-shell", kind: lrkUntracked))
+    machineryRoots
+
+  let hostTempKey = block:
+    var key = getTempDir().replace('\\', '/')
+    while key.len > 1 and key.endsWith("/"):
+      key.setLen(key.len - 1)
+    when defined(windows): key.toLowerAscii() else: key
+
+  proc isHostTempListing(path: string): bool =
+    ## The host temp directory ITSELF — its listing, or its existence. Every
+    ## process on the machine writes into it, so its membership changes
+    ## between any two runs; gemini-cli's bundle step enumerates it. Files
+    ## BENEATH it stay ordinary inputs: projects and test fixtures do live
+    ## under temp, and their contents are real.
+    var key = path.replace('\\', '/')
+    while key.len > 1 and key.endsWith("/"):
+      key.setLen(key.len - 1)
+    when defined(windows):
+      key = key.toLowerAscii()
+    key == hostTempKey
+
+  proc isLaunchMachinery(path: string): bool =
+    isHostTempListing(path) or
+      toLogicalPath(launchMachineryRoots(), path).kind == lpkUntracked
+
+  proc portableRecordRoots(): seq[LogicalRoot] =
+    ## `portableRoots` plus the launch machinery, untracked.
+    config.portableRoots & launchMachineryRoots()
+
+  proc transientOwnWrites(evidence: PathSetEvidence): HashSet[string] =
+    ## Paths the action itself WROTE that no longer exist once it finished:
+    ## its temporaries. npm's delete-by-rename (`x.js.DELETE.<random>`) is
+    ## the case that showed up — written, probed, deleted, under a new random
+    ## name every run. What the action observed there was its own doing, so
+    ## it is not an input; a written file that still EXISTS is kept, because
+    ## an action that read a file and then rewrote it did consume it.
+    for path in evidence.monitorWrites:
+      if not fileExists(extendedPath(path)) and
+          not dirExists(extendedPath(path)):
+        result.incl(path.replace('\\', '/'))
+
+  proc determinismProbeAdmits(action: BuildAction;
+                              evidence: EvidenceCollection): bool =
+    ## Windows-Build-Correctness M6 refuses to cache an action whose tool
+    ## read entropy unless that tool is BLESSED — a trusted claim that its
+    ## randomness cannot reach its outputs. The determinism probe earns the
+    ## same admission by MEASUREMENT instead (`nix build --check`, BuildXL's
+    ## determinism probe): an action is cached once two executions with
+    ## byte-identical inputs produced byte-identical outputs.
+    ##
+    ## No extra execution is needed. A refused action is not cached, so it
+    ## runs again on the next build, and that run is the probe. The first
+    ## run leaves a CANDIDATE (its output digests) under a key over its
+    ## inputs' CONTENT — never mtimes, which an upstream re-run changes
+    ## without changing a byte. A later run with the same key and the same
+    ## output bytes is admitted. Any difference fails closed, for that key,
+    ## for good.
+    ##
+    ## Only an action whose sole refusal is unblessed entropy is probed. A
+    ## monitor loss or an unobservable backend is a gap in what was SEEN,
+    ## which no comparison of outputs can close.
+    if evidence.cacheIneligibilityReasons != {cirUnblessedEntropy}:
+      return false
+    # The probe compares what the cache would store and restore for this
+    # action: its declared outputs. An action that declares none gives two
+    # runs nothing to compare, and "equal" would be vacuous — admitting an
+    # action whose real effects were never looked at.
+    if action.outputs.len == 0 and action.declaredOutputs.len == 0:
+      runResult.trace(action.id, "determinism-probe-refused",
+        "the action declares no outputs, so two runs cannot be compared")
+      return false
+    var key = "reprobuild.determinism-probe.v1\0" &
+      toHex(action.weakFingerprint.bytes) & "\0"
+    var inputs = action.cacheInputPaths(evidence.evidence)
+    inputs.sort()
+    let transient = transientOwnWrites(evidence.evidence)
+    # A directory CONTAINING the action's working directory: its listing is
+    # how this host lays out everything else stored above the project (the
+    # drive root, a home directory), which changes with anything on the
+    # machine. Leaving it out of the key can only make two runs count as
+    # comparable; differing outputs still fail closed.
+    var cwdKey = action.cwd.replace('\\', '/')
+    when defined(windows):
+      cwdKey = cwdKey.toLowerAscii()
+    for path in inputs:
+      if isLaunchMachinery(path) or path.replace('\\', '/') in transient:
+        continue
+      var pathKey = path.replace('\\', '/')
+      while pathKey.len > 1 and pathKey.endsWith("/"):
+        pathKey.setLen(pathKey.len - 1)
+      when defined(windows):
+        pathKey = pathKey.toLowerAscii()
+      let isDir = dirExists(extendedPath(path))
+      if isDir and cwdKey.len > pathKey.len and cwdKey.startsWith(pathKey) and
+          (pathKey.endsWith("/") or cwdKey[pathKey.len] == '/'):
+        continue
+      let identity =
+        if fileExists(extendedPath(path)): "f" & fileContentHex(path)
+        elif isDir: "d" & membershipHex(path)
+        else: "absent"
+      key.add(path & "\0" & identity & "\0")
+    var env = action.cacheEnvInputs(evidence.evidence, unsafeAddr config)
+    env.sort(proc (a, b: EnvFingerprint): int = cmp(a.name, b.name))
+    for variable in env:
+      key.add(variable.name & "=" & $variable.present & ":" &
+        variable.value & "\0")
+    var outputs: seq[string] = @[]
+    for output in action.outputs & action.declaredOutputs:
+      let path = materialPath(action.cwd, output)
+      outputs.add(path & "\t" &
+        (if fileExists(extendedPath(path)): fileContentHex(path)
+         elif dirExists(extendedPath(path)): treeContentHex(path)
+         else: "missing"))
+    outputs.sort()
+    let observed = outputs.join("\n")
+    let probeFile = sharedRoot / "determinism-probe" /
+      toHex(casDigest(toBytes(key)).bytes)
+    try:
+      createDir(extendedPath(probeFile.parentDir))
+      if not fileExists(extendedPath(probeFile)):
+        writeFile(extendedPath(probeFile), "candidate\n" & observed)
+        # What the key was made of, beside it: when a later run records a
+        # NEW candidate instead of deciding, diffing two of these names the
+        # input that moved.
+        writeFile(extendedPath(probeFile & ".inputs"),
+          key.replace('\0', '\n'))
+        runResult.trace(action.id, "determinism-probe-candidate",
+          "outputs recorded; the next run with the same inputs decides")
+        return false
+      let previous = readFile(extendedPath(probeFile))
+      let newline = previous.find('\n')
+      let verdict = if newline < 0: previous else: previous[0 ..< newline]
+      let recorded = if newline < 0: "" else: previous[newline + 1 .. ^1]
+      if verdict == "nondeterministic":
+        runResult.trace(action.id, "determinism-probe-refused",
+          "an earlier run with these inputs produced different outputs")
+        return false
+      if recorded != observed:
+        writeFile(extendedPath(probeFile), "nondeterministic\n" & recorded)
+        runResult.trace(action.id, "determinism-probe-mismatch",
+          "two runs with byte-identical inputs produced different outputs")
+        return false
+      writeFile(extendedPath(probeFile), "verified\n" & observed)
+      runResult.trace(action.id, "determinism-probe-verified",
+        "two runs with byte-identical inputs produced byte-identical " &
+        "outputs; caching despite unblessed entropy")
+      true
+    except CatchableError as err:
+      runResult.trace(action.id, "determinism-probe-failed", err.msg)
+      false
+
+  var declaredActions = initTable[string, BuildAction]()
+    ## The graph's actions before any launch rewrites them; filled just
+    ## before scheduling. Dynamically created actions are absent and fall
+    ## back to what the recorder is handed.
+
+  proc portableStaticFieldsOf(action: BuildAction): seq[string] =
+    ## What the argv does not say about the action: its kind, a builtin's
+    ## payload, and the outputs it declares (sorted: a set).
+    result.add("kind=" & $action.kind)
+    result.add("builtinText=" & action.builtinText)
+    for entry in action.builtinEntries:
+      result.add("builtinEntry=" & entry)
+    var outputs: seq[string] = @[]
+    for output in action.outputs:
+      outputs.add("output=" & materialPath(action.cwd, output))
+    for output in action.declaredOutputs:
+      outputs.add("declaredOutput=" & materialPath(action.cwd, output))
+    outputs.sort()
+    result.add(outputs)
+
   proc portableWeakOf(action: BuildAction): string =
     ## The portable weak fingerprint: the action's STATIC description, so it
     ## is known before the action runs (the P3.4 lookup needs exactly that).
     portableWeakFingerprint(config.portableRoots, action.argv, action.cwd,
-      portableEnvOf(action), portableDeclaredInputsOf(action))
+      portableEnvOf(action), portableDeclaredInputsOf(action),
+      portableStaticFieldsOf(action))
 
   proc portablePhysicalOutputsOf(action: BuildAction): seq[string] =
     ## `outputs` plus `declaredOutputs`: an install-mirror action's outputs
@@ -14017,13 +14688,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         seen.incl(key)
         result.add(physical)
 
-  proc finishPortableRecord(idx: int; action: BuildAction;
-                            reads, probes, enumerations: seq[string]) =
+  proc finishPortableRecord(idx: int; launched: BuildAction;
+                            reads, probes, enumerations: seq[string];
+                            observedEnv: seq[ObservedEnv] = @[]) =
     ## The shared tail of both portable recorders: fingerprint, outputs,
     ## local memo record, and (once per record) publication.
-    var fp = computePortableFingerprint(config.portableRoots, action.argv,
+    ##
+    ## Keyed by the action AS THE GRAPH DECLARED IT, the same object the
+    ## pre-pass looks up — never the launch-time copy, which the monitor and
+    ## RunQuota rewrite with per-launch paths (the first gemini-cli run with
+    ## fixed-output fetches recorded a new weak fingerprint every build).
+    let action = declaredActions.getOrDefault(launched.id, launched)
+    var fp = computePortableFingerprint(portableRecordRoots(), action.argv,
       action.cwd, portableEnvOf(action), portableDeclaredInputsOf(action),
-      reads, probes, enumerations)
+      reads, probes, enumerations, portableStaticFieldsOf(action),
+      observedEnv)
     if fp.portable:
       # P3.2: a record is only shareable if its RESULT can be named too.
       let outs = portableOutputs(config.portableRoots,
@@ -14044,8 +14723,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runResult.trace(action.id, "portable-memo-write-failed", err.msg)
         let withOutputs = action.publishToBinaryCache or
           config.binaryCacheIntermediateScope
-        # A warm build re-derives the same records; publish each once.
-        if config.portableMemoPublisher != nil and
+        # A warm build re-derives the same records; publish each once. A
+        # host-bound or volatile action is never offered to another host,
+        # the rule the binary-cache publisher applies.
+        let substitutable =
+          action.determinismClass.allowsCrossMachineSubstitution()
+        if not substitutable:
+          runResult.trace(action.id, "portable-memo-host-bound",
+            "determinism class " & $action.determinismClass &
+            " forbids cross-machine substitution")
+        if config.portableMemoPublisher != nil and substitutable and
             not memoPublished(memoRoot, memo, withOutputs):
           let failure =
             try: config.portableMemoPublisher(config.portableRoots, memo,
@@ -14084,23 +14771,49 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## reported on the result and the trace, and changes no cache decision.
     if config.portableRoots.len == 0:
       return
-    let enumerations = action.cacheEnumeratedDirectories(evidence)
+    var enumerations: seq[string] = @[]
     var enumerated = initHashSet[string]()
-    for path in enumerations:
+    for path in action.cacheEnumeratedDirectories(evidence):
       enumerated.incl(path)
+      if not isHostTempListing(path):
+        enumerations.add(path)
     var probed = initHashSet[string]()
     for path in evidence.monitorProbes:
       probed.incl(materialPath(action.cwd, path))
     var reads: seq[string] = @[]
     var probes: seq[string] = @[]
+    let transient = transientOwnWrites(evidence)
     for path in action.cacheInputPaths(evidence):
-      if path in enumerated:
+      if path in enumerated or isHostTempListing(path) or
+          path.replace('\\', '/') in transient:
         continue
       elif path in probed:
         probes.add(path)
       else:
         reads.add(path)
-    finishPortableRecord(idx, action, reads, probes, enumerations)
+    # The OBSERVED environment, exactly as the local fingerprint takes it:
+    # a variable a process read is an input whether or not the action
+    # declared it.
+    var observed: seq[ObservedEnv] = @[]
+    for variable in action.cacheEnvInputs(evidence, unsafeAddr config):
+      observed.add(ObservedEnv(name: variable.name,
+        present: variable.present, value: variable.value))
+    finishPortableRecord(idx, action, reads, probes, enumerations, observed)
+
+  proc recordFixedOutputPortable(idx: int; action: BuildAction) =
+    ## A fixed-output action is not locally cacheable and leaves no local
+    ## record, but its outputs are fixed by the content hashes it declares
+    ## and verifies. Its portable record is therefore keyed by what it
+    ## DECLARES — its static description (the URLs and hashes are in its
+    ## argv) and its declared inputs' content — and not by what its tools
+    ## read from the network or the host while fetching.
+    if config.portableRoots.len == 0:
+      return
+    var reads: seq[string] = @[]
+    for input in portableDeclaredInputsOf(action):
+      if fileExists(extendedPath(input)):
+        reads.add(input)
+    finishPortableRecord(idx, action, reads, @[], @[])
 
   proc recordPortableFromLocalHit(idx: int; action: BuildAction;
                                   record: ActionResultRecord) =
@@ -14115,11 +14828,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var reads, probes, enumerations: seq[string]
     for input in record.inputs:
       let path = materialPath(action.cwd, input.path)
+      if isHostTempListing(path):
+        continue
       case input.metadata.kind
       of ffkMissing, ffkOther: probes.add(path)
       of ffkRegular: reads.add(path)
       of ffkDirectory: enumerations.add(path)
-    finishPortableRecord(idx, action, reads, probes, enumerations)
+    var observed: seq[ObservedEnv] = @[]
+    for variable in record.envInputs:
+      observed.add(ObservedEnv(name: variable.name,
+        present: variable.present, value: variable.value))
+    finishPortableRecord(idx, action, reads, probes, enumerations, observed)
 
   proc publishBinaryCacheBundle(action: BuildAction;
                                 record: ActionResultRecord;
@@ -15269,14 +15988,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         else:
           hi = mid - 1
       -1
-    proc makeResolver(ancestors: HashSet[string]): IdentityResolver =
+    proc makeResolver(ancestors: HashSet[string];
+                      action: BuildAction): IdentityResolver =
       ## Inputs another graph action produces are identified from that
       ## action's resolved RECORD: a produced file by its digest, a path
       ## inside a produced directory by the directory's manifest, a directory
       ## above produced paths by its listing here plus what this action's
       ## ancestors produce (on the producing host, nothing else had been
       ## produced yet when this action ran). Everything else is on disk.
+      let launchEnv = action.actionEnvResolver(unsafeAddr config)
       result = proc (entry: PathSetEntry): Option[string] =
+        if entry.kind == pikEnvironment:
+          # What the action WOULD launch with here, the value the local
+          # fingerprint re-reads too — not the engine process's own env.
+          let name = entry.path["env:".len .. ^1]
+          let (present, value) = launchEnv(name)
+          return some(envIdentity(portableRecordRoots(), present, value))
         let path = entry.path
         if path in producer:
           if path notin producedOutputs:
@@ -15291,6 +16018,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if o.directory:
               return some(membershipHexOfNames(childNames(o.entries, "")))
             return some(Unresolved)
+          of pikEnvironment:
+            return some(Unresolved)   # answered above
         var up = parentKey(path)
         while up.len > 0:
           if up in producer:
@@ -15310,12 +16039,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               if at >= 0 and o.entries[at].kind == tekDirectory:
                 return some(membershipHexOfNames(childNames(o.entries, rel)))
               return some(Unresolved)
+            of pikEnvironment:
+              return some(Unresolved)   # answered above
           up = parentKey(up)
         if path in aboveProduced:
           case entry.kind
           of pikProbe:
             return some("present")
-          of pikRead:
+          of pikRead, pikEnvironment:
             return some(Unresolved)
           of pikEnumeration:
             var names = initHashSet[string]()
@@ -15351,7 +16082,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         for above in ancestorsOf.getOrDefault(dep):
           ancestors.incl(above)
       ancestorsOf[id] = ancestors
-      if not action.cacheable or action.dynamicDepsFile.len > 0:
+      if not (action.cacheable or action.fixedOutput) or
+          action.dynamicDepsFile.len > 0:
         continue
       var depsResolved = true
       for dep in action.deps:
@@ -15361,14 +16093,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if not depsResolved:
         continue
       let weak = portableWeakOf(action)
-      let resolver = makeResolver(ancestors)
+      let resolver = makeResolver(ancestors, action)
       var hit = none(PortableMemoRecord)
       var source = "local"
       try:
         hit = lookupMemo(memoRoot, roots, weak, resolver)
       except CatchableError as err:
         runResult.trace(id, "portable-lookup-failed", err.msg)
-      if hit.isNone and config.portableMemoLookup != nil:
+      if hit.isNone and config.portableMemoLookup != nil and
+          action.determinismClass.allowsCrossMachineSubstitution():
         source = "remote"
         try:
           hit = config.portableMemoLookup(roots, weak, resolver)
@@ -15460,6 +16193,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       runResult.results[idx].portableStrongHex = record.strongHex
       runResult.results[idx].portableOutputs = record.outputs
 
+  for declared in buildGraph.actions:
+    declaredActions[declared.id] = declared
   runPortablePrepass()
 
   var completed = 0
@@ -16006,7 +16741,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # so downstream cache LOOKUPS can skip narrowly.
             registerEvidenceInvalidation(evidence)
             # Cache ineligibility withholds publication, not successful outputs.
-            if action.cacheable and not evidence.disableCacheHits:
+            if action.cacheable and (not evidence.disableCacheHits or
+                determinismProbeAdmits(action, evidence)):
               let recordStart = statStart()
               let storeOutputBlobs =
                 storeOutputBlobsFor(action, evidence.evidence)
@@ -16039,6 +16775,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               publishBinaryCacheBundle(action, record)
             elif action.cacheable and evidence.disableCacheHits:
               runResult.traceCacheIneligibility(id, evidence)
+            elif action.fixedOutput:
+              recordFixedOutputPortable(idToIndex.resultIndex(id), action)
             completeSuccess(id, asSucceeded,
               runResult.results[idx].cacheDecision, true, "elevated")
           else:
@@ -16190,7 +16928,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # so downstream cache LOOKUPS can skip narrowly.
             registerEvidenceInvalidation(evidence)
             # Cache ineligibility withholds publication, not successful outputs.
-            if plan.action.cacheable and not evidence.disableCacheHits:
+            if plan.action.cacheable and (not evidence.disableCacheHits or
+                determinismProbeAdmits(plan.action, evidence)):
               let recordStart = statStart()
               # Peer-Cache M1: when a publisher closure is set, force
               # output-blob retention so the publisher can read the
@@ -16229,6 +16968,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               publishBinaryCacheBundle(plan.action, record)
             elif plan.action.cacheable and evidence.disableCacheHits:
               runResult.traceCacheIneligibility(finished.id, evidence)
+            elif plan.action.fixedOutput:
+              recordFixedOutputPortable(
+                idToIndex.resultIndex(finished.id), plan.action)
             completeSuccess(finished.id, asSucceeded,
               runResult.results[idx].cacheDecision, true, "builtin")
           else:
@@ -16802,7 +17544,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # so downstream cache LOOKUPS can skip narrowly.
         registerEvidenceInvalidation(evidence)
         # Cache ineligibility withholds publication, not successful outputs.
-        if action.cacheable and not evidence.disableCacheHits:
+        if action.cacheable and (not evidence.disableCacheHits or
+            determinismProbeAdmits(action, evidence)):
           let recordStart = statStart()
           # M9.L.4-refactor Step A: force output-blob retention when
           # either the peer-cache publisher OR the binary-cache
@@ -16826,6 +17569,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           publishBinaryCacheBundle(action, record)
         elif action.cacheable and evidence.disableCacheHits:
           runResult.traceCacheIneligibility(finished.id, evidence)
+        elif action.fixedOutput:
+          recordFixedOutputPortable(idx, action)
         completeSuccess(finished.id, asSucceeded, runResult.results[idx].cacheDecision,
           true, "exit=0")
       else:

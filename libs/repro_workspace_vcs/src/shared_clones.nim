@@ -12,7 +12,9 @@
 ##   - Each unique upstream fetch URL → a stable filesystem slug → ONE
 ##     bare clone under a per-user cache root. The shared bare is
 ##     refreshed clone-if-missing / fetch-if-present
-##     (``git fetch --all --prune``).
+##     (``git fetch --all --prune``), and never loses an object or rewrites
+##     its commit-graph (``SharedBareSafetyConfig``): other checkouts borrow
+##     from it.
 ##   - Each per-workspace repo writes ``objects/info/alternates`` pointing
 ##     at the shared bare's ``objects/`` dir, so a sync transfers only the
 ##     objects not already in the shared pool. Git natively honors
@@ -667,6 +669,94 @@ proc ensureSharedBareRefspec*(gitBin, barePath: string): bool =
   runGit(gitBin, ["-C", barePath, "config", "--replace-all",
     "remote.origin.prune", "true"]).code == 0
 
+const SharedBareSafetyConfig* = [
+  ("gc.auto", "0"),
+  ("maintenance.auto", "false"),
+  ("maintenance.strategy", "none"),
+  ("gc.pruneExpire", "never"),
+  ("gc.writeCommitGraph", "false"),
+  ("fetch.writeCommitGraph", "false")]
+  ## Configuration every shared bare MUST carry because other checkouts
+  ## BORROW from it.
+  ##
+  ## A checkout wired to the bare through ``objects/info/alternates`` can hold
+  ## branches, remote-tracking refs, reflogs and stashes naming objects that
+  ## exist ONLY in the bare. The bare cannot see those references, and its
+  ## borrowers live in any number of sibling workspaces, so "unreachable here"
+  ## never means "unused". Two things git does on its own therefore destroy
+  ## sibling workspaces:
+  ##
+  ##   1. Automatic maintenance. ``git fetch`` (and ``receive-pack``, i.e. the
+  ##      post-commit cache-ref push) ends with ``git maintenance run --auto``.
+  ##      Right after an upstream history rewrite, ``fetch --prune`` has just
+  ##      made the pre-rewrite commits unreachable in the bare, and the gc task
+  ##      expires them. Measured on 12 recorder bares borrowed by 8 workspaces
+  ##      each: borrowers then failed ``fsck`` with ``invalid sha1 pointer`` and
+  ##      every later ``git fetch`` with ``did not send all necessary
+  ##      objects``. ``gc.auto`` / ``maintenance.auto`` /
+  ##      ``maintenance.strategy`` turn the automatic pass off (each alone was
+  ##      enough to stop the loss in the fixture); ``gc.pruneExpire=never``
+  ##      makes even a hand-run ``git gc`` keep them.
+  ##   2. Commit-graph rewrites. A borrower that writes a split commit-graph
+  ##      chains its layer onto the bare's layers. ``fetch.writeCommitGraph``
+  ##      MERGES the bare's split chain on every fetch, and gc replaces it; each
+  ##      leaves every chained borrower printing ``unable to find all
+  ##      commit-graph files`` on every command. Measured on git 2.54 under both
+  ##      the ``gc`` and ``geometric`` maintenance strategies: disabling
+  ##      automatic maintenance alone does NOT prevent this -- the fetch-time
+  ##      write does it by itself -- so ``fetch.writeCommitGraph=false`` is
+  ##      required in addition, and ``gc.writeCommitGraph=false`` covers gc.
+  ##
+  ## Persisted in the bare's own config (not only passed per command) so the
+  ## property holds for whoever touches the cache: an operator's hand-run
+  ## ``git fetch``, and the ``receive-pack`` a cache-ref push runs there.
+
+proc sharedBareSafetyArgs*(): seq[string] =
+  ## ``-c key=value`` pairs for ``SharedBareSafetyConfig``, to prefix every git
+  ## command reprobuild itself runs against a shared bare. Belt and braces for
+  ## a bare whose config could not be written (read-only cache, a concurrent
+  ## writer holding the config lock).
+  for (key, value) in SharedBareSafetyConfig:
+    result.add("-c")
+    result.add(key & "=" & value)
+
+proc ensureSharedBareSafety*(gitBin, barePath: string): bool =
+  ## Idempotently install ``SharedBareSafetyConfig`` into ``barePath``'s
+  ## config. Like ``ensureSharedBareRefspec`` this is also the in-place
+  ## migration for every bare already in a user's cache. Returns ``false``
+  ## when a key could not be written.
+  result = true
+  for (key, value) in SharedBareSafetyConfig:
+    let current = runGit(gitBin, ["-C", barePath, "config", "--get", key])
+    if current.code == 0 and current.output.strip() == value:
+      continue
+    if runGit(gitBin, ["-C", barePath, "config", "--replace-all", key,
+        value]).code != 0:
+      result = false
+
+proc prepareSharedBare*(gitBin, barePath: string): string =
+  ## Install everything an existing shared bare must carry before anything
+  ## writes to it: the fetch refspec (``ensureSharedBareRefspec``) and the
+  ## borrower-safety config (``ensureSharedBareSafety``). Returns "" on
+  ## success, otherwise the diagnostic. Every refresh path calls this -- the
+  ## ``refresh-bare`` engine action ``repro sync`` schedules as well as
+  ## ``refreshSharedBare`` -- so no path can refresh an unprotected bare.
+  if not ensureSharedBareSafety(gitBin, barePath):
+    return "could not install the shared-bare safety config on " & barePath &
+      " (automatic maintenance there could delete objects that checkouts in " &
+      "other workspaces still borrow)"
+  if not ensureSharedBareRefspec(gitBin, barePath):
+    return "could not install the shared-bare fetch refspec (" &
+      SharedBareFetchRefspec & ") on " & barePath &
+      "; a fetch there would silently advance no refs"
+  ""
+
+proc sharedBareFetchArgs*(barePath: string): seq[string] =
+  ## The argv (after the git binary) of the one refresh fetch every path runs
+  ## against an existing shared bare.
+  result = sharedBareSafetyArgs()
+  result.add(["-C", barePath, "fetch", "--all", "--prune", "--quiet"])
+
 proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult =
   ## Clone-if-missing / fetch-if-present the shared bare for ``fetchUrl``.
   ## Returns ``ok = true`` with the bare path populated, or ``ok = false``
@@ -679,14 +769,15 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
     # Migrate-then-fetch. Without the refspec the fetch below is a no-op
     # that reports success (see ``SharedBareFetchRefspec``), so installing
     # it is not an optimization -- it is what makes the refresh a refresh.
-    if not ensureSharedBareRefspec(gitBin, bare):
+    # The safety config goes in FIRST: a ``--prune`` that finally advances
+    # refs is exactly what makes a rewritten upstream's old history
+    # unreachable here while borrowers still use it (``SharedBareSafetyConfig``).
+    let prepared = prepareSharedBare(gitBin, bare)
+    if prepared.len > 0:
       return SharedCloneResult(ok: false, sharedBarePath: bare,
-        diagnostic: "could not install the shared-bare fetch refspec (" &
-          SharedBareFetchRefspec & ") on " & bare &
-          "; a fetch there would silently advance no refs")
+        diagnostic: prepared)
     # fetch-if-present: refresh all refs, prune deleted ones.
-    let res = runGit(gitBin,
-      ["-C", bare, "fetch", "--all", "--prune", "--quiet"])
+    let res = runGit(gitBin, sharedBareFetchArgs(bare))
     if res.code != 0:
       return SharedCloneResult(ok: false, sharedBarePath: bare,
         diagnostic: "git fetch in shared bare failed (" & $res.code & "): " &
@@ -716,11 +807,10 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
   # refspec, so its NEXT refresh would be the silent no-op described on
   # ``SharedBareFetchRefspec``. Install it at birth, so no bare in the cache
   # ever spends a single refresh cycle frozen.
-  if not ensureSharedBareRefspec(gitBin, bare):
+  let prepared = prepareSharedBare(gitBin, bare)
+  if prepared.len > 0:
     return SharedCloneResult(ok: false, sharedBarePath: bare,
-      diagnostic: "cloned the shared bare but could not install its fetch " &
-        "refspec (" & SharedBareFetchRefspec & ") on " & bare &
-        "; later refreshes there would silently advance no refs")
+      diagnostic: "cloned the shared bare but " & prepared)
   SharedCloneResult(ok: true, sharedBarePath: bare)
 
 # ---- bootstrap manifest cache population (RA-11) ---------------------------
@@ -1284,8 +1374,8 @@ proc pushCacheRef*(gitBin, repoPath, sharedBarePath, workspaceName: string;
 #
 #   1. prunes ``refs/cache/<workspace>/*`` for workspaces that are no longer
 #      live (so unreachable objects become collectable), and
-#   2. runs ``git gc``/``git repack`` to fold loose objects into packs,
-#      bounded by a loose-object-count / cache-size / age budget so we do NOT
+#   2. runs ``git gc``/``git repack`` to fold loose objects into packs
+#      (never expiring objects -- borrowers may still need them), bounded by a loose-object-count / cache-size / age budget so we do NOT
 #      gc on every operation.
 #
 # It is designed to never block a clone or commit: callers run it on a
@@ -1475,7 +1565,9 @@ proc maintainSharedBare*(gitBin, barePath: string;
   ##   1. prune dead-workspace ``refs/cache/*`` (workspaces not in
   ##      ``liveWorkspaces``), then
   ##   2. when the budget is exceeded (or ``force``), run ``git gc`` to fold
-  ##      loose objects into packs and drop now-unreachable objects.
+  ##      loose objects into packs. Objects are never expired: other
+  ##      workspaces' checkouts borrow from the bare (see
+  ##      ``SharedBareSafetyConfig``).
   ##
   ## Never raises: a git failure is returned as ``ok = false`` with a
   ## diagnostic so a caller on the init/commit path can ignore it. ``force``
@@ -1504,10 +1596,20 @@ proc maintainSharedBare*(gitBin, barePath: string;
     result.looseAfter = result.looseBefore
     return
 
-  # ``git gc --prune=now`` packs loose objects and expires unreachable ones
-  # (the dead-ref objects pruned above become collectable). ``--quiet`` keeps
-  # it silent on the fire-and-forget path.
-  let gc = runGit(gitBin, ["-C", barePath, "gc", "--quiet", "--prune=now"])
+  # ``git gc --prune=never`` packs loose objects and repacks, and EXPIRES
+  # NOTHING. It used to be ``--prune=now``, which deleted every object the
+  # bare's own refs no longer reach -- including the ones checkouts in
+  # sibling workspaces still borrow through alternates (their branches,
+  # remote-tracking refs and reflogs are invisible from here). After an
+  # upstream history rewrite that is the whole pre-rewrite history, at the
+  # exact moment every borrower still points at it. The cost is disk: an
+  # unreachable object stays until it is reclaimed by an operation that has
+  # first established no borrower needs it. See ``SharedBareSafetyConfig``
+  # for the commit-graph half, which the ``-c`` overrides also cover.
+  discard ensureSharedBareSafety(gitBin, barePath)
+  var gcArgs = sharedBareSafetyArgs()
+  gcArgs.add(["-C", barePath, "gc", "--quiet", "--prune=never"])
+  let gc = runGit(gitBin, gcArgs)
   if gc.code != 0:
     result.ok = false
     result.ran = false

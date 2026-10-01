@@ -96,6 +96,84 @@ const
 
   CommittedLockFileName* = "repro.lock"
 
+  ProviderNimPackageName* = "nim"
+    ## The package name a project pins for the compiler that builds its
+    ## PROVIDER (the binary compiled from ``repro.nim`` that reads the
+    ## recipe). Reprobuild-specs Distribution-And-Packaging.milestones.org,
+    ## M5 "pin the provider-compile toolchain", rule 1: "A project's lock may
+    ## pin both the reprobuild version and the Nim compiler used to build its
+    ## provider. Both are ordinary locked packages, realized into the store
+    ## like any other." So it is the ordinary ``nim`` package, declared the
+    ## same way the reprobuild pin is (``packageSource "nim", "store"`` beside
+    ## a ``uses:`` entry), and only a STORE-sourced entry is a pin: the bare
+    ## ``nim`` entry most locks already carry (this repository's own included)
+    ## has no coordinate, pins nothing, and leaves the compile to the
+    ## bootstrap's own Nim (rule 2).
+
+  ProviderNimAdapter* = "reprobuild-provider-nim"
+    ## Store adapter recorded in the receipt of a realized pinned Nim, for
+    ## the same reason ``SelfHostAdapter`` exists: ``repro store list`` says
+    ## what the prefix is, and a ``nim`` realized by an unrelated adapter (a
+    ## package build's own tool, a scoop install) is never mistaken for the
+    ## one a pin addresses.
+
+type
+  PinnedPackage* = object
+    ## A package a project's committed lock may pin and a reprobuild resolves
+    ## by ARITHMETIC over that lock: where its store prefix lives, which
+    ## adapter realizes it, which executable a resolved prefix must hold.
+    ##
+    ## Two exist, and they are the two rule 1 names. Adding a field here
+    ## rather than a second copy of the resolution code is the point: the
+    ## tamper check, the prefix naming and the pin-root derivation are the
+    ## same for both, and a second copy is how they would come to differ.
+    name*: string
+    adapter*: string
+    executable*: string
+      ## Base name, no extension: ``repro`` / ``nim``.
+
+proc reprobuildPin*(): PinnedPackage =
+  PinnedPackage(name: SelfPackageName, adapter: SelfHostAdapter,
+    executable: "repro")
+
+proc providerNimPin*(): PinnedPackage =
+  PinnedPackage(name: ProviderNimPackageName, adapter: ProviderNimAdapter,
+    executable: "nim")
+
+proc pinnedPackageNamed*(name: string): PinnedPackage =
+  ## The pinnable package called ``name``. Raises for any other name: a
+  ## caller that asks for a package nothing here knows how to lay out would
+  ## otherwise get a prefix computed under an empty adapter.
+  case name
+  of SelfPackageName: reprobuildPin()
+  of ProviderNimPackageName: providerNimPin()
+  else:
+    raise newException(ValueError, "\"" & name & "\" is not a package a " &
+      "project can pin for reprobuild itself; the pinnable packages are " &
+      SelfPackageName & " and " & ProviderNimPackageName)
+
+proc pinnedExecutableName*(pkg: PinnedPackage): string =
+  addFileExt(pkg.executable, ExeExt)
+
+proc pinnedDeclaredExecutablePath*(pkg: PinnedPackage): string =
+  ## Prefix-relative image path, extension included. Folded into the
+  ## realization hash, so it is spelled once.
+  "bin/" & pinnedExecutableName(pkg)
+
+proc pinnedExecutableIn*(pkg: PinnedPackage;
+                         prefixAbsolutePath: string): string =
+  prefixAbsolutePath / "bin" / pinnedExecutableName(pkg)
+
+proc pinRootPrefixFor*(pkg: PinnedPackage): string =
+  ## ``pin:<package>:``. For reprobuild this is ``PinRootPrefix``.
+  "pin:" & pkg.name & ":"
+
+proc constraintHint(pkg: PinnedPackage): string =
+  ## How the remedy sentences spell the ``uses:`` entry. A reprobuild pin
+  ## names a floor; a compiler pin names the exact version, because the
+  ## version is what the provider compile's cache key moves with.
+  if pkg.name == SelfPackageName: " >=<version>" else: " ==<version>"
+
 type
   SelfPinState* = enum
     ## Why resolution answered the way it did. Every non-``spsPinned`` value
@@ -125,6 +203,14 @@ type
     detail*: string
       ## A one-sentence explanation for the non-``spsPinned`` states, written
       ## for whoever has to act on it.
+    package*: string
+      ## Which pinnable package this pin is for (``SelfPackageName`` or
+      ## ``ProviderNimPackageName``). Empty means reprobuild, so a value built
+      ## by hand before this field existed keeps its meaning.
+
+proc pinnedPackageOf*(pin: SelfPin): PinnedPackage =
+  if pin.package.len == 0: reprobuildPin()
+  else: pinnedPackageNamed(pin.package)
 
 type
   StoreRootError* = object of CatchableError
@@ -224,24 +310,16 @@ proc findProjectRoot*(startDir: string): string =
       return ""
     dir = parent
 
-proc pinFromLockText*(text, lockPath, projectRoot: string): SelfPin =
-  ## Read the reprobuild pin out of committed-lock BYTES.
+proc pinFromParsed*(ld: LockedDependencies; lockPath, projectRoot: string;
+                    pkg: PinnedPackage): SelfPin =
+  ## Read ``pkg``'s pin out of an already-parsed committed lock.
   ##
-  ## Split from ``selfPinForProject`` so the property "a lock with a
-  ## store-sourced reprobuild package resolves, and one with a bare
-  ## definition identity does not" is testable on bytes, with no filesystem
-  ## and no store.
+  ## The one resolution routine for every pinnable package: the lock is
+  ## parsed once by the caller and each pin read from the same document, so
+  ## the reprobuild pin and the compiler pin cannot be read from two
+  ## different versions of a lock that changed between two reads.
   result = SelfPin(state: spsNoPin, projectRoot: projectRoot,
-                   lockPath: lockPath)
-  var ld: LockedDependencies
-  try:
-    ld = parseLockedDependencies(text)
-  except CatchableError as err:
-    result.state = spsNoProject
-    result.detail = "the committed lock at " & lockPath &
-      " could not be read (" & err.msg & "); regenerate it with " &
-      "`repro lock refresh`"
-    return
+                   lockPath: lockPath, package: pkg.name)
   result.platform = ld.platform
 
   # The LIFTED entry is authoritative: it is the one that carries a
@@ -249,7 +327,7 @@ proc pinFromLockText*(text, lockPath, projectRoot: string): SelfPin =
   # because recomputing would make this module agree with itself rather than
   # with the lock.
   for dep in ld.deps:
-    if dep.name != SelfPackageName:
+    if dep.name != pkg.name:
       continue
     if dep.coordinates.kind != ckStore:
       continue
@@ -259,7 +337,7 @@ proc pinFromLockText*(text, lockPath, projectRoot: string): SelfPin =
     if result.version.len == 0 or result.storeHash.len == 0:
       result.state = spsNotAddressable
       result.detail = "the committed lock at " & lockPath & " records a " &
-        "store-coordinate dependency on " & SelfPackageName &
+        "store-coordinate dependency on " & pkg.name &
         " whose version or store hash is empty; regenerate it with " &
         "`repro lock refresh`"
       return
@@ -290,13 +368,13 @@ proc pinFromLockText*(text, lockPath, projectRoot: string): SelfPin =
     # every machine. An empty `platform` therefore fails too, which is
     # correct: a lock that does not say which platform it solved for has not
     # committed to an address.
-    let expectedHash = solvedPackageStoreHash(SelfPackageName,
+    let expectedHash = solvedPackageStoreHash(pkg.name,
       result.version, result.platform)
     let expectedIntegrity = formatMultihash("blake3", expectedHash)
     if result.storeHash != expectedHash or result.integrity != expectedIntegrity:
       result.state = spsTampered
       result.detail = "the committed lock at " & lockPath & " pins " &
-        SelfPackageName & " " & result.version & " for platform \"" &
+        pkg.name & " " & result.version & " for platform \"" &
         result.platform & "\" with store address " & result.storeHash &
         " (integrity " & result.integrity & "), but that identity addresses " &
         expectedHash & " (integrity " & expectedIntegrity & "). A " &
@@ -310,63 +388,147 @@ proc pinFromLockText*(text, lockPath, projectRoot: string): SelfPin =
     result.state = spsPinned
     return
 
-  for pkg in ld.packages:
-    if pkg.name != SelfPackageName:
+  for p in ld.packages:
+    if p.name != pkg.name:
       continue
-    result.version = pkg.version
+    result.version = p.version
     result.state = spsNotAddressable
     result.detail = "the committed lock at " & lockPath & " pins " &
-      SelfPackageName & " " & pkg.version & " with the bare definition " &
-      "identity source=\"" & pkg.source & "\", which carries no " &
+      pkg.name & " " & p.version & " with the bare definition " &
+      "identity source=\"" & p.source & "\", which carries no " &
       "coordinate, so there is nothing to resolve in the store. Declare " &
-      "packageSource \"" & SelfPackageName & "\", \"store\" in the " &
+      "packageSource \"" & pkg.name & "\", \"store\" in the " &
       "recipe's package block and re-run `repro lock refresh`."
     return
 
   result.detail = "the committed lock at " & lockPath & " does not pin " &
-    SelfPackageName & "; add a uses: \"" & SelfPackageName &
-    " >=<version>\" entry (with packageSource \"" & SelfPackageName &
+    pkg.name & "; add a uses: \"" & pkg.name & constraintHint(pkg) &
+    "\" entry (with packageSource \"" & pkg.name &
     "\", \"store\") to the recipe and run `repro lock refresh`"
+
+proc unreadableLockPin(lockPath, projectRoot, why: string;
+                       pkg: PinnedPackage): SelfPin =
+  SelfPin(state: spsNoProject, projectRoot: projectRoot, lockPath: lockPath,
+    package: pkg.name,
+    detail: "the committed lock at " & lockPath & " could not be read (" &
+      why & "); regenerate it with `repro lock refresh`")
+
+proc pinFromLockText*(text, lockPath, projectRoot: string;
+                      pkg: PinnedPackage): SelfPin =
+  ## Read ``pkg``'s pin out of committed-lock BYTES.
+  ##
+  ## Split from ``selfPinForProject`` so the property "a lock with a
+  ## store-sourced package resolves, and one with a bare definition identity
+  ## does not" is testable on bytes, with no filesystem and no store.
+  var ld: LockedDependencies
+  try:
+    ld = parseLockedDependencies(text)
+  except CatchableError as err:
+    return unreadableLockPin(lockPath, projectRoot, err.msg, pkg)
+  pinFromParsed(ld, lockPath, projectRoot, pkg)
+
+proc pinFromLockText*(text, lockPath, projectRoot: string): SelfPin =
+  ## The reprobuild pin out of committed-lock bytes.
+  pinFromLockText(text, lockPath, projectRoot, reprobuildPin())
+
+proc noLockPin(projectRoot: string; pkg: PinnedPackage): (SelfPin, string) =
+  ## ``(pin, "")`` when there is no lock to read, else ``(_, lockPath)``.
+  if projectRoot.len == 0:
+    return (SelfPin(state: spsNoProject, package: pkg.name,
+      detail: "no enclosing project: no " & CommittedLockFileName &
+        " was found at or above the working directory"), "")
+  let lockPath = projectRoot / CommittedLockFileName
+  if not fileExists(lockPath):
+    return (SelfPin(state: spsNoProject, projectRoot: projectRoot,
+      lockPath: lockPath, package: pkg.name,
+      detail: "no committed lock at " & lockPath &
+        "; run `repro lock refresh` in " & projectRoot), "")
+  (SelfPin(), lockPath)
+
+proc selfPinForProject*(projectRoot: string; pkg: PinnedPackage): SelfPin =
+  ## ``pkg``'s pin committed by the project rooted at ``projectRoot``.
+  let (absent, lockPath) = noLockPin(projectRoot, pkg)
+  if lockPath.len == 0:
+    return absent
+  pinFromLockText(readFile(lockPath), lockPath, projectRoot, pkg)
 
 proc selfPinForProject*(projectRoot: string): SelfPin =
   ## The reprobuild pin committed by the project rooted at ``projectRoot``.
-  if projectRoot.len == 0:
-    return SelfPin(state: spsNoProject,
-      detail: "no enclosing project: no " & CommittedLockFileName &
-        " was found at or above the working directory")
-  let lockPath = projectRoot / CommittedLockFileName
-  if not fileExists(lockPath):
-    return SelfPin(state: spsNoProject, projectRoot: projectRoot,
-      lockPath: lockPath,
-      detail: "no committed lock at " & lockPath &
-        "; run `repro lock refresh` in " & projectRoot)
-  pinFromLockText(readFile(lockPath), lockPath, projectRoot)
+  selfPinForProject(projectRoot, reprobuildPin())
 
 proc selfPinFrom*(startDir: string): SelfPin =
   ## ``findProjectRoot`` + ``selfPinForProject``, the pair the launcher runs.
   selfPinForProject(findProjectRoot(startDir))
 
+type
+  ProjectPins* = object
+    ## Every pin one committed lock makes, read from ONE parse of it.
+    projectRoot*: string
+    lockPath*: string
+    reprobuild*: SelfPin
+    providerNim*: SelfPin
+
+proc projectPinsFor*(projectRoot: string): ProjectPins =
+  ## Rule 1's two pins for the project rooted at ``projectRoot``.
+  result.projectRoot = projectRoot
+  let (absent, lockPath) = noLockPin(projectRoot, reprobuildPin())
+  if lockPath.len == 0:
+    result.reprobuild = absent
+    result.providerNim = noLockPin(projectRoot, providerNimPin())[0]
+    return
+  result.lockPath = lockPath
+  var ld: LockedDependencies
+  try:
+    ld = parseLockedDependencies(readFile(lockPath))
+  except CatchableError as err:
+    result.reprobuild = unreadableLockPin(lockPath, projectRoot, err.msg,
+      reprobuildPin())
+    result.providerNim = unreadableLockPin(lockPath, projectRoot, err.msg,
+      providerNimPin())
+    return
+  result.reprobuild = pinFromParsed(ld, lockPath, projectRoot, reprobuildPin())
+  result.providerNim = pinFromParsed(ld, lockPath, projectRoot,
+    providerNimPin())
+
+proc projectPinsFrom*(startDir: string): ProjectPins =
+  projectPinsFor(findProjectRoot(startDir))
+
+proc storeAddressFor*(pkg: PinnedPackage; version, platform: string): string =
+  ## The store address the LOCK would record for ``pkg`` at this identity.
+  solvedPackageStoreHash(pkg.name, version, platform)
+
 proc storeAddressFor*(version, platform: string): string =
   ## The store address the LOCK would record for this identity. Exposed so an
   ## installer can address a version it is about to realize before any lock
   ## names it, and so a test can assert the two agree.
-  solvedPackageStoreHash(SelfPackageName, version, platform)
+  storeAddressFor(reprobuildPin(), version, platform)
+
+proc prefixIdFor*(pkg: PinnedPackage; version, storeHash: string):
+    PrefixIdBytes =
+  ## The store prefix id for a pinned ``pkg``. For reprobuild this is exactly
+  ## the value it has always been (same name, adapter and executable path
+  ## folded in), so no existing pin is re-addressed.
+  computeRealizationHash(pkg.name, version, pkg.adapter,
+    selfLockIdentity(storeHash), pinnedDeclaredExecutablePath(pkg))
 
 proc prefixIdFor*(version, storeHash: string): PrefixIdBytes =
   ## The store prefix id for a pinned reprobuild image.
-  computeRealizationHash(SelfPackageName, version, SelfHostAdapter,
-    selfLockIdentity(storeHash), selfDeclaredExecutablePath())
+  prefixIdFor(reprobuildPin(), version, storeHash)
 
 proc selfPrefixId*(pin: SelfPin): PrefixIdBytes =
-  prefixIdFor(pin.version, pin.storeHash)
+  prefixIdFor(pinnedPackageOf(pin), pin.version, pin.storeHash)
+
+proc prefixRelativePathFor*(pkg: PinnedPackage; version,
+                            storeHash: string): string =
+  prefixRelativePath(pkg.name, version, prefixIdFor(pkg, version, storeHash))
 
 proc prefixRelativePathFor*(version, storeHash: string): string =
-  prefixRelativePath(SelfPackageName, version, prefixIdFor(version, storeHash))
+  prefixRelativePathFor(reprobuildPin(), version, storeHash)
 
 proc selfPrefixRelativePath*(pin: SelfPin): string =
-  ## ``prefixes/reprobuild/<version>-<hash16>``, from the store's own
+  ## ``prefixes/<package>/<version>-<hash16>``, from the store's own
   ## arithmetic.
-  prefixRelativePathFor(pin.version, pin.storeHash)
+  prefixRelativePathFor(pinnedPackageOf(pin), pin.version, pin.storeHash)
 
 proc selfPrefixAbsolutePath*(storeRoot: string; pin: SelfPin): string =
   storeRoot / selfPrefixRelativePath(pin)
@@ -374,9 +536,7 @@ proc selfPrefixAbsolutePath*(storeRoot: string; pin: SelfPin): string =
 proc selfExecutableIn*(prefixAbsolutePath: string): string =
   prefixAbsolutePath / "bin" / selfExecutableName()
 
-proc pinRootIdFor*(projectRoot: string): string =
-  ## The ``rkPin`` root id for a consuming project.
-  ##
+proc normalizedProjectKey(projectRoot: string): string =
   ## Forward-slashed, and lower-cased on Windows, so the same project reached
   ## through two spellings of its path is one root rather than two. A second
   ## root for the same project would keep a superseded version alive after
@@ -392,10 +552,25 @@ proc pinRootIdFor*(projectRoot: string): string =
     p.setLen(p.len - 1)
   when defined(windows):
     p = p.toLowerAscii()
-  PinRootPrefix & p
+  p
+
+proc pinRootIdFor*(pkg: PinnedPackage; projectRoot: string): string =
+  ## The ``rkPin`` root id holding ``pkg`` for a consuming project:
+  ## ``pin:<package>:<project>``.
+  pinRootPrefixFor(pkg) & normalizedProjectKey(projectRoot)
+
+proc pinRootIdFor*(projectRoot: string): string =
+  ## The ``rkPin`` root id for a consuming project's reprobuild pin.
+  pinRootIdFor(reprobuildPin(), projectRoot)
+
+proc projectRootFromPinRootId*(pkg: PinnedPackage; rootId: string): string =
+  ## The inverse of ``pinRootIdFor(pkg, _)``, or "" when ``rootId`` is not a
+  ## pin root for ``pkg``.
+  let prefix = pinRootPrefixFor(pkg)
+  if not rootId.startsWith(prefix):
+    return ""
+  rootId[prefix.len .. ^1]
 
 proc projectRootFromPinRootId*(rootId: string): string =
   ## The inverse of ``pinRootIdFor``, or "" when ``rootId`` is not a pin root.
-  if not rootId.startsWith(PinRootPrefix):
-    return ""
-  rootId[PinRootPrefix.len .. ^1]
+  projectRootFromPinRootId(reprobuildPin(), rootId)
