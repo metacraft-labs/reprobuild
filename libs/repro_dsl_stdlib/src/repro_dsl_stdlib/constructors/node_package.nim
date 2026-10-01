@@ -166,6 +166,23 @@ proc node_package*(srcDir = "src";
 
   proc q(v: string): string = v.replace("\\", "/").replace("\"", "\\\"")
 
+  # THE BUILD RUNS IN A SCRATCH COPY of the fetched tree, and delivers only
+  # the bundle. `npm ci` fills `node_modules` and the bundle script writes
+  # `dist/` trees and then reads them back; done in the fetched `src/` that
+  # mutated the fetch's own output (so its record no longer described it),
+  # and every one of those read-backs was recorded as an input keyed by what
+  # the PREVIOUS run had left there -- absent on any checkout where the build
+  # never ran, so no other checkout could match it. A scratch directory is
+  # emptied by the engine before the action runs and nothing under it is
+  # evidence (`BuildAction.scratchDirs`, BuildXL's pip temp directory); the
+  # bundle goes to `distDir`, the edge's declared output.
+  let underProject = proc (rel: string): string =
+    if projectRoot.len > 0: projectRoot / rel else: rel
+  let scratchDir = underProject(".repro/build/node-work")
+  let workTree = scratchDir / "src"
+  let distDir = underProject(".repro/build/node/dist")
+  let entryDirOf = entry.parentDir.replace("\\", "/")
+
   # Build: `npm ci` against the vendor step's PRIVATE npm cache, then the
   # project's own bundle script. The cache and offline mode go in the
   # environment rather than on the `npm ci` command line so they also bind
@@ -174,7 +191,9 @@ proc node_package*(srcDir = "src";
   var extraEnvPrefix = ""
   for (k, v) in extraEnv:
     extraEnvPrefix.add(k & "=\"" & q(v) & "\" ")
-  var buildScript = "set -e; cd \"" & q(src) & "\"; "
+  var buildScript = "set -e; mkdir -p \"" & q(workTree) & "\"; " &
+    "cp -R \"" & q(src) & "/.\" \"" & q(workTree) & "/\"; " &
+    "cd \"" & q(workTree) & "\"; "
   if projectRoot.len > 0:
     buildScript.add("export npm_config_cache=\"" &
       q(npmPrivateCacheDir(projectRoot)) & "\"; ")
@@ -205,7 +224,7 @@ proc node_package*(srcDir = "src";
   #     cache in the host temp directory — the home directory is a
   #     project-local one, and the compile cache is off.
   if projectRoot.len > 0:
-    let hermetic = projectRoot / ".repro" / "node-hermetic"
+    let hermetic = scratchDir / "hermetic"
     buildScript.add("mkdir -p \"" & q(hermetic / "home") & "\"; ")
     buildScript.add("export HOME=\"" & q(hermetic / "home") &
       "\" USERPROFILE=\"" & q(hermetic / "home") &
@@ -225,6 +244,19 @@ proc node_package*(srcDir = "src";
   buildScript.add(extraEnvPrefix & "npm ci --no-progress" &
     (if ignoreScripts: " --ignore-scripts" else: "") & "; ")
   buildScript.add(extraEnvPrefix & "npm run " & bundleScript & "; ")
+  # Deliver the bundle: the directory holding `entry` (or the entry itself,
+  # when it sits at the source root) and the root `package.json`, at the
+  # same relative paths, which is everything the install edge copies.
+  buildScript.add("rm -rf \"" & q(distDir) & "\"; ")
+  if entryDirOf.len > 0:
+    buildScript.add("mkdir -p \"" & q(distDir / entryDirOf) & "\"; " &
+      "cp -R \"" & q(workTree / entryDirOf) & "/.\" \"" &
+      q(distDir / entryDirOf) & "/\"; ")
+  else:
+    buildScript.add("mkdir -p \"" & q(distDir) & "\"; " &
+      "cp -f \"" & q(workTree / entry) & "\" \"" & q(distDir) & "/\"; ")
+  buildScript.add("if [ -f package.json ]; then cp -f package.json \"" &
+    q(distDir) & "/\"; fi")
   let compileEdge = buildAction(
     id = "node-build-" & pkgName,
     call = inlineExecCall(@["sh", "-c", buildScript], projectRoot),
@@ -235,10 +267,8 @@ proc node_package*(srcDir = "src";
     # The bundle is what the install edge reads. Declared, a record can name
     # it (so another host resolves the install without it on disk) and the
     # determinism probe has something to compare.
-    declaredOutputs =
-      (if entry.parentDir.len > 0:
-         @[projectRoot / src / entry.parentDir.replace("\\", "/")]
-       else: @[projectRoot / src / entry]),
+    declaredOutputs = @[distDir],
+    scratchDirs = @[scratchDir],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "node_package.build",
@@ -266,15 +296,16 @@ proc node_package*(srcDir = "src";
   installScript.add("mkdir -p \"" & q(libDir) & "\" \"" & q(binDir) & "\"; ")
   if entryDir.len > 0:
     installScript.add("mkdir -p \"" & q(libDir / entryDir) & "\"; ")
-    installScript.add("cp -R \"" & q(src / entryDir) & "/.\" \"" &
+    installScript.add("cp -R \"" & q(distDir / entryDir) & "/.\" \"" &
       q(libDir / entryDir) & "/\"; ")
   else:
     # An entry at the source root has no bundle directory to isolate; the
     # entry file is what runs.
-    installScript.add("cp -f \"" & q(src / entryRel) & "\" \"" &
-      q(libDir) & "/\"; ")
-  installScript.add("if [ -f \"" & q(src / "package.json") & "\" ]; then " &
-    "cp -f \"" & q(src / "package.json") & "\" \"" & q(libDir) & "/\"; fi; ")
+    installScript.add("cp -f \"" & q(distDir / entryRel.extractFilename) &
+      "\" \"" & q(libDir) & "/\"; ")
+  installScript.add("if [ -f \"" & q(distDir / "package.json") &
+    "\" ]; then cp -f \"" & q(distDir / "package.json") & "\" \"" &
+    q(libDir) & "/\"; fi; ")
   # bash launcher: resolve our own dir, exec node on the bundle entry.
   installScript.add("printf '%s\\n' " &
     "'#!/usr/bin/env bash' " &

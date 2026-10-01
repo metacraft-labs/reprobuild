@@ -2859,6 +2859,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # actions that don't opt in) reduce to no-op enforcement,
     # preserving pre-M9.R.75 behaviour byte-for-byte.
     result.declaredOutputs = payload.declaredOutputs
+    result.scratchDirs = payload.scratchDirs
     result.readOnlyRoots = payload.readOnlyRoots
   let actionCachePolicy =
     case payload.actionCachePolicy
@@ -4394,7 +4395,11 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 11'u16
+  LoweredGraphCacheVersion = 12'u16
+    # v12: ``BuildAction.scratchDirs``, a string list after
+    # ``requiresElevation``. A v11 cache would decode every action with no
+    # scratch directories, and the engine would then neither empty them nor
+    # leave their contents out of the key.
     # v10: DA-6 — the two trailing event-interest bools
     # (``captureNonDeterminism``, ``captureIpc``) are replaced by ONE byte
     # carrying ``MonitorCaptureBreadth``: the tool package's declaration of how
@@ -5272,6 +5277,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeStringSeq(action.declaredOutputs)
   outp.writeStringSeq(action.readOnlyRoots)
   outp.add(if action.requiresElevation: 1'u8 else: 0'u8)
+  outp.writeStringSeq(action.scratchDirs)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -5351,6 +5357,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
     raiseEnvelopeError(eeMalformed,
       "invalid lowered action elevation sentinel")
   result.requiresElevation = elevationByte == 1'u8
+  result.scratchDirs = readStringSeq(bytes, pos)
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)
@@ -22295,6 +22302,7 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "weakFingerprint": digestHex(action.weakFingerprint),
     "publishToBinaryCache": action.publishToBinaryCache,
     "fixedOutput": action.fixedOutput,
+    "scratchDirs": action.scratchDirs,
     "binaryCacheKey": binaryCacheKey,
     "binaryCacheIdentityError": identityError,
     "actionCachePolicy": $action.actionCachePolicy,
