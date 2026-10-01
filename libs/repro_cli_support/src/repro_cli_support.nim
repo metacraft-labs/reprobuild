@@ -10351,7 +10351,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   #   3. ``FromSourceMaxRecursionDepth`` — sanity ceiling. Production
   #      recipe chains stay below 10; the ceiling exists to crash
   #      cleanly on a runaway pattern rather than blow the stack.
-  if effectiveMode == tpmFromSource and not materializedOnly:
+  #
+  # Tarball mode takes the same pass for the tool uses whose package has no
+  # tarball for the host (Dependency-Provisioning-In-Build-Graph.md 4.3):
+  # those fall through to their from-source recipe, which is built here, in
+  # tarball mode, before the identity resolver needs its artifact. Every
+  # other use keeps its tarball and never enters the pass. No bootstrap floor
+  # is seeded and no cycle is broken by stdlib provisioning: a fall-through
+  # use has no tarball to break a cycle with, so a cycle is an error.
+  let tarballFallThrough = effectiveMode == tpmTarball
+  if (effectiveMode == tpmFromSource or tarballFallThrough) and
+      not materializedOnly:
     # M9.R.14c.2 — proactively seed the bootstrap tool chain so the
     # auto-recurse loop short-circuits gcc / make / binutils (and
     # binutils sub-binaries: ld, ar, ranlib, strip, nm, objdump,
@@ -10363,7 +10373,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # build. The bootstrap layer is treated as a stdlib-provisioned
     # floor; the upper layers (autoconf / automake / expat / libffi /
     # etc.) still build from source.
-    seedBootstrapCycleBreakTools()
+    if not tarballFallThrough:
+      seedBootstrapCycleBreakTools()
     var pendingSourceUses = buildArtifact.projectInterface.toolUses
     var expandedSourceRecipes = initHashSet[string]()
     var nextSourceUse = 0
@@ -10415,9 +10426,21 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     while nextSourceUse < pendingSourceUses.len:
       let useDef = pendingSourceUses[nextSourceUse]
       inc nextSourceUse
+      if tarballFallThrough and
+          not tarballModeFallsThroughToFromSource(useDef):
+        continue
       let outcome = tryResolveFromSourceTool(useDef)
       if outcome.kind == rrSiblingMissing:
         continue
+      if tarballFallThrough:
+        # Once per recipe: a built use is queued again to resolve it.
+        let fallThroughDir = absolutePath(
+          if outcome.kind == rrResolved: outcome.profile.selectedStorePath
+          else: outcome.recipeDir)
+        if fallThroughDir notin fromSourceResolvedRecipes:
+          logSummary("tarball provisioning: \"" & useDef.packageSelector &
+            "\" has no tarball realization for this host; using the " &
+            "from-source recipe at " & fallThroughDir)
       let siblingRecipeDir = absolutePath(
         if outcome.kind == rrResolved: outcome.profile.selectedStorePath
         else: outcome.recipeDir)
@@ -10467,10 +10490,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           continue
       # The bootstrap floor suppresses recursive construction only after a
       # configured source-artifact cache had a chance to restore the mirror.
-      if outcome.kind == rrNeedsBuild and useDef.executableName.len > 0 and
+      if not tarballFallThrough and outcome.kind == rrNeedsBuild and
+          useDef.executableName.len > 0 and
           useDef.executableName in fromSourceCycleBrokenTools:
         enqueueSourceDependencies(siblingRecipeDir, true)
         continue
+      if tarballFallThrough and siblingRecipeDir in fromSourceBuildStack:
+        var cycle = fromSourceBuildStack
+        cycle.add(siblingRecipeDir)
+        raise newException(ValueError,
+          "tool-resolution failed: tarball provisioning fell through to " &
+          "from-source recipes that form a cycle (" & cycle.join(" -> ") &
+          "), and \"" & useDef.packageSelector & "\" has no tarball for " &
+          "this host to break it with. Declare a host tarball for one of " &
+          "these packages.")
       if siblingRecipeDir in fromSourceBuildStack:
         # DSL-port M9.R.10a — cycle break via stdlib fall-through.
         # Instead of raising the cycle diagnostic, mark the closing-edge
@@ -10989,7 +11022,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if effectiveMode == tpmNix:
         "portable"
       elif effectiveMode == tpmTarball:
-        "portable"
+        # A use that fell through to its source recipe (4.3) carries a
+        # local-only from-source profile.
+        if identity.profiles.anyIt(it.cachePortability != cpPortable):
+          "mixed"
+        else:
+          "portable"
       elif effectiveMode == tpmScoop:
         # Scoop receipts may be cache-portable or cache-local depending on
         # the practical hardening tier. Read the resolved identity to find

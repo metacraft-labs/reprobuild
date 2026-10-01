@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1792,
+    "nimTestBinaries": 1794,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 590,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1807
+    "testEntries": 1809
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1062,7 +1062,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 937,
+      "integration": 939,
       "platform/destructive": 116,
       "pure unit": 590,
       "unclassified": 153
@@ -1213,9 +1213,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1792,
+    "nimTestBinaryCount": 1794,
     "pythonTestFileCount": 15,
-    "testEntryCount": 1807
+    "testEntryCount": 1809
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -32768,6 +32768,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_tarball_mode_builds_a_fall_through_source_recipe",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_tarball_mode_builds_a_fall_through_source_recipe.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_tarball_provisioning_cold_store_extractors",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -37932,6 +37949,24 @@
       "source": "tests/unit/t_substituted_provider_compile_is_verified.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tarball_mode_falls_through_to_from_source",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": true,
+      "source": "tests/unit/t_tarball_mode_falls_through_to_from_source.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
