@@ -181,3 +181,20 @@ suite "portable memo store":
     record.outputs[0].digest = "0".repeat(64)
     check not memoPublished(store, record, withOutputs = true)
     check not memoPublished(store, record, withOutputs = false)
+
+  test "an input past MAX_PATH is identified, not read as absent":
+    # Which files passed 260 characters depended on how deep the checkout
+    # was, so the same probe answered "present" under one checkout and
+    # "absent" under a longer one.
+    let base = createTempDir("repro-memo-long-", "")
+    defer: removeDir(extendedPath(base))
+    let project = base / "p"
+    let rel = "a".repeat(100) & "/" & "b".repeat(100) & "/" &
+      "c".repeat(60) & ".snap.svg"
+    check (project / rel).len > 260
+    createDir(extendedPath((project / rel).parentDir))
+    writeFile(extendedPath(project / rel), "<svg/>")
+    check currentIdentity(roots(project),
+      PathSetEntry(kind: pikProbe, path: "project:" & rel)) == some("present")
+    check currentIdentity(roots(project),
+      PathSetEntry(kind: pikRead, path: "project:" & rel)).isSome

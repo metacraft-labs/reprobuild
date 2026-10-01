@@ -247,7 +247,8 @@ proc ancestorProbeIdentity*(roots: openArray[LogicalRoot]; key: string):
       for ancestor in properAncestors(root.path):
         let candidate = ancestor.strip(leading = false, chars = {'/'}) & "/" &
           rest
-        if fileExists(candidate) or dirExists(candidate):
+        if fileExists(extendedPath(candidate)) or
+            dirExists(extendedPath(candidate)):
           return "present"
       return "absent"
   ""
@@ -462,7 +463,8 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
     consider(path, pikRead, fileContentHex(path))
   for path in probes:
     consider(path, pikProbe,
-      (if fileExists(path) or dirExists(path): ProbePresent
+      (if fileExists(extendedPath(path)) or dirExists(extendedPath(path)):
+         ProbePresent
        else: ProbeAbsent))
   for path in enumerations:
     consider(path, pikEnumeration, membershipHex(path))
@@ -558,11 +560,11 @@ proc portableOutputs*(roots: openArray[LogicalRoot];
       result.reason = "output outside every tracked logical root: " &
         physical
       return
-    if dirExists(physical):
+    if dirExists(extendedPath(physical)):
       let entries = treeEntries(physical)
       result.outputs.add(PortableOutput(path: render(logical),
         digest: treeDigestOf(entries), directory: true, entries: entries))
-    elif fileExists(physical):
+    elif fileExists(extendedPath(physical)):
       result.outputs.add(PortableOutput(path: render(logical),
         digest: fileContentHex(physical)))
     else:

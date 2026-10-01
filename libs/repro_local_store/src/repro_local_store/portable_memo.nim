@@ -195,14 +195,19 @@ proc currentIdentity*(roots: openArray[LogicalRoot]; entry: PathSetEntry;
     return none(string)
   let p = physical.get()
   case entry.kind
+  # Existence is asked in the extended-length form: a path past MAX_PATH
+  # otherwise reads as absent, so the same file was "present" under a short
+  # checkout path and "absent" under a longer one.
   of pikRead:
-    if not fileExists(p):
+    if not fileExists(extendedPath(p)):
       return none(string)
     some(fileContentHex(p))
   of pikProbe:
-    some(if fileExists(p) or dirExists(p): "present" else: "absent")
+    some(if fileExists(extendedPath(p)) or dirExists(extendedPath(p)):
+           "present"
+         else: "absent")
   of pikEnumeration:
-    if not dirExists(p):
+    if not dirExists(extendedPath(p)):
       return none(string)
     some(membershipHex(p))
   of pikEnvironment:
