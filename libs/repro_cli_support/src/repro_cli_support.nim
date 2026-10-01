@@ -5504,10 +5504,10 @@ proc evidenceJson(evidence: PathSetEvidence): JsonNode =
   %*{
     "declaredInputs": jsonStringSeq(evidence.declaredInputs),
     "declaredOutputs": jsonStringSeq(evidence.declaredOutputs),
-    "depfileInputs": jsonStringSeq(evidence.depfileInputs),
-    "monitorReads": jsonStringSeq(evidence.monitorReads),
-    "monitorWrites": jsonStringSeq(evidence.monitorWrites),
-    "monitorProbes": jsonStringSeq(evidence.monitorProbes),
+    "depfileInputs": jsonStringSeq(evidence.depfileInputs.paths),
+    "monitorReads": jsonStringSeq(evidence.monitorReads.paths),
+    "monitorWrites": jsonStringSeq(evidence.monitorWrites.paths),
+    "monitorProbes": jsonStringSeq(evidence.monitorProbes.paths),
     "provisionerReportedInputs":
       jsonStringSeq(evidence.provisionerReportedInputs),
     "evidenceProvenance": jsonStringSeq(provenance),
@@ -5560,8 +5560,8 @@ proc fileSizeOrZero(path: string): BiggestInt =
 
 proc evidenceInputCount(evidence: PathSetEvidence): int =
   var seen: seq[string] = @[]
-  for group in [evidence.declaredInputs, evidence.depfileInputs,
-      evidence.monitorReads, evidence.monitorProbes]:
+  for group in [evidence.declaredInputs, evidence.depfileInputs.paths,
+      evidence.monitorReads.paths, evidence.monitorProbes.paths]:
     for path in group:
       if path.len > 0 and seen.find(path) < 0:
         seen.add(path)
@@ -9797,8 +9797,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           "`executeBuildTarget(wantsInputEvidencePaths = …)` and the " &
           "consumer of `BuildCommandOutcome.inputEvidencePaths` have gone " &
           "out of step.")
-      for group in [item.evidence.declaredInputs, item.evidence.depfileInputs,
-          item.evidence.monitorReads, item.evidence.monitorProbes]:
+      for group in [item.evidence.declaredInputs,
+          item.evidence.depfileInputs.paths,
+          item.evidence.monitorReads.paths,
+          item.evidence.monitorProbes.paths]:
         for path in group:
           collectedInputEvidence.add(path)
 
