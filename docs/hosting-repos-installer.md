@@ -156,6 +156,36 @@ A tarball install records every path it wrote to
 exactly those. A tarball uninstall that globbed `$prefix/bin` would
 delete files it never installed.
 
+### NixOS and Nix: the nixpkgs fork is the repository
+
+For Nix users the package repository is the
+[`metacraft-labs/nixpkgs`](https://github.com/metacraft-labs/nixpkgs) fork:
+every released Metacraft package, on standing branches named after the
+upstream channel each one tracks (`nixos-unstable`, `nixpkgs-unstable`,
+`nixos-YY.MM`, `nixpkgs-YY.MM-darwin`), rebased and rebuilt daily
+(metacraft-specs `infrastructure/package-distribution.md` §6.4).
+
+On NixOS (`ID=nixos` in `/etc/os-release`, or `/etc/NIXOS`) the installer
+selects `--method nixos` before looking for any other package manager, and
+**installs nothing**: a NixOS system is declarative, so it prints the change
+to make and exits 0. The branch is the one matching the system's channel:
+the `github:NixOS/nixpkgs/<ref>` input of `/etc/nixos/flake.nix` if it names
+one the fork has, else `nixos-<VERSION_ID>`, else `nixos-unstable` (and it
+says why it fell back). A flake configuration gets an `inputs.metacraft`
+snippet; a channel configuration gets `nix-channel --add
+https://github.com/metacraft-labs/nixpkgs/archive/<branch>.tar.gz metacraft`.
+It never edits `/etc/nixos`, and never installs reprobuild's own flake at
+`dev`, which would be unreleased code under a release's name.
+`REPRO_NIX_BRANCH` overrides the choice.
+
+`--method nix` is the Nix-profile install for any other system with Nix:
+`nix profile install github:metacraft-labs/nixpkgs/nixpkgs-unstable#reprobuild`
+(or `nix profile upgrade reprobuild` when the profile already has it from the
+fork). It is not chosen automatically: where a native repository or the
+signed tarball applies, that stays the default.
+
+`tests/unit/test_install_nix_paths.py` drives both paths.
+
 ### One real asymmetry, stated rather than papered over
 
 On Linux the repository metadata carries OpenPGP signatures. **On Windows

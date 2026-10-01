@@ -8,7 +8,7 @@
 ## action is found when its input is an upstream OUTPUT that is not on disk,
 ## identified only through the upstream record's output digest.
 
-import std/[options, os, tempfiles, unittest]
+import std/[options, os, strutils, tempfiles, unittest]
 
 import repro_core/paths
 import repro_local_store/portable_fingerprint
@@ -156,3 +156,45 @@ suite "portable memo store":
       outputResolver([hitUp.get()]))
     check hitDown.isSome
     check hitDown.get().outputs[0].path == "project:out/app"
+
+  test "a record is published again when its content changes under one key":
+    # A key can come to describe different outputs: a fetch whose tree a
+    # later action used to mutate was recorded with the mutated tree, and the
+    # record re-derived once that stopped is a correction under the same
+    # name. The published marker names the content, so the correction goes
+    # out instead of the stale record staying on the remote for good.
+    let base = createTempDir("repro-memo-marker-", "")
+    # Marker names run past MAX_PATH under the host temp directory.
+    defer: removeDir(extendedPath(base))
+    let project = checkout(base, "int a;\n")
+    let store = base / "store"
+    var record = execute(project)
+    recordMemo(store, record)
+    check not memoPublished(store, record, withOutputs = false)
+    markMemoPublished(store, record, withOutputs = false)
+    check memoPublished(store, record, withOutputs = false)
+    # Published without its bytes is not published with them.
+    check not memoPublished(store, record, withOutputs = true)
+    markMemoPublished(store, record, withOutputs = true)
+    check memoPublished(store, record, withOutputs = true)
+    # Same weak, path set and strong, different outputs: not published.
+    record.outputs[0].digest = "0".repeat(64)
+    check not memoPublished(store, record, withOutputs = true)
+    check not memoPublished(store, record, withOutputs = false)
+
+  test "an input past MAX_PATH is identified, not read as absent":
+    # Which files passed 260 characters depended on how deep the checkout
+    # was, so the same probe answered "present" under one checkout and
+    # "absent" under a longer one.
+    let base = createTempDir("repro-memo-long-", "")
+    defer: removeDir(extendedPath(base))
+    let project = base / "p"
+    let rel = "a".repeat(100) & "/" & "b".repeat(100) & "/" &
+      "c".repeat(60) & ".snap.svg"
+    check (project / rel).len > 260
+    createDir(extendedPath((project / rel).parentDir))
+    writeFile(extendedPath(project / rel), "<svg/>")
+    check currentIdentity(roots(project),
+      PathSetEntry(kind: pikProbe, path: "project:" & rel)) == some("present")
+    check currentIdentity(roots(project),
+      PathSetEntry(kind: pikRead, path: "project:" & rel)).isSome

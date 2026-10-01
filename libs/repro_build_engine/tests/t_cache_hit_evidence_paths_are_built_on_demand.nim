@@ -104,8 +104,10 @@ proc observedPaths(item: ActionResult): HashSet[string] =
   ## read (`collectInputEvidence` and `watchPathsFromOutcome` take exactly
   ## these four groups).
   result = initHashSet[string]()
-  for group in [item.evidence.declaredInputs, item.evidence.depfileInputs,
-      item.evidence.monitorReads, item.evidence.monitorProbes]:
+  for group in [item.evidence.declaredInputs,
+      item.evidence.depfileInputs.paths,
+      item.evidence.monitorReads.paths,
+      item.evidence.monitorProbes.paths]:
     for path in group:
       result.incl(path.norm)
 
