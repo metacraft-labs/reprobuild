@@ -176,13 +176,15 @@
       # which this same revision moves into the supported set -- says the fold
       # is there, i.e. an over-claim in the depfile this engine reads.
       # Preserve child exec identities and the resumed parent guard across vfork.
+      # Bumped to 31b05a5 (io-mon#41): IPC connect records carry the socket
+      # path and the peer uid (endpoint-keyed daemon trust), and
+      # `FsSnoopRequest.isolateEnv` launches a child from its declared
+      # environment alone (Dev-Env-Warm-Entry.md).
       # Keep this, the lock, sibling clone and package fallback on one revision.
-      # Bumped to 53994c0, io-mon's `dev` tip, reconciling the two pins above
-      # (07cc4af from reprobuild `dev`, 4b2bb39 from reprobuild `agents`):
-      # neither is an ancestor of the other, and 53994c0 contains both, so it
-      # keeps the observation-identity fold AND the vfork repairs. Its tree is
-      # identical to 983a113, which the agents-side lock already built against.
-      url = "github:metacraft-labs/io-mon/53994c0ca76f263ff04f046b2f99d98a038d41f3";
+        # Bumped to e750199 (2026-09-30), io-mon's `agents` tip: it contains
+        # 53994c0 (dev's observation-identity fold + agents' vfork repairs) and
+        # 31b05a5 (io-mon#41: endpoint + peer-uid IPC records, isolated launch).
+      url = "github:metacraft-labs/io-mon/e75019940be4722fcaf11f1b239de37adae54f41";
       flake = false;
     };
     nim-shm-gset-src = {

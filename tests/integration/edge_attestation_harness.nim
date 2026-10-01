@@ -60,11 +60,31 @@ proc kidOf*(key: TestKey): seq[byte] =
   for i in 0 ..< hex.len div 2:
     result.add byte(parseHexInt(hex[2 * i .. 2 * i + 1]))
 
+const
+  HarnessAdmittedFrom* = 0'i64
+    ## The window every harness roster entry is admitted for.
+    ##
+    ## It starts at the epoch for a reason worth stating, because the
+    ## number otherwise looks like a field somebody left alone: the
+    ## verifier harness beside this one builds its request with
+    ## ``nowMs`` at zero, so a window that opened later would make every
+    ## pre-existing edge-attestation gate fail with "signer not yet
+    ## admitted" — a change in what those gates measure, smuggled in as
+    ## a default. The END is stated and `validateRoster` requires it, so
+    ## the property that matters (no key is admitted forever) holds
+    ## whatever the start is.
+  HarnessAdmittedUntil* = 1_900_000_000'i64  ## 2030-03-17T13:46:40Z.
+  HarnessNow* = 1_800_000_000'i64            ## 2027-01-15T08:00:00Z.
+    ## The instant a gate calling `evaluateQuorum` directly evaluates
+    ## at: inside the window above and far from either edge, so a case
+    ## that means to exercise rotation has to say so.
+
 proc signerFor*(key: TestKey): QuorumSigner =
   ## The roster entry a verifier's operator would install for this key.
   var point: seq[byte] = @[]
   for b in key.pub: point.add b
-  QuorumSigner(key: CoseKey(kid: kidOf(key), curve: ccP256, point: point))
+  admittedSigner(CoseKey(kid: kidOf(key), curve: ccP256, point: point),
+                 HarnessAdmittedFrom, HarnessAdmittedUntil)
 
 proc signerName*(key: TestKey): string = signerNameOf(signerFor(key).key)
 

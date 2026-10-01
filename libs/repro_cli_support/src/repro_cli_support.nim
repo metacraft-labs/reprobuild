@@ -5589,6 +5589,11 @@ proc actionResultJson(item: ActionResult): JsonNode =
     "launched": item.launched,
     "wouldLaunch": item.wouldLaunch,
     "cacheDecision": $item.cacheDecision,
+    # WHY a lookup missed (`input metadata changed: <path>`, `no cache record
+    # for weak fingerprint`, ...). Without it a report says only that an edge
+    # re-ran, and a warm activation that never converges cannot be diagnosed
+    # from the stats it writes.
+    "cacheMissReason": item.cacheMissReason,
     "reason": item.reason,
     "dependencyPolicyKind": $item.dependencyPolicyKind,
     "runQuotaBackend": item.runQuotaBackend,
@@ -5963,7 +5968,14 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     commandStatsId = "repro provider compile edge",
     cacheable = providerCompileCacheable(plan),
     weakFingerprint = plan.compileEdge.actionFingerprint,
-    envPassthrough = ProviderCompileEnvironmentPassthrough,
+    envPassthrough = @ProviderCompileEnvironmentPassthrough &
+      @ProviderCompileIsolatedPassthrough,
+    # The same edge as the dev-env engine's, so the same declared environment
+    # (see `providerCompileLaunchEnv`).
+    env = providerCompileLaunchEnv(compilerCwd / "home"),
+    # Dev-Env-Warm-Entry.md §2: the compile starts from the environment
+    # declared above and nothing else, so no caller variable can be an input.
+    isolateHostEnvironment = true,
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy = automaticMonitorGatheringPolicy(
@@ -27414,6 +27426,52 @@ type
     explicitSource: bool
     report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
+proc workspaceShellFirstRoot(explicit: string): string =
+  ## The workspace root a DEVELOP-SET verb should act on: the workspace SHELL
+  ## when an ancestor carries one, otherwise the generic MO-2 marker.
+  ##
+  ## Shared with ``flakeOverrideWorkspaceRoot``, which delegates here, because
+  ## the two must agree. `repro develop --list` and `repro flake override-args`
+  ## answer the same question — which develop set backs this directory — and
+  ## they used to answer it differently: develop took the cwd VERBATIM while the
+  ## flake verbs ascended. Standing in a participating repo, `develop --list
+  ## --all` therefore described that repo as its own workspace while
+  ## `override-args --all` described the whole workspace, from one directory.
+  ##
+  ## Why the shell wins over the generic ascent, measured rather than assumed:
+  ## ``isInitializedWorkspace`` is true of a directory carrying EITHER a
+  ## workspace shell OR, by MO-2, a committed ``repro.lock``. A participating
+  ## repo of a multi-repo workspace normally has both a committed lock and
+  ## siblings one level up, so the generic ascent stops at the REPO. That is why
+  ## the shell is looked for first, and the generic marker only when no ancestor
+  ## carries one (the manifest-optional, single-repo case the marker exists for).
+  ##
+  ## This does NOT widen the develop SET. Which repos are in it remains the
+  ## pushed repo's own dependencies per its lock
+  ## (``CLI/develop.md`` §"The Develop Set Is The Repo's Own Dependencies"); this
+  ## only decides which workspace's lock sources are readable when resolving
+  ## them, which that section calls out as the separate question.
+  if explicit.len > 0:
+    return absolutePath(explicit)
+  let here = absolutePath(getCurrentDir())
+  var dir = here
+  while true:
+    if fileExists(workspaceTomlPath(dir)):
+      return dir
+    let parent = parentDir(dir)
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+  dir = here
+  while true:
+    if isInitializedWorkspace(dir):
+      return dir
+    let parent = parentDir(dir)
+    if parent.len == 0 or parent == dir:
+      break
+    dir = parent
+  here
+
 proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
   ## ``repro develop <pkg> [--source=PATH] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
@@ -27454,9 +27512,7 @@ proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
   if result.package.len == 0:
     raise newException(ValueError,
       "`repro develop <pkg>` requires a package name")
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  result.workspaceRoot = workspaceShellFirstRoot(result.workspaceRoot)
 
 proc resolveDevelopWorkspacePrimary(
     workspaceRoot: string): ResolvedProject =
@@ -29534,9 +29590,7 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
       "`repro develop` with no target and no selector is not a bulk " &
       "operation: pass --all/--direct/--indirect/--transitive-of, a " &
       "membership selector, or --list to query the lock set")
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  result.workspaceRoot = workspaceShellFirstRoot(result.workspaceRoot)
 
 proc looksLikeDevelopAllArgs(args: openArray[string]): bool =
   ## The L1 develop-SET form is distinguished by a set-selection flag
@@ -30678,6 +30732,55 @@ const DaemonParentPrewarmEnv* = "REPROBUILD_DAEMON_PARENT_PREWARM"
 proc daemonParentPrewarmEnabled*(): bool =
   getEnv(DaemonParentPrewarmEnv, "1") != "0"
 
+const DaemonRequestValueFlags = ["--tool-provisioning",
+    "--action-cache-root", "--daemon", "--progress", "--progress-bars",
+    "--write-diagnostics", "--show", "--measure", "--log", "--write-benchmark",
+    "--monitor-hosting", "--evidence"]
+  ## The ``repro build`` flags whose BARE spelling consumes the next argument,
+  ## as ``runBuildCommand``'s parser reads them — the daemon parent's two
+  ## request readers (``daemonRequestProjectRoot``,
+  ## ``daemonPrewarmTargetOutputDir``) must skip exactly these to find the
+  ## same target the worker builds. ``--write-report`` and ``--write-stats``
+  ## are NOT here: bare, both are switches (only ``=PATH`` names a path), and
+  ## listing them made a trailing ``--write-report`` raise "requires a value"
+  ## while a leading one swallowed the target.
+
+proc daemonRequestProjectRoot*(rawArgs: openArray[string];
+                               workingDir: string): string =
+  ## The project a daemon-hosted ``repro build`` request is for, derived from
+  ## the request alone — the same target the worker will build: the first
+  ## positional of ``rawArgs`` (``.`` when there is none), resolved against the
+  ## request's ``workingDir``, never the daemon's own. "" when the target does
+  ## not resolve to a project file; the session record then keeps its
+  ## working-directory fallback. Read-only, so it is safe in the daemon parent
+  ## (see ``UserDaemonProjectRootResolver``).
+  var target = ""
+  var i = 0
+  while i < rawArgs.len:
+    let arg = rawArgs[i]
+    if arg == "--work-root" or arg in DaemonRequestValueFlags:
+      discard valueFromFlag(rawArgs, i, arg)
+    elif not arg.startsWith("-") and target.len == 0:
+      target = arg
+    inc i
+  if target.len == 0:
+    target = "."
+  var base = splitTarget(target).base
+  if base.len == 0:
+    base = "."
+  if not base.isAbsolute:
+    if workingDir.len == 0:
+      return ""
+    base = absolutePath(base, workingDir)
+  try:
+    let parsed = parseBuildTarget(base)
+    if not parsed.modulePath.isAbsolute or
+        not fileExists(extendedPath(parsed.modulePath)):
+      return ""
+    projectRootForModule(parsed.modulePath)
+  except CatchableError:
+    ""
+
 proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
                                    workingDir: string;
                                    requestEnvironment: openArray[string]):
@@ -30707,10 +30810,7 @@ proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
       workRoot = valueFromFlag(rawArgs, i, "--work-root")
     elif arg == "--force-rebuild" or arg == "--rebuild" or arg == "--dry-run":
       forceRefresh = true
-    elif arg in ["--tool-provisioning", "--action-cache-root", "--daemon",
-        "--progress", "--progress-bars", "--write-diagnostics", "--show",
-        "--measure", "--write-report", "--log", "--write-benchmark",
-        "--write-stats", "--monitor-hosting", "--evidence"]:
+    elif arg in DaemonRequestValueFlags:
       discard valueFromFlag(rawArgs, i, arg)
     elif not arg.startsWith("-") and target.len == 0:
       # THE FIRST POSITIONAL IS THE TARGET, with no `build` verb to skip.
@@ -30816,6 +30916,11 @@ proc installUserDaemonParentPrewarmer() =
   ## process-global first, which is a separate change.
   setUserDaemonParentPrewarmer(proc(request: UserDaemonBuildRequest): string =
     prewarmDaemonParentBuildCaches(request))
+  # Registered beside the prewarmer because it runs at the same point, in the
+  # same process, under the same read-only rule.
+  setUserDaemonProjectRootResolver(
+    proc(request: UserDaemonBuildRequest): string =
+      daemonRequestProjectRoot(request.rawArgs, request.workingDir))
 
 proc installUserDaemonBuildExecutor() =
   setUserDaemonBuildExecutor(proc(request: UserDaemonBuildRequest;
@@ -64659,19 +64764,15 @@ proc siblingVariantDeclarations(checkout: string):
   ## no variants emits no solver inputs at all, which is the same `none` a
   ## failed provider compile returns.
   ##
-  ## KNOWN LIMITATION, recorded rather than papered over and pinned by
-  ## `a recipe with no build: block cannot be asked` in
-  ## `t_develop_override_records_the_identity_it_replaced`: a sibling whose
-  ## recipe has neither a `build:` nor a `devEnv:` body contributes nothing,
-  ## even when it declares variants. `buildCode` (`macros_b.nim`) emits the
-  ## provider's `runPackageProvider` entry point only for a recipe with one of
-  ## those bodies, so the compiled binary runs its module init — emitting the
-  ## solver inputs — and exits without answering the protocol, and the probe
-  ## discards the emission along with the failed request. Closing it means
-  ## teaching that probe to keep inputs the provider demonstrably wrote before
-  ## the request failed, which is a change to `repro lock refresh`'s source of
-  ## truth and belongs to its own milestone. A develop sibling is a project you
-  ## build, so the shape that misses out is the rare one.
+  ## A RECIPE WITH NO `build:` OR `devEnv:` BODY IS ASKED TOO. `buildCode`
+  ## (`macros_b.nim`) emits the provider's `runPackageProvider` dispatcher
+  ## only for a recipe with one of those bodies, so such a binary cannot
+  ## answer a protocol request. It does not need to: its module init emits
+  ## the solver inputs, and since 0e7146a92 the probe runs a declaration-only
+  ## module's initialiser directly instead of sending it a request. This was
+  ## recorded here as a known limitation until then; it is now pinned the
+  ## other way round by `a recipe with no build: block is asked through its
+  ## initialiser` in `t_develop_override_records_the_identity_it_replaced`.
   result = @[]
   if checkout.len == 0:
     return
@@ -67060,17 +67161,10 @@ proc flakeOverrideWorkspaceRoot(explicit: string): string =
   ## ``.repro/workspace.toml`` first, and only fall back to the generic marker
   ## when no ancestor carries one (the manifest-optional, single-repo case that
   ## MO-2 marker exists for).
-  if explicit.len > 0:
-    return absolutePath(explicit)
-  var dir = absolutePath(getCurrentDir())
-  while true:
-    if fileExists(workspaceTomlPath(dir)):
-      return dir
-    let parent = parentDir(dir)
-    if parent.len == 0 or parent == dir:
-      break
-    dir = parent
-  resolveInvokedWorkspaceRoot("")
+  ## The ascent itself now lives in ``workspaceShellFirstRoot``, which
+  ## ``repro develop`` also uses. Keeping two copies is what let the two verb
+  ## families disagree about what "here" means from one directory.
+  workspaceShellFirstRoot(explicit)
 
 # ``flakeSiblingIsGitCheckout`` lives in
 # ``repro_dsl_stdlib/foreign_env/flake.nim`` beside the override-URL builder

@@ -110,7 +110,8 @@ package libfoo:
     ## point only for a recipe that has one, so a recipe without it compiles to
     ## a binary that runs its module init and exits without ever answering the
     ## protocol. A develop sibling is a project you build, so this is what one
-    ## looks like — and `a recipe with no build: block cannot be asked` below
+    ## looks like — and `a recipe with no build: block is asked through its
+    ## initialiser` below
     ## pins the other case as the known limitation it is.
 
   SiblingRecipeWithoutVariants = """
@@ -132,8 +133,9 @@ package libfoo:
     ## Enable TLS support.
     enableTls: variant bool = true
 """
-    ## Declares a variant and cannot answer the provider protocol. The known
-    ## limitation, recorded rather than papered over.
+    ## Declares a variant and cannot answer the provider protocol. Once the
+    ## known limitation; since 0e7146a92 the probe runs such a recipe's
+    ## initialiser directly, which is where the declarations are emitted.
 
 let NoPackages: seq[LockedPackage] = @[]
   ## A consumer with no committed lock at all — the case the engine must not
@@ -406,7 +408,7 @@ proc variantSibling(): Scenario =
     SiblingRecipe)
 
 proc unaskableSibling(): Scenario =
-  ## A sibling that declares a variant and cannot be asked about it.
+  ## A sibling that declares a variant and has no protocol dispatcher.
   scenario("unaskable", NoPackages, SiblingRecipeVariantsButNoBuild)
 
 addExitProc(proc () =
@@ -546,19 +548,37 @@ suite "the engine records the sibling's variant declarations":
     check not entry.hasKey("version")
     check entry.len == 2
 
-  test "a recipe with no build: block cannot be asked, and that is recorded here":
-    # The KNOWN LIMITATION, pinned as an observed fact rather than left for
-    # somebody to discover. `buildCode` emits the provider's protocol entry
-    # point only for a recipe with a `build:` (or `devEnv:`) body, so a recipe
-    # without one compiles to a binary that runs its module init and exits
-    # without answering — and the probe reports nothing, exactly as it would
-    # for a provider that failed to compile.
+  test "a recipe with no build: block is asked through its initialiser":
+    # THIS CASE USED TO PIN THE OPPOSITE, as a known limitation: `buildCode`
+    # emits the provider's protocol dispatcher only for a recipe with a
+    # `build:` (or `devEnv:`) body, and the probe used to send such a binary a
+    # manifest request it could not answer, discarding the solver inputs its
+    # module init had already written. 0e7146a92 ("Include resource-provider
+    # constraints in refreshed locks") closed that: for a declaration-only
+    # module `solverInputsFromCompiledProvider` now runs the binary's
+    # initialiser alone and reads the emission — the fix the writer's own
+    # doc-comment named ("teaching that probe to keep inputs the provider
+    # demonstrably wrote"). The limitation is gone, so the case asserts the
+    # declaration ARRIVES rather than that it is missing.
     #
     # The premise first, so this cannot silently become a test of something
-    # else: the recipe really does declare a variant.
-    check "enableTls: variant bool = true" in
-      readFile(unaskableSibling().checkout / "repro.nim")
-    check not overrideEntry(unaskableSibling().metadataPath).hasKey("variants")
+    # else: the recipe really does declare a variant, and has no `build:`.
+    let recipe = readFile(unaskableSibling().checkout / "repro.nim")
+    check "enableTls: variant bool = true" in recipe
+    check "build:" notin recipe
+    let entry = overrideEntry(unaskableSibling().metadataPath)
+    check entry.hasKey("variants")
+    var byName = initTable[string, JsonNode]()
+    if entry.hasKey("variants"):
+      for item in entry["variants"]:
+        byName[item["name"].getStr()] = item
+    # Exactly the one declaration, with its declared default — not the
+    # two-variant sibling's set leaking in, and not a synthesized value.
+    check byName.len == 1
+    check "enableTls" in byName
+    if "enableTls" in byName:
+      check byName["enableTls"]["kind"].getStr() == "bool"
+      check byName["enableTls"]["default"].getStr() == "true"
 
 suite "an override document written before this change still loads":
   ## Every override on disk today carries `node` and `path` and nothing else.

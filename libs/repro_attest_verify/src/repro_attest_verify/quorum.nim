@@ -65,6 +65,39 @@ import repro_attest
 import repro_attest/cose
 
 type
+  SignerAdmission* = object
+    ## For how long a rebuilder's key is admitted, and whether it has
+    ## been revoked.
+    ##
+    ## There is no "admitted forever" spelling and that is deliberate.
+    ## `hasNotAfter` is REQUIRED by `validateRoster`, so an operator
+    ## cannot admit a key by leaving a field at its zero value — which
+    ## is how key lifetime gets skipped in practice, not by anyone
+    ## deciding it should be unbounded.
+    ##
+    ## Rotation is expressed by OVERLAP rather than by replacement: the
+    ## successor's window opens before the predecessor's closes, so a
+    ## bundle signed during the handover reaches the threshold under
+    ## both rosters. Closing one window at the instant the next opens
+    ## leaves anything in flight short.
+    notBefore*: int64
+    hasNotAfter*: bool
+    notAfter*: int64
+    revoked*: bool
+    revokedAt*: int64
+      ## The instant from which this key stops counting. See
+      ## `RevocationHasNoSigningTimeCaveat` for what that can and
+      ## cannot mean here.
+    revocationReason*: string
+      ## Required when `revoked`. A revocation with no reason is a
+      ## decision nobody can review.
+
+  AdmissionState* = enum
+    saAdmitted = "admitted"
+    saNotYetAdmitted = "not-yet-admitted"
+    saAdmissionEnded = "admission-ended"
+    saRevoked = "revoked"
+
   QuorumSigner* = object
     ## One admitted rebuilder, as the verifier's operator supplied it.
     ##
@@ -72,6 +105,7 @@ type
     ## identifier, so there is no second name for a policy and a roster
     ## to come to disagree about.
     key*: CoseKey
+    admission*: SignerAdmission
 
   WitnessedLogRoot* = object
     ## A transparency-log root this verifier obtained from somewhere
@@ -85,6 +119,9 @@ type
   QuorumEntryOutcome* = enum
     qeoCounted = "counted"
     qeoNotAnAdmittedSigner = "not-an-admitted-signer"
+    qeoSignerNotYetAdmitted = "signer-not-yet-admitted"
+    qeoSignerAdmissionEnded = "signer-admission-ended"
+    qeoSignerRevoked = "signer-revoked"
     qeoAlreadyCounted = "already-counted"
     qeoMalformed = "malformed"
     qeoSignatureDidNotVerify = "signature-did-not-verify"
@@ -97,6 +134,10 @@ type
     detail*: string
 
   QuorumEvaluation* = object
+    caveats*: seq[string]
+      ## What this evaluation could not establish. Carried out of here
+      ## rather than composed by the caller, because the limits belong
+      ## to the rule that has them.
     entries*: seq[QuorumEntry]
     countedSigners*: seq[string]
       ## Distinct kids that contributed, in the order first counted.
@@ -135,6 +176,12 @@ const
     "the quorum counted distinct signing keys; nothing in a signature " &
     "says who holds the key, so one party holding several of the " &
     "admitted keys would satisfy this threshold alone"
+
+  RevocationHasNoSigningTimeCaveat* =
+    "a revocation here is evaluated at verification time; a quorum " &
+    "signature carries no signing time, so nothing distinguishes a " &
+    "signature made before a key was revoked from one made after, and " &
+    "revoking a key therefore withdraws every bundle it contributed to"
 
   UnverifiedLogAgeCaveat* =
     "this verdict establishes that the claim is in a log whose root " &
@@ -176,6 +223,73 @@ proc validateRoster*(roster: openArray[QuorumSigner]) =
         "; two entries with one identity would be counted as one signer " &
         "or as two depending on which was reached first")
     seen[name] = i
+    if not s.admission.hasNotAfter:
+      raise newException(RosterError,
+        "roster entry " & $i & " (" & name & ") states no end to its " &
+        "admission; this build has no spelling for a key that is " &
+        "admitted forever, because an unbounded key is what an " &
+        "operator ends up with by leaving a field alone rather than " &
+        "by deciding anything")
+    if s.admission.notAfter <= s.admission.notBefore:
+      raise newException(RosterError,
+        "roster entry " & $i & " (" & name & ") is admitted from " &
+        $s.admission.notBefore & " until " & $s.admission.notAfter &
+        ", which is not a window; a key admitted for no time at all " &
+        "would count for nothing at every instant and read as a key " &
+        "that was never admitted")
+    if s.admission.revoked:
+      if s.admission.revocationReason.len == 0:
+        raise newException(RosterError,
+          "roster entry " & $i & " (" & name & ") is revoked with no " &
+          "reason; a revocation nobody can review is a decision nobody " &
+          "can undo either")
+      if s.admission.revokedAt < s.admission.notBefore:
+        raise newException(RosterError,
+          "roster entry " & $i & " (" & name & ") is revoked at " &
+          $s.admission.revokedAt & ", before its admission began at " &
+          $s.admission.notBefore & "; a key revoked before it was " &
+          "admitted was never admitted, and saying it twice invites " &
+          "the two statements to disagree")
+
+proc classifyAdmission*(a: SignerAdmission; nowSeconds: int64):
+    AdmissionState =
+  ## Whether a key counts at `nowSeconds`.
+  ##
+  ## Revocation is tested FIRST, and only once its instant has passed.
+  ## A revoked key inside its window is revoked, which is the fact a
+  ## reader needs; testing the window first would report a key whose
+  ## holder lost control of it as merely "admitted".
+  if a.revoked and nowSeconds >= a.revokedAt: return saRevoked
+  if nowSeconds < a.notBefore: return saNotYetAdmitted
+  if a.hasNotAfter and nowSeconds >= a.notAfter: return saAdmissionEnded
+  saAdmitted
+
+proc outcomeFor*(state: AdmissionState): QuorumEntryOutcome =
+  ## The entry outcome an admission state produces. A total function
+  ## over the enumeration, so a state added without a decision does not
+  ## compile — and written here rather than inline in the evaluator,
+  ## where the `saAdmitted` arm would have been unreachable and an
+  ## unreachable arm is a rule with no input.
+  case state
+  of saAdmitted: qeoCounted
+  of saNotYetAdmitted: qeoSignerNotYetAdmitted
+  of saAdmissionEnded: qeoSignerAdmissionEnded
+  of saRevoked: qeoSignerRevoked
+
+proc admittedSigner*(key: CoseKey; notBefore, notAfter: int64):
+    QuorumSigner =
+  ## A roster entry with a stated window and no revocation. The one
+  ## constructor, so a caller cannot produce an entry with a default
+  ## admission and have it silently mean "forever".
+  QuorumSigner(key: key, admission: SignerAdmission(
+    notBefore: notBefore, hasNotAfter: true, notAfter: notAfter))
+
+proc revoked*(signer: QuorumSigner; at: int64; reason: string):
+    QuorumSigner =
+  result = signer
+  result.admission.revoked = true
+  result.admission.revokedAt = at
+  result.admission.revocationReason = reason
 
 proc rosterNames*(roster: openArray[QuorumSigner]): seq[string] =
   for s in roster: result.add signerNameOf(s.key)
@@ -207,7 +321,8 @@ proc unevaluatedVerifiers*(bundle: EdgeAttestationBundle): seq[string] =
 # ---------------------------------------------------------------------
 
 proc evaluateQuorum*(bundle: EdgeAttestationBundle; claim: EdgeClaim;
-                     roster: openArray[QuorumSigner]): QuorumEvaluation =
+                     roster: openArray[QuorumSigner];
+                     nowSeconds: int64): QuorumEvaluation =
   ## Evaluate every ``signed-quorum.v1`` entry against the admitted set.
   ##
   ## ``claim`` is the claim the VERIFIER computed from the manifest it
@@ -217,6 +332,14 @@ proc evaluateQuorum*(bundle: EdgeAttestationBundle; claim: EdgeClaim;
   ## rule the report verifier applies to a challenge, for the same
   ## reason.
   validateRoster(roster)
+  for s in roster:
+    if s.admission.revoked and nowSeconds >= s.admission.revokedAt:
+      # Carried on every evaluation that applied a revocation, whatever
+      # it concluded. A reader who is not told what a revocation here
+      # does and does not establish cannot tell a withdrawn key from a
+      # key that never signed.
+      result.caveats.add RevocationHasNoSigningTimeCaveat
+      break
   let statement = edgeStatementBytes(claim)
   var payload = newSeq[byte](statement.len)
   for i in 0 ..< statement.len: payload[i] = byte(statement[i])
@@ -296,6 +419,45 @@ proc evaluateQuorum*(bundle: EdgeAttestationBundle; claim: EdgeClaim;
       continue
 
     entry.signer = hexOfKid(verified.kid)
+
+    # The signature verified under an admitted key's scalar. Whether
+    # that key still counts is a separate question, asked here rather
+    # than by withholding the key from the verifier above: filtering
+    # the key set would have reported a lapsed or revoked signer as one
+    # the policy never admitted, which is a different fact and sends
+    # the reader somewhere else.
+    #
+    # None of these is a DEFECT. A lapsed or revoked signature beside a
+    # bundle that reaches the threshold on other signers must not deny
+    # it, for the same reason an unadmitted party's signature does not:
+    # appending a signature to a published bundle would otherwise be a
+    # denial of service.
+    block admission:
+      var state = saAdmitted
+      var because = ""
+      for s in roster:
+        if signerNameOf(s.key) != entry.signer: continue
+        state = classifyAdmission(s.admission, nowSeconds)
+        because =
+          case state
+          of saAdmitted: ""
+          of saNotYetAdmitted:
+            " is admitted from " & $s.admission.notBefore & " and this " &
+              "verdict is being reached at " & $nowSeconds
+          of saAdmissionEnded:
+            " stopped being admitted at " & $s.admission.notAfter &
+              " and this verdict is being reached at " & $nowSeconds
+          of saRevoked:
+            " was revoked at " & $s.admission.revokedAt & ": " &
+              s.admission.revocationReason
+        break
+      if state == saAdmitted: break admission
+      entry.outcome = outcomeFor(state)
+      entry.detail = at & " is signed by " & entry.signer & ", which" &
+        because & ", so it contributes nothing"
+      result.entries.add entry
+      continue
+
     if entry.signer in result.countedSigners:
       entry.outcome = qeoAlreadyCounted
       entry.detail = at & " is a second signature by " & entry.signer &

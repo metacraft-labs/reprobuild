@@ -145,7 +145,7 @@ suite "edge attestations on the measurement manifest: K-of-N":
     let bundleText = bundleOf(claim, [quorumEntry(keyA, statement),
                                       quorumEntry(outsider, statement)])
     let bundle = parseEdgeAttestationBundle(bundleText, "<bundle>")
-    let ev = evaluateQuorum(bundle, claim, roster)
+    let ev = evaluateQuorum(bundle, claim, roster, HarnessNow)
     check ev.countedSigners == @[signerName(keyA)]
     check ev.defects.len == 0
     check ev.entries[1].outcome == qeoNotAnAdmittedSigner
@@ -162,7 +162,7 @@ suite "edge attestations on the measurement manifest: K-of-N":
     let bundleText = bundleOf(claim, [quorumEntry(keyA, statement),
                                       quorumEntry(keyA, statement)])
     let bundle = parseEdgeAttestationBundle(bundleText, "<bundle>")
-    let ev = evaluateQuorum(bundle, claim, roster)
+    let ev = evaluateQuorum(bundle, claim, roster, HarnessNow)
     check ev.countedSigners.len == 1
     check ev.entries[1].outcome == qeoAlreadyCounted
     check ev.defects.len == 0
@@ -183,7 +183,7 @@ suite "edge attestations on the measurement manifest: K-of-N":
                                       quorumEntry(keyB, statement),
                                       forged])
     let bundle = parseEdgeAttestationBundle(bundleText, "<bundle>")
-    let ev = evaluateQuorum(bundle, claim, roster)
+    let ev = evaluateQuorum(bundle, claim, roster, HarnessNow)
     check ev.countedSigners.len == 2          # the threshold IS reached
     check ev.defects.len == 1                 # and it still rejects
     check ev.entries[2].outcome == qeoSignatureDidNotVerify
