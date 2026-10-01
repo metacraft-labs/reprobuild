@@ -141,11 +141,12 @@ proc evidenceShape(res: ActionResult; subs: seq[(string, string)]): string =
   @[
     render("declaredInputs", ev.declaredInputs),
     render("declaredOutputs", ev.declaredOutputs),
-    render("depfileInputs", ev.depfileInputs),
-    render("monitorReads", ev.monitorReads),
-    render("monitorWrites", ev.monitorWrites),
-    render("monitorProbes", ev.monitorProbes),
-    render("monitorDirectoryEnumerations", ev.monitorDirectoryEnumerations),
+    render("depfileInputs", ev.depfileInputs.paths),
+    render("monitorReads", ev.monitorReads.paths),
+    render("monitorWrites", ev.monitorWrites.paths),
+    render("monitorProbes", ev.monitorProbes.paths),
+    render("monitorDirectoryEnumerations",
+      ev.monitorDirectoryEnumerations.paths),
     render("diagnostics", ev.diagnostics)
   ].join("\n")
 
