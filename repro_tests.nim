@@ -14805,6 +14805,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_from_source_cabal_recognition.nim",
+    binary: "build/test-bin/t_from_source_cabal_recognition",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_from_source_cargo_recognition.nim",
     binary: "build/test-bin/t_from_source_cargo_recognition",
     defines: @["reproProviderMode"],
@@ -14834,6 +14843,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_from_source_realization_platform.nim",
     binary: "build/test-bin/t_from_source_realization_platform",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/unit/t_hackage_vendor_manifest.nim",
+    binary: "build/test-bin/t_hackage_vendor_manifest",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
