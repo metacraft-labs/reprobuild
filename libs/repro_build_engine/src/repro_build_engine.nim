@@ -11280,7 +11280,15 @@ proc launchChildEnv(action: BuildAction;
   # Under an allowlisted environment nothing is inherited, so the host's
   # OS-essential set is handed over here -- before `action.env`, so a value
   # the action declares (a hermetic `USERPROFILE`, say) still wins.
-  if config.hermeticEnv:
+  #
+  # An ISOLATED action inherits nothing either, so it needs the same set, for
+  # the same reason. Without it the provider-compile edge (the first isolated
+  # action) could not start on Windows at all: a process with no `SystemRoot`
+  # cannot create a socket, and the `repro` helper that edge runs creates one
+  # while initialising, so every recipe compile died with "An operation was
+  # attempted on something that is not a socket". Isolation removes what the
+  # caller's shell happens to hold; these names are what the OS needs.
+  if config.hermeticEnv or action.isolateHostEnvironment:
     result.add(hostEssentialEnv())
   for entry in action.env:
     result.add(entry)

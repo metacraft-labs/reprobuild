@@ -16,6 +16,14 @@
 ##      it does not re-run the edge.
 ##   4. Isolation is keyed. The inheriting fingerprint is unchanged (so no
 ##      existing record moves), and the isolated one differs from it.
+##   5. An isolated action still receives the host's OS-essential variables
+##      (`HostEssentialEnvNames`), exactly as an action under an allowlisted
+##      environment does. Isolation first shipped without them, and on
+##      Windows a process with no `SystemRoot` cannot create a socket: the
+##      provider-compile edge's `repro` helper died initialising with "An
+##      operation was attempted on something that is not a socket", so no
+##      recipe could be compiled. The case reads the child's own view of
+##      `SystemRoot` (Windows) / `HOME` (POSIX) by value.
 ##
 ## MOCKS: none. Real processes and a real action cache in a temp directory.
 
@@ -75,6 +83,29 @@ proc edge(sh, workRoot: string; isolate: bool): BuildAction =
     actionCachePolicy = ffpHybrid,
     env = [DeclaredVar & "=declared"],
     isolateHostEnvironment = isolate,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+
+const EssentialVar =
+  when defined(windows): "SYSTEMROOT"
+  else: "HOME"
+    ## One name from `HostEssentialEnvNames` that every host has. Spelled in
+    ## capitals on Windows because that is how the MSYS `sh` the probe runs
+    ## exposes `SystemRoot`; Windows environment names are case-insensitive.
+
+proc essentialEdge(sh, workRoot: string): BuildAction =
+  ## An isolated action that records what it received for `EssentialVar`.
+  action("env/isolated-essential",
+    [sh, "-c",
+     "printf '%s\\n' \"${" & EssentialVar & "-unset}\" >> out/runs.log; " &
+     "printf 'run.stamp: src/fixture.txt\\n' > out/run.d"],
+    cwd = workRoot,
+    inputs = ["src/fixture.txt"],
+    outputs = [],
+    depfile = "out/run.d",
+    cacheable = true,
+    weakFingerprint = weak("env/isolated-essential"),
+    actionCachePolicy = ffpHybrid,
+    isolateHostEnvironment = true,
     governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
 proc directConfig(cacheRoot: string): BuildEngineConfig =
@@ -139,3 +170,16 @@ suite "isolated action environment":
     let inheriting = edge("/bin/sh", f.workRoot, isolate = false)
     let isolated = edge("/bin/sh", f.workRoot, isolate = true)
     check inheriting.weakFingerprint != isolated.weakFingerprint
+
+  test "5. an isolated action still receives the host's OS-essential variables":
+    if sh.len == 0:
+      skip("no sh on PATH to run the probe action")
+    else:
+      let expected = getEnv(EssentialVar)
+      require expected.len > 0
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      let run = runBuild(graph([essentialEdge(sh, f.workRoot)]),
+        directConfig(f.cacheRoot))
+      check run.byId("env/isolated-essential").status == asSucceeded
+      check f.runLines() == @[expected]
