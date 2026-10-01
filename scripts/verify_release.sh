@@ -15,8 +15,25 @@ fi
 
 archive_name=$(basename "$archive_path")
 mkdir -p "$(pwd)/build"
+
+# The extracted tree carries read-only files and directories (copies of
+# Nix-store paths keep their r-x modes), and a plain `rm -rf` cannot remove an
+# entry from a directory that has no write bit. Restore owner write first. A
+# tree left behind would otherwise sit in the runner's checkout, and on a
+# persistent runner the next job's checkout clean fails on it with EACCES.
+remove_tree() {
+  [[ -e "$1" ]] || return 0
+  chmod -R u+w "$1" 2>/dev/null || true
+  rm -rf "$1"
+}
+
+# Trees from earlier runs that were killed before their EXIT trap ran.
+for stale in "$(pwd)"/build/reprobuild-verify-??????; do
+  [[ -d "$stale" ]] && remove_tree "$stale"
+done
+
 tmp_dir=$(mktemp -d "$(pwd)/build/reprobuild-verify-XXXXXX")
-trap 'rm -rf "$tmp_dir"' EXIT
+trap 'remove_tree "$tmp_dir"' EXIT
 
 echo "=== Extracting $archive_name to $tmp_dir ==="
 if [[ "$archive_name" == *.zip ]]; then
