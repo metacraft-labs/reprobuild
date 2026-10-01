@@ -64229,6 +64229,14 @@ proc reportGeneratedLock(verb, lockP: string;
     " metadata fetch edge(s) in " & $generated.fetchWaves.len & " wave(s))")
   stdout.writeLine("repro lock " & verb & ": lock identity " &
     $generated.lockIdentity)
+  # M5 "pin the provider-compile toolchain": an archive pin is a digest the
+  # network supplied at THIS moment and every later realization trusts, so it
+  # is said out loud, for whoever reviews the lock diff.
+  for d in ld.deps:
+    if d.archive.isPinned:
+      stdout.writeLine("repro lock " & verb & ": pinned " & d.name & " " &
+        d.version & " to " & d.archive.url & " (" & d.archive.build &
+        ", sha256 " & d.archive.sha256 & ")")
   # NLF-M6, third folded criterion — a strategy that cannot take effect must
   # SAY SO. NLF-M5 shipped `--strategy` accepted, printed in the run summary,
   # and silently inert wherever no candidate universe existed to rank; the
