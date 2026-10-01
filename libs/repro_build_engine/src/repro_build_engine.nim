@@ -14518,8 +14518,31 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       key = key.toLowerAscii()
     key == hostTempKey
 
+  let hostSystemKey = block:
+    when defined(windows):
+      var key = getEnv("SystemRoot", "C:\\Windows").replace('\\', '/')
+      while key.len > 1 and key.endsWith("/"):
+        key.setLen(key.len - 1)
+      key.toLowerAscii()
+    else:
+      ""
+
+  proc isHostSystemPath(path: string): bool =
+    ## Beneath the host OS directory — the root the CLI's portable roots
+    ## already mark untracked. Which system DLLs a process loads varies
+    ## between two runs of the same command (the loader pulls in
+    ## `apphelp.dll`, `cmdext.dll`, ... only sometimes), so for the
+    ## determinism probe they are not inputs to compare on; differing
+    ## outputs still fail closed.
+    if hostSystemKey.len == 0:
+      return false
+    var key = path.replace('\\', '/')
+    when defined(windows):
+      key = key.toLowerAscii()
+    key == hostSystemKey or key.startsWith(hostSystemKey & "/")
+
   proc isLaunchMachinery(path: string): bool =
-    isHostTempListing(path) or
+    isHostTempListing(path) or isHostSystemPath(path) or
       toLogicalPath(launchMachineryRoots(), path).kind == lpkUntracked
 
   proc portableRecordRoots(): seq[LogicalRoot] =

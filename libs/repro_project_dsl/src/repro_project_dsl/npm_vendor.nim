@@ -222,8 +222,11 @@ proc emitNpmVendorAction*(projectRoot, packageName: string;
     if fields.len == 3 and not fields[0].startsWith("#") and
         fields[2] notin uniqueUrls:
       uniqueUrls.add(fields[2])
+  # The populate program is hashed with the project's own path taken out, so
+  # two checkouts of the recipe agree on the token (see `withoutProjectPath`).
   let token = "repro-npm-vendor-v1:" & blake3.toHex(blake3.digest(
-    script & "\n--manifest--\n" & manifestText & "\n--lock--\n" & lockText))
+    withoutProjectPath(script, projectRoot) & "\n--manifest--\n" &
+    manifestText & "\n--lock--\n" & lockText))
   let escapedStamp = q(stamp)
   let indexGlob = q(npmCache) & "/_cacache/index-v5/*/*/*"
   var full = prologue
