@@ -34,6 +34,9 @@
 ##   2. After lib-b advances by a published commit, a second refresh re-pins
 ##      lib-b at its new HEAD (an observation of the checkout, not a copy of the
 ##      old pin).
+##   4. A dev-env-only recipe (a `repro.nim` with nothing to solve) still gets
+##      a committed lock recording its develop set, instead of "no solver
+##      inputs found".
 ##   3. Carry-forward outside a workspace: a fresh standalone clone of app with
 ##      no workspace and no sibling checkouts still records lib-b and lib-c
 ##      after a refresh, at the committed pins. A refresh must never silently
@@ -233,3 +236,18 @@ suite "the committed lock records the develop-set siblings":
       checkpoint(body3)
       check ("revision = \"" & libBNext & "\"") in depLineFor(body3, "../lib-b")
       check ("revision = \"" & libCHead & "\"") in depLineFor(body3, "../lib-c")
+
+      # ---- (4) a recipe with nothing to solve still records its develop set.
+      let recipeOnly = workspace / "app"
+      removeFile(recipeOnly / "repro.solver")
+      removeFile(recipeOnly / "repro.lock")
+      writeFile(recipeOnly / "repro.nim",
+        "import repro_project_dsl\nimport repro_dsl_stdlib/foreign_env\n\n" &
+        "package appEnvironment:\n  devEnv:\n    useFlakeDevShell()\n")
+      let noSolve = runCmd(q(reproBin) & " lock refresh " & q(recipeOnly))
+      checkpoint(noSolve.output)
+      check noSolve.code == 0
+      check "no solver inputs found" notin noSolve.output
+      let body4 = readFile(recipeOnly / "repro.lock")
+      check ("revision = \"" & libBNext & "\"") in depLineFor(body4, "../lib-b")
+      check "packages = []" in body4

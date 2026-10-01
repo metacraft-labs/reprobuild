@@ -396,6 +396,17 @@ else:
       elif value is seq[string]:
         for entry in value:
           entries.add normalisePath(entry, workDir)
+      elif value is ObservedPathChannel:
+        # DA-1f. The five OBSERVED channels became a distinct type so that
+        # nothing can append to one without naming an `EvidenceContributor`.
+        # They are rendered EXACTLY as the `seq[string]` arm above renders
+        # them -- same normalisation, same sort, same spelling -- so this
+        # suite's arm-to-arm comparison is byte-for-byte what it was. A
+        # separate arm rather than a widened `when` because the whole point
+        # of the `{.error.}` below is that a new SHAPE is a decision, and
+        # "render it like a path seq" is that decision written down.
+        for entry in value:
+          entries.add normalisePath(entry, workDir)
       elif value is seq[EntropyObservation]:
         # ALL THREE components. `EntropyCallerOrigin` is the axis on which a
         # hosted monitor (io-mon running inside the ENGINE process) could
@@ -995,7 +1006,8 @@ else:
       checkOrEcho after.results[0].status == asSucceeded,
         "the engine could not host another monitor after two concurrent " &
         "worker faults: " & after.results[0].stderr
-      checkOrEcho mentionsMarker(after.results[0].evidence.monitorReads, work),
+      checkOrEcho mentionsMarker(
+          after.results[0].evidence.monitorReads.paths, work),
         "the build after the faults produced no evidence of its own, so the " &
         "faults were not confined to the build they happened in: " &
         after.results[0].evidence.monitorReads.join(" ")

@@ -194,7 +194,7 @@ suite "monitor_fault_fails_the_action_not_the_daemon":
             " stderr: ", good.stderr
         check good.status == asSucceeded
         check good.monitorDepfilePath.len > 0
-        check mentionsPath(good.evidence.monitorReads,
+        check mentionsPath(good.evidence.monitorReads.paths,
           expandFilename(healthyMarker))
         check not good.joinedDiagnostics.contains("monitor depfile read failed")
 
@@ -233,7 +233,8 @@ suite "monitor_fault_fails_the_action_not_the_daemon":
         check res.status == asSucceeded
         # And still fully monitored — the fault did not leave the host in
         # a degraded state that silently stops capturing evidence.
-        check mentionsPath(res.evidence.monitorReads, expandFilename(marker))
+        check mentionsPath(res.evidence.monitorReads.paths,
+          expandFilename(marker))
 
     test "teardown":
       removeDir(tempRoot)
