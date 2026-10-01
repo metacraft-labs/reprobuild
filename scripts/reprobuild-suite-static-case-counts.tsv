@@ -78,6 +78,7 @@ libs/repro_build_engine/tests/t_named_pipe_evidence.nim	nim	3
 libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim	nim	14
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim	nim	10
+libs/repro_build_engine/tests/t_scratch_dirs.nim	nim	4
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
 libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim	nim	4
 libs/repro_build_engine/tests/t_whole_graph_shortcut_matches_per_edge_verdict.nim	nim	2
@@ -288,6 +289,7 @@ libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	206
 libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim	nim	12
 libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim	nim	5
 libs/repro_interface_artifacts/tests/t_multi_package_merge.nim	nim	2
+libs/repro_interface_artifacts/tests/t_provider_link_flags_bake_no_host_rpath.nim	nim	1
 libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	2
 libs/repro_interface_artifacts/tests/t_provider_source_discovery.nim	nim	3
 libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim	nim	8
@@ -306,8 +308,8 @@ libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entit
 libs/repro_local_store/tests/t_m8_multi_output_realize.nim	nim	6
 libs/repro_local_store/tests/t_newest_alias_and_interned_records.nim	nim	22
 libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim	nim	4
-libs/repro_local_store/tests/t_portable_fingerprint.nim	nim	16
-libs/repro_local_store/tests/t_portable_memo.nim	nim	5
+libs/repro_local_store/tests/t_portable_fingerprint.nim	nim	17
+libs/repro_local_store/tests/t_portable_memo.nim	nim	7
 libs/repro_local_store/tests/t_retention_gc.nim	nim	6
 libs/repro_local_store/tests/t_sqlite_smoke.nim	nim	4
 libs/repro_local_store/tests/t_store_optimise_dedup.nim	nim	2
@@ -1158,6 +1160,7 @@ tests/integration/t_ext_test_execution_rows.nim	nim	3
 tests/integration/t_extension_type_lifted_and_consumed.nim	nim	1
 tests/integration/t_external_cli_store_contract_writes_and_reads.nim	nim	1
 tests/integration/t_finish_outcome_reaches_the_spine.nim	nim	1
+tests/integration/t_flake_override_resolution_uses_the_invoking_engine.nim	nim	3
 tests/integration/t_framework_field_is_present_and_filtering_works.nim	nim	1
 tests/integration/t_gate_and_sync_consume_unified_locked_deps_regardless_of_source.nim	nim	1
 tests/integration/t_gate_consumes_published_evidence_for_unclonable_private_repo.nim	nim	1
