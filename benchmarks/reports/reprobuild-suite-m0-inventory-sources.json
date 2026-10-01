@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1798,
+    "nimTestBinaries": 1800,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 592,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1813
+    "testEntries": 1815
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1063,7 +1063,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 940,
+      "integration": 942,
       "platform/destructive": 116,
       "pure unit": 592,
       "unclassified": 154
@@ -1214,9 +1214,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1798,
+    "nimTestBinaryCount": 1800,
     "pythonTestFileCount": 15,
-    "testEntryCount": 1813
+    "testEntryCount": 1815
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -23689,6 +23689,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_a_backward_flake_pin_refuses_the_commit",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_backward_flake_pin_refuses_the_commit.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_a_behind_only_refusal_names_a_pasteable_command",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -25369,6 +25384,23 @@
       "source": "tests/integration/t_commit_records_the_sibling_revision_the_shell_actually_used.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_commit_refuses_a_backward_sibling_pin",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_commit_refuses_a_backward_sibling_pin.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
