@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1790,
+    "nimTestBinaries": 1791,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 590,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1805
+    "testEntries": 1806
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1062,7 +1062,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 935,
+      "integration": 936,
       "platform/destructive": 116,
       "pure unit": 590,
       "unclassified": 153
@@ -1213,9 +1213,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1790,
+    "nimTestBinaryCount": 1791,
     "pythonTestFileCount": 15,
-    "testEntryCount": 1805
+    "testEntryCount": 1806
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -4665,7 +4665,7 @@
             "env",
             "parts"
           ],
-          "line": 39,
+          "line": 52,
           "path": "tests/integration/t_moved_package_without_catalog_names_where_it_looked.nim",
           "patterns": [
             "nim-argv"
@@ -25853,6 +25853,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_dependency_lists_resolve_reprobuild_packages_interface",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_dependency_lists_resolve_reprobuild_packages_interface.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_dependency_report_and_converter_paths",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -29490,7 +29508,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_moved_package_without_catalog_names_where_it_looked.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

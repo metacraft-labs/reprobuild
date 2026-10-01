@@ -1102,6 +1102,7 @@ tests/integration/t_declared_daemon_ipc_trust.nim	nim	17
 tests/integration/t_declared_platforms_change_no_existing_resolution.nim	nim	1
 tests/integration/t_default_projects_auto_layer_on_fresh_workspace.nim	nim	3
 tests/integration/t_default_target_floor_is_conservative.nim	nim	7
+tests/integration/t_dependency_lists_resolve_reprobuild_packages_interface.nim	nim	2
 tests/integration/t_dependency_report_and_converter_paths.nim	nim	1
 tests/integration/t_der_nesting_is_bounded_by_the_parent.nim	nim	9
 tests/integration/t_derived_daemon_ipc_trust.nim	nim	10
@@ -1308,7 +1309,7 @@ tests/integration/t_monitor_depfile_reader.nim	nim	2
 tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim	nim	3
 tests/integration/t_monitor_shim_edges_carry_static_libgcc.nim	nim	3
 tests/integration/t_monitored_zero_output_edge_input_completeness.nim	nim	5
-tests/integration/t_moved_package_without_catalog_names_where_it_looked.nim	nim	3
+tests/integration/t_moved_package_without_catalog_names_where_it_looked.nim	nim	5
 tests/integration/t_named_pool_capacity_enforced_once_via_runquota_not_double_counted.nim	nim	2
 tests/integration/t_negative_chain_fixtures.nim	nim	14
 tests/integration/t_nested_bootstrap_runtime_closure.nim	nim	1

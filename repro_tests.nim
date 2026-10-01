@@ -9864,6 +9864,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_dependency_lists_resolve_reprobuild_packages_interface.nim",
+    binary: "build/test-bin/t_dependency_lists_resolve_reprobuild_packages_interface",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_dependency_report_and_converter_paths.nim",
     binary: "build/test-bin/t_dependency_report_and_converter_paths",
     defines: @[],

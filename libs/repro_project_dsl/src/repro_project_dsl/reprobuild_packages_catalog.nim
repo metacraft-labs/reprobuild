@@ -164,9 +164,11 @@ proc describeReprobuildPackagesSearch*(search: ReprobuildPackagesSearch):
   lines.join("\n")
 
 proc movedPackageUnresolvedDiagnostic*(selector, rawConstraint,
-    consumerSourceFile: string; sourceLine = 0): string =
+    consumerSourceFile: string; sourceLine = 0; listName = "uses"): string =
   ## "" unless ``selector`` is a moved package (`MovedToReprobuildPackages`)
   ## that no catalog defines for this consumer; otherwise the full error text.
+  ## ``listName`` is the recipe block that names it: ``uses``,
+  ## ``nativeBuildDeps`` or ``runtimeDeps``.
   if selector notin MovedToReprobuildPackages:
     return ""
   let search = reprobuildPackagesSearch(selector, consumerSourceFile)
@@ -179,7 +181,7 @@ proc movedPackageUnresolvedDiagnostic*(selector, rawConstraint,
       consumerSourceFile & ": "
     else:
       ""
-  where & "uses: \"" & rawConstraint & "\" names `" & selector &
+  where & listName & ": \"" & rawConstraint & "\" names `" & selector &
     "`, which is no longer bundled with reprobuild's stdlib: it is defined" &
     " by the reprobuild-packages catalog (packages/interfaces/" & selector &
     "/repro.nim), and no reachable catalog defines it.\n" &
