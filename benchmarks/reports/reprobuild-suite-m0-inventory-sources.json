@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1767,
+    "nimTestBinaries": 1768,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 591,
     "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1781
+    "testEntries": 1782
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1081,7 +1081,7 @@
       "integration": 905,
       "platform/destructive": 117,
       "pure unit": 591,
-      "unclassified": 157
+      "unclassified": 158
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1229,9 +1229,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1767,
+    "nimTestBinaryCount": 1768,
     "pythonTestFileCount": 14,
-    "testEntryCount": 1781
+    "testEntryCount": 1782
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7323,6 +7323,24 @@
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_hermetic_action_env",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_hash"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_hermetic_action_env.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
