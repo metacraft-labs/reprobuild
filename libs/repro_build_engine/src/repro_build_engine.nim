@@ -16132,7 +16132,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let o = producedOutputs[path]
           case entry.kind
           of pikRead:
-            return some(if o.directory: Unresolved else: o.digest)
+            # `readIdentity`'s answers, so a lookup agrees with the recorder.
+            return some(if o.directory: ReadOfDirectory else: o.digest)
           of pikProbe:
             return some("present")
           of pikEnumeration:
@@ -16151,9 +16152,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             let at = findEntry(o.entries, rel)
             case entry.kind
             of pikRead:
-              if at >= 0 and o.entries[at].kind == tekFile:
-                return some(o.entries[at].identity)
-              return some(Unresolved)
+              # A produced directory's manifest names every entry in it, so
+              # an entry it lacks is absent (a failed open, as node's module
+              # resolution makes at every level it walks).
+              if at < 0:
+                return some(ReadOfAbsent)
+              case o.entries[at].kind
+              of tekFile: return some(o.entries[at].identity)
+              of tekDirectory: return some(ReadOfDirectory)
+              else: return some(Unresolved)
             of pikProbe:
               return some(if at >= 0: "present" else: "absent")
             of pikEnumeration:
