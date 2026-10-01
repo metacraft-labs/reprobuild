@@ -34,6 +34,8 @@
 
 import std/[algorithm, os, strutils]
 
+from repro_core/paths import extendedPath
+
 import blake3
 
 type
@@ -287,7 +289,7 @@ proc logicalizeText*(roots: openArray[LogicalRoot]; text: string): string =
 proc fileContentHex*(path: string): string =
   ## BLAKE3-256 of a file's bytes, streamed. "" when it cannot be read.
   var f: File
-  if not open(f, path, fmRead):
+  if not open(f, extendedPath(path), fmRead):
     return ""
   defer: close(f)
   let hasher = initHasher()
@@ -313,7 +315,7 @@ proc membershipHex*(dir: string): string =
   ## exist, not their content (reads of those entries are separate inputs).
   var names: seq[string] = @[]
   try:
-    for kind, entry in walkDir(dir, relative = true):
+    for kind, entry in walkDir(extendedPath(dir), relative = true):
       names.add(entry.replace('\\', '/') &
         (if kind in {pcDir, pcLinkToDir}: "/" else: ""))
   except CatchableError:
@@ -480,9 +482,15 @@ proc treeEntries*(dir: string): seq[TreeEntry] =
   ## Every entry beneath `dir`: a file with its BLAKE3 content digest, a
   ## symlink with its target text, a directory by its presence (so an empty
   ## directory still counts). Symlinked directories are not descended into.
-  for path in walkDirRec(dir, yieldFilter = {pcFile, pcLinkToFile, pcDir,
+  ##
+  ## Walked in the extended-length form: an entry whose full path passes
+  ## MAX_PATH used to fail `getFileInfo` and be skipped SILENTLY, so a tree
+  ## with deep names (gemini-cli's test snapshots) got a manifest missing
+  ## files, and a digest no other walk of the same tree reproduced.
+  let root = extendedPath(dir)
+  for path in walkDirRec(root, yieldFilter = {pcFile, pcLinkToFile, pcDir,
       pcLinkToDir}, relative = true, followFilter = {pcDir}):
-    let full = dir / path
+    let full = root / path
     let rel = path.replace('\\', '/')
     let info =
       try: getFileInfo(full, followSymlink = false)
