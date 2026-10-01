@@ -48,6 +48,7 @@
 ## that gap by exercising the full path against a real toolchain.
 
 import std/[os, strutils, tables, unittest]
+import repro_test_support/reasoned_skip
 import repro_test_support
 
 import repro_core

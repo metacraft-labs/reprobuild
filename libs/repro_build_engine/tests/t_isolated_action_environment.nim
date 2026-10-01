@@ -20,6 +20,7 @@
 ## MOCKS: none. Real processes and a real action cache in a temp directory.
 
 import std/[os, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_build_engine
 import repro_hash

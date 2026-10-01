@@ -29,6 +29,7 @@
 
 import std/[algorithm, monotimes, options, os, sequtils, strutils, tempfiles,
             times, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_core
 import repro_hash

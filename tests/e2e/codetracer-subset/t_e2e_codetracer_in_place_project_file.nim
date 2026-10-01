@@ -1,4 +1,5 @@
 import std/[json, os, osproc, sequtils, sets, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import nimcrypto/sha2 as ncSha2
 import repro_tool_profiles

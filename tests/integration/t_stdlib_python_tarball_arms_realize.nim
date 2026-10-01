@@ -41,6 +41,7 @@
 ## executable python/bin/python3" on Linux x86_64 and macOS aarch64.
 
 import std/[os, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_project_dsl
 import repro_interface_artifacts

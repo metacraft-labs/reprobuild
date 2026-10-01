@@ -89,6 +89,7 @@
 ## Skip rule: ``git`` missing on PATH.
 
 import std/[os, osproc, strutils, times, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 import repro_workspace_manifests

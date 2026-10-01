@@ -15,6 +15,7 @@
 ## place `repro watch --hcr`'s PRODUCTION wire is driven on Linux at all.
 
 import std/[json, monotimes, os, osproc, sequtils, strutils, tempfiles, times, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_hcr_agent
 import repro_hcr_linkgraph/elf_decompress
