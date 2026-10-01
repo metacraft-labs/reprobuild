@@ -71098,16 +71098,26 @@ proc runThinAppDispatch(programName: string): int =
   # recipe owns its own directory and needs no session to separate it from
   # its siblings, and a second invocation reuses the first's directory
   # instead of starting cold under a fresh token.
+  let args = normalizeWorkspaceNamespaceAlias(
+    normalizeInternalArgs(commandLineParams()))
+  # The CLI's own directory goes on PATH so what it spawns finds the DLLs
+  # staged beside it -- EXCEPT under `internal io monitor`, whose child is
+  # the build action itself. The action's PATH is what it declared; with this
+  # prepend every monitored action on Windows also searched the engine's
+  # `bin` for each command it ran, recorded those probes as inputs, and so
+  # keyed itself on where the engine is installed. The monitor needs no
+  # PATH for its own DLLs: the loader searches the application directory
+  # first.
+  let monitoringAnAction = args.len >= internalIoMonitorArgs.len and
+    args[0 ..< internalIoMonitorArgs.len] == internalIoMonitorArgs
   when defined(windows):
     let appDir = parentDir(getAppFilename())
-    if appDir.len > 0:
+    if appDir.len > 0 and not monitoringAnAction:
       let pathEnv = getEnv("PATH")
       if pathEnv.len > 0:
         putEnv("PATH", appDir & ";" & pathEnv)
       else:
         putEnv("PATH", appDir)
-  let args = normalizeWorkspaceNamespaceAlias(
-    normalizeInternalArgs(commandLineParams()))
   let publicCliPath = stablePublicCliPath()
   if programName == "repro" and args.len > 0 and
       args[0] == BrokerModeFlag:
