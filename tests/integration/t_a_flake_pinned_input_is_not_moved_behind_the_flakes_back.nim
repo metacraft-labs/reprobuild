@@ -325,10 +325,12 @@ suite "NF-2: a rev-pinned flake input is not re-pinned behind flake.nix's back":
     ##      whole case is satisfied by making the verb always fail, which is the
     ##      obvious mutation;
     ##   4. THE COMMIT PATH IS UNAFFECTED. A commit must not start failing
-    ##      merely because a pin is author-owned: `runPreCommitLockCommand` is
-    ##      documented "ALWAYS returns 0" and reaches this refresh through
-    ##      `refreshFlakeLockAtCommit`, whose return tuple carries no exit code
-    ##      at all. Asserted rather than assumed, because a fix that routed the
+    ##      merely because a pin is author-owned: `runPreCommitLockCommand`
+    ##      refuses a commit for one reason only, a pin that would move
+    ##      backward (Unified-Locking-And-Hooks.md §13.3), and an author-owned
+    ##      pin is not one; it reaches this refresh through
+    ##      `refreshFlakeLockAtCommit`, whose result carries no exit code at
+    ##      all. Asserted rather than assumed, because a fix that routed the
     ##      status through the hook would break every commit in a workspace with
     ##      an author-pinned input.
     if not nf2Prerequisites("t_a_declined_refresh_exits_non_zero"):

@@ -1,0 +1,72 @@
+name: Attestation collateral
+
+# The calendar half of the attestation fixture corpus.
+#
+# WHY THIS IS NOT PART OF THE TEST SUITE
+#
+# There are two clocks over this material and conflating them is the
+# expensive mistake.
+#
+# Every gate that judges pinned vendor material states its own `Now` as a
+# constant, because those gates test the EVALUATOR: a certificate chain that
+# was valid when it was captured has to evaluate the same way in five years,
+# or the test is a test of the date. `t_attestation_fixture_lifecycle` checks
+# those clocks against the windows of what they judge, hermetically, on every
+# commit -- and it never reads the wall clock or a socket.
+#
+# This job is the other clock. Its whole job is to say "three revocation lists
+# stop being usable in five days" WHILE FIVE DAYS REMAIN, and to notice that a
+# publisher is serving different bytes than the ones pinned here. Neither is a
+# property of a commit, so neither belongs on a commit's critical path: a check
+# that turns red for everybody on a morning nobody chose is a check somebody
+# turns off.
+#
+# WHAT A FAILURE MEANS
+#
+# Exit 1 means something needs attention and every line says which artifact,
+# what state it is in, when it entered or enters it, where it came from, and
+# the command that replaces it. Exit 2 means the run could not do its job --
+# an unreadable table, a fetch that did not complete -- which is deliberately
+# distinct, because "I looked and found nothing" and "I could not look" are
+# different answers and a scheduled job that conflates them eventually reports
+# the second as the first.
+#
+# `docs/attestation-fixture-operations.md` is the runbook for both.
+#
+# RUNNER CLASS
+#
+# `ubuntu-latest`. This is not a nix job: it needs python3 from the standard
+# image and outbound HTTPS, and nothing else. Provisioning a dev shell would
+# cost minutes for a shell the check never enters, and running it hosted keeps
+# a weekly job off the self-hosted pool that pull requests are waiting on.
+
+on:
+  schedule:
+    # Mondays, early. A weekly cadence against a 30-day refresh horizon
+    # gives four notices before anything expires, which is the point of
+    # the horizon: the first notice must not be the outage.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  push:
+    paths:
+      # Only when the ledger itself moves. The tool reads these three
+      # tables and a change to any of them can make it unable to run at
+      # all -- exit 2 -- which is worth finding out at the commit that
+      # caused it rather than the following Monday.
+      - "tests/integration/attestation-fixture-ledger.tsv"
+      - "tests/integration/attestation-fixture-publishers.tsv"
+      - "tests/integration/attestation-fixture-fetch.tsv"
+      - "tools/attestation_collateral_monitor.py"
+      - ".github/workflows/attestation-collateral.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  collateral:
+    name: Pinned collateral expiry and drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Expiry and drift, against the wall clock and the publishers
+        run: python3 tools/attestation_collateral_monitor.py

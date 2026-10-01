@@ -445,6 +445,26 @@ type
       ## ``repro why``, the codetracer ``repro test`` integration)
       ## identify framework-specific outputs by interface tag from
       ## this list rather than re-parsing the DSL.
+    scratchDirs*: seq[string]
+      ## The action's SCRATCH directories — BuildXL's pip temp directories.
+      ## The engine empties each one before the action runs, and nothing the
+      ## action does under one is evidence: not an input, not an output.
+      ##
+      ## That is what makes a working tree an action builds in, and reads back
+      ## from, something other than an input. Without it every file such an
+      ## action wrote and then read (`npm ci` populating `node_modules`, a
+      ## bundler reading its own intermediate `dist/`) was recorded as a read,
+      ## keyed by the content the PREVIOUS run left there: absent on a
+      ## checkout where the action never ran, so no other checkout could ever
+      ## match the record (Cache-Scope P3.4). Emptied first, everything under
+      ## a scratch directory was produced by this run, so it cannot be an
+      ## input; and since nothing outside the action reads it, it is not a
+      ## product either. What the action produces goes to its declared
+      ## outputs.
+      ##
+      ## Refused (the action fails) when a scratch directory is or contains
+      ## the action's cwd, a declared input or a declared output: emptying it
+      ## would destroy what the action reads or makes.
     fixedOutput*: bool
       ## Cache-Scope P3.4 — a FIXED-OUTPUT action (BuildXL's download pip,
       ## Nix's fixed-output derivation): its outputs are determined by
@@ -916,6 +936,23 @@ type
       ## still needs. Off by default; requires `portableRoots`.
     portableMemoLookup*: PortableMemoLookup
     portableMemoRestorer*: PortableMemoRestorer
+    hermeticEnv*: bool
+      ## Hermetic-Builds-And-Path-Independence: "environment variables are
+      ## allowlisted and normalized". A process action is launched with
+      ## EXACTLY the environment the engine composes for it -- its declared
+      ## entries, its passthrough names resolved from the host, and the
+      ## host's OS-essential set (`HostEssentialEnvNames`) -- instead of that
+      ## composition layered over whatever the invoking shell carries.
+      ##
+      ## Why it matters for a key: an action is keyed on the variables it
+      ## was observed reading. `node` and `npm` read ALL of them (342 on the
+      ## measuring host, `CLAUDE_*` session ids and the cache root's own
+      ## location among them), so with inheritance two hosts building the
+      ## same thing could never agree on a key.
+      ##
+      ## The monitor is then always the wrapped `repro internal io monitor`
+      ## launch: the in-process host composes its child's environment over
+      ## the ENGINE's own, and has no way to start from nothing.
     binaryCacheIntermediateScope*: bool
       ## L3 PUBLISH-SCOPE. When ``true`` the target binary cache is an
       ## INTERMEDIATE cache: EVERY successful cacheable action's store
@@ -1097,18 +1134,45 @@ type
     ## member is silently missing from, where the omission is
     ## indistinguishable from a decision.
     ##
-    ## DO NOT READ THAT AS A PROPERTY OF THE GUARD. It is a property of ONE of
-    ## the guard's five terms. The other four — `monitorObservedNoReads` and
-    ## the `.len == 0` tests on `monitorWrites`, `monitorProbes` and
-    ## `monitorDirectoryEnumerations` — still ask whether the CHANNEL is
-    ## empty, and a set is not empty because an unmarked writer filled it.
-    ## Measured, not inferred: a probe adding one unmarked path to
+    ## FOUR OF THE FIVE TERMS STILL ASK WHETHER THE CHANNEL IS EMPTY — and
+    ## the fifth is only better on one of its arms, see the measurement below —
+    ## AND THAT IS NOW HARMLESS, but only because the unmarked writer they were
+    ## blind to can no longer be written. `monitorObservedNoReads` and the
+    ## `.len == 0` tests on `monitorWrites`, `monitorProbes` and
+    ## `monitorDirectoryEnumerations` are unchanged, and a set is still not
+    ## empty because an unmarked writer filled it; what changed is that the
+    ## channels are `ObservedPathChannel`, whose only append (`observe`)
+    ## takes an `EvidenceContributor` and `incl`s it here. There is no
+    ## unmarked append left to write.
+    ##
+    ## MEASURED IN BOTH DIRECTIONS, not inferred. At `55219d92`, with the
+    ## channels still `seq[string]`, a probe adding ONE unmarked path to
     ## `monitorReads` in `collectEvidence` suppressed the zero-evidence
     ## diagnostic, PUBLISHED a record for an edge that observed nothing, and
-    ## served it back as a `cdHit` on the warm run. The same probe against
-    ## `depfileInputs` changed nothing. Marking a new writer is therefore
-    ## still mandatory rather than merely advisable, and converting the other
-    ## four terms is the follow-up that would make it enforced.
+    ## served it back as a `cdHit` with `launched=false` on the warm run —
+    ## `t_zero_evidence_edge_is_not_cacheable`'s "zero observations" case went
+    ## red on `hasRecord`, on the diagnostic and on the re-run. Measured
+    ## twice: the probe placed where the root-image fold sits takes the suite
+    ## from 29 OK / 0 FAILED to 14 OK / 15 FAILED, and the same probe hoisted
+    ## one level out of that `if` takes it to 10 OK / 19 FAILED.
+    ##
+    ## AND `depfileInputs` IS NOT THE EXCEPTION THE FIRST PASS RECORDED. The
+    ## review ran the same unmarked probe into that channel at `55219d92`:
+    ## 20 OK / 9 FAILED. The automatic-monitor "zero observations" case does
+    ## stay green — that term asks for the PRESENCE of an observer, and no
+    ## observing depfile contributor is marked on that arm — but a
+    ## `dgRecognizedFormatValidatedByMonitor` edge has already marked
+    ## `evcToolReportedDepfile` from its empty report, so there the unmarked
+    ## path makes both disjuncts false and the edge publishes and warm-hits
+    ## exactly as the `monitorReads` probe did. Three more cases go red on
+    ## `gradeKeyedInputSet`, where the fabricated path simply makes the key
+    ## non-empty. No probe into any of the five channels compiles now; see
+    ## `ObservedPathChannel`.
+    ##
+    ## MARKING IS THEREFORE NOT A CONVENTION ANY MORE. It is still worth
+    ## reading the enum before adding a member, because WHICH contributor a
+    ## writer names is a judgement the compiler cannot make for it — only
+    ## THAT it names one.
     evcMonitorCapture
       ## A `MonitorRecord` from an io-mon capture of THIS action reached
       ## `foldOneMonitorRecord`. The only contributor that is an observation
@@ -1146,13 +1210,89 @@ type
       ## for its own" contribution). Derived attribution from a peer, not an
       ## observation this engine made.
 
+  ObservedPathChannel* = distinct seq[string]
+    ## DA-1f — one of the FIVE OBSERVED channels of `PathSetEvidence`, which
+    ## are exactly the five terms of the zero-evidence guard in
+    ## `applyMonitorEvidenceStatus`.
+    ##
+    ## WHY IT IS A TYPE AND NOT A `seq[string]`. `EvidenceContributor` makes
+    ## the SOURCE of an entry recordable; it did not make recording it
+    ## MANDATORY. While these were exported `seq[string]`s,
+    ## `evidence.monitorReads.add(p)` compiled anywhere in the tree, and a
+    ## writer that forgot to mark itself did not cost a publish — it BOUGHT
+    ## one. Measured at `55219d92`, with one unmarked path appended to
+    ## `monitorReads` in `collectEvidence`: the zero-evidence diagnostic did
+    ## not fire, a record was published for an edge that observed nothing,
+    ## and the warm run served it back as a `cdHit` with `launched=false`.
+    ## Four of the guard's five terms only ask "is this channel empty", which
+    ## an unmarked writer satisfies by filling it.
+    ##
+    ## AND SO, ON A REACHABLE EDGE, DOES THE FIFTH. The review re-measured the
+    ## same unmarked probe against `depfileInputs` at `55219d92` and found it
+    ## is NOT the safe channel the earlier pass recorded: it is safe only on
+    ## the automatic-monitor arm, where the provenance carries no
+    ## `DepfileObservingContributors` member and `depfileObservedNothing`
+    ## answers `true` whatever the channel holds. On a
+    ## `dgRecognizedFormatValidatedByMonitor` edge the empty tool report has
+    ## already marked `evcToolReportedDepfile`, so one unmarked path makes
+    ## BOTH disjuncts false — guard silent, record published, warm run `cdHit`,
+    ## `runCount()==1`. The same probe also defeats `gradeKeyedInputSet` on
+    ## three further edges by putting a fabricated path in the key. So the
+    ## construction below is what all five terms need, not four.
+    ##
+    ## `distinct` is what closes that. The only append is `observe` (and its
+    ## bulk form `observeAll`), which REQUIRES an `EvidenceContributor` and
+    ## `incl`s it into the evidence's `evidenceProvenance` before it appends
+    ## anything. There is no unmarked append to write, so the zero-evidence
+    ## guard's question — "did anything LOOK at this action" — can no longer
+    ## be answered accidentally by a writer that never looked.
+    ##
+    ## A COMPILE ERROR, NOT A TEST, for the same reason
+    ## `DepfileObservingContributors` is an exhaustive `case` and not a set
+    ## literal: a runtime case only catches the writers somebody thought to
+    ## test, and the construction catches the ones nobody has written yet.
+    ##
+    ## WHAT THAT COMPILE ERROR SAYS, because an error nobody can act on is
+    ## half a guard. The `distinct` alone refuses `channel.add(p)` with a type
+    ## mismatch that names the field and its type but NOT the right spelling —
+    ## `observe` is not an `add` overload, so it never enters the candidate
+    ## list and the compiler cannot suggest it. The `{.error.}` `add` overload
+    ## beside `observe` supplies the name. It covers the likeliest wrong
+    ## spelling only; the remaining ones are listed in the next paragraph.
+    ##
+    ## WHAT IS STILL EXPRESSIBLE, recorded rather than claimed away: Nim
+    ## allows the explicit conversion `ObservedPathChannel(@[p])` from
+    ## anywhere, so a determined writer can still replace a channel wholesale.
+    ## That is a deliberate, greppable act rather than an ordinary `.add`, and
+    ## the tree contains no instance of it outside this module — measured,
+    ## `git grep 'ObservedPathChannel('` is four hits, three of them these
+    ## doc comments and the fourth `dropObserved`'s own
+    ## `ObservedPathChannel(kept)` a few hundred lines below. Closing it
+    ## completely wants an object with a private field.
+    ##
+    ## WHAT THAT WOULD COST IS SMALLER THAN IT LOOKS, and the next reader
+    ## should not accept this residual on the strength of a cost nobody
+    ## measured. Seven of the ten read-surface members below are already
+    ## hand-written bodies an object would keep verbatim; only `len`, `==`
+    ## and `$` are `{.borrow.}`, and each becomes a one-line body over the
+    ## private field. On that reading no reader moves and no file outside
+    ## this one is touched. NOT COMPILED — a hypothesis, not a measurement,
+    ## and recorded as one.
+    ##
+    ## READS ARE UNRESTRICTED. Everything a `seq[string]` reader did —
+    ## `len`, `[]`, `for … in`, `==`, `$`, `join`, `find`, `in`, the `…It`
+    ## templates — is provided below, and `paths` is the escape to a plain
+    ## `seq[string]` for an `openArray` parameter. Nothing about what a
+    ## correct writer publishes changes: this is a refactor of HOW a channel
+    ## is appended to, not of what evidence means.
+
   PathSetEvidence* = object
     declaredInputs*: seq[string]
     declaredOutputs*: seq[string]
-    depfileInputs*: seq[string]
-    monitorReads*: seq[string]
-    monitorWrites*: seq[string]
-    monitorProbes*: seq[string]
+    depfileInputs*: ObservedPathChannel
+    monitorReads*: ObservedPathChannel
+    monitorWrites*: ObservedPathChannel
+    monitorProbes*: ObservedPathChannel
     monitorEnvReads*: seq[string]
       ## M10 — the NAMES of the environment variables the monitor observed
       ## this action reading (`mrEnvRead`, io-mon's observed-declared-input
@@ -1171,7 +1311,7 @@ type
       ## cache ignored them, which is a false cache HIT whenever a build reads
       ## a variable whose value later changes.
 
-    monitorDirectoryEnumerations*: seq[string]
+    monitorDirectoryEnumerations*: ObservedPathChannel
       ## Directories the action ENUMERATED (`opendir`/`readdir`), as opposed
       ## to merely probed for existence. The monitor reports the two as
       ## distinct iomon record kinds (`mrDirectoryEnumerate` vs
@@ -3694,6 +3834,125 @@ proc envNameKey*(name: string): string =
     name.toUpperAscii
   else:
     name
+
+# ---------------------------------------------------------------------------
+# DA-1f — `ObservedPathChannel`: every read a `seq[string]` reader had, and
+# exactly ONE way to write.
+#
+# The read half is deliberately complete, so that converting the five channels
+# costs the tree nothing at its 280-odd read sites and the change stays a
+# refactor of the WRITE path. The write half is `observe` / `observeAll` and
+# `dropObserved`, and there is no third.
+#
+# `dropObserved` can only REMOVE, so it cannot be the hole `observe` closes.
+# It exists for `dropNamedPipeOpens`, which filters a channel rather than
+# appending to it, and which therefore has no contributor to name.
+# ---------------------------------------------------------------------------
+
+proc len*(channel: ObservedPathChannel): int {.borrow.}
+proc `==`*(a, b: ObservedPathChannel): bool {.borrow.}
+proc `$`*(channel: ObservedPathChannel): string {.borrow.}
+
+proc `[]`*(channel: ObservedPathChannel; index: int): string =
+  seq[string](channel)[index]
+
+iterator items*(channel: ObservedPathChannel): string =
+  ## Also what makes `anyIt` / `allIt` / `mapIt` / `toSeq` keep working:
+  ## every one of those templates expands to `for it in items(s)`.
+  for path in seq[string](channel):
+    yield path
+
+proc `==`*(a: ObservedPathChannel; b: openArray[string]): bool =
+  seq[string](a) == @b
+
+proc `==`*(a: openArray[string]; b: ObservedPathChannel): bool =
+  @a == seq[string](b)
+
+proc paths*(channel: ObservedPathChannel): seq[string] =
+  ## The channel as a plain `seq[string]`, for an `openArray[string]`
+  ## parameter or a JSON encoder. A COPY of the entries and not a handle on
+  ## the channel, so it cannot be appended to behind the contributor.
+  seq[string](channel)
+
+proc join*(channel: ObservedPathChannel; sep = ""): string =
+  seq[string](channel).join(sep)
+
+proc find*(channel: ObservedPathChannel; value: string): int =
+  seq[string](channel).find(value)
+
+proc contains*(channel: ObservedPathChannel; value: string): bool =
+  seq[string](channel).contains(value)
+
+proc observe*(channel: var ObservedPathChannel;
+              provenance: var set[EvidenceContributor];
+              contributor: EvidenceContributor;
+              seen: var HashSet[string];
+              value: string) =
+  ## THE append into an observed channel. `contributor` is not optional and
+  ## not advisory: it is `incl`ed into `provenance` on the way in, so a path
+  ## cannot enter one of the guard's five terms without the guard being told
+  ## who put it there.
+  ##
+  ## THE MARK PRECEDES THE DE-DUPLICATION on purpose. A contributor that
+  ## re-observes a path some other contributor already recorded has still
+  ## observed it, and the channel not growing does not unobserve it. This
+  ## also keeps the conversion of the existing call sites bit-identical: each
+  ## one already `incl`ed its contributor unconditionally, upstream of the
+  ## append.
+  ##
+  ## `seen` is the Deferred-D4 side-car: N appends stay O(N) instead of
+  ## O(N^2). It is the caller's because it is shared across the channels of
+  ## one action's fold.
+  if value.len == 0:
+    return
+  provenance.incl contributor
+  if seen.containsOrIncl(value):
+    return
+  seq[string](channel).add(value)
+
+proc observeAll*(channel: var ObservedPathChannel;
+                 provenance: var set[EvidenceContributor];
+                 contributor: EvidenceContributor;
+                 values: openArray[string]) =
+  ## `observe` for a whole path set at once, de-duplicated against whatever
+  ## the channel already holds. For the callers — chiefly suites building a
+  ## fixture evidence object — that have no long-lived `seen` set to thread.
+  var seen = seq[string](channel).toHashSet()
+  for value in values:
+    channel.observe(provenance, contributor, seen, value)
+
+proc add*(channel: var ObservedPathChannel; value: string) {.error:
+    "an observed evidence channel cannot be appended to without naming the " &
+    "EvidenceContributor that produced the entry. Use `observe` -- " &
+    "`channel.observe(evidence.evidenceProvenance, <evc...>, seen.<channel>, " &
+    "path)` -- or `observeAll` for a whole set. See `ObservedPathChannel`.".}
+  ## NOT an append, and the body is never reached: `{.error.}` makes any CALL
+  ## a compile error carrying the message above.
+  ##
+  ## IT EXISTS FOR THE MESSAGE AND NOTHING ELSE. Without it, the `distinct`
+  ## already refuses `channel.add(p)` — but with a type mismatch whose
+  ## candidate list is `JsonNode`, `Table`, `string` and `seq[T]`, and which
+  ## never mentions `observe`: the compiler cannot suggest `observe` for an
+  ## `add` call because `observe` is not an `add` overload and so never enters
+  ## the candidate list. Measured — the unimproved message for
+  ## `result.evidence.monitorReads.add(p)` names the field and its type
+  ## (`result.evidence.monitorReads: ObservedPathChannel`) and leaves the
+  ## reader to find the right spelling themselves. This names it.
+  ##
+  ## It covers the most likely wrong spelling, not every one. A whole-channel
+  ## assignment (`= @[p]`) and the explicit conversion
+  ## (`ObservedPathChannel(@[p])`) are discussed in `ObservedPathChannel`'s
+  ## own docstring; the first is refused by the `distinct` with a clear
+  ## message already, the second is deliberately still legal.
+
+proc dropObserved*(channel: var ObservedPathChannel; drop: HashSet[string]) =
+  ## Remove every entry in `drop`. Subtractive only — it names no contributor
+  ## because it introduces no evidence.
+  var kept: seq[string] = @[]
+  for path in seq[string](channel):
+    if path notin drop:
+      kept.add(path)
+  channel = ObservedPathChannel(kept)
 
 proc normalizedDeclaredActionPath(action: BuildAction; path: string): string =
   result = path.replace('\\', '/').strip()
@@ -6311,13 +6570,9 @@ proc dropNamedPipeOpens(evidence: var PathSetEvidence;
   ## attribution, and its "path" is not an input or an output.
   if pipes.len == 0:
     return
-  proc withoutPipes(paths: seq[string]): seq[string] =
-    for path in paths:
-      if path notin pipes:
-        result.add(path)
-  evidence.monitorReads = withoutPipes(evidence.monitorReads)
-  evidence.monitorProbes = withoutPipes(evidence.monitorProbes)
-  evidence.monitorWrites = withoutPipes(evidence.monitorWrites)
+  evidence.monitorReads.dropObserved(pipes)
+  evidence.monitorProbes.dropObserved(pipes)
+  evidence.monitorWrites.dropObserved(pipes)
 
 proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
                           evidence: var PathSetEvidence;
@@ -6456,7 +6711,8 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     return
   case record.kind
   of mrFileRead:
-    evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+    evidence.monitorReads.observe(evidence.evidenceProvenance,
+      evcMonitorCapture, seen.monitorReads, materialized)
   of mrLibraryLoad:
     # A library the dynamic loader MAPPED into the action. This is a
     # content dependency and nothing else: change the file, change what
@@ -6523,17 +6779,21 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     # `cacheInputPaths` still drops the ones under the action's own
     # tool roots, and `isVolatileMonitorPath` above still drops
     # `/run`-resident driver libraries.
-    evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+    evidence.monitorReads.observe(evidence.evidenceProvenance,
+      evcMonitorCapture, seen.monitorReads, materialized)
   of mrFileOpen:
     case record.observationKind
     of moFileRead, moFileOpen:
-      evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+      evidence.monitorReads.observe(evidence.evidenceProvenance,
+        evcMonitorCapture, seen.monitorReads, materialized)
     of moFileWrite:
-      evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
+      evidence.monitorWrites.observe(evidence.evidenceProvenance,
+        evcMonitorCapture, seen.monitorWrites, materialized)
     else:
       discard
   of mrFileWrite:
-    evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
+    evidence.monitorWrites.observe(evidence.evidenceProvenance,
+      evcMonitorCapture, seen.monitorWrites, materialized)
   of mrProcessExec:
     # A binary the action EXECUTED. Its bytes decide what the action
     # computes at least as directly as any file it reads, so it is a
@@ -6592,15 +6852,19 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     #     is for; it must not enter the key as a content read.
     if record.path.isAbsolute and
         not record.detail.contains(FailedExecDetailToken):
-      evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+      evidence.monitorReads.observe(evidence.evidenceProvenance,
+        evcMonitorCapture, seen.monitorReads, materialized)
   of mrPathProbe:
-    evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
+    evidence.monitorProbes.observe(evidence.evidenceProvenance,
+      evcMonitorCapture, seen.monitorProbes, materialized)
   of mrDirectoryEnumerate:
     # Stays in `monitorProbes` (every existing consumer keeps its set) AND
     # is recorded separately, because membership, not existence, is what
     # an enumeration depends on. See `monitorDirectoryEnumerations`.
-    evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
-    evidence.monitorDirectoryEnumerations.addUnique(
+    evidence.monitorProbes.observe(evidence.evidenceProvenance,
+      evcMonitorCapture, seen.monitorProbes, materialized)
+    evidence.monitorDirectoryEnumerations.observe(
+      evidence.evidenceProvenance, evcMonitorCapture,
       seen.monitorDirectoryEnumerations, materialized)
   else:
     discard
@@ -6942,23 +7206,34 @@ proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
   # -reported enumeration must land where a monitor-reported one lands or the
   # two sources disagree about what the same observation means. What changes
   # is that the source is now named.
-  if recognized:
-    if pathSet.declarationDerived:
-      evidence.evidenceProvenance.incl evcDeclarationDerivedDepfile
+  #
+  # NAMED ONCE, into a local, because `observe` below needs the same answer
+  # for every channel this path set touches: the mark and the appends cannot
+  # disagree about who produced the entries if there is only one expression
+  # deciding it. The `incl` is kept as its own statement rather than left to
+  # `observe`, because an EMPTY path set still has a producer and still has
+  # to say so.
+  let contributor =
+    if recognized:
+      if pathSet.declarationDerived: evcDeclarationDerivedDepfile
+      else: evcToolReportedDepfile
     else:
-      evidence.evidenceProvenance.incl evcToolReportedDepfile
-  else:
-    evidence.evidenceProvenance.incl evcPostBuildConverterReport
+      evcPostBuildConverterReport
+  evidence.evidenceProvenance.incl contributor
   if recognized:
     for input in pathSet.inputs:
-      evidence.depfileInputs.addUnique(seen.depfileInputs, input)
+      evidence.depfileInputs.observe(evidence.evidenceProvenance,
+        contributor, seen.depfileInputs, input)
   else:
     for input in pathSet.inputs:
-      evidence.monitorReads.addUnique(seen.monitorReads, input)
+      evidence.monitorReads.observe(evidence.evidenceProvenance,
+        contributor, seen.monitorReads, input)
     for output in pathSet.outputs:
-      evidence.monitorWrites.addUnique(seen.monitorWrites, output)
+      evidence.monitorWrites.observe(evidence.evidenceProvenance,
+        contributor, seen.monitorWrites, output)
     for probe in pathSet.probes:
-      evidence.monitorProbes.addUnique(seen.monitorProbes, probe)
+      evidence.monitorProbes.observe(evidence.evidenceProvenance,
+        contributor, seen.monitorProbes, probe)
     for enumerated in pathSet.enumerations:
       # Mirrors the ``mrDirectoryEnumerate`` arm of
       # ``foldMonitorDepFileEvidence``: an enumeration is BOTH an
@@ -6968,8 +7243,10 @@ proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
       # converter-reported enumeration must land in exactly the same two
       # places as a monitor-reported one, or the two evidence sources
       # would disagree about what the same observation means.
-      evidence.monitorProbes.addUnique(seen.monitorProbes, enumerated)
-      evidence.monitorDirectoryEnumerations.addUnique(
+      evidence.monitorProbes.observe(evidence.evidenceProvenance,
+        contributor, seen.monitorProbes, enumerated)
+      evidence.monitorDirectoryEnumerations.observe(
+        evidence.evidenceProvenance, contributor,
         seen.monitorDirectoryEnumerations, enumerated)
   for diagnostic in pathSet.diagnostics:
     evidence.diagnostics.add(diagnostic)
@@ -7258,6 +7535,23 @@ proc depfileObservedNothing(col: EvidenceCollection): bool {.inline.} =
   ## which is what keeps an unmarked contributor fail-closed: a future writer
   ## into `depfileInputs` that forgets to mark itself reads as "nothing
   ## observed" and costs a publish, never as "something observed".
+  ##
+  ## READ THAT AS A PROPERTY OF THIS EXPRESSION AND NOT OF THE CHANNEL, which
+  ## is a distinction the first pass elided and the review measured. It holds
+  ## when NOTHING ELSE on the edge has already marked an observing depfile
+  ## contributor. It does not hold on a `dgRecognizedFormatValidatedByMonitor`
+  ## or converter edge, where the empty report's own `addPathSet` has already
+  ## `incl`ed `evcToolReportedDepfile`: there the second disjunct is already
+  ## false, and ANY entry in the channel — marked or not — makes the first one
+  ## false too, so an unmarked writer buys the publish instead of paying for
+  ## it. Measured at `55219d92` with one unmarked path appended in
+  ## `collectEvidence`: `t_zero_evidence_edge_is_not_cacheable` went 29 OK / 0
+  ## FAILED to 20 OK / 9 FAILED, and
+  ## "recognized-format-validated-by-monitor: zero observations do not
+  ## publish" failed with `hasRecord` true, a warm `cdHit` and
+  ## `runCount()==1`. What closes that is not this expression but
+  ## `ObservedPathChannel`, which is why the write side had to become
+  ## impossible rather than merely discouraged.
   ##
   ## WHICH POLARITY THAT IS, AND WHAT GRADES IT. The caller is the
   ## zero-evidence guard in `applyMonitorEvidenceStatus`, the only one, and
@@ -7617,6 +7911,130 @@ proc gradeKeyedInputSet(action: BuildAction; col: var EvidenceCollection) =
     emptyKeyedInputSetDiagnostic(action.id, observed, observed))
   col.disableCacheHits = true
 
+proc scratchKey(path: string): string =
+  ## Normalized for containment: forward slashes, no trailing separator,
+  ## case-folded on Windows (one directory, however a tool spelled it).
+  result = withoutExtendedLengthPrefix(path).replace('\\', '/')
+  while result.len > 1 and result.endsWith("/"):
+    result.setLen(result.len - 1)
+  when defined(windows):
+    result = result.toLowerAscii()
+
+proc scratchRoots*(action: BuildAction): seq[string] =
+  for dir in action.scratchDirs:
+    if dir.len > 0:
+      result.add(scratchKey(materialPath(action.cwd, dir)))
+
+proc isUnderScratch(key: string; roots: openArray[string]): bool =
+  for root in roots:
+    if key == root or key.startsWith(root & "/"):
+      return true
+
+proc dropScratchEvidence*(action: BuildAction; evidence: var PathSetEvidence) =
+  ## Removes every observation at or below one of the action's scratch
+  ## directories (`BuildAction.scratchDirs`).
+  let roots = action.scratchRoots()
+  if roots.len == 0:
+    return
+  proc keep(channel: var ObservedPathChannel) =
+    ## Expressed as a `dropObserved` SUBTRACTION rather than as a rebuilt
+    ## sequence, because `ObservedPathChannel` has exactly three writers and
+    ## the removing one is this one. Same predicate, same surviving order:
+    ## `dropObserved` keeps the entries it does not drop, in place.
+    var drop = initHashSet[string]()
+    for path in channel:
+      if isUnderScratch(scratchKey(path), roots):
+        drop.incl(path)
+    channel.dropObserved(drop)
+  keep(evidence.monitorReads)
+  keep(evidence.monitorWrites)
+  keep(evidence.monitorProbes)
+  keep(evidence.monitorDirectoryEnumerations)
+  keep(evidence.depfileInputs)
+
+proc scratchDirProblem*(action: BuildAction): string =
+  ## Why emptying the action's scratch directories would be unsafe, or "".
+  let roots = action.scratchRoots()
+  if roots.len == 0:
+    return ""
+  proc overlaps(path, what: string): string =
+    let key = scratchKey(materialPath(action.cwd, path))
+    for root in roots:
+      if key == root or key.startsWith(root & "/") or root.startsWith(key & "/"):
+        return "scratch directory '" & root & "' overlaps the action's " &
+          what & " '" & path & "'"
+    ""
+  for root in roots:
+    if root.count('/') < 2:
+      return "scratch directory '" & root & "' is too close to a " &
+        "filesystem root to empty"
+  if action.cwd.len > 0:
+    let key = scratchKey(absolutePath(action.cwd))
+    for root in roots:
+      if key == root or key.startsWith(root & "/"):
+        return "scratch directory '" & root & "' contains the action's cwd"
+  for input in action.inputs:
+    let why = overlaps(input, "declared input")
+    if why.len > 0: return why
+  for output in action.outputs & action.declaredOutputs:
+    let why = overlaps(output, "declared output")
+    if why.len > 0: return why
+  ""
+
+when defined(windows):
+  proc scratchRemoveDirectoryW(path: WideCString): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "RemoveDirectoryW".}
+  proc scratchSetFileAttributesW(path: WideCString; attrs: DWORD): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "SetFileAttributesW".}
+
+proc removeTreeNoFollow(path: string) =
+  ## Deletes `path` and everything below it WITHOUT FOLLOWING LINKS: a link
+  ## is removed, never what it points at. A scratch tree is full of them --
+  ## npm links every workspace package into `node_modules`, as a directory
+  ## junction on Windows -- and following one would delete the linked
+  ## sources. `os.removeDir` neither follows nor removes a junction (it treats
+  ## the link as a file, and Windows refuses to delete a directory link that
+  ## way), and stops at the first read-only file.
+  for kind, child in walkDir(path):
+    case kind
+    of pcDir:
+      removeTreeNoFollow(child)
+    of pcLinkToDir:
+      when defined(windows):
+        if scratchRemoveDirectoryW(newWideCString(child)) == 0:
+          raiseOSError(osLastError(), child)
+      else:
+        removeFile(child)
+    of pcFile, pcLinkToFile:
+      when defined(windows):
+        discard scratchSetFileAttributesW(newWideCString(child),
+          DWORD(0x80))   # FILE_ATTRIBUTE_NORMAL: clears read-only
+      removeFile(child)
+  when defined(windows):
+    discard scratchSetFileAttributesW(newWideCString(path), DWORD(0x80))
+    if scratchRemoveDirectoryW(newWideCString(path)) == 0:
+      raiseOSError(osLastError(), path)
+  else:
+    removeDir(path)
+
+proc resetScratchDirs*(action: BuildAction): string =
+  ## Empties the action's scratch directories before it runs; returns why it
+  ## could not, or "".
+  let problem = action.scratchDirProblem()
+  if problem.len > 0:
+    return problem
+  for dir in action.scratchDirs:
+    if dir.len == 0:
+      continue
+    let physical = extendedPath(materialPath(action.cwd, dir))
+    try:
+      if dirExists(physical):
+        removeTreeNoFollow(physical)
+      createDir(physical)
+    except CatchableError as err:
+      return "cannot empty scratch directory '" & dir & "': " & err.msg
+  ""
+
 proc collectEvidence(action: BuildAction; strict: bool;
                      hostedRecords: ptr seq[MonitorRecord] = nil;
                      config: ptr BuildEngineConfig = nil):
@@ -7717,7 +8135,9 @@ proc collectEvidence(action: BuildAction; strict: bool;
       action.kind == bakProcess:
     let rootImage = executedToolImagePath(action, config)
     if rootImage.len > 0 and not rootImage.isVolatileMonitorPath():
-      result.evidence.monitorReads.addUnique(seen.monitorReads, rootImage)
+      result.evidence.monitorReads.observe(
+        result.evidence.evidenceProvenance, evcRootImageReconstruction,
+        seen.monitorReads, rootImage)
       # Remembered, not just added: the zero-evidence guard downstream asks
       # what the MONITOR saw, and this entry is a reconstruction rather than
       # an observation. See `EvidenceCollection.engineSuppliedRootImage`.
@@ -8029,7 +8449,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # payload compatibility), so they are unaffected.
   if action.readOnlyRoots.len > 0 and result.evidence.monitorWrites.len > 0:
     let offenders = detectSourceWrites(action.readOnlyRoots,
-      result.evidence.monitorWrites)
+      result.evidence.monitorWrites.paths)
     for offender in offenders:
       result.evidence.diagnostics.add(
         "source-write attempt (R6): action wrote to '" & offender.write &
@@ -8039,6 +8459,10 @@ proc collectEvidence(action: BuildAction; strict: bool;
         "rewrites are errors'.")
     if offenders.len > 0:
       result.publishable = false
+  # Everything under a scratch directory is the action's own, so it leaves
+  # the evidence here, before the key is graded -- the local key, the
+  # portable record and the determinism probe all read what remains.
+  dropScratchEvidence(action, result.evidence)
   # LAST OF ALL, after every contributor to the key — the root-image fold at
   # the head of this proc included — grade the set the key is actually built
   # from. Rule 7. See `gradeKeyedInputSet`.
@@ -8462,6 +8886,36 @@ proc lookupEnv(env: openArray[string]; name: string):
         return (true, item.substr(prefix.len))
   (false, "")
 
+# What a process needs from the host merely to run on it, handed to every
+# action launched with an allowlisted environment
+# (`BuildEngineConfig.hermeticEnv`). Keyed by NAME, never by value, like a
+# passthrough: `TEMP` differs between any two hosts, and a key that bound it
+# would never be shared.
+const HostEssentialEnvNames* =
+  when defined(windows):
+    ["SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT",
+     "TEMP", "TMP", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+     "PROCESSOR_IDENTIFIER", "OS", "ProgramData", "ProgramFiles",
+     "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles",
+     "CommonProgramFiles(x86)", "CommonProgramW6432", "USERPROFILE",
+     "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "USERNAME"]
+  else:
+    ["HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TZ", "TERM",
+     "SSL_CERT_FILE", "NIX_SSL_CERT_FILE"]
+
+proc isHostEssentialEnvName*(name: string): bool =
+  for essential in HostEssentialEnvNames:
+    when defined(windows):
+      if cmpIgnoreCase(essential, name) == 0: return true
+    else:
+      if essential == name: return true
+  false
+
+proc hostEssentialEnv(): seq[string] =
+  for name in HostEssentialEnvNames:
+    if existsEnv(name):
+      result.add(name & "=" & getEnv(name))
+
 proc actionEnvLookup*(action: BuildAction; name: string):
     tuple[present: bool, value: string] =
   result = lookupEnv(action.env, name)
@@ -8477,9 +8931,12 @@ proc actionEnvResolver*(action: BuildAction;
   ## Only names actually observed by the action enter a strong fingerprint.
   var env: seq[string]
   if action.kind == bakProcess:
-    # The launch composes the child's environment exactly this way; an
-    # isolated launch starts from nothing, so neither may the snapshot.
-    if not action.isolateHostEnvironment:
+    # The launch composes the child's environment exactly this way: an
+    # isolated action, or any action under an allowlisted environment, starts
+    # from what the engine composed for it, so a host variable outside that
+    # set is UNSET to it and the snapshot must not supply one either.
+    if not action.isolateHostEnvironment and
+        (config == nil or not config[].hermeticEnv):
       for name, value in envPairs():
         env.add(name & "=" & value)
     if config != nil:
@@ -8513,9 +8970,12 @@ proc cacheEnvInputs*(action: BuildAction; evidence: PathSetEvidence;
   var passthrough = initHashSet[string]()
   for name in action.envPassthrough:
     passthrough.incl(envNameKey(name))
+  let hermetic = config != nil and config[].hermeticEnv
   let resolve = action.actionEnvResolver(config)
   for name in names:
     if envNameKey(name) in passthrough:
+      continue
+    if hermetic and isHostEssentialEnvName(name):
       continue
     let resolved = resolve(name)
     result.add(EnvFingerprint(name: name, present: resolved.present,
@@ -8769,9 +9229,11 @@ proc evidenceFromRecord*(action: BuildAction;
   for input in record.inputs:
     if not declaredInputPaths.contains(input.path):
       if action.dependencyPolicy.kind in MonitorPolicyKinds:
-        result.monitorReads.addUnique(seenMonitorReads, input.path)
+        result.monitorReads.observe(result.evidenceProvenance,
+          evcReplayedCacheRecord, seenMonitorReads, input.path)
       else:
-        result.depfileInputs.addUnique(seenDepfileInputs, input.path)
+        result.depfileInputs.observe(result.evidenceProvenance,
+          evcReplayedCacheRecord, seenDepfileInputs, input.path)
 
 proc evidenceCountsFromRecord*(action: BuildAction;
                               record: ActionResultRecord): EvidencePathCounts =
@@ -10866,6 +11328,12 @@ proc launchChildEnv(action: BuildAction;
   # (``REPRO_MONITOR_SHIM_LIB`` above) and lets it "just work" — no backend
   # selection. (io-mon keeps DEBUG-only per-mechanism diagnostic toggles, but
   # those are for local A/B diagnosis, not something the engine seeds.)
+  #
+  # Under an allowlisted environment nothing is inherited, so the host's
+  # OS-essential set is handed over here -- before `action.env`, so a value
+  # the action declares (a hermetic `USERPROFILE`, say) still wins.
+  if config.hermeticEnv:
+    result.add(hostEssentialEnv())
   for entry in action.env:
     result.add(entry)
   # BuildXL `PipEnvironment.GetEffectiveEnvironmentVariables`
@@ -11151,9 +11619,9 @@ proc preparedRunQuotaCommand(action: BuildAction;
            else: deferred.argv),
     cwd: action.cwd,
     env: deferred.env,
-    isolateEnvironment: action.isolateHostEnvironment,
     stdoutLimit: config.stdoutLimit,
-    stderrLimit: config.stderrLimit)
+    stderrLimit: config.stderrLimit,
+    isolatedEnv: config.hermeticEnv or action.isolateHostEnvironment)
 
 # ---------------------------------------------------------------------------
 # In-Process-Monitor-Hosting HM-4 — the engine hosts io-mon's consumer itself.
@@ -12152,7 +12620,7 @@ proc monitorHostRequest(action: BuildAction;
     evidenceScope: evidenceScope,
     passthroughChildStdout: true,
     passthroughChildStderr: true,
-    isolateEnv: command.isolateEnvironment)
+    isolateEnv: command.isolatedEnv)
   for entry in command.env:
     let eq = entry.find('=')
     if eq <= 0:
@@ -14575,13 +15043,62 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       key = key.toLowerAscii()
     key == hostTempKey
 
+  let hostSystemKey = block:
+    when defined(windows):
+      var key = getEnv("SystemRoot", "C:\\Windows").replace('\\', '/')
+      while key.len > 1 and key.endsWith("/"):
+        key.setLen(key.len - 1)
+      key.toLowerAscii()
+    else:
+      ""
+
+  proc isHostSystemPath(path: string): bool =
+    ## Beneath the host OS directory — the root the CLI's portable roots
+    ## already mark untracked. Which system DLLs a process loads varies
+    ## between two runs of the same command (the loader pulls in
+    ## `apphelp.dll`, `cmdext.dll`, ... only sometimes), so for the
+    ## determinism probe they are not inputs to compare on; differing
+    ## outputs still fail closed.
+    if hostSystemKey.len == 0:
+      return false
+    var key = path.replace('\\', '/')
+    when defined(windows):
+      key = key.toLowerAscii()
+    key == hostSystemKey or key.startsWith(hostSystemKey & "/")
+
   proc isLaunchMachinery(path: string): bool =
-    isHostTempListing(path) or
+    isHostTempListing(path) or isHostSystemPath(path) or
       toLogicalPath(launchMachineryRoots(), path).kind == lpkUntracked
 
   proc portableRecordRoots(): seq[LogicalRoot] =
     ## `portableRoots` plus the launch machinery, untracked.
     config.portableRoots & launchMachineryRoots()
+
+  proc isOwnOutput(action: BuildAction; path: string): bool =
+    ## `path` is, or lies inside, one of the action's own outputs -- what it
+    ## PRODUCES. BuildXL: a pip's accesses to its own outputs are not inputs.
+    ## An action that writes its declared output directory observes it while
+    ## doing so (`cp` probes the tree it is filling, `mkdir -p` each parent
+    ## below it), and the portable lookup can never answer such an entry: on
+    ## any host, before the action runs, its own outputs are by definition
+    ## not there to be identified. Left in, they made gemini-cli's bundle
+    ## step unresolvable everywhere (1701 entries of 8408).
+    ##
+    ## For the PORTABLE record and the determinism probe only. The local key
+    ## keeps its narrower exact-path rule (`selfWrittenOutputKeys`).
+    var key = withoutExtendedLengthPrefix(path).replace('\\', '/')
+    when defined(windows):
+      key = key.toLowerAscii()
+    # `outputs` plus `declaredOutputs`, as `portablePhysicalOutputsOf`
+    # (defined further down) names them.
+    for output in action.outputs & action.declaredOutputs:
+      var root = materialPath(action.cwd, output).replace('\\', '/')
+      while root.len > 1 and root.endsWith("/"):
+        root.setLen(root.len - 1)
+      when defined(windows):
+        root = root.toLowerAscii()
+      if root.len > 0 and (key == root or key.startsWith(root & "/")):
+        return true
 
   proc transientOwnWrites(evidence: PathSetEvidence): HashSet[string] =
     ## Paths the action itself WROTE that no longer exist once it finished:
@@ -14639,7 +15156,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     when defined(windows):
       cwdKey = cwdKey.toLowerAscii()
     for path in inputs:
-      if isLaunchMachinery(path) or path.replace('\\', '/') in transient:
+      if isLaunchMachinery(path) or path.replace('\\', '/') in transient or
+          isOwnOutput(action, path):
         continue
       var pathKey = path.replace('\\', '/')
       while pathKey.len > 1 and pathKey.endsWith("/"):
@@ -14722,8 +15240,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       outputs.add("output=" & materialPath(action.cwd, output))
     for output in action.declaredOutputs:
       outputs.add("declaredOutput=" & materialPath(action.cwd, output))
+    for dir in action.scratchDirs:
+      outputs.add("scratch=" & materialPath(action.cwd, dir))
     outputs.sort()
     result.add(outputs)
+    # Passthrough is keyed by NAME (BuildXL): the value is the host's, but
+    # which variables the action was allowed to see is part of what it is.
+    var passthrough: seq[string] = @[]
+    for name in action.envPassthrough:
+      passthrough.add("passthrough=" & name)
+    if config.hermeticEnv:
+      result.add("env=allowlisted")
+      for name in HostEssentialEnvNames:
+        passthrough.add("passthrough=" & name)
+    passthrough.sort()
+    result.add(passthrough)
 
   proc portableWeakOf(action: BuildAction): string =
     ## The portable weak fingerprint: the action's STATIC description, so it
@@ -14832,7 +15363,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var enumerated = initHashSet[string]()
     for path in action.cacheEnumeratedDirectories(evidence):
       enumerated.incl(path)
-      if not isHostTempListing(path):
+      if not isHostTempListing(path) and not isOwnOutput(action, path):
         enumerations.add(path)
     var probed = initHashSet[string]()
     for path in evidence.monitorProbes:
@@ -14842,7 +15373,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     let transient = transientOwnWrites(evidence)
     for path in action.cacheInputPaths(evidence):
       if path in enumerated or isHostTempListing(path) or
-          path.replace('\\', '/') in transient:
+          path.replace('\\', '/') in transient or isOwnOutput(action, path):
         continue
       elif path in probed:
         probes.add(path)
@@ -16917,7 +17448,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # silently downgraded where nothing could observe it.
         let hostMonitorInProcess = InProcessMonitorHostSupported and
           action.kind == bakProcess and
-          monitorHostingRequested(config.monitorHosting, launchPath)
+          monitorHostingRequested(config.monitorHosting, launchPath) and
+          not config.hermeticEnv
+
+        if action.scratchDirs.len > 0:
+          let scratchProblem = action.resetScratchDirs()
+          if scratchProblem.len > 0:
+            statuses[id] = asFailed
+            let idx = idToIndex.resultIndex(id)
+            runResult.results[idx].status = asFailed
+            runResult.results[idx].stderr = scratchProblem
+            runResult.trace(id, "failed", scratchProblem)
+            blockClosure(id, id)
+            emitProgress(bpkActionCompleted, id)
+            completed = terminalCount()
+            launchedAny = true
+            continue
 
         let monitorPlanStart = statStart()
         let plan = monitoredAction(action, config, cacheRoot,

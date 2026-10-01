@@ -25,6 +25,10 @@
 ##     when all are present.
 ##   * ``--json`` is valid JSON with the documented shape and a non-zero
 ##     exit code when any check fails; the table mode exits non-zero too.
+##   * With real direnv installed, its initially untrusted, allowed and
+##     denied states produce fail/ok/fail for this workspace's direnv row.
+##     The allow-list is isolated under a temporary XDG_DATA_HOME; no
+##     executable or status response is mocked.
 ##
 ## Skip rule: only when ``git`` is missing from PATH (same convention as
 ## the M9–M12 / status fixtures).
@@ -200,6 +204,26 @@ suite "RA-30 — repro health reports each layer status with remedy":
       check report["failed"].getInt() >= 1
       check report["exitCode"].getInt() == 1
       check res.code == 1
+
+      let direnvBin = findExe("direnv")
+      if direnvBin.len > 0:
+        let hadDataHome = existsEnv("XDG_DATA_HOME")
+        let previousDataHome = getEnv("XDG_DATA_HOME")
+        putEnv("XDG_DATA_HOME", fx.scratch / "direnv-data")
+        defer:
+          if hadDataHome: putEnv("XDG_DATA_HOME", previousDataHome)
+          else: delEnv("XDG_DATA_HOME")
+        writeFile(fx.workspaceRoot / ".envrc", "# real direnv trust fixture\n")
+        let untrusted = parseJson(invokeHealth(fx, ["--json"]).output)
+        check findCheck(untrusted, "direnv")["status"].getStr() == "fail"
+        let allow = runCmd(q(direnvBin) & " allow " & q(fx.workspaceRoot))
+        check allow.code == 0
+        let trusted = parseJson(invokeHealth(fx, ["--json"]).output)
+        check findCheck(trusted, "direnv")["status"].getStr() == "ok"
+        let deny = runCmd(q(direnvBin) & " deny " & q(fx.workspaceRoot))
+        check deny.code == 0
+        let denied = parseJson(invokeHealth(fx, ["--json"]).output)
+        check findCheck(denied, "direnv")["status"].getStr() == "fail"
 
   test "test_ra30_reports_all_expected_layer_names":
     let gitBin = findExe("git")

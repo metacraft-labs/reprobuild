@@ -64,7 +64,7 @@ when defined(linux) or defined(macosx):
     writeFile(root / (role & ".json"), $(%*{
       "status": $res.status, "exitCode": res.exitCode, "stderr": res.stderr,
       "diagnostics": res.evidence.diagnostics,
-      "reads": res.evidence.monitorReads,
+      "reads": res.evidence.monitorReads.paths,
       "depfile": res.monitorDepfilePath}))
     quit(if res.status in {asSucceeded, asCacheHit}: 0 else: 1)
 

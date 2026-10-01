@@ -43,6 +43,13 @@
 ##     a secret to the machine it accepted, and recording every decision
 ##     — including the ones that release nothing — in a sink this build
 ##     refuses to run without.
+##   * ``repro_attest_verify/lifecycle`` — what a verifier's OWN inputs
+##     are worth on the day it runs. Every other module here asks
+##     whether a machine should be believed; this one asks whether the
+##     certificates, revocation lists and trusted-computing-base
+##     documents it is judging WITH have gone stale, reading every date
+##     out of the artifact's own bytes and taking the clock as a
+##     parameter like everything else in this library.
 ##   * ``repro_attest_verify/fetch`` — the command line's
 ##     ``--report-url``. Deliberately NOT imported by ``verify``: the
 ##     verifier proper touches no socket.
@@ -58,6 +65,8 @@ import ./repro_attest_verify/evidence
 import ./repro_attest_verify/challenge
 import ./repro_attest_verify/verify
 import ./repro_attest_verify/release
+import ./repro_attest_verify/lifecycle
 
 export policy, verdict, x509, trust, evidence, challenge, verify, release
+export lifecycle
 export snp_chain, snp_report, snp_tcb
