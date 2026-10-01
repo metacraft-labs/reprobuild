@@ -2556,6 +2556,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_provider_link_flags_bake_no_host_rpath.nim",
+    binary: "build/test-bin/t_provider_link_flags_bake_no_host_rpath",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim",
     binary: "build/test-bin/t_provider_nimcache_key_tracks_external_libs",
     defines: @[],
