@@ -34,7 +34,7 @@
 ## workspace; explicit pairs win over it. `workspaceOverrides = false` opts
 ## out when a recipe deliberately needs only its explicit overrides.
 
-import std/[json, os, osproc, strutils]
+import std/[json, os, osproc, streams, strutils]
 
 import repro_core/ambient_execution
 import repro_core/paths
@@ -293,17 +293,54 @@ proc workspaceFlakeOverrides*(projectRoot: string; flakeRef = DefaultFlakeRef):
   elif localRef.contains(":"):
     return
   let flakeRoot = absolutePath(localRef, projectRoot)
+  # WHICH `repro` answers. This code runs inside a provider the ENGINE
+  # compiled from the recipe with the engine's own stdlib, so the request is
+  # in the engine's protocol and the engine is the one binary guaranteed to
+  # speak it. `REPRO_INVOKING_CLI` is how the engine names itself to the
+  # processes it starts. A `repro` found on PATH is only a last resort: a
+  # dev shell pinned to an older release puts that release there, and it
+  # answers a verb it does not know with a non-zero exit — which is how
+  # `repro exec` into a flake-backed workspace repo failed for anyone whose
+  # shell lagged the engine. `REPROBUILD_REPRO` stays the explicit override.
   let explicit = getEnv("REPROBUILD_REPRO")
-  let repro = if explicit.len > 0: explicit else: uncontrolledFindExe("repro")
+  let invoking = getEnv("REPRO_INVOKING_CLI")
+  let repro =
+    if explicit.len > 0: explicit
+    elif invoking.len > 0: invoking
+    else: uncontrolledFindExe("repro")
   if repro.len == 0:
     raise newException(ForeignEnvCaptureError,
       "workspace flake activation requires repro for native override resolution")
-  let probe = uncontrolledExecCmdEx(quoteShell(repro) &
-    " flake override-args --all --json --workspace-root=" & quoteShell(root) &
-    " --flake=" & quoteShell(flakeRoot), options = {poUsePath}, workingDir = projectRoot)
-  if probe.exitCode != 0:
+  # An argv, not a command string: stdout must stay parseable JSON on
+  # success, and on failure stderr is the only place the reason is, so the
+  # two streams are read separately.
+  var probe: tuple[output: string, exitCode: int]
+  var stderrText = ""
+  try:
+    let process = uncontrolledStartProcess(repro, workingDir = projectRoot,
+      args = @["flake", "override-args", "--all", "--json",
+        "--workspace-root=" & root, "--flake=" & flakeRoot],
+      options = {poUsePath})
+    try:
+      probe.output = process.outputStream.readAll()
+      stderrText = process.errorStream.readAll().strip()
+      probe.exitCode = process.waitForExit()
+    finally:
+      process.close()
+  except CatchableError as err:
     raise newException(ForeignEnvCaptureError,
-      "native workspace flake override resolution failed: " & probe.output)
+      "native workspace flake override resolution failed: could not run `" &
+        repro & "`: " & err.msg)
+  if probe.exitCode != 0:
+    var why = "`" & repro & " flake override-args` exited " &
+      $probe.exitCode
+    let said = (stderrText & "\n" & probe.output).strip()
+    why.add(if said.len > 0: ": " & said else: " and printed nothing")
+    if explicit.len == 0 and invoking.len == 0:
+      why.add(" (this `repro` was taken from PATH because the engine did " &
+        "not name itself; an older release on PATH does not know this verb)")
+    raise newException(ForeignEnvCaptureError,
+      "native workspace flake override resolution failed: " & why)
   let document = parseJson(probe.output)
   if document["schemaId"].getStr() != "reprobuild.flake-override-args.v1":
     raise newException(ForeignEnvCaptureError,
