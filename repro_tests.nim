@@ -4698,6 +4698,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_tool_profiles/tests/t_nix_expression_closure_scanner.nim",
+    binary: "build/test-bin/t_nix_expression_closure_scanner",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim",
     binary: "build/test-bin/t_path_sidecar_batches",
     defines: @[],
@@ -11214,6 +11223,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_nix_expression_closure_keys.nim",
+    binary: "build/test-bin/t_nix_expression_closure_keys",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_no_runtime_compilation_in_tests.nim",
     binary: "build/test-bin/t_no_runtime_compilation_in_tests",
     defines: @[],
@@ -11243,6 +11261,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_output_cleanup_executor.nim",
     binary: "build/test-bin/t_output_cleanup_executor",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_path_tool_rewrite_detected.nim",
+    binary: "build/test-bin/t_path_tool_rewrite_detected",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

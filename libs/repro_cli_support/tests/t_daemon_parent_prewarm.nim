@@ -53,6 +53,10 @@
 ##     `forgetWarmBuildCaches()` call for a changed `outDir` reddens it.
 ##   * `a_forced_rebuild_warms_nothing` — a forced rebuild consults none of
 ##     these caches. Dropping the `forceRefresh` arm reddens it.
+##   * `a_rekeyed_cache_file_does_not_accumulate` — one entry per persisted
+##     file, whatever keys it has had. Removing the
+##     `dropWarmEntriesWithPrefix` calls for lowered graphs, or the one in
+##     `prewarmToolIdentitiesFrom`, reddens it (counts 2, 3, 4).
 
 import std/[algorithm, options, os, sequtils, strutils, tempfiles, unittest]
 
@@ -60,6 +64,7 @@ import repro_build_engine
 import repro_cli_support
 import repro_core
 import repro_hash
+import repro_tool_profiles
 
 proc sampleActions(tag: string): seq[BuildAction] =
   @[BuildAction(
@@ -256,6 +261,37 @@ suite "MAC-2 daemon parent prewarm":
     check daemonPrewarmTargetOutputDir(
       @[".", "--dry-run"], project, @[]).len == 0
     check daemonPrewarmTargetOutputDir(@["."], project, @[]).len > 0
+
+  test "a_rekeyed_cache_file_does_not_accumulate":
+    # ReproOS M7 sibling (6): an uncacheable Nix expression puts a fresh
+    # nonce in the tool-identity key -- and so in the lowered-graph key --
+    # on EVERY build. The persisted files are rewritten in place under the
+    # new key; the warm tables must hold one entry per file, not one per
+    # key a file ever had. Before the fix each re-prewarm added one lowered
+    # graph and one identity that nothing could read (a long-lived daemon
+    # grew by a whole graph per build).
+    let root = createTempDir("repro-mac2-rekey", "")
+    defer: removeDir(root)
+    let path = loweredGraphCachePathForTest(root, "target")
+    let stamp = root / "tool-identity-cache" / "path.current-key"
+    createDir(root / "tool-identity-cache")
+    writePathOnlyBuildIdentity(root / "path-only-tool-identities.rbtp",
+      PathOnlyBuildIdentity(projectName: "rekey"))
+    forgetWarmBuildCaches()
+    for round in 1 .. 4:
+      sleep(20)
+      writeLoweredGraphCacheFileForTest(path, root / "repro.nim", root,
+        "target", "PATHENV", "key-" & $round, sampleActions($round))
+      writeFile(stamp, "identity-key-" & $round & "\n")
+      let report = prewarmDaemonParentCaches(root)
+      check report.loweredGraphs == 1
+      check report.toolIdentities == 1
+      check warmLoweredGraphCountForTest() == 1
+      check warmToolIdentityCountForTest() == 1
+      # The in-process read under the current key replaces, not adds.
+      check readLoweredGraphForTest(path, root / "repro.nim", root, "target",
+        "PATHENV", "key-" & $round).isSome
+      check warmLoweredGraphCountForTest() == 1
 
   test "switching_projects_does_not_accumulate":
     let root = createTempDir("repro-mac2-bound", "")

@@ -397,9 +397,9 @@ proc cliRefusal(body: proc ()): string =
 proc hx(d: ContentDigest): string =
   d.bytes.mapIt(it.toHex(2)).join().toLowerAscii()
 
-const UnpinnedKeyV5 =
-  "1fc751f77e9581f08b7d0e160ceac70378ecb4d4e0485fae966b7985142eef22"
-  ## ``toolIdentityCacheKey(fixedKeyArtifact(), tpmTarball)`` under the v5
+const UnpinnedKeyV6 =
+  "b9865bd74e0d604d3d164dbed0eef7d434d48172b1e737ba962ad05fbdfb1733"
+  ## ``toolIdentityCacheKey(fixedKeyArtifact(), tpmTarball)`` under the v6
   ## key. A build with no lock-selected pin and no imported contribution
   ## must key exactly so: the pins add nothing to it.
   ##
@@ -409,6 +409,14 @@ const UnpinnedKeyV5 =
   ## and unchanged through 543006de. v5 binds each tool use's realizations
   ## whole (``toolUseRealizationDigest``) instead of through a field list
   ## that missed eight fields of an in-package realization, which changed
+  ## every tool-identity key once (approved); this literal changed for that
+  ## reason only.
+  ##
+  ## Under v5 it was
+  ## ``1fc751f77e9581f08b7d0e160ceac70378ecb4d4e0485fae966b7985142eef22``.
+  ## v6 (ReproOS M7 sibling (6)) binds the content closure of every Nix
+  ## ``expressionFile`` in a counted section after the uses -- empty for this
+  ## fixture, which has none -- and moves the version tag, which changed
   ## every tool-identity key once (approved); this literal changed for that
   ## reason only.
 
@@ -1132,13 +1140,13 @@ suite "e2e_locked_provisioning_contributor_selection":
     check buildProvisioningPins(artifact, "").len == 0
     setCurrentDir(cwd)
     # Nothing consulted the catalogs, and the key is the unpinned one --
-    # byte for byte the pinned literal (``UnpinnedKeyV5``).
+    # byte for byte the pinned literal (``UnpinnedKeyV6``).
     check catalogSourceCalls == 0
     let fixed = fixedKeyArtifact()
-    check toolIdentityCacheKey(fixed, tpmTarball) == UnpinnedKeyV5
+    check toolIdentityCacheKey(fixed, tpmTarball) == UnpinnedKeyV6
     for root in [noLock, plain, otherPlatform, malformed]:
       check toolIdentityCacheKey(fixed, tpmTarball,
-        pins = buildProvisioningPins(fixed, root)) == UnpinnedKeyV5
+        pins = buildProvisioningPins(fixed, root)) == UnpinnedKeyV6
     for root in [noLock, plain, otherPlatform, malformed]:
       check toolIdentityCacheKey(artifact, tpmTarball,
         pins = buildProvisioningPins(artifact, root)) == unpinnedKey

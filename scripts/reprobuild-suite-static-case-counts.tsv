@@ -107,7 +107,7 @@ libs/repro_cas_store/tests/t_link_capability_probe.nim	nim	20
 libs/repro_cas_store/tests/t_repro_cas_store_basic.nim	nim	14
 libs/repro_cli_support/tests/t_action_cache_root_resolution.nim	nim	3
 libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	13
-libs/repro_cli_support/tests/t_daemon_parent_prewarm.nim	nim	6
+libs/repro_cli_support/tests/t_daemon_parent_prewarm.nim	nim	7
 libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced.nim	nim	17
 libs/repro_cli_support/tests/t_e2e_watch_via_adapter.nim	nim	8
 libs/repro_cli_support/tests/t_hcr_support_profile_follows_the_host.nim	nim	4
@@ -528,6 +528,7 @@ libs/repro_system_apply/tests/t_b1_dsl_parse.nim	nim	12
 libs/repro_system_apply/tests/t_b2_pipeline.nim	nim	15
 libs/repro_system_rollback/tests/t_b3_rollback_unit.nim	nim	14
 libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	nim	3
+libs/repro_tool_profiles/tests/t_nix_expression_closure_scanner.nim	nim	21
 libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim	nim	12
 libs/repro_tool_profiles/tests/t_provisioning_pin_selects_and_keys.nim	nim	8
 libs/repro_workspace_vcs/tests/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths.nim	nim	3
@@ -1252,10 +1253,12 @@ tests/integration/t_nf4_foreign_env_contract.nim	nim	10
 tests/integration/t_nim_package_path_handling.nim	nim	1
 tests/integration/t_nix_daemon_ipc.nim	nim	4
 tests/integration/t_nix_daemon_provisioner.nim	nim	3
+tests/integration/t_nix_expression_closure_keys.nim	nim	15
 tests/integration/t_no_runtime_compilation_in_tests.nim	nim	2
 tests/integration/t_only_overridden_nodes_are_rewritten.nim	nim	1
 tests/integration/t_optin_layer_runs_under_the_engine.nim	nim	1
 tests/integration/t_output_cleanup_executor.nim	nim	10
+tests/integration/t_path_tool_rewrite_detected.nim	nim	11
 tests/integration/t_pcr_composite_matches_tpm.nim	nim	2
 tests/integration/t_personal_workspace_restores_on_fresh_machine_from_pushed_lock_and_dotfiles.nim	nim	1
 tests/integration/t_pinned_attestation_signatures.nim	nim	7

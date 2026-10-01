@@ -28,6 +28,14 @@ import repro_binary_cache_client/caches_config
 import repro_binary_cache_client/in_process as bcInProcess
 import repro_binary_cache_server/types as bcTypes
 import repro_project_dsl/install_mirror_resolver
+# ReproOS M7 sibling (6): the content closure of a Nix ``expressionFile``,
+# bound by the Nix materialization key here and by the CLI tool-identity key.
+import repro_tool_profiles/nix_expression_closure
+export nix_expression_closure
+# ReproOS M7 sibling (7): stat evidence of the resolved executable, checked on
+# every tool-identity cache hit.
+import repro_tool_profiles/executable_evidence
+export executable_evidence
 # repro_local_store provides the M56 unified store. Every adapter
 # (Nix / tarball / Scoop) calls `registerInUnifiedStore` after laying
 # out its realized prefix on disk so the same SQLite-backed
@@ -161,6 +169,12 @@ type
       ## profile's content identity and IS fingerprinted: it is what makes
       ## dropping ``pathSearchList`` from the key sound rather than a
       ## stale-serve hole.
+    executableEvidence*: ExecutableEvidence
+      ## Stat evidence of ``resolvedExecutablePath`` taken when the digest
+      ## was computed (codec v9). NOT fingerprinted -- it says when to
+      ## re-hash, not what the tool is: a touch that leaves the bytes alone
+      ## refreshes it without moving any fingerprint. See
+      ## ``verifyResolvedExecutable``.
     # M9.R.14e.1 — additional search-path channels populated by the
     # from-source resolver when the sibling recipe's install tree carries
     # the relevant artefacts. The engine threads each list onto a
@@ -326,7 +340,11 @@ const
   # artifact round-trip: a field that is fingerprinted but not serialized
   # would make a cached identity re-hash to a different fingerprint on
   # every read.
-  ArtifactVersion = 8'u16
+  # v9 — ``executableEvidence`` on the profile (ReproOS M7 sibling (7)): the
+  # stat evidence every cache hit compares before trusting the digest. A v8
+  # profile reads back with no evidence, so its first hit re-hashes (and a
+  # changed executable is then a miss) instead of being trusted.
+  ArtifactVersion = 9'u16
   NixMaterializationMagic = [byte(ord('R')), byte(ord('B')), byte(ord('N')), byte(ord('M'))]
   NixMaterializationVersion = 3'u16
 
@@ -588,6 +606,23 @@ proc resolvedExecutableContentDigest*(path: string): string =
     # to a readable file's digest.
     result = "unreadable"
 
+proc sealExecutable*(path: string):
+    tuple[digest: string; evidence: ExecutableEvidence] =
+  ## ``resolvedExecutableContentDigest(path)`` together with the stat
+  ## evidence of the bytes that were read: stat, hash, stat again. The
+  ## evidence is recorded only when both stats agree (the file did not change
+  ## under the read), stamped with the moment hashing STARTED -- the
+  ## reference the racy window is measured from (see ``executable_evidence``).
+  if path.len == 0:
+    return (digest: "", evidence: ExecutableEvidence())
+  let started = nowNs()
+  let before = statExecutable(path)
+  result.digest = resolvedExecutableContentDigest(path)
+  let after = statExecutable(path)
+  if before.ok and after.ok and sameFileState(before.evidence, after.evidence):
+    result.evidence = before.evidence
+    result.evidence.recordedAtNs = started
+
 proc profileFingerprintFor(profile: PathOnlyToolProfile): ContentDigest =
   var payload: seq[byte] = @[]
   # v7 — the profile fingerprint now keys on WHAT WAS RESOLVED, not on
@@ -740,9 +775,69 @@ proc refreshProfileIdentity*(profile: var PathOnlyToolProfile) =
   ## Adding an adapter means adding a call here. There is no compiler
   ## check for that, so it is stated where the field is declared as well
   ## (see ``PathOnlyToolProfile.profileFingerprint``).
-  profile.resolvedExecutableDigest =
-    resolvedExecutableContentDigest(profile.resolvedExecutablePath)
+  let sealed = sealExecutable(profile.resolvedExecutablePath)
+  profile.resolvedExecutableDigest = sealed.digest
+  profile.executableEvidence = sealed.evidence
   profile.profileFingerprint = profileFingerprintFor(profile)
+
+type
+  ExecutableCheck* = enum
+    ecCurrent    ## stat evidence matched and is not racy: nothing read
+    ecRefreshed  ## re-hashed, same digest: the evidence was refreshed
+    ecChanged    ## missing, changed under the read, or a different digest
+
+proc verifyResolvedExecutable*(profile: var PathOnlyToolProfile):
+    ExecutableCheck =
+  ## The per-hit check of a cached profile's executable (ReproOS M7 sibling
+  ## (7); see ``executable_evidence``). One stat; a re-hash only on an
+  ## evidence mismatch or racy evidence; a different digest is
+  ## ``ecChanged`` -- the caller must treat the whole identity as a miss.
+  let path = profile.resolvedExecutablePath
+  if path.len == 0:
+    return ecCurrent
+  let current = statExecutable(path)
+  if not current.ok:
+    return ecChanged
+  let recorded = profile.executableEvidence
+  if sameFileState(recorded, current.evidence) and not recorded.racy:
+    return ecCurrent
+  let sealed = sealExecutable(path)
+  if not sealed.evidence.recorded:
+    # The file changed while it was being read (or vanished): whatever the
+    # digest says, it is not evidence of the recorded bytes.
+    return ecChanged
+  if sealed.digest != profile.resolvedExecutableDigest:
+    return ecChanged
+  profile.executableEvidence = sealed.evidence
+  ecRefreshed
+
+proc verifyIdentityExecutables*(identity: var PathOnlyBuildIdentity):
+    tuple[current: bool; refreshed: bool] =
+  ## Every profile's executable, then every action identity's mirror of it:
+  ## ``current`` is false as soon as one is ``ecChanged``, or an action
+  ## identity names an executable / digest no verified profile carries.
+  ## ``refreshed`` is true when some evidence was refreshed and the identity
+  ## should be written back.
+  var verified = initTable[string, string]()
+  for profile in identity.profiles.mitems:
+    case verifyResolvedExecutable(profile)
+    of ecChanged:
+      return (current: false, refreshed: false)
+    of ecRefreshed:
+      result.refreshed = true
+    of ecCurrent:
+      discard
+    if profile.resolvedExecutablePath.len > 0:
+      verified[profile.resolvedExecutablePath] =
+        profile.resolvedExecutableDigest
+  for action in identity.actionIdentities:
+    if action.resolvedExecutablePath.len == 0:
+      continue
+    if not verified.hasKey(action.resolvedExecutablePath) or
+        verified[action.resolvedExecutablePath] !=
+          action.resolvedExecutableDigest:
+      return (current: false, refreshed: false)
+  result.current = true
 
 proc findExecutableOnPath(executableName: string;
                           pathSearchList: openArray[string]): string =
@@ -1377,17 +1472,28 @@ proc materializationKeyFileComponent(value: string): string =
   safeStoreSegment(value[0 .. min(value.high, 31)], "nix-materialization") &
     "-" & value
 
-proc nixMaterializationExpressionDigest(path: string): string =
-  if path.len == 0:
-    return ""
-  if not fileExists(extendedPath(path)):
-    return "missing"
-  blake3.toHex(blake3.digest(readFile(extendedPath(path))))
+type
+  NixMaterializationKey* = tuple[cacheable: bool; key: string]
+    ## ``cacheable`` is false when the plan's ``expressionFile`` closure is
+    ## uncacheable (see ``nix_expression_closure``): the key then carries a
+    ## fresh nonce and the cache is neither read nor written.
 
-proc nixMaterializationCacheKey(useDef: InterfaceToolUse;
-                                plan: NixAcquisitionPlan): string =
+proc nixMaterializationCacheKey*(useDef: InterfaceToolUse;
+                                 plan: NixAcquisitionPlan):
+    NixMaterializationKey =
+  ## v2 (ReproOS M7 sibling (6)): the expression is bound by its CONTENT
+  ## CLOSURE -- the top-level file, every file and directory it names
+  ## (``../nixpkgs.nix``, ``src = ./.``), recursively -- instead of by the
+  ## top-level file's bytes alone, which let a nixpkgs-pin bump or a lock
+  ## file edit serve the stale materialization. Exported so the M7 key test
+  ## drives the real key.
+  let closure =
+    if plan.nixExpressionFile.len > 0:
+      nixExpressionClosure(plan.nixExpressionFile)
+    else:
+      NixExpressionClosure(cacheable: true)
   var payload: seq[byte] = @[]
-  payload.writeString("reprobuild.nix.materialization.v1")
+  payload.writeString("reprobuild.nix.materialization.v2")
   payload.writeString(hostOS)
   payload.writeString(hostCPU)
   payload.writeString(useDef.packageSelector)
@@ -1397,7 +1503,9 @@ proc nixMaterializationCacheKey(useDef: InterfaceToolUse;
   payload.writeString(plan.nixSelector)
   payload.writeString(plan.declaredExecutablePath)
   payload.writeString(plan.nixExpressionFile)
-  payload.writeString(nixMaterializationExpressionDigest(plan.nixExpressionFile))
+  payload.writeString(
+    if plan.nixExpressionFile.len > 0: nixExpressionClosureKey(closure)
+    else: "")
   payload.writeString(plan.nixpkgsRef)
   payload.writeString(plan.nixpkgsRev)
   payload.writeString(plan.nixpkgsNarHash)
@@ -1408,7 +1516,8 @@ proc nixMaterializationCacheKey(useDef: InterfaceToolUse;
     payload.writeByte(byte(ord(probe.kind)))
     payload.writeString(probe.name)
     payload.writeStringSeq(probe.args)
-  blake3.toHex(blake3.digest(toByteString(payload)))
+  (cacheable: closure.cacheable,
+   key: blake3.toHex(blake3.digest(toByteString(payload))))
 
 proc nixMaterializationCachePath(storeRoot, key: string): string =
   storeRoot / "nix-materialization-cache" /
@@ -1499,12 +1608,16 @@ proc expandNixPropagatedStorePaths*(paths: var seq[string])
 proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile)
 
 proc readCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
-                                  plan: NixAcquisitionPlan):
+                                  plan: NixAcquisitionPlan;
+                                  key: NixMaterializationKey):
     tuple[hit: bool; profile: PathOnlyToolProfile] =
-  if storeRoot.len == 0:
+  ## ``key`` is computed ONCE, before resolution, and the same value is
+  ## passed to ``writeCachedNixMaterialization``: a closure edited while the
+  ## realization runs is then cached under the OLDER key, which the next
+  ## build (computing the newer one) misses -- never the reverse.
+  if storeRoot.len == 0 or not key.cacheable:
     return
-  let key = nixMaterializationCacheKey(useDef, plan)
-  let path = nixMaterializationCachePath(storeRoot, key)
+  let path = nixMaterializationCachePath(storeRoot, key.key)
   if not fileExists(extendedPath(path)):
     return
   try:
@@ -1519,11 +1632,11 @@ proc readCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
 
 proc writeCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
                                    plan: NixAcquisitionPlan;
-                                   profile: PathOnlyToolProfile) =
-  if storeRoot.len == 0:
+                                   profile: PathOnlyToolProfile;
+                                   key: NixMaterializationKey) =
+  if storeRoot.len == 0 or not key.cacheable:
     return
-  let key = nixMaterializationCacheKey(useDef, plan)
-  let path = nixMaterializationCachePath(storeRoot, key)
+  let path = nixMaterializationCachePath(storeRoot, key.key)
   createDir(extendedPath(parentDir(path)))
   writeFile(extendedPath(path),
     toByteString(encodeNixMaterializationProfile(profile)))
@@ -1584,7 +1697,9 @@ else:
                        writerMode = "direct"): PathOnlyToolProfile =
     let plan = nixAcquisitionPlan(useDef)
     let selector = plan.nixSelector
-    let cached = readCachedNixMaterialization(storeRoot, useDef, plan)
+    let materializationKey = nixMaterializationCacheKey(useDef, plan)
+    let cached = readCachedNixMaterialization(storeRoot, useDef, plan,
+      materializationKey)
     if cached.hit:
       return cached.profile
 
@@ -1821,7 +1936,8 @@ else:
         unified.absolutePath, [plan.declaredExecutablePath],
         writerMode = writerMode)
       result.realizedStorePaths.add(unified.absolutePath)
-      writeCachedNixMaterialization(storeRoot, useDef, plan, result)
+      writeCachedNixMaterialization(storeRoot, useDef, plan, result,
+        materializationKey)
 
     refreshProfileIdentity(result)
 
@@ -6502,6 +6618,16 @@ proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile) =
   # v8 — the resolved executable's content digest. Emitted after the v7
   # search-path block, same trailing-extension discipline.
   outp.writeString(profile.resolvedExecutableDigest)
+  # v9 — the executable's stat evidence (see ``executable_evidence``).
+  let evidence = profile.executableEvidence
+  outp.writeByte(byte(ord(evidence.recorded)))
+  outp.writeU64Le(cast[uint64](evidence.size))
+  outp.writeU64Le(cast[uint64](evidence.mtimeNs))
+  outp.writeU64Le(cast[uint64](evidence.ctimeNs))
+  outp.writeU64Le(evidence.volume)
+  outp.writeU64Le(evidence.fileIdHigh)
+  outp.writeU64Le(evidence.fileIdLow)
+  outp.writeU64Le(cast[uint64](evidence.recordedAtNs))
   outp.writeDigest(profile.profileFingerprint)
 
 proc readProfile(bytes: openArray[byte]; pos: var int;
@@ -6568,6 +6694,20 @@ proc readProfile(bytes: openArray[byte]; pos: var int;
     result.libraryPathList = readStringSeq(bytes, pos)
   if version >= 8'u16:
     result.resolvedExecutableDigest = readString(bytes, pos)
+  if version >= 9'u16:
+    let recordedByte = readByte(bytes, pos)
+    if recordedByte > 1'u8:
+      raiseEnvelopeError(eeMalformed, "invalid executable evidence flag")
+    result.executableEvidence.recorded = recordedByte == 1'u8
+    result.executableEvidence.size = cast[int64](readU64Le(bytes, pos))
+    result.executableEvidence.mtimeNs = cast[int64](readU64Le(bytes, pos))
+    result.executableEvidence.ctimeNs = cast[int64](readU64Le(bytes, pos))
+    result.executableEvidence.volume = readU64Le(bytes, pos)
+    result.executableEvidence.fileIdHigh = readU64Le(bytes, pos)
+    result.executableEvidence.fileIdLow = readU64Le(bytes, pos)
+    result.executableEvidence.recordedAtNs = cast[int64](readU64Le(bytes, pos))
+  # A v < 9 artifact leaves the evidence unrecorded, so its first cache hit
+  # re-hashes the executable rather than trusting the digest.
   # A v < 8 artifact leaves the digest empty. Its stored
   # ``profileFingerprint`` was computed under the v6 profile scheme and
   # will not equal ``profileFingerprintFor(result)``, so every freshness
