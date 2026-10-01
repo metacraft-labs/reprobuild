@@ -1,63 +1,55 @@
-## NF-2 — **the behind-pin skip names the sibling, the distance and a remedy
-## that actually runs and actually works.**
+## NF-2 — **the behind-pin refusal names the sibling, the distance and remedies
+## that actually run and actually work.**
 ##
-## Spec: Nix-Flake-Coexistence.md §3.2 ("reported ambiently, naming the sibling,
-## the distance, and the command that reconciles it") and
-## Unified-Locking-And-Hooks.md §"the named command must RUN where the message
-## is printed".
+## Spec: Nix-Flake-Coexistence.md §3.2 ("Rule, at commit": the refresh refuses
+## the commit unless the committer names the input in
+## `REPRO_ALLOW_PIN_REGRESSION`) and Unified-Locking-And-Hooks.md §13.3 ("What
+## the refusal prints": the sibling, the relation and its distance, the pinned
+## and observed revisions, then two courses of action, each with a command that
+## runs where the message is printed).
 ##
 ## ## Why the message needs a case of its own
 ##
-## `t_a_behind_pin_sibling_is_not_recorded_as_the_new_pin` asserts that nothing
-## was written. That assertion is satisfied equally by a hook that skipped and
-## warned and by one that silently did nothing — and "silently did nothing while
-## looking like it worked" is the failure mode this whole campaign exists to
-## remove. So the CONTENT of the notice is asserted here, and not by matching a
-## pattern: every command the notice quotes is lifted out of the text, parsed as
-## a shell command, RUN from the directory the message itself names, and checked
-## to have moved the state it was named for.
+## `t_a_behind_pin_sibling_is_not_recorded_as_the_new_pin` asserts that the
+## commit was refused and nothing was written. That is satisfied equally by a
+## refusal that tells the operator what to do and by one that only says no —
+## and a refusal nobody can act on is how a hook gets uninstalled. So the
+## CONTENT is asserted here, and not by matching a pattern: every command the
+## refusal quotes is lifted out of the text, parsed as a shell command, RUN from
+## the repository the message was printed in, and checked to have done what it
+## was named for.
 ##
-## That rule has already been broken once by a message that quotes it. NF-3's
-## first behind-pin remedy read
+## That rule was broken once by a message this case inherits from. NF-3's first
+## behind-pin remedy read
 ##
 ##     `git -C <dir> merge --ff-only <sha>  (or, to record the downgrade
 ##      instead: repro flake refresh-lock --flake=… --workspace-root=…)`
 ##
 ## — one command and a parenthesised aside inside ONE pair of backticks, which
-## pastes as `bash: syntax error near unexpected token '('`. This case inherits
-## NF-3's fix rather than growing a second remedy generator: the strings under
-## test here are produced by `flakeReconcileCommand` /
-## `flakeReconcileAlternative`, the same two procs the pre-push refusal uses.
+## pastes as `bash: syntax error near unexpected token '('`.
 ##
 ## ## What is asserted
 ##
-##   1. the notice names the SIBLING (`gamma`) and the NUMERIC distance
-##      (`3 commit(s) BEHIND`). A notice that says "a sibling is behind" without
-##      saying which or by how much cannot be acted on;
+##   1. the refusal names the INPUT and the NUMERIC distance
+##      (`behind by 3 commit(s)`) with both revisions;
 ##   2. every backticked chunk is ONE pasteable line — a single physical line
-##      that `bash -n` accepts, which is exactly the check a human paste
-##      performs;
-##   3. the ALTERNATIVE remedy is truthful: run from the named directory, it
-##      really does record the downgrade the notice says it records. This is the
-##      half a message can satisfy in prose and fail in a terminal, and it is a
-##      live risk here precisely because the default refresh now declines to
-##      record a downgrade — so the alternative had to become an explicit
-##      opt-in, and a message still naming the old spelling would be a lie;
-##   4. the FIRST remedy reconciles: run from the named directory it exits 0 and
-##      the sibling ends AT the pinned revision;
-##   5. …and the hook then stops warning, without touching the lock. The remedy
-##      resolved the thing it was named for rather than leaving the operator to
-##      loop.
+##      that `bash -n` accepts, with no parenthesised aside;
+##   3. the DELIBERATE course is truthful: the printed
+##      `REPRO_ALLOW_PIN_REGRESSION=… git commit`, run in the repository with a
+##      message appended, commits the downgrade and announces it;
+##   4. the named `git log` lists exactly the three commits the lock would drop;
+##   5. the FIRST remedy brings the checkout forward: run as printed it exits 0
+##      and the sibling ends AT the pinned revision;
+##   6. …after which the hook proceeds, touching nothing. The remedy resolved
+##      the thing it was named for rather than leaving the operator to loop.
 ##
 ## ## Mutations
 ##
-##   * drop the distance from the sentence (`$row.behindBy`) ⇒ RED on (1);
-##   * fold the alternative back inside the first pair of backticks as a
-##     parenthesised aside ⇒ RED on (2) (`bash -n` rejects it, and it is no
-##     longer one line's worth of command) and RED on (4) (the lifted string is
-##     not runnable);
-##   * emit the alternative WITHOUT its explicit opt-in flag ⇒ RED on (3): the
-##     command runs, exits 0, and records nothing.
+##   * drop the distance from `pinRegressionDistance` ⇒ RED on (1);
+##   * fold a remedy into another's backticks as a parenthesised aside ⇒ RED on
+##     (2);
+##   * print the variable without the sibling's name ⇒ RED on (3): the re-run
+##     commit is refused again.
 ##
 ## Test-double policy: NO mocks, doubles or fakes. See the headers of
 ## `nf2_flake_lock_fixture.nim` and `nf3_override_state_fixture.nim`.
@@ -66,18 +58,17 @@ import std/[os, osproc, strutils, unittest]
 
 import nf3_override_state_fixture
 
-proc behindNotice(text: string): string =
-  ## The one line of the hook's output that announces the withheld refresh.
-  ## Scoped to the line rather than taken as the whole stream, because
-  ## `backtickedCommands` over the whole stream would happily pick up a command
-  ## quoted by some unrelated diagnostic and the case would then assert about a
-  ## string the withholding never produced.
+proc lineWith(text: string; needles: varargs[string]): string =
   for line in text.splitLines():
-    if line.contains("NOT refreshed") and line.contains("gamma-src"):
-      return line
+    var all = true
+    for n in needles:
+      if n notin line:
+        all = false
+        break
+    if all: return line
   ""
 
-suite "NF-2: a behind-pin skip names the sibling, distance and remedy":
+suite "NF-2: a behind-pin refusal names the sibling, distance and remedies":
 
   test "t_a_behind_pin_skip_names_the_sibling_distance_and_remedy":
     const caseName = "t_a_behind_pin_skip_names_the_sibling_distance_and_remedy"
@@ -103,67 +94,76 @@ suite "NF-2: a behind-pin skip names the sibling, distance and remedy":
         commitLockAndPublish(fx, "a lock pinned three ahead of gamma")
 
         let before = readFile(lockPath(fx))
+        let headBefore = headOf(fx, fx.app)
 
         let committed = tryCommitInApp(fx, "work made against a stale gamma")
         checkpoint("commit output:\n" & committed.output)
-        check committed.code == 0
+        check committed.code != 0
+        check committed.head == headBefore
         check readFile(lockPath(fx)) == before
 
-        let notice = behindNotice(committed.output)
-        checkpoint("notice: " & notice)
-        check notice.len > 0
-        if notice.len == 0:
-          checkpoint("pre-commit log:\n" & preCommitLog(fx))
-        else:
-          # ---- (1) the sibling, and the DISTANCE ------------------------
-          check notice.contains("gamma")
-          check notice.contains("3 commit(s) BEHIND")
+        # ---- (1) the input, the DISTANCE and both revisions -------------
+        let headline = lineWith(committed.output,
+          "flake.lock input 'gamma-src'", "behind by 3 commit(s)")
+        checkpoint("headline: " & headline)
+        check headline.len > 0
+        check headline.contains(gammaPinned)
+        check headline.contains(gammaCheckout)
 
-          # ---- (2) every quoted chunk is ONE pasteable line -------------
-          let namedDir = directoryNamedForRunning(notice)
-          checkpoint("named directory: " & namedDir)
-          check namedDir.len > 0
-          check dirExists(namedDir)
+        # ---- (2) every quoted chunk is ONE pasteable line ---------------
+        let commands = backtickedCommands(committed.output)
+        checkpoint("commands: " & $commands)
+        check commands.len >= 4
+        for cmd in commands:
+          check cmd.splitLines().len == 1
+          check not cmd.contains("(")
+          let parsed = execCmdEx(q(shell) & " -n -c " & q(cmd))
+          checkpoint("bash -n `" & cmd & "` -> " & $parsed.exitCode & " " &
+            parsed.output)
+          check parsed.exitCode == 0
 
-          let commands = backtickedCommands(notice)
-          checkpoint("commands: " & $commands)
-          check commands.len == 2
-          for cmd in commands:
-            check cmd.splitLines().len == 1
-            check not cmd.contains("(")
-            let parsed = execCmdEx(q(shell) & " -n -c " & q(cmd))
-            checkpoint("bash -n `" & cmd & "` -> " & $parsed.exitCode & " " &
-              parsed.output)
-            check parsed.exitCode == 0
+        let forward = backtickedCommands(lineWith(committed.output,
+          "bring the checkout forward"))
+        let dropped = backtickedCommands(lineWith(committed.output,
+          "would drop from the published lock"))
+        let deliberate = backtickedCommands(lineWith(committed.output,
+          "REPRO_ALLOW_PIN_REGRESSION=gamma-src git commit"))
+        check forward.len == 1
+        check dropped.len == 1
+        check deliberate.len == 1
+        if forward.len == 1 and dropped.len == 1 and deliberate.len == 1:
+          # ---- (3) the DELIBERATE course commits the downgrade ----------
+          let alt = run(deliberate[0] & " -q -m " &
+            q("deliberately older gamma"), cwd = fx.app)
+          checkpoint("ran `" & deliberate[0] & "` -> " & $alt.code & "\n" &
+            alt.output)
+          check alt.code == 0
+          let downgraded = lockInCommit(fx)
+          check nodeText(downgraded, "gamma-src").contains(gammaCheckout)
+          check not nodeText(downgraded, "gamma-src").contains(gammaPinned)
+          check alt.output.contains("allowed pin regression")
+          # Back to the refused state, so the remaining remedies run against
+          # the situation the refusal was printed about.
+          discard gitIn(fx, fx.app, "reset -q --hard " & headBefore)
+          check readFile(lockPath(fx)) == before
 
-          if commands.len == 2:
-            # ---- (3) the ALTERNATIVE really records the downgrade -------
-            let alt = runNamedCommand(fx, commands[1], namedDir)
-            checkpoint("ran `" & commands[1] & "` in " & namedDir & " -> " &
-              $alt.code & "\n" & alt.output)
-            check alt.code == 0
-            let downgraded = readFile(lockPath(fx))
-            check nodeText(downgraded, "gamma-src").contains(gammaCheckout)
-            check downgraded != before
-            # Put the lock back, so (4) and (5) run against the state the
-            # notice was printed about rather than against the downgrade this
-            # step deliberately filed.
-            discard gitIn(fx, fx.app, "checkout -- flake.lock")
-            check readFile(lockPath(fx)) == before
+          # ---- (4) the named log lists what the lock would drop ---------
+          let log = runNamedCommand(fx, dropped[0], fx.app)
+          checkpoint("ran `" & dropped[0] & "` -> " & $log.code & "\n" &
+            log.output)
+          check log.code == 0
+          check log.output.strip().splitLines().len == 3
 
-            # ---- (4) the FIRST remedy reconciles -----------------------
-            let res = runNamedCommand(fx, commands[0], namedDir)
-            checkpoint("ran `" & commands[0] & "` in " & namedDir & " -> " &
-              $res.code & "\n" & res.output)
-            check res.code == 0
-            check headOf(fx, siblingDir(fx, "gamma")) == gammaPinned
+          # ---- (5) the FIRST remedy brings the checkout forward ---------
+          let res = runNamedCommand(fx, forward[0], fx.app)
+          checkpoint("ran `" & forward[0] & "` -> " & $res.code & "\n" &
+            res.output)
+          check res.code == 0
+          check headOf(fx, siblingDir(fx, "gamma")) == gammaPinned
 
-            # ---- (5) …and the hook stops warning, touching nothing -----
-            let again = firePreCommitHook(fx)
-            checkpoint("re-fired hook -> " & $again.code & "\n" & again.output)
-            check again.code == 0
-            check behindNotice(again.output).len == 0
-            check readFile(lockPath(fx)) == before
-            let logLine = lastFlakeLogLine(fx)
-            checkpoint("last flake-lock log line: " & logLine)
-            check not logLine.contains("BEHIND")
+          # ---- (6) …and the hook proceeds, touching nothing -------------
+          let again = firePreCommitHook(fx)
+          checkpoint("re-fired hook -> " & $again.code & "\n" & again.output)
+          check again.code == 0
+          check not again.output.contains("REFUSED")
+          check readFile(lockPath(fx)) == before

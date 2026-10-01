@@ -1,45 +1,49 @@
 ## NF-2 — **one refresh, four siblings, four different answers.**
 ##
-## Spec: Nix-Flake-Coexistence.md §3.1 and §3.2. The policy is a per-INPUT
-## decision with four outcomes, and this is the case that holds all four at once:
+## Spec: Nix-Flake-Coexistence.md §3.1 and §3.2 (including §3.2's "Rule, at
+## commit", owner-decided 2026-09-30). The case holds all four at once:
 ##
-##   | sibling AHEAD of its pin     | recorded (§3.1 — you are developing)   |
-##   | sibling AT its pin           | untouched, not even rewritten equal   |
-##   | sibling BEHIND its pin       | withheld (§3.2 — your checkout is stale) |
-##   | sibling whose pin is unfetched | withheld (it cannot be classified)  |
+##   | sibling AHEAD of its pin       | recorded (§3.1 — you are developing)    |
+##   | sibling AT its pin             | untouched, not even rewritten equal    |
+##   | sibling BEHIND its pin         | refuses the commit (a downgrade)       |
+##   | sibling whose pin is unfetched | refuses the commit (unprovable)        |
 ##
 ## ## Why the four have to meet in one refresh
 ##
 ## Each of the other cases moves one sibling and holds the rest still, so each
-## of them is satisfied by an implementation that decides ONCE PER REFRESH — for
-## instance "withhold everything if anything is behind", or "record everything
-## if anything is ahead". Both of those pass every single-sibling case and are
-## catastrophic in a real workspace, where 86 repos carry a flake and several
-## are always drifting in different directions at once. The defect that
-## motivated this change was found in exactly such a workspace, where
-## `codetracer` (742 behind) and `io-mon` (4 behind) were rewritten downwards
-## during commits whose actual subject was a third repo entirely.
+## of them is satisfied by implementations that get the COMBINATION wrong — "a
+## regression anywhere records nothing, and says nothing", or "record every
+## ahead input even when the commit is refused", or "once the regressions are
+## resolved, record only what moved last". A real workspace has several
+## siblings drifting in different directions at once: the defect that motivated
+## the behind-pin rule was found where `codetracer` (742 behind) and `io-mon`
+## (4 behind) were rewritten downwards during commits whose subject was a third
+## repo entirely.
 ##
 ## ## What is asserted
 ##
-##   1. exactly the AHEAD input's node moved, to that sibling's `HEAD`;
-##   2. every other node — the at-pin sibling, the behind one, the unfetched
-##      one, and the two non-sibling inputs — is BYTE-identical;
-##   3. …and so is the rest of the document: the file after the refresh is the
-##      file before it with ONE node substituted, which is a stronger statement
-##      than four node comparisons (it also catches reserialisation, member
-##      reordering and whitespace normalisation elsewhere);
-##   4. the commit carries that file;
-##   5. both withheld inputs are named, each with its own reason — the behind
-##      one with its distance, the unfetched one with the fetch it needs. Two
-##      skips that read alike would leave an operator unable to tell which
-##      remedy to apply.
+##   PHASE 1 — the refusal.
+##   1. the commit is refused, and `flake.lock` is BYTE-identical: a refused
+##      commit writes nothing, not even the ahead input it would have recorded;
+##   2. BOTH regressions are named, each with its own reason — the behind one
+##      with its distance, the unfetched one with the absent commit and the
+##      fetch it needs. Two refusals that read alike would leave an operator
+##      unable to tell which remedy to apply.
 ##
-## ## Mutation
+##   PHASE 2 — the same workspace once both checkouts are brought forward by
+##   the commands the refusal named (a fast-forward, a fetch).
+##   3. exactly the AHEAD input's node moved, to that sibling's `HEAD`;
+##   4. every other node — the at-pin sibling, the two siblings now at their
+##      pins, and the two non-sibling inputs — is BYTE-identical, and the file
+##      after the refresh is the file before it with ONE node substituted;
+##   5. the commit carries that file.
 ##
-## Make the decision per-refresh rather than per-input (withhold everything as
-## soon as any row is unrecordable) ⇒ RED on (1): `alpha-src` still names the
-## old revision, and §3.1 is silently gone.
+## ## Mutations
+##
+##   * record the ahead input even though the commit is refused ⇒ RED on (1);
+##   * render one reason for both regressions ⇒ RED on (2);
+##   * decide per refresh rather than per input once nothing regresses ⇒ RED on
+##     (3).
 ##
 ## Test-double policy: NO mocks, doubles or fakes. See the headers of
 ## `nf2_flake_lock_fixture.nim` and `nf3_override_state_fixture.nim`. The
@@ -50,6 +54,16 @@
 import std/[os, strutils, unittest]
 
 import nf3_override_state_fixture
+
+proc lineWith(text: string; needles: varargs[string]): string =
+  for line in text.splitLines():
+    var all = true
+    for n in needles:
+      if n notin line:
+        all = false
+        break
+    if all: return line
+  ""
 
 suite "NF-2: a mixed workspace records only the ahead inputs":
 
@@ -81,20 +95,54 @@ suite "NF-2: a mixed workspace records only the ahead inputs":
       let alphaHead = advancePublishedSibling(fx, "alpha", 2)
       check alphaHead != fx.seedSha[0]
 
-      let committed = tryCommitInApp(fx, "work built against the newer alpha")
-      checkpoint("commit output:\n" & committed.output)
+      # ==== PHASE 1: the refusal ==========================================
+      let headBefore = headOf(fx, fx.app)
+      let refused = tryCommitInApp(fx, "work built against the newer alpha")
+      checkpoint("commit output:\n" & refused.output)
       checkpoint("pre-commit log:\n" & preCommitLog(fx))
+
+      # ---- (1) refused, and nothing written -----------------------------
+      check refused.code != 0
+      check refused.head == headBefore
+      check readFile(lockPath(fx)) == before
+      check not readFile(lockPath(fx)).contains(alphaHead)
+
+      # ---- (2) both regressions named, with different reasons -----------
+      let behindLine = lineWith(refused.output,
+        "flake.lock input 'gamma-src'")
+      let unfetchedLine = lineWith(refused.output,
+        "flake.lock input 'delta-src'")
+      checkpoint("behind line: " & behindLine)
+      checkpoint("unfetched line: " & unfetchedLine)
+      check behindLine.contains("behind by 3 commit(s)")
+      check unfetchedLine.contains("pinned commit " & deltaPinned &
+        " not present in")
+      check not unfetchedLine.contains("behind by")
+      check behindLine != unfetchedLine
+      # One variable naming both, in the order the refusal lists them.
+      check refused.output.contains(
+        "REPRO_ALLOW_PIN_REGRESSION=delta-src,gamma-src git commit")
+
+      # ==== PHASE 2: both checkouts brought forward ======================
+      discard gitIn(fx, siblingDir(fx, "gamma"),
+        "merge -q --ff-only " & gammaPinned)
+      discard gitIn(fx, siblingDir(fx, "delta"), "fetch -q --all")
+      discard gitIn(fx, siblingDir(fx, "delta"),
+        "merge -q --ff-only " & deltaPinned)
+      let committed = run(q(fx.gitBin) & " -C " & q(fx.app) &
+        " commit -q -m " & q("work built against the newer alpha"))
+      checkpoint("second commit output:\n" & committed.output)
       check committed.code == 0
 
       let after = readFile(lockPath(fx))
 
-      # ---- (1) exactly the AHEAD input moved ---------------------------
+      # ---- (3) exactly the AHEAD input moved ----------------------------
       let alphaAfter = nodeText(after, "alpha-src")
       checkpoint("alpha-src AFTER:\n" & alphaAfter)
       check alphaAfter.contains(alphaHead)
       check not alphaAfter.contains(fx.seedSha[0])
 
-      # ---- (2) every other node is BYTE-identical -----------------------
+      # ---- (4) every other node is BYTE-identical -----------------------
       for node in ["beta-src", "gamma-src", "delta-src", "flake-utils",
                    "nixpkgs"]:
         let was = nodeText(before, node)
@@ -106,24 +154,9 @@ suite "NF-2: a mixed workspace records only the ahead inputs":
       check nodeText(after, "gamma-src").contains(gammaPinned)
       check nodeText(after, "delta-src").contains(deltaPinned)
       check nodeText(after, "beta-src").contains(fx.seedSha[1])
-
-      # ---- (3) …and so is the whole rest of the document ----------------
       let alphaBefore = nodeText(before, "alpha-src")
       check alphaBefore.len > 0
       check before.replace(alphaBefore, alphaAfter) == after
 
-      # ---- (4) the commit carries it ------------------------------------
+      # ---- (5) the commit carries it -------------------------------------
       check lockInCommit(fx) == after
-
-      # ---- (5) both withheld inputs are named, with different reasons ----
-      var behindNotice, unfetchedNotice: string
-      for line in committed.output.splitLines():
-        if not line.contains("NOT refreshed"): continue
-        if line.contains("gamma-src"): behindNotice = line
-        if line.contains("delta-src"): unfetchedNotice = line
-      checkpoint("behind notice: " & behindNotice)
-      checkpoint("unfetched notice: " & unfetchedNotice)
-      check behindNotice.contains("3 commit(s) BEHIND")
-      check unfetchedNotice.contains("CANNOT BE CLASSIFIED")
-      check not unfetchedNotice.contains("BEHIND")
-      check behindNotice != unfetchedNotice
