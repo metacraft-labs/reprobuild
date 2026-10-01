@@ -255,7 +255,9 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 29'u16
+  BuildActionPayloadVersion* = 30'u16
+    ## v30: ``scratchDirs`` — the action's scratch directories (BuildXL's pip
+    ## temp directories), a string list appended last.
     ## v29: ``subToolRefs`` — the typed tool's own bare-name sub-tools
     ## (``cli: subTools ...``), a string list appended last.
     ## v28: Cache-Scope P3.4 — the ``fixedOutput`` edge attribute, one strict
@@ -1858,7 +1860,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   cwdKind = acwdRecipeRoot;
                   cwdCustomPath = "";
                   declaredOutputs: openArray[string] = [];
-                  readOnlyRoots: openArray[string] = []):
+                  readOnlyRoots: openArray[string] = [];
+                  scratchDirs: openArray[string] = []):
     BuildActionDef {.dynOrStatic.} =
   ## ``outputTag`` (Recipe-Val M8): which package-output this edge
   ## contributes to. Defaults to the empty string which the closure
@@ -1940,7 +1943,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     cwdKind: cwdKind,
     cwdCustomPath: cwdCustomPath,
     declaredOutputs: @declaredOutputs,
-    readOnlyRoots: @readOnlyRoots)
+    readOnlyRoots: @readOnlyRoots,
+    scratchDirs: @scratchDirs)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -3693,6 +3697,9 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
   # v29: the typed tool's own sub-tools (``cli: subTools``).
   if version >= 29'u16:
     payload.writeStringSeq(action.subToolRefs)
+  # v30: the action's scratch directories.
+  if version >= 30'u16:
+    payload.writeStringSeq(action.scratchDirs)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -3917,6 +3924,10 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.subToolRefs = readStringSeq(bytes, pos)
   else:
     result.subToolRefs = @[]
+  if version >= 30'u16:
+    result.scratchDirs = readStringSeq(bytes, pos)
+  else:
+    result.scratchDirs = @[]
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

@@ -2860,6 +2860,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # actions that don't opt in) reduce to no-op enforcement,
     # preserving pre-M9.R.75 behaviour byte-for-byte.
     result.declaredOutputs = payload.declaredOutputs
+    result.scratchDirs = payload.scratchDirs
     result.readOnlyRoots = payload.readOnlyRoots
   let actionCachePolicy =
     case payload.actionCachePolicy
@@ -4395,7 +4396,11 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 11'u16
+  LoweredGraphCacheVersion = 12'u16
+    # v12: ``BuildAction.scratchDirs``, a string list after
+    # ``requiresElevation``. A v11 cache would decode every action with no
+    # scratch directories, and the engine would then neither empty them nor
+    # leave their contents out of the key.
     # v10: DA-6 — the two trailing event-interest bools
     # (``captureNonDeterminism``, ``captureIpc``) are replaced by ONE byte
     # carrying ``MonitorCaptureBreadth``: the tool package's declaration of how
@@ -5273,6 +5278,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeStringSeq(action.declaredOutputs)
   outp.writeStringSeq(action.readOnlyRoots)
   outp.add(if action.requiresElevation: 1'u8 else: 0'u8)
+  outp.writeStringSeq(action.scratchDirs)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -5352,6 +5358,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
     raiseEnvelopeError(eeMalformed,
       "invalid lowered action elevation sentinel")
   result.requiresElevation = elevationByte == 1'u8
+  result.scratchDirs = readStringSeq(bytes, pos)
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)
@@ -5498,10 +5505,10 @@ proc evidenceJson(evidence: PathSetEvidence): JsonNode =
   %*{
     "declaredInputs": jsonStringSeq(evidence.declaredInputs),
     "declaredOutputs": jsonStringSeq(evidence.declaredOutputs),
-    "depfileInputs": jsonStringSeq(evidence.depfileInputs),
-    "monitorReads": jsonStringSeq(evidence.monitorReads),
-    "monitorWrites": jsonStringSeq(evidence.monitorWrites),
-    "monitorProbes": jsonStringSeq(evidence.monitorProbes),
+    "depfileInputs": jsonStringSeq(evidence.depfileInputs.paths),
+    "monitorReads": jsonStringSeq(evidence.monitorReads.paths),
+    "monitorWrites": jsonStringSeq(evidence.monitorWrites.paths),
+    "monitorProbes": jsonStringSeq(evidence.monitorProbes.paths),
     "provisionerReportedInputs":
       jsonStringSeq(evidence.provisionerReportedInputs),
     "evidenceProvenance": jsonStringSeq(provenance),
@@ -5554,8 +5561,8 @@ proc fileSizeOrZero(path: string): BiggestInt =
 
 proc evidenceInputCount(evidence: PathSetEvidence): int =
   var seen: seq[string] = @[]
-  for group in [evidence.declaredInputs, evidence.depfileInputs,
-      evidence.monitorReads, evidence.monitorProbes]:
+  for group in [evidence.declaredInputs, evidence.depfileInputs.paths,
+      evidence.monitorReads.paths, evidence.monitorProbes.paths]:
     for path in group:
       if path.len > 0 and seen.find(path) < 0:
         seen.add(path)
@@ -9777,8 +9784,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           "`executeBuildTarget(wantsInputEvidencePaths = …)` and the " &
           "consumer of `BuildCommandOutcome.inputEvidencePaths` have gone " &
           "out of step.")
-      for group in [item.evidence.declaredInputs, item.evidence.depfileInputs,
-          item.evidence.monitorReads, item.evidence.monitorProbes]:
+      for group in [item.evidence.declaredInputs,
+          item.evidence.depfileInputs.paths,
+          item.evidence.monitorReads.paths,
+          item.evidence.monitorProbes.paths]:
         for path in group:
           collectedInputEvidence.add(path)
 
@@ -22719,6 +22728,7 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "weakFingerprint": digestHex(action.weakFingerprint),
     "publishToBinaryCache": action.publishToBinaryCache,
     "fixedOutput": action.fixedOutput,
+    "scratchDirs": action.scratchDirs,
     "binaryCacheKey": binaryCacheKey,
     "binaryCacheIdentityError": identityError,
     "actionCachePolicy": $action.actionCachePolicy,
@@ -72458,16 +72468,26 @@ proc runThinAppDispatch(programName: string): int =
   # recipe owns its own directory and needs no session to separate it from
   # its siblings, and a second invocation reuses the first's directory
   # instead of starting cold under a fresh token.
+  let args = normalizeWorkspaceNamespaceAlias(
+    normalizeInternalArgs(commandLineParams()))
+  # The CLI's own directory goes on PATH so what it spawns finds the DLLs
+  # staged beside it -- EXCEPT under `internal io monitor`, whose child is
+  # the build action itself. The action's PATH is what it declared; with this
+  # prepend every monitored action on Windows also searched the engine's
+  # `bin` for each command it ran, recorded those probes as inputs, and so
+  # keyed itself on where the engine is installed. The monitor needs no
+  # PATH for its own DLLs: the loader searches the application directory
+  # first.
+  let monitoringAnAction = args.len >= internalIoMonitorArgs.len and
+    args[0 ..< internalIoMonitorArgs.len] == internalIoMonitorArgs
   when defined(windows):
     let appDir = parentDir(getAppFilename())
-    if appDir.len > 0:
+    if appDir.len > 0 and not monitoringAnAction:
       let pathEnv = getEnv("PATH")
       if pathEnv.len > 0:
         putEnv("PATH", appDir & ";" & pathEnv)
       else:
         putEnv("PATH", appDir)
-  let args = normalizeWorkspaceNamespaceAlias(
-    normalizeInternalArgs(commandLineParams()))
   let publicCliPath = stablePublicCliPath()
   if programName == "repro" and args.len > 0 and
       args[0] == BrokerModeFlag:

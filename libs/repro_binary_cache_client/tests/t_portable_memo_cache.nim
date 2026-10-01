@@ -308,6 +308,26 @@ suite "Cache-Scope P3.3 — remote memoization plane":
     check "not the content its record names" in restored
     check not fileExists(c / "out" / "x.txt")
 
+  test "a record whose path set is EMPTY is discoverable":
+    ## A fixed-output fetch with no declared inputs is keyed by its
+    ## description alone. Its empty path set once doubled as the marker for
+    ## an unreadable slot: published, confirmed by its publisher, and then
+    ## never offered to a lookup.
+    let weak = repeat('e', 64)
+    let r = remote("empty-pathset")
+    let record = PortableMemoRecord(weakHex: weak, pathSet: @[],
+      strongHex: portableStrongFingerprint(weak, @[]), outputs: @[])
+    let published = publishMemo(r, @[], record, withOutputs = false)
+    checkpoint(published.reason)
+    require published.ok
+    check remoteCandidatePathSets(r, weak).len == 1
+    let found = lookupRemoteMemo(remote("empty-pathset-consumer"), @[], weak)
+    checkpoint(found.reason)
+    check found.hit.isSome
+    # And republishing finds its slot rather than taking another.
+    check publishMemo(r, @[], record, withOutputs = false).slot ==
+      published.slot
+
   test "several path sets for one weak fingerprint are all discoverable":
     let p = project("multi", "int main;\n")
     createDir(p / "out")
