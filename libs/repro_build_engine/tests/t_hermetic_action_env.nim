@@ -64,16 +64,13 @@ suite "an allowlisted action environment":
 
   test "control: without it, the invoking shell's variables reach the child":
     if findExe("sh").len == 0:
-      skip("no `sh` on PATH; the reporting action is a shell script")
+      skip("no `sh` on PATH; the probe action is a shell script")
     else:
       check (LeakVar & "=from-the-invoking-shell") in seenBy(false)
 
   test "with it, the child sees what it declared and nothing else":
-    if findExe("sh").len == 0:
-      skip("no `sh` on PATH; the reporting action is a shell script")
-    elif not LauncherIsolates:
-      skip("the linked runquota predates 2c50aaf and cannot start a " &
-        "child from an empty environment")
+    if findExe("sh").len == 0 or not LauncherIsolates:
+      skip("needs `sh` on PATH and a launcher that isolates the environment on this platform")
     else:
       let seen = seenBy(true)
       check (LeakVar & "=<unset>") in seen

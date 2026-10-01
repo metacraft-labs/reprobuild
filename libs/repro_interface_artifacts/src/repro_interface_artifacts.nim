@@ -4852,26 +4852,42 @@ proc externalHashFlags(workDir = ""): seq[string] =
   # The Windows branch above has already returned; guard only macOS, which
   # ships libsqlite3 in the SDK and needs no explicit `-L` (matching
   # config.nims's `when not defined(windows) and not defined(macosx)`).
+  #
+  # Resolution order and the RPATH rule match `config.nims` exactly: an
+  # explicit SQLITE_LIBDIR/SQLITE_PREFIX, then a Nix store SQLite whenever a
+  # Nix toolchain is present, and the distribution's directories only on a
+  # host with no Nix at all. A HOST directory is used for `-L` but never
+  # written into RPATH: this edge runs with an allowlisted environment, so
+  # the dev shell's SQLITE_PREFIX is not visible here, and a `/usr/lib`
+  # RPATH made a Nix-linked provider load the host's libc under Nix's
+  # loader and die with SIGSEGV before reading the recipe.
   when not defined(macosx):
+    let sqliteNames = ["libsqlite3.so", "libsqlite3.a"]
+    let nixInPlay = dirExists("/nix/store")
     let sqliteLibDir = block:
-      let direct = firstExistingLibDir(
-        [
-          getEnv("SQLITE_LIBDIR"),
-          getEnv("SQLITE_PREFIX"),
-          "/usr",
-          "/usr/local",
-          "/usr/lib",
-          "/usr/lib64",
-          "/usr/lib/x86_64-linux-gnu",
-        ],
-        ["libsqlite3.so", "libsqlite3.a"])
-      if direct.len > 0:
-        direct
+      let explicit = firstExistingLibDir(
+        [getEnv("SQLITE_LIBDIR"), getEnv("SQLITE_PREFIX")], sqliteNames)
+      if explicit.len > 0:
+        explicit
+      elif nixInPlay and nixLibDir("*-sqlite-*", sqliteNames).len > 0:
+        nixLibDir("*-sqlite-*", sqliteNames)
       else:
-        nixLibDir("*-sqlite-*", ["libsqlite3.so", "libsqlite3.a"])
+        firstExistingLibDir(
+          [
+            "/usr",
+            "/usr/local",
+            "/usr/lib",
+            "/usr/lib64",
+            "/usr/lib/x86_64-linux-gnu",
+          ],
+          sqliteNames)
     if sqliteLibDir.len > 0:
       result.add("--passL:-L" & sqliteLibDir)
-      result.add("--passL:-Wl,-rpath," & sqliteLibDir)
+      let d = sqliteLibDir.strip()
+      let hostDir = d == "/usr" or d.startsWith("/usr/") or d == "/lib" or
+        d.startsWith("/lib/") or d == "/lib64" or d.startsWith("/lib64/")
+      if not hostDir:
+        result.add("--passL:-Wl,-rpath," & sqliteLibDir)
 
 proc consumerCompilePathFlags*(workDir = getCurrentDir()): seq[string] =
   ## ``--path:`` / ``--passC:`` / ``--passL:`` flags a downstream module

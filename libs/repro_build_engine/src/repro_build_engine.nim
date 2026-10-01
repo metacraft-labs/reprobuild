@@ -1110,18 +1110,45 @@ type
     ## member is silently missing from, where the omission is
     ## indistinguishable from a decision.
     ##
-    ## DO NOT READ THAT AS A PROPERTY OF THE GUARD. It is a property of ONE of
-    ## the guard's five terms. The other four — `monitorObservedNoReads` and
-    ## the `.len == 0` tests on `monitorWrites`, `monitorProbes` and
-    ## `monitorDirectoryEnumerations` — still ask whether the CHANNEL is
-    ## empty, and a set is not empty because an unmarked writer filled it.
-    ## Measured, not inferred: a probe adding one unmarked path to
+    ## FOUR OF THE FIVE TERMS STILL ASK WHETHER THE CHANNEL IS EMPTY — and
+    ## the fifth is only better on one of its arms, see the measurement below —
+    ## AND THAT IS NOW HARMLESS, but only because the unmarked writer they were
+    ## blind to can no longer be written. `monitorObservedNoReads` and the
+    ## `.len == 0` tests on `monitorWrites`, `monitorProbes` and
+    ## `monitorDirectoryEnumerations` are unchanged, and a set is still not
+    ## empty because an unmarked writer filled it; what changed is that the
+    ## channels are `ObservedPathChannel`, whose only append (`observe`)
+    ## takes an `EvidenceContributor` and `incl`s it here. There is no
+    ## unmarked append left to write.
+    ##
+    ## MEASURED IN BOTH DIRECTIONS, not inferred. At `55219d92`, with the
+    ## channels still `seq[string]`, a probe adding ONE unmarked path to
     ## `monitorReads` in `collectEvidence` suppressed the zero-evidence
     ## diagnostic, PUBLISHED a record for an edge that observed nothing, and
-    ## served it back as a `cdHit` on the warm run. The same probe against
-    ## `depfileInputs` changed nothing. Marking a new writer is therefore
-    ## still mandatory rather than merely advisable, and converting the other
-    ## four terms is the follow-up that would make it enforced.
+    ## served it back as a `cdHit` with `launched=false` on the warm run —
+    ## `t_zero_evidence_edge_is_not_cacheable`'s "zero observations" case went
+    ## red on `hasRecord`, on the diagnostic and on the re-run. Measured
+    ## twice: the probe placed where the root-image fold sits takes the suite
+    ## from 29 OK / 0 FAILED to 14 OK / 15 FAILED, and the same probe hoisted
+    ## one level out of that `if` takes it to 10 OK / 19 FAILED.
+    ##
+    ## AND `depfileInputs` IS NOT THE EXCEPTION THE FIRST PASS RECORDED. The
+    ## review ran the same unmarked probe into that channel at `55219d92`:
+    ## 20 OK / 9 FAILED. The automatic-monitor "zero observations" case does
+    ## stay green — that term asks for the PRESENCE of an observer, and no
+    ## observing depfile contributor is marked on that arm — but a
+    ## `dgRecognizedFormatValidatedByMonitor` edge has already marked
+    ## `evcToolReportedDepfile` from its empty report, so there the unmarked
+    ## path makes both disjuncts false and the edge publishes and warm-hits
+    ## exactly as the `monitorReads` probe did. Three more cases go red on
+    ## `gradeKeyedInputSet`, where the fabricated path simply makes the key
+    ## non-empty. No probe into any of the five channels compiles now; see
+    ## `ObservedPathChannel`.
+    ##
+    ## MARKING IS THEREFORE NOT A CONVENTION ANY MORE. It is still worth
+    ## reading the enum before adding a member, because WHICH contributor a
+    ## writer names is a judgement the compiler cannot make for it — only
+    ## THAT it names one.
     evcMonitorCapture
       ## A `MonitorRecord` from an io-mon capture of THIS action reached
       ## `foldOneMonitorRecord`. The only contributor that is an observation
@@ -1159,13 +1186,89 @@ type
       ## for its own" contribution). Derived attribution from a peer, not an
       ## observation this engine made.
 
+  ObservedPathChannel* = distinct seq[string]
+    ## DA-1f — one of the FIVE OBSERVED channels of `PathSetEvidence`, which
+    ## are exactly the five terms of the zero-evidence guard in
+    ## `applyMonitorEvidenceStatus`.
+    ##
+    ## WHY IT IS A TYPE AND NOT A `seq[string]`. `EvidenceContributor` makes
+    ## the SOURCE of an entry recordable; it did not make recording it
+    ## MANDATORY. While these were exported `seq[string]`s,
+    ## `evidence.monitorReads.add(p)` compiled anywhere in the tree, and a
+    ## writer that forgot to mark itself did not cost a publish — it BOUGHT
+    ## one. Measured at `55219d92`, with one unmarked path appended to
+    ## `monitorReads` in `collectEvidence`: the zero-evidence diagnostic did
+    ## not fire, a record was published for an edge that observed nothing,
+    ## and the warm run served it back as a `cdHit` with `launched=false`.
+    ## Four of the guard's five terms only ask "is this channel empty", which
+    ## an unmarked writer satisfies by filling it.
+    ##
+    ## AND SO, ON A REACHABLE EDGE, DOES THE FIFTH. The review re-measured the
+    ## same unmarked probe against `depfileInputs` at `55219d92` and found it
+    ## is NOT the safe channel the earlier pass recorded: it is safe only on
+    ## the automatic-monitor arm, where the provenance carries no
+    ## `DepfileObservingContributors` member and `depfileObservedNothing`
+    ## answers `true` whatever the channel holds. On a
+    ## `dgRecognizedFormatValidatedByMonitor` edge the empty tool report has
+    ## already marked `evcToolReportedDepfile`, so one unmarked path makes
+    ## BOTH disjuncts false — guard silent, record published, warm run `cdHit`,
+    ## `runCount()==1`. The same probe also defeats `gradeKeyedInputSet` on
+    ## three further edges by putting a fabricated path in the key. So the
+    ## construction below is what all five terms need, not four.
+    ##
+    ## `distinct` is what closes that. The only append is `observe` (and its
+    ## bulk form `observeAll`), which REQUIRES an `EvidenceContributor` and
+    ## `incl`s it into the evidence's `evidenceProvenance` before it appends
+    ## anything. There is no unmarked append to write, so the zero-evidence
+    ## guard's question — "did anything LOOK at this action" — can no longer
+    ## be answered accidentally by a writer that never looked.
+    ##
+    ## A COMPILE ERROR, NOT A TEST, for the same reason
+    ## `DepfileObservingContributors` is an exhaustive `case` and not a set
+    ## literal: a runtime case only catches the writers somebody thought to
+    ## test, and the construction catches the ones nobody has written yet.
+    ##
+    ## WHAT THAT COMPILE ERROR SAYS, because an error nobody can act on is
+    ## half a guard. The `distinct` alone refuses `channel.add(p)` with a type
+    ## mismatch that names the field and its type but NOT the right spelling —
+    ## `observe` is not an `add` overload, so it never enters the candidate
+    ## list and the compiler cannot suggest it. The `{.error.}` `add` overload
+    ## beside `observe` supplies the name. It covers the likeliest wrong
+    ## spelling only; the remaining ones are listed in the next paragraph.
+    ##
+    ## WHAT IS STILL EXPRESSIBLE, recorded rather than claimed away: Nim
+    ## allows the explicit conversion `ObservedPathChannel(@[p])` from
+    ## anywhere, so a determined writer can still replace a channel wholesale.
+    ## That is a deliberate, greppable act rather than an ordinary `.add`, and
+    ## the tree contains no instance of it outside this module — measured,
+    ## `git grep 'ObservedPathChannel('` is four hits, three of them these
+    ## doc comments and the fourth `dropObserved`'s own
+    ## `ObservedPathChannel(kept)` a few hundred lines below. Closing it
+    ## completely wants an object with a private field.
+    ##
+    ## WHAT THAT WOULD COST IS SMALLER THAN IT LOOKS, and the next reader
+    ## should not accept this residual on the strength of a cost nobody
+    ## measured. Seven of the ten read-surface members below are already
+    ## hand-written bodies an object would keep verbatim; only `len`, `==`
+    ## and `$` are `{.borrow.}`, and each becomes a one-line body over the
+    ## private field. On that reading no reader moves and no file outside
+    ## this one is touched. NOT COMPILED — a hypothesis, not a measurement,
+    ## and recorded as one.
+    ##
+    ## READS ARE UNRESTRICTED. Everything a `seq[string]` reader did —
+    ## `len`, `[]`, `for … in`, `==`, `$`, `join`, `find`, `in`, the `…It`
+    ## templates — is provided below, and `paths` is the escape to a plain
+    ## `seq[string]` for an `openArray` parameter. Nothing about what a
+    ## correct writer publishes changes: this is a refactor of HOW a channel
+    ## is appended to, not of what evidence means.
+
   PathSetEvidence* = object
     declaredInputs*: seq[string]
     declaredOutputs*: seq[string]
-    depfileInputs*: seq[string]
-    monitorReads*: seq[string]
-    monitorWrites*: seq[string]
-    monitorProbes*: seq[string]
+    depfileInputs*: ObservedPathChannel
+    monitorReads*: ObservedPathChannel
+    monitorWrites*: ObservedPathChannel
+    monitorProbes*: ObservedPathChannel
     monitorEnvReads*: seq[string]
       ## M10 — the NAMES of the environment variables the monitor observed
       ## this action reading (`mrEnvRead`, io-mon's observed-declared-input
@@ -1184,7 +1287,7 @@ type
       ## cache ignored them, which is a false cache HIT whenever a build reads
       ## a variable whose value later changes.
 
-    monitorDirectoryEnumerations*: seq[string]
+    monitorDirectoryEnumerations*: ObservedPathChannel
       ## Directories the action ENUMERATED (`opendir`/`readdir`), as opposed
       ## to merely probed for existence. The monitor reports the two as
       ## distinct iomon record kinds (`mrDirectoryEnumerate` vs
@@ -3637,6 +3740,125 @@ proc envNameKey*(name: string): string =
   else:
     name
 
+# ---------------------------------------------------------------------------
+# DA-1f — `ObservedPathChannel`: every read a `seq[string]` reader had, and
+# exactly ONE way to write.
+#
+# The read half is deliberately complete, so that converting the five channels
+# costs the tree nothing at its 280-odd read sites and the change stays a
+# refactor of the WRITE path. The write half is `observe` / `observeAll` and
+# `dropObserved`, and there is no third.
+#
+# `dropObserved` can only REMOVE, so it cannot be the hole `observe` closes.
+# It exists for `dropNamedPipeOpens`, which filters a channel rather than
+# appending to it, and which therefore has no contributor to name.
+# ---------------------------------------------------------------------------
+
+proc len*(channel: ObservedPathChannel): int {.borrow.}
+proc `==`*(a, b: ObservedPathChannel): bool {.borrow.}
+proc `$`*(channel: ObservedPathChannel): string {.borrow.}
+
+proc `[]`*(channel: ObservedPathChannel; index: int): string =
+  seq[string](channel)[index]
+
+iterator items*(channel: ObservedPathChannel): string =
+  ## Also what makes `anyIt` / `allIt` / `mapIt` / `toSeq` keep working:
+  ## every one of those templates expands to `for it in items(s)`.
+  for path in seq[string](channel):
+    yield path
+
+proc `==`*(a: ObservedPathChannel; b: openArray[string]): bool =
+  seq[string](a) == @b
+
+proc `==`*(a: openArray[string]; b: ObservedPathChannel): bool =
+  @a == seq[string](b)
+
+proc paths*(channel: ObservedPathChannel): seq[string] =
+  ## The channel as a plain `seq[string]`, for an `openArray[string]`
+  ## parameter or a JSON encoder. A COPY of the entries and not a handle on
+  ## the channel, so it cannot be appended to behind the contributor.
+  seq[string](channel)
+
+proc join*(channel: ObservedPathChannel; sep = ""): string =
+  seq[string](channel).join(sep)
+
+proc find*(channel: ObservedPathChannel; value: string): int =
+  seq[string](channel).find(value)
+
+proc contains*(channel: ObservedPathChannel; value: string): bool =
+  seq[string](channel).contains(value)
+
+proc observe*(channel: var ObservedPathChannel;
+              provenance: var set[EvidenceContributor];
+              contributor: EvidenceContributor;
+              seen: var HashSet[string];
+              value: string) =
+  ## THE append into an observed channel. `contributor` is not optional and
+  ## not advisory: it is `incl`ed into `provenance` on the way in, so a path
+  ## cannot enter one of the guard's five terms without the guard being told
+  ## who put it there.
+  ##
+  ## THE MARK PRECEDES THE DE-DUPLICATION on purpose. A contributor that
+  ## re-observes a path some other contributor already recorded has still
+  ## observed it, and the channel not growing does not unobserve it. This
+  ## also keeps the conversion of the existing call sites bit-identical: each
+  ## one already `incl`ed its contributor unconditionally, upstream of the
+  ## append.
+  ##
+  ## `seen` is the Deferred-D4 side-car: N appends stay O(N) instead of
+  ## O(N^2). It is the caller's because it is shared across the channels of
+  ## one action's fold.
+  if value.len == 0:
+    return
+  provenance.incl contributor
+  if seen.containsOrIncl(value):
+    return
+  seq[string](channel).add(value)
+
+proc observeAll*(channel: var ObservedPathChannel;
+                 provenance: var set[EvidenceContributor];
+                 contributor: EvidenceContributor;
+                 values: openArray[string]) =
+  ## `observe` for a whole path set at once, de-duplicated against whatever
+  ## the channel already holds. For the callers — chiefly suites building a
+  ## fixture evidence object — that have no long-lived `seen` set to thread.
+  var seen = seq[string](channel).toHashSet()
+  for value in values:
+    channel.observe(provenance, contributor, seen, value)
+
+proc add*(channel: var ObservedPathChannel; value: string) {.error:
+    "an observed evidence channel cannot be appended to without naming the " &
+    "EvidenceContributor that produced the entry. Use `observe` -- " &
+    "`channel.observe(evidence.evidenceProvenance, <evc...>, seen.<channel>, " &
+    "path)` -- or `observeAll` for a whole set. See `ObservedPathChannel`.".}
+  ## NOT an append, and the body is never reached: `{.error.}` makes any CALL
+  ## a compile error carrying the message above.
+  ##
+  ## IT EXISTS FOR THE MESSAGE AND NOTHING ELSE. Without it, the `distinct`
+  ## already refuses `channel.add(p)` — but with a type mismatch whose
+  ## candidate list is `JsonNode`, `Table`, `string` and `seq[T]`, and which
+  ## never mentions `observe`: the compiler cannot suggest `observe` for an
+  ## `add` call because `observe` is not an `add` overload and so never enters
+  ## the candidate list. Measured — the unimproved message for
+  ## `result.evidence.monitorReads.add(p)` names the field and its type
+  ## (`result.evidence.monitorReads: ObservedPathChannel`) and leaves the
+  ## reader to find the right spelling themselves. This names it.
+  ##
+  ## It covers the most likely wrong spelling, not every one. A whole-channel
+  ## assignment (`= @[p]`) and the explicit conversion
+  ## (`ObservedPathChannel(@[p])`) are discussed in `ObservedPathChannel`'s
+  ## own docstring; the first is refused by the `distinct` with a clear
+  ## message already, the second is deliberately still legal.
+
+proc dropObserved*(channel: var ObservedPathChannel; drop: HashSet[string]) =
+  ## Remove every entry in `drop`. Subtractive only — it names no contributor
+  ## because it introduces no evidence.
+  var kept: seq[string] = @[]
+  for path in seq[string](channel):
+    if path notin drop:
+      kept.add(path)
+  channel = ObservedPathChannel(kept)
+
 proc normalizedDeclaredActionPath(action: BuildAction; path: string): string =
   result = path.replace('\\', '/').strip()
   while result.startsWith("./"):
@@ -6044,13 +6266,9 @@ proc dropNamedPipeOpens(evidence: var PathSetEvidence;
   ## attribution, and its "path" is not an input or an output.
   if pipes.len == 0:
     return
-  proc withoutPipes(paths: seq[string]): seq[string] =
-    for path in paths:
-      if path notin pipes:
-        result.add(path)
-  evidence.monitorReads = withoutPipes(evidence.monitorReads)
-  evidence.monitorProbes = withoutPipes(evidence.monitorProbes)
-  evidence.monitorWrites = withoutPipes(evidence.monitorWrites)
+  evidence.monitorReads.dropObserved(pipes)
+  evidence.monitorProbes.dropObserved(pipes)
+  evidence.monitorWrites.dropObserved(pipes)
 
 proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
                           evidence: var PathSetEvidence;
@@ -6189,7 +6407,8 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     return
   case record.kind
   of mrFileRead:
-    evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+    evidence.monitorReads.observe(evidence.evidenceProvenance,
+      evcMonitorCapture, seen.monitorReads, materialized)
   of mrLibraryLoad:
     # A library the dynamic loader MAPPED into the action. This is a
     # content dependency and nothing else: change the file, change what
@@ -6256,17 +6475,21 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     # `cacheInputPaths` still drops the ones under the action's own
     # tool roots, and `isVolatileMonitorPath` above still drops
     # `/run`-resident driver libraries.
-    evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+    evidence.monitorReads.observe(evidence.evidenceProvenance,
+      evcMonitorCapture, seen.monitorReads, materialized)
   of mrFileOpen:
     case record.observationKind
     of moFileRead, moFileOpen:
-      evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+      evidence.monitorReads.observe(evidence.evidenceProvenance,
+        evcMonitorCapture, seen.monitorReads, materialized)
     of moFileWrite:
-      evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
+      evidence.monitorWrites.observe(evidence.evidenceProvenance,
+        evcMonitorCapture, seen.monitorWrites, materialized)
     else:
       discard
   of mrFileWrite:
-    evidence.monitorWrites.addUnique(seen.monitorWrites, materialized)
+    evidence.monitorWrites.observe(evidence.evidenceProvenance,
+      evcMonitorCapture, seen.monitorWrites, materialized)
   of mrProcessExec:
     # A binary the action EXECUTED. Its bytes decide what the action
     # computes at least as directly as any file it reads, so it is a
@@ -6325,15 +6548,19 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     #     is for; it must not enter the key as a content read.
     if record.path.isAbsolute and
         not record.detail.contains(FailedExecDetailToken):
-      evidence.monitorReads.addUnique(seen.monitorReads, materialized)
+      evidence.monitorReads.observe(evidence.evidenceProvenance,
+        evcMonitorCapture, seen.monitorReads, materialized)
   of mrPathProbe:
-    evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
+    evidence.monitorProbes.observe(evidence.evidenceProvenance,
+      evcMonitorCapture, seen.monitorProbes, materialized)
   of mrDirectoryEnumerate:
     # Stays in `monitorProbes` (every existing consumer keeps its set) AND
     # is recorded separately, because membership, not existence, is what
     # an enumeration depends on. See `monitorDirectoryEnumerations`.
-    evidence.monitorProbes.addUnique(seen.monitorProbes, materialized)
-    evidence.monitorDirectoryEnumerations.addUnique(
+    evidence.monitorProbes.observe(evidence.evidenceProvenance,
+      evcMonitorCapture, seen.monitorProbes, materialized)
+    evidence.monitorDirectoryEnumerations.observe(
+      evidence.evidenceProvenance, evcMonitorCapture,
       seen.monitorDirectoryEnumerations, materialized)
   else:
     discard
@@ -6675,23 +6902,34 @@ proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
   # -reported enumeration must land where a monitor-reported one lands or the
   # two sources disagree about what the same observation means. What changes
   # is that the source is now named.
-  if recognized:
-    if pathSet.declarationDerived:
-      evidence.evidenceProvenance.incl evcDeclarationDerivedDepfile
+  #
+  # NAMED ONCE, into a local, because `observe` below needs the same answer
+  # for every channel this path set touches: the mark and the appends cannot
+  # disagree about who produced the entries if there is only one expression
+  # deciding it. The `incl` is kept as its own statement rather than left to
+  # `observe`, because an EMPTY path set still has a producer and still has
+  # to say so.
+  let contributor =
+    if recognized:
+      if pathSet.declarationDerived: evcDeclarationDerivedDepfile
+      else: evcToolReportedDepfile
     else:
-      evidence.evidenceProvenance.incl evcToolReportedDepfile
-  else:
-    evidence.evidenceProvenance.incl evcPostBuildConverterReport
+      evcPostBuildConverterReport
+  evidence.evidenceProvenance.incl contributor
   if recognized:
     for input in pathSet.inputs:
-      evidence.depfileInputs.addUnique(seen.depfileInputs, input)
+      evidence.depfileInputs.observe(evidence.evidenceProvenance,
+        contributor, seen.depfileInputs, input)
   else:
     for input in pathSet.inputs:
-      evidence.monitorReads.addUnique(seen.monitorReads, input)
+      evidence.monitorReads.observe(evidence.evidenceProvenance,
+        contributor, seen.monitorReads, input)
     for output in pathSet.outputs:
-      evidence.monitorWrites.addUnique(seen.monitorWrites, output)
+      evidence.monitorWrites.observe(evidence.evidenceProvenance,
+        contributor, seen.monitorWrites, output)
     for probe in pathSet.probes:
-      evidence.monitorProbes.addUnique(seen.monitorProbes, probe)
+      evidence.monitorProbes.observe(evidence.evidenceProvenance,
+        contributor, seen.monitorProbes, probe)
     for enumerated in pathSet.enumerations:
       # Mirrors the ``mrDirectoryEnumerate`` arm of
       # ``foldMonitorDepFileEvidence``: an enumeration is BOTH an
@@ -6701,8 +6939,10 @@ proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
       # converter-reported enumeration must land in exactly the same two
       # places as a monitor-reported one, or the two evidence sources
       # would disagree about what the same observation means.
-      evidence.monitorProbes.addUnique(seen.monitorProbes, enumerated)
-      evidence.monitorDirectoryEnumerations.addUnique(
+      evidence.monitorProbes.observe(evidence.evidenceProvenance,
+        contributor, seen.monitorProbes, enumerated)
+      evidence.monitorDirectoryEnumerations.observe(
+        evidence.evidenceProvenance, contributor,
         seen.monitorDirectoryEnumerations, enumerated)
   for diagnostic in pathSet.diagnostics:
     evidence.diagnostics.add(diagnostic)
@@ -6980,6 +7220,23 @@ proc depfileObservedNothing(col: EvidenceCollection): bool {.inline.} =
   ## which is what keeps an unmarked contributor fail-closed: a future writer
   ## into `depfileInputs` that forgets to mark itself reads as "nothing
   ## observed" and costs a publish, never as "something observed".
+  ##
+  ## READ THAT AS A PROPERTY OF THIS EXPRESSION AND NOT OF THE CHANNEL, which
+  ## is a distinction the first pass elided and the review measured. It holds
+  ## when NOTHING ELSE on the edge has already marked an observing depfile
+  ## contributor. It does not hold on a `dgRecognizedFormatValidatedByMonitor`
+  ## or converter edge, where the empty report's own `addPathSet` has already
+  ## `incl`ed `evcToolReportedDepfile`: there the second disjunct is already
+  ## false, and ANY entry in the channel — marked or not — makes the first one
+  ## false too, so an unmarked writer buys the publish instead of paying for
+  ## it. Measured at `55219d92` with one unmarked path appended in
+  ## `collectEvidence`: `t_zero_evidence_edge_is_not_cacheable` went 29 OK / 0
+  ## FAILED to 20 OK / 9 FAILED, and
+  ## "recognized-format-validated-by-monitor: zero observations do not
+  ## publish" failed with `hasRecord` true, a warm `cdHit` and
+  ## `runCount()==1`. What closes that is not this expression but
+  ## `ObservedPathChannel`, which is why the write side had to become
+  ## impossible rather than merely discouraged.
   ##
   ## WHICH POLARITY THAT IS, AND WHAT GRADES IT. The caller is the
   ## zero-evidence guard in `applyMonitorEvidenceStatus`, the only one, and
@@ -7364,12 +7621,16 @@ proc dropScratchEvidence*(action: BuildAction; evidence: var PathSetEvidence) =
   let roots = action.scratchRoots()
   if roots.len == 0:
     return
-  proc keep(paths: var seq[string]) =
-    var kept: seq[string] = @[]
-    for path in paths:
-      if not isUnderScratch(scratchKey(path), roots):
-        kept.add(path)
-    paths = kept
+  proc keep(channel: var ObservedPathChannel) =
+    ## Expressed as a `dropObserved` SUBTRACTION rather than as a rebuilt
+    ## sequence, because `ObservedPathChannel` has exactly three writers and
+    ## the removing one is this one. Same predicate, same surviving order:
+    ## `dropObserved` keeps the entries it does not drop, in place.
+    var drop = initHashSet[string]()
+    for path in channel:
+      if isUnderScratch(scratchKey(path), roots):
+        drop.incl(path)
+    channel.dropObserved(drop)
   keep(evidence.monitorReads)
   keep(evidence.monitorWrites)
   keep(evidence.monitorProbes)
@@ -7558,7 +7819,9 @@ proc collectEvidence(action: BuildAction; strict: bool;
       action.kind == bakProcess:
     let rootImage = executedToolImagePath(action, config)
     if rootImage.len > 0 and not rootImage.isVolatileMonitorPath():
-      result.evidence.monitorReads.addUnique(seen.monitorReads, rootImage)
+      result.evidence.monitorReads.observe(
+        result.evidence.evidenceProvenance, evcRootImageReconstruction,
+        seen.monitorReads, rootImage)
       # Remembered, not just added: the zero-evidence guard downstream asks
       # what the MONITOR saw, and this entry is a reconstruction rather than
       # an observation. See `EvidenceCollection.engineSuppliedRootImage`.
@@ -7870,7 +8133,7 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # payload compatibility), so they are unaffected.
   if action.readOnlyRoots.len > 0 and result.evidence.monitorWrites.len > 0:
     let offenders = detectSourceWrites(action.readOnlyRoots,
-      result.evidence.monitorWrites)
+      result.evidence.monitorWrites.paths)
     for offender in offenders:
       result.evidence.diagnostics.add(
         "source-write attempt (R6): action wrote to '" & offender.write &
@@ -8644,9 +8907,11 @@ proc evidenceFromRecord*(action: BuildAction;
   for input in record.inputs:
     if not declaredInputPaths.contains(input.path):
       if action.dependencyPolicy.kind in MonitorPolicyKinds:
-        result.monitorReads.addUnique(seenMonitorReads, input.path)
+        result.monitorReads.observe(result.evidenceProvenance,
+          evcReplayedCacheRecord, seenMonitorReads, input.path)
       else:
-        result.depfileInputs.addUnique(seenDepfileInputs, input.path)
+        result.depfileInputs.observe(result.evidenceProvenance,
+          evcReplayedCacheRecord, seenDepfileInputs, input.path)
 
 proc evidenceCountsFromRecord*(action: BuildAction;
                               record: ActionResultRecord): EvidencePathCounts =

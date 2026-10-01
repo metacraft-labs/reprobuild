@@ -37,7 +37,7 @@ suite "scratch directories":
   test "the engine empties one before every run":
     let sh = findExe("sh")
     if sh.len == 0:
-      skip("no `sh` on PATH; the actions are shell scripts")
+      skip("no `sh` on PATH; the action under test is a shell script")
     else:
       let root = createTempDir("repro-scratch-", "")
       defer: removeDir(root)
@@ -87,12 +87,24 @@ suite "scratch directories":
       weakFingerprint = weakFingerprintFromText("scratch.evidence"),
       governingLockIdentity = lockIdentityOutsideSolvedGraph())
     a.scratchDirs = @["build/work"]
-    var evidence = PathSetEvidence(
-      monitorReads: @["/proj/src/main.c", "/proj/build/work/node_modules/x.js",
-                      "/proj/build/workshop/kept.c"],
-      monitorWrites: @["/proj/build/work/a.o", "/proj/out/app"],
-      monitorProbes: @["/proj/build/work", "/proj/src"],
-      monitorDirectoryEnumerations: @["/proj/build/work/dist"])
+    # The four OBSERVED channels are an `ObservedPathChannel`, whose only
+    # append names the `EvidenceContributor` that produced the entry — so a
+    # fixture states what it is pretending to be. These are the shape a real
+    # monitor capture produces, hence `evcMonitorCapture`; nothing in this
+    # case reads the provenance, which is why the choice is free to be the
+    # honest one.
+    var evidence = PathSetEvidence()
+    evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, ["/proj/src/main.c",
+                          "/proj/build/work/node_modules/x.js",
+                          "/proj/build/workshop/kept.c"])
+    evidence.monitorWrites.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, ["/proj/build/work/a.o", "/proj/out/app"])
+    evidence.monitorProbes.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, ["/proj/build/work", "/proj/src"])
+    evidence.monitorDirectoryEnumerations.observeAll(
+      evidence.evidenceProvenance, evcMonitorCapture,
+      ["/proj/build/work/dist"])
     dropScratchEvidence(a, evidence)
     # A sibling whose name merely starts with the scratch directory's is kept.
     check evidence.monitorReads == @["/proj/src/main.c",

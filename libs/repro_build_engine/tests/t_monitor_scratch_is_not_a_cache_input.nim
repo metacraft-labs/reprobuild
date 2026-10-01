@@ -81,10 +81,13 @@ suite "the monitor's drop-in tool directory is not a cache input":
     var evidence: PathSetEvidence
     evidence.declaredInputs = act.inputs
     evidence.declaredOutputs = act.outputs
-    evidence.monitorReads = @[declaredInput, realInput, scratchTool,
-                              tmpNeighbour, lookalike]
-    evidence.monitorProbes = @[scratchShell, realInput]
-    evidence.depfileInputs = @[scratchShell, realInput]
+    evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [declaredInput, realInput, scratchTool,
+                          tmpNeighbour, lookalike])
+    evidence.monitorProbes.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [scratchShell, realInput])
+    evidence.depfileInputs.observeAll(evidence.evidenceProvenance,
+      evcToolReportedDepfile, [scratchShell, realInput])
 
     let inputs = act.cacheInputPaths(evidence)
 
@@ -119,8 +122,10 @@ suite "the monitor's drop-in tool directory is not a cache input":
       var evidence: PathSetEvidence
       evidence.declaredInputs = act.inputs
       evidence.declaredOutputs = act.outputs
-      evidence.monitorReads = @[realInput]
-      evidence.monitorProbes = @[scratch / "bin" / "sh"]
+      evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+        evcMonitorCapture, [realInput])
+      evidence.monitorProbes.observeAll(evidence.evidenceProvenance,
+        evcMonitorCapture, [scratch / "bin" / "sh"])
       act.cacheInputPaths(evidence)
 
     # The two directory names measured from consecutive runs.
@@ -162,9 +167,11 @@ suite "the monitor's drop-in tool directory is not a cache input":
     var evidence: PathSetEvidence
     evidence.declaredInputs = act.inputs
     evidence.declaredOutputs = act.outputs
-    evidence.monitorReads = @[declaredInput, ccParams, ldParams,
-                              tmpNeighbour, bareCc, bareLd]
-    evidence.monitorWrites = @[ccParams, ldParams]
+    evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [declaredInput, ccParams, ldParams,
+                          tmpNeighbour, bareCc, bareLd])
+    evidence.monitorWrites.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [ccParams, ldParams])
 
     let inputs = act.cacheInputPaths(evidence)
 

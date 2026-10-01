@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1788,
+    "nimTestBinaries": 1790,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 592,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1804
+    "testEntries": 1806
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1079,10 +1079,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 924,
+      "integration": 925,
       "platform/destructive": 118,
       "pure unit": 592,
-      "unclassified": 159
+      "unclassified": 160
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1230,9 +1230,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1788,
+    "nimTestBinaryCount": 1790,
     "pythonTestFileCount": 16,
-    "testEntryCount": 1804
+    "testEntryCount": 1806
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -11490,6 +11490,23 @@
       "source": "libs/repro_interface_artifacts/tests/t_multi_package_merge.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_provider_link_flags_bake_no_host_rpath",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_provider_link_flags_bake_no_host_rpath.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -26959,6 +26976,23 @@
       "source": "tests/integration/t_finish_outcome_reaches_the_spine.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_flake_override_resolution_uses_the_invoking_engine",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_flake_override_resolution_uses_the_invoking_engine.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
