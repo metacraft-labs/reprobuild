@@ -37,7 +37,7 @@ suite "scratch directories":
   test "the engine empties one before every run":
     let sh = findExe("sh")
     if sh.len == 0:
-      skip()
+      skip("no `sh` on PATH; the action under test is a shell script")
     else:
       let root = createTempDir("repro-scratch-", "")
       defer: removeDir(root)
