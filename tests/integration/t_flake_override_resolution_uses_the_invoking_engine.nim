@@ -35,6 +35,7 @@
 ## disk, and a real `repro exec`.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_dsl_stdlib/foreign_env
 

@@ -15939,6 +15939,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_reasoned_skip_compiles_on_any_unittest.nim",
+    binary: "build/test-bin/t_reasoned_skip_compiles_on_any_unittest",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_run_consumes.nim",
     binary: "build/test-bin/t_run_consumes",
     defines: @[],

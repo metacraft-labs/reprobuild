@@ -9,33 +9,28 @@
 ## where ``std/unittest`` lacks it.
 ##
 ## THIS FILE IS ITS OWN FIRST ASSERTION: before that module existed it did not
-## compile under stock Nim. The cases below then check that the call is a real
-## skip on whichever ``std/unittest`` is in use -- a template that compiled and
-## did nothing would let a guarded test body run on as a pass -- and that the
-## module took the arm its compiler calls for.
+## compile under stock Nim. Each skipping case then checks, after the call,
+## that its own status really is SKIPPED -- a ``skip`` that compiled and did
+## nothing would leave it OK and let a guarded body run on as a pass, and that
+## check turns it into a FAILURE instead. Each case verifies itself rather
+## than a later case collecting the others, because the protocol runner
+## executes cases one per process (``--run suite::test``).
 ##
-## No mocks. The verdict is read from ``std/unittest``'s own formatter
-## callback, the same channel the console and JUnit formatters are driven by.
+## The intended outcome of the two skipping cases is therefore [SKIPPED], each
+## with its reason; a FAILED there is the defect.
+##
+## No mocks: the status read is ``std/unittest``'s own per-test status.
 
 import std/[macros, unittest]
 import repro_test_support/reasoned_skip
 
-type StatusRecorder = ref object of OutputFormatter
-  statuses: seq[(string, TestStatus)]
-
-method testEnded*(formatter: StatusRecorder; testResult: TestResult) =
-  formatter.statuses.add((testResult.testName, testResult.status))
-
-let recorder = StatusRecorder()
-# Registering any formatter suppresses the default console one, so it is
-# registered explicitly: the run's own output is part of the evidence.
-addOutputFormatter(defaultConsoleFormatter())
-addOutputFormatter(recorder)
-
-proc recordedStatus(name: string): seq[TestStatus] =
-  for (testName, status) in recorder.statuses:
-    if testName == name:
-      result.add(status)
+template currentTestStatus(): TestStatus {.dirty.} =
+  ## The running case's status, as ``std/unittest`` holds it: a variable in
+  ## the stock template, a pointer in the fork's.
+  when typeof(testStatusIMPL) is ptr TestStatus:
+    testStatusIMPL[]
+  else:
+    testStatusIMPL
 
 macro stdSkipParameterCount(): int =
   ## The parameter count of ``std/unittest``'s own ``skip``, asked
@@ -57,21 +52,13 @@ macro stdSkipParameterCount(): int =
   newLit(count)
 
 suite "reasoned skip":
-  test "a skip with a literal reason":
+  test "a skip with a literal reason is a real skip":
     skip("this case is skipped on purpose")
+    check currentTestStatus() == TestStatus.SKIPPED
 
-  test "a skip with a composed reason":
+  test "a skip with a composed reason is a real skip":
     skip("not on " & hostOS & "/" & hostCPU & " -- skipped on purpose")
-
-  test "a bare skip still resolves to std/unittest's":
-    skip()
-
-  test "every case above was recorded as skipped, once":
-    for name in ["a skip with a literal reason",
-                 "a skip with a composed reason",
-                 "a bare skip still resolves to std/unittest's"]:
-      checkpoint(name)
-      check recordedStatus(name) == @[TestStatus.SKIPPED]
+    check currentTestStatus() == TestStatus.SKIPPED
 
   test "the module declares its skip only where std/unittest has none":
     check UnittestSkipTakesReason == (stdSkipParameterCount() == 1)
