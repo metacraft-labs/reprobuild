@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1790,
+    "nimTestBinaries": 1792,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 590,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1805
+    "testEntries": 1807
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1062,7 +1062,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 935,
+      "integration": 937,
       "platform/destructive": 116,
       "pure unit": 590,
       "unclassified": 153
@@ -1213,9 +1213,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1790,
+    "nimTestBinaryCount": 1792,
     "pythonTestFileCount": 15,
-    "testEntryCount": 1805
+    "testEntryCount": 1807
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -24314,6 +24314,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_attestation_fixture_lifecycle",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest_verify"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_attestation_fixture_lifecycle.nim",
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 44,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_attestation_report",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -32023,6 +32040,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_signer_roster_rotation_and_revocation",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_attest",
+        "repro_attest_verify",
+        "repro_cli_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_signer_roster_rotation_and_revocation.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 22,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_single_platform_entries_declare_platforms",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -32099,13 +32135,14 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_attest",
-        "repro_attest_verify"
+        "repro_attest_verify",
+        "repro_cli_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_snp_evidence_reaches_the_verdict.nim",
-      "sourceSuiteCount": 8,
-      "staticCaseCount": 19,
+      "sourceSuiteCount": 9,
+      "staticCaseCount": 22,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
