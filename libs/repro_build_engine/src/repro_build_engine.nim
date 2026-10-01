@@ -420,6 +420,26 @@ type
       ## ``repro why``, the codetracer ``repro test`` integration)
       ## identify framework-specific outputs by interface tag from
       ## this list rather than re-parsing the DSL.
+    scratchDirs*: seq[string]
+      ## The action's SCRATCH directories — BuildXL's pip temp directories.
+      ## The engine empties each one before the action runs, and nothing the
+      ## action does under one is evidence: not an input, not an output.
+      ##
+      ## That is what makes a working tree an action builds in, and reads back
+      ## from, something other than an input. Without it every file such an
+      ## action wrote and then read (`npm ci` populating `node_modules`, a
+      ## bundler reading its own intermediate `dist/`) was recorded as a read,
+      ## keyed by the content the PREVIOUS run left there: absent on a
+      ## checkout where the action never ran, so no other checkout could ever
+      ## match the record (Cache-Scope P3.4). Emptied first, everything under
+      ## a scratch directory was produced by this run, so it cannot be an
+      ## input; and since nothing outside the action reads it, it is not a
+      ## product either. What the action produces goes to its declared
+      ## outputs.
+      ##
+      ## Refused (the action fails) when a scratch directory is or contains
+      ## the action's cwd, a declared input or a declared output: emptying it
+      ## would destroy what the action reads or makes.
     fixedOutput*: bool
       ## Cache-Scope P3.4 — a FIXED-OUTPUT action (BuildXL's download pip,
       ## Nix's fixed-output derivation): its outputs are determined by
@@ -7318,6 +7338,126 @@ proc gradeKeyedInputSet(action: BuildAction; col: var EvidenceCollection) =
     emptyKeyedInputSetDiagnostic(action.id, observed, observed))
   col.disableCacheHits = true
 
+proc scratchKey(path: string): string =
+  ## Normalized for containment: forward slashes, no trailing separator,
+  ## case-folded on Windows (one directory, however a tool spelled it).
+  result = withoutExtendedLengthPrefix(path).replace('\\', '/')
+  while result.len > 1 and result.endsWith("/"):
+    result.setLen(result.len - 1)
+  when defined(windows):
+    result = result.toLowerAscii()
+
+proc scratchRoots*(action: BuildAction): seq[string] =
+  for dir in action.scratchDirs:
+    if dir.len > 0:
+      result.add(scratchKey(materialPath(action.cwd, dir)))
+
+proc isUnderScratch(key: string; roots: openArray[string]): bool =
+  for root in roots:
+    if key == root or key.startsWith(root & "/"):
+      return true
+
+proc dropScratchEvidence*(action: BuildAction; evidence: var PathSetEvidence) =
+  ## Removes every observation at or below one of the action's scratch
+  ## directories (`BuildAction.scratchDirs`).
+  let roots = action.scratchRoots()
+  if roots.len == 0:
+    return
+  proc keep(paths: var seq[string]) =
+    var kept: seq[string] = @[]
+    for path in paths:
+      if not isUnderScratch(scratchKey(path), roots):
+        kept.add(path)
+    paths = kept
+  keep(evidence.monitorReads)
+  keep(evidence.monitorWrites)
+  keep(evidence.monitorProbes)
+  keep(evidence.monitorDirectoryEnumerations)
+  keep(evidence.depfileInputs)
+
+proc scratchDirProblem*(action: BuildAction): string =
+  ## Why emptying the action's scratch directories would be unsafe, or "".
+  let roots = action.scratchRoots()
+  if roots.len == 0:
+    return ""
+  proc overlaps(path, what: string): string =
+    let key = scratchKey(materialPath(action.cwd, path))
+    for root in roots:
+      if key == root or key.startsWith(root & "/") or root.startsWith(key & "/"):
+        return "scratch directory '" & root & "' overlaps the action's " &
+          what & " '" & path & "'"
+    ""
+  for root in roots:
+    if root.count('/') < 2:
+      return "scratch directory '" & root & "' is too close to a " &
+        "filesystem root to empty"
+  if action.cwd.len > 0:
+    let key = scratchKey(absolutePath(action.cwd))
+    for root in roots:
+      if key == root or key.startsWith(root & "/"):
+        return "scratch directory '" & root & "' contains the action's cwd"
+  for input in action.inputs:
+    let why = overlaps(input, "declared input")
+    if why.len > 0: return why
+  for output in action.outputs & action.declaredOutputs:
+    let why = overlaps(output, "declared output")
+    if why.len > 0: return why
+  ""
+
+when defined(windows):
+  proc scratchRemoveDirectoryW(path: WideCString): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "RemoveDirectoryW".}
+  proc scratchSetFileAttributesW(path: WideCString; attrs: DWORD): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "SetFileAttributesW".}
+
+proc removeTreeNoFollow(path: string) =
+  ## Deletes `path` and everything below it WITHOUT FOLLOWING LINKS: a link
+  ## is removed, never what it points at. A scratch tree is full of them --
+  ## npm links every workspace package into `node_modules`, as a directory
+  ## junction on Windows -- and following one would delete the linked
+  ## sources. `os.removeDir` neither follows nor removes a junction (it treats
+  ## the link as a file, and Windows refuses to delete a directory link that
+  ## way), and stops at the first read-only file.
+  for kind, child in walkDir(path):
+    case kind
+    of pcDir:
+      removeTreeNoFollow(child)
+    of pcLinkToDir:
+      when defined(windows):
+        if scratchRemoveDirectoryW(newWideCString(child)) == 0:
+          raiseOSError(osLastError(), child)
+      else:
+        removeFile(child)
+    of pcFile, pcLinkToFile:
+      when defined(windows):
+        discard scratchSetFileAttributesW(newWideCString(child),
+          DWORD(0x80))   # FILE_ATTRIBUTE_NORMAL: clears read-only
+      removeFile(child)
+  when defined(windows):
+    discard scratchSetFileAttributesW(newWideCString(path), DWORD(0x80))
+    if scratchRemoveDirectoryW(newWideCString(path)) == 0:
+      raiseOSError(osLastError(), path)
+  else:
+    removeDir(path)
+
+proc resetScratchDirs*(action: BuildAction): string =
+  ## Empties the action's scratch directories before it runs; returns why it
+  ## could not, or "".
+  let problem = action.scratchDirProblem()
+  if problem.len > 0:
+    return problem
+  for dir in action.scratchDirs:
+    if dir.len == 0:
+      continue
+    let physical = extendedPath(materialPath(action.cwd, dir))
+    try:
+      if dirExists(physical):
+        removeTreeNoFollow(physical)
+      createDir(physical)
+    except CatchableError as err:
+      return "cannot empty scratch directory '" & dir & "': " & err.msg
+  ""
+
 proc collectEvidence(action: BuildAction; strict: bool;
                      hostedRecords: ptr seq[MonitorRecord] = nil;
                      config: ptr BuildEngineConfig = nil):
@@ -7739,6 +7879,10 @@ proc collectEvidence(action: BuildAction; strict: bool;
         "rewrites are errors'.")
     if offenders.len > 0:
       result.publishable = false
+  # Everything under a scratch directory is the action's own, so it leaves
+  # the evidence here, before the key is graded -- the local key, the
+  # portable record and the determinism probe all read what remains.
+  dropScratchEvidence(action, result.evidence)
   # LAST OF ALL, after every contributor to the key — the root-image fold at
   # the head of this proc included — grade the set the key is actually built
   # from. Rule 7. See `gradeKeyedInputSet`.
@@ -14337,6 +14481,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       outputs.add("output=" & materialPath(action.cwd, output))
     for output in action.declaredOutputs:
       outputs.add("declaredOutput=" & materialPath(action.cwd, output))
+    for dir in action.scratchDirs:
+      outputs.add("scratch=" & materialPath(action.cwd, dir))
     outputs.sort()
     result.add(outputs)
     # Passthrough is keyed by NAME (BuildXL): the value is the host's, but
@@ -16528,6 +16674,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           action.kind == bakProcess and
           monitorHostingRequested(config.monitorHosting, launchPath) and
           not config.hermeticEnv
+
+        if action.scratchDirs.len > 0:
+          let scratchProblem = action.resetScratchDirs()
+          if scratchProblem.len > 0:
+            statuses[id] = asFailed
+            let idx = idToIndex.resultIndex(id)
+            runResult.results[idx].status = asFailed
+            runResult.results[idx].stderr = scratchProblem
+            runResult.trace(id, "failed", scratchProblem)
+            blockClosure(id, id)
+            emitProgress(bpkActionCompleted, id)
+            completed = terminalCount()
+            launchedAny = true
+            continue
 
         let monitorPlanStart = statStart()
         let plan = monitoredAction(action, config, cacheRoot,
