@@ -113,11 +113,15 @@ suite "S5 an action's own declared output is not one of its inputs":
     var evidence: PathSetEvidence
     evidence.declaredInputs = act.inputs
     evidence.declaredOutputs = act.outputs
-    evidence.monitorReads = @[declaredInput, ownOutput, siblingInput,
-                              prefixInput, unrelatedInput]
-    evidence.monitorProbes = @[ownOutput, siblingInput]
-    evidence.depfileInputs = @[ownOutput, unrelatedInput]
-    evidence.monitorWrites = @[ownOutput]
+    evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [declaredInput, ownOutput, siblingInput,
+                          prefixInput, unrelatedInput])
+    evidence.monitorProbes.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [ownOutput, siblingInput])
+    evidence.depfileInputs.observeAll(evidence.evidenceProvenance,
+      evcToolReportedDepfile, [ownOutput, unrelatedInput])
+    evidence.monitorWrites.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [ownOutput])
 
     let inputs = act.cacheInputPaths(evidence)
 
@@ -154,8 +158,10 @@ suite "S5 an action's own declared output is not one of its inputs":
     var evidence: PathSetEvidence
     evidence.declaredInputs = act.inputs
     evidence.declaredOutputs = act.outputs
-    evidence.monitorReads = @[statePath]
-    evidence.monitorWrites = @[statePath]
+    evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [statePath])
+    evidence.monitorWrites.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [statePath])
 
     check act.selfConsumedDeclaredPaths().hasPath(statePath)
     check act.cacheInputPaths(evidence).hasPath(statePath)

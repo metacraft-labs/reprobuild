@@ -101,9 +101,10 @@ suite "M6 the entropy blessing round-trips through the action payload":
     # both out is the assertion that would have caught the old forgery: it
     # accounted for the first group and not for the second. Every later bump
     # is spelled out too: v27's capture-breadth byte, v28's fixedOutput byte
-    # and v29's empty `subToolRefs` list (a u32 count of zero).
+    # v29's empty `subToolRefs` list and v30's empty `scratchDirs` list (a u32
+    # count of zero each).
     check encodeBuildActionPayload(action).len - v23.len ==
-      (1 + 4 + 1) + 1 + 1 + 1 + 4
+      (1 + 4 + 1) + 1 + 1 + 1 + 4 + 4
 
     let decoded = decodeBuildActionPayload(v23)
     # The surrounding fields must still decode, or this would be testing a

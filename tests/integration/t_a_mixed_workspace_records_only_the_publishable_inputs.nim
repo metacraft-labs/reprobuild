@@ -8,7 +8,7 @@
 ##
 ##   | sibling AHEAD of its pin, PUBLISHED   | recorded                     |
 ##   | sibling AHEAD of its pin, unpushed    | withheld (nobody can fetch it) |
-##   | sibling BEHIND its pin                | withheld (your checkout is stale) |
+##   | sibling BEHIND its pin                | withheld by the verb (see below) |
 ##   | sibling AT its pin                    | untouched, not rewritten equal |
 ##   | a DIRTY sibling in the develop closure | the whole refresh is skipped |
 ##
@@ -38,6 +38,15 @@
 ##   * PHASE 2, the same workspace with the dirt cleaned and nothing else
 ##     changed: exactly the publishable input moves and every other node is
 ##     byte-identical.
+##
+## Phase 2 runs the refresh through the operator verb, `repro flake
+## refresh-lock`, which shares the whole decision with the commit path
+## (`executeFlakeLockRefresh`) and keeps its per-input withholding. On the
+## commit path the BEHIND sibling would instead refuse the whole commit
+## (§3.2's "Rule, at commit", pinned by `t_a_behind_pin_sibling_is_not_recorded_
+## as_the_new_pin`), and then nothing is written at all — which would leave the
+## per-input publication decision this case exists for unobservable. The verb
+## reports that it withheld inputs with status 3.
 ##
 ## ## What is asserted
 ##
@@ -125,9 +134,11 @@ suite "NF-2: a mixed workspace records only the publishable inputs":
 
       # ==== PHASE 2: the same workspace, dirt cleaned, nothing else ======
       discard gitIn(fx, siblingDir(fx, "epsilon"), "checkout -- .")
-      let refreshed = firePreCommitHook(fx)
-      checkpoint("phase-2 hook output:\n" & refreshed.output)
-      check refreshed.code == 0
+      let refreshed = run(q(fx.repro) &
+        " flake refresh-lock --all --tool-provisioning=path", cwd = fx.app)
+      checkpoint("phase-2 refresh output:\n" & refreshed.output)
+      # 3 = the refresh RAN and withheld at least one input.
+      check refreshed.code == 3
 
       let after = readFile(lockPath(fx))
 
@@ -159,9 +170,11 @@ suite "NF-2: a mixed workspace records only the publishable inputs":
       # ---- (5) two withheld inputs, two DIFFERENT reasons ----------------
       var unpublishedNotice, behindNotice: string
       for line in refreshed.output.splitLines():
-        if not line.contains("NOT refreshed"): continue
-        if line.contains("beta-src"): unpublishedNotice = line
-        if line.contains("gamma-src"): behindNotice = line
+        # The per-input WARNING lines only: the verb's closing summary repeats
+        # every withheld sentence on one line and would match both.
+        if not line.contains("WARNING: flake.lock NOT refreshed"): continue
+        if line.contains("input 'beta-src'"): unpublishedNotice = line
+        if line.contains("input 'gamma-src'"): behindNotice = line
       checkpoint("unpublished notice: " & unpublishedNotice)
       checkpoint("behind notice: " & behindNotice)
       check unpublishedNotice.contains("ONLY in this local checkout")

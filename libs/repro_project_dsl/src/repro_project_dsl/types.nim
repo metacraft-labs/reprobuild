@@ -1117,6 +1117,12 @@ type
       ## resolve time — matching the pre-M9.R.74 behaviour of the
       ## ``inlineExecCall(argv, cwd = "")`` overload whose CLI-support
       ## fallback was ``projectRoot``. Payload codec v21+.
+    scratchDirs*: seq[string]
+      ## The action's scratch directories (BuildXL's pip temp directories):
+      ## emptied by the engine before the action runs, and nothing the action
+      ## does under one is an input or an output. A working tree the action
+      ## builds in belongs here; what it produces goes to `declaredOutputs`.
+      ## See `BuildAction.scratchDirs` in the engine. Payload codec v30+.
     declaredOutputs*: seq[string]
       ## M9.R.75 — R7 (double-write reject) per-action write-root
       ## declaration. Spec cite: Filesystem-Policy-And-Observed-

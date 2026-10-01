@@ -574,7 +574,7 @@ proc evidenceContextFor(req: VerificationRequest; manifestText: string;
   if not result.haveClaim: return
   try:
     result.quorum = evaluateQuorum(result.bundle, result.claim,
-                                   req.signerRoster)
+                                   req.signerRoster, req.nowMs div 1000)
   except RosterError as err:
     result.rosterComplaint = err.msg
   result.inclusion = evaluateInclusion(result.bundle, result.claim,
@@ -958,6 +958,12 @@ proc verifyUsing(req: VerificationRequest;
     result.caveats.add DistinctSignerCaveat
     if result.checks[vcTransparencyLog].outcome == coPassed:
       result.caveats.add UnverifiedLogAgeCaveat
+  for caveat in ctx.quorum.caveats:
+    # What the quorum evaluation itself could not establish. Carried on
+    # every verdict it reached, accepted or not: a reader who is not
+    # told what a revocation here means cannot tell a withdrawn key
+    # from one that never signed.
+    if caveat notin result.caveats: result.caveats.add caveat
   if ctx.parsed:
     let unevaluated = unevaluatedVerifiers(ctx.bundle)
     if unevaluated.len > 0:

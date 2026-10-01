@@ -52,6 +52,7 @@ import std/[options, os, strutils, unittest]
 import repro_attest
 import repro_attest_verify
 import repro_attest_verify/snp_report
+import repro_cli_support/attest as cli_attest
 
 include ./snp_vectors
 include ./attestation_verifier_harness
@@ -609,3 +610,75 @@ suite "what hardware is needed for, stated as a failing row":
     # Everything else this change wired DID pass, so the binding row
     # is the only thing between this evidence and an acceptance.
     check v.failedChecks == @[vcReportDataBinding]
+
+
+suite "the command line can hand the verifier a vendor revocation list":
+
+  # ADDED BY REVIEW, because the change that opened this door shipped
+  # without a case behind it.
+  #
+  # `VerificationRequest.vendorRevocationLists` is the field BOTH
+  # confidential-computing chain evaluators read revocation data from,
+  # and until `--vendor-revocation-list` existed nothing outside this
+  # repository's own tests ever assigned it. So `repro attest verify`
+  # could only ever reach the no-revocation-data refusal, whatever
+  # collateral the operator held. The flag closes that; this is the
+  # case that says so through the command an operator actually runs.
+  #
+  # THE ASSERTION IS DELIBERATELY NOT "the chain row passes". The
+  # command line takes its clock from `epochTime()` and has no
+  # override, so a case that required an ACCEPTANCE over this pinned
+  # revocation list would turn red on 2026-10-04 when the list expires
+  # — which is precisely the two-clock mistake the ledger beside this
+  # corpus exists to document. What is asserted instead is
+  # clock-independent and is the
+  # thing actually in question: the refusal names HOW MANY lists the
+  # verifier was handed, and that count is 0 if and only if the flag
+  # did not reach the field.
+
+  let dir = getTempDir() / ("repro-attest-vendor-crl-" & $getCurrentProcessId())
+  createDir(dir)
+
+  proc write(name, content: string): string =
+    result = dir / name
+    writeFile(result, content)
+
+  let manifest = snpManifestText(hexOfBytes(reportOf(partA).measurement))
+  let f = floorOf(partA)
+  let manifestPath = write("manifest.toml", manifest)
+  let policyPath = write("policy.toml", snpPolicyText(
+    DigestPrefix & sha256Hex(manifest), f.bootloader, f.tee, f.snp,
+    f.microcode))
+  let reportPath = write("report.json",
+                         snpReportTextFor(partA, some(chainOf(partA))))
+  let crlPath = write("milan.crl", milanCrl)
+
+  proc verdictTextFor(extra: seq[string]): string =
+    let outPath = dir / ("verdict-" & $extra.len & ".txt")
+    discard cli_attest.runAttestCommand(@[
+      "verify", "--report-file", reportPath, "--policy", policyPath,
+      "--manifest", manifestPath, "--out", outPath] & extra)
+    readFile(outPath)
+
+  const HandedNone = "was handed 0 revocation list(s)"
+
+  test "without the flag the verifier is handed NOTHING, and says so":
+    let text = verdictTextFor(@[])
+    checkpoint text
+    check HandedNone in text
+
+  test "with the flag it is handed the operator's list, and stops saying so":
+    # One argument different between the two runs. Nothing else moves:
+    # same report, same policy, same manifest, same clock.
+    let text = verdictTextFor(@["--vendor-revocation-list", crlPath])
+    checkpoint text
+    check HandedNone notin text
+
+  test "a vendor revocation list this verifier cannot open is a REFUSAL":
+    # Not silently skipped. A verifier that dropped collateral it was
+    # told to use would be judging against a smaller set than the one
+    # it was configured with, and would not say so.
+    check cli_attest.runAttestCommand(@[
+      "verify", "--report-file", reportPath, "--policy", policyPath,
+      "--vendor-revocation-list", dir / "there-is-no-such-file"]) ==
+      ord(AttestExitUsage)

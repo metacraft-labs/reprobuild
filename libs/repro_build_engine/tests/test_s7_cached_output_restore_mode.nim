@@ -299,9 +299,10 @@ suite "S7 the CAS-restore configuration is reachable and gated":
       governingLockIdentity = lockIdentityOutsideSolvedGraph())
     var evidence = PathSetEvidence()
     evidence.declaredOutputs = act.outputs
-    evidence.monitorWrites = @[
+    evidence.monitorWrites.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [
       tempRoot / "out" / "app.exe",
-      tempRoot / "out" / "app.pdb"]
+      tempRoot / "out" / "app.pdb"])
     check act.undeclaredSurvivingWrites(evidence).len == 0
 
   test "an undeclared write that survives IS reported":
@@ -320,9 +321,10 @@ suite "S7 the CAS-restore configuration is reachable and gated":
       governingLockIdentity = lockIdentityOutsideSolvedGraph())
     var evidence = PathSetEvidence()
     evidence.declaredOutputs = act.outputs
-    evidence.monitorWrites = @[
+    evidence.monitorWrites.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [
       tempRoot / "out" / "app.exe",
-      tempRoot / "out" / "sidecar.dat"]
+      tempRoot / "out" / "sidecar.dat"])
     let reported = act.undeclaredSurvivingWrites(evidence)
     check reported.len == 1
     check reported.hasPath(tempRoot / "out" / "sidecar.dat")
@@ -344,9 +346,10 @@ suite "S7 the CAS-restore configuration is reachable and gated":
       governingLockIdentity = lockIdentityOutsideSolvedGraph())
     var evidence = PathSetEvidence()
     evidence.declaredOutputs = act.outputs
-    evidence.monitorWrites = @[
+    evidence.monitorWrites.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [
       tempRoot / "out" / "app.exe",
-      tempRoot / "out" / "link.tmp"]      # never created
+      tempRoot / "out" / "link.tmp"])     # never created
     check act.undeclaredSurvivingWrites(evidence).len == 0
 
   test "a written DIRECTORY is not reported, but a file inside one is":
@@ -375,12 +378,13 @@ suite "S7 the CAS-restore configuration is reachable and gated":
       governingLockIdentity = lockIdentityOutsideSolvedGraph())
     var evidence = PathSetEvidence()
     evidence.declaredOutputs = act.outputs
-    evidence.monitorWrites = @[
+    evidence.monitorWrites.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [
       tempRoot,                             # a directory, and an ancestor
       tempRoot / "out",                     # the declared output's parent
       tempRoot / "out" / "clone",           # an UNdeclared directory
       tempRoot / "out" / "app.exe",
-      tempRoot / "out" / "clone" / "README"]
+      tempRoot / "out" / "clone" / "README"])
     let reported = act.undeclaredSurvivingWrites(evidence)
     check reported.len == 1
     check reported.hasPath(tempRoot / "out" / "clone" / "README")
@@ -407,10 +411,11 @@ suite "S7 the CAS-restore configuration is reachable and gated":
       governingLockIdentity = lockIdentityOutsideSolvedGraph())
     var evidence = PathSetEvidence()
     evidence.declaredOutputs = act.outputs
-    evidence.monitorWrites = @[
+    evidence.monitorWrites.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [
       tempRoot / "out" / "app.exe",
       tempRoot / "nimcache" / "app" / "app.o",
-      tempRoot / "out" / "sidecar.dat"]
+      tempRoot / "out" / "sidecar.dat"])
     let reported = act.undeclaredSurvivingWrites(evidence)
     # The exemption is scoped to the declared prefix and nothing else: the
     # sidecar beside the real output still fails the gate.
@@ -437,9 +442,10 @@ suite "S7 the CAS-restore configuration is reachable and gated":
     act.declaredOutputs = @[tempRoot / "out"]
     var evidence = PathSetEvidence()
     evidence.declaredOutputs = act.outputs
-    evidence.monitorWrites = @[
+    evidence.monitorWrites.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [
       tempRoot / "out" / "receipt.txt",
-      tempRoot / "out" / "clone" / "README"]
+      tempRoot / "out" / "clone" / "README"])
     let reported = act.undeclaredSurvivingWrites(evidence)
     check reported.len == 1
     check reported.hasPath(tempRoot / "out" / "clone" / "README")
@@ -478,10 +484,11 @@ suite "S7 the CAS-restore configuration is reachable and gated":
     act.declaredOutputs = @[destRoot]
     var evidence = PathSetEvidence()
     evidence.declaredOutputs = act.outputs
-    evidence.monitorWrites = @[
+    evidence.monitorWrites.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [
       tempRoot / ".repro" / "install.stamp",
       buildDir / "CMakeCache.txt",
-      destRoot / "usr" / "libfoo.so"]
+      destRoot / "usr" / "libfoo.so"])
 
     # Neither prefix survives: ``destRoot`` IS the write root, and
     # ``buildDir`` CONTAINS it.
@@ -517,9 +524,10 @@ suite "S7 the CAS-restore configuration is reachable and gated":
       governingLockIdentity = lockIdentityOutsideSolvedGraph())
     var evidence = PathSetEvidence()
     evidence.declaredOutputs = act.outputs
-    evidence.monitorWrites = @[
+    evidence.monitorWrites.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [
       tempRoot / "build" / "bin" / "hello.exe",
-      tempRoot / "build" / "nimcache" / "hello" / "hello.c"]
+      tempRoot / "build" / "nimcache" / "hello" / "hello.c"])
     check act.honouredDerivedPrefixes().len == 1
     check act.undeclaredSurvivingWrites(evidence).len == 0
 

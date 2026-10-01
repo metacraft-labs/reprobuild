@@ -712,6 +712,29 @@ suite "M6 the determinism probe: identical outputs earn the entry":
     let second = runBuild(graph([act]), config)
     check second.probeEvents == @["determinism-probe-verified"]
 
+  test "which OS libraries the loader pulled in does not reset it":
+    ## Two runs of one command load different system DLLs (apphelp.dll,
+    ## cmdext.dll, ... only sometimes).
+    when defined(windows):
+      let scenario = setupScenario("probe-loader")
+      defer: removeDir(scenario.root)
+      let act = scenarioAction(scenario, ndpUnblessed)
+      let config = defaultBuildEngineConfig(scenario.cacheRoot)
+      let system32 = getEnv("SystemRoot", "C:\\Windows") / "System32"
+      writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+        fileRead(scenario.sourcePath),
+        fileRead(system32 / "apphelp.dll"),
+        entropyRead("BCryptGenRandom", "program")])
+      discard runBuild(graph([act]), config)
+      writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+        fileRead(scenario.sourcePath),
+        entropyRead("BCryptGenRandom", "program")])
+      removeFile(scenario.outputPath)
+      let second = runBuild(graph([act]), config)
+      check second.probeEvents == @["determinism-probe-verified"]
+    else:
+      skip("the loaded-OS-library shape this case replays (System32 DLLs) exists only on Windows")
+
   test "launch machinery with a per-launch name does not reset the probe":
     ## runquota stages a long `sh -c` program under a random name in its
     ## wrapper directory, and the shell is observed reading it. Its content
