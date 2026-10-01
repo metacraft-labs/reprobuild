@@ -2867,6 +2867,58 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
 proc pool*(name: string; capacity: uint32): BuildPool =
   BuildPool(name: name, capacity: capacity)
 
+const ConventionRunQuotaPoolCaps* = [
+  ("compile", 8'u32),
+  ("fetch", 2'u32)
+]
+  ## The two pools the standard provider's convention bodies register
+  ## (``buildPool("compile", 8'u32)`` / ``buildPool("fetch", 2'u32)`` in
+  ## ``runtime_core``). Used only for an action that names one of them in a
+  ## graph that does not declare it, so the daemon is told the convention's
+  ## figure rather than the engine's ``maxParallel`` fallback.
+
+proc runQuotaPoolDeclaration*(pools: openArray[BuildPool];
+                              actions: openArray[BuildAction];
+                              maxParallel: uint32):
+    seq[tuple[name: string; capacity: uint32]] =
+  ## The named pools a build declares to RunQuota (``declareRunQuotaPools``):
+  ## every pool the graph declares, at the graph's capacity, plus every pool
+  ## an action names that the graph does not declare -- at the convention
+  ## figure for ``compile`` / ``fetch``, and otherwise at ``maxParallel``,
+  ## which is what the engine's own pool gate uses for an undeclared pool.
+  ##
+  ## WHY A DECLARATION AND NOT A FLAG. These used to reach the daemon as
+  ## ``runquotad --pool NAME=CAP`` flags, passed only when this process
+  ## spawned the daemon. A flag pins the pool for the daemon's whole life
+  ## (the host file and ``runquota config set pools.NAME`` could not change
+  ## it), and a daemon somebody else started -- the installed service, or the
+  ## one a previous build left running on Windows -- never heard of the pool,
+  ## so its leases were refused. A declaration reaches whichever daemon
+  ## serves the host and sits under its host file
+  ## (reprobuild-specs/RunQuota-Host-Configuration.md, "Pools a build
+  ## declares").
+  ##
+  ## Deterministic order: the graph's pools as declared, then the undeclared
+  ## pools actions use, sorted by name.
+  var seen = initHashSet[string]()
+  for p in pools:
+    if p.name.len == 0 or p.name in seen:
+      continue
+    seen.incl(p.name)
+    result.add((name: p.name, capacity: p.capacity))
+  var undeclared: seq[string] = @[]
+  for action in actions:
+    if action.pool.len > 0 and action.pool notin seen:
+      seen.incl(action.pool)
+      undeclared.add(action.pool)
+  undeclared.sort()
+  for name in undeclared:
+    var capacity = maxParallel
+    for (convention, cap) in ConventionRunQuotaPoolCaps:
+      if convention == name:
+        capacity = cap
+    result.add((name: name, capacity: capacity))
+
 proc graph*(actions: openArray[BuildAction];
             pools: openArray[BuildPool] = []): BuildGraph =
   BuildGraph(actions: @actions, pools: @pools)
@@ -12662,14 +12714,19 @@ proc startBypassRunQuotaProcess(action: BuildAction;
   return startDirect(preparedRunQuotaCommand(action, config))
 
 proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
-                          resultPath: string): Process =
+                          resultPath: string;
+                          poolCapacity: uint32): Process =
+  ## ``poolCapacity`` is what the build declares for ``action.pool``; the
+  ## helper declares it on its own session before it asks for the lease
+  ## (``runWithRunQuota``), as the inline path does for the whole build.
   let rq = ReproResourceRequest(
     label: action.id,
     commandStatsId: action.commandStatsId,
     cpuMilli: action.cpuMilli,
     memoryBytes: action.memoryBytes,
     namedPool: action.pool,
-    namedPoolUnits: action.poolUnits)
+    namedPoolUnits: action.poolUnits,
+    namedPoolCapacity: poolCapacity)
   let command = preparedRunQuotaCommand(action, config)
   let helper = if config.runQuotaCliPath.len > 0: config.runQuotaCliPath
     else: defaultRunQuotaHelperPath()
@@ -15347,6 +15404,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   poolCapacity[""] = maxParallel
   for p in buildGraph.pools:
     poolCapacity[p.name] = p.capacity
+  # What this build declares to RunQuota for its named pools, once per
+  # session (``declareRunQuotaPools`` below, and the helper path's own
+  # session through ``startRunQuotaProcess``).
+  let runQuotaPools = runQuotaPoolDeclaration(buildGraph.pools,
+    buildGraph.actions, maxParallel)
+  var runQuotaPoolCaps = initTable[string, uint32]()
+  var runQuotaPoolNames: seq[string] = @[]
+  for p in runQuotaPools:
+    runQuotaPoolCaps[p.name] = p.capacity
+    runQuotaPoolNames.add(p.name)
   for action in buildGraph.actions:
     let cap = poolCapacity.getOrDefault(action.pool, maxParallel)
     let units = if action.poolUnits == 0'u32: 1'u32 else: action.poolUnits
@@ -15422,6 +15489,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       inlineRunQuotaSessionOpen = true
       runQuotaDaemonReachable = some(true)
       result = true
+      # Before the first lease: tell the daemon the pools this graph uses.
+      # It admits against them where its host file leaves them unsized, for
+      # as long as this session is open.
+      if runQuotaPools.len > 0:
+        let declaration = declareRunQuotaPools(inlineRunQuotaSession,
+          runQuotaPools)
+        reportPoolDeclarationUnsupported(declaration, runQuotaPoolNames)
     except CatchableError as err:
       runQuotaDaemonReachable = some(false)
       if config.fallbackToRunQuotaBypass:
@@ -17092,7 +17166,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           elif bypassRunQuota:
             directProcess = startBypassRunQuotaProcess(plan.action, config)
           else:
-            process = startRunQuotaProcess(plan.action, config, resultPath)
+            process = startRunQuotaProcess(plan.action, config, resultPath,
+              runQuotaPoolCaps.getOrDefault(plan.action.pool, 0'u32))
         except CatchableError as err:
           launchFailure = err.msg
         finishStat("repro runquota launch", launchStart)
