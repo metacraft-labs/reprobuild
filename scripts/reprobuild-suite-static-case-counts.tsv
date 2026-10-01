@@ -1072,6 +1072,7 @@ tests/integration/t_cloud_attestation_launch_manifest_identity.nim	nim	28
 tests/integration/t_cmake_fresh_configure.nim	nim	1
 tests/integration/t_cmake_install_mirror_tools.nim	nim	1
 tests/integration/t_commit_records_the_sibling_revision_the_shell_actually_used.nim	nim	3
+tests/integration/t_commit_repins_committed_lock_siblings.nim	nim	1
 tests/integration/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep.nim	nim	1
 tests/integration/t_committed_lock_folds_sibling_develop_deps.nim	nim	1
 tests/integration/t_committed_lock_pins_solved_graph_and_build_consumes_it.nim	nim	4
@@ -1355,6 +1356,7 @@ tests/integration/t_pre_push_public_only_writes_no_manifest_lock.nim	nim	1
 tests/integration/t_pre_push_publishes_only_when_publish_locks_opted_in.nim	nim	1
 tests/integration/t_pre_push_refuses_an_undeclared_depends_edge.nim	nim	1
 tests/integration/t_pre_push_refuses_on_unreachable_team_backend.nim	nim	1
+tests/integration/t_pre_push_refuses_stale_committed_sibling_pin.nim	nim	1
 tests/integration/t_pre_push_refuses_when_lock_publish_fails.nim	nim	1
 tests/integration/t_pre_push_requires_certificate_coverage_when_project_opts_in.nim	nim	1
 tests/integration/t_pre_push_rewrite_orphan_gate.nim	nim	5

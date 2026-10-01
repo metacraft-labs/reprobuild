@@ -9594,6 +9594,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_commit_repins_committed_lock_siblings.nim",
+    binary: "build/test-bin/t_commit_repins_committed_lock_siblings",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep.nim",
     binary: "build/test-bin/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep",
     defines: @[],
@@ -12134,6 +12143,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_pre_push_refuses_on_unreachable_team_backend.nim",
     binary: "build/test-bin/t_pre_push_refuses_on_unreachable_team_backend",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_pre_push_refuses_stale_committed_sibling_pin.nim",
+    binary: "build/test-bin/t_pre_push_refuses_stale_committed_sibling_pin",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

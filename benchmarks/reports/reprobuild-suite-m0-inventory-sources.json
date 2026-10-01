@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1793,
+    "nimTestBinaries": 1795,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 590,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1808
+    "testEntries": 1810
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1062,7 +1062,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 938,
+      "integration": 940,
       "platform/destructive": 116,
       "pure unit": 590,
       "unclassified": 153
@@ -1213,9 +1213,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1793,
+    "nimTestBinaryCount": 1795,
     "pythonTestFileCount": 15,
-    "testEntryCount": 1808
+    "testEntryCount": 1810
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -25320,6 +25320,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_commit_repins_committed_lock_siblings",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_commit_repins_committed_lock_siblings.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -30300,6 +30315,21 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_pre_push_refuses_on_unreachable_team_backend.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_pre_push_refuses_stale_committed_sibling_pin",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_pre_push_refuses_stale_committed_sibling_pin.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
