@@ -3646,7 +3646,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1313,
+          "line": 1317,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
