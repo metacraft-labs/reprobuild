@@ -15,6 +15,12 @@ import repro_core
 # and at two in `git_actions.nim`, and a repo-wide re-export would put
 # `fsContainment` in the namespace of every module that touches `repro_core`.
 import repro_core/path_identity
+# PG-14 — the managed-hook contract handshake has to run a `repro` this build
+# did NOT produce (that is the entire measurement: seventeen store paths on one
+# host, answering differently per shell). The `uncontrolled*` wrappers are the
+# repo's way of saying so out loud rather than tripping the ambient-execution
+# lint at every probe site.
+import repro_core/ambient_execution
 import repro_core/cli_images
 import repro_build_engine
 import repro_cmake_trycompile
@@ -7200,6 +7206,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
     var mergedCmakePrefixDirs: seq[string] = @[]
     var mergedIncludeDirs: seq[string] = @[]
     var mergedLibDirs: seq[string] = @[]
+    var mergedReceipts: seq[string] = @[]
     for actionIdy in snapshot.actionIdentities:
       let matchByName = actionIdy.executableName == name
       let bareSelector = block:
@@ -7217,6 +7224,12 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
       if not (matchByName or matchBySelector):
         continue
       matched = true
+      # The provisioning edge that realized this tool: the engine declares
+      # its receipt as an input of the consuming action
+      # (``withProvisioningReceiptInputs``).
+      if actionIdy.provisioningReceipt.len > 0 and
+          actionIdy.provisioningReceipt notin mergedReceipts:
+        mergedReceipts.add(actionIdy.provisioningReceipt)
       if actionIdy.resolvedExecutablePath.len > 0:
         if mergedExecutablePath.len == 0:
           mergedExecutablePath = actionIdy.resolvedExecutablePath
@@ -7279,6 +7292,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
       return some(ResolvedToolIdentity(
         binDirs: mergedBinDirs,
         resolvedExecutablePath: mergedExecutablePath,
+        provisioningReceipts: mergedReceipts,
         pkgConfigDirs: mergedPkgConfigDirs,
         cmakePrefixDirs: mergedCmakePrefixDirs,
         includeDirs: mergedIncludeDirs,
@@ -16527,6 +16541,438 @@ proc managedHookNameFromContract*(contract: string): string =
     return ""
   rest[0 ..< lastDot]
 
+# ---- PG-14: the handshake as a predicate, not only as a hook line ----------
+#
+# The generated body asks its resolved interpreter one question
+# (``hooks protocol --require=2 --hook-contract=<token>``). Everything below
+# makes that same question askable from INSIDE the tool — by ``hooks ensure``
+# before it writes a body, by ``repro health`` about every ``repro`` a hook
+# could resolve, and by the migration sweep before it touches the first repo.
+#
+# Why it is a named layer rather than three call sites. Measured on this host
+# (Push-Gateway-Wiring-And-Policy.md §1.6b): 770 managed bodies across 154
+# repos demand one of five tokens, uniformly, and whether the resolved ``repro``
+# SERVICES that demand depends on which shell it fires in. THE DISCRIMINATOR IS
+# THE STORE PATH, NOT THE VERSION — of the four builds probed, three report
+# ``0.1.3`` and two of those three answer the handshake. So every answer this
+# layer produces is keyed to a BINARY (by path, and by its store path where it
+# has one) and never to a version string, and every verdict records HOW the
+# binary was resolved, because that is what differs between two shells on one
+# machine.
+#
+# The predicate is "does not speak the handshake", never "is older". A version
+# comparison would mis-classify the two servicing 0.1.3 builds on this host.
+
+const ManagedHookContractFlag* = "--hook-contract="
+  ## The flag a generated body passes its interpreter, and therefore also the
+  ## marker whose ABSENCE identifies a body written by a build that predates
+  ## the handshake.
+
+const
+  # The two anchors around the one machine-local value a managed hook body
+  # carries. Kept beside the reader rather than inside it so the coupling to
+  # `vcsManagedHookBody`'s escape-hatch block is visible from both ends.
+  #
+  # That block writes the line as
+  #   echo <quoteShellPosix("repro hooks: ... REPROBUILD_REPRO=" &
+  #                         quoteShellPosix(author) & " git push")> >&2
+  # and the message always contains spaces, so the outer quoting is always
+  # the single-quoted form. Change one end and the other stops finding the
+  # author: every hook written from a second path of the same build is then
+  # reported as "old or partially upgraded" and `repro push` stops at
+  # hook-preflight. Tripwire: t_repro_push_accepts_hooks_the_same_build_wrote_
+  # from_another_path (tests/integration/t_repro_push_sync_integrates_...).
+  ManagedHookAuthorEchoPrefix =
+    "      echo 'repro hooks:        REPROBUILD_REPRO="
+  ManagedHookAuthorEchoSuffix = " git push' >&2"
+
+proc unquoteShellPosixWord(quoted: string): string =
+  ## Inverse of `quoteShellPosix` for one word: bare as-is, or `'...'` with
+  ## each embedded quote spelled `'"'"'`. Only ever used to PROPOSE a
+  ## candidate that the caller then re-renders byte-exactly, so a misreading
+  ## can reject a body but never accept one.
+  if quoted.len >= 2 and quoted[0] == '\'' and quoted[^1] == '\'':
+    quoted[1 .. ^2].replace("'\"'\"'", "'")
+  else:
+    quoted
+
+proc managedHookAuthorBin*(body: string): string =
+  ## The `repro` path an installed managed hook advertises in its escape
+  ## hatch, or "" when the hook carries none.
+  for line in body.splitLines():
+    if line.startsWith(ManagedHookAuthorEchoPrefix) and
+        line.endsWith(ManagedHookAuthorEchoSuffix) and
+        line.len > ManagedHookAuthorEchoPrefix.len +
+          ManagedHookAuthorEchoSuffix.len:
+      # Undo the outer (message) quoting, then the inner (path) quoting.
+      let inner = line[ManagedHookAuthorEchoPrefix.len ..
+        ^(ManagedHookAuthorEchoSuffix.len + 1)].replace("'\"'\"'", "'")
+      return unquoteShellPosixWord(inner)
+  ""
+
+proc managedHookBodyContractDemand*(body: string): string =
+  ## The contract token an installed managed-hook BODY demands, or ``""`` when
+  ## it demands none.
+  ##
+  ## ``""`` is a positive finding, not a parse failure: a body with no
+  ## ``--hook-contract=`` line was written by a build that predates the
+  ## handshake, which is precisely the state the hook body's own remedy text
+  ## warns ``hooks ensure`` can create ("the contract line disappears, and you
+  ## silence this message instead of fixing it"). Callers must report it as its
+  ## OWN state — not as ``missing`` (which names the wrong remedy: the hook is
+  ## there) and not as ``already current``.
+  var i = body.find(ManagedHookContractFlag)
+  if i < 0:
+    return ""
+  i += ManagedHookContractFlag.len
+  var j = i
+  # The generated line is ``--hook-contract=<token> >/dev/null 2>&1 || …``, so
+  # the token ends at the first shell metacharacter or whitespace. Accepting
+  # only the token's own alphabet keeps a hand-mangled body from yielding a
+  # "token" that happens to compare equal to nothing.
+  while j < body.len and (body[j] in {'a' .. 'z', 'A' .. 'Z', '0' .. '9'} or
+      body[j] in {'.', '-', '_'}):
+    inc j
+  body[i ..< j]
+
+proc managedHookContractServiceVerdict*(contract: string):
+    tuple[code: int; diagnostic: string] =
+  ## THE handshake, answered in process: "do I generate the hook that demands
+  ## ``contract``?"
+  ##
+  ## ``code`` is the exit status ``repro hooks protocol
+  ## --require=2 --hook-contract=<contract>`` returns — ``0`` for yes and ``3``
+  ## for "I speak this handshake and simply generate a different body". The
+  ## distinction is load-bearing and is the reason this is not a bool: ``3``
+  ## earns a DIFFERENT remedy from the arm an older build lands in (re-anchor
+  ## the repository to the other build, versus reconcile what supplies
+  ## ``repro``), and conflating them is what forced the predecessor of the
+  ## hook's refusal text to give one piece of advice for two opposite
+  ## situations.
+  ##
+  ## Shared with the ``hooks protocol`` subcommand so the answer this build
+  ## gives a sibling process and the answer it gives itself cannot diverge.
+  let hookName = managedHookNameFromContract(contract)
+  if hookName.len == 0 or hookName notin VcsHookNames:
+    return (3, "repro hooks: '" & contract &
+      "' is not a managed-hook contract token this build recognizes")
+  let mine = managedHookContract(hookName)
+  if contract != mine:
+    return (3, "repro hooks: this build generates '" & mine & "' for " &
+      hookName & ", not '" & contract & "'")
+  (0, "")
+
+proc buildServicesManagedHookContract*(contract: string): bool =
+  ## Convenience form of the verdict above: does THIS build service
+  ## ``contract``?
+  managedHookContractServiceVerdict(contract).code == 0
+
+type
+  HookContractServicing* = enum
+    ## What one ``repro`` build answered about one contract token.
+    hcsUnresolved
+      ## There was no binary to ask. Absence DEGRADES (§8); it is not a skew,
+      ## and reporting it as one would make every host without ``repro`` on
+      ## PATH look broken.
+    hcsServices
+      ## It confirmed the exact token: it generates the body that demands it.
+    hcsSpeaksDifferentBody
+      ## It understands the handshake and generates a DIFFERENT body
+      ## (``hooks protocol`` exit 3). Two builds, both current enough to
+      ## speak, disagreeing about the body.
+    hcsDoesNotSpeakHandshake
+      ## It rejected a flag it has never heard of (any other non-zero exit).
+      ## THIS is the arm the version string cannot predict: on this host one
+      ## 0.1.3 build lands here while two others answer.
+
+  ReproBuildIdentity* = object
+    ## A ``repro`` build, identified the way §1.6b insists it must be.
+    ##
+    ## ``storePath`` is first among equals: "a binary is identified by store
+    ## path, never by version" is a rule this campaign adopted after three
+    ## measurements in a row were reported by version and had to be corrected.
+    ## ``version`` is carried too, because operators ask for it — never alone.
+    path*: string       ## the executable as it was resolved
+    realPath*: string   ## symlinks followed, so two spellings of one build
+                        ## compare equal
+    storePath*: string  ## the ``/nix/store/<hash>-<name>`` prefix, or ""
+    version*: string    ## first line of ``--version``, or "" if it did not
+                        ## answer
+
+  HookInterpreterResolution* = object
+    ## One way a managed hook could resolve ``repro``, and what that build
+    ## answered. A per-SHELL fact: ``source`` is what makes it one, and what
+    ## stops a single row being read as a machine-wide answer.
+    source*: string          ## "REPROBUILD_REPRO", "PATH", "direnv shell at X"
+    build*: ReproBuildIdentity
+    servicing*: HookContractServicing
+    probeExit*: int          ## the raw exit status, for the diagnostic
+    contract*: string        ## the token it was probed with
+    thisShell*: bool         ## true for the resolution a hook firing in the
+                             ## CURRENT process environment would get
+
+const
+  NixStoreMarker = "nix/store/"
+  # The character set of a store path's base name: nix's own (alphanumerics
+  # plus ``+-._?=``).
+  NixStoreNameChars = {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '+', '-', '.', '_',
+                       '?', '='}
+  # The set the scan may walk LEFT through to recover the store's own root.
+  # Deliberately narrower: ``=`` and ``?`` are legal in a store base NAME but
+  # walking left through them turns ``PATH=/nix/store/x`` into the "path"
+  # ``PATH=/nix/store/x``.
+  NixStoreRootChars = {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '+', '-', '.', '_',
+                       '/'}
+
+proc nixStorePathsIn*(text: string): seq[string] =
+  ## Every distinct ``<store-root>/<hash>-<name>`` path in ``text``, in order
+  ## of first appearance.
+  ##
+  ## The store ROOT is recovered rather than assumed to be ``/nix/store``. Nix
+  ## honours ``NIX_STORE_DIR``, chroot stores exist, and — the reason this
+  ## matters here — a hermetic test cannot write into the host's real store, so
+  ## a checker that hard-coded ``/nix/store`` could only ever be exercised
+  ## against the machine it ran on.
+  let normalised = text.replace('\\', '/')
+  var at = normalised.find(NixStoreMarker)
+  while at >= 0:
+    let nameStart = at + NixStoreMarker.len
+    var nameEnd = nameStart
+    while nameEnd < normalised.len and
+        normalised[nameEnd] in NixStoreNameChars:
+      inc nameEnd
+    var rootStart = at
+    while rootStart > 0 and normalised[rootStart - 1] in NixStoreRootChars:
+      dec rootStart
+    if nameEnd > nameStart:
+      let full = normalised[rootStart ..< nameEnd]
+      if full notin result:
+        result.add(full)
+    at = normalised.find(NixStoreMarker, nameEnd)
+
+proc nixStorePathOf*(path: string): string =
+  ## The store path ``path`` lives in, or ``""`` when it lives in none.
+  ##
+  ## Not a general store-path parser: it exists so a diagnostic can name the
+  ## thing that actually discriminates between two builds that both say
+  ## ``repro 0.1.3``.
+  let found = nixStorePathsIn(path)
+  if found.len == 0: "" else: found[0]
+
+proc nixStorePathsNamed*(text, namePrefix: string): seq[string] =
+  ## Every distinct store path in ``text`` whose base name, after the hash,
+  ## begins with ``namePrefix``.
+  ##
+  ## This is how the enumeration of "which ``repro`` does each dev shell
+  ## supply?" is produced: direnv writes the shell's exported ``PATH`` into its
+  ## own profile ``.rc`` file, so the store paths are there to be read without
+  ## evaluating anything or entering any shell. §1.6b's measurement was taken
+  ## exactly this way.
+  for full in nixStorePathsIn(text):
+    let base = lastPathPart(full)
+    let dash = base.find('-')
+    if dash > 0 and base[(dash + 1) .. ^1].startsWith(namePrefix):
+      result.add(full)
+
+proc reproBuildVersionLine(path: string): string =
+  ## ``<path> --version``, first line, or ``""``. Best effort by design: a
+  ## build that cannot answer is still named by its path, which is the part
+  ## that identifies it.
+  if path.len == 0:
+    return ""
+  try:
+    # AMBIENT ON PURPOSE. The whole subject of this layer is a binary
+    # reprobuild did NOT build and cannot describe with a typed profile: the
+    # measurement is about the SEVENTEEN ``repro`` builds installed on this
+    # host, reached exactly as a managed hook reaches them.
+    let res = uncontrolledExecCmdEx(quoteShell(path) & " --version")
+    if res.exitCode != 0:
+      return ""
+    for line in res.output.splitLines():
+      if line.strip().len > 0:
+        return line.strip()
+  except CatchableError:
+    discard
+  ""
+
+proc reproBuildIdentity*(path: string; withVersion = true): ReproBuildIdentity =
+  ## Identify the build at ``path``. ``withVersion = false`` skips the
+  ## ``--version`` subprocess for callers that only need the paths.
+  result.path = path
+  if path.len == 0:
+    return
+  result.realPath =
+    try: expandFilename(path)
+    except CatchableError: path
+  result.storePath = nixStorePathOf(result.realPath)
+  if result.storePath.len == 0:
+    result.storePath = nixStorePathOf(path)
+  if withVersion:
+    result.version = reproBuildVersionLine(path)
+
+proc describeReproBuild*(build: ReproBuildIdentity): string =
+  ## One line naming a build the way the skew diagnostics must: path first,
+  ## store path next, version LAST and never alone.
+  if build.path.len == 0:
+    return "<unresolved>"
+  result = build.path
+  if build.realPath.len > 0 and build.realPath != build.path:
+    result.add(" -> " & build.realPath)
+  if build.storePath.len > 0:
+    result.add(" [store " & build.storePath & "]")
+  result.add(
+    if build.version.len > 0: " (" & build.version & ")"
+    else: " (version unknown; it did not answer --version)")
+
+proc probeHookContractServicing*(reproPath, contract: string):
+    tuple[servicing: HookContractServicing; exitCode: int] =
+  ## Ask the build at ``reproPath`` the generated body's own question.
+  ##
+  ## This runs a binary this process did not build — deliberately, and it is
+  ## the only way the question has an answer: the installed bodies will execute
+  ## that binary, not this one. A build that is the SAME FILE as this process
+  ## is answered in process instead, which keeps the ambient command the
+  ## generated ``.envrc`` runs on every directory entry from paying for a
+  ## subprocess it cannot benefit from.
+  if reproPath.len == 0:
+    return (hcsUnresolved, -1)
+  var isSelf = false
+  try:
+    isSelf = sameFile(reproPath, getAppFilename())
+  except CatchableError:
+    isSelf = false
+  if isSelf:
+    let verdict = managedHookContractServiceVerdict(contract)
+    return (
+      (if verdict.code == 0: hcsServices else: hcsSpeaksDifferentBody),
+      verdict.code)
+  var code = -1
+  try:
+    # AMBIENT ON PURPOSE — see `reproBuildVersionLine`. The probe is the
+    # handshake verbatim, so a build that refuses it here refuses it for the
+    # hook too.
+    code = uncontrolledExecCmdEx(quoteShell(reproPath) &
+      " hooks protocol --require=2 " & ManagedHookContractFlag &
+      quoteShell(contract)).exitCode
+  except CatchableError:
+    # Could not even be executed. Not "does not speak the handshake": a hook
+    # resolving it would not get an answer either, and the remedy is the same
+    # as for a build that rejects the flag.
+    return (hcsDoesNotSpeakHandshake, -1)
+  case code
+  of 0: (hcsServices, 0)
+  of 3: (hcsSpeaksDifferentBody, 3)
+  else: (hcsDoesNotSpeakHandshake, code)
+
+proc executableFile(path: string): bool =
+  if path.len == 0 or not fileExists(path):
+    return false
+  when defined(posix):
+    let perms = getFilePermissions(path)
+    result = fpUserExec in perms or fpGroupExec in perms or fpOthersExec in perms
+  else:
+    result = true
+
+proc resolveManagedHookInterpreter*(repoRoot: string):
+    tuple[path, source: string] =
+  ## ``find_repro_cmd`` from the generated body, evaluated in this process:
+  ## ``$REPROBUILD_REPRO`` if it is executable, else the first ``repro`` on
+  ## PATH, else nothing.
+  ##
+  ## It must stay byte-for-byte equivalent to the shell version. The silent
+  ## PATH fallback is the whole mechanism by which governance became
+  ## per-shell (§1.6b), so anything that wants to REPORT on it has to resolve
+  ## it the same way — a checker that probed ``getAppFilename()`` would
+  ## describe a binary no hook will ever run, and would report green on
+  ## precisely the host this milestone exists for.
+  let configured = getEnv("REPROBUILD_REPRO")
+  if configured.len > 0:
+    let candidate =
+      if configured.isAbsolute: configured
+      elif repoRoot.len > 0: repoRoot / configured
+      else: configured
+    if executableFile(candidate):
+      return (candidate, "REPROBUILD_REPRO")
+    return ("", "REPROBUILD_REPRO (set to '" & configured &
+      "', which is not executable)")
+  # AMBIENT ON PURPOSE: ``command -v repro`` is what the hook does.
+  let onPath = uncontrolledFindExe("repro")
+  if onPath.len > 0:
+    return (onPath, "PATH")
+  ("", "")
+
+proc probeHookInterpreter*(path, source, contract: string;
+                           thisShell = false): HookInterpreterResolution =
+  ## Resolve one candidate into a reportable row.
+  result.source = source
+  result.contract = contract
+  result.thisShell = thisShell
+  result.build = reproBuildIdentity(path)
+  let probe = probeHookContractServicing(path, contract)
+  result.servicing = probe.servicing
+  result.probeExit = probe.exitCode
+
+type
+  HookWriteGuard* = ref object
+    ## Per-invocation memo for the PG-14 write guard.
+    ##
+    ## ``hooks ensure`` touches up to five hooks in each of 172 repos, and the
+    ## guard's question ("does the build that will RUN these hooks service the
+    ## body I am about to write?") has at most a handful of distinct answers on
+    ## one machine. Resolving the interpreter once and caching per contract
+    ## token keeps the generated ``.envrc``'s ambient
+    ## ``hooks ensure --vcs "$PWD"`` from paying for 860 subprocesses — and
+    ## keeps the guard from being the reason somebody turns it off.
+    ##
+    ## A guard is explicitly NOT long-lived: the resolution it caches is a
+    ## property of the process environment, which is the thing that differs
+    ## between two shells. One per command invocation, never a global.
+    resolved: bool
+    interpreterPath: string
+    interpreterSource: string
+    probed: Table[string, HookContractServicing]
+
+proc newHookWriteGuard*(): HookWriteGuard =
+  HookWriteGuard(probed: initTable[string, HookContractServicing]())
+
+proc interpreter*(guard: HookWriteGuard; repoRoot: string):
+    tuple[path, source: string] =
+  ## The ``repro`` a hook installed into ``repoRoot`` would resolve, resolved
+  ## at most once per guard.
+  if not guard.resolved:
+    let r = resolveManagedHookInterpreter(repoRoot)
+    guard.interpreterPath = r.path
+    guard.interpreterSource = r.source
+    guard.resolved = true
+  (guard.interpreterPath, guard.interpreterSource)
+
+proc servicing*(guard: HookWriteGuard; repoRoot, contract: string):
+    HookContractServicing =
+  ## Does that interpreter service ``contract``? Memoised per token.
+  if contract.len == 0:
+    return hcsUnresolved
+  if contract in guard.probed:
+    return guard.probed[contract]
+  let interp = guard.interpreter(repoRoot)
+  let verdict =
+    if interp.path.len == 0: hcsUnresolved
+    else: probeHookContractServicing(interp.path, contract).servicing
+  guard.probed[contract] = verdict
+  verdict
+
+proc describeHookInterpreterResolution*(res: HookInterpreterResolution): string =
+  ## One row of a skew report: how it was resolved, which build that is, and
+  ## what it answered.
+  let verdict =
+    case res.servicing
+    of hcsUnresolved: "no repro resolved"
+    of hcsServices: "SERVICES the contract"
+    of hcsSpeaksDifferentBody:
+      "speaks the handshake but generates a DIFFERENT body (exit 3)"
+    of hcsDoesNotSpeakHandshake:
+      "does NOT speak the handshake (exit " & $res.probeExit & ")"
+  res.source & " -> " & describeReproBuild(res.build) & ": " & verdict
+
 proc vcsManagedHookContent(hookName: string): string =
   ## The canonical managed-hook body, carrying the contract token of THIS
   ## build. Drift detection compares the on-disk file to this exact string, so
@@ -16549,6 +16995,23 @@ type
     vheoInstalled ## A fresh install or a missing file was created.
     vheoChainedUserHook ## A pre-existing non-managed hook was preserved as ``<name>.repro-local``.
     vheoRefreshedDrifted ## Sentinel present but body diverged; rewrote canonical content.
+    vheoRewroteContractlessBody
+      ## PG-14 — the managed body that was there demanded NO contract, so it
+      ## was written by a build that predates the handshake, and this build
+      ## replaced it with one that carries a token.
+      ##
+      ## It is a state of its own because the two obvious reports are both
+      ## wrong and point somewhere unhelpful. ``missing`` names the wrong
+      ## remedy: the hook WAS there, executable, and running — "install the
+      ## hooks" describes nothing that was broken. ``already current`` /
+      ## ``refreshed-drifted`` hides the one fact worth having, which is that
+      ## something on this machine writes contract-less bodies and will do it
+      ## again on its next ambient ``hooks ensure`` — the hook's own remedy
+      ## text calls that out: "that rewrites this file with its own older body,
+      ## the contract line disappears, and you silence this message instead of
+      ## fixing it". A build that cannot know it is doing this (it predates the
+      ## flag) cannot report it; this build can, and that is the asymmetry
+      ## PG-14 deliverable 2 names.
     vheoReclaimedShadowed
       ## The dispatcher had been overwritten at the canonical path by a
       ## foreign installer re-running over an ALREADY-chained copy of
@@ -16689,14 +17152,63 @@ proc regeneratedShimIdentity(content: string): string =
     return ""
   (if '\r' in content: "CRLF\n" else: "LF\n") & normalised.join("\n")
 
-proc ensureVcsHookDetailed(hooksDir, hookName: string): VcsHookEnsureOutcome =
+proc hookContractWriteRefusal(hooksDir, hookName, oldContract,
+    newContract, existingBody: string; interpreterPath,
+    interpreterSource: string): string =
+  ## The message `ensureVcsHookDetailed` refuses with when installing would
+  ## take a hook that the resolved interpreter CAN service and leave one it
+  ## cannot.
+  ##
+  ## Everything about its shape is a consequence of §1.6b: it names BOTH builds
+  ## (writer and runner) by PATH and STORE PATH, says how each was resolved,
+  ## and never offers ``hooks ensure`` as the remedy — that is the command the
+  ## hook body's own text warns against, the command running ambiently from the
+  ## generated ``.envrc`` on every directory entry, and the command whose
+  ## effect is to delete the diagnostic rather than the defect.
+  let writer = reproBuildIdentity(
+    try: getAppFilename() except CatchableError: "")
+  let runner = reproBuildIdentity(interpreterPath)
+  let author = managedHookAuthorBin(existingBody)
+  let repoRoot = parentDir(parentDir(hooksDir))
+  result = "refusing to rewrite " & hookName & " in " & repoRoot &
+    ": the 'repro' that will RUN this hook services the body that is " &
+    "installed and does NOT service the body this build writes. Installing " &
+    "would leave the repository with a hook nothing on this machine can " &
+    "evaluate.\n" &
+    "  the hook writer (this build): " & describeReproBuild(writer) & "\n" &
+    "    writes contract:            " & newContract & "\n" &
+    "  the hook runner:              " & describeReproBuild(runner) &
+      " (resolved from " & interpreterSource & ")\n" &
+    "    services contract:          " & oldContract & "\n"
+  if author.len > 0:
+    result.add("  the installed body was written by: " & author & "\n")
+  result.add(
+    "  THE VERSION STRING IS NOT THE DISCRIMINATOR — compare the store " &
+      "paths above.\n" &
+    "  Reconcile what supplies 'repro' rather than rewriting the hook:\n" &
+    "    1. direnv reload        (or open a new shell: a shell started " &
+      "before the last\n" &
+    "                             pin bump keeps serving the binary it was " &
+      "born with)\n" &
+    "    2. if it survives that, update the reprobuild pin and rebuild this " &
+      "environment\n" &
+    "  To install from the build that will run them, point both at one " &
+      "binary:\n" &
+    "    REPROBUILD_REPRO=" & interpreterPath & " " & interpreterPath &
+      " hooks ensure --vcs " & repoRoot)
+
+proc ensureVcsHookDetailed(hooksDir, hookName: string;
+                           guard: HookWriteGuard = nil): VcsHookEnsureOutcome =
   ## Idempotent installer for one (hooksDir, hookName) pair. Returns a
   ## structured outcome so callers can surface per-repo per-hook status
   ## in the JSON report and the human-readable summary line.
   ##
   ## Outcome priority (the higher-impact change wins when several apply):
-  ##   reclaimed-shadowed  >  chained-user-hook  >  refreshed-drifted  >
-  ##   installed  >  already-up-to-date
+  ##   reclaimed-shadowed  >  chained-user-hook  >  rewrote-contractless-body
+  ##   >  refreshed-drifted  >  installed  >  already-up-to-date
+  ##
+  ## ``guard`` memoises the PG-14 contract probe across the repos of one
+  ## ``ensure`` run; pass ``nil`` and one is created for this call alone.
   createDir(extendedPath(hooksDir))
   let standard = hookPath(hooksDir, hookName)
   let local = localHookPath(hooksDir, hookName)
@@ -16789,10 +17301,77 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string): VcsHookEnsureOutcome =
 
   # Detect drift: file exists, sentinel matches, body diverges from canonical.
   let canonicalManaged = vcsManagedHookContent(hookName)
+  var existingManaged = ""
   if fileExists(extendedPath(managed)) and
-      isReprobuildVcsHook(managed, hookName) and
-      readFile(extendedPath(managed)) != canonicalManaged:
-    refreshedDrift = true
+      isReprobuildVcsHook(managed, hookName):
+    existingManaged = readFile(extendedPath(managed))
+    if existingManaged != canonicalManaged:
+      refreshedDrift = true
+
+  # ---- PG-14: what the body about to be written demands, and who can service
+  #      it. Three questions, asked before a single byte is written.
+  let newContract = managedHookBodyContractDemand(canonicalManaged)
+  let oldContract = managedHookBodyContractDemand(existingManaged)
+  var rewroteContractless = false
+
+  # (1) SELF-CONSISTENCY. This build is about to write a body demanding
+  #     ``newContract``; its own ``hooks protocol`` handler must confirm that
+  #     token. The two are derived from the same proc today, so this cannot
+  #     fire — which is the point of asserting it: a future change that moves
+  #     body generation without moving the handshake would otherwise install
+  #     860 bodies that NOTHING, including their own author, can service, and
+  #     the symptom would be a workspace-wide silent refusal rather than a
+  #     build error.
+  if newContract.len == 0 or not buildServicesManagedHookContract(newContract):
+    raise newException(ValueError,
+      "refusing to install " & hookName & ": this build would write a body " &
+      "demanding the contract '" & newContract & "', which its own 'hooks " &
+      "protocol' handler does not confirm. That hook would refuse on every " &
+      "fire. This is a defect in the build, not in the repository.")
+
+  # (2) DOWNGRADE. A contract-bearing body must never be replaced by a
+  #     contract-less one: that is the trap the hook body warns about, and the
+  #     one thing an older build does that cannot be undone by reading the
+  #     file afterwards (the diagnostic is gone with the line). Structural for
+  #     this build — it always writes a token — and asserted anyway, because
+  #     the cost of being wrong is silence.
+  if oldContract.len > 0 and newContract.len == 0:
+    raise newException(ValueError,
+      "refusing to rewrite " & hookName & " in " & parentDir(parentDir(hooksDir)) &
+      ": the installed body demands the contract '" & oldContract &
+      "' and the body this build writes demands none. Writing it would " &
+      "delete the only line that reports a mismatch.")
+
+  # (3) WRITER vs RUNNER. Two builds that both speak the handshake may still
+  #     generate different bodies, and ``ensure`` re-anchoring a repository to
+  #     the build the operator ran is the NORMAL upgrade — it must stay
+  #     allowed. What must not happen is the strictly destructive case: the
+  #     interpreter the hooks will actually resolve services what is installed
+  #     and does NOT service what we would write. Then the rewrite converts a
+  #     working pairing into a broken one, and nothing afterwards reports it
+  #     (§1.6c measures `health` scoring exactly that state ``ok``).
+  #
+  #     Deliberately NOT a version comparison: on this host three 0.1.3 builds
+  #     disagree about the flag. Deliberately NOT fired on an unresolved
+  #     interpreter either — absence degrades (§8); a machine with no ``repro``
+  #     on PATH is not skewed, it is unconfigured.
+  if oldContract.len > 0 and oldContract != newContract:
+    let g = if guard.isNil: newHookWriteGuard() else: guard
+    let repoRoot = parentDir(parentDir(hooksDir))
+    let interp = g.interpreter(repoRoot)
+    if interp.path.len > 0 and
+        g.servicing(repoRoot, oldContract) == hcsServices and
+        g.servicing(repoRoot, newContract) != hcsServices:
+      raise newException(ValueError,
+        hookContractWriteRefusal(hooksDir, hookName, oldContract, newContract,
+          existingManaged, interp.path, interp.source))
+
+  # (4) The distinct state of deliverable 2: the body that was here demanded
+  #     nothing, so a build that predates the handshake wrote it. Replacing it
+  #     is an upgrade and proceeds — but it is REPORTED as what it is.
+  if existingManaged.len > 0 and oldContract.len == 0:
+    rewroteContractless = true
+
   let canonicalDispatcher = vcsDispatcherContent(hookName)
   if fileExists(extendedPath(standard)) and
       isReprobuildVcsHook(standard, hookName) and
@@ -16807,20 +17386,20 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string): VcsHookEnsureOutcome =
     return vheoReclaimedShadowed
   if chainedUser:
     return vheoChainedUserHook
+  if rewroteContractless:
+    # Ranked above plain drift: both rewrote a body, but only this one says
+    # that a build which cannot speak the handshake has been writing here.
+    return vheoRewroteContractlessBody
   if refreshedDrift:
     return vheoRefreshedDrifted
   if anyChange:
     return vheoInstalled
   vheoAlreadyUpToDate
 
-proc ensureVcsHook(hooksDir, hookName: string): bool =
-  ## Back-compat single-hook installer that reports a single
-  ## "changed / unchanged" boolean. Retained so the legacy single-repo
-  ## ``runVcsHooksCommand`` path (used by ``repro hooks reinstall`` and
-  ## ``repro hooks uninstall``) keeps the same shape it had before
-  ## the workspace-aware M17 ``ensure`` path was added.
-  let outcome = ensureVcsHookDetailed(hooksDir, hookName)
-  outcome != vheoAlreadyUpToDate
+# `ensureVcsHook`, the boolean-returning single-hook wrapper, is gone: its one
+# caller (`runVcsHooksCommand`) now reads the structured outcome directly,
+# because "changed / unchanged" cannot express the contract-less state PG-14
+# requires to be reported as its own (deliverable 2).
 
 proc selfHealManagedHooks*(repoRoot: string): seq[string] =
   ## Re-assert this repo's managed hook set from a hook that is CURRENTLY
@@ -16892,9 +17471,13 @@ proc selfHealManagedHooks*(repoRoot: string): seq[string] =
   for line in hooksPathDiagnosisLines(top, inspectWorktreeSafeHooksPath(top)):
     result.add(line)
   let hooksDir = gitHooksDir(top)
+  # One guard for the five hooks of this repo: the contract probe is a
+  # subprocess and this proc runs from post-commit / post-merge /
+  # post-checkout, i.e. on every commit in every repo.
+  let guard = newHookWriteGuard()
   for hookName in VcsHookNames:
     try:
-      let outcome = ensureVcsHookDetailed(hooksDir, hookName)
+      let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard)
       case outcome
       of vheoAlreadyUpToDate, vheoChainedUserHook:
         discard
@@ -16904,6 +17487,11 @@ proc selfHealManagedHooks*(repoRoot: string): seq[string] =
       of vheoRefreshedDrifted:
         result.add("repro hooks: repaired " & hookName & " in " & top &
           " (refreshed-drifted)")
+      of vheoRewroteContractlessBody:
+        result.add("repro hooks: repaired " & hookName & " in " & top &
+          " (rewrote-contractless-body: the body that was installed demanded " &
+          "no contract, so a build that predates the handshake wrote it; " &
+          "something on this machine will write one again)")
       of vheoReclaimedShadowed:
         result.add("repro hooks: repaired " & hookName & " in " & top &
           " (reclaimed-shadowed)")
@@ -16942,6 +17530,7 @@ proc vcsHookOutcomeTag(outcome: VcsHookEnsureOutcome): string =
   of vheoInstalled: "installed"
   of vheoChainedUserHook: "chained-user-hook"
   of vheoRefreshedDrifted: "refreshed-drifted"
+  of vheoRewroteContractlessBody: "rewrote-contractless-body"
   of vheoReclaimedShadowed: "reclaimed-shadowed"
 
 proc toJsonNode*(report: HooksEnsureReport): JsonNode =
@@ -17140,6 +17729,11 @@ proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
   result.project = enumerated.projectName
   for repo in enumerated.repos:
     result.repos.add(repo.name)
+  # ONE guard for the whole sweep. The interpreter it resolves is a property of
+  # this process's environment, which is exactly the thing that differs between
+  # two shells — so it is resolved once per invocation and never cached beyond
+  # it.
+  let guard = newHookWriteGuard()
   for repo in enumerated.repos:
     if gitTopLevel(repo.repoPath).len == 0:
       # Skip repos that the operator hasn't materialized yet — same
@@ -17165,8 +17759,18 @@ proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
       result.exitCode = 1
     let hooksDir = gitHooksDir(repo.repoPath)
     for hookName in VcsHookNames:
-      let outcome = ensureVcsHookDetailed(hooksDir, hookName)
+      let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard)
       let tag = vcsHookOutcomeTag(outcome)
+      if outcome == vheoRewroteContractlessBody:
+        # Deliverable 2's distinct state, said out loud and not only counted.
+        # An operator who sees this knows a non-speaking build writes here and
+        # that the next ambient `hooks ensure` from that build will undo this
+        # repair; a count in a summary table does not carry that.
+        stderr.writeLine("repro hooks: " & repo.name & "/" & hookName &
+          ": the installed body demanded NO contract — a build that predates " &
+          "the handshake wrote it. Rewritten with a contract-bearing body; " &
+          "reconcile what supplies 'repro' (direnv reload, then the pin) or " &
+          "it will be stripped again.")
       result.entries.add(VcsHookEntry(
         repo: repo.name,
         repoPath: repo.repoPath,
@@ -17244,16 +17848,34 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
     of hakReinstall: "reinstall"
     of hakUninstall: "uninstall"
   var changed = false
+  var contractless: seq[string]
   if action == hakReinstall:
     for hookName in VcsHookNames:
       changed = uninstallVcsHook(hooksDir, hookName) or changed
   case action
   of hakEnsure, hakReinstall:
+    let guard = newHookWriteGuard()
     for hookName in VcsHookNames:
-      changed = ensureVcsHook(hooksDir, hookName) or changed
+      let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard)
+      if outcome != vheoAlreadyUpToDate:
+        changed = true
+      if outcome == vheoRewroteContractlessBody:
+        contractless.add(hookName)
   of hakUninstall:
     for hookName in VcsHookNames:
       changed = uninstallVcsHook(hooksDir, hookName) or changed
+  # PG-14 deliverable 2 — a contract-less body is NOT "already current" and is
+  # not merely "updated": it says a build that predates the handshake has been
+  # writing into this hooks directory, and that it will do so again from the
+  # ambient `hooks ensure` the generated `.envrc` runs on every directory
+  # entry. So the single-repo path names it rather than folding it into the
+  # one-line status the two existing words carry.
+  if contractless.len > 0:
+    stderr.writeLine("repro hooks: " & contractless.join(", ") &
+      " had NO contract line at " & hooksDir &
+      " — written by a build that predates the handshake, and rewritten now. " &
+      "Reconcile what supplies 'repro' (direnv reload, then the pin); " &
+      "otherwise the next run of that build strips it again.")
   let status = if changed: "updated" else: "already current"
   echo "repro hooks: VCS hooks " & actionName & " " & status & " at " &
     hooksDir
@@ -17380,6 +18002,16 @@ proc runPostCommitLockCommand*(args: openArray[string]): int
 proc runPreCommitLockCommand*(args: openArray[string]): int
 proc runCachePushCommand*(args: openArray[string]): int
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string]
+
+proc emitLeafReports(reports: openArray[LeafCheckReport]) =
+  ## Print the shared-clone detector's messages
+  ## (Shared-Clone-Pool-Integrity §4.4) on stderr. Every caller that refreshes
+  ## a pool or runs the detector routes its findings here, so a stale ref
+  ## that was removed, or a branch of the user's whose history is gone, is
+  ## said once, in the same words, whichever command noticed it.
+  for line in messages(reports):
+    stderr.writeLine(line)
+
 proc runManifestRefreshHookCommand*(hookName: string;
                                     args: openArray[string]): int
 # Workspace-Membership-Model.md — the ``post-merge`` hook's local-state
@@ -17637,16 +18269,15 @@ proc runHooksCommand(args: openArray[string]): int =
       raise newException(ValueError,
         "repro hooks protocol requires exactly --require=2")
     if contractSeen:
-      let hookName = managedHookNameFromContract(contract)
-      if hookName.len == 0 or hookName notin VcsHookNames:
-        stderr.writeLine("repro hooks: '" & contract &
-          "' is not a managed-hook contract token this build recognizes")
-        return 3
-      let mine = managedHookContract(hookName)
-      if contract != mine:
-        stderr.writeLine("repro hooks: this build generates '" & mine &
-          "' for " & hookName & ", not '" & contract & "'")
-        return 3
+      # One implementation of the verdict, shared with every in-process asker
+      # (`hooks ensure`'s preflight, `health`'s skew check, the migration
+      # refusal). Two copies of this answer would let the tool tell a sibling
+      # process something it does not believe itself.
+      let verdict = managedHookContractServiceVerdict(contract)
+      if verdict.code != 0:
+        if verdict.diagnostic.len > 0:
+          stderr.writeLine(verdict.diagnostic)
+        return verdict.code
     stdout.writeLine("2")
     return 0
   if args.len > 0 and args[0] == "dispatch":
@@ -18231,14 +18862,10 @@ proc autoRunQuotaMemoryBytes*(): Option[uint64] =
       "REPROBUILD_RUNQUOTA_MEMORY_BYTES must be a positive integer")
   some(value)
 
-proc executableFile(path: string): bool =
-  if path.len == 0 or not fileExists(path):
-    return false
-  when defined(posix):
-    let perms = getFilePermissions(path)
-    result = fpUserExec in perms or fpGroupExec in perms or fpOthersExec in perms
-  else:
-    result = true
+# `executableFile` used to be defined here. It moved up beside
+# `resolveManagedHookInterpreter` (PG-14), which is the earliest caller: the
+# hook interpreter has to be resolved before `hooks ensure` writes a body, and
+# that is thousands of lines above this point.
 
 proc findRunQuotaDaemonBin*(): string =
   ## M9.R.11 — deterministic discovery of the ``runquotad`` binary.
@@ -21375,7 +22002,7 @@ proc computeDepIntegrity*(repoAbsPath, headSha: string): string =
     return gitObjectMultihash(gitObjectFormatOf(repoAbsPath), headSha)
   narStyleTreeMultihash(collectTreeEntries(repoAbsPath))
 
-proc usesProducerLockedDep(selector, root: string;
+proc usesProducerLockedDep(selector, root, pathBase: string;
                            existingDeps: seq[LockedDep]): Option[LockedDep] =
   ## FUP-M — resolve a recipe ``uses:`` producer SELECTOR to a locked sibling
   ## dependency so ``repro lock refresh`` carries the declared cross-repo
@@ -21397,7 +22024,9 @@ proc usesProducerLockedDep(selector, root: string;
   if srcRoot.len > 0 and dirExists(extendedPath(srcRoot)):
     let depAbs = absolutePath(srcRoot)
     let facts = committedLockRepoFacts(depAbs)
-    let rel = relativePath(depAbs, root).replace('\\', '/')
+    # Discovered from the invoking tree, RECORDED relative to the committed
+    # lock's frame of reference (``committedLockPathBase``).
+    let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     return some(LockedDep(
       name: selector, path: rel,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
@@ -21430,13 +22059,15 @@ proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
   ## Forward declaration; defined beside ``developSetClosure``, whose closure it
   ## computes.
 
-proc lockedDepFromCheckout(name, depAbs, root: string): LockedDep =
+proc lockedDepFromCheckout(name, depAbs, pathBase: string): LockedDep =
   ## A locked VCS dependency observed from the checkout at ``depAbs``: its
   ## ``HEAD`` as the revision, its canonical fetch URL, and the VCS-native
-  ## integrity of that commit. ``path`` is ``depAbs`` relative to ``root``.
+  ## integrity of that commit. ``path`` is ``depAbs`` relative to
+  ## ``pathBase`` — ``committedLockPathBase`` of the project, never the
+  ## invoking directory; see that proc for why the two differ.
   let facts = committedLockRepoFacts(depAbs)
   LockedDep(
-    name: name, path: relativePath(depAbs, root).replace('\\', '/'),
+    name: name, path: relativePath(depAbs, pathBase).replace('\\', '/'),
     coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
       gitRef: facts.branch, revision: facts.headSha),
     integrity: computeDepIntegrity(depAbs, facts.headSha),
@@ -21447,6 +22078,51 @@ proc isGitCheckoutDir(path: string): bool =
   dirExists(extendedPath(path)) and
     (dirExists(extendedPath(path / ".git")) or
      fileExists(extendedPath(path / ".git")))
+
+proc committedLockPathBase(projectRoot: string): string =
+  ## The directory a COMMITTED lock's ``deps`` paths are relative to.
+  ##
+  ## WHY THIS IS NOT SIMPLY THE INVOKING DIRECTORY. ``repro.lock`` is a
+  ## committed artifact, so every ``path`` it carries has to mean the same
+  ## thing to every reader of the repository. The frame of reference the spec
+  ## states is "the checkout relative to the repo", and every example is the
+  ## one-level sibling form ``../<sibling>`` (Unified-Locking-And-Hooks.md
+  ## §14.2, Workspace-Manifests.md).
+  ##
+  ## A LINKED WORKTREE is a checkout of the same repository at a different
+  ## depth, and that broke the invariant silently. Refreshed in
+  ## ``reprobuild/.claude/worktrees/agent-<id>`` — four levels below the repo
+  ## root — the writer produced ``path = "../../../../nim-shm-queue"``: correct
+  ## from that one worktree, and from the repo root (or any clone, or CI) a
+  ## path four levels ABOVE the workspace, outside the home directory. The
+  ## verifier cannot catch it either, because the lock is self-consistent for
+  ## the tree that wrote it.
+  ##
+  ## Agent sessions work in worktrees by default — this repository ships a
+  ## ``.gitignore`` entry for ``.claude/worktrees/`` — so refusing to refresh
+  ## there would make the normal case the unsupported one. Resolving against
+  ## the MAIN worktree instead makes a worktree refresh produce the SAME BYTES
+  ## as a refresh at the repo root, which is the property a committed file
+  ## needs.
+  ##
+  ## The mapping preserves the project's position WITHIN the repository, so a
+  ## project in a subdirectory keeps writing paths relative to its own
+  ## directory — where its lock lives — rather than to the repository top.
+  ##
+  ## Degrades to ``projectRoot`` whenever the main worktree cannot be
+  ## determined: no VCS tool, a directory that is not a checkout, or a layout
+  ## whose worktree listing is unavailable. That is the previous behaviour,
+  ## and it is correct whenever the invoking tree IS the main one — every
+  ## non-worktree case.
+  let normalized = os.normalizedPath(absolutePath(projectRoot))
+  let top = gitTopLevel(normalized)
+  if top.len == 0: return normalized
+  let main = gitMainWorktreeTop(normalized)
+  if main.len == 0 or cmpPaths(main, top) == 0: return normalized
+  let within = relativePath(normalized, top).replace('\\', '/')
+  if within.len == 0 or within == "." or within.startsWith(".."):
+    return os.normalizedPath(main)
+  os.normalizedPath(main / within)
 
 proc lockedDepsForWorkspace(workspaceRoot: string;
                             usesSelectors: seq[string] = @[];
@@ -21470,6 +22146,11 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   ## producer graph.
   result = @[]
   let root = absolutePath(workspaceRoot)
+  # Every ``path`` written below, and every path read back out of the existing
+  # lock, is relative to THIS directory rather than to ``root``. The two are
+  # the same everywhere except in a linked worktree; see
+  # ``committedLockPathBase``.
+  let pathBase = committedLockPathBase(root)
   let rootFacts = committedLockRepoFacts(root)
   let nested = discoverDevelopDeps(root)
   let bare = extractFilename(root.strip(
@@ -21496,20 +22177,23 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   var seenPaths: seq[string] = @[]
   var seenNames: seq[string] = @[]
   for d in nested:
-    let depAbs = root / d.path
+    let depAbs = absolutePath(root / d.path)
     let facts = committedLockRepoFacts(depAbs)
+    # ``d.path`` is relative to the INVOKING tree (that is what discovery
+    # resolves against); the lock records it relative to ``pathBase``.
+    let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     siblingDeps.add(LockedDep(
-      name: d.name, path: d.path,
+      name: d.name, path: rel,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
         gitRef: facts.branch, revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
       depends: @[], tags: @[]))
-    seenPaths.add(d.path)
+    seenPaths.add(rel)
     seenNames.add(d.name)
   for selector in usesSelectors:
     if selector in seenNames: continue
-    let depOpt = usesProducerLockedDep(selector, root, existingDeps)
+    let depOpt = usesProducerLockedDep(selector, root, pathBase, existingDeps)
     if depOpt.isNone: continue
     let dep = depOpt.get()
     if dep.path in seenPaths or dep.name in seenNames: continue
@@ -21527,7 +22211,7 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
     let depAbs = absolutePath(repoRoot)
     if cmpPaths(depAbs, root) == 0:
       continue
-    let rel = relativePath(depAbs, root).replace('\\', '/')
+    let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     if rel in seenPaths:
       continue
     let facts = committedLockRepoFacts(depAbs)
@@ -21564,10 +22248,10 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   if manifest.resolved:
     for sib in manifest.siblings:
       let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
-      let rel = relativePath(depAbs, root).replace('\\', '/')
+      let rel = relativePath(depAbs, pathBase).replace('\\', '/')
       if rel in seenPaths or sib.name in seenNames: continue
       if isGitCheckoutDir(depAbs):
-        siblingDeps.add(lockedDepFromCheckout(sib.name, depAbs, root))
+        siblingDeps.add(lockedDepFromCheckout(sib.name, depAbs, pathBase))
       else:
         var carried = false
         for d in existingDeps:
@@ -21596,9 +22280,9 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
     for d in existingDeps:
       if d.path == "." or d.coordinates.kind != ckVcs: continue
       if d.path in seenPaths or d.name in seenNames: continue
-      let depAbs = absolutePath(root / d.path)
+      let depAbs = absolutePath(pathBase / d.path)
       if isGitCheckoutDir(depAbs):
-        var observed = lockedDepFromCheckout(d.name, depAbs, root)
+        var observed = lockedDepFromCheckout(d.name, depAbs, pathBase)
         observed.path = d.path
         siblingDeps.add(observed)
       else:
@@ -32793,6 +33477,12 @@ proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; ide
     var prunable: seq[string]
     var surviving = 0
     for name in actualRemotes:
+      if name == LeafPoolRemoteName:
+        # Reprobuild's own remote for the shared clone this checkout borrows
+        # from (Shared-Clone-Pool-Integrity §3.4). No manifest declares it,
+        # and it is neither the manifest's to prune nor a remote that counts
+        # as the checkout "having" one.
+        continue
       if name in expectedRemotes:
         inc surviving
       else:
@@ -32895,6 +33585,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
     if sharedBareByUrl.hasKey(fetchUrl):
       return sharedBareByUrl[fetchUrl]
     let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     if not refreshed.ok and refreshed.diagnostic.len > 0:
       stderr.writeLine("workspace init: shared-clone cache miss for " &
@@ -33743,9 +34434,11 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
   # Measured on a real workspace: 12 repos reset by a run that reported
   # ``force-reset 0, skipped 0``.
   #
-  # The planner's refusal text has always said "run 'repro sync
-  # --rebase-on-force-push' to rebase your local commits on the new history".
-  # That sentence is only honest when the flag is what turns the rebase on.
+  # The planner's refusal text offers "'repro sync --rebase-on-force-push
+  # --yes' to reset onto the new history and replay the commits you own".
+  # That sentence is only honest when the flag is what turns the rebase on —
+  # and the planner now also withholds it where the replay has no base to
+  # work from, so a refusal never names a command that cannot act.
   result.rebaseOnForcePush = false
   var i = 0
   while i < args.len:
@@ -38856,6 +39549,22 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       oldRemoteTips[repoIdx] = revParse(identity, repoPath,
         "refs/remotes/" & rName & "/" & repo.revision)
 
+  # Shared-Clone-Pool-Integrity §4.2: the detector runs in every leaf BEFORE
+  # its fetch. It registers the leaf with its pool and writes the refetch
+  # chain and ``fetch.hideRefs`` (§4.3), refills what upstream still serves,
+  # removes remote-tracking refs whose commit exists nowhere (message A) and
+  # explains, without touching anything, a branch of the user's that depends
+  # on a commit that is gone (message B). The pool refreshes below run it
+  # again, for every registered leaf, once the refresh has moved the pool.
+  block sharedCloneLeaves:
+    var reports: seq[LeafCheckReport]
+    for repo in resolved.repos:
+      let repoPath = args.workspaceRoot / repo.path
+      if dirExists(repoPath / ".git"):
+        reports.add(checkLeaf(identity.binaryPath, repoPath, lcmRepair,
+          cacheRoot))
+    emitLeafReports(reports)
+
   var sharedBareRefreshAction = initTable[string, string]()
   var fetchActions: seq[BuildAction]
   var refreshActions: seq[BuildAction]
@@ -38977,6 +39686,12 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     var fetchById = initTable[string, ActionResult]()
     for outcome in res.results:
       fetchById[outcome.id] = outcome
+    # A pool refresh reports what it found in the leaves registered with it
+    # on its stdout (``executeRefreshBare``); say it here.
+    for a in refreshActions:
+      let printed = fetchById.getOrDefault(a.id).stdout
+      if printed.len > 0:
+        stderr.write(printed)
     var fetchOk = 0
     for a in fetchActions:
       let outcome = fetchById.getOrDefault(a.id)
@@ -39127,6 +39842,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     if sharedBareForClone.hasKey(fetchUrl):
       return sharedBareForClone[fetchUrl]
     let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     if not refreshed.ok and refreshed.diagnostic.len > 0:
       stderr.writeLine("workspace sync: shared-clone cache miss for " &
@@ -39184,10 +39900,18 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         continue
       # ``scForcePushRebase`` belongs in this set, and its absence was a
       # promise the tool did not keep: the planner's own refusal text for a
-      # rewritten remote ends "or discard it with 'repro sync --force-sync'",
-      # yet that case was filtered out here, so ``--force-sync`` did nothing
-      # for it and the repo stayed refused however many times the operator
-      # ran the named remedy.
+      # rewritten remote names a ``--force-sync`` remedy, yet that case was
+      # filtered out here, so ``--force-sync`` did nothing for it and the repo
+      # stayed refused however many times the operator ran the named remedy.
+      #
+      # Keeping that promise takes BOTH halves, and the second was missing for
+      # longer than the first. This arm makes the flag act; the planner's text
+      # has to name a command that survives the gate below, which in a
+      # non-interactive context means ``--force-sync --yes``. Twelve rewritten
+      # checkouts were refused, the printed remedy was run verbatim, and the
+      # answer was ``refused 12, force-reset 0`` — the flag was gated here
+      # correctly and then declined for want of a confirmation the advice
+      # never mentioned.
       if decision.syncCase notin
           {scDirty, scLocallyUnpublished, scDivergentFeatureBranch,
            scForcePushRebase}:
@@ -39793,6 +40517,7 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     if sharedBareForClone.hasKey(fetchUrl):
       return sharedBareForClone[fetchUrl]
     let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     if not refreshed.ok and refreshed.diagnostic.len > 0:
       stderr.writeLine("workspace mainline sync: shared-clone cache miss for " &
@@ -40625,6 +41350,7 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     if sharedBareByUrl.hasKey(fetchUrl):
       return sharedBareByUrl[fetchUrl]
     let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     sharedBareByUrl[fetchUrl] = reference
     reference
@@ -41367,6 +42093,14 @@ proc sameFilesystemPath(a, b: string): bool =
   else:
     aN == bN
 
+type
+  TriggerRepoUndeclaredError* = object of ValueError
+    ## The caller named a triggering checkout that no declared repo of the
+    ## resolved project matches, so there is no name to key a lock record on.
+    ## Distinct from the other lock-writer failures because for one trigger —
+    ## the membership repo — this is the SPECIFIED outcome rather than an
+    ## error (see ``pcoSkippedMembershipRepo``).
+
 proc pickTriggerRepo(resolved: ResolvedProject;
                      explicit, explicitPath, workspaceRoot: string;
                      identity: GitToolIdentity):
@@ -41423,7 +42157,16 @@ proc pickTriggerRepo(resolved: ResolvedProject;
     # commit this operation never observed, and that no consumer of the
     # triggering repo can find. "No lock" is recoverable and legible;
     # a misfiled one is neither.
-    raise newException(ValueError,
+    #
+    # Raised as its OWN type, not a bare ``ValueError``, because one caller
+    # has to tell this refusal apart from every other way the lock writer can
+    # fail. The post-commit hook does: for the MEMBERSHIP repo, "the trigger
+    # is not a declared repo" is the specified outcome rather than a failure
+    # (Workspace-And-Develop-Mode.md §"Gate scope when the pushed repo is the
+    # membership repo"), and the alternative — matching on this message's
+    # wording — would make that classification a property of the sentence
+    # below instead of of the condition it reports.
+    raise newException(TriggerRepoUndeclaredError,
       "triggering repo at '" & explicitPath &
         "' is not declared in project '" & resolved.projectName &
         "'; no lock can be anchored at it" &
@@ -42241,47 +42984,11 @@ type EffectivePrePushHookKind = enum
   ephReproIncompatible
   ephThirdParty
 
-const
-  # The two anchors around the one machine-local value a managed hook body
-  # carries. Kept beside the reader rather than inside it so the coupling to
-  # `vcsManagedHookBody`'s escape-hatch block is visible from both ends.
-  #
-  # That block writes the line as
-  #   echo <quoteShellPosix("repro hooks: ... REPROBUILD_REPRO=" &
-  #                         quoteShellPosix(author) & " git push")> >&2
-  # and the message always contains spaces, so the outer quoting is always
-  # the single-quoted form. Change one end and the other stops finding the
-  # author: every hook written from a second path of the same build is then
-  # reported as "old or partially upgraded" and `repro push` stops at
-  # hook-preflight. Tripwire: t_repro_push_accepts_hooks_the_same_build_wrote_
-  # from_another_path (tests/integration/t_repro_push_sync_integrates_...).
-  ManagedHookAuthorEchoPrefix =
-    "      echo 'repro hooks:        REPROBUILD_REPRO="
-  ManagedHookAuthorEchoSuffix = " git push' >&2"
-
-proc unquoteShellPosixWord(quoted: string): string =
-  ## Inverse of `quoteShellPosix` for one word: bare as-is, or `'...'` with
-  ## each embedded quote spelled `'"'"'`. Only ever used to PROPOSE a
-  ## candidate that the caller then re-renders byte-exactly, so a misreading
-  ## can reject a body but never accept one.
-  if quoted.len >= 2 and quoted[0] == '\'' and quoted[^1] == '\'':
-    quoted[1 .. ^2].replace("'\"'\"'", "'")
-  else:
-    quoted
-
-proc managedHookAuthorBin(body: string): string =
-  ## The `repro` path an installed managed hook advertises in its escape
-  ## hatch, or "" when the hook carries none.
-  for line in body.splitLines():
-    if line.startsWith(ManagedHookAuthorEchoPrefix) and
-        line.endsWith(ManagedHookAuthorEchoSuffix) and
-        line.len > ManagedHookAuthorEchoPrefix.len +
-          ManagedHookAuthorEchoSuffix.len:
-      # Undo the outer (message) quoting, then the inner (path) quoting.
-      let inner = line[ManagedHookAuthorEchoPrefix.len ..
-        ^(ManagedHookAuthorEchoSuffix.len + 1)].replace("'\"'\"'", "'")
-      return unquoteShellPosixWord(inner)
-  ""
+# `ManagedHookAuthorEchoPrefix` / `unquoteShellPosixWord` /
+# `managedHookAuthorBin` used to live here. They moved up beside
+# `managedHookContract` (PG-14) because `hooks ensure` now needs to name the
+# build that wrote an installed body, and that happens long before this point
+# in the module.
 
 proc managedHookBodyIsCurrent(hookName, body: string): bool =
   ## "Does this build generate the hook body in front of me?" — the question
@@ -42358,13 +43065,11 @@ proc resolveHookReproCli(repoRoot: string): string =
   ## `find_repro_cmd`, evaluated from the same repository directory. This is
   ## shared by preflight so it cannot probe getAppFilename() while the installed
   ## hook will later execute a different REPROBUILD_REPRO/PATH binary.
-  let configured = getEnv("REPROBUILD_REPRO")
-  if configured.len > 0:
-    let candidate =
-      if configured.isAbsolute: configured else: repoRoot / configured
-    if executableFile(candidate): return candidate
-    return ""
-  findExe("repro")
+  ##
+  ## PG-14 folded the resolution itself into `resolveManagedHookInterpreter`,
+  ## which additionally reports HOW it resolved — the half the skew diagnostics
+  ## need. This wrapper keeps the path-only shape its callers expect.
+  resolveManagedHookInterpreter(repoRoot).path
 
 proc configuredPushLocation(identity: GitToolIdentity; repoRoot,
     remote: string): tuple[ok: bool; value: string; diagnostic: string] =
@@ -44173,6 +44878,21 @@ type
     pcoNoLockFailed      ## Lock writer raised (IO error, VCS query
                          ## failure, missing checkout, ...) and NO lock
                          ## exists.
+    pcoSkippedMembershipRepo ## The commit landed in the MEMBERSHIP repo (the
+                          ## checkout carrying ``projects/``/``repos/``), for
+                          ## which Workspace-And-Develop-Mode.md §"Gate scope
+                          ## when the pushed repo is the membership repo"
+                          ## decides that no trigger-keyed record is due at
+                          ## all: it is not a project repo, so it has no
+                          ## declared name to encode as the ``<repo>``
+                          ## component and belongs to no tier's partition.
+                          ## Writing nothing is the SPECIFIED outcome here, so
+                          ## it is a skip and not a failure — the distinction
+                          ## this suite's invariant 4 reserves
+                          ## ``no-lock-failed`` for. A stray undeclared
+                          ## checkout keeps that tag: it has no resolvable
+                          ## anchor, which does block a record somebody would
+                          ## have looked for.
     pcoSkippedGitOperation ## Git is mid-rebase / mid-cherry-pick / mid-am /
                            ## mid-bisect in the repo that fired the hook. The
                            ## commit this hook saw is one of that operation's
@@ -44231,6 +44951,7 @@ proc postCommitOutcomeTag(outcome: PostCommitOutcome): string =
   of pcoNoLockDirty: "no-lock-dirty-siblings"
   of pcoSkippedNoWorkspace: "skipped-no-workspace"
   of pcoNoLockFailed: "no-lock-failed"
+  of pcoSkippedMembershipRepo: "skipped-membership-repo"
   of pcoSkippedGitOperation: "skipped-git-operation-in-progress"
   of pcoInertGitStateUnknown: "inert-git-state-unknown"
 
@@ -45503,6 +46224,33 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   ## ``mayWrite = false`` classifies and reports without writing, for a commit
   ## the `repro.lock` re-pin is already refusing.
 
+proc triggerIsMembershipRepo(toolProvisioning: ToolProvisioningMode;
+                             workspaceRoot, triggerRepoPath: string): bool =
+  ## Is ``triggerRepoPath`` this workspace's MEMBERSHIP repo — the checkout
+  ## carrying ``projects/``/``repos/``, which no project declares?
+  ##
+  ## The same test the pre-push gate makes (``currentIsMembershipRepo``), and
+  ## made the same way on purpose: ``manifestsRoot`` locates membership (the
+  ## flat workspace root, else a materialized ``.repro/manifests``), and
+  ## ``discoverGitWorktree`` insists the path IS a worktree ROOT rather than
+  ## accepting an ancestor's answer. Without that second half an arbitrary
+  ## directory that happens to sit at the membership path would qualify.
+  ##
+  ## False on any probe failure. The caller is deciding whether to downgrade a
+  ## failure report to a decided no-op, so an unanswerable question must leave
+  ## the failure report standing.
+  if triggerRepoPath.len == 0 or workspaceRoot.len == 0:
+    return false
+  try:
+    let membershipRoot = manifestsRoot(workspaceRoot)
+    if not sameFilesystemPath(absolutePath(membershipRoot),
+                              absolutePath(triggerRepoPath)):
+      return false
+    let identity = ensureGitToolResolvable(toolProvisioning, getEnv("PATH"))
+    discoverGitWorktree(identity, membershipRoot).ok
+  except CatchableError:
+    false
+
 proc runPostCommitLockCommand*(args: openArray[string]): int =
   ## ``repro hooks dispatch post-commit --repo-root=<repo>`` (and the
   ## operator-facing manual entry point) routes here. The M19 policy is
@@ -45732,12 +46480,61 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
 
   var raised = false
   var raisedDiagnostic = ""
+  var raisedTriggerUndeclared = false
   var outcome: WorkspaceLockOutcome
   try:
     outcome = executeWorkspaceLock(lockArgs)
   except CatchableError as err:
     raised = true
     raisedDiagnostic = err.msg
+    raisedTriggerUndeclared = err of TriggerRepoUndeclaredError
+
+  if raised and raisedTriggerUndeclared and
+      triggerIsMembershipRepo(parsed.toolProvisioning, workspaceRoot,
+                              lockArgs.triggerRepoPath):
+    # NOT a failure: this is the outcome the specs decide for this trigger.
+    #
+    # Workspace-And-Develop-Mode.md §"Gate scope when the pushed repo is the
+    # membership repo" — "Rule (DECIDED). A membership push writes NO
+    # trigger-keyed lock record." The membership repo is not a project repo,
+    # so it has no declared name to encode as the ``<repo>`` component of
+    # ``locks/<project>/<repo>/<sha>.toml`` and belongs to no tier's
+    # partition; Unified-Locking-And-Hooks.md §6 Decision 1 consequence 2 then
+    # applies verbatim. The resolver is right to refuse an anchor and must not
+    # fall through to the project-named default — that files a false claim at a
+    # coordinate the commit cannot move, and burns it.
+    #
+    # What was wrong was the REPORT. Every manifest commit logged
+    # ``no-lock-failed`` — the tag
+    # ``t_workspace_post_commit_lock_refresh_is_best_effort`` reserves for
+    # invariant 4, a lock writer that genuinely failed — and said no lock
+    # "can be anchored at it", which describes an obstacle where the spec
+    # says no record is due. One workspace accumulated eighteen days of those
+    # with nothing wrong with it, and the real failure underneath (a dirty
+    # sibling) had been masked by the same log for two weeks before that.
+    #
+    # Everything else post-commit does for this repo still happens: the
+    # cache-ref push and the evidence refresh above have already run. Only the
+    # record is not due.
+    report.outcome = postCommitOutcomeTag(pcoSkippedMembershipRepo)
+    report.publication = postCommitPublicationTag(pcpNoRecord)
+    report.lockWritten = false
+    report.diagnostic = "no lock record is due: '" &
+      lockArgs.triggerRepoPath & "' is this workspace's membership repo " &
+      "(it carries projects/ and repos/), which no project declares as one " &
+      "of its repos, so a commit here anchors no trigger-keyed record " &
+      "(Workspace-And-Develop-Mode.md §\"Gate scope when the pushed repo " &
+      "is the membership repo\"). Nothing failed and nothing is pending; " &
+      "the repos whose pins this commit changes each record their own lock " &
+      "when they are pushed."
+    writePostCommitReport(workspaceRoot, report)
+    appendPostCommitLog(workspaceRoot,
+      timestamp & " " & report.outcome & " " & report.diagnostic)
+    # Deliberately NOT routed through ``emitPostCommitWarning``: that channel
+    # is for a run that did not reach the designed steady state, and this one
+    # IS the designed steady state for this repo. A warning on every manifest
+    # commit is how an operator learns to stop reading them.
+    return 0
 
   if raised:
     # M19b mode 3: no lock exists. The commonest instance of this branch is
@@ -46063,12 +46860,17 @@ proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies):
   ## checkout and related to its pin by ``classifySiblingPin``. Reads only;
   ## writes nothing.
   let root = absolutePath(repoRoot)
+  # The committed lock's frame of reference, not the invoking tree's: this
+  # runs from the managed ``pre-commit`` hook, which fires in a linked
+  # worktree exactly as it does in the main one. See
+  # ``committedLockPathBase``.
+  let pathBase = committedLockPathBase(root)
   let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   var seen: seq[string] = @[]
   proc observe(name, depAbs, pinned: string; declared: bool):
       CommittedPinObservation =
     result = CommittedPinObservation(name: name,
-      path: relativePath(depAbs, root).replace('\\', '/'), pinned: pinned,
+      path: relativePath(depAbs, pathBase).replace('\\', '/'), pinned: pinned,
       declared: declared, relation: sprUnknown)
     if not isGitCheckoutDir(depAbs): return
     let head = gitRunPlain(identity, ["-C", depAbs, "rev-parse", "HEAD"])
@@ -46093,15 +46895,15 @@ proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies):
   for d in ld.deps:
     if d.path == "." or d.coordinates.kind != ckVcs or d.path.len == 0:
       continue
-    let depAbs = absolutePath(root / d.path)
+    let depAbs = absolutePath(pathBase / d.path)
     result.observations.add(observe(d.name, depAbs, d.coordinates.revision,
       d.name in declaredNames))
     seen.add(d.name)
-    seen.add(relativePath(depAbs, root).replace('\\', '/'))
+    seen.add(relativePath(depAbs, pathBase).replace('\\', '/'))
   if manifest.resolved:
     for sib in manifest.siblings:
       let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
-      let rel = relativePath(depAbs, root).replace('\\', '/')
+      let rel = relativePath(depAbs, pathBase).replace('\\', '/')
       if sib.name in seen or rel in seen: continue
       result.observations.add(observe(sib.name, depAbs, "", true))
 
@@ -46159,6 +46961,9 @@ proc planCommittedLockRepin(repoRoot: string;
       " carries no `deps = [...]` line to re-pin"
     return
   let obs = observeCommittedLockSiblings(root, ld)
+  # Resolved once: the lookup costs a subprocess, and every observation below
+  # shares the same base.
+  let pathBase = committedLockPathBase(root)
   var moved: seq[string] = @[]
   var added: seq[string] = @[]
   var rootIdx = -1
@@ -46172,8 +46977,8 @@ proc planCommittedLockRepin(repoRoot: string;
         "uncommitted changes; repro.lock pins its HEAD " & o.observed &
         ", which does not describe the working tree this commit was built " &
         "against")
-    let depAbs = absolutePath(root / o.path)
-    let fresh = lockedDepFromCheckout(o.name, depAbs, root)
+    let depAbs = absolutePath(pathBase / o.path)
+    let fresh = lockedDepFromCheckout(o.name, depAbs, pathBase)
     var found = false
     for i in 0 ..< ld.deps.len:
       if ld.deps[i].path == "." or ld.deps[i].coordinates.kind != ckVcs:
@@ -50465,6 +51270,291 @@ proc parseGatewayDirFlag(args: openArray[string]): string =
   if gitDir.len > 0: return gitDir
   getCurrentDir()
 
+# ---- PG-14 / spec §7.6.5: the ONE workspace-level refusal -----------------
+#
+# Migration is per-repo independent by design (§7.6.4): no abort on the first
+# failure, no rollback of earlier repos, and "is this workspace migrated?" is
+# answered as a count with its residue. §7.6.5 carves out exactly one
+# exception, and it is an exception for a reason that is structural rather than
+# a matter of taste: BINARY SKEW IS A PROPERTY OF THE MACHINE, not of any repo,
+# and it is identically fatal for all of them.
+#
+# Why a refusal and not a warning (§7.6.5, verbatim in substance):
+#
+#   * Under skew, wiring makes things WORSE in a way nothing reports. A wired
+#     gateway whose hooks the resolved `repro` cannot service rejects every
+#     push (serving fails closed) — or, on the non-blocking arm, accepts every
+#     push ungated. Either way the repo now LOOKS governed, and §1.6c measures
+#     `health` scoring exactly that state `ok`.
+#   * The repair costs one `direnv reload`. The diagnosis costs a day of a gate
+#     that is not a gate.
+#   * The failure mode is self-concealing: `hooks ensure` run by the
+#     non-speaking build strips the contract line, and that command runs
+#     ambiently on every directory entry with its output discarded.
+#
+# It is evaluated ONCE, BEFORE the first repo is touched. Evaluating it per
+# repo after the first wiring would already have written a `pushurl` that the
+# refusal then claims it refused to write.
+
+type
+  HookWriterRunnerSkew* = object
+    ## Writer-versus-runner verdict for one machine, as the shell this process
+    ## runs in sees it.
+    skewed*: bool
+    writer*: ReproBuildIdentity   ## the build that would WRITE the hooks
+    runner*: ReproBuildIdentity   ## the build that will RUN them
+    runnerSource*: string         ## how the runner was resolved
+    contract*: string             ## the token the writer would bake in
+    servicing*: HookContractServicing
+    probeExit*: int
+
+proc assessHookWriterRunnerSkew*(repoRoot: string;
+    hookName = "post-commit"): HookWriterRunnerSkew =
+  ## §7.6.5's check: resolve `repro` the way a managed hook does and ask it the
+  ## generated body's own question.
+  ##
+  ## ``hookName`` selects which of the five tokens is probed. Any one of them
+  ## answers the question — a build either speaks the handshake or does not,
+  ## and a build that generates a different body for one hook is a different
+  ## build — so this is a probe, not a survey. ``post-commit`` is the default
+  ## because it is the token §1.6b's measurements were taken against.
+  result.contract = managedHookContract(hookName)
+  result.writer = reproBuildIdentity(
+    try: getAppFilename() except CatchableError: "")
+  let resolved = resolveManagedHookInterpreter(repoRoot)
+  result.runnerSource =
+    if resolved.source.len > 0: resolved.source
+    else: "neither REPROBUILD_REPRO nor PATH"
+  result.runner = reproBuildIdentity(resolved.path)
+  if resolved.path.len == 0:
+    # NOT "absence degrades" here, and the difference from the `health` row is
+    # deliberate. `health` reports a state; migration WRITES a `pushurl` whose
+    # receiving hooks need a `repro` to evaluate a push at all. With none
+    # resolvable, the push path the sweep installs is broken rather than
+    # degraded, so the sweep declines to install it.
+    result.servicing = hcsUnresolved
+    result.probeExit = -1
+    result.skewed = true
+    return
+  let probe = probeHookContractServicing(resolved.path, result.contract)
+  result.servicing = probe.servicing
+  result.probeExit = probe.exitCode
+  # ANY non-zero answer refuses (§7.6.5). Exit 3 included: a build that speaks
+  # the handshake and generates a different body is still not the build that
+  # wrote these hooks, which is the whole predicate ("the hook writer and the
+  # hook runner must be one build").
+  result.skewed = probe.servicing != hcsServices
+
+proc hookWriterRunnerSkewDiagnostic*(skew: HookWriterRunnerSkew): seq[string] =
+  ## The refusal, as lines. Names BOTH builds and how each was resolved — by
+  ## path and by store path, never by version alone, because three 0.1.3 builds
+  ## on this host disagree about the flag.
+  result.add("reprobuild gateway: REFUSING the whole migration sweep: the " &
+    "'repro' that would WRITE this workspace's hooks is not the 'repro' that " &
+    "will RUN them.")
+  result.add("  hook writer (this build): " & describeReproBuild(skew.writer))
+  result.add("  hook runner:              " & describeReproBuild(skew.runner) &
+    " (resolved from " & skew.runnerSource & ")")
+  result.add("  contract probed:          " & skew.contract)
+  case skew.servicing
+  of hcsUnresolved:
+    result.add("  the runner could not be resolved at all, so a gateway " &
+      "wired now would receive pushes nothing can evaluate.")
+  of hcsSpeaksDifferentBody:
+    result.add("  the runner speaks this handshake and generates a " &
+      "DIFFERENT hook body (probe exit 3).")
+  of hcsDoesNotSpeakHandshake:
+    result.add("  the runner does NOT speak this handshake (probe exit " &
+      $skew.probeExit & "): it rejected a flag it has never heard of.")
+  of hcsServices:
+    result.add("  (the runner services the contract; this is not a skew)")
+  result.add("  THE VERSION STRING IS NOT THE DISCRIMINATOR — compare the " &
+    "store paths above. Seventeen reprobuild builds exist on the host this " &
+    "was measured on, and three of them report the same version while " &
+    "disagreeing about the flag.")
+  result.add("  NOTHING was wired: no repo's remote.origin.pushurl was " &
+    "touched. Reconcile what supplies 'repro' and re-run:")
+  result.add("    1. direnv reload   (or open a new shell — a shell started " &
+    "before the last pin bump keeps serving the binary it was born with)")
+  result.add("    2. if it survives that, update the reprobuild pin and " &
+    "rebuild this environment")
+  if skew.runner.path.len > 0:
+    result.add("  To run the sweep with the build that will run the hooks, " &
+      "point both at one binary:")
+    result.add("    REPROBUILD_REPRO=" & skew.runner.path & " " &
+      skew.runner.path & " gateway migrate")
+
+# ---- the per-repo wiring entry point --------------------------------------
+
+type
+  GatewayWireOutcome* = enum
+    ## Per-repo verdict of ``ensureGatewayForRepo``.
+    gwoWired            ## the pushurl now points at this workspace's gateway
+    gwoAlreadyWired     ## it already did; nothing was written
+    gwoForeignPushurl   ## a pushurl this tool did not set: REPORTED, never
+                        ## overwritten (§7.3)
+    gwoNoUpstream       ## no ``remote.<name>.url`` to forward to
+    gwoSkewRefused      ## the §7.6.5 refusal reached this repo
+    gwoFailed           ## git refused the write
+
+  GatewayWireResult* = object
+    repo*: string
+    repoPath*: string
+    outcome*: GatewayWireOutcome
+    gatewayDir*: string
+    upstreamUrl*: string
+    diagnostic*: string
+
+proc gatewayBarePathFor*(cacheRoot, workspaceName, upstreamUrl: string): string =
+  ## Spec §2's layout: ``<cache>/gateways/<workspace>/<host>/<org>/<repo>.git``
+  ## beside ``<cache>/clones/<host>/<org>/<repo>.git``.
+  ##
+  ## MINIMAL BY INTENT. PG-4 owns the real ``ensureGateway`` — alternates to
+  ## the pool, refs seeded from it, so a gateway costs no network and almost no
+  ## disk. This computes only the PATH, which is all the skew refusal and its
+  ## test need, and is the path PG-4 will fill in.
+  ##
+  ## ``cacheRoot`` is the clones root. When ``REPRO_WORKSPACE_CLONES`` points it
+  ## somewhere arbitrary the gateways tree still lands beside it, which is the
+  ## intended relationship.
+  parentDir(cacheRoot) / "gateways" / workspaceName / urlSlug(upstreamUrl)
+
+proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
+                           cacheRoot = ""; remoteName = "origin";
+                           skew = HookWriterRunnerSkew(skewed: false);
+                           dryRun = false): GatewayWireResult =
+  ## PG-8's single wiring entry point, with PG-14's refusal in front of it.
+  ##
+  ## ``skew`` is passed IN rather than computed here: §7.6.5's refusal is
+  ## evaluated once per sweep, before the first repo is touched, and a per-repo
+  ## evaluation would be a different (and weaker) guarantee. A caller that
+  ## wires a single repo and has not assessed the machine gets the default,
+  ## which is "not skewed" — and is expected to have asked.
+  result.repo = repoName
+  result.repoPath = repoPath
+  if skew.skewed:
+    result.outcome = gwoSkewRefused
+    result.diagnostic = "refused: binary skew (spec §7.6.5)"
+    return
+  let upstream = gitNoteRun(gitBin,
+    ["-C", repoPath, "config", "--get", "remote." & remoteName & ".url"])
+  if upstream.code != 0 or upstream.output.strip().len == 0:
+    result.outcome = gwoNoUpstream
+    result.diagnostic = "no remote." & remoteName & ".url in " & repoPath
+    return
+  result.upstreamUrl = upstream.output.strip()
+  let root =
+    if cacheRoot.len > 0: cacheRoot
+    else: defaultCacheRoot(workspaceRoot)
+  result.gatewayDir = gatewayBarePathFor(root, lastPathPart(workspaceRoot),
+    result.upstreamUrl)
+  let existing = gitNoteRun(gitBin,
+    ["-C", repoPath, "config", "--get", "remote." & remoteName & ".pushurl"])
+  if existing.code == 0 and existing.output.strip().len > 0:
+    let current = existing.output.strip()
+    if current == absolutePath(result.gatewayDir):
+      result.outcome = gwoAlreadyWired
+      return
+    # §7.3 — a pushurl this tool did not set is never overwritten. Stricter
+    # here than PG-9 will be: without the provenance record (PG-9's
+    # deliverable) this cannot tell "reprobuild set it, to a stale value" from
+    # "the operator set it", so it reports and leaves it alone. Erring toward
+    # not clobbering a developer's own mirror is the right side to err on.
+    result.outcome = gwoForeignPushurl
+    result.diagnostic = "remote." & remoteName & ".pushurl is already '" &
+      current & "'; left untouched (no provenance record says reprobuild " &
+      "set it)"
+    return
+  if dryRun:
+    result.outcome = gwoWired
+    result.diagnostic = "dry-run: would wire " & repoPath & " -> " &
+      result.gatewayDir
+    return
+  var cfg = GatewayConfig()
+  let wired = wirePushGateway(gitBin, repoPath, result.gatewayDir,
+    result.upstreamUrl, cfg, remoteName)
+  if not wired.ok:
+    result.outcome = gwoFailed
+    result.diagnostic = wired.diagnostic
+    return
+  result.outcome = gwoWired
+
+proc migrateWorkspaceGateways*(workspaceRoot: string; dryRun = false;
+    cacheRoot = ""): tuple[code: int; lines: seq[string];
+                           results: seq[GatewayWireResult]] =
+  ## The sweep. Step one is the refusal; there is no step two under skew.
+  let gitBin = findExe("git")
+  if gitBin.len == 0:
+    return (1, @["reprobuild gateway: git not found on PATH; cannot migrate"],
+            @[])
+  let skew = assessHookWriterRunnerSkew(workspaceRoot)
+  if skew.skewed:
+    # BEFORE the enumeration, let alone the first write. The test for this
+    # asserts ZERO pushurl writes anywhere, and the only implementation that
+    # satisfies it is one that refuses here.
+    return (1, hookWriterRunnerSkewDiagnostic(skew), @[])
+  let enumerated = enumerateParticipatingRepos(workspaceRoot)
+  var lines: seq[string]
+  var results: seq[GatewayWireResult]
+  var code = 0
+  for repo in enumerated.repos:
+    if gitTopLevel(repo.repoPath).len == 0:
+      continue
+    # Per-repo independence (§7.6.4): a failure here does not abort the sweep
+    # and does not roll back the repos already done.
+    let res = ensureGatewayForRepo(gitBin, workspaceRoot, repo.name,
+      repo.repoPath, cacheRoot, "origin", skew, dryRun)
+    results.add(res)
+    case res.outcome
+    of gwoWired:
+      lines.add("reprobuild gateway: " & repo.name & ": wired -> " &
+        res.gatewayDir)
+    of gwoAlreadyWired:
+      lines.add("reprobuild gateway: " & repo.name & ": already wired")
+    of gwoForeignPushurl:
+      lines.add("reprobuild gateway: " & repo.name & ": foreign — " &
+        res.diagnostic)
+    of gwoNoUpstream:
+      lines.add("reprobuild gateway: " & repo.name & ": skipped — " &
+        res.diagnostic)
+    of gwoSkewRefused:
+      lines.add("reprobuild gateway: " & repo.name & ": refused — " &
+        res.diagnostic)
+      code = 1
+    of gwoFailed:
+      lines.add("reprobuild gateway: " & repo.name & ": FAILED — " &
+        res.diagnostic)
+      code = 1
+  (code, lines, results)
+
+proc runGatewayMigrateCommand(args: openArray[string]): int =
+  ## ``repro gateway migrate [--workspace-root=PATH] [--dry-run]``.
+  ##
+  ## EXPLICIT AND OPT-IN, and that is not an accident of implementation order:
+  ## the rollout sequence (§7.7) puts wiring at step 4, behind PG-0 and PG-3,
+  ## and PG-9 owns attaching migration to `sync` / `pull`. Nothing ambient
+  ## invokes this verb — not `sync`, not `hooks ensure`, not dev-shell entry.
+  ## What it exists for at step 1 is to make §7.6.5's refusal a thing in the
+  ## code with a caller, rather than a sentence in a runbook.
+  var workspaceRoot = ""
+  var dryRun = false
+  for arg in args:
+    if arg.startsWith("--workspace-root="):
+      workspaceRoot = arg["--workspace-root=".len .. ^1]
+    elif arg == "--dry-run":
+      dryRun = true
+    else:
+      stderr.writeLine("repro gateway migrate: unsupported flag: " & arg)
+      return 2
+  if workspaceRoot.len == 0:
+    workspaceRoot = getCurrentDir()
+  workspaceRoot = os.normalizedPath(absolutePath(workspaceRoot))
+  let swept = migrateWorkspaceGateways(workspaceRoot, dryRun)
+  for line in swept.lines:
+    if swept.code != 0: stderr.writeLine(line)
+    else: echo line
+  swept.code
+
 proc runGatewayCommand*(args: openArray[string]): int =
   ## ``repro gateway <phase> [--gateway-dir PATH]`` — the thin entry point the
   ## gateway bare's hooks invoke. Two phases:
@@ -50486,9 +51576,15 @@ proc runGatewayCommand*(args: openArray[string]): int =
   let received = receiveHookObjectStore()
   if args.len == 0:
     stderr.writeLine("repro gateway: expected a phase " &
-      "(pre-receive | post-receive)")
+      "(pre-receive | post-receive) or 'migrate'")
     return 2
   let phase = args[0]
+  if phase == "migrate":
+    # Not a receive phase: it reads no stdin stream and there is no gateway
+    # config to load yet (it is the thing that creates them). Dispatched here,
+    # ahead of the config read below, for exactly that reason.
+    return runGatewayMigrateCommand(
+      if args.len > 1: args[1 .. ^1] else: @[])
   let gatewayDir = parseGatewayDirFlag(args)
   let gitBin = findExe("git")
   if gitBin.len == 0:
@@ -50552,7 +51648,7 @@ proc runGatewayCommand*(args: openArray[string]): int =
     return 0
   else:
     stderr.writeLine("repro gateway: unknown phase '" & phase &
-      "' (expected: pre-receive | post-receive)")
+      "' (expected: pre-receive | post-receive | migrate)")
     return 2
 
 proc developSetClosure(repos: seq[ResolvedRepo];
@@ -50607,8 +51703,18 @@ proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
   ## fails to resolve, or one that does not contain this repo. The caller then
   ## falls back to the committed lock's own pins rather than treating "could
   ## not look" as "declares nothing".
+  ##
+  ## ``repoRoot`` is mapped through ``committedLockPathBase`` first, because a
+  ## manifest declares a repository by ITS path and a LINKED WORKTREE is the
+  ## same repository at a different one. Identifying the repo by the invoking
+  ## directory matched no declared repo when the refresh ran from a worktree,
+  ## ``selfName`` stayed empty, and this returned ``resolved = false`` — so a
+  ## worktree refresh wrote a lock with NO develop set at all, indistinguishable
+  ## from a repo that declares none. That is the same defect as the dep paths
+  ## (see ``committedLockPathBase``) in the membership dimension rather than
+  ## the path dimension.
   result = (false, "", @[])
-  let root = absolutePath(repoRoot)
+  let root = committedLockPathBase(repoRoot)
   let ws = enclosingWorkspaceRoot(root)
   if ws.len == 0 or cmpPaths(absolutePath(ws), root) == 0:
     return
@@ -54806,10 +55912,23 @@ type
     repos*: seq[WorkspaceStatusRepoEntry]
     summary*: tuple[clean, dirty, missing, drifted, atLock,
       noLockRecorded: int]
+    leafReports*: seq[LeafCheckReport]
+      ## Shared-Clone-Pool-Integrity §4.2: the detector's report for each
+      ## checkout that borrows from a shared clone (report-only unless
+      ## ``--fix``).
     exitCode*: int
 
 proc toJsonNode*(report: WorkspaceStatusReport): JsonNode =
   result = newJObject()
+  var sharedCloneFindings = newJArray()
+  for lr in report.leafReports:
+    for f in lr.findings:
+      if f.message.len == 0:
+        continue
+      sharedCloneFindings.add(%*{"leaf": lr.leaf, "pool": lr.pool,
+        "kind": $f.kind, "ref": f.refName, "object": f.objectId,
+        "removed": f.removed, "message": f.message})
+  result["sharedCloneFindings"] = sharedCloneFindings
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
   result["activeBranch"] = %report.activeBranch
@@ -54923,6 +56042,9 @@ type
     aheadBehind: bool
     unmerged: bool
     fileDetails: bool
+    fix: bool
+      ## Shared-Clone-Pool-Integrity §4.2: remove stale remote-tracking refs
+      ## the shared-clone detector finds, instead of only reporting them.
     report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
@@ -54965,6 +56087,8 @@ proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
       result.unmerged = true
     elif arg == "--file-details":
       result.fileDetails = true
+    elif arg == "--fix":
+      result.fix = true
     elif consumeReportFlag(arg, result.report):
       discard
     elif arg.startsWith("-"):
@@ -55232,6 +56356,14 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
     if branchRes.code == 0:
       entry.branch = branchRes.output.strip()
 
+    # Shared-Clone-Pool-Integrity §4.2: is anything this checkout names gone
+    # from it and from its shared clone? Report-only unless ``--fix``.
+    let leafReport = checkLeaf(identity.binaryPath, repoAbsPath,
+      if args.fix: lcmRepair else: lcmReport,
+      defaultCacheRoot(args.workspaceRoot))
+    if leafReport.pool.len > 0:
+      report.leafReports.add(leafReport)
+
     if not entry.isClean:
       entry.checkoutState = "dirty"
       inc report.summary.dirty
@@ -55292,6 +56424,7 @@ proc runWorkspaceStatusCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
     emitLockCoherenceAdvisory(parsed.toolProvisioning, report.workspaceRoot,
       report.project, report.repos)
+    emitLeafReports(report.leafReports)
   report.exitCode
 
 # ---- M12.B: `repro workspace list` ----------------------------------------
@@ -55520,6 +56653,7 @@ type
     hfCloneSiblings   ## Clone the missing develop-mode siblings.
     hfWorkspaceErgonomics ## Repair workspace-projects.md, gitignore, and AGENTS.md.
     hfEnsureVcsHooks  ## Reinstall the managed VCS hooks in every participating repo.
+    hfSharedCloneLeaves ## Remove stale remote-tracking refs the shared-clone detector found.
 
   HealthCheck* = object
     ## One diagnosed layer. ``remedy`` is the exact command the user (or
@@ -55548,6 +56682,8 @@ type
     missingSiblings: seq[ResolvedRepo]
     gitIdentity: GitToolIdentity
     gitOk: bool
+    leafReports: seq[LeafCheckReport]
+      ## ``shared-clone-leaves``: the detector's report-only pass.
 
 proc parseHealthArgs(args: openArray[string]): HealthArgs =
   result.workspaceRoot = ""
@@ -55627,6 +56763,303 @@ proc detectDirenvEnvrcState(workspaceRoot: string):
         (allowed.kind == JBool and allowed.getBool())
     except CatchableError:
       discard  # Missing or malformed status cannot establish trust.
+
+# ---- PG-14: the hook-interpreter skew check --------------------------------
+#
+# The defect this answers, measured 2026-10-01 on this host
+# (Push-Gateway-Wiring-And-Policy.md §1.6b): 770 managed hook bodies across 154
+# repos demand one of five contract tokens, UNIFORMLY — and whether the
+# resolved ``repro`` services that demand depends on WHICH SHELL the hook fires
+# in. `repro health` run in a dev shell and in a bare-PATH shell disagree, and
+# neither reports that it disagrees with the other.
+#
+# Three properties follow, and each is a deliverable rather than a nicety:
+#
+#   * A version string answers nothing. Three 0.1.3 builds on this host
+#     disagree about the flag; printing "repro 0.1.3" as the diagnosis is
+#     actively misleading. Every build named here is named by PATH and by
+#     STORE PATH.
+#   * A per-shell answer must not be presented as a machine-wide one. The row
+#     for the resolution THIS process would get is marked as such, and it is
+#     one row among several rather than the answer.
+#   * The remedy must not be `hooks ensure`. That is the command the hook
+#     body's own refusal text warns against, the command the generated
+#     `.envrc` runs ambiently on every directory entry with its output
+#     discarded, and the command whose effect here is to delete the diagnostic
+#     instead of the defect. The remedy is to reconcile what SUPPLIES `repro`.
+
+const ReproStoreNamePrefix = "reprobuild-"
+  ## Store-path name prefix of a reprobuild build. A derivation that merely
+  ## shares the prefix (``reprobuild-convention-test-toolchains``) is excluded
+  ## not by name but by the stronger test below: it carries no ``bin/repro``.
+
+proc direnvSuppliedReproBuilds(dir: string): seq[string] =
+  ## Every ``repro`` the dev shell for ``dir`` would place on PATH, read out of
+  ## direnv's own profile ``.rc`` files.
+  ##
+  ## Reading the ``.rc`` rather than entering the shell is deliberate: entering
+  ## it would evaluate a flake (slow, and a side effect inside a doctor), and
+  ## the ``.rc`` is the artefact direnv itself exports, so it describes the
+  ## shell as it IS rather than as it would be rebuilt.
+  let direnvDir = dir / ".direnv"
+  if not dirExists(direnvDir):
+    return
+  for kind, path in walkDir(direnvDir):
+    if kind != pcFile or not path.endsWith(".rc"):
+      continue
+    var content = ""
+    try:
+      content = readFile(path)
+    except CatchableError:
+      continue
+    for storePath in nixStorePathsNamed(content, ReproStoreNamePrefix):
+      let candidate = storePath / "bin" / addFileExt("repro", ExeExt)
+      if executableFile(candidate) and candidate notin result:
+        result.add(candidate)
+
+proc installedManagedHookContracts(repos: seq[HookRepoTarget]):
+    tuple[tokens, authors: seq[string]; bodies, contractless: int] =
+  ## What the hooks INSTALLED in these repos actually demand.
+  ##
+  ## The skew question is about the bodies on disk, not about the body this
+  ## build would write — those are the same thing only when the writer and the
+  ## runner are one build, which is exactly what is in doubt. A check that
+  ## probed only its own tokens would report green on a host whose 770
+  ## installed bodies demand something else entirely.
+  for repo in repos:
+    if gitTopLevel(repo.repoPath).len == 0:
+      continue
+    let hooksDir = gitHooksDir(repo.repoPath)
+    for hookName in VcsHookNames:
+      let managed = managedHookPath(hooksDir, hookName)
+      if not fileExists(extendedPath(managed)):
+        continue
+      if not isReprobuildVcsHook(managed, hookName):
+        continue
+      var body = ""
+      try:
+        body = readFile(extendedPath(managed))
+      except CatchableError:
+        continue
+      inc result.bodies
+      let token = managedHookBodyContractDemand(body)
+      if token.len == 0:
+        inc result.contractless
+      elif token notin result.tokens:
+        result.tokens.add(token)
+      # The body names the build that WROTE it. That build is the other half of
+      # "both builds" the skew report has to name: one wrote these hooks, one
+      # will run them, and a report that names only the runner leaves the
+      # operator to guess which install the demand came from.
+      let author = managedHookAuthorBin(body)
+      if author.len > 0 and author notin result.authors:
+        result.authors.add(author)
+
+proc enumerateHookInterpreterResolutions(workspaceRoot: string;
+    repos: seq[HookRepoTarget]; contract: string):
+    seq[HookInterpreterResolution] =
+  ## Every ``repro`` a managed hook of this workspace could resolve, probed
+  ## with ``contract``.
+  ##
+  ## MUST NOT be reduced to "this process's PATH". That reduction is what every
+  ## implementation an author writes first does, it is what shipped, and it is
+  ## what makes `health` report its own shell's answer as the truth. §7.7's
+  ## exit criterion is an ENUMERATED set of shells — bare ``PATH``, the
+  ## workspace-root dev shell, and each per-repo dev shell that supplies its
+  ## own ``repro`` — and condition 3 is that a DISAGREEMENT between them is
+  ## reported when one exists.
+  var seen: HashSet[string]
+
+  proc add(res: var seq[HookInterpreterResolution]; path, source: string;
+           thisShell: bool) =
+    if path.len == 0:
+      return
+    var key = path
+    try:
+      key = expandFilename(path)
+    except CatchableError:
+      discard
+    if key in seen:
+      # The same build reached two ways is one build. Keep the FIRST label:
+      # the resolution order below puts the hook's own resolution first, and
+      # that is the one whose source matters.
+      return
+    seen.incl(key)
+    res.add(probeHookInterpreter(path, source, contract, thisShell))
+
+  # 1. The resolution a hook firing in THIS process environment would get, and
+  #    the one `health`'s own verdict would otherwise silently be about.
+  let mine = resolveManagedHookInterpreter(workspaceRoot)
+  if mine.path.len > 0:
+    result.add(mine.path, mine.source & " (this shell)", true)
+
+  # 2. The dev shells. The workspace root first, then every participating repo
+  #    that carries its own direnv profile — on this host those are two
+  #    distinct builds, and they are the half that ANSWERS the handshake while
+  #    bare PATH refuses.
+  for candidate in direnvSuppliedReproBuilds(workspaceRoot):
+    result.add(candidate, "direnv dev shell at " & workspaceRoot, false)
+  for repo in repos:
+    for candidate in direnvSuppliedReproBuilds(repo.repoPath):
+      result.add(candidate, "direnv dev shell at " & repo.repoPath, false)
+
+proc hookInterpreterSkewCheck(workspaceRoot: string): HealthCheck =
+  ## The ``hook-interpreter`` row of ``repro health``.
+  ##
+  ## Never ``--fix``-able: the fix is to change what supplies a binary, which
+  ## no doctor may do on an operator's behalf.
+  const name = "hook-interpreter"
+  # The remedy, in one place. It names NOTHING that writes a hook: `hooks
+  # ensure` is the command that makes this symptom disappear without fixing
+  # anything, so it must not appear here even as a suggestion.
+  const remedy = "direnv reload   # then: update the reprobuild pin and " &
+    "rebuild this environment"
+  let enumerated = enumerateParticipatingRepos(workspaceRoot)
+  let demands = installedManagedHookContracts(enumerated.repos)
+  # Probe with what is INSTALLED. With nothing installed there is nothing to
+  # service, so fall back to the token this build WRITES — the question then
+  # becomes "would the hooks I am about to install be serviceable?", which is
+  # worth answering but is not yet a live mis-governance, hence the softer
+  # grade below.
+  #
+  # Every distinct demanded token is probed (see the loop below). The set is
+  # bounded by five tokens per writing build, and it is CAPPED here as well:
+  # a cache that somehow accumulated bodies from a dozen writers must not turn
+  # a doctor into a hundred subprocesses. The cap is generous enough that it
+  # has never been reached in practice and is reported when it bites.
+  const MaxProbedContracts = 24
+  var probeTokens =
+    if demands.tokens.len > 0: demands.tokens
+    else: @[managedHookContract("post-commit")]
+  var tokensTruncated = false
+  if probeTokens.len > MaxProbedContracts:
+    probeTokens = probeTokens[0 ..< MaxProbedContracts]
+    tokensTruncated = true
+  let resolutions = enumerateHookInterpreterResolutions(workspaceRoot,
+    enumerated.repos, probeTokens[0])
+
+  var servicing = 0
+  var refusing = 0
+  var differentBody = 0
+  var rows: seq[string]
+  var usedRow = ""
+  for res in resolutions:
+    # Every demanded token has to be serviced, not just the first: a host can
+    # carry bodies from two writers, and a build that services one of them is
+    # not thereby a build that services the others.
+    # EVERY demanded token, not just the first. Measured on this workspace:
+    # 765 installed bodies demand SIX distinct tokens, so "does this build
+    # service the contract?" has six answers per build, and a single-token
+    # probe makes the whole verdict depend on which hook happened to be
+    # enumerated first. It also loses the finding: a build servicing five of
+    # six would read identically to one servicing none, and a DISAGREEMENT
+    # between resolutions would be reported as a flat skew.
+    var serviced = 0
+    var verdict = hcsUnresolved
+    for token in probeTokens:
+      let probe =
+        if token == res.contract: (servicing: res.servicing,
+                                   exitCode: res.probeExit)
+        else: probeHookContractServicing(res.build.path, token)
+      if probe.servicing == hcsServices:
+        inc serviced
+      elif verdict == hcsUnresolved or verdict == hcsSpeaksDifferentBody:
+        # Keep the WORST answer seen: "does not speak the handshake" outranks
+        # "generates a different body", because the two earn opposite remedies
+        # and the operator needs the one that applies.
+        verdict = probe.servicing
+    let servicesAll = serviced == probeTokens.len
+    if servicesAll:
+      verdict = hcsServices
+      inc servicing
+    else:
+      inc refusing
+      if verdict == hcsSpeaksDifferentBody:
+        inc differentBody
+    var row = res
+    row.servicing = verdict
+    let rendered = describeHookInterpreterResolution(row) &
+      " (services " & $serviced & " of " & $probeTokens.len & " contract(s))"
+    rows.add(rendered)
+    if res.thisShell:
+      usedRow = rendered
+
+  var writerRows: seq[string]
+  for author in demands.authors:
+    writerRows.add(describeReproBuild(reproBuildIdentity(author)))
+  let scope =
+    (if demands.bodies > 0:
+      $demands.bodies & " installed managed body(ies) demanding " &
+        $demands.tokens.len & " distinct contract(s)"
+    else:
+      "no managed bodies installed yet; probed with the contract this build " &
+        "writes") &
+    (if demands.contractless > 0:
+      ", " & $demands.contractless &
+        " of them carrying NO contract line (written by a build that " &
+        "predates the handshake)"
+    else: "") &
+    (if writerRows.len > 0:
+      "; written by " & writerRows.join(" | ")
+    else: "") &
+    (if tokensTruncated:
+      "; only the first " & $MaxProbedContracts & " contracts were probed"
+    else: "")
+  let usedLine =
+    if usedRow.len > 0:
+      "resolution used by a hook firing in THIS shell: " & usedRow
+    else:
+      "no 'repro' resolves in THIS shell (REPROBUILD_REPRO unset and none " &
+        "on PATH), so a hook firing here would not dispatch at all"
+
+  if resolutions.len == 0:
+    # Absence degrades (§8). Nothing resolves, so nothing disagrees.
+    return HealthCheck(name: name, status: hsOk,
+      detail: "no 'repro' resolves for this workspace's hooks (" & scope &
+        "); hooks degrade rather than refuse. " & usedLine,
+      remedy: "", fixKind: hfNone)
+
+  if servicing > 0 and refusing > 0:
+    # THE DISAGREEMENT. This is the finding a per-PATH implementation cannot
+    # make, and the one §7.7 condition 3 exists for.
+    return HealthCheck(name: name, status: hsFail,
+      detail: "BINARY SKEW: this host's 'repro' resolutions DISAGREE about " &
+        "the managed-hook contract — " & $servicing &
+        " service every installed contract, " & $refusing &
+        " do not (" & scope & "). " &
+        "The discriminator is the STORE PATH, not the version. " & usedLine &
+        ". All resolutions: " & rows.join(" | ") &
+        ". Governance is therefore per-shell: the same 'git commit' " &
+        "dispatches in one shell and refuses in another, and a green answer " &
+        "in one shell is NOT evidence about the others.",
+      remedy: remedy, fixKind: hfNone)
+
+  if servicing == 0:
+    let status = if demands.bodies > 0: hsFail else: hsWarn
+    return HealthCheck(name: name, status: status,
+      detail: "BINARY SKEW: none of the " & $resolutions.len &
+        " 'repro' resolution(s) this check could enumerate services every " &
+        "installed managed-hook contract (" & scope &
+        "). That is a statement about " &
+        "those resolutions, NOT about every shell on the machine — a shell " &
+        "this check cannot see may still resolve a servicing build. The hook " &
+        "writer and the hook runner are not one build; " &
+        (if differentBody > 0:
+          "at least one build speaks the handshake and generates a different " &
+          "body. "
+        else:
+          "the resolved build does not speak the handshake at all — a flag " &
+          "it has never heard of, which the version string does not predict. ") &
+        usedLine & ". All resolutions: " & rows.join(" | "),
+      remedy: remedy, fixKind: hfNone)
+
+  HealthCheck(name: name, status: hsOk,
+    detail: $servicing & " of " & $resolutions.len &
+      " 'repro' resolution(s) service every installed managed-hook " &
+      "contract, and none refuse (" & scope & "). " & usedLine &
+      ". This is an answer about the resolutions listed, not about every " &
+      "shell on the machine: " & rows.join(" | "),
+    remedy: "", fixKind: hfNone)
 
 proc gatherHealthChecks(parsed: HealthArgs):
     tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
@@ -55908,6 +57341,19 @@ proc gatherHealthChecks(parsed: HealthArgs):
           $reposInspected & " participating repo(s)",
         remedy: "", fixKind: hfNone))
 
+  # 8c. PG-14 — WHICH `repro` services those hooks, and whether the answer is
+  #     the same in every shell one can fire in.
+  #
+  #     Separate from 8b on purpose and not a refinement of it. 8b asks "is a
+  #     managed hook PRESENT", a question about files; this asks "is the build
+  #     that will RUN it able to", a question about binaries — and §1.6c
+  #     measures that 8b answers `ok` for a hook that refuses on every fire,
+  #     because nothing in it compares the installed body's contract against
+  #     what the resolved `repro` generates. (Teaching 8b to compare contracts
+  #     per repo is PG-16's; this row is the machine-wide skew and the
+  #     disagreement between shells, which is PG-14's.)
+  checks.add(hookInterpreterSkewCheck(parsed.workspaceRoot))
+
   # 9. Push gateway. Structural/advisory: a certificate-enforcing project
   #    routes pushes through the local gateway. Absent enforcement, the
   #    gateway is not required; we report advisory so the user knows
@@ -56085,6 +57531,70 @@ proc gatherHealthChecks(parsed: HealthArgs):
           else: "re-run with the remotes reachable",
         fixKind: hfNone))
 
+  # 14. Shared-Clone-Pool-Integrity §4.2 — checkouts that borrow from a
+  #     shared clone and name an object that is gone from both. Report-only:
+  #     ``--fix`` removes the stale remote-tracking refs (message A); a
+  #     branch of the user's is never touched (message B), so it stays a warn
+  #     whose remedy is the per-branch fix the messages print.
+  block sharedCloneLeavesCheck:
+    if not ctx.resolvedOk or not ctx.gitOk:
+      checks.add(HealthCheck(
+        name: "shared-clone-leaves",
+        status: hsWarn,
+        detail: "skipped: " &
+          (if not ctx.resolvedOk: "manifest unresolved"
+           else: "no usable git tool"),
+        remedy: self & " health",
+        fixKind: hfNone))
+      break sharedCloneLeavesCheck
+    let cacheRoot = defaultCacheRoot(parsed.workspaceRoot)
+    var leaves = 0
+    var stale: seq[string]
+    var broken: seq[string]
+    for repo in ctx.resolved.repos:
+      let abs = parsed.workspaceRoot / repo.path
+      if not dirExists(abs / ".git"):
+        continue
+      let lr = checkLeaf(ctx.gitIdentity.binaryPath, abs, lcmReport,
+        cacheRoot)
+      if lr.pool.len == 0:
+        continue
+      inc leaves
+      ctx.leafReports.add(lr)
+      for f in lr.findings:
+        case f.kind
+        of lfkStaleRemoteRef:
+          stale.add(repo.path & " " & f.refName)
+        of lfkLocalTipMissing, lfkLocalHistoryMissing:
+          broken.add(repo.path & " " & f.refName)
+        else:
+          discard
+    if stale.len == 0 and broken.len == 0:
+      checks.add(HealthCheck(
+        name: "shared-clone-leaves",
+        status: hsOk,
+        detail: $leaves & " checkout(s) borrow from shared clones; every " &
+          "object they name is present",
+        remedy: "", fixKind: hfNone))
+    else:
+      var detail: seq[string]
+      if stale.len > 0:
+        detail.add($stale.len & " stale remote-tracking ref(s) whose " &
+          "commit no longer exists upstream or in the shared clone: " &
+          stale.join(", "))
+      if broken.len > 0:
+        detail.add($broken.len & " ref(s) of yours depend on a commit " &
+          "that no longer exists (nothing is changed automatically; the " &
+          "messages below say how to recover): " & broken.join(", "))
+      checks.add(HealthCheck(
+        name: "shared-clone-leaves",
+        status: hsWarn,
+        detail: detail.join("; "),
+        remedy:
+          if stale.len > 0: self & " health --fix"
+          else: "follow the per-ref fix in the messages printed below",
+        fixKind: if stale.len > 0: hfSharedCloneLeaves else: hfNone))
+
   result = (checks: checks, ctx: ctx)
 
 proc healthHasFailure(checks: seq[HealthCheck]): bool =
@@ -56208,6 +57718,19 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           $report.repos.len & " repo(s) (" & parts.join(", ") & ")")
       except CatchableError as err:
         result.add("fix: hooks ensure failed: " & err.msg)
+    of hfSharedCloneLeaves:
+      if not ctx.gitOk:
+        result.add("fix: cannot repair shared-clone leaves (no usable git tool)")
+        continue
+      result.add("fix: removing stale remote-tracking refs from checkouts " &
+        "that borrow from shared clones")
+      for lr in ctx.leafReports:
+        let repaired = checkLeaf(ctx.gitIdentity.binaryPath, lr.leaf,
+          lcmRepair, pool = lr.pool)
+        for f in repaired.findings:
+          if f.kind == lfkStaleRemoteRef and f.removed:
+            result.add("fix: removed " & f.refName & " in " & lr.leaf)
+            stderr.writeLine(f.message)
     of hfWorkspaceErgonomics:
       result.add("fix: repairing workspace ergonomics files")
       let gitignoreFile = parsed.workspaceRoot / ".gitignore"
@@ -56273,6 +57796,9 @@ proc runHealthCommand*(args: openArray[string]): int =
   else:
     for line in renderHealthTextLines(checks):
       stdout.writeLine(line)
+  # The shared-clone detector's messages (report-only here): what is wrong
+  # in each checkout, in words, with the exact commands that fix it.
+  emitLeafReports(ctx.leafReports)
 
   if healthHasFailure(checks): 1 else: 0
 
@@ -56548,7 +58074,7 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
   report.exitCode
 
-# ---- RA-5: `repro workspace shared-clones [list|rewire|root]` --------------
+# ---- RA-5: `repro workspace shared-clones [list|rewire|root|gc|migrate]` ----
 #
 # Inspection / repair surface for the shared object-cache (per-upstream bare
 # clones + per-repo ``objects/info/alternates`` wiring). The accelerator is
@@ -56565,6 +58091,13 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
 #                  already-checked-out repo that is missing it. Best-effort
 #                  per repo — a failure to populate one bare is reported but
 #                  does not abort the others.
+#   * ``migrate`` — Shared-Clone-Pool-Integrity §5 over the WHOLE cache
+#                  root in one pass: every pool gets the retention hook and
+#                  its config, every leaf found (this workspace's repos, the
+#                  checkouts under it and under its initialized siblings, and
+#                  every leaf already registered) is registered, configured
+#                  and checked for dangling refs, and only then may a pool
+#                  leave ``gc.pruneExpire=never``.
 #   * ``gc`` (alias ``maintenance``) — RA-15 maintenance pass per unique
 #                  shared bare: prune ``refs/cache/<ws>/*`` for dead
 #                  workspaces (those whose directory no longer exists among
@@ -56611,6 +58144,11 @@ type
     cacheRoot*: string
     project*: string
     repos*: seq[SharedClonesRepoReport]
+    leafReports*: seq[LeafCheckReport]
+      ## The shared-clone detector's reports (``rewire``, ``migrate``).
+    poolExpiry*: seq[(string, string)]
+      ## ``migrate`` only: each pool and its ``gc.pruneExpire`` afterwards.
+    diagnostics*: seq[string]
     exitCode*: int
 
 proc toJsonNode*(report: SharedClonesReport): JsonNode =
@@ -56639,11 +58177,43 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
     obj["diagnostic"] = %entry.diagnostic
     repos.add(obj)
   result["repos"] = repos
+  var pools = newJArray()
+  for (pool, expiry) in report.poolExpiry:
+    pools.add(%*{"pool": pool, "pruneExpire": expiry,
+      "borrowers": readBorrowers(pool).len})
+  result["pools"] = pools
+  var leaves = newJArray()
+  for lr in report.leafReports:
+    var findings = newJArray()
+    for f in lr.findings:
+      findings.add(%*{"kind": $f.kind, "ref": f.refName, "object": f.objectId,
+        "removed": f.removed, "message": f.message})
+    leaves.add(%*{"leaf": lr.leaf, "pool": lr.pool,
+      "registered": lr.registered, "configured": lr.configured,
+      "findings": findings, "diagnostic": lr.diagnostic})
+  result["leaves"] = leaves
+  result["diagnostics"] = %report.diagnostics
   result["exitCode"] = %report.exitCode
 
 proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
   if report.verb == "root":
     result.add(report.cacheRoot)
+    return
+  if report.verb == "migrate":
+    result.add("workspace shared-clones: migrate root=" & report.cacheRoot &
+      " pools=" & $report.poolExpiry.len & " leaves=" &
+      $report.leafReports.len)
+    for (pool, expiry) in report.poolExpiry:
+      result.add("workspace shared-clones: pool " & pool & " gc.pruneExpire=" &
+        expiry & " borrowers=" & $readBorrowers(pool).len)
+    for lr in report.leafReports:
+      var line = "workspace shared-clones: leaf " & lr.leaf &
+        " registered=" & $lr.registered & " configured=" & $lr.configured
+      if lr.diagnostic.len > 0:
+        line.add(" diagnostic=" & lr.diagnostic)
+      result.add(line)
+    for d in report.diagnostics:
+      result.add("workspace shared-clones: error: " & d)
     return
   result.add("workspace shared-clones: root=" & report.cacheRoot &
     " project=" & report.project & " repos=" & $report.repos.len)
@@ -56696,13 +58266,28 @@ proc parseSharedClonesArgs(args: openArray[string]): SharedClonesArgs =
   # ``gc`` and ``maintenance`` are aliases for the RA-15 maintenance pass.
   if result.verb == "maintenance":
     result.verb = "gc"
-  if result.verb notin ["list", "rewire", "root", "gc"]:
+  if result.verb notin ["list", "rewire", "root", "gc", "migrate"]:
     raise newException(ValueError,
       "`repro workspace shared-clones` verb must be " &
-        "list|rewire|root|gc|maintenance, got: " & result.verb)
+        "list|rewire|root|gc|maintenance|migrate, got: " & result.verb)
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc liveWorkspaceRootsForCache(workspaceRoot: string): seq[string] =
+  ## This workspace plus every initialized sibling workspace under the same
+  ## parent directory: the workspaces that share this machine's shared
+  ## clones in the usual side-by-side layout.
+  result.add(workspaceRoot)
+  let parent = workspaceRoot.parentDir
+  if parent.len > 0 and dirExists(parent):
+    for kind, entry in walkDir(parent):
+      if kind notin {pcDir, pcLinkToDir}:
+        continue
+      if entry == workspaceRoot:
+        continue
+      if isInitializedWorkspace(entry):
+        result.add(entry)
 
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string] =
   ## RA-15 liveness predicate for dead-workspace ref pruning. The cache-ref
@@ -56714,18 +58299,7 @@ proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string] =
   ## not in this set belongs to a workspace that no longer exists on disk and
   ## is safe to prune. We err on the side of KEEPING a ref: only directories
   ## that fail the initialized-workspace check are treated as dead.
-  var roots: seq[string]
-  roots.add(workspaceRoot)
-  let parent = workspaceRoot.parentDir
-  if parent.len > 0 and dirExists(parent):
-    for kind, entry in walkDir(parent):
-      if kind notin {pcDir, pcLinkToDir}:
-        continue
-      if entry == workspaceRoot:
-        continue
-      if isInitializedWorkspace(entry):
-        roots.add(entry)
-  discoverLiveWorkspaceNames(roots)
+  discoverLiveWorkspaceNames(liveWorkspaceRootsForCache(workspaceRoot))
 
 proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   result.verb = parsed.verb
@@ -56746,8 +58320,29 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   # ``rewire`` and ``gc`` do live VCS work. ``list`` is read-only. Resolve
   # git only when we will use it.
   var identity: GitToolIdentity
-  if parsed.verb in ["rewire", "gc"]:
+  if parsed.verb in ["rewire", "gc", "migrate"]:
     identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+
+  if parsed.verb == "migrate":
+    # Shared-Clone-Pool-Integrity §5. The leaves a pool does not know about
+    # yet are found here, from the workspaces that share this cache; the
+    # pass itself (``migrateSharedClones``) also takes every leaf a pool has
+    # already registered.
+    var candidates: seq[string]
+    for repo in resolved.repos:
+      candidates.add(parsed.workspaceRoot / repo.path)
+    for found in findCheckoutsUnder(
+        liveWorkspaceRootsForCache(parsed.workspaceRoot)):
+      if found notin candidates:
+        candidates.add(found)
+    let migration = migrateSharedClones(identity.binaryPath,
+      result.cacheRoot, candidates)
+    result.leafReports = migration.leaves
+    result.poolExpiry = migration.poolExpiry
+    result.diagnostics = migration.diagnostics
+    if migration.diagnostics.len > 0:
+      result.exitCode = 1
+    return
 
   # RA-15: the dead-workspace prune needs the live-workspace set. Compute it
   # once for the whole pass (it is the same for every bare in this run).
@@ -56785,6 +58380,7 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
         sharedBareByUrl[cloneUrl] =
           refreshSharedBare(identity.binaryPath, result.cacheRoot,
             cloneUrl)
+        result.leafReports.add(sharedBareByUrl[cloneUrl].leafReports)
       let refreshed = sharedBareByUrl[cloneUrl]
       if not refreshed.ok:
         entry.diagnostic = "shared bare unavailable: " & refreshed.diagnostic
@@ -56794,8 +58390,13 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
       if info.wired:
         entry.wired = true
         entry.rewired = false
+        # Already wired, perhaps by a build that predates the borrower
+        # registry: the detector registers and configures it (§4.3).
+        result.leafReports.add(checkLeaf(identity.binaryPath, repoAbs,
+          lcmRepair, pool = refreshed.sharedBarePath))
       else:
-        let wired = wireAlternates(repoAbs, refreshed.sharedBarePath)
+        let wired = wireAlternates(repoAbs, refreshed.sharedBarePath,
+          identity.binaryPath)
         if wired.ok:
           entry.wired = true
           entry.rewired = true
@@ -56848,7 +58449,7 @@ proc writeSharedClonesReport(report: SharedClonesReport;
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runWorkspaceSharedClonesCommand*(args: openArray[string]): int =
-  ## ``repro workspace shared-clones [list|rewire|root|gc] [<project>]
+  ## ``repro workspace shared-clones [list|rewire|root|gc|migrate] [<project>]
   ## [--workspace-root=PATH] [--json] [--force]``. ``maintenance`` is an alias
   ## for ``gc``; ``--force`` bypasses the gc budget gate.
   let parsed = parseSharedClonesArgs(args)
@@ -56866,6 +58467,7 @@ proc runWorkspaceSharedClonesCommand*(args: openArray[string]): int =
   else:
     for line in renderSharedClonesTextLines(report):
       stdout.writeLine(line)
+  emitLeafReports(report.leafReports)
   report.exitCode
 
 # ---- RA-20: `repro workspace forall` --------------------------------------
@@ -65020,6 +66622,14 @@ proc reportGeneratedLock(verb, lockP: string;
     " metadata fetch edge(s) in " & $generated.fetchWaves.len & " wave(s))")
   stdout.writeLine("repro lock " & verb & ": lock identity " &
     $generated.lockIdentity)
+  # M5 "pin the provider-compile toolchain": an archive pin is a digest the
+  # network supplied at THIS moment and every later realization trusts, so it
+  # is said out loud, for whoever reviews the lock diff.
+  for d in ld.deps:
+    if d.archive.isPinned:
+      stdout.writeLine("repro lock " & verb & ": pinned " & d.name & " " &
+        d.version & " to " & d.archive.url & " (" & d.archive.build &
+        ", sha256 " & d.archive.sha256 & ")")
   # NLF-M6, third folded criterion — a strategy that cannot take effect must
   # SAY SO. NLF-M5 shipped `--strategy` accepted, printed in the run summary,
   # and silently inert wherever no candidate universe existed to rank; the
@@ -67992,6 +69602,10 @@ type
     workspaceRoot: string
     checkoutOf: Table[string, string]
     selected: seq[string]
+    onlyNames: seq[string]
+      ## ``--only`` / ``--except`` exactly as given: a repo they excluded was
+      ## left out ON PURPOSE, and the bind report says nothing about it.
+    exceptNames: seq[string]
     notices: seq[string]   ## non-fatal; still reported, never swallowed
     refusals: seq[string]  ## fatal; ``ok`` is false when any is present
 
@@ -68016,6 +69630,8 @@ proc flakeDevelopSelectionOf(passthrough: openArray[string];
     return
   developArgs.list = true
   developArgs.json = false
+  result.onlyNames = developArgs.only
+  result.exceptNames = developArgs.exceptNames
   # `.envrc` runs in the REPO, not at the workspace root, so the workspace is
   # found by walking up — the same ascent `repro branch` / `repro switch` use.
   developArgs.workspaceRoot = flakeOverrideWorkspaceRoot(explicitRoot)
@@ -68090,7 +69706,8 @@ proc flakeDeclaredInputsAt(flakeRoot: string):
 proc flakeBindInputsToCheckouts(inputNames: openArray[string];
     checkoutOf: Table[string, string]; suffixes: openArray[string];
     identity: GitToolIdentity; workspaceRoot: string;
-    report: var seq[string]): seq[FlakeOverrideBinding] =
+    report: var seq[string]; onlyNames: openArray[string] = [];
+    exceptNames: openArray[string] = []): seq[FlakeOverrideBinding] =
   ## Bind each declared flake input to the develop-set checkout of the repo its
   ## (suffix-stripped) name denotes. Every input that is NOT bound and could
   ## plausibly have been is NAMED in ``report`` rather than dropped, because a
@@ -68144,10 +69761,20 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
   ## `nim-shm-gset-src`, `reprobuild-ct-test-runner-src` — every one a manifest
   ## member, checked out, carrying a `flake.nix`, and carrying no `repro.lock`).
   ## The verb reported ONE skip and said nothing about those five.
+  ##
+  ## A repo the invocation's EXACT-NAME selection excluded (named in
+  ## ``--except``, or absent from a non-empty ``--only``) is the third case,
+  ## and it is not a finding: the caller asked for it to be left out, so the
+  ## report says nothing about it at all. Pattern selectors (``--filter``,
+  ## ``--tag``, ``--tier``) cannot be inverted here, so their omissions are
+  ## still named, with the selection given as one possible reason.
   var unknownToWorkspace: seq[string]
   let wsRoot = if workspaceRoot.len > 0: absolutePath(workspaceRoot) else: ""
   for name in inputNames:
     let repo = stripFlakeInputSuffix(name, suffixes)
+    if repo notin checkoutOf and
+        (repo in exceptNames or (onlyNames.len > 0 and repo notin onlyNames)):
+      continue
     if repo notin checkoutOf:
       let sibling = if wsRoot.len > 0: wsRoot / repo else: ""
       if sibling.len > 0 and dirExists(extendedPath(sibling)):
@@ -69339,7 +70966,8 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
 
   # ---- bind inputs to develop-set checkouts ------------------------------
   let emitted = flakeBindInputsToCheckouts(inputNames, checkoutOf, suffixes,
-    identity, selection.workspaceRoot, report)
+    identity, selection.workspaceRoot, report, selection.onlyNames,
+    selection.exceptNames)
 
   # ---- the SAME bindings, compared against the pins (§3.2) ----------------
   let state = flakeOverrideStateReport(flakeRoot, emitted, identity)
@@ -70224,7 +71852,8 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     return
   result.notices = selection.notices
   let bound = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
-    suffixes, identity, selection.workspaceRoot, result.notices)
+    suffixes, identity, selection.workspaceRoot, result.notices,
+    selection.onlyNames, selection.exceptNames)
   if bound.len == 0:
     result.tag = "no-overrides"
     result.diagnostic = "no flake input of " & declared.flakePath &
@@ -70926,7 +72555,8 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   var skipped: seq[string]
   for n in selection.notices: skipped.add(n)
   let exact = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
-    defaultFlakeInputStripSuffixes, identity, selection.workspaceRoot, skipped)
+    defaultFlakeInputStripSuffixes, identity, selection.workspaceRoot, skipped,
+    selection.onlyNames, selection.exceptNames)
   var state = flakeOverrideStateReport(flakeRoot, exact, identity)
   if not state.ok:
     result.examined = true
@@ -71308,7 +72938,7 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
     for n in selection.notices: notices.add(n)
     bindings = flakeBindInputsToCheckouts(declared.names,
       selection.checkoutOf, suffixes, identity, selection.workspaceRoot,
-      notices)
+      notices, selection.onlyNames, selection.exceptNames)
 
   var state = flakeOverrideStateReport(flakeRoot, bindings, identity)
   if not state.ok:
@@ -74016,7 +75646,7 @@ proc runThinAppDispatch(programName: string): int =
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "shared-clones":
-    # RA-5 — `repro workspace shared-clones [list|rewire|root]`. Inspect
+    # RA-5 — `repro workspace shared-clones [list|rewire|root|gc|migrate]`. Inspect
     # or repair the shared object-cache wiring. Same dispatch convention
     # as the M9–M12 family: the implementation lives in
     # ``repro_cli_support`` as ``runWorkspaceSharedClonesCommand``.

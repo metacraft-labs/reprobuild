@@ -98,6 +98,15 @@ type
       ## version), read whole.
     mokCuratorSnapshotIndex = "curator-snapshot-index"
       ## §7. Named composed distributions a curator advertises. Read whole.
+    mokUpstreamArchive = "upstream-archive"
+      ## An acquisition record (§5) for a store-sourced package whose bytes
+      ## come from its UPSTREAM rather than from a reprobuild repository: the
+      ## release archive URL for the lock's platform and its SHA-256, as
+      ## upstream publishes it (``upstream_archives``). Per (package,
+      ## version), read whole. Planned for every store-sourced package that
+      ## has an upstream route, whatever ``objectKinds`` asks for and whether
+      ## or not a repository is configured: it is what makes the lock entry
+      ## realizable, not an optional richer view of a registry.
 
   MetadataFetchError* = object of CatchableError
     ## The object could not be retrieved. Raised rather than returning an
@@ -162,6 +171,7 @@ proc metadataObjectUrl*(endpoint: string; kind: MetadataObjectKind;
   of mokVersionList: base & "/" & subject & ".versions"
   of mokAcquisitionRecord: base & "/acquisition/" & subject & ".acquisition"
   of mokCuratorSnapshotIndex: base & "/snapshots.index"
+  of mokUpstreamArchive: base & "/" & subject & ".sha256"
 
 proc metadataObjectUrl*(endpoint, packageName: string): string =
   ## Back-compatible spelling for the one kind NLF-M5 shipped.
@@ -185,6 +195,8 @@ proc metadataObjectFileName*(kind: MetadataObjectKind;
     "acquisition-" & subject.replace('/', '_').replace('@', '_') &
       ".acquisition"
   of mokCuratorSnapshotIndex: "snapshots.index"
+  of mokUpstreamArchive:
+    "upstream-" & subject.replace('/', '_').replace('@', '_') & ".archive"
 
 proc isEnumerationKind*(kind: MetadataObjectKind): bool =
   ## Whether a §5.7 interval filter can apply to this kind at all.
@@ -248,5 +260,34 @@ proc fetchMetadataObject*(url: string): RetrievedMetadata =
       body[i] = char(b)
     RetrievedMetadata(url: url, body: body,
       integrity: narStyleTreeMultihash(@[(path: "body", content: body)]))
+  finally:
+    pool.close()
+
+proc fetchMetadataObjectIfPublished*(url: string):
+    tuple[published: bool; retrieved: RetrievedMetadata] =
+  ## ``fetchMetadataObject``, except that an object the server says does not
+  ## exist (HTTP 404 or 410) is answered ``published = false`` instead of
+  ## raising. For a caller probing which of several objects upstream
+  ## publishes; every other failure still raises, because "the network
+  ## failed" must not read as "upstream has no such object".
+  inc metadataFetchAttemptCount
+  let pool = newHttpPool(maxConnections = 4)
+  try:
+    let resp =
+      try:
+        pool.getEntireBody(url)
+      except CatchableError as err:
+        raise newException(MetadataFetchError,
+          "metadata fetch failed for " & url & ": " & err.msg)
+    if resp.statusCode in [404, 410]:
+      return (published: false, retrieved: RetrievedMetadata(url: url))
+    if resp.statusCode != 200:
+      raise newException(MetadataFetchError,
+        "metadata fetch for " & url & " returned HTTP " & $resp.statusCode)
+    var body = newString(resp.body.len)
+    for i, b in resp.body:
+      body[i] = char(b)
+    (published: true, retrieved: RetrievedMetadata(url: url, body: body,
+      integrity: narStyleTreeMultihash(@[(path: "body", content: body)])))
   finally:
     pool.close()

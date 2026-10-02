@@ -314,6 +314,10 @@ suite "HL-6 — post-commit publishes evidence and excludes from cache push":
       check evRefProbe.code != 0   # NO cache ref for the evidence-only repo
       # The sibling (alternated to the secret shared bare) cannot read the new
       # evidence-only commit object — its source objects were NOT propagated.
-      let siblingRead = run(q(gitBin) & " -C " & q(siblingSecret) &
-        " cat-file -e " & secretSha1)
+      # Lazy fetching is disabled for the probe: a checkout wired to a shared
+      # bare can fetch a missing object on demand through it from upstream
+      # (Shared-Clone-Pool-Integrity §3.4), which would answer "readable" for
+      # a reason that has nothing to do with the cache push under test.
+      let siblingRead = run("GIT_NO_LAZY_FETCH=1 " & q(gitBin) & " -C " &
+        q(siblingSecret) & " cat-file -e " & secretSha1)
       check siblingRead.code != 0

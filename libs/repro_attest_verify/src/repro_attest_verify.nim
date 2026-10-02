@@ -50,6 +50,13 @@
 ##     documents it is judging WITH have gone stale, reading every date
 ##     out of the artifact's own bytes and taking the clock as a
 ##     parameter like everything else in this library.
+##   * ``repro_attest_verify/inference`` — what a
+##     ``reproos.inference-statement.v1`` is worth: one entry point for
+##     local-test and provider-rooted statements alike, the trust class
+##     decided by which chain evaluator accepts rather than by a flag,
+##     and a signature checked under the accepted certificate's own key.
+##     It has no plaintext parameter and a ``static`` assertion stops one
+##     being added.
 ##   * ``repro_attest_verify/fetch`` — the command line's
 ##     ``--report-url``. Deliberately NOT imported by ``verify``: the
 ##     verifier proper touches no socket.
@@ -66,7 +73,9 @@ import ./repro_attest_verify/challenge
 import ./repro_attest_verify/verify
 import ./repro_attest_verify/release
 import ./repro_attest_verify/lifecycle
+import ./repro_attest_verify/inference
 
 export policy, verdict, x509, trust, evidence, challenge, verify, release
 export lifecycle
+export inference
 export snp_chain, snp_report, snp_tcb

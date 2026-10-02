@@ -167,6 +167,13 @@ type
       ## profile's content identity and IS fingerprinted: it is what makes
       ## dropping ``pathSearchList`` from the key sound rather than a
       ## stale-serve hole.
+    provisioningReceipt*: string
+      ## The receipt of the provisioning edge that realized this tool
+      ## (Dependency-Provisioning-In-Build-Graph.md section 4.2), or "" when
+      ## no provisioning edge did. NOT fingerprinted: it is a stable path
+      ## whose CONTENT changes with the realization. Consumers declare it as
+      ## an input (section 3, step 5) through ``ToolActionIdentity`` and the
+      ## engine's ``withProvisioningReceiptInputs``.
     # M9.R.14e.1 — additional search-path channels populated by the
     # from-source resolver when the sibling recipe's install tree carries
     # the relevant artefacts. The engine threads each list onto a
@@ -250,6 +257,10 @@ type
       ## Mirror of the profile's content identity, copied through by
       ## ``actionIdentityFor`` and fingerprinted into
       ## ``actionFingerprint``.
+    provisioningReceipt*: string
+      ## Mirror of ``PathOnlyToolProfile.provisioningReceipt``. The CLI's
+      ## tool-identity projection hands it to the engine, which declares it
+      ## as an input of every action that uses this tool.
     # M9.R.14e.1 — mirror of ``PathOnlyToolProfile``'s extra search-path
     # channels. The provider-compile pass copies these fields out of the
     # resolved profile and into the per-action identity so the CLI's
@@ -346,7 +357,10 @@ const
   # artifact round-trip: a field that is fingerprinted but not serialized
   # would make a cached identity re-hash to a different fingerprint on
   # every read.
-  ArtifactVersion = 8'u16
+  # v9 — ``provisioningReceipt`` on both the profile and the action
+  # identity, so a cached identity still tells the engine which provisioning
+  # edge's receipt its consumers depend on.
+  ArtifactVersion = 9'u16
   NixMaterializationMagic = [byte(ord('R')), byte(ord('B')), byte(ord('N')), byte(ord('M'))]
   NixMaterializationVersion = 3'u16
 
@@ -4012,13 +4026,42 @@ proc tarballProvisioningEdges*(useDef: InterfaceToolUse; storeRoot: string;
   result.rootId = root.id
   result.rootReceipt = root.receipt
 
+proc receiptStoreRoot(receiptPath: string): string =
+  ## The tool store a receipt belongs to: receipts live at
+  ## ``<store>/provisioning/receipts/<id>.receipt`` (``provisioningStateRoot``).
+  receiptPath.parentDir.parentDir.parentDir
+
+proc storeRelativePath(path, storeRoot: string): string =
+  ## ``path`` spelled relative to ``storeRoot`` with ``/`` separators when it
+  ## lies inside it, else unchanged. A receipt records its realization this
+  ## way so its CONTENT is the same on every host that realizes the same pin:
+  ## consumers declare the receipt as an input (Dependency-Provisioning-In-
+  ## Build-Graph.md section 3, step 5), and an absolute store path in it
+  ## would make that input differ between two hosts whose stores sit in
+  ## different places.
+  if path.len == 0 or storeRoot.len == 0:
+    return path
+  let relative = relativePath(absolutePath(path), absolutePath(storeRoot))
+  if relative.len == 0 or relative.startsWith("..") or isAbsolute(relative):
+    return path
+  relative.replace('\\', '/')
+
+proc storeResolvedPath(recorded, storeRoot: string): string =
+  ## Inverse of ``storeRelativePath``. An absolute spelling (a receipt written
+  ## before receipts were store-relative, or a path outside the store) is
+  ## returned as recorded.
+  if recorded.len == 0 or isAbsolute(recorded):
+    return recorded
+  os.normalizedPath(storeRoot / recorded)
+
 proc readTarballProvisionReceipt*(path: string): TarballProvisionReceipt =
   let node = parseJson(readFile(extendedPath(path)))
+  let storeRoot = receiptStoreRoot(absolutePath(path))
   TarballProvisionReceipt(
     packageSelector: node{"packageSelector"}.getStr(),
     planIndex: node{"planIndex"}.getInt(),
-    prefix: node{"prefix"}.getStr(),
-    executable: node{"executable"}.getStr(),
+    prefix: storeResolvedPath(node{"prefix"}.getStr(), storeRoot),
+    executable: storeResolvedPath(node{"executable"}.getStr(), storeRoot),
     selectedUrl: node{"selectedUrl"}.getStr())
 
 proc extractorExecutable(node: JsonNode): string =
@@ -4038,11 +4081,12 @@ proc extractorExecutable(node: JsonNode): string =
       "tool-resolution failed: the " & node{"role"}.getStr() &
       " dependency edge's receipt names " & result & ", which does not exist")
 
-var lastTarballProvisionError {.threadvar.}: ref CatchableError
-  ## The exception the tarball executor turned into a failed ActionResult,
-  ## kept so `resolveTarballTool` re-raises the realizer's own error -- its
-  ## type (`ValueError`, `OSError`, ...) and message -- rather than a
-  ## flattened copy. The executor runs inline on the scheduler's thread.
+var lastProvisionError {.threadvar.}: ref CatchableError
+  ## The exception a provisioning executor (tarball, scoop) turned into a
+  ## failed ActionResult, kept so the resolver re-raises the realizer's own
+  ## error -- its type (`ValueError`, `OSError`, `EScoopBucketMissing`, ...)
+  ## and message -- rather than a flattened copy. The executor runs inline
+  ## on the scheduler's thread.
 
 proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} =
   ## The `"tarball"` provisioner's executor: realize the pinned archive into
@@ -4084,12 +4128,13 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
               plan.declaredExecutablePath)
           let receipt = action.outputs[0]
           createDir(extendedPath(parentDir(receipt)))
+          let receiptStore = receiptStoreRoot(absolutePath(receipt))
           writeFile(extendedPath(receipt), $(%*{
             "schema": TarballProvisionEdgeSchema,
             "packageSelector": plan.packageSelector,
             "planIndex": index,
-            "prefix": materialized.prefix,
-            "executable": resolved,
+            "prefix": storeRelativePath(materialized.prefix, receiptStore),
+            "executable": storeRelativePath(resolved, receiptStore),
             "selectedUrl": materialized.selectedUrl}) & "\n")
           result.status = asSucceeded
           result.exitCode = 0
@@ -4107,7 +4152,7 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
         "tool-resolution failed: every pinned alternative of " & action.id &
         " failed:\n  " & failures.join("\n  "))
     except CatchableError as err:
-      lastTarballProvisionError = err
+      lastProvisionError = err
       result.status = asFailed
       result.exitCode = 1
       result.stderr = err.msg
@@ -4136,16 +4181,16 @@ proc provisioningEngineConfig*(storeRoot: string;
 proc runProvisioningEdges*(edges: ProvisioningEdges; storeRoot: string;
                            forceRebuild = false): BuildRunResult =
   registerTarballProvisioner()
-  lastTarballProvisionError = nil
+  lastProvisionError = nil
   runBuild(graph(edges.actions), provisioningEngineConfig(storeRoot,
     forceRebuild))
 
 proc raiseProvisioningFailure(run: BuildRunResult) =
   for item in run.results:
     if item.status == asFailed:
-      if not lastTarballProvisionError.isNil:
-        let err = lastTarballProvisionError
-        lastTarballProvisionError = nil
+      if not lastProvisionError.isNil:
+        let err = lastProvisionError
+        lastProvisionError = nil
         raise err
       raise newException(OSError,
         "tool-resolution failed: provisioning edge " & item.id &
@@ -4186,8 +4231,11 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
         plan.declaredExecutablePath & " (receipt " & edges.rootReceipt &
         " names " & receipt.executable & ")")
   refuseUnrunnableTarballExecutable(useDef, receipt.executable)
-  tarballProfileFor(useDef, plan, receipt.prefix, receipt.selectedUrl,
-    receipt.executable)
+  result = tarballProfileFor(useDef, plan, receipt.prefix,
+    receipt.selectedUrl, receipt.executable)
+  # Not part of the profile fingerprint (see the field), so set after the
+  # profile is sealed.
+  result.provisioningReceipt = edges.rootReceipt
 
 # ---------------------------------------------------------------------------
 # MR5 -- Bootstrap toolchain resolution for the interface-extract step.
@@ -4722,16 +4770,21 @@ proc provisionBootstrapCCompiler*(storeRoot: string;
   requireUsableCCompiler(cc, origin, storeRoot / "compiler-probes", sysroot)
   BootstrapCCompiler(path: cc, sdkRoot: sdk)
 
-proc buildBootstrapNimFromSource(sourcePrefix, storeRoot, cc: string): string =
-  ## Build ``bin/nim`` from the extracted source archive at ``sourcePrefix``,
-  ## once per tool store, and return its path. The build runs the archive's
-  ## own ``build.sh`` (upstream's documented way to build its C sources) with
-  ## ``CC`` set to the bootstrap compiler, in a scratch copy holding only what
+proc buildNimFromSource(sourcePrefix, storeRoot, cc, sdkRoot, version,
+                        url, sha256: string): string =
+  ## Build ``bin/nim`` from the extracted source archive of Nim ``version``
+  ## at ``sourcePrefix``, once per tool store, and return its path. The build
+  ## runs the archive's own ``build.sh`` (upstream's documented way to build
+  ## its C sources) with ``CC`` set to the bootstrap compiler (and, on macOS,
+  ## ``SDKROOT`` to the SDK it was given), in a scratch copy holding only what
   ## the build and the compiler need, and is moved into place whole, so a
   ## concurrent or interrupted build never leaves a half-built compiler where
   ## the next run would find it.
-  let id = "nim-2.2.10-" & BootstrapNimSourceTarballSha256[0 .. 15] & "-" &
-    hostCpuToken()
+  ##
+  ## The result is a Nim distribution tree: ``bin/nim``, ``lib/``,
+  ## ``config/``. Used by the bootstrap's own source route and by a pinned
+  ## Nim whose lock entry names a source archive.
+  let id = "nim-" & version & "-" & sha256[0 .. 15] & "-" & hostCpuToken()
   let dest = storeRoot / "bootstrap-nim" / id
   let nimExe = dest / "bin" / "nim"
   let marker = dest / ".repro-built"
@@ -4744,16 +4797,26 @@ proc buildBootstrapNimFromSource(sourcePrefix, storeRoot, cc: string): string =
   createDir(extendedPath(work))
   try:
     for entry in ["build.sh", "copying.txt"]:
-      copyFile(extendedPath(sourcePrefix / entry), extendedPath(work / entry))
+      if fileExists(extendedPath(sourcePrefix / entry)):
+        copyFile(extendedPath(sourcePrefix / entry), extendedPath(work / entry))
+    if not fileExists(extendedPath(work / "build.sh")):
+      raise newException(OSError, "the Nim " & version & " source archive " &
+        "has no build.sh at its top level (" & sourcePrefix & ")")
     for dir in ["c_code", "lib", "config"]:
+      if not dirExists(extendedPath(sourcePrefix / dir)):
+        raise newException(OSError, "the Nim " & version & " source " &
+          "archive has no " & dir & "/ at its top level (" & sourcePrefix &
+          ")")
       copyDir(extendedPath(sourcePrefix / dir), extendedPath(work / dir))
     createDir(extendedPath(work / "bin"))
     let env = newStringTable(modeCaseSensitive)
     for key, value in envPairs():
       env[key] = value
     env["CC"] = cc
+    if sdkRoot.len > 0:
+      env["SDKROOT"] = sdkRoot
     try:
-      stderr.writeLine("repro: building the bootstrap Nim 2.2.10 from its " &
+      stderr.writeLine("repro: building Nim " & version & " from its " &
         "source archive with " & cc & " (once per tool store)")
       flushFile(stderr)
     except IOError, OSError:
@@ -4769,13 +4832,12 @@ proc buildBootstrapNimFromSource(sourcePrefix, storeRoot, cc: string): string =
       var tail = res.output.strip().splitLines()
       if tail.len > 30:
         tail = tail[^30 .. ^1]
-      raise newException(OSError, "`sh build.sh` in the Nim source archive " &
-        "exited " & $res.exitCode & " (full log: " & logPath & "):\n" &
-        tail.join("\n"))
+      raise newException(OSError, "`sh build.sh` in the Nim " & version &
+        " source archive exited " & $res.exitCode & " (full log: " &
+        logPath & "):\n" & tail.join("\n"))
     removeDir(extendedPath(work / "c_code"))
     writeFile(extendedPath(work / ".repro-built"),
-      "source " & BootstrapNimSourceTarballUrl & "\nsha256 " &
-      BootstrapNimSourceTarballSha256 & "\ncc " & cc & "\n")
+      "source " & url & "\nsha256 " & sha256 & "\ncc " & cc & "\n")
     if dirExists(extendedPath(dest)) and not fileExists(extendedPath(marker)):
       removeDir(extendedPath(dest))
     try:
@@ -4790,6 +4852,154 @@ proc buildBootstrapNimFromSource(sourcePrefix, storeRoot, cc: string): string =
   if not fileExists(extendedPath(nimExe)):
     raise newException(OSError, "the source build left no " & nimExe)
   nimExe
+
+# ---------------------------------------------------------------------------
+# The Nim source-build provisioning edge.
+#
+# A Nim realized from its SOURCE archive is two edges, not a side path:
+#
+#   tarball-provision.nim-source@V.*   the pinned source archive, downloaded,
+#                                      verified against its SHA-256 and
+#                                      extracted (the ordinary tarball edge,
+#                                      with its extractor edges);
+#   nim-source-build.nim@V.*           ``build.sh`` run over that tree with
+#                                      the bootstrap C compiler.
+#
+# The build edge depends on the tarball edge and reads its receipt, which is a
+# declared input, exactly as a tarball edge reads its extractor's
+# (Dependency-Provisioning-In-Build-Graph.md sections 2 and 4). Its pin --
+# version, source digest, compiler, SDK -- is its weak fingerprint, so a
+# repeat is an action-cache hit and a changed compiler re-builds. Both the
+# bootstrap's no-Nix Linux route and a pinned Nim whose lock entry names a
+# source archive (Linux, other POSIX, a macOS version with no darwin archive)
+# realize through it.
+# ---------------------------------------------------------------------------
+
+const
+  NimSourceBuildProvisionerName* = "nim-source-build"
+  NimSourceBuildEdgeSchema = "reprobuild.nim-source-build.v1"
+
+proc nimSourceToolUse*(version, url, sha256: string): InterfaceToolUse =
+  ## The tarball package of Nim ``version``'s pinned source archive. Its
+  ## declared executable is ``build.sh``: what the tarball edge must find in
+  ## the extracted tree for the build edge to run.
+  InterfaceToolUse(
+    rawConstraint: "nim ==" & version,
+    packageSelector: "nim-source@" & version,
+    executableName: "nim",
+    tarballProvisioning: @[InterfaceTarballProvisioning(
+      packageName: "nim",
+      url: url,
+      sha256: sha256,
+      archiveType: "tar.xz",
+      executablePath: "build.sh",
+      stripComponents: 1,
+      packageId: "nim-source@" & version,
+      lockIdentity: "tarball:nim-source@" & version & ":sha256:" & sha256)])
+
+proc nimSourceBuildEdges*(version, url, sha256, storeRoot, cc,
+                          sdkRoot: string): ProvisioningEdges =
+  ## The provisioning subgraph that builds Nim ``version`` from its pinned
+  ## source archive: the tarball edge (and its extractors), then the build.
+  result = tarballProvisioningEdges(nimSourceToolUse(version, url, sha256),
+    storeRoot)
+  let source = result.rootReceipt
+  let identity = provisionEdgeIdentity(NimSourceBuildProvisionerName,
+    "nim@" & version, "bin/nim")
+  let id = "nim-source-build.nim@" & safeIdSegment(version) & "." &
+    identity[0 .. 11]
+  let receipt = provisioningStateRoot(storeRoot) / "receipts" /
+    (id & ".receipt")
+  let text = $(%*{
+    "schema": NimSourceBuildEdgeSchema,
+    "storeRoot": storeRoot,
+    "version": version,
+    "url": url,
+    "sha256": sha256,
+    "cc": cc,
+    "sdkRoot": sdkRoot,
+    "sourceReceipt": source})
+  var action = builtinAction(bakForeignProvision, id,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    cwd = storeRoot,
+    deps = [result.rootId],
+    inputs = [source],
+    outputs = [receipt],
+    commandStatsId = "repro nim source build edge",
+    cacheable = true,
+    weakFingerprint = weakFingerprintFromText(NimSourceBuildEdgeSchema &
+      "\0" & storeRoot & "\0" & version & "\0" & sha256 & "\0" & cc &
+      "\0" & sdkRoot),
+    text = text)
+  action.argv = @[NimSourceBuildProvisionerName, "nim@" & version]
+  result.actions.add(action)
+  result.rootId = id
+  result.rootReceipt = receipt
+
+proc executeNimSourceBuildEdge*(action: BuildAction): ActionResult {.gcsafe.} =
+  ## The ``"nim-source-build"`` provisioner's executor: build the tree the
+  ## source tarball edge's receipt names, and write a receipt naming the
+  ## built ``bin/nim``.
+  result = ActionResult(id: action.id, launched: true,
+    runQuotaBackend: "provision-nim-source-build",
+    dependencyPolicyKind: action.dependencyPolicy.kind)
+  {.cast(gcsafe).}:
+    try:
+      let spec = parseJson(action.builtinText)
+      if spec{"schema"}.getStr() != NimSourceBuildEdgeSchema:
+        raise newException(ValueError,
+          "nim source-build edge carries an unknown schema: " & action.id)
+      let sourceReceipt = spec{"sourceReceipt"}.getStr()
+      if not fileExists(extendedPath(sourceReceipt)):
+        raise newException(OSError, "the Nim source archive edge left no " &
+          "receipt at " & sourceReceipt)
+      let source = readTarballProvisionReceipt(sourceReceipt)
+      let nimExe = buildNimFromSource(source.prefix,
+        spec{"storeRoot"}.getStr(), spec{"cc"}.getStr(),
+        spec{"sdkRoot"}.getStr(), spec{"version"}.getStr(),
+        spec{"url"}.getStr(), spec{"sha256"}.getStr())
+      let receipt = action.outputs[0]
+      createDir(extendedPath(parentDir(receipt)))
+      writeFile(extendedPath(receipt), $(%*{
+        "schema": NimSourceBuildEdgeSchema,
+        "packageSelector": "nim@" & spec{"version"}.getStr(),
+        "planIndex": 0,
+        "prefix": nimExe.parentDir.parentDir,
+        "executable": nimExe,
+        "selectedUrl": source.selectedUrl}) & "\n")
+      result.status = asSucceeded
+      result.exitCode = 0
+      result.evidence = PathSetEvidence(declaredInputs: action.inputs,
+        declaredOutputs: action.outputs)
+    except CatchableError as err:
+      lastProvisionError = err
+      result.status = asFailed
+      result.exitCode = 1
+      result.stderr = err.msg
+
+proc registerNimSourceBuildProvisioner*() =
+  registerForeignProvisionExecutor(NimSourceBuildProvisionerName,
+    executeNimSourceBuildEdge)
+
+registerNimSourceBuildProvisioner()
+
+proc buildNimFromSourceThroughEdges*(version, url, sha256, storeRoot, cc,
+                                     sdkRoot: string): string =
+  ## Run ``nimSourceBuildEdges`` and return the built ``bin/nim``. A receipt
+  ## the action cache kept after the built tree was removed is re-executed,
+  ## as ``resolveTarballTool`` does for a tarball prefix.
+  let root = absolutePath(storeRoot)
+  let edges = nimSourceBuildEdges(version, url, sha256, root, cc, sdkRoot)
+  for attempt in 0 .. 1:
+    registerNimSourceBuildProvisioner()
+    let run = runProvisioningEdges(edges, root, forceRebuild = attempt > 0)
+    raiseProvisioningFailure(run)
+    let receipt = readTarballProvisionReceipt(edges.rootReceipt)
+    if receipt.executable.len > 0 and
+        fileExists(extendedPath(receipt.executable)):
+      return receipt.executable
+  raise newException(OSError, "the Nim " & version & " source build " &
+    "edge's receipt " & edges.rootReceipt & " names no existing bin/nim")
 
 proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
                             cc = ""): string =
@@ -4809,12 +5019,9 @@ proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
       if cc.len == 0:
         raise newException(OSError, "there is no bootstrap C compiler to " &
           "build it with")
-      var sourceUse = bootstrapNimToolUse()
-      sourceUse.packageSelector = "nim-source@2.2.10"
-      sourceUse.nixProvisioning = @[]
-      let materialized = materializeTarballPrefix(
-        tarballAcquisitionPlan(sourceUse), storeRoot)
-      result = buildBootstrapNimFromSource(materialized.prefix, storeRoot, cc)
+      result = buildNimFromSourceThroughEdges("2.2.10",
+        BootstrapNimSourceTarballUrl, BootstrapNimSourceTarballSha256,
+        storeRoot, cc, "")
     if result.len == 0:
       raise newException(OSError, "the route resolved no executable")
   except CatchableError as err:
@@ -4906,6 +5113,93 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
     bumpWindowsNimStack(nim)
     putEnv(bootstrapNimCompilerEnv, nim)
   publishBootstrapCompilerEnv(cc, defined(windows))
+
+# ---------------------------------------------------------------------------
+# M5 "pin the provider-compile toolchain": realizing a PINNED Nim.
+#
+# A project that pins its provider compiler (``packageSource "nim", "store"``
+# and ``uses: "nim ==V"``) gets, from ``repro lock refresh``, a lock entry
+# naming the official release archive for the lock's platform and its SHA-256
+# (``repro_lock.LockedArchive``; ``repro_lock_gen/upstream_archives`` says
+# which archive per platform and why). This realizes that pin through the
+# same provisioning edges as everything else: a binary archive is one tarball
+# edge, verified against the pinned digest; a source archive is the tarball
+# edge plus the Nim source-build edge above, built with the bootstrap C
+# compiler. Any failure raises, naming what failed; nothing here substitutes
+# another Nim.
+# ---------------------------------------------------------------------------
+
+const
+  PinnedNimArchiveBinary* = "binary"
+  PinnedNimArchiveSource* = "source"
+    ## Spelled as ``repro_lock.LockedArchiveBinary`` / ``LockedArchiveSource``;
+    ## repeated rather than imported so this module does not depend on the
+    ## lock reader.
+
+proc pinnedNimArchiveToolUse*(version, url, sha256,
+                              archiveType: string): InterfaceToolUse =
+  ## The tarball package of a pinned BINARY Nim archive. For the
+  ## bootstrap's own Windows Nim this is the same selector, URL, digest and
+  ## lock identity as ``bootstrapNimToolUse``, so the two share one
+  ## tool-store prefix.
+  InterfaceToolUse(
+    rawConstraint: "nim ==" & version,
+    packageSelector: "nim@" & version,
+    executableName: "nim",
+    tarballProvisioning: @[InterfaceTarballProvisioning(
+      packageName: "nim",
+      url: url,
+      sha256: sha256,
+      archiveType: archiveType,
+      executablePath: "bin/" & addFileExt("nim", ExeExt),
+      stripComponents: 1,
+      packageId: "nim@" & version,
+      lockIdentity: "tarball:nim@" & version & ":sha256:" & sha256)])
+
+type
+  PinnedNimRealization* = object
+    tree*: string
+      ## The Nim distribution directory: ``bin/nim``, ``lib/``, ``config/``.
+    executable*: string
+    route*: string
+      ## How it was realized, for diagnostics and narration.
+
+proc provisionPinnedNim*(storeRoot, version, url, sha256, archiveType,
+                         build: string): PinnedNimRealization =
+  ## Realize the pinned Nim ``version`` from its lock-pinned archive into
+  ## the tool store at ``storeRoot`` and return the distribution tree.
+  ## Raises on any failure, including a download whose SHA-256 is not
+  ## ``sha256``.
+  if url.len == 0 or sha256.len != 64:
+    raise newException(ValueError, "the pin for nim " & version &
+      " names no archive URL and SHA-256 to realize it from")
+  case build
+  of PinnedNimArchiveBinary:
+    let profile = resolveTarballTool(
+      pinnedNimArchiveToolUse(version, url, sha256, archiveType), storeRoot)
+    bumpWindowsNimStack(profile.resolvedExecutablePath)
+    result = PinnedNimRealization(tree: profile.selectedStorePath,
+      executable: profile.resolvedExecutablePath,
+      route: "the official archive " & url & " (sha256 " & sha256 & ")")
+  of PinnedNimArchiveSource:
+    # Verify and unpack the pinned source archive FIRST (the same tarball
+    # edge the build edge depends on, so the build below finds it cached):
+    # bytes that do not match the pin are refused before a C compiler is
+    # provisioned for a build that must not happen.
+    discard resolveTarballTool(nimSourceToolUse(version, url, sha256),
+      storeRoot)
+    let cc = provisionBootstrapCCompiler(storeRoot)
+    let exe = buildNimFromSourceThroughEdges(version, url, sha256, storeRoot,
+      cc.path, cc.sdkRoot)
+    result = PinnedNimRealization(tree: exe.parentDir.parentDir,
+      executable: exe,
+      route: "the official source archive " & url & " (sha256 " & sha256 &
+        "), built with " & cc.path)
+  else:
+    raise newException(ValueError, "the pin for nim " & version &
+      " names an archive of unknown kind \"" & build & "\" (expected " &
+      PinnedNimArchiveBinary & " or " & PinnedNimArchiveSource & ")")
+
 proc blake3HexBytes*(bytes: openArray[byte]): string =
   blake3.toHex(blake3.digest(bytes))
 
@@ -5609,8 +5903,12 @@ proc determinePracticalHardening(plan: ScoopAcquisitionPlan;
   else:
     if executionProfileCaptured: phRangedAndProfileVerified else: phRanged
 
-proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
-                       scoopOverride = ""): PathOnlyToolProfile =
+proc realizeScoopTool(useDef: InterfaceToolUse; storeRoot: string;
+                      scoopOverride = ""): PathOnlyToolProfile =
+  ## The Scoop realization itself: install (or reuse) the app, junction it
+  ## into the tool store, verify it, and return its profile. Run only by the
+  ## `"scoop"` provisioning edge's executor; `resolveScoopTool` is the entry
+  ## point.
   let plan = scoopAcquisitionPlan(useDef)
   let scoopExe = resolveScoopExecutable(scoopOverride)
   if scoopExe.len == 0:
@@ -5945,6 +6243,318 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
         result.probes.add(probeResult)
 
   refreshProfileIdentity(result)
+
+
+# ---------------------------------------------------------------------------
+# Scoop realization as a build-graph edge.
+#
+# Dependency-Provisioning-In-Build-Graph.md sections 2-4, applied to Scoop the
+# way the tarball section above applies them to archives. Realizing a
+# Scoop-provisioned package is a `bakForeignProvision` edge whose provisioner
+# (`argv[0]`) is `"scoop"`:
+#
+#   * IDENTITY: package selector, declared executable and host, not the pin
+#     (`provisionEdgeIdentity`), so a re-pin is the same edge and the same
+#     receipt path with new content;
+#   * STATIC INPUTS: the selected scoopApp pin, the Scoop root and the Scoop
+#     executable, in the edge's text and weak fingerprint; the bucket
+#     manifest is a declared input, keyed by content (`ffpChecksum`), so an
+#     in-place manifest edit or a bucket update re-runs the realization and
+#     its checksum checks;
+#   * OUTPUTS: a receipt naming the realization with store-relative paths
+#     (what consumers declare as an input), and the realized profile, which
+#     names host paths (the Scoop root, the version directory) and is read
+#     back on a cache hit;
+#   * a receipt whose realization has since gone (an uninstalled app, a
+#     removed prefix) is re-executed rather than trusted.
+#
+# `scoop install` reaches the network through Scoop itself. The edge is
+# `netFetch`, and its destinations are what the bucket manifest says Scoop
+# will download (`url`, top-level and per architecture) plus the logical
+# `scoop://<bucket>/<app>` source the pin names.
+# ---------------------------------------------------------------------------
+
+const
+  ScoopProvisionerName* = "scoop"
+  ScoopProvisionEdgeSchema = "reprobuild.scoop-provision.v1"
+
+proc scoopProvisioningJson(provisioning: InterfaceScoopProvisioning): JsonNode =
+  %*{
+    "packageName": provisioning.packageName,
+    "contributor": provisioning.contributor,
+    "bucket": provisioning.bucket,
+    "app": provisioning.app,
+    "version": provisioning.version,
+    "preferredVersion": provisioning.preferredVersion,
+    "manifestChecksum": provisioning.manifestChecksum,
+    "manifestUrl": provisioning.manifestUrl,
+    "executablePath": provisioning.executablePath,
+    "requiresExecutionProfileChecksum":
+      provisioning.requiresExecutionProfileChecksum,
+    "packageId": provisioning.packageId,
+    "lockIdentity": provisioning.lockIdentity,
+    "locationFile": provisioning.location.file,
+    "locationLine": provisioning.location.line}
+
+proc scoopProvisioningFromJson(node: JsonNode): InterfaceScoopProvisioning =
+  InterfaceScoopProvisioning(
+    packageName: node{"packageName"}.getStr(),
+    contributor: node{"contributor"}.getStr(),
+    bucket: node{"bucket"}.getStr(),
+    app: node{"app"}.getStr(),
+    version: node{"version"}.getStr(),
+    preferredVersion: node{"preferredVersion"}.getStr(),
+    manifestChecksum: node{"manifestChecksum"}.getStr(),
+    manifestUrl: node{"manifestUrl"}.getStr(),
+    executablePath: node{"executablePath"}.getStr(),
+    requiresExecutionProfileChecksum:
+      node{"requiresExecutionProfileChecksum"}.getBool(),
+    packageId: node{"packageId"}.getStr(),
+    lockIdentity: node{"lockIdentity"}.getStr(),
+    location: SourceLocation(file: node{"locationFile"}.getStr(),
+      line: node{"locationLine"}.getInt()))
+
+proc scoopUseJson(useDef: InterfaceToolUse): JsonNode =
+  ## The part of the tool use the Scoop realization reads.
+  var provisioning = newJArray()
+  for entry in useDef.scoopProvisioning:
+    provisioning.add(scoopProvisioningJson(entry))
+  %*{
+    "rawConstraint": useDef.rawConstraint,
+    "packageSelector": useDef.packageSelector,
+    "executableName": useDef.executableName,
+    "scoopProvisioning": provisioning}
+
+proc scoopUseFromJson(node: JsonNode): InterfaceToolUse =
+  result = InterfaceToolUse(
+    rawConstraint: node{"rawConstraint"}.getStr(),
+    packageSelector: node{"packageSelector"}.getStr(),
+    executableName: node{"executableName"}.getStr())
+  for entry in node{"scoopProvisioning"}:
+    result.scoopProvisioning.add(scoopProvisioningFromJson(entry))
+
+proc scoopManifestDownloadUrls(manifestPath: string): seq[string] =
+  ## The download URLs a Scoop manifest declares: `url` (a string or an
+  ## array) at the top level and under each `architecture` entry. A
+  ## manifest that cannot be read contributes none; the realization reports
+  ## that itself.
+  proc addUrls(node: JsonNode; urls: var seq[string]) =
+    if node == nil:
+      return
+    case node.kind
+    of JString:
+      let url = node.getStr().split('#')[0]
+      if url.len > 0 and url notin urls:
+        urls.add(url)
+    of JArray:
+      for item in node:
+        addUrls(item, urls)
+    else:
+      discard
+  try:
+    let manifest = parseJson(readFile(extendedPath(manifestPath)))
+    if manifest.kind != JObject:
+      return
+    addUrls(manifest{"url"}, result)
+    let architectures = manifest{"architecture"}
+    if architectures != nil and architectures.kind == JObject:
+      for _, entry in architectures:
+        if entry.kind == JObject:
+          addUrls(entry{"url"}, result)
+  except CatchableError:
+    discard
+
+proc scoopProvisioningStateRoot(storeRoot: string): string =
+  ## Receipts and the action cache live under the tool store, like the
+  ## tarball edge's. A caller that passed no store keeps its prefixes where
+  ## `realizeScoopTool` always put them; only the edge's state needs a root.
+  if storeRoot.len > 0: absolutePath(storeRoot)
+  else: getCurrentDir() / ".repro" / "tool-store"
+
+proc scoopProvisioningEdges*(useDef: InterfaceToolUse; storeRoot: string;
+                             scoopOverride = ""): ProvisioningEdges =
+  ## The provisioning subgraph that realizes `useDef` from its scoopApp pin:
+  ## one `"scoop"` edge (Scoop needs no extractor edge; it extracts with its
+  ## own tools). Raises the plan's own errors (no scoopApp metadata, an
+  ## ambiguous contributor) and `EScoopMissing` before any edge exists.
+  let plan = scoopAcquisitionPlan(useDef)
+  let scoopExe = resolveScoopExecutable(scoopOverride)
+  if scoopExe.len == 0:
+    raise newException(EScoopMissing,
+      "EScoopMissing: scoop is not installed or not on PATH. " &
+      "Install Scoop from https://scoop.sh/ before running --tool-provisioning=scoop.")
+  let scoopRoot = resolveScoopRoot(scoopExe)
+  let stateStore = scoopProvisioningStateRoot(storeRoot)
+  let identity = provisionEdgeIdentity(ScoopProvisionerName,
+    useDef.packageSelector, plan.declaredExecutablePath)
+  let id = "scoop-provision." & safeIdSegment(useDef.packageSelector) & "." &
+    identity[0 .. 11]
+  let receipt = provisioningStateRoot(stateStore) / "receipts" /
+    (id & ".receipt")
+  let profileOut = provisioningStateRoot(stateStore) / "receipts" /
+    (id & ".profile")
+  let planNode = %*{
+    "packageId": plan.packageId,
+    "bucket": plan.bucket,
+    "app": plan.app,
+    "version": plan.version,
+    "preferredVersion": plan.preferredVersion,
+    "manifestChecksum": plan.manifestChecksum,
+    "manifestUrl": plan.manifestUrl,
+    "declaredExecutablePath": plan.declaredExecutablePath,
+    "requiresExecutionProfileChecksum":
+      plan.requiresExecutionProfileChecksum,
+    "lockIdentity": plan.lockIdentity}
+  let text = $(%*{
+    "schema": ScoopProvisionEdgeSchema,
+    "storeRoot": storeRoot,
+    "stateStore": stateStore,
+    "scoopOverride": scoopOverride,
+    "scoopExecutable": scoopExe,
+    "scoopRoot": scoopRoot,
+    "plan": planNode,
+    "use": scoopUseJson(useDef)})
+  var inputs: seq[string]
+  var destinations = @["scoop://" & plan.bucket & "/" & plan.app]
+  if scoopRoot.len > 0:
+    let manifest = scoopRoot / "buckets" / plan.bucket / "bucket" /
+      (plan.app & ".json")
+    # A missing manifest is the realization's own error to report
+    # (`EScoopBucketMissing`), so it is declared only when present.
+    if fileExists(extendedPath(manifest)):
+      inputs.add(manifest)
+      for url in scoopManifestDownloadUrls(manifest):
+        if url notin destinations:
+          destinations.add(url)
+  var action = builtinAction(bakForeignProvision, id,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    cwd = stateStore,
+    inputs = inputs,
+    outputs = [receipt, profileOut],
+    commandStatsId = "repro scoop provision edge",
+    cacheable = true,
+    weakFingerprint = weakFingerprintFromText(text),
+    actionCachePolicy = ffpChecksum,
+    text = text,
+    networkMode = netFetch,
+    netDestinations = destinations)
+  action.argv = @[ScoopProvisionerName, useDef.packageSelector]
+  result.actions.add(action)
+  result.rootId = id
+  result.rootReceipt = receipt
+
+proc scoopProfilePath(receipt: string): string =
+  receipt.changeFileExt("profile")
+
+proc readScoopProvisionProfile(receipt: string): PathOnlyToolProfile =
+  let bytes = readFile(extendedPath(scoopProfilePath(receipt)))
+  var raw = newSeq[byte](bytes.len)
+  for i, ch in bytes:
+    raw[i] = byte(ord(ch))
+  var pos = 0
+  result = readProfile(raw, pos, ArtifactVersion)
+  if pos != raw.len:
+    raise newException(ValueError,
+      "scoop provision edge left a malformed profile at " &
+      scoopProfilePath(receipt))
+
+proc executeScoopProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} =
+  ## The `"scoop"` provisioner's executor: realize the pinned Scoop app into
+  ## the tool store and write the receipt and the realized profile.
+  result = ActionResult(id: action.id, launched: true,
+    runQuotaBackend: "provision-scoop",
+    dependencyPolicyKind: action.dependencyPolicy.kind)
+  {.cast(gcsafe).}:
+    try:
+      let spec = parseJson(action.builtinText)
+      if spec{"schema"}.getStr() != ScoopProvisionEdgeSchema:
+        raise newException(ValueError,
+          "scoop provision edge carries an unknown schema: " & action.id)
+      let useDef = scoopUseFromJson(spec{"use"})
+      let profile = realizeScoopTool(useDef, spec{"storeRoot"}.getStr(),
+        spec{"scoopOverride"}.getStr())
+      let receipt = action.outputs[0]
+      let stateStore = spec{"stateStore"}.getStr()
+      createDir(extendedPath(parentDir(receipt)))
+      var encoded: seq[byte]
+      encoded.writeProfile(profile)
+      var encodedText = newString(encoded.len)
+      for i, b in encoded:
+        encodedText[i] = char(b)
+      writeFile(extendedPath(action.outputs[1]), encodedText)
+      # What a consumer declares: the realization, without the host's Scoop
+      # root or version directory, so it reads the same on every host that
+      # realizes the same pin.
+      writeFile(extendedPath(receipt), $(%*{
+        "schema": ScoopProvisionEdgeSchema,
+        "packageSelector": profile.packageSelector,
+        "bucket": profile.scoopBucket,
+        "app": profile.scoopApp,
+        "resolvedVersion": profile.scoopResolvedVersion,
+        "manifestChecksum": profile.scoopManifestChecksum,
+        "executionProfileChecksum": profile.scoopExecutionProfileChecksum,
+        "practicalHardening":
+          practicalHardeningName(profile.practicalHardening),
+        "lockIdentity": profile.lockIdentity,
+        "prefix": storeRelativePath(profile.selectedStorePath, stateStore),
+        "executable":
+          storeRelativePath(profile.resolvedExecutablePath, stateStore)}) &
+        "\n")
+      result.status = asSucceeded
+      result.exitCode = 0
+      result.evidence = PathSetEvidence(declaredInputs: action.inputs,
+        declaredOutputs: action.outputs)
+    except CatchableError as err:
+      lastProvisionError = err
+      result.status = asFailed
+      result.exitCode = 1
+      result.stderr = err.msg
+
+proc registerScoopProvisioner*() =
+  ## Install the `"scoop"` executor on this thread. `resolveScoopTool` calls
+  ## it before every provisioning run.
+  registerForeignProvisionExecutor(ScoopProvisionerName,
+    executeScoopProvisionEdge)
+
+registerScoopProvisioner()
+
+proc scoopRealizationPresent(profile: PathOnlyToolProfile): bool =
+  ## Whether what a (possibly cached) receipt describes is still on disk:
+  ## the prefix's junction, the Scoop version directory it targets, and the
+  ## executable, when the app exposes one.
+  if profile.selectedStorePath.len == 0 or
+      not dirExists(extendedPath(profile.selectedStorePath / "bin")):
+    return false
+  if profile.scoopJunctionTarget.len > 0 and
+      not dirExists(extendedPath(profile.scoopJunctionTarget)):
+    return false
+  profile.resolvedExecutablePath.len == 0 or
+    fileExists(extendedPath(profile.resolvedExecutablePath))
+
+proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
+                       scoopOverride = ""): PathOnlyToolProfile =
+  ## Realize a Scoop-provisioned package THROUGH ITS PROVISIONING EDGE and
+  ## return its profile. See the section comment above for the edge's shape.
+  let edges = scoopProvisioningEdges(useDef, storeRoot, scoopOverride)
+  let stateStore = scoopProvisioningStateRoot(storeRoot)
+  registerScoopProvisioner()
+  for attempt in 0 .. 1:
+    # The action cache can keep a receipt whose realization was since
+    # removed (`scoop uninstall`, a collected prefix); the second attempt
+    # forces the edge to execute, which realizes it again.
+    let run = runProvisioningEdges(edges, stateStore,
+      forceRebuild = attempt > 0)
+    raiseProvisioningFailure(run)
+    result = readScoopProvisionProfile(edges.rootReceipt)
+    if scoopRealizationPresent(result):
+      break
+    if attempt > 0:
+      raise newException(EScoopInstallFailed,
+        "EScoopInstallFailed: the scoop provisioning edge " & edges.rootId &
+        " realized " & result.selectedStorePath &
+        ", which is not present after realization")
+  # Not part of the profile fingerprint (see the field).
+  result.provisioningReceipt = edges.rootReceipt
 
 proc verifyScoopExecutionProfile*(prefix: string) =
   ## Reads the receipt at `prefix` and recomputes the execution profile
@@ -7621,6 +8231,7 @@ proc actionIdentityFor(useDef: InterfaceToolUse;
     # from being blind to the tool's bytes once ``pathSearchList`` left
     # the payload.
     resolvedExecutableDigest: profile.resolvedExecutableDigest,
+    provisioningReceipt: profile.provisioningReceipt,
     probes: profile.probes,
     adapterStrength: profile.adapterStrength,
     cachePortability: profile.cachePortability,
@@ -7843,6 +8454,8 @@ proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile) =
   # v8 — the resolved executable's content digest. Emitted after the v7
   # search-path block, same trailing-extension discipline.
   outp.writeString(profile.resolvedExecutableDigest)
+  # v9 — the provisioning edge's receipt. Same trailing-extension discipline.
+  outp.writeString(profile.provisioningReceipt)
   outp.writeDigest(profile.profileFingerprint)
 
 proc readProfile(bytes: openArray[byte]; pos: var int;
@@ -7909,6 +8522,8 @@ proc readProfile(bytes: openArray[byte]; pos: var int;
     result.libraryPathList = readStringSeq(bytes, pos)
   if version >= 8'u16:
     result.resolvedExecutableDigest = readString(bytes, pos)
+  if version >= 9'u16:
+    result.provisioningReceipt = readString(bytes, pos)
   # A v < 8 artifact leaves the digest empty. Its stored
   # ``profileFingerprint`` was computed under the v6 profile scheme and
   # will not equal ``profileFingerprintFor(result)``, so every freshness
@@ -7963,6 +8578,8 @@ proc writeActionIdentity(outp: var seq[byte]; identity: ToolActionIdentity) =
   outp.writeStringSeq(identity.libraryPathList)
   # v8 — content digest of the resolved executable (see ``writeProfile``).
   outp.writeString(identity.resolvedExecutableDigest)
+  # v9 — the provisioning edge's receipt (see ``writeProfile``).
+  outp.writeString(identity.provisioningReceipt)
 
 proc readActionIdentity(bytes: openArray[byte];
     pos: var int; version: uint16): ToolActionIdentity =
@@ -8034,6 +8651,8 @@ proc readActionIdentity(bytes: openArray[byte];
     result.libraryPathList = readStringSeq(bytes, pos)
   if version >= 8'u16:
     result.resolvedExecutableDigest = readString(bytes, pos)
+  if version >= 9'u16:
+    result.provisioningReceipt = readString(bytes, pos)
 
 proc encodePathOnlyBuildIdentity*(identity: PathOnlyBuildIdentity): seq[byte] =
   var payload: seq[byte] = @[]
@@ -8121,6 +8740,7 @@ proc jsonProfile(profile: PathOnlyToolProfile): JsonNode =
     "pathSearchList": profile.pathSearchList,
     "resolvedExecutablePath": profile.resolvedExecutablePath,
     "resolvedExecutableDigest": profile.resolvedExecutableDigest,
+    "provisioningReceipt": profile.provisioningReceipt,
     "probes": probes,
     "adapterStrength": strengthName(profile.adapterStrength),
     "cachePortability": portabilityName(profile.cachePortability),
@@ -8170,6 +8790,7 @@ proc jsonAction(identity: ToolActionIdentity): JsonNode =
     "pathSearchList": identity.pathSearchList,
     "resolvedExecutablePath": identity.resolvedExecutablePath,
     "resolvedExecutableDigest": identity.resolvedExecutableDigest,
+    "provisioningReceipt": identity.provisioningReceipt,
     "probes": probes,
     "adapterStrength": strengthName(identity.adapterStrength),
     "cachePortability": portabilityName(identity.cachePortability),

@@ -23,11 +23,11 @@
 #
 # name	module	class	publisher	observed	bytes	sha256	window	not_before	not_after
 KdsMilanChainPem	snp_vectors.nim	trust-root	amd-kds	2026-09-20	4602	22e62f8d2c21a156470145fc75f7b5a377cb053ced3e97f0bd3f8d8ca5941ce6	none	-	-
-KdsMilanCrlDerHex	snp_vectors.nim	vendor-collateral	amd-kds	2026-09-20	866	873efcf8c8cedc28c603cf50acdff8556a704658357a0d9daab297f483deb0df	amd-revocation-list	2026-08-19T14:19:23Z	2026-10-04T00:00:00Z
+KdsMilanCrlDerHex	snp_vectors.nim	vendor-collateral	amd-kds	2026-10-02	866	dd68e9e3feb97dd0e95135feeae47d9cc193c73239a6281ec9884c00d5e6a525	amd-revocation-list	2026-09-22T07:35:42Z	2026-11-09T01:00:00Z
 KdsGenoaChainPem	snp_vectors.nim	trust-root	amd-kds	2026-09-20	4602	e6ecc853fa56d3170a624d40851f98a1036f974b50204ea69e6aec91d777aca3	none	-	-
-KdsGenoaCrlDerHex	snp_vectors.nim	vendor-collateral	amd-kds	2026-09-20	890	31deeb4eef05a1c68d4807f37d8cc3918a966ef32fb02966d53f177cf1c73e72	amd-revocation-list	2026-08-19T14:09:01Z	2026-10-04T00:00:00Z
+KdsGenoaCrlDerHex	snp_vectors.nim	vendor-collateral	amd-kds	2026-10-02	890	f242adeb201bd20fc6bf2cd5b77646619ac4a55983e53bbe34a29ae58ba0cc16	amd-revocation-list	2026-09-22T07:31:33Z	2026-11-09T01:00:00Z
 KdsTurinChainPem	snp_vectors.nim	trust-root	amd-kds	2026-09-20	4602	3bc97ef895aa1be2150b2e9fb12403f131e80c68fbc9683d2ae465220188dbfe	none	-	-
-KdsTurinCrlDerHex	snp_vectors.nim	vendor-collateral	amd-kds	2026-09-20	866	49dd3fb3194c43fa7a703f1c67144574b458ca7b23d0a20a270e44678b29cb49	amd-revocation-list	2026-08-19T14:22:45Z	2026-10-04T00:00:00Z
+KdsTurinCrlDerHex	snp_vectors.nim	vendor-collateral	amd-kds	2026-10-02	866	0699382acf7fb955e57c54aaa2f1e8b43908ebc3181f63d6ae5503e6cd4f604b	amd-revocation-list	2026-09-22T07:39:31Z	2026-11-09T01:00:00Z
 GsgMilanVlekChainPem	snp_vectors.nim	trust-root	go-sev-guest	-	4611	3098f7e90ee7049b8cf116448d1bdf33b08847b4250bd99507cf73b5c49d3467	none	-	-
 VirteeMilanVcekDerHex	snp_vectors.nim	genuine-capture	virtee-sev	-	1360	3bbfb6ee259f75a95d13168cfdf2e034181bb93c7c016825731cbe8ea16c95e1	amd-certificate	2023-04-03T19:23:43Z	2030-04-03T19:23:43Z
 VirteeMilanReportHex	snp_vectors.nim	genuine-capture	virtee-sev	-	1184	120d77b213c8868dd42f160ccb0114f05336ec715f6d51070f534b33c7e03f3b	none	-	-
@@ -61,9 +61,9 @@ ImpostorLeafWithoutFmspcDerHex	tdx_vectors.nim	minted-negative	this-repository	-
 ImpostorLeafWithoutTcbDerHex	tdx_vectors.nim	minted-negative	this-repository	-	799	a6a73220eb03e575d2bddb16e4ec9a9de31df551a25e0a15cc8faab2d1372b8f	x509-certificate	2026-09-21T05:32:45Z	2045-11-20T05:32:45Z
 ImpostorLeafWithUnknownCriticalDerHex	tdx_vectors.nim	minted-negative	this-repository	-	1174	2fc1618a25d16c79327d554a3a268b5fc55774e6437a0d02e4f9f89b80dddad0	x509-certificate	2026-09-21T05:32:46Z	2045-11-20T05:32:46Z
 PcsPckCrlPlatformWithoutNextUpdateDerHex	tdx_vectors.nim	minted-negative	this-repository	-	3341	bcefa7525a7714cf7f84048d8650b4695bb7f502a237f5c6627504c2b1aa36a0	x509-revocation-list	2026-09-21T04:02:03Z	-
-GtgTcbInfoSprJson	tdx_vectors.nim	vendor-collateral	go-tdx-guest	-	2401	1b96f799643d045c076fbc505c094a4fb26f51f4851feb8ac95f3fc12408f2d6	tcb-document	2023-06-18T08:42:58Z	2023-07-18T08:42:58Z
-GtgTcbInfoEmrJson	tdx_vectors.nim	vendor-collateral	go-tdx-guest	-	4268	1cd562453aa7de360666f5526968f38ddc6c27bd8cbdd10695d09573fca57dfb	tcb-document	2026-02-01T14:49:26Z	2026-03-03T14:49:26Z
-GtgQeIdentityJson	tdx_vectors.nim	vendor-collateral	go-tdx-guest	-	624	86239584ed47792d02cdfc051cde95cb5169a0b74dc9dcc61c1ebaeb5e59ade0	tcb-document	2023-06-08T07:24:59Z	2023-07-08T07:24:59Z
+GtgTcbInfoSprJson	tdx_vectors.nim	historical-vintage	go-tdx-guest	-	2401	1b96f799643d045c076fbc505c094a4fb26f51f4851feb8ac95f3fc12408f2d6	tcb-document	2023-06-18T08:42:58Z	2023-07-18T08:42:58Z
+GtgTcbInfoEmrJson	tdx_vectors.nim	historical-vintage	go-tdx-guest	-	4268	1cd562453aa7de360666f5526968f38ddc6c27bd8cbdd10695d09573fca57dfb	tcb-document	2026-02-01T14:49:26Z	2026-03-03T14:49:26Z
+GtgQeIdentityJson	tdx_vectors.nim	historical-vintage	go-tdx-guest	-	624	86239584ed47792d02cdfc051cde95cb5169a0b74dc9dcc61c1ebaeb5e59ade0	tcb-document	2023-06-08T07:24:59Z	2023-07-08T07:24:59Z
 PcsTcbInfoSprJson	tdx_vectors.nim	vendor-collateral	intel-pcs	2026-09-21	7953	f37ff2ccd977aa4cd5749860d9003466b263756244db30e2ed3036d6394f66f9	tcb-document	2026-09-21T04:19:36Z	2026-10-21T04:19:36Z
 PcsTcbInfoEmrJson	tdx_vectors.nim	vendor-collateral	intel-pcs	2026-09-21	5679	18db919a9986d2d37cdfffbca6815069d77369d710aace7ecb795ae154815ac3	tcb-document	2026-09-21T03:25:24Z	2026-10-21T03:25:24Z
 PcsTdxQeIdentityJson	tdx_vectors.nim	vendor-collateral	intel-pcs	2026-09-21	624	c17240716976f18d70f2fcd293601b507555724cc3bdd0f7d4bc7a1717d91a1e	tcb-document	2026-09-21T03:51:44Z	2026-10-21T03:51:44Z

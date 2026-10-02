@@ -6,16 +6,16 @@ import repro_test_support
 
 const
   CodeTracerProjectContractCommit =
-    "a9ef983ed1e7d9a60b85034b596f55ea8b2164f5"
+    "01068538c9986b40c8c8fbac28555eac7751ccc2"
   PinnedCodeTracerProjectFile =
-    "tests/fixtures/codetracer-subset/repro-a9ef983e.nim"
+    "tests/fixtures/codetracer-subset/repro-01068538.nim"
   PinnedCodeTracerConfigFile =
-    "tests/fixtures/codetracer-subset/config-a9ef983e.nims"
+    "tests/fixtures/codetracer-subset/config-01068538.nims"
   PinnedCodeTracerFixtureHeaderLines = 6
   PinnedCodeTracerProjectPayloadSha256 =
-    "ecb87da01665a172128ec45b2eab00e8e97a709ccdd52f7291797207b84ee85e"
+    "5f250ec582986fe6f379b250fd85e195cf46939ee9202fa77c1bf42d1a785112"
   PinnedCodeTracerConfigPayloadSha256 =
-    "fadd0d2371f3456043db00f902d59d1c9e186b0bf97e8a52f48e10b87dd3485d"
+    "b96945ef91ba4524f30b1cbfb4c586da731a1e9d5a824a2f5da591df7f10d7ba"
   # `reprobuild-provision` used to live in THIS repo, at
   # `.github/actions/reprobuild-provision/action.yml`. It was moved to the
   # shared-actions repo because GitHub materialises a composite action by

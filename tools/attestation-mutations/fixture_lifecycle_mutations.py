@@ -46,6 +46,9 @@ SNPGATE = "tests/integration/t_snp_fixture_verify.nim"
 MONITOR = "tools/attestation_collateral_monitor.py"
 CLIATTEST = "libs/repro_cli_support/src/repro_cli_support/attest.nim"
 VERDICTGATE = "tests/integration/t_snp_evidence_reaches_the_verdict.nim"
+SNPTCB = "tests/integration/t_snp_tcb_policy.nim"
+FETCH = "tests/integration/attestation-fixture-fetch.tsv"
+WORKFLOW = ".github/workflows/attestation-collateral.yml"
 
 DEFINES: dict[str, list[str]] = {}
 
@@ -67,12 +70,12 @@ ROWS: list[Row] = [
     Row("L1", "one character of a recorded digest is changed",
         LIFECYCLE,
         [(LEDGER,
-          "873efcf8c8cedc28c603cf50acdff8556a704658357a0d9daab297f483deb0df",
-          "873efcf8c8cedc28c603cf50acdff8556a704658357a0d9daab297f483deb0de")]),
+          "dd68e9e3feb97dd0e95135feeae47d9cc193c73239a6281ec9884c00d5e6a525",
+          "dd68e9e3feb97dd0e95135feeae47d9cc193c73239a6281ec9884c00d5e6a524")]),
     Row("L2", "a recorded not_after is moved by one day",
         LIFECYCLE,
-        [(LEDGER, "amd-revocation-list\t2026-08-19T14:19:23Z\t2026-10-04T00:00:00Z",
-          "amd-revocation-list\t2026-08-19T14:19:23Z\t2026-10-05T00:00:00Z")]),
+        [(LEDGER, "amd-revocation-list\t2026-09-22T07:35:42Z\t2026-11-09T01:00:00Z",
+          "amd-revocation-list\t2026-09-22T07:35:42Z\t2026-11-10T01:00:00Z")]),
     Row("L3", "a recorded not_before is moved by one second",
         LIFECYCLE,
         [(LEDGER, "x509-revocation-list\t2026-02-26T13:04:00Z",
@@ -111,17 +114,17 @@ ROWS: list[Row] = [
     # ---- pinned clocks ----------------------------------------------
     Row("L12", "a pinned clock is moved past the collateral it judges",
         LIFECYCLE,
-        [(SNPGATE, "  Now = 1_788_220_800'i64", "  Now = 1_795_000_000'i64"),
-         (LIFECYCLE, 'source: "t_snp_fixture_verify.nim", now: 1_788_220_800\'i64',
+        [(SNPGATE, "  Now = 1_790_121_600'i64", "  Now = 1_795_000_000'i64"),
+         (LIFECYCLE, 'source: "t_snp_fixture_verify.nim", now: 1_790_121_600\'i64',
           'source: "t_snp_fixture_verify.nim", now: 1_795_000_000\'i64')]),
     Row("L13", "a sixth gate pins a clock and no row names it",
         LIFECYCLE, [],
         [("tests/integration/t_zz_mutation_clock.nim",
-          "const\n  Now = 1_788_220_800'i64\n\nwhen isMainModule: discard Now\n")]),
+          "const\n  Now = 1_790_121_600'i64\n\nwhen isMainModule: discard Now\n")]),
     Row("L14", "a gate's pinned clock is transcribed wrongly into the table",
         LIFECYCLE,
-        [(LIFECYCLE, 'source: "t_snp_tcb_policy.nim", now: 1_788_220_800\'i64',
-          'source: "t_snp_tcb_policy.nim", now: 1_788_220_801\'i64')]),
+        [(LIFECYCLE, 'source: "t_snp_tcb_policy.nim", now: 1_790_121_600\'i64',
+          'source: "t_snp_tcb_policy.nim", now: 1_790_121_601\'i64')]),
     Row("L15", "a gate's list of what it judges is emptied",
         LIFECYCLE,
         [(LIFECYCLE,
@@ -161,8 +164,15 @@ ROWS: list[Row] = [
     Row("L23", "a trust root that drifted is reported as expected to differ",
         LIFECYCLE,
         [(LIFEMOD,
-          "  of lcProtocolVector, lcTrustRoot, lcVendorCollateral:\n    if pinnedSha256 == observedSha256: doUnchanged else: doDrifted",
-          "  of lcProtocolVector, lcVendorCollateral:\n    if pinnedSha256 == observedSha256: doUnchanged else: doDrifted\n  of lcTrustRoot:\n    if pinnedSha256 == observedSha256: doUnchanged else: doExpectedToDiffer")]),
+          "  of lcProtocolVector, lcTrustRoot, lcVendorCollateral, lcHistoricalVintage:",
+          "  of lcTrustRoot:\n    if pinnedSha256 == observedSha256: doUnchanged else: doExpectedToDiffer\n  of lcProtocolVector, lcVendorCollateral, lcHistoricalVintage:")]),
+    # NOTE, because the first attempt at this row was measured GREEN and
+    # the reason is worth keeping: splitting `lcTrustRoot` out of the
+    # shared arm is not by itself a mutation. The arm it was split into
+    # has to DECIDE differently, or the two spellings compile to the
+    # same program and a green gate is the correct answer. A mutation
+    # that does not change behaviour tests nothing, and the only way to
+    # find out which kind you wrote is to run it.
     Row("L24", "a class with no publisher answers instead of refusing",
         LIFECYCLE,
         [(LIFEMOD,
@@ -199,7 +209,7 @@ ROWS: list[Row] = [
         LIFECYCLE,
         [(LEDGER,
           "ImpostorArkHex\tsnp_vectors.nim\tminted-negative\tthis-repository\t-",
-          "ImpostorArkHex\tsnp_vectors.nim\tminted-negative\tthis-repository\t2026-09-29")]),
+          "ImpostorArkHex\tsnp_vectors.nim\tminted-negative\tthis-repository\t2026-10-02")]),
     # ---- sanitization ------------------------------------------------
     Row("S1", "a private key is pasted into a corpus module's header",
         LIFECYCLE,
@@ -301,6 +311,77 @@ ROWS: list[Row] = [
         VERDICTGATE,
         [(CLIATTEST, "    req.vendorRevocationLists.add readFile(path)",
           "    discard readFile(path)")]),
+    # ---- the refresh of 2026-10-02 and the two repairs it needed ----
+    #
+    # Every row below mutates something this change ADDED. A fix for a
+    # check that could not fail is itself an unfalsified check.
+    Row("N1", "a pinned clock is moved OFF the derived instant but left inside the window",
+        LIFECYCLE,
+        [(SNPTCB, "  Now = 1_790_121_600'i64        ## 2026-09-23T00:00:00Z; see",
+          "  Now = 1_790_208_000'i64        ## 2026-09-23T00:00:00Z; see"),
+         (LIFECYCLE, 'source: "t_snp_tcb_policy.nim", now: 1_790_121_600\'i64',
+          'source: "t_snp_tcb_policy.nim", now: 1_790_208_000\'i64')]),
+    Row("N2", "the clock rule rounds DOWN to a midnight instead of up",
+        LIFECYCLE,
+        [(LIFECYCLE, "  ((t + Day - 1) div Day) * Day", "  (t div Day) * Day")]),
+    Row("N3", "the clock rule reads the END of each window instead of the start",
+        LIFECYCLE,
+        [(LIFECYCLE, "    if w.notBefore > result: result = w.notBefore",
+          "    if w.notAfter > result: result = w.notAfter")]),
+    Row("N4", "the horizon cap is removed and the flat thirty days comes back",
+        LIFECYCLE,
+        [(LIFEMOD, "  min(horizonSeconds, lifetime div 2)", "  horizonSeconds")]),
+    Row("N5", "the horizon is capped at the whole lifetime instead of half",
+        LIFECYCLE,
+        [(LIFEMOD, "  min(horizonSeconds, lifetime div 2)",
+          "  min(horizonSeconds, lifetime)")]),
+    Row("N6", "the vintage class stops quietening anything",
+        LIFECYCLE,
+        [(LIFEMOD, "  if class == lcHistoricalVintage:\n    return status != lsExpired",
+          "  if false:\n    return status != lsExpired")]),
+    Row("N7", "the vintage class quietens a row whatever state it is in",
+        LIFECYCLE,
+        [(LIFEMOD, "  if class == lcHistoricalVintage:\n    return status != lsExpired",
+          "  if class == lcHistoricalVintage:\n    return false")]),
+    Row("N8", "the monitor keeps its own flat horizon",
+        LIFECYCLE,
+        [(MONITOR,
+          "    if now + effective_horizon(not_before, not_after, horizon) >= not_after:",
+          "    if now + horizon >= not_after:")]),
+    Row("N9", "the monitor decides loudness from the status alone",
+        LIFECYCLE,
+        [(MONITOR, '        loud = expiry_needs_attention(row["class"], status)',
+          '        loud = status in NEEDS_ATTENTION')]),
+    Row("N10", "a vintage pinned for being old is given an unattended refresh route",
+        LIFECYCLE,
+        [(FETCH, "IntelSgxRootCaDerHex\thttps://certificates.trustedservices.intel.com/Intel_SGX_Provisioning_Certification_RootCA.cer\tnone",
+          "IntelSgxRootCaDerHex\thttps://certificates.trustedservices.intel.com/Intel_SGX_Provisioning_Certification_RootCA.cer\tnone\nGtgQeIdentityJson\thttps://example.invalid/qe\tnone")]),
+    Row("N11", "a merely out-of-date document is reclassified to quieten it",
+        LIFECYCLE,
+        [(LEDGER, "PcsTcbInfoEmrJson\ttdx_vectors.nim\tvendor-collateral",
+          "PcsTcbInfoEmrJson\ttdx_vectors.nim\thistorical-vintage")]),
+    Row("N12", "the reference instant is left behind while the corpus moves",
+        LIFECYCLE,
+        [(LEDGERMOD, "  LedgerReferenceInstant* = 1_790_899_200'i64",
+          "  LedgerReferenceInstant* = 1_790_640_000'i64")]),
+    Row("N13", "an observation date falls outside the window the artifact states",
+        LIFECYCLE,
+        [(LEDGER, "amd-kds\t2026-10-02\t866\tdd68e9e3",
+          "amd-kds\t2026-09-01\t866\tdd68e9e3")]),
+    Row("N14", "the next-expiry derivation reports the LAST one instead of the first",
+        LIFECYCLE,
+        [(LIFECYCLE, "      if w.notAfter < soonest:", "      if w.notAfter > soonest:")]),
+    Row("N15", "the scheduled run loses the trigger it can reach",
+        LIFECYCLE,
+        [(WORKFLOW, "  push:\n    branches: [dev, agents]\n", "")]),
+    Row("N16", "the per-landing arm starts going to the network",
+        LIFECYCLE,
+        [(WORKFLOW, "monitor.py --offline", "monitor.py")]),
+    Row("N17", "a comment in the new horizon rule is reworded (GREEN control)",
+        LIFECYCLE,
+        [(LIFEMOD, "  ## Half, specifically, because half is the largest fraction that",
+          "  ## Half, precisely, because half is the largest fraction that")],
+        expect="GREEN"),
 ]
 
 
