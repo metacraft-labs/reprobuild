@@ -122,7 +122,8 @@ proc pemCertificates(text: string): seq[seq[byte]] =
     pos = e + End.len
 
 const
-  Now = 1_788_220_800'i64        ## 2026-09-01T00:00:00Z; see `snp_vectors`.
+  Now = 1_790_121_600'i64        ## 2026-09-23T00:00:00Z; see
+    ## `snp_vectors`'s clock rule. Derived, not chosen.
   FloorTookEffect = 1_780_000_000'i64
     ## The verifier's own instant, 2026-05-28T12:26:40Z. Chosen so the
     ## whole sweep below stays inside every certificate's validity
