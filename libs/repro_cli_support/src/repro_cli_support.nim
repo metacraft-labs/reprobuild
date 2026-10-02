@@ -67992,6 +67992,10 @@ type
     workspaceRoot: string
     checkoutOf: Table[string, string]
     selected: seq[string]
+    onlyNames: seq[string]
+      ## ``--only`` / ``--except`` exactly as given: a repo they excluded was
+      ## left out ON PURPOSE, and the bind report says nothing about it.
+    exceptNames: seq[string]
     notices: seq[string]   ## non-fatal; still reported, never swallowed
     refusals: seq[string]  ## fatal; ``ok`` is false when any is present
 
@@ -68016,6 +68020,8 @@ proc flakeDevelopSelectionOf(passthrough: openArray[string];
     return
   developArgs.list = true
   developArgs.json = false
+  result.onlyNames = developArgs.only
+  result.exceptNames = developArgs.exceptNames
   # `.envrc` runs in the REPO, not at the workspace root, so the workspace is
   # found by walking up — the same ascent `repro branch` / `repro switch` use.
   developArgs.workspaceRoot = flakeOverrideWorkspaceRoot(explicitRoot)
@@ -68090,7 +68096,8 @@ proc flakeDeclaredInputsAt(flakeRoot: string):
 proc flakeBindInputsToCheckouts(inputNames: openArray[string];
     checkoutOf: Table[string, string]; suffixes: openArray[string];
     identity: GitToolIdentity; workspaceRoot: string;
-    report: var seq[string]): seq[FlakeOverrideBinding] =
+    report: var seq[string]; onlyNames: openArray[string] = [];
+    exceptNames: openArray[string] = []): seq[FlakeOverrideBinding] =
   ## Bind each declared flake input to the develop-set checkout of the repo its
   ## (suffix-stripped) name denotes. Every input that is NOT bound and could
   ## plausibly have been is NAMED in ``report`` rather than dropped, because a
@@ -68144,10 +68151,20 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
   ## `nim-shm-gset-src`, `reprobuild-ct-test-runner-src` — every one a manifest
   ## member, checked out, carrying a `flake.nix`, and carrying no `repro.lock`).
   ## The verb reported ONE skip and said nothing about those five.
+  ##
+  ## A repo the invocation's EXACT-NAME selection excluded (named in
+  ## ``--except``, or absent from a non-empty ``--only``) is the third case,
+  ## and it is not a finding: the caller asked for it to be left out, so the
+  ## report says nothing about it at all. Pattern selectors (``--filter``,
+  ## ``--tag``, ``--tier``) cannot be inverted here, so their omissions are
+  ## still named, with the selection given as one possible reason.
   var unknownToWorkspace: seq[string]
   let wsRoot = if workspaceRoot.len > 0: absolutePath(workspaceRoot) else: ""
   for name in inputNames:
     let repo = stripFlakeInputSuffix(name, suffixes)
+    if repo notin checkoutOf and
+        (repo in exceptNames or (onlyNames.len > 0 and repo notin onlyNames)):
+      continue
     if repo notin checkoutOf:
       let sibling = if wsRoot.len > 0: wsRoot / repo else: ""
       if sibling.len > 0 and dirExists(extendedPath(sibling)):
@@ -69339,7 +69356,8 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
 
   # ---- bind inputs to develop-set checkouts ------------------------------
   let emitted = flakeBindInputsToCheckouts(inputNames, checkoutOf, suffixes,
-    identity, selection.workspaceRoot, report)
+    identity, selection.workspaceRoot, report, selection.onlyNames,
+    selection.exceptNames)
 
   # ---- the SAME bindings, compared against the pins (§3.2) ----------------
   let state = flakeOverrideStateReport(flakeRoot, emitted, identity)
@@ -70224,7 +70242,8 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     return
   result.notices = selection.notices
   let bound = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
-    suffixes, identity, selection.workspaceRoot, result.notices)
+    suffixes, identity, selection.workspaceRoot, result.notices,
+    selection.onlyNames, selection.exceptNames)
   if bound.len == 0:
     result.tag = "no-overrides"
     result.diagnostic = "no flake input of " & declared.flakePath &
@@ -70926,7 +70945,8 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   var skipped: seq[string]
   for n in selection.notices: skipped.add(n)
   let exact = flakeBindInputsToCheckouts(declared.names, selection.checkoutOf,
-    defaultFlakeInputStripSuffixes, identity, selection.workspaceRoot, skipped)
+    defaultFlakeInputStripSuffixes, identity, selection.workspaceRoot, skipped,
+    selection.onlyNames, selection.exceptNames)
   var state = flakeOverrideStateReport(flakeRoot, exact, identity)
   if not state.ok:
     result.examined = true
@@ -71308,7 +71328,7 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
     for n in selection.notices: notices.add(n)
     bindings = flakeBindInputsToCheckouts(declared.names,
       selection.checkoutOf, suffixes, identity, selection.workspaceRoot,
-      notices)
+      notices, selection.onlyNames, selection.exceptNames)
 
   var state = flakeOverrideStateReport(flakeRoot, bindings, identity)
   if not state.ok:
