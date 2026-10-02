@@ -648,6 +648,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_package_identity_is_the_producing_action.nim",
+    binary: "build/test-bin/t_package_identity_is_the_producing_action",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_scratch_dirs.nim",
     binary: "build/test-bin/t_scratch_dirs",
     defines: @[],
