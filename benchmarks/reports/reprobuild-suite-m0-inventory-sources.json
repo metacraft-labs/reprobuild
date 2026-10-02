@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1816,
+    "nimTestBinaries": 1818,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 593,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1832
+    "testEntries": 1834
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1064,7 +1064,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 956,
+      "integration": 958,
       "platform/destructive": 117,
       "pure unit": 593,
       "unclassified": 155
@@ -1215,9 +1215,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1816,
+    "nimTestBinaryCount": 1818,
     "pythonTestFileCount": 16,
-    "testEntryCount": 1832
+    "testEntryCount": 1834
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7635,6 +7635,44 @@
       "source": "libs/repro_build_engine/tests/t_warm_noop_consultation_hashes_no_bytes.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_whole_graph_prefix_refuses_free_before_statting",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_whole_graph_prefix_refuses_free_before_statting.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_whole_graph_prefix_warm_state_reaches_the_scheduler",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_whole_graph_prefix_warm_state_reaches_the_scheduler.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
