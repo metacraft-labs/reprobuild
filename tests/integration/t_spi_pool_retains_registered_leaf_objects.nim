@@ -70,6 +70,7 @@
 ## Skip rule: ``git`` missing on PATH, or older than 2.42 (the hook needs it).
 
 import std/[os, osproc, strutils, tempfiles, times, unittest]
+import repro_test_support/reasoned_skip
 
 import shared_clones
 

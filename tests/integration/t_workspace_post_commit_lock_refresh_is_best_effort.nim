@@ -57,6 +57,7 @@
 
 import std/[algorithm, json, os, osproc, sequtils, strutils, tempfiles,
   unittest]
+import repro_test_support/reasoned_skip
 
 when defined(posix):
   import std/posix

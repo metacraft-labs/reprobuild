@@ -60,6 +60,7 @@
 ## PATH; the CLI case additionally needs the built ``repro``.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 import shared_clones
