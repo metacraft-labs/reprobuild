@@ -15507,6 +15507,64 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         "status=" & $res.statusCode & " bytes=" & $res.bytesUploaded)
     finishStat("repro binary-cache publish", publishStart)
 
+  # THE BUILD'S ONE metadata cache. Declared HERE — above the whole-graph
+  # no-op prefix rather than beside the scheduler's other tables below —
+  # because the prefix and the scheduler share it.
+  #
+  # AC-5. The prefix is a PREFIX, not an alternative: when
+  # `tryFastNoopCacheHits` returns `none` the scheduler runs anyway, so
+  # everything the prefix observed is observed a second time. It used to warm
+  # a cache of its own and drop it on the floor at every one of its
+  # `return none` points, and the scheduler then allocated a second, empty
+  # one — on three measured workloads 88–96% of the prefix's cost was that
+  # duplication. One cache means the scheduler's first touch of a path the
+  # prefix already looked at is a table probe instead of an `lstat`.
+  #
+  # WHY THIS IS NOT A WEAKER CHECK. The cache is a memo of OBSERVATIONS made
+  # in this process, in this build, and it is already shared across every
+  # action the scheduler visits — an entry the scheduler's action #40 reads
+  # was written by its action #1, which is the same cross-phase reuse this
+  # makes the prefix a participant in. Nothing treats "present in the cache"
+  # as "already validated": the comparison against the recorded metadata
+  # happens at the call site, on the cached value exactly as on a fresh one
+  # (`fingerprintRecordedMetadataImpl` compares `result` with `recorded`
+  # either way). Writes still invalidate — `invalidateCachedOutputs` /
+  # `invalidateCachedWrites` after every execution and
+  # `fileMetadataCache.clear()` after every restore — and those run against
+  # this cache whatever filled it.
+  #
+  # STATS FINALISATION, which is the one thing that must not be moved.
+  # `finishMetadataCacheStats` is called from the prefix's two HIT exits and
+  # from the scheduler's single exit, and never from a bail. Those three are
+  # mutually exclusive: a prefix hit returns from `runBuild` before the
+  # scheduler starts. `addCountedMetric` ACCUMULATES into the row it finds by
+  # name, so finalising one cache twice would silently double every
+  # `repro file metadata *` count. Do not add a finalisation to a bail path.
+  var fileMetadataCache = initFileMetadataCache()
+
+  # AC-5 deliverable 3's instrument, and the prefix's fall-through accounting.
+  # Only the prefix writes these; they are read once, at the fall-through.
+  var fastNoopPrefixOutputStats = 0
+  var fastNoopPrefixOutputStatUs = 0.0
+
+  proc countFastNoopPrefixOutputStat(started: float) =
+    ## Attribute one `allOutputsExist()` probe to the PREFIX as well as to the
+    ## whole build.
+    ##
+    ## `repro output stat` is emitted from four places — the prefix's two
+    ## loops and the scheduler's two — so it cannot answer "how much
+    ## filesystem work did the prefix do before refusing", which is the
+    ## question AC-5 deliverable 3 is accountable to. This counts the prefix's
+    ## share separately. The row it feeds is NESTED inside `repro output stat`,
+    ## not beside it — called BEFORE `finishStat` at each site, so its duration
+    ## is a strict sub-interval of the one that row gets, never a longer one.
+    ## It is deliberately absent from the `invalidationChecksUs` bucket in
+    ## `repro_cli_support` so the same microseconds are not added twice.
+    if not config.statsEnabled:
+      return
+    inc fastNoopPrefixOutputStats
+    fastNoopPrefixOutputStatUs += (epochTime() - started) * 1_000_000.0
+
   proc fastNoopReuseReason(action: BuildAction): string =
     ## The whole-graph fast scan and the regular scheduler decide the SAME
     ## state — "the record revalidated and the declared outputs (if any)
@@ -15556,12 +15614,37 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # consults a retention clause. Bail out for both.
     if config.rebuildClass != rbNone:
       return none(BuildRunResult)
+    # THE FREE REFUSALS, all of them, over the whole graph, before either of
+    # the expensive loops below touches the filesystem.
+    #
+    # AC-5 deliverable 3. `cacheable` and `dynamicDepsFile` are plain fields of
+    # `BuildAction` — no syscall, no record read, no allocation. They used to
+    # be tested INSIDE the two loops that also `allOutputsExist()` each edge
+    # and read each edge's hot record, so a graph whose uncacheable edge sorts
+    # LAST paid n edges of filesystem work and then refused anyway. Every graph
+    # carrying an `install`, `test` or `preinstall` edge is in that class; the
+    # zlib `all` target that the campaign measured happens to exclude them,
+    # which is why the waste never showed up in those numbers.
+    #
+    # This loop is the natural home: it already existed, it already visits
+    # every action, and `buildGraph.actions` is FIXED for the whole of the
+    # prefix — `applyDynamicDeps` only appends to it from inside the scheduler,
+    # which has not started yet. So the three refusals here subsume the
+    # per-iteration copies completely and the copies are gone rather than left
+    # behind as dead field reads.
     for action in buildGraph.actions:
       if action.effectiveRetention.kind != crkForever:
         return none(BuildRunResult)
+      # An uncacheable edge must run, so no whole-graph "nothing to do" answer
+      # can be correct for a graph containing one.
+      if not action.cacheable:
+        return none(BuildRunResult)
+      # A `dynamicDepsFile` edge's input set is not known until it has run, so
+      # the prefix has nothing it could revalidate against.
+      if action.dynamicDepsFile.len > 0:
+        return none(BuildRunResult)
     var fastResult: BuildRunResult
     fastResult.traceEnabled = not config.suppressTrace
-    var metadataCache = initFileMetadataCache()
     if config.skipCacheHitEvidence:
       var hotProbes: seq[HotMetadataProbe] = @[]
       # M10 — parallel to `hotProbes`, so a record that observed environment
@@ -15570,8 +15653,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       # environment moved, and nothing downstream would look again.
       var hotEnvResolvers: seq[EnvResolver] = @[]
       for action in buildGraph.actions:
-        if (not action.cacheable) or action.dynamicDepsFile.len > 0:
-          return none(BuildRunResult)
+        # `cacheable` / `dynamicDepsFile` are refused in the free pre-pass
+        # above, before this loop stats anything. See the note there.
+        #
         # An edge that declares no outputs has nothing to stat and nothing
         # to restore; its record is reusable on unchanged inputs alone
         # (`cachedResultReusableInPlace`). Bailing out of the fast path for
@@ -15580,6 +15664,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if not action.declaresNoOutputs():
           let outputStatStart = statStart()
           let outputsPresent = action.allOutputsExist()
+          countFastNoopPrefixOutputStat(outputStatStart)
           finishStat("repro output stat", outputStatStart)
           if not outputsPresent:
             return none(BuildRunResult)
@@ -15596,7 +15681,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       let lookupStart = statStart()
       let navigatorStart = statStart()
       let scan = cache.scanHotIndexMetadataInputsUnchanged(hotProbes,
-        addr metadataCache, hotEnvResolvers)
+        addr fileMetadataCache, hotEnvResolvers)
       finishStat("repro hot index navigator scan", navigatorStart)
       finishStat("repro cache lookup", lookupStart)
       case scan.status
@@ -15610,7 +15695,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             reason: fastNoopReuseReason(action),
             dependencyPolicyKind: action.dependencyPolicy.kind))
         finishStat("repro cache hit result materialize", resultMaterializeStart)
-        finishMetadataCacheStats(metadataCache)
+        finishMetadataCacheStats(fileMetadataCache)
         fastResult.stats = stats
         return some(fastResult)
       of hmssMissingRecord, hmssInputChanged, hmssOutputChanged,
@@ -15634,12 +15719,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # M10 — parallel to `hotRecords`; see `hotEnvResolvers` above.
     var hotRecordEnvResolvers: seq[EnvResolver] = @[]
     for action in buildGraph.actions:
-      if (not action.cacheable) or action.dynamicDepsFile.len > 0:
-        return none(BuildRunResult)
+      # `cacheable` / `dynamicDepsFile`: refused in the free pre-pass above.
       # See the note above: no declared outputs means nothing to stat.
       if not action.declaresNoOutputs():
         let outputStatStart = statStart()
         let outputsPresent = action.allOutputsExist()
+        countFastNoopPrefixOutputStat(outputStatStart)
         finishStat("repro output stat", outputStatStart)
         if not outputsPresent:
           return none(BuildRunResult)
@@ -15669,7 +15754,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     let lookupStart = statStart()
     let inputScanStart = statStart()
     let inputsUnchanged =
-      hotMetadataRecordInputsUnchanged(hotRecords, addr metadataCache,
+      hotMetadataRecordInputsUnchanged(hotRecords, addr fileMetadataCache,
         hotRecordEnvResolvers)
     finishStat("repro hot input scan", inputScanStart)
     finishStat("repro cache lookup", lookupStart)
@@ -15689,7 +15774,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       assignCacheHitEvidence(item, action, record)
       fastResult.results.add(item)
     finishStat("repro cache hit result materialize", resultMaterializeStart)
-    finishMetadataCacheStats(metadataCache)
+    finishMetadataCacheStats(fileMetadataCache)
     fastResult.stats = stats
     some(fastResult)
 
@@ -15729,6 +15814,29 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     runResult.stats = stats
     return runResult
 
+  # THE FALL-THROUGH. Everything below is the scheduler, and reaching it means
+  # the prefix refused — so the prefix's cost is ADDED to the normal path
+  # rather than spent instead of it. These two rows are what makes that cost,
+  # and what survives it, countable. Emitted here and nowhere else: on a
+  # whole-graph hit there is no fall-through, the prefix never runs twice, and
+  # `repro output stat` is already the build's whole output-stat figure.
+  #
+  # `prefix output stat` — `allOutputsExist()` probes the prefix paid before
+  # refusing. A NESTED subset of `repro output stat`, which also carries the
+  # scheduler's; see `countFastNoopPrefixOutputStat`. AC-5 deliverable 3's
+  # criterion is this row reading ZERO on a graph whose only uncacheable edge
+  # sorts last.
+  #
+  # `prefix metadata carry` — observations the prefix leaves IN the cache the
+  # scheduler is about to use. AC-5 deliverable 2's criterion: it was
+  # structurally zero while the prefix warmed a cache of its own, because the
+  # scheduler's cache was freshly allocated right here.
+  if config.statsEnabled:
+    stats.addCountedMetric("repro fast noop prefix output stat",
+      fastNoopPrefixOutputStats, fastNoopPrefixOutputStatUs)
+    stats.addCountedMetric("repro fast noop prefix metadata carry",
+      fileMetadataCache.entryCount, 0.0)
+
   var idToIndex = initTable[string, int]()
   var dependents = initTable[string, seq[string]]()
   var remaining = initTable[string, int]()
@@ -15738,7 +15846,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var ready: seq[string] = @[]
   var actionsById = initTable[string, BuildAction]()
   var dynamicDepsLoaded = initHashSet[string]()
-  var fileMetadataCache = initFileMetadataCache()
+  # `fileMetadataCache` used to be allocated HERE, empty, immediately after the
+  # whole-graph prefix had warmed and discarded one of its own. It is declared
+  # above the prefix now and carries the prefix's observations across the
+  # fall-through; see the note at its declaration. AC-5.
   var inlineRunQuotaSession: ReproRunQuotaSession
   var inlineRunQuotaSessionOpen = false
 

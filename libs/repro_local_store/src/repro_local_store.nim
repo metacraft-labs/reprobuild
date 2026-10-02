@@ -1755,6 +1755,22 @@ proc invalidate*(cache: var FileMetadataCache; path: string) =
 proc metadataStats*(cache: FileMetadataCache): FileMetadataCacheStats =
   cache.stats
 
+proc entryCount*(cache: FileMetadataCache): int =
+  ## How many paths this cache currently holds an observation for.
+  ##
+  ## The counts in `metadataStats` are a history of what the cache DID; this is
+  ## its present contents, and the two answer different questions. AC-5 needs
+  ## the second one: the engine reports it at the whole-graph prefix's
+  ## fall-through, where "the scheduler inherits a populated cache" is the
+  ## property under test and every history row would be satisfied by a cache
+  ## that had been warmed and then thrown away.
+  ##
+  ## Not the number of distinct files OBSERVED: `fingerprintRecordedMetadataImpl`
+  ## also inserts an entry for a recorded-absent path inside an existing store
+  ## output without probing it (`storeAbsenceSkips`), and `invalidate` / `clear`
+  ## remove entries. It is exactly "paths this cache can answer for right now".
+  cache.entries.len
+
 proc attributeMetadataProbe(cache: ptr FileMetadataCache; path: string;
                             elapsedNanos: int64) =
   ## Credit one timed check to the row for the arm it took.

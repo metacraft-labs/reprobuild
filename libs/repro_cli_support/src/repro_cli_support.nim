@@ -17391,6 +17391,16 @@ proc runPostCommitLockCommand*(args: openArray[string]): int
 proc runPreCommitLockCommand*(args: openArray[string]): int
 proc runCachePushCommand*(args: openArray[string]): int
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string]
+
+proc emitLeafReports(reports: openArray[LeafCheckReport]) =
+  ## Print the shared-clone detector's messages
+  ## (Shared-Clone-Pool-Integrity §4.4) on stderr. Every caller that refreshes
+  ## a pool or runs the detector routes its findings here, so a stale ref
+  ## that was removed, or a branch of the user's whose history is gone, is
+  ## said once, in the same words, whichever command noticed it.
+  for line in messages(reports):
+    stderr.writeLine(line)
+
 proc runManifestRefreshHookCommand*(hookName: string;
                                     args: openArray[string]): int
 # Workspace-Membership-Model.md — the ``post-merge`` hook's local-state
@@ -21386,7 +21396,7 @@ proc computeDepIntegrity*(repoAbsPath, headSha: string): string =
     return gitObjectMultihash(gitObjectFormatOf(repoAbsPath), headSha)
   narStyleTreeMultihash(collectTreeEntries(repoAbsPath))
 
-proc usesProducerLockedDep(selector, root: string;
+proc usesProducerLockedDep(selector, root, pathBase: string;
                            existingDeps: seq[LockedDep]): Option[LockedDep] =
   ## FUP-M — resolve a recipe ``uses:`` producer SELECTOR to a locked sibling
   ## dependency so ``repro lock refresh`` carries the declared cross-repo
@@ -21408,7 +21418,9 @@ proc usesProducerLockedDep(selector, root: string;
   if srcRoot.len > 0 and dirExists(extendedPath(srcRoot)):
     let depAbs = absolutePath(srcRoot)
     let facts = committedLockRepoFacts(depAbs)
-    let rel = relativePath(depAbs, root).replace('\\', '/')
+    # Discovered from the invoking tree, RECORDED relative to the committed
+    # lock's frame of reference (``committedLockPathBase``).
+    let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     return some(LockedDep(
       name: selector, path: rel,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
@@ -21441,13 +21453,15 @@ proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
   ## Forward declaration; defined beside ``developSetClosure``, whose closure it
   ## computes.
 
-proc lockedDepFromCheckout(name, depAbs, root: string): LockedDep =
+proc lockedDepFromCheckout(name, depAbs, pathBase: string): LockedDep =
   ## A locked VCS dependency observed from the checkout at ``depAbs``: its
   ## ``HEAD`` as the revision, its canonical fetch URL, and the VCS-native
-  ## integrity of that commit. ``path`` is ``depAbs`` relative to ``root``.
+  ## integrity of that commit. ``path`` is ``depAbs`` relative to
+  ## ``pathBase`` — ``committedLockPathBase`` of the project, never the
+  ## invoking directory; see that proc for why the two differ.
   let facts = committedLockRepoFacts(depAbs)
   LockedDep(
-    name: name, path: relativePath(depAbs, root).replace('\\', '/'),
+    name: name, path: relativePath(depAbs, pathBase).replace('\\', '/'),
     coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
       gitRef: facts.branch, revision: facts.headSha),
     integrity: computeDepIntegrity(depAbs, facts.headSha),
@@ -21458,6 +21472,51 @@ proc isGitCheckoutDir(path: string): bool =
   dirExists(extendedPath(path)) and
     (dirExists(extendedPath(path / ".git")) or
      fileExists(extendedPath(path / ".git")))
+
+proc committedLockPathBase(projectRoot: string): string =
+  ## The directory a COMMITTED lock's ``deps`` paths are relative to.
+  ##
+  ## WHY THIS IS NOT SIMPLY THE INVOKING DIRECTORY. ``repro.lock`` is a
+  ## committed artifact, so every ``path`` it carries has to mean the same
+  ## thing to every reader of the repository. The frame of reference the spec
+  ## states is "the checkout relative to the repo", and every example is the
+  ## one-level sibling form ``../<sibling>`` (Unified-Locking-And-Hooks.md
+  ## §14.2, Workspace-Manifests.md).
+  ##
+  ## A LINKED WORKTREE is a checkout of the same repository at a different
+  ## depth, and that broke the invariant silently. Refreshed in
+  ## ``reprobuild/.claude/worktrees/agent-<id>`` — four levels below the repo
+  ## root — the writer produced ``path = "../../../../nim-shm-queue"``: correct
+  ## from that one worktree, and from the repo root (or any clone, or CI) a
+  ## path four levels ABOVE the workspace, outside the home directory. The
+  ## verifier cannot catch it either, because the lock is self-consistent for
+  ## the tree that wrote it.
+  ##
+  ## Agent sessions work in worktrees by default — this repository ships a
+  ## ``.gitignore`` entry for ``.claude/worktrees/`` — so refusing to refresh
+  ## there would make the normal case the unsupported one. Resolving against
+  ## the MAIN worktree instead makes a worktree refresh produce the SAME BYTES
+  ## as a refresh at the repo root, which is the property a committed file
+  ## needs.
+  ##
+  ## The mapping preserves the project's position WITHIN the repository, so a
+  ## project in a subdirectory keeps writing paths relative to its own
+  ## directory — where its lock lives — rather than to the repository top.
+  ##
+  ## Degrades to ``projectRoot`` whenever the main worktree cannot be
+  ## determined: no VCS tool, a directory that is not a checkout, or a layout
+  ## whose worktree listing is unavailable. That is the previous behaviour,
+  ## and it is correct whenever the invoking tree IS the main one — every
+  ## non-worktree case.
+  let normalized = os.normalizedPath(absolutePath(projectRoot))
+  let top = gitTopLevel(normalized)
+  if top.len == 0: return normalized
+  let main = gitMainWorktreeTop(normalized)
+  if main.len == 0 or cmpPaths(main, top) == 0: return normalized
+  let within = relativePath(normalized, top).replace('\\', '/')
+  if within.len == 0 or within == "." or within.startsWith(".."):
+    return os.normalizedPath(main)
+  os.normalizedPath(main / within)
 
 proc lockedDepsForWorkspace(workspaceRoot: string;
                             usesSelectors: seq[string] = @[];
@@ -21481,6 +21540,11 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   ## producer graph.
   result = @[]
   let root = absolutePath(workspaceRoot)
+  # Every ``path`` written below, and every path read back out of the existing
+  # lock, is relative to THIS directory rather than to ``root``. The two are
+  # the same everywhere except in a linked worktree; see
+  # ``committedLockPathBase``.
+  let pathBase = committedLockPathBase(root)
   let rootFacts = committedLockRepoFacts(root)
   let nested = discoverDevelopDeps(root)
   let bare = extractFilename(root.strip(
@@ -21507,20 +21571,23 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   var seenPaths: seq[string] = @[]
   var seenNames: seq[string] = @[]
   for d in nested:
-    let depAbs = root / d.path
+    let depAbs = absolutePath(root / d.path)
     let facts = committedLockRepoFacts(depAbs)
+    # ``d.path`` is relative to the INVOKING tree (that is what discovery
+    # resolves against); the lock records it relative to ``pathBase``.
+    let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     siblingDeps.add(LockedDep(
-      name: d.name, path: d.path,
+      name: d.name, path: rel,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
         gitRef: facts.branch, revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
       depends: @[], tags: @[]))
-    seenPaths.add(d.path)
+    seenPaths.add(rel)
     seenNames.add(d.name)
   for selector in usesSelectors:
     if selector in seenNames: continue
-    let depOpt = usesProducerLockedDep(selector, root, existingDeps)
+    let depOpt = usesProducerLockedDep(selector, root, pathBase, existingDeps)
     if depOpt.isNone: continue
     let dep = depOpt.get()
     if dep.path in seenPaths or dep.name in seenNames: continue
@@ -21538,7 +21605,7 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
     let depAbs = absolutePath(repoRoot)
     if cmpPaths(depAbs, root) == 0:
       continue
-    let rel = relativePath(depAbs, root).replace('\\', '/')
+    let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     if rel in seenPaths:
       continue
     let facts = committedLockRepoFacts(depAbs)
@@ -21575,10 +21642,10 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   if manifest.resolved:
     for sib in manifest.siblings:
       let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
-      let rel = relativePath(depAbs, root).replace('\\', '/')
+      let rel = relativePath(depAbs, pathBase).replace('\\', '/')
       if rel in seenPaths or sib.name in seenNames: continue
       if isGitCheckoutDir(depAbs):
-        siblingDeps.add(lockedDepFromCheckout(sib.name, depAbs, root))
+        siblingDeps.add(lockedDepFromCheckout(sib.name, depAbs, pathBase))
       else:
         var carried = false
         for d in existingDeps:
@@ -21607,9 +21674,9 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
     for d in existingDeps:
       if d.path == "." or d.coordinates.kind != ckVcs: continue
       if d.path in seenPaths or d.name in seenNames: continue
-      let depAbs = absolutePath(root / d.path)
+      let depAbs = absolutePath(pathBase / d.path)
       if isGitCheckoutDir(depAbs):
-        var observed = lockedDepFromCheckout(d.name, depAbs, root)
+        var observed = lockedDepFromCheckout(d.name, depAbs, pathBase)
         observed.path = d.path
         siblingDeps.add(observed)
       else:
@@ -32804,6 +32871,12 @@ proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; ide
     var prunable: seq[string]
     var surviving = 0
     for name in actualRemotes:
+      if name == LeafPoolRemoteName:
+        # Reprobuild's own remote for the shared clone this checkout borrows
+        # from (Shared-Clone-Pool-Integrity §3.4). No manifest declares it,
+        # and it is neither the manifest's to prune nor a remote that counts
+        # as the checkout "having" one.
+        continue
       if name in expectedRemotes:
         inc surviving
       else:
@@ -32906,6 +32979,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
     if sharedBareByUrl.hasKey(fetchUrl):
       return sharedBareByUrl[fetchUrl]
     let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     if not refreshed.ok and refreshed.diagnostic.len > 0:
       stderr.writeLine("workspace init: shared-clone cache miss for " &
@@ -33754,9 +33828,11 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
   # Measured on a real workspace: 12 repos reset by a run that reported
   # ``force-reset 0, skipped 0``.
   #
-  # The planner's refusal text has always said "run 'repro sync
-  # --rebase-on-force-push' to rebase your local commits on the new history".
-  # That sentence is only honest when the flag is what turns the rebase on.
+  # The planner's refusal text offers "'repro sync --rebase-on-force-push
+  # --yes' to reset onto the new history and replay the commits you own".
+  # That sentence is only honest when the flag is what turns the rebase on —
+  # and the planner now also withholds it where the replay has no base to
+  # work from, so a refusal never names a command that cannot act.
   result.rebaseOnForcePush = false
   var i = 0
   while i < args.len:
@@ -38867,6 +38943,22 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       oldRemoteTips[repoIdx] = revParse(identity, repoPath,
         "refs/remotes/" & rName & "/" & repo.revision)
 
+  # Shared-Clone-Pool-Integrity §4.2: the detector runs in every leaf BEFORE
+  # its fetch. It registers the leaf with its pool and writes the refetch
+  # chain and ``fetch.hideRefs`` (§4.3), refills what upstream still serves,
+  # removes remote-tracking refs whose commit exists nowhere (message A) and
+  # explains, without touching anything, a branch of the user's that depends
+  # on a commit that is gone (message B). The pool refreshes below run it
+  # again, for every registered leaf, once the refresh has moved the pool.
+  block sharedCloneLeaves:
+    var reports: seq[LeafCheckReport]
+    for repo in resolved.repos:
+      let repoPath = args.workspaceRoot / repo.path
+      if dirExists(repoPath / ".git"):
+        reports.add(checkLeaf(identity.binaryPath, repoPath, lcmRepair,
+          cacheRoot))
+    emitLeafReports(reports)
+
   var sharedBareRefreshAction = initTable[string, string]()
   var fetchActions: seq[BuildAction]
   var refreshActions: seq[BuildAction]
@@ -38988,6 +39080,12 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     var fetchById = initTable[string, ActionResult]()
     for outcome in res.results:
       fetchById[outcome.id] = outcome
+    # A pool refresh reports what it found in the leaves registered with it
+    # on its stdout (``executeRefreshBare``); say it here.
+    for a in refreshActions:
+      let printed = fetchById.getOrDefault(a.id).stdout
+      if printed.len > 0:
+        stderr.write(printed)
     var fetchOk = 0
     for a in fetchActions:
       let outcome = fetchById.getOrDefault(a.id)
@@ -39138,6 +39236,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     if sharedBareForClone.hasKey(fetchUrl):
       return sharedBareForClone[fetchUrl]
     let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     if not refreshed.ok and refreshed.diagnostic.len > 0:
       stderr.writeLine("workspace sync: shared-clone cache miss for " &
@@ -39195,10 +39294,18 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         continue
       # ``scForcePushRebase`` belongs in this set, and its absence was a
       # promise the tool did not keep: the planner's own refusal text for a
-      # rewritten remote ends "or discard it with 'repro sync --force-sync'",
-      # yet that case was filtered out here, so ``--force-sync`` did nothing
-      # for it and the repo stayed refused however many times the operator
-      # ran the named remedy.
+      # rewritten remote names a ``--force-sync`` remedy, yet that case was
+      # filtered out here, so ``--force-sync`` did nothing for it and the repo
+      # stayed refused however many times the operator ran the named remedy.
+      #
+      # Keeping that promise takes BOTH halves, and the second was missing for
+      # longer than the first. This arm makes the flag act; the planner's text
+      # has to name a command that survives the gate below, which in a
+      # non-interactive context means ``--force-sync --yes``. Twelve rewritten
+      # checkouts were refused, the printed remedy was run verbatim, and the
+      # answer was ``refused 12, force-reset 0`` — the flag was gated here
+      # correctly and then declined for want of a confirmation the advice
+      # never mentioned.
       if decision.syncCase notin
           {scDirty, scLocallyUnpublished, scDivergentFeatureBranch,
            scForcePushRebase}:
@@ -39804,6 +39911,7 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     if sharedBareForClone.hasKey(fetchUrl):
       return sharedBareForClone[fetchUrl]
     let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     if not refreshed.ok and refreshed.diagnostic.len > 0:
       stderr.writeLine("workspace mainline sync: shared-clone cache miss for " &
@@ -40636,6 +40744,7 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     if sharedBareByUrl.hasKey(fetchUrl):
       return sharedBareByUrl[fetchUrl]
     let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     sharedBareByUrl[fetchUrl] = reference
     reference
@@ -41378,6 +41487,14 @@ proc sameFilesystemPath(a, b: string): bool =
   else:
     aN == bN
 
+type
+  TriggerRepoUndeclaredError* = object of ValueError
+    ## The caller named a triggering checkout that no declared repo of the
+    ## resolved project matches, so there is no name to key a lock record on.
+    ## Distinct from the other lock-writer failures because for one trigger —
+    ## the membership repo — this is the SPECIFIED outcome rather than an
+    ## error (see ``pcoSkippedMembershipRepo``).
+
 proc pickTriggerRepo(resolved: ResolvedProject;
                      explicit, explicitPath, workspaceRoot: string;
                      identity: GitToolIdentity):
@@ -41434,7 +41551,16 @@ proc pickTriggerRepo(resolved: ResolvedProject;
     # commit this operation never observed, and that no consumer of the
     # triggering repo can find. "No lock" is recoverable and legible;
     # a misfiled one is neither.
-    raise newException(ValueError,
+    #
+    # Raised as its OWN type, not a bare ``ValueError``, because one caller
+    # has to tell this refusal apart from every other way the lock writer can
+    # fail. The post-commit hook does: for the MEMBERSHIP repo, "the trigger
+    # is not a declared repo" is the specified outcome rather than a failure
+    # (Workspace-And-Develop-Mode.md §"Gate scope when the pushed repo is the
+    # membership repo"), and the alternative — matching on this message's
+    # wording — would make that classification a property of the sentence
+    # below instead of of the condition it reports.
+    raise newException(TriggerRepoUndeclaredError,
       "triggering repo at '" & explicitPath &
         "' is not declared in project '" & resolved.projectName &
         "'; no lock can be anchored at it" &
@@ -44184,6 +44310,21 @@ type
     pcoNoLockFailed      ## Lock writer raised (IO error, VCS query
                          ## failure, missing checkout, ...) and NO lock
                          ## exists.
+    pcoSkippedMembershipRepo ## The commit landed in the MEMBERSHIP repo (the
+                          ## checkout carrying ``projects/``/``repos/``), for
+                          ## which Workspace-And-Develop-Mode.md §"Gate scope
+                          ## when the pushed repo is the membership repo"
+                          ## decides that no trigger-keyed record is due at
+                          ## all: it is not a project repo, so it has no
+                          ## declared name to encode as the ``<repo>``
+                          ## component and belongs to no tier's partition.
+                          ## Writing nothing is the SPECIFIED outcome here, so
+                          ## it is a skip and not a failure — the distinction
+                          ## this suite's invariant 4 reserves
+                          ## ``no-lock-failed`` for. A stray undeclared
+                          ## checkout keeps that tag: it has no resolvable
+                          ## anchor, which does block a record somebody would
+                          ## have looked for.
     pcoSkippedGitOperation ## Git is mid-rebase / mid-cherry-pick / mid-am /
                            ## mid-bisect in the repo that fired the hook. The
                            ## commit this hook saw is one of that operation's
@@ -44242,6 +44383,7 @@ proc postCommitOutcomeTag(outcome: PostCommitOutcome): string =
   of pcoNoLockDirty: "no-lock-dirty-siblings"
   of pcoSkippedNoWorkspace: "skipped-no-workspace"
   of pcoNoLockFailed: "no-lock-failed"
+  of pcoSkippedMembershipRepo: "skipped-membership-repo"
   of pcoSkippedGitOperation: "skipped-git-operation-in-progress"
   of pcoInertGitStateUnknown: "inert-git-state-unknown"
 
@@ -45514,6 +45656,33 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   ## ``mayWrite = false`` classifies and reports without writing, for a commit
   ## the `repro.lock` re-pin is already refusing.
 
+proc triggerIsMembershipRepo(toolProvisioning: ToolProvisioningMode;
+                             workspaceRoot, triggerRepoPath: string): bool =
+  ## Is ``triggerRepoPath`` this workspace's MEMBERSHIP repo — the checkout
+  ## carrying ``projects/``/``repos/``, which no project declares?
+  ##
+  ## The same test the pre-push gate makes (``currentIsMembershipRepo``), and
+  ## made the same way on purpose: ``manifestsRoot`` locates membership (the
+  ## flat workspace root, else a materialized ``.repro/manifests``), and
+  ## ``discoverGitWorktree`` insists the path IS a worktree ROOT rather than
+  ## accepting an ancestor's answer. Without that second half an arbitrary
+  ## directory that happens to sit at the membership path would qualify.
+  ##
+  ## False on any probe failure. The caller is deciding whether to downgrade a
+  ## failure report to a decided no-op, so an unanswerable question must leave
+  ## the failure report standing.
+  if triggerRepoPath.len == 0 or workspaceRoot.len == 0:
+    return false
+  try:
+    let membershipRoot = manifestsRoot(workspaceRoot)
+    if not sameFilesystemPath(absolutePath(membershipRoot),
+                              absolutePath(triggerRepoPath)):
+      return false
+    let identity = ensureGitToolResolvable(toolProvisioning, getEnv("PATH"))
+    discoverGitWorktree(identity, membershipRoot).ok
+  except CatchableError:
+    false
+
 proc runPostCommitLockCommand*(args: openArray[string]): int =
   ## ``repro hooks dispatch post-commit --repo-root=<repo>`` (and the
   ## operator-facing manual entry point) routes here. The M19 policy is
@@ -45743,12 +45912,61 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
 
   var raised = false
   var raisedDiagnostic = ""
+  var raisedTriggerUndeclared = false
   var outcome: WorkspaceLockOutcome
   try:
     outcome = executeWorkspaceLock(lockArgs)
   except CatchableError as err:
     raised = true
     raisedDiagnostic = err.msg
+    raisedTriggerUndeclared = err of TriggerRepoUndeclaredError
+
+  if raised and raisedTriggerUndeclared and
+      triggerIsMembershipRepo(parsed.toolProvisioning, workspaceRoot,
+                              lockArgs.triggerRepoPath):
+    # NOT a failure: this is the outcome the specs decide for this trigger.
+    #
+    # Workspace-And-Develop-Mode.md §"Gate scope when the pushed repo is the
+    # membership repo" — "Rule (DECIDED). A membership push writes NO
+    # trigger-keyed lock record." The membership repo is not a project repo,
+    # so it has no declared name to encode as the ``<repo>`` component of
+    # ``locks/<project>/<repo>/<sha>.toml`` and belongs to no tier's
+    # partition; Unified-Locking-And-Hooks.md §6 Decision 1 consequence 2 then
+    # applies verbatim. The resolver is right to refuse an anchor and must not
+    # fall through to the project-named default — that files a false claim at a
+    # coordinate the commit cannot move, and burns it.
+    #
+    # What was wrong was the REPORT. Every manifest commit logged
+    # ``no-lock-failed`` — the tag
+    # ``t_workspace_post_commit_lock_refresh_is_best_effort`` reserves for
+    # invariant 4, a lock writer that genuinely failed — and said no lock
+    # "can be anchored at it", which describes an obstacle where the spec
+    # says no record is due. One workspace accumulated eighteen days of those
+    # with nothing wrong with it, and the real failure underneath (a dirty
+    # sibling) had been masked by the same log for two weeks before that.
+    #
+    # Everything else post-commit does for this repo still happens: the
+    # cache-ref push and the evidence refresh above have already run. Only the
+    # record is not due.
+    report.outcome = postCommitOutcomeTag(pcoSkippedMembershipRepo)
+    report.publication = postCommitPublicationTag(pcpNoRecord)
+    report.lockWritten = false
+    report.diagnostic = "no lock record is due: '" &
+      lockArgs.triggerRepoPath & "' is this workspace's membership repo " &
+      "(it carries projects/ and repos/), which no project declares as one " &
+      "of its repos, so a commit here anchors no trigger-keyed record " &
+      "(Workspace-And-Develop-Mode.md §\"Gate scope when the pushed repo " &
+      "is the membership repo\"). Nothing failed and nothing is pending; " &
+      "the repos whose pins this commit changes each record their own lock " &
+      "when they are pushed."
+    writePostCommitReport(workspaceRoot, report)
+    appendPostCommitLog(workspaceRoot,
+      timestamp & " " & report.outcome & " " & report.diagnostic)
+    # Deliberately NOT routed through ``emitPostCommitWarning``: that channel
+    # is for a run that did not reach the designed steady state, and this one
+    # IS the designed steady state for this repo. A warning on every manifest
+    # commit is how an operator learns to stop reading them.
+    return 0
 
   if raised:
     # M19b mode 3: no lock exists. The commonest instance of this branch is
@@ -46074,12 +46292,17 @@ proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies):
   ## checkout and related to its pin by ``classifySiblingPin``. Reads only;
   ## writes nothing.
   let root = absolutePath(repoRoot)
+  # The committed lock's frame of reference, not the invoking tree's: this
+  # runs from the managed ``pre-commit`` hook, which fires in a linked
+  # worktree exactly as it does in the main one. See
+  # ``committedLockPathBase``.
+  let pathBase = committedLockPathBase(root)
   let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   var seen: seq[string] = @[]
   proc observe(name, depAbs, pinned: string; declared: bool):
       CommittedPinObservation =
     result = CommittedPinObservation(name: name,
-      path: relativePath(depAbs, root).replace('\\', '/'), pinned: pinned,
+      path: relativePath(depAbs, pathBase).replace('\\', '/'), pinned: pinned,
       declared: declared, relation: sprUnknown)
     if not isGitCheckoutDir(depAbs): return
     let head = gitRunPlain(identity, ["-C", depAbs, "rev-parse", "HEAD"])
@@ -46104,15 +46327,15 @@ proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies):
   for d in ld.deps:
     if d.path == "." or d.coordinates.kind != ckVcs or d.path.len == 0:
       continue
-    let depAbs = absolutePath(root / d.path)
+    let depAbs = absolutePath(pathBase / d.path)
     result.observations.add(observe(d.name, depAbs, d.coordinates.revision,
       d.name in declaredNames))
     seen.add(d.name)
-    seen.add(relativePath(depAbs, root).replace('\\', '/'))
+    seen.add(relativePath(depAbs, pathBase).replace('\\', '/'))
   if manifest.resolved:
     for sib in manifest.siblings:
       let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
-      let rel = relativePath(depAbs, root).replace('\\', '/')
+      let rel = relativePath(depAbs, pathBase).replace('\\', '/')
       if sib.name in seen or rel in seen: continue
       result.observations.add(observe(sib.name, depAbs, "", true))
 
@@ -46170,6 +46393,9 @@ proc planCommittedLockRepin(repoRoot: string;
       " carries no `deps = [...]` line to re-pin"
     return
   let obs = observeCommittedLockSiblings(root, ld)
+  # Resolved once: the lookup costs a subprocess, and every observation below
+  # shares the same base.
+  let pathBase = committedLockPathBase(root)
   var moved: seq[string] = @[]
   var added: seq[string] = @[]
   var rootIdx = -1
@@ -46183,8 +46409,8 @@ proc planCommittedLockRepin(repoRoot: string;
         "uncommitted changes; repro.lock pins its HEAD " & o.observed &
         ", which does not describe the working tree this commit was built " &
         "against")
-    let depAbs = absolutePath(root / o.path)
-    let fresh = lockedDepFromCheckout(o.name, depAbs, root)
+    let depAbs = absolutePath(pathBase / o.path)
+    let fresh = lockedDepFromCheckout(o.name, depAbs, pathBase)
     var found = false
     for i in 0 ..< ld.deps.len:
       if ld.deps[i].path == "." or ld.deps[i].coordinates.kind != ckVcs:
@@ -50618,8 +50844,18 @@ proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
   ## fails to resolve, or one that does not contain this repo. The caller then
   ## falls back to the committed lock's own pins rather than treating "could
   ## not look" as "declares nothing".
+  ##
+  ## ``repoRoot`` is mapped through ``committedLockPathBase`` first, because a
+  ## manifest declares a repository by ITS path and a LINKED WORKTREE is the
+  ## same repository at a different one. Identifying the repo by the invoking
+  ## directory matched no declared repo when the refresh ran from a worktree,
+  ## ``selfName`` stayed empty, and this returned ``resolved = false`` — so a
+  ## worktree refresh wrote a lock with NO develop set at all, indistinguishable
+  ## from a repo that declares none. That is the same defect as the dep paths
+  ## (see ``committedLockPathBase``) in the membership dimension rather than
+  ## the path dimension.
   result = (false, "", @[])
-  let root = absolutePath(repoRoot)
+  let root = committedLockPathBase(repoRoot)
   let ws = enclosingWorkspaceRoot(root)
   if ws.len == 0 or cmpPaths(absolutePath(ws), root) == 0:
     return
@@ -54817,10 +55053,23 @@ type
     repos*: seq[WorkspaceStatusRepoEntry]
     summary*: tuple[clean, dirty, missing, drifted, atLock,
       noLockRecorded: int]
+    leafReports*: seq[LeafCheckReport]
+      ## Shared-Clone-Pool-Integrity §4.2: the detector's report for each
+      ## checkout that borrows from a shared clone (report-only unless
+      ## ``--fix``).
     exitCode*: int
 
 proc toJsonNode*(report: WorkspaceStatusReport): JsonNode =
   result = newJObject()
+  var sharedCloneFindings = newJArray()
+  for lr in report.leafReports:
+    for f in lr.findings:
+      if f.message.len == 0:
+        continue
+      sharedCloneFindings.add(%*{"leaf": lr.leaf, "pool": lr.pool,
+        "kind": $f.kind, "ref": f.refName, "object": f.objectId,
+        "removed": f.removed, "message": f.message})
+  result["sharedCloneFindings"] = sharedCloneFindings
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
   result["activeBranch"] = %report.activeBranch
@@ -54934,6 +55183,9 @@ type
     aheadBehind: bool
     unmerged: bool
     fileDetails: bool
+    fix: bool
+      ## Shared-Clone-Pool-Integrity §4.2: remove stale remote-tracking refs
+      ## the shared-clone detector finds, instead of only reporting them.
     report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
@@ -54976,6 +55228,8 @@ proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
       result.unmerged = true
     elif arg == "--file-details":
       result.fileDetails = true
+    elif arg == "--fix":
+      result.fix = true
     elif consumeReportFlag(arg, result.report):
       discard
     elif arg.startsWith("-"):
@@ -55243,6 +55497,14 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
     if branchRes.code == 0:
       entry.branch = branchRes.output.strip()
 
+    # Shared-Clone-Pool-Integrity §4.2: is anything this checkout names gone
+    # from it and from its shared clone? Report-only unless ``--fix``.
+    let leafReport = checkLeaf(identity.binaryPath, repoAbsPath,
+      if args.fix: lcmRepair else: lcmReport,
+      defaultCacheRoot(args.workspaceRoot))
+    if leafReport.pool.len > 0:
+      report.leafReports.add(leafReport)
+
     if not entry.isClean:
       entry.checkoutState = "dirty"
       inc report.summary.dirty
@@ -55303,6 +55565,7 @@ proc runWorkspaceStatusCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
     emitLockCoherenceAdvisory(parsed.toolProvisioning, report.workspaceRoot,
       report.project, report.repos)
+    emitLeafReports(report.leafReports)
   report.exitCode
 
 # ---- M12.B: `repro workspace list` ----------------------------------------
@@ -55531,6 +55794,7 @@ type
     hfCloneSiblings   ## Clone the missing develop-mode siblings.
     hfWorkspaceErgonomics ## Repair workspace-projects.md, gitignore, and AGENTS.md.
     hfEnsureVcsHooks  ## Reinstall the managed VCS hooks in every participating repo.
+    hfSharedCloneLeaves ## Remove stale remote-tracking refs the shared-clone detector found.
 
   HealthCheck* = object
     ## One diagnosed layer. ``remedy`` is the exact command the user (or
@@ -55559,6 +55823,8 @@ type
     missingSiblings: seq[ResolvedRepo]
     gitIdentity: GitToolIdentity
     gitOk: bool
+    leafReports: seq[LeafCheckReport]
+      ## ``shared-clone-leaves``: the detector's report-only pass.
 
 proc parseHealthArgs(args: openArray[string]): HealthArgs =
   result.workspaceRoot = ""
@@ -56096,6 +56362,70 @@ proc gatherHealthChecks(parsed: HealthArgs):
           else: "re-run with the remotes reachable",
         fixKind: hfNone))
 
+  # 14. Shared-Clone-Pool-Integrity §4.2 — checkouts that borrow from a
+  #     shared clone and name an object that is gone from both. Report-only:
+  #     ``--fix`` removes the stale remote-tracking refs (message A); a
+  #     branch of the user's is never touched (message B), so it stays a warn
+  #     whose remedy is the per-branch fix the messages print.
+  block sharedCloneLeavesCheck:
+    if not ctx.resolvedOk or not ctx.gitOk:
+      checks.add(HealthCheck(
+        name: "shared-clone-leaves",
+        status: hsWarn,
+        detail: "skipped: " &
+          (if not ctx.resolvedOk: "manifest unresolved"
+           else: "no usable git tool"),
+        remedy: self & " health",
+        fixKind: hfNone))
+      break sharedCloneLeavesCheck
+    let cacheRoot = defaultCacheRoot(parsed.workspaceRoot)
+    var leaves = 0
+    var stale: seq[string]
+    var broken: seq[string]
+    for repo in ctx.resolved.repos:
+      let abs = parsed.workspaceRoot / repo.path
+      if not dirExists(abs / ".git"):
+        continue
+      let lr = checkLeaf(ctx.gitIdentity.binaryPath, abs, lcmReport,
+        cacheRoot)
+      if lr.pool.len == 0:
+        continue
+      inc leaves
+      ctx.leafReports.add(lr)
+      for f in lr.findings:
+        case f.kind
+        of lfkStaleRemoteRef:
+          stale.add(repo.path & " " & f.refName)
+        of lfkLocalTipMissing, lfkLocalHistoryMissing:
+          broken.add(repo.path & " " & f.refName)
+        else:
+          discard
+    if stale.len == 0 and broken.len == 0:
+      checks.add(HealthCheck(
+        name: "shared-clone-leaves",
+        status: hsOk,
+        detail: $leaves & " checkout(s) borrow from shared clones; every " &
+          "object they name is present",
+        remedy: "", fixKind: hfNone))
+    else:
+      var detail: seq[string]
+      if stale.len > 0:
+        detail.add($stale.len & " stale remote-tracking ref(s) whose " &
+          "commit no longer exists upstream or in the shared clone: " &
+          stale.join(", "))
+      if broken.len > 0:
+        detail.add($broken.len & " ref(s) of yours depend on a commit " &
+          "that no longer exists (nothing is changed automatically; the " &
+          "messages below say how to recover): " & broken.join(", "))
+      checks.add(HealthCheck(
+        name: "shared-clone-leaves",
+        status: hsWarn,
+        detail: detail.join("; "),
+        remedy:
+          if stale.len > 0: self & " health --fix"
+          else: "follow the per-ref fix in the messages printed below",
+        fixKind: if stale.len > 0: hfSharedCloneLeaves else: hfNone))
+
   result = (checks: checks, ctx: ctx)
 
 proc healthHasFailure(checks: seq[HealthCheck]): bool =
@@ -56219,6 +56549,19 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           $report.repos.len & " repo(s) (" & parts.join(", ") & ")")
       except CatchableError as err:
         result.add("fix: hooks ensure failed: " & err.msg)
+    of hfSharedCloneLeaves:
+      if not ctx.gitOk:
+        result.add("fix: cannot repair shared-clone leaves (no usable git tool)")
+        continue
+      result.add("fix: removing stale remote-tracking refs from checkouts " &
+        "that borrow from shared clones")
+      for lr in ctx.leafReports:
+        let repaired = checkLeaf(ctx.gitIdentity.binaryPath, lr.leaf,
+          lcmRepair, pool = lr.pool)
+        for f in repaired.findings:
+          if f.kind == lfkStaleRemoteRef and f.removed:
+            result.add("fix: removed " & f.refName & " in " & lr.leaf)
+            stderr.writeLine(f.message)
     of hfWorkspaceErgonomics:
       result.add("fix: repairing workspace ergonomics files")
       let gitignoreFile = parsed.workspaceRoot / ".gitignore"
@@ -56284,6 +56627,9 @@ proc runHealthCommand*(args: openArray[string]): int =
   else:
     for line in renderHealthTextLines(checks):
       stdout.writeLine(line)
+  # The shared-clone detector's messages (report-only here): what is wrong
+  # in each checkout, in words, with the exact commands that fix it.
+  emitLeafReports(ctx.leafReports)
 
   if healthHasFailure(checks): 1 else: 0
 
@@ -56559,7 +56905,7 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
   report.exitCode
 
-# ---- RA-5: `repro workspace shared-clones [list|rewire|root]` --------------
+# ---- RA-5: `repro workspace shared-clones [list|rewire|root|gc|migrate]` ----
 #
 # Inspection / repair surface for the shared object-cache (per-upstream bare
 # clones + per-repo ``objects/info/alternates`` wiring). The accelerator is
@@ -56576,6 +56922,13 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
 #                  already-checked-out repo that is missing it. Best-effort
 #                  per repo — a failure to populate one bare is reported but
 #                  does not abort the others.
+#   * ``migrate`` — Shared-Clone-Pool-Integrity §5 over the WHOLE cache
+#                  root in one pass: every pool gets the retention hook and
+#                  its config, every leaf found (this workspace's repos, the
+#                  checkouts under it and under its initialized siblings, and
+#                  every leaf already registered) is registered, configured
+#                  and checked for dangling refs, and only then may a pool
+#                  leave ``gc.pruneExpire=never``.
 #   * ``gc`` (alias ``maintenance``) — RA-15 maintenance pass per unique
 #                  shared bare: prune ``refs/cache/<ws>/*`` for dead
 #                  workspaces (those whose directory no longer exists among
@@ -56622,6 +56975,11 @@ type
     cacheRoot*: string
     project*: string
     repos*: seq[SharedClonesRepoReport]
+    leafReports*: seq[LeafCheckReport]
+      ## The shared-clone detector's reports (``rewire``, ``migrate``).
+    poolExpiry*: seq[(string, string)]
+      ## ``migrate`` only: each pool and its ``gc.pruneExpire`` afterwards.
+    diagnostics*: seq[string]
     exitCode*: int
 
 proc toJsonNode*(report: SharedClonesReport): JsonNode =
@@ -56650,11 +57008,43 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
     obj["diagnostic"] = %entry.diagnostic
     repos.add(obj)
   result["repos"] = repos
+  var pools = newJArray()
+  for (pool, expiry) in report.poolExpiry:
+    pools.add(%*{"pool": pool, "pruneExpire": expiry,
+      "borrowers": readBorrowers(pool).len})
+  result["pools"] = pools
+  var leaves = newJArray()
+  for lr in report.leafReports:
+    var findings = newJArray()
+    for f in lr.findings:
+      findings.add(%*{"kind": $f.kind, "ref": f.refName, "object": f.objectId,
+        "removed": f.removed, "message": f.message})
+    leaves.add(%*{"leaf": lr.leaf, "pool": lr.pool,
+      "registered": lr.registered, "configured": lr.configured,
+      "findings": findings, "diagnostic": lr.diagnostic})
+  result["leaves"] = leaves
+  result["diagnostics"] = %report.diagnostics
   result["exitCode"] = %report.exitCode
 
 proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
   if report.verb == "root":
     result.add(report.cacheRoot)
+    return
+  if report.verb == "migrate":
+    result.add("workspace shared-clones: migrate root=" & report.cacheRoot &
+      " pools=" & $report.poolExpiry.len & " leaves=" &
+      $report.leafReports.len)
+    for (pool, expiry) in report.poolExpiry:
+      result.add("workspace shared-clones: pool " & pool & " gc.pruneExpire=" &
+        expiry & " borrowers=" & $readBorrowers(pool).len)
+    for lr in report.leafReports:
+      var line = "workspace shared-clones: leaf " & lr.leaf &
+        " registered=" & $lr.registered & " configured=" & $lr.configured
+      if lr.diagnostic.len > 0:
+        line.add(" diagnostic=" & lr.diagnostic)
+      result.add(line)
+    for d in report.diagnostics:
+      result.add("workspace shared-clones: error: " & d)
     return
   result.add("workspace shared-clones: root=" & report.cacheRoot &
     " project=" & report.project & " repos=" & $report.repos.len)
@@ -56707,13 +57097,28 @@ proc parseSharedClonesArgs(args: openArray[string]): SharedClonesArgs =
   # ``gc`` and ``maintenance`` are aliases for the RA-15 maintenance pass.
   if result.verb == "maintenance":
     result.verb = "gc"
-  if result.verb notin ["list", "rewire", "root", "gc"]:
+  if result.verb notin ["list", "rewire", "root", "gc", "migrate"]:
     raise newException(ValueError,
       "`repro workspace shared-clones` verb must be " &
-        "list|rewire|root|gc|maintenance, got: " & result.verb)
+        "list|rewire|root|gc|maintenance|migrate, got: " & result.verb)
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc liveWorkspaceRootsForCache(workspaceRoot: string): seq[string] =
+  ## This workspace plus every initialized sibling workspace under the same
+  ## parent directory: the workspaces that share this machine's shared
+  ## clones in the usual side-by-side layout.
+  result.add(workspaceRoot)
+  let parent = workspaceRoot.parentDir
+  if parent.len > 0 and dirExists(parent):
+    for kind, entry in walkDir(parent):
+      if kind notin {pcDir, pcLinkToDir}:
+        continue
+      if entry == workspaceRoot:
+        continue
+      if isInitializedWorkspace(entry):
+        result.add(entry)
 
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string] =
   ## RA-15 liveness predicate for dead-workspace ref pruning. The cache-ref
@@ -56725,18 +57130,7 @@ proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string] =
   ## not in this set belongs to a workspace that no longer exists on disk and
   ## is safe to prune. We err on the side of KEEPING a ref: only directories
   ## that fail the initialized-workspace check are treated as dead.
-  var roots: seq[string]
-  roots.add(workspaceRoot)
-  let parent = workspaceRoot.parentDir
-  if parent.len > 0 and dirExists(parent):
-    for kind, entry in walkDir(parent):
-      if kind notin {pcDir, pcLinkToDir}:
-        continue
-      if entry == workspaceRoot:
-        continue
-      if isInitializedWorkspace(entry):
-        roots.add(entry)
-  discoverLiveWorkspaceNames(roots)
+  discoverLiveWorkspaceNames(liveWorkspaceRootsForCache(workspaceRoot))
 
 proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   result.verb = parsed.verb
@@ -56757,8 +57151,29 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   # ``rewire`` and ``gc`` do live VCS work. ``list`` is read-only. Resolve
   # git only when we will use it.
   var identity: GitToolIdentity
-  if parsed.verb in ["rewire", "gc"]:
+  if parsed.verb in ["rewire", "gc", "migrate"]:
     identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+
+  if parsed.verb == "migrate":
+    # Shared-Clone-Pool-Integrity §5. The leaves a pool does not know about
+    # yet are found here, from the workspaces that share this cache; the
+    # pass itself (``migrateSharedClones``) also takes every leaf a pool has
+    # already registered.
+    var candidates: seq[string]
+    for repo in resolved.repos:
+      candidates.add(parsed.workspaceRoot / repo.path)
+    for found in findCheckoutsUnder(
+        liveWorkspaceRootsForCache(parsed.workspaceRoot)):
+      if found notin candidates:
+        candidates.add(found)
+    let migration = migrateSharedClones(identity.binaryPath,
+      result.cacheRoot, candidates)
+    result.leafReports = migration.leaves
+    result.poolExpiry = migration.poolExpiry
+    result.diagnostics = migration.diagnostics
+    if migration.diagnostics.len > 0:
+      result.exitCode = 1
+    return
 
   # RA-15: the dead-workspace prune needs the live-workspace set. Compute it
   # once for the whole pass (it is the same for every bare in this run).
@@ -56796,6 +57211,7 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
         sharedBareByUrl[cloneUrl] =
           refreshSharedBare(identity.binaryPath, result.cacheRoot,
             cloneUrl)
+        result.leafReports.add(sharedBareByUrl[cloneUrl].leafReports)
       let refreshed = sharedBareByUrl[cloneUrl]
       if not refreshed.ok:
         entry.diagnostic = "shared bare unavailable: " & refreshed.diagnostic
@@ -56805,8 +57221,13 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
       if info.wired:
         entry.wired = true
         entry.rewired = false
+        # Already wired, perhaps by a build that predates the borrower
+        # registry: the detector registers and configures it (§4.3).
+        result.leafReports.add(checkLeaf(identity.binaryPath, repoAbs,
+          lcmRepair, pool = refreshed.sharedBarePath))
       else:
-        let wired = wireAlternates(repoAbs, refreshed.sharedBarePath)
+        let wired = wireAlternates(repoAbs, refreshed.sharedBarePath,
+          identity.binaryPath)
         if wired.ok:
           entry.wired = true
           entry.rewired = true
@@ -56859,7 +57280,7 @@ proc writeSharedClonesReport(report: SharedClonesReport;
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runWorkspaceSharedClonesCommand*(args: openArray[string]): int =
-  ## ``repro workspace shared-clones [list|rewire|root|gc] [<project>]
+  ## ``repro workspace shared-clones [list|rewire|root|gc|migrate] [<project>]
   ## [--workspace-root=PATH] [--json] [--force]``. ``maintenance`` is an alias
   ## for ``gc``; ``--force`` bypasses the gc budget gate.
   let parsed = parseSharedClonesArgs(args)
@@ -56877,6 +57298,7 @@ proc runWorkspaceSharedClonesCommand*(args: openArray[string]): int =
   else:
     for line in renderSharedClonesTextLines(report):
       stdout.writeLine(line)
+  emitLeafReports(report.leafReports)
   report.exitCode
 
 # ---- RA-20: `repro workspace forall` --------------------------------------
@@ -74035,7 +74457,7 @@ proc runThinAppDispatch(programName: string): int =
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "shared-clones":
-    # RA-5 — `repro workspace shared-clones [list|rewire|root]`. Inspect
+    # RA-5 — `repro workspace shared-clones [list|rewire|root|gc|migrate]`. Inspect
     # or repair the shared object-cache wiring. Same dispatch convention
     # as the M9–M12 family: the implementation lives in
     # ``repro_cli_support`` as ``runWorkspaceSharedClonesCommand``.
