@@ -165,12 +165,19 @@ proc runSelfProvision(a: SelfArgs): int =
     local.platform = platform
     return runSelfInstall(local)
   if pkg.name == ProviderNimPackageName:
-    # The compiler has a route the reprobuild image does not: this
-    # reprobuild's own bootstrap Nim, when it is the version asked for.
-    let pin = SelfPin(state: spsPinned, version: a.version,
+    # The compiler has routes the reprobuild image does not: the archive the
+    # enclosing project's lock pins for this version (URL + SHA-256), and
+    # otherwise this reprobuild's own bootstrap Nim, when it is the version
+    # asked for. Nothing here resolves a version against the network: a
+    # digest is trusted only when a committed lock carries it.
+    var pin = SelfPin(state: spsPinned, version: a.version,
       platform: platform, storeHash: address,
       integrity: formatMultihash("blake3", address),
       lockPath: "repro self provision", package: pkg.name)
+    let projectPin = projectPinsFrom(effectiveProject(a.project)).providerNim
+    if projectPin.state == spsPinned and projectPin.version == a.version and
+        projectPin.platform == platform:
+      pin = projectPin
     try:
       let exe = realizePinnedProviderNim(root, pin)
       echo "repro self provision: " & pkg.name & " " & a.version &

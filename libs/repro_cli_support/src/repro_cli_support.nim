@@ -21383,7 +21383,7 @@ proc computeDepIntegrity*(repoAbsPath, headSha: string): string =
     return gitObjectMultihash(gitObjectFormatOf(repoAbsPath), headSha)
   narStyleTreeMultihash(collectTreeEntries(repoAbsPath))
 
-proc usesProducerLockedDep(selector, root: string;
+proc usesProducerLockedDep(selector, root, pathBase: string;
                            existingDeps: seq[LockedDep]): Option[LockedDep] =
   ## FUP-M — resolve a recipe ``uses:`` producer SELECTOR to a locked sibling
   ## dependency so ``repro lock refresh`` carries the declared cross-repo
@@ -21405,7 +21405,9 @@ proc usesProducerLockedDep(selector, root: string;
   if srcRoot.len > 0 and dirExists(extendedPath(srcRoot)):
     let depAbs = absolutePath(srcRoot)
     let facts = committedLockRepoFacts(depAbs)
-    let rel = relativePath(depAbs, root).replace('\\', '/')
+    # Discovered from the invoking tree, RECORDED relative to the committed
+    # lock's frame of reference (``committedLockPathBase``).
+    let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     return some(LockedDep(
       name: selector, path: rel,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
@@ -21438,13 +21440,15 @@ proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
   ## Forward declaration; defined beside ``developSetClosure``, whose closure it
   ## computes.
 
-proc lockedDepFromCheckout(name, depAbs, root: string): LockedDep =
+proc lockedDepFromCheckout(name, depAbs, pathBase: string): LockedDep =
   ## A locked VCS dependency observed from the checkout at ``depAbs``: its
   ## ``HEAD`` as the revision, its canonical fetch URL, and the VCS-native
-  ## integrity of that commit. ``path`` is ``depAbs`` relative to ``root``.
+  ## integrity of that commit. ``path`` is ``depAbs`` relative to
+  ## ``pathBase`` — ``committedLockPathBase`` of the project, never the
+  ## invoking directory; see that proc for why the two differ.
   let facts = committedLockRepoFacts(depAbs)
   LockedDep(
-    name: name, path: relativePath(depAbs, root).replace('\\', '/'),
+    name: name, path: relativePath(depAbs, pathBase).replace('\\', '/'),
     coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
       gitRef: facts.branch, revision: facts.headSha),
     integrity: computeDepIntegrity(depAbs, facts.headSha),
@@ -21455,6 +21459,51 @@ proc isGitCheckoutDir(path: string): bool =
   dirExists(extendedPath(path)) and
     (dirExists(extendedPath(path / ".git")) or
      fileExists(extendedPath(path / ".git")))
+
+proc committedLockPathBase(projectRoot: string): string =
+  ## The directory a COMMITTED lock's ``deps`` paths are relative to.
+  ##
+  ## WHY THIS IS NOT SIMPLY THE INVOKING DIRECTORY. ``repro.lock`` is a
+  ## committed artifact, so every ``path`` it carries has to mean the same
+  ## thing to every reader of the repository. The frame of reference the spec
+  ## states is "the checkout relative to the repo", and every example is the
+  ## one-level sibling form ``../<sibling>`` (Unified-Locking-And-Hooks.md
+  ## §14.2, Workspace-Manifests.md).
+  ##
+  ## A LINKED WORKTREE is a checkout of the same repository at a different
+  ## depth, and that broke the invariant silently. Refreshed in
+  ## ``reprobuild/.claude/worktrees/agent-<id>`` — four levels below the repo
+  ## root — the writer produced ``path = "../../../../nim-shm-queue"``: correct
+  ## from that one worktree, and from the repo root (or any clone, or CI) a
+  ## path four levels ABOVE the workspace, outside the home directory. The
+  ## verifier cannot catch it either, because the lock is self-consistent for
+  ## the tree that wrote it.
+  ##
+  ## Agent sessions work in worktrees by default — this repository ships a
+  ## ``.gitignore`` entry for ``.claude/worktrees/`` — so refusing to refresh
+  ## there would make the normal case the unsupported one. Resolving against
+  ## the MAIN worktree instead makes a worktree refresh produce the SAME BYTES
+  ## as a refresh at the repo root, which is the property a committed file
+  ## needs.
+  ##
+  ## The mapping preserves the project's position WITHIN the repository, so a
+  ## project in a subdirectory keeps writing paths relative to its own
+  ## directory — where its lock lives — rather than to the repository top.
+  ##
+  ## Degrades to ``projectRoot`` whenever the main worktree cannot be
+  ## determined: no VCS tool, a directory that is not a checkout, or a layout
+  ## whose worktree listing is unavailable. That is the previous behaviour,
+  ## and it is correct whenever the invoking tree IS the main one — every
+  ## non-worktree case.
+  let normalized = os.normalizedPath(absolutePath(projectRoot))
+  let top = gitTopLevel(normalized)
+  if top.len == 0: return normalized
+  let main = gitMainWorktreeTop(normalized)
+  if main.len == 0 or cmpPaths(main, top) == 0: return normalized
+  let within = relativePath(normalized, top).replace('\\', '/')
+  if within.len == 0 or within == "." or within.startsWith(".."):
+    return os.normalizedPath(main)
+  os.normalizedPath(main / within)
 
 proc lockedDepsForWorkspace(workspaceRoot: string;
                             usesSelectors: seq[string] = @[];
@@ -21478,6 +21527,11 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   ## producer graph.
   result = @[]
   let root = absolutePath(workspaceRoot)
+  # Every ``path`` written below, and every path read back out of the existing
+  # lock, is relative to THIS directory rather than to ``root``. The two are
+  # the same everywhere except in a linked worktree; see
+  # ``committedLockPathBase``.
+  let pathBase = committedLockPathBase(root)
   let rootFacts = committedLockRepoFacts(root)
   let nested = discoverDevelopDeps(root)
   let bare = extractFilename(root.strip(
@@ -21504,20 +21558,23 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   var seenPaths: seq[string] = @[]
   var seenNames: seq[string] = @[]
   for d in nested:
-    let depAbs = root / d.path
+    let depAbs = absolutePath(root / d.path)
     let facts = committedLockRepoFacts(depAbs)
+    # ``d.path`` is relative to the INVOKING tree (that is what discovery
+    # resolves against); the lock records it relative to ``pathBase``.
+    let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     siblingDeps.add(LockedDep(
-      name: d.name, path: d.path,
+      name: d.name, path: rel,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
         gitRef: facts.branch, revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
       depends: @[], tags: @[]))
-    seenPaths.add(d.path)
+    seenPaths.add(rel)
     seenNames.add(d.name)
   for selector in usesSelectors:
     if selector in seenNames: continue
-    let depOpt = usesProducerLockedDep(selector, root, existingDeps)
+    let depOpt = usesProducerLockedDep(selector, root, pathBase, existingDeps)
     if depOpt.isNone: continue
     let dep = depOpt.get()
     if dep.path in seenPaths or dep.name in seenNames: continue
@@ -21535,7 +21592,7 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
     let depAbs = absolutePath(repoRoot)
     if cmpPaths(depAbs, root) == 0:
       continue
-    let rel = relativePath(depAbs, root).replace('\\', '/')
+    let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     if rel in seenPaths:
       continue
     let facts = committedLockRepoFacts(depAbs)
@@ -21572,10 +21629,10 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   if manifest.resolved:
     for sib in manifest.siblings:
       let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
-      let rel = relativePath(depAbs, root).replace('\\', '/')
+      let rel = relativePath(depAbs, pathBase).replace('\\', '/')
       if rel in seenPaths or sib.name in seenNames: continue
       if isGitCheckoutDir(depAbs):
-        siblingDeps.add(lockedDepFromCheckout(sib.name, depAbs, root))
+        siblingDeps.add(lockedDepFromCheckout(sib.name, depAbs, pathBase))
       else:
         var carried = false
         for d in existingDeps:
@@ -21604,9 +21661,9 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
     for d in existingDeps:
       if d.path == "." or d.coordinates.kind != ckVcs: continue
       if d.path in seenPaths or d.name in seenNames: continue
-      let depAbs = absolutePath(root / d.path)
+      let depAbs = absolutePath(pathBase / d.path)
       if isGitCheckoutDir(depAbs):
-        var observed = lockedDepFromCheckout(d.name, depAbs, root)
+        var observed = lockedDepFromCheckout(d.name, depAbs, pathBase)
         observed.path = d.path
         siblingDeps.add(observed)
       else:
@@ -33751,9 +33808,11 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
   # Measured on a real workspace: 12 repos reset by a run that reported
   # ``force-reset 0, skipped 0``.
   #
-  # The planner's refusal text has always said "run 'repro sync
-  # --rebase-on-force-push' to rebase your local commits on the new history".
-  # That sentence is only honest when the flag is what turns the rebase on.
+  # The planner's refusal text offers "'repro sync --rebase-on-force-push
+  # --yes' to reset onto the new history and replay the commits you own".
+  # That sentence is only honest when the flag is what turns the rebase on —
+  # and the planner now also withholds it where the replay has no base to
+  # work from, so a refusal never names a command that cannot act.
   result.rebaseOnForcePush = false
   var i = 0
   while i < args.len:
@@ -39192,10 +39251,18 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         continue
       # ``scForcePushRebase`` belongs in this set, and its absence was a
       # promise the tool did not keep: the planner's own refusal text for a
-      # rewritten remote ends "or discard it with 'repro sync --force-sync'",
-      # yet that case was filtered out here, so ``--force-sync`` did nothing
-      # for it and the repo stayed refused however many times the operator
-      # ran the named remedy.
+      # rewritten remote names a ``--force-sync`` remedy, yet that case was
+      # filtered out here, so ``--force-sync`` did nothing for it and the repo
+      # stayed refused however many times the operator ran the named remedy.
+      #
+      # Keeping that promise takes BOTH halves, and the second was missing for
+      # longer than the first. This arm makes the flag act; the planner's text
+      # has to name a command that survives the gate below, which in a
+      # non-interactive context means ``--force-sync --yes``. Twelve rewritten
+      # checkouts were refused, the printed remedy was run verbatim, and the
+      # answer was ``refused 12, force-reset 0`` — the flag was gated here
+      # correctly and then declined for want of a confirmation the advice
+      # never mentioned.
       if decision.syncCase notin
           {scDirty, scLocallyUnpublished, scDivergentFeatureBranch,
            scForcePushRebase}:
@@ -41375,6 +41442,14 @@ proc sameFilesystemPath(a, b: string): bool =
   else:
     aN == bN
 
+type
+  TriggerRepoUndeclaredError* = object of ValueError
+    ## The caller named a triggering checkout that no declared repo of the
+    ## resolved project matches, so there is no name to key a lock record on.
+    ## Distinct from the other lock-writer failures because for one trigger —
+    ## the membership repo — this is the SPECIFIED outcome rather than an
+    ## error (see ``pcoSkippedMembershipRepo``).
+
 proc pickTriggerRepo(resolved: ResolvedProject;
                      explicit, explicitPath, workspaceRoot: string;
                      identity: GitToolIdentity):
@@ -41431,7 +41506,16 @@ proc pickTriggerRepo(resolved: ResolvedProject;
     # commit this operation never observed, and that no consumer of the
     # triggering repo can find. "No lock" is recoverable and legible;
     # a misfiled one is neither.
-    raise newException(ValueError,
+    #
+    # Raised as its OWN type, not a bare ``ValueError``, because one caller
+    # has to tell this refusal apart from every other way the lock writer can
+    # fail. The post-commit hook does: for the MEMBERSHIP repo, "the trigger
+    # is not a declared repo" is the specified outcome rather than a failure
+    # (Workspace-And-Develop-Mode.md §"Gate scope when the pushed repo is the
+    # membership repo"), and the alternative — matching on this message's
+    # wording — would make that classification a property of the sentence
+    # below instead of of the condition it reports.
+    raise newException(TriggerRepoUndeclaredError,
       "triggering repo at '" & explicitPath &
         "' is not declared in project '" & resolved.projectName &
         "'; no lock can be anchored at it" &
@@ -44181,6 +44265,21 @@ type
     pcoNoLockFailed      ## Lock writer raised (IO error, VCS query
                          ## failure, missing checkout, ...) and NO lock
                          ## exists.
+    pcoSkippedMembershipRepo ## The commit landed in the MEMBERSHIP repo (the
+                          ## checkout carrying ``projects/``/``repos/``), for
+                          ## which Workspace-And-Develop-Mode.md §"Gate scope
+                          ## when the pushed repo is the membership repo"
+                          ## decides that no trigger-keyed record is due at
+                          ## all: it is not a project repo, so it has no
+                          ## declared name to encode as the ``<repo>``
+                          ## component and belongs to no tier's partition.
+                          ## Writing nothing is the SPECIFIED outcome here, so
+                          ## it is a skip and not a failure — the distinction
+                          ## this suite's invariant 4 reserves
+                          ## ``no-lock-failed`` for. A stray undeclared
+                          ## checkout keeps that tag: it has no resolvable
+                          ## anchor, which does block a record somebody would
+                          ## have looked for.
     pcoSkippedGitOperation ## Git is mid-rebase / mid-cherry-pick / mid-am /
                            ## mid-bisect in the repo that fired the hook. The
                            ## commit this hook saw is one of that operation's
@@ -44239,6 +44338,7 @@ proc postCommitOutcomeTag(outcome: PostCommitOutcome): string =
   of pcoNoLockDirty: "no-lock-dirty-siblings"
   of pcoSkippedNoWorkspace: "skipped-no-workspace"
   of pcoNoLockFailed: "no-lock-failed"
+  of pcoSkippedMembershipRepo: "skipped-membership-repo"
   of pcoSkippedGitOperation: "skipped-git-operation-in-progress"
   of pcoInertGitStateUnknown: "inert-git-state-unknown"
 
@@ -45511,6 +45611,33 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   ## ``mayWrite = false`` classifies and reports without writing, for a commit
   ## the `repro.lock` re-pin is already refusing.
 
+proc triggerIsMembershipRepo(toolProvisioning: ToolProvisioningMode;
+                             workspaceRoot, triggerRepoPath: string): bool =
+  ## Is ``triggerRepoPath`` this workspace's MEMBERSHIP repo — the checkout
+  ## carrying ``projects/``/``repos/``, which no project declares?
+  ##
+  ## The same test the pre-push gate makes (``currentIsMembershipRepo``), and
+  ## made the same way on purpose: ``manifestsRoot`` locates membership (the
+  ## flat workspace root, else a materialized ``.repro/manifests``), and
+  ## ``discoverGitWorktree`` insists the path IS a worktree ROOT rather than
+  ## accepting an ancestor's answer. Without that second half an arbitrary
+  ## directory that happens to sit at the membership path would qualify.
+  ##
+  ## False on any probe failure. The caller is deciding whether to downgrade a
+  ## failure report to a decided no-op, so an unanswerable question must leave
+  ## the failure report standing.
+  if triggerRepoPath.len == 0 or workspaceRoot.len == 0:
+    return false
+  try:
+    let membershipRoot = manifestsRoot(workspaceRoot)
+    if not sameFilesystemPath(absolutePath(membershipRoot),
+                              absolutePath(triggerRepoPath)):
+      return false
+    let identity = ensureGitToolResolvable(toolProvisioning, getEnv("PATH"))
+    discoverGitWorktree(identity, membershipRoot).ok
+  except CatchableError:
+    false
+
 proc runPostCommitLockCommand*(args: openArray[string]): int =
   ## ``repro hooks dispatch post-commit --repo-root=<repo>`` (and the
   ## operator-facing manual entry point) routes here. The M19 policy is
@@ -45740,12 +45867,61 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
 
   var raised = false
   var raisedDiagnostic = ""
+  var raisedTriggerUndeclared = false
   var outcome: WorkspaceLockOutcome
   try:
     outcome = executeWorkspaceLock(lockArgs)
   except CatchableError as err:
     raised = true
     raisedDiagnostic = err.msg
+    raisedTriggerUndeclared = err of TriggerRepoUndeclaredError
+
+  if raised and raisedTriggerUndeclared and
+      triggerIsMembershipRepo(parsed.toolProvisioning, workspaceRoot,
+                              lockArgs.triggerRepoPath):
+    # NOT a failure: this is the outcome the specs decide for this trigger.
+    #
+    # Workspace-And-Develop-Mode.md §"Gate scope when the pushed repo is the
+    # membership repo" — "Rule (DECIDED). A membership push writes NO
+    # trigger-keyed lock record." The membership repo is not a project repo,
+    # so it has no declared name to encode as the ``<repo>`` component of
+    # ``locks/<project>/<repo>/<sha>.toml`` and belongs to no tier's
+    # partition; Unified-Locking-And-Hooks.md §6 Decision 1 consequence 2 then
+    # applies verbatim. The resolver is right to refuse an anchor and must not
+    # fall through to the project-named default — that files a false claim at a
+    # coordinate the commit cannot move, and burns it.
+    #
+    # What was wrong was the REPORT. Every manifest commit logged
+    # ``no-lock-failed`` — the tag
+    # ``t_workspace_post_commit_lock_refresh_is_best_effort`` reserves for
+    # invariant 4, a lock writer that genuinely failed — and said no lock
+    # "can be anchored at it", which describes an obstacle where the spec
+    # says no record is due. One workspace accumulated eighteen days of those
+    # with nothing wrong with it, and the real failure underneath (a dirty
+    # sibling) had been masked by the same log for two weeks before that.
+    #
+    # Everything else post-commit does for this repo still happens: the
+    # cache-ref push and the evidence refresh above have already run. Only the
+    # record is not due.
+    report.outcome = postCommitOutcomeTag(pcoSkippedMembershipRepo)
+    report.publication = postCommitPublicationTag(pcpNoRecord)
+    report.lockWritten = false
+    report.diagnostic = "no lock record is due: '" &
+      lockArgs.triggerRepoPath & "' is this workspace's membership repo " &
+      "(it carries projects/ and repos/), which no project declares as one " &
+      "of its repos, so a commit here anchors no trigger-keyed record " &
+      "(Workspace-And-Develop-Mode.md §\"Gate scope when the pushed repo " &
+      "is the membership repo\"). Nothing failed and nothing is pending; " &
+      "the repos whose pins this commit changes each record their own lock " &
+      "when they are pushed."
+    writePostCommitReport(workspaceRoot, report)
+    appendPostCommitLog(workspaceRoot,
+      timestamp & " " & report.outcome & " " & report.diagnostic)
+    # Deliberately NOT routed through ``emitPostCommitWarning``: that channel
+    # is for a run that did not reach the designed steady state, and this one
+    # IS the designed steady state for this repo. A warning on every manifest
+    # commit is how an operator learns to stop reading them.
+    return 0
 
   if raised:
     # M19b mode 3: no lock exists. The commonest instance of this branch is
@@ -46071,12 +46247,17 @@ proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies):
   ## checkout and related to its pin by ``classifySiblingPin``. Reads only;
   ## writes nothing.
   let root = absolutePath(repoRoot)
+  # The committed lock's frame of reference, not the invoking tree's: this
+  # runs from the managed ``pre-commit`` hook, which fires in a linked
+  # worktree exactly as it does in the main one. See
+  # ``committedLockPathBase``.
+  let pathBase = committedLockPathBase(root)
   let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   var seen: seq[string] = @[]
   proc observe(name, depAbs, pinned: string; declared: bool):
       CommittedPinObservation =
     result = CommittedPinObservation(name: name,
-      path: relativePath(depAbs, root).replace('\\', '/'), pinned: pinned,
+      path: relativePath(depAbs, pathBase).replace('\\', '/'), pinned: pinned,
       declared: declared, relation: sprUnknown)
     if not isGitCheckoutDir(depAbs): return
     let head = gitRunPlain(identity, ["-C", depAbs, "rev-parse", "HEAD"])
@@ -46101,15 +46282,15 @@ proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies):
   for d in ld.deps:
     if d.path == "." or d.coordinates.kind != ckVcs or d.path.len == 0:
       continue
-    let depAbs = absolutePath(root / d.path)
+    let depAbs = absolutePath(pathBase / d.path)
     result.observations.add(observe(d.name, depAbs, d.coordinates.revision,
       d.name in declaredNames))
     seen.add(d.name)
-    seen.add(relativePath(depAbs, root).replace('\\', '/'))
+    seen.add(relativePath(depAbs, pathBase).replace('\\', '/'))
   if manifest.resolved:
     for sib in manifest.siblings:
       let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
-      let rel = relativePath(depAbs, root).replace('\\', '/')
+      let rel = relativePath(depAbs, pathBase).replace('\\', '/')
       if sib.name in seen or rel in seen: continue
       result.observations.add(observe(sib.name, depAbs, "", true))
 
@@ -46167,6 +46348,9 @@ proc planCommittedLockRepin(repoRoot: string;
       " carries no `deps = [...]` line to re-pin"
     return
   let obs = observeCommittedLockSiblings(root, ld)
+  # Resolved once: the lookup costs a subprocess, and every observation below
+  # shares the same base.
+  let pathBase = committedLockPathBase(root)
   var moved: seq[string] = @[]
   var added: seq[string] = @[]
   var rootIdx = -1
@@ -46180,8 +46364,8 @@ proc planCommittedLockRepin(repoRoot: string;
         "uncommitted changes; repro.lock pins its HEAD " & o.observed &
         ", which does not describe the working tree this commit was built " &
         "against")
-    let depAbs = absolutePath(root / o.path)
-    let fresh = lockedDepFromCheckout(o.name, depAbs, root)
+    let depAbs = absolutePath(pathBase / o.path)
+    let fresh = lockedDepFromCheckout(o.name, depAbs, pathBase)
     var found = false
     for i in 0 ..< ld.deps.len:
       if ld.deps[i].path == "." or ld.deps[i].coordinates.kind != ckVcs:
@@ -50615,8 +50799,18 @@ proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
   ## fails to resolve, or one that does not contain this repo. The caller then
   ## falls back to the committed lock's own pins rather than treating "could
   ## not look" as "declares nothing".
+  ##
+  ## ``repoRoot`` is mapped through ``committedLockPathBase`` first, because a
+  ## manifest declares a repository by ITS path and a LINKED WORKTREE is the
+  ## same repository at a different one. Identifying the repo by the invoking
+  ## directory matched no declared repo when the refresh ran from a worktree,
+  ## ``selfName`` stayed empty, and this returned ``resolved = false`` — so a
+  ## worktree refresh wrote a lock with NO develop set at all, indistinguishable
+  ## from a repo that declares none. That is the same defect as the dep paths
+  ## (see ``committedLockPathBase``) in the membership dimension rather than
+  ## the path dimension.
   result = (false, "", @[])
-  let root = absolutePath(repoRoot)
+  let root = committedLockPathBase(repoRoot)
   let ws = enclosingWorkspaceRoot(root)
   if ws.len == 0 or cmpPaths(absolutePath(ws), root) == 0:
     return
@@ -65028,6 +65222,14 @@ proc reportGeneratedLock(verb, lockP: string;
     " metadata fetch edge(s) in " & $generated.fetchWaves.len & " wave(s))")
   stdout.writeLine("repro lock " & verb & ": lock identity " &
     $generated.lockIdentity)
+  # M5 "pin the provider-compile toolchain": an archive pin is a digest the
+  # network supplied at THIS moment and every later realization trusts, so it
+  # is said out loud, for whoever reviews the lock diff.
+  for d in ld.deps:
+    if d.archive.isPinned:
+      stdout.writeLine("repro lock " & verb & ": pinned " & d.name & " " &
+        d.version & " to " & d.archive.url & " (" & d.archive.build &
+        ", sha256 " & d.archive.sha256 & ")")
   # NLF-M6, third folded criterion — a strategy that cannot take effect must
   # SAY SO. NLF-M5 shipped `--strategy` accepted, printed in the run summary,
   # and silently inert wherever no candidate universe existed to rank; the

@@ -119,6 +119,7 @@ libs/repro_cas_store/tests/t_cas_store_occupancy_cost.nim	nim	11
 libs/repro_cas_store/tests/t_link_capability_facts.nim	nim	41
 libs/repro_cas_store/tests/t_link_capability_probe.nim	nim	20
 libs/repro_cas_store/tests/t_repro_cas_store_basic.nim	nim	14
+libs/repro_cli_support/tests/t_a_pinned_nim_archive_is_verified_against_the_lock.nim	nim	4
 libs/repro_cli_support/tests/t_action_cache_root_resolution.nim	nim	3
 libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	13
 libs/repro_cli_support/tests/t_daemon_parent_prewarm.nim	nim	7
@@ -320,6 +321,7 @@ libs/repro_local_store/tests/t_sqlite_smoke.nim	nim	4
 libs/repro_local_store/tests/t_store_optimise_dedup.nim	nim	2
 libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim	nim	9
 libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim	nim	7
+libs/repro_lock/tests/t_a_store_pin_carries_its_archive_through_the_lock.nim	nim	5
 libs/repro_lock/tests/t_lock_identity_feature_change_differs.nim	nim	3
 libs/repro_lock/tests/t_lock_identity_rename_invalidates_nothing.nim	nim	2
 libs/repro_lock/tests/t_lock_identity_solver_tie_no_collision.nim	nim	4
@@ -329,6 +331,7 @@ libs/repro_lock/tests/t_provenance_reports_shared_names.nim	nim	5
 libs/repro_lock/tests/t_selection_is_not_the_same_as_absence.nim	nim	4
 libs/repro_lock/tests/t_selection_status_survives_the_lock_round_trip.nim	nim	4
 libs/repro_lock_files/tests/t_declarations_are_emitted_eagerly.nim	nim	5
+libs/repro_lock_gen/tests/t_a_pinned_nim_resolves_to_its_upstream_archive.nim	nim	10
 libs/repro_lock_gen/tests/t_designation_propagates_to_closure.nim	nim	4
 libs/repro_lock_gen/tests/t_develop_checkout_once_products_per_lock_file.nim	nim	5
 libs/repro_lock_gen/tests/t_hidden_lock_shares_with_committed.nim	nim	3
@@ -992,6 +995,7 @@ tests/integration/t_a_gate_refusal_over_an_unpublished_sibling_names_the_push_fi
 tests/integration/t_a_linked_worktree_sibling_is_reported_and_gated.nim	nim	1
 tests/integration/t_a_mixed_workspace_records_only_the_ahead_inputs.nim	nim	1
 tests/integration/t_a_mixed_workspace_records_only_the_publishable_inputs.nim	nim	1
+tests/integration/t_a_pinned_nim_is_provisioned_from_a_cold_store.nim	nim	3
 tests/integration/t_a_pushed_sibling_is_still_recorded.nim	nim	1
 tests/integration/t_a_repo_not_in_develop_mode_is_not_substituted.nim	nim	1
 tests/integration/t_a_root_repo_flake_is_reported_not_refused.nim	nim	1
@@ -1083,6 +1087,7 @@ tests/integration/t_commit_refuses_a_backward_sibling_pin.nim	nim	10
 tests/integration/t_commit_repins_committed_lock_siblings.nim	nim	1
 tests/integration/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep.nim	nim	1
 tests/integration/t_committed_lock_folds_sibling_develop_deps.nim	nim	1
+tests/integration/t_committed_lock_paths_do_not_depend_on_the_invoking_worktree.nim	nim	2
 tests/integration/t_committed_lock_pins_solved_graph_and_build_consumes_it.nim	nim	4
 tests/integration/t_committed_lock_records_canonical_remote_url_when_not_named_origin.nim	nim	1
 tests/integration/t_committed_lock_records_develop_set_siblings.nim	nim	1
@@ -1600,7 +1605,7 @@ tests/integration/t_workspace_metadata_branch_survives_init_and_status.nim	nim	3
 tests/integration/t_workspace_migrate_reconciles_local_state.nim	nim	3
 tests/integration/t_workspace_migrate_refuses_to_endanger_work.nim	nim	2
 tests/integration/t_workspace_override_shadows_upstream_in_resolver.nim	nim	5
-tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	nim	13
+tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim	nim	14
 tests/integration/t_workspace_pre_push_blocks_lock_with_private_only_refs.nim	nim	4
 tests/integration/t_workspace_pre_push_blocks_on_develop_override_cleanliness.nim	nim	5
 tests/integration/t_workspace_pre_push_blocks_when_head_unpublished.nim	nim	1
@@ -1624,7 +1629,7 @@ tests/integration/t_workspace_sync_does_not_rewrite_a_force_pushed_checkout_unas
 tests/integration/t_workspace_sync_fetches_repos_in_parallel.nim	nim	1
 tests/integration/t_workspace_sync_force_push.nim	nim	2
 tests/integration/t_workspace_sync_jobs_network_pool_bounds_concurrency.nim	nim	1
-tests/integration/t_workspace_sync_never_advises_pushing_onto_a_rewritten_remote.nim	nim	2
+tests/integration/t_workspace_sync_never_advises_pushing_onto_a_rewritten_remote.nim	nim	3
 tests/integration/t_workspace_sync_progress_modes.nim	nim	1
 tests/integration/t_workspace_sync_refuses_to_classify_on_a_failed_fetch.nim	nim	1
 tests/integration/t_workspace_sync_selectors_narrow_the_default_path.nim	nim	2
@@ -1639,6 +1644,7 @@ tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim	nim	4
 tests/test_dev_env_m9_policy.py	python	4
 tests/unit/t_action_compatibility_key.nim	nim	4
 tests/unit/t_action_index_platform_arm.nim	nim	3
+tests/unit/t_bearssl_probe_marker_is_the_imported_module.nim	nim	5
 tests/unit/t_bootstrap_nim_monitoring.nim	nim	3
 tests/unit/t_cached_source_dependency_closure.nim	nim	11
 tests/unit/t_capabilities.nim	nim	2
