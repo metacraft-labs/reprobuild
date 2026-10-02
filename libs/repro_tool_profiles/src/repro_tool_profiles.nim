@@ -3403,6 +3403,26 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
       " skipped: " & err.msg)
     flushStoreDiagnostics()
 
+proc tarballPrefixLayoutParts(plan: TarballAcquisitionPlan): seq[string] =
+  ## The declared LAYOUT a realized prefix is keyed on, beyond the executable
+  ## path and the archive: everything that changes the bytes the realize step
+  ## leaves in the prefix. The cache-entry identity (`toolCacheIdentity`)
+  ## already keys on the same facts; the local prefix directory did not.
+  ##
+  ## It keyed on the archive type and strip depth only, so a package that
+  ## gained an `executableAlias` -- Windows `python3` gained `python3.exe` --
+  ## kept resolving to the prefix realized BEFORE the alias existed: the
+  ## directory existed, it held `python.exe`, and reuse checked nothing else.
+  ## `python3` then never reached PATH. The alias, the launcher and the prune
+  ## set are added only when declared, so no other package's key moves.
+  result = @[plan.archiveType, $plan.stripComponents]
+  if plan.declaredExecutableAlias.len > 0:
+    result.add("alias=" & plan.declaredExecutableAlias)
+  if plan.declaredLauncher.len > 0:
+    result.add("launcher=" & plan.declaredLauncher)
+  if plan.declaredPrunePaths.len > 0:
+    result.add("prune=" & plan.declaredPrunePaths.join(","))
+
 proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
                               writerMode = "direct";
                               tools = ExtractorTools()):
@@ -3419,7 +3439,7 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
       plan.sha256[0 .. 15]
   let unified = unifiedPrefixPath(storeRoot, packageName, resolvedVersion,
     "tarball", plan.lockIdentity, plan.declaredExecutablePath,
-    plan.url, plan.sha256, [plan.archiveType, $plan.stripComponents])
+    plan.url, plan.sha256, tarballPrefixLayoutParts(plan))
   let prefix = unified.absolutePath
   if dirExists(extendedPath(prefix)):
     if executableInStorePath(prefix, plan.declaredExecutablePath,
@@ -3593,7 +3613,7 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
     discard registerInUnifiedStore(storeRoot, packageName,
       resolvedVersion, "tarball", plan.lockIdentity,
       plan.declaredExecutablePath, plan.url, plan.sha256, "directory",
-      [plan.archiveType, $plan.stripComponents], prefix,
+      tarballPrefixLayoutParts(plan), prefix,
       [plan.declaredExecutablePath], writerMode = writerMode,
       declaredExecutableAlias = plan.declaredExecutableAlias,
       declaredLauncher = plan.declaredLauncher,

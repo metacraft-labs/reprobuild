@@ -568,6 +568,7 @@ libs/repro_system_apply/tests/t_b1_dsl_lowering.nim	nim	10
 libs/repro_system_apply/tests/t_b1_dsl_parse.nim	nim	12
 libs/repro_system_apply/tests/t_b2_pipeline.nim	nim	15
 libs/repro_system_rollback/tests/t_b3_rollback_unit.nim	nim	14
+libs/repro_tool_profiles/tests/t_a_declared_alias_is_never_served_from_a_prefix_without_it.nim	nim	1
 libs/repro_tool_profiles/tests/t_bootstrap_cc_override_is_honoured_and_scoped.nim	nim	5
 libs/repro_tool_profiles/tests/t_bootstrap_provisioning_failure_is_a_hard_failure.nim	nim	3
 libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode.nim	nim	3

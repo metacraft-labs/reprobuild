@@ -5058,6 +5058,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_tool_profiles/tests/t_a_declared_alias_is_never_served_from_a_prefix_without_it.nim",
+    binary: "build/test-bin/t_a_declared_alias_is_never_served_from_a_prefix_without_it",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_tool_profiles/tests/t_bootstrap_cc_override_is_honoured_and_scoped.nim",
     binary: "build/test-bin/t_bootstrap_cc_override_is_honoured_and_scoped",
     defines: @[],
