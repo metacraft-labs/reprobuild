@@ -5,6 +5,10 @@
 #   curl -fsSL https://get.reprobuild.com/sh | sh -s -- --method tarball
 #   curl -fsSL https://get.reprobuild.com/sh | sh -s -- --uninstall
 #
+# On NixOS it installs nothing: it prints the configuration change that
+# adds reprobuild from the metacraft-labs/nixpkgs fork (see "Nix and
+# NixOS" below). `--method nix` installs into a Nix profile elsewhere.
+#
 # detect -> verify -> register the native repo -> let the PACKAGE MANAGER
 # install. After that, `apt upgrade` / `dnf upgrade` / `pacman -Syu` move
 # the user to newer releases with no further involvement from this script.
@@ -165,6 +169,25 @@ TARBALL_PREFIX="${REPRO_INSTALL_PREFIX:-/usr/local}"
 # $prefix/bin would delete files it never installed.
 TARBALL_MANIFEST="${REPRO_TARBALL_MANIFEST:-/var/lib/reprobuild/installed-files.txt}"
 
+# ---------------------------------------------------------------------
+# Nix and NixOS: the metacraft-labs/nixpkgs fork IS the repository.
+#
+# The fork carries every released Metacraft package on standing branches
+# named after the upstream channel each one tracks (nixos-unstable,
+# nixpkgs-unstable, nixos-YY.MM, nixpkgs-YY.MM-darwin), rebased and
+# rebuilt continuously (metacraft-specs infrastructure/
+# package-distribution.md §6.4). A NixOS system is declarative, so the
+# installer does not install anything there: it picks the branch that
+# matches the system's own channel and PRINTS the change to make. It
+# never edits /etc/nixos, and never installs from reprobuild's own flake
+# at `dev` -- that would be unreleased code under a release's name.
+# ---------------------------------------------------------------------
+NIX_FORK="${REPRO_NIX_FORK:-metacraft-labs/nixpkgs}"
+NIX_ATTR="${REPRO_NIX_ATTR:-reprobuild}"
+OS_RELEASE="${REPRO_OS_RELEASE:-/etc/os-release}"
+NIXOS_MARKER="${REPRO_NIXOS_MARKER:-/etc/NIXOS}"
+NIXOS_CONFIG_DIR="${REPRO_NIXOS_CONFIG_DIR:-/etc/nixos}"
+
 method='auto'
 do_uninstall=0
 dry_run=0
@@ -186,10 +209,14 @@ usage() {
   cat <<'USAGE'
 Usage: repro-install.sh [OPTIONS]
 
-  --method auto|apt|dnf|pacman|tarball|scoop
+  --method auto|apt|dnf|pacman|tarball|nix|nixos|scoop
                         Install method. "auto" detects the native package
                         manager and falls back to "tarball" when there is
-                        no repository for this platform.
+                        no repository for this platform. On NixOS it is
+                        "nixos": print the configuration change that adds
+                        reprobuild from the metacraft-labs/nixpkgs fork,
+                        and install nothing. "nix" installs into your Nix
+                        profile from that fork (nix profile install).
   --version VERSION     Install this exact version instead of the newest.
   --uninstall           Remove the package, the repository registration
                         and the trust anchor, then assert they are gone.
@@ -213,6 +240,8 @@ Environment (see the comment block at the top of this file):
   REPRO_VERIFY_SCRIPT   Path to repro-verify-release.sh (tarball method).
   REPRO_ALLOW_TEST_KEY=1
                         Pass --allow-test-key to the verifier.
+  REPRO_NIX_BRANCH      Branch of the nixpkgs fork to use (nix, nixos);
+                        default: the one matching this system's channel.
 USAGE
 }
 
@@ -240,13 +269,15 @@ done
 DISTRO_ID=''
 DISTRO_LIKE=''
 DISTRO_CODENAME=''
+DISTRO_VERSION_ID=''
 detect_distro() {
-  if [ -r /etc/os-release ]; then
-    # shellcheck disable=SC1091
-    . /etc/os-release
+  if [ -r "$OS_RELEASE" ]; then
+    # shellcheck disable=SC1090
+    . "$OS_RELEASE"
     DISTRO_ID="${ID:-}"
     DISTRO_LIKE="${ID_LIKE:-}"
     DISTRO_CODENAME="${VERSION_CODENAME:-}"
+    DISTRO_VERSION_ID="${VERSION_ID:-}"
   fi
   [ -n "$DISTRO_ID" ] || DISTRO_ID="$(uname -s | tr '[:upper:]' '[:lower:]')"
 }
@@ -276,6 +307,12 @@ detect_platform() {
 # still a distro reprobuild runs on.
 detect_method() {
   _f=''
+  # NixOS before anything else: it may well have apt or dnf on PATH (in a
+  # dev shell), and registering a system repository there is meaningless.
+  if is_nixos; then
+    echo 'nixos'
+    return 0
+  fi
   case " $DISTRO_ID $DISTRO_LIKE " in
     *' debian '*|*' ubuntu '*) _f='apt' ;;
     *' rhel '*|*' fedora '*|*' centos '*) _f='dnf' ;;
@@ -780,10 +817,133 @@ remove_tarball() {
 }
 
 # ---------------------------------------------------------------------
+# Nix and NixOS (see NIX_FORK above)
+# ---------------------------------------------------------------------
+
+is_nixos() { [ "$DISTRO_ID" = 'nixos' ] || [ -e "$NIXOS_MARKER" ]; }
+
+# fork_has_branch <name>: does the fork have a standing branch <name>?
+# REPRO_NIX_BRANCHES (a space-separated list) answers without the
+# network, for tests and air-gapped mirrors.
+fork_has_branch() {
+  if [ -n "${REPRO_NIX_BRANCHES+set}" ]; then
+    case " $REPRO_NIX_BRANCHES " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+  fi
+  [ -n "$DL" ] || pick_downloader
+  _u="https://github.com/$NIX_FORK/tree/$1"
+  case "$DL" in
+    curl) curl -fsSL --proto '=https' -o /dev/null "$_u" 2>/dev/null ;;
+    wget) wget -q -O /dev/null "$_u" 2>/dev/null ;;
+  esac
+}
+
+# The nixpkgs ref a NixOS flake configuration follows, when it names one
+# of the upstream channel branches (github:NixOS/nixpkgs/<ref>).
+nixos_flake_channel() {
+  [ -r "$NIXOS_CONFIG_DIR/flake.nix" ] || return 0
+  sed -n 's|.*github:[Nn]ix[Oo][Ss]/nixpkgs/\(nix[a-z]*-[0-9a-z.-]*[a-z0-9]\).*|\1|p' \
+    "$NIXOS_CONFIG_DIR/flake.nix" | head -n 1
+}
+
+# Pick the fork branch for this system, in order: an explicit
+# REPRO_NIX_BRANCH; the channel the flake configuration follows; the
+# NixOS release (os-release VERSION_ID, i.e. what nixos-version reports);
+# nixos-unstable. A candidate the fork has no branch for (a release
+# upstream no longer supports, or the unstable version number) falls
+# through, and the fallback is said out loud.
+nixos_fork_branch() {
+  if [ -n "${REPRO_NIX_BRANCH:-}" ]; then echo "$REPRO_NIX_BRANCH"; return 0; fi
+  _tried=' '
+  for _c in "$(nixos_flake_channel)" "${DISTRO_VERSION_ID:+nixos-$DISTRO_VERSION_ID}"; do
+    [ -n "$_c" ] || continue
+    case "$_tried" in *" $_c "*) continue ;; esac
+    _tried="$_tried$_c "
+    if fork_has_branch "$_c"; then echo "$_c"; return 0; fi
+    log "$NIX_FORK has no branch $_c (unstable, or no longer supported upstream)"
+  done
+  echo 'nixos-unstable'
+}
+
+print_nixos_instructions() {
+  _branch="$(nixos_fork_branch)"
+  _url="github:$NIX_FORK/$_branch"
+  log "NixOS detected (VERSION_ID=${DISTRO_VERSION_ID:--}); $PRODUCT comes from $NIX_FORK, branch $_branch."
+  log 'This installer does not change a NixOS system. Make the change below, then rebuild.'
+  if [ "$do_uninstall" -eq 1 ]; then
+    cat <<EOT
+To remove $PRODUCT, delete the \`metacraft\` input (or channel) and the
+\`$NIX_ATTR\` entry you added from your NixOS configuration, then run
+\`sudo nixos-rebuild switch\`.
+EOT
+    return 0
+  fi
+  if [ -e "$NIXOS_CONFIG_DIR/flake.nix" ]; then
+    cat <<EOT
+# In $NIXOS_CONFIG_DIR/flake.nix, add the input:
+inputs.metacraft.url = "$_url";
+
+# and in your configuration (pass \`inputs\` to modules, e.g. via
+# \`specialArgs = { inherit inputs; };\` in nixpkgs.lib.nixosSystem):
+environment.systemPackages = [
+  inputs.metacraft.legacyPackages.\${pkgs.stdenv.hostPlatform.system}.$NIX_ATTR
+];
+
+# Then:
+sudo nixos-rebuild switch
+# Updates: nix flake update metacraft && sudo nixos-rebuild switch
+EOT
+  else
+    cat <<EOT
+# Register the channel:
+sudo nix-channel --add https://github.com/$NIX_FORK/archive/$_branch.tar.gz metacraft
+sudo nix-channel --update metacraft
+
+# In $NIXOS_CONFIG_DIR/configuration.nix:
+environment.systemPackages = [ (import <metacraft> { }).$NIX_ATTR ];
+
+# Then:
+sudo nixos-rebuild switch
+# Updates: sudo nixos-rebuild switch --upgrade
+EOT
+  fi
+}
+
+nix_cmd() { nix --extra-experimental-features 'nix-command flakes' "$@"; }
+
+# Nix outside NixOS: the fork's nixpkgs-unstable branch (nixpkgs-unstable
+# is the channel for Nix on other Linux distributions and on macOS). The
+# profile then updates with `nix profile upgrade`, never with this script.
+install_nix() {
+  command -v nix >/dev/null 2>&1 || die 'method=nix needs the nix command on PATH (https://nixos.org/download)'
+  [ -z "$want_version" ] || warn "--version is ignored for method=nix: $NIX_FORK carries the current release"
+  _branch="${REPRO_NIX_BRANCH:-nixpkgs-unstable}"
+  _ref="github:$NIX_FORK/$_branch#$NIX_ATTR"
+  if nix_cmd profile list 2>/dev/null | grep -q "github:$NIX_FORK/"; then
+    log "$PRODUCT is already in your Nix profile from $NIX_FORK; upgrading it"
+    run nix_cmd profile upgrade "$NIX_ATTR"
+  else
+    log "nix profile install $_ref"
+    run nix_cmd profile install "$_ref"
+  fi
+  log "Future upgrades: nix profile upgrade $NIX_ATTR"
+}
+
+remove_nix() {
+  command -v nix >/dev/null 2>&1 || die 'method=nix needs the nix command on PATH'
+  run nix_cmd profile remove "$NIX_ATTR"
+}
+
+# ---------------------------------------------------------------------
 # uninstall
 # ---------------------------------------------------------------------
 
 uninstall_all() {
+  # Nothing system-wide was written on these paths: no root, no shared
+  # repository entry, no trust anchor.
+  case "$method" in
+    nixos) print_nixos_instructions; return 0 ;;
+    nix)   remove_nix; log 'uninstall complete'; return 0 ;;
+  esac
   need_root
   log "uninstalling via method=$method"
   case "$method" in
@@ -845,6 +1005,13 @@ case "$method" in
     ;;
   tarball)
     install_tarball
+    ;;
+  nixos)
+    print_nixos_instructions
+    exit 0
+    ;;
+  nix)
+    install_nix
     ;;
   scoop)
     die 'method=scoop is the Windows path; run scripts/install/repro-install.ps1 under PowerShell.'

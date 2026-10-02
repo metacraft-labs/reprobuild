@@ -74,7 +74,8 @@ suite "an ignored root fires through a symlinked spelling":
 
     var evidence: PathSetEvidence
     evidence.declaredOutputs = act.outputs
-    evidence.monitorReads = @[observedIgnored, observedKept]
+    evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [observedIgnored, observedKept])
 
     let inputs = act.cacheInputPaths(evidence)
 
