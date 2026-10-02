@@ -41,8 +41,8 @@
 ## diagnosing a malformed lock; but records that exist and cannot be read
 ## are refused, never silently dropped -- and so is a lock file that exists
 ## and cannot be opened, and a lock that spells the key in any form the
-## strict reader skips (``lockHasUnreadProvisioningSpelling``), even beside
-## a line it does read.
+## strict reader skips (``lockHasUnreadProvisioningSpelling``), in any letter
+## case, even beside a line it does read.
 ##
 ## ## Refusals
 ##
@@ -62,10 +62,33 @@
 ##     CLI ignored those records and provisioned whatever the catalogs
 ##     offered;
 ##   * the lock's ``provisioning`` records cannot be read, or some line
-##     names the key in a spelling the strict reader skips (even beside a
-##     line it does read);
+##     names the key in a spelling the strict reader skips, in any letter
+##     case (even beside a line it does read);
 ##   * a lock NAMED for the build is missing or not a file, or the lock file
 ##     exists and cannot be opened.
+##
+## ## Why a refusal happened, and re-selection (M7 deliverable 5)
+##
+## A resolver refusal also carries "what changed since the lock was
+## written": ``provisioning_lock_diff.explainLockMismatch`` compares each
+## locked record for this platform pair with what the composed catalogs now
+## offer for the same contributor -- field by field when the catalog source
+## supplies the locked contribution's identity as evidence
+## (``ProvisioningCatalogInputs.previous``, used only if it reproduces the
+## locked fingerprint), else saying the cause is not determinable from the
+## records -- followed by the exact re-select command
+## (``provisioningReselectCommand``).
+##
+## ``repro lock refresh`` never re-selects: it carries the records forward
+## (``repro_lock.withProvisioningCarriedForward``). Re-selection is the
+## explicit ``repro lock refresh --provisioning``
+## (``reselectCommittedProvisioning``): resolve WITHOUT the lock's own
+## claims, lock every selection through the lock writer, carry other
+## platform pairs, print the diff, and write nothing on any refusal --
+## including when no catalog source is installed, the production state
+## today. ``repro lock diff`` (``diffProvisioningLockDocuments``) is the
+## same diff over two lock files; an unreadable lock refuses it, never
+## reads as "no change".
 ##
 ## ## Trust boundary
 ##
@@ -87,17 +110,29 @@ import repro_interface_artifacts
 import repro_interface_artifacts/catalog_composition
 import repro_interface_artifacts/contribution_fingerprint
 import repro_interface_artifacts/contribution_selection
+import repro_interface_artifacts/provisioning_lock_diff
 import repro_lock
 
 export catalog_composition.CatalogImport, catalog_composition.CatalogSelectionPolicy
 export contribution_fingerprint.ContributionIdentity,
   contribution_fingerprint.ContributionResolver
+export provisioning_lock_diff
 
 type
   ProvisioningSelectionRefused* = object of ValueError
     ## The build's provisioning selection could not be made from the
     ## committed lock. The message is the resolver's (or names the missing
     ## input); the build must fail with it.
+
+  ProvisioningCatalogPurpose* = enum
+    pcpBuild = "build"
+      ## A build (or inspection / develop session) verifying the committed
+      ## lock; ``artifact`` is the consumer's interface artifact.
+    pcpLockReselect = "lock-reselect"
+      ## ``repro lock refresh --provisioning`` re-selecting the lock's
+      ## provisioning records. A lock refresh builds and extracts nothing,
+      ## so ``artifact`` is EMPTY; the source answers for the project at
+      ## ``projectRoot``.
 
   ProvisioningCatalogRequest* = object
     ## What a ``ProvisioningCatalogSource`` is asked for.
@@ -106,6 +141,7 @@ type
     artifact*: ProjectInterfaceArtifact
     hostPlatform*: string
     targetPlatform*: string
+    purpose*: ProvisioningCatalogPurpose
 
   ProvisioningCatalogInputs* = object
     ## The resolver inputs a build cannot read out of its own artifact.
@@ -120,6 +156,13 @@ type
       ## Dependency resolver for contribution fingerprints; ``nil`` means
       ## ``noContributionResolver`` (a contribution with dependencies is
       ## then not fully bound and the resolver refuses it).
+    previous*: seq[ContributionIdentity]
+      ## OPTIONAL diagnostic evidence: full identities of contributions as
+      ## they were at the LOCKED catalog revisions, when the source can
+      ## supply them. Used only to explain a changed contribution field by
+      ## field (``provisioning_lock_diff``), and only after its fingerprint
+      ## is recomputed and found EQUAL to the locked one. Never selects
+      ## anything.
 
   ProvisioningCatalogSource* = proc (request: ProvisioningCatalogRequest):
     ProvisioningCatalogInputs {.closure.}
@@ -138,82 +181,26 @@ proc setProvisioningCatalogSource*(source: ProvisioningCatalogSource) =
 proc provisioningCatalogSourceInstalled*(): bool =
   not catalogSource.isNil
 
-proc decodedKeyText(keyPart: string): string =
-  ## ``keyPart`` with TOML's ``\uXXXX`` / ``\UXXXXXXXX`` escapes of ASCII
-  ## code points decoded, so ``"\u0070rovisioning"`` reads as the key it
-  ## spells. Everything else is kept byte for byte.
-  var i = 0
-  while i < keyPart.len:
-    if keyPart[i] == '\\' and i + 1 < keyPart.len and
-        keyPart[i + 1] in {'u', 'U'}:
-      let digits = if keyPart[i + 1] == 'u': 4 else: 8
-      if i + 2 + digits <= keyPart.len:
-        try:
-          let code = parseHexInt(keyPart[i + 2 ..< i + 2 + digits])
-          if code >= 0 and code < 128:
-            result.add(char(code))
-            i += 2 + digits
-            continue
-        except ValueError:
-          discard
-    result.add(keyPart[i])
-    inc i
-
-proc readsProvisioningLine(line: string): bool =
-  ## The ONE form ``repro_lock.parseLockedDependencies`` reads records from:
-  ## a (stripped) non-header line whose key, before its first ``=``, is
-  ## exactly ``provisioning``.
-  if line.startsWith("[") or line.startsWith("#"):
-    return false
-  let eq = line.find('=')
-  eq > 0 and line[0 ..< eq].strip() == ProvisioningLockKey
-
-proc namesProvisioningKey(line: string): bool =
-  ## Whether the KEY part of a (stripped, non-comment) line -- the whole of a
-  ## header line, else the text before its first ``=`` -- names
-  ## ``provisioning`` in any spelling: bare, quoted, escaped, dotted, as a
-  ## table or array-of-tables header, or behind bytes TOML does not treat as
-  ## whitespace (a BOM, a no-break space). Values are not inspected, so a
-  ## dependency that merely mentions the word is not a match.
-  let eq = line.find('=')
-  let keyPart =
-    if line.startsWith("[") or eq < 0: line
-    else: line[0 ..< eq]
-  ProvisioningLockKey in decodedKeyText(keyPart)
-
-proc lockDeclaresProvisioning*(text: string): bool =
-  ## True when ``text`` has a line that names the ``provisioning`` key in ANY
-  ## spelling (see ``namesProvisioningKey``), including the writer's own.
-  for rawLine in text.splitLines():
-    let line = rawLine.strip()
-    if line.len == 0 or line.startsWith("#"):
-      continue
-    if namesProvisioningKey(line):
-      return true
-  false
-
-proc lockHasUnreadProvisioningSpelling*(text: string): bool =
-  ## True when ``text`` names the ``provisioning`` key on some line OTHER
-  ## than the one form the strict reader reads (``readsProvisioningLine``).
-  ## The strict reader silently skips every other spelling -- quoted,
-  ## escaped, dotted, table headers -- (measured), so records written that
-  ## way would be dropped: alone they read as "no record", and beside a
-  ## read line (say, one holding only another platform's records) the
-  ## host's records vanish while the lock still parses. Either way the CLI
-  ## refuses instead of building unpinned.
-  for rawLine in text.splitLines():
-    let line = rawLine.strip()
-    if line.len == 0 or line.startsWith("#"):
-      continue
-    if readsProvisioningLine(line):
-      continue
-    if namesProvisioningKey(line):
-      return true
-  false
-
 proc refuse(message: string) {.noreturn.} =
   raise newException(ProvisioningSelectionRefused,
     "provisioning selection refused: " & message)
+
+const ProvisioningCommittedLockName = "repro.lock"
+  ## ``repro_cli_support.CommittedLockFileName``; repeated here because this
+  ## module is imported by, and cannot import, that one.
+
+proc provisioningReselectCommand*(projectRoot, lockPath: string): string =
+  ## The exact command that re-selects the provisioning records of the lock
+  ## at ``lockPath`` for the project at ``projectRoot``: ``repro lock
+  ## refresh --provisioning``, naming the project and -- when it is not the
+  ## project's own ``repro.lock`` -- the lock.
+  result = "repro lock refresh --provisioning"
+  if projectRoot.len > 0:
+    result.add(" " & quoteShell(projectRoot))
+  if lockPath.len > 0 and os.normalizedPath(absolutePath(lockPath)) !=
+      os.normalizedPath(absolutePath(projectRoot /
+        ProvisioningCommittedLockName)):
+    result.add(" --lock " & quoteShell(lockPath))
 
 proc lockSelectedProvisioningPins*(artifact: ProjectInterfaceArtifact;
                                    projectRoot, lockPath: string;
@@ -303,12 +290,162 @@ proc lockSelectedProvisioningPins*(artifact: ProjectInterfaceArtifact;
   var resolver: ContributionResolver = noContributionResolver
   if not inputs.resolver.isNil:
     resolver = inputs.resolver
-  let resolution = resolveProvisioningSelections(ProvisioningResolutionRequest(
+  let request = ProvisioningResolutionRequest(
     imports: inputs.imports, lockClaims: claims, policy: inputs.policy,
-    offered: inputs.offered, hostPlatform: host, targetPlatform: target),
-    resolver)
+    offered: inputs.offered, hostPlatform: host, targetPlatform: target)
+  let resolution = resolveProvisioningSelections(request, resolver)
   if not resolution.resolved:
-    refuse("the committed lock " & lockPath & " does not resolve against " &
-      "the composed catalogs; the lock is not relaxed to an unpinned " &
-      "selection:\n  " & resolution.refusals.join("\n  "))
+    var message = "the committed lock " & lockPath & " does not resolve " &
+      "against the composed catalogs; the lock is not relaxed to an " &
+      "unpinned selection:\n  " & resolution.refusals.join("\n  ")
+    # M7 deliverable 5: say WHAT changed, with the same diff re-selection
+    # prints, and name the one command that re-selects.
+    try:
+      let explained = explainLockMismatch(request, resolver, inputs.previous)
+      if explained.len > 0:
+        message.add("\nwhat changed since the lock was written (the locked " &
+          "record -> what the composed catalogs offer now):")
+        for change in explained:
+          for line in renderChange(change):
+            message.add("\n  " & line)
+    except CatchableError as err:
+      message.add("\n(the change could not be explained: " & err.msg & ")")
+    message.add("\nto re-select explicitly (rewrites the lock's " &
+      "provisioning records and prints this diff; nothing re-selects " &
+      "silently):\n  " & provisioningReselectCommand(projectRoot, lockPath))
+    refuse(message)
   resolution.pinsOf()
+
+# ---------------------------------------------------------------------------
+# M7 deliverable 5: the diff of two committed locks, and explicit
+# re-selection (``repro lock refresh --provisioning``)
+# ---------------------------------------------------------------------------
+
+proc provisioningRecordsOf*(text, label: string;
+                            records: var seq[LockedRealization]): string =
+  ## The ``provisioning`` records of a committed lock document, read for a
+  ## DIFF; returns the refusal, or "" when ``records`` holds them all. Every
+  ## record must be readable: a document the strict reader cannot parse, or
+  ## one that names the key in a spelling the reader skips (in any letter
+  ## case), is refused rather than read as having no records.
+  records = @[]
+  var lock: LockedDependencies
+  try:
+    lock = parseLockedDependencies(text)
+  except CatchableError as err:
+    return label & " cannot be read as a committed lock (" & err.msg & ")"
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#") or readsProvisioningLine(line):
+      continue
+    if namesProvisioningKey(line):
+      return label & " names `" & ProvisioningLockKey & "` in a form the " &
+        "lock reader does not read (only the writer's `" &
+        ProvisioningLockKey & " = [...]` line is read): " & line.escape() &
+        "; its records would be invisible, so it is not diffed"
+  records = lock.lockedProvisioningClaims()
+  ""
+
+proc diffProvisioningLockDocuments*(oldText, newText: string;
+                                    evidence = ProvisioningDiffEvidence()):
+    ProvisioningLockDiff =
+  ## The provisioning-level diff of two committed lock documents. A
+  ## document that cannot be read refuses the diff (never "no change"); a
+  ## lock written before the ``provisioning`` key existed has no records.
+  var oldRecords, newRecords: seq[LockedRealization]
+  var refusals: seq[string] = @[]
+  let a = provisioningRecordsOf(oldText, "the old lock", oldRecords)
+  if a.len > 0: refusals.add(a)
+  let b = provisioningRecordsOf(newText, "the new lock", newRecords)
+  if b.len > 0: refusals.add(b)
+  if refusals.len > 0:
+    return ProvisioningLockDiff(refusals: refusals)
+  diffProvisioningRecords(oldRecords, newRecords, evidence)
+
+type
+  CommittedReselection* = object
+    ## The outcome of ``repro lock refresh --provisioning``: the document to
+    ## write and the report to print, or the refusals (nothing is written).
+    document*: string
+    report*: string
+    diff*: ProvisioningLockDiff
+    refusals*: seq[string]
+
+proc reselected*(r: CommittedReselection): bool = r.refusals.len == 0
+
+proc reselectCommittedProvisioning*(projectRoot, lockPath: string;
+                                    incumbentExists: bool;
+                                    incumbentText, freshDocument: string;
+                                    hostPlatform, targetPlatform: string):
+    CommittedReselection =
+  ## Explicit re-selection of the committed lock's provisioning records on
+  ## one platform pair, over ``freshDocument`` (the lock the refresh just
+  ## solved): every selection the resolver makes WITHOUT the lock's own
+  ## pins (curator policy, else the unique eligible contribution) is locked
+  ## by the lock writer, the incumbent's records for other platform pairs
+  ## are carried unchanged, and the provisioning diff against the incumbent
+  ## is reported. All or nothing: any refusal -- an unreadable incumbent, no
+  ## catalog source, an ambiguous or unsatisfiable selection, a
+  ## contradictory policy, a contribution that is not fully bound, a
+  ## realization the writer cannot lock -- leaves ``document`` empty.
+  ##
+  ## The pins a build provisions from are NOT produced here: they are
+  ## re-derived in-process, on every build, from the records written.
+  var incumbent: seq[LockedRealization] = @[]
+  if incumbentExists and lockDeclaresProvisioning(incumbentText):
+    # An incumbent that names the key in no spelling contributes no record
+    # (and may be any document, as for a plain refresh); one that names it
+    # must be read in full.
+    let refusal = provisioningRecordsOf(incumbentText,
+      "the committed lock " & lockPath, incumbent)
+    if refusal.len > 0:
+      return CommittedReselection(refusals: @[refusal])
+  if catalogSource.isNil:
+    return CommittedReselection(refusals: @["re-selection needs the " &
+      "composed catalogs, and none is supplied to this command: explicit " &
+      "cross-repository catalog imports and the offered contributions' " &
+      "provider identities (ReproOS M6 deliverables 1 and 2) have no " &
+      "production source yet. The lock is left unchanged."])
+  var inputs: ProvisioningCatalogInputs
+  try:
+    inputs = catalogSource(ProvisioningCatalogRequest(
+      projectRoot: projectRoot, lockPath: lockPath,
+      artifact: ProjectInterfaceArtifact(), hostPlatform: hostPlatform,
+      targetPlatform: targetPlatform, purpose: pcpLockReselect))
+  except CatchableError as err:
+    return CommittedReselection(refusals: @["the catalogs to re-select " &
+      "from could not be obtained: " & err.msg])
+  var resolver: ContributionResolver = noContributionResolver
+  if not inputs.resolver.isNil:
+    resolver = inputs.resolver
+  var outcome: ProvisioningReselection
+  try:
+    outcome = reselectProvisioning(ProvisioningReselectionRequest(
+      imports: inputs.imports, policy: inputs.policy, offered: inputs.offered,
+      previous: inputs.previous, incumbent: incumbent,
+      hostPlatform: hostPlatform, targetPlatform: targetPlatform), resolver)
+  except CatchableError as err:
+    return CommittedReselection(refusals: @["re-selection failed: " & err.msg])
+  if not outcome.reselected:
+    return CommittedReselection(refusals: outcome.refusals)
+  var document = freshDocument
+  try:
+    # With no record to write, the fresh document is written exactly as a
+    # plain refresh writes it (``landCommittedLock``), byte for byte.
+    if outcome.records.len > 0:
+      document = serializeLockedDependencies(parseLockedDependencies(
+        freshDocument).withProvisioningRealizations(outcome.records))
+  except CatchableError as err:
+    return CommittedReselection(refusals: @["the re-selected lock cannot " &
+      "be written: " & err.msg])
+  let selectedHere = outcome.records.len - outcome.carriedForward
+  var report = "repro lock refresh --provisioning: re-selected provisioning " &
+    "on " & hostPlatform & " -> " & targetPlatform & " (" & $selectedHere &
+    " selection(s) locked; " & $outcome.carriedForward & " record(s) for " &
+    "other platform pairs carried forward unchanged)"
+  if outcome.diff.unchanged:
+    report.add("\nno provisioning selection changed")
+  else:
+    report.add("\n" & renderProvisioningDiff(outcome.diff))
+  CommittedReselection(document: document, report: report,
+    diff: outcome.diff)

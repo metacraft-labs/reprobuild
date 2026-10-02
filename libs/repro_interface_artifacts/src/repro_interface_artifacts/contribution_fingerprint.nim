@@ -337,6 +337,17 @@ type
     fromSourceProvisioning*: seq[FromSourceRealization]
     dependencies*: seq[ContributionDependencyRef]
 
+  ContributionDependencyBinding* = object
+    ## One declared dependency edge of a contribution that was BOUND
+    ## through the resolver, and the composed sub-fingerprint its
+    ## fingerprint folded in for it. Diagnostics only
+    ## (``provisioning_lock_diff``): the fingerprint folds in the SET of
+    ## these hexes, so comparing two binding lists says which dependency
+    ## moved it. Edges folded in as a coordinate-only leaf are not listed
+    ## here; they are ``unresolvedDependencies``.
+    dependency*: ContributionDependencyRef
+    hex*: string
+
   ContributionFingerprint* = object
     ## ``hex`` is non-empty exactly when ``refusals`` is empty. There is
     ## no third state and no partial fingerprint.
@@ -362,6 +373,12 @@ type
       ## an empty dependency set is complete evidence, not missing
       ## evidence. Same distinction ``source_cache_identity`` draws with
       ## ``dependenciesResolved``.
+    dependencyBindings*: seq[ContributionDependencyBinding]
+      ## This contribution's OWN declared dependency edges that were bound
+      ## through the resolver, in declaration order, each with the
+      ## sub-fingerprint folded in for it. Not an input of anything; empty
+      ## when ``refusals`` is not. Complete exactly when the fingerprint
+      ## is ``dependenciesFullyResolved``.
 
   ContributionResolver* = proc (dep: ContributionDependencyRef):
     Option[ContributionIdentity] {.gcsafe.}
@@ -527,65 +544,120 @@ proc isDigestField(value: string): bool =
 # Realization encoding
 # ---------------------------------------------------------------------------
 
+type
+  RealizationFieldView* = object
+    ## ONE realization exactly as the contribution fingerprint and the
+    ## record digest encode it: its family tag, its (name, value) field
+    ## map, its set-valued fields and its pair-valued fields, each value
+    ## spelled as it enters the payload (the from-source ``recipePath``
+    ## with forward slashes and its ``recipeDigest`` lower-cased; nothing
+    ## else is normalised). The encoders below are built FROM this view,
+    ## so a field cannot enter the fingerprint without also being visible
+    ## to a diagnostic that compares two views
+    ## (``provisioning_lock_diff``), and vice versa.
+    family*: string
+    lockIdentity*: string
+      ## The realization's declared lock identity, as declared; also one
+      ## of ``fields``.
+    fields*: seq[(string, string)]
+    sets*: seq[(string, seq[string])]
+      ## Set-valued fields, in encoding order; each encoded sorted, with
+      ## duplicates kept.
+    pairSets*: seq[(string, seq[(string, string)])]
+      ## Pair-valued fields, in encoding order; each encoded as a sorted
+      ## field map.
+
+proc nixFieldView*(p: InterfaceNixProvisioning): RealizationFieldView =
+  RealizationFieldView(family: "nix", lockIdentity: p.lockIdentity,
+    fields: @[
+      ("packageName", p.packageName),
+      ("contributor", p.contributor),
+      ("selector", p.selector),
+      ("executablePath", p.executablePath),
+      ("expressionFile", p.expressionFile),
+      ("nixpkgsRef", p.nixpkgsRef),
+      ("nixpkgsRev", p.nixpkgsRev),
+      ("nixpkgsNarHash", p.nixpkgsNarHash),
+      ("packageId", p.packageId),
+      ("lockIdentity", p.lockIdentity)])
+
+proc tarballFieldView*(p: InterfaceTarballProvisioning):
+    RealizationFieldView =
+  RealizationFieldView(family: "tarball", lockIdentity: p.lockIdentity,
+    fields: @[
+      ("packageName", p.packageName),
+      ("contributor", p.contributor),
+      ("url", p.url),
+      ("sha256", p.sha256),
+      ("archiveType", p.archiveType),
+      ("executablePath", p.executablePath),
+      ("executableAlias", p.executableAlias),
+      ("stripComponents", $p.stripComponents),
+      ("packageId", p.packageId),
+      ("lockIdentity", p.lockIdentity),
+      ("cpu", p.cpu),
+      ("os", p.os)],
+    sets: @[("mirrors", p.mirrors), ("prunePaths", p.prunePaths)])
+
+proc scoopFieldView*(p: InterfaceScoopProvisioning): RealizationFieldView =
+  RealizationFieldView(family: "scoop", lockIdentity: p.lockIdentity,
+    fields: @[
+      ("packageName", p.packageName),
+      ("contributor", p.contributor),
+      ("bucket", p.bucket),
+      ("app", p.app),
+      ("version", p.version),
+      ("preferredVersion", p.preferredVersion),
+      ("manifestChecksum", p.manifestChecksum),
+      ("manifestUrl", p.manifestUrl),
+      ("executablePath", p.executablePath),
+      ("requiresExecutionProfileChecksum",
+        if p.requiresExecutionProfileChecksum: "1" else: "0"),
+      ("packageId", p.packageId),
+      ("lockIdentity", p.lockIdentity)])
+
+proc fromSourceFieldView*(p: FromSourceRealization): RealizationFieldView =
+  RealizationFieldView(family: "from-source", lockIdentity: p.lockIdentity,
+    fields: @[
+      ("packageName", p.packageName),
+      ("contributor", p.contributor),
+      ("recipePath", p.recipePath.replace('\\', '/')),
+      ("recipeDigest", p.recipeDigest.toLowerAscii()),
+      ("packageId", p.packageId),
+      ("lockIdentity", p.lockIdentity)],
+    pairSets: @[("recipeInputs", p.recipeInputs)])
+
+proc encodeFieldView*(view: RealizationFieldView): string =
+  ## The canonical bytes of one realization -- what the fingerprint and
+  ## the record digest fold in for it.
+  result.putStr(view.family)
+  result.add(encodeFields(view.fields))
+  for (_, values) in view.sets:
+    result.putStrSet(values)
+  for (_, pairs) in view.pairSets:
+    result.add(encodeFields(pairs))
+
+proc realizationFieldViews*(identity: ContributionIdentity):
+    seq[RealizationFieldView] =
+  ## Every realization the contribution fingerprint of ``identity`` folds
+  ## in, as views, in declaration order (Nix, tarball, Scoop, from-source).
+  let c = identity.contribution
+  for p in c.nixProvisioning: result.add(nixFieldView(p))
+  for p in c.tarballProvisioning: result.add(tarballFieldView(p))
+  for p in c.scoopProvisioning: result.add(scoopFieldView(p))
+  for p in identity.fromSourceProvisioning: result.add(fromSourceFieldView(p))
+
 proc encodeNix(p: InterfaceNixProvisioning): string =
-  result.putStr("nix")
-  result.add(encodeFields(@[
-    ("packageName", p.packageName),
-    ("contributor", p.contributor),
-    ("selector", p.selector),
-    ("executablePath", p.executablePath),
-    ("expressionFile", p.expressionFile),
-    ("nixpkgsRef", p.nixpkgsRef),
-    ("nixpkgsRev", p.nixpkgsRev),
-    ("nixpkgsNarHash", p.nixpkgsNarHash),
-    ("packageId", p.packageId),
-    ("lockIdentity", p.lockIdentity)]))
+  encodeFieldView(nixFieldView(p))
 
 proc encodeTarball(p: InterfaceTarballProvisioning): string =
-  result.putStr("tarball")
-  result.add(encodeFields(@[
-    ("packageName", p.packageName),
-    ("contributor", p.contributor),
-    ("url", p.url),
-    ("sha256", p.sha256),
-    ("archiveType", p.archiveType),
-    ("executablePath", p.executablePath),
-    ("executableAlias", p.executableAlias),
-    ("stripComponents", $p.stripComponents),
-    ("packageId", p.packageId),
-    ("lockIdentity", p.lockIdentity),
-    ("cpu", p.cpu),
-    ("os", p.os)]))
-  result.putStrSet(p.mirrors)
-  result.putStrSet(p.prunePaths)
+  encodeFieldView(tarballFieldView(p))
 
 proc encodeScoop(p: InterfaceScoopProvisioning): string =
-  result.putStr("scoop")
-  result.add(encodeFields(@[
-    ("packageName", p.packageName),
-    ("contributor", p.contributor),
-    ("bucket", p.bucket),
-    ("app", p.app),
-    ("version", p.version),
-    ("preferredVersion", p.preferredVersion),
-    ("manifestChecksum", p.manifestChecksum),
-    ("manifestUrl", p.manifestUrl),
-    ("executablePath", p.executablePath),
-    ("requiresExecutionProfileChecksum",
-      if p.requiresExecutionProfileChecksum: "1" else: "0"),
-    ("packageId", p.packageId),
-    ("lockIdentity", p.lockIdentity)]))
+  encodeFieldView(scoopFieldView(p))
 
 proc encodeFromSource(p: FromSourceRealization): string =
-  result.putStr("from-source")
-  result.add(encodeFields(@[
-    ("packageName", p.packageName),
-    ("contributor", p.contributor),
-    ("recipePath", p.recipePath.replace('\\', '/')),
-    ("recipeDigest", p.recipeDigest.toLowerAscii()),
-    ("packageId", p.packageId),
-    ("lockIdentity", p.lockIdentity)]))
-  result.add(encodeFields(p.recipeInputs))
+  encodeFieldView(fromSourceFieldView(p))
 
 proc interfaceContributionRecordDigest*(
     contribution: InterfaceProvisioningContribution): string =
@@ -824,6 +896,7 @@ proc composeContribution(identity: ContributionIdentity;
   # the duration of the loop, so a dependency that points back at it is a
   # cycle and folds in as its leaf.
   var depHexes: seq[string] = @[]
+  var bindings: seq[ContributionDependencyBinding] = @[]
   var unresolved: seq[ContributionDependencyRef] = @[]
   let myKey = dependencyKey(c.targetPackage, c.contributor)
   visited.add(myKey)
@@ -869,6 +942,8 @@ proc composeContribution(identity: ContributionIdentity;
     template absorb(subFp: ContributionFingerprint) =
       if subFp.isResolved:
         depHexes.add(subFp.hex)
+        bindings.add(ContributionDependencyBinding(dependency: dep,
+          hex: subFp.hex))
         # Transitive: the root's payload contains this child's hex, so a
         # coordinate the CHILD bound only as a leaf is one the root binds
         # only as a leaf too.
@@ -971,6 +1046,7 @@ proc composeContribution(identity: ContributionIdentity;
 
   result.fp.hex = hexOfDigest(payload)
   result.fp.refusals = @[]
+  result.fp.dependencyBindings = bindings
 
 proc contributionFingerprint*(identity: ContributionIdentity;
                               resolver: ContributionResolver):

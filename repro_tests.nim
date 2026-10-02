@@ -1080,6 +1080,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_provisioning_lock_reselect_and_diff.nim",
+    binary: "build/test-bin/t_provisioning_lock_reselect_and_diff",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim",
     binary: "build/test-bin/t_s7_build_paths_reach_the_restore_config",
     defines: @[],
@@ -2450,6 +2459,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim",
     binary: "build/test-bin/test_library_codec_roundtrip",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "libs/repro_interface_artifacts/tests/test_provisioning_lock_diff.nim",
+    binary: "build/test-bin/test_provisioning_lock_diff",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

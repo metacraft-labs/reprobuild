@@ -61037,6 +61037,10 @@ type
     strategy: LockStrategy
     registries: seq[string]
     write: bool
+    reselectProvisioning: bool
+      ## ReproOS M7 deliverable 5 — ``repro lock refresh --provisioning``:
+      ## re-select the lock's provisioning records instead of carrying them
+      ## forward (``reselectCommittedProvisioning``). ``refresh`` only.
 
 proc parseLockVerbArgs(rest: openArray[string]; verb: string;
                        projectDir, inputsOverride, lockOverride,
@@ -61083,6 +61087,17 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
       gen.registries.add(valueFromFlag(rest, i, "--registry"))
     elif arg == "--write":
       gen.write = true
+    elif arg == "--provisioning":
+      # ReproOS M7 deliverable 5. Re-selection rewrites the committed lock's
+      # provisioning records, so it belongs to the verb that writes the
+      # committed lock by definition; `solve --write` keeps carrying them
+      # forward, and `validate` writes nothing.
+      if verb != "refresh":
+        stderr.writeLine("repro lock " & verb & ": --provisioning " &
+          "re-selects the committed lock's provisioning records and is " &
+          "accepted only by `repro lock refresh`")
+        return 2
+      gen.reselectProvisioning = true
     elif arg == "--json":
       asJson = true
     elif arg.startsWith("--"):
@@ -61793,6 +61808,33 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
     defer:
       try: removeDir(extendedPath(request.workDir))
       except CatchableError: discard
+    if gen.reselectProvisioning and entryPoint == lgeLockRefresh:
+      # ReproOS M7 deliverable 5 — EXPLICIT re-selection. Re-solve exactly
+      # as a refresh does, but land nothing until the provisioning records
+      # are re-selected: any refusal leaves the committed lock untouched,
+      # never half-refreshed.
+      var generated = runLockRefresh(request, "")
+      let incumbentExists = fileExists(extendedPath(lockP))
+      let incumbentText =
+        if incumbentExists: readFile(extendedPath(lockP)) else: ""
+      let platform =
+        if platformOverride.len > 0: platformOverride
+        else: currentPlatformId()
+      let outcome = reselectCommittedProvisioning(projectDir, lockP,
+        incumbentExists, incumbentText, generated.lockDocument, platform,
+        platform)
+      if not outcome.reselected:
+        stderr.writeLine("repro lock " & verb & " --provisioning: " &
+          "re-selection refused; " & lockP & " was not written:")
+        for refusal in outcome.refusals:
+          stderr.writeLine("  " & refusal)
+        return 1
+      stdout.writeLine(outcome.report)
+      createDir(parentDir(lockP))
+      writeFile(lockP, outcome.document)
+      generated.lockDocument = outcome.document
+      generated.lockPath = lockP
+      return reportGeneratedLock(verb, lockP, generated)
     let generated =
       case entryPoint
       of lgeLockRefresh: runLockRefresh(request, writeTo)
@@ -61810,6 +61852,13 @@ proc runReproLockRefresh(rest: openArray[string]): int =
   ## ``repro lock refresh`` — re-solve the project's solver inputs and
   ## (re)write the committed lock WITHOUT building. No build artifacts are
   ## produced; only the lock file is written.
+  ##
+  ## The lock's ``provisioning`` records (ReproOS M7) are CARRIED FORWARD
+  ## unchanged: a refresh never re-selects a contributor as a side effect
+  ## of re-solving versions. ``--provisioning`` re-selects them explicitly
+  ## (``provisioning_lock_selection.reselectCommittedProvisioning``) and
+  ## prints the provisioning diff; it refuses, writing nothing, when the
+  ## selection cannot be made in full.
   runLockGenerationVerb(rest, "refresh", lgeLockRefresh,
     writeByDefault = true)
 
@@ -62368,6 +62417,47 @@ proc runReproLockList(rest: openArray[string]): int =
     lockFileDeclarationsFromCompiledProvider(absolutePath(projectDir))))
   0
 
+proc lockDiffReport*(oldPath, newPath: string): tuple[rc: int; text: string] =
+  ## ``repro lock diff <old-lock> <new-lock>`` (ReproOS M7 deliverable 5):
+  ## the provisioning-level diff of two committed locks, each change with
+  ## why it changed (``provisioning_lock_diff``). ``rc`` follows ``diff``:
+  ## 0 = no provisioning selection changed, 1 = changes, 2 = a lock cannot
+  ## be read (a refused diff is never reported as "no change").
+  for path in [oldPath, newPath]:
+    if not fileExists(extendedPath(path)):
+      return (2, "repro lock diff: cannot read " & path & ": " &
+        (if dirExists(extendedPath(path)): "it is a directory"
+         else: "no such file"))
+  var oldText, newText: string
+  try:
+    oldText = readFile(extendedPath(oldPath))
+    newText = readFile(extendedPath(newPath))
+  except CatchableError as err:
+    return (2, "repro lock diff: " & err.msg)
+  let diff = diffProvisioningLockDocuments(oldText, newText)
+  if diff.refused:
+    return (2, "repro lock diff: " & renderProvisioningDiff(diff))
+  if diff.unchanged:
+    return (0, "repro lock diff: no provisioning selection changed")
+  (1, renderProvisioningDiff(diff))
+
+proc runReproLockDiff(rest: openArray[string]): int =
+  var paths: seq[string] = @[]
+  for arg in rest:
+    if arg.startsWith("--"):
+      stderr.writeLine("repro lock diff: unknown flag " & arg)
+      return 2
+    paths.add(arg)
+  if paths.len != 2:
+    stderr.writeLine("usage: repro lock diff <old-lock> <new-lock>")
+    return 2
+  let report = lockDiffReport(paths[0], paths[1])
+  if report.rc == 2:
+    stderr.writeLine(report.text)
+  else:
+    stdout.writeLine(report.text)
+  report.rc
+
 proc runReproLockCommand*(args: openArray[string]): int =
   ## Top-level dispatcher for ``repro lock <verb> ...``.
   ##
@@ -62381,7 +62471,7 @@ proc runReproLockCommand*(args: openArray[string]): int =
   ## ``visualize`` (Locking-And-Solver.md §"CLI Surface") remain future work.
   if args.len == 0:
     stderr.writeLine("repro lock: error: missing verb " &
-      "(one of: list, solve, refresh, validate, explain)")
+      "(one of: list, solve, refresh, validate, explain, diff)")
     return 2
   let rest =
     if args.len > 1: args[1 .. ^1]
@@ -62395,6 +62485,8 @@ proc runReproLockCommand*(args: openArray[string]): int =
     return runReproLockSolve(rest)
   of "validate":
     return runReproLockValidate(rest)
+  of "diff":
+    return runReproLockDiff(rest)
   of "explain":
     var variantName = ""
     var fixturePath = ""

@@ -91,7 +91,11 @@
 ##   * Model the canonical package's in-package realizations as a
 ##     contribution: they are not a ``CatalogContent`` entry, so the lock
 ##     cannot pin them.
-##   * Diff diagnostics explaining WHY a contributor changed (deliverable 5).
+##   * Explain WHY a lock record no longer matches, or re-select: that is
+##     deliverable 5, ``provisioning_lock_diff`` (``explainLockMismatch``,
+##     which the CLI appends to this resolver's refusal, and
+##     ``reselectProvisioning``, which runs THIS resolver without the lock's
+##     claims for ``repro lock refresh --provisioning``).
 
 import std/[algorithm, options, sequtils, strutils]
 

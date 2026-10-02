@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1661,
+    "nimTestBinaries": 1663,
     "pureUnitConsolidationGroups": 52,
-    "pureUnitTests": 591,
+    "pureUnitTests": 593,
     "staticallyDetectedRuntimeCompilerFlowTests": 100,
-    "testEntries": 1672
+    "testEntries": 1674
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1132,7 +1132,7 @@
       "graph-fixture": 12,
       "integration": 776,
       "platform/destructive": 116,
-      "pure unit": 591,
+      "pure unit": 593,
       "unclassified": 177
     },
     "graphOwnedTestArtifacts": [
@@ -1281,9 +1281,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1661,
+    "nimTestBinaryCount": 1663,
     "pythonTestFileCount": 11,
-    "testEntryCount": 1672
+    "testEntryCount": 1674
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8160,6 +8160,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_provisioning_lock_reselect_and_diff",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_interface_artifacts",
+        "repro_lock"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_provisioning_lock_reselect_and_diff.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_s7_build_paths_reach_the_restore_config",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -10953,6 +10972,24 @@
       "source": "libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_provisioning_lock_diff",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_lock"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/test_provisioning_lock_diff.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 40,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

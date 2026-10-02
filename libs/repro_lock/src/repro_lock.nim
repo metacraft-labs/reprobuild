@@ -1043,6 +1043,86 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
         depends: splitNames(f.getOrDefault("depends", "")),
         tags: splitNames(f.getOrDefault("tags", ""))))
 
+proc decodedKeyText(keyPart: string): string =
+  ## ``keyPart`` with TOML's ``\uXXXX`` / ``\UXXXXXXXX`` escapes of ASCII
+  ## code points decoded, so ``"\u0070rovisioning"`` reads as the key it
+  ## spells. Everything else is kept byte for byte.
+  var i = 0
+  while i < keyPart.len:
+    if keyPart[i] == '\\' and i + 1 < keyPart.len and
+        keyPart[i + 1] in {'u', 'U'}:
+      let digits = if keyPart[i + 1] == 'u': 4 else: 8
+      if i + 2 + digits <= keyPart.len:
+        try:
+          let code = parseHexInt(keyPart[i + 2 ..< i + 2 + digits])
+          if code >= 0 and code < 128:
+            result.add(char(code))
+            i += 2 + digits
+            continue
+        except ValueError:
+          discard
+    result.add(keyPart[i])
+    inc i
+
+proc readsProvisioningLine*(line: string): bool =
+  ## The ONE form ``parseLockedDependencies`` reads records from:
+  ## a (stripped) non-header line whose key, before its first ``=``, is
+  ## exactly ``provisioning``.
+  if line.startsWith("[") or line.startsWith("#"):
+    return false
+  let eq = line.find('=')
+  eq > 0 and line[0 ..< eq].strip() == ProvisioningLockKey
+
+proc namesProvisioningKey*(line: string): bool =
+  ## Whether the KEY part of a (stripped, non-comment) line -- the whole of a
+  ## header line, else the text before its first ``=`` -- names
+  ## ``provisioning`` in any spelling: bare, quoted, escaped, dotted, as a
+  ## table or array-of-tables header, or behind bytes TOML does not treat as
+  ## whitespace (a BOM, a no-break space) -- and in ANY ASCII letter case.
+  ## TOML keys are case-sensitive, so ``Provisioning = [...]`` is another
+  ## key that every reader skips; but a lock that spells it so meant to pin,
+  ## and skipping it would build unpinned. (The lock's own keys are a fixed
+  ## lower-case set; package names are values, never keys.) Values are not
+  ## inspected, so a dependency that merely mentions the word is not a
+  ## match.
+  let eq = line.find('=')
+  let keyPart =
+    if line.startsWith("[") or eq < 0: line
+    else: line[0 ..< eq]
+  ProvisioningLockKey in decodedKeyText(keyPart).toLowerAscii()
+
+proc lockDeclaresProvisioning*(text: string): bool =
+  ## True when ``text`` has a line that names the ``provisioning`` key in ANY
+  ## spelling (see ``namesProvisioningKey``), including the writer's own.
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    if namesProvisioningKey(line):
+      return true
+  false
+
+proc lockHasUnreadProvisioningSpelling*(text: string): bool =
+  ## True when ``text`` names the ``provisioning`` key on some line OTHER
+  ## than the one form the strict reader reads (``readsProvisioningLine``).
+  ## The strict reader silently skips every other spelling -- quoted,
+  ## escaped, dotted, table headers -- (measured), so records written that
+  ## way would be dropped: alone they read as "no record", and beside a
+  ## read line (say, one holding only another platform's records) the
+  ## host's records vanish while the lock still parses. Either way the CLI
+  ## build path refuses instead of building unpinned, and a refresh refuses
+  ## to replace the lock (``withProvisioningCarriedForward``) rather than
+  ## drop them.
+  for rawLine in text.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    if readsProvisioningLine(line):
+      continue
+    if namesProvisioningKey(line):
+      return true
+  false
+
 proc documentCarriesProvisioning(content: string): bool =
   ## Whether a committed lock document spells a ``provisioning`` key at all
   ## -- including one cut before its ``=`` -- by the line rules
@@ -1079,6 +1159,26 @@ proc withProvisioningCarriedForward*(fresh: LockedDependencies;
   ## parse; otherwise this raises ``SolvedGraphLockParseError`` and the
   ## caller must not replace the committed lock.
   result = fresh
+  if lockHasUnreadProvisioningSpelling(incumbentDocument):
+    # Records under a key spelling the strict reader skips (quoted, escaped,
+    # dotted, a table header, another letter case) are invisible to it:
+    # rewriting the lock would drop them without a word, and the next build
+    # would run unpinned.
+    var spelled = ""
+    for rawLine in incumbentDocument.splitLines():
+      let line = rawLine.strip()
+      if line.len > 0 and not line.startsWith("#") and
+          not readsProvisioningLine(line) and namesProvisioningKey(line):
+        spelled = line
+        break
+    raise newException(SolvedGraphLockParseError,
+      "refusing to replace the committed lock: it names `" &
+      ProvisioningLockKey & "` in a form the lock reader does not read " &
+      "(only the writer's `" & ProvisioningLockKey & " = [...]` line is " &
+      "read): " & (if spelled.len > 80: spelled[0 ..< 80] & "..." else: spelled).escape() &
+      "; a refresh carries locked provisioning realizations forward -- it " &
+      "never drops one silently. Restore the writer's line from version " &
+      "control, or remove the line deliberately.")
   if not documentCarriesProvisioning(incumbentDocument):
     return
   var incumbent: LockedDependencies

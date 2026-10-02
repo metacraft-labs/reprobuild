@@ -1418,7 +1418,16 @@ suite "e2e_locked_provisioning_contributor_selection":
                      "\"provisioni\\u006Eg\" = " & hostRecords,
                      "\"\\U00000070rovisioning\" = " & hostRecords,
                      "[[\"\\u0070rovisioning\"]]\nrecord = \"x\"",
-                     "\xEF\xBB\xBFprovisioning = " & hostRecords]:
+                     "\xEF\xBB\xBFprovisioning = " & hostRecords,
+                     # Letter-case variants (found by the D5 verifier):
+                     # TOML keys are case-sensitive, so the reader skips
+                     # them as another key -- but a lock that spells the
+                     # key this way meant to pin: refused, never unpinned.
+                     "Provisioning = " & hostRecords,
+                     "PROVISIONING = " & hostRecords,
+                     "\"Provisioning\" = " & hostRecords,
+                     "[[Provisioning]]\nrecord = \"x\"",
+                     "[PROVISIONING]"]:
       for withForeign in [true, false]:
         let body =
           if withForeign: plainLock & "\n" & foreignLine & "\n" & spelling
@@ -1440,8 +1449,8 @@ suite "e2e_locked_provisioning_contributor_selection":
         ContributorA
     # A key merely CONTAINING the word elsewhere in the document is not the
     # provisioning key: an inline-table member of another key.
-    writeFile(mixed / "repro.lock", plainLock & "\n" &
-      "x = { provisioning = 1 }\n")
-    check buildProvisioningPins(artifact, mixed).len == 0
+    for member in ["x = { provisioning = 1 }", "x = { Provisioning = 1 }"]:
+      writeFile(mixed / "repro.lock", plainLock & "\n" & member & "\n")
+      check buildProvisioningPins(artifact, mixed).len == 0
 
   removeDir(fixtureRoot)

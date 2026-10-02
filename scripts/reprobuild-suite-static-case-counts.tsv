@@ -126,6 +126,7 @@ libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim	nim	3
 libs/repro_cli_support/tests/t_partition_planner_degrades_gracefully_on_cold_cache.nim	nim	1
 libs/repro_cli_support/tests/t_partition_planner_reads_runquota_estimates.nim	nim	1
 libs/repro_cli_support/tests/t_phase_g_cli_wiring.nim	nim	6
+libs/repro_cli_support/tests/t_provisioning_lock_reselect_and_diff.nim	nim	7
 libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	6
 libs/repro_cli_support/tests/t_strategy_unknown_name_refused.nim	nim	8
 libs/repro_cli_support/tests/t_w2_activation_surfaces_declare_producer_ops.nim	nim	4
@@ -279,6 +280,7 @@ libs/repro_interface_artifacts/tests/test_catalog_composition_is_order_independe
 libs/repro_interface_artifacts/tests/test_contribution_fingerprint_invalidation_boundaries.nim	nim	46
 libs/repro_interface_artifacts/tests/test_imported_contribution_typecheck_identity.nim	nim	7
 libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim	nim	6
+libs/repro_interface_artifacts/tests/test_provisioning_lock_diff.nim	nim	40
 libs/repro_interface_artifacts/tests/test_provisioning_realization_lock_record.nim	nim	13
 libs/repro_interface_artifacts/tests/test_provisioning_selection_from_lock.nim	nim	14
 libs/repro_launch_plan/tests/t_codec_smoke.nim	nim	12

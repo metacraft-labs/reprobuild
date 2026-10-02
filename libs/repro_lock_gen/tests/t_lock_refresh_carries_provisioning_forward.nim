@@ -136,8 +136,17 @@ suite "a lock refresh carries locked provisioning realizations forward":
       discard runLockSolve(reg.request(workspace(), lsHighest), committed)
       pinProvisioning(committed)
       let pinned = provisioningLine(readFile(committed))
+      # The last four (found by the M7 D5 verifier): records under a key
+      # spelling the strict reader skips -- quoted, escaped, another letter
+      # case -- used to be dropped by the rewrite without a word, and the
+      # next build then ran unpinned.
+      let records = pinned[pinned.find('=') + 1 .. ^1].strip()
       for damaged in [pinned[0 ..< pinned.len - 3], "provisioning",
-                      pinned.replace("\"tarball\"", "\"docker\"")]:
+                      pinned.replace("\"tarball\"", "\"docker\""),
+                      "\"provisioning\" = " & records,
+                      "\"\\u0070rovisioning\" = " & records,
+                      "Provisioning = " & records,
+                      "[PROVISIONING]"]:
         let incumbent = readFile(committed).replace(pinned, damaged)
         writeFile(committed, incumbent)
         var refusal = ""
