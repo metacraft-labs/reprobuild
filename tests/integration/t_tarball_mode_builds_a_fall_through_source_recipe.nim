@@ -15,7 +15,7 @@
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
-const reproBinary = "./build/bin/repro"
+const reproBinary = "." / "build" / "bin" / addFileExt("repro", ExeExt)
 const FromSourceRootEnv = "REPRO_FROM_SOURCE_ROOT"
 
 const producerRepro = """
@@ -60,10 +60,10 @@ package fallThroughConsumer:
 
 suite "tarball mode builds a fall-through source recipe":
   test "an unbuilt recipe is built in tarball mode, then the consumer runs":
-    if findExe("sh").len == 0:
-      checkpoint("skipped - sh is unavailable")
-      skip()
-    elif not fileExists(reproBinary):
+    # The producer's action runs `sh`, which every lane provides (Git
+    # Bash on Windows); its absence is a broken host, not a reason to skip.
+    check findExe("sh").len > 0
+    if not fileExists(reproBinary):
       checkpoint("missing " & reproBinary & "; build reprobuild first")
       fail()
     else:
