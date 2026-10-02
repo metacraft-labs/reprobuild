@@ -31,15 +31,27 @@
 ##     (aged 30 days) survive ``maintainSharedBare``; B's expire, which is
 ##     also the proof that expiry actually ran (SPI-GOAL-3).
 ##   - ``mutation_hook_without_env_reset_protects_nothing`` — the same gc with
-##     the hook's ``unset GIT_DIR …`` line removed loses A's objects: gc runs
-##     the hook with the pool's ``GIT_DIR`` exported, and it overrides
-##     ``git -C <leaf>``.
+##     the hook's ``unset GIT_DIR …`` line removed: gc runs the hook with the
+##     pool's ``GIT_DIR`` exported, and it overrides ``git -C <leaf>``. A hook
+##     that skipped a leaf it could not read lost A's objects silently
+##     (measured 2026-10-02); the hook now refuses such a leaf, so this
+##     mutation surfaces as a failed gc that prunes nothing. The case keeps
+##     its name so the history of the failure stays findable.
 ##   - ``mutation_hook_without_history_walk_loses_parent`` — the hook without
 ##     its walk behind leaf-only ids keeps ``origin/feat`` but loses the
 ##     parent of A's own commit. (This walk goes beyond the spec's §3.3 list
 ##     of what the hook prints; see the module comment above.)
 ##   - ``failing_hook_aborts_pruning`` — a hook that exits non-zero makes git
 ##     skip pruning: nothing is deleted, not even B's objects (SPI-GOAL-5).
+##   - ``unreadable_registered_leaf_aborts_pruning`` — a registered leaf that
+##     still exists but that git cannot open (a broken config standing in for
+##     an ownership refusal) makes the hook refuse, so nothing is pruned;
+##     ``mutation_unreadable_leaf_skipped_loses_its_objects`` shows the same
+##     fixture losing A's objects when the hook merely skips such a leaf.
+##   - ``missing_registry_aborts_pruning`` — expiry is only switched on once
+##     the registry names a leaf, so a registry that has disappeared makes the
+##     hook refuse; ``mutation_missing_registry_accepted_prunes_everything``
+##     shows the loss when a missing registry is treated as "nothing to keep".
 ##   - ``empty_registry_or_old_git_keeps_never`` — a pool with no registered
 ##     leaf, and a pool driven by a git older than 2.42, both keep
 ##     ``gc.pruneExpire=never``; with a leaf registered and git >= 2.42 it is
@@ -225,10 +237,18 @@ suite "SPI-1: the pool retains what registered leaves name":
       let f = setUp(root)
       mutateHook(f.pool, "unset GIT_DIR", "# Checkouts are partial clones")
       # The operator-run gc: the pool's own config, no reprobuild in between
-      # (``maintainSharedBare`` would rewrite the hook first).
-      discard must(f.pool, "gc", "--quiet")
-      check not has(f.pool, f.aFeat)
-      check not has(f.pool, f.aBase)
+      # (``maintainSharedBare`` would rewrite the hook first). Without the
+      # reset, ``git -C <leaf>`` resolves the pool's exported GIT_DIR
+      # relative to the leaf and fails. A hook that SKIPPED such a leaf
+      # protected nothing and git did not warn; this hook refuses instead,
+      # so the missing reset now surfaces as a failed gc that deleted
+      # nothing.
+      let gc = gitIn(f.pool, "gc", "--quiet")
+      checkpoint("gc without the env reset: " & $gc.code & " " & gc.output)
+      check gc.code != 0
+      check has(f.pool, f.aFeat)
+      check has(f.pool, f.aBase)
+      check has(f.pool, f.bFeat)          # refused: nothing pruned at all
 
   test "mutation_hook_without_history_walk_loses_parent":
     if findExe("git").len == 0 or not gitAtLeast(2, 42):
@@ -259,6 +279,78 @@ suite "SPI-1: the pool retains what registered leaves name":
       check has(f.pool, f.aFeat)
       check has(f.pool, f.aBase)
       check has(f.pool, f.bFeat)          # nothing at all was pruned
+
+  test "unreadable_registered_leaf_aborts_pruning":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-unreadable-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      # A is still a checkout that borrows from the pool, but git cannot open
+      # it (a broken config stands in for an ownership refusal).
+      let cfg = f.a / ".git" / "config"
+      writeFile(cfg, readFile(cfg) & "[broken\n")
+      doAssert gitIn(f.a, "rev-parse", "--git-dir").code != 0
+      let gc = gitIn(f.pool, "gc", "--quiet")
+      checkpoint("gc with an unreadable leaf: " & $gc.code & " " & gc.output)
+      check has(f.pool, f.aFeat)
+      check has(f.pool, f.aBase)
+      check has(f.pool, f.bFeat)          # the hook refused: nothing pruned
+
+  test "mutation_unreadable_leaf_skipped_loses_its_objects":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-unreadable-mut-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      let cfg = f.a / ".git" / "config"
+      writeFile(cfg, readFile(cfg) & "[broken\n")
+      let hook = retentionHookPath(f.pool)
+      let script = readFile(hook)
+      let refuse = "|| { status=1; continue; }\n  : > "
+      doAssert script.contains(refuse), "mutation anchor not found in the hook"
+      writeFile(hook, script.replace(refuse, "|| continue\n  : > "))
+      discard must(f.pool, "gc", "--quiet")
+      check not has(f.pool, f.aFeat)      # skipping the leaf expired its objects
+
+  test "missing_registry_aborts_pruning":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-noregistry-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      removeFile(borrowersPath(f.pool))
+      let gc = gitIn(f.pool, "gc", "--quiet")
+      checkpoint("gc with the registry gone: " & $gc.code & " " & gc.output)
+      check has(f.pool, f.aFeat)
+      check has(f.pool, f.bFeat)          # nothing pruned
+
+  test "mutation_missing_registry_accepted_prunes_everything":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-noregistry-mut-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      removeFile(borrowersPath(f.pool))
+      let hook = retentionHookPath(f.pool)
+      let script = readFile(hook)
+      let refuse = "[ -f \"$registry\" ] || exit 1"
+      doAssert script.contains(refuse), "mutation anchor not found in the hook"
+      writeFile(hook, script.replace(refuse, "[ -f \"$registry\" ] || exit 0"))
+      discard must(f.pool, "gc", "--quiet")
+      check not has(f.pool, f.aFeat)      # A is registered no more: lost
 
   test "empty_registry_or_old_git_keeps_never":
     if findExe("git").len == 0 or not gitAtLeast(2, 42):

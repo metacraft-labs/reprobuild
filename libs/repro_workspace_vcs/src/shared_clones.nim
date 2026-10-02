@@ -1448,7 +1448,9 @@ export GIT_NO_LAZY_FETCH
 
 pool=$(cd "$(dirname "$0")/.." && pwd) || exit 1
 registry="$pool/repro/borrowers"
-[ -f "$registry" ] || exit 0
+# Expiry is only switched on once the registry names a checkout, so a missing
+# registry here means something removed it. Refuse: git then prunes nothing.
+[ -f "$registry" ] || exit 1
 work="$pool/repro/retain.$$"
 rm -rf "$work" && mkdir "$work" || exit 1
 trap 'rm -rf "$work"' EXIT
@@ -1458,8 +1460,11 @@ status=0
 while IFS= read -r leaf || [ -n "$leaf" ]; do
   [ -n "$leaf" ] || continue
   [ -d "$leaf" ] || continue
-  # A path that is no longer a repository borrows nothing.
-  common=$(git -C "$leaf" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || continue
+  # A path that is no longer a repository borrows nothing. A repository git
+  # cannot open (ownership checks, a broken config) still borrows: refuse
+  # rather than let its objects expire.
+  [ -e "$leaf/.git" ] || continue
+  common=$(git -C "$leaf" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || { status=1; continue; }
   : > "$work/names"
   # Refs, read from the ref store: this format never opens the objects.
   git -C "$leaf" for-each-ref --format='%(objectname)' >> "$work/names" || { status=1; continue; }
