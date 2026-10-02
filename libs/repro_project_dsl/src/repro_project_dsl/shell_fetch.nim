@@ -88,13 +88,55 @@ proc appendTarExtraction*(script: var string; archive, destination: string;
   else:
     script.add(command & "; ")
 
+proc projectAnchorOf*(pathUnderRepro: string): string =
+  ## The project root a `<project>/.repro/...` path lives under, or "".
+  let s = pathUnderRepro.replace('\\', '/')
+  let i = s.find("/.repro/")
+  if i > 0: s[0 ..< i] else: ""
+
+proc withoutProjectPath*(text, anchor: string): string =
+  ## `text` with every spelling of `anchor` — either separator, and on
+  ## Windows any case — replaced by `<project>`.
+  ##
+  ## For hashing a program into an up-to-date token. The token binds WHAT the
+  ## program does; where the checkout happens to be is not part of that, and a
+  ## token that hashed it made the action's static description differ between
+  ## two checkouts of the same recipe — so no portable record could ever be
+  ## shared between them (Cache-Scope P3.4). Text that merely names a path
+  ## is rewritten by portable logicalization; a path inside a HASH is not
+  ## reachable by it, so it has to be taken out before hashing.
+  if anchor.len == 0:
+    return text
+  result = text
+  for spelling in [anchor.replace('\\', '/'), anchor.replace('/', '\\')]:
+    when defined(windows):
+      var i = 0
+      var built = ""
+      let lower = result.toLowerAscii()
+      let needle = spelling.toLowerAscii()
+      while i < result.len:
+        let hit = lower.find(needle, i)
+        if hit < 0:
+          built.add(result[i .. ^1])
+          break
+        built.add(result[i ..< hit])
+        built.add("<project>")
+        i = hit + needle.len
+      result = built
+    else:
+      result = result.replace(spelling, "<project>")
+
 proc appendVerifiedFetchStamp*(script: var string; stamp: string) =
   ## Called only after successful verification and extraction. Bind the whole
   ## acquisition program so changed extraction settings invalidate consumers,
   ## while repeated verification of the same source does not change its mtime.
   ## Fetch actions remain noncacheable: the stamp is not evidence that a
   ## previously extracted tree still exists or that acquisition was monitored.
-  let token = "repro-source-fetch-v1:" & blake3.toHex(blake3.digest(script))
+  ##
+  ## The program is hashed with the project's own path taken out
+  ## (`withoutProjectPath`), so two checkouts of one recipe agree on it.
+  let token = "repro-source-fetch-v1:" & blake3.toHex(blake3.digest(
+    withoutProjectPath(script, projectAnchorOf(stamp))))
   let escapedStamp = shellDoubleQuote(stamp)
   script.add("if [ -f \"" & escapedStamp & "\" ] && { " &
     "IFS= read -r repro_fetch_stamp && " &

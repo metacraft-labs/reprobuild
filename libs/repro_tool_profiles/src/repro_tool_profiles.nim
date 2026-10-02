@@ -4722,16 +4722,21 @@ proc provisionBootstrapCCompiler*(storeRoot: string;
   requireUsableCCompiler(cc, origin, storeRoot / "compiler-probes", sysroot)
   BootstrapCCompiler(path: cc, sdkRoot: sdk)
 
-proc buildBootstrapNimFromSource(sourcePrefix, storeRoot, cc: string): string =
-  ## Build ``bin/nim`` from the extracted source archive at ``sourcePrefix``,
-  ## once per tool store, and return its path. The build runs the archive's
-  ## own ``build.sh`` (upstream's documented way to build its C sources) with
-  ## ``CC`` set to the bootstrap compiler, in a scratch copy holding only what
+proc buildNimFromSource(sourcePrefix, storeRoot, cc, sdkRoot, version,
+                        url, sha256: string): string =
+  ## Build ``bin/nim`` from the extracted source archive of Nim ``version``
+  ## at ``sourcePrefix``, once per tool store, and return its path. The build
+  ## runs the archive's own ``build.sh`` (upstream's documented way to build
+  ## its C sources) with ``CC`` set to the bootstrap compiler (and, on macOS,
+  ## ``SDKROOT`` to the SDK it was given), in a scratch copy holding only what
   ## the build and the compiler need, and is moved into place whole, so a
   ## concurrent or interrupted build never leaves a half-built compiler where
   ## the next run would find it.
-  let id = "nim-2.2.10-" & BootstrapNimSourceTarballSha256[0 .. 15] & "-" &
-    hostCpuToken()
+  ##
+  ## The result is a Nim distribution tree: ``bin/nim``, ``lib/``,
+  ## ``config/``. Used by the bootstrap's own source route and by a pinned
+  ## Nim whose lock entry names a source archive.
+  let id = "nim-" & version & "-" & sha256[0 .. 15] & "-" & hostCpuToken()
   let dest = storeRoot / "bootstrap-nim" / id
   let nimExe = dest / "bin" / "nim"
   let marker = dest / ".repro-built"
@@ -4744,16 +4749,26 @@ proc buildBootstrapNimFromSource(sourcePrefix, storeRoot, cc: string): string =
   createDir(extendedPath(work))
   try:
     for entry in ["build.sh", "copying.txt"]:
-      copyFile(extendedPath(sourcePrefix / entry), extendedPath(work / entry))
+      if fileExists(extendedPath(sourcePrefix / entry)):
+        copyFile(extendedPath(sourcePrefix / entry), extendedPath(work / entry))
+    if not fileExists(extendedPath(work / "build.sh")):
+      raise newException(OSError, "the Nim " & version & " source archive " &
+        "has no build.sh at its top level (" & sourcePrefix & ")")
     for dir in ["c_code", "lib", "config"]:
+      if not dirExists(extendedPath(sourcePrefix / dir)):
+        raise newException(OSError, "the Nim " & version & " source " &
+          "archive has no " & dir & "/ at its top level (" & sourcePrefix &
+          ")")
       copyDir(extendedPath(sourcePrefix / dir), extendedPath(work / dir))
     createDir(extendedPath(work / "bin"))
     let env = newStringTable(modeCaseSensitive)
     for key, value in envPairs():
       env[key] = value
     env["CC"] = cc
+    if sdkRoot.len > 0:
+      env["SDKROOT"] = sdkRoot
     try:
-      stderr.writeLine("repro: building the bootstrap Nim 2.2.10 from its " &
+      stderr.writeLine("repro: building Nim " & version & " from its " &
         "source archive with " & cc & " (once per tool store)")
       flushFile(stderr)
     except IOError, OSError:
@@ -4769,13 +4784,12 @@ proc buildBootstrapNimFromSource(sourcePrefix, storeRoot, cc: string): string =
       var tail = res.output.strip().splitLines()
       if tail.len > 30:
         tail = tail[^30 .. ^1]
-      raise newException(OSError, "`sh build.sh` in the Nim source archive " &
-        "exited " & $res.exitCode & " (full log: " & logPath & "):\n" &
-        tail.join("\n"))
+      raise newException(OSError, "`sh build.sh` in the Nim " & version &
+        " source archive exited " & $res.exitCode & " (full log: " &
+        logPath & "):\n" & tail.join("\n"))
     removeDir(extendedPath(work / "c_code"))
     writeFile(extendedPath(work / ".repro-built"),
-      "source " & BootstrapNimSourceTarballUrl & "\nsha256 " &
-      BootstrapNimSourceTarballSha256 & "\ncc " & cc & "\n")
+      "source " & url & "\nsha256 " & sha256 & "\ncc " & cc & "\n")
     if dirExists(extendedPath(dest)) and not fileExists(extendedPath(marker)):
       removeDir(extendedPath(dest))
     try:
@@ -4790,6 +4804,154 @@ proc buildBootstrapNimFromSource(sourcePrefix, storeRoot, cc: string): string =
   if not fileExists(extendedPath(nimExe)):
     raise newException(OSError, "the source build left no " & nimExe)
   nimExe
+
+# ---------------------------------------------------------------------------
+# The Nim source-build provisioning edge.
+#
+# A Nim realized from its SOURCE archive is two edges, not a side path:
+#
+#   tarball-provision.nim-source@V.*   the pinned source archive, downloaded,
+#                                      verified against its SHA-256 and
+#                                      extracted (the ordinary tarball edge,
+#                                      with its extractor edges);
+#   nim-source-build.nim@V.*           ``build.sh`` run over that tree with
+#                                      the bootstrap C compiler.
+#
+# The build edge depends on the tarball edge and reads its receipt, which is a
+# declared input, exactly as a tarball edge reads its extractor's
+# (Dependency-Provisioning-In-Build-Graph.md sections 2 and 4). Its pin --
+# version, source digest, compiler, SDK -- is its weak fingerprint, so a
+# repeat is an action-cache hit and a changed compiler re-builds. Both the
+# bootstrap's no-Nix Linux route and a pinned Nim whose lock entry names a
+# source archive (Linux, other POSIX, a macOS version with no darwin archive)
+# realize through it.
+# ---------------------------------------------------------------------------
+
+const
+  NimSourceBuildProvisionerName* = "nim-source-build"
+  NimSourceBuildEdgeSchema = "reprobuild.nim-source-build.v1"
+
+proc nimSourceToolUse*(version, url, sha256: string): InterfaceToolUse =
+  ## The tarball package of Nim ``version``'s pinned source archive. Its
+  ## declared executable is ``build.sh``: what the tarball edge must find in
+  ## the extracted tree for the build edge to run.
+  InterfaceToolUse(
+    rawConstraint: "nim ==" & version,
+    packageSelector: "nim-source@" & version,
+    executableName: "nim",
+    tarballProvisioning: @[InterfaceTarballProvisioning(
+      packageName: "nim",
+      url: url,
+      sha256: sha256,
+      archiveType: "tar.xz",
+      executablePath: "build.sh",
+      stripComponents: 1,
+      packageId: "nim-source@" & version,
+      lockIdentity: "tarball:nim-source@" & version & ":sha256:" & sha256)])
+
+proc nimSourceBuildEdges*(version, url, sha256, storeRoot, cc,
+                          sdkRoot: string): ProvisioningEdges =
+  ## The provisioning subgraph that builds Nim ``version`` from its pinned
+  ## source archive: the tarball edge (and its extractors), then the build.
+  result = tarballProvisioningEdges(nimSourceToolUse(version, url, sha256),
+    storeRoot)
+  let source = result.rootReceipt
+  let identity = provisionEdgeIdentity(NimSourceBuildProvisionerName,
+    "nim@" & version, "bin/nim")
+  let id = "nim-source-build.nim@" & safeIdSegment(version) & "." &
+    identity[0 .. 11]
+  let receipt = provisioningStateRoot(storeRoot) / "receipts" /
+    (id & ".receipt")
+  let text = $(%*{
+    "schema": NimSourceBuildEdgeSchema,
+    "storeRoot": storeRoot,
+    "version": version,
+    "url": url,
+    "sha256": sha256,
+    "cc": cc,
+    "sdkRoot": sdkRoot,
+    "sourceReceipt": source})
+  var action = builtinAction(bakForeignProvision, id,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    cwd = storeRoot,
+    deps = [result.rootId],
+    inputs = [source],
+    outputs = [receipt],
+    commandStatsId = "repro nim source build edge",
+    cacheable = true,
+    weakFingerprint = weakFingerprintFromText(NimSourceBuildEdgeSchema &
+      "\0" & storeRoot & "\0" & version & "\0" & sha256 & "\0" & cc &
+      "\0" & sdkRoot),
+    text = text)
+  action.argv = @[NimSourceBuildProvisionerName, "nim@" & version]
+  result.actions.add(action)
+  result.rootId = id
+  result.rootReceipt = receipt
+
+proc executeNimSourceBuildEdge*(action: BuildAction): ActionResult {.gcsafe.} =
+  ## The ``"nim-source-build"`` provisioner's executor: build the tree the
+  ## source tarball edge's receipt names, and write a receipt naming the
+  ## built ``bin/nim``.
+  result = ActionResult(id: action.id, launched: true,
+    runQuotaBackend: "provision-nim-source-build",
+    dependencyPolicyKind: action.dependencyPolicy.kind)
+  {.cast(gcsafe).}:
+    try:
+      let spec = parseJson(action.builtinText)
+      if spec{"schema"}.getStr() != NimSourceBuildEdgeSchema:
+        raise newException(ValueError,
+          "nim source-build edge carries an unknown schema: " & action.id)
+      let sourceReceipt = spec{"sourceReceipt"}.getStr()
+      if not fileExists(extendedPath(sourceReceipt)):
+        raise newException(OSError, "the Nim source archive edge left no " &
+          "receipt at " & sourceReceipt)
+      let source = readTarballProvisionReceipt(sourceReceipt)
+      let nimExe = buildNimFromSource(source.prefix,
+        spec{"storeRoot"}.getStr(), spec{"cc"}.getStr(),
+        spec{"sdkRoot"}.getStr(), spec{"version"}.getStr(),
+        spec{"url"}.getStr(), spec{"sha256"}.getStr())
+      let receipt = action.outputs[0]
+      createDir(extendedPath(parentDir(receipt)))
+      writeFile(extendedPath(receipt), $(%*{
+        "schema": NimSourceBuildEdgeSchema,
+        "packageSelector": "nim@" & spec{"version"}.getStr(),
+        "planIndex": 0,
+        "prefix": nimExe.parentDir.parentDir,
+        "executable": nimExe,
+        "selectedUrl": source.selectedUrl}) & "\n")
+      result.status = asSucceeded
+      result.exitCode = 0
+      result.evidence = PathSetEvidence(declaredInputs: action.inputs,
+        declaredOutputs: action.outputs)
+    except CatchableError as err:
+      lastTarballProvisionError = err
+      result.status = asFailed
+      result.exitCode = 1
+      result.stderr = err.msg
+
+proc registerNimSourceBuildProvisioner*() =
+  registerForeignProvisionExecutor(NimSourceBuildProvisionerName,
+    executeNimSourceBuildEdge)
+
+registerNimSourceBuildProvisioner()
+
+proc buildNimFromSourceThroughEdges*(version, url, sha256, storeRoot, cc,
+                                     sdkRoot: string): string =
+  ## Run ``nimSourceBuildEdges`` and return the built ``bin/nim``. A receipt
+  ## the action cache kept after the built tree was removed is re-executed,
+  ## as ``resolveTarballTool`` does for a tarball prefix.
+  let root = absolutePath(storeRoot)
+  let edges = nimSourceBuildEdges(version, url, sha256, root, cc, sdkRoot)
+  for attempt in 0 .. 1:
+    registerNimSourceBuildProvisioner()
+    let run = runProvisioningEdges(edges, root, forceRebuild = attempt > 0)
+    raiseProvisioningFailure(run)
+    let receipt = readTarballProvisionReceipt(edges.rootReceipt)
+    if receipt.executable.len > 0 and
+        fileExists(extendedPath(receipt.executable)):
+      return receipt.executable
+  raise newException(OSError, "the Nim " & version & " source build " &
+    "edge's receipt " & edges.rootReceipt & " names no existing bin/nim")
 
 proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
                             cc = ""): string =
@@ -4809,12 +4971,9 @@ proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
       if cc.len == 0:
         raise newException(OSError, "there is no bootstrap C compiler to " &
           "build it with")
-      var sourceUse = bootstrapNimToolUse()
-      sourceUse.packageSelector = "nim-source@2.2.10"
-      sourceUse.nixProvisioning = @[]
-      let materialized = materializeTarballPrefix(
-        tarballAcquisitionPlan(sourceUse), storeRoot)
-      result = buildBootstrapNimFromSource(materialized.prefix, storeRoot, cc)
+      result = buildNimFromSourceThroughEdges("2.2.10",
+        BootstrapNimSourceTarballUrl, BootstrapNimSourceTarballSha256,
+        storeRoot, cc, "")
     if result.len == 0:
       raise newException(OSError, "the route resolved no executable")
   except CatchableError as err:
@@ -4906,6 +5065,93 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
     bumpWindowsNimStack(nim)
     putEnv(bootstrapNimCompilerEnv, nim)
   publishBootstrapCompilerEnv(cc, defined(windows))
+
+# ---------------------------------------------------------------------------
+# M5 "pin the provider-compile toolchain": realizing a PINNED Nim.
+#
+# A project that pins its provider compiler (``packageSource "nim", "store"``
+# and ``uses: "nim ==V"``) gets, from ``repro lock refresh``, a lock entry
+# naming the official release archive for the lock's platform and its SHA-256
+# (``repro_lock.LockedArchive``; ``repro_lock_gen/upstream_archives`` says
+# which archive per platform and why). This realizes that pin through the
+# same provisioning edges as everything else: a binary archive is one tarball
+# edge, verified against the pinned digest; a source archive is the tarball
+# edge plus the Nim source-build edge above, built with the bootstrap C
+# compiler. Any failure raises, naming what failed; nothing here substitutes
+# another Nim.
+# ---------------------------------------------------------------------------
+
+const
+  PinnedNimArchiveBinary* = "binary"
+  PinnedNimArchiveSource* = "source"
+    ## Spelled as ``repro_lock.LockedArchiveBinary`` / ``LockedArchiveSource``;
+    ## repeated rather than imported so this module does not depend on the
+    ## lock reader.
+
+proc pinnedNimArchiveToolUse*(version, url, sha256,
+                              archiveType: string): InterfaceToolUse =
+  ## The tarball package of a pinned BINARY Nim archive. For the
+  ## bootstrap's own Windows Nim this is the same selector, URL, digest and
+  ## lock identity as ``bootstrapNimToolUse``, so the two share one
+  ## tool-store prefix.
+  InterfaceToolUse(
+    rawConstraint: "nim ==" & version,
+    packageSelector: "nim@" & version,
+    executableName: "nim",
+    tarballProvisioning: @[InterfaceTarballProvisioning(
+      packageName: "nim",
+      url: url,
+      sha256: sha256,
+      archiveType: archiveType,
+      executablePath: "bin/" & addFileExt("nim", ExeExt),
+      stripComponents: 1,
+      packageId: "nim@" & version,
+      lockIdentity: "tarball:nim@" & version & ":sha256:" & sha256)])
+
+type
+  PinnedNimRealization* = object
+    tree*: string
+      ## The Nim distribution directory: ``bin/nim``, ``lib/``, ``config/``.
+    executable*: string
+    route*: string
+      ## How it was realized, for diagnostics and narration.
+
+proc provisionPinnedNim*(storeRoot, version, url, sha256, archiveType,
+                         build: string): PinnedNimRealization =
+  ## Realize the pinned Nim ``version`` from its lock-pinned archive into
+  ## the tool store at ``storeRoot`` and return the distribution tree.
+  ## Raises on any failure, including a download whose SHA-256 is not
+  ## ``sha256``.
+  if url.len == 0 or sha256.len != 64:
+    raise newException(ValueError, "the pin for nim " & version &
+      " names no archive URL and SHA-256 to realize it from")
+  case build
+  of PinnedNimArchiveBinary:
+    let profile = resolveTarballTool(
+      pinnedNimArchiveToolUse(version, url, sha256, archiveType), storeRoot)
+    bumpWindowsNimStack(profile.resolvedExecutablePath)
+    result = PinnedNimRealization(tree: profile.selectedStorePath,
+      executable: profile.resolvedExecutablePath,
+      route: "the official archive " & url & " (sha256 " & sha256 & ")")
+  of PinnedNimArchiveSource:
+    # Verify and unpack the pinned source archive FIRST (the same tarball
+    # edge the build edge depends on, so the build below finds it cached):
+    # bytes that do not match the pin are refused before a C compiler is
+    # provisioned for a build that must not happen.
+    discard resolveTarballTool(nimSourceToolUse(version, url, sha256),
+      storeRoot)
+    let cc = provisionBootstrapCCompiler(storeRoot)
+    let exe = buildNimFromSourceThroughEdges(version, url, sha256, storeRoot,
+      cc.path, cc.sdkRoot)
+    result = PinnedNimRealization(tree: exe.parentDir.parentDir,
+      executable: exe,
+      route: "the official source archive " & url & " (sha256 " & sha256 &
+        "), built with " & cc.path)
+  else:
+    raise newException(ValueError, "the pin for nim " & version &
+      " names an archive of unknown kind \"" & build & "\" (expected " &
+      PinnedNimArchiveBinary & " or " & PinnedNimArchiveSource & ")")
+
 proc blake3HexBytes*(bytes: openArray[byte]): string =
   blake3.toHex(blake3.digest(bytes))
 

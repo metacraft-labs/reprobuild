@@ -1603,7 +1603,9 @@ suite "which argument is the image the action executes":
       weakFingerprint = seed,
       governingLockIdentity = lockIdentityOutsideSolvedGraph())
     const observed = "/nix/store/ffffffffffffffffffffffffffffffff-d-1.0/x"
-    let keyed = noImage.cacheInputPaths(
-      PathSetEvidence(monitorReads: @[observed]))
+    var probeEvidence = PathSetEvidence()
+    probeEvidence.monitorReads.observeAll(probeEvidence.evidenceProvenance,
+      evcMonitorCapture, [observed])
+    let keyed = noImage.cacheInputPaths(probeEvidence)
     checkpoint("unlocatable image, keyed inputs: " & $keyed)
     check keyed == @[observed]

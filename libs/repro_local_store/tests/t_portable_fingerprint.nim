@@ -8,6 +8,7 @@
 import std/[os, strutils, tempfiles, times, unittest]
 
 import repro_local_store/portable_fingerprint
+from repro_core/paths import extendedPath
 
 proc checkout(base: string): string =
   ## A tiny "project" with one source file and one data file.
@@ -342,3 +343,23 @@ suite "portable fingerprints":
       check p.rel == "Src/Main.c"
       check logicalizeText(roots, r"-IM:\m\dev\pkg\include") ==
         "-I${project}/include"
+
+  test "a tree's manifest includes entries whose full path passes MAX_PATH":
+    # gemini-cli's test snapshots have names long enough that, under a
+    # project, their full paths pass 260 characters. The walk used to skip
+    # them silently, so the manifest missed files and no other walk of the
+    # same tree reproduced its digest.
+    let base = createTempDir("repro-long-tree-", "")
+    defer: removeDir(extendedPath(base))
+    let deep = base / "tree" / "a".repeat(100) / "b".repeat(100)
+    let leaf = deep / ("c".repeat(80) & ".snap.svg")
+    check leaf.len > 260
+    createDir(extendedPath(deep))
+    writeFile(extendedPath(leaf), "<svg/>")
+    var names: seq[string] = @[]
+    for entry in treeEntries(base / "tree"):
+      if entry.kind == tekFile:
+        names.add(entry.rel)
+    check names.len == 1
+    check names[0].endsWith(".snap.svg")
+    check fileContentHex(leaf).len == 64

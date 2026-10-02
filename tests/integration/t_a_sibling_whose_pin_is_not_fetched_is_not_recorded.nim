@@ -32,27 +32,29 @@
 ##   1. the arrangement is real: the pinned revision genuinely is NOT in the
 ##      sibling's object store (asked with git's own `cat-file -e`, the same
 ##      predicate the classifier uses);
-##   2. the commit SUCCEEDS and `flake.lock` is byte-identical — nothing was
-##      recorded;
-##   3. the diagnostic DISTINGUISHES this from every other cause: it says the
-##      sibling cannot be classified until it is fetched, it does not claim a
+##   2. the commit is REFUSED and `flake.lock` is byte-identical — nothing was
+##      recorded. An unprovable pin is one of the three relations §3.2's "Rule,
+##      at commit" refuses on (behind, diverged, pinned commit absent), unless
+##      `REPRO_ALLOW_PIN_REGRESSION` names the input;
+##   3. the refusal DISTINGUISHES this from every other cause: it says the
+##      pinned commit is not present in the checkout, it does not claim a
 ##      direction, and `repro flake override-status --json` reports the row's
 ##      relation as `unfetched` rather than `unknown`, `at` or `behind`;
-##   4. it names the FETCH, as a pasteable command — and that command, run from
-##      the directory the message names, really does make the sibling
+##   4. it names the FETCH, as a pasteable command — and that command, run
+##      where the refusal was printed, really does make the sibling
 ##      classifiable;
-##   5. once fetched, the sibling turns out to be **5 commits behind**, and is
-##      STILL not recorded. That is the whole story in one assertion: the
+##   5. once fetched, the sibling turns out to be **5 commits behind**, and the
+##      commit is STILL refused. That is the whole story in one assertion: the
 ##      classification changed, the refusal to file a downgrade did not.
 ##
 ## ## Mutations
 ##
-##   * treat an unfetched pin as AT the pin (return `fprAt`) ⇒ RED on (3): the
-##     row reports `at`, the diagnostic names no fetch, and (5)'s re-check finds
-##     no notice at all;
+##   * treat an unfetched pin as AT the pin (return `sprAt`) ⇒ RED on (2) and
+##     (3): the row reports `at`, and nothing is refused or fetched;
 ##   * treat it as BEHIND with distance 0 ⇒ RED on (3): the relation is `behind`
-##     and the "cannot be classified until fetched" wording is gone;
-##   * make it recordable ⇒ RED on (2).
+##     and the "not present in" wording is gone;
+##   * make it no regression (drop `sprUnprovable` from `isPinRegression`) ⇒
+##     RED on (2): the commit goes through.
 ##
 ## Test-double policy: NO mocks, doubles or fakes. See the headers of
 ## `nf2_flake_lock_fixture.nim` and `nf3_override_state_fixture.nim`.
@@ -61,9 +63,16 @@ import std/[json, os, osproc, strutils, unittest]
 
 import nf3_override_state_fixture
 
-proc withheldNotice(text: string): string =
+proc refusalLine(text: string): string =
+  ## The refusal's line for the gamma input.
   for line in text.splitLines():
-    if line.contains("NOT refreshed") and line.contains("gamma-src"):
+    if line.contains("flake.lock input 'gamma-src'"):
+      return line
+  ""
+
+proc fetchLine(text: string): string =
+  for line in text.splitLines():
+    if line.contains("fetch it so the direction can be decided"):
       return line
   ""
 
@@ -100,11 +109,13 @@ suite "NF-2: a sibling whose pin is not fetched is not recorded":
         commitLockAndPublish(fx, "a lock pinned at an unfetched gamma")
         let before = readFile(lockPath(fx))
 
-        # ---- (2) the commit stands and nothing is recorded ---------------
+        # ---- (2) the commit is refused and nothing is recorded -----------
+        let headBefore = headOf(fx, fx.app)
         let committed = tryCommitInApp(fx, "work made without fetching gamma")
         checkpoint("commit output:\n" & committed.output)
         checkpoint("pre-commit log:\n" & preCommitLog(fx))
-        check committed.code == 0
+        check committed.code != 0
+        check committed.head == headBefore
         let after = readFile(lockPath(fx))
         if after != before:
           checkpoint("gamma-src BEFORE:\n" & nodeText(before, "gamma-src"))
@@ -114,13 +125,13 @@ suite "NF-2: a sibling whose pin is not fetched is not recorded":
         check lockInCommit(fx) == before
 
         # ---- (3) it is DISTINGUISHED from every other cause --------------
-        let notice = withheldNotice(committed.output)
-        checkpoint("notice: " & notice)
+        let notice = refusalLine(committed.output)
+        checkpoint("refusal: " & notice)
         check notice.len > 0
-        check notice.contains("CANNOT BE CLASSIFIED")
-        check notice.contains("until it is fetched")
-        check not notice.contains("BEHIND")
-        check not notice.contains("AHEAD")
+        check notice.contains("pinned commit " & gammaPinned &
+          " not present in")
+        check not notice.contains("behind by")
+        check not notice.contains("ahead by")
 
         let js = flakeStatus(fx, "--json")
         checkpoint("override-status stderr:\n" & js.stderr)
@@ -146,11 +157,10 @@ suite "NF-2: a sibling whose pin is not fetched is not recorded":
         check counts["at"].getInt() == 2
 
         # ---- (4) the named FETCH is pasteable, and works -----------------
-        let namedDir = directoryNamedForRunning(notice)
-        checkpoint("named directory: " & namedDir)
-        check namedDir.len > 0
-        check dirExists(namedDir)
-        let commands = backtickedCommands(notice)
+        # The refusal is printed in the repository being committed to (the
+        # hook `cd`s there), and its commands name every path absolutely.
+        let namedDir = fx.app
+        let commands = backtickedCommands(fetchLine(committed.output))
         checkpoint("commands: " & $commands)
         check commands.len >= 1
         if commands.len >= 1:
@@ -167,14 +177,14 @@ suite "NF-2: a sibling whose pin is not fetched is not recorded":
           check fetched.code == 0
           check pinIsFetched(fx, "gamma", gammaPinned)
 
-          # ---- (5) …and it was 5 behind all along, still not recorded ----
+          # ---- (5) …and it was 5 behind all along, still refused ---------
           let again = firePreCommitHook(fx)
           checkpoint("re-fired hook -> " & $again.code & "\n" & again.output)
-          check again.code == 0
-          let second = withheldNotice(again.output)
-          checkpoint("second notice: " & second)
-          check second.contains("5 commit(s) BEHIND")
-          check not second.contains("CANNOT BE CLASSIFIED")
+          check again.code != 0
+          let second = refusalLine(again.output)
+          checkpoint("second refusal: " & second)
+          check second.contains("behind by 5 commit(s)")
+          check not second.contains("not present in")
           check readFile(lockPath(fx)) == before
 
           let js2 = flakeStatus(fx, "--json")
