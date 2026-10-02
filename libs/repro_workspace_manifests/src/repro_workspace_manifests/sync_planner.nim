@@ -440,6 +440,37 @@ proc classifyRepoState*(resolved: ResolvedRepo;
       result.message = "cherry-picking locally authored commits on top of force-pushed branch at '" & resolved.path & "'"
       return
     result.action = saNone
+    # The remedies these refusals name, spelled as commands that RESOLVE the
+    # refusal rather than as the flag that is relevant to it.
+    #
+    # Interactive-UX-And-Progress.md Principle 2 is "Name the fix. Pair every
+    # refusal with the command that resolves it", and a command that is one
+    # flag short of resolving it is worse than naming none: it costs a full
+    # re-run to learn the advice was inert. Both destructive sync paths route
+    # through the RA-9 preview-and-confirm gate, which REFUSES in a
+    # non-interactive context without ``--yes`` — and every CI job and every
+    # agent is non-interactive. Measured: twelve rewritten checkouts refused,
+    # the remedy ``repro sync --force-sync`` run exactly as printed, and the
+    # answer was ``refused 12, force-reset 0`` plus a reprint of the same
+    # advice. So ``--yes`` belongs in the named command, with the note that it
+    # is the confirmation and can be dropped at a terminal.
+    let discardRemedy =
+      "'repro sync --force-sync --yes' to discard your local history and " &
+      "reset to the remote (it previews each checkout first; drop '--yes' " &
+      "to be asked interactively instead)"
+    # ``--rebase-on-force-push`` is named ONLY where it would actually act.
+    # It needs a remote counterpart to replay onto and a RECORDED superseded
+    # base (``.repro/workspace/force-pushes.json``), and when both are present
+    # the missing input is just the flag — which is exactly when naming it is
+    # the fix. When one is absent the flag changes nothing, and advertising it
+    # would re-create the defect above in the other direction.
+    let replayRemedyApplies =
+      observation.remoteBranchTip.len > 0 and
+      observation.forcePushedBaseSha.len > 0
+    let replayRemedy =
+      "'repro sync --rebase-on-force-push --yes' to reset onto the new " &
+      "history and replay the commits you own (the pre-rewrite tip is kept " &
+      "as refs/repro/pre-rewrite/<branch>/<sha>)"
     if observation.remoteHistoryDisjoint:
       # THE post-rewrite case, and the reason this arm exists at all.
       #
@@ -465,14 +496,23 @@ proc classifyRepoState*(resolved: ResolvedRepo;
         " <your branch point> " &
         (if observation.currentBranch.len > 0: observation.currentBranch
          else: "HEAD") &
-        "'), or discard it with 'repro sync --force-sync'"
+        "')" &
+        (if replayRemedyApplies: ", or run " & replayRemedy else: "") &
+        ", or run " & discardRemedy
       result.message = "refusing to sync '" & resolved.path &
         "': its history is disjoint from the rewritten remote"
       return
     if not rebaseOnForcePush:
       result.refusalReason = "remote branch was force-pushed; refused — " &
-        "run 'repro sync --rebase-on-force-push' to rebase your local commits " &
-        "on the new history, or 'repro sync --force-sync' to discard local changes"
+        "run " &
+        (if replayRemedyApplies: replayRemedy
+         else:
+           "'git -C " & resolved.path & " rebase --onto " &
+           gitRemoteFor(resolved) & "/" & trunkNameFor(resolved) &
+           " <your branch point> " &
+           (if observation.currentBranch.len > 0: observation.currentBranch
+            else: "HEAD") & "' to replay the commits you own by hand") &
+        ", or run " & discardRemedy
       result.message = "refusing to sync force-pushed checkout at '" & resolved.path & "'"
       return
     # Force-pushed, the operator wants the rebase, and one of its two
@@ -489,8 +529,7 @@ proc classifyRepoState*(resolved: ResolvedRepo;
        else: "no superseded base commit was recorded to replay from") &
       ". Refused — do NOT push before checking whether the remote history " &
       "was rewritten; rebase manually onto '" & gitRemoteFor(resolved) &
-      "/" & trunkNameFor(resolved) & "', or run 'repro sync --force-sync' " &
-      "to discard local changes"
+      "/" & trunkNameFor(resolved) & "', or run " & discardRemedy
     result.message = "refusing to sync force-pushed checkout at '" &
       resolved.path & "': nothing to rebase onto"
     return

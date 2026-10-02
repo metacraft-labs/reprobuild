@@ -33800,9 +33800,11 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
   # Measured on a real workspace: 12 repos reset by a run that reported
   # ``force-reset 0, skipped 0``.
   #
-  # The planner's refusal text has always said "run 'repro sync
-  # --rebase-on-force-push' to rebase your local commits on the new history".
-  # That sentence is only honest when the flag is what turns the rebase on.
+  # The planner's refusal text offers "'repro sync --rebase-on-force-push
+  # --yes' to reset onto the new history and replay the commits you own".
+  # That sentence is only honest when the flag is what turns the rebase on —
+  # and the planner now also withholds it where the replay has no base to
+  # work from, so a refusal never names a command that cannot act.
   result.rebaseOnForcePush = false
   var i = 0
   while i < args.len:
@@ -39241,10 +39243,18 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         continue
       # ``scForcePushRebase`` belongs in this set, and its absence was a
       # promise the tool did not keep: the planner's own refusal text for a
-      # rewritten remote ends "or discard it with 'repro sync --force-sync'",
-      # yet that case was filtered out here, so ``--force-sync`` did nothing
-      # for it and the repo stayed refused however many times the operator
-      # ran the named remedy.
+      # rewritten remote names a ``--force-sync`` remedy, yet that case was
+      # filtered out here, so ``--force-sync`` did nothing for it and the repo
+      # stayed refused however many times the operator ran the named remedy.
+      #
+      # Keeping that promise takes BOTH halves, and the second was missing for
+      # longer than the first. This arm makes the flag act; the planner's text
+      # has to name a command that survives the gate below, which in a
+      # non-interactive context means ``--force-sync --yes``. Twelve rewritten
+      # checkouts were refused, the printed remedy was run verbatim, and the
+      # answer was ``refused 12, force-reset 0`` — the flag was gated here
+      # correctly and then declined for want of a confirmation the advice
+      # never mentioned.
       if decision.syncCase notin
           {scDirty, scLocallyUnpublished, scDivergentFeatureBranch,
            scForcePushRebase}:
