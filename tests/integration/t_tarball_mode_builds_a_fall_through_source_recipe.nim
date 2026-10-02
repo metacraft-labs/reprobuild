@@ -7,99 +7,40 @@
 ## invocation's mode. Before that rule a tarball-mode build stopped at tool
 ## resolution with "no tarball provisioning entry ... matches host".
 ##
-## Black-box: a real `repro` binary (this checkout's `build/bin/repro`) builds
-## a real consumer recipe against a synthetic source catalog selected with
-## `REPRO_FROM_SOURCE_ROOT`. The consumer's `uses: "fsfallthrough"` names a
-## package nothing provisions, so tarball mode has no tarball for any host and
-## must fall through to the catalog recipe. Nothing is mocked.
+## Black-box: this checkout's real `repro` binary builds the consumer of
+## `source_producer_fixture` (the fixture `t_source_producer_revalidation`
+## uses in from-source mode). Its `probe` package is a stub with no
+## realization at all, so tarball mode has no tarball for any host and must
+## fall through to the catalog's `probe` recipe, which `REPRO_FROM_SOURCE_ROOT`
+## selects. Both recipes use only builtin actions, so the run needs no host
+## tool. Nothing is mocked.
 
-import std/[os, osproc, strutils, tempfiles, unittest]
+import std/[os, osproc, strtabs, strutils, unittest]
+import source_producer_fixture
 
-const reproBinary = "." / "build" / "bin" / addFileExt("repro", ExeExt)
-const FromSourceRootEnv = "REPRO_FROM_SOURCE_ROOT"
-
-const producerRepro = """
-import repro_project_dsl
-
-package fsfallthroughSource:
-  build:
-    let materialize = buildAction(
-      id = "fsfallthrough-source.materialize",
-      call = inlineExecCall(@[
-        "sh", "-c",
-        "mkdir -p .repro/output/fsfallthrough && " &
-          "printf '#!/bin/sh\\necho fall-through\\n' > " &
-          ".repro/output/fsfallthrough/fsfallthrough && " &
-          "chmod +x .repro/output/fsfallthrough/fsfallthrough"
-      ]),
-      outputs = @[".repro/output/fsfallthrough/fsfallthrough"],
-      cacheable = false)
-    defaultTarget(target("fsfallthrough", [materialize]))
-"""
-
-const consumerRepro = """
-import repro_project_dsl
-
-package fallThroughConsumer:
-  defaultToolProvisioning "tarball"
-
-  uses:
-    "fsfallthrough"
-
-  build:
-    let consumerAction = buildAction(
-      id = "consumer.run",
-      call = inlineExecCall(@[
-        "sh", "-c", "mkdir -p build && printf ran > build/consumer-ran.txt"
-      ]),
-      outputs = @["build/consumer-ran.txt"],
-      cacheable = false,
-      toolIdentityRefs = @["fsfallthrough"])
-    defaultTarget(target("consumer", [consumerAction]))
-"""
+const reproBinary = "build" / "bin" / addFileExt("repro", ExeExt)
 
 suite "tarball mode builds a fall-through source recipe":
   test "an unbuilt recipe is built in tarball mode, then the consumer runs":
-    # The producer's action runs `sh`, which every lane provides (Git
-    # Bash on Windows); its absence is a broken host, not a reason to skip.
-    check findExe("sh").len > 0
-    if not fileExists(reproBinary):
-      checkpoint("missing " & reproBinary & "; build reprobuild first")
-      fail()
-    else:
-      let scratch = createTempDir("repro-tarball-fall-through-", "")
-      defer: removeDir(scratch)
-      let catalogRoot = scratch / "catalog"
-      let producerRoot = catalogRoot / "fsfallthrough"
-      let consumerRoot = scratch / "consumer"
-      let cacheRoot = scratch / "action-cache"
-      for dir in [producerRoot, consumerRoot, cacheRoot]:
-        createDir(dir)
-      writeFile(producerRoot / "repro.nim", producerRepro)
-      writeFile(consumerRoot / "repro.nim", consumerRepro)
+    let binary = absolutePath(reproBinary)
+    require fileExists(binary)
+    let root = createSourceFixture()
+    defer: removeDir(root)
+    let artifact = root / "catalog/probe/.repro/output/install/usr/lib/libprobe.so"
+    let output = root / "consumer/build/result.txt"
+    check not fileExists(artifact)
 
-      let savedSourceRoot = getEnv(FromSourceRootEnv)
-      let savedNoRunquota = getEnv("REPROBUILD_NO_RUNQUOTA")
-      putEnv(FromSourceRootEnv, catalogRoot)
-      putEnv("REPROBUILD_NO_RUNQUOTA", "1")
-      defer:
-        if savedSourceRoot.len > 0: putEnv(FromSourceRootEnv, savedSourceRoot)
-        else: delEnv(FromSourceRootEnv)
-        if savedNoRunquota.len > 0:
-          putEnv("REPROBUILD_NO_RUNQUOTA", savedNoRunquota)
-        else: delEnv("REPROBUILD_NO_RUNQUOTA")
-
-      let producerArtifact =
-        producerRoot / ".repro" / "output" / "fsfallthrough" / "fsfallthrough"
-      let consumerMarker = consumerRoot / "build" / "consumer-ran.txt"
-      check not fileExists(producerArtifact)
-
-      let command = quoteShell(absolutePath(reproBinary)) & " build" &
-        " --daemon=off --tool-provisioning=tarball --progress=quiet" &
-        " --measure=none --action-cache-root=" & quoteShell(cacheRoot)
-      let res = execCmdEx(command, workingDir = consumerRoot)
-      checkpoint(res.output)
-      check res.exitCode == 0
-      check fileExists(producerArtifact)
-      check fileExists(consumerMarker)
-      check "has no tarball realization for this host" in res.output
+    var env = newStringTable(modeCaseSensitive)
+    for key, value in envPairs(): env[key] = value
+    for (key, value) in sourceFixtureEnv(root): env[key] = value
+    env["REPROBUILD_NO_RUNQUOTA"] = "1"
+    let res = execCmdEx(quoteShellCommand([binary, "build", "--daemon=off",
+      "--tool-provisioning=tarball", "--progress=quiet", "--log=actions"]),
+      env = env, workingDir = root / "consumer")
+    checkpoint(res.output)
+    check res.exitCode == 0
+    check "\"probe\" has no tarball realization for this host" in res.output
+    check fileExists(artifact)
+    check fileExists(output)
+    if fileExists(output):
+      check readFile(output) == "implementation-one\n"

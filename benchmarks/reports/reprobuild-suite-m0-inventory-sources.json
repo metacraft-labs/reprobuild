@@ -33309,9 +33309,7 @@
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [
-        "repro_project_dsl"
-      ],
+      "localDependencyShape": [],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_tarball_mode_builds_a_fall_through_source_recipe.nim",
