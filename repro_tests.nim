@@ -9720,6 +9720,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_committed_lock_paths_do_not_depend_on_the_invoking_worktree.nim",
+    binary: "build/test-bin/t_committed_lock_paths_do_not_depend_on_the_invoking_worktree",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_committed_lock_pins_solved_graph_and_build_consumes_it.nim",
     binary: "build/test-bin/t_committed_lock_pins_solved_graph_and_build_consumes_it",
     defines: @[],

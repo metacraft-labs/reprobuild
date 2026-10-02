@@ -21375,7 +21375,7 @@ proc computeDepIntegrity*(repoAbsPath, headSha: string): string =
     return gitObjectMultihash(gitObjectFormatOf(repoAbsPath), headSha)
   narStyleTreeMultihash(collectTreeEntries(repoAbsPath))
 
-proc usesProducerLockedDep(selector, root: string;
+proc usesProducerLockedDep(selector, root, pathBase: string;
                            existingDeps: seq[LockedDep]): Option[LockedDep] =
   ## FUP-M — resolve a recipe ``uses:`` producer SELECTOR to a locked sibling
   ## dependency so ``repro lock refresh`` carries the declared cross-repo
@@ -21397,7 +21397,9 @@ proc usesProducerLockedDep(selector, root: string;
   if srcRoot.len > 0 and dirExists(extendedPath(srcRoot)):
     let depAbs = absolutePath(srcRoot)
     let facts = committedLockRepoFacts(depAbs)
-    let rel = relativePath(depAbs, root).replace('\\', '/')
+    # Discovered from the invoking tree, RECORDED relative to the committed
+    # lock's frame of reference (``committedLockPathBase``).
+    let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     return some(LockedDep(
       name: selector, path: rel,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
@@ -21430,13 +21432,15 @@ proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
   ## Forward declaration; defined beside ``developSetClosure``, whose closure it
   ## computes.
 
-proc lockedDepFromCheckout(name, depAbs, root: string): LockedDep =
+proc lockedDepFromCheckout(name, depAbs, pathBase: string): LockedDep =
   ## A locked VCS dependency observed from the checkout at ``depAbs``: its
   ## ``HEAD`` as the revision, its canonical fetch URL, and the VCS-native
-  ## integrity of that commit. ``path`` is ``depAbs`` relative to ``root``.
+  ## integrity of that commit. ``path`` is ``depAbs`` relative to
+  ## ``pathBase`` — ``committedLockPathBase`` of the project, never the
+  ## invoking directory; see that proc for why the two differ.
   let facts = committedLockRepoFacts(depAbs)
   LockedDep(
-    name: name, path: relativePath(depAbs, root).replace('\\', '/'),
+    name: name, path: relativePath(depAbs, pathBase).replace('\\', '/'),
     coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
       gitRef: facts.branch, revision: facts.headSha),
     integrity: computeDepIntegrity(depAbs, facts.headSha),
@@ -21447,6 +21451,51 @@ proc isGitCheckoutDir(path: string): bool =
   dirExists(extendedPath(path)) and
     (dirExists(extendedPath(path / ".git")) or
      fileExists(extendedPath(path / ".git")))
+
+proc committedLockPathBase(projectRoot: string): string =
+  ## The directory a COMMITTED lock's ``deps`` paths are relative to.
+  ##
+  ## WHY THIS IS NOT SIMPLY THE INVOKING DIRECTORY. ``repro.lock`` is a
+  ## committed artifact, so every ``path`` it carries has to mean the same
+  ## thing to every reader of the repository. The frame of reference the spec
+  ## states is "the checkout relative to the repo", and every example is the
+  ## one-level sibling form ``../<sibling>`` (Unified-Locking-And-Hooks.md
+  ## §14.2, Workspace-Manifests.md).
+  ##
+  ## A LINKED WORKTREE is a checkout of the same repository at a different
+  ## depth, and that broke the invariant silently. Refreshed in
+  ## ``reprobuild/.claude/worktrees/agent-<id>`` — four levels below the repo
+  ## root — the writer produced ``path = "../../../../nim-shm-queue"``: correct
+  ## from that one worktree, and from the repo root (or any clone, or CI) a
+  ## path four levels ABOVE the workspace, outside the home directory. The
+  ## verifier cannot catch it either, because the lock is self-consistent for
+  ## the tree that wrote it.
+  ##
+  ## Agent sessions work in worktrees by default — this repository ships a
+  ## ``.gitignore`` entry for ``.claude/worktrees/`` — so refusing to refresh
+  ## there would make the normal case the unsupported one. Resolving against
+  ## the MAIN worktree instead makes a worktree refresh produce the SAME BYTES
+  ## as a refresh at the repo root, which is the property a committed file
+  ## needs.
+  ##
+  ## The mapping preserves the project's position WITHIN the repository, so a
+  ## project in a subdirectory keeps writing paths relative to its own
+  ## directory — where its lock lives — rather than to the repository top.
+  ##
+  ## Degrades to ``projectRoot`` whenever the main worktree cannot be
+  ## determined: no VCS tool, a directory that is not a checkout, or a layout
+  ## whose worktree listing is unavailable. That is the previous behaviour,
+  ## and it is correct whenever the invoking tree IS the main one — every
+  ## non-worktree case.
+  let normalized = os.normalizedPath(absolutePath(projectRoot))
+  let top = gitTopLevel(normalized)
+  if top.len == 0: return normalized
+  let main = gitMainWorktreeTop(normalized)
+  if main.len == 0 or cmpPaths(main, top) == 0: return normalized
+  let within = relativePath(normalized, top).replace('\\', '/')
+  if within.len == 0 or within == "." or within.startsWith(".."):
+    return os.normalizedPath(main)
+  os.normalizedPath(main / within)
 
 proc lockedDepsForWorkspace(workspaceRoot: string;
                             usesSelectors: seq[string] = @[];
@@ -21470,6 +21519,11 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   ## producer graph.
   result = @[]
   let root = absolutePath(workspaceRoot)
+  # Every ``path`` written below, and every path read back out of the existing
+  # lock, is relative to THIS directory rather than to ``root``. The two are
+  # the same everywhere except in a linked worktree; see
+  # ``committedLockPathBase``.
+  let pathBase = committedLockPathBase(root)
   let rootFacts = committedLockRepoFacts(root)
   let nested = discoverDevelopDeps(root)
   let bare = extractFilename(root.strip(
@@ -21496,20 +21550,23 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   var seenPaths: seq[string] = @[]
   var seenNames: seq[string] = @[]
   for d in nested:
-    let depAbs = root / d.path
+    let depAbs = absolutePath(root / d.path)
     let facts = committedLockRepoFacts(depAbs)
+    # ``d.path`` is relative to the INVOKING tree (that is what discovery
+    # resolves against); the lock records it relative to ``pathBase``.
+    let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     siblingDeps.add(LockedDep(
-      name: d.name, path: d.path,
+      name: d.name, path: rel,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
         gitRef: facts.branch, revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
       depends: @[], tags: @[]))
-    seenPaths.add(d.path)
+    seenPaths.add(rel)
     seenNames.add(d.name)
   for selector in usesSelectors:
     if selector in seenNames: continue
-    let depOpt = usesProducerLockedDep(selector, root, existingDeps)
+    let depOpt = usesProducerLockedDep(selector, root, pathBase, existingDeps)
     if depOpt.isNone: continue
     let dep = depOpt.get()
     if dep.path in seenPaths or dep.name in seenNames: continue
@@ -21527,7 +21584,7 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
     let depAbs = absolutePath(repoRoot)
     if cmpPaths(depAbs, root) == 0:
       continue
-    let rel = relativePath(depAbs, root).replace('\\', '/')
+    let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     if rel in seenPaths:
       continue
     let facts = committedLockRepoFacts(depAbs)
@@ -21564,10 +21621,10 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   if manifest.resolved:
     for sib in manifest.siblings:
       let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
-      let rel = relativePath(depAbs, root).replace('\\', '/')
+      let rel = relativePath(depAbs, pathBase).replace('\\', '/')
       if rel in seenPaths or sib.name in seenNames: continue
       if isGitCheckoutDir(depAbs):
-        siblingDeps.add(lockedDepFromCheckout(sib.name, depAbs, root))
+        siblingDeps.add(lockedDepFromCheckout(sib.name, depAbs, pathBase))
       else:
         var carried = false
         for d in existingDeps:
@@ -21596,9 +21653,9 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
     for d in existingDeps:
       if d.path == "." or d.coordinates.kind != ckVcs: continue
       if d.path in seenPaths or d.name in seenNames: continue
-      let depAbs = absolutePath(root / d.path)
+      let depAbs = absolutePath(pathBase / d.path)
       if isGitCheckoutDir(depAbs):
-        var observed = lockedDepFromCheckout(d.name, depAbs, root)
+        var observed = lockedDepFromCheckout(d.name, depAbs, pathBase)
         observed.path = d.path
         siblingDeps.add(observed)
       else:
@@ -46063,12 +46120,17 @@ proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies):
   ## checkout and related to its pin by ``classifySiblingPin``. Reads only;
   ## writes nothing.
   let root = absolutePath(repoRoot)
+  # The committed lock's frame of reference, not the invoking tree's: this
+  # runs from the managed ``pre-commit`` hook, which fires in a linked
+  # worktree exactly as it does in the main one. See
+  # ``committedLockPathBase``.
+  let pathBase = committedLockPathBase(root)
   let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   var seen: seq[string] = @[]
   proc observe(name, depAbs, pinned: string; declared: bool):
       CommittedPinObservation =
     result = CommittedPinObservation(name: name,
-      path: relativePath(depAbs, root).replace('\\', '/'), pinned: pinned,
+      path: relativePath(depAbs, pathBase).replace('\\', '/'), pinned: pinned,
       declared: declared, relation: sprUnknown)
     if not isGitCheckoutDir(depAbs): return
     let head = gitRunPlain(identity, ["-C", depAbs, "rev-parse", "HEAD"])
@@ -46093,15 +46155,15 @@ proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies):
   for d in ld.deps:
     if d.path == "." or d.coordinates.kind != ckVcs or d.path.len == 0:
       continue
-    let depAbs = absolutePath(root / d.path)
+    let depAbs = absolutePath(pathBase / d.path)
     result.observations.add(observe(d.name, depAbs, d.coordinates.revision,
       d.name in declaredNames))
     seen.add(d.name)
-    seen.add(relativePath(depAbs, root).replace('\\', '/'))
+    seen.add(relativePath(depAbs, pathBase).replace('\\', '/'))
   if manifest.resolved:
     for sib in manifest.siblings:
       let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
-      let rel = relativePath(depAbs, root).replace('\\', '/')
+      let rel = relativePath(depAbs, pathBase).replace('\\', '/')
       if sib.name in seen or rel in seen: continue
       result.observations.add(observe(sib.name, depAbs, "", true))
 
@@ -46159,6 +46221,9 @@ proc planCommittedLockRepin(repoRoot: string;
       " carries no `deps = [...]` line to re-pin"
     return
   let obs = observeCommittedLockSiblings(root, ld)
+  # Resolved once: the lookup costs a subprocess, and every observation below
+  # shares the same base.
+  let pathBase = committedLockPathBase(root)
   var moved: seq[string] = @[]
   var added: seq[string] = @[]
   var rootIdx = -1
@@ -46172,8 +46237,8 @@ proc planCommittedLockRepin(repoRoot: string;
         "uncommitted changes; repro.lock pins its HEAD " & o.observed &
         ", which does not describe the working tree this commit was built " &
         "against")
-    let depAbs = absolutePath(root / o.path)
-    let fresh = lockedDepFromCheckout(o.name, depAbs, root)
+    let depAbs = absolutePath(pathBase / o.path)
+    let fresh = lockedDepFromCheckout(o.name, depAbs, pathBase)
     var found = false
     for i in 0 ..< ld.deps.len:
       if ld.deps[i].path == "." or ld.deps[i].coordinates.kind != ckVcs:
@@ -50607,8 +50672,18 @@ proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
   ## fails to resolve, or one that does not contain this repo. The caller then
   ## falls back to the committed lock's own pins rather than treating "could
   ## not look" as "declares nothing".
+  ##
+  ## ``repoRoot`` is mapped through ``committedLockPathBase`` first, because a
+  ## manifest declares a repository by ITS path and a LINKED WORKTREE is the
+  ## same repository at a different one. Identifying the repo by the invoking
+  ## directory matched no declared repo when the refresh ran from a worktree,
+  ## ``selfName`` stayed empty, and this returned ``resolved = false`` — so a
+  ## worktree refresh wrote a lock with NO develop set at all, indistinguishable
+  ## from a repo that declares none. That is the same defect as the dep paths
+  ## (see ``committedLockPathBase``) in the membership dimension rather than
+  ## the path dimension.
   result = (false, "", @[])
-  let root = absolutePath(repoRoot)
+  let root = committedLockPathBase(repoRoot)
   let ws = enclosingWorkspaceRoot(root)
   if ws.len == 0 or cmpPaths(absolutePath(ws), root) == 0:
     return
