@@ -839,7 +839,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     CapabilitySurface(key: "runquota_process", audit: caFullSurface,
       sourceRels: @["libs/runquota_process/src/runquota_process.nim"],
       spawning: @["commandSpec", "launchProcess"],
-      inert: @["libraryInfo", "backendProfile", "launchResult", "running",
+      inert: @["libraryInfo", "shellScriptDir", "backendProfile", "launchResult", "running",
                "pollCompletion", "terminate", "killNow", "waitForCompletion",
                "waitForExit", "cancelAndWait", "close"]),
     # THE MODULE THE WHOLE ENUMERATION GOES THROUGH, and the one that was
@@ -1003,10 +1003,14 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     CapabilitySurface(key: "posix", audit: caImportAllowlist,
       sourceRels: @["posix/posix.nim"],
       spawning: @[],
-      inert: @["kill", "setpgid", "umask", "dup2", "close", "fcntl"],
+      # `lstat` and the `S_IS*` tests: `endpointRootOwned` reads the
+      # ownership and type of a daemon endpoint's path components
+      # (Dev-Env-Warm-Entry.md §3). Metadata reads; none can start a child.
+      inert: @["kill", "setpgid", "umask", "dup2", "close", "fcntl", "lstat"],
       allowedSymbols: @["Pid", "SIGKILL", "SIGTERM", "kill", "setpgid",
                         "Mode", "umask", "dup2", "close", "fcntl", "F_GETFD",
-                        "F_SETFD", "FD_CLOEXEC", "F_DUPFD_CLOEXEC"]),
+                        "F_SETFD", "FD_CLOEXEC", "F_DUPFD_CLOEXEC",
+                        "Stat", "lstat", "S_ISDIR", "S_ISLNK", "S_ISSOCK"]),
     CapabilitySurface(key: "winlean", audit: caImportAllowlist,
       sourceRels: @["windows/winlean.nim"],
       spawning: @[],
@@ -1624,17 +1628,18 @@ proc evidenceShape(res: ActionResult;
   @[
     render("declaredInputs", ev.declaredInputs),
     render("declaredOutputs", ev.declaredOutputs),
-    render("depfileInputs", ev.depfileInputs),
-    render("monitorReads", ev.monitorReads),
-    render("monitorWrites", ev.monitorWrites),
-    render("monitorProbes", ev.monitorProbes),
+    render("depfileInputs", ev.depfileInputs.paths),
+    render("monitorReads", ev.monitorReads.paths),
+    render("monitorWrites", ev.monitorWrites.paths),
+    render("monitorProbes", ev.monitorProbes.paths),
     # P10. The EIGHTH field, and the last one this rendering was blind to.
     # An enumeration lands in `monitorProbes` too, so a difference in this
     # field alone is only visible if it is rendered separately — and the
     # fixture has to actually enumerate something, or five empty sets
     # compare equal. Both halves; see `FixtureSource` and the presence pin
     # in `evidence is identical across launch paths`.
-    render("monitorDirectoryEnumerations", ev.monitorDirectoryEnumerations),
+    render("monitorDirectoryEnumerations",
+      ev.monitorDirectoryEnumerations.paths),
     render("diagnostics", ev.diagnostics),
 
     # THE THREE FIELDS `PathSetEvidence` GREW AFTER P10, and the ninth /
@@ -1858,11 +1863,11 @@ template checkMonitoredEvidence(res: ActionResult; markerPath, label: string) =
   # reached the engine's evidence. This is the property "this launch
   # path is monitored"; it is false for an unmonitored path no matter
   # how healthy the rest of the run looks.
-  if not mentionsPath(res.evidence.monitorReads, markerPath):
+  if not mentionsPath(res.evidence.monitorReads.paths, markerPath):
     echo "[", label, "] monitorReads (", res.evidence.monitorReads.len,
       " entries) did not contain ", markerPath,
       "\n  diagnostics: ", res.evidence.diagnostics.join("; ")
-  check mentionsPath(res.evidence.monitorReads, markerPath)
+  check mentionsPath(res.evidence.monitorReads.paths, markerPath)
 
   # And the evidence is COMPLETE, not merely non-empty.
   for diagnostic in res.evidence.diagnostics:

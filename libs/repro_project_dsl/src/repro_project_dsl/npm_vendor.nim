@@ -125,13 +125,14 @@ proc emitNpmVendorAction*(projectRoot, packageName: string;
                             BuildActionDef =
   ## The single action that materialises the build's private npm cache.
   ##
-  ## Depends on the source fetch: it installs the committed lock over the
-  ## `package-lock.json` that arrives with the source, which does not exist
-  ## until the source is unpacked.
+  ## Ordered after the source fetch. It does NOT install the committed lock
+  ## (`NpmBuildClosureLockName`) into the fetched tree: that made two actions
+  ## write `src/package-lock.json`, so the fetch's record never described the
+  ## tree on disk again and every build re-ran the chain. The build copies the
+  ## lock into its own scratch work tree instead (`node_package`).
   let manifest = npmBuildClosureManifestPath(projectRoot)
   let cacheDir = npmVendorCacheDir(projectRoot)
   let npmCache = npmPrivateCacheDir(projectRoot)
-  let lockfile = npmLockfilePath(projectRoot)
   let stamp = npmVendorStampPath(projectRoot)
   createDir(extendedPath(npmVendorRoot(projectRoot)))
 
@@ -182,18 +183,12 @@ proc emitNpmVendorAction*(projectRoot, packageName: string;
   script.add("if [ -n \"$repro_batch\" ]; then ")
   script.add("(cd \"" & q(cacheDir) & "\" && npm cache add --cache \"" &
     q(npmCache) & "\" $repro_batch); fi; ")
-  # A committed lock (see `NpmBuildClosureLockName`) replaces the fetched
-  # one, so `npm ci` installs the lock the closure manifest was generated
-  # from. Decided at emission time so its presence is part of the action,
-  # and the file is an input so an edit to it re-runs the vendor. It runs
-  # on EVERY execution, the up-to-date path included: the fetch action
-  # re-extracts `src/` each run, which restores upstream's lock.
+  # A committed lock (see `NpmBuildClosureLockName`) is what the closure
+  # manifest was generated from, so its content is part of the up-to-date
+  # token below and the file is an input: an edit re-populates the cache.
   let overrideLock = npmBuildClosureLockPath(projectRoot)
   let hasOverrideLock = fileExists(overrideLock)
   var prologue = "set -e; "
-  if hasOverrideLock:
-    prologue.add("cp -f \"" & q(overrideLock) & "\" \"" & q(lockfile) &
-      "\"; ")
 
   # UP-TO-DATE SKIP. This action is non-cacheable (it reaches the network),
   # so the engine runs it on every build — and under automatic monitoring
@@ -222,8 +217,11 @@ proc emitNpmVendorAction*(projectRoot, packageName: string;
     if fields.len == 3 and not fields[0].startsWith("#") and
         fields[2] notin uniqueUrls:
       uniqueUrls.add(fields[2])
+  # The populate program is hashed with the project's own path taken out, so
+  # two checkouts of the recipe agree on the token (see `withoutProjectPath`).
   let token = "repro-npm-vendor-v1:" & blake3.toHex(blake3.digest(
-    script & "\n--manifest--\n" & manifestText & "\n--lock--\n" & lockText))
+    withoutProjectPath(script, projectRoot) & "\n--manifest--\n" &
+    manifestText & "\n--lock--\n" & lockText))
   let escapedStamp = q(stamp)
   let indexGlob = q(npmCache) & "/_cacache/index-v5/*/*/*"
   var full = prologue
@@ -253,12 +251,8 @@ proc emitNpmVendorAction*(projectRoot, packageName: string;
     # What this action produces, fixed by what it declares and verifies — the
     # manifest's archives against their lockfile integrity, the committed
     # lock — so it is a fixed-output action (Cache-Scope P3.4): the portable
-    # lookup resolves it without the network. The overridden lock is named
-    # on its own because it lands INSIDE the fetched tree: without it, a
-    # downstream read of that file would be identified by the fetch's
-    # (upstream) copy instead of the one `npm ci` actually installed.
-    declaredOutputs = (if hasOverrideLock: @[npmCache, lockfile]
-                       else: @[npmCache]),
+    # lookup resolves it without the network.
+    declaredOutputs = @[npmCache],
     fixedOutput = true,
     pool = "fetch",
     cacheable = false,

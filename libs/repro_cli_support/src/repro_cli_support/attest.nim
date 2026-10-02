@@ -60,7 +60,7 @@
 ## never be published with an expectation nobody can compute, and the
 ## place to stop that is the build.
 
-import std/[options, os, strutils, times]
+import std/[options, os, sequtils, strutils, tables, times]
 
 import cbor
 
@@ -115,6 +115,9 @@ type
     revocationListPaths*: seq[string]
     attestationsPath*: string
     signerKeyPaths*: seq[string]
+    signerAdmissions*: seq[string]
+    revokedSigners*: seq[string]
+    vendorRevocationListPaths*: seq[string]
     witnessedRoots*: seq[string]
     firmware*: string
     vcpus*: string
@@ -317,6 +320,32 @@ repro attest verify --report-file PATH | --report-url URL [options]
                                     policy says which key identifiers may
                                     count; this says what their keys are,
                                     and the two sets must agree exactly.
+      --signer-admission KID=FROM/UNTIL
+                                    for how long that key counts, as two
+                                    instants written YYYY-MM-DDTHH:MM:SSZ;
+                                    repeatable and REQUIRED for every
+                                    --signer-key. There is no spelling for
+                                    a key admitted forever: a key that
+                                    outlives its holder's control is what
+                                    an operator ends up with by leaving a
+                                    field alone. Rotate by OVERLAP — open
+                                    the successor's window before the
+                                    predecessor's closes.
+      --revoked-signer KID=AT:WHY   that key stops counting from that
+                                    instant; repeatable. A revocation is
+                                    applied at verification time and a
+                                    quorum signature carries no signing
+                                    time, so this withdraws every bundle
+                                    the key contributed to.
+      --vendor-revocation-list PATH a DER revocation list from a
+                                    confidential-computing vendor's own
+                                    distribution service; repeatable. A
+                                    DIFFERENT document from
+                                    --revocation-list — signed by a vendor
+                                    root rather than by an operator anchor
+                                    — and without it every bundled vendor
+                                    chain is refused for having no
+                                    revocation data.
       --witnessed-root LOG:SIZE:HEX a transparency-log root this verifier
                                     has already witnessed; repeatable. An
                                     inclusion proof for a log with no
@@ -458,6 +487,13 @@ proc parseAttestArgs*(args: seq[string]): AttestCliOptions =
       result.attestationsPath = valueFor(args, i, "--attestations")
     of "--signer-key":
       result.signerKeyPaths.add valueFor(args, i, "--signer-key")
+    of "--signer-admission":
+      result.signerAdmissions.add valueFor(args, i, "--signer-admission")
+    of "--revoked-signer":
+      result.revokedSigners.add valueFor(args, i, "--revoked-signer")
+    of "--vendor-revocation-list":
+      result.vendorRevocationListPaths.add(
+        valueFor(args, i, "--vendor-revocation-list"))
     of "--witnessed-root":
       result.witnessedRoots.add valueFor(args, i, "--witnessed-root")
     of "--json":
@@ -1237,16 +1273,97 @@ proc runAttestVerify(opts: AttestCliOptions): int =
       return AttestExitUsage
     req.attestationsSource = opts.attestationsPath
     req.attestationsText = some(readFile(opts.attestationsPath))
+  for path in opts.vendorRevocationListPaths:
+    # A vendor's list is RAW DER here rather than a parsed record: the
+    # two chain evaluators read their own vendor's format, and this
+    # field is deliberately the one place both of them are handed
+    # everything so each can take its own by issuer name. Before this
+    # flag existed nothing populated it, so every bundled vendor chain
+    # took the no-revocation-data refusal whatever the operator held.
+    if not fileExists(path):
+      stderr.writeLine("repro attest verify: no vendor revocation list at " &
+        path)
+      return AttestExitUsage
+    req.vendorRevocationLists.add readFile(path)
+  var admissionOf = initTable[string, (int64, int64)]()
+  for spec in opts.signerAdmissions:
+    let eq = spec.find('=')
+    let slash = (if eq < 0: -1 else: spec.find('/', eq + 1))
+    if eq <= 0 or slash < 0:
+      stderr.writeLine("repro attest verify: --signer-admission " &
+        spec.escape() & " must be <key-id>=<from>/<until>, each instant " &
+        "written " & IssuedAtFormat)
+      return AttestExitUsage
+    let kid = spec[0 ..< eq].toLowerAscii
+    var fromAt, untilAt: int64
+    try:
+      fromAt = parseIsoInstant(spec[eq + 1 ..< slash],
+                               "--signer-admission " & kid & " start")
+      untilAt = parseIsoInstant(spec[slash + 1 .. ^1],
+                                "--signer-admission " & kid & " end")
+    except LifecycleError as err:
+      stderr.writeLine("repro attest verify: " & err.msg)
+      return AttestExitUsage
+    if admissionOf.hasKey(kid):
+      stderr.writeLine("repro attest verify: --signer-admission names " &
+        kid & " twice; two windows for one key would admit it for " &
+        "whichever was read last")
+      return AttestExitUsage
+    admissionOf[kid] = (fromAt, untilAt)
+  var revocationOf = initTable[string, (int64, string)]()
+  for spec in opts.revokedSigners:
+    let eq = spec.find('=')
+    let colon = (if eq < 0: -1 else: spec.find(':', eq + 1))
+    if eq <= 0 or colon < 0 or colon + 1 >= spec.len:
+      stderr.writeLine("repro attest verify: --revoked-signer " &
+        spec.escape() & " must be <key-id>=<instant>:<reason>, the " &
+        "instant written " & IssuedAtFormat & " and the reason non-empty")
+      return AttestExitUsage
+    let kid = spec[0 ..< eq].toLowerAscii
+    var at: int64
+    try:
+      at = parseIsoInstant(spec[eq + 1 ..< colon],
+                           "--revoked-signer " & kid & " instant")
+    except LifecycleError as err:
+      stderr.writeLine("repro attest verify: " & err.msg)
+      return AttestExitUsage
+    revocationOf[kid] = (at, spec[colon + 1 .. ^1])
   for path in opts.signerKeyPaths:
     if not fileExists(path):
       stderr.writeLine("repro attest verify: no signer key at " & path)
       return AttestExitUsage
+    var signer: QuorumSigner
     try:
-      req.signerRoster.add QuorumSigner(
-        key: parseCoseKey(decodeItem(fileBytes(path))))
+      signer = QuorumSigner(key: parseCoseKey(decodeItem(fileBytes(path))))
     except CatchableError as err:
       stderr.writeLine("repro attest verify: --signer-key " & path &
         " is not a COSE_Key this build reads: " & err.msg)
+      return AttestExitUsage
+    let kid = signerNameOf(signer.key)
+    if not admissionOf.hasKey(kid):
+      stderr.writeLine("repro attest verify: --signer-key " & path &
+        " holds key " & kid & " and no --signer-admission states for how " &
+        "long it counts; a key admitted with no window is one nobody " &
+        "decided to admit forever")
+      return AttestExitUsage
+    let (fromAt, untilAt) = admissionOf[kid]
+    signer = admittedSigner(signer.key, fromAt, untilAt)
+    if revocationOf.hasKey(kid):
+      let (at, why) = revocationOf[kid]
+      signer = revoked(signer, at, why)
+    req.signerRoster.add signer
+  for kid in admissionOf.keys:
+    if not req.signerRoster.anyIt(signerNameOf(it.key) == kid):
+      stderr.writeLine("repro attest verify: --signer-admission names " &
+        kid & " and no --signer-key supplies that key; a window over a " &
+        "key this verifier does not hold admits nothing and hides a typo")
+      return AttestExitUsage
+  for kid in revocationOf.keys:
+    if not req.signerRoster.anyIt(signerNameOf(it.key) == kid):
+      stderr.writeLine("repro attest verify: --revoked-signer names " &
+        kid & " and no --signer-key supplies that key; a revocation of a " &
+        "key this verifier does not hold withdraws nothing, and reads " &
+        "like it withdrew something")
       return AttestExitUsage
   for spec in opts.witnessedRoots:
     let parts = spec.split(':')

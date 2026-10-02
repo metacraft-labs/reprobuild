@@ -207,6 +207,12 @@ type
       ## Which pinnable package this pin is for (``SelfPackageName`` or
       ## ``ProviderNimPackageName``). Empty means reprobuild, so a value built
       ## by hand before this field existed keeps its meaning.
+    archive*: LockedArchive
+      ## The upstream archive the lock pins this version's bytes to, when
+      ## ``repro lock refresh`` resolved one (today: a store-sourced ``nim``).
+      ## Realization downloads it and verifies it against this digest; it is
+      ## what lets a reprobuild realize a pinned compiler it does not already
+      ## hold. Empty for a lock written before archive pins existed.
 
 proc pinnedPackageOf*(pin: SelfPin): PinnedPackage =
   if pin.package.len == 0: reprobuildPin()
@@ -334,6 +340,7 @@ proc pinFromParsed*(ld: LockedDependencies; lockPath, projectRoot: string;
     result.version = dep.version
     result.storeHash = dep.coordinates.storeHash
     result.integrity = dep.integrity
+    result.archive = dep.archive
     if result.version.len == 0 or result.storeHash.len == 0:
       result.state = spsNotAddressable
       result.detail = "the committed lock at " & lockPath & " records a " &

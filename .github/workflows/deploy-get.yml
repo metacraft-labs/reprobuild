@@ -35,9 +35,17 @@ on:
       - ".github/workflows/deploy-get.yml"
   workflow_dispatch:
 
+# NOT cancel-in-progress. This workflow fires on every flake.lock change, which
+# lands on dev several times a day, while a deploy can wait hours for a
+# self-hosted runner. With cancel-in-progress, each new push cancelled the
+# queued deploy before it ever ran, and get.reprobuild.com went days without
+# a deploy (2026-09-30: three in a row cancelled while queued). A run that
+# holds the slot now keeps it; newer runs wait, and GitHub keeps only the
+# newest of those. Each deploy publishes the whole tree at its commit, so an
+# older deploy followed by a newer one is harmless.
 concurrency:
   group: deploy-get-${{ github.ref_name }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:

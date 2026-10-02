@@ -697,13 +697,23 @@ addPackagePath("NIMCRYPTO_SRC", [
   ".." / "codetracer" / "libs" / "nimcrypto",
   ".." / "nimcrypto",
 ], "nimcrypto" / "hash.nim")
-# Peer-Cache-BearSSL M0: status-im/nim-bearssl. The package's entry module
-# is `bearssl.nim` at the repo root with submodules under `bearssl/`, so the
-# repo root itself is the path we want on --path. Marker is `bearssl.nim`.
+# Peer-Cache-BearSSL M0: status-im/nim-bearssl. The package's entry module is
+# `bearssl.nim` at the repo root with submodules under `bearssl/`, so the repo
+# root itself is the path we want on --path.
+#
+# The MARKER is `bearssl/abi/consttypes.nim`, not that root file. `bearssl.nim`
+# is present in every revision ever published, including ones predating the
+# `bearssl/abi/` module tree `repro_deploy_agent` imports, so a probe testing
+# only for it accepts a checkout that cannot satisfy the import and the build
+# dies tens of modules later on `cannot open file: bearssl/abi/consttypes`.
+# Probing for the module makes this check reject exactly what the compiler
+# would reject. `repro.nim` (via `repro_dsl_stdlib/source_only_packages`),
+# `scripts/source_paths.sh` and `scripts/release/stage_release_sources.sh`
+# spell the same string for the same reason.
 addPackagePath("BEARSSL_SRC", [
   ".." / "nim-bearssl",
   "libs" / "nim-bearssl",
-], "bearssl.nim", useDevShellFallback = true)
+], "bearssl/abi/consttypes.nim", useDevShellFallback = true)
 addPackagePath("RESULTS_SRC", [
   "libs" / "results" / "src",
 ], "results.nim")
@@ -949,27 +959,61 @@ else:
       switch("passL", "-L" & xxhashPrefix / "lib")
     switch("passL", "-lxxhash")
 
+proc isHostSystemLibDir(dir: string): bool =
+  ## A directory of the HOST distribution (`/usr/lib`, `/lib64`, a Debian
+  ## multiarch triple, ...), as opposed to a Nix store path or a prefix the
+  ## caller named. Baking one into RPATH is what makes a binary linked by
+  ## Nix's toolchain load the host's libc under Nix's loader: RPATH beats the
+  ## loader's own defaults, so every library that directory also carries is
+  ## found there first.
+  let d = dir.strip()
+  d == "/usr" or d.startsWith("/usr/") or d == "/lib" or
+    d.startsWith("/lib/") or d == "/lib64" or d.startsWith("/lib64/")
+
+proc nixLdflagsLibDir(dylibNames: openArray[string]): string =
+  ## The first `-L<dir>` in `NIX_LDFLAGS` (the active Nix dev shell's own
+  ## link inputs) that carries one of `dylibNames`.
+  for tok in getEnv("NIX_LDFLAGS").splitWhitespace():
+    if tok.startsWith("-L") and tok.len > 2:
+      let dir = tok[2 .. ^1]
+      for n in dylibNames:
+        if fileExists(dir / n):
+          return dir
+  ""
+
 when not defined(windows) and not defined(macosx):
+  # SQLite link search path. Order: an explicit SQLITE_LIBDIR/SQLITE_PREFIX;
+  # then, when a Nix toolchain is in play, the dev shell's own sqlite
+  # (NIX_LDFLAGS) or any Nix store sqlite; only on a host with no Nix at all
+  # the distribution's directories. A host directory is used for `-L` but is
+  # never baked into RPATH (see `isHostSystemLibDir`).
+  let sqliteNames = ["libsqlite3.so", "libsqlite3.a"]
+  let nixInPlay = getEnv("NIX_CC").len > 0 or
+    getEnv("IN_NIX_SHELL").len > 0 or dirExists("/nix/store")
   let sqliteLibDir = block:
-    let direct = firstExistingLibDir(
-      [
-        getEnv("SQLITE_LIBDIR"),
-        getEnv("SQLITE_PREFIX"),
-        "/usr",
-        "/usr/local",
-        "/usr/lib",
-        "/usr/lib64",
-        "/usr/lib/x86_64-linux-gnu",
-      ],
-      ["libsqlite3.so", "libsqlite3.a"])
-    if direct.len > 0:
-      direct
+    let explicit = firstExistingLibDir(
+      [getEnv("SQLITE_LIBDIR"), getEnv("SQLITE_PREFIX")], sqliteNames)
+    if explicit.len > 0:
+      explicit
+    elif nixInPlay and nixLdflagsLibDir(sqliteNames).len > 0:
+      nixLdflagsLibDir(sqliteNames)
+    elif nixInPlay and nixLibDir("*-sqlite-*", sqliteNames).len > 0:
+      nixLibDir("*-sqlite-*", sqliteNames)
     else:
-      nixLibDir("*-sqlite-*", ["libsqlite3.so", "libsqlite3.a"])
+      firstExistingLibDir(
+        [
+          "/usr",
+          "/usr/local",
+          "/usr/lib",
+          "/usr/lib64",
+          "/usr/lib/x86_64-linux-gnu",
+        ],
+        sqliteNames)
 
   if sqliteLibDir.len > 0:
     switch("passL", "-L" & sqliteLibDir)
-    switch("passL", "-Wl,-rpath," & sqliteLibDir)
+    if not isHostSystemLibDir(sqliteLibDir):
+      switch("passL", "-Wl,-rpath," & sqliteLibDir)
 
 # OpenSSL link search path for `-d:ssl` edges (POSIX).
 #
