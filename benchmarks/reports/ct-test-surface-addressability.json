@@ -41,7 +41,7 @@
     "itemsTotal": 14334,
     "responseDiagnostics": {
       "info": 1,
-      "warning": 35
+      "warning": 34
     }
   },
   "discoveryScope": "auto (the surface's default: the workspace's own VCS inventory; vendored and ignored trees excluded)",
@@ -266,7 +266,7 @@
     "binary": "ct-test",
     "provenance": "",
     "resolvedBy": "PATH:ct-test",
-    "sha256": "02b014353c9bbd26b2ce08ca4f8eaf93899c8fc43d669eab2a90726efcc28393"
+    "sha256": "114de68cf5d6c1b8990a82d2d77f41a196d402dffb4b7ef7cac05067d95815a2"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "unaddressableSources": [
