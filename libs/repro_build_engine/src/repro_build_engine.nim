@@ -6654,7 +6654,15 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   else:
     discard
 
-  let materialized = materialPath(cwd, withoutExtendedLengthPrefix(record.path))
+  let unprefixed = withoutExtendedLengthPrefix(record.path)
+  # The device test reads the path AS RECORDED as well: `\Device\...` is not
+  # absolute to a POSIX host's path functions, so `materialPath` would join it
+  # to the action's cwd and the joined spelling no longer starts with the
+  # device prefix. Folding a Windows capture on Linux kept both device names
+  # as relative file inputs.
+  if unprefixed.isNtDevicePath():
+    return
+  let materialized = materialPath(cwd, unprefixed)
   if materialized.isVolatileMonitorPath() or materialized.isNtDevicePath():
     return
   case record.kind
