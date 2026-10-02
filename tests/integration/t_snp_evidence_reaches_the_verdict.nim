@@ -205,7 +205,7 @@ const
     vcKdsMilanChain: VerdictCorpusRow(name: "KdsMilanChainPem", bytes: 4602,
       sha256: "22e62f8d2c21a156470145fc75f7b5a377cb053ced3e97f0bd3f8d8ca5941ce6"),
     vcKdsMilanCrl: VerdictCorpusRow(name: "KdsMilanCrlDerHex", bytes: 866,
-      sha256: "873efcf8c8cedc28c603cf50acdff8556a704658357a0d9daab297f483deb0df")]
+      sha256: "dd68e9e3feb97dd0e95135feeae47d9cc193c73239a6281ec9884c00d5e6a525")]
 
 proc verdictCorpusBytes(c: VerdictCorpus): string =
   case c
@@ -263,8 +263,11 @@ require_challenge = true
    .replace("@BL@", $bootloader).replace("@TEE@", $tee)
    .replace("@SNP@", $snp).replace("@UC@", $microcode)
 
-const Now = 1_789_000_000'i64
-  ## A fixed instant, so nothing below can move because the clock did.
+const Now = 1_790_121_600'i64
+  ## 2026-09-23T00:00:00Z. A fixed instant, so nothing below can move
+  ## because the clock did — and the particular instant is derived
+  ## rather than chosen, by the rule `snp_vectors` states: the first UTC
+  ## midnight at which every artifact this gate judges is in force.
 
 proc verdictFor(p: Part; manifestText: string;
                 bootloader, tee, snp, microcode: int;
@@ -628,7 +631,7 @@ suite "the command line can hand the verifier a vendor revocation list":
   # THE ASSERTION IS DELIBERATELY NOT "the chain row passes". The
   # command line takes its clock from `epochTime()` and has no
   # override, so a case that required an ACCEPTANCE over this pinned
-  # revocation list would turn red on 2026-10-04 when the list expires
+  # revocation list would turn red the day that list expires
   # — which is precisely the two-clock mistake the ledger beside this
   # corpus exists to document. What is asserted instead is
   # clock-independent and is the
