@@ -15,8 +15,45 @@
 ## per-platform overrides.
 
 import std/tables
+import repro_project_dsl
+import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages_schema
 export packages_schema
+
+# ---------------------------------------------------------------------------
+# The DSL declaration (hand-written; a re-harvest emits only the catalog
+# below, so re-attach this block if you regenerate).
+#
+# What a recipe's ``nativeBuildDeps: "ghc"`` resolves to -- the compiler
+# the ``cabal_package`` constructor drives.
+#
+# * Windows x86_64: upstream's bindist, ``ghc-9.12.1-x86_64-unknown-
+#   mingw32.tar.xz`` from downloads.haskell.org, whose SHA-256 below matches
+#   upstream's ``SHA256SUMS`` for the release and was re-computed over the
+#   downloaded archive (2026-10-01). The bindist is relocatable (it finds
+#   its ``lib`` and its bundled MinGW toolchain beside ``bin``), so
+#   extracting it IS installing it. ``doc`` (832 MB of the 3.5 GB tree) is
+#   pruned: nothing a build runs reads it.
+# * Linux and macOS: the pinned nixpkgs' ``ghc``. Upstream's Linux bindists
+#   need ``./configure && make install`` before they run, which is not an
+#   extraction.
+# ---------------------------------------------------------------------------
+
+package ghc:
+  provisioning:
+    nixPackage "nixpkgs#ghc", executablePath = "bin/ghc",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+    tarball url = "https://downloads.haskell.org/~ghc/9.12.1/ghc-9.12.1-x86_64-unknown-mingw32.tar.xz",
+      sha256 = "22dc942be1b968d5e28e75c06aba52829d0c52d9234bc9941df9ab2a0e2a610d",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/ghc.exe",
+      prunePaths = @["doc"],
+      packageId = "ghc@9.12.1",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:ghc@9.12.1:windows-x86_64:sha256:22dc942be1b968d5e28e75c06aba52829d0c52d9234bc9941df9ab2a0e2a610d"
 
 let ghcCatalog* = @[
   VersionedProvisioning(

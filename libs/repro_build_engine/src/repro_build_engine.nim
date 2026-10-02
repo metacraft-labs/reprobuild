@@ -1975,6 +1975,17 @@ type
     ##     diagnostics. Not used by the env-plumbing path itself.
     binDirs*: seq[string]
     resolvedExecutablePath*: string
+    provisioningReceipts*: seq[string]
+      ## The receipts of the provisioning edges that realized this tool
+      ## (Dependency-Provisioning-In-Build-Graph.md section 4.2): the output
+      ## of each ``bakForeignProvision`` edge, at a path that is stable across
+      ## re-pins and whose CONTENT names the realization. ``runBuild`` adds
+      ## them to the declared inputs of every action whose
+      ## ``toolIdentityRefs`` name this tool (section 3, step 5), so
+      ## re-realizing the tool invalidates its consumers through the ordinary
+      ## declared-input path. Empty for a tool no provisioning edge realized
+      ## (a host ``PATH`` tool, a Nix realization outside the dev-env graph,
+      ## a from-source build).
     # M9.R.14e.3 — auxiliary search-path channels. The engine threads
     # each list onto a dedicated env var at action-launch time (see
     # ``resolvedToolAuxPaths`` / ``applyEnvSearchLists``):
@@ -10255,6 +10266,44 @@ proc resolvedToolBinDirs(action: BuildAction;
       if binDir.len > 0 and binDir notin promotedDirs:
         result.add(binDir)
 
+proc withProvisioningReceiptInputs*(g: BuildGraph;
+                                    resolver: ToolIdentityResolver):
+    BuildGraph =
+  ## Dependency-Provisioning-In-Build-Graph.md section 3, step 5: an edge that
+  ## uses a provisioned tool declares a dependency on the provisioning edge's
+  ## output. For every action whose ``toolIdentityRefs`` resolve to a tool a
+  ## provisioning edge realized, that edge's receipt
+  ## (``ResolvedToolIdentity.provisioningReceipts``) is appended to the
+  ## action's declared inputs.
+  ##
+  ## The receipt's path is stable across re-pins and its content names the
+  ## realization, so re-realizing a tool (a new pin, a new contributor)
+  ## changes a declared input of every edge that used it, and those edges
+  ## re-execute through the same fingerprint path as any other input change.
+  ## Before this, the tool reached the edge only as a ``PATH`` entry added at
+  ## launch, which no cache key observed.
+  ##
+  ## The provisioning edges themselves still run in tool resolution, before
+  ## this graph is lowered, so the receipt exists by the time this graph is
+  ## scheduled; ordering holds by construction rather than through ``deps``.
+  ## Only ``bakProcess`` actions are touched: a tool is something a process
+  ## executes, and the built-in kinds have fixed input shapes (``bakCopyFile``
+  ## copies exactly one input) that an added receipt would break. A ``nil``
+  ## resolver, or an action with no refs, is left exactly as it was.
+  result = g
+  if resolver == nil:
+    return
+  for action in result.actions.mitems:
+    if action.kind != bakProcess or action.toolIdentityRefs.len == 0:
+      continue
+    for i, refName in action.toolIdentityRefs:
+      let resolved = resolver(refName, kindForRef(action, i))
+      if resolved.isNone:
+        continue
+      for receipt in resolved.get().provisioningReceipts:
+        if receipt.len > 0 and receipt notin action.inputs:
+          action.inputs.add(receipt)
+
 type
   ResolvedAuxPaths* = object
     ## DSL-port M9.R.14e.3 — accumulated per-action auxiliary search
@@ -14773,7 +14822,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # over the growing slice, and the scheduler loop terminates against
   # ``completed < buildGraph.actions.len`` so a freshly inserted action keeps
   # the loop alive.
-  var buildGraph = inferDeclaredActionDeps(g)
+  var buildGraph = inferDeclaredActionDeps(
+    withProvisioningReceiptInputs(g, config.toolIdentityResolver))
   # NOTE: an earlier ``REPRO_MACOS_DISABLE_ACTION_MONITOR`` opt-in lived here and
   # downgraded every monitored action to a declared-only (unmonitored) policy
   # on macOS. That was an unapproved soundness hole — it marked actions

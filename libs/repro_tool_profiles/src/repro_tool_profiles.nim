@@ -167,6 +167,13 @@ type
       ## profile's content identity and IS fingerprinted: it is what makes
       ## dropping ``pathSearchList`` from the key sound rather than a
       ## stale-serve hole.
+    provisioningReceipt*: string
+      ## The receipt of the provisioning edge that realized this tool
+      ## (Dependency-Provisioning-In-Build-Graph.md section 4.2), or "" when
+      ## no provisioning edge did. NOT fingerprinted: it is a stable path
+      ## whose CONTENT changes with the realization. Consumers declare it as
+      ## an input (section 3, step 5) through ``ToolActionIdentity`` and the
+      ## engine's ``withProvisioningReceiptInputs``.
     # M9.R.14e.1 — additional search-path channels populated by the
     # from-source resolver when the sibling recipe's install tree carries
     # the relevant artefacts. The engine threads each list onto a
@@ -250,6 +257,10 @@ type
       ## Mirror of the profile's content identity, copied through by
       ## ``actionIdentityFor`` and fingerprinted into
       ## ``actionFingerprint``.
+    provisioningReceipt*: string
+      ## Mirror of ``PathOnlyToolProfile.provisioningReceipt``. The CLI's
+      ## tool-identity projection hands it to the engine, which declares it
+      ## as an input of every action that uses this tool.
     # M9.R.14e.1 — mirror of ``PathOnlyToolProfile``'s extra search-path
     # channels. The provider-compile pass copies these fields out of the
     # resolved profile and into the per-action identity so the CLI's
@@ -346,7 +357,10 @@ const
   # artifact round-trip: a field that is fingerprinted but not serialized
   # would make a cached identity re-hash to a different fingerprint on
   # every read.
-  ArtifactVersion = 8'u16
+  # v9 — ``provisioningReceipt`` on both the profile and the action
+  # identity, so a cached identity still tells the engine which provisioning
+  # edge's receipt its consumers depend on.
+  ArtifactVersion = 9'u16
   NixMaterializationMagic = [byte(ord('R')), byte(ord('B')), byte(ord('N')), byte(ord('M'))]
   NixMaterializationVersion = 3'u16
 
@@ -4012,13 +4026,42 @@ proc tarballProvisioningEdges*(useDef: InterfaceToolUse; storeRoot: string;
   result.rootId = root.id
   result.rootReceipt = root.receipt
 
+proc receiptStoreRoot(receiptPath: string): string =
+  ## The tool store a receipt belongs to: receipts live at
+  ## ``<store>/provisioning/receipts/<id>.receipt`` (``provisioningStateRoot``).
+  receiptPath.parentDir.parentDir.parentDir
+
+proc storeRelativePath(path, storeRoot: string): string =
+  ## ``path`` spelled relative to ``storeRoot`` with ``/`` separators when it
+  ## lies inside it, else unchanged. A receipt records its realization this
+  ## way so its CONTENT is the same on every host that realizes the same pin:
+  ## consumers declare the receipt as an input (Dependency-Provisioning-In-
+  ## Build-Graph.md section 3, step 5), and an absolute store path in it
+  ## would make that input differ between two hosts whose stores sit in
+  ## different places.
+  if path.len == 0 or storeRoot.len == 0:
+    return path
+  let relative = relativePath(absolutePath(path), absolutePath(storeRoot))
+  if relative.len == 0 or relative.startsWith("..") or isAbsolute(relative):
+    return path
+  relative.replace('\\', '/')
+
+proc storeResolvedPath(recorded, storeRoot: string): string =
+  ## Inverse of ``storeRelativePath``. An absolute spelling (a receipt written
+  ## before receipts were store-relative, or a path outside the store) is
+  ## returned as recorded.
+  if recorded.len == 0 or isAbsolute(recorded):
+    return recorded
+  os.normalizedPath(storeRoot / recorded)
+
 proc readTarballProvisionReceipt*(path: string): TarballProvisionReceipt =
   let node = parseJson(readFile(extendedPath(path)))
+  let storeRoot = receiptStoreRoot(absolutePath(path))
   TarballProvisionReceipt(
     packageSelector: node{"packageSelector"}.getStr(),
     planIndex: node{"planIndex"}.getInt(),
-    prefix: node{"prefix"}.getStr(),
-    executable: node{"executable"}.getStr(),
+    prefix: storeResolvedPath(node{"prefix"}.getStr(), storeRoot),
+    executable: storeResolvedPath(node{"executable"}.getStr(), storeRoot),
     selectedUrl: node{"selectedUrl"}.getStr())
 
 proc extractorExecutable(node: JsonNode): string =
@@ -4038,11 +4081,12 @@ proc extractorExecutable(node: JsonNode): string =
       "tool-resolution failed: the " & node{"role"}.getStr() &
       " dependency edge's receipt names " & result & ", which does not exist")
 
-var lastTarballProvisionError {.threadvar.}: ref CatchableError
-  ## The exception the tarball executor turned into a failed ActionResult,
-  ## kept so `resolveTarballTool` re-raises the realizer's own error -- its
-  ## type (`ValueError`, `OSError`, ...) and message -- rather than a
-  ## flattened copy. The executor runs inline on the scheduler's thread.
+var lastProvisionError {.threadvar.}: ref CatchableError
+  ## The exception a provisioning executor (tarball, scoop) turned into a
+  ## failed ActionResult, kept so the resolver re-raises the realizer's own
+  ## error -- its type (`ValueError`, `OSError`, `EScoopBucketMissing`, ...)
+  ## and message -- rather than a flattened copy. The executor runs inline
+  ## on the scheduler's thread.
 
 proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} =
   ## The `"tarball"` provisioner's executor: realize the pinned archive into
@@ -4084,12 +4128,13 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
               plan.declaredExecutablePath)
           let receipt = action.outputs[0]
           createDir(extendedPath(parentDir(receipt)))
+          let receiptStore = receiptStoreRoot(absolutePath(receipt))
           writeFile(extendedPath(receipt), $(%*{
             "schema": TarballProvisionEdgeSchema,
             "packageSelector": plan.packageSelector,
             "planIndex": index,
-            "prefix": materialized.prefix,
-            "executable": resolved,
+            "prefix": storeRelativePath(materialized.prefix, receiptStore),
+            "executable": storeRelativePath(resolved, receiptStore),
             "selectedUrl": materialized.selectedUrl}) & "\n")
           result.status = asSucceeded
           result.exitCode = 0
@@ -4107,7 +4152,7 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
         "tool-resolution failed: every pinned alternative of " & action.id &
         " failed:\n  " & failures.join("\n  "))
     except CatchableError as err:
-      lastTarballProvisionError = err
+      lastProvisionError = err
       result.status = asFailed
       result.exitCode = 1
       result.stderr = err.msg
@@ -4136,16 +4181,16 @@ proc provisioningEngineConfig*(storeRoot: string;
 proc runProvisioningEdges*(edges: ProvisioningEdges; storeRoot: string;
                            forceRebuild = false): BuildRunResult =
   registerTarballProvisioner()
-  lastTarballProvisionError = nil
+  lastProvisionError = nil
   runBuild(graph(edges.actions), provisioningEngineConfig(storeRoot,
     forceRebuild))
 
 proc raiseProvisioningFailure(run: BuildRunResult) =
   for item in run.results:
     if item.status == asFailed:
-      if not lastTarballProvisionError.isNil:
-        let err = lastTarballProvisionError
-        lastTarballProvisionError = nil
+      if not lastProvisionError.isNil:
+        let err = lastProvisionError
+        lastProvisionError = nil
         raise err
       raise newException(OSError,
         "tool-resolution failed: provisioning edge " & item.id &
@@ -4186,8 +4231,11 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
         plan.declaredExecutablePath & " (receipt " & edges.rootReceipt &
         " names " & receipt.executable & ")")
   refuseUnrunnableTarballExecutable(useDef, receipt.executable)
-  tarballProfileFor(useDef, plan, receipt.prefix, receipt.selectedUrl,
-    receipt.executable)
+  result = tarballProfileFor(useDef, plan, receipt.prefix,
+    receipt.selectedUrl, receipt.executable)
+  # Not part of the profile fingerprint (see the field), so set after the
+  # profile is sealed.
+  result.provisioningReceipt = edges.rootReceipt
 
 # ---------------------------------------------------------------------------
 # MR5 -- Bootstrap toolchain resolution for the interface-extract step.
@@ -4924,7 +4972,7 @@ proc executeNimSourceBuildEdge*(action: BuildAction): ActionResult {.gcsafe.} =
       result.evidence = PathSetEvidence(declaredInputs: action.inputs,
         declaredOutputs: action.outputs)
     except CatchableError as err:
-      lastTarballProvisionError = err
+      lastProvisionError = err
       result.status = asFailed
       result.exitCode = 1
       result.stderr = err.msg
@@ -5855,8 +5903,12 @@ proc determinePracticalHardening(plan: ScoopAcquisitionPlan;
   else:
     if executionProfileCaptured: phRangedAndProfileVerified else: phRanged
 
-proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
-                       scoopOverride = ""): PathOnlyToolProfile =
+proc realizeScoopTool(useDef: InterfaceToolUse; storeRoot: string;
+                      scoopOverride = ""): PathOnlyToolProfile =
+  ## The Scoop realization itself: install (or reuse) the app, junction it
+  ## into the tool store, verify it, and return its profile. Run only by the
+  ## `"scoop"` provisioning edge's executor; `resolveScoopTool` is the entry
+  ## point.
   let plan = scoopAcquisitionPlan(useDef)
   let scoopExe = resolveScoopExecutable(scoopOverride)
   if scoopExe.len == 0:
@@ -6191,6 +6243,318 @@ proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
         result.probes.add(probeResult)
 
   refreshProfileIdentity(result)
+
+
+# ---------------------------------------------------------------------------
+# Scoop realization as a build-graph edge.
+#
+# Dependency-Provisioning-In-Build-Graph.md sections 2-4, applied to Scoop the
+# way the tarball section above applies them to archives. Realizing a
+# Scoop-provisioned package is a `bakForeignProvision` edge whose provisioner
+# (`argv[0]`) is `"scoop"`:
+#
+#   * IDENTITY: package selector, declared executable and host, not the pin
+#     (`provisionEdgeIdentity`), so a re-pin is the same edge and the same
+#     receipt path with new content;
+#   * STATIC INPUTS: the selected scoopApp pin, the Scoop root and the Scoop
+#     executable, in the edge's text and weak fingerprint; the bucket
+#     manifest is a declared input, keyed by content (`ffpChecksum`), so an
+#     in-place manifest edit or a bucket update re-runs the realization and
+#     its checksum checks;
+#   * OUTPUTS: a receipt naming the realization with store-relative paths
+#     (what consumers declare as an input), and the realized profile, which
+#     names host paths (the Scoop root, the version directory) and is read
+#     back on a cache hit;
+#   * a receipt whose realization has since gone (an uninstalled app, a
+#     removed prefix) is re-executed rather than trusted.
+#
+# `scoop install` reaches the network through Scoop itself. The edge is
+# `netFetch`, and its destinations are what the bucket manifest says Scoop
+# will download (`url`, top-level and per architecture) plus the logical
+# `scoop://<bucket>/<app>` source the pin names.
+# ---------------------------------------------------------------------------
+
+const
+  ScoopProvisionerName* = "scoop"
+  ScoopProvisionEdgeSchema = "reprobuild.scoop-provision.v1"
+
+proc scoopProvisioningJson(provisioning: InterfaceScoopProvisioning): JsonNode =
+  %*{
+    "packageName": provisioning.packageName,
+    "contributor": provisioning.contributor,
+    "bucket": provisioning.bucket,
+    "app": provisioning.app,
+    "version": provisioning.version,
+    "preferredVersion": provisioning.preferredVersion,
+    "manifestChecksum": provisioning.manifestChecksum,
+    "manifestUrl": provisioning.manifestUrl,
+    "executablePath": provisioning.executablePath,
+    "requiresExecutionProfileChecksum":
+      provisioning.requiresExecutionProfileChecksum,
+    "packageId": provisioning.packageId,
+    "lockIdentity": provisioning.lockIdentity,
+    "locationFile": provisioning.location.file,
+    "locationLine": provisioning.location.line}
+
+proc scoopProvisioningFromJson(node: JsonNode): InterfaceScoopProvisioning =
+  InterfaceScoopProvisioning(
+    packageName: node{"packageName"}.getStr(),
+    contributor: node{"contributor"}.getStr(),
+    bucket: node{"bucket"}.getStr(),
+    app: node{"app"}.getStr(),
+    version: node{"version"}.getStr(),
+    preferredVersion: node{"preferredVersion"}.getStr(),
+    manifestChecksum: node{"manifestChecksum"}.getStr(),
+    manifestUrl: node{"manifestUrl"}.getStr(),
+    executablePath: node{"executablePath"}.getStr(),
+    requiresExecutionProfileChecksum:
+      node{"requiresExecutionProfileChecksum"}.getBool(),
+    packageId: node{"packageId"}.getStr(),
+    lockIdentity: node{"lockIdentity"}.getStr(),
+    location: SourceLocation(file: node{"locationFile"}.getStr(),
+      line: node{"locationLine"}.getInt()))
+
+proc scoopUseJson(useDef: InterfaceToolUse): JsonNode =
+  ## The part of the tool use the Scoop realization reads.
+  var provisioning = newJArray()
+  for entry in useDef.scoopProvisioning:
+    provisioning.add(scoopProvisioningJson(entry))
+  %*{
+    "rawConstraint": useDef.rawConstraint,
+    "packageSelector": useDef.packageSelector,
+    "executableName": useDef.executableName,
+    "scoopProvisioning": provisioning}
+
+proc scoopUseFromJson(node: JsonNode): InterfaceToolUse =
+  result = InterfaceToolUse(
+    rawConstraint: node{"rawConstraint"}.getStr(),
+    packageSelector: node{"packageSelector"}.getStr(),
+    executableName: node{"executableName"}.getStr())
+  for entry in node{"scoopProvisioning"}:
+    result.scoopProvisioning.add(scoopProvisioningFromJson(entry))
+
+proc scoopManifestDownloadUrls(manifestPath: string): seq[string] =
+  ## The download URLs a Scoop manifest declares: `url` (a string or an
+  ## array) at the top level and under each `architecture` entry. A
+  ## manifest that cannot be read contributes none; the realization reports
+  ## that itself.
+  proc addUrls(node: JsonNode; urls: var seq[string]) =
+    if node == nil:
+      return
+    case node.kind
+    of JString:
+      let url = node.getStr().split('#')[0]
+      if url.len > 0 and url notin urls:
+        urls.add(url)
+    of JArray:
+      for item in node:
+        addUrls(item, urls)
+    else:
+      discard
+  try:
+    let manifest = parseJson(readFile(extendedPath(manifestPath)))
+    if manifest.kind != JObject:
+      return
+    addUrls(manifest{"url"}, result)
+    let architectures = manifest{"architecture"}
+    if architectures != nil and architectures.kind == JObject:
+      for _, entry in architectures:
+        if entry.kind == JObject:
+          addUrls(entry{"url"}, result)
+  except CatchableError:
+    discard
+
+proc scoopProvisioningStateRoot(storeRoot: string): string =
+  ## Receipts and the action cache live under the tool store, like the
+  ## tarball edge's. A caller that passed no store keeps its prefixes where
+  ## `realizeScoopTool` always put them; only the edge's state needs a root.
+  if storeRoot.len > 0: absolutePath(storeRoot)
+  else: getCurrentDir() / ".repro" / "tool-store"
+
+proc scoopProvisioningEdges*(useDef: InterfaceToolUse; storeRoot: string;
+                             scoopOverride = ""): ProvisioningEdges =
+  ## The provisioning subgraph that realizes `useDef` from its scoopApp pin:
+  ## one `"scoop"` edge (Scoop needs no extractor edge; it extracts with its
+  ## own tools). Raises the plan's own errors (no scoopApp metadata, an
+  ## ambiguous contributor) and `EScoopMissing` before any edge exists.
+  let plan = scoopAcquisitionPlan(useDef)
+  let scoopExe = resolveScoopExecutable(scoopOverride)
+  if scoopExe.len == 0:
+    raise newException(EScoopMissing,
+      "EScoopMissing: scoop is not installed or not on PATH. " &
+      "Install Scoop from https://scoop.sh/ before running --tool-provisioning=scoop.")
+  let scoopRoot = resolveScoopRoot(scoopExe)
+  let stateStore = scoopProvisioningStateRoot(storeRoot)
+  let identity = provisionEdgeIdentity(ScoopProvisionerName,
+    useDef.packageSelector, plan.declaredExecutablePath)
+  let id = "scoop-provision." & safeIdSegment(useDef.packageSelector) & "." &
+    identity[0 .. 11]
+  let receipt = provisioningStateRoot(stateStore) / "receipts" /
+    (id & ".receipt")
+  let profileOut = provisioningStateRoot(stateStore) / "receipts" /
+    (id & ".profile")
+  let planNode = %*{
+    "packageId": plan.packageId,
+    "bucket": plan.bucket,
+    "app": plan.app,
+    "version": plan.version,
+    "preferredVersion": plan.preferredVersion,
+    "manifestChecksum": plan.manifestChecksum,
+    "manifestUrl": plan.manifestUrl,
+    "declaredExecutablePath": plan.declaredExecutablePath,
+    "requiresExecutionProfileChecksum":
+      plan.requiresExecutionProfileChecksum,
+    "lockIdentity": plan.lockIdentity}
+  let text = $(%*{
+    "schema": ScoopProvisionEdgeSchema,
+    "storeRoot": storeRoot,
+    "stateStore": stateStore,
+    "scoopOverride": scoopOverride,
+    "scoopExecutable": scoopExe,
+    "scoopRoot": scoopRoot,
+    "plan": planNode,
+    "use": scoopUseJson(useDef)})
+  var inputs: seq[string]
+  var destinations = @["scoop://" & plan.bucket & "/" & plan.app]
+  if scoopRoot.len > 0:
+    let manifest = scoopRoot / "buckets" / plan.bucket / "bucket" /
+      (plan.app & ".json")
+    # A missing manifest is the realization's own error to report
+    # (`EScoopBucketMissing`), so it is declared only when present.
+    if fileExists(extendedPath(manifest)):
+      inputs.add(manifest)
+      for url in scoopManifestDownloadUrls(manifest):
+        if url notin destinations:
+          destinations.add(url)
+  var action = builtinAction(bakForeignProvision, id,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    cwd = stateStore,
+    inputs = inputs,
+    outputs = [receipt, profileOut],
+    commandStatsId = "repro scoop provision edge",
+    cacheable = true,
+    weakFingerprint = weakFingerprintFromText(text),
+    actionCachePolicy = ffpChecksum,
+    text = text,
+    networkMode = netFetch,
+    netDestinations = destinations)
+  action.argv = @[ScoopProvisionerName, useDef.packageSelector]
+  result.actions.add(action)
+  result.rootId = id
+  result.rootReceipt = receipt
+
+proc scoopProfilePath(receipt: string): string =
+  receipt.changeFileExt("profile")
+
+proc readScoopProvisionProfile(receipt: string): PathOnlyToolProfile =
+  let bytes = readFile(extendedPath(scoopProfilePath(receipt)))
+  var raw = newSeq[byte](bytes.len)
+  for i, ch in bytes:
+    raw[i] = byte(ord(ch))
+  var pos = 0
+  result = readProfile(raw, pos, ArtifactVersion)
+  if pos != raw.len:
+    raise newException(ValueError,
+      "scoop provision edge left a malformed profile at " &
+      scoopProfilePath(receipt))
+
+proc executeScoopProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} =
+  ## The `"scoop"` provisioner's executor: realize the pinned Scoop app into
+  ## the tool store and write the receipt and the realized profile.
+  result = ActionResult(id: action.id, launched: true,
+    runQuotaBackend: "provision-scoop",
+    dependencyPolicyKind: action.dependencyPolicy.kind)
+  {.cast(gcsafe).}:
+    try:
+      let spec = parseJson(action.builtinText)
+      if spec{"schema"}.getStr() != ScoopProvisionEdgeSchema:
+        raise newException(ValueError,
+          "scoop provision edge carries an unknown schema: " & action.id)
+      let useDef = scoopUseFromJson(spec{"use"})
+      let profile = realizeScoopTool(useDef, spec{"storeRoot"}.getStr(),
+        spec{"scoopOverride"}.getStr())
+      let receipt = action.outputs[0]
+      let stateStore = spec{"stateStore"}.getStr()
+      createDir(extendedPath(parentDir(receipt)))
+      var encoded: seq[byte]
+      encoded.writeProfile(profile)
+      var encodedText = newString(encoded.len)
+      for i, b in encoded:
+        encodedText[i] = char(b)
+      writeFile(extendedPath(action.outputs[1]), encodedText)
+      # What a consumer declares: the realization, without the host's Scoop
+      # root or version directory, so it reads the same on every host that
+      # realizes the same pin.
+      writeFile(extendedPath(receipt), $(%*{
+        "schema": ScoopProvisionEdgeSchema,
+        "packageSelector": profile.packageSelector,
+        "bucket": profile.scoopBucket,
+        "app": profile.scoopApp,
+        "resolvedVersion": profile.scoopResolvedVersion,
+        "manifestChecksum": profile.scoopManifestChecksum,
+        "executionProfileChecksum": profile.scoopExecutionProfileChecksum,
+        "practicalHardening":
+          practicalHardeningName(profile.practicalHardening),
+        "lockIdentity": profile.lockIdentity,
+        "prefix": storeRelativePath(profile.selectedStorePath, stateStore),
+        "executable":
+          storeRelativePath(profile.resolvedExecutablePath, stateStore)}) &
+        "\n")
+      result.status = asSucceeded
+      result.exitCode = 0
+      result.evidence = PathSetEvidence(declaredInputs: action.inputs,
+        declaredOutputs: action.outputs)
+    except CatchableError as err:
+      lastProvisionError = err
+      result.status = asFailed
+      result.exitCode = 1
+      result.stderr = err.msg
+
+proc registerScoopProvisioner*() =
+  ## Install the `"scoop"` executor on this thread. `resolveScoopTool` calls
+  ## it before every provisioning run.
+  registerForeignProvisionExecutor(ScoopProvisionerName,
+    executeScoopProvisionEdge)
+
+registerScoopProvisioner()
+
+proc scoopRealizationPresent(profile: PathOnlyToolProfile): bool =
+  ## Whether what a (possibly cached) receipt describes is still on disk:
+  ## the prefix's junction, the Scoop version directory it targets, and the
+  ## executable, when the app exposes one.
+  if profile.selectedStorePath.len == 0 or
+      not dirExists(extendedPath(profile.selectedStorePath / "bin")):
+    return false
+  if profile.scoopJunctionTarget.len > 0 and
+      not dirExists(extendedPath(profile.scoopJunctionTarget)):
+    return false
+  profile.resolvedExecutablePath.len == 0 or
+    fileExists(extendedPath(profile.resolvedExecutablePath))
+
+proc resolveScoopTool*(useDef: InterfaceToolUse; storeRoot: string;
+                       scoopOverride = ""): PathOnlyToolProfile =
+  ## Realize a Scoop-provisioned package THROUGH ITS PROVISIONING EDGE and
+  ## return its profile. See the section comment above for the edge's shape.
+  let edges = scoopProvisioningEdges(useDef, storeRoot, scoopOverride)
+  let stateStore = scoopProvisioningStateRoot(storeRoot)
+  registerScoopProvisioner()
+  for attempt in 0 .. 1:
+    # The action cache can keep a receipt whose realization was since
+    # removed (`scoop uninstall`, a collected prefix); the second attempt
+    # forces the edge to execute, which realizes it again.
+    let run = runProvisioningEdges(edges, stateStore,
+      forceRebuild = attempt > 0)
+    raiseProvisioningFailure(run)
+    result = readScoopProvisionProfile(edges.rootReceipt)
+    if scoopRealizationPresent(result):
+      break
+    if attempt > 0:
+      raise newException(EScoopInstallFailed,
+        "EScoopInstallFailed: the scoop provisioning edge " & edges.rootId &
+        " realized " & result.selectedStorePath &
+        ", which is not present after realization")
+  # Not part of the profile fingerprint (see the field).
+  result.provisioningReceipt = edges.rootReceipt
 
 proc verifyScoopExecutionProfile*(prefix: string) =
   ## Reads the receipt at `prefix` and recomputes the execution profile
@@ -7920,6 +8284,7 @@ proc actionIdentityFor(useDef: InterfaceToolUse;
     # from being blind to the tool's bytes once ``pathSearchList`` left
     # the payload.
     resolvedExecutableDigest: profile.resolvedExecutableDigest,
+    provisioningReceipt: profile.provisioningReceipt,
     probes: profile.probes,
     adapterStrength: profile.adapterStrength,
     cachePortability: profile.cachePortability,
@@ -8142,6 +8507,8 @@ proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile) =
   # v8 — the resolved executable's content digest. Emitted after the v7
   # search-path block, same trailing-extension discipline.
   outp.writeString(profile.resolvedExecutableDigest)
+  # v9 — the provisioning edge's receipt. Same trailing-extension discipline.
+  outp.writeString(profile.provisioningReceipt)
   outp.writeDigest(profile.profileFingerprint)
 
 proc readProfile(bytes: openArray[byte]; pos: var int;
@@ -8208,6 +8575,8 @@ proc readProfile(bytes: openArray[byte]; pos: var int;
     result.libraryPathList = readStringSeq(bytes, pos)
   if version >= 8'u16:
     result.resolvedExecutableDigest = readString(bytes, pos)
+  if version >= 9'u16:
+    result.provisioningReceipt = readString(bytes, pos)
   # A v < 8 artifact leaves the digest empty. Its stored
   # ``profileFingerprint`` was computed under the v6 profile scheme and
   # will not equal ``profileFingerprintFor(result)``, so every freshness
@@ -8262,6 +8631,8 @@ proc writeActionIdentity(outp: var seq[byte]; identity: ToolActionIdentity) =
   outp.writeStringSeq(identity.libraryPathList)
   # v8 — content digest of the resolved executable (see ``writeProfile``).
   outp.writeString(identity.resolvedExecutableDigest)
+  # v9 — the provisioning edge's receipt (see ``writeProfile``).
+  outp.writeString(identity.provisioningReceipt)
 
 proc readActionIdentity(bytes: openArray[byte];
     pos: var int; version: uint16): ToolActionIdentity =
@@ -8333,6 +8704,8 @@ proc readActionIdentity(bytes: openArray[byte];
     result.libraryPathList = readStringSeq(bytes, pos)
   if version >= 8'u16:
     result.resolvedExecutableDigest = readString(bytes, pos)
+  if version >= 9'u16:
+    result.provisioningReceipt = readString(bytes, pos)
 
 proc encodePathOnlyBuildIdentity*(identity: PathOnlyBuildIdentity): seq[byte] =
   var payload: seq[byte] = @[]
@@ -8420,6 +8793,7 @@ proc jsonProfile(profile: PathOnlyToolProfile): JsonNode =
     "pathSearchList": profile.pathSearchList,
     "resolvedExecutablePath": profile.resolvedExecutablePath,
     "resolvedExecutableDigest": profile.resolvedExecutableDigest,
+    "provisioningReceipt": profile.provisioningReceipt,
     "probes": probes,
     "adapterStrength": strengthName(profile.adapterStrength),
     "cachePortability": portabilityName(profile.cachePortability),
@@ -8469,6 +8843,7 @@ proc jsonAction(identity: ToolActionIdentity): JsonNode =
     "pathSearchList": identity.pathSearchList,
     "resolvedExecutablePath": identity.resolvedExecutablePath,
     "resolvedExecutableDigest": identity.resolvedExecutableDigest,
+    "provisioningReceipt": identity.provisioningReceipt,
     "probes": probes,
     "adapterStrength": strengthName(identity.adapterStrength),
     "cachePortability": portabilityName(identity.cachePortability),

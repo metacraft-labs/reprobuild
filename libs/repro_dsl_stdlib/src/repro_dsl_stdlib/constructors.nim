@@ -10,6 +10,7 @@ import ./constructors/autotools_package
 import ./constructors/cargo_package
 import ./constructors/go_package
 import ./constructors/node_package
+import ./constructors/cabal_package
 # Pull the node / npm provisioning packages into every recipe that imports
 # ``constructors`` so a from-source-npm recipe's ``nativeBuildDeps: "node"``
 # resolves (their provisioning metadata only reaches the InterfaceToolUse once
@@ -17,6 +18,10 @@ import ./constructors/node_package
 # reason ``system_tools`` is pulled in below).
 import ./packages/node
 import ./packages/npm
+# Likewise ``ghc`` and ``cabal`` for a from-source Haskell recipe's
+# ``nativeBuildDeps``.
+import ./packages/ghc
+import ./packages/cabal
 
 # DSL-port M9.R.10a — pull the system-tool stdlib package set into
 # ``registeredPackages()`` for every recipe that imports
@@ -45,7 +50,10 @@ export autotools_package
 export cargo_package
 export go_package
 export node_package
+export cabal_package
 export node
 export npm
+export ghc
+export cabal
 export system_tools
 export kf6_qt6_modules

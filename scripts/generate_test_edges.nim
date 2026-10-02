@@ -493,6 +493,7 @@ proc isProviderModePath(path: string): bool =
     "tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim",
     "tests/unit/t_configure_build_tree_cleanup.nim",
     "tests/unit/t_constructor_fetch_tool_refs.nim",
+    "tests/unit/t_from_source_cabal_recognition.nim",
     "tests/unit/t_from_source_cargo_recognition.nim",
     "tests/unit/t_from_source_go_recognition.nim",
     "tests/unit/t_from_source_npm_recognition.nim",
