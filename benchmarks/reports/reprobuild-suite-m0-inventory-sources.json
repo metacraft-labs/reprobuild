@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1792,
+    "nimTestBinaries": 1796,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 590,
-    "staticallyDetectedRuntimeCompilerFlowTests": 109,
-    "testEntries": 1807
+    "staticallyDetectedRuntimeCompilerFlowTests": 110,
+    "testEntries": 1811
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1062,7 +1062,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 937,
+      "integration": 941,
       "platform/destructive": 116,
       "pure unit": 590,
       "unclassified": 153
@@ -1213,9 +1213,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1792,
+    "nimTestBinaryCount": 1796,
     "pythonTestFileCount": 15,
-    "testEntryCount": 1807
+    "testEntryCount": 1811
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -4490,6 +4490,60 @@
         }
       ],
       "source": "tests/integration/t_integration_scheduler_dependency_gathering_policies.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 74,
+          "path": "tests/integration/t_interface_extraction_follows_the_selected_catalog.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "let first = extractInterfaceFromModule(modulePath, artifactPath, stubPath,"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 79,
+          "path": "tests/integration/t_interface_extraction_follows_the_selected_catalog.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "let second = extractInterfaceFromModule(modulePath, artifactPath, stubPath,"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 85,
+          "path": "tests/integration/t_interface_extraction_follows_the_selected_catalog.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "let third = extractInterfaceFromModule(modulePath, artifactPath, stubPath,"
+        }
+      ],
+      "source": "tests/integration/t_interface_extraction_follows_the_selected_catalog.nim"
     },
     {
       "class": "integration",
@@ -27370,6 +27424,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_installed_reprobuild_resolves_moved_packages_from_its_own_catalog",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_installed_reprobuild_resolves_moved_packages_from_its_own_catalog.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_integration_build_engine_api_ready_queue",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -28155,6 +28226,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_interface_extraction_follows_the_selected_catalog",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_interface_extraction_follows_the_selected_catalog.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_is_published_accepts_any_remote_name",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -28761,6 +28850,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_lock_refresh_records_the_catalog_a_package_resolved_from",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_lock_refresh_records_the_catalog_a_package_resolved_from.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_lock_refresh_reuses_monitored_provider_metadata",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -28848,6 +28954,26 @@
       "source": "tests/integration/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_locked_deps_record_the_catalog_revision",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_interface_artifacts",
+        "repro_lock",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_locked_deps_record_the_catalog_revision.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

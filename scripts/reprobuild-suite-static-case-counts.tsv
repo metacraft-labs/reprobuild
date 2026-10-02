@@ -1186,6 +1186,7 @@ tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim	nim	3
 tests/integration/t_inline_launch_refuses_unhostable_monitor_hosting.nim	nim	6
 tests/integration/t_install_mirror_atomic_patching.nim	nim	9
 tests/integration/t_installed_engine_read_only_source_tree.nim	nim	2
+tests/integration/t_installed_reprobuild_resolves_moved_packages_from_its_own_catalog.nim	nim	3
 tests/integration/t_integration_build_engine_api_ready_queue.nim	nim	18
 tests/integration/t_integration_build_report_target_resolution_kind.nim	nim	5
 tests/integration/t_integration_cli_variant_flag_drives_solver.nim	nim	3
@@ -1231,6 +1232,7 @@ tests/integration/t_integration_variant_override_priorities.nim	nim	6
 tests/integration/t_integration_variant_value_accessor.nim	nim	4
 tests/integration/t_integrity_mismatch_surfaces_per_tier.nim	nim	1
 tests/integration/t_integrity_uses_vcs_native_hash_else_own_file_hash_both_multihash.nim	nim	1
+tests/integration/t_interface_extraction_follows_the_selected_catalog.nim	nim	1
 tests/integration/t_is_published_accepts_any_remote_name.nim	nim	1
 tests/integration/t_just_test_end_to_end_via_parallel_runner.nim	nim	1
 tests/integration/t_just_test_hot_cache_is_no_op_build.nim	nim	2
@@ -1266,11 +1268,13 @@ tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	nim	11
 tests/integration/t_lock_refresh_and_validate_without_building.nim	nim	5
 tests/integration/t_lock_refresh_folds_uses_sibling_producer_deps.nim	nim	2
 tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim	nim	2
+tests/integration/t_lock_refresh_records_the_catalog_a_package_resolved_from.nim	nim	2
 tests/integration/t_lock_refresh_reuses_monitored_provider_metadata.nim	nim	1
 tests/integration/t_lock_store_backend_roundtrip_each_backend.nim	nim	1
 tests/integration/t_lock_store_inside_another_repo_is_not_publishable.nim	nim	1
 tests/integration/t_lock_validate_root_provenance_survives_commit.nim	nim	11
 tests/integration/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db.nim	nim	1
+tests/integration/t_locked_deps_record_the_catalog_revision.nim	nim	4
 tests/integration/t_locking_explain_reports_resolved_tier_backend_and_layer.nim	nim	1
 tests/integration/t_long_operations_announce_plan_and_emit_live_progress.nim	nim	1
 tests/integration/t_m20_second_runner_generic_layer.nim	nim	3

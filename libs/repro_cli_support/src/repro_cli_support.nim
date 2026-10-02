@@ -9237,8 +9237,12 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
         workDir, scratchDir)
   let compileConfiguration =
     providerCompileConfigurationIdentity(compileCommand)
+  # The selected catalog decides which module a catalog `uses:` imports;
+  # see `catalogSelectionIdentity`. Appended only when one is selected.
+  let catalogSelection = catalogSelectionIdentity()
   let edgeIdentity = weakFingerprintFromText(command.join("\x00") &
-    "\x00provider-compile-configuration\x00" & digestHex(compileConfiguration))
+    "\x00provider-compile-configuration\x00" & digestHex(compileConfiguration) &
+    (if catalogSelection.len > 0: "\x00" & catalogSelection else: ""))
   let sessionKey = toHex(edgeIdentity.bytes)
   if not forceRebuild and not validateExistingOnly and
       interfaceEdgeSessionResults.hasKey(sessionKey) and
@@ -21435,9 +21439,108 @@ proc isGitCheckoutDir(path: string): bool =
     (dirExists(extendedPath(path / ".git")) or
      fileExists(extendedPath(path / ".git")))
 
-proc lockedDepsForWorkspace(workspaceRoot: string;
+proc catalogRootsOfToolUses*(uses: openArray[InterfaceToolUse]): seq[string] =
+  ## The `reprobuild-packages` catalog checkouts the given tool uses'
+  ## realizations were declared in, each once, in first-seen order. A
+  ## realization carries the source location of its ``provisioning:`` block;
+  ## when that file is a catalog interface module
+  ## (``<root>/packages/interfaces/<name>/repro.nim``) the package definition
+  ## came from the catalog at ``<root>`` (`catalogRootOfInterfaceModule`).
+  ## Reading it off the realizations rather than repeating the lookup keeps
+  ## the answer to what the compile actually imported.
+  proc consider(roots: var seq[string]; file: string) =
+    let root = catalogRootOfInterfaceModule(file)
+    if root.len == 0:
+      return
+    let absolute = absolutePath(root)
+    for existing in roots:
+      if cmpPaths(existing, absolute) == 0:
+        return
+    roots.add(absolute)
+  for use in uses:
+    for realization in use.nixProvisioning:
+      consider(result, realization.location.file)
+    for realization in use.tarballProvisioning:
+      consider(result, realization.location.file)
+    for realization in use.scoopProvisioning:
+      consider(result, realization.location.file)
+
+proc catalogLockedDep*(catalogRoot, root: string;
+                      existingDeps: seq[LockedDep]): Option[LockedDep] =
+  ## The lock record of the catalog at ``catalogRoot``
+  ## (Provisioning-Contributions.md, "Locks And Snapshots": a locked
+  ## realization records "catalog repository coordinates and revision").
+  ##
+  ##   * A copy with a `CatalogRevisionMarkerFile` -- the catalog an installed
+  ##     reprobuild ships -- is recorded at the url and revision the marker
+  ##     names. It is not a checkout of the project's workspace, so its
+  ##     ``path`` is the sibling convention: that is where `repro develop`
+  ##     places it when the lock asks for it. The marker is asked first: such
+  ##     a copy can sit inside an unrelated git checkout (an archive unpacked
+  ##     in a CI workspace), whose HEAD says nothing about the catalog.
+  ##   * A git checkout is observed: its origin, branch and HEAD, and the
+  ##     VCS-native integrity of that commit. Its ``path`` is where it sits
+  ##     relative to the project, which for the workspace-sibling convention
+  ##     is ``../reprobuild-packages``.
+  ##   * Anything else (a Nix store copy from a flake input) carries forward
+  ##     the pin the committed lock already holds; with none, nothing true can
+  ##     be recorded, and the omission is said rather than hidden.
+  ##
+  ## A catalog inside the repository that holds the project (reprobuild's
+  ## fixture catalog) is versioned with the project and yields nothing.
+  let marker = readCatalogRevisionMarker(catalogRoot)
+  if marker.url.len > 0 and marker.revision.len > 0:
+    let markerName = repositoryNameFromUrl(marker.url)
+    let name =
+      if markerName.len > 0: markerName
+      else: ReprobuildPackagesRepositoryName
+    return some(LockedDep(
+      name: name, path: "../" & name,
+      coordinates: Coordinates(kind: ckVcs, url: marker.url, gitRef: "",
+        revision: marker.revision),
+      integrity: gitObjectMultihash(
+        (if marker.revision.len == 64: "sha256" else: "sha1"),
+        marker.revision),
+      version: "", visibility: "public", participation: "",
+      depends: @[], tags: @[]))
+  let top = gitTopLevel(catalogRoot)
+  if top.len > 0:
+    let depAbs = absolutePath(top)
+    if cmpPaths(depAbs, root) == 0 or root.isRelativeTo(depAbs):
+      return none(LockedDep)
+    let facts = committedLockRepoFacts(depAbs)
+    let originName = repositoryNameFromUrl(facts.originUrl)
+    let bareName = extractFilename(depAbs.strip(
+      leading = false, trailing = true, chars = {'/', '\\'}))
+    return some(LockedDep(
+      name: (if originName.len > 0: originName
+             elif bareName.len > 0: bareName
+             else: ReprobuildPackagesRepositoryName),
+      path: relativePath(depAbs, root).replace('\\', '/'),
+      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+        gitRef: facts.branch, revision: facts.headSha),
+      integrity: computeDepIntegrity(depAbs, facts.headSha),
+      version: "", visibility: "public", participation: "",
+      depends: @[], tags: @[]))
+  for d in existingDeps:
+    if d.coordinates.kind == ckVcs and
+        (d.name == ReprobuildPackagesRepositoryName or
+         repositoryNameFromUrl(d.coordinates.url) ==
+           ReprobuildPackagesRepositoryName):
+      return some(d)
+  stderr.writeLine("repro lock refresh: the reprobuild-packages catalog at " &
+    catalogRoot & " supplied package definitions to this build, but it is " &
+    "neither a git checkout nor a copy carrying a `" &
+    CatalogRevisionMarkerFile & "` file, and the committed lock carries no " &
+    "pin for it, so this lock records NO catalog revision; use a " &
+    "reprobuild-packages checkout (a workspace sibling, or " &
+    ReprobuildPackagesRootEnv & " pointing at one) and refresh again")
+  none(LockedDep)
+
+proc lockedDepsForWorkspace*(workspaceRoot: string;
                             usesSelectors: seq[string] = @[];
-                            sourceRecipeRoots: seq[string] = @[]):
+                            sourceRecipeRoots: seq[string] = @[];
+                            catalogRoots: seq[string] = @[]):
                             seq[LockedDep] =
   ## MO-8 — observe the workspace's participating repos and produce a
   ## ``LockedDep`` per dependency, each with checkout COORDINATES (vcs
@@ -21536,6 +21639,17 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
       depends: @[], tags: @[]))
     seenPaths.add(rel)
     seenNames.add(depName)
+  # The reprobuild-packages catalog the solved tool uses' definitions came
+  # from. Which catalog revision defined a package decides which realizations
+  # were eligible, so it is pinned like any other source the build read.
+  for catalogRoot in catalogRoots:
+    let depOpt = catalogLockedDep(catalogRoot, root, existingDeps)
+    if depOpt.isNone: continue
+    let dep = depOpt.get()
+    if dep.path in seenPaths or dep.name in seenNames: continue
+    siblingDeps.add(dep)
+    seenPaths.add(dep.path)
+    seenNames.add(dep.name)
   # The develop set declared by the workspace manifest: the transitive closure
   # of this repo's ``depends`` edges — the same closure the pre-push gate holds
   # clean and published (Unified-Locking-And-Hooks.md §14). A sibling can reach
@@ -63619,6 +63733,10 @@ type CompiledProviderSolverInputs = object
   usesSelectors: seq[string]
   defaultToolProvisioning: string
   sourceRecipeRoots: seq[string]
+  catalogRoots: seq[string]
+    ## The `reprobuild-packages` catalog checkouts the solved tool uses'
+    ## definitions were read from (`catalogRootsOfToolUses`). A lock records
+    ## each one (Provisioning-Contributions.md, "Locks And Snapshots").
 
 type DurableSolverProviderArtifacts = object
   interfaceArtifact: ProjectInterfaceArtifact
@@ -63788,7 +63906,9 @@ proc tryLoadDurableSolverProviderArtifacts(
 
 proc solverInputsFromCompiledProvider(projectDir: string;
                                       requireSolverBinding = true;
-                                      strict = false):
+                                      strict = false;
+                                      allowEmptySolve = false;
+                                      failure: ptr string = nil):
     Option[CompiledProviderSolverInputs] =
   ## MO-12 — obtain solver inputs from the compiled project provider. Compiles
   ## the project's ``repro.nim`` / ``reprobuild.nim`` recipe to a provider
@@ -63799,10 +63919,18 @@ proc solverInputsFromCompiledProvider(projectDir: string;
   ## Best-effort by design — ANY of {no recipe, no ``build:`` block, no
   ## solver-bound ``uses:``, interface-extraction / provider-compile / run
   ## failure, an empty solve} returns ``none`` so the caller falls back to the
-  ## ``repro.solver`` sidecar. Compile artifacts live in the user cache; only
+  ## ``repro.solver`` sidecar. With ``allowEmptySolve`` an empty solve of a
+  ## recipe that declares tool uses is returned instead, with no variants and
+  ## no packages: the lock still records what those uses resolved to (a
+  ## workspace producer, a catalog), and that does not need a solve.
+  ## ``failure``, when given, receives the message of an error the probe
+  ## swallowed, so a caller that has no fallback can say why it has none. Compile artifacts live in the user cache; only
   ## the fresh manifest request and solver emission use disposable scratch.
   ## Refresh still writes NO build artifacts into the project tree.
   result = none(CompiledProviderSolverInputs)
+  # With ``allowEmptySolve``: what to answer, once the interface is known,
+  # for every outcome that yields no solve.
+  var emptySolve = none(CompiledProviderSolverInputs)
   let match =
     try: resolveProjectFile(projectDir)
     except CatchableError: return result
@@ -63891,6 +64019,13 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       if useDef.packageSelector.len > 0 and
           useDef.packageSelector notin usesSelectors:
         usesSelectors.add(useDef.packageSelector)
+    if allowEmptySolve and artifact.projectInterface.toolUses.len > 0:
+      emptySolve = some(CompiledProviderSolverInputs(
+        toolUses: artifact.projectInterface.toolUses,
+        usesSelectors: usesSelectors,
+        defaultToolProvisioning:
+          artifact.projectInterface.defaultToolProvisioning))
+      result = emptySolve
     let provider =
       if durable.isSome:
         durable.get().providerArtifact
@@ -63972,10 +64107,12 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       usesSelectors: usesSelectors,
       defaultToolProvisioning:
         artifact.projectInterface.defaultToolProvisioning))
-  except CatchableError:
+  except CatchableError as e:
     if strict:
       raise
-    return result
+    if failure != nil:
+      failure[] = e.msg
+    return emptySolve
 
 proc dependencyDeclEqual(a, b: DependencyDecl): bool =
   a.name == b.name and a.range == b.range and a.conditional == b.conditional
@@ -64135,13 +64272,15 @@ proc foldProviderSolverInputs(projectDir: string;
       pending.add((recipeDir, transitiveUse))
     aggregate.mergeProviderSolverInputs(producerInputs)
   aggregate.sourceRecipeRoots = seenRecipeDirs[1 .. ^1]
+  aggregate.catalogRoots = catalogRootsOfToolUses(aggregate.toolUses)
   aggregate.text = solver_variants.renderSolverInputsFixture(
     aggregate.variants, aggregate.packages)
 
 proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
     found: bool; variants: seq[variant_encoder.VariantDecl];
     packages: seq[PackageDecl]; text: string; source: string;
-    usesSelectors: seq[string]; sourceRecipeRoots: seq[string]] =
+    usesSelectors: seq[string]; sourceRecipeRoots: seq[string];
+    catalogRoots: seq[string]] =
   ## MO-12 — resolve the solver inputs for ``lock refresh`` / ``validate``,
   ## PREFERRING the compiled project provider (the real recipe's solve) and
   ## falling back to the ``repro.solver`` sidecar. An explicit ``--inputs``
@@ -64151,21 +64290,35 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string): tuple[
   ## FUP-M — ``usesSelectors`` carries the recipe's declared ``uses:`` producer
   ## selectors (provider path only; the sidecar has none) so ``lock refresh``
   ## folds each sibling PRODUCER edge into the committed lock's ``deps``.
+  var probeFailure = ""
   if inputsOverride.len == 0:
-    let fromProvider = solverInputsFromCompiledProvider(projectDir)
+    let fromProvider = solverInputsFromCompiledProvider(projectDir,
+      allowEmptySolve = true, failure = addr probeFailure)
     if fromProvider.isSome:
       var p = fromProvider.get()
+      let emptySolve = p.variants.len == 0 and p.packages.len == 0
       foldProviderSolverInputs(projectDir, p)
+      if emptySolve and p.variants.len == 0 and p.packages.len == 0:
+        # Nothing to solve, but the tool uses still name what the lock
+        # records. Spelled exactly as the recipe-without-solve answer below,
+        # so the two agree on the inputs digest of an empty solve.
+        return (true, @[], @[], "", "recipe-without-solve",
+          p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots)
       return (true, p.variants, p.packages, p.text, "provider",
-        p.usesSelectors, p.sourceRecipeRoots)
+        p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots)
   let inputsP =
     if inputsOverride.len > 0: absolutePath(inputsOverride)
     else: solverInputsPath(projectDir)
   if fileExists(extendedPath(inputsP)):
     let loaded = loadSolverInputsFile(inputsP)
     return (true, loaded.variants, loaded.packages, loaded.text, "sidecar",
-      @[], @[])
-  return (false, @[], @[], "", "", @[], @[])
+      @[], @[], @[])
+  if probeFailure.len > 0:
+    # Without the recipe's interface the lock cannot name the workspace
+    # producers and catalogs its tool uses resolve from; say why.
+    stderr.writeLine("repro lock refresh: could not read the tool uses of " &
+      "the recipe in " & projectDir & ": " & probeFailure)
+  return (false, @[], @[], "", "", @[], @[], @[])
 
 proc buildLockGenerationRequest(projectDir, inputsOverride,
                                 platformOverride: string;
@@ -64207,7 +64360,7 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
     workDir: getTempDir() /
       ("repro-lock-generation-" & $getCurrentProcessId() & "-" & verb),
     extraDeps: lockedDepsForWorkspace(projectDir, resolved.usesSelectors,
-      resolved.sourceRecipeRoots),
+      resolved.sourceRecipeRoots, resolved.catalogRoots),
     entryPoint: entryPoint)
   return 0
 
@@ -64470,7 +64623,8 @@ proc runReproLockValidate(rest: openArray[string]): int =
     var resolved: tuple[found: bool;
       variants: seq[variant_encoder.VariantDecl];
       packages: seq[PackageDecl]; text: string; source: string;
-      usesSelectors: seq[string]; sourceRecipeRoots: seq[string]]
+      usesSelectors: seq[string]; sourceRecipeRoots: seq[string];
+      catalogRoots: seq[string]]
     try:
       resolved = resolveRefreshSolverInputs(projectDir, inputsOverride)
     except CatchableError as e:
