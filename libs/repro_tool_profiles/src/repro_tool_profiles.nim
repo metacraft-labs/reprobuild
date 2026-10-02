@@ -1869,6 +1869,15 @@ proc hasHostTarballProvisioning(useDef: InterfaceToolUse): bool =
       return true
   false
 
+proc pathModeCanRealize*(useDef: InterfaceToolUse): bool =
+  ## Whether the path-mode resolver has anything to realize `useDef` from
+  ## when the caller's PATH lacks it: a release archive for this host, or (on
+  ## a Nix-capable host) a pinned Nix channel -- the fallbacks
+  ## `toolProfileFor`'s `tpmPathOnly` arm takes. A tool with neither is simply
+  ## absent in path mode, which is that mode's ordinary state.
+  hasHostTarballProvisioning(useDef) or
+    ((defined(linux) or defined(macosx)) and useDef.nixProvisioning.len > 0)
+
 proc selectTarballProvisioning(useDef: InterfaceToolUse;
                                honorRequestedContributor = true):
     InterfaceTarballProvisioning =

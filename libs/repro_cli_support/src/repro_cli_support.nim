@@ -13408,6 +13408,7 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
     # individually instead of hiding behind whichever selector happened to be
     # evaluated first. The cost is paid only when something is already wrong.
     var failures: seq[string] = @[]
+    var absentInPathMode = 0
     for useDef in interfaceArtifact.projectInterface.toolUses:
       var single = interfaceArtifact
       single.projectInterface.toolUses = @[useDef]
@@ -13421,8 +13422,15 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
           if not prefixOps.anyIt(it.name == op.name):
             prefixOps.add(op)
       except CatchableError as toolErr:
+        # In path mode a tool that is neither on the caller's PATH nor
+        # realizable is merely absent -- that mode's ordinary state, and what
+        # it reported before it provided anything at all. Only a tool the
+        # resolver COULD have realized and did not is worth a warning.
+        if mode == tpmPathOnly and not pathModeCanRealize(useDef):
+          inc absentInPathMode
+          continue
         failures.add(useDef.packageSelector & " (" & toolErr.msg & ")")
-    if failures.len == 0:
+    if failures.len == 0 and absentInPathMode == 0:
       # The per-tool pass found nothing wrong, so the failure was in the
       # batch path itself rather than in any one package. Report the original.
       stderr.writeLine("repro dev-env: warning: " & mode.modeName &

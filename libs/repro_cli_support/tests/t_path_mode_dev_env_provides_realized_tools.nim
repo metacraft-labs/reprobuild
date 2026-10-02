@@ -20,6 +20,13 @@
 ##      not move: "resolve against the caller's PATH" -- a fix that simply
 ##      realized every declared tool would pass case 1 and fail here.
 ##
+## The recipe also declares a third tool that is on no PATH and has nothing to
+## be realized from -- reprobuild's own recipe has several (`runquotad`, the
+## source-library producers). That makes the batch resolution fail and the
+## activation fall back to resolving tool by tool, which is the path a real
+## Windows shell takes; case 1 then also holds that one absent tool does not
+## cost the shell the tools that WERE realized.
+##
 ## No mocks. The archive is a real file served through the resolver's own
 ## ``file://`` arm, realized into a real tool store under a temporary root, and
 ## the ops are the ones ``repro dev-env export`` renders.
@@ -112,7 +119,10 @@ suite "path-mode dev environment":
       projectName: "consumer", packageName: "consumer",
       defaultToolProvisioning: "path",
       toolUses: @[rawTarballUse(root, "absent"),
-                  rawTarballUse(root, "present")])))
+                  rawTarballUse(root, "present"),
+                  InterfaceToolUse(rawConstraint: "unprovisioned",
+                    packageSelector: "unprovisioned",
+                    executableName: "unprovisioned")])))
 
   teardown:
     putEnv("PATH", savedPath)
