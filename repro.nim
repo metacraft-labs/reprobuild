@@ -64,6 +64,7 @@ import repro_dsl_stdlib/monitor_shim_artifacts
               # the linker flags — see the ``registerOpensslPrefixCandidate``
               # call in the ``build:`` block below.
 import repro_dsl_stdlib/openssl_layout
+import repro_dsl_stdlib/source_only_packages
 
 proc sanitizeStaticExec(val: string): string =
   var cleanLines: seq[string] = @[]
@@ -1236,39 +1237,6 @@ package reprobuild:
       "libclingo.so", "libclingo.dylib",
       "libzstd.so.1", "libzstd.dylib"])
 
-    proc findNixStoreSourceDir(namePart, marker: string): string =
-      when defined(posix):
-        let storeRoot = "/nix/store"
-        if dirExists(storeRoot):
-          for kind, path in walkDir(storeRoot):
-            if kind == pcDir and namePart in path.lastPathPart and
-                fileExists(path / marker):
-              return path
-      ""
-
-    proc nixDevShellSourcePath(envName, marker: string): string =
-      when defined(windows):
-        ""
-      else:
-        if not fileExists("flake.nix"):
-          return ""
-        let systemResult =
-          uncontrolledExecCmdEx("nix eval --raw --impure --expr 'builtins.currentSystem' 2>/dev/null")
-        if systemResult.exitCode != 0:
-          return ""
-        let system = systemResult.output.strip()
-        if system.len == 0:
-          return ""
-        let valueResult = uncontrolledExecCmdEx(
-          "nix eval --raw '.#devShells." & system & ".default." & envName &
-          "' 2>/dev/null")
-        if valueResult.exitCode != 0:
-          return ""
-        let candidate = valueResult.output.strip()
-        if candidate.len > 0 and fileExists(candidate / marker):
-          return candidate
-        ""
-
     # THE ENV-VAR SOURCE CHANNEL, AND WHAT IS LEFT ON IT.
     #
     # This helper used to resolve SEVEN inputs, five of which were workspace
@@ -1326,56 +1294,27 @@ package reprobuild:
     # executable (it declares ``executable ioMon``, so the same admission
     # gate that refuses runquota refuses it).
     #
-    # AN UNRESOLVED INPUT IS NOW FATAL, NOT DROPPED. This helper used to
-    # return ``("", @[])`` and the caller used to skip it with ``if
-    # pkg.path.len > 0``, so a dependency that resolved nowhere produced no
-    # message at all — the build simply went on without it and failed later
-    # somewhere that named a Nim module instead of the missing checkout. Four
-    # silent fallthroughs stacked on top of each other is exactly the shape
-    # that let ``reprobuild-test-adapters`` drift off its pin unnoticed.
-    proc sourceOnlyPackagePath(envName: string; candidates: openArray[string];
-                               marker: string; nixStoreNamePart = "";
-                               remedy = ""):
-        tuple[path: string; env: seq[(string, string)]] =
-      let fromEnv = getEnv(envName)
-      if fromEnv.len > 0 and fileExists(fromEnv / marker):
-        return (fromEnv, @[(envName, fromEnv)])
-      for candidate in candidates:
-        if fileExists(candidate / marker):
-          return (candidate, @[(envName, candidate)])
-      let fromFlake = nixDevShellSourcePath(envName, marker)
-      if fromFlake.len > 0:
-        return (fromFlake, @[(envName, fromFlake)])
-      if nixStoreNamePart.len > 0:
-        let fromStore = findNixStoreSourceDir(nixStoreNamePart, marker)
-        if fromStore.len > 0:
-          return (fromStore, @[(envName, fromStore)])
-      # Every probe missed. Say which probes, with what they were looking for
-      # and how to satisfy them, instead of returning an empty path the
-      # caller cannot distinguish from "this input is not needed here".
-      var tried: seq[string] = @[]
-      tried.add("$" & envName & (if fromEnv.len == 0: " (unset)"
-                                 else: "=" & fromEnv))
-      for candidate in candidates:
-        tried.add(candidate)
-      tried.add("the flake devShell attribute `." & "#devShells.<system>." &
-        "default." & envName & "`")
-      if nixStoreNamePart.len > 0:
-        tried.add("a /nix/store entry whose name contains `" &
-          nixStoreNamePart & "`")
-      raise newException(OSError,
-        "reprobuild's recipe could not resolve the source-only dependency " &
-        "provisioned through $" & envName & ". Every candidate was probed " &
-        "for `" & marker & "` and none carried it: " & tried.join("; ") &
-        ". This dependency is an input of every Nim compile this recipe " &
-        "declares, so it cannot be skipped: dropping it here is what makes " &
-        "the failure surface later as `cannot open file: <some module>` in " &
-        "a place that does not name the missing checkout. Remedy: " &
-        (if remedy.len > 0: remedy
-         else: "enter this repository's dev shell (`nix develop`, or " &
-           "`scripts/dev-shell.sh`), which exports $" & envName &
-           " from the flake's pinned input; or set $" & envName &
-           " to a checkout that carries `" & marker & "`."))
+    # THE PROBE ITSELF LIVES IN ``repro_dsl_stdlib/source_only_packages``.
+    #
+    # It used to be a nested proc here, and the three properties that make it
+    # correct — the marker is the module the consumer imports, an explicitly
+    # named checkout is used or refused but never substituted, and there is no
+    # ``/nix/store`` scan — were each decided here and nowhere else, so
+    # nothing could test them and nothing could hold them equal to
+    # ``scripts/source_paths.sh``, which resolves the SAME inputs for the
+    # shell build path. The module header states each property with the
+    # evidence for it; ``tests/unit/``
+    # ``t_bearssl_probe_marker_is_the_imported_module.nim`` holds this
+    # recipe, ``config.nims``, the release stager and ``source_paths.sh`` to
+    # one spelling of the bearssl marker.
+    #
+    # AN UNRESOLVED INPUT IS FATAL, NOT DROPPED. The helper used to return
+    # ``("", @[])`` and the caller used to skip it with ``if pkg.path.len >
+    # 0``, so a dependency that resolved nowhere produced no message at all —
+    # the build simply went on without it and failed later somewhere that
+    # named a Nim module instead of the missing checkout. Four silent
+    # fallthroughs stacked on top of each other is exactly the shape that let
+    # ``reprobuild-test-adapters`` drift off its pin unnoticed.
 
     proc resolvedIoMonNimPaths(): seq[string] =
       ## io-mon's importable root. NOT migrated to ``uses: "io-mon"`` — see
@@ -1421,14 +1360,14 @@ package reprobuild:
       sourceOnlyPackagePath("BEARSSL_SRC", [
         "libs" / "nim-bearssl",
         repoParent / "nim-bearssl",
-      ], "bearssl.nim", "nim-bearssl-",
+      ], BearsslModuleMarker,
         remedy = "enter this repository's dev shell (`nix develop`, or " &
           "`scripts/dev-shell.sh`), which exports $BEARSSL_SRC from the " &
           "flake's pinned `nim-bearssl` input; or set $BEARSSL_SRC to a " &
-          "nim-bearssl checkout. Note that `scripts/source_paths.sh` " &
-          "probes the STRICTER marker `bearssl/abi/consttypes.nim` for the " &
-          "same input, and explains why: a checkout predating that module " &
-          "tree satisfies this probe and still cannot satisfy the import."),
+          "nim-bearssl checkout carrying that module. `bearssl.nim` at the " &
+          "package root is NOT enough: it is present in every revision, " &
+          "including ones predating the `bearssl/abi/` tree " &
+          "`repro_deploy_agent` imports."),
       sourceOnlyPackagePath("REPRO_CT_TEST_RUNNER_SRC", [
         repoParent / "reprobuild-ct-test-runner",
       ], "libs" / "ct_test_runner_adapter" / "src" /

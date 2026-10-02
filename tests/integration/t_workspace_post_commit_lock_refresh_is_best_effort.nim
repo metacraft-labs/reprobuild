@@ -923,6 +923,127 @@ suite "M19b — post-commit reports publication, not just the write":
       check not dirExists(fx.workspaceRoot / ".repro" / "manifests" /
         "locks" / "lib-a" / "lib-a")
 
+  test "test_membership_repo_commit_writes_no_record_and_is_not_a_failure":
+    ## The MEMBERSHIP repo — the checkout carrying ``projects/`` and
+    ## ``repos/``, which no project declares — is the one trigger for which
+    ## writing nothing is the SPECIFIED answer, not a failure.
+    ##
+    ## Workspace-And-Develop-Mode.md §"Gate scope when the pushed repo is the
+    ## membership repo": **"Rule (DECIDED). A membership push writes NO
+    ## trigger-keyed lock record."** Its premise is that the membership repo
+    ## is not a project repo, so it has no declared ``name`` to encode as the
+    ## ``<repo>`` component of ``locks/<project>/<repo>/<sha>.toml`` and
+    ## belongs to no tier's partition; Unified-Locking-And-Hooks.md §6
+    ## Decision 1 consequence 2 then applies verbatim — "when the trigger is
+    ## outside the partition, the manifest gets no trigger-keyed document for
+    ## that operation."
+    ##
+    ## Measured before this case existed: every commit to a workspace's
+    ## manifests repo reported
+    ##
+    ##   repro post-commit: no-lock-failed: NO lock written: triggering repo
+    ##     at '<ws>' is not declared in project '<p>'; no lock can be
+    ##     anchored at it
+    ##
+    ## — the decided no-op wearing the tag this very suite reserves for
+    ## invariant 4, "lock writer fails". Eighteen days of those accumulated in
+    ## one workspace's log while nothing was wrong with the arrangement at
+    ## all. Two separate defects: the CLASSIFICATION (a failure tag for a
+    ## specified outcome) and the FRAMING ("no lock *can be* anchored at it"
+    ## describes an obstacle, where the spec says none is *due*).
+    ##
+    ## The stray-repo case next door keeps ``no-lock-failed``: a checkout the
+    ## project does not declare and which is NOT the membership repo has no
+    ## resolvable anchor, and that genuinely blocks a record a consumer would
+    ## have looked for. The two must not share a tag.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case drives a real membership repo " &
+        "and a real lock store")
+    else:
+      let fx = setupFixture(gitBin, "membership")
+      defer: removeDir(fx.scratch)
+      cloneAll(gitBin, fx)
+      seedWorkspaceToml(fx)
+
+      # Make the workspace root a real git checkout: that — plus the
+      # ``projects/``/``repos/`` the fixture already wrote there — is exactly
+      # what ``manifestsRoot`` recognises as the membership repo.
+      let noHooks = fx.scratch / "no-hooks-membership"
+      createDir(noHooks)
+      discard requireGit(q(gitBin) & " init -b main " & q(fx.workspaceRoot))
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+        " config user.email tester@example.invalid")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+        " config user.name \"Membership Tester\"")
+      writeFile(fx.workspaceRoot / ".gitignore",
+        "/.repro/\n/lib-a/\n/lib-b/\n/lib-c/\n")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+        " -c core.hooksPath=" & q(noHooks) & " commit -m \"seed manifests\"")
+
+      # The trigger under test: a manifest edit committed in the membership
+      # repo, which is what fires this hook in a real workspace.
+      writeFile(fx.workspaceRoot / "repos" / "lib-b.toml",
+        readFile(fx.workspaceRoot / "repos" / "lib-b.toml") &
+        "\n# a description edit\n")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+        " -c core.hooksPath=" & q(noHooks) &
+        " commit -m \"manifests: describe lib-b\"")
+
+      let res = invokePostCommit(fx, fx.workspaceRoot)
+      checkpoint("membership post-commit output: " & res.output)
+      # The best-effort contract is unchanged: a commit is never blocked.
+      check res.code == 0
+
+      let report = readPostCommitReport(fx)
+      # THE CLASSIFICATION. Stated both ways on purpose: the positive tag
+      # pins what this outcome IS, and the negative one names the tag the
+      # defect used — a third tag appearing here must not read as a pass.
+      check report["outcome"].getStr() == "skipped-membership-repo"
+      check report["outcome"].getStr() != "no-lock-failed"
+      check not report["lockWritten"].getBool()
+      check report["publication"].getStr() == "no-record"
+      check report["lockFilePath"].getStr() == ""
+
+      # THE FRAMING. The diagnostic has to say no record is DUE, and must not
+      # repeat the obstacle wording the resolver uses for a stray checkout.
+      let diagnostic = report["diagnostic"].getStr()
+      check diagnostic.contains("membership")
+      check not diagnostic.contains("no lock can be anchored at it")
+      check not diagnostic.contains("NO lock written")
+
+      # The log carries the same tag, since the log is where an arrangement
+      # that has produced nothing for weeks is actually discovered.
+      check readPostCommitLog(fx).contains("skipped-membership-repo")
+      # And the operator is not warned about a failure that did not happen.
+      check not res.output.contains("no-lock-failed")
+
+      # NO record, anywhere in the store — asserted over the whole tree
+      # rather than at one expected path, because the defect the spec forbids
+      # is a record anchored at SOME other repo's name.
+      var records: seq[string] = @[]
+      let locksRoot = lockStoreRoot(fx) / "locks"
+      if dirExists(locksRoot):
+        for path in walkDirRec(locksRoot):
+          if path.endsWith(".toml"):
+            records.add(path)
+      check records.len == 0
+
+      # NON-VACUITY. The same fixture, the same store, a DECLARED repo: a
+      # record appears. Without this, "no record" would also be satisfied by
+      # a build whose lock writer never writes anything at all.
+      let libASha = commitInLibA(gitBin, fx, "work.txt")
+      let declared = invokePostCommit(fx, fx.workspaceRoot / "lib-a")
+      checkpoint("declared-repo post-commit output: " & declared.output)
+      check declared.code == 0
+      let declaredReport = readPostCommitReport(fx)
+      check declaredReport["lockWritten"].getBool()
+      check declaredReport["triggerRepo"].getStr() == "lib-a"
+      check fileExists(lockStoreRoot(fx) / "locks" / "lib-a" / "lib-a" /
+        (libASha & ".toml"))
+
   test "test_ra31_gate_supersedes_its_own_unpublished_draft":
     ## RA-31 — an untracked file at the lock path is a draft, not history.
     ##
