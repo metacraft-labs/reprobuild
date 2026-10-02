@@ -7803,12 +7803,22 @@ proc executedToolImagePath(action: BuildAction;
     return ""
   if searchPath.len == 0:
     return ""
+  # The FILE the launcher will find. On Windows the launcher hands a bare
+  # name to `CreateProcessW`, which appends `.exe` to a module name that has
+  # no extension, so `sh` names `sh.exe`. Searching for the literal `sh`
+  # found nothing there, and every bare-named action on Windows silently kept
+  # its root image out of its record.
+  let fileName =
+    when defined(windows):
+      if name.splitFile.ext.len == 0: name & ".exe" else: name
+    else:
+      name
   for dir in searchPath.split(PathSep):
     # POSIX: an empty PATH element names the current working directory.
     let dirBase = if dir.len == 0: action.cwd else: dir
     if dirBase.len == 0:
       continue
-    let candidate = materialPath(action.cwd, dirBase) / name
+    let candidate = materialPath(action.cwd, dirBase) / fileName
     if isExecutableFile(candidate):
       return os.normalizedPath(candidate)
   ""
