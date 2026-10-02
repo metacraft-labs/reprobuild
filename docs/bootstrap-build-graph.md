@@ -64,7 +64,17 @@ Linux does not use the upstream Linux binary archive: its `bin/nim` is
 statically linked, which the preload monitor cannot instrument, so interface
 extraction would produce incomplete dependency evidence and never be cached.
 Building the same release from its C sources gives a dynamically linked
-compiler that the monitor observes.
+compiler that the monitor observes. The source build is a provisioning edge of
+its own (`nim-source-build`), downstream of the tarball edge that downloads,
+verifies and unpacks the source archive.
+
+A project that pins its provider compiler (`packageSource "nim", "store"`,
+`uses: "nim ==<v>"`) replaces this table for its own recipe: `repro lock
+refresh` records the official archive for the lock's platform (URL and
+sha256) in the lock, and the first command in the project realizes that
+archive through the same edges (binary archives as is; source archives built
+as above) into `prefixes/nim/<v>-<hash>/`. See
+[Pinning the compiler that builds the provider](user-guide/pinning-reprobuild-itself.md#pinning-the-compiler-that-builds-the-provider).
 
 **A provisioning failure stops the command.** The diagnostic names what was
 being provisioned, the route, the tool store, the failure, and the remedy. It
