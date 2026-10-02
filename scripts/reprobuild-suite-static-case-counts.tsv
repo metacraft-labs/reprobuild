@@ -972,6 +972,7 @@ tests/e2e/path-only/t_path_only_tool_interfaces.nim	nim	2
 tests/e2e/scoop/t_e2e_scoop_adapter_diagnostics.nim	nim	0
 tests/e2e/scoop/t_e2e_scoop_adapter_realize_and_launch.nim	nim	0
 tests/e2e/scoop/t_e2e_scoop_practical_hardening.nim	nim	0
+tests/e2e/scoop/t_e2e_scoop_provisioning_edge.nim	nim	0
 tests/e2e/sharding/t_e2e_repro_test_shard_balances_wall_time.nim	nim	1
 tests/e2e/sharding/t_e2e_repro_test_shard_emit_plan_then_consume.nim	nim	1
 tests/e2e/sharding/t_e2e_repro_test_shard_lan_peer_cache_not_implemented.nim	nim	1
@@ -1556,6 +1557,7 @@ tests/integration/t_ti1_interface_artifact_edge.nim	nim	4
 tests/integration/t_ti2_separate_module_producer.nim	nim	2
 tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim	nim	1
 tests/integration/t_ti3_fingerprint_split.nim	nim	3
+tests/integration/t_tool_consumer_declares_provisioning_receipt.nim	nim	3
 tests/integration/t_tool_probe_stdin.nim	nim	3
 tests/integration/t_top_level_sync_pull_shortcuts_match_workspace_forms.nim	nim	1
 tests/integration/t_tpm2_codec_rejects_malformed.nim	nim	2
@@ -1691,10 +1693,12 @@ tests/unit/t_export_plan_carries_tool_ops.nim	nim	4
 tests/unit/t_flake_lock_has_no_competing_reprobuild_pin.nim	nim	2
 tests/unit/t_flake_lock_names_no_private_input.nim	nim	10
 tests/unit/t_fribidi_dev_stub.nim	nim	1
+tests/unit/t_from_source_cabal_recognition.nim	nim	8
 tests/unit/t_from_source_cargo_recognition.nim	nim	8
 tests/unit/t_from_source_go_recognition.nim	nim	8
 tests/unit/t_from_source_npm_recognition.nim	nim	7
 tests/unit/t_from_source_realization_platform.nim	nim	2
+tests/unit/t_hackage_vendor_manifest.nim	nim	10
 tests/unit/t_hash_policy_frame_bytes.nim	nim	7
 tests/unit/t_hcr_agent_coordinator.nim	nim	1
 tests/unit/t_hcr_agent_endpoint.nim	nim	6
