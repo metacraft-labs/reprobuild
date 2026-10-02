@@ -4206,8 +4206,20 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
     let run = runProvisioningEdges(edges, root, forceRebuild = attempt > 0)
     raiseProvisioningFailure(run)
     receipt = readTarballProvisionReceipt(edges.rootReceipt)
+    # The receipt must name a prefix that carries what the package declares
+    # NOW, its alias included. An edge record from before a package gained an
+    # alias names the prefix realized without it, and accepting that
+    # receipt because the primary executable is there is how Windows
+    # `python3` stayed off PATH after `python3.exe` was declared. Re-running
+    # the edge realizes the prefix the current layout keys on. (The alias is
+    # written beside the executable; a launcher-pair alias is not a plain
+    # file of that name and is not checked here.)
     if receipt.executable.len > 0 and
-        fileExists(extendedPath(receipt.executable)):
+        fileExists(extendedPath(receipt.executable)) and
+        (plan.declaredExecutableAlias.len == 0 or
+         plan.declaredLauncher.len > 0 or
+         fileExists(extendedPath(receipt.executable.parentDir /
+           plan.declaredExecutableAlias))):
       break
     if attempt > 0:
       raise newException(OSError,
