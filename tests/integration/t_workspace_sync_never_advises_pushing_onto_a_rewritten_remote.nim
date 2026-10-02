@@ -189,6 +189,38 @@ proc advisesPush(reason: string): bool =
     idx = lowered.find("push", idx + 4)
   false
 
+proc advisedReproSyncCommands(reason: string): seq[string] =
+  ## Every ``repro sync …`` command a refusal names, exactly as an operator
+  ## would copy it out of the quotes.
+  ##
+  ## The cases below RUN what this returns rather than a command the test
+  ## author chose. That is the whole point: Interactive-UX-And-Progress.md
+  ## Principle 2 is "Name the fix. Pair every refusal with the command that
+  ## resolves it", and the only way to assert that property is to take the
+  ## tool at its word. A test that hard-codes the right flags passes while
+  ## the printed advice is one flag short of working, which is the defect
+  ## these cases exist for.
+  var i = 0
+  while true:
+    let start = reason.find("'repro sync", i)
+    if start < 0: break
+    let close = reason.find('\'', start + 1)
+    if close < 0: break
+    result.add(reason[start + 1 ..< close])
+    i = close + 1
+
+proc advisedCommandWith(reason, flag: string): string =
+  ## The one advised ``repro sync`` command carrying ``flag``, or "".
+  for command in advisedReproSyncCommands(reason):
+    if flag in command:
+      return command
+  ""
+
+proc flagsOf(command: string): seq[string] =
+  for token in command.split(' '):
+    if token.startsWith("--"):
+      result.add(token.strip())
+
 suite "repro workspace sync — never advise pushing onto a rewritten remote":
 
   test "t_workspace_sync_never_advises_pushing_onto_a_rewritten_remote":
@@ -473,3 +505,176 @@ suite "repro workspace sync — never advise pushing onto a rewritten remote":
         " rev-parse HEAD").strip() == intactHead
       check runCmd(q(gitBin) & " -C " & q(workspaceRoot / "purged") &
         " cat-file -e " & q(oldTip & "^{commit}")).code == 0
+
+  test "t_workspace_sync_rewritten_remote_remedy_resolves_the_refusal":
+    ## The refusal is right to refuse, right to forbid the push — and then
+    ## has to hand over a command that WORKS.
+    ##
+    ## Interactive-UX-And-Progress.md Principle 2: "Name the fix. Pair every
+    ## refusal with the command that resolves it." The text named
+    ## ``repro sync --force-sync``, and run exactly as printed that resolved
+    ## nothing: both destructive sync paths route through the RA-9
+    ## preview-and-confirm gate, which REFUSES in a non-interactive context
+    ## without ``--yes`` — and every CI job and every agent is
+    ## non-interactive. Measured on twelve rewritten recorder checkouts:
+    ## ``repro sync --only=<the twelve> --force-sync`` answered
+    ## ``refused 12, force-reset 0`` and re-printed the same advice, so the
+    ## operator paid a full workspace re-run to learn the remedy was inert.
+    ## Naming an incomplete command is worse than naming none.
+    ##
+    ## So these assertions do not hard-code the flags they think are right:
+    ## they TAKE THE TOOL AT ITS WORD, extract the ``repro sync`` command out
+    ## of the refusal, and run it. A test that typed ``--force-sync --yes``
+    ## itself would stay green while the printed advice went back to being
+    ## one flag short.
+    ##
+    ## The second half is the conditional advice, asserted in BOTH
+    ## polarities, because a remedy offered where it cannot act is the same
+    ## defect in the other direction:
+    ##
+    ##   * ``observed`` — the sync's own fetch watches the remote move, so a
+    ##     superseded base is recorded and the replay has both inputs it
+    ##     needs. ``--rebase-on-force-push`` is then the remedy that KEEPS
+    ##     the operator's commits, and it must be offered.
+    ##   * ``inferred`` — the rewrite was learned about after the fact (an
+    ##     earlier command fetched), so nothing is recorded and
+    ##     ``canAutoRebase`` is false whatever the flag says. Offering the
+    ##     flag there would advertise a second inert command.
+    ##
+    ## Both repos sit on their declared trunk with a remote counterpart, so
+    ## the ONLY difference between the two rows is whether the transition was
+    ## observed.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case rewrites a real remote and then " &
+        "runs the remedy the refusal names")
+    else:
+      let scratch = createTempDir("repro-sync-rewrite-remedy-", "")
+      defer: removeDir(scratch)
+      let reproBin = reproBinary()
+      let workspaceRoot = scratch / "workspace"
+      createDir(workspaceRoot / "projects")
+      createDir(workspaceRoot / "repos")
+      var remotes: seq[(string, string)]
+
+      proc seedRewritten(name: string; fetchBeforeSync: bool):
+          tuple[origin, seedPath, oldTip, head: string] =
+        let origin = scratch / ("origin-" & name & ".git")
+        let seedPath = scratch / ("seed-" & name)
+        let oldTip = seedOrigin(gitBin, origin, seedPath, "old " & name,
+          branch = "dev")
+        discard requireGit(q(gitBin) & " clone --branch dev " &
+          q(fileUrl(origin)) & " " & q(workspaceRoot / name))
+        discard requireGit(q(gitBin) & " -C " & q(workspaceRoot / name) &
+          " config user.email tester@example.invalid")
+        discard requireGit(q(gitBin) & " -C " & q(workspaceRoot / name) &
+          " config user.name \"Rewrite Tester\"")
+        let head = commitOwnWorkOnCurrentBranch(gitBin, workspaceRoot / name)
+        rewriteOriginWithDisjointHistory(gitBin, origin, seedPath,
+          branch = "dev")
+        if fetchBeforeSync:
+          discard requireGit(q(gitBin) & " -C " & q(workspaceRoot / name) &
+            " fetch --prune origin")
+        writeFile(workspaceRoot / "repos" / (name & ".toml"),
+          branchTrackingFragmentToml(name, "dev"))
+        remotes.add((name, fileUrl(origin)))
+        (origin, seedPath, oldTip, head)
+
+      let observed = seedRewritten("observed", fetchBeforeSync = false)
+      let inferred = seedRewritten("inferred", fetchBeforeSync = true)
+      writeFile(workspaceRoot / "projects" / "rewriteproject.toml",
+        projectToml(remotes, trunk = "dev"))
+
+      proc runSync(extra: openArray[string]): CmdResult =
+        var argv = @[reproBin, "workspace", "sync", "rewriteproject",
+          "--write-report", "--workspace-root=" & workspaceRoot]
+        for arg in extra:
+          argv.add(arg)
+        runShell(shellCommand(argv))
+
+      let reportPath = workspaceRoot / ".repro" / "build" / "reports" /
+        "sync-report.json"
+      proc report(): JsonNode = parseFile(reportPath)
+
+      proc headOf(name: string): string =
+        requireGit(q(gitBin) & " -C " & q(workspaceRoot / name) &
+          " rev-parse HEAD").strip()
+
+      # ---- the refusal, and what it advises ----------------------------
+      let refusal = runSync([])
+      checkpoint("bare sync: exit " & $refusal.code & "\n" & refusal.output)
+      check fileExists(reportPath)
+      let firstDoc = report()
+      check firstDoc["summary"]["refused"].getInt() == 2
+      check firstDoc["summary"]["forceReset"].getInt() == 0
+
+      let observedReason = entryFor(firstDoc, "observed")["refusalReason"].getStr()
+      let inferredReason = entryFor(firstDoc, "inferred")["refusalReason"].getStr()
+      checkpoint("observed remedy: " & observedReason)
+      checkpoint("inferred remedy: " & inferredReason)
+      # THE PREMISE of the two polarities, asserted rather than assumed.
+      #
+      # It is read off ``force-pushes.json`` and not off the report, because
+      # the report's ``forcePushedBaseSha`` is populated from the DECISION and
+      # the planner copies the observation's base only into the accepted
+      # rebase — a refusal's row carries "" whatever the observation saw. A
+      # premise read there would be vacuously true for both rows.
+      let forcePushesPath = workspaceRoot / ".repro" / "workspace" /
+        "force-pushes.json"
+      check fileExists(forcePushesPath)
+      let recorded = parseFile(forcePushesPath)
+      # ``observed``: the sync's own fetch watched the remote move, so the
+      # superseded commits are on record and the replay has a base.
+      check recorded.hasKey("observed")
+      # ``inferred``: the rewrite was already fetched, so this run saw no
+      # transition and recorded nothing for it. Ancestry is the only signal
+      # that produced its verdict, and there is nothing to replay from.
+      check not recorded.hasKey("inferred")
+
+      # The preserving remedy is offered where it can act, and nowhere else.
+      check "--rebase-on-force-push" in observedReason
+      check "--rebase-on-force-push" notin inferredReason
+      # Both name a discard remedy, since that one always applies.
+      check advisedCommandWith(observedReason, "--force-sync").len > 0
+      check advisedCommandWith(inferredReason, "--force-sync").len > 0
+
+      # ---- running the advice resolves it: the discard remedy ----------
+      let discardCommand = advisedCommandWith(inferredReason, "--force-sync")
+      checkpoint("running the advised command: " & discardCommand)
+      let discardRun = runSync(flagsOf(discardCommand) &
+        @["--only=inferred"])
+      checkpoint("advised discard run: exit " & $discardRun.code & "\n" &
+        discardRun.output)
+      let afterDiscard = report()
+      # RESOLVED: not refused again, counted as the overwrite it is, and the
+      # checkout is on the rewritten history.
+      check afterDiscard["summary"]["refused"].getInt() == 0
+      check afterDiscard["summary"]["forceReset"].getInt() == 1
+      check discardRun.code == 0
+      let inferredRemoteTip = requireGit(q(gitBin) & " -C " &
+        q(workspaceRoot / "inferred") &
+        " rev-parse refs/remotes/origin/dev").strip()
+      check headOf("inferred") == inferredRemoteTip
+      check headOf("inferred") != inferred.head
+
+      # ---- and the preserving remedy, where it was offered -------------
+      let replayCommand = advisedCommandWith(observedReason,
+        "--rebase-on-force-push")
+      checkpoint("running the advised command: " & replayCommand)
+      let replayRun = runSync(flagsOf(replayCommand) & @["--only=observed"])
+      checkpoint("advised replay run: exit " & $replayRun.code & "\n" &
+        replayRun.output)
+      let afterReplay = report()
+      check afterReplay["summary"]["refused"].getInt() == 0
+      check afterReplay["summary"]["rebased"].getInt() == 1
+      check replayRun.code == 0
+      # The operator's commit is ON THE BRANCH, on top of the rewritten
+      # upstream — asserted against refs, never the reflog.
+      let observedRemoteTip = requireGit(q(gitBin) & " -C " &
+        q(workspaceRoot / "observed") &
+        " rev-parse refs/remotes/origin/dev").strip()
+      check requireGit(q(gitBin) & " -C " & q(workspaceRoot / "observed") &
+        " rev-parse HEAD~1").strip() == observedRemoteTip
+      check requireGit(q(gitBin) & " -C " & q(workspaceRoot / "observed") &
+        " log -1 --format=%s").strip() == "my own work"
+      check fileExists(workspaceRoot / "observed" / "my-work.txt")

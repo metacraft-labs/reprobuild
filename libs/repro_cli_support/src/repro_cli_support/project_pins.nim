@@ -23,8 +23,8 @@
 ##     loop guard), or hand over. A hand-over to a version the store does not
 ##     hold refuses, exit 70, naming ``repro self install``;
 ##   * a pinned provider Nim is realized into the store (resident prefix, or
-##     the bootstrap's own Nim route when the versions agree) and held by a
-##     pin root;
+##     the official archive the lock pins by URL and SHA-256, built from
+##     source where that archive is the source one) and held by a pin root;
 ##   * a hand-over execs the pinned prefix's ``bin/repro`` with the caller's
 ##     argv unchanged and the environment edits ``handOverEnvironment``
 ##     documents (the compiler among them);
@@ -86,18 +86,27 @@ proc realizePinnedProviderNim*(storeRoot: string; pin: SelfPin): string =
   ## Put the Nim ``pin`` names into the store and return its executable.
   ##
   ## Resident: arithmetic and one ``fileExists``, like the reprobuild pin.
-  ## Not resident: the ONE route this reprobuild has is its own bootstrap
-  ## Nim (``bootstrapNimToolUse``: URL + sha256, realized through the same
-  ## verified tarball path every declared tool uses), and it satisfies the
-  ## pin only when it is the pinned version for the pinned platform. The
-  ## realized distribution is then installed at the pin's own prefix
+  ## Not resident, in order:
+  ##
+  ##   1. The archive the LOCK pins (``pin.archive``: URL + SHA-256, written
+  ##      by ``repro lock refresh`` for the lock's platform). Realized through
+  ##      the tool store's provisioning edges (``provisionPinnedNim``): a
+  ##      binary archive is downloaded and verified against the pinned digest;
+  ##      a source archive is verified the same way and then built with the
+  ##      bootstrap C compiler. Any released Nim version, on every host.
+  ##   2. A lock written before archive pins existed carries none. Its pin is
+  ##      still realizable when it names the bootstrap's own Nim
+  ##      (``bootstrapNimToolUse``), whose digest this reprobuild carries.
+  ##
+  ## The realized distribution is then installed at the pin's own prefix
   ## (hardlinked, so no second copy of the bytes), which is what makes the
   ## next resolution arithmetic again and lets ``repro store gc`` see it.
   ##
-  ## Every other case RAISES, naming the command that would satisfy it.
-  ## Falling back to the bootstrap's default Nim would compile the provider
-  ## with a compiler the lock does not name, which is the failure the pin
-  ## exists to rule out.
+  ## Every other case, and every failure, RAISES ``ProviderNimPinError``
+  ## naming what was being provisioned, from where, the failure and the
+  ## remedy. Falling back to the bootstrap's default Nim would compile the
+  ## provider with a compiler the lock does not name, which is the failure
+  ## the pin exists to rule out.
   let pkg = providerNimPin()
   let prefix = selfPrefixAbsolutePath(storeRoot, pin)
   let exe = pinnedExecutableIn(pkg, prefix)
@@ -112,37 +121,65 @@ proc realizePinnedProviderNim*(storeRoot: string; pin: SelfPin): string =
       pin.lockPath & " pins the provider compiler " & pkg.name & " " &
       pin.version & " for platform \"" & pin.platform & "\", which is not " &
       "in the store at " & prefix & ", and this host is \"" & host &
-      "\", so this reprobuild's own Nim cannot stand in for it. Re-lock on " &
-      "this platform (`repro lock refresh`), or install that distribution: " &
-      installCmd)
-  let routeVersion = bootstrapNimVersion()
-  let useDef = bootstrapNimToolUse()
-  if routeVersion != pin.version or useDef.tarballProvisioning.len == 0:
-    raise newException(ProviderNimPinError,
-      pin.lockPath & " pins the provider compiler " & pkg.name & " " &
-      pin.version & ", which is not in the store at " & prefix & ". This " &
-      "reprobuild can fetch only " &
-      (if routeVersion.len > 0: pkg.name & " " & routeVersion
-       else: "a Nim whose version its route does not declare") &
-      " by itself. Install " & pin.version & " from a Nim distribution " &
-      "directory: " & installCmd)
-  note("realizing the pinned provider compiler " & pkg.name & " " &
-    pin.version & " from " & useDef.tarballProvisioning[0].url)
+      "\", so the archive the lock pins is not one this host can run. " &
+      "Re-lock on this platform (`repro lock refresh`), or install that " &
+      "distribution: " & installCmd)
   let toolStore = storeRoot / "tool-store"
   var tree = ""
-  try:
-    let profile = resolveTarballTool(useDef, toolStore)
-    bumpWindowsNimStack(profile.resolvedExecutablePath)
-    tree = profile.selectedStorePath
-  except CatchableError as err:
-    raise newException(ProviderNimPinError,
-      "could not realize the pinned provider compiler " & pkg.name & " " &
-      pin.version & " (" & useDef.tarballProvisioning[0].url & ", sha256 " &
-      useDef.tarballProvisioning[0].sha256 & ") into the tool store at " &
-      toolStore & ": " & err.msg & ". Or install it from a Nim " &
-      "distribution directory: " & installCmd)
-  let installed = selfinstall.installPinnedImage(pkg, storeRoot, pin.version,
-    pin.platform, tree)
+  if pin.archive.isPinned:
+    note("realizing the pinned provider compiler " & pkg.name & " " &
+      pin.version & " from " & pin.archive.url & " (" & pin.archive.build &
+      ", sha256 " & pin.archive.sha256 & ")")
+    try:
+      tree = provisionPinnedNim(toolStore, pin.version, pin.archive.url,
+        pin.archive.sha256, pin.archive.archiveType, pin.archive.build).tree
+    except CatchableError as err:
+      raise newException(ProviderNimPinError,
+        "could not provision the provider compiler " & pkg.name & " " &
+        pin.version & " that " & pin.lockPath & " pins" &
+        "\n  archive: " & pin.archive.url & " (" & pin.archive.build &
+        ", sha256 " & pin.archive.sha256 & ", as the lock records it)" &
+        "\n  tool store: " & toolStore &
+        "\n  failure: " & err.msg.strip().replace("\n", "\n    ") &
+        "\n  remedy: if the archive's digest no longer matches, the lock " &
+        "and upstream disagree; re-run `repro lock refresh` and review the " &
+        "new digest before committing it. To provide the compiler by hand " &
+        "instead: " & installCmd)
+  else:
+    let routeVersion = bootstrapNimVersion()
+    let useDef = bootstrapNimToolUse()
+    if routeVersion != pin.version or useDef.tarballProvisioning.len == 0:
+      raise newException(ProviderNimPinError,
+        pin.lockPath & " pins the provider compiler " & pkg.name & " " &
+        pin.version & ", which is not in the store at " & prefix & ", and " &
+        "the lock records no archive for it (it was written before " &
+        "`repro lock refresh` recorded one). Re-run `repro lock refresh` " &
+        "to pin the official " & pkg.name & " " & pin.version & " archive " &
+        "for " & pin.platform & ", or install it from a Nim distribution " &
+        "directory: " & installCmd)
+    note("realizing the pinned provider compiler " & pkg.name & " " &
+      pin.version & " from this reprobuild's own pin, " &
+      useDef.tarballProvisioning[0].url)
+    try:
+      let profile = resolveTarballTool(useDef, toolStore)
+      bumpWindowsNimStack(profile.resolvedExecutablePath)
+      tree = profile.selectedStorePath
+    except CatchableError as err:
+      raise newException(ProviderNimPinError,
+        "could not realize the pinned provider compiler " & pkg.name & " " &
+        pin.version & " (" & useDef.tarballProvisioning[0].url & ", sha256 " &
+        useDef.tarballProvisioning[0].sha256 & ") into the tool store at " &
+        toolStore & ": " & err.msg & ". Or install it from a Nim " &
+        "distribution directory: " & installCmd)
+  let installed =
+    try:
+      selfinstall.installPinnedImage(pkg, storeRoot, pin.version,
+        pin.platform, tree)
+    except CatchableError as err:
+      raise newException(ProviderNimPinError,
+        "the provider compiler " & pkg.name & " " & pin.version &
+        " was realized at " & tree & " but could not be installed at " &
+        prefix & ": " & err.msg)
   if not fileExists(installed.executablePath):
     raise newException(ProviderNimPinError,
       "installing the pinned provider compiler " & pkg.name & " " &
