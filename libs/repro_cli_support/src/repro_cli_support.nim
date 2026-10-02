@@ -13309,10 +13309,19 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
   ## but applied none of the recipe's `devEnv:` block, and the artifact path
   ## applied the block but provisioned nothing.
   ##
-  ## Path-mode is deliberately a no-op. Its whole contract is "resolve against
-  ## the caller's PATH", so there is nothing to prepend and prepending the
-  ## resolver's own search list would merely re-order the host's PATH against
-  ## itself.
+  ## Path-mode contributes only what the caller's PATH could NOT supply. Its
+  ## contract is "resolve against the caller's PATH", so a tool found there is
+  ## left where it is -- prepending the resolver's own search list would merely
+  ## re-order the host's PATH against itself. But the path-mode resolver does
+  ## not stop at the caller's PATH: a tool missing from it whose package
+  ## declares a release archive is realized from that archive, which is how
+  ## `repro build` obtains it. An activation that skipped path mode outright
+  ## therefore provided less than the build it is the environment for:
+  ## reprobuild's own Windows shell, entered from a minimal PATH, had neither
+  ## `just` nor anything else its `uses:` declares, and `just lint` could not
+  ## start. So path mode now runs the same resolution and contributes the
+  ## directories of every tool it REALIZED (any install method other than
+  ## `path`), and nothing for a tool the caller's PATH already had.
   ##
   ## Never fatal. A recipe that names a package with no realization for this
   ## platform must leave the developer with a WORKING shell that says what it
@@ -13350,10 +13359,6 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
 
   let mode = effectiveToolProvisioning(
     resolveToolProvisioningWithEnv(tpmUnspecified), interfaceArtifact)
-  if mode == tpmPathOnly:
-    # Path-mode's whole contract is "resolve against the caller's PATH", so
-    # there is nothing to prepend.
-    return
   if mode == tpmUnspecified:
     # Declared packages and no mode to realize them with. Silence here reads
     # as a working environment that quietly provisions none of what the
@@ -13379,9 +13384,15 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
   let storeRoot = resolveStoreRoot() / "tool-store"
   var binDirs: seq[string] = @[]
   var prefixOps: seq[DevEnvShellOp] = @[]
+  proc contributed(identity: PathOnlyBuildIdentity): PathOnlyBuildIdentity =
+    ## Under path mode, only the tools the resolver realized; a tool resolved
+    ## from the caller's own PATH is already on it. See the doc comment.
+    result = identity
+    if mode == tpmPathOnly:
+      result.profiles = identity.profiles.filterIt(it.installMethod != "path")
   try:
-    let identity = resolveAndWriteIdentity(interfaceArtifact,
-      selection.outDir, mode, storeRootOverride = storeRoot).identity
+    let identity = contributed(resolveAndWriteIdentity(interfaceArtifact,
+      selection.outDir, mode, storeRootOverride = storeRoot).identity)
     binDirs = binDirsForDevelop(identity, storeRoot = storeRoot)
     prefixOps = prefixEnvOpsForDevelop(identity)
   except CatchableError as batchErr:
@@ -13401,8 +13412,8 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
       var single = interfaceArtifact
       single.projectInterface.toolUses = @[useDef]
       try:
-        let singleIdentity = toolBuildIdentity(single, mode,
-          storeRoot = storeRoot)
+        let singleIdentity = contributed(toolBuildIdentity(single, mode,
+          storeRoot = storeRoot))
         for dir in binDirsForDevelop(singleIdentity, storeRoot = storeRoot):
           if dir notin binDirs:
             binDirs.add(dir)
