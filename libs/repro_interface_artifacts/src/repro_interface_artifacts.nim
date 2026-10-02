@@ -3260,6 +3260,13 @@ proc hostCCompilerPath(): string =
   else:
     ""
 
+const ReprobuildLibsOverrideEnvVars* = ["REPROBUILD_LIBS_DIR",
+                                       "REPROBUILD_REPO_ROOT"]
+  ## The operator overrides `reprobuildLibsRootFromEnv` reads, in precedence
+  ## order. Named once because every process boundary a recipe compile
+  ## crosses has to carry them: an isolated launch, and the dev-env cache key
+  ## that decides whether a previous extraction may be reused.
+
 proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
   ## The environment values the provider-compile edge DECLARES, so that the
   ## caller's shell stops deciding what the edge is.
@@ -3327,6 +3334,14 @@ proc providerCompileLaunchEnv*(homeDir: string): seq[string] =
       seenRoots.add(name)
   for name in ["REPROBUILD_SOURCE_ROOT", "CODETRACER_TRACE_FORMAT_NIM_SRC",
                SeededSourceEnvironmentVar]:
+    if name notin seenRoots:
+      seenRoots.add(name)
+  # And the operator's override for WHICH reprobuild libs the compile builds
+  # against (`reprobuildLibsRootFromEnv`, read by `reproLibPathFlags` INSIDE
+  # this compile). Leaving them out of an isolated launch silently reverted
+  # every recipe compile to the libs of the checkout the engine was built
+  # from, whatever the caller had asked for.
+  for name in ReprobuildLibsOverrideEnvVars:
     if name notin seenRoots:
       seenRoots.add(name)
   for name in seenRoots:
@@ -3425,10 +3440,10 @@ proc reprobuildLibsRootFromEnv(): string =
   ## "where reprobuild's libs/ live". Set by the engine when invoking
   ## an out-of-tree provider compile; mirrors ``$REPROBUILD_REPO_ROOT``
   ## except it points at the libs dir directly. Empty when not set.
-  let direct = getEnv("REPROBUILD_LIBS_DIR")
+  let direct = getEnv(ReprobuildLibsOverrideEnvVars[0])
   if direct.len > 0:
     return direct
-  let repoRoot = getEnv("REPROBUILD_REPO_ROOT")
+  let repoRoot = getEnv(ReprobuildLibsOverrideEnvVars[1])
   if repoRoot.len > 0:
     return repoRoot / "libs"
   ""

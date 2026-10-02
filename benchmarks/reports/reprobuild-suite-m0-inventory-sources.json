@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1808,
+    "nimTestBinaries": 1809,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 594,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1824
+    "testEntries": 1825
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1065,7 +1065,7 @@
       "integration": 948,
       "platform/destructive": 117,
       "pure unit": 594,
-      "unclassified": 154
+      "unclassified": 155
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1213,9 +1213,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1808,
+    "nimTestBinaryCount": 1809,
     "pythonTestFileCount": 16,
-    "testEntryCount": 1824
+    "testEntryCount": 1825
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -38015,6 +38015,24 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_reasoned_skip_compiles_on_any_unittest.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_recipe_compile_honours_the_reprobuild_libs_override",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dev_env_engine",
+        "repro_interface_artifacts"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,

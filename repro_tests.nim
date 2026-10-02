@@ -15993,6 +15993,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim",
+    binary: "build/test-bin/t_recipe_compile_honours_the_reprobuild_libs_override",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_run_consumes.nim",
     binary: "build/test-bin/t_run_consumes",
     defines: @[],
