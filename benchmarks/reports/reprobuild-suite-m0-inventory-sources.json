@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1810,
+    "nimTestBinaries": 1812,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 593,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1826
+    "testEntries": 1828
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1064,7 +1064,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 950,
+      "integration": 952,
       "platform/destructive": 117,
       "pure unit": 593,
       "unclassified": 155
@@ -1215,9 +1215,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1810,
+    "nimTestBinaryCount": 1812,
     "pythonTestFileCount": 16,
-    "testEntryCount": 1826
+    "testEntryCount": 1828
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -32600,6 +32600,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_spi_leaf_detector_messages",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_spi_leaf_detector_messages.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_spi_leaf_refetches_through_pool",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -32611,6 +32628,23 @@
       "source": "tests/integration/t_spi_leaf_refetches_through_pool.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_spi_migrates_existing_pool_and_leaves",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_spi_migrates_existing_pool_and_leaves.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

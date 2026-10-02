@@ -17380,6 +17380,16 @@ proc runPostCommitLockCommand*(args: openArray[string]): int
 proc runPreCommitLockCommand*(args: openArray[string]): int
 proc runCachePushCommand*(args: openArray[string]): int
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string]
+
+proc emitLeafReports(reports: openArray[LeafCheckReport]) =
+  ## Print the shared-clone detector's messages
+  ## (Shared-Clone-Pool-Integrity §4.4) on stderr. Every caller that refreshes
+  ## a pool or runs the detector routes its findings here, so a stale ref
+  ## that was removed, or a branch of the user's whose history is gone, is
+  ## said once, in the same words, whichever command noticed it.
+  for line in messages(reports):
+    stderr.writeLine(line)
+
 proc runManifestRefreshHookCommand*(hookName: string;
                                     args: openArray[string]): int
 # Workspace-Membership-Model.md — the ``post-merge`` hook's local-state
@@ -32850,6 +32860,12 @@ proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; ide
     var prunable: seq[string]
     var surviving = 0
     for name in actualRemotes:
+      if name == LeafPoolRemoteName:
+        # Reprobuild's own remote for the shared clone this checkout borrows
+        # from (Shared-Clone-Pool-Integrity §3.4). No manifest declares it,
+        # and it is neither the manifest's to prune nor a remote that counts
+        # as the checkout "having" one.
+        continue
       if name in expectedRemotes:
         inc surviving
       else:
@@ -32952,6 +32968,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
     if sharedBareByUrl.hasKey(fetchUrl):
       return sharedBareByUrl[fetchUrl]
     let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     if not refreshed.ok and refreshed.diagnostic.len > 0:
       stderr.writeLine("workspace init: shared-clone cache miss for " &
@@ -38915,6 +38932,22 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       oldRemoteTips[repoIdx] = revParse(identity, repoPath,
         "refs/remotes/" & rName & "/" & repo.revision)
 
+  # Shared-Clone-Pool-Integrity §4.2: the detector runs in every leaf BEFORE
+  # its fetch. It registers the leaf with its pool and writes the refetch
+  # chain and ``fetch.hideRefs`` (§4.3), refills what upstream still serves,
+  # removes remote-tracking refs whose commit exists nowhere (message A) and
+  # explains, without touching anything, a branch of the user's that depends
+  # on a commit that is gone (message B). The pool refreshes below run it
+  # again, for every registered leaf, once the refresh has moved the pool.
+  block sharedCloneLeaves:
+    var reports: seq[LeafCheckReport]
+    for repo in resolved.repos:
+      let repoPath = args.workspaceRoot / repo.path
+      if dirExists(repoPath / ".git"):
+        reports.add(checkLeaf(identity.binaryPath, repoPath, lcmRepair,
+          cacheRoot))
+    emitLeafReports(reports)
+
   var sharedBareRefreshAction = initTable[string, string]()
   var fetchActions: seq[BuildAction]
   var refreshActions: seq[BuildAction]
@@ -39036,6 +39069,12 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     var fetchById = initTable[string, ActionResult]()
     for outcome in res.results:
       fetchById[outcome.id] = outcome
+    # A pool refresh reports what it found in the leaves registered with it
+    # on its stdout (``executeRefreshBare``); say it here.
+    for a in refreshActions:
+      let printed = fetchById.getOrDefault(a.id).stdout
+      if printed.len > 0:
+        stderr.write(printed)
     var fetchOk = 0
     for a in fetchActions:
       let outcome = fetchById.getOrDefault(a.id)
@@ -39186,6 +39225,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     if sharedBareForClone.hasKey(fetchUrl):
       return sharedBareForClone[fetchUrl]
     let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     if not refreshed.ok and refreshed.diagnostic.len > 0:
       stderr.writeLine("workspace sync: shared-clone cache miss for " &
@@ -39860,6 +39900,7 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     if sharedBareForClone.hasKey(fetchUrl):
       return sharedBareForClone[fetchUrl]
     let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     if not refreshed.ok and refreshed.diagnostic.len > 0:
       stderr.writeLine("workspace mainline sync: shared-clone cache miss for " &
@@ -40692,6 +40733,7 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
     if sharedBareByUrl.hasKey(fetchUrl):
       return sharedBareByUrl[fetchUrl]
     let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     sharedBareByUrl[fetchUrl] = reference
     reference
@@ -55000,10 +55042,23 @@ type
     repos*: seq[WorkspaceStatusRepoEntry]
     summary*: tuple[clean, dirty, missing, drifted, atLock,
       noLockRecorded: int]
+    leafReports*: seq[LeafCheckReport]
+      ## Shared-Clone-Pool-Integrity §4.2: the detector's report for each
+      ## checkout that borrows from a shared clone (report-only unless
+      ## ``--fix``).
     exitCode*: int
 
 proc toJsonNode*(report: WorkspaceStatusReport): JsonNode =
   result = newJObject()
+  var sharedCloneFindings = newJArray()
+  for lr in report.leafReports:
+    for f in lr.findings:
+      if f.message.len == 0:
+        continue
+      sharedCloneFindings.add(%*{"leaf": lr.leaf, "pool": lr.pool,
+        "kind": $f.kind, "ref": f.refName, "object": f.objectId,
+        "removed": f.removed, "message": f.message})
+  result["sharedCloneFindings"] = sharedCloneFindings
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
   result["activeBranch"] = %report.activeBranch
@@ -55117,6 +55172,9 @@ type
     aheadBehind: bool
     unmerged: bool
     fileDetails: bool
+    fix: bool
+      ## Shared-Clone-Pool-Integrity §4.2: remove stale remote-tracking refs
+      ## the shared-clone detector finds, instead of only reporting them.
     report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
@@ -55159,6 +55217,8 @@ proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
       result.unmerged = true
     elif arg == "--file-details":
       result.fileDetails = true
+    elif arg == "--fix":
+      result.fix = true
     elif consumeReportFlag(arg, result.report):
       discard
     elif arg.startsWith("-"):
@@ -55426,6 +55486,14 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
     if branchRes.code == 0:
       entry.branch = branchRes.output.strip()
 
+    # Shared-Clone-Pool-Integrity §4.2: is anything this checkout names gone
+    # from it and from its shared clone? Report-only unless ``--fix``.
+    let leafReport = checkLeaf(identity.binaryPath, repoAbsPath,
+      if args.fix: lcmRepair else: lcmReport,
+      defaultCacheRoot(args.workspaceRoot))
+    if leafReport.pool.len > 0:
+      report.leafReports.add(leafReport)
+
     if not entry.isClean:
       entry.checkoutState = "dirty"
       inc report.summary.dirty
@@ -55486,6 +55554,7 @@ proc runWorkspaceStatusCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
     emitLockCoherenceAdvisory(parsed.toolProvisioning, report.workspaceRoot,
       report.project, report.repos)
+    emitLeafReports(report.leafReports)
   report.exitCode
 
 # ---- M12.B: `repro workspace list` ----------------------------------------
@@ -55714,6 +55783,7 @@ type
     hfCloneSiblings   ## Clone the missing develop-mode siblings.
     hfWorkspaceErgonomics ## Repair workspace-projects.md, gitignore, and AGENTS.md.
     hfEnsureVcsHooks  ## Reinstall the managed VCS hooks in every participating repo.
+    hfSharedCloneLeaves ## Remove stale remote-tracking refs the shared-clone detector found.
 
   HealthCheck* = object
     ## One diagnosed layer. ``remedy`` is the exact command the user (or
@@ -55742,6 +55812,8 @@ type
     missingSiblings: seq[ResolvedRepo]
     gitIdentity: GitToolIdentity
     gitOk: bool
+    leafReports: seq[LeafCheckReport]
+      ## ``shared-clone-leaves``: the detector's report-only pass.
 
 proc parseHealthArgs(args: openArray[string]): HealthArgs =
   result.workspaceRoot = ""
@@ -56279,6 +56351,70 @@ proc gatherHealthChecks(parsed: HealthArgs):
           else: "re-run with the remotes reachable",
         fixKind: hfNone))
 
+  # 14. Shared-Clone-Pool-Integrity §4.2 — checkouts that borrow from a
+  #     shared clone and name an object that is gone from both. Report-only:
+  #     ``--fix`` removes the stale remote-tracking refs (message A); a
+  #     branch of the user's is never touched (message B), so it stays a warn
+  #     whose remedy is the per-branch fix the messages print.
+  block sharedCloneLeavesCheck:
+    if not ctx.resolvedOk or not ctx.gitOk:
+      checks.add(HealthCheck(
+        name: "shared-clone-leaves",
+        status: hsWarn,
+        detail: "skipped: " &
+          (if not ctx.resolvedOk: "manifest unresolved"
+           else: "no usable git tool"),
+        remedy: self & " health",
+        fixKind: hfNone))
+      break sharedCloneLeavesCheck
+    let cacheRoot = defaultCacheRoot(parsed.workspaceRoot)
+    var leaves = 0
+    var stale: seq[string]
+    var broken: seq[string]
+    for repo in ctx.resolved.repos:
+      let abs = parsed.workspaceRoot / repo.path
+      if not dirExists(abs / ".git"):
+        continue
+      let lr = checkLeaf(ctx.gitIdentity.binaryPath, abs, lcmReport,
+        cacheRoot)
+      if lr.pool.len == 0:
+        continue
+      inc leaves
+      ctx.leafReports.add(lr)
+      for f in lr.findings:
+        case f.kind
+        of lfkStaleRemoteRef:
+          stale.add(repo.path & " " & f.refName)
+        of lfkLocalTipMissing, lfkLocalHistoryMissing:
+          broken.add(repo.path & " " & f.refName)
+        else:
+          discard
+    if stale.len == 0 and broken.len == 0:
+      checks.add(HealthCheck(
+        name: "shared-clone-leaves",
+        status: hsOk,
+        detail: $leaves & " checkout(s) borrow from shared clones; every " &
+          "object they name is present",
+        remedy: "", fixKind: hfNone))
+    else:
+      var detail: seq[string]
+      if stale.len > 0:
+        detail.add($stale.len & " stale remote-tracking ref(s) whose " &
+          "commit no longer exists upstream or in the shared clone: " &
+          stale.join(", "))
+      if broken.len > 0:
+        detail.add($broken.len & " ref(s) of yours depend on a commit " &
+          "that no longer exists (nothing is changed automatically; the " &
+          "messages below say how to recover): " & broken.join(", "))
+      checks.add(HealthCheck(
+        name: "shared-clone-leaves",
+        status: hsWarn,
+        detail: detail.join("; "),
+        remedy:
+          if stale.len > 0: self & " health --fix"
+          else: "follow the per-ref fix in the messages printed below",
+        fixKind: if stale.len > 0: hfSharedCloneLeaves else: hfNone))
+
   result = (checks: checks, ctx: ctx)
 
 proc healthHasFailure(checks: seq[HealthCheck]): bool =
@@ -56402,6 +56538,19 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           $report.repos.len & " repo(s) (" & parts.join(", ") & ")")
       except CatchableError as err:
         result.add("fix: hooks ensure failed: " & err.msg)
+    of hfSharedCloneLeaves:
+      if not ctx.gitOk:
+        result.add("fix: cannot repair shared-clone leaves (no usable git tool)")
+        continue
+      result.add("fix: removing stale remote-tracking refs from checkouts " &
+        "that borrow from shared clones")
+      for lr in ctx.leafReports:
+        let repaired = checkLeaf(ctx.gitIdentity.binaryPath, lr.leaf,
+          lcmRepair, pool = lr.pool)
+        for f in repaired.findings:
+          if f.kind == lfkStaleRemoteRef and f.removed:
+            result.add("fix: removed " & f.refName & " in " & lr.leaf)
+            stderr.writeLine(f.message)
     of hfWorkspaceErgonomics:
       result.add("fix: repairing workspace ergonomics files")
       let gitignoreFile = parsed.workspaceRoot / ".gitignore"
@@ -56467,6 +56616,9 @@ proc runHealthCommand*(args: openArray[string]): int =
   else:
     for line in renderHealthTextLines(checks):
       stdout.writeLine(line)
+  # The shared-clone detector's messages (report-only here): what is wrong
+  # in each checkout, in words, with the exact commands that fix it.
+  emitLeafReports(ctx.leafReports)
 
   if healthHasFailure(checks): 1 else: 0
 
@@ -56742,7 +56894,7 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
       stdout.writeLine(line)
   report.exitCode
 
-# ---- RA-5: `repro workspace shared-clones [list|rewire|root]` --------------
+# ---- RA-5: `repro workspace shared-clones [list|rewire|root|gc|migrate]` ----
 #
 # Inspection / repair surface for the shared object-cache (per-upstream bare
 # clones + per-repo ``objects/info/alternates`` wiring). The accelerator is
@@ -56759,6 +56911,13 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
 #                  already-checked-out repo that is missing it. Best-effort
 #                  per repo — a failure to populate one bare is reported but
 #                  does not abort the others.
+#   * ``migrate`` — Shared-Clone-Pool-Integrity §5 over the WHOLE cache
+#                  root in one pass: every pool gets the retention hook and
+#                  its config, every leaf found (this workspace's repos, the
+#                  checkouts under it and under its initialized siblings, and
+#                  every leaf already registered) is registered, configured
+#                  and checked for dangling refs, and only then may a pool
+#                  leave ``gc.pruneExpire=never``.
 #   * ``gc`` (alias ``maintenance``) — RA-15 maintenance pass per unique
 #                  shared bare: prune ``refs/cache/<ws>/*`` for dead
 #                  workspaces (those whose directory no longer exists among
@@ -56805,6 +56964,11 @@ type
     cacheRoot*: string
     project*: string
     repos*: seq[SharedClonesRepoReport]
+    leafReports*: seq[LeafCheckReport]
+      ## The shared-clone detector's reports (``rewire``, ``migrate``).
+    poolExpiry*: seq[(string, string)]
+      ## ``migrate`` only: each pool and its ``gc.pruneExpire`` afterwards.
+    diagnostics*: seq[string]
     exitCode*: int
 
 proc toJsonNode*(report: SharedClonesReport): JsonNode =
@@ -56833,11 +56997,43 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
     obj["diagnostic"] = %entry.diagnostic
     repos.add(obj)
   result["repos"] = repos
+  var pools = newJArray()
+  for (pool, expiry) in report.poolExpiry:
+    pools.add(%*{"pool": pool, "pruneExpire": expiry,
+      "borrowers": readBorrowers(pool).len})
+  result["pools"] = pools
+  var leaves = newJArray()
+  for lr in report.leafReports:
+    var findings = newJArray()
+    for f in lr.findings:
+      findings.add(%*{"kind": $f.kind, "ref": f.refName, "object": f.objectId,
+        "removed": f.removed, "message": f.message})
+    leaves.add(%*{"leaf": lr.leaf, "pool": lr.pool,
+      "registered": lr.registered, "configured": lr.configured,
+      "findings": findings, "diagnostic": lr.diagnostic})
+  result["leaves"] = leaves
+  result["diagnostics"] = %report.diagnostics
   result["exitCode"] = %report.exitCode
 
 proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
   if report.verb == "root":
     result.add(report.cacheRoot)
+    return
+  if report.verb == "migrate":
+    result.add("workspace shared-clones: migrate root=" & report.cacheRoot &
+      " pools=" & $report.poolExpiry.len & " leaves=" &
+      $report.leafReports.len)
+    for (pool, expiry) in report.poolExpiry:
+      result.add("workspace shared-clones: pool " & pool & " gc.pruneExpire=" &
+        expiry & " borrowers=" & $readBorrowers(pool).len)
+    for lr in report.leafReports:
+      var line = "workspace shared-clones: leaf " & lr.leaf &
+        " registered=" & $lr.registered & " configured=" & $lr.configured
+      if lr.diagnostic.len > 0:
+        line.add(" diagnostic=" & lr.diagnostic)
+      result.add(line)
+    for d in report.diagnostics:
+      result.add("workspace shared-clones: error: " & d)
     return
   result.add("workspace shared-clones: root=" & report.cacheRoot &
     " project=" & report.project & " repos=" & $report.repos.len)
@@ -56890,13 +57086,28 @@ proc parseSharedClonesArgs(args: openArray[string]): SharedClonesArgs =
   # ``gc`` and ``maintenance`` are aliases for the RA-15 maintenance pass.
   if result.verb == "maintenance":
     result.verb = "gc"
-  if result.verb notin ["list", "rewire", "root", "gc"]:
+  if result.verb notin ["list", "rewire", "root", "gc", "migrate"]:
     raise newException(ValueError,
       "`repro workspace shared-clones` verb must be " &
-        "list|rewire|root|gc|maintenance, got: " & result.verb)
+        "list|rewire|root|gc|maintenance|migrate, got: " & result.verb)
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc liveWorkspaceRootsForCache(workspaceRoot: string): seq[string] =
+  ## This workspace plus every initialized sibling workspace under the same
+  ## parent directory: the workspaces that share this machine's shared
+  ## clones in the usual side-by-side layout.
+  result.add(workspaceRoot)
+  let parent = workspaceRoot.parentDir
+  if parent.len > 0 and dirExists(parent):
+    for kind, entry in walkDir(parent):
+      if kind notin {pcDir, pcLinkToDir}:
+        continue
+      if entry == workspaceRoot:
+        continue
+      if isInitializedWorkspace(entry):
+        result.add(entry)
 
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string] =
   ## RA-15 liveness predicate for dead-workspace ref pruning. The cache-ref
@@ -56908,18 +57119,7 @@ proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string] =
   ## not in this set belongs to a workspace that no longer exists on disk and
   ## is safe to prune. We err on the side of KEEPING a ref: only directories
   ## that fail the initialized-workspace check are treated as dead.
-  var roots: seq[string]
-  roots.add(workspaceRoot)
-  let parent = workspaceRoot.parentDir
-  if parent.len > 0 and dirExists(parent):
-    for kind, entry in walkDir(parent):
-      if kind notin {pcDir, pcLinkToDir}:
-        continue
-      if entry == workspaceRoot:
-        continue
-      if isInitializedWorkspace(entry):
-        roots.add(entry)
-  discoverLiveWorkspaceNames(roots)
+  discoverLiveWorkspaceNames(liveWorkspaceRootsForCache(workspaceRoot))
 
 proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   result.verb = parsed.verb
@@ -56940,8 +57140,29 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   # ``rewire`` and ``gc`` do live VCS work. ``list`` is read-only. Resolve
   # git only when we will use it.
   var identity: GitToolIdentity
-  if parsed.verb in ["rewire", "gc"]:
+  if parsed.verb in ["rewire", "gc", "migrate"]:
     identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+
+  if parsed.verb == "migrate":
+    # Shared-Clone-Pool-Integrity §5. The leaves a pool does not know about
+    # yet are found here, from the workspaces that share this cache; the
+    # pass itself (``migrateSharedClones``) also takes every leaf a pool has
+    # already registered.
+    var candidates: seq[string]
+    for repo in resolved.repos:
+      candidates.add(parsed.workspaceRoot / repo.path)
+    for found in findCheckoutsUnder(
+        liveWorkspaceRootsForCache(parsed.workspaceRoot)):
+      if found notin candidates:
+        candidates.add(found)
+    let migration = migrateSharedClones(identity.binaryPath,
+      result.cacheRoot, candidates)
+    result.leafReports = migration.leaves
+    result.poolExpiry = migration.poolExpiry
+    result.diagnostics = migration.diagnostics
+    if migration.diagnostics.len > 0:
+      result.exitCode = 1
+    return
 
   # RA-15: the dead-workspace prune needs the live-workspace set. Compute it
   # once for the whole pass (it is the same for every bare in this run).
@@ -56979,6 +57200,7 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
         sharedBareByUrl[cloneUrl] =
           refreshSharedBare(identity.binaryPath, result.cacheRoot,
             cloneUrl)
+        result.leafReports.add(sharedBareByUrl[cloneUrl].leafReports)
       let refreshed = sharedBareByUrl[cloneUrl]
       if not refreshed.ok:
         entry.diagnostic = "shared bare unavailable: " & refreshed.diagnostic
@@ -56988,8 +57210,13 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
       if info.wired:
         entry.wired = true
         entry.rewired = false
+        # Already wired, perhaps by a build that predates the borrower
+        # registry: the detector registers and configures it (§4.3).
+        result.leafReports.add(checkLeaf(identity.binaryPath, repoAbs,
+          lcmRepair, pool = refreshed.sharedBarePath))
       else:
-        let wired = wireAlternates(repoAbs, refreshed.sharedBarePath)
+        let wired = wireAlternates(repoAbs, refreshed.sharedBarePath,
+          identity.binaryPath)
         if wired.ok:
           entry.wired = true
           entry.rewired = true
@@ -57042,7 +57269,7 @@ proc writeSharedClonesReport(report: SharedClonesReport;
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
 proc runWorkspaceSharedClonesCommand*(args: openArray[string]): int =
-  ## ``repro workspace shared-clones [list|rewire|root|gc] [<project>]
+  ## ``repro workspace shared-clones [list|rewire|root|gc|migrate] [<project>]
   ## [--workspace-root=PATH] [--json] [--force]``. ``maintenance`` is an alias
   ## for ``gc``; ``--force`` bypasses the gc budget gate.
   let parsed = parseSharedClonesArgs(args)
@@ -57060,6 +57287,7 @@ proc runWorkspaceSharedClonesCommand*(args: openArray[string]): int =
   else:
     for line in renderSharedClonesTextLines(report):
       stdout.writeLine(line)
+  emitLeafReports(report.leafReports)
   report.exitCode
 
 # ---- RA-20: `repro workspace forall` --------------------------------------
@@ -74218,7 +74446,7 @@ proc runThinAppDispatch(programName: string): int =
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "shared-clones":
-    # RA-5 — `repro workspace shared-clones [list|rewire|root]`. Inspect
+    # RA-5 — `repro workspace shared-clones [list|rewire|root|gc|migrate]`. Inspect
     # or repair the shared object-cache wiring. Same dispatch convention
     # as the M9–M12 family: the implementation lives in
     # ``repro_cli_support`` as ``runWorkspaceSharedClonesCommand``.
