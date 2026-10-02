@@ -4972,7 +4972,7 @@ proc executeNimSourceBuildEdge*(action: BuildAction): ActionResult {.gcsafe.} =
       result.evidence = PathSetEvidence(declaredInputs: action.inputs,
         declaredOutputs: action.outputs)
     except CatchableError as err:
-      lastTarballProvisionError = err
+      lastProvisionError = err
       result.status = asFailed
       result.exitCode = 1
       result.stderr = err.msg
