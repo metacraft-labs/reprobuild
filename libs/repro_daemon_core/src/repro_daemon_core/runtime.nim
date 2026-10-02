@@ -115,6 +115,19 @@ type
                                   emit: UserDaemonBuildEmit;
                                   cancelCheck: UserDaemonBuildCancelCheck):
                                   int
+  UserDaemonProjectRootResolver* = proc(request: UserDaemonBuildRequest):
+      string
+    ## The project a build request is FOR, when the request does not say.
+    ##
+    ## The engine's own client fills ``projectRoot`` from the target it parsed.
+    ## The thin client (``apps/repro-client``) cannot — it forwards the raw
+    ## argument vector and links none of the target-resolution code — so its
+    ## requests arrive with ``projectRoot`` empty, and the session record used
+    ## to fall back to the client's working directory. ``repro build
+    ## <project>`` run from anywhere else then listed the wrong project in
+    ## ``repro daemon sessions``. The resolver derives it from the request
+    ## alone (``rawArgs`` resolved against ``workingDir``); an empty answer
+    ## keeps the working-directory fallback.
   UserDaemonParentPrewarmer* = proc(request: UserDaemonBuildRequest): string
     ## Dependency-Attribution MAC-2 — warm the DAEMON PARENT's in-memory build
     ## caches for an incoming request, so the worker about to be forked
@@ -209,6 +222,7 @@ const UserDaemonLockFileName = ".repro-daemon.lock"
 
 var userDaemonBuildExecutor: UserDaemonBuildExecutor
 var userDaemonParentPrewarmer: UserDaemonParentPrewarmer
+var userDaemonProjectRootResolver: UserDaemonProjectRootResolver
 var userDaemonWatchExecutor: UserDaemonWatchExecutor
 var userDaemonSubstituteExecutor: UserDaemonSubstituteExecutor
 
@@ -217,6 +231,26 @@ proc setUserDaemonBuildExecutor*(executor: UserDaemonBuildExecutor) =
 
 proc setUserDaemonParentPrewarmer*(prewarmer: UserDaemonParentPrewarmer) =
   userDaemonParentPrewarmer = prewarmer
+
+proc setUserDaemonProjectRootResolver*(
+    resolver: UserDaemonProjectRootResolver) =
+  userDaemonProjectRootResolver = resolver
+
+proc buildRequestProjectRoot*(request: UserDaemonBuildRequest): string =
+  ## The project root a build session is recorded under: the request's own
+  ## ``projectRoot`` when it carries one, else what the registered resolver
+  ## derives from its arguments, else the client's working directory. A
+  ## resolver that raises is treated as having no answer — this names a
+  ## session, it must never refuse a build.
+  if request.projectRoot.len > 0:
+    return request.projectRoot
+  if userDaemonProjectRootResolver != nil:
+    try:
+      result = userDaemonProjectRootResolver(request)
+    except CatchableError:
+      result = ""
+  if result.len == 0:
+    result = request.workingDir
 
 var userDaemonWorkerNote: string
 
@@ -1062,6 +1096,20 @@ var activeSessionCacheDir = ""
 var activeSessionStateById = initTable[string, bool]()
 var activeSessionTally = 0
 
+proc abandonedRecord(session: UserDaemonSession): UserDaemonSession =
+  ## The `abandoned` rewrite of one record whose writer is provably gone.
+  ##
+  ## ONE DEFINITION, because two sites reclaim: the startup sweep
+  ## (`reclaimAbandonedSessions`) and the tally reconciliation
+  ## (`refreshBelievedActiveSessions`). A second spelling of the same rewrite
+  ## is how the two would come to disagree about what a reclaimed record
+  ## looks like, and `repro daemon sessions` reads both.
+  result = session
+  result.state = AbandonedSessionState
+  result.endedAtUnix = getTime().toUnix
+  if result.message.len == 0:
+    result.message = "writer process no longer exists"
+
 proc reclaimAbandonedSessions*(config: UserDaemonConfig): int =
   ## Rewrite every non-terminal record whose writer PROVABLY no longer exists
   ## as `abandoned`. Returns how many were reclaimed.
@@ -1099,12 +1147,8 @@ proc reclaimAbandonedSessions*(config: UserDaemonConfig): int =
       continue
     if writerLiveness(session.writer) != wlDead:
       continue
-    session.state = AbandonedSessionState
-    session.endedAtUnix = getTime().toUnix
-    if session.message.len == 0:
-      session.message = "writer process no longer exists"
     try:
-      writeSessionRecord(config, session)
+      writeSessionRecord(config, abandonedRecord(session))
       inc result
     except CatchableError:
       # A record that cannot be rewritten stays as it was; the next daemon
@@ -1160,24 +1204,67 @@ proc refreshBelievedActiveSessions(config: UserDaemonConfig) =
   ## ended; one that cannot be READ keeps its last known state, because
   ## under-reporting live work is the failure `restartCandidateReady` cannot
   ## afford (see the note above `activeSessionCacheDir`).
+  ##
+  ## A RECORD LEFT NON-TERMINAL BY A WRITER THAT DIED COUNTS AS ENDED TOO,
+  ## AND IS RECLAIMED HERE. The re-read above answers "did someone write a
+  ## terminal state?", and that is only half of how a session stops being
+  ## live work: the other half is a worker that is SIGKILLed, OOM-killed or
+  ## dies with its terminal machine, which writes nothing at all. Such a
+  ## record stays `running` on disk forever, so the re-read keeps agreeing
+  ## that it is active and the tally keeps blocking the dev self-restart --
+  ## for the whole life of the daemon process, because
+  ## `reclaimAbandonedSessions` runs only at prime/startup. Measured on this
+  ## workstation: a daemon deferring its restart 16,788 consecutive times,
+  ## and a live per-user daemon holding a tally that never came down.
+  ##
+  ## So the reconciliation happens WHERE THE ANSWER WOULD BLOCK AN ACTION
+  ## rather than only at startup. It costs nothing extra: the record has just
+  ## been read, and `writerLiveness` is one `/proc` (or `sysctl`) probe per
+  ## session in flight -- never the unbounded directory walk. The rewrite is
+  ## what makes the finding durable and shared: this process stops counting
+  ## the record, and every other process that reads `sessions/` now sees
+  ## `abandoned` instead of a lie.
+  ##
+  ## UNKNOWN IDENTITY IS STILL TREATED AS LIVE, exactly as in
+  ## `reclaimAbandonedSessions` and for the same reason: only `wlDead` is
+  ## provable, and reclaiming a record out from under a running writer would
+  ## let two builds believe they own one session.
   var ended: seq[string] = @[]
+  var abandoned: seq[UserDaemonSession] = @[]
   for sessionId, active in activeSessionStateById.pairs:
     if not active:
       continue
     let path = sessionRecordPath(config, sessionId)
-    var stillActive = true
     if not fileExists(path):
-      stillActive = false
-    else:
-      try:
-        stillActive = sessionStateIsActive(readSessionRecord(path).state)
-      except CatchableError:
-        stillActive = true
-    if not stillActive:
       ended.add(sessionId)
+      continue
+    var record: UserDaemonSession
+    try:
+      record = readSessionRecord(path)
+    except CatchableError:
+      # Keeps its last known state: see the docstring on why this direction.
+      continue
+    if not sessionStateIsActive(record.state):
+      ended.add(sessionId)
+    elif writerLiveness(record.writer) == wlDead:
+      abandoned.add(record)
   for sessionId in ended:
     activeSessionStateById[sessionId] = false
     dec activeSessionTally
+  # After the loop, never inside it: `writeSessionRecord` folds the record
+  # into `activeSessionStateById` through `noteSessionRecordWritten`, and a
+  # table must not be mutated while it is being iterated.
+  for record in abandoned:
+    try:
+      writeSessionRecord(config, abandonedRecord(record))
+    except CatchableError:
+      # The record stays as it is on disk and the next reconciliation tries
+      # again -- but this process stops counting it either way, because the
+      # writer is provably gone whether or not the rewrite landed.
+      discard
+    if activeSessionStateById.getOrDefault(record.sessionId, false):
+      activeSessionStateById[record.sessionId] = false
+      dec activeSessionTally
 
 proc activeSessionTallyFor*(config: UserDaemonConfig): int =
   ## The number `statusFor` reports. O(1) after the first call.
@@ -1688,11 +1775,7 @@ proc handleBuildRequest(socket: IpcConn; config: UserDaemonConfig;
     else:
       $getCurrentProcessId() & "-" & $started.toUnix & "-" &
         $started.nanosecond
-  let projectRoot =
-    if request.projectRoot.len > 0:
-      request.projectRoot
-    else:
-      request.workingDir
+  let projectRoot = buildRequestProjectRoot(request)
   var session = sessionStateAccepted(sessionId, projectRoot, started)
   sessions.add(session)
   writeSessionRecord(config, session)
@@ -2696,9 +2779,42 @@ proc launchWithLaunchd(exe: string; config: UserDaemonConfig): bool =
   else:
     false
 
-proc systemdUnitName(config: UserDaemonConfig): string =
-  "repro-daemon-" & safePathSegment(config.endpoint.extractFilename,
-    "user") & ".service"
+proc systemdUnitName*(config: UserDaemonConfig): string =
+  ## The transient user unit the daemon for ``config.endpoint`` runs under.
+  ##
+  ## KEYED ON THE WHOLE ENDPOINT PATH, NOT ON ITS LAST COMPONENT. Transient
+  ## unit names are a per-user GLOBAL namespace, while endpoints are placed in
+  ## per-run scratch directories precisely BECAUSE the basename is not unique:
+  ## every one of them is some directory's ``d.sock``. Keying the unit on
+  ## ``extractFilename`` therefore discarded exactly the distinguishing part,
+  ## and ``systemd-run`` refuses a name that is already loaded -- measured:
+  ## ``Failed to start transient service unit: Unit
+  ## repro-daemon-d.sock.service was already loaded``, exit 1. Six concurrent
+  ## daemons wanted that one name; one held it and the other five took the
+  ## ``launchWithFork`` fallback, which is not a supervised unit at all: they
+  ## reparented to init and survived 11.8 days until they were reaped by hand.
+  ##
+  ## The basename is KEPT in front of the hash, because the name is also a
+  ## human interface -- it is what ``systemctl --user list-units`` shows and
+  ## what someone types to stop a daemon -- and a name that is only a hash
+  ## tells that reader nothing.
+  ##
+  ## The endpoint string is hashed VERBATIM rather than normalised. The name
+  ## has to be the same at launch and at
+  ## ``cleanupPlatformBackgroundRegistration``, and the only thing guaranteed
+  ## to be the same across those two calls is the config field itself; a
+  ## normalisation against the process's cwd is not (the launching CLI and a
+  ## later cleanup need not share one). Endpoints are absolute in every
+  ## producer (``defaultUserDaemonEndpoint``, the ``--endpoint`` flag,
+  ## per-run scratch dirs), so verbatim is also already canonical in practice.
+  ##
+  ## 16 hex characters is 64 bits of the digest: for a namespace whose
+  ## population is the handful of daemons one user runs at once, a collision
+  ## is not a risk worth a longer name. The result is bounded well under
+  ## systemd's 255-byte limit, because an AF_UNIX path is itself bounded by
+  ## ``sun_path`` (108 bytes).
+  "repro-daemon-" & safePathSegment(config.endpoint.extractFilename, "user") &
+    "-" & blake3.digest(config.endpoint).toHex()[0 ..< 16] & ".service"
 
 proc systemdUserRunArgs*(exe: string; config: UserDaemonConfig):
     seq[string] =
@@ -2758,6 +2874,29 @@ proc launchWithSystemdUser(exe: string; config: UserDaemonConfig): bool =
     false
   else:
     false
+
+proc noteSupervisionDowngrade(config: UserDaemonConfig; reason: string) =
+  ## Say, in the daemon's own log, that what is about to start is NOT a
+  ## supervised process.
+  ##
+  ## WHY THIS IS NOT JUST ANOTHER "falling back" LINE. The two launchers above
+  ## already log why the platform manager declined, and that reads as a
+  ## routine retry. It is not: the fallback changes WHO IS RESPONSIBLE FOR THE
+  ## PROCESS'S DEATH. A transient unit is stopped when the unit is stopped,
+  ## collected when it exits, and listed by ``systemctl --user``; a
+  ## ``fork()`` + ``setsid()`` child is owned by nobody, reparents to init,
+  ## and appears in no inventory. That difference is what turned an ordinary
+  ## test-fixture leak into five daemons that ran for 11.8 days. Nobody chose
+  ## the quieter supervision model, so the log has to name it.
+  ##
+  ## ``ppid=1`` is named because it is the discriminator that actually works
+  ## for finding these afterwards. Age does not: of the leaked cohort, one
+  ## daemon 369 s old with a live parent was healthy, while two aged 1.1 h and
+  ## 1.6 h with ``ppid=1`` were already orphaned.
+  logLine(config.logPath,
+    "supervision downgraded: " & reason & "; starting a detached setsid " &
+    "child instead. Nothing supervises it -- it reparents to init (ppid=1) " &
+    "and is in no manager's inventory. endpoint=" & config.endpoint)
 
 proc launchWithFork(exe: string; config: UserDaemonConfig) =
   when defined(posix):
@@ -2897,12 +3036,18 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
     when defined(macosx):
       launchedWithPlatformManager = launchWithLaunchd(exe, launchConfig)
       if not launchedWithPlatformManager:
+        noteSupervisionDowngrade(launchConfig,
+          "launchd did not take the daemon")
         launchWithFork(exe, launchConfig)
     elif defined(linux):
       launchedWithPlatformManager = launchWithSystemdUser(exe, launchConfig)
       if not launchedWithPlatformManager:
+        noteSupervisionDowngrade(launchConfig,
+          "systemd --user did not take the daemon")
         launchWithFork(exe, launchConfig)
     else:
+      noteSupervisionDowngrade(launchConfig,
+        "this platform has no background manager")
       launchWithFork(exe, launchConfig)
     if launchedWithPlatformManager:
       try:
@@ -2913,6 +3058,8 @@ proc startUserDaemon*(publicCliPath: string; config: UserDaemonConfig):
             err.msg & "; falling back to posix-fork")
         cleanupPlatformBackgroundRegistration(launchConfig)
         discard cleanupStaleUserDaemonDiscovery(launchConfig)
+        noteSupervisionDowngrade(launchConfig,
+          "the platform manager started a daemon that never became ready")
         launchWithFork(exe, launchConfig)
   else:
     var env = newStringTable()

@@ -31,15 +31,19 @@ import repro_selfhost
 import repro_selfhost/install as selfinstall
 export PinRootOutcome, PinRootAction
 import repro_local_store
+import repro_cli_support/project_pins
 
 const SelfUsage = """usage: repro self <subcommand> [options]
 
-  install --from=DIR --version=V [--platform=P] [--store-root=PATH]
-  provision --version=V [--platform=P] [--store-root=PATH] [--from=DIR]
-  hold [--project=DIR] [--store-root=PATH]
-  which [--project=DIR] [--store-root=PATH] [--json]
-  list [--store-root=PATH] [--json]
-  prune-roots [--store-root=PATH] [--json]"""
+  install --from=DIR --version=V [--package=P] [--platform=P] [--store-root=PATH]
+  provision --version=V [--package=P] [--platform=P] [--store-root=PATH] [--from=DIR]
+  hold [--package=P] [--project=DIR] [--store-root=PATH]
+  which [--package=P] [--project=DIR] [--store-root=PATH] [--json]
+  list [--package=P] [--store-root=PATH] [--json]
+  prune-roots [--store-root=PATH] [--json]
+
+  --package is `reprobuild` (the default) or `nim`, the compiler that builds
+  the project's provider (M5 "pin the provider-compile toolchain")."""
 
 type
   SelfArgs = object
@@ -50,6 +54,7 @@ type
     project: string
     storeRoot: string
     emitJson: bool
+    package: string
 
 proc parseSelfArgs(args: openArray[string]): (SelfArgs, string) =
   var parsed = SelfArgs()
@@ -62,6 +67,8 @@ proc parseSelfArgs(args: openArray[string]): (SelfArgs, string) =
       parsed.platform = raw["--platform=".len .. ^1]
     elif raw.startsWith("--project="):
       parsed.project = raw["--project=".len .. ^1]
+    elif raw.startsWith("--package="):
+      parsed.package = raw["--package=".len .. ^1]
     elif raw.startsWith("--store-root="):
       parsed.storeRoot = raw["--store-root=".len .. ^1]
     elif raw == "--json":
@@ -73,6 +80,11 @@ proc parseSelfArgs(args: openArray[string]): (SelfArgs, string) =
     else:
       return (parsed, "unexpected argument: " & raw)
   (parsed, "")
+
+proc pkgOf(a: SelfArgs): PinnedPackage =
+  ## The package a verb acts on; raises (reported by `runSelfCommand`) for a
+  ## name nothing here can lay out.
+  if a.package.len == 0: reprobuildPin() else: pinnedPackageNamed(a.package)
 
 proc effectivePlatform(explicit: string): string =
   if explicit.len > 0: explicit else: currentPlatformId()
@@ -100,7 +112,8 @@ proc runSelfInstall(a: SelfArgs): int =
     return 2
   let root = resolveStoreRoot(a.storeRoot)
   let platform = effectivePlatform(a.platform)
-  let res = selfinstall.installSelfImage(root, a.version, platform, a.fromDir)
+  let res = selfinstall.installPinnedImage(pkgOf(a), root, a.version,
+    platform, a.fromDir)
   if a.emitJson:
     echo $(%*{
       "storeRoot": root, "version": res.version, "platform": res.platform,
@@ -111,6 +124,7 @@ proc runSelfInstall(a: SelfArgs): int =
       "alreadyPresent": res.alreadyPresent})
   else:
     echo "repro self install: store-root=" & root
+    echo "package: " & pkgOf(a).name
     echo "version: " & res.version & " (" & res.platform & ")"
     echo "store address: " & res.storeAddress
     echo "prefix id: " & prefixIdHex(res.prefixId)
@@ -138,17 +152,41 @@ proc runSelfProvision(a: SelfArgs): int =
     return 2
   let root = resolveStoreRoot(a.storeRoot)
   let platform = effectivePlatform(a.platform)
-  let address = storeAddressFor(a.version, platform)
-  let relative = prefixRelativePathFor(a.version, address)
+  let pkg = pkgOf(a)
+  let address = storeAddressFor(pkg, a.version, platform)
+  let relative = prefixRelativePathFor(pkg, a.version, address)
   let absolute = root / relative
-  if fileExists(selfExecutableIn(absolute)):
-    echo "repro self provision: " & SelfPackageName & " " & a.version &
+  if fileExists(pinnedExecutableIn(pkg, absolute)):
+    echo "repro self provision: " & pkg.name & " " & a.version &
       " is already resident at " & relative
     return 0
   if a.fromDir.len > 0:
     var local = a
     local.platform = platform
     return runSelfInstall(local)
+  if pkg.name == ProviderNimPackageName:
+    # The compiler has routes the reprobuild image does not: the archive the
+    # enclosing project's lock pins for this version (URL + SHA-256), and
+    # otherwise this reprobuild's own bootstrap Nim, when it is the version
+    # asked for. Nothing here resolves a version against the network: a
+    # digest is trusted only when a committed lock carries it.
+    var pin = SelfPin(state: spsPinned, version: a.version,
+      platform: platform, storeHash: address,
+      integrity: formatMultihash("blake3", address),
+      lockPath: "repro self provision", package: pkg.name)
+    let projectPin = projectPinsFrom(effectiveProject(a.project)).providerNim
+    if projectPin.state == spsPinned and projectPin.version == a.version and
+        projectPin.platform == platform:
+      pin = projectPin
+    try:
+      let exe = realizePinnedProviderNim(root, pin)
+      echo "repro self provision: " & pkg.name & " " & a.version &
+        " realized at " & relative
+      echo "executable: " & exe
+      return 0
+    except ProviderNimPinError as err:
+      stderr.writeLine("repro self provision: " & err.msg)
+      return 1
   stderr.writeLine("repro self provision: " & SelfPackageName & " " &
     a.version & " (" & platform & ", store address " & address &
     ") is not resident in " & root & " and no local image was offered.")
@@ -163,22 +201,23 @@ proc runSelfProvision(a: SelfArgs): int =
 proc runSelfHold(a: SelfArgs): int =
   let root = resolveStoreRoot(a.storeRoot)
   let project = effectiveProject(a.project)
-  let pin = selfPinForProject(project)
+  let pkg = pkgOf(a)
+  let pin = selfPinForProject(project, pkg)
   if pin.state != spsPinned:
     stderr.writeLine("repro self hold: " & pin.detail)
     return 1
   let prefixId = selfPrefixId(pin)
-  if not selfinstall.attachPinRoot(root, project, prefixId):
-    stderr.writeLine("repro self hold: " & SelfPackageName & " " &
+  if not selfinstall.attachPinRoot(pkg, root, project, prefixId):
+    stderr.writeLine("repro self hold: " & pkg.name & " " &
       pin.version & " is not installed in " & root &
       " (prefix " & prefixIdHex(prefixId) & "); nothing to hold")
     return 1
   if a.emitJson:
-    echo $(%*{"rootId": pinRootIdFor(project), "project": project,
+    echo $(%*{"rootId": pinRootIdFor(pkg, project), "project": project,
       "prefixId": prefixIdHex(prefixId), "version": pin.version})
   else:
-    echo "repro self hold: " & pinRootIdFor(project) & " -> " &
-      prefixIdHex(prefixId) & " (" & SelfPackageName & " " & pin.version & ")"
+    echo "repro self hold: " & pinRootIdFor(pkg, project) & " -> " &
+      prefixIdHex(prefixId) & " (" & pkg.name & " " & pin.version & ")"
   0
 
 proc runSelfWhich(a: SelfArgs): int =
@@ -186,16 +225,18 @@ proc runSelfWhich(a: SelfArgs): int =
   ## to a resident image, 1 otherwise — so a script can gate on it.
   let root = resolveStoreRoot(a.storeRoot)
   let project = effectiveProject(a.project)
-  let pin = selfPinForProject(project)
+  let pkg = pkgOf(a)
+  let pin = selfPinForProject(project, pkg)
   var executable = ""
   var relative = ""
   var resident = false
   if pin.state == spsPinned:
     relative = selfPrefixRelativePath(pin)
-    executable = selfExecutableIn(root / relative)
+    executable = pinnedExecutableIn(pkg, root / relative)
     resident = fileExists(executable)
   if a.emitJson:
     echo $(%*{
+      "package": pkg.name,
       "state": pinStateWord(pin.state),
       "projectRoot": pin.projectRoot,
       "lockPath": pin.lockPath,
@@ -209,6 +250,7 @@ proc runSelfWhich(a: SelfArgs): int =
       "resident": resident,
       "detail": pin.detail})
   else:
+    echo "package: " & pkg.name
     echo "state: " & pinStateWord(pin.state)
     echo "project: " & pin.projectRoot
     echo "lock: " & pin.lockPath
@@ -226,7 +268,8 @@ proc runSelfWhich(a: SelfArgs): int =
 
 proc runSelfList(a: SelfArgs): int =
   let root = resolveStoreRoot(a.storeRoot)
-  let rows = selfinstall.listSelfPrefixes(root)
+  let pkg = pkgOf(a)
+  let rows = selfinstall.listPinnedPrefixes(pkg, root)
   if a.emitJson:
     var arr = newJArray()
     for row in rows:
@@ -237,7 +280,7 @@ proc runSelfList(a: SelfArgs): int =
     echo $(%*{"storeRoot": root, "count": rows.len, "versions": arr})
   else:
     echo "repro self list: store-root=" & root
-    echo "resident " & SelfPackageName & " versions: " & $rows.len
+    echo "resident " & pkg.name & " versions: " & $rows.len
     for row in rows:
       echo "  - " & row.version & "  " & prefixIdHex(row.prefixId) & "  " &
         row.realizedPath

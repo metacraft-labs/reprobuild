@@ -128,6 +128,17 @@ esac
 # can still opt into debug apps explicitly with REPROBUILD_BUILD_MODE=debug.
 export REPROBUILD_BUILD_MODE="${REPROBUILD_BUILD_MODE:-release}"
 
+# The suite tests THIS checkout, so its engine must read this checkout's
+# libs/. The engine prefers an ambient REPROBUILD_SOURCE_ROOT over its own
+# location, and `repro exec` run from another checkout's build exports that
+# checkout's root — a whole suite run once compiled every provider against a
+# different worktree's libs/ that way. Pin it; say so when it overrides one.
+if [[ -n "${REPROBUILD_SOURCE_ROOT:-}" &&
+      "$(cd "${REPROBUILD_SOURCE_ROOT}" 2>/dev/null && pwd -P)" != "${repo_root}" ]]; then
+  echo "run_tests: REPROBUILD_SOURCE_ROOT named ${REPROBUILD_SOURCE_ROOT}; testing ${repo_root} instead" >&2
+fi
+export REPROBUILD_SOURCE_ROOT="${repo_root}"
+
 # Tests must not depend on the developer's persistent action cache. Large or
 # stale user-level metadata can dominate memory use in daemon-hosted cache-hit
 # evidence reconstruction, so give this run a clean, reproducible cache root.

@@ -48,10 +48,21 @@ private path beside it.
 | Module | Purpose |
 |---|---|
 | `repro_selfhost` | `SelfPin` / `SelfPinState`, `selfPinFrom`, the prefix arithmetic (`selfPrefixAbsolutePath`, `selfExecutableIn`), `pinRootIdFor`. Store-runtime-free. |
+| `repro_selfhost/handover` | `decideHandOver` / `handOverEnvironment`: what the ENGINE does when started as the bootstrap in a project that pins a different reprobuild (M5 extension, rule 3). Pure; the side effects live in `repro_cli_support/project_pins`. |
 | `repro_selfhost/install` | `installSelfImage` (via the store's generic `realizePrefix`), `attachPinRoot`, `dropPinRoot`, `prunePinRoots`, `listSelfPrefixes`. Needs `repro_local_store`. |
 
 The umbrella module `repro_selfhost` is re-exported by the install half, so a
 caller that needs both imports one module.
+
+## The provider compiler is the second pinnable package
+
+`PinnedPackage` names what a pin resolves: `reprobuildPin()` and
+`providerNimPin()` (the `nim` that compiles the project's provider, M5
+extension rule 1). Both go through the same `pinFromParsed`, the same tamper
+check, the same prefix arithmetic (`prefixIdFor(pkg, …)`) and the same pin
+roots (`pin:<package>:<project>`). The reprobuild prefix id is byte-for-byte
+what it was before the generalization, which a test pins. `projectPinsFor`
+reads both pins from one parse of the lock.
 
 ## A coordinate is checked against its own content
 
@@ -104,8 +115,15 @@ Run from the repo root via `just test`.
 - `t_removing_the_pin_makes_the_version_collectable` — two versions in one
   store, gc collecting exactly the unpinned one, a moved pin repointing its
   root.
+- `t_the_provider_compiler_pin_lives_in_the_lock` — the compiler pin is an
+  ordinary locked package; bare entries are not pins; install refuses a tree
+  without `lib/system.nim`; its pin root is re-derived.
+- `t_the_bootstrap_hands_over_only_to_a_different_pin` — every branch of
+  `decideHandOver`, and the exact environment a hand-over passes on.
 - `t_self_store_root_matches_the_store` — the launcher and the store resolve
   the same store root, including where both refuse.
 
 The launcher itself is driven end to end by
-`tests/integration/t_the_resolving_launcher_execs_the_pinned_image`.
+`tests/integration/t_the_resolving_launcher_execs_the_pinned_image`, and the
+engine's hand-over by
+`tests/integration/t_the_bootstrap_hands_over_to_the_pinned_reprobuild`.

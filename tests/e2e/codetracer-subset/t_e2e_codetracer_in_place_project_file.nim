@@ -753,8 +753,15 @@ proc prepareIsonimFixture(sourcePath, destPath: string) =
     writeFile(tailwindStyles, "{}\n")
 
 proc linkCodeTracerSiblingDeps(codeTracerRoot, projectRoot: string) =
-  for dep in ["codetracer-trace-format-nim", "io-mon", "isonim", "nim-acp",
-              "nim-agent-harbor", "nim-agents", "nim-everywhere",
+  # ``isonim-tui`` is not a ``uses:`` package: CodeTracer's ``config.nims``
+  # puts ``<workspace>/isonim-tui/src`` on the compiler path when that
+  # directory exists, and its frontend imports ``isonim_tui/...`` through it
+  # (``src/frontend/viewmodel/editor/selection.nim`` since CodeTracer
+  # 8d1c99922). The fixture workspace is this temp directory, not the real
+  # one, so the sibling has to be linked here like the others or every
+  # frontend compile fails with ``cannot open file: isonim_tui/text/width``.
+  for dep in ["codetracer-trace-format-nim", "io-mon", "isonim", "isonim-tui",
+              "nim-acp", "nim-agent-harbor", "nim-agents", "nim-everywhere",
               "nim-shm-gset", "nim-shm-queue", "nim-stackable-hooks"]:
     var sourcePath = codeTracerRoot.parentDir / dep
     if dep == "codetracer-trace-format-nim":

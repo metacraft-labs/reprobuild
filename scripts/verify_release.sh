@@ -106,7 +106,10 @@ required_sources=(
   src/nim-shm-gset/src/shm_gset.nim
   src/nim-shm-queue/src/shm_queue.nim
   src/runquota/libs/runquota_core/src/runquota_core.nim
-  src/bearssl/bearssl.nim
+  # The module `repro_deploy_agent` imports, not bearssl's root file:
+  # the root file is present in revisions that cannot satisfy the
+  # import, so its presence does not show the archive can build.
+  src/bearssl/bearssl/abi/consttypes.nim
 )
 missing_sources=()
 for f in "${required_sources[@]}"; do

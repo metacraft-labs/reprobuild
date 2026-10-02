@@ -14,6 +14,13 @@
 ## ``--memory-bytes`` / ``--cpu-milli`` / every convention pool) and the
 ## "host file sets it" cases fail: the spawned daemon would enforce 16 GiB
 ## whatever the file says.
+##
+## AND WITH NO HOST FILE, NO MEMORY FLAG AT ALL (2026-09-30). The daemon's
+## built-in budget is now 75% of physical memory; the 16 GiB constant
+## reprobuild used to pass would override it, and -- because a flag pins its
+## key for the daemon's whole launch -- would also make a later ``runquota
+## config set machine.memory_bytes`` reload a no-op on every host reprobuild
+## had started the daemon on.
 
 import std/[options, os, strutils, tables, unittest]
 
@@ -53,10 +60,9 @@ suite "runquota auto-spawn defers to the host config":
     else:
       delEnv(MemoryKey)
 
-  test "no host file: the built-in budget, as before":
+  test "no host file: memory is left to the daemon's own default":
     let budget = autoRunQuotaBudgetArgs(HostConfig(), [], 12000'u32)
-    check budget.args.flagValue("--memory-bytes") ==
-      some($DefaultAutoRunQuotaMemoryBytes)
+    check budget.args.flagValue("--memory-bytes").isNone
     check budget.args.flagValue("--cpu-milli") == some("12000")
     check budget.args.poolValues == @["compile=8", "fetch=2"]
     check budget.warnings.len == 0
