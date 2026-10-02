@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1806,
+    "nimTestBinaries": 1807,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 593,
     "staticallyDetectedRuntimeCompilerFlowTests": 108,
-    "testEntries": 1822
+    "testEntries": 1823
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1067,7 +1067,7 @@
       "integration": 947,
       "platform/destructive": 117,
       "pure unit": 593,
-      "unclassified": 154
+      "unclassified": 155
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1215,9 +1215,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1806,
+    "nimTestBinaryCount": 1807,
     "pythonTestFileCount": 16,
-    "testEntryCount": 1822
+    "testEntryCount": 1823
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -35344,6 +35344,23 @@
       "source": "tests/unit/t_action_index_platform_arm.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_bearssl_probe_marker_is_the_imported_module",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_bearssl_probe_marker_is_the_imported_module.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

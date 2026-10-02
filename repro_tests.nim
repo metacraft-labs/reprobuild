@@ -14706,6 +14706,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/unit/t_bearssl_probe_marker_is_the_imported_module.nim",
+    binary: "build/test-bin/t_bearssl_probe_marker_is_the_imported_module",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/unit/t_bootstrap_nim_monitoring.nim",
     binary: "build/test-bin/t_bootstrap_nim_monitoring",
     defines: @[],
