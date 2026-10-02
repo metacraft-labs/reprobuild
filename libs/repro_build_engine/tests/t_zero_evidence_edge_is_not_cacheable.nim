@@ -374,6 +374,7 @@ proc reportValidatedByMonitorEdge(f: Fixture; id: string;
 
 proc twoReportsValidatedByMonitorEdge(f: Fixture; id: string;
                                       firstHeader, secondHeader: string;
+                                      firstNamesPrerequisite = true;
                                       rootImage = RootImage): BuildAction =
   ## THE STATE THAT SEPARATES THE TWO SPELLINGS OF `depfileObservedNothing`,
   ## and it needs no production seam to reach: one edge, one recognized report
@@ -404,11 +405,23 @@ proc twoReportsValidatedByMonitorEdge(f: Fixture; id: string;
   ## `tests/unit/t_unmonitorable_action_depfile_guards.nim`, so this needle
   ## cannot drift from what the DSL emits without something reddening.
   ##
+  ## `firstNamesPrerequisite = false` writes the FIRST depfile with a target
+  ## and NO prerequisites — a report that was produced, resolved and parsed,
+  ## and that named nothing. That is the second state this fixture reaches
+  ## and the one DA-1f Z2 is about: it is how a tool report comes to be
+  ## CONSULTED AND EMPTY on an edge whose channel some other contributor has
+  ## filled. `printf 'out:\n'` is exactly what `reportValidatedByMonitorEdge`
+  ## above writes for its own zero case, so the two agree on what an empty
+  ## recognized report looks like.
+  ##
   ## The capture stays empty, so the other four terms of the guard are true
   ## and the publish turns on this term alone.
+  let firstRule =
+    if firstNamesPrerequisite: "out: " & f.observedPath & "\\n"
+    else: "out:\\n"
   result = action(id,
     [rootImage, "-c", "echo ran >> " & f.runLogPath &
-      "; printf '" & firstHeader & "out: " & f.observedPath & "\\n' > " &
+      "; printf '" & firstHeader & firstRule & "' > " &
       f.makeDepfilePath &
       "; printf '" & secondHeader & "out: " & f.secondObservedPath &
       "\\n' > " & f.secondDepfilePath],
@@ -738,6 +751,12 @@ suite "the guard holds for every monitored policy kind, not just the first":
     check r0.evidence.monitorWrites.len == 0
     check r0.evidence.monitorProbes.len == 0
 
+    # The report WAS read — it is the empty-read mark that is present, not the
+    # absence of any depfile mark. "Declared a report and produced none of its
+    # declared paths" is a different outcome with its own reason code.
+    check evcEmptyToolDepfileReport in r0.evidence.evidenceProvenance
+    check evcToolReportedDepfile notin r0.evidence.evidenceProvenance
+
     let diagnosed = r0.evidence.diagnostics.join(" ")
     check diagnosed.contains("no observation of any kind")
     check diagnosed.contains(act.id)
@@ -751,6 +770,22 @@ suite "the guard holds for every monitored policy kind, not just the first":
     check f.runCount() == 2
 
   test "recognized-format-validated-by-monitor: one observation publishes":
+    ## DA-1f Z2 — ALSO THE OVER-REFUSAL CONTROL FOR `evcEmptyToolDepfileReport`,
+    ## which is why the extra assertions below are here rather than in a case
+    ## of their own.
+    ##
+    ## `reportValidatedByMonitorEdge` writes `printf 'out:\n'` — a declared,
+    ## produced, resolved, parsed recognized report that names NO
+    ## prerequisite. That is a LEGITIMATE zero-depfile capture (a compile with
+    ## no includes reports exactly this) and it must keep publishing on the
+    ## strength of the evidence the OTHER four terms carry. A fix for the
+    ## empty-report defect that refused every empty report would trade a false
+    ## accept for a false reject and reddens here.
+    ##
+    ## And the read is still DISTINGUISHABLE from no report at all: the
+    ## provenance says `evcEmptyToolDepfileReport`, not nothing. "The action
+    ## declared a report and produced none of its declared paths" is a
+    ## different outcome again, recorded by `cirMissingDependencyReport`.
     let f = makeFixture("validated-report-one")
     defer: removeDir(f.root)
     f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
@@ -760,8 +795,17 @@ suite "the guard holds for every monitored policy kind, not just the first":
 
     let first = runBuild(g, config)
     let r0 = first.byId(act.id)
-    checkpoint("first: reads=" & $r0.evidence.monitorReads)
+    checkpoint("first: reads=" & $r0.evidence.monitorReads &
+      " provenance=" & $r0.evidence.evidenceProvenance)
     check r0.status == asSucceeded
+
+    # THE DENOMINATOR for the control: the report really was read and really
+    # was empty, or the publish below would be about some other edge.
+    check r0.evidence.depfileInputs.len == 0
+    check evcEmptyToolDepfileReport in r0.evidence.evidenceProvenance
+    check evcToolReportedDepfile notin r0.evidence.evidenceProvenance
+    check not r0.evidence.diagnostics.join(" ").contains(
+      "no observation of any kind")
     # Launcher reconstruction first, observation after it — the same shape the
     # `dgAutomaticMonitor` case pins, asserted again on the policy kind where
     # BOTH `applyMonitorEvidenceStatus` producers can run. What makes this edge
@@ -1563,6 +1607,114 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
         check evcToolReportedDepfile notin r0.evidence.evidenceProvenance
         check diagnosed.contains("no observation of any kind")
         check not f.hasRecord(act)
+
+  test "an EMPTY tool report beside a declaration-derived one is not an observation":
+    ## DA-1f Z2 — THE POLARITY QUESTION THE Z1 CASE ABOVE LEFT OPEN, and the
+    ## one the B1 construction does not answer.
+    ##
+    ## WHAT WAS WRONG. `depfileObservedNothing` is
+    ##
+    ##   depfileInputs.len == 0 or
+    ##     evidenceProvenance * DepfileObservingContributors == {}
+    ##
+    ## and `addPathSet` used to `incl evcToolReportedDepfile` for EVERY
+    ## recognized report before looking at whether the report named anything.
+    ## So an empty report made the second disjunct false on its own, the term
+    ## degenerated into the same plain emptiness test as the other four, and
+    ## ONE entry put into the channel by anything else suppressed the guard.
+    ##
+    ## THAT IS NOT A PROBE STATE. One edge, one
+    ## `RecognizedDependencyReportSpec`, two declared depfiles — which is what
+    ## an author writes when a compile edge has inputs no tool reports — and
+    ## the tool-written one comes out EMPTY while the
+    ## `fs.unmonitorableActionDepfile` beside it names a prerequisite.
+    ## Measured on `dev` `75f8e33c` BEFORE the fix, this case's refusal arm
+    ## got `hasRecord` true, a warm `cdHit`, `runCount()==1` and an empty
+    ## diagnostic list: a published record and a stale hit for an action
+    ## nothing looked at. Reverting `addPathSet` to the unconditional mark
+    ## and changing nothing else reproduces exactly that, 27 OK / 3 FAILED
+    ## at that tip, which is this case earning its keep: production
+    ## behaviour byte-identical to `dev`, and the stale hit comes back.
+    ##
+    ## The same shape is what the branch-legal
+    ## `observe(…, evcDeclarationDerivedDepfile, …)` probe reached
+    ## artificially; this reaches it through production types alone, which
+    ## is why it can be a test, and why no case count is quoted for the
+    ## probe — see `depfileObservedNothing` for why that count is a property
+    ## of the probe rather than of the engine.
+    ##
+    ## WHAT GRADES THE FIX IN THE OTHER DIRECTION. Two things, neither in
+    ## this case: "recognized-format-validated-by-monitor: one observation
+    ## publishes" is the LEGITIMATE consulted-and-empty report, which still
+    ## publishes on the monitor's evidence and must; and the `false` arm of
+    ## "a declaration-derived depfile cannot answer the observation question"
+    ## is the edge whose ONLY evidence is a tool depfile, which still
+    ## publishes on that depfile alone. A fix that simply distrusted empty
+    ## reports, or depfiles, reddens one of those.
+    ##
+    ## THE PAIR HERE varies ONE thing — whether the tool-written report names
+    ## a prerequisite. Same edge, same two declared depfiles, same stamps,
+    ## same empty capture.
+    const DeclarationDerivedHeader =
+      "# generated by unmonitorableActionDepfile - this action is not\\n"
+    const ToolWrittenHeader =
+      "# generated by a tool that opened these files\\n"
+    for toolReportNamedAnInput in [false, true]:
+      let name = "da1f-z2-" &
+        (if toolReportNamedAnInput: "tool-named-one" else: "tool-named-none")
+      let f = makeFixture(name)
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord()])
+      let act = f.twoReportsValidatedByMonitorEdge("da1f/z2/" & name,
+        firstHeader = ToolWrittenHeader,
+        secondHeader = DeclarationDerivedHeader,
+        firstNamesPrerequisite = toolReportNamedAnInput)
+      let g = graph([act])
+      let config = testConfig(f.cacheRoot)
+      let first = runBuild(g, config)
+      let r0 = first.byId(act.id)
+      checkpoint(name & ": depfileInputs=" & $r0.evidence.depfileInputs &
+        " provenance=" & $r0.evidence.evidenceProvenance &
+        " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+      check r0.status == asSucceeded
+      check f.runCount() == 1
+
+      # THE DENOMINATOR, and it is what makes the refusal arm mean anything:
+      # the channel is NOT empty in EITHER arm, so the first disjunct of
+      # `depfileObservedNothing` cannot be what decides this and the
+      # declaration-derived report really did fold.
+      check f.secondObservedPath in r0.evidence.depfileInputs
+      check evcDeclarationDerivedDepfile in r0.evidence.evidenceProvenance
+
+      let diagnosed = r0.evidence.diagnostics.join(" ")
+      if toolReportNamedAnInput:
+        check f.observedPath in r0.evidence.depfileInputs
+        check evcToolReportedDepfile in r0.evidence.evidenceProvenance
+        check evcEmptyToolDepfileReport notin r0.evidence.evidenceProvenance
+        check not diagnosed.contains("no observation of any kind")
+        check f.hasRecord(act)
+
+        let warm = runBuild(g, config)
+        check warm.byId(act.id).cacheDecision in ReuseDecisions
+        check f.runCount() == 1
+      else:
+        # ATTRIBUTION, NOT SUPPRESSION: the declaration-derived prerequisite
+        # is still in the channel and still keyed on. What changed is that an
+        # empty report no longer claims somebody observed it.
+        check r0.evidence.depfileInputs.len == 1
+        check evcEmptyToolDepfileReport in r0.evidence.evidenceProvenance
+        check evcToolReportedDepfile notin r0.evidence.evidenceProvenance
+        check diagnosed.contains("no observation of any kind")
+        check diagnosed.contains(act.id)
+        check not f.hasRecord(act)
+
+        let warm = runBuild(g, config)
+        let r1 = warm.byId(act.id)
+        checkpoint(name & " warm: decision=" & $r1.cacheDecision &
+          " launched=" & $r1.launched)
+        check r1.cacheDecision notin ReuseDecisions
+        check r1.launched
+        check f.runCount() == 2
 
 suite "DA-1f: a backend profile that claims nothing is not a claim of completeness":
   ## ITEM 5 — the asymmetry, settled. `monitorProfileEvidenceComplete` used to

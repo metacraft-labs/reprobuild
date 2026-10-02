@@ -1109,8 +1109,9 @@ type
     ## member is silently missing from, where the omission is
     ## indistinguishable from a decision.
     ##
-    ## FOUR OF THE FIVE TERMS STILL ASK WHETHER THE CHANNEL IS EMPTY — and
-    ## the fifth is only better on one of its arms, see the measurement below —
+    ## FOUR OF THE FIVE TERMS STILL ASK WHETHER THE CHANNEL IS EMPTY — the
+    ## fifth asks the observation question on every arm since
+    ## `evcEmptyToolDepfileReport`, see the measurement below —
     ## AND THAT IS NOW HARMLESS, but only because the unmarked writer they were
     ## blind to can no longer be written. `monitorObservedNoReads` and the
     ## `.len == 0` tests on `monitorWrites`, `monitorProbes` and
@@ -1136,13 +1137,24 @@ type
     ## 20 OK / 9 FAILED. The automatic-monitor "zero observations" case does
     ## stay green — that term asks for the PRESENCE of an observer, and no
     ## observing depfile contributor is marked on that arm — but a
-    ## `dgRecognizedFormatValidatedByMonitor` edge has already marked
+    ## `dgRecognizedFormatValidatedByMonitor` edge had already marked
     ## `evcToolReportedDepfile` from its empty report, so there the unmarked
-    ## path makes both disjuncts false and the edge publishes and warm-hits
+    ## path made both disjuncts false and the edge published and warm-hit
     ## exactly as the `monitorReads` probe did. Three more cases go red on
     ## `gradeKeyedInputSet`, where the fabricated path simply makes the key
     ## non-empty. No probe into any of the five channels compiles now; see
     ## `ObservedPathChannel`.
+    ##
+    ## MARKING WAS THEN NECESSARY AND STILL NOT SUFFICIENT, which is the
+    ## residual that measurement left open and `evcEmptyToolDepfileReport`
+    ## closes: the probe that remained LEGAL — `observe(…,
+    ## evcDeclarationDerivedDepfile, …)`, a contributor correctly named and
+    ## correctly non-observing — still bought the publish on that arm, at
+    ## `75f8e33c`. It did so because the EMPTY report's
+    ## mark, not the probe's, was what answered the observation question. An
+    ## empty report now marks `evcEmptyToolDepfileReport` instead, so the
+    ## `depfileInputs` term asks about observation on every arm rather than
+    ## only on the automatic-monitor one.
     ##
     ## MARKING IS THEREFORE NOT A CONVENTION ANY MORE. It is still worth
     ## reading the enum before adding a member, because WHICH contributor a
@@ -1155,7 +1167,52 @@ type
     evcToolReportedDepfile
       ## A dependency report a TOOL wrote while doing the action's work —
       ## `gcc -MD`, rustc's `.d`, a post-build converter emitting a
-      ## recognized format. An observation, by something other than io-mon.
+      ## recognized format — AND IT NAMED AT LEAST ONE INPUT. An observation,
+      ## by something other than io-mon.
+      ##
+      ## THE SECOND HALF OF THAT SENTENCE IS LOAD-BEARING and was not always
+      ## there; see `evcEmptyToolDepfileReport` below for the defect that
+      ## taught it.
+    evcEmptyToolDepfileReport
+      ## A recognized-format report a tool wrote WAS READ, and it named NO
+      ## input. The read happened — so this is not the same silence as "the
+      ## action declared a report and produced none of its declared paths",
+      ## which `cirMissingDependencyReport` records — but nothing was
+      ## observed, so it is NOT a `DepfileObservingContributors` member.
+      ##
+      ## WHY IT EXISTS AS ITS OWN MEMBER, rather than `addPathSet` simply not
+      ## marking an empty report. Two facts live here and they are not the
+      ## same fact:
+      ##
+      ##   1. "a tool report was consulted on this edge" — which `repro why`
+      ##      and `--write-report` must still be able to show, because a
+      ##      consulted-and-genuinely-empty report (a compile with no
+      ##      includes) is a legitimate capture and has to be
+      ##      DISTINGUISHABLE from nothing having looked at all;
+      ##   2. "a tool report contributed an observed input" — which is the
+      ##      only thing the zero-evidence guard may conclude an observation
+      ##      from.
+      ##
+      ## Marking nothing would have kept (2) honest by throwing (1) away.
+      ## This member keeps both, and keeps the decision about which of them
+      ## counts as an observation in the one place that decision belongs:
+      ## `DepfileObservingContributors`' exhaustive `case`.
+      ##
+      ## THE DEFECT IT CLOSES, measured on `dev` `75f8e33c`. `addPathSet`
+      ## `incl`ed `evcToolReportedDepfile` for EVERY recognized report,
+      ## before looking at whether the report named anything, so the mark
+      ## meant (1) while `depfileObservedNothing` read it as (2). One edge
+      ## declaring two depfiles — `RecognizedDependencyReportSpec.outputs` is
+      ## a `seq`, and `collectEvidence` folds every resolved file into the
+      ## same `PathSetEvidence` — where the tool-written one came out EMPTY
+      ## and an `fs.unmonitorableActionDepfile` beside it named a
+      ## prerequisite therefore reached the guard with a NON-EMPTY channel
+      ## and an observing mark no tool had earned: guard silent, record
+      ## published, warm run `cdHit`, `runCount()==1`. That is a recipe
+      ## shape, not a probe — "this compile has extra inputs no tool reports"
+      ## is exactly why an author pairs the two. Graded by
+      ## `t_zero_evidence_edge_is_not_cacheable`'s "an EMPTY tool report
+      ## beside a declaration-derived one is not an observation".
     evcRootImageReconstruction
       ## `executedToolImagePath`: the action's own root image, resolved from
       ## argv the way the launcher resolves it. A correct cache input and not
@@ -1202,18 +1259,27 @@ type
     ## Four of the guard's five terms only ask "is this channel empty", which
     ## an unmarked writer satisfies by filling it.
     ##
-    ## AND SO, ON A REACHABLE EDGE, DOES THE FIFTH. The review re-measured the
+    ## AND SO, ON A REACHABLE EDGE, DID THE FIFTH. The review re-measured the
     ## same unmarked probe against `depfileInputs` at `55219d92` and found it
-    ## is NOT the safe channel the earlier pass recorded: it is safe only on
+    ## is NOT the safe channel the earlier pass recorded: it was safe only on
     ## the automatic-monitor arm, where the provenance carries no
     ## `DepfileObservingContributors` member and `depfileObservedNothing`
     ## answers `true` whatever the channel holds. On a
-    ## `dgRecognizedFormatValidatedByMonitor` edge the empty tool report has
-    ## already marked `evcToolReportedDepfile`, so one unmarked path makes
+    ## `dgRecognizedFormatValidatedByMonitor` edge the empty tool report had
+    ## already marked `evcToolReportedDepfile`, so one unmarked path made
     ## BOTH disjuncts false — guard silent, record published, warm run `cdHit`,
     ## `runCount()==1`. The same probe also defeats `gradeKeyedInputSet` on
     ## three further edges by putting a fabricated path in the key. So the
     ## construction below is what all five terms need, not four.
+    ##
+    ## WHAT THE CONSTRUCTION DOES NOT DO ON ITS OWN, recorded because it was
+    ## once read as closed by it: it makes marking NECESSARY, not sufficient.
+    ## A correctly marked, correctly NON-observing append —
+    ## `observe(…, evcDeclarationDerivedDepfile, …)`, which this type permits
+    ## and should — still bought the publish on that same arm at `75f8e33c`,
+    ## because what answered the observation question there was the empty
+    ## report's own mark. That is fixed where it was caused, in
+    ## `addPathSet`; see `evcEmptyToolDepfileReport`.
     ##
     ## `distinct` is what closes that. The only append is `observe` (and its
     ## bulk form `observeAll`), which REQUIRES an `EvidenceContributor` and
@@ -6893,6 +6959,21 @@ proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
   # the declaration-derived generator stamp, in which case nothing looked at
   # the action at all (see `repro_depfile.DeclarationDerivedDepfileMarker`).
   #
+  # ...OR UNLESS IT NAMED NOTHING, which is the third case and was the defect.
+  # `evcToolReportedDepfile` is consumed by `depfileObservedNothing` as "a
+  # tool OBSERVED an input of this action"; an empty report observed none, and
+  # marking it anyway made the mark mean the weaker "a report was READ" while
+  # the guard went on reading it as the stronger claim. On an edge whose
+  # channel is filled by some OTHER, non-observing contributor — a
+  # declaration-derived depfile declared beside this one, which
+  # `RecognizedDependencyReportSpec.outputs` being a `seq` allows on one edge
+  # — both of the guard's disjuncts then came out false and a record was
+  # published for an action nothing had looked at. `evcEmptyToolDepfileReport`
+  # keeps the weaker fact recordable (so a consulted-and-empty report stays
+  # distinguishable from no report at all, which is what `repro why` needs and
+  # what a legitimate zero-include compile IS) without letting it answer the
+  # observation question. The guard's own five terms are untouched.
+  #
   # The `recognized = false` arm is the one rule 8 named. It puts a post-build
   # converter's `repro-pathset` output into `monitorReads` / `monitorWrites` /
   # `monitorProbes` — the MONITOR's channels — and downstream could not tell
@@ -6911,6 +6992,7 @@ proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
   let contributor =
     if recognized:
       if pathSet.declarationDerived: evcDeclarationDerivedDepfile
+      elif pathSet.inputs.len == 0: evcEmptyToolDepfileReport
       else: evcToolReportedDepfile
     else:
       evcPostBuildConverterReport
@@ -7181,10 +7263,21 @@ const DepfileObservingContributors: set[EvidenceContributor] = (block:
   for contributor in EvidenceContributor:
     case contributor
     of evcToolReportedDepfile:
-      # A dependency report a TOOL wrote while doing the action's work. The
-      # only contributor to `depfileInputs` that is an OBSERVATION of this
-      # action — `gcc -MD` lists the headers it really opened.
+      # A dependency report a TOOL wrote while doing the action's work, WHICH
+      # NAMED AT LEAST ONE INPUT. The only contributor to `depfileInputs` that
+      # is an OBSERVATION of this action — `gcc -MD` lists the headers it
+      # really opened.
       observing.incl contributor
+    of evcEmptyToolDepfileReport:
+      # A tool's report was READ and named nothing. The read is a fact worth
+      # recording — it is what tells a consulted-and-genuinely-empty report
+      # apart from no report at all — but it is not an observation of any
+      # INPUT, which is the only thing this set is allowed to mean. Putting it
+      # in the observing set is the defect `evcEmptyToolDepfileReport` was
+      # split out of `evcToolReportedDepfile` to remove, and the mutation that
+      # restores it reddens "an EMPTY tool report beside a declaration-derived
+      # one is not an observation".
+      discard
     of evcMonitorCapture, evcRootImageReconstruction, evcReplayedCacheRecord,
        evcDeclarationDerivedDepfile, evcPostBuildConverterReport,
        evcForeignProvisionerReport:
@@ -7223,19 +7316,42 @@ proc depfileObservedNothing(col: EvidenceCollection): bool {.inline.} =
   ## READ THAT AS A PROPERTY OF THIS EXPRESSION AND NOT OF THE CHANNEL, which
   ## is a distinction the first pass elided and the review measured. It holds
   ## when NOTHING ELSE on the edge has already marked an observing depfile
-  ## contributor. It does not hold on a `dgRecognizedFormatValidatedByMonitor`
-  ## or converter edge, where the empty report's own `addPathSet` has already
-  ## `incl`ed `evcToolReportedDepfile`: there the second disjunct is already
-  ## false, and ANY entry in the channel — marked or not — makes the first one
-  ## false too, so an unmarked writer buys the publish instead of paying for
-  ## it. Measured at `55219d92` with one unmarked path appended in
-  ## `collectEvidence`: `t_zero_evidence_edge_is_not_cacheable` went 29 OK / 0
-  ## FAILED to 20 OK / 9 FAILED, and
-  ## "recognized-format-validated-by-monitor: zero observations do not
-  ## publish" failed with `hasRecord` true, a warm `cdHit` and
-  ## `runCount()==1`. What closes that is not this expression but
-  ## `ObservedPathChannel`, which is why the write side had to become
-  ## impossible rather than merely discouraged.
+  ## contributor. Until `evcEmptyToolDepfileReport` existed it did NOT hold on
+  ## a `dgRecognizedFormatValidatedByMonitor` or converter edge, because the
+  ## EMPTY report's own `addPathSet` had already `incl`ed
+  ## `evcToolReportedDepfile`: the second disjunct was already false, and ANY
+  ## entry in the channel made the first one false too, so this term
+  ## degenerated into a plain emptiness test and one entry from any other
+  ## contributor bought the publish. Measured at `55219d92` with one unmarked
+  ## path appended in `collectEvidence`:
+  ## `t_zero_evidence_edge_is_not_cacheable` went 29 OK / 0 FAILED to 20 OK /
+  ## 9 FAILED, and "recognized-format-validated-by-monitor: zero observations
+  ## do not publish" failed with `hasRecord` true, a warm `cdHit` and
+  ## `runCount()==1`. Re-measured at `75f8e33c` with the branch-legal
+  ## `observe(…, evcDeclarationDerivedDepfile, …)` probe that
+  ## `ObservedPathChannel` permits: same headline case, same
+  ## `hasRecord`/`cdHit`/`runCount()==1`/empty diagnostics.
+  ##
+  ## DO NOT RECORD A CASE COUNT FOR THAT PROBE, and the review that landed
+  ## this tried to. The probe has a free parameter — WHICH path it
+  ## fabricates — and the tool-root elision treats a real root image and a
+  ## synthetic path differently, so the two obvious spellings reach
+  ## different `gradeKeyedInputSet` cases: appending `rootImage` gives 25 OK
+  ## / 4 FAILED and appending a synthetic path beside it gives 24 OK / 5
+  ## FAILED, both at `75f8e33c`. The HEADLINE case behaves identically in
+  ## both, which is the part that is a fact about the engine rather than
+  ## about the probe. The reproduction that has no free parameter at all is
+  ## the no-probe one below.
+  ##
+  ## TWO SEPARATE THINGS CLOSE THAT, and neither closes it alone.
+  ## `ObservedPathChannel` makes the write side NAME a contributor — marking
+  ## is necessary. `evcEmptyToolDepfileReport` is what makes marking
+  ## SUFFICIENT: with it, an empty report no longer answers the observation
+  ## question on anybody's behalf, so the second disjunct stays TRUE on such
+  ## an edge and the term is an observation test again rather than an
+  ## emptiness test. The state is reachable with no probe at all — one edge,
+  ## one recognized-report spec, two declared depfiles, the tool-written one
+  ## empty — and that is the case that grades it.
   ##
   ## WHICH POLARITY THAT IS, AND WHAT GRADES IT. The caller is the
   ## zero-evidence guard in `applyMonitorEvidenceStatus`, the only one, and
