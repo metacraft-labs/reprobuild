@@ -41424,6 +41424,14 @@ proc sameFilesystemPath(a, b: string): bool =
   else:
     aN == bN
 
+type
+  TriggerRepoUndeclaredError* = object of ValueError
+    ## The caller named a triggering checkout that no declared repo of the
+    ## resolved project matches, so there is no name to key a lock record on.
+    ## Distinct from the other lock-writer failures because for one trigger —
+    ## the membership repo — this is the SPECIFIED outcome rather than an
+    ## error (see ``pcoSkippedMembershipRepo``).
+
 proc pickTriggerRepo(resolved: ResolvedProject;
                      explicit, explicitPath, workspaceRoot: string;
                      identity: GitToolIdentity):
@@ -41480,7 +41488,16 @@ proc pickTriggerRepo(resolved: ResolvedProject;
     # commit this operation never observed, and that no consumer of the
     # triggering repo can find. "No lock" is recoverable and legible;
     # a misfiled one is neither.
-    raise newException(ValueError,
+    #
+    # Raised as its OWN type, not a bare ``ValueError``, because one caller
+    # has to tell this refusal apart from every other way the lock writer can
+    # fail. The post-commit hook does: for the MEMBERSHIP repo, "the trigger
+    # is not a declared repo" is the specified outcome rather than a failure
+    # (Workspace-And-Develop-Mode.md §"Gate scope when the pushed repo is the
+    # membership repo"), and the alternative — matching on this message's
+    # wording — would make that classification a property of the sentence
+    # below instead of of the condition it reports.
+    raise newException(TriggerRepoUndeclaredError,
       "triggering repo at '" & explicitPath &
         "' is not declared in project '" & resolved.projectName &
         "'; no lock can be anchored at it" &
@@ -44230,6 +44247,21 @@ type
     pcoNoLockFailed      ## Lock writer raised (IO error, VCS query
                          ## failure, missing checkout, ...) and NO lock
                          ## exists.
+    pcoSkippedMembershipRepo ## The commit landed in the MEMBERSHIP repo (the
+                          ## checkout carrying ``projects/``/``repos/``), for
+                          ## which Workspace-And-Develop-Mode.md §"Gate scope
+                          ## when the pushed repo is the membership repo"
+                          ## decides that no trigger-keyed record is due at
+                          ## all: it is not a project repo, so it has no
+                          ## declared name to encode as the ``<repo>``
+                          ## component and belongs to no tier's partition.
+                          ## Writing nothing is the SPECIFIED outcome here, so
+                          ## it is a skip and not a failure — the distinction
+                          ## this suite's invariant 4 reserves
+                          ## ``no-lock-failed`` for. A stray undeclared
+                          ## checkout keeps that tag: it has no resolvable
+                          ## anchor, which does block a record somebody would
+                          ## have looked for.
     pcoSkippedGitOperation ## Git is mid-rebase / mid-cherry-pick / mid-am /
                            ## mid-bisect in the repo that fired the hook. The
                            ## commit this hook saw is one of that operation's
@@ -44288,6 +44320,7 @@ proc postCommitOutcomeTag(outcome: PostCommitOutcome): string =
   of pcoNoLockDirty: "no-lock-dirty-siblings"
   of pcoSkippedNoWorkspace: "skipped-no-workspace"
   of pcoNoLockFailed: "no-lock-failed"
+  of pcoSkippedMembershipRepo: "skipped-membership-repo"
   of pcoSkippedGitOperation: "skipped-git-operation-in-progress"
   of pcoInertGitStateUnknown: "inert-git-state-unknown"
 
@@ -45560,6 +45593,33 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   ## ``mayWrite = false`` classifies and reports without writing, for a commit
   ## the `repro.lock` re-pin is already refusing.
 
+proc triggerIsMembershipRepo(toolProvisioning: ToolProvisioningMode;
+                             workspaceRoot, triggerRepoPath: string): bool =
+  ## Is ``triggerRepoPath`` this workspace's MEMBERSHIP repo — the checkout
+  ## carrying ``projects/``/``repos/``, which no project declares?
+  ##
+  ## The same test the pre-push gate makes (``currentIsMembershipRepo``), and
+  ## made the same way on purpose: ``manifestsRoot`` locates membership (the
+  ## flat workspace root, else a materialized ``.repro/manifests``), and
+  ## ``discoverGitWorktree`` insists the path IS a worktree ROOT rather than
+  ## accepting an ancestor's answer. Without that second half an arbitrary
+  ## directory that happens to sit at the membership path would qualify.
+  ##
+  ## False on any probe failure. The caller is deciding whether to downgrade a
+  ## failure report to a decided no-op, so an unanswerable question must leave
+  ## the failure report standing.
+  if triggerRepoPath.len == 0 or workspaceRoot.len == 0:
+    return false
+  try:
+    let membershipRoot = manifestsRoot(workspaceRoot)
+    if not sameFilesystemPath(absolutePath(membershipRoot),
+                              absolutePath(triggerRepoPath)):
+      return false
+    let identity = ensureGitToolResolvable(toolProvisioning, getEnv("PATH"))
+    discoverGitWorktree(identity, membershipRoot).ok
+  except CatchableError:
+    false
+
 proc runPostCommitLockCommand*(args: openArray[string]): int =
   ## ``repro hooks dispatch post-commit --repo-root=<repo>`` (and the
   ## operator-facing manual entry point) routes here. The M19 policy is
@@ -45789,12 +45849,61 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
 
   var raised = false
   var raisedDiagnostic = ""
+  var raisedTriggerUndeclared = false
   var outcome: WorkspaceLockOutcome
   try:
     outcome = executeWorkspaceLock(lockArgs)
   except CatchableError as err:
     raised = true
     raisedDiagnostic = err.msg
+    raisedTriggerUndeclared = err of TriggerRepoUndeclaredError
+
+  if raised and raisedTriggerUndeclared and
+      triggerIsMembershipRepo(parsed.toolProvisioning, workspaceRoot,
+                              lockArgs.triggerRepoPath):
+    # NOT a failure: this is the outcome the specs decide for this trigger.
+    #
+    # Workspace-And-Develop-Mode.md §"Gate scope when the pushed repo is the
+    # membership repo" — "Rule (DECIDED). A membership push writes NO
+    # trigger-keyed lock record." The membership repo is not a project repo,
+    # so it has no declared name to encode as the ``<repo>`` component of
+    # ``locks/<project>/<repo>/<sha>.toml`` and belongs to no tier's
+    # partition; Unified-Locking-And-Hooks.md §6 Decision 1 consequence 2 then
+    # applies verbatim. The resolver is right to refuse an anchor and must not
+    # fall through to the project-named default — that files a false claim at a
+    # coordinate the commit cannot move, and burns it.
+    #
+    # What was wrong was the REPORT. Every manifest commit logged
+    # ``no-lock-failed`` — the tag
+    # ``t_workspace_post_commit_lock_refresh_is_best_effort`` reserves for
+    # invariant 4, a lock writer that genuinely failed — and said no lock
+    # "can be anchored at it", which describes an obstacle where the spec
+    # says no record is due. One workspace accumulated eighteen days of those
+    # with nothing wrong with it, and the real failure underneath (a dirty
+    # sibling) had been masked by the same log for two weeks before that.
+    #
+    # Everything else post-commit does for this repo still happens: the
+    # cache-ref push and the evidence refresh above have already run. Only the
+    # record is not due.
+    report.outcome = postCommitOutcomeTag(pcoSkippedMembershipRepo)
+    report.publication = postCommitPublicationTag(pcpNoRecord)
+    report.lockWritten = false
+    report.diagnostic = "no lock record is due: '" &
+      lockArgs.triggerRepoPath & "' is this workspace's membership repo " &
+      "(it carries projects/ and repos/), which no project declares as one " &
+      "of its repos, so a commit here anchors no trigger-keyed record " &
+      "(Workspace-And-Develop-Mode.md §\"Gate scope when the pushed repo " &
+      "is the membership repo\"). Nothing failed and nothing is pending; " &
+      "the repos whose pins this commit changes each record their own lock " &
+      "when they are pushed."
+    writePostCommitReport(workspaceRoot, report)
+    appendPostCommitLog(workspaceRoot,
+      timestamp & " " & report.outcome & " " & report.diagnostic)
+    # Deliberately NOT routed through ``emitPostCommitWarning``: that channel
+    # is for a run that did not reach the designed steady state, and this one
+    # IS the designed steady state for this repo. A warning on every manifest
+    # commit is how an operator learns to stop reading them.
+    return 0
 
   if raised:
     # M19b mode 3: no lock exists. The commonest instance of this branch is

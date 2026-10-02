@@ -34700,7 +34700,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_workspace_post_commit_lock_refresh_is_best_effort.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 13,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
