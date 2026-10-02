@@ -119,7 +119,8 @@ template expectCollateralRefusal(want: TdxCollateralErrorKind;
   check raised
 
 const
-  Now = 1_790_294_400'i64                 ## 2026-09-25T00:00:00Z.
+  Now = 1_790_035_200'i64                 ## 2026-09-22T00:00:00Z; see
+    ## `snp_vectors`'s clock rule. Derived, not chosen.
   NowMs = Now * 1000'i64
 
 let signerDer = bytesOfHex(IntelTcbSigningCertDerHex)

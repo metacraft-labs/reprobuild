@@ -75,6 +75,7 @@ DRIFT_MEANS = {
     "protocol-vector": "drifted",
     "trust-root": "drifted",
     "vendor-collateral": "drifted",
+    "historical-vintage": "drifted",
     "genuine-capture": "expected-to-differ",
     "minted-negative": "no-publisher",
     "derived-reading": "no-publisher",
@@ -115,6 +116,32 @@ def parse_instant(value: str, what: str) -> int:
     return int(stamp.replace(tzinfo=datetime.timezone.utc).timestamp())
 
 
+def effective_horizon(not_before: int, not_after: int | None,
+                      horizon: int) -> int:
+    """The lesser of the caller's horizon and half this artifact's own
+    stated lifetime. `effectiveHorizon` on the Nim side, same rule.
+
+    An announcement that is true for an artifact's whole life announces
+    nothing. Measured on this corpus rather than reasoned about: every
+    trusted-computing-base document and platform revocation list one of
+    these vendors serves states a next-update EXACTLY thirty days after
+    its issue date, so under a flat thirty-day horizon none of them is
+    ever `current` -- each is born due for refresh and stays due until it
+    expires. A weekly run over such a corpus prints the same rows from
+    the day it is switched on, and a report that has never once been
+    empty cannot say that something changed.
+
+    Half, because half is the largest fraction that guarantees the quiet
+    period is at least as long as the warning period.
+    """
+    if not_after is None:
+        return horizon
+    lifetime = not_after - not_before
+    if lifetime <= 0:
+        return horizon
+    return min(horizon, lifetime // 2)
+
+
 def classify(not_before: int, not_after: int | None, now: int,
              horizon: int) -> str:
     """The same five statuses, in the same order, as the Nim side.
@@ -130,7 +157,7 @@ def classify(not_before: int, not_after: int | None, now: int,
         return "no-stated-end"
     if now >= not_after:
         return "expired"
-    if now + horizon >= not_after:
+    if now + effective_horizon(not_before, not_after, horizon) >= not_after:
         return "due-for-refresh"
     return "current"
 
@@ -138,6 +165,23 @@ def classify(not_before: int, not_after: int | None, now: int,
 NEEDS_ATTENTION = {
     "not-yet-in-force", "due-for-refresh", "expired", "no-stated-end",
 }
+
+
+def expiry_needs_attention(cls: str, status: str) -> bool:
+    """Whether this (class, status) pair is reported LOUDLY.
+
+    `expiryNeedsAttention` on the Nim side. `historical-vintage` is the
+    one class whose answer differs from the status alone: such an
+    artifact is pinned BECAUSE it has expired -- it is the second, older
+    vintage that proves this build reads the format rather than one
+    document -- so `expired` is the state it is supposed to be in, and
+    reporting it every week is the crying-wolf failure the
+    classification exists to prevent. Any OTHER status for it
+    contradicts the class and is LOUDER than what it displaces.
+    """
+    if cls == "historical-vintage":
+        return status != "expired"
+    return status in NEEDS_ATTENTION
 
 
 def days(a: int, b: int) -> int:
@@ -160,6 +204,8 @@ def expiry_line(row: dict, status: str, now: int, remedy: str) -> str:
     else:
         raise Unusable(f"{name} classified {status!r}, which this tool "
                        "has no sentence for")
+    if row["class"] == "historical-vintage" and status == "expired":
+        when += ", which is what it is pinned for"
     return (f"{name}: {status} {when}. It is {row['class']} from "
             f"{row['publisher']}. Refresh it with: {remedy}")
 
@@ -236,6 +282,20 @@ def main(argv: list[str]) -> int:
         if row["publisher"] not in publishers:
             raise Unusable(f"{row['name']} names the publisher "
                            f"{row['publisher']!r}, which no row describes")
+        if row["class"] == "historical-vintage" and row["name"] in fetchable:
+            # The class says "this document cannot be made current, it is
+            # pinned old on purpose", and that is what quietens its
+            # expiry. An unattended refresh route says the opposite --
+            # one HTTP GET returns the publisher's current answer. A row
+            # claiming both is a row using the class as a mute button,
+            # and the tool refuses to run rather than deciding which
+            # half to believe.
+            raise Unusable(
+                f"{row['name']} is classified 'historical-vintage', which "
+                "is what stops its expiry being reported, and the fetch "
+                "table gives it an unattended refresh route; an artifact "
+                "that can be re-fetched in one request is not pinned for "
+                "being old")
     for name in fetchable:
         if not any(r["name"] == name for r in ledger):
             raise Unusable(f"the fetch table names {name!r}, "
@@ -253,6 +313,7 @@ def main(argv: list[str]) -> int:
     findings: list[str] = []
     quiet: list[str] = []
     unreachable: list[str] = []
+    next_deadline: list[tuple[int, str]] = []
 
     for row in ledger:
         if row["window"] in ("none", "unreadable"):
@@ -263,7 +324,9 @@ def main(argv: list[str]) -> int:
         status = classify(nb, na, now, horizon)
         remedy = publishers[row["publisher"]]
         line = expiry_line(row, status, now, remedy)
-        loud = status in NEEDS_ATTENTION
+        loud = expiry_needs_attention(row["class"], status)
+        if na is not None and status != "expired":
+            next_deadline.append((na, row["name"]))
         # One pinned revocation list carries no next-update ON PURPOSE:
         # it is the input the evaluators' set-aside rule needs, and it
         # was minted here by removing the field. Reporting it every run
@@ -316,6 +379,16 @@ def main(argv: list[str]) -> int:
         print("  ? " + line)
     for line in quiet:
         print("    " + line)
+    # The next deadline, named, on EVERY run including a quiet one. A
+    # report that says only "nothing needs attention" leaves a reader
+    # unable to tell a corpus that was refreshed yesterday from one no
+    # scheduled run has ever looked at, and those are the two states
+    # this tool exists to distinguish.
+    if next_deadline:
+        when, who = min(next_deadline)
+        print(f"  next expiry: {who} on "
+              f"{datetime.datetime.fromtimestamp(when, datetime.timezone.utc).strftime(ISO)}"
+              f" (in {days(now, when)} days)")
     if findings:
         print(f"  {len(findings)} artifact(s) need attention")
     if unreachable:
