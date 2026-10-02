@@ -7200,6 +7200,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
     var mergedCmakePrefixDirs: seq[string] = @[]
     var mergedIncludeDirs: seq[string] = @[]
     var mergedLibDirs: seq[string] = @[]
+    var mergedReceipts: seq[string] = @[]
     for actionIdy in snapshot.actionIdentities:
       let matchByName = actionIdy.executableName == name
       let bareSelector = block:
@@ -7217,6 +7218,12 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
       if not (matchByName or matchBySelector):
         continue
       matched = true
+      # The provisioning edge that realized this tool: the engine declares
+      # its receipt as an input of the consuming action
+      # (``withProvisioningReceiptInputs``).
+      if actionIdy.provisioningReceipt.len > 0 and
+          actionIdy.provisioningReceipt notin mergedReceipts:
+        mergedReceipts.add(actionIdy.provisioningReceipt)
       if actionIdy.resolvedExecutablePath.len > 0:
         if mergedExecutablePath.len == 0:
           mergedExecutablePath = actionIdy.resolvedExecutablePath
@@ -7279,6 +7286,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
       return some(ResolvedToolIdentity(
         binDirs: mergedBinDirs,
         resolvedExecutablePath: mergedExecutablePath,
+        provisioningReceipts: mergedReceipts,
         pkgConfigDirs: mergedPkgConfigDirs,
         cmakePrefixDirs: mergedCmakePrefixDirs,
         includeDirs: mergedIncludeDirs,
