@@ -1991,6 +1991,12 @@ proc emitAutotoolsStageCopy(installEdge: BuildActionDef;
     pool = "compile",
     dependencyPolicy = dependencyPolicy,
     commandStatsId = "autotools_package.stage." & kind,
+    # Part of the package's PUBLIC output: a consumer resolves this
+    # package's staged artifact through `.repro/output/<name>`. Tagged so its bytes
+    # are published with its portable record; untagged, another checkout
+    # resolved the whole chain and then executed it anyway, because this
+    # sink's outputs could not be put in place (Cache-Scope P3.4).
+    publishToBinaryCache = true,
     toolIdentityRefs = stageToolRefs)
 
 proc emitStageCopyAlias(installEdge: BuildActionDef;
@@ -2107,6 +2113,12 @@ proc emitStageCopyAlias(installEdge: BuildActionDef;
     pool = "compile",
     dependencyPolicy = dependencyPolicy,
     commandStatsId = "autotools_package.stage.executable_alias",
+    # Part of the package's PUBLIC output: a consumer resolves this
+    # package's executable alias through `.repro/output/<name>`. Tagged so its bytes
+    # are published with its portable record; untagged, another checkout
+    # resolved the whole chain and then executed it anyway, because this
+    # sink's outputs could not be put in place (Cache-Scope P3.4).
+    publishToBinaryCache = true,
     toolIdentityRefs = aliasToolRefs)
 
 # ---------------------------------------------------------------------------
