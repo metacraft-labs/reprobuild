@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Pinned verbatim payload from CodeTracer commit
-# 34b96d03b9436a0538e0d526a9caaf458226c63f, repro.nim.
-# Source: https://github.com/metacraft-labs/codetracer/blob/34b96d03b9436a0538e0d526a9caaf458226c63f/repro.nim
+# 01068538c9986b40c8c8fbac28555eac7751ccc2, repro.nim.
+# Source: https://github.com/metacraft-labs/codetracer/blob/01068538c9986b40c8c8fbac28555eac7751ccc2/repro.nim
 #
 # Keep every byte after this provenance header identical to the public source.
 import repro_dsl_stdlib/foreign_env
@@ -104,7 +104,6 @@ const
     "codetracer-polkavm-recorder",
     "codetracer-solana-recorder",
     "codetracer-ton-recorder",
-    "codetracer-wasmi-recorder",
     "nix-blockchain-development",
     "noir",
     "runquota",
@@ -599,7 +598,7 @@ package codeTracer:
 
     for recorderName in [
         "cairo", "cardano", "circom", "evm", "flow", "fuel", "leo",
-        "miden", "move", "polkavm", "solana", "ton", "native", "wasmi"]:
+        "miden", "move", "polkavm", "solana", "ton", "native"]:
       let recorderRepo = siblingPath(workspaceRoot,
         "codetracer-" & recorderName & "-recorder")
       let recorderBin = recorderRepo / "target" / "release" /
