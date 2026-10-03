@@ -17,13 +17,19 @@ const
   # ``!nim_js`` expands through ``NIM_SELECTED``. That is the only change to a
   # fingerprinted definition since 04d6aff3; ``!trace_object_file`` is
   # unchanged, so its hash is too.
-  NimJsSemanticsHash = "b8d6481bcc00d87b"
-  NimJsWithoutOldCaseObjectsHash = "85e7880da3e33f69"
+  #
+  # Refreshed at 34b96d03 (the next ``codetracer-src`` pin): ``!nim_js`` gained
+  # a per-rule ``--nimcache:/tmp/ct-nim-cache/%B_nim_js`` and the output-side
+  # exclusion ``| $(NIM_SIDE_OUTPUTS_IGNORE)``, which tells tup to accept the
+  # writes into that cache. Every other fingerprinted definition is
+  # byte-identical, so ``!trace_object_file`` keeps its hash.
+  NimJsSemanticsHash = "c78271220ebdc225"
+  NimJsWithoutOldCaseObjectsHash = "600a5090da25c07b"
   TraceObjectFileSemanticsHash = "3d1a52e3befe61cf"
   CodeTracerTupSemanticsCommit =
-    "a9ef983ed1e7d9a60b85034b596f55ea8b2164f5"
+    "01068538c9986b40c8c8fbac28555eac7751ccc2"
   PinnedTupSemanticsFixture =
-    "tests/fixtures/codetracer-subset/Tuprules-a9ef983e.tup"
+    "tests/fixtures/codetracer-subset/Tuprules-01068538.tup"
 
 type
   TupRules = object
@@ -202,7 +208,7 @@ proc expandTupVars(value: string; variables: Table[string, string]): string =
   raise newException(ValueError, "recursive Tup variable expansion: " & value)
 
 proc tupRuleParts(rules: TupRules; name: string): tuple[command: string;
-    outputs: seq[string]] =
+    outputs: seq[string]; exclusions: seq[string]] =
   if not rules.macros.hasKey(name):
     raise newException(ValueError, "missing Tup macro " & name)
   let macroBody = rules.macros[name]
@@ -217,8 +223,22 @@ proc tupRuleParts(rules: TupRules; name: string): tuple[command: string;
       raise newException(ValueError, "unterminated Tup display marker: " & name)
     command = command[markerEnd + 1 .. ^1].strip()
   let expanded = expandTupVars(command, rules.variables)
-  let outputText = macroBody[second + 2 .. ^1].strip()
-  result = (command: expanded, outputs: outputText.splitWhitespace())
+  # Tup's output section is `<outputs> [| <extra outputs and exclusions>]`.
+  # Only the part before `|` names the files the rule writes; a `^regex`
+  # after it is an EXCLUSION -- writes tup accepts and ignores, not outputs.
+  var outputText = macroBody[second + 2 .. ^1].strip()
+  var exclusions: seq[string]
+  let bar = outputText.find('|')
+  if bar >= 0:
+    for item in expandTupVars(outputText[bar + 1 .. ^1].strip(),
+        rules.variables).splitWhitespace():
+      if not item.startsWith("^"):
+        raise newException(ValueError,
+          "Tup extra output is not modeled by this test: " & item)
+      exclusions.add(item)
+    outputText = outputText[0 ..< bar].strip()
+  result = (command: expanded, outputs: outputText.splitWhitespace(),
+    exclusions: exclusions)
 
 proc tupCommandTemplate(rules: TupRules; name: string): seq[string] =
   tupRuleParts(rules, name).command.splitWhitespace()
@@ -227,7 +247,9 @@ proc tupOutputPatterns(rules: TupRules; name: string): seq[string] =
   tupRuleParts(rules, name).outputs
 
 proc replaceTupPlaceholders(token, sourcePath, outputPath: string): string =
-  token.replace("%f", sourcePath).replace("%o", outputPath)
+  # `%B` is the input's base name without its extension, as in tup.
+  token.replace("%f", sourcePath).replace("%o", outputPath).replace(
+    "%B", splitFile(sourcePath).name)
 
 proc tupCommand(rules: TupRules; name, sourcePath, outputPath: string): seq[string] =
   for token in tupCommandTemplate(rules, name):
@@ -242,12 +264,22 @@ proc stableHash64(text: string): string =
 
 proc tupSemanticsHash(rules: TupRules; name: string): string =
   let parts = tupRuleParts(rules, name)
-  stableHash64(parts.command.splitWhitespace().join("\n") &
-    "\noutputs\n" & parts.outputs.join("\n"))
+  var text = parts.command.splitWhitespace().join("\n") &
+    "\noutputs\n" & parts.outputs.join("\n")
+  # Exclusions are part of what tup accepts from the command, so they are part
+  # of its semantics; a rule without any hashes exactly as before.
+  if parts.exclusions.len > 0:
+    text.add("\nexclusions\n" & parts.exclusions.join("\n"))
+  stableHash64(text)
 
 proc assertCommittedTupSemantics(rules: TupRules) =
   check tupOutputPatterns(rules, "!nim_js") == @["%B.js"]
   check tupOutputPatterns(rules, "!trace_object_file") == @["%o"]
+  # `!nim_js` excludes its per-rule nimcache (NIM_SIDE_OUTPUTS_IGNORE);
+  # `!trace_object_file` excludes nothing.
+  check tupRuleParts(rules, "!nim_js").exclusions.len == 1
+  check tupRuleParts(rules, "!nim_js").exclusions.allIt("ct-nim-cache" in it)
+  check tupRuleParts(rules, "!trace_object_file").exclusions.len == 0
   check tupCommandTemplate(rules, "!nim_js")[0 .. 1] == @["nim", NimFirstFlag]
   check "-d:nimOldCaseObjects" in tupCommandTemplate(rules, "!nim_js")
   check tupCommandTemplate(rules, "!trace_object_file")[0 .. 3] ==

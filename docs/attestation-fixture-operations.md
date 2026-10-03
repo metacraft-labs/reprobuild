@@ -49,6 +49,22 @@ it judges — so refreshing a fixture without moving the clock beside it,
 or moving a clock past the material it was chosen for, is a failure with
 a name rather than a surprise six months later.
 
+And the clock is **derived rather than chosen**, by one sentence:
+
+> a gate's `Now` is the first UTC midnight at which every artifact that
+> gate judges is simultaneously in force — the midnight at or after the
+> latest `notBefore` among them.
+
+"Inside the window" is satisfied by any instant in a fifty-day interval,
+and an agent who has to move a clock to get a refresh landed will reach
+for one that passes. That is how a clock ends up far ahead of its
+evidence, and how the refresh after it silently stops testing anything.
+The earliest defensible instant is a decision nobody has to make twice:
+it is re-derivable by anyone holding the corpus, from dates read out of
+the artifacts themselves, and it moves when and only when the material
+moves. `t_attestation_fixture_lifecycle` computes it per gate and
+requires equality.
+
 ---
 
 ## A local developer
@@ -69,13 +85,20 @@ Read the failure by which of its suites failed.
 | *the ledger describes the bytes* | A pinned constant's bytes changed, or the ledger's record of them did | Do not edit the ledger to match. Find out which side moved — `git log -p` the corpus module. A digest that changed without a deliberate refresh is a corrupted or mis-transcribed constant |
 | *every date is read out of the artifact* | The ledger's recorded window disagrees with the window the bytes state | The ledger was edited by hand. Regenerate it; never transcribe |
 | *the ledger is complete* | A corpus constant exists with no ledger row, or a row names a constant that is gone | Add or remove the row. This is the check that stops a corpus growing a member nobody tracks |
-| *pinned clocks agree with the material they judge* | A gate's `Now` fell outside the window of the material it judges | Either the fixture was refreshed and the clock was not moved, or a clock was moved past its material. Move the clock to sit inside the new window, and say in the commit which fixture forced it |
+| *pinned clocks agree with the material they judge* | A gate's `Now` is not the instant the clock rule gives | Either a fixture was refreshed and the clock was not moved, or a clock was moved by hand. The clock is derived, not chosen: it is the first UTC midnight at which every artifact that gate judges is in force. The failure prints what the gate states and what the rule gives; set it to the second |
 | *sanitization* | A private key reached a pinned artifact or a corpus module's source | **Stop and treat it as a disclosure**, not as a test failure. The bytes are in the repository's history from the commit that added them; rotating the key is the remedy, deleting the line is not |
 | *the lifecycle decision* | The rules themselves changed | Nothing about fixtures. Read the diff to `repro_attest_verify/lifecycle` |
 
 ### "I need to refresh one fixture"
 
-Refreshing a fixture is four steps and the fourth is the one people skip.
+Refreshing a fixture is five steps and the last two are the ones people
+skip. **All of them land in one commit.** Steps 1–3 alone leave the tree
+red, and that is not a hazard to be careful about — it is arithmetic: a
+reissued revocation list comes into force *later* than the one it
+replaces, and a list that is not yet in force is set aside by every
+chain evaluator here, so the gates whose pinned clock sits before the
+new `thisUpdate` begin reporting "no revocation data". This happened to
+be four gates the last time; the ledger gate names them.
 
 1. Re-fetch from the publisher named in the ledger's publisher table.
    That table carries the exact command; it is not prose.
@@ -83,10 +106,18 @@ Refreshing a fixture is four steps and the fourth is the one people skip.
    truthful — the observation date in particular.
 3. Regenerate the ledger row (digest, size, window). Do not type a
    digest.
-4. **Check every pinned clock that judges it.** The ledger gate will
-   tell you which, by name. A refreshed CRL with a later `nextUpdate`
-   will happily pass a gate whose pinned clock is now *before* its
-   `thisUpdate`, and that gate is then testing nothing.
+4. **Move every pinned clock that judges it, in the same commit.** The
+   clock is not a judgement call: it is the first UTC midnight at which
+   every artifact that gate judges is in force — the midnight at or
+   after the latest `notBefore` among them. The ledger gate computes
+   that from the artifacts' own dates and requires equality, so there
+   is nothing to choose and nothing to argue about. Pick a value
+   because it passes and the gate says so.
+5. **Move `LedgerReferenceInstant`** to the UTC midnight of the new
+   observation date. It is likewise derived — the latest `observed` in
+   the ledger — and the gate checks it, because a reference instant
+   that stays put while the corpus moves is a set of cases describing a
+   corpus nobody has.
 
 ### The review checklist for a new or refreshed fixture
 
@@ -136,9 +167,10 @@ and is not printed as a finding.
 * **`expired`** — the document stopped being usable on a date now in the
   past. Every evaluator in this build refuses on it. Refresh now.
 * **`due-for-refresh`** — it is still valid and expires inside the
-  horizon (30 days by default). This is the state the tool exists to
-  produce: it is a deadline, not an outage, and the whole value is that
-  it arrives while there is time.
+  horizon (at most 30 days; see the cadence section below for why it is
+  a ceiling and not a fixed number). This is the state the tool exists
+  to produce: it is a deadline, not an outage, and the whole value is
+  that it arrives while there is time.
 * **`no-stated-end`** — a revocation list with no `nextUpdate`. This is
   *not* "valid forever": the chain evaluators set such a list aside, so
   a verifier holding only that one cannot ask the revocation question at
@@ -164,9 +196,79 @@ The vendors set it, and they do not agree with each other. Both AMD's
 and Intel's distribution services reissue their revocation lists and
 trusted-computing-base documents on roughly monthly windows, so a corpus
 of them goes stale about that fast whatever anybody here would prefer.
-That is why the horizon is 30 days: a shorter one announces deadlines
-that have already passed, and a longer one is indistinguishable from not
-checking.
+
+**Which is exactly why a flat 30-day horizon did not work, and this is
+the correction.** Measured on the corpus: every trusted-computing-base
+document and platform revocation list one of these vendors serves states
+a next-update *exactly thirty days* after its issue date. Under a flat
+thirty-day horizon not one of them is ever `current` — each is born due
+for refresh and stays due until it expires — so seven of the sixty-seven
+pinned artifacts were permanently in the report and the run was red on
+the day it was switched on and every day after. A report that has never
+once been empty cannot say that something changed.
+
+So the thirty days is a **ceiling**, and the horizon an artifact gets is
+the lesser of it and **half that artifact's own stated lifetime**. Half,
+because half is the largest fraction that leaves a quiet period at least
+as long as the warning period. A thirty-day document is now quiet for
+fifteen days and warns for fifteen; a forty-eight-day revocation list is
+quiet for twenty-four and warns for twenty-four; anything living longer
+than sixty days gets the full thirty.
+
+It narrows the warning and never the validity. `expired` is unchanged,
+`isUsable` is unchanged, and every evaluator's refusal is unchanged; the
+only thing that moves is the day the announcement starts.
+
+### What "needs attention" does not include
+
+One class is quiet while expired, on purpose, and it is worth knowing
+which and why before reading a run as clean.
+
+**`historical-vintage`** is vendor collateral pinned *because* it is
+old. A corpus holding one vintage of a trusted-computing-base document
+shows that this build reads the vintage it happens to hold; two
+vintages, issued years apart, show that it is reading the **format**.
+Three documents here are kept at issue dates long past for that reason,
+and refreshing one would delete the property it exists for. Their
+expiry is therefore printed and not counted.
+
+The class costs something rather than being a label:
+
+* a row carrying it **must** be expired — a vintage that is current
+  contradicts the class and is reported *more* loudly than an ordinary
+  expiry, not less;
+* a row carrying it **must not** be in the fetch table. "This cannot be
+  made current" and "one HTTP GET returns the publisher's current
+  answer" cannot both be true, and the tool refuses to run at all
+  (exit 2) rather than deciding which half to believe;
+* **drift** for it is `drifted`, exactly as for ordinary collateral. Its
+  publisher is a project's committed test data at a named commit, which
+  cannot answer differently, so a difference is a defect in the pin. The
+  class quietens an expiry and nothing else.
+
+### Where the periodic run actually runs
+
+A GitHub Actions `schedule:` trigger fires **only from the repository's
+default branch**. A workflow that lives on a development branch has no
+scheduled run — not a late one, an absent one — and the Actions UI shows
+the workflow as `active` either way, so nothing says so.
+
+That is not hypothetical here: between this job being added and the
+first expiry it was written to announce, the API recorded exactly one
+run of it, from the `push` that introduced it. The one Monday in between
+fell before the file existed; the next fell after the documents expired.
+
+The job therefore runs its **offline expiry half on every push** to the
+branches work lands on, and keeps the schedule for the network half. If
+you are wondering whether the weekly run is working, do not read the
+workflow file — ask for its runs:
+
+```
+gh api repos/<owner>/<repo>/actions/workflows/attestation-collateral.yml/runs \
+  -q '.workflow_runs[] | "\(.created_at) \(.event) \(.head_branch) \(.conclusion)"'
+```
+
+An `event` column with no `schedule` in it is the answer.
 
 ---
 

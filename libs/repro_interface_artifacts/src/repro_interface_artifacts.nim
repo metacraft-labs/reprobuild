@@ -4431,6 +4431,11 @@ proc interfaceExtractionContext(modulePath: string;
   for extra in extraPaths:
     if extra.len > 0:
       libPathFlags.add("--path:" & normalizedStampPath(extra))
+  # The selected catalog decides which module a catalog `uses:` imports
+  # (`catalogSelectionIdentity`); the recipe text does not change with it.
+  let catalogSelection = catalogSelectionIdentity()
+  if catalogSelection.len > 0:
+    libPathFlags.add(catalogSelection)
   InterfaceExtractionContext(
     modulePath: normalizedStampPath(modulePath),
     workDir: normalizedStampPath(workDir),
@@ -4454,6 +4459,11 @@ proc interfaceExtractionCacheContext(modulePath: string;
   for extra in extraPaths:
     if extra.len > 0:
       libPathFlags.add("--path:" & normalizedStampPath(extra))
+  # The selected catalog decides which module a catalog `uses:` imports
+  # (`catalogSelectionIdentity`); the recipe text does not change with it.
+  let catalogSelection = catalogSelectionIdentity()
+  if catalogSelection.len > 0:
+    libPathFlags.add(catalogSelection)
   InterfaceExtractionContext(
     modulePath: normalizedStampPath(modulePath),
     workDir: normalizedStampPath(workDir),

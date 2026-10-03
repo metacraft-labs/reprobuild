@@ -50,6 +50,11 @@
       # ``nixos-modules`` follows ours so runquota's package set is this
       # flake's package set — one nixpkgs evaluation, not two.
       inputs.nixos-modules.follows = "nixos-modules";
+      # runquota's release dev shell takes reprobuild's packaging sources as
+      # ``release-packaging-src``, pinned to SOME reprobuild revision. Inside
+      # this flake that is a second, competing reprobuild pin (and an identity
+      # with no recorded visibility); point it at this flake itself instead.
+      inputs.release-packaging-src.follows = "";
     };
     io-mon-src = {
       # io-mon ships the ``io_mon`` Nim package (the byte-identical wire-format
