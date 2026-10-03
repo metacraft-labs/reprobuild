@@ -19,8 +19,8 @@
 ##      substituted for the failed move.
 ##   4. Re-runnable: with the obstruction removed, the same sync relocates.
 
-import std/[json, os, osproc, strutils, unittest]
 import repro_test_support/reasoned_skip
+import std/[json, os, osproc, strutils, unittest]
 import declared_rename_fixture
 
 suite "declared rename — a failed move is clean and re-runnable":
@@ -28,14 +28,14 @@ suite "declared rename — a failed move is clean and re-runnable":
   test "t_rename_relocation_failed_moves_nothing_and_exits_one":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip("git not on PATH; the declared-rename fixture needs a repository")
+      skip("git is not on PATH; this case uses real Git repositories")
     elif defined(windows):
       # The staging below uses POSIX permission bits.
-      skip("the staging uses POSIX permission bits, which Windows does not have")
+      skip("requires POSIX permission bits to obstruct the move")
     elif execCmdEx("id -u").output.strip() == "0":
       # root ignores the permission bits, so the obstruction cannot be staged
       # and a pass here would mean nothing.
-      skip("running as root, which ignores permission bits, so the obstruction cannot be staged")
+      skip("root bypasses the permission obstruction required by this case")
     else:
       let fx = newRenameFixture(gitBin, "movefail")
       defer:

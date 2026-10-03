@@ -59,7 +59,7 @@
 
 {.push raises: [].}
 
-import std/[algorithm, os, osproc, strutils]
+import std/[algorithm, os, strutils]
 import git_tool
 
 proc cRename(oldname, newname: cstring): cint
@@ -80,10 +80,9 @@ proc cRename(oldname, newname: cstring): cint
 
 type
   RelocationGitProbe* = object
-    ## How this module runs git. Injected rather than imported so the module
-    ## stays free of the CLI layer's tool-identity machinery and is drivable
-    ## from a test with nothing but a git binary path.
-    gitBin*: string
+    ## Keep the CLI's resolved Git execution profile, including its identity
+    ## and version evidence, through every relocation query.
+    identity*: GitToolIdentity
 
   CheckoutCapture* = object
     ## The state of a checkout, captured for two readers at once
@@ -145,14 +144,8 @@ proc runGit(probe: RelocationGitProbe; args: openArray[string]):
   ## sync invoked from inside a git hook would ask its questions of the
   ## INVOKING repository and answer them about the candidate. Every other git
   ## caller in this library scrubs for the same reason.
-  var command = quoteShell(probe.gitBin)
-  for arg in args:
-    command.add(' ')
-    command.add(quoteShell(arg))
   try:
-    let res = execCmdEx(command, options = {poStdErrToStdOut, poUsePath},
-      env = scrubbedGitRepositoryEnv())
-    (code: res.exitCode, output: res.output)
+    queryGit(probe.identity, args)
   except CatchableError as err:
     (code: 127, output: "could not run git: " & err.msg)
   except Exception as err:
@@ -182,9 +175,10 @@ proc isGitCheckout*(probe: RelocationGitProbe; dir: string): bool =
     return false
   # A directory nested inside another checkout answers `true` above and
   # reports the OUTER toplevel. Relocation must not take such a directory for
-  # a checkout of its own.
+  # a checkout of its own. Git resolves filesystem aliases such as macOS
+  # /tmp -> /private/tmp; compare the actual directories, not their spellings.
   try:
-    absolutePath(reported).normalizedPath == absolutePath(dir).normalizedPath
+    sameFile(reported, dir)
   except ValueError, OSError:
     false
 

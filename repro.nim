@@ -555,6 +555,10 @@ package reprobuild:
     # ``reprobuild.python_test.<stem>`` action. The Bootstrap-And-Self-
     # Build B4 outcome documented this gap; D1 closes it.
     "python3"
+    when not defined(windows):
+      # The real helper-cache regression realizes and removes its own private
+      # Nix output. nix-store ships beside nix in this declared tool prefix.
+      "nix"
 
     # ``runquotad`` is a runtime dependency (spawned as a subprocess by
     # daemon tests at ``../runquota/build/bin/runquotad``). This is the
@@ -1728,16 +1732,26 @@ package reprobuild:
     for source in pythonTestPaths:
       let pyActionId = pythonTestActionId(source)
       let hookScopeTest = source == "tests/unit/test_dev_shell_hook_scope.py"
+      let nixCacheTest = source == "tests/integration/test_nix_daemon_cache.py"
       let pyExecute = pythonUnittest.run(
         source = source,
         actionId = pyActionId,
         extraInputs = if hookScopeTest:
-          @["scripts/is_reprobuild_checkout.sh", "flake.nix"] else: @[])
+          @["scripts/is_reprobuild_checkout.sh", "flake.nix"]
+        elif nixCacheTest:
+          @["tools/reprobuild-nix-daemon/reprobuild-nix-daemon",
+            "tests/fixtures/nix-daemon-local-flake/flake.nix",
+            "tests/fixtures/nix-daemon-local-flake/flake.lock"]
+        else: @[])
       when not defined(windows):
         if hookScopeTest:
           appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "git"])
+        if nixCacheTest:
+          appendRegisteredActionToolIdentityRefs(pyExecute.id, ["nix"])
       if hookScopeTest:
         discard target("test-dev-shell-hook-scope", pyExecute)
+      if nixCacheTest:
+        discard target("test-nix-daemon-cache", pyExecute)
       reprobuildTestExecuteActions.add(pyExecute)
 
     # Spec-Implementation M0: the ``test`` build graph collection

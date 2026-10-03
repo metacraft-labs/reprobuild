@@ -11610,6 +11610,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_lock_refresh_never_moves_a_pin_backward.nim",
+    binary: "build/test-bin/t_lock_refresh_never_moves_a_pin_backward",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim",
     binary: "build/test-bin/t_lock_refresh_reads_solver_inputs_from_compiled_provider",
     defines: @[],
@@ -16768,6 +16777,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
 ## test execute edges, so the ``test`` collection covers
 ## both languages in one engine pass.
 const pythonTestPaths*: seq[string] = @[
+  "tests/integration/test_nix_daemon_cache.py",
   "tests/test_dev_env_m9_policy.py",
   "tests/unit/test_build_report_attribution.py",
   "tests/unit/test_cmake_generator_competitiveness_bench.py",

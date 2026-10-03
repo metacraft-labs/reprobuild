@@ -21,8 +21,8 @@
 ##
 ## See `declared_rename_fixture.nim` for why nothing here is mocked.
 
-import std/[json, os, strutils, unittest]
 import repro_test_support/reasoned_skip
+import std/[json, os, strutils, unittest]
 import declared_rename_fixture
 
 suite "declared rename — relocate instead of cloning":
@@ -30,7 +30,7 @@ suite "declared rename — relocate instead of cloning":
   test "t_rename_relocates_instead_of_cloning":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip("git not on PATH; the declared-rename fixture needs a repository")
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let fx = newRenameFixture(gitBin, "relocate")
       defer: removeDir(fx.scratch)
@@ -144,7 +144,7 @@ suite "declared rename — relocate instead of cloning":
     ## work it did not do.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip("git not on PATH; the declared-rename fixture needs a repository")
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let fx = newRenameFixture(gitBin, "cleanmove")
       defer: removeDir(fx.scratch)
@@ -173,7 +173,7 @@ suite "declared rename — relocate instead of cloning":
     ## the case an operator most wants to preview before it touches disk.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip("git not on PATH; the declared-rename fixture needs a repository")
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let fx = newRenameFixture(gitBin, "dryrun")
       defer: removeDir(fx.scratch)
@@ -204,7 +204,7 @@ suite "declared rename — relocate instead of cloning":
     ## nothing was there, so the absence is reported rather than inferred.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip("git not on PATH; the declared-rename fixture needs a repository")
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let fx = newRenameFixture(gitBin, "nocandidate")
       defer: removeDir(fx.scratch)
@@ -230,7 +230,7 @@ suite "declared rename — relocate instead of cloning":
     ## "there is nothing there" must never collapse into one answer.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip("git not on PATH; the declared-rename fixture needs a repository")
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let fx = newRenameFixture(gitBin, "debris")
       defer: removeDir(fx.scratch)

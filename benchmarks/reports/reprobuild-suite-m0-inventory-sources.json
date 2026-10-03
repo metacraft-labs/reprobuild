@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1853,
+    "nimTestBinaries": 1854,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 592,
     "staticallyDetectedRuntimeCompilerFlowTests": 110,
-    "testEntries": 1869
+    "testEntries": 1871
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1063,7 +1063,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 991,
+      "integration": 993,
       "platform/destructive": 118,
       "pure unit": 592,
       "unclassified": 157
@@ -1214,9 +1214,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1853,
-    "pythonTestFileCount": 16,
-    "testEntryCount": 1869
+    "nimTestBinaryCount": 1854,
+    "pythonTestFileCount": 17,
+    "testEntryCount": 1871
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5750,7 +5750,7 @@
             "cmd",
             "tmp"
           ],
-          "line": 319,
+          "line": 318,
           "path": "tests/integration/t_spec_6_2_matches_implementation.nim",
           "patterns": [
             "nim-compile-verb"
@@ -29445,6 +29445,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_lock_refresh_never_moves_a_pin_backward",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_lock_refresh_never_moves_a_pin_backward.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_lock_refresh_reads_solver_inputs_from_compiled_provider",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -36207,6 +36224,21 @@
     },
     {
       "binary": "",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/test_nix_daemon_cache.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
       "class": "unclassified",
       "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
@@ -38909,7 +38941,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_repo_relocation_move_ordering.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -189,7 +189,9 @@
         # Bumped to e750199 (2026-09-30), io-mon's `agents` tip: it contains
         # 53994c0 (dev's observation-identity fold + agents' vfork repairs) and
         # 31b05a5 (io-mon#41: endpoint + peer-uid IPC records, isolated launch).
-      url = "github:metacraft-labs/io-mon/e75019940be4722fcaf11f1b239de37adae54f41";
+        # Bumped to b464ce1 (2026-10-03), io-mon's `agents` tip; e750199 is an
+        # ancestor.
+      url = "github:metacraft-labs/io-mon/b464ce17cdf2196e61ccf4ab3e61ed0ee1a70ed2";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -329,8 +331,11 @@
       # lives, and past a hard deadline terminates it and fails the spawn
       # instead. 5125869 is an ancestor.
       #
+      # Bumped to 3b99d26 (2026-10-03), the published `agents`/`dev` tip; 72f5782
+      # is an ancestor.
+      #
       # Keep this pin aligned with the published workspace dependency.
-      url = "github:metacraft-labs/nim-stackable-hooks/72f578249e9d8bbca8e3705c8a41ed5085c05bf9";
+      url = "github:metacraft-labs/nim-stackable-hooks/3b99d26fd969a48698cf75fc90a8657010c81eec";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
