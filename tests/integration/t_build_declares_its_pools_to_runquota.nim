@@ -124,7 +124,15 @@ proc pooledGraph(app, workRoot, logPrefix: string): BuildGraph =
       governingLockIdentity = lockIdentityOutsideSolvedGraph())
   graph(actions, [pool("rq-test.serial", 1'u32)])
 
-proc runPooledBuild(repoRoot, tag: string; inline: bool) =
+type PooledOutcome = object
+  failure: string
+  outputs: int
+  concurrency: int
+
+proc runPooledBuild(repoRoot, tag: string; inline: bool): PooledOutcome =
+  ## Returns what happened; the CHECKS are in the test bodies, where a failed
+  ## one marks the case failed (a `check` in a helper proc is reported but
+  ## leaves the case `[OK]`).
   let root = createTempDir("repro-pooldecl-" & tag, "")
   defer: removeDir(root)
   let oldTimeout = getEnv("REPRO_RUNQUOTA_DENIAL_TIMEOUT", "")
@@ -154,19 +162,29 @@ proc runPooledBuild(repoRoot, tag: string; inline: bool) =
         inlineRunQuota: inline))
   except CatchableError as err:
     failure = err.msg
-  checkpoint("build failure: " & failure)
-  check failure.len == 0
-  check "named-pool budget" notin failure
+  result.failure = failure
   for i in 0 ..< 3:
-    check fileExists(workRoot / "out" / ($i & ".txt"))
+    if fileExists(workRoot / "out" / ($i & ".txt")):
+      inc result.outputs
+  result.concurrency = maxConcurrency(logPrefix, 3)
+
+proc checkOutcome(outcome: PooledOutcome): bool =
+  checkpoint("build failure: " & outcome.failure)
+  checkpoint("outputs: " & $outcome.outputs & ", max concurrency: " &
+    $outcome.concurrency)
   # Capacity 1 reached the daemon: the engine does not gate the pool itself.
-  check maxConcurrency(logPrefix, 3) == 1
+  outcome.failure.len == 0 and outcome.outputs == 3 and
+    outcome.concurrency == 1
 
 suite "a build declares its named pools to a runquotad started without them":
   let repoRoot = getCurrentDir()
 
   test "inline session":
-    runPooledBuild(repoRoot, "inline", inline = true)
+    let outcome = runPooledBuild(repoRoot, "inline", inline = true)
+    check "named-pool budget" notin outcome.failure
+    check checkOutcome(outcome)
 
   test "out-of-process helper":
-    runPooledBuild(repoRoot, "helper", inline = false)
+    let outcome = runPooledBuild(repoRoot, "helper", inline = false)
+    check "named-pool budget" notin outcome.failure
+    check checkOutcome(outcome)

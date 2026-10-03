@@ -126,7 +126,14 @@ proc runquotaCli(repoRoot: string; args: varargs[string]):
   # An argv, not a command string: nothing here goes through a shell.
   var process = startProcess(requireRunQuotaCliBin(repoRoot), args = argv,
     options = {poStdErrToStdOut})
-  let output = process.outputStream.readAll()
+  # Line by line to end of stream: a single `readAll` on Windows returned
+  # only what the pipe held at the first read (measured: the CLI's first
+  # line and none of the reload report that followed it).
+  var output = ""
+  var line = ""
+  let stream = process.outputStream
+  while stream.readLine(line):
+    output.add(line & "\n")
   let code = process.waitForExit()
   process.close()
   checkpoint("runquota " & argv.join(" ") & " -> " & $code & "\n" & output)
