@@ -1889,10 +1889,27 @@ proc prependExplicitWorkRootToolPath(explicitWorkRoot: string) =
   if dirExists(extendedPath(toolDir)):
     prependProcessPath(toolDir)
 
-proc reprobuildLibraryWorkDir(): string =
+proc reprobuildLibraryWorkDir*(): string =
+  ## The reprobuild checkout whose `libs/` recipe compiles run against.
+  ##
+  ## The operator's overrides come FIRST: `$REPROBUILD_LIBS_DIR` (the libs
+  ## directory itself) and `$REPROBUILD_REPO_ROOT`, the variables
+  ## `reprobuildLibsRootFromEnv` documents for exactly this. They used to be
+  ## consulted only downstream, by `reprobuildExternalLibsRoot`, which never
+  ## asks once the work dir is itself a reprobuild tree -- and this proc
+  ## always returned one: `$REPROBUILD_SOURCE_ROOT`, which the engine sets to
+  ## its OWN checkout while resolving the monitor shim, or else the checkout
+  ## the engine was compiled from. So a dev environment compiled every
+  ## recipe against the engine's libs whatever the override said.
   proc hasReprobuildLibs(root: string): bool =
     dirExists(extendedPath(root / "libs" / "repro_project_dsl" / "src"))
 
+  let libsDir = getEnv("REPROBUILD_LIBS_DIR")
+  if libsDir.len > 0 and hasReprobuildLibs(libsDir.parentDir):
+    return libsDir.parentDir
+  let repoRoot = getEnv("REPROBUILD_REPO_ROOT")
+  if repoRoot.len > 0 and hasReprobuildLibs(repoRoot):
+    return repoRoot
   let envRoot = getEnv("REPROBUILD_SOURCE_ROOT")
   if envRoot.len > 0 and hasReprobuildLibs(envRoot):
     return envRoot

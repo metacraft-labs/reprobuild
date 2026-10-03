@@ -1812,7 +1812,7 @@ tests/unit/t_provider_snapshot_binary_binding.nim	nim	3
 tests/unit/t_provider_startup_body_containment.nim	nim	14
 tests/unit/t_python3_provides_its_own_name.nim	nim	2
 tests/unit/t_reasoned_skip_compiles_on_any_unittest.nim	nim	3
-tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim	nim	3
+tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim	nim	4
 tests/unit/t_run_consumes.nim	nim	6
 tests/unit/t_runquota_endpoint_paths.nim	nim	6
 tests/unit/t_runquota_grant_wait_unresponsive.nim	nim	11
