@@ -143,7 +143,7 @@ libs/repro_cli_support/tests/t_partition_planner_reads_runquota_estimates.nim	ni
 libs/repro_cli_support/tests/t_phase_g_cli_wiring.nim	nim	6
 libs/repro_cli_support/tests/t_portable_cache_roots.nim	nim	2
 libs/repro_cli_support/tests/t_provider_compile_entry_points_publish_bootstrap_toolchain.nim	nim	3
-libs/repro_cli_support/tests/t_runquota_auto_spawn_defers_to_host_config.nim	nim	5
+libs/repro_cli_support/tests/t_runquota_auto_spawn_defers_to_host_config.nim	nim	8
 libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	6
 libs/repro_cli_support/tests/t_strategy_unknown_name_refused.nim	nim	8
 libs/repro_cli_support/tests/t_w2_activation_surfaces_declare_producer_ops.nim	nim	5
@@ -1051,6 +1051,7 @@ tests/integration/t_branch_fork_inherits_project_set.nim	nim	3
 tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	nim	16
 tests/integration/t_branch_from_mainlines.nim	nim	6
 tests/integration/t_branch_unpublished_source_head.nim	nim	5
+tests/integration/t_build_declares_its_pools_to_runquota.nim	nim	2
 tests/integration/t_build_machine_and_host_target_are_distinct.nim	nim	9
 tests/integration/t_build_progress_modes.nim	nim	1
 tests/integration/t_buildtype_drives_compile_flags.nim	nim	7
@@ -1442,6 +1443,7 @@ tests/integration/t_run_edge_session_resolver_auto.nim	nim	2
 tests/integration/t_runner_cpu_progress_liveness.nim	nim	4
 tests/integration/t_runner_exclusive_phase_budget.nim	nim	2
 tests/integration/t_runner_progress_visibility.nim	nim	2
+tests/integration/t_runquota_auto_spawned_daemon_follows_host_config.nim	nim	4
 tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim	nim	6
 tests/integration/t_runquota_long_temp_rendezvous.nim	nim	3
 tests/integration/t_s7_repro_build_restores_a_deleted_output.nim	nim	1
@@ -1783,8 +1785,7 @@ tests/unit/t_runquota_endpoint_paths.nim	nim	6
 tests/unit/t_runquota_grant_wait_unresponsive.nim	nim	11
 tests/unit/t_runquota_grant_wait_wedged_connected.nim	nim	2
 tests/unit/t_runquota_queue_wait_is_loud_and_bounded.nim	nim	15
-tests/unit/t_rx_consumer_own_pool_forwarded_despite_unresolved_sibling.nim	nim	4
-tests/unit/t_rx_runquotad_forwards_custom_pools.nim	nim	5
+tests/unit/t_rx_runquotad_forwards_custom_pools.nim	nim	6
 tests/unit/t_same_project_fragment_selectors.nim	nim	10
 tests/unit/t_script_launcher.nim	nim	3
 tests/unit/t_shared_mime_info_dev_stub.nim	nim	1

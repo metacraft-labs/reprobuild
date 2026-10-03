@@ -134,7 +134,7 @@ proc runquotaCli(repoRoot: string; args: varargs[string]):
 
 suite "a runquotad reprobuild starts follows the host configuration":
   let repoRoot = getCurrentDir()
-  let defaultCpu = max(1, countProcessors()) * 1000
+  let defaultCpu = max(1, cpuinfo.countProcessors()) * 1000
 
   test "no cpu_milli in the host file: config set + reload changes the CPU budget":
     var fixture = startAutoSpawnedShape(repoRoot, "cpu", "")
@@ -173,8 +173,10 @@ suite "a runquotad reprobuild starts follows the host configuration":
     check poolInForce("compile").isNone
     let declaration = runQuotaPoolDeclaration(
       [pool("rq-test.serial", 1'u32)],
-      [BuildAction(id: "cc", pool: "compile", poolUnits: 1'u32),
-       BuildAction(id: "t", pool: "rq-test.serial", poolUnits: 1'u32)],
+      [action("cc", ["unused"], pool = "compile", poolUnits = 1'u32,
+         governingLockIdentity = lockIdentityOutsideSolvedGraph()),
+       action("t", ["unused"], pool = "rq-test.serial", poolUnits = 1'u32,
+         governingLockIdentity = lockIdentityOutsideSolvedGraph())],
       12'u32)
     var session = openRunQuotaSession("reprobuild test", "0.1.0")
     let declared = declareRunQuotaPools(session, declaration)

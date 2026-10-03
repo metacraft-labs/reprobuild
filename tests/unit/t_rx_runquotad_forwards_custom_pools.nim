@@ -45,7 +45,10 @@ import std/[unittest]
 import repro_build_engine
 
 proc pooled(id, poolName: string): BuildAction =
-  BuildAction(id: id, pool: poolName, poolUnits: 1'u32)
+  ## Through the engine's own constructor, which keys the action on its
+  ## governing lock; only the pool fields matter here.
+  action(id, ["unused"], pool = poolName, poolUnits = 1'u32,
+    governingLockIdentity = lockIdentityOutsideSolvedGraph())
 
 proc pairs(declared: seq[tuple[name: string; capacity: uint32]]):
     seq[string] =
@@ -94,5 +97,6 @@ suite "RX — a build declares recipe pools to RunQuota":
       "compile=8", "fetch=2"]
 
   test "no pools and no pooled action declares nothing":
-    check runQuotaPoolDeclaration([], [BuildAction(id: "plain")],
+    check runQuotaPoolDeclaration([], [action("plain", ["unused"],
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())],
       12'u32).len == 0

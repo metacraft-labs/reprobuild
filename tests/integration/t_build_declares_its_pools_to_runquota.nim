@@ -37,6 +37,7 @@ import std/[algorithm, os, osproc, strutils, tempfiles, times, unittest]
 
 import repro_build_engine
 import repro_core
+import repro_depfile
 import repro_runquota
 
 import repro_test_support
