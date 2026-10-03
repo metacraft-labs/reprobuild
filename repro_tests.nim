@@ -8685,6 +8685,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_a_backward_flake_pin_refuses_the_commit.nim",
+    binary: "build/test-bin/t_a_backward_flake_pin_refuses_the_commit",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_a_behind_only_refusal_names_a_pasteable_command.nim",
     binary: "build/test-bin/t_a_behind_only_refusal_names_a_pasteable_command",
     defines: @[],
@@ -9560,6 +9569,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_commit_records_the_sibling_revision_the_shell_actually_used.nim",
     binary: "build/test-bin/t_commit_records_the_sibling_revision_the_shell_actually_used",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_commit_refuses_a_backward_sibling_pin.nim",
+    binary: "build/test-bin/t_commit_refuses_a_backward_sibling_pin",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -11286,6 +11304,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_lock_refresh_never_moves_a_pin_backward.nim",
+    binary: "build/test-bin/t_lock_refresh_never_moves_a_pin_backward",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim",
     binary: "build/test-bin/t_lock_refresh_reads_solver_inputs_from_compiled_provider",
     defines: @[],
@@ -11423,6 +11450,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_managed_hook_reentry_guard_prevents_recursive_publish.nim",
     binary: "build/test-bin/t_managed_hook_reentry_guard_prevents_recursive_publish",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
+    source: "tests/integration/t_managed_hooks_gate_every_worktree_of_a_repo.nim",
+    binary: "build/test-bin/t_managed_hooks_gate_every_worktree_of_a_repo",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
