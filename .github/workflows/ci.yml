@@ -539,10 +539,14 @@ jobs:
           repro_bin="$repro_root/build/bin/repro"
           # Keep the underlying dlerror for the monitored startup failure.
           # The wrapper changes only compiler diagnostics, on this CI build.
-          REPRO_CI_REAL_NIM="$(dev-exec sh -c 'command -v nim')"
-          export REPRO_CI_REAL_NIM
           export REPRO_CI_NIM_DIR="$RUNNER_TEMP/repro-loader-nim-$GITHUB_RUN_ID"
           mkdir -p "$REPRO_CI_NIM_DIR"
+          # Shell activation prints hook setup messages to stdout. Capture
+          # the command's path inside that shell, separately from its banner.
+          dev-exec sh -c 'command -v nim > "$REPRO_CI_NIM_DIR/compiler-path"'
+          IFS= read -r REPRO_CI_REAL_NIM < "$REPRO_CI_NIM_DIR/compiler-path"
+          test -x "$REPRO_CI_REAL_NIM"
+          export REPRO_CI_REAL_NIM
           cat > "$REPRO_CI_NIM_DIR/nim" <<'NIM_DIAGNOSTICS'
           #!/usr/bin/env bash
           case "${1:-}" in
