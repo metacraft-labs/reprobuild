@@ -30,15 +30,15 @@
   "counts": {
     "catalogs": 4,
     "itemsByKind": {
-      "case": 11708,
-      "suite": 2686
+      "case": 11782,
+      "suite": 2707
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 14107,
-      "python-unittest": 284
+      "nim-unittest": 14199,
+      "python-unittest": 287
     },
-    "itemsTotal": 14394,
+    "itemsTotal": 14489,
     "responseDiagnostics": {
       "info": 1,
       "warning": 34
@@ -69,11 +69,11 @@
       "sites": [
         {
           "file": "tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim",
-          "startLine": 102
+          "startLine": 103
         },
         {
           "file": "tests/e2e/m74/t_integration_scoop_manifest_bin_resolution.nim",
-          "startLine": 108
+          "startLine": 109
         }
       ]
     },
@@ -84,11 +84,11 @@
       "sites": [
         {
           "file": "tests/e2e/m75/t_integration_scoop_probe_gui_and_timeout.nim",
-          "startLine": 117
+          "startLine": 118
         },
         {
           "file": "tests/e2e/m75/t_integration_scoop_probe_gui_and_timeout.nim",
-          "startLine": 123
+          "startLine": 124
         }
       ]
     },
@@ -99,11 +99,11 @@
       "sites": [
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 62
+          "startLine": 64
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 177
+          "startLine": 179
         }
       ]
     },
@@ -114,11 +114,11 @@
       "sites": [
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 70
+          "startLine": 72
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 265
+          "startLine": 267
         }
       ]
     },
@@ -129,11 +129,11 @@
       "sites": [
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 74
+          "startLine": 76
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 341
+          "startLine": 343
         }
       ]
     },
@@ -144,11 +144,11 @@
       "sites": [
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 66
+          "startLine": 68
         },
         {
           "file": "tests/e2e/m76/t_integration_stow_byte_identical_target_is_cache_hit.nim",
-          "startLine": 222
+          "startLine": 224
         }
       ]
     },
@@ -159,11 +159,11 @@
       "sites": [
         {
           "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
-          "startLine": 38
+          "startLine": 40
         },
         {
           "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
-          "startLine": 118
+          "startLine": 120
         }
       ]
     },
@@ -174,11 +174,11 @@
       "sites": [
         {
           "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
-          "startLine": 41
+          "startLine": 43
         },
         {
           "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
-          "startLine": 132
+          "startLine": 134
         }
       ]
     },
@@ -189,11 +189,11 @@
       "sites": [
         {
           "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
-          "startLine": 44
+          "startLine": 46
         },
         {
           "file": "tests/e2e/m83/t_e2e_compile_fail_is_hard_error.nim",
-          "startLine": 141
+          "startLine": 143
         }
       ]
     },
@@ -204,11 +204,11 @@
       "sites": [
         {
           "file": "tests/integration/t_r2_iso_boot.nim",
-          "startLine": 181
+          "startLine": 182
         },
         {
           "file": "tests/integration/t_r2_iso_boot.nim",
-          "startLine": 213
+          "startLine": 214
         }
       ]
     },
@@ -219,11 +219,11 @@
       "sites": [
         {
           "file": "tests/integration/t_r9_systemd_boot.nim",
-          "startLine": 137
+          "startLine": 138
         },
         {
           "file": "tests/integration/t_r9_systemd_boot.nim",
-          "startLine": 167
+          "startLine": 168
         }
       ]
     },
@@ -234,39 +234,39 @@
       "sites": [
         {
           "file": "tests/integration/t_repro_test_runner_survives_its_binary_being_replaced.nim",
-          "startLine": 122
+          "startLine": 124
         },
         {
           "file": "tests/integration/t_repro_test_runner_survives_its_binary_being_replaced.nim",
-          "startLine": 205
+          "startLine": 207
         }
       ]
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 96.45,
-    "caseItemsInCatalog": 11708,
-    "casesAddressableThroughTheSurface": 11034,
+    "caseCoveragePercent": 96.47,
+    "caseItemsInCatalog": 11782,
+    "casesAddressableThroughTheSurface": 11105,
     "collidingIdentities": 13,
-    "distinctCaseIdentities": 11695,
+    "distinctCaseIdentities": 11769,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 1819,
-      "compared": 1824,
+      "agree": 1839,
+      "compared": 1844,
       "disagree": 5
     },
     "sourceCoveragePercent": 99.51,
-    "sourcesAddressableThroughTheSurface": 1824,
+    "sourcesAddressableThroughTheSurface": 1844,
     "sourcesNotAddressable": 9,
-    "trackedNimSuiteSources": 1833,
-    "trackedStaticCaseCount": 11440
+    "trackedNimSuiteSources": 1853,
+    "trackedStaticCaseCount": 11511
   },
   "schemaVersion": 1,
   "surface": {
     "binary": "ct-test",
     "provenance": "",
     "resolvedBy": "PATH:ct-test",
-    "sha256": "114de68cf5d6c1b8990a82d2d77f41a196d402dffb4b7ef7cac05067d95815a2"
+    "sha256": "3bf0e401561f0567a41e00384fb1278bb1ca867146f2a77080efc569948bcf05"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "unaddressableSources": [

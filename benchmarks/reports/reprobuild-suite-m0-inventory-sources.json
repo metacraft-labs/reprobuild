@@ -5750,7 +5750,7 @@
             "cmd",
             "tmp"
           ],
-          "line": 318,
+          "line": 319,
           "path": "tests/integration/t_spec_6_2_matches_implementation.nim",
           "patterns": [
             "nim-compile-verb"
@@ -39562,7 +39562,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_install_nix_paths.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 11,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
