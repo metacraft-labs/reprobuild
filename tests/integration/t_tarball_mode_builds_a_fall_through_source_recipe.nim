@@ -39,6 +39,8 @@ suite "tarball mode builds a fall-through source recipe":
     for key, value in envPairs(): env[key] = value
     for (key, value) in sourceFixtureEnv(root): env[key] = value
     env["REPROBUILD_NO_RUNQUOTA"] = "1"
+    # A cold interface-extraction compile outruns the default 1800 s cap on a loaded Windows host; the cap stays finite.
+    env["REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS"] = "7200"
     let res = execCmdEx(quoteShellCommand([binary, "build", "--daemon=off",
       "--tool-provisioning=tarball", "--progress=quiet", "--log=actions"]),
       env = env, workingDir = root / "consumer")
