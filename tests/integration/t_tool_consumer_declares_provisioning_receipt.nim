@@ -135,6 +135,11 @@ suite "an edge that uses a provisioned tool declares its receipt":
 
   test "a repeat is not re-executed; a re-pinned tool re-executes it":
     let identityV1 = identityFor(rawUse(v1.url, v1.sha256), storeRoot)
+    # The build this case repeats happens HERE. It used to be the previous
+    # case's, but the runner runs every case in its own process with its own
+    # `tempRoot`, so the "repeat" was a first build and always ran.
+    let first = run(consumerGraph("consumer", @["receiptfixture"]), identityV1)
+    check first.resultFor("consumer").status == asSucceeded
     let again = run(consumerGraph("consumer", @["receiptfixture"]), identityV1)
     check again.resultFor("consumer").status in {asUpToDate, asCacheHit}
     check not again.resultFor("consumer").launched
