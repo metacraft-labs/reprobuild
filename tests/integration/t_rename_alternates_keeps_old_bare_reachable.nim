@@ -22,6 +22,7 @@
 ## resolving.
 
 import std/[json, os, strutils, unittest]
+import repro_test_support/reasoned_skip
 import declared_rename_fixture
 
 proc alternatesOf(checkout: string): seq[string] =
@@ -38,7 +39,7 @@ suite "declared rename — alternates keep the old bare reachable":
   test "t_rename_alternates_keeps_old_bare_reachable":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let fx = newRenameFixture(gitBin, "alternates")
       defer: removeDir(fx.scratch)

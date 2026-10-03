@@ -27,6 +27,7 @@
 ##      discarded or re-keyed in place.
 
 import std/[json, os, strutils, unittest]
+import repro_test_support/reasoned_skip
 import declared_rename_fixture
 
 proc forcePushesFile(fx: RenameFixture): string =
@@ -48,7 +49,7 @@ suite "declared rename — force-pushes.json is re-keyed":
   test "t_rename_force_pushes_record_is_rekeyed":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let fx = newRenameFixture(gitBin, "forcepush")
       defer: removeDir(fx.scratch)
@@ -163,7 +164,7 @@ suite "declared rename — force-pushes.json is re-keyed":
     ## than invented.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let fx = newRenameFixture(gitBin, "flatshape")
       defer: removeDir(fx.scratch)
