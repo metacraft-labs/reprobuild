@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1776,
+    "nimTestBinaries": 1777,
     "pureUnitConsolidationGroups": 48,
     "pureUnitTests": 591,
-    "staticallyDetectedRuntimeCompilerFlowTests": 107,
-    "testEntries": 1790
+    "staticallyDetectedRuntimeCompilerFlowTests": 108,
+    "testEntries": 1791
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1078,7 +1078,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 913,
+      "integration": 914,
       "platform/destructive": 117,
       "pure unit": 591,
       "unclassified": 158
@@ -1229,9 +1229,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1776,
+    "nimTestBinaryCount": 1777,
     "pythonTestFileCount": 14,
-    "testEntryCount": 1790
+    "testEntryCount": 1791
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3241,7 +3241,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 149,
+          "line": 155,
           "path": "tests/integration/t_compiler_scratch_isolation.nim",
           "patterns": [
             "repro-extract-interface"
@@ -3257,7 +3257,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 165,
+          "line": 171,
           "path": "tests/integration/t_compiler_scratch_isolation.nim",
           "patterns": [
             "repro-extract-interface"
@@ -3273,7 +3273,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 239,
+          "line": 245,
           "path": "tests/integration/t_compiler_scratch_isolation.nim",
           "patterns": [
             "repro-compile-provider-binary"
@@ -3289,7 +3289,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 257,
+          "line": 263,
           "path": "tests/integration/t_compiler_scratch_isolation.nim",
           "patterns": [
             "repro-extract-interface"
@@ -3305,7 +3305,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 274,
+          "line": 280,
           "path": "tests/integration/t_compiler_scratch_isolation.nim",
           "patterns": [
             "repro-extract-interface"
@@ -3321,7 +3321,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 330,
+          "line": 336,
           "path": "tests/integration/t_compiler_scratch_isolation.nim",
           "patterns": [
             "repro-extract-interface"
@@ -5656,6 +5656,44 @@
         }
       ],
       "source": "tests/integration/t_runner_progress_visibility.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 63,
+          "path": "tests/integration/t_source_interface_openssl_runtime.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "discard extractInterfaceFromModule(modulePath, scratch / \"positive.rbsz\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 75,
+          "path": "tests/integration/t_source_interface_openssl_runtime.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "discard extractInterfaceFromModule(controlPath, scratch / \"negative.rbsz\","
+        }
+      ],
+      "source": "tests/integration/t_source_interface_openssl_runtime.nim"
     },
     {
       "class": "integration",
@@ -32085,6 +32123,25 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_source_interface_openssl_runtime",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_interface_artifacts",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_source_interface_openssl_runtime.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {

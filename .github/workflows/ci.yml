@@ -45,6 +45,8 @@ jobs:
     runs-on: [self-hosted, linux, x64]  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # Mint a GitHub App installation token via the CI Token Provider
       # app.  GitHub free plan restricts org-level secrets with
       # visibility ALL from being readable inside private repos, so we
@@ -84,6 +86,7 @@ jobs:
             nim-termctl
             devops-modules
             repo-workspaces
+            reprobuild
             reprobuild-ct-test-runner
             reprobuild-test-adapters
             runquota
@@ -167,10 +170,16 @@ jobs:
     runs-on: [self-hosted, windows, x64]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Check Windows PowerShell bootstrap syntax
         shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
         run: .\scripts\check_windows_bootstrap_syntax.ps1
+
+      - name: Verify OpenSSL mirror fallback and checksum refusal
+        shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
+        run: .\windows\tests\test-openssl-mirrors.ps1
 
       - name: Mint installation token for Windows dev environment
         id: ci_token
@@ -321,6 +330,8 @@ jobs:
       REPROBUILD_TEST_THREADS: "8"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # Mint a GitHub App installation token via the CI Token Provider
       # app for the sibling-repo clones + setup-dev-env below.  See the
@@ -366,6 +377,7 @@ jobs:
             nim-termctl
             devops-modules
             repo-workspaces
+            reprobuild
             reprobuild-ct-test-runner
             reprobuild-test-adapters
             runquota
@@ -531,8 +543,30 @@ jobs:
           set -euo pipefail
           repro_root="${{ github.workspace }}"
           repro_bin="$repro_root/build/bin/repro"
+          # Keep the underlying dlerror for the monitored startup failure.
+          # The wrapper changes only compiler diagnostics, on this CI build.
+          export REPRO_CI_NIM_DIR="$RUNNER_TEMP/repro-loader-nim-$GITHUB_RUN_ID"
+          mkdir -p "$REPRO_CI_NIM_DIR"
+          # Shell activation prints hook setup messages to stdout. Capture
+          # the command's path inside that shell, separately from its banner.
+          dev-exec sh -c 'command -v nim > "$REPRO_CI_NIM_DIR/compiler-path"'
+          IFS= read -r REPRO_CI_REAL_NIM < "$REPRO_CI_NIM_DIR/compiler-path"
+          test -x "$REPRO_CI_REAL_NIM"
+          export REPRO_CI_REAL_NIM
+          cat > "$REPRO_CI_NIM_DIR/nim" <<'NIM_DIAGNOSTICS'
+          #!/usr/bin/env bash
+          case "${1:-}" in
+            c|cc|cpp)
+              command="$1"
+              shift
+              exec "$REPRO_CI_REAL_NIM" "$command" -d:nimDebugDlOpen "$@"
+              ;;
+            *) exec "$REPRO_CI_REAL_NIM" "$@" ;;
+          esac
+          NIM_DIAGNOSTICS
+          chmod +x "$REPRO_CI_NIM_DIR/nim"
           # Materialise reprobuild's own `repro` binary (idempotent bootstrap).
-          dev-exec just bootstrap
+          dev-exec bash -c 'export PATH="$REPRO_CI_NIM_DIR:$PATH"; just bootstrap'
           # The bootstrapped `repro` carries bare dlopen()s for its runtime
           # libraries (libclingo.so is lazy; libzstd.so.1 loads at module init for
           # the binary-cache client) because build_apps.sh strips rpath per the
@@ -631,6 +665,9 @@ jobs:
       # cache on the self-hosted runners) makes rebuilds fast once warm.
       - name: Build codetracer ct (via reprobuild)
         env:
+          # This prerequisite must exercise this job's freshly built engine;
+          # a pre-existing host daemon can carry another source/runtime closure.
+          REPRO_DAEMON: 'off'
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_TERMINAL_PROMPT: '0'
@@ -664,6 +701,22 @@ jobs:
             echo "ct-build: no REPRO_PUBLISH_KEY; binary-cache publish disabled"
           fi
           repro_bin="$repro_root/build/bin/repro"
+          # Identify a loader failure in the actual engine/helper child. Keep
+          # glibc's per-process search/version trace in artifacts: the generic
+          # Nim "could not load libcrypto" message omits the underlying error.
+          mkdir -p "$repro_root/test-logs"
+          export REPRO_CI_REAL_CLI="$repro_bin"
+          export REPRO_CI_LOADER_LOG="$repro_root/test-logs/ct-loader"
+          diagnostic_cli="$repro_root/build/bin/repro-ct-loader-diagnostic"
+          cat > "$diagnostic_cli" <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec env LD_DEBUG=libs,versions LD_DEBUG_OUTPUT="$REPRO_CI_LOADER_LOG" \
+            "$REPRO_CI_REAL_CLI" "$@"
+          SCRIPT
+          chmod +x "$diagnostic_cli"
+          git -C "$repro_root" rev-parse HEAD
+          sha256sum "$repro_bin" "$repro_root/build/bin/reprobuild"
           # Build only the `ct` target via codetracer's reprobuild.nim recipe.
           #    build-once.sh's reprobuild path (CODETRACER_REPROBUILD_LINUX=1)
           #    runs `repro build "$CODETRACER_REPROBUILD_TARGET"`; codetracer's
@@ -674,7 +727,7 @@ jobs:
             CODETRACER_REPROBUILD_TARGET=ct \
             CODETRACER_REPROBUILD_REPO_PATH="$repro_root" \
             REPROBUILD_NIX_DAEMON_BIN="$repro_root/tools/reprobuild-nix-daemon/reprobuild-nix-daemon" \
-            REPROBUILD_BIN="$repro_bin" \
+            REPROBUILD_BIN="$diagnostic_cli" \
             REPRO_BINARY_CACHE_URL="${REPRO_BINARY_CACHE_URL:-}" \
             REPRO_BINARY_CACHE_KEY_PATH="${REPRO_BINARY_CACHE_KEY_PATH:-}" \
             REPRO_BINARY_CACHE_CERT_PATH="${REPRO_BINARY_CACHE_CERT_PATH:-}" \
@@ -864,6 +917,8 @@ jobs:
     runs-on: [self-hosted, linux, x64]  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Mint installation token for cross-repo sibling access
         id: ci_token
         uses: actions/create-github-app-token@v2
@@ -897,6 +952,7 @@ jobs:
             nim-termctl
             devops-modules
             repo-workspaces
+            reprobuild
             reprobuild-ct-test-runner
             reprobuild-test-adapters
             runquota

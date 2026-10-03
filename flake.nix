@@ -175,7 +175,8 @@
       # a merge path WITHOUT the fold while io-mon's capability declaration --
       # which this same revision moves into the supported set -- says the fold
       # is there, i.e. an over-claim in the depfile this engine reads.
-      url = "github:metacraft-labs/io-mon/07cc4afc823a7c631d9ef9fdf4522f4d219c46a8";
+      # Linux dlopen preserves fallback past incompatible ELF classes.
+      url = "github:metacraft-labs/io-mon/10249629cc97f01aa5bafe9dff8fa3c00cc82749";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -1471,6 +1472,9 @@
               pkgs.openssl
               pkgs.pcre
             ];
+            # Source bootstrap and interface helpers must use this shell's
+            # target library, not the first OpenSSL in a mixed-architecture store.
+            OPENSSL_LIBDIR = "${pkgs.openssl.out}/lib";
             BLAKE3_PREFIX = blake3Prefix;
             NIMCRYPTO_SRC = nimcrypto-src;
             BEARSSL_SRC = bearssl-src;

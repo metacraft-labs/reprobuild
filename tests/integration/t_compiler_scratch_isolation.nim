@@ -5,6 +5,9 @@
 ## scratch. Provider compiles are also invoked concurrently in one process to
 ## prove their compiler CWD allocation is exclusive, not merely unlikely to
 ## collide.
+## The observer delegates extraction to the real compiler. Only the concurrent
+## provider response is substituted: those calls test scratch ownership and
+## cleanup, while compiling the same provider twice adds no boundary coverage.
 
 import std/[os, sequtils, strutils, tables, tempfiles, times, unittest]
 
@@ -102,7 +105,10 @@ when defined(posix) and isNixSupported:
 
     test "immutable source, atomic concurrent CWDs, and failure cleanup":
       let repoRoot = getCurrentDir()
-      let tempRoot = createTempDir("repro-compiler-scratch-", "")
+      # pwd in the real compiler observer resolves macOS /tmp to /private/tmp.
+      # Start with that same physical root so exact parent comparisons still
+      # distinguish an escaped CWD from two names for one directory.
+      let tempRoot = expandFilename(createTempDir("repro-compiler-scratch-", ""))
       let sourceRoot = tempRoot / "immutable-source"
       let projectRoot = sourceRoot / "project"
       let outputRoot = tempRoot / "output"

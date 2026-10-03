@@ -33,7 +33,7 @@
 ## missing sled is a LOUD failure. The `skip()` arm exists only for platforms
 ## that are not Linux x86_64.
 
-import std/[json, options, os, osproc, streams, strtabs, strutils, unittest]
+import std/[json, options, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 when defined(linux) and defined(amd64):
   import repro_hcr_agent
@@ -156,8 +156,12 @@ when defined(linux) and defined(amd64):
           @["-ldl", "-lpthread"]), repoRoot)
 
       proc runCase(targetBin: string; patchId: string): RunOutcome =
-        let socketPath = workDir / (patchId & ".sock")
-        removeFile(socketPath)
+        # sockaddr_un cannot hold the runner's checkout plus the patch id.
+        # Keep only IPC in a unique short directory; all compiled artifacts and
+        # the real HCR assertions retain their existing locations and behavior.
+        let socketDir = createTempDir("rhcr-", "", "/tmp")
+        defer: removeDir(socketDir)
+        let socketPath = socketDir / "agent.sock"
         var listener = listenHcrAgentUnixSocket(socketPath)
         defer: listener.close()
         var env = newStringTable()

@@ -3,6 +3,7 @@
  * the production DLL and this process repeatedly records the production code's
  * return value, providing a behavioral observation independent of protocol.
  */
+#include <share.h>
 #include <stdio.h>
 #include <windows.h>
 
@@ -21,8 +22,11 @@ int wmain(int argc, wchar_t **argv) {
          sequence < 4000) {
     FILE *observations = NULL;
     int value = hwg_m1_victim(7);
-    if (_wfopen_s(&observations, argv[1], sequence == 0 ? L"wb" : L"ab") != 0 ||
-        observations == NULL) {
+    /* The gate reads this stream while the target runs. _wfopen_s denies
+     * sharing, so a reader racing fprintf/fclose fails with PermissionError.
+     * Permit readers while retaining the single-writer contract. */
+    observations = _wfsopen(argv[1], sequence == 0 ? L"wb" : L"ab", _SH_DENYWR);
+    if (observations == NULL) {
       return 3;
     }
     fprintf(observations, "%u,%d\n", sequence, value);
