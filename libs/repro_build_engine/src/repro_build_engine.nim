@@ -1501,6 +1501,20 @@ type
       ## depfile) and produced none of the paths it declared, so it
       ## contributed no evidence at all. See the aggregate guard in
       ## ``collectEvidence``.
+    cirEmptyKeyedInputSet = "empty-keyed-input-set"
+      ## The edge DID observe something, and the engine's own subtractions
+      ## — ``toolInputRoots`` and ``ignoredInputRoots`` — removed all of it,
+      ## so the record would have been keyed on the weak fingerprint alone.
+      ## Distinct from ``cirEmptyEvidence``, which is the monitor having
+      ## seen nothing: the remedies differ (the elision, or the edge wanting
+      ## ``cacheable = false``) and so must the class. See
+      ## ``gradeKeyedInputSet`` and ``emptyKeyedInputSetDiagnostic``.
+      ##
+      ## APPEND NEW MEMBERS HERE. Nothing persists this enum — the set is a
+      ## module-private diagnostic field whose only escape is ``$reason`` in
+      ## ``traceCacheIneligibility`` — but ordinal order IS the order those
+      ## strings are joined in, which several tests pin, so an insertion
+      ## reshuffles reported text for no gain.
 
   MonitorEvidenceRequirement* = object
     ## WHAT THIS BUILD NEEDS A CAPTURE TO HAVE OBSERVED BEFORE IT WILL TRUST IT
@@ -1560,12 +1574,31 @@ type
     publishable: bool
     disableCacheHits: bool
       ## Withhold this action's cache publication without failing the action.
-      ## Entropy policy, empty evidence, unknown-scope monitor loss, and
-      ## capture-flush failure can all set this flag. Only ``monitorStatus``
-      ## governs session-wide loss invalidation; known-scope loss uses
+      ## ``CacheIneligibilityReason`` enumerates every cause — read that enum
+      ## rather than a list here, which had already gone stale (it omitted
+      ## ``cirMissingDependencyReport``). Only ``monitorStatus`` governs
+      ## session-wide loss invalidation; known-scope loss uses
       ## ``invalidatedPaths`` instead.
+      ##
+      ## SET THIS AND ``cacheIneligibilityReasons`` TOGETHER, always. The two
+      ## are not independent: this flag decides, that set says which class
+      ## decided, and a site that sets only this one reaches an operator as
+      ## ``reasons=unspecified`` and is invisible to any per-class count.
     cacheIneligibilityReasons: set[CacheIneligibilityReason]
-      ## Diagnostic only; never used to decide cache acceptance/publication.
+      ## Diagnostic, with ONE exception that this comment used to deny and
+      ## that a reader must not be surprised by: ``determinismProbeAdmits``
+      ## gates on ``!= {cirUnblessedEntropy}``, because a probe that compares
+      ## output bytes can answer a determinism question and cannot answer a
+      ## question about what was SEEN. That is an exact-set comparison, so it
+      ## is only as truthful as this set is COMPLETE — a site that refuses
+      ## without recording its class does not merely go uncounted, it tells
+      ## the probe that entropy was the sole refusal and buys a publish the
+      ## other refusal had already denied. ``gradeKeyedInputSet`` did exactly
+      ## that; the case is in
+      ## ``t_zero_evidence_edge_is_not_cacheable``. Nothing else reads this
+      ## set but ``traceCacheIneligibility``.
+      ##
+      ## Never persisted — see the note on ``CacheIneligibilityReason``.
     invalidatedPaths: HashSet[string]
       ## M9.R.73.2 — per-Failure-Semantics.md-plus-Monitor-Loss-Path-Invalidation.md
       ## the certainly-invalidated + ambiguous path set for a Level 1
@@ -7710,6 +7743,14 @@ proc gradeKeyedInputSet(action: BuildAction; col: var EvidenceCollection) =
   col.evidence.diagnostics.add(
     emptyKeyedInputSetDiagnostic(action.id, observed, observed))
   col.disableCacheHits = true
+  # The MACHINE-READABLE half of the same refusal. The diagnostic above is
+  # for a human reading one build; this is what a per-class count reads, and
+  # a refusal that records no reason is not "uncounted" but INVISIBLE — it
+  # cannot appear as a row, a zero, or a regression. Every other
+  # ``disableCacheHits`` site in this file names its class; this one did not,
+  # and reached an operator as ``reasons=unspecified`` via the defensive
+  # fallback in ``traceCacheIneligibility``.
+  col.cacheIneligibilityReasons.incl(cirEmptyKeyedInputSet)
 
 proc scratchKey(path: string): string =
   ## Normalized for containment: forward slashes, no trailing separator,
