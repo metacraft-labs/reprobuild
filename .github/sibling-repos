@@ -122,7 +122,10 @@ reprobuild-ct-test-runner=dev
 # adds the merge-time observation-identity fold that the file/merge transport
 # (every macOS and Windows capture) previously did not have. 279a17b is an
 # ancestor of 07cc4af.
-io-mon=07cc4afc823a7c631d9ef9fdf4522f4d219c46a8
+# Linux caller-scoped dlopen skips incompatible ELF classes; verified by the
+# real-loader control in shared-actions run 37132084729. Keep all four pins
+# aligned so the bootstrap engine, shim, and installed sources agree.
+io-mon=10249629cc97f01aa5bafe9dff8fa3c00cc82749
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood

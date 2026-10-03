@@ -7,7 +7,7 @@ if ($PSVersionTable.PSEdition -ne 'Desktop' -or $PSVersionTable.PSVersion.Major 
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $files = @((Get-Item -LiteralPath (Join-Path $repoRoot 'env.ps1')))
-$files += @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'windows') -Filter '*.ps1' -File | Sort-Object FullName)
+$files += @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'windows') -Filter '*.ps1' -File -Recurse | Sort-Object FullName)
 $failures = 0
 foreach ($file in $files) {
     $tokens = $null
