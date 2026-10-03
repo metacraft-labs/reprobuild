@@ -26,6 +26,11 @@ suite "tarball mode builds a fall-through source recipe":
     require fileExists(binary)
     let root = createSourceFixture()
     defer: removeDir(root)
+    # `usesImportPath "stubs"` splices `import stubs/probe` into the
+    # consumer's module, which Nim resolves against the consumer's own
+    # directory; the fixture's root `config.nims` path switch is not read by
+    # the extractor's compile on Windows, so the stub also sits beside it.
+    copyDir(root / "stubs", root / "consumer" / "stubs")
     let artifact = root / "catalog/probe/.repro/output/install/usr/lib/libprobe.so"
     let output = root / "consumer/build/result.txt"
     check not fileExists(artifact)
