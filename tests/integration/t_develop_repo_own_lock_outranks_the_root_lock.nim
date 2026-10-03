@@ -87,6 +87,7 @@
 ## tier. Skip: `git` missing or `repro` unbuilt.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 import repro_workspace_manifests

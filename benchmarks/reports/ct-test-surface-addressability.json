@@ -30,18 +30,18 @@
   "counts": {
     "catalogs": 4,
     "itemsByKind": {
-      "case": 11407,
-      "suite": 2619
+      "case": 11708,
+      "suite": 2686
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 13751,
-      "python-unittest": 272
+      "nim-unittest": 14107,
+      "python-unittest": 284
     },
-    "itemsTotal": 14026,
+    "itemsTotal": 14394,
     "responseDiagnostics": {
       "info": 1,
-      "warning": 35
+      "warning": 34
     }
   },
   "discoveryScope": "auto (the surface's default: the workspace's own VCS inventory; vendored and ignored trees excluded)",
@@ -244,29 +244,29 @@
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 96.36,
-    "caseItemsInCatalog": 11407,
-    "casesAddressableThroughTheSurface": 10744,
+    "caseCoveragePercent": 96.45,
+    "caseItemsInCatalog": 11708,
+    "casesAddressableThroughTheSurface": 11034,
     "collidingIdentities": 13,
-    "distinctCaseIdentities": 11394,
+    "distinctCaseIdentities": 11695,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 1775,
-      "compared": 1780,
+      "agree": 1819,
+      "compared": 1824,
       "disagree": 5
     },
-    "sourceCoveragePercent": 99.5,
-    "sourcesAddressableThroughTheSurface": 1780,
+    "sourceCoveragePercent": 99.51,
+    "sourcesAddressableThroughTheSurface": 1824,
     "sourcesNotAddressable": 9,
-    "trackedNimSuiteSources": 1789,
-    "trackedStaticCaseCount": 11150
+    "trackedNimSuiteSources": 1833,
+    "trackedStaticCaseCount": 11440
   },
   "schemaVersion": 1,
   "surface": {
     "binary": "ct-test",
     "provenance": "",
     "resolvedBy": "PATH:ct-test",
-    "sha256": "f91ae5ef7614f9477d396109573e1afcf8c970629eb5285c6f5413a15059fb94"
+    "sha256": "114de68cf5d6c1b8990a82d2d77f41a196d402dffb4b7ef7cac05067d95815a2"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "unaddressableSources": [

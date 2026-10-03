@@ -40,6 +40,7 @@ import repro_interface_artifacts
 import repro_tool_profiles
 import repro_dsl_stdlib/packages/git
 import repro_dsl_stdlib/packages/msys2_ncurses
+import repro_test_support/reasoned_skip
 
 const HostHasArchivedTools = defined(windows) and defined(amd64)
 

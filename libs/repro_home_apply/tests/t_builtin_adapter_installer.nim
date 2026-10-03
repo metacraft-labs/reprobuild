@@ -21,6 +21,7 @@
 ## are EXPLICITLY out of scope.
 
 import std/[os, osproc, strutils, tables, unittest]
+import repro_test_support/reasoned_skip
 from repro_core/paths import extendedPath
 
 import repro_local_store

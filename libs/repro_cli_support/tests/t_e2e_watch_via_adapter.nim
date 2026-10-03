@@ -32,6 +32,7 @@
 ##      skips. This proves the real engine decides through the subprocess seam.
 
 import std/[unittest, os, strutils, times]
+import repro_test_support/reasoned_skip
 
 # Imported EXACTLY as ``repro_cli_support`` imports it. The adapter exposes
 # ``watchTestEdgeDecision`` / ``recordWatchTestEdge`` / ``defaultCachePath`` +

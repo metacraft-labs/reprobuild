@@ -46,6 +46,7 @@
 ## Skip rule: ``git`` missing on PATH.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import git_actions
 import git_tool
@@ -160,7 +161,14 @@ proc advanceUpstream(s: Scenario) =
   commitFile(s.gitBin, s.up, "q", "q\n")
 
 proc bareHas(s: Scenario; sha: string): bool =
-  gitIn(s.gitBin, s.bare, "cat-file", "-e", sha).code == 0
+  ## Presence in the bare itself. Lazy fetching is off for the probe: a
+  ## prepared bare is a partial clone of upstream
+  ## (Shared-Clone-Pool-Integrity §3.4), and this fixture's upstream still
+  ## holds the rewritten-away commits, so a lazy read would fetch them back
+  ## and report the bare as never having lost them.
+  let res = execCmdEx("GIT_NO_LAZY_FETCH=1 " & q(s.gitBin) & " -C " &
+    q(s.bare) & " cat-file -e " & q(sha))
+  res.exitCode == 0
 
 proc graphWarning(s: Scenario): string =
   ## stderr+stdout of an ordinary history walk in A; git prints the chain

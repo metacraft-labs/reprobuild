@@ -1,4 +1,5 @@
 import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 from repro_test_support import requireBinary, monitorShimPath,
   requireCodeTracerSourceRoot, requireRunQuotaDaemonBin,

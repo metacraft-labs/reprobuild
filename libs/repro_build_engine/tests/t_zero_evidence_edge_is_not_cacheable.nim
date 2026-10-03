@@ -108,7 +108,9 @@ import io_mon/[types, writer, capabilities]
 const TmpDir = "build/test-tmp/t_zero_evidence_edge_is_not_cacheable"
 const ReuseDecisions = {cdHit, cdHybridCutoff}
 
-const RootImage = "/bin/sh"
+let RootImage =
+  when defined(windows): findExe("sh").replace('\\', '/')
+  else: "/bin/sh"
   ## The DEFAULT `argv[0]` for the edges below, and therefore the path the
   ## LAUNCHER contributes
   ## through `collectEvidence`'s root-image fold — the action's own root image,
@@ -185,23 +187,44 @@ proc runCount(f: Fixture): int =
       inc n
   n
 
+proc fixturePath(path: string): string =
+  ## Every fixture path is spliced into a `sh -c` command line and, for the
+  ## depfile and path-set cases, into a `printf` FORMAT. A Windows path's
+  ## backslashes are escapes in both (`\test-tmp\t_zero...` holds a `\t`),
+  ## so on Windows the fixture uses the forward-slash spelling, which Win32
+  ## and MSYS `sh` both accept. POSIX paths are returned unchanged.
+  when defined(windows): path.replace('\\', '/')
+  else: path
+
+proc removeFixtureTree(root: string) =
+  ## The action cache nests records three directories deep under the fixture
+  ## (`cache/action-cache/hot-records/<68-char key>.rbar/<64-char>.rec`), which
+  ## takes a checkout at an ordinary depth past Windows' 260-character
+  ## `MAX_PATH`. A plain `removeDir` cannot delete those files, and Nim's
+  ## `removeFile` reports `ERROR_PATH_NOT_FOUND` as "already gone", so the
+  ## failure surfaced only as the enclosing directory "not empty" -- failing
+  ## a case whose assertions had all passed, and leaving the tree for the next
+  ## run's `makeFixture` to trip over. The engine itself reaches these files
+  ## through `extendedPath`; so does this.
+  removeDir(corepaths.extendedPath(root))
+
 proc makeFixture(name: string): Fixture =
-  let root = absolutePath(TmpDir / name)
+  let root = fixturePath(absolutePath(TmpDir / name))
   if dirExists(root):
-    removeDir(root)
-  let workRoot = root / "work"
+    removeFixtureTree(root)
+  let workRoot = fixturePath(root / "work")
   createDir(workRoot)
   result = Fixture(
     root: root,
     workRoot: workRoot,
-    cacheRoot: root / "cache",
-    rmdfPath: workRoot / "observed.iomon",
-    runLogPath: workRoot / "runs.log",
-    observedPath: workRoot / "observed.txt",
-    secondObservedPath: workRoot / "observed-2.txt",
-    makeDepfilePath: workRoot / "deps.d",
-    secondDepfilePath: workRoot / "extra-deps.d",
-    pathSetPath: workRoot / "converted.pathset")
+    cacheRoot: fixturePath(root / "cache"),
+    rmdfPath: fixturePath(workRoot / "observed.iomon"),
+    runLogPath: fixturePath(workRoot / "runs.log"),
+    observedPath: fixturePath(workRoot / "observed.txt"),
+    secondObservedPath: fixturePath(workRoot / "observed-2.txt"),
+    makeDepfilePath: fixturePath(workRoot / "deps.d"),
+    secondDepfilePath: fixturePath(workRoot / "extra-deps.d"),
+    pathSetPath: fixturePath(workRoot / "converted.pathset"))
   writeFile(result.observedPath, "generation-1\n")
   # The second prerequisite exists for the same reason the first does: a
   # missing prerequisite is a different failure than the ones under test.
@@ -235,7 +258,7 @@ proc writeRmdf(f: Fixture; records: seq[MonitorRecord]) =
   var all = profileRecords(defaultHooksMonitorProfile())
   for record in records:
     all.add(record)
-  writeFile(f.rmdfPath, cast[string](encodeCanonical(all)))
+  writeFile(f.rmdfPath, encodeCanonical(all))
 
 proc processRecord(): MonitorRecord =
   ## A record that carries no file observation. The real monitor emits
@@ -374,6 +397,7 @@ proc reportValidatedByMonitorEdge(f: Fixture; id: string;
 
 proc twoReportsValidatedByMonitorEdge(f: Fixture; id: string;
                                       firstHeader, secondHeader: string;
+                                      firstNamesPrerequisite = true;
                                       rootImage = RootImage): BuildAction =
   ## THE STATE THAT SEPARATES THE TWO SPELLINGS OF `depfileObservedNothing`,
   ## and it needs no production seam to reach: one edge, one recognized report
@@ -404,11 +428,23 @@ proc twoReportsValidatedByMonitorEdge(f: Fixture; id: string;
   ## `tests/unit/t_unmonitorable_action_depfile_guards.nim`, so this needle
   ## cannot drift from what the DSL emits without something reddening.
   ##
+  ## `firstNamesPrerequisite = false` writes the FIRST depfile with a target
+  ## and NO prerequisites — a report that was produced, resolved and parsed,
+  ## and that named nothing. That is the second state this fixture reaches
+  ## and the one DA-1f Z2 is about: it is how a tool report comes to be
+  ## CONSULTED AND EMPTY on an edge whose channel some other contributor has
+  ## filled. `printf 'out:\n'` is exactly what `reportValidatedByMonitorEdge`
+  ## above writes for its own zero case, so the two agree on what an empty
+  ## recognized report looks like.
+  ##
   ## The capture stays empty, so the other four terms of the guard are true
   ## and the publish turns on this term alone.
+  let firstRule =
+    if firstNamesPrerequisite: "out: " & f.observedPath & "\\n"
+    else: "out:\\n"
   result = action(id,
     [rootImage, "-c", "echo ran >> " & f.runLogPath &
-      "; printf '" & firstHeader & "out: " & f.observedPath & "\\n' > " &
+      "; printf '" & firstHeader & firstRule & "' > " &
       f.makeDepfilePath &
       "; printf '" & secondHeader & "out: " & f.secondObservedPath &
       "\\n' > " & f.secondDepfilePath],
@@ -464,7 +500,7 @@ proc converterValidatedByMonitorEdge(f: Fixture; id: string;
       postBuildConverters: @[
         PostBuildDependencyConverterSpec(
           converterProcess: directProcess(
-            corepaths.normalizedPath("/bin/sh"),
+            corepaths.normalizedPath(RootImage),
             ["-c", "printf 'repro-pathset-v1\\n" & converterReports & "' > " &
               f.pathSetPath],
             corepaths.normalizedPath(f.workRoot)),
@@ -492,7 +528,7 @@ suite "an edge that observed nothing is not cacheable":
 
   test "zero observations: the edge does not publish and re-runs":
     let f = makeFixture("zero")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord()])
     let act = f.runEdge("zero-evidence/run")
     let g = graph([act])
@@ -556,7 +592,7 @@ suite "an edge that observed nothing is not cacheable":
     # record mean something, and such an edge must keep the reuse that
     # making zero-output edges cacheable was for.
     let f = makeFixture("one")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
     let act = f.runEdge("one-observation/run")
     let g = graph([act])
@@ -614,7 +650,7 @@ suite "an edge that observed nothing is not cacheable":
     # home for actions with no monitorable evidence — into a failure or a
     # new diagnostic. It never published, so there is nothing to skip.
     let f = makeFixture("noncacheable")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord()])
     let act = f.runEdge("non-cacheable/run", cacheable = false)
     let g = graph([act])
@@ -639,7 +675,7 @@ suite "the same guard holds on the recognized-report evidence arm":
 
   test "zero observations in a produced .iomon: the edge does not publish":
     let f = makeFixture("report-zero")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord()])
     let act = f.iomonReportEdge("report-zero-evidence/run")
     let g = graph([act])
@@ -677,7 +713,7 @@ suite "the same guard holds on the recognized-report evidence arm":
     # would also be satisfied by an engine that refused every edge of this
     # class for some unrelated reason.
     let f = makeFixture("report-one")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
     let act = f.iomonReportEdge("report-one-observation/run")
     let g = graph([act])
@@ -716,7 +752,7 @@ suite "the guard holds for every monitored policy kind, not just the first":
 
   test "recognized-format-validated-by-monitor: zero observations do not publish":
     let f = makeFixture("validated-report-zero")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord()])
     let act = f.reportValidatedByMonitorEdge("validated-report-zero/run")
     let g = graph([act])
@@ -738,6 +774,12 @@ suite "the guard holds for every monitored policy kind, not just the first":
     check r0.evidence.monitorWrites.len == 0
     check r0.evidence.monitorProbes.len == 0
 
+    # The report WAS read — it is the empty-read mark that is present, not the
+    # absence of any depfile mark. "Declared a report and produced none of its
+    # declared paths" is a different outcome with its own reason code.
+    check evcEmptyToolDepfileReport in r0.evidence.evidenceProvenance
+    check evcToolReportedDepfile notin r0.evidence.evidenceProvenance
+
     let diagnosed = r0.evidence.diagnostics.join(" ")
     check diagnosed.contains("no observation of any kind")
     check diagnosed.contains(act.id)
@@ -751,8 +793,24 @@ suite "the guard holds for every monitored policy kind, not just the first":
     check f.runCount() == 2
 
   test "recognized-format-validated-by-monitor: one observation publishes":
+    ## DA-1f Z2 — ALSO THE OVER-REFUSAL CONTROL FOR `evcEmptyToolDepfileReport`,
+    ## which is why the extra assertions below are here rather than in a case
+    ## of their own.
+    ##
+    ## `reportValidatedByMonitorEdge` writes `printf 'out:\n'` — a declared,
+    ## produced, resolved, parsed recognized report that names NO
+    ## prerequisite. That is a LEGITIMATE zero-depfile capture (a compile with
+    ## no includes reports exactly this) and it must keep publishing on the
+    ## strength of the evidence the OTHER four terms carry. A fix for the
+    ## empty-report defect that refused every empty report would trade a false
+    ## accept for a false reject and reddens here.
+    ##
+    ## And the read is still DISTINGUISHABLE from no report at all: the
+    ## provenance says `evcEmptyToolDepfileReport`, not nothing. "The action
+    ## declared a report and produced none of its declared paths" is a
+    ## different outcome again, recorded by `cirMissingDependencyReport`.
     let f = makeFixture("validated-report-one")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
     let act = f.reportValidatedByMonitorEdge("validated-report-one/run")
     let g = graph([act])
@@ -760,8 +818,17 @@ suite "the guard holds for every monitored policy kind, not just the first":
 
     let first = runBuild(g, config)
     let r0 = first.byId(act.id)
-    checkpoint("first: reads=" & $r0.evidence.monitorReads)
+    checkpoint("first: reads=" & $r0.evidence.monitorReads &
+      " provenance=" & $r0.evidence.evidenceProvenance)
     check r0.status == asSucceeded
+
+    # THE DENOMINATOR for the control: the report really was read and really
+    # was empty, or the publish below would be about some other edge.
+    check r0.evidence.depfileInputs.len == 0
+    check evcEmptyToolDepfileReport in r0.evidence.evidenceProvenance
+    check evcToolReportedDepfile notin r0.evidence.evidenceProvenance
+    check not r0.evidence.diagnostics.join(" ").contains(
+      "no observation of any kind")
     # Launcher reconstruction first, observation after it — the same shape the
     # `dgAutomaticMonitor` case pins, asserted again on the policy kind where
     # BOTH `applyMonitorEvidenceStatus` producers can run. What makes this edge
@@ -777,7 +844,7 @@ suite "the guard holds for every monitored policy kind, not just the first":
 
   test "converter-validated-by-monitor: zero observations do not publish":
     let f = makeFixture("validated-converter-zero")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord()])
     let act = f.converterValidatedByMonitorEdge("validated-converter-zero/run")
     let g = graph([act])
@@ -808,7 +875,7 @@ suite "the guard holds for every monitored policy kind, not just the first":
 
   test "converter-validated-by-monitor: one converted input publishes":
     let f = makeFixture("validated-converter-one")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord()])
     let act = f.converterValidatedByMonitorEdge("validated-converter-one/run",
       converterReports = "input\\t" & f.observedPath & "\\n")
@@ -943,7 +1010,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-auto-zero")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
       let act = f.runEdge("keyed-auto-zero/run", rootImage = sh)
       let g = graph([act])
@@ -989,7 +1056,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-auto-one")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       # Same store `argv[0]`; the observation is a WORKSPACE file, so it
       # survives the elision and the key is not empty.
       f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
@@ -1026,7 +1093,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-report-zero")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
       let act = f.reportValidatedByMonitorEdge("keyed-report-zero/run",
         rootImage = sh)
@@ -1056,7 +1123,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-report-one")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
       let act = f.reportValidatedByMonitorEdge("keyed-report-one/run",
         rootImage = sh)
@@ -1081,7 +1148,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-converter-zero")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
       let act = f.converterValidatedByMonitorEdge("keyed-converter-zero/run",
         rootImage = sh)
@@ -1109,7 +1176,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-converter-one")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord()])
       let act = f.converterValidatedByMonitorEdge("keyed-converter-one/run",
         converterReports = "input\\t" & f.observedPath & "\\n",
@@ -1158,7 +1225,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-out-of-scope")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
       let act = f.iomonReportEdge("keyed-out-of-scope/run", rootImage = sh)
       let g = graph([act])
@@ -1205,7 +1272,7 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
       skip()
     else:
       let f = makeFixture("keyed-noncacheable")
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
       let act = f.runEdge("keyed-noncacheable/run", cacheable = false,
         rootImage = sh)
@@ -1285,7 +1352,7 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
     ## the case fails on a path being present rather than on a resolution
     ## having quietly returned "".
     let f = makeFixture("da1f-builtin-root-image")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     let config = testConfig(f.cacheRoot)
     let outPath = f.workRoot / "written.txt"
 
@@ -1320,7 +1387,7 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
     # the fold outright reddens here; deleting only its `kind == bakProcess`
     # clause reddens above.
     let f2 = makeFixture("da1f-process-root-image")
-    defer: removeDir(f2.root)
+    defer: removeFixtureTree(f2.root)
     f2.writeRmdf(@[processRecord(), readRecord(f2.observedPath)])
     var proc0 = f2.runEdge("da1f/process-with-argv")
     proc0.argv = @["sh", "-c", "echo ran >> " & f2.runLogPath]
@@ -1336,7 +1403,8 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
     # than two empty answers.
     var resolvedRootImage = ""
     for path in rp.evidence.monitorReads:
-      if path.isAbsolute and path.extractFilename == "sh":
+      # `sh` on POSIX, `sh.exe` on Windows.
+      if path.isAbsolute and path.splitFile.name == "sh":
         resolvedRootImage = path
     checkpoint("resolved root image: " & resolvedRootImage)
     check resolvedRootImage.len > 0
@@ -1354,7 +1422,7 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
     ## Asserting only the warm half would pass against an engine that marks
     ## every evidence set a replay.
     let f = makeFixture("da1f-replay-provenance")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
     let act = f.runEdge("da1f/replay-provenance")
     let g = graph([act])
@@ -1393,7 +1461,7 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
     ## sources disagree about what the same observation means), so this case
     ## pins BOTH halves: the entry is still there, and it is now attributable.
     let f = makeFixture("da1f-converter-provenance")
-    defer: removeDir(f.root)
+    defer: removeFixtureTree(f.root)
     f.writeRmdf(@[processRecord()])
     let act = f.converterValidatedByMonitorEdge("da1f/converter-provenance",
       converterReports = "input\\t" & f.observedPath & "\\n")
@@ -1428,7 +1496,7 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
       let name = "da1f-depfile-" &
         (if declarationDerived: "declared" else: "observed")
       let f = makeFixture(name)
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord()])
       # The generator stamp is a COMMENT, exactly as
       # `unmonitorableActionDepfileText` writes it. The rule below it is
@@ -1530,7 +1598,7 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
       let name = "da1f-z1-" &
         (if observationPresent: "mixed" else: "both-declared")
       let f = makeFixture(name)
-      defer: removeDir(f.root)
+      defer: removeFixtureTree(f.root)
       f.writeRmdf(@[processRecord()])
       let act = f.twoReportsValidatedByMonitorEdge("da1f/z1/" & name,
         firstHeader =
@@ -1563,6 +1631,114 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
         check evcToolReportedDepfile notin r0.evidence.evidenceProvenance
         check diagnosed.contains("no observation of any kind")
         check not f.hasRecord(act)
+
+  test "an EMPTY tool report beside a declaration-derived one is not an observation":
+    ## DA-1f Z2 — THE POLARITY QUESTION THE Z1 CASE ABOVE LEFT OPEN, and the
+    ## one the B1 construction does not answer.
+    ##
+    ## WHAT WAS WRONG. `depfileObservedNothing` is
+    ##
+    ##   depfileInputs.len == 0 or
+    ##     evidenceProvenance * DepfileObservingContributors == {}
+    ##
+    ## and `addPathSet` used to `incl evcToolReportedDepfile` for EVERY
+    ## recognized report before looking at whether the report named anything.
+    ## So an empty report made the second disjunct false on its own, the term
+    ## degenerated into the same plain emptiness test as the other four, and
+    ## ONE entry put into the channel by anything else suppressed the guard.
+    ##
+    ## THAT IS NOT A PROBE STATE. One edge, one
+    ## `RecognizedDependencyReportSpec`, two declared depfiles — which is what
+    ## an author writes when a compile edge has inputs no tool reports — and
+    ## the tool-written one comes out EMPTY while the
+    ## `fs.unmonitorableActionDepfile` beside it names a prerequisite.
+    ## Measured on `dev` `75f8e33c` BEFORE the fix, this case's refusal arm
+    ## got `hasRecord` true, a warm `cdHit`, `runCount()==1` and an empty
+    ## diagnostic list: a published record and a stale hit for an action
+    ## nothing looked at. Reverting `addPathSet` to the unconditional mark
+    ## and changing nothing else reproduces exactly that, 27 OK / 3 FAILED
+    ## at that tip, which is this case earning its keep: production
+    ## behaviour byte-identical to `dev`, and the stale hit comes back.
+    ##
+    ## The same shape is what the branch-legal
+    ## `observe(…, evcDeclarationDerivedDepfile, …)` probe reached
+    ## artificially; this reaches it through production types alone, which
+    ## is why it can be a test, and why no case count is quoted for the
+    ## probe — see `depfileObservedNothing` for why that count is a property
+    ## of the probe rather than of the engine.
+    ##
+    ## WHAT GRADES THE FIX IN THE OTHER DIRECTION. Two things, neither in
+    ## this case: "recognized-format-validated-by-monitor: one observation
+    ## publishes" is the LEGITIMATE consulted-and-empty report, which still
+    ## publishes on the monitor's evidence and must; and the `false` arm of
+    ## "a declaration-derived depfile cannot answer the observation question"
+    ## is the edge whose ONLY evidence is a tool depfile, which still
+    ## publishes on that depfile alone. A fix that simply distrusted empty
+    ## reports, or depfiles, reddens one of those.
+    ##
+    ## THE PAIR HERE varies ONE thing — whether the tool-written report names
+    ## a prerequisite. Same edge, same two declared depfiles, same stamps,
+    ## same empty capture.
+    const DeclarationDerivedHeader =
+      "# generated by unmonitorableActionDepfile - this action is not\\n"
+    const ToolWrittenHeader =
+      "# generated by a tool that opened these files\\n"
+    for toolReportNamedAnInput in [false, true]:
+      let name = "da1f-z2-" &
+        (if toolReportNamedAnInput: "tool-named-one" else: "tool-named-none")
+      let f = makeFixture(name)
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord()])
+      let act = f.twoReportsValidatedByMonitorEdge("da1f/z2/" & name,
+        firstHeader = ToolWrittenHeader,
+        secondHeader = DeclarationDerivedHeader,
+        firstNamesPrerequisite = toolReportNamedAnInput)
+      let g = graph([act])
+      let config = testConfig(f.cacheRoot)
+      let first = runBuild(g, config)
+      let r0 = first.byId(act.id)
+      checkpoint(name & ": depfileInputs=" & $r0.evidence.depfileInputs &
+        " provenance=" & $r0.evidence.evidenceProvenance &
+        " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+      check r0.status == asSucceeded
+      check f.runCount() == 1
+
+      # THE DENOMINATOR, and it is what makes the refusal arm mean anything:
+      # the channel is NOT empty in EITHER arm, so the first disjunct of
+      # `depfileObservedNothing` cannot be what decides this and the
+      # declaration-derived report really did fold.
+      check f.secondObservedPath in r0.evidence.depfileInputs
+      check evcDeclarationDerivedDepfile in r0.evidence.evidenceProvenance
+
+      let diagnosed = r0.evidence.diagnostics.join(" ")
+      if toolReportNamedAnInput:
+        check f.observedPath in r0.evidence.depfileInputs
+        check evcToolReportedDepfile in r0.evidence.evidenceProvenance
+        check evcEmptyToolDepfileReport notin r0.evidence.evidenceProvenance
+        check not diagnosed.contains("no observation of any kind")
+        check f.hasRecord(act)
+
+        let warm = runBuild(g, config)
+        check warm.byId(act.id).cacheDecision in ReuseDecisions
+        check f.runCount() == 1
+      else:
+        # ATTRIBUTION, NOT SUPPRESSION: the declaration-derived prerequisite
+        # is still in the channel and still keyed on. What changed is that an
+        # empty report no longer claims somebody observed it.
+        check r0.evidence.depfileInputs.len == 1
+        check evcEmptyToolDepfileReport in r0.evidence.evidenceProvenance
+        check evcToolReportedDepfile notin r0.evidence.evidenceProvenance
+        check diagnosed.contains("no observation of any kind")
+        check diagnosed.contains(act.id)
+        check not f.hasRecord(act)
+
+        let warm = runBuild(g, config)
+        let r1 = warm.byId(act.id)
+        checkpoint(name & " warm: decision=" & $r1.cacheDecision &
+          " launched=" & $r1.launched)
+        check r1.cacheDecision notin ReuseDecisions
+        check r1.launched
+        check f.runCount() == 2
 
 suite "DA-1f: a backend profile that claims nothing is not a claim of completeness":
   ## ITEM 5 — the asymmetry, settled. `monitorProfileEvidenceComplete` used to

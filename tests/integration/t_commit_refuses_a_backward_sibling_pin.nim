@@ -59,6 +59,7 @@
 ## managed body's dispatch line.
 
 import std/[os, strutils, times, unittest]
+import repro_test_support/reasoned_skip
 import repro_test_support
 import ./committed_lock_siblings_fixture
 

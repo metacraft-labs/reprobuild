@@ -1134,8 +1134,9 @@ type
     ## member is silently missing from, where the omission is
     ## indistinguishable from a decision.
     ##
-    ## FOUR OF THE FIVE TERMS STILL ASK WHETHER THE CHANNEL IS EMPTY — and
-    ## the fifth is only better on one of its arms, see the measurement below —
+    ## FOUR OF THE FIVE TERMS STILL ASK WHETHER THE CHANNEL IS EMPTY — the
+    ## fifth asks the observation question on every arm since
+    ## `evcEmptyToolDepfileReport`, see the measurement below —
     ## AND THAT IS NOW HARMLESS, but only because the unmarked writer they were
     ## blind to can no longer be written. `monitorObservedNoReads` and the
     ## `.len == 0` tests on `monitorWrites`, `monitorProbes` and
@@ -1161,13 +1162,24 @@ type
     ## 20 OK / 9 FAILED. The automatic-monitor "zero observations" case does
     ## stay green — that term asks for the PRESENCE of an observer, and no
     ## observing depfile contributor is marked on that arm — but a
-    ## `dgRecognizedFormatValidatedByMonitor` edge has already marked
+    ## `dgRecognizedFormatValidatedByMonitor` edge had already marked
     ## `evcToolReportedDepfile` from its empty report, so there the unmarked
-    ## path makes both disjuncts false and the edge publishes and warm-hits
+    ## path made both disjuncts false and the edge published and warm-hit
     ## exactly as the `monitorReads` probe did. Three more cases go red on
     ## `gradeKeyedInputSet`, where the fabricated path simply makes the key
     ## non-empty. No probe into any of the five channels compiles now; see
     ## `ObservedPathChannel`.
+    ##
+    ## MARKING WAS THEN NECESSARY AND STILL NOT SUFFICIENT, which is the
+    ## residual that measurement left open and `evcEmptyToolDepfileReport`
+    ## closes: the probe that remained LEGAL — `observe(…,
+    ## evcDeclarationDerivedDepfile, …)`, a contributor correctly named and
+    ## correctly non-observing — still bought the publish on that arm, at
+    ## `75f8e33c`. It did so because the EMPTY report's
+    ## mark, not the probe's, was what answered the observation question. An
+    ## empty report now marks `evcEmptyToolDepfileReport` instead, so the
+    ## `depfileInputs` term asks about observation on every arm rather than
+    ## only on the automatic-monitor one.
     ##
     ## MARKING IS THEREFORE NOT A CONVENTION ANY MORE. It is still worth
     ## reading the enum before adding a member, because WHICH contributor a
@@ -1180,7 +1192,52 @@ type
     evcToolReportedDepfile
       ## A dependency report a TOOL wrote while doing the action's work —
       ## `gcc -MD`, rustc's `.d`, a post-build converter emitting a
-      ## recognized format. An observation, by something other than io-mon.
+      ## recognized format — AND IT NAMED AT LEAST ONE INPUT. An observation,
+      ## by something other than io-mon.
+      ##
+      ## THE SECOND HALF OF THAT SENTENCE IS LOAD-BEARING and was not always
+      ## there; see `evcEmptyToolDepfileReport` below for the defect that
+      ## taught it.
+    evcEmptyToolDepfileReport
+      ## A recognized-format report a tool wrote WAS READ, and it named NO
+      ## input. The read happened — so this is not the same silence as "the
+      ## action declared a report and produced none of its declared paths",
+      ## which `cirMissingDependencyReport` records — but nothing was
+      ## observed, so it is NOT a `DepfileObservingContributors` member.
+      ##
+      ## WHY IT EXISTS AS ITS OWN MEMBER, rather than `addPathSet` simply not
+      ## marking an empty report. Two facts live here and they are not the
+      ## same fact:
+      ##
+      ##   1. "a tool report was consulted on this edge" — which `repro why`
+      ##      and `--write-report` must still be able to show, because a
+      ##      consulted-and-genuinely-empty report (a compile with no
+      ##      includes) is a legitimate capture and has to be
+      ##      DISTINGUISHABLE from nothing having looked at all;
+      ##   2. "a tool report contributed an observed input" — which is the
+      ##      only thing the zero-evidence guard may conclude an observation
+      ##      from.
+      ##
+      ## Marking nothing would have kept (2) honest by throwing (1) away.
+      ## This member keeps both, and keeps the decision about which of them
+      ## counts as an observation in the one place that decision belongs:
+      ## `DepfileObservingContributors`' exhaustive `case`.
+      ##
+      ## THE DEFECT IT CLOSES, measured on `dev` `75f8e33c`. `addPathSet`
+      ## `incl`ed `evcToolReportedDepfile` for EVERY recognized report,
+      ## before looking at whether the report named anything, so the mark
+      ## meant (1) while `depfileObservedNothing` read it as (2). One edge
+      ## declaring two depfiles — `RecognizedDependencyReportSpec.outputs` is
+      ## a `seq`, and `collectEvidence` folds every resolved file into the
+      ## same `PathSetEvidence` — where the tool-written one came out EMPTY
+      ## and an `fs.unmonitorableActionDepfile` beside it named a
+      ## prerequisite therefore reached the guard with a NON-EMPTY channel
+      ## and an observing mark no tool had earned: guard silent, record
+      ## published, warm run `cdHit`, `runCount()==1`. That is a recipe
+      ## shape, not a probe — "this compile has extra inputs no tool reports"
+      ## is exactly why an author pairs the two. Graded by
+      ## `t_zero_evidence_edge_is_not_cacheable`'s "an EMPTY tool report
+      ## beside a declaration-derived one is not an observation".
     evcRootImageReconstruction
       ## `executedToolImagePath`: the action's own root image, resolved from
       ## argv the way the launcher resolves it. A correct cache input and not
@@ -1227,18 +1284,27 @@ type
     ## Four of the guard's five terms only ask "is this channel empty", which
     ## an unmarked writer satisfies by filling it.
     ##
-    ## AND SO, ON A REACHABLE EDGE, DOES THE FIFTH. The review re-measured the
+    ## AND SO, ON A REACHABLE EDGE, DID THE FIFTH. The review re-measured the
     ## same unmarked probe against `depfileInputs` at `55219d92` and found it
-    ## is NOT the safe channel the earlier pass recorded: it is safe only on
+    ## is NOT the safe channel the earlier pass recorded: it was safe only on
     ## the automatic-monitor arm, where the provenance carries no
     ## `DepfileObservingContributors` member and `depfileObservedNothing`
     ## answers `true` whatever the channel holds. On a
-    ## `dgRecognizedFormatValidatedByMonitor` edge the empty tool report has
-    ## already marked `evcToolReportedDepfile`, so one unmarked path makes
+    ## `dgRecognizedFormatValidatedByMonitor` edge the empty tool report had
+    ## already marked `evcToolReportedDepfile`, so one unmarked path made
     ## BOTH disjuncts false — guard silent, record published, warm run `cdHit`,
     ## `runCount()==1`. The same probe also defeats `gradeKeyedInputSet` on
     ## three further edges by putting a fabricated path in the key. So the
     ## construction below is what all five terms need, not four.
+    ##
+    ## WHAT THE CONSTRUCTION DOES NOT DO ON ITS OWN, recorded because it was
+    ## once read as closed by it: it makes marking NECESSARY, not sufficient.
+    ## A correctly marked, correctly NON-observing append —
+    ## `observe(…, evcDeclarationDerivedDepfile, …)`, which this type permits
+    ## and should — still bought the publish on that same arm at `75f8e33c`,
+    ## because what answered the observation question there was the empty
+    ## report's own mark. That is fixed where it was caused, in
+    ## `addPathSet`; see `evcEmptyToolDepfileReport`.
     ##
     ## `distinct` is what closes that. The only append is `observe` (and its
     ## bulk form `observeAll`), which REQUIRES an `EvidenceContributor` and
@@ -1975,6 +2041,17 @@ type
     ##     diagnostics. Not used by the env-plumbing path itself.
     binDirs*: seq[string]
     resolvedExecutablePath*: string
+    provisioningReceipts*: seq[string]
+      ## The receipts of the provisioning edges that realized this tool
+      ## (Dependency-Provisioning-In-Build-Graph.md section 4.2): the output
+      ## of each ``bakForeignProvision`` edge, at a path that is stable across
+      ## re-pins and whose CONTENT names the realization. ``runBuild`` adds
+      ## them to the declared inputs of every action whose
+      ## ``toolIdentityRefs`` name this tool (section 3, step 5), so
+      ## re-realizing the tool invalidates its consumers through the ordinary
+      ## declared-input path. Empty for a tool no provisioning edge realized
+      ## (a host ``PATH`` tool, a Nix realization outside the dev-env graph,
+      ## a from-source build).
     # M9.R.14e.3 — auxiliary search-path channels. The engine threads
     # each list onto a dedicated env var at action-launch time (see
     # ``resolvedToolAuxPaths`` / ``applyEnvSearchLists``):
@@ -6706,7 +6783,15 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   else:
     discard
 
-  let materialized = materialPath(cwd, withoutExtendedLengthPrefix(record.path))
+  let unprefixed = withoutExtendedLengthPrefix(record.path)
+  # The device test reads the path AS RECORDED as well: `\Device\...` is not
+  # absolute to a POSIX host's path functions, so `materialPath` would join it
+  # to the action's cwd and the joined spelling no longer starts with the
+  # device prefix. Folding a Windows capture on Linux kept both device names
+  # as relative file inputs.
+  if unprefixed.isNtDevicePath():
+    return
+  let materialized = materialPath(cwd, unprefixed)
   if materialized.isVolatileMonitorPath() or materialized.isNtDevicePath():
     return
   case record.kind
@@ -7198,6 +7283,21 @@ proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
   # the declaration-derived generator stamp, in which case nothing looked at
   # the action at all (see `repro_depfile.DeclarationDerivedDepfileMarker`).
   #
+  # ...OR UNLESS IT NAMED NOTHING, which is the third case and was the defect.
+  # `evcToolReportedDepfile` is consumed by `depfileObservedNothing` as "a
+  # tool OBSERVED an input of this action"; an empty report observed none, and
+  # marking it anyway made the mark mean the weaker "a report was READ" while
+  # the guard went on reading it as the stronger claim. On an edge whose
+  # channel is filled by some OTHER, non-observing contributor — a
+  # declaration-derived depfile declared beside this one, which
+  # `RecognizedDependencyReportSpec.outputs` being a `seq` allows on one edge
+  # — both of the guard's disjuncts then came out false and a record was
+  # published for an action nothing had looked at. `evcEmptyToolDepfileReport`
+  # keeps the weaker fact recordable (so a consulted-and-empty report stays
+  # distinguishable from no report at all, which is what `repro why` needs and
+  # what a legitimate zero-include compile IS) without letting it answer the
+  # observation question. The guard's own five terms are untouched.
+  #
   # The `recognized = false` arm is the one rule 8 named. It puts a post-build
   # converter's `repro-pathset` output into `monitorReads` / `monitorWrites` /
   # `monitorProbes` — the MONITOR's channels — and downstream could not tell
@@ -7216,6 +7316,7 @@ proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
   let contributor =
     if recognized:
       if pathSet.declarationDerived: evcDeclarationDerivedDepfile
+      elif pathSet.inputs.len == 0: evcEmptyToolDepfileReport
       else: evcToolReportedDepfile
     else:
       evcPostBuildConverterReport
@@ -7497,10 +7598,21 @@ const DepfileObservingContributors: set[EvidenceContributor] = (block:
   for contributor in EvidenceContributor:
     case contributor
     of evcToolReportedDepfile:
-      # A dependency report a TOOL wrote while doing the action's work. The
-      # only contributor to `depfileInputs` that is an OBSERVATION of this
-      # action — `gcc -MD` lists the headers it really opened.
+      # A dependency report a TOOL wrote while doing the action's work, WHICH
+      # NAMED AT LEAST ONE INPUT. The only contributor to `depfileInputs` that
+      # is an OBSERVATION of this action — `gcc -MD` lists the headers it
+      # really opened.
       observing.incl contributor
+    of evcEmptyToolDepfileReport:
+      # A tool's report was READ and named nothing. The read is a fact worth
+      # recording — it is what tells a consulted-and-genuinely-empty report
+      # apart from no report at all — but it is not an observation of any
+      # INPUT, which is the only thing this set is allowed to mean. Putting it
+      # in the observing set is the defect `evcEmptyToolDepfileReport` was
+      # split out of `evcToolReportedDepfile` to remove, and the mutation that
+      # restores it reddens "an EMPTY tool report beside a declaration-derived
+      # one is not an observation".
+      discard
     of evcMonitorCapture, evcRootImageReconstruction, evcReplayedCacheRecord,
        evcDeclarationDerivedDepfile, evcPostBuildConverterReport,
        evcForeignProvisionerReport:
@@ -7539,19 +7651,42 @@ proc depfileObservedNothing(col: EvidenceCollection): bool {.inline.} =
   ## READ THAT AS A PROPERTY OF THIS EXPRESSION AND NOT OF THE CHANNEL, which
   ## is a distinction the first pass elided and the review measured. It holds
   ## when NOTHING ELSE on the edge has already marked an observing depfile
-  ## contributor. It does not hold on a `dgRecognizedFormatValidatedByMonitor`
-  ## or converter edge, where the empty report's own `addPathSet` has already
-  ## `incl`ed `evcToolReportedDepfile`: there the second disjunct is already
-  ## false, and ANY entry in the channel — marked or not — makes the first one
-  ## false too, so an unmarked writer buys the publish instead of paying for
-  ## it. Measured at `55219d92` with one unmarked path appended in
-  ## `collectEvidence`: `t_zero_evidence_edge_is_not_cacheable` went 29 OK / 0
-  ## FAILED to 20 OK / 9 FAILED, and
-  ## "recognized-format-validated-by-monitor: zero observations do not
-  ## publish" failed with `hasRecord` true, a warm `cdHit` and
-  ## `runCount()==1`. What closes that is not this expression but
-  ## `ObservedPathChannel`, which is why the write side had to become
-  ## impossible rather than merely discouraged.
+  ## contributor. Until `evcEmptyToolDepfileReport` existed it did NOT hold on
+  ## a `dgRecognizedFormatValidatedByMonitor` or converter edge, because the
+  ## EMPTY report's own `addPathSet` had already `incl`ed
+  ## `evcToolReportedDepfile`: the second disjunct was already false, and ANY
+  ## entry in the channel made the first one false too, so this term
+  ## degenerated into a plain emptiness test and one entry from any other
+  ## contributor bought the publish. Measured at `55219d92` with one unmarked
+  ## path appended in `collectEvidence`:
+  ## `t_zero_evidence_edge_is_not_cacheable` went 29 OK / 0 FAILED to 20 OK /
+  ## 9 FAILED, and "recognized-format-validated-by-monitor: zero observations
+  ## do not publish" failed with `hasRecord` true, a warm `cdHit` and
+  ## `runCount()==1`. Re-measured at `75f8e33c` with the branch-legal
+  ## `observe(…, evcDeclarationDerivedDepfile, …)` probe that
+  ## `ObservedPathChannel` permits: same headline case, same
+  ## `hasRecord`/`cdHit`/`runCount()==1`/empty diagnostics.
+  ##
+  ## DO NOT RECORD A CASE COUNT FOR THAT PROBE, and the review that landed
+  ## this tried to. The probe has a free parameter — WHICH path it
+  ## fabricates — and the tool-root elision treats a real root image and a
+  ## synthetic path differently, so the two obvious spellings reach
+  ## different `gradeKeyedInputSet` cases: appending `rootImage` gives 25 OK
+  ## / 4 FAILED and appending a synthetic path beside it gives 24 OK / 5
+  ## FAILED, both at `75f8e33c`. The HEADLINE case behaves identically in
+  ## both, which is the part that is a fact about the engine rather than
+  ## about the probe. The reproduction that has no free parameter at all is
+  ## the no-probe one below.
+  ##
+  ## TWO SEPARATE THINGS CLOSE THAT, and neither closes it alone.
+  ## `ObservedPathChannel` makes the write side NAME a contributor — marking
+  ## is necessary. `evcEmptyToolDepfileReport` is what makes marking
+  ## SUFFICIENT: with it, an empty report no longer answers the observation
+  ## question on anybody's behalf, so the second disjunct stays TRUE on such
+  ## an edge and the term is an observation test again rather than an
+  ## emptiness test. The state is reachable with no probe at all — one edge,
+  ## one recognized-report spec, two declared depfiles, the tool-written one
+  ## empty — and that is the case that grades it.
   ##
   ## WHICH POLARITY THAT IS, AND WHAT GRADES IT. The caller is the
   ## zero-evidence guard in `applyMonitorEvidenceStatus`, the only one, and
@@ -7855,12 +7990,22 @@ proc executedToolImagePath(action: BuildAction;
     return ""
   if searchPath.len == 0:
     return ""
+  # The FILE the launcher will find. On Windows the launcher hands a bare
+  # name to `CreateProcessW`, which appends `.exe` to a module name that has
+  # no extension, so `sh` names `sh.exe`. Searching for the literal `sh`
+  # found nothing there, and every bare-named action on Windows silently kept
+  # its root image out of its record.
+  let fileName =
+    when defined(windows):
+      if name.splitFile.ext.len == 0: name & ".exe" else: name
+    else:
+      name
   for dir in searchPath.split(PathSep):
     # POSIX: an empty PATH element names the current working directory.
     let dirBase = if dir.len == 0: action.cwd else: dir
     if dirBase.len == 0:
       continue
-    let candidate = materialPath(action.cwd, dirBase) / name
+    let candidate = materialPath(action.cwd, dirBase) / fileName
     if isExecutableFile(candidate):
       return os.normalizedPath(candidate)
   ""
@@ -10299,6 +10444,44 @@ proc resolvedToolBinDirs(action: BuildAction;
       if binDir.len > 0 and binDir notin promotedDirs:
         result.add(binDir)
 
+proc withProvisioningReceiptInputs*(g: BuildGraph;
+                                    resolver: ToolIdentityResolver):
+    BuildGraph =
+  ## Dependency-Provisioning-In-Build-Graph.md section 3, step 5: an edge that
+  ## uses a provisioned tool declares a dependency on the provisioning edge's
+  ## output. For every action whose ``toolIdentityRefs`` resolve to a tool a
+  ## provisioning edge realized, that edge's receipt
+  ## (``ResolvedToolIdentity.provisioningReceipts``) is appended to the
+  ## action's declared inputs.
+  ##
+  ## The receipt's path is stable across re-pins and its content names the
+  ## realization, so re-realizing a tool (a new pin, a new contributor)
+  ## changes a declared input of every edge that used it, and those edges
+  ## re-execute through the same fingerprint path as any other input change.
+  ## Before this, the tool reached the edge only as a ``PATH`` entry added at
+  ## launch, which no cache key observed.
+  ##
+  ## The provisioning edges themselves still run in tool resolution, before
+  ## this graph is lowered, so the receipt exists by the time this graph is
+  ## scheduled; ordering holds by construction rather than through ``deps``.
+  ## Only ``bakProcess`` actions are touched: a tool is something a process
+  ## executes, and the built-in kinds have fixed input shapes (``bakCopyFile``
+  ## copies exactly one input) that an added receipt would break. A ``nil``
+  ## resolver, or an action with no refs, is left exactly as it was.
+  result = g
+  if resolver == nil:
+    return
+  for action in result.actions.mitems:
+    if action.kind != bakProcess or action.toolIdentityRefs.len == 0:
+      continue
+    for i, refName in action.toolIdentityRefs:
+      let resolved = resolver(refName, kindForRef(action, i))
+      if resolved.isNone:
+        continue
+      for receipt in resolved.get().provisioningReceipts:
+        if receipt.len > 0 and receipt notin action.inputs:
+          action.inputs.add(receipt)
+
 type
   ResolvedAuxPaths* = object
     ## DSL-port M9.R.14e.3 — accumulated per-action auxiliary search
@@ -11332,7 +11515,15 @@ proc launchChildEnv(action: BuildAction;
   # Under an allowlisted environment nothing is inherited, so the host's
   # OS-essential set is handed over here -- before `action.env`, so a value
   # the action declares (a hermetic `USERPROFILE`, say) still wins.
-  if config.hermeticEnv:
+  #
+  # An ISOLATED action inherits nothing either, so it needs the same set, for
+  # the same reason. Without it the provider-compile edge (the first isolated
+  # action) could not start on Windows at all: a process with no `SystemRoot`
+  # cannot create a socket, and the `repro` helper that edge runs creates one
+  # while initialising, so every recipe compile died with "An operation was
+  # attempted on something that is not a socket". Isolation removes what the
+  # caller's shell happens to hold; these names are what the OS needs.
+  if config.hermeticEnv or action.isolateHostEnvironment:
     result.add(hostEssentialEnv())
   for entry in action.env:
     result.add(entry)
@@ -14822,7 +15013,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # over the growing slice, and the scheduler loop terminates against
   # ``completed < buildGraph.actions.len`` so a freshly inserted action keeps
   # the loop alive.
-  var buildGraph = inferDeclaredActionDeps(g)
+  var buildGraph = inferDeclaredActionDeps(
+    withProvisioningReceiptInputs(g, config.toolIdentityResolver))
   # NOTE: an earlier ``REPRO_MACOS_DISABLE_ACTION_MONITOR`` opt-in lived here and
   # downgraded every monitored action to a declared-only (unmonitored) policy
   # on macOS. That was an unapproved soundness hole — it marked actions
@@ -15546,6 +15738,64 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         "status=" & $res.statusCode & " bytes=" & $res.bytesUploaded)
     finishStat("repro binary-cache publish", publishStart)
 
+  # THE BUILD'S ONE metadata cache. Declared HERE — above the whole-graph
+  # no-op prefix rather than beside the scheduler's other tables below —
+  # because the prefix and the scheduler share it.
+  #
+  # AC-5. The prefix is a PREFIX, not an alternative: when
+  # `tryFastNoopCacheHits` returns `none` the scheduler runs anyway, so
+  # everything the prefix observed is observed a second time. It used to warm
+  # a cache of its own and drop it on the floor at every one of its
+  # `return none` points, and the scheduler then allocated a second, empty
+  # one — on three measured workloads 88–96% of the prefix's cost was that
+  # duplication. One cache means the scheduler's first touch of a path the
+  # prefix already looked at is a table probe instead of an `lstat`.
+  #
+  # WHY THIS IS NOT A WEAKER CHECK. The cache is a memo of OBSERVATIONS made
+  # in this process, in this build, and it is already shared across every
+  # action the scheduler visits — an entry the scheduler's action #40 reads
+  # was written by its action #1, which is the same cross-phase reuse this
+  # makes the prefix a participant in. Nothing treats "present in the cache"
+  # as "already validated": the comparison against the recorded metadata
+  # happens at the call site, on the cached value exactly as on a fresh one
+  # (`fingerprintRecordedMetadataImpl` compares `result` with `recorded`
+  # either way). Writes still invalidate — `invalidateCachedOutputs` /
+  # `invalidateCachedWrites` after every execution and
+  # `fileMetadataCache.clear()` after every restore — and those run against
+  # this cache whatever filled it.
+  #
+  # STATS FINALISATION, which is the one thing that must not be moved.
+  # `finishMetadataCacheStats` is called from the prefix's two HIT exits and
+  # from the scheduler's single exit, and never from a bail. Those three are
+  # mutually exclusive: a prefix hit returns from `runBuild` before the
+  # scheduler starts. `addCountedMetric` ACCUMULATES into the row it finds by
+  # name, so finalising one cache twice would silently double every
+  # `repro file metadata *` count. Do not add a finalisation to a bail path.
+  var fileMetadataCache = initFileMetadataCache()
+
+  # AC-5 deliverable 3's instrument, and the prefix's fall-through accounting.
+  # Only the prefix writes these; they are read once, at the fall-through.
+  var fastNoopPrefixOutputStats = 0
+  var fastNoopPrefixOutputStatUs = 0.0
+
+  proc countFastNoopPrefixOutputStat(started: float) =
+    ## Attribute one `allOutputsExist()` probe to the PREFIX as well as to the
+    ## whole build.
+    ##
+    ## `repro output stat` is emitted from four places — the prefix's two
+    ## loops and the scheduler's two — so it cannot answer "how much
+    ## filesystem work did the prefix do before refusing", which is the
+    ## question AC-5 deliverable 3 is accountable to. This counts the prefix's
+    ## share separately. The row it feeds is NESTED inside `repro output stat`,
+    ## not beside it — called BEFORE `finishStat` at each site, so its duration
+    ## is a strict sub-interval of the one that row gets, never a longer one.
+    ## It is deliberately absent from the `invalidationChecksUs` bucket in
+    ## `repro_cli_support` so the same microseconds are not added twice.
+    if not config.statsEnabled:
+      return
+    inc fastNoopPrefixOutputStats
+    fastNoopPrefixOutputStatUs += (epochTime() - started) * 1_000_000.0
+
   proc fastNoopReuseReason(action: BuildAction): string =
     ## The whole-graph fast scan and the regular scheduler decide the SAME
     ## state — "the record revalidated and the declared outputs (if any)
@@ -15595,12 +15845,37 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # consults a retention clause. Bail out for both.
     if config.rebuildClass != rbNone:
       return none(BuildRunResult)
+    # THE FREE REFUSALS, all of them, over the whole graph, before either of
+    # the expensive loops below touches the filesystem.
+    #
+    # AC-5 deliverable 3. `cacheable` and `dynamicDepsFile` are plain fields of
+    # `BuildAction` — no syscall, no record read, no allocation. They used to
+    # be tested INSIDE the two loops that also `allOutputsExist()` each edge
+    # and read each edge's hot record, so a graph whose uncacheable edge sorts
+    # LAST paid n edges of filesystem work and then refused anyway. Every graph
+    # carrying an `install`, `test` or `preinstall` edge is in that class; the
+    # zlib `all` target that the campaign measured happens to exclude them,
+    # which is why the waste never showed up in those numbers.
+    #
+    # This loop is the natural home: it already existed, it already visits
+    # every action, and `buildGraph.actions` is FIXED for the whole of the
+    # prefix — `applyDynamicDeps` only appends to it from inside the scheduler,
+    # which has not started yet. So the three refusals here subsume the
+    # per-iteration copies completely and the copies are gone rather than left
+    # behind as dead field reads.
     for action in buildGraph.actions:
       if action.effectiveRetention.kind != crkForever:
         return none(BuildRunResult)
+      # An uncacheable edge must run, so no whole-graph "nothing to do" answer
+      # can be correct for a graph containing one.
+      if not action.cacheable:
+        return none(BuildRunResult)
+      # A `dynamicDepsFile` edge's input set is not known until it has run, so
+      # the prefix has nothing it could revalidate against.
+      if action.dynamicDepsFile.len > 0:
+        return none(BuildRunResult)
     var fastResult: BuildRunResult
     fastResult.traceEnabled = not config.suppressTrace
-    var metadataCache = initFileMetadataCache()
     if config.skipCacheHitEvidence:
       var hotProbes: seq[HotMetadataProbe] = @[]
       # M10 — parallel to `hotProbes`, so a record that observed environment
@@ -15609,8 +15884,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       # environment moved, and nothing downstream would look again.
       var hotEnvResolvers: seq[EnvResolver] = @[]
       for action in buildGraph.actions:
-        if (not action.cacheable) or action.dynamicDepsFile.len > 0:
-          return none(BuildRunResult)
+        # `cacheable` / `dynamicDepsFile` are refused in the free pre-pass
+        # above, before this loop stats anything. See the note there.
+        #
         # An edge that declares no outputs has nothing to stat and nothing
         # to restore; its record is reusable on unchanged inputs alone
         # (`cachedResultReusableInPlace`). Bailing out of the fast path for
@@ -15619,6 +15895,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if not action.declaresNoOutputs():
           let outputStatStart = statStart()
           let outputsPresent = action.allOutputsExist()
+          countFastNoopPrefixOutputStat(outputStatStart)
           finishStat("repro output stat", outputStatStart)
           if not outputsPresent:
             return none(BuildRunResult)
@@ -15635,7 +15912,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       let lookupStart = statStart()
       let navigatorStart = statStart()
       let scan = cache.scanHotIndexMetadataInputsUnchanged(hotProbes,
-        addr metadataCache, hotEnvResolvers)
+        addr fileMetadataCache, hotEnvResolvers)
       finishStat("repro hot index navigator scan", navigatorStart)
       finishStat("repro cache lookup", lookupStart)
       case scan.status
@@ -15649,7 +15926,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             reason: fastNoopReuseReason(action),
             dependencyPolicyKind: action.dependencyPolicy.kind))
         finishStat("repro cache hit result materialize", resultMaterializeStart)
-        finishMetadataCacheStats(metadataCache)
+        finishMetadataCacheStats(fileMetadataCache)
         fastResult.stats = stats
         return some(fastResult)
       of hmssMissingRecord, hmssInputChanged, hmssOutputChanged,
@@ -15673,12 +15950,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # M10 — parallel to `hotRecords`; see `hotEnvResolvers` above.
     var hotRecordEnvResolvers: seq[EnvResolver] = @[]
     for action in buildGraph.actions:
-      if (not action.cacheable) or action.dynamicDepsFile.len > 0:
-        return none(BuildRunResult)
+      # `cacheable` / `dynamicDepsFile`: refused in the free pre-pass above.
       # See the note above: no declared outputs means nothing to stat.
       if not action.declaresNoOutputs():
         let outputStatStart = statStart()
         let outputsPresent = action.allOutputsExist()
+        countFastNoopPrefixOutputStat(outputStatStart)
         finishStat("repro output stat", outputStatStart)
         if not outputsPresent:
           return none(BuildRunResult)
@@ -15708,7 +15985,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     let lookupStart = statStart()
     let inputScanStart = statStart()
     let inputsUnchanged =
-      hotMetadataRecordInputsUnchanged(hotRecords, addr metadataCache,
+      hotMetadataRecordInputsUnchanged(hotRecords, addr fileMetadataCache,
         hotRecordEnvResolvers)
     finishStat("repro hot input scan", inputScanStart)
     finishStat("repro cache lookup", lookupStart)
@@ -15728,7 +16005,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       assignCacheHitEvidence(item, action, record)
       fastResult.results.add(item)
     finishStat("repro cache hit result materialize", resultMaterializeStart)
-    finishMetadataCacheStats(metadataCache)
+    finishMetadataCacheStats(fileMetadataCache)
     fastResult.stats = stats
     some(fastResult)
 
@@ -15768,6 +16045,29 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     runResult.stats = stats
     return runResult
 
+  # THE FALL-THROUGH. Everything below is the scheduler, and reaching it means
+  # the prefix refused — so the prefix's cost is ADDED to the normal path
+  # rather than spent instead of it. These two rows are what makes that cost,
+  # and what survives it, countable. Emitted here and nowhere else: on a
+  # whole-graph hit there is no fall-through, the prefix never runs twice, and
+  # `repro output stat` is already the build's whole output-stat figure.
+  #
+  # `prefix output stat` — `allOutputsExist()` probes the prefix paid before
+  # refusing. A NESTED subset of `repro output stat`, which also carries the
+  # scheduler's; see `countFastNoopPrefixOutputStat`. AC-5 deliverable 3's
+  # criterion is this row reading ZERO on a graph whose only uncacheable edge
+  # sorts last.
+  #
+  # `prefix metadata carry` — observations the prefix leaves IN the cache the
+  # scheduler is about to use. AC-5 deliverable 2's criterion: it was
+  # structurally zero while the prefix warmed a cache of its own, because the
+  # scheduler's cache was freshly allocated right here.
+  if config.statsEnabled:
+    stats.addCountedMetric("repro fast noop prefix output stat",
+      fastNoopPrefixOutputStats, fastNoopPrefixOutputStatUs)
+    stats.addCountedMetric("repro fast noop prefix metadata carry",
+      fileMetadataCache.entryCount, 0.0)
+
   var idToIndex = initTable[string, int]()
   var dependents = initTable[string, seq[string]]()
   var remaining = initTable[string, int]()
@@ -15777,7 +16077,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var ready: seq[string] = @[]
   var actionsById = initTable[string, BuildAction]()
   var dynamicDepsLoaded = initHashSet[string]()
-  var fileMetadataCache = initFileMetadataCache()
+  # `fileMetadataCache` used to be allocated HERE, empty, immediately after the
+  # whole-graph prefix had warmed and discarded one of its own. It is declared
+  # above the prefix now and carries the prefix's observations across the
+  # fall-through; see the note at its declaration. AC-5.
   var inlineRunQuotaSession: ReproRunQuotaSession
   var inlineRunQuotaSessionOpen = false
 
@@ -16616,7 +16919,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let o = producedOutputs[path]
           case entry.kind
           of pikRead:
-            return some(if o.directory: Unresolved else: o.digest)
+            # `readIdentity`'s answers, so a lookup agrees with the recorder.
+            return some(if o.directory: ReadOfDirectory else: o.digest)
           of pikProbe:
             return some("present")
           of pikEnumeration:
@@ -16635,9 +16939,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             let at = findEntry(o.entries, rel)
             case entry.kind
             of pikRead:
-              if at >= 0 and o.entries[at].kind == tekFile:
-                return some(o.entries[at].identity)
-              return some(Unresolved)
+              # A produced directory's manifest names every entry in it, so
+              # an entry it lacks is absent (a failed open, as node's module
+              # resolution makes at every level it walks).
+              if at < 0:
+                return some(ReadOfAbsent)
+              case o.entries[at].kind
+              of tekFile: return some(o.entries[at].identity)
+              of tekDirectory: return some(ReadOfDirectory)
+              else: return some(Unresolved)
             of pikProbe:
               return some(if at >= 0: "present" else: "absent")
             of pikEnumeration:

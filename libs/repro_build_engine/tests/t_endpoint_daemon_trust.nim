@@ -25,6 +25,7 @@
 ## under test is the engine's, and io-mon's own suite covers the shim.
 
 import std/[net, os, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_build_engine
 import repro_local_store

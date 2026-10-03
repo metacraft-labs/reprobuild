@@ -60,7 +60,7 @@ suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
       detail: "process killed with an un-flushed read batch (kill-before-flush) diag-ctx=[pid=1234]")
 
     let encoded = encodeCanonical(@[realRead, killLoss])
-    writeFile(rmdfPath, cast[string](encoded))
+    writeFile(rmdfPath, encoded)
 
     # The engine consumes the iomon via collectEvidence -> the same
     # foldMonitorDepFileEvidence proc. Verify the return code matches
@@ -91,7 +91,7 @@ suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
       detail: "unmonitored subtree/peer (un-injectable spawn child)")
 
     let encoded = encodeCanonical(@[subtreeLoss])
-    writeFile(rmdfPath, cast[string](encoded))
+    writeFile(rmdfPath, encoded)
 
     var evidence: PathSetEvidence
     var seen: EvidenceSeenSets
@@ -110,7 +110,7 @@ suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
       osPid: 1, threadId: 1, path: "/b.h", detail: "")
 
     let encoded = encodeCanonical(@[read1, read2])
-    writeFile(rmdfPath, cast[string](encoded))
+    writeFile(rmdfPath, encoded)
 
     var evidence: PathSetEvidence
     var seen: EvidenceSeenSets
@@ -136,7 +136,7 @@ suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
       detail: "unmonitored subtree/peer (SETEXEC into hardened image)")
 
     let encoded = encodeCanonical(@[killLoss, subtreeLoss])
-    writeFile(rmdfPath, cast[string](encoded))
+    writeFile(rmdfPath, encoded)
 
     var evidence: PathSetEvidence
     var seen: EvidenceSeenSets
@@ -169,7 +169,7 @@ suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
       detail: "libc raw syscall unsupported nr=39 run=1787695082.5534084")
 
     let encoded = encodeCanonical(@[read1, closeRange, getPid])
-    writeFile(rmdfPath, cast[string](encoded))
+    writeFile(rmdfPath, encoded)
 
     var evidence: PathSetEvidence
     var seen: EvidenceSeenSets
@@ -208,7 +208,7 @@ suite "M9.R.72.3 Phase D end-to-end monitor-loss handling":
     # fold happens to see last.
     for records in [@[closeRange, subtreeLoss], @[subtreeLoss, closeRange]]:
       let encoded = encodeCanonical(records)
-      writeFile(rmdfPath, cast[string](encoded))
+      writeFile(rmdfPath, encoded)
       var evidence: PathSetEvidence
       var seen: EvidenceSeenSets
       check foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen) ==

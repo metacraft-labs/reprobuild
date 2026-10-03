@@ -3919,9 +3919,10 @@ proc requireDslScratchDir(dir, scratchRoot, consumerSourceFile: string) =
 
 proc unresolvedMovedPackageDiagnostic(pkg: PackageDef;
     consumerSourceFile: string): string =
-  ## The compile error for a ``uses:`` of a package that moved out of the
-  ## bundled stdlib into `reprobuild-packages` and that nothing resolves, or
-  ## "" when every such use resolves. It follows `usesImportCode`'s order: an
+  ## The compile error for a ``uses:``, ``nativeBuildDeps:`` or
+  ## ``runtimeDeps:`` entry naming a package that moved out of the bundled
+  ## stdlib into `reprobuild-packages` and that nothing resolves, or "" when
+  ## every such entry resolves. It follows `usesImportCode`'s order: an
   ## explicit ``usesImportPath`` or a workspace project of that name takes the
   ## selector first, and only then is a missing catalog an error. See
   ## `MovedToReprobuildPackages` for why this is not left unresolved.
@@ -3929,21 +3930,28 @@ proc unresolvedMovedPackageDiagnostic(pkg: PackageDef;
     if normalizedImportBase(base).len > 0:
       return ""
   var reported: seq[string] = @[]
-  for useDef in pkg.toolUses:
-    let selector = useDef.packageSelector
-    if selector notin MovedToReprobuildPackages or selector in reported:
-      continue
-    if workspaceProducerModule(selector, consumerSourceFile).len > 0:
-      continue
-    let diagnostic = movedPackageUnresolvedDiagnostic(selector,
-      useDef.rawConstraint,
-      if useDef.sourceFile.len > 0: useDef.sourceFile else: consumerSourceFile,
-      useDef.sourceLine)
-    if diagnostic.len > 0:
-      reported.add(selector)
-      if result.len > 0:
-        result.add("\n\n")
-      result.add(diagnostic)
+  # All three lists: `usesImportCode` consults the catalog for each of them,
+  # so a moved package unresolved in any of them loses its provisioning the
+  # same way.
+  for (listName, uses) in [("uses", pkg.toolUses),
+      ("nativeBuildDeps", pkg.nativeBuildDeps),
+      ("runtimeDeps", pkg.runtimeDeps)]:
+    for useDef in uses:
+      let selector = useDef.packageSelector
+      if selector notin MovedToReprobuildPackages or selector in reported:
+        continue
+      if workspaceProducerModule(selector, consumerSourceFile).len > 0:
+        continue
+      let diagnostic = movedPackageUnresolvedDiagnostic(selector,
+        useDef.rawConstraint,
+        if useDef.sourceFile.len > 0: useDef.sourceFile
+        else: consumerSourceFile,
+        useDef.sourceLine, listName)
+      if diagnostic.len > 0:
+        reported.add(selector)
+        if result.len > 0:
+          result.add("\n\n")
+        result.add(diagnostic)
 
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   proc isBundledStdlibSelector(selector: string): bool =
@@ -4183,6 +4191,36 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       # ``.nim`` extension (Nim's ``import "<path>"`` form). Re-attach it
       # so the per-sibling shim below can ``include`` the real file.
       producerModules.add((moduleAlias, selector, producerModule & ".nim"))
+  # A package named in ``nativeBuildDeps:`` / ``runtimeDeps:`` resolves from
+  # the `reprobuild-packages` catalog too (Provisioning-Contributions.md,
+  # "Catalog Lookup And Provisioning": wherever a recipe names it). Like the
+  # stdlib's dependency-only imports above, it needs module initialization
+  # (to register its provisioning) but not its typed command surface, so it
+  # is imported for its selector-specific marker alone; a selector `uses:`
+  # already imported in full is not imported again. The order follows the
+  # `uses:` branch: an explicit ``usesImportPath`` or a workspace project of
+  # that name keeps the selector, and only then is the catalog consulted.
+  var dependencyOnlyAliases: seq[string] = @[]
+  if not hasExplicitImports:
+    for useDef in pkg.nativeBuildDeps & pkg.runtimeDeps:
+      let selector = useDef.packageSelector
+      if isBundledStdlibSelector(selector):
+        continue
+      if workspaceProducerModule(selector, consumerSourceFile).len > 0:
+        continue
+      let catalogModule =
+        reprobuildPackagesInterfaceModule(selector, consumerSourceFile)
+      if catalogModule.len == 0:
+        continue
+      let catalogAlias = selectorModuleName(selector) & "_packages_module"
+      var catalogSeen = false
+      for (existingAlias, _, _) in producerModules:
+        if existingAlias == catalogAlias:
+          catalogSeen = true
+          break
+      if not catalogSeen:
+        producerModules.add((catalogAlias, selector, catalogModule & ".nim"))
+        dependencyOnlyAliases.add(catalogAlias)
   # Multi-Sibling interface-extraction object-collision fix.
   #
   # ``usesImportCode`` used to emit a direct ``import "<sibling>/repro"`` per
@@ -4262,6 +4300,15 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       let importedModule =
         if shimCurrent: shimDir / shimStem
         else: siblingReproPath.changeFileExt("")
+      if moduleAlias in dependencyOnlyAliases:
+        # A catalog package named only in a dependency list: see the
+        # dependency-only branch above, and the stdlib's dependency imports
+        # for why the ``as <alias>`` binding is load-bearing.
+        let markerName = packageMarkerName(selector)
+        result.add("from \"" & importedModule.replace('\\', '/') & "\" as " &
+          moduleAlias & "_dep import " & markerName & "\n")
+        result.add(markerName & "()\n")
+        continue
       result.add("import \"" & importedModule.replace('\\', '/') & "\" as " &
         moduleAlias & " except package\n")
       result.add("when compiles(" & moduleAlias &

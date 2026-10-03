@@ -839,7 +839,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     CapabilitySurface(key: "runquota_process", audit: caFullSurface,
       sourceRels: @["libs/runquota_process/src/runquota_process.nim"],
       spawning: @["commandSpec", "launchProcess"],
-      inert: @["libraryInfo", "backendProfile", "launchResult", "running",
+      inert: @["libraryInfo", "shellScriptDir", "backendProfile", "launchResult", "running",
                "pollCompletion", "terminate", "killNow", "waitForCompletion",
                "waitForExit", "cancelAndWait", "close"]),
     # THE MODULE THE WHOLE ENUMERATION GOES THROUGH, and the one that was
@@ -1003,10 +1003,14 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     CapabilitySurface(key: "posix", audit: caImportAllowlist,
       sourceRels: @["posix/posix.nim"],
       spawning: @[],
-      inert: @["kill", "setpgid", "umask", "dup2", "close", "fcntl"],
+      # `lstat` and the `S_IS*` tests: `endpointRootOwned` reads the
+      # ownership and type of a daemon endpoint's path components
+      # (Dev-Env-Warm-Entry.md §3). Metadata reads; none can start a child.
+      inert: @["kill", "setpgid", "umask", "dup2", "close", "fcntl", "lstat"],
       allowedSymbols: @["Pid", "SIGKILL", "SIGTERM", "kill", "setpgid",
                         "Mode", "umask", "dup2", "close", "fcntl", "F_GETFD",
-                        "F_SETFD", "FD_CLOEXEC", "F_DUPFD_CLOEXEC"]),
+                        "F_SETFD", "FD_CLOEXEC", "F_DUPFD_CLOEXEC",
+                        "Stat", "lstat", "S_ISDIR", "S_ISLNK", "S_ISSOCK"]),
     CapabilitySurface(key: "winlean", audit: caImportAllowlist,
       sourceRels: @["windows/winlean.nim"],
       spawning: @[],

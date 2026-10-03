@@ -96,6 +96,7 @@
 ## Skip rule: ``git`` missing on PATH (same convention as the RA-10 suite).
 
 import std/[os, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 

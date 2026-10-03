@@ -188,6 +188,31 @@ type
       foreignCoordinates*: string   ## The foreign coordinate identifier string
 
 
+  LockedArchive* = object
+    ## Where the bytes of a store-sourced dependency come from, pinned: an
+    ## upstream release archive and the SHA-256 it must hash to.
+    ##
+    ## ``ckStore``'s ``store_hash`` names WHICH package version a pin means
+    ## (a BLAKE3 over name + version + platform). It says nothing about where
+    ## to get it, so a reprobuild that does not already hold the version
+    ## cannot realize it. This is the other half: written by ``repro lock
+    ## refresh`` when it resolves the version to an upstream archive for the
+    ## lock's platform (reprobuild-specs Distribution-And-Packaging, M5 "pin
+    ## the provider-compile toolchain"), and verified by realization against
+    ## the bytes it downloads. The digest is part of the committed pin; it is
+    ## never re-read from the network at use time.
+    ##
+    ## Empty (``url == ""``) for every dependency that has no such archive,
+    ## and then not written at all, so every lock written before this field
+    ## existed re-serializes byte-identically.
+    url*: string              ## ``archive_url``.
+    sha256*: string           ## ``archive_sha256``, lowercase hex.
+    archiveType*: string      ## ``archive_type``: ``zip``, ``tar.xz``, ...
+    build*: string
+      ## ``archive_build``: ``binary`` (the archive holds the package ready
+      ## to use) or ``source`` (the archive holds sources the realizer builds;
+      ## see ``LockedArchiveSource``).
+
   LockedDep* = object
     ## One pinned dependency in the unified model. Workspace repos and solved
     ## packages are both just dependencies with coordinates + integrity; the
@@ -203,6 +228,9 @@ type
     participation*: string    ## ``""`` (shared) / ``evidence-only``.
     depends*: seq[string]     ## develop-set dependency edges (by name).
     tags*: seq[string]        ## subset-selection tags (`repro sync --tags=`).
+    archive*: LockedArchive
+      ## The pinned upstream archive a store-sourced dependency is realized
+      ## from, when ``repro lock refresh`` resolved one. See ``LockedArchive``.
 
   LockedDependencies* = object
     ## The unified locked-dependency model (MO-8). It SUBSUMES the
@@ -218,6 +246,17 @@ type
     variants*: seq[LockedVariant]
     packages*: seq[LockedPackage]
     deps*: seq[LockedDep]
+
+const
+  LockedArchiveBinary* = "binary"
+    ## ``LockedArchive.build``: unpack the archive and use what it holds.
+  LockedArchiveSource* = "source"
+    ## ``LockedArchive.build``: unpack the archive and build the package
+    ## from the sources it holds.
+
+proc isPinned*(archive: LockedArchive): bool =
+  ## Whether a lock entry carries an archive pin at all.
+  archive.url.len > 0
 
 # ---------------------------------------------------------------------------
 # Provenance digest (dependency-free, deterministic)
@@ -791,6 +830,15 @@ proc serializeDepInline(d: LockedDep): string =
   result.add(", participation = \"" & tomlEscape(d.participation) & "\"")
   result.add(", depends = \"" & tomlEscape(joinNames(d.depends)) & "\"")
   result.add(", tags = \"" & tomlEscape(joinNames(d.tags)) & "\"")
+  # Written only when pinned, and last, so an entry without one -- every
+  # entry in every lock written before archive pins existed -- re-serializes
+  # byte-identically.
+  if d.archive.isPinned:
+    result.add(", archive_url = \"" & tomlEscape(d.archive.url) & "\"")
+    result.add(", archive_sha256 = \"" & tomlEscape(d.archive.sha256) & "\"")
+    result.add(", archive_type = \"" & tomlEscape(d.archive.archiveType) &
+      "\"")
+    result.add(", archive_build = \"" & tomlEscape(d.archive.build) & "\"")
   result.add(" }")
 
 proc serializeLockedDependencies*(ld: LockedDependencies): string =
@@ -909,4 +957,9 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
         visibility: f.getOrDefault("visibility", ""),
         participation: f.getOrDefault("participation", ""),
         depends: splitNames(f.getOrDefault("depends", "")),
-        tags: splitNames(f.getOrDefault("tags", ""))))
+        tags: splitNames(f.getOrDefault("tags", "")),
+        archive: LockedArchive(
+          url: f.getOrDefault("archive_url", ""),
+          sha256: f.getOrDefault("archive_sha256", ""),
+          archiveType: f.getOrDefault("archive_type", ""),
+          build: f.getOrDefault("archive_build", ""))))

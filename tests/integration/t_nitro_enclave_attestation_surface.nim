@@ -122,11 +122,6 @@ import repro_attest_verify/x509
 
 include ./nitro_vectors
 
-# ---------------------------------------------------------------------
-# Which refusals were reached
-# ---------------------------------------------------------------------
-
-var reachedCoseKinds: set[CoseErrorKind] = {}
 
 # ---------------------------------------------------------------------
 # Helpers
@@ -743,6 +738,29 @@ suite "what a Nitro document does not bind":
 # 5. What a backend would have to clear first
 # ---------------------------------------------------------------------
 
+# ---------------------------------------------------------------------
+# Which refusals were reached
+# ---------------------------------------------------------------------
+#
+# Driven, not accumulated. The summary case used to read a global the two
+# COSE cases filled in, but the runner executes every case in its OWN
+# process, so in the suite it always saw the empty set. Each driver repeats
+# its case's calls and returns the refusal kinds they raised.
+
+proc driveCoseTagRefusals(): set[CoseErrorKind] =
+  for d in docs:
+    try:
+      discard verifyCoseSign1(d.raw, [d.keyOf()])
+    except CoseError as e:
+      result.incl e.kind
+
+proc driveCoseKidRefusals(): set[CoseErrorKind] =
+  for d in docs:
+    try:
+      discard verifyCoseSign1(d.raw, [d.keyOf()], requireTag = false)
+    except CoseError as e:
+      result.incl e.kind
+
 suite "what this build would have to change to read one":
 
   test "the COSE reader requires the tag, and no document carries one":
@@ -752,7 +770,6 @@ suite "what this build would have to change to read one":
         discard verifyCoseSign1(d.raw, [d.keyOf()])
       except CoseError as e:
         raised = true
-        reachedCoseKinds.incl e.kind
         check (d.label, e.kind) == (d.label, cxeNotTagged)
         for other in CoseErrorKind:
           if other == cxeNotTagged: continue
@@ -770,7 +787,6 @@ suite "what this build would have to change to read one":
         discard verifyCoseSign1(d.raw, [d.keyOf()], requireTag = false)
       except CoseError as e:
         raised = true
-        reachedCoseKinds.incl e.kind
         check (d.label, e.kind) == (d.label, cxeNoKeyIdentifier)
         for other in CoseErrorKind:
           if other == cxeNoKeyIdentifier: continue
@@ -835,4 +851,5 @@ suite "what this build would have to change to read one":
       discard decodeItem(d.raw, DeterministicCborOptions)
 
   test "every refusal this gate names was reached":
-    check reachedCoseKinds == {cxeNotTagged, cxeNoKeyIdentifier}
+    let reached = driveCoseTagRefusals() + driveCoseKidRefusals()
+    check reached == {cxeNotTagged, cxeNoKeyIdentifier}

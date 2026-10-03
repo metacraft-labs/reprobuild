@@ -236,21 +236,38 @@ proc setUserDaemonProjectRootResolver*(
     resolver: UserDaemonProjectRootResolver) =
   userDaemonProjectRootResolver = resolver
 
-proc buildRequestProjectRoot*(request: UserDaemonBuildRequest): string =
+type
+  BuildRequestProjectRootSource* = enum
+    ## Where a build session's recorded project root came from. Logged with
+    ## every accepted build request, so it is visible which client composed
+    ## the request: the full image fills ``projectRoot`` from its own parse
+    ## (``request``); the thin client leaves it empty and the daemon derives it
+    ## from the raw arguments (``derived``); ``workingDir`` is the last resort.
+    prsRequest = "request"
+    prsDerived = "derived"
+    prsWorkingDir = "workingDir"
+
+proc resolveBuildRequestProjectRoot*(request: UserDaemonBuildRequest):
+    tuple[root: string; source: BuildRequestProjectRootSource] =
   ## The project root a build session is recorded under: the request's own
   ## ``projectRoot`` when it carries one, else what the registered resolver
   ## derives from its arguments, else the client's working directory. A
   ## resolver that raises is treated as having no answer — this names a
   ## session, it must never refuse a build.
   if request.projectRoot.len > 0:
-    return request.projectRoot
+    return (request.projectRoot, prsRequest)
   if userDaemonProjectRootResolver != nil:
+    var derived = ""
     try:
-      result = userDaemonProjectRootResolver(request)
+      derived = userDaemonProjectRootResolver(request)
     except CatchableError:
-      result = ""
-  if result.len == 0:
-    result = request.workingDir
+      derived = ""
+    if derived.len > 0:
+      return (derived, prsDerived)
+  (request.workingDir, prsWorkingDir)
+
+proc buildRequestProjectRoot*(request: UserDaemonBuildRequest): string =
+  resolveBuildRequestProjectRoot(request).root
 
 var userDaemonWorkerNote: string
 
@@ -1775,12 +1792,15 @@ proc handleBuildRequest(socket: IpcConn; config: UserDaemonConfig;
     else:
       $getCurrentProcessId() & "-" & $started.toUnix & "-" &
         $started.nanosecond
-  let projectRoot = buildRequestProjectRoot(request)
+  let (projectRoot, projectRootSource) =
+    resolveBuildRequestProjectRoot(request)
   var session = sessionStateAccepted(sessionId, projectRoot, started)
   sessions.add(session)
   writeSessionRecord(config, session)
   logLine(config.logPath, "build request accepted session=" & sessionId &
-    " projectRoot=" & projectRoot & " attached=" & $request.attached &
+    " projectRoot=" & projectRoot &
+    " projectRootSource=" & $projectRootSource &
+    " attached=" & $request.attached &
     " cancelOnDisconnect=" & $request.cancelOnDisconnect)
   try:
     socket.writeFrame(udkBuildEvent, buildEventBody(nextBuildEvent(
