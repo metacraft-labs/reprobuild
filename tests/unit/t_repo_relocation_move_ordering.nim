@@ -24,6 +24,7 @@
 ## a real second filesystem (`/dev/shm`, skipped when absent).
 
 import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 import repo_relocation
 
 proc q(value: string): string = quoteShell(value)
@@ -57,7 +58,7 @@ suite "repo_relocation — the move, and the order of it":
   test "t_relocate_renames_within_a_filesystem_and_carries_everything":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let scratch = createTempDir("repro-reloc-rename-", "")
       defer: removeDir(scratch)
@@ -90,7 +91,7 @@ suite "repo_relocation — the move, and the order of it":
   test "t_relocate_across_filesystems_copies_verifies_then_deletes":
     let gitBin = findExe("git")
     if gitBin.len == 0 or not dirExists("/dev/shm"):
-      skip()
+      skip("git not on PATH or no /dev/shm; the cross-filesystem case needs both")
     else:
       # Two real filesystems: the temp dir and `/dev/shm` (tmpfs). A rename
       # between them fails with EXDEV, which is the only way to reach the
@@ -110,7 +111,7 @@ suite "repo_relocation — the move, and the order of it":
         let srcDev = execCmdEx("stat -c %d " & q(scratch)).output.strip()
         let dstDev = execCmdEx("stat -c %d " & q(otherFs)).output.strip()
         if srcDev == dstDev:
-          skip()
+          skip("the scratch directory and /dev/shm are one filesystem, so the cross-filesystem fallback cannot be exercised")
           return
 
       let before = captureCheckoutState(probe, source)
@@ -134,7 +135,7 @@ suite "repo_relocation — the move, and the order of it":
     ## `relocateCheckout` a failed capture and a rename that cannot succeed.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let scratch = createTempDir("repro-reloc-nocapture-", "")
       defer:
@@ -155,7 +156,7 @@ suite "repo_relocation — the move, and the order of it":
       when defined(posix):
         if execCmdEx("id -u").output.strip() == "0":
           # root ignores the permission bits, so the case cannot be staged.
-          skip()
+          skip("running as root, which ignores permission bits, so the obstruction cannot be staged")
           return
 
       let failedCapture = CheckoutCapture(ok: false,
@@ -175,7 +176,7 @@ suite "repo_relocation — the move, and the order of it":
     ## and the report quotes this string verbatim.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let scratch = createTempDir("repro-reloc-samestate-", "")
       defer: removeDir(scratch)
@@ -209,7 +210,7 @@ suite "repo_relocation — the move, and the order of it":
     ## the other is something the operator put there.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let scratch = createTempDir("repro-reloc-substance-", "")
       defer: removeDir(scratch)
@@ -240,7 +241,7 @@ suite "repo_relocation — the move, and the order of it":
     ## any", and the markers are stable documented git interface.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let scratch = createTempDir("repro-reloc-inprogress-", "")
       defer: removeDir(scratch)
@@ -271,7 +272,7 @@ suite "repo_relocation — the move, and the order of it":
     ## cannot empty the whole sample.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let scratch = createTempDir("repro-reloc-sample-", "")
       defer: removeDir(scratch)

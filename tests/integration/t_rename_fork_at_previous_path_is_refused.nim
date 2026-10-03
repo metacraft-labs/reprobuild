@@ -24,6 +24,7 @@
 ##      history-only check accepts it.
 
 import std/[json, os, strutils, unittest]
+import repro_test_support/reasoned_skip
 import declared_rename_fixture
 
 suite "declared rename — a fork at the previous path":
@@ -31,7 +32,7 @@ suite "declared rename — a fork at the previous path":
   test "t_rename_fork_at_previous_path_is_refused":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let fx = newRenameFixture(gitBin, "fork")
       defer: removeDir(fx.scratch)

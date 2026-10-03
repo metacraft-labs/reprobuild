@@ -13,6 +13,7 @@
 ## `previous_path_claimed_by_live_repo`.
 
 import std/[json, os, strutils, unittest]
+import repro_test_support/reasoned_skip
 import declared_rename_fixture
 
 suite "declared rename — the pre-flight refusals":
@@ -23,7 +24,7 @@ suite "declared rename — the pre-flight refusals":
     ## operator's two sets of local branches survives.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let fx = newRenameFixture(gitBin, "ambiguous")
       defer: removeDir(fx.scratch)
@@ -63,7 +64,7 @@ suite "declared rename — the pre-flight refusals":
     ## `previously` entry reaches the clone path exactly as it does today.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let fx = newRenameFixture(gitBin, "occupied")
       defer: removeDir(fx.scratch)
@@ -103,7 +104,7 @@ suite "declared rename — the pre-flight refusals":
     ## neither the rename nor the move.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let fx = newRenameFixture(gitBin, "inprogress")
       defer: removeDir(fx.scratch)
@@ -156,7 +157,7 @@ suite "declared rename — the pre-flight refusals":
     ## replacement in this model.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let fx = newRenameFixture(gitBin, "submodule")
       defer: removeDir(fx.scratch)
@@ -201,7 +202,7 @@ suite "declared rename — the pre-flight refusals":
     ## a submodule at all.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let fx = newRenameFixture(gitBin, "submodulerel")
       defer: removeDir(fx.scratch)
@@ -255,7 +256,7 @@ suite "declared rename — the pre-flight refusals":
     ## and the consequence of getting it wrong is a MOVED DIRECTORY.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let fx = newRenameFixture(gitBin, "liveclaim")
       defer: removeDir(fx.scratch)

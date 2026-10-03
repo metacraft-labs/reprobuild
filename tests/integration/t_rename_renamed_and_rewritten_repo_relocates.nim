@@ -26,6 +26,7 @@
 ##      history the rewrite removed.
 
 import std/[json, os, strutils, unittest]
+import repro_test_support/reasoned_skip
 import declared_rename_fixture
 
 suite "declared rename — renamed AND rewritten":
@@ -33,7 +34,7 @@ suite "declared rename — renamed AND rewritten":
   test "t_rename_renamed_and_rewritten_repo_relocates":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; the declared-rename fixture needs a repository")
     else:
       let fx = newRenameFixture(gitBin, "rewritten")
       defer: removeDir(fx.scratch)
