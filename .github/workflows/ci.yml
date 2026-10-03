@@ -172,6 +172,10 @@ jobs:
         shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
         run: .\scripts\check_windows_bootstrap_syntax.ps1
 
+      - name: Verify OpenSSL mirror fallback and checksum refusal
+        shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
+        run: .\windows\tests\test-openssl-mirrors.ps1
+
       - name: Mint installation token for Windows dev environment
         id: ci_token
         uses: actions/create-github-app-token@v2
