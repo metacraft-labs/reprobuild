@@ -45,6 +45,8 @@ jobs:
     runs-on: [self-hosted, linux, x64]  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # Mint a GitHub App installation token via the CI Token Provider
       # app.  GitHub free plan restricts org-level secrets with
       # visibility ALL from being readable inside private repos, so we
@@ -168,6 +170,8 @@ jobs:
     runs-on: [self-hosted, windows, x64]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Check Windows PowerShell bootstrap syntax
         shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
@@ -326,6 +330,8 @@ jobs:
       REPROBUILD_TEST_THREADS: "8"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # Mint a GitHub App installation token via the CI Token Provider
       # app for the sibling-repo clones + setup-dev-env below.  See the
@@ -911,6 +917,8 @@ jobs:
     runs-on: [self-hosted, linux, x64]  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Mint installation token for cross-repo sibling access
         id: ci_token
         uses: actions/create-github-app-token@v2
