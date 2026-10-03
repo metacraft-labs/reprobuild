@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Pinned verbatim payload from CodeTracer commit
-# 01068538c9986b40c8c8fbac28555eac7751ccc2, repro.nim.
-# Source: https://github.com/metacraft-labs/codetracer/blob/01068538c9986b40c8c8fbac28555eac7751ccc2/repro.nim
+# 704bf164e15098983f13f699bb739cfa768bf1dd, repro.nim.
+# Source: https://github.com/metacraft-labs/codetracer/blob/704bf164e15098983f13f699bb739cfa768bf1dd/repro.nim
 #
 # Keep every byte after this provenance header identical to the public source.
 import repro_dsl_stdlib/foreign_env
