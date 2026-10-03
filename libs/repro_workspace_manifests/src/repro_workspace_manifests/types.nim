@@ -105,6 +105,64 @@ const
 type
   # --- repos/<repo>.toml -----------------------------------------------------
 
+  PreviousRepoIdentity* = object
+    ## One prior identity of a repo — Declared-Repository-Renames.md §2.
+    ##
+    ## Authored as an inline-table-array element under `[extensions]`, NOT
+    ## under `[repo]`:
+    ##
+    ##   [extensions]
+    ##   previously = [{ name = "reprobuild-specs", path = "reprobuild-specs" }]
+    ##
+    ## **`[extensions]`, deliberately.** `decodeStrict` decodes every record
+    ## with `TomlUnknownFields` unset, so an unknown key under `[repo]` RAISES
+    ## on every `repro` that predates the key — the whole repo, and whatever
+    ## resolve needed it, then fails. `Extensions.readValue` above passes an
+    ## unknown key under `[extensions]` through untouched, so an older binary
+    ## parses such a fragment and behaves exactly as it does today (clones
+    ## fresh, leaves the orphan). That is the only placement whose
+    ## rollout-order failure degrades to the status quo rather than to a
+    ## workspace that will not resolve, which matters because the pin cannot
+    ## always be moved before the manifest edit lands (on Windows it waits on
+    ## a published release). Promotion to `[repo] previously` under a
+    ## `reprobuild.workspace.repo.v2` bump happens when a floor can actually
+    ## be asserted. Do not "tidy" this into `[repo]`.
+    ##
+    ## Every field is OPTIONAL and an omitted field means "unchanged from
+    ## `[repo]`", so a pure path move names only `path`. An entry must differ
+    ## from the present identity in at least one field (`readRepoFragment`
+    ## enforces it). Declaration order is "most recent first"; the validator
+    ## cannot verify that, so first-match-wins in `sync` is the only
+    ## observable consequence of the order.
+    ##
+    ## The four fields are exactly the four that determine where a checkout
+    ## sits and what it talks to. `branch` is deliberately NOT among them: a
+    ## mainline rename strands nothing, because the directory stays where it is
+    ## and `repro switch --mainline` already moves a checkout between branches.
+    ##
+    ## ONE TUPLE ARRAY, NOT TWO PARALLEL LISTS. `path` and `name` are
+    ## independent but PAIRED at any given moment, and the pairing is
+    ## load-bearing twice: the prior URL is DERIVED from the prior `name` (plus
+    ## a prefix), and a repo can move twice (`foo` → `vendor/foo` →
+    ## `vendor/bar`), which flat lists cannot express. The inline-table array
+    ## is also the shape this schema is already obliged to use — see
+    ## `CopyLinkFileEntry` for the pinned deserializer's nested
+    ## array-of-tables limitation.
+    name*: string
+      ## The identity the repo was declared under — what `--only`,
+      ## `member_repos`, lock record paths and the sidecar file name used.
+    path*: string
+      ## The working tree it occupied: workspace-root-relative, forward
+      ## slashes, no `..` segment. Validated by the SAME check a live
+      ## `repo.path` gets (`declaredCheckoutPathRejection`), because a prior
+      ## path places a directory MOVE on every machine that syncs.
+    url_prefix*: string
+      ## The prefix entry its URL was composed from, for a repo that changed
+      ## org or host.
+    url_suffix*: string
+      ## The remainder under that prefix, for a repo that carried its org in
+      ## the suffix.
+
   CopyLinkFileEntry* = object
     ## RA-18 — one copyfile / linkfile directive (the `repo`
     ## `<copyfile>` / `<linkfile>` equivalent). `src` is interpreted

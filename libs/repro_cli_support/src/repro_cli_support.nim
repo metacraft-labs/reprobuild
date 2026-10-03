@@ -96,6 +96,12 @@ import git_tool
 import git_actions
 import shared_clones
 import sibling_ignores
+# Declared-Repository-Renames.md — the git/filesystem half of relocating a
+# checkout a declared rename stranded. The POLICY (candidate choice, refusals,
+# reporting) lives here in the sync driver, because only it knows the whole
+# declared repo set; `repo_relocation` answers one question about one
+# directory and performs the move.
+import repo_relocation
 import repro_tool_profiles
 import repro_local_store
 # M9.R.77.5 — R11 Layer-1 CAS facade. ``runCasCommand`` uses the narrow
@@ -33511,46 +33517,115 @@ proc refreshWorkspaceProjectsIndexBestEffort(workspaceRoot, verb: string) =
 proc gitRunPlain(identity: GitToolIdentity;
                  args: openArray[string]): tuple[code: int; output: string]
 
-proc repoCheckoutRecognized(identity: GitToolIdentity; repoAbs: string;
-    repo: ResolvedRepo; existingRemoteUrls: seq[string]): bool =
-  ## Decide whether the git checkout at ``repoAbs`` is recognizably THIS
-  ## manifest repo. Used to gate the auto-modifying remote alignment so a
-  ## foreign checkout that happens to occupy a repo path is left untouched
-  ## rather than having its git remotes silently rewritten.
+type
+  RemoteAgreement* = enum
+    ## Why (or why not) the checkout in front of us is recognizably the repo a
+    ## fragment declares, judged from its git remotes plus content identity.
+    ##
+    ## A graded answer rather than a bool because two callers need different
+    ## amounts of it: ``alignWorkspaceRemotes`` only asks "may I rewrite this
+    ## checkout's remotes", while the declared-rename relocation has to put the
+    ## reason in a refusal an operator can act on
+    ## (Declared-Repository-Renames.md §3.3a). One proc answers both, so the
+    ## two cannot drift apart — the widening below would otherwise have to be
+    ## written twice.
+    raNoRemotes        ## Nothing configured; nothing to clobber.
+    raCurrentUrl       ## A configured remote names the declared URL.
+    raPreviousUrl      ## A configured remote names a declared PRIOR URL.
+    raPinnedRevision   ## Content identity: HEAD sits at the manifest's pin.
+    raCaseOnly         ## Differs from an accepted URL only in PATH CASE.
+    raMismatch         ## None of the above.
+
+proc remoteIdentityAgreement(identity: GitToolIdentity; repoAbs: string;
+    repo: ResolvedRepo; existingRemoteUrls: seq[string]):
+    tuple[verdict: RemoteAgreement; foundUrl: string;
+          acceptedUrls: seq[string]] =
+  ## Is the git checkout at ``repoAbs`` recognizably THIS manifest repo?
   ##
-  ## Recognized when ANY of:
+  ## Accepted when ANY of:
   ##   * it has no remotes configured yet — nothing to clobber; a fresh or
   ##     partial clone we may safely populate;
-  ##   * one of its remote URLs already matches an expected manifest URL —
-  ##     it is ours, possibly with drifted remote *names* or extras;
+  ##   * one of its remote URLs denotes an expected manifest URL — it is ours,
+  ##     possibly with drifted remote *names* or extras;
+  ##   * one of its remote URLs denotes a URL derived from a DECLARED PRIOR
+  ##     IDENTITY. A renamed repository legitimately presents the OLD URL: the
+  ##     forge serves the new location under a redirect and nothing has
+  ##     rewritten the checkout's config, so this is the expected pass for the
+  ##     case the rename mechanism exists to handle, not a leniency;
   ##   * its HEAD is at the manifest's pinned revision — content identity,
   ##     which covers a genuinely drifted remote *URL* (e.g. an org rename)
   ##     where rewriting the remote is exactly the intended fix.
   ##
-  ## Only a checkout that matches NONE of these — remotes present, none
-  ## pointing at an expected URL, and HEAD not at the pinned revision — is
-  ## treated as unrecognized (left untouched by the caller).
+  ## "Denotes" is ``canonicalRemoteIdentity``, not string equality. That helper
+  ## already folds exactly the differences that are not differences: transport
+  ## spelling (``https://h/o/r``, ``git@h:o/r``, ``ssh://git@h/o/r``), a
+  ## trailing ``.git``, a trailing ``/``, userinfo, host case, and a redundant
+  ## default port. Reusing it also inherits its documented NON-foldings, and
+  ## one of them matters here: it does NOT fold PATH CASE, deliberately,
+  ## because some forges fold it and some servers do not and the URL cannot say
+  ## which. The forges in use DO fold it, so ``org/Repo-Name`` and
+  ## ``org/repo-name`` are one repository this reports as two. The right
+  ## response is not to override a normalisation every other caller depends on
+  ## for the sake of this one; it is to make the near-miss LEGIBLE —
+  ## ``raCaseOnly`` — so a caller can say so in those words. An operator can
+  ## fix a difference they can see; the failure mode worth engineering against
+  ## is a mismatch that looks like no mismatch at all.
   if existingRemoteUrls.len == 0:
-    return true
-  var expectedUrls = initHashSet[string]()
-  if repo.fetchUrl.len > 0: expectedUrls.incl(repo.fetchUrl)
+    return (raNoRemotes, "", @[])
+  var currentIdentities = initHashSet[string]()
+  var previousIdentities = initHashSet[string]()
+  var accepted: seq[string]
+  if repo.fetchUrl.len > 0:
+    currentIdentities.incl(canonicalRemoteIdentity(repo.fetchUrl))
+    accepted.add(repo.fetchUrl)
   for r in repo.remotes:
-    if r.fetchUrl.len > 0: expectedUrls.incl(r.fetchUrl)
+    if r.fetchUrl.len > 0:
+      currentIdentities.incl(canonicalRemoteIdentity(r.fetchUrl))
+      if r.fetchUrl notin accepted: accepted.add(r.fetchUrl)
+  for prior in repo.previously:
+    if prior.fetchUrl.len > 0:
+      previousIdentities.incl(canonicalRemoteIdentity(prior.fetchUrl))
+      if prior.fetchUrl notin accepted: accepted.add(prior.fetchUrl)
   for u in existingRemoteUrls:
-    if u in expectedUrls:
-      return true
+    let found = canonicalRemoteIdentity(u)
+    if found in currentIdentities:
+      return (raCurrentUrl, u, accepted)
+    if found in previousIdentities:
+      return (raPreviousUrl, u, accepted)
   if repo.revision.len > 0:
     let headSha = localHeadOrEmpty(identity, repoAbs)
     if headSha.len > 0:
       if looksLikeSha(repo.revision):
         if headSha.startsWith(repo.revision) or repo.revision.startsWith(headSha):
-          return true
+          return (raPinnedRevision, "", accepted)
       else:
         let branchTip = expectedBranchTip(identity, repoAbs, repo.revision,
           remoteName = gitRemoteNameFor(repo))
         if branchTip.len > 0 and branchTip == headSha:
-          return true
-  false
+          return (raPinnedRevision, "", accepted)
+  # Last: is the ONLY difference path case? Said as its own verdict so the
+  # caller's diagnostic can name it, which is the whole value of knowing.
+  for u in existingRemoteUrls:
+    let foundLower = canonicalRemoteIdentity(u).toLowerAscii()
+    for expected in currentIdentities:
+      if foundLower == expected.toLowerAscii():
+        return (raCaseOnly, u, accepted)
+    for expected in previousIdentities:
+      if foundLower == expected.toLowerAscii():
+        return (raCaseOnly, u, accepted)
+  (raMismatch, existingRemoteUrls[0], accepted)
+
+proc repoCheckoutRecognized(identity: GitToolIdentity; repoAbs: string;
+    repo: ResolvedRepo; existingRemoteUrls: seq[string]): bool =
+  ## Bool face of ``remoteIdentityAgreement``, for the auto-modifying remote
+  ## alignment: a foreign checkout that happens to occupy a repo path is left
+  ## untouched rather than having its git remotes silently rewritten.
+  ##
+  ## ``raCaseOnly`` is NOT recognized, which preserves the pre-widening
+  ## behaviour exactly: an exact-string compare also rejected a URL that
+  ## differed only in case.
+  remoteIdentityAgreement(identity, repoAbs, repo, existingRemoteUrls).verdict in
+    {raNoRemotes, raCurrentUrl, raPreviousUrl, raPinnedRevision}
 
 proc alignWorkspaceRemotes*(workspaceRoot: string; repos: seq[ResolvedRepo]; identity: GitToolIdentity) =
   ## Align on-disk Git remote configurations to match the resolved TOML manifests.
@@ -34256,6 +34331,29 @@ type
     executionStatus*: string
     executionDiagnostic*: string
     forcePushedBaseSha*: string
+    relocation*: string
+      ## Declared-Repository-Renames.md §3.6 — the relocation verdict for this
+      ## repo, when it had one: ``relocated``, the informational
+      ## ``no_previous_checkout`` / ``previous_checkout_skipped`` /
+      ## ``orphaned_previous_checkout``, or one of the §4 refusal case names.
+      ## Empty for the overwhelming majority of repos, which declare no prior
+      ## identity at all.
+    relocationDetail*: string
+      ## What was found, by name. Every refusal names its own evidence, which
+      ## is the difference between a verdict an operator can act on and one
+      ## they have to reverse-engineer.
+    relocatedFrom*: string
+      ## The prior path the checkout came from (or was found at, for the
+      ## orphan notice).
+    relocationEvidence*: string
+      ## What satisfied each half of the §3.3 identity check, so the verdict
+      ## is auditable rather than asserted.
+    relocationRekeyed*: seq[string]
+      ## Every workspace-local record the move re-keyed, named.
+    relocationAlternates*: seq[string]
+      ## The shared bares the moved checkout borrows objects from. More than
+      ## one is the expected steady state after a URL change — see the
+      ## judgement recorded at the alternates repair.
 
   WorkspaceSyncPlanEntry* = object
     ## RA-27 — one announced-before-acting plan line per participating repo.
@@ -34274,6 +34372,15 @@ type
       ## MO-8 — the resolved (locked) revision for this repo. For a
       ## committed-lock-only workspace this comes from the lock's CONTENT
       ## (coordinates), so it reflects the LOCKED state, not live ``git HEAD``.
+    previousPath*: string
+      ## Declared-Repository-Renames.md §3.1 — the declared PRIOR path a
+      ## checkout was found at, when ``intendedAction`` is ``relocate``. A
+      ## rename is the case an operator most wants to preview before it
+      ## touches disk, so it joins the plan rather than only the results.
+      ##
+      ## Computed from the same cheap on-disk presence check the rest of the
+      ## plan uses, so like the rest of the plan it is a PREVIEW: the identity
+      ## check in §3.3 has not run yet and can still turn this into a refusal.
 
   WorkspaceSyncReport* = object
     ## Structured outcome of one ``repro workspace sync`` invocation.
@@ -34401,6 +34508,7 @@ proc toJsonNode*(report: WorkspaceSyncReport): JsonNode =
     obj["fetchUrl"] = %entry.fetchUrl
     obj["intendedAction"] = %entry.intendedAction
     obj["revision"] = %entry.revision
+    obj["previousPath"] = %entry.previousPath
     plan.add(obj)
   result["plan"] = plan
   var layers = newJArray()
@@ -34430,6 +34538,21 @@ proc toJsonNode*(report: WorkspaceSyncReport): JsonNode =
     obj["executionStatus"] = %entry.executionStatus
     obj["executionDiagnostic"] = %entry.executionDiagnostic
     obj["forcePushedBaseSha"] = %entry.forcePushedBaseSha
+    # Declared-Repository-Renames.md §3.6. Emitted unconditionally (empty for
+    # the repos that declare no prior identity) so a consumer can read the
+    # field without having to know whether this run had a rename in it.
+    obj["relocation"] = %entry.relocation
+    obj["relocationDetail"] = %entry.relocationDetail
+    obj["relocatedFrom"] = %entry.relocatedFrom
+    obj["relocationEvidence"] = %entry.relocationEvidence
+    var rekeyed = newJArray()
+    for item in entry.relocationRekeyed:
+      rekeyed.add(%item)
+    obj["relocationRekeyed"] = rekeyed
+    var bares = newJArray()
+    for item in entry.relocationAlternates:
+      bares.add(%item)
+    obj["relocationAlternates"] = bares
     repos.add(obj)
   result["repos"] = repos
   var materialized = newJArray()
@@ -34462,8 +34585,15 @@ proc renderSyncPlanLines*(report: WorkspaceSyncReport): seq[string] =
   for entry in report.plan:
     result.add(prefix & "  [" & entry.intendedAction & "] " & entry.path &
       " (" & entry.name & ")" &
-      (if entry.revision.len > 0: " @ " & entry.revision else: "") &
-      (if entry.fetchUrl.len > 0: " <- " & entry.fetchUrl else: ""))
+      # Declared-Repository-Renames.md §3.1 — a planned relocation names the
+      # directory it would move INSTEAD of the URL it would clone from, because
+      # the directory is the thing at risk and the URL is not what the operator
+      # is being asked to preview.
+      (if entry.previousPath.len > 0: " <- " & entry.previousPath &
+         " (declared previous path; identity not yet verified)"
+       elif entry.fetchUrl.len > 0: " <- " & entry.fetchUrl
+       else: "") &
+      (if entry.revision.len > 0: " @ " & entry.revision else: ""))
   if report.dryRun:
     result.add(
       "workspace sync (dry-run): no repos were modified " &
@@ -34514,6 +34644,28 @@ proc renderSyncTextLines*(report: WorkspaceSyncReport;
     elif entry.message.len > 0:
       line.add(" — " & entry.message)
     result.add(line)
+    # Declared-Repository-Renames.md §3.6 / §6 — the relocation line is NOT
+    # behind ``--verbose``. The informational notices are the whole mechanism
+    # for `orphaned_previous_checkout`: "nothing may ever again be true of a
+    # workspace where the orphan exists and no report says so" is not a
+    # property a line nobody prints by default can have.
+    if entry.relocation.len > 0:
+      var relocLine = "workspace sync: " & entry.path & " relocation=" &
+        entry.relocation
+      if entry.relocatedFrom.len > 0:
+        relocLine.add(" from=" & entry.relocatedFrom)
+      if entry.relocationDetail.len > 0:
+        relocLine.add(" — " & entry.relocationDetail)
+      result.add(relocLine)
+      if entry.relocationEvidence.len > 0:
+        result.add("    | evidence: " & entry.relocationEvidence)
+      for item in entry.relocationRekeyed:
+        result.add("    | re-keyed: " & item)
+      if entry.relocationAlternates.len > 1:
+        result.add("    | borrows objects from " &
+          $entry.relocationAlternates.len & " shared bares (" &
+          entry.relocationAlternates.join(", ") &
+          ") — consolidate with `repro ws shared-clones rewire`")
     if verbose and entry.executionDiagnostic.len > 0:
       # RA-27 ``--verbose``: surface the raw tool diagnostic behind the flag
       # so the default output stays a legible digest.
@@ -39029,7 +39181,9 @@ proc observeRepoForSync(identity: GitToolIdentity;
 
   # Force-push detection that needs NO recorded history at all.
   #
-  # ``forcePushedSHAs`` comes from ``.repro/records``, which a workspace only
+  # ``forcePushedSHAs`` comes from ``.repro/workspace/force-pushes.json``
+  # (NOT ``.repro/records``, which this comment named for a while and which
+  # holds nothing of the kind), which a workspace only
   # has if it happened to be running a sync across the rewrite. The workspace
   # this was measured on had none, and every recorder repo whose remote had
   # been rewritten still had to be diagnosed. The signal that survives is
@@ -39151,8 +39305,14 @@ proc syncCheckoutActionFor(identity: GitToolIdentity; workspaceRoot: string;
   let idSeg = safeRepoIdSegment(resolved.name) & "-" & $repoIdx
   case decision.action
   of saNone:
+    # A relocation that was ATTEMPTED and failed is a broken action, not a
+    # judgement call, so it reports ``failed`` (exit 1) where every other
+    # ``saNone`` case reports ``refused`` (exit 2) or ``noop``. That split is
+    # the one `CLI/sync.md` already defines; relocation adds no exit code.
+    if decision.syncCase == scRelocationFailed:
+      return (false, noScheduledAction(), "failed", decision.refusalReason)
     if decision.syncCase in {scDirty, scLocallyUnpublished, scForcePushRebase,
-                             scFetchFailed}:
+                             scFetchFailed, scRelocationRefused}:
       # Named-Lock-Files §7.2. `hasAction: false` means the `action` field
       # is never read; the identity is supplied because the type requires it,
       # and it is the honest one for an edge that does not exist.
@@ -39455,20 +39615,194 @@ proc forceSyncGuard(args: WorkspaceSyncArgs;
   of ddRefusedNonTty: fsgRefusedNonTty
   of ddDeclined: fsgDeclined
 
+# ---- `.repro/workspace/force-pushes.json` ---------------------------------
+#
+# THE RECOVERY RECORD FOR A REWRITTEN REMOTE, and therefore not bookkeeping.
+# Each entry says what the superseded revision was and where the pre-rewrite
+# state can be found. The history-rewrite campaign that produced the entries in
+# this workspace is still underway, and `backup_ref` in particular CANNOT BE
+# RECONSTRUCTED once dropped — there is no other record of which backup ref a
+# migration wrote. Fields can be removed later; they cannot be recovered. So
+# this plane reads and writes the RICHER of the two shapes it has met, and
+# migrates the poorer one into it rather than discarding fields.
+#
+# The two shapes, stated exactly because the file is read by both halves of a
+# rename:
+#
+#   * the ARRAY of records — `[{repo, branch, superseded, new, backup_ref,
+#     migrated_at}, …]` — which is what this workspace actually carries (14
+#     records, `migrated_at` reading `"2026-09-21T-migration"`), written by
+#     hand during the history-rewrite migration;
+#   * the flat OBJECT `{"<checkout path>": ["<sha>", …]}`, which is what the
+#     writer here used to emit. It carries no branch, no new tip, no backup
+#     ref and no timestamp, so re-keying it on a rename would be re-keying the
+#     half that is not a recovery record.
+#
+# A parse failure still degrades to "no records", which is the pre-existing
+# behaviour and is right for a detector: an unreadable advisory file must not
+# fail a sync. It is NOT right silently, so it now says so.
+
+const forcePushesRelPath = ".repro" / "workspace" / "force-pushes.json"
+
+proc forcePushesPath(workspaceRoot: string): string =
+  workspaceRoot / forcePushesRelPath
+
+proc migrateForcePushShape(node: JsonNode): JsonNode =
+  ## Normalise whatever is on disk to the ARRAY-of-records shape.
+  ##
+  ## A flat `{path: [sha…]}` object becomes one record per sha, carrying the
+  ## only two facts it held (`repo`, `superseded`) and empty strings for the
+  ## rest. Empty is honest: the poorer shape never knew them, and inventing a
+  ## `backup_ref` would be worse than admitting there is none.
+  if node.isNil:
+    return newJArray()
+  if node.kind == JArray:
+    return node
+  result = newJArray()
+  if node.kind != JObject:
+    return result
+  for repoKey, shas in node.pairs:
+    if shas.isNil or shas.kind != JArray:
+      continue
+    for sha in shas:
+      if sha.isNil or sha.kind != JString or sha.getStr().len == 0:
+        continue
+      result.add(%*{
+        "repo": repoKey,
+        "branch": "",
+        "superseded": sha.getStr(),
+        "new": "",
+        "backup_ref": "",
+        "migrated_at": ""})
+
 proc loadForcePushedCommits(workspaceRoot: string): JsonNode =
-  let path = workspaceRoot / ".repro" / "workspace" / "force-pushes.json"
+  ## The records on disk, as a JSON array (see `migrateForcePushShape`).
+  let path = forcePushesPath(workspaceRoot)
   if fileExists(path):
     try:
-      return parseFile(path)
-    except CatchableError:
-      discard
-  newJObject()
+      return migrateForcePushShape(parseFile(path))
+    except CatchableError as err:
+      stderr.writeLine("workspace: could not read " & path & " (" & err.msg &
+        ") — proceeding as if no force-push was ever recorded. That file is " &
+        "the recovery record for a rewritten remote; fix or move it rather " &
+        "than letting the next write replace it.")
+  newJArray()
 
 proc saveForcePushedCommits(workspaceRoot: string; node: JsonNode) =
   let dir = workspaceRoot / ".repro" / "workspace"
   createDir(dir)
-  let path = dir / "force-pushes.json"
-  writeFile(path, pretty(node, indent = 2) & "\n")
+  writeFile(forcePushesPath(workspaceRoot),
+    pretty(node, indent = 2) & "\n")
+
+proc forcePushRecordKey(record: JsonNode): string =
+  ## The key a record is filed under.
+  ##
+  ## `repo` holds a checkout PATH in records this tool wrote (the flat shape's
+  ## key was `repo.path`) and a repo NAME in the hand-written migration
+  ## records. Both spellings are honoured on READ rather than one being
+  ## declared canonical, because declaring either canonical would orphan the
+  ## other half of the file this workspace is actually carrying.
+  if record.isNil or record.kind != JObject:
+    return ""
+  if "repo" notin record or record["repo"].kind != JString:
+    return ""
+  record["repo"].getStr()
+
+proc forcePushedShasFor(records: JsonNode; repoPath, repoName: string):
+    HashSet[string] =
+  ## Superseded SHAs recorded for this repo, under either spelling of its key.
+  result = initHashSet[string]()
+  if records.isNil or records.kind != JArray:
+    return
+  for record in records:
+    let key = forcePushRecordKey(record)
+    if key.len == 0 or (key != repoPath and key != repoName):
+      continue
+    if "superseded" in record and record["superseded"].kind == JString:
+      let sha = record["superseded"].getStr()
+      if sha.len > 0:
+        result.incl(sha)
+
+proc recordForcePush(records: JsonNode;
+                     repoKey, branch, superseded, newTip: string): bool =
+  ## Append one record unless an identical (key, branch, superseded) triple is
+  ## already filed. Returns true when the file needs rewriting.
+  if records.isNil or records.kind != JArray:
+    return false
+  for record in records:
+    if forcePushRecordKey(record) != repoKey:
+      continue
+    if "superseded" notin record or
+        record["superseded"].getStr() != superseded:
+      continue
+    let recordedBranch =
+      if "branch" in record and record["branch"].kind == JString:
+        record["branch"].getStr()
+      else: ""
+    if recordedBranch == branch:
+      return false
+  records.add(%*{
+    "repo": repoKey,
+    "branch": branch,
+    "superseded": superseded,
+    "new": newTip,
+    # Not known at DETECTION time: the backup ref is written by
+    # `executeForcePushRebase`, which has not run yet (and may never run, if
+    # the operator never opts into the rebase). Empty rather than invented.
+    "backup_ref": "",
+    "migrated_at": getTime().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'")})
+  true
+
+proc rekeyForcePushRecords(records: JsonNode;
+                           oldKeys, newKey: string): int =
+  ## Re-file every record under `oldKeys` as `newKey`, MERGING rather than
+  ## replacing when records already exist under the new key
+  ## (Declared-Repository-Renames.md §3.5). Returns how many were re-keyed.
+  ##
+  ## Merging matters because two migrations can be in flight over one
+  ## checkout: a repo that was renamed AND rewritten has records under both
+  ## spellings, and the whole point of the file is that neither half is
+  ## disposable. A duplicate (branch, superseded) pair under the new key is
+  ## dropped on the way in, so the merge is idempotent across re-runs.
+  if records.isNil or records.kind != JArray or
+      oldKeys.len == 0 or newKey.len == 0 or oldKeys == newKey:
+    return 0
+  var existing = initHashSet[string]()
+  for record in records:
+    if forcePushRecordKey(record) != newKey:
+      continue
+    let branch =
+      if "branch" in record and record["branch"].kind == JString:
+        record["branch"].getStr()
+      else: ""
+    let superseded =
+      if "superseded" in record and record["superseded"].kind == JString:
+        record["superseded"].getStr()
+      else: ""
+    existing.incl(branch & "\t" & superseded)
+  var kept = newJArray()
+  for record in records:
+    if forcePushRecordKey(record) != oldKeys:
+      kept.add(record)
+      continue
+    let branch =
+      if "branch" in record and record["branch"].kind == JString:
+        record["branch"].getStr()
+      else: ""
+    let superseded =
+      if "superseded" in record and record["superseded"].kind == JString:
+        record["superseded"].getStr()
+      else: ""
+    if (branch & "\t" & superseded) in existing:
+      # Already present under the new key with the same (branch, superseded).
+      # Drop the duplicate, not the record it duplicates.
+      inc result
+      continue
+    record["repo"] = %newKey
+    kept.add(record)
+    inc result
+  if result > 0:
+    records.elems = kept.elems
 
 proc applyRepoSelectors(repos: seq[ResolvedRepo];
                         only, exceptNames: seq[string];
@@ -39548,6 +39882,680 @@ proc narrowSyncRepoSet(args: WorkspaceSyncArgs;
   result = applyRepoSelectors(result, args.onlyRepos, args.exceptRepos,
     args.filterGlob)
 
+# ---- declared repository renames (Declared-Repository-Renames.md) ---------
+#
+# A fragment may declare the identities it was previously known by
+# (`[extensions] previously`). When the declared `path` holds nothing and a
+# prior path holds a checkout, sync MOVES the directory instead of orphaning it
+# and cloning a second copy — which is what it did before, with nothing in any
+# report saying the two were related. The failure mode that matters was never
+# the wasted clone: it was that the orphan is indistinguishable from debris, so
+# the next person tidying a workspace deletes it, and in the one case that
+# counts — a branch that was never pushed — that deletion is unrecoverable.
+#
+# WHERE THIS RUNS, AND WHY HERE. Relocation is part of materialisation, not a
+# phase of its own: a relocated repo is then classified by `classifyRepoState`
+# exactly like any other existing checkout, at its new path. One pass, one set
+# of rules.
+#
+# It runs BEFORE `alignWorkspaceRemotes` and before the warm-up/fetch phases,
+# and both halves of that are load-bearing:
+#
+#   * `alignWorkspaceRemotes` rewrites `remote.origin.url` to the declared URL.
+#     Run against a relocation candidate it would destroy the single most
+#     useful piece of evidence the identity check reads. The spec notes the
+#     collision cannot happen today only because alignment skips any checkout
+#     `repoCheckoutRecognized` rejects — and widening that to accept prior URLs
+#     (which §3.3a requires) is exactly what makes a candidate eligible. So the
+#     ordering constraint is CREATED by this change, not merely observed by it.
+#   * running before the fetch phase (rather than after it, as §3.1 suggests)
+#     is a deliberate deviation, and it is strictly better for the compound
+#     case §5 is about. The fetch loop iterates `repo.path`, so a checkout
+#     still sitting at its PRIOR path is not fetched at all; relocating first
+#     puts it at `repo.path` in time to be fetched, which is what lets the
+#     rewritten-remote detection classify it on FRESH refs rather than stale
+#     ones. Relocating after the fetch would hand §5 a checkout whose
+#     remote-tracking refs nothing had refreshed this run.
+#
+# The identity evidence therefore cannot come from "the tip the fetch phase
+# already populated". It comes from the shared bare for the NEW url, refreshed
+# here, once per candidate URL — the same refresh the warm-up would do moments
+# later, and the only object store that is INDEPENDENT evidence about the
+# repository at the new location. Reading the candidate's own remote-tracking
+# ref instead would be near-vacuous: of course the candidate has its own
+# objects. When the bare cannot be reached (offline) the candidate's own tip is
+# the fallback, and the report says which evidence it rested on.
+
+type
+  RelocationOutcomeKind = enum
+    ## What relocation did for one repo. The three informational kinds exit 0;
+    ## `rokRefused` is exit 2 (a judgement call) and `rokFailed` is exit 1 (a
+    ## broken action). That split is the one `CLI/sync.md` already defines, and
+    ## relocation deliberately adds no third exit code.
+    rokInert                  ## No `previously`, or a checkout already at `path`.
+    rokNoPreviousCheckout     ## A prior path was declared and nothing was there.
+    rokSkipped                ## Something was at a prior path, not a candidate.
+    rokOrphaned               ## Checkouts at BOTH the prior and declared paths.
+    rokRelocated              ## Moved.
+    rokRefused                ## One of the eight pre-flight refusals.
+    rokFailed                 ## The move was attempted and failed.
+
+  RepoRelocationOutcome = object
+    kind: RelocationOutcomeKind
+    tag: string          ## The §3.6 / §4 case name, verbatim.
+    message: string      ## What was found, by name.
+    fromPath: string     ## Workspace-relative prior path, when there was one.
+    evidence: string     ## What satisfied each half of the identity check.
+    rekeyed: seq[string] ## Workspace-local records re-keyed by the move.
+    alternates: seq[string] ## Shared bares the moved checkout now borrows from.
+    preMoveHeadSha: string
+      ## The candidate's tip BEFORE the move, captured once and read twice
+      ## (§3.4 step 1 + §5): the copy fallback's verification needs it, and so
+      ## does the rewritten-history detection, which tests whether the recorded
+      ## pre-fetch tip is still an ancestor of the fetched tip.
+
+proc relocationRefusal(tag, message: string): RepoRelocationOutcome =
+  RepoRelocationOutcome(kind: rokRefused, tag: tag, message: message)
+
+proc describeDirectoryContents(probe: RelocationGitProbe;
+                               dir: string): string =
+  ## Name what is at `dir` in the words a refusal or a note needs. "No
+  ## directory at the prior path" and "a directory the tool could not identify"
+  ## are DIFFERENT notices and must not collapse into one — that is the
+  ## work-loss probes' standing rule, and the half of it that binds here.
+  if not dirExists(dir):
+    if fileExists(dir):
+      return "a FILE, not a directory"
+    return "nothing"
+  if isGitCheckout(probe, dir):
+    return "a git checkout"
+  if directoryIsEmpty(dir):
+    return "an empty directory"
+  "a non-empty directory that is not a git checkout"
+
+proc relocateDeclaredRenames(identity: GitToolIdentity;
+                             workspaceRoot, cacheRoot: string;
+                             repos: seq[ResolvedRepo];
+                             emitProgress: bool):
+    Table[int, RepoRelocationOutcome] =
+  ## Decide and perform the relocation for every declared repo that has a
+  ## `previously` list. Per-repo atomicity throughout: one repo awaiting a
+  ## decision must not block the other hundred.
+  ##
+  ## MUTATING, and therefore NOT called under `--dry-run`. The dry run's
+  ## relocation line comes from the plan preview in `executeWorkspaceSync`
+  ## instead, which decides on the same cheap on-disk presence check the
+  ## clone/update split uses. That is a deliberate narrowing: this proc
+  ## refreshes a shared bare to get its identity evidence, and a shared-bare
+  ## refresh is a cache WRITE — so running the real check under a flag that
+  ## promises "mutates nothing" would break the stronger promise to keep the
+  ## weaker one. The consequence, stated so nobody is surprised by it: a dry
+  ## run announces a relocation it has not verified, and the §4 refusals are
+  ## only visible on a real run.
+  result = initTable[int, RepoRelocationOutcome]()
+  var anyDeclared = false
+  for repo in repos:
+    if repo.previously.len > 0:
+      anyDeclared = true
+      break
+  if not anyDeclared:
+    return
+
+  let probe = RelocationGitProbe(gitBin: identity.binaryPath)
+  # Live claims, for the belt to the resolver's validator braces (§4
+  # `previous_path_claimed_by_live_repo`) and for nested-checkout detection.
+  var liveByPath = initTable[string, string]()
+  for repo in repos:
+    if repo.path notin liveByPath:
+      liveByPath[repo.path] = repo.name
+  var bareForUrl = initTable[string, string]()
+
+  for repoIdx, repo in repos:
+    if repo.previously.len == 0:
+      continue
+    let destination = workspaceRoot / repo.path
+
+    # §3.2 step 1 — A CHECKOUT AT THE DECLARED PATH ENDS IT. This is what
+    # makes the key safe to leave in a fragment forever and makes the whole
+    # operation idempotent: the second sync after a rename does no work and
+    # says nothing. The one thing it still does is §6's standing notice.
+    if isGitCheckout(probe, destination):
+      var orphans: seq[string]
+      for prior in repo.previously:
+        if prior.path == repo.path:
+          continue
+        let priorAbs = workspaceRoot / prior.path
+        if checkoutSubstance(probe, priorAbs) == csSubstantial:
+          let capture = captureCheckoutState(probe, priorAbs)
+          orphans.add(prior.path & " (branch " &
+            (if capture.currentBranch.len > 0: capture.currentBranch
+             else: "detached") &
+            ", " & $capture.porcelain.len & " uncommitted change(s), " &
+            $capture.stashes.len & " stash entr(ies), " &
+            $capture.refs.len & " ref(s))")
+      if orphans.len > 0:
+        # UNCONDITIONAL, and a notice rather than a refusal: the workspace is
+        # functional and nothing is at risk until somebody deletes the old
+        # directory. But it never scrolls past silently, because the whole
+        # point of the mechanism is that nothing may ever again be true of a
+        # workspace where the orphan exists and no report says so. This is
+        # also what makes the key worth landing even if the rollout order is
+        # got wrong: the first correct `repro` to sync finds what the old one
+        # left.
+        result[repoIdx] = RepoRelocationOutcome(
+          kind: rokOrphaned, tag: "orphaned_previous_checkout",
+          fromPath: orphans[0],
+          message: "'" & repo.path & "' has a checkout AND so does a " &
+            "declared previous path: " & orphans.join("; ") &
+            ". Nothing is at risk until one is deleted, and they are not " &
+            "the same directory. Reconcile them by hand (move the work " &
+            "across, then remove the old tree); `repro sync` will not merge " &
+            "two checkouts.")
+      continue
+
+    # §3.2 steps 2-3 — walk `previously` in declaration order and take the
+    # FIRST entry whose prior path holds a substantial checkout. Debris is not
+    # a candidate: a failed clone leaves exactly an empty git repo, it is
+    # common, and it must not become a refusal that blocks the rest of the
+    # sync. It is SKIPPED and REPORTED, naming what was found.
+    var candidates: seq[int]
+    var absentNotes: seq[string]
+    var skipNotes: seq[string]
+    for priorIdx, prior in repo.previously:
+      if prior.path == repo.path:
+        continue
+      let priorAbs = workspaceRoot / prior.path
+      case checkoutSubstance(probe, priorAbs)
+      of csAbsent:
+        # "Nothing was there" is a DIFFERENT notice from "something was there
+        # the tool could not identify", and §3.6 gives them different tags.
+        # Collapsing them is the half of the work-loss probes' rule that binds
+        # here: the skip is the one worth an operator's attention.
+        absentNotes.add("no directory at previous path '" & prior.path & "'")
+      of csNotAGitRepo:
+        skipNotes.add("'" & prior.path & "' holds " &
+          describeDirectoryContents(probe, priorAbs) &
+          " — left exactly where it is")
+      of csEmptyGitRepo:
+        skipNotes.add("'" & prior.path & "' holds a git repository with no " &
+          "commits, branches, stashes or uncommitted work (the shape a " &
+          "failed clone leaves) — left exactly where it is")
+      of csSubstantial:
+        candidates.add(priorIdx)
+
+    if candidates.len == 0:
+      result[repoIdx] =
+        if skipNotes.len > 0:
+          RepoRelocationOutcome(kind: rokSkipped,
+            tag: "previous_checkout_skipped",
+            message: (skipNotes & absentNotes).join("; "))
+        else:
+          RepoRelocationOutcome(kind: rokNoPreviousCheckout,
+            tag: "no_previous_checkout",
+            message: absentNotes.join("; ") &
+              "; the ordinary clone ran")
+      continue
+
+    if candidates.len > 1:
+      # Merging two checkouts is not something a sync should attempt, and
+      # picking one by declaration order would silently choose which of the
+      # operator's two sets of local branches survives.
+      var named: seq[string]
+      for priorIdx in candidates:
+        named.add("'" & repo.previously[priorIdx].path & "'")
+      result[repoIdx] = relocationRefusal("ambiguous_previous_checkouts",
+        "two or more declared previous paths of '" & repo.name &
+          "' hold a plausible checkout (" & named.join(", ") &
+          "); refusing to choose which of them becomes '" & repo.path &
+          "'. Move or remove the ones that are not wanted and re-run.")
+      continue
+
+    let prior = repo.previously[candidates[0]]
+    let candidateAbs = workspaceRoot / prior.path
+
+    # §4 `previous_path_claimed_by_live_repo` — the belt to the resolver's
+    # validator. A forge FREES the old name on rename and lets anyone create a
+    # repository there, so a stale prior claim could otherwise authorise
+    # moving a directory that belongs to someone else.
+    if prior.path in liveByPath and liveByPath[prior.path] != repo.name:
+      result[repoIdx] = relocationRefusal("previous_path_claimed_by_live_repo",
+        "'" & repo.name & "' declares '" & prior.path &
+          "' as a previous path, but repo '" & liveByPath[prior.path] &
+          "' declares that path RIGHT NOW. The live claim wins and the prior " &
+          "claim is inert; drop it from the fragment.")
+      continue
+
+    # §4 `nested_checkout_inside_candidate` — A LIVE CASE IN THIS WORKSPACE,
+    # not a hypothetical. The nested topology is supported and used: the
+    # reference trees sit at paths like `reprobuild/references/llvm-project`,
+    # inside another declared checkout. Moving an outer path would relocate a
+    # dozen inner repos as a side effect, leaving every one of them at a path
+    # no fragment declares — manufacturing, in bulk, exactly the orphan this
+    # mechanism exists to eliminate.
+    var nested: seq[string]
+    for other in repos:
+      if other.path == repo.path or other.path == prior.path:
+        continue
+      if not other.path.startsWith(prior.path & "/"):
+        continue
+      if not dirExists(workspaceRoot / other.path):
+        continue
+      nested.add("'" & other.path & "' (repo '" & other.name & "'" &
+        (if other.fragmentPath.len > 0: ", declared in " & other.fragmentPath
+         else: "") & ")")
+    if nested.len > 0:
+      result[repoIdx] = relocationRefusal("nested_checkout_inside_candidate",
+        "the checkout at '" & prior.path &
+          "' CONTAINS the working tree of another declared repo: " &
+          nested.join(", ") & ". Moving it to '" & repo.path &
+          "' would drag " & $nested.len &
+          " declared repo(s) to a path no fragment declares. Relocate or " &
+          "remove the inner checkout(s) first.")
+      continue
+
+    # §4 `destination_occupied` — scoped to a repo with a relocation in play,
+    # on purpose. `executeClone` treats a directory with no `.git` at the
+    # clone target as a half-cloned artifact and deletes it (through
+    # `removeCloneTargetSafely`, which proves containment first). That
+    # behaviour is correct and must survive: a fragment with no `previously`
+    # entry reaches the clone path exactly as it does today.
+    if fileExists(destination) or
+        (dirExists(destination) and not directoryIsEmpty(destination)):
+      result[repoIdx] = relocationRefusal("destination_occupied",
+        "'" & repo.path & "' already holds " &
+          describeDirectoryContents(probe, destination) &
+          ", so the checkout at '" & prior.path &
+          "' cannot be moved into it. Nothing was deleted and nothing was " &
+          "cloned over it.")
+      continue
+
+    # §4 `candidate_in_progress_operation` — moving a checkout mid-rebase
+    # leaves the sequencer's state pointing at a directory that no longer
+    # exists, and the operator's `--continue` then fails naming neither the
+    # rename nor the move.
+    let operation = inProgressOperation(probe, candidateAbs)
+    if operation.len > 0:
+      result[repoIdx] = relocationRefusal("candidate_in_progress_operation",
+        "the checkout at '" & prior.path & "' is in the middle of a " &
+          operation & "; finish it (`git -C " & prior.path & " " & operation &
+          " --continue`) or abandon it (`git -C " & prior.path & " " &
+          operation & " --abort`) and re-run. Nothing was moved.")
+      continue
+
+    # §4 `submodule_absolute_gitdir`. The one refusal in the table that buys
+    # less than it costs — there is no submodule detection anywhere else in
+    # the workspace code, by design, because a develop-mode sibling checkout
+    # IS the submodule replacement in this model. It is kept because "rare" is
+    # not "never" and what it prevents is a silently broken checkout after a
+    # move that reported success.
+    let absoluteGitdirs = absoluteSubmoduleGitdirs(candidateAbs)
+    if absoluteGitdirs.len > 0:
+      result[repoIdx] = relocationRefusal("submodule_absolute_gitdir",
+        "the checkout at '" & prior.path &
+          "' has submodule(s) whose `.git` file holds an ABSOLUTE gitdir " &
+          "pointer that the move would break: " & absoluteGitdirs.join(", ") &
+          ". Run `git -C " & prior.path &
+          " submodule absorbgitdirs` and re-run. Nothing was moved.")
+      continue
+
+    # §3.3a — remote agreement. This is what excludes a FORK: a fork shares
+    # every object with its upstream, so a history test alone cannot tell one
+    # from the other, but a fork sits under a different org and its URL
+    # matches neither the current nor any declared prior URL.
+    var candidateRemoteUrls: seq[string]
+    let remoteNames = gitRunPlain(identity, ["-C", candidateAbs, "remote"])
+    if remoteNames.code == 0:
+      for line in remoteNames.output.strip().splitLines():
+        let name = line.strip()
+        if name.len == 0:
+          continue
+        let urlRes = gitRunPlain(identity,
+          ["-C", candidateAbs, "remote", "get-url", name])
+        if urlRes.code == 0:
+          let url = urlRes.output.strip()
+          if url.len > 0 and url notin candidateRemoteUrls:
+            candidateRemoteUrls.add(url)
+    let agreement = remoteIdentityAgreement(identity, candidateAbs, repo,
+      candidateRemoteUrls)
+    # CONTENT IDENTITY IS NOT ACCEPTED HERE, and this is the one place where
+    # the relocation check is NARROWER than `repoCheckoutRecognized` rather
+    # than wider.
+    #
+    # `raPinnedRevision` means "HEAD sits at the manifest's pinned revision".
+    # For remote ALIGNMENT that is good evidence: the checkout is already at
+    # the declared path, so the operator put it there, and a drifted URL is
+    # exactly what alignment exists to repair. For a MOVE it is worthless,
+    # because it is a HISTORY test — and §3.3(a) exists precisely because a
+    # history test cannot tell a repository from a FORK of it. A fork shares
+    # every commit with its upstream, so its HEAD is at the pinned revision
+    # too. Measured: with content identity accepted, a clone of a fork sitting
+    # at the declared previous path was RELOCATED, which is the single
+    # outcome this check exists to prevent.
+    #
+    # So the move requires URL evidence (or a checkout with no remote at all,
+    # which has no URL to disagree with and leans entirely on the
+    # shared-object half below).
+    if agreement.verdict == raPinnedRevision:
+      result[repoIdx] = relocationRefusal("previous_remote_mismatch",
+        "the checkout at '" & prior.path & "' has remote URL(s) " &
+          candidateRemoteUrls.join(", ") &
+          " which match neither the URL '" & repo.fetchUrl &
+          "' this fragment resolves to nor any URL derived from a declared " &
+          "previous identity (" & agreement.acceptedUrls.join(", ") &
+          "). Its HEAD does sit at the pinned revision, but that is a " &
+          "HISTORY test and a fork of this repository would pass it too, so " &
+          "it cannot authorise moving the directory. Point its remote at one " &
+          "of the accepted URLs if it really is '" & repo.name &
+          "', or move it aside. Nothing was moved.")
+      continue
+    if agreement.verdict == raCaseOnly:
+      result[repoIdx] = relocationRefusal("previous_remote_mismatch",
+        "the checkout at '" & prior.path & "' has remote URL '" &
+          agreement.foundUrl &
+          "' which differs from an accepted URL ONLY IN PATH CASE. The " &
+          "forges in use fold case and this tool deliberately does not (two " &
+          "spellings of one path may be two repositories on a server that " &
+          "does not fold), so the difference has to be settled by a human: " &
+          "accepted URLs are " & agreement.acceptedUrls.join(", ") &
+          ". Run `git -C " & prior.path & " remote set-url <name> <url>` " &
+          "with the declared spelling and re-run. Nothing was moved.")
+      continue
+    if agreement.verdict == raMismatch:
+      result[repoIdx] = relocationRefusal("previous_remote_mismatch",
+        "the checkout at '" & prior.path & "' has remote URL(s) " &
+          candidateRemoteUrls.join(", ") &
+          " which match neither the URL '" & repo.fetchUrl &
+          "' this fragment resolves to nor any URL derived from a declared " &
+          "previous identity (" & agreement.acceptedUrls.join(", ") &
+          "), and its HEAD is not at the pinned revision. It is not " &
+          "recognizably '" & repo.name &
+          "'. Nothing was moved and nothing was cloned over it: move or " &
+          "remove that directory and re-run.")
+      continue
+
+    # §3.3b — a shared object. Evidence about the repository at the NEW url
+    # has to come from a store that is not the candidate itself, or the check
+    # is near-vacuous. The shared bare keyed by the new fetch URL is that
+    # store (and the refresh here is the same one the warm-up phase performs
+    # per URL moments later).
+    let newCloneUrl = cloneUrlFor(repo)
+    var tipRepo = ""
+    var tipRef = ""
+    var evidenceSource = ""
+    if newCloneUrl.len > 0:
+      if newCloneUrl notin bareForUrl:
+        let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot,
+          newCloneUrl)
+        emitLeafReports(refreshed.leafReports)
+        bareForUrl[newCloneUrl] =
+          if refreshed.ok: refreshed.sharedBarePath else: ""
+        if not refreshed.ok and refreshed.diagnostic.len > 0 and emitProgress:
+          stderr.writeLine("workspace sync: relocation evidence for '" &
+            repo.name & "' cannot use the shared clone for " & newCloneUrl &
+            " (" & refreshed.diagnostic &
+            "); falling back to the candidate's own remote-tracking tip")
+      let bare = bareForUrl[newCloneUrl]
+      if bare.len > 0:
+        let branchName =
+          if repo.branch.len > 0: repo.branch
+          elif repo.revision.len > 0 and not looksLikeSha(repo.revision):
+            repo.revision
+          else: ""
+        # The declared mainline first, then the bare's own HEAD. The second is
+        # the fallback for a fragment pinned to a SHA (which names no branch)
+        # and for a mainline the remote has since renamed.
+        var tipRefNames: seq[string]
+        if branchName.len > 0:
+          tipRefNames.add("refs/heads/" & branchName)
+        tipRefNames.add("HEAD")
+        for refName in tipRefNames:
+          let resolvedTip = resolveRef(probe, bare, refName)
+          if resolvedTip.len > 0:
+            tipRepo = bare
+            tipRef = resolvedTip
+            evidenceSource = "the shared clone for " & newCloneUrl &
+              " at " & refName
+            break
+    if tipRef.len == 0:
+      # Offline, or a bare that does not yet serve the mainline. The
+      # candidate's own remote-tracking tip is weaker evidence and the report
+      # says so, rather than the check silently becoming a tautology.
+      let rName = gitRemoteNameFor(repo)
+      let branchName =
+        if repo.branch.len > 0: repo.branch
+        elif repo.revision.len > 0 and not looksLikeSha(repo.revision):
+          repo.revision
+        else: ""
+      if branchName.len > 0:
+        let own = resolveRef(probe, candidateAbs,
+          "refs/remotes/" & rName & "/" & branchName)
+        if own.len > 0:
+          tipRepo = candidateAbs
+          tipRef = own
+          evidenceSource = "the candidate's own " & rName & "/" & branchName &
+            " (WEAKER: no shared clone for " & newCloneUrl &
+            " was reachable, so this is not independent evidence)"
+    let candidateHead = resolveRef(probe, candidateAbs, "HEAD")
+    var sharedEvidence = ""
+    if tipRef.len > 0:
+      # The ordinary form: a non-empty merge-base. Only askable when the
+      # candidate HAS the tip object; a renamed-and-rewritten repo often does
+      # not, and that is not a negative result.
+      if candidateHead.len > 0 and objectPresent(probe, candidateAbs, tipRef):
+        let base = mergeBase(probe, candidateAbs, candidateHead, tipRef)
+        if base.found:
+          sharedEvidence = "merge-base(" & candidateHead[0 ..< min(12,
+            candidateHead.len)] & ", " & tipRef[0 ..< min(12, tipRef.len)] &
+            ") = " & base.sha[0 ..< min(12, base.sha.len)]
+      if sharedEvidence.len == 0:
+        # AN EMPTY MERGE-BASE IS NOT A NEGATIVE RESULT. A repository whose
+        # history was rewritten shares no commit with its own remote, and
+        # under the history-rewrite campaign that is a live, expected state
+        # for exactly the repositories most likely to be renamed. `filter-repo`
+        # rewrites commits and trees but carries BLOBS across, so blob
+        # presence survives a rewrite where every commit id does not. This
+        # fallback is the whole reason the renamed-AND-rewritten case works.
+        let sample = sampleBlobIds(probe, tipRepo, tipRef)
+        var present = 0
+        var firstPresent = ""
+        for oid in sample:
+          if objectPresent(probe, candidateAbs, oid):
+            inc present
+            if firstPresent.len == 0:
+              firstPresent = oid
+        if present > 0:
+          sharedEvidence = $present & "/" & $sample.len &
+            " sampled blob(s) from " & tipRef[0 ..< min(12, tipRef.len)] &
+            " present in the candidate (first: " &
+            firstPresent[0 ..< min(12, firstPresent.len)] & ")"
+        else:
+          result[repoIdx] = relocationRefusal("no_shared_history",
+            "the checkout at '" & prior.path &
+              "' has a matching remote, but shares no object with '" &
+              repo.name & "' as published at " & newCloneUrl &
+              ": merge-base(HEAD " &
+              (if candidateHead.len > 0: candidateHead else: "<none>") &
+              ", tip " & tipRef & ") is empty AND none of " & $sample.len &
+              " sampled blob(s) from that tip is present. Evidence was read " &
+              "from " & evidenceSource &
+              ". Nothing was moved and nothing was cloned over it.")
+          continue
+    else:
+      result[repoIdx] = relocationRefusal("no_shared_history",
+        "the checkout at '" & prior.path &
+          "' has a matching remote, but no tip of '" & repo.name &
+          "' as published at " & newCloneUrl &
+          " could be obtained to compare against — neither the shared clone " &
+          "for that URL nor the candidate's own remote-tracking refs offer " &
+          "one. A probe that cannot be run is itself a blocker here. " &
+          "Nothing was moved and nothing was cloned over it.")
+      continue
+
+    let identityEvidence = "remote agreement via " &
+      (case agreement.verdict
+       of raNoRemotes:
+         "no remotes configured in the candidate (so this verdict rests " &
+           "entirely on the shared object below)"
+       of raCurrentUrl: "the current URL (" & agreement.foundUrl & ")"
+       of raPreviousUrl: "a declared previous URL (" & agreement.foundUrl & ")"
+       else: "an accepted URL") &
+      "; shared object via " & sharedEvidence
+
+    # §3.4 step 1 — capture BEFORE anything moves. One capture, two readers:
+    # the copy fallback's post-copy comparison, and §5's ancestor test, which
+    # needs the candidate's pre-fetch tip.
+    let before = captureCheckoutState(probe, candidateAbs)
+    let moved = relocateCheckout(probe, candidateAbs, destination, before)
+    if not moved.ok:
+      result[repoIdx] = RepoRelocationOutcome(
+        kind: rokFailed,
+        tag: (if moved.verificationFailed: "relocation_verification_failed"
+              else: "relocation_failed"),
+        fromPath: prior.path,
+        message: "could not move '" & prior.path & "' to '" & repo.path &
+          "': " & moved.diagnostic)
+      continue
+
+    var outcome = RepoRelocationOutcome(
+      kind: rokRelocated, tag: "relocated", fromPath: prior.path,
+      evidence: identityEvidence, preMoveHeadSha: before.headSha)
+    if moved.diagnostic.len > 0:
+      outcome.message = moved.diagnostic
+
+    # §3.5 repairs. Four things live outside the moved directory.
+    #
+    # 1. THE REMOTE URL. Done here and not left to `alignWorkspaceRemotes`
+    #    (which runs right after and would also do it) because leaving it is
+    #    not harmless and the report has to be able to CLAIM it: the checkout
+    #    otherwise keeps fetching through the forge's rename redirect, which
+    #    works right up until someone creates a new repository at the freed old
+    #    name — at which moment the redirect stops and the checkout is silently
+    #    pointed at a stranger's repository.
+    #
+    #    Per-branch upstreams need NO repair, and that is worth stating because
+    #    it looks like it should: `branch.<name>.remote` names a remote by
+    #    NAME, not URL, so rewriting the URL leaves every upstream valid.
+    if newCloneUrl.len > 0:
+      let primary = gitRemoteNameFor(repo)
+      let current = gitRunPlain(identity,
+        ["-C", destination, "remote", "get-url", primary])
+      if current.code == 0 and current.output.strip() != newCloneUrl:
+        let setUrl = gitRunPlain(identity,
+          ["-C", destination, "remote", "set-url", primary, newCloneUrl])
+        if setUrl.code == 0:
+          outcome.rekeyed.add("remote." & primary & ".url -> " & newCloneUrl)
+
+    # 2. `objects/info/alternates`. The file holds an ABSOLUTE path to the
+    #    shared bare's `objects/` dir, and the bare is keyed by FETCH URL and
+    #    by nothing else. Two consequences pulling opposite ways: the move
+    #    alone does not invalidate the link (the bare did not move, and `.git`
+    #    travelled byte-for-byte), but a rename CHANGES the url, so the new URL
+    #    slugs to a DIFFERENT bare and the relocated checkout is alternated to
+    #    the old one.
+    #
+    #    The repair APPENDS the new bare and KEEPS the old entry, which is
+    #    exactly what `wireAlternates` already does.
+    #
+    #    KEEPING THE OLD ENTRY IS A JUDGEMENT, STATED AS ONE. `alternates`
+    #    accepts multiple lines, and dropping the old line in the same
+    #    operation can make objects the working tree depends on unreachable:
+    #    objects borrowed from the old bare are not necessarily in the new one,
+    #    which starts cold. Under the history-rewrite campaign the old bare may
+    #    also hold pre-rewrite history. The alternative — dropping it — risks
+    #    corrupting a checkout that holds unpushed work, which is the loss this
+    #    whole mechanism exists to prevent. Correctness of the operator's
+    #    checkout wins, because REPUBLICATION is guarded elsewhere and
+    #    independently (the pre-push gate, and the refusal to push a branch
+    #    sharing no history with its remote). The cost is a checkout alternated
+    #    to two bares; it is reported as such, and
+    #    `repro ws shared-clones rewire` is the consolidation step.
+    for entry in readAlternates(destination):
+      outcome.alternates.add(entry)
+    if newCloneUrl.len > 0:
+      let bare = bareForUrl.getOrDefault(newCloneUrl)
+      if bare.len > 0 and not isWiredTo(destination, bare):
+        let wired = wireAlternates(destination, bare, identity.binaryPath)
+        if wired.ok:
+          outcome.alternates.add(bare / "objects")
+          outcome.rekeyed.add("objects/info/alternates += " &
+            (bare / "objects"))
+
+    # 3. `.repro/workspace/force-pushes.json` — the recovery record for a
+    #    rewritten remote. THE KEY IS THE CHECKOUT PATH, which is precisely why
+    #    a path change strands the record, and the loader degrades silently to
+    #    "no records" so nothing reports that it stopped being found. Losing it
+    #    during a rename loses it at the one moment two migrations are in
+    #    flight over the same checkout.
+    block rekeyForcePushes:
+      let records = loadForcePushedCommits(workspaceRoot)
+      var rekeyedCount = rekeyForcePushRecords(records, prior.path, repo.path)
+      if prior.name != repo.name:
+        rekeyedCount += rekeyForcePushRecords(records, prior.name, repo.name)
+      if rekeyedCount > 0:
+        saveForcePushedCommits(workspaceRoot, records)
+        outcome.rekeyed.add($rekeyedCount &
+          " force-pushes.json record(s) re-keyed from '" & prior.path &
+          "' to '" & repo.path & "'")
+
+    # 4. `.repro/develop-overrides.toml`. The general rule the list serves: a
+    #    relocation re-keys every workspace-local record keyed by checkout
+    #    path or repo name, in the same operation, and REPORTS each file it
+    #    re-keyed.
+    #
+    #    Only `local_path` is re-keyed, and only when it actually resolves to
+    #    the prior checkout. `package` is a SOLVED PACKAGE ID, not a repo name
+    #    or a path, so a repository rename says nothing about it and rewriting
+    #    it would be inventing a fact. The develop plane's default topology is
+    #    also a SIBLING (`../<name>`), which a workspace rename does not move —
+    #    hence the resolve-and-compare rather than a string match on the path.
+    block rekeyDevelopOverrides:
+      try:
+        let loaded = readDevelopOverridesFile(workspaceRoot)
+        if loaded.isNone:
+          break rekeyDevelopOverrides
+        var file = loaded.get()
+        var touched = 0
+        for i in 0 ..< file.`override`.len:
+          let declared = file.`override`[i].local_path
+          if declared.len == 0:
+            continue
+          let resolvedDeclared =
+            if isAbsolute(declared): declared
+            else: workspaceRoot / declared
+          if samePathOnDisk(resolvedDeclared, candidateAbs):
+            file.`override`[i].local_path =
+              if isAbsolute(declared): destination else: repo.path
+            inc touched
+        if touched > 0:
+          writeDevelopOverridesFile(workspaceRoot, file)
+          outcome.rekeyed.add($touched &
+            " develop-overrides.toml local_path entr(ies) re-keyed to '" &
+            repo.path & "'")
+      except CatchableError as err:
+        # A malformed overrides file must not fail a relocation that has
+        # already happened. Say so: the record is now stale and nothing else
+        # will notice.
+        stderr.writeLine("workspace sync: relocated '" & prior.path &
+          "' to '" & repo.path &
+          "' but could not re-key .repro/develop-overrides.toml (" & err.msg &
+          "); any develop override naming the old path is now stale")
+    #
+    #    `.repro/workspace.toml`'s local state is keyed by PROJECT, not by
+    #    checkout path, so a rename does not strand it. The sibling ignore set
+    #    needs no special handling either: its managed block names the old
+    #    path and `refreshWorkspaceSiblingIgnoresBestEffort` is already wired
+    #    into sync, so the next regeneration drops the stale entry.
+    #
+    #    Published lock records are NOT migrated. `locks/<project>/<repo>/
+    #    <sha>.toml` is keyed by repo name, and the records written under the
+    #    old name are published, immutable history — the publisher refuses to
+    #    rewrite an already-published record whose bytes differ, and it is
+    #    right to. A rename starts a new series under the new name.
+    if emitProgress:
+      stderr.writeLine("workspace sync: [relocated] '" & prior.path &
+        "' -> '" & repo.path & "' (" & identityEvidence & ")")
+    result[repoIdx] = outcome
+
 proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   ## End-to-end driver. (1) Refresh manifest layers so the composer
   ## reads the freshest manifest data. (2) Resolve the project / compose
@@ -39618,12 +40626,30 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   # touching the network or the working trees.
   for repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
-    let intended =
+    var intended =
       if dirExists(repoPath / ".git"): "update"
       else: "clone"
+    # Declared-Repository-Renames.md §3.1 — ``relocate`` is a third verdict in
+    # this plan, and ``--dry-run`` must print it and perform none. Decided here
+    # with the same cheap presence check the clone/update split uses, which is
+    # what lets the dry run answer without resolving a git tool or touching
+    # the network. The authoritative decision (candidate substance, identity
+    # verification) runs in the materialisation phase below and can still turn
+    # this into a refusal.
+    var previousPath = ""
+    if intended == "clone":
+      for prior in repo.previously:
+        if prior.path == repo.path:
+          continue
+        let priorAbs = args.workspaceRoot / prior.path
+        if dirExists(priorAbs / ".git") or fileExists(priorAbs / ".git"):
+          intended = "relocate"
+          previousPath = prior.path
+          break
     report.plan.add(WorkspaceSyncPlanEntry(
       name: repo.name, path: repo.path, fetchUrl: repo.fetchUrl,
-      intendedAction: intended, revision: repo.revision))
+      intendedAction: intended, revision: repo.revision,
+      previousPath: previousPath))
 
   # RA-27 ``--dry-run``: the plan is the deliverable; STOP before any
   # mutating phase. No manifest-layer refresh has touched a working tree
@@ -39638,6 +40664,22 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
   let identity = ensureGitToolResolvable(
     args.toolProvisioning, getEnv("PATH"))
   installGitVcsExecutor()
+
+  # Step 3-pre (Declared-Repository-Renames.md §3) — RELOCATION, and it must
+  # run here: BEFORE `alignWorkspaceRemotes`, which would rewrite
+  # `remote.origin.url` on a candidate and destroy the evidence the identity
+  # check reads, and before the fetch phase, so a relocated checkout is fetched
+  # at its NEW path and the rewritten-remote detection classifies it on fresh
+  # refs. See the long comment on `relocateDeclaredRenames`.
+  #
+  # `emitProgress` is not resolved yet (it depends on the jobs block below) so
+  # the progress decision is recomputed from the same two inputs; duplicating
+  # the expression is cheaper than moving the whole jobs block above a phase
+  # that has nothing to do with it.
+  let relocations = relocateDeclaredRenames(identity, args.workspaceRoot,
+    defaultCacheRoot(args.workspaceRoot), resolved.repos,
+    emitProgress = not args.json and args.progressMode != bpmQuiet)
+
   alignWorkspaceRemotes(args.workspaceRoot, resolved.repos, identity)
 
   # RA-5c jobs resolution: ``--jobs-network`` (or ``--jobs``) bounds the
@@ -39939,19 +40981,17 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
           let logRes = gitRunPlain(identity, ["-C", repoPath,
             "log", "--format=%H", newTip & ".." & oldRemoteTips[repoIdx]])
           if logRes.code == 0:
-            let forcePushedSHAs = logRes.output.strip().splitLines()
-            if not forcePushes.hasKey(repo.path):
-              forcePushes[repo.path] = newJArray()
-            for rawSha in forcePushedSHAs:
+            for rawSha in logRes.output.strip().splitLines():
               let sha = rawSha.strip()
               if sha.len > 0:
-                var exists = false
-                for existing in forcePushes[repo.path]:
-                  if existing.getStr() == sha:
-                    exists = true
-                    break
-                if not exists:
-                  forcePushes[repo.path].add(%sha)
+                # Keyed on the checkout PATH, which is the key this writer has
+                # always used and the key a declared rename re-files
+                # (`rekeyForcePushRecords`). The record now carries the branch,
+                # the new tip and a timestamp as well, so a detection made
+                # today is as useful a recovery record as the hand-written
+                # migration entries beside it.
+                if recordForcePush(forcePushes, repo.path, repo.revision,
+                    sha, newTip):
                   forcePushesUpdated = true
   if forcePushesUpdated:
     saveForcePushedCommits(args.workspaceRoot, forcePushes)
@@ -39976,10 +41016,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         $resolved.repos.len & "] " & repo.path & "...")
       stderr.flushFile()
     let repoPath = args.workspaceRoot / repo.path
-    var repoForcePushed = initHashSet[string]()
-    if forcePushes.hasKey(repo.path):
-      for val in forcePushes[repo.path]:
-        repoForcePushed.incl(val.getStr())
+    let repoForcePushed =
+      forcePushedShasFor(forcePushes, repo.path, repo.name)
     var observation =
       observeRepoForSync(identity, repoPath, repo, repoForcePushed)
     # The fetch that should have refreshed this repo's remote-tracking refs
@@ -39988,6 +41026,18 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
     if fetchFailureByPath.hasKey(repo.path):
       observation.fetchFailed = true
       observation.fetchDiagnostic = fetchFailureByPath[repo.path]
+    # A declined or broken relocation leaves the declared path empty BY
+    # DECISION. Carried in the observation so the planner refuses rather than
+    # reading `exists = false` as "newly declared" and cloning the second copy
+    # this mechanism exists to prevent.
+    if relocations.hasKey(idx):
+      let outcome = relocations[idx]
+      case outcome.kind
+      of rokRefused:
+        observation.relocationRefusal = outcome.tag & ": " & outcome.message
+      of rokFailed:
+        observation.relocationFailure = outcome.tag & ": " & outcome.message
+      else: discard
     observations.add(observation)
   if emitProgress and isTty and args.progressMode in {bpmLine, bpmBarLine}:
     stderr.write("\r\27[2K")
@@ -40416,6 +41466,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
         "force-sync overwrote '" & decision.path & "' to " &
           forceResetTarget.getOrDefault(repoIdx)
       else: decision.message
+    let relocation = relocations.getOrDefault(repoIdx)
     report.repos.add(WorkspaceSyncRepoEntry(
       name: decision.name,
       path: decision.path,
@@ -40428,7 +41479,13 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs): WorkspaceSyncOutcome =
       refusalReason: (if wasForceReset: "" else: decision.refusalReason),
       executionStatus: status,
       executionDiagnostic: diagnostic,
-      forcePushedBaseSha: decision.forcePushedBaseSha))
+      forcePushedBaseSha: decision.forcePushedBaseSha,
+      relocation: relocation.tag,
+      relocationDetail: relocation.message,
+      relocatedFrom: relocation.fromPath,
+      relocationEvidence: relocation.evidence,
+      relocationRekeyed: relocation.rekeyed,
+      relocationAlternates: relocation.alternates))
 
   # RA-18: materialize copyfile/linkfile directives AFTER the checkout
   # phase, for every selected repo whose working tree exists. Re-applied on

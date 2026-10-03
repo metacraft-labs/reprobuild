@@ -111,6 +111,22 @@ type
     projectRemote*: string ## Key into the project manifest's `[[remote]]` table (e.g. "metacraft-labs", "github")
     fetchUrl*: string      ## Full constructed fetch URL
 
+  ResolvedPreviousIdentity* = object
+    ## One prior identity of a repo, with every field RESOLVED to the
+    ## effective value an omitted field inherits from `[repo]`
+    ## (Declared-Repository-Renames.md §2).
+    ##
+    ## `fetchUrl` is the point of resolving these here rather than carrying
+    ## the raw `PreviousRepoIdentity` through: a fragment's fetch URL is
+    ## COMPOSED from a prefix plus `name`/`url_suffix`, so declaring the prior
+    ## NAME is what lets the tool reconstruct the prior URL — and the prior URL
+    ## is the primary evidence the relocation identity check reads (§3.3a).
+    ## Composition needs the `url-prefixes/` table, which only exists inside
+    ## resolution.
+    name*: string     ## effective prior repo name
+    path*: string     ## effective prior checkout path, workspace-relative
+    fetchUrl*: string ## effective prior fetch URL, derived not declared
+
   ResolvedRepo* = object
     ## Post-resolution facts for a single repo.
     ##
@@ -189,6 +205,12 @@ type
     # gate uses these to compute the pushed repo's transitive dependency
     # closure (Workspace-And-Develop-Mode.md §"VCS Hook Integration").
     depends*: seq[string]
+    previously*: seq[ResolvedPreviousIdentity]
+      ## Declared-Repository-Renames.md §2 — the identities this repo was
+      ## previously declared under, most recent first, resolved from
+      ## `[extensions] previously`. Empty for the overwhelming majority of
+      ## fragments, and INERT whenever a checkout already sits at `path`, so
+      ## the key is safe to leave in a fragment forever.
 
   CertificateGateMode* = enum
     ## TC-3 / TC-6 / RA-32 — the resolved `[certificates] gate_mode`.
@@ -293,6 +315,63 @@ proc conflictingFields*(existing, candidate: ResolvedRepo): seq[string] =
       candidate.revision & ")")
   if existing.vcs != candidate.vcs:
     result.add("vcs (" & existing.vcs & " vs " & candidate.vcs & ")")
+
+proc validatePreviousIdentities*(repos: openArray[ResolvedRepo];
+                                 ownerFile, ownerSchema: string) =
+  ## Declared-Repository-Renames.md §2.3, rules 2-4 — the three validator
+  ## rules that need the WHOLE resolved set and so cannot be answered by
+  ## `readRepoFragment` from one file.
+  ##
+  ## Rule 2 is the dangerous one and the reason this is an error rather than a
+  ## notice. A forge FREES the old name when a repository is renamed and lets
+  ## anyone create a new repository there; if a fragment then legitimately
+  ## declares that path, a stale prior claim from another fragment would
+  ## authorise `sync` to MOVE a directory that belongs to someone else. A live
+  ## claim always wins and the prior claim is an error, not a silent loss.
+  ##
+  ## Rule 3 is the same reasoning for the half of identity that keys lock
+  ## records and `--only` selectors. Rule 4 refuses two fragments claiming one
+  ## ancestor, because whichever `sync` reached first would win by accident.
+  ##
+  ## The per-repo `previous_path_claimed_by_live_repo` refusal in `sync` is the
+  ## belt to this proc's braces: a manifest can reach a checkout through a
+  ## layer composition or an older writer that never passed through here, and
+  ## the consequence of getting it wrong is a moved directory.
+  if repos.len == 0:
+    return
+  var liveByPath = initTable[string, string]()
+  var liveByName = initTable[string, string]()
+  for repo in repos:
+    if repo.path notin liveByPath:
+      liveByPath[repo.path] = repo.name
+    if repo.name notin liveByName:
+      liveByName[repo.name] = repo.path
+  var claimedPrior = initTable[string, string]()
+  for repo in repos:
+    for index, prior in repo.previously:
+      let keyPath = "extensions.previously[" & $index & "]"
+      if prior.path in liveByPath and prior.path != repo.path:
+        raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+          "repo '" & repo.name & "' declares previous checkout path '" &
+            prior.path & "', but repo '" & liveByPath[prior.path] &
+            "' declares that path RIGHT NOW. A live claim wins: drop the " &
+            "prior claim, or the next sync would move a directory that " &
+            "belongs to another repo")
+      if prior.name in liveByName and prior.name != repo.name:
+        raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+          "repo '" & repo.name & "' declares previous name '" & prior.name &
+            "', but a live repo is declared under that name right now (at '" &
+            liveByName[prior.name] & "'). A live claim wins: drop the prior " &
+            "claim")
+      let priorKey = prior.name & "\t" & prior.path
+      if priorKey in claimedPrior and claimedPrior[priorKey] != repo.name:
+        raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+          "repos '" & claimedPrior[priorKey] & "' and '" & repo.name &
+            "' both declare the previous identity (name='" & prior.name &
+            "', path='" & prior.path &
+            "'); two repos cannot share one ancestor, and whichever sync " &
+            "reached first would win by accident")
+      claimedPrior[priorKey] = repo.name
 
 # ---- TC-3 / TC-6 / RA-32 certificate policy resolution --------------------
 
@@ -1020,6 +1099,48 @@ proc resolveFragment(ctx: FragmentContext; fragmentAbs: string;
   # RA-21 — carry the develop-set dependency edges through verbatim.
   result.depends = fragment.repo.depends
 
+  # Declared-Repository-Renames.md §2 — resolve each declared prior identity
+  # to its EFFECTIVE (name, path, fetchUrl) triple. An omitted field inherits
+  # from `[repo]`, so a pure path move resolves to today's name and URL with
+  # yesterday's directory.
+  #
+  # The URL is composed through the SAME two paths the live URL above takes,
+  # because a prior identity is a declaration of what the live one used to be
+  # and must compose the same way or the reconstruction is a guess:
+  #
+  #   * a prior identity that names `url_prefix` resolves it against
+  #     `url-prefixes/` and composes its own suffix — the org/host-change
+  #     case, which is the only reason that field exists;
+  #   * otherwise the repo's own prefix (membership-model path) or the
+  #     project's `[[remote]]` entry (legacy `remote` path) composes the
+  #     prior NAME / `url_suffix`.
+  for prior in previousIdentities(fragmentAbs, fragment.extensions):
+    var resolvedPrior = ResolvedPreviousIdentity(
+      name: if prior.name.len > 0: prior.name else: result.name,
+      path: if prior.path.len > 0: prior.path else: result.path)
+    let priorSuffix =
+      if prior.url_suffix.len > 0: prior.url_suffix
+      elif prior.name.len > 0: prior.name
+      else: defaultSuffix
+    if prior.url_prefix.len > 0:
+      let priorPrefix = resolveUrlPrefix(ctx, ownerFile, ownerSchema, keyPath,
+        reference, prior.url_prefix)
+      resolvedPrior.fetchUrl = composePrefixedUrl(priorPrefix, priorSuffix)
+    elif repoUrlPrefix.len > 0:
+      let livePrefix = resolveUrlPrefix(ctx, ownerFile, ownerSchema, keyPath,
+        reference, repoUrlPrefix)
+      resolvedPrior.fetchUrl = composePrefixedUrl(livePrefix, priorSuffix)
+    elif result.projectRemote in ctx.remotes:
+      resolvedPrior.fetchUrl =
+        getFetchUrl(ctx.remotes[result.projectRemote], resolvedPrior.name)
+    else:
+      # No way to compose a prior URL. Not an error: the relocation identity
+      # check accepts a candidate on the CURRENT URL too (and on content
+      # identity), so an unreconstructible prior URL narrows the evidence it
+      # can read rather than invalidating the declaration.
+      resolvedPrior.fetchUrl = ""
+    result.previously.add(resolvedPrior)
+
 # ---- Workspace-Membership-Model.md: membership expansion -------------------
 
 type
@@ -1220,6 +1341,9 @@ proc resolveProject*(projectFile: string): ResolvedProject =
       project.member_sets, project.member_repos, @[], acc)
     result.repos = acc.repos
 
+  validatePreviousIdentities(result.repos, absProject,
+    schemaProjectManifestV1)
+
 proc resolveRepoSet*(setFile: string): ResolvedProject =
   ## Resolve a `repo-sets/<set>.toml` into the SAME `ResolvedProject` a project
   ## resolves to.
@@ -1254,6 +1378,8 @@ proc resolveRepoSet*(setFile: string): ResolvedProject =
     manifest.member_sets, manifest.member_repos,
     @[manifest.`repo-set`.name], acc)
   result.repos = acc.repos
+
+  validatePreviousIdentities(result.repos, absSet, schemaRepoSetV1)
 
 # ---- string-based entry point --------------------------------------------
 
@@ -1501,6 +1627,9 @@ proc resolveVariant*(variantFile: string): ResolvedProject =
           "', path='" & r.path & "', remote='" & r.projectRemote &
           "') triple")
     finalSeen[triple] = i
+
+  validatePreviousIdentities(result.repos, absVariant,
+    schemaVariantManifestV1)
 
 proc resolveVariantFromString*(content: string;
                                basePath: string): ResolvedProject =
