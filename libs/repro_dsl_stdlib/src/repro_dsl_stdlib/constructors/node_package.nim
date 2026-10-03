@@ -37,6 +37,28 @@ import repro_project_dsl/npm_vendor
 import ../types/package_result
 
 const
+  DeliveredPathRewriter = """
+const fs = require("fs"), path = require("path");
+const work = process.argv[1], dist = process.argv[2];
+const spellings = [...new Set([work, work.replace(/\\/g, "/"),
+  work.replace(/\//g, "\\")])].sort((a, b) => b.length - a.length);
+const walk = (dir) => {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) { walk(p); continue; }
+    if (!/\.(m?js|cjs|map)$/.test(e.name)) continue;
+    const before = fs.readFileSync(p, "latin1");
+    let after = before;
+    for (const s of spellings) after = after.split(s).join(".");
+    if (after !== before) fs.writeFileSync(p, after, "latin1");
+  }
+};
+walk(dist);
+"""
+    ## Rewrites the work tree's absolute path, in either slash spelling, to
+    ## `.` in a delivered bundle (see the node-build edge). Single-quoted on
+    ## the shell line, so it must not contain a single quote. `latin1`
+    ## round-trips every byte, so a file is changed only where a path was.
   FetchScratchSubdir = ".repro/fetch"
     ## Where the source tarball and its stamp land. The same literal each
     ## sibling constructor declares privately, and deliberately the same
@@ -266,7 +288,16 @@ proc node_package*(srcDir = "src";
     buildScript.add("mkdir -p \"" & q(distDir) & "\"; " &
       "cp -f \"" & q(workTree / entry) & "\" \"" & q(distDir) & "/\"; ")
   buildScript.add("if [ -f package.json ]; then cp -f package.json \"" &
-    q(distDir) & "/\"; fi")
+    q(distDir) & "/\"; fi; ")
+  # The delivered bundle must not name the checkout. Bundlers embed the
+  # absolute path of what they bundled -- gemini-cli's wasm loader writes
+  # `// wasm-embedded:<work tree>\node_modules\...` comments, a source map
+  # names its sources -- so two checkouts that both EXECUTE this step
+  # produced different bytes. Every occurrence of the work tree's absolute
+  # path, in either slash spelling, becomes `.` (the work tree the paths were
+  # relative to). Done with `node`, a tool this step already declares.
+  buildScript.add("node -e '" & DeliveredPathRewriter & "' \"" &
+    q(workTree) & "\" \"" & q(distDir) & "\"")
   let compileEdge = buildAction(
     id = "node-build-" & pkgName,
     call = inlineExecCall(@["sh", "-c", buildScript], projectRoot),
