@@ -504,6 +504,15 @@ package reprobuild:
     when defined(macosx):
       "clang"
     "just >=1"
+    # ``just lint`` ends in ``scripts/check_workflows.sh``, which runs
+    # actionlint over ``.github/workflows``. The flake shell carries it on
+    # Linux and macOS (so path mode finds it there); on Windows there is no
+    # flake shell, and the path-mode resolver realizes it from the release
+    # archives reprobuild-packages' ``packages/interfaces/actionlint``
+    # declares -- as it does ``just`` from the stdlib's. Without it the
+    # repository's local gate, the only gate ``agents`` has, could not pass
+    # in a Windows dev shell.
+    "actionlint"
     # The shipped CLI is compiled with ``-d:ssl``. Model the corresponding
     # link/runtime closure explicitly so graph-built binaries receive
     # OpenSSL's library channels instead of depending on ambient
