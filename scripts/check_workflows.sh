@@ -225,10 +225,16 @@ sibling_ref_exists() {
 # reported as a missing ref on a laptop that is merely offline.
 sibling_probe_repo="reprobuild"
 network_ok=0
+sibling_probe_error="$(mktemp)"
 if git ls-remote --heads "https://github.com/metacraft-labs/${sibling_probe_repo}" \
-    dev >/dev/null 2>&1; then
+    dev >/dev/null 2>"${sibling_probe_error}"; then
   network_ok=1
+else
+  # Keep authorization and transport failures distinguishable. Older URL
+  # rewrites can embed credentials, so redact URL userinfo before printing.
+  sed -E 's#https?://[^/@[:space:]]+@#https://***@#g' "${sibling_probe_error}" >&2
 fi
+rm -f "${sibling_probe_error}"
 
 # Prove the PARSER handles every entry form the clone action accepts, before
 # any network is involved -- this part is free and runs even offline. A parser

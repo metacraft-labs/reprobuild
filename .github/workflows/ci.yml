@@ -84,6 +84,7 @@ jobs:
             nim-termctl
             devops-modules
             repo-workspaces
+            reprobuild
             reprobuild-ct-test-runner
             reprobuild-test-adapters
             runquota
@@ -370,6 +371,7 @@ jobs:
             nim-termctl
             devops-modules
             repo-workspaces
+            reprobuild
             reprobuild-ct-test-runner
             reprobuild-test-adapters
             runquota
@@ -535,8 +537,26 @@ jobs:
           set -euo pipefail
           repro_root="${{ github.workspace }}"
           repro_bin="$repro_root/build/bin/repro"
+          # Keep the underlying dlerror for the monitored startup failure.
+          # The wrapper changes only compiler diagnostics, on this CI build.
+          REPRO_CI_REAL_NIM="$(dev-exec sh -c 'command -v nim')"
+          export REPRO_CI_REAL_NIM
+          export REPRO_CI_NIM_DIR="$RUNNER_TEMP/repro-loader-nim-$GITHUB_RUN_ID"
+          mkdir -p "$REPRO_CI_NIM_DIR"
+          cat > "$REPRO_CI_NIM_DIR/nim" <<'NIM_DIAGNOSTICS'
+          #!/usr/bin/env bash
+          case "${1:-}" in
+            c|cc|cpp)
+              command="$1"
+              shift
+              exec "$REPRO_CI_REAL_NIM" "$command" -d:nimDebugDlOpen "$@"
+              ;;
+            *) exec "$REPRO_CI_REAL_NIM" "$@" ;;
+          esac
+          NIM_DIAGNOSTICS
+          chmod +x "$REPRO_CI_NIM_DIR/nim"
           # Materialise reprobuild's own `repro` binary (idempotent bootstrap).
-          dev-exec just bootstrap
+          dev-exec bash -c 'export PATH="$REPRO_CI_NIM_DIR:$PATH"; just bootstrap'
           # The bootstrapped `repro` carries bare dlopen()s for its runtime
           # libraries (libclingo.so is lazy; libzstd.so.1 loads at module init for
           # the binary-cache client) because build_apps.sh strips rpath per the
@@ -920,6 +940,7 @@ jobs:
             nim-termctl
             devops-modules
             repo-workspaces
+            reprobuild
             reprobuild-ct-test-runner
             reprobuild-test-adapters
             runquota
