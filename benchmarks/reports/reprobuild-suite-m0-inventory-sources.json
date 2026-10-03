@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1833,
+    "nimTestBinaries": 1834,
     "pureUnitConsolidationGroups": 47,
     "pureUnitTests": 592,
     "staticallyDetectedRuntimeCompilerFlowTests": 110,
-    "testEntries": 1849
+    "testEntries": 1850
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1066,7 +1066,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 972,
+      "integration": 973,
       "platform/destructive": 118,
       "pure unit": 592,
       "unclassified": 156
@@ -1217,9 +1217,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1833,
+    "nimTestBinaryCount": 1834,
     "pythonTestFileCount": 16,
-    "testEntryCount": 1849
+    "testEntryCount": 1850
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7638,6 +7638,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_package_identity_is_the_producing_action",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_hash",
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_package_identity_is_the_producing_action.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_portable_fingerprint_engine",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -7809,7 +7830,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim",
       "sourceSuiteCount": 7,
-      "staticCaseCount": 29,
+      "staticCaseCount": 30,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -12031,7 +12052,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_local_store/tests/t_portable_memo.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

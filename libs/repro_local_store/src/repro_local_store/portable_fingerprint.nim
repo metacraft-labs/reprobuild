@@ -310,6 +310,31 @@ proc membershipHexOfNames*(names: openArray[string]): string =
   sorted.sort()
   blake3.digest(sorted.join("\n")).toHex()
 
+const
+  ReadOfAbsent* = "absent"
+    ## The identity of a READ whose target does not exist.
+  ReadOfDirectory* = "directory"
+    ## The identity of a READ whose target is a directory.
+
+proc readIdentity*(path: string): string =
+  ## The identity of an observed READ of `path`, the same on the recording
+  ## side and the lookup side: the file's content digest, or what stands
+  ## there instead.
+  ##
+  ## Reads of files that do not exist are common, not exotic: node's module
+  ## resolution tries to open `package.json` at every level it walks, and
+  ## the monitor records each failed open as a read. The recorder used to
+  ## identify such a read as "" (nothing could be hashed) while the lookup
+  ## answered "cannot identify" -- so a path set holding even one of them
+  ## could never be evaluated, on any host, the recording one included.
+  ## gemini-cli's bundle step had 125.
+  if fileExists(extendedPath(path)):
+    fileContentHex(path)
+  elif dirExists(extendedPath(path)):
+    ReadOfDirectory
+  else:
+    ReadOfAbsent
+
 proc membershipHex*(dir: string): string =
   ## Membership digest of a directory: the sorted child names, each suffixed
   ## `/` for a directory. Names only — an enumeration observes WHICH entries
@@ -460,7 +485,7 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
         result.inputs.add(PortableInput(kind: inputKind, path: render(logical),
           digest: identity))
   for path in reads:
-    consider(path, pikRead, fileContentHex(path))
+    consider(path, pikRead, readIdentity(path))
   for path in probes:
     consider(path, pikProbe,
       (if fileExists(extendedPath(path)) or dirExists(extendedPath(path)):

@@ -198,3 +198,30 @@ suite "portable memo store":
       PathSetEntry(kind: pikProbe, path: "project:" & rel)) == some("present")
     check currentIdentity(roots(project),
       PathSetEntry(kind: pikRead, path: "project:" & rel)).isSome
+
+  test "a read of a file that does not exist is an input like any other":
+    # node's module resolution opens `package.json` at every level it walks,
+    # and most of them are not there. The recorder identified such a read as
+    # "" and the lookup as "cannot identify", so no lookup could evaluate the
+    # path set at all.
+    let base = createTempDir("repro-memo-absent-", "")
+    defer: removeDir(extendedPath(base))
+    var records: seq[PortableMemoRecord] = @[]
+    for name in ["a", "b-at-a-deeper-path"]:
+      let project = checkout(base / name, "int a;\n")
+      let fp = computePortableFingerprint(roots(project), argv = @["node"],
+        cwd = project, env = @[], declaredInputs = @[],
+        reads = @[project / "src" / "a.c", project / "src" / "package.json"],
+        probes = @[], enumerations = @[])
+      require fp.portable
+      records.add(PortableMemoRecord(weakHex: fp.weakHex,
+        pathSet: pathSetOf(fp.inputs), strongHex: fp.strongHex, outputs: @[]))
+    check records[0].strongHex == records[1].strongHex
+    let store = base / "store"
+    recordMemo(store, records[0])
+    let other = base / "b-at-a-deeper-path" / "p"
+    let hit = lookupMemo(store, roots(other), records[0].weakHex)
+    check hit.isSome
+    # Creating the file is a change, as it should be.
+    writeFile(other / "src" / "package.json", "{}")
+    check lookupMemo(store, roots(other), records[0].weakHex).isNone
