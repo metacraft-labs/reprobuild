@@ -24,10 +24,15 @@
 ##
 ##   1. an ahead sibling's pin MOVES to the sibling's `HEAD` — in the working
 ##      tree and in the blob the commit carries;
-##   2. it moves for an ahead sibling standing beside a behind one in the same
-##      workspace, because the withholding is per-INPUT and a per-REFRESH
-##      implementation of it would pass a single-sibling case and lose §3.1 the
-##      moment anything else drifted;
+##   2. it moves for an ahead sibling standing beside a WITHHELD one in the
+##      same workspace — an ahead sibling whose revision was never pushed —
+##      because withholding is per-INPUT and a per-REFRESH implementation of it
+##      would pass a single-sibling case and lose §3.1 the moment anything else
+##      drifted. (The companion used to be a sibling BEHIND its pin; since §3.2's
+##      "Rule, at commit" a behind sibling refuses the whole commit instead of
+##      being withheld, which `t_a_behind_pin_sibling_is_not_recorded_as_the_
+##      new_pin` pins, so the per-input guard now stands on the withholding that
+##      remains.)
 ##   3. the refresh announces itself, naming the input and both revisions.
 ##
 ## ## Mutation
@@ -54,12 +59,12 @@ suite "NF-2: an ahead sibling is still recorded":
       isolateNf2Config(fx)
       defer: releaseNf2Config()
 
-      # gamma is left BEHIND its pin, in the same refresh, so the ahead half is
-      # asserted in the presence of the case that withholds.
-      let gammaPinned = advanceSibling(fx, "gamma", 2)
-      discard rewindSibling(fx, "gamma", 2)
-      setFlakePins(fx, fx.seedSha[0], fx.seedSha[1], gammaPinned)
-      commitLockAndPublish(fx, "a lock pinned ahead of the gamma checkout")
+      # gamma moves AHEAD but is never pushed, so its input is withheld in the
+      # same refresh and the ahead half is asserted in the presence of the case
+      # that withholds.
+      let gammaPinned = fx.seedSha[2]
+      let gammaUnpushed = advanceSibling(fx, "gamma", 2)
+      check not siblingRevIsPublished(fx, "gamma", gammaUnpushed)
 
       # alpha moves FORWARD: this is §3.1's situation exactly — the shell builds
       # this revision and the lock still names the older one.
@@ -82,9 +87,10 @@ suite "NF-2: an ahead sibling is still recorded":
       check carried.len > 0
       check nodeText(carried, "alpha-src").contains(alphaHead)
 
-      # ---- (2) …while the behind sibling beside it kept its pin ----------
+      # ---- (2) …while the withheld sibling beside it kept its pin --------
       check nodeText(after, "gamma-src").contains(gammaPinned)
       check nodeText(carried, "gamma-src").contains(gammaPinned)
+      check not after.contains(gammaUnpushed)
 
       # ---- (3) and the refresh said so ----------------------------------
       let logLine = lastFlakeLogLine(fx)
