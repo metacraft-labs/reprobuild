@@ -926,6 +926,73 @@ case "${REPRO_HOST_PLATFORM}" in
     ;;
 esac
 
+# Windows self-containment, TLS library half: stage libssl-3-x64.dll and
+# libcrypto-3-x64.dll next to the engine.
+#
+# The `--define:ssl` entry points (the engine, repro-binary-cache,
+# repro-harvest-apt) load OpenSSL through Nim's `std/openssl`, which binds it
+# with `{.dynlib: "(libssl-3-x64|...).dll".}` -- a LoadLibrary by name at
+# module init, not an import the linker records. So exactly as with clingo.dll
+# and sqlite3_64.dll, a build/bin without them works only where the CALLER's
+# PATH happens to hold an OpenSSL, and an engine run from a clean environment
+# (a dev shell's minimal PATH, a service, the integration tests) dies at
+# start-up with
+#
+#   could not load: libssl-3-x64.dll
+#
+# Measured on the Windows workstation at agents b668bea7f: every engine this
+# script built failed that way under `repro exec`'s minimal PATH until the
+# two DLLs were copied in by hand.
+#
+# Source resolution policy (mirrors the blocks above -- no hardcoded store
+# path), in the order that keeps the staged DLLs the build's OWN OpenSSL:
+#   1. `$REPRO_WINDOWS_OPENSSL_DIR/bin` (what ensure-openssl.ps1 exports, and
+#      what windows/stage-release-dlls.ps1 stages a release from);
+#   2. the install whose `lib` dir is on `$LIBRARY_PATH` -- env.ps1 exports
+#      ensure-openssl.ps1's `lib` there for the link, and its runtime DLLs sit
+#      in the sibling `bin`;
+#   3. the directory of `openssl.exe` on PATH;
+#   4. the DLLs themselves on PATH.
+case "${REPRO_HOST_PLATFORM}" in
+  windows)
+    openssl_bin_dir=""
+    openssl_candidates=()
+    if [ -n "${REPRO_WINDOWS_OPENSSL_DIR:-}" ]; then
+      openssl_candidates+=("${REPRO_WINDOWS_OPENSSL_DIR}/bin")
+    fi
+    if [ -n "${LIBRARY_PATH:-}" ]; then
+      IFS=';' read -r -a library_path_entries <<<"${LIBRARY_PATH}"
+      for entry in "${library_path_entries[@]}"; do
+        [ -n "${entry}" ] && openssl_candidates+=("$(dirname "${entry}")/bin")
+      done
+    fi
+    openssl_exe="$(command -v openssl.exe 2>/dev/null || true)"
+    if [ -n "${openssl_exe}" ]; then
+      openssl_candidates+=("$(dirname "${openssl_exe}")")
+    fi
+    libssl_on_path="$(command -v libssl-3-x64.dll 2>/dev/null || true)"
+    if [ -n "${libssl_on_path}" ]; then
+      openssl_candidates+=("$(dirname "${libssl_on_path}")")
+    fi
+    for cand in ${openssl_candidates[@]+"${openssl_candidates[@]}"}; do
+      if [ -f "${cand}/libssl-3-x64.dll" ] && [ -f "${cand}/libcrypto-3-x64.dll" ]; then
+        openssl_bin_dir="${cand}"
+        break
+      fi
+    done
+    if [ -n "${openssl_bin_dir}" ]; then
+      for dll in libssl-3-x64.dll libcrypto-3-x64.dll; do
+        if [ ! "${openssl_bin_dir}/${dll}" -ef "build/bin/${dll}" ]; then
+          cp -f "${openssl_bin_dir}/${dll}" "build/bin/${dll}"
+        fi
+      done
+      echo "Staged libssl-3-x64.dll and libcrypto-3-x64.dll from ${openssl_bin_dir} -> build/bin/"
+    else
+      windows_dll_staging_problem "libssl-3-x64.dll / libcrypto-3-x64.dll not found (REPRO_WINDOWS_OPENSSL_DIR, LIBRARY_PATH's OpenSSL, openssl.exe on PATH, PATH); cannot stage them next to the engine -- it will fail 'could not load: libssl-3-x64.dll' in a clean environment until OpenSSL is provisioned (windows/ensure-openssl.ps1)"
+    fi
+    ;;
+esac
+
 # Windows self-containment, HTTPS half: stage cacert.pem next to repro.exe.
 #
 # Nim's ``net.newContext(CVerifyPeer)`` delegates to

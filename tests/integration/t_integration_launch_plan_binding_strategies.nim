@@ -32,6 +32,7 @@
 ## hosts where running the launcher binary would not be possible.
 
 import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import blake3
 import repro_launch_plan

@@ -516,11 +516,11 @@ proc nodeText*(lockText, node: string): string =
   ""
 
 proc preCommitLog*(fx: Nf2Fixture): string =
-  let path = fx.ws / ".repro" / "workspace" / "pre-commit-lock.log"
+  let path = fx.ws / ".repro" / "build" / "reports" / "pre-commit-lock.log"
   if fileExists(path): readFile(path) else: ""
 
 proc postCommitLog*(fx: Nf2Fixture): string =
-  let path = fx.ws / ".repro" / "workspace" / "post-commit-lock.log"
+  let path = fx.ws / ".repro" / "build" / "reports" / "post-commit-lock.log"
   if fileExists(path): readFile(path) else: ""
 
 proc lastFlakeLogLine*(fx: Nf2Fixture): string =

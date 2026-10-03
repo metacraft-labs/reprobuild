@@ -105,8 +105,8 @@
   ioMonSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "io-mon";
-    rev = "07cc4afc823a7c631d9ef9fdf4522f4d219c46a8";
-    hash = "sha256-bLG7RtdIseK8D4qrD+4PkOuIE2rUy8ou0I1ppBVPH4U=";
+    rev = "e75019940be4722fcaf11f1b239de37adae54f41";
+    hash = "sha256-ZhlF06zxG00Ieaakuh0TCw1SUZv7Y9L7nwIL9k0TlZo=";
   },
   shmGsetSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -145,8 +145,8 @@
   runquotaSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
-    rev = "7a79877992908f64d3c8318bb7b20078ff5d1bf4";
-    hash = "sha256-7wTdJkutu2VDQFuKIzZgAzJ7X8J3pHXbr3dEcqcVH2Q=";
+    rev = "3590066e9c9dc82ca758ff2d7918f3b6f8304f35";
+    hash = "sha256-KD47AShW5Y8trE9vY4WrPtk/ot6qagq3p4vhPw/mQBU=";
   },
 }:
 let

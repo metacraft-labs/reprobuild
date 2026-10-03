@@ -90,6 +90,12 @@ try {
     throw 'Failed extraction was published as a successful install.'
   }
   Write-Output 'PASS: corrupt archives fail without publishing a partial install'
+
+  # The case above makes tar.exe fail on purpose, and its nonzero exit code
+  # stays in $LASTEXITCODE. A `shell: pwsh` step exits with $LASTEXITCODE when
+  # the script finishes, so the expected failure would fail a check whose
+  # every case passed. A real failure in this script throws instead.
+  $global:LASTEXITCODE = 0
 } finally {
   ConvertTo-InstallRelativePath -AbsolutePath $tempRoot -Root ([IO.Path]::GetTempPath()) | Out-Null
   Remove-Item -LiteralPath $tempRoot -Recurse -Force

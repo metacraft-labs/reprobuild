@@ -64,6 +64,20 @@ type
       ## of the world at some UNKNOWN earlier time. No verdict may be
       ## rendered from it -- least of all a reassuring one. See the guard
       ## at the top of ``classifyRepoState``.
+    scRelocationRefused
+      ## Declared-Repository-Renames.md §4 — the repo declares a prior
+      ## identity, something was found at a prior path, and the tool DECLINED
+      ## to move it (one of the eight pre-flight refusals). The repo must not
+      ## be cloned either: cloning fresh at the new path after concluding
+      ## something is wrong reproduces the orphan-beside-empty-clone outcome
+      ## the mechanism exists to prevent, and does it KNOWINGLY. Exit 2 — a
+      ## judgement call with manual work for the operator.
+    scRelocationFailed
+      ## Declared-Repository-Renames.md §4 — the move was attempted and
+      ## FAILED (`relocation_failed` / `relocation_verification_failed`).
+      ## Exit 1, because this is a broken action rather than a judgement
+      ## call; that split is the one `CLI/sync.md` already defines and
+      ## relocation does not need a third code.
 
   SyncActionKind* = enum
     ## Discriminator for what the dispatcher should do for a given repo
@@ -148,6 +162,22 @@ type
     fetchDiagnostic*: string
       ## Why the fetch failed, verbatim from the dispatcher, so the refusal
       ## names the real cause instead of the symptom.
+    relocationRefusal*: string
+      ## Declared-Repository-Renames.md §4 — the dispatcher declined to
+      ## relocate a checkout found at one of this repo's declared prior paths,
+      ## and this is the refusal, naming the case and what was found.
+      ##
+      ## Carried in the OBSERVATION rather than applied as a side table for
+      ## the reason the `fetchFailed` flag is: one code path downstream has to
+      ## report, count and exit-code every per-repo outcome, and a repo whose
+      ## relocation was refused has no checkout at its declared path — so
+      ## without this field the planner would read `exists = false` and
+      ## schedule the clone that manufactures the orphan.
+    relocationFailure*: string
+      ## Same, for a relocation that was ATTEMPTED and failed. Separate field
+      ## because the two map onto different exit codes (2 vs 1), and
+      ## collapsing them would make a broken move indistinguishable from a
+      ## declined one.
     remoteHistoryDisjoint*: bool
       ## HEAD shares NO history with the remote: the merge-base of HEAD and
       ## the remote's trunk tip is empty. On a branch with a remote
@@ -203,6 +233,8 @@ proc syncCaseTag*(syncCase: SyncCase): string =
   of scMissingCheckout: "missing_checkout"
   of scForcePushRebase: "force_push_rebase"
   of scFetchFailed: "fetch_failed"
+  of scRelocationRefused: "relocation_refused"
+  of scRelocationFailed: "relocation_failed"
 
 proc syncActionTag*(action: SyncActionKind): string =
   ## Stable identifier for the planner's action enum, used as the JSON
@@ -318,6 +350,11 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   ## cases. The decision logic deliberately runs in a fixed priority
   ## order:
   ##
+  ## -1. ``relocation_failed`` /
+  ##     ``relocation_refused``        (a declared rename's move failed, or
+  ##                                    the tool declined it — either way the
+  ##                                    declared path is empty BY DECISION and
+  ##                                    must not be cloned into)
   ## 0. ``fetch_failed``              (the pre-classification fetch for
   ##                                    this repo did not succeed, so no
   ##                                    remote-derived field can be trusted)
@@ -360,6 +397,28 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   result.path = resolved.path
   result.expected = resolved.revision
   result.branch = observation.currentBranch
+
+  # Declared-Repository-Renames.md §3.3 — AHEAD of the missing-checkout arm,
+  # because that is the arm these two displace and the displacement is the
+  # whole point. A repo whose relocation was refused or failed has no checkout
+  # at its declared path, so `exists = false` is true and `missing_checkout`
+  # → `clone` is what the planner would otherwise answer: a second empty copy
+  # beside a directory the tool has just said it does not understand. "A
+  # failed check refuses the repo, and does not clone either."
+  if observation.relocationFailure.len > 0:
+    result.syncCase = scRelocationFailed
+    result.action = saNone
+    result.refusalReason = observation.relocationFailure
+    result.message = "relocation of '" & resolved.path & "' FAILED; nothing " &
+      "was half-moved and no clone was substituted for it"
+    return
+  if observation.relocationRefusal.len > 0:
+    result.syncCase = scRelocationRefused
+    result.action = saNone
+    result.refusalReason = observation.relocationRefusal
+    result.message = "declining to relocate a checkout into '" &
+      resolved.path & "'; it was NOT cloned over"
+    return
 
   if not observation.exists:
     result.syncCase = scMissingCheckout
@@ -440,6 +499,37 @@ proc classifyRepoState*(resolved: ResolvedRepo;
       result.message = "cherry-picking locally authored commits on top of force-pushed branch at '" & resolved.path & "'"
       return
     result.action = saNone
+    # The remedies these refusals name, spelled as commands that RESOLVE the
+    # refusal rather than as the flag that is relevant to it.
+    #
+    # Interactive-UX-And-Progress.md Principle 2 is "Name the fix. Pair every
+    # refusal with the command that resolves it", and a command that is one
+    # flag short of resolving it is worse than naming none: it costs a full
+    # re-run to learn the advice was inert. Both destructive sync paths route
+    # through the RA-9 preview-and-confirm gate, which REFUSES in a
+    # non-interactive context without ``--yes`` — and every CI job and every
+    # agent is non-interactive. Measured: twelve rewritten checkouts refused,
+    # the remedy ``repro sync --force-sync`` run exactly as printed, and the
+    # answer was ``refused 12, force-reset 0`` plus a reprint of the same
+    # advice. So ``--yes`` belongs in the named command, with the note that it
+    # is the confirmation and can be dropped at a terminal.
+    let discardRemedy =
+      "'repro sync --force-sync --yes' to discard your local history and " &
+      "reset to the remote (it previews each checkout first; drop '--yes' " &
+      "to be asked interactively instead)"
+    # ``--rebase-on-force-push`` is named ONLY where it would actually act.
+    # It needs a remote counterpart to replay onto and a RECORDED superseded
+    # base (``.repro/workspace/force-pushes.json``), and when both are present
+    # the missing input is just the flag — which is exactly when naming it is
+    # the fix. When one is absent the flag changes nothing, and advertising it
+    # would re-create the defect above in the other direction.
+    let replayRemedyApplies =
+      observation.remoteBranchTip.len > 0 and
+      observation.forcePushedBaseSha.len > 0
+    let replayRemedy =
+      "'repro sync --rebase-on-force-push --yes' to reset onto the new " &
+      "history and replay the commits you own (the pre-rewrite tip is kept " &
+      "as refs/repro/pre-rewrite/<branch>/<sha>)"
     if observation.remoteHistoryDisjoint:
       # THE post-rewrite case, and the reason this arm exists at all.
       #
@@ -465,14 +555,23 @@ proc classifyRepoState*(resolved: ResolvedRepo;
         " <your branch point> " &
         (if observation.currentBranch.len > 0: observation.currentBranch
          else: "HEAD") &
-        "'), or discard it with 'repro sync --force-sync'"
+        "')" &
+        (if replayRemedyApplies: ", or run " & replayRemedy else: "") &
+        ", or run " & discardRemedy
       result.message = "refusing to sync '" & resolved.path &
         "': its history is disjoint from the rewritten remote"
       return
     if not rebaseOnForcePush:
       result.refusalReason = "remote branch was force-pushed; refused — " &
-        "run 'repro sync --rebase-on-force-push' to rebase your local commits " &
-        "on the new history, or 'repro sync --force-sync' to discard local changes"
+        "run " &
+        (if replayRemedyApplies: replayRemedy
+         else:
+           "'git -C " & resolved.path & " rebase --onto " &
+           gitRemoteFor(resolved) & "/" & trunkNameFor(resolved) &
+           " <your branch point> " &
+           (if observation.currentBranch.len > 0: observation.currentBranch
+            else: "HEAD") & "' to replay the commits you own by hand") &
+        ", or run " & discardRemedy
       result.message = "refusing to sync force-pushed checkout at '" & resolved.path & "'"
       return
     # Force-pushed, the operator wants the rebase, and one of its two
@@ -489,8 +588,7 @@ proc classifyRepoState*(resolved: ResolvedRepo;
        else: "no superseded base commit was recorded to replay from") &
       ". Refused — do NOT push before checking whether the remote history " &
       "was rewritten; rebase manually onto '" & gitRemoteFor(resolved) &
-      "/" & trunkNameFor(resolved) & "', or run 'repro sync --force-sync' " &
-      "to discard local changes"
+      "/" & trunkNameFor(resolved) & "', or run " & discardRemedy
     result.message = "refusing to sync force-pushed checkout at '" &
       resolved.path & "': nothing to rebase onto"
     return
@@ -675,6 +773,7 @@ type
     msaFastForward
     msaRebase
     msaMerge
+    msaClone
 
   MainlineSyncObservation* = object
     ## One repo's git state, relative to ITS mainline. Every field is a fact
@@ -724,6 +823,7 @@ proc mainlineSyncActionTag*(a: MainlineSyncAction): string =
   of msaFastForward: "fast_forward"
   of msaRebase: "rebase"
   of msaMerge: "merge"
+  of msaClone: "clone"
 
 proc classifyMainlineSync*(resolved: ResolvedRepo;
                            obs: MainlineSyncObservation;
@@ -736,10 +836,18 @@ proc classifyMainlineSync*(resolved: ResolvedRepo;
   result.action = msaNone
 
   if not obs.exists:
+    if obs.mainlineBranch.len == 0:
+      result.syncCase = mscNoMainlineBranch
+      result.refusalReason = "repo '" & resolved.path &
+        "' declares no `branch` in its manifest fragment" &
+        (if resolved.fragmentPath.len > 0: " (" & resolved.fragmentPath & ")"
+         else: "") & " — cannot clone without a target branch"
+      result.message = result.refusalReason
+      return
     result.syncCase = mscMissingCheckout
-    result.refusalReason = "no checkout at '" & resolved.path &
-      "' — run `repro sync` or `repro workspace pull` first"
-    result.message = result.refusalReason
+    result.action = msaClone
+    result.message = "scheduling clone of '" & resolved.path & "' from " &
+      resolved.fetchUrl & " @ " & obs.mainlineBranch
     return
 
   # The manifest is this mode's input, so an incomplete fragment is named

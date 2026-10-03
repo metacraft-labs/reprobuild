@@ -47,6 +47,8 @@ const PlatformSkipReason =
   "[platform N/A] t_integration_stow_byte_identical_target_is_cache_hit: " &
     "requires Windows stow junction fixtures"
 
+import repro_test_support/reasoned_skip
+
 when not defined(windows):
   # The Windows-only branch below cannot be compiled here (its imports
   # and stow-junction fixtures are Windows-shaped), so the cases are

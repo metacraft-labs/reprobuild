@@ -23,6 +23,7 @@
 ## and stdout. When qemu-user is missing the run sub-step is skipped.
 
 import std/[os, osproc, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_dsl_stdlib
 import repro_dsl_stdlib/configurables

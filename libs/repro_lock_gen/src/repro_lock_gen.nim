@@ -90,9 +90,11 @@ import repro_solver
 
 import repro_lock_gen/metadata_objects
 import repro_lock_gen/solve_path_set
+import repro_lock_gen/upstream_archives
 
 export metadata_objects
 export solve_path_set
+export upstream_archives
 
 type
   LockStrategy* = enum
@@ -195,6 +197,13 @@ type
       ## give it a stable value. Deliberately NOT `workDir`: the wave's
       ## artifacts are scratch and the CLI deletes them, while the path-set
       ## store is exactly the thing that must survive between invocations.
+    nimReleaseBase*: string
+      ## Where the upstream-archive edges look for official Nim release
+      ## archives and their ``.sha256`` files. Empty means
+      ## ``upstream_archives.NimReleaseBase`` (nim-lang.org). A request field
+      ## so a test can serve the release tree from a loopback listener and
+      ## an air-gapped site from its own mirror; whatever base is used, the
+      ## URL it resolved to is what the lock records.
 
   MetadataFetchPlanEntry* = object
     ## One planned `bakMetadataFetch` edge — one retrieved object.
@@ -218,6 +227,13 @@ type
     destination*: string
     objectPath*: string
     actionId*: string
+    version*: string
+      ## ``mokUpstreamArchive`` only: the candidate version the record is
+      ## for, so the solve can pick the record of the version it selected.
+    requestText*: string
+      ## ``mokUpstreamArchive`` only: the edge's ``builtinText``, an
+      ## ``upstream_archives`` request naming package, version, platform and
+      ## release base. Every other kind's edge text is its ``url``.
 
   LockGenerationResult* = object
     entryPoint*: LockGenerationEntryPoint
@@ -363,6 +379,11 @@ proc canonicalSolveInputs*(req: LockGenerationRequest): string =
   result.add(framed("variants", vs))
   result.add(framed("packages", ps))
   result.add(framed("repositories", eps))
+  # Only when set, so every request that leaves it at the default keeps the
+  # weak fingerprint (and the action ids derived from it) it had before
+  # upstream-archive edges existed.
+  if req.nimReleaseBase.len > 0:
+    result.add("nim-release-base=" & req.nimReleaseBase & "\x1e")
 
 proc solveInputsDigestHex*(req: LockGenerationRequest): string =
   hexOf(weakFingerprintFromText(canonicalSolveInputs(req)))
@@ -370,6 +391,65 @@ proc solveInputsDigestHex*(req: LockGenerationRequest): string =
 # ---------------------------------------------------------------------------
 # Wave 1, part 1: the over-approximated metadata-fetch plan
 # ---------------------------------------------------------------------------
+
+proc effectiveNimReleaseBase*(req: LockGenerationRequest): string =
+  if req.nimReleaseBase.len > 0: req.nimReleaseBase else: NimReleaseBase
+
+proc upstreamArchivePlan(req: LockGenerationRequest; digest: string):
+    seq[MetadataFetchPlanEntry] =
+  ## One ``mokUpstreamArchive`` edge per (store-sourced package with an
+  ## upstream route, DECLARED candidate version): reprobuild-specs
+  ## Distribution-And-Packaging, M5 "pin the provider-compile toolchain".
+  ##
+  ## Planned over the declared universe, not the solved version, for the
+  ## reason ``mokAcquisitionRecord`` is: which version wins is the solve's
+  ## output, and a plan that waited for it would be the fixpoint §5.6
+  ## dissolves. A compiler pin is an exact ``==V``, so its universe is that
+  ## one version and the over-approximation costs nothing. A platform
+  ## upstream publishes nothing for gets no edge, and its lock entry no
+  ## archive (realization then names the manual install).
+  ##
+  ## Independent of ``endpoints`` and ``objectKinds``: those describe a
+  ## reprobuild repository, and this object comes from the package's
+  ## upstream.
+  let base = req.effectiveNimReleaseBase()
+  var names: seq[string]
+  for p in req.packages:
+    if parsePackageSource(p.source).kind == pskStore and
+        hasUpstreamArchives(p.name) and p.name notin names:
+      names.add(p.name)
+  names.sort()
+  for name in names:
+    var versions: seq[string]
+    for p in req.packages:
+      if p.name == name:
+        for v in p.versions:
+          if v notin versions: versions.add(v)
+    versions.sort()
+    for v in versions:
+      let candidates =
+        try: nimReleaseCandidates(v, req.platform, base)
+        except UpstreamArchiveError as err:
+          raise newException(UpstreamArchiveError,
+            "cannot pin " & name & " " & v & " for " & req.platform & ": " &
+            err.msg)
+      if candidates.len == 0:
+        continue
+      let subject = name & "@" & v
+      result.add(MetadataFetchPlanEntry(
+        kind: mokUpstreamArchive,
+        subject: subject,
+        packageName: name,
+        arms: @[],
+        url: candidates[0].sha256Url,
+        destination: base.strip(leading = false, chars = {'/'}) & "/",
+        objectPath: req.workDir / "metadata" /
+          metadataObjectFileName(mokUpstreamArchive, subject),
+        actionId: "lockgen/" & digest & "/fetch/" & $mokUpstreamArchive &
+          "/" & subject,
+        version: v,
+        requestText: renderUpstreamArchiveRequest(name, v, req.platform,
+          base)))
 
 proc fetchPlan*(req: LockGenerationRequest): seq[MetadataFetchPlanEntry] =
   ## Every metadata object wave 1 retrieves, over-approximated across variant
@@ -409,14 +489,19 @@ proc fetchPlan*(req: LockGenerationRequest): seq[MetadataFetchPlanEntry] =
   ##     universe comes only from the registry contributes no acquisition
   ##     record in wave 1 — stated rather than implied, because that is a real
   ##     limit of planning acquisition from static inputs.
+  ##
+  ## Before all of these, and whether or not a repository is configured:
+  ## one ``mokUpstreamArchive`` per store-sourced package with an upstream
+  ## route (``upstreamArchivePlan``).
   result = @[]
+  let digest = req.solveInputsDigestHex()
+  result.add(upstreamArchivePlan(req, digest))
   if req.endpoints.len == 0:
     return
   let kinds =
     if req.objectKinds == {}: {mokVersionList} else: req.objectKinds
   let endpoint = req.endpoints[0]
   let destination = metadataDestinationOf(endpoint)
-  let digest = req.solveInputsDigestHex()
 
   proc entry(kind: MetadataObjectKind; subject, packageName: string;
              arms: seq[string]): MetadataFetchPlanEntry =
@@ -528,7 +613,7 @@ proc generationWaveOne*(req: LockGenerationRequest): seq[BuildAction] =
       governingLockIdentity = identity,
       outputs = [entry.objectPath],
       cacheable = true,
-      text = entry.url,
+      text = (if entry.requestText.len > 0: entry.requestText else: entry.url),
       networkMode = netFetch,
       netDestinations = [entry.destination]))
     deps.add(entry.actionId)
@@ -622,8 +707,42 @@ proc mergeFetchedVersions(req: LockGenerationRequest;
       result.add(PackageDecl(name: entry.packageName, versions: fetched,
         depends: @[], variants: @[], source: "", pinned: false))
 
+proc attachUpstreamArchives(deps: var seq[LockedDep];
+                            plan: seq[MetadataFetchPlanEntry]) =
+  ## Copy the upstream-archive record of each lifted store dependency's
+  ## SOLVED version into its lock entry. A record that was planned but is
+  ## absent or unreadable fails the generation: writing the entry without
+  ## its archive would commit a pin no reprobuild can realize, and the edge
+  ## that should have produced it has already reported why it did not.
+  for i in 0 ..< deps.len:
+    if deps[i].coordinates.kind != ckStore:
+      continue
+    var planned: seq[string]
+    for entry in plan:
+      if entry.kind != mokUpstreamArchive or
+          entry.packageName != deps[i].name:
+        continue
+      planned.add(entry.version)
+      if entry.version != deps[i].version:
+        continue
+      if not fileExists(entry.objectPath):
+        raise newException(UpstreamArchiveError,
+          "the upstream-archive edge for " & entry.subject &
+          " produced no record at " & entry.objectPath)
+      deps[i].archive = parseUpstreamArchiveRecord(readFile(entry.objectPath))
+      break
+    if planned.len > 0 and not deps[i].archive.isPinned:
+      # The platform has an upstream route (edges were planned) but the
+      # solve chose a version none of them was for: writing the entry
+      # without an archive would be the unrealizable pin this refuses.
+      raise newException(UpstreamArchiveError,
+        "the solve chose " & deps[i].name & " " & deps[i].version &
+        ", but upstream archives were resolved only for " &
+        planned.join(", ") & " (the declared candidates)")
+
 proc renderLockDocument(req: LockGenerationRequest;
-                        sol: UnifiedSolution): string =
+                        sol: UnifiedSolution;
+                        plan: seq[MetadataFetchPlanEntry]): string =
   ## The rule-set artifact: a canonical `reprobuild.solved-graph-lock.v2`
   ## document.
   ##
@@ -647,7 +766,9 @@ proc renderLockDocument(req: LockGenerationRequest;
   var ld = lockedDepsFromSolved(solved)
   ld.schema = SolvedGraphLockSchemaV2
   ld.deps = req.extraDeps
-  ld.deps.add(lockedDepsFromPackages(ld.packages, req.platform))
+  var lifted = lockedDepsFromPackages(ld.packages, req.platform)
+  attachUpstreamArchives(lifted, plan)
+  ld.deps.add(lifted)
   serializeLockedDependencies(ld)
 
 var solveExecutionCount {.threadvar.}: int
@@ -708,7 +829,11 @@ proc installGenerationExecutors*(req: LockGenerationRequest) =
       # wave runs at `maxParallelism = 1`.
       var retrieved: RetrievedMetadata
       {.cast(gcsafe).}:
-        retrieved = fetchMetadataObject(action.builtinText)
+        retrieved =
+          if isUpstreamArchiveRequest(action.builtinText):
+            resolveUpstreamArchive(action.builtinText)
+          else:
+            fetchMetadataObject(action.builtinText)
       let outPath = action.outputs[0]
       createDir(parentDir(outPath))
       writeFile(outPath, retrieved.body)
@@ -775,7 +900,7 @@ proc installGenerationExecutors*(req: LockGenerationRequest) =
         let preference = versionPreferenceOf(req.strategy)
         inc solveExecutionCount
         let sol = solve(req.variants, packages, preference)
-        let document = renderLockDocument(req, sol)
+        let document = renderLockDocument(req, sol, plan)
         writeFile(outPath, document)
 
         # ---- Record what the solve consulted ------------------------------

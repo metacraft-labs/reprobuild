@@ -48,6 +48,7 @@ import std/[algorithm, json, os, osproc, streams, strtabs, strutils,
   tempfiles]
 
 import std/unittest
+import repro_test_support/reasoned_skip
 import repro_home_generations
 import repro_local_store
 import repro_test_support

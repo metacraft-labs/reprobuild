@@ -196,7 +196,7 @@ proc writeRmdf(f: Fixture) =
     osPid: 4242, threadId: 4242))
   all.add(MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
     osPid: 4242, threadId: 4242, path: f.observedPath))
-  writeFile(f.rmdfPath, cast[string](encodeCanonical(all)))
+  writeFile(f.rmdfPath, encodeCanonical(all))
 
 proc recFiles(f: Fixture): seq[string] =
   let hot = f.cacheRoot / "action-cache" / "hot-records"

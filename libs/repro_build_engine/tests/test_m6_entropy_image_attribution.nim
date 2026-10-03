@@ -106,7 +106,7 @@ proc setupScenario(name: string): Scenario =
   # action's read set and the cache key fingerprints what it reads. A
   # made-up path would make these cases fail for a reason that has nothing
   # to do with the blessing.
-  for image in [BlessedImage, UnblessedImage, "git"]:
+  for image in [BlessedImage, UnblessedImage, "git", "otherrand"]:
     writeFile(result.binRoot / image, "#!/bin/sh\n")
 
 proc image(scenario: Scenario; name: string): string =
@@ -354,3 +354,55 @@ suite "M6 an entropy record is graded against the image that emitted it":
           BlessedImage in diagnostic and "per-image" in diagnostic:
         reported = true
     check reported
+
+  test "an action-scoped image blessing excuses that image in that action only":
+    ## Dev-Env-Warm-Entry.md §4. `nix` is blessed on the dev-env introspection
+    ## edge, and only there. Three things are checked on one image name, so
+    ## the scoped blessing cannot pass by accident:
+    ##   * the action that names the image publishes;
+    ##   * an otherwise identical action that does not name it stays
+    ##     unpublished, so the image is not blessed globally;
+    ##   * the scoped action with a SECOND, unnamed emitter stays unpublished,
+    ##     so the scope is per image, not a waiver for the whole tree.
+    let scoped = @[EntropyBlessedTool(image: UnblessedImage,
+      spec: "test", justification: "names a scratch directory it deletes")]
+
+    block:
+      let scenario = setupScenario("scoped-publishes")
+      defer: removeDir(scenario.root)
+      writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+        fileRead(scenario.sourcePath),
+        execRecord(1002, scenario.image(UnblessedImage)),
+        entropyReadFrom(1002)])
+      var act = scenarioAction(scenario)
+      act.entropyBlessedImages = scoped
+      discard runBuild(graph([act]),
+        defaultBuildEngineConfig(scenario.cacheRoot))
+      check scenario.published(act)
+
+    block:
+      let scenario = setupScenario("scoped-not-global")
+      defer: removeDir(scenario.root)
+      writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+        fileRead(scenario.sourcePath),
+        execRecord(1002, scenario.image(UnblessedImage)),
+        entropyReadFrom(1002)])
+      let act = scenarioAction(scenario)
+      discard runBuild(graph([act]),
+        defaultBuildEngineConfig(scenario.cacheRoot))
+      check not scenario.published(act)
+
+    block:
+      let scenario = setupScenario("scoped-other-emitter")
+      defer: removeDir(scenario.root)
+      writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+        fileRead(scenario.sourcePath),
+        execRecord(1002, scenario.image(UnblessedImage)),
+        entropyReadFrom(1002),
+        execRecord(1003, scenario.image("otherrand")),
+        entropyReadFrom(1003)])
+      var act = scenarioAction(scenario)
+      act.entropyBlessedImages = scoped
+      discard runBuild(graph([act]),
+        defaultBuildEngineConfig(scenario.cacheRoot))
+      check not scenario.published(act)

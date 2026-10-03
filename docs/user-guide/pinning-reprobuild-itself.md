@@ -77,6 +77,115 @@ actually called `repro`. A bootstrap installed as, say, `repro-bootstrap`
 answers `cannot schedule the provider-compile edge … no 'repro' image to
 spawn it with`. Give it a directory of its own rather than a different name.
 
+## Without the launcher: the bootstrap hands over
+
+The launcher is optional. Whatever `repro` a host has — the native
+package's, a CI image's, `build/bin/reprobuild` from a checkout — reads the
+project's pin before it does anything else, and if the project pins a
+different reprobuild it runs that one instead:
+
+```console
+$ cd myApp && REPRO_SELFHOST_DEBUG=1 repro --version
+repro(0.2.5): …/myApp/repro.lock pins reprobuild 0.1.4; this image is 0.2.5, so it hands over to …/prefixes/reprobuild/0.1.4-0f5a178d/bin/repro
+repro(0.2.5): exec …/prefixes/reprobuild/0.1.4-0f5a178d/bin/repro (engine …/bin/reprobuild)
+repro 0.1.4
+```
+
+This is the whole job of the reprobuild a host starts with: provision the
+project's pinned reprobuild (and its compiler, below), then hand over. It
+never evaluates a recipe it is not pinned to. The rules:
+
+- The pinned image gets your argv and environment unchanged, plus
+  `REPRO_SELFHOST_RESOLVED` (the prefix it was handed), `REPRO_PUBLIC_CLI_PATH`
+  (the pinned engine) and, when the compiler is pinned, `REPRO_NIM_COMPILER`.
+  `REPRO_FULL_CLI` is removed, so nothing can route the pinned thin client
+  back to the bootstrap.
+- No hand-over when nothing is pinned, when the pinned version is the
+  running version, or when the running image *is* the pinned prefix's engine
+  (compared by file identity).
+- If a hand-over to a prefix already happened in this process tree and the
+  image running now is not that prefix, `repro` refuses with exit 72 rather
+  than looping or running the recipe with the wrong reprobuild.
+- A pinned version that is not in the store is refused with exit 70 and the
+  `repro self install` command that would put it there.
+- `repro self …` is always answered by the reprobuild you ran: it is how a
+  missing version gets installed.
+- A daemon-hosted build of a project pinned to another reprobuild is
+  declined by the daemon, and the client's engine hands over.
+
+The project is the one enclosing the working directory, as for the
+launcher.
+
+## Pinning the compiler that builds the provider
+
+The recipe (`repro.nim`) is compiled into a provider binary before it can be
+read, so the Nim compiler that does it decides what your recipe means. Pin it
+the same way, as the ordinary `nim` package with a store source and an exact
+version:
+
+```nim
+package myApp:
+  packageSource "nim", "store"
+  uses:
+    "nim ==2.2.10"
+```
+
+`repro lock refresh` records it as a `deps` entry with `coord_kind =
+"store"`, exactly like the reprobuild pin, and pins where its bytes come
+from: the official release archive for the lock's platform and the SHA-256
+nim-lang.org publishes for it. Only a store-sourced `nim` entry is a pin: the
+bare `nim` entry most locks already carry pins nothing, and the provider is
+compiled with the bootstrap's own Nim.
+
+```toml
+deps = [ …, { name = "nim", path = "", coord_kind = "store",
+              store_hash = "…", integrity = "blake3:…", version = "2.2.8", …,
+              archive_url = "https://nim-lang.org/download/nim-2.2.8_x64.zip",
+              archive_sha256 = "11fe2415a64a791b899cc78e2eeacdde93b5f122f2fabc447db36d38002bfb8c",
+              archive_type = "zip", archive_build = "binary" } ]
+```
+
+`repro lock refresh` prints each archive it pinned. Review the digest like any
+other line of the lock diff: it is fetched from upstream once, when the lock
+is written, and every later realization is checked against it.
+
+Which archive, per lock platform:
+
+| Platform | Archive | |
+|---|---|---|
+| Windows x64 / x86 | `nim-<v>_x64.zip` / `nim-<v>_x32.zip` | used as is |
+| macOS arm64 / x86_64 | `nim-<v>-macosx_{arm64,x64}.tar.xz` where nim-lang.org publishes one (2.2.8 and later) | used as is |
+| macOS, older versions | `nim-<v>.tar.xz` | built from source with the Xcode clang |
+| Linux (with or without Nix) and other POSIX | `nim-<v>.tar.xz` | built from source with the bootstrap C compiler |
+
+Linux builds from source because the vendor `linux_x64` binary is statically
+linked, which the build monitor cannot observe, and because nixpkgs cannot
+give an arbitrary Nim version. A version upstream never released (`nim
+==2.2.9`) fails `repro lock refresh`, naming it.
+
+A pinned compiler lives in the store at `prefixes/nim/<version>-<hash>/`. The
+first command that needs it (any `repro` verb in the project except `self`,
+`--version` and help) provisions it there: the archive is downloaded into the
+tool store, checked against the lock's digest, unpacked (and, for a source
+archive, built), and installed at that prefix. A digest mismatch or any other
+failure stops the command and says what was being provisioned, from where,
+why it failed and what to do; the bootstrap never compiles the provider with
+a compiler the lock does not name. The pin also wins over an inherited
+`REPRO_NIM_COMPILER`, with a warning when the two differ.
+
+To provide the compiler by hand instead (offline, or a platform upstream has
+no archive for), install a Nim distribution directory (it must contain
+`bin/nim` and `lib/system.nim`):
+
+```sh
+repro self install --package=nim --from=<nim-dir> --version=2.2.14
+```
+
+A lock written before archive pins existed carries no archive; re-run
+`repro lock refresh` to add one. `repro self which --package=nim`, `repro self
+list --package=nim` and `repro store gc` treat the compiler like the
+reprobuild pin.
+
 ## Installing versions into the store
 
 ```sh
