@@ -156,6 +156,19 @@ type
       ## reproduce-locally posture, where the manifest really was built
       ## here — and indistinguishable, to this code, from a verdict about
       ## an attacker's file.
+    allowEvidenceBackedManifest*: bool
+      ## Release against
+      ## ``accepted-against-an-evidence-backed-manifest``: the manifest
+      ## was not pinned, and a quorum of the rebuilders the policy
+      ## admits signed it.
+      ##
+      ## Its own opt-in, and not folded into the one above, because the
+      ## two ask for different things. That one asks an operator to
+      ## accept a document nothing vouched for; this one asks them to
+      ## accept the judgement of a named set of parties. An operator who
+      ## grants the first would be astonished to find it had granted the
+      ## second, and — more to the point — an operator who wants only
+      ## the second must not have to grant the first to get it.
 
   ReleaseOutcome* = object
     decision*: ReleaseDecision
@@ -241,6 +254,7 @@ proc releasesUnder(d: VerdictDecision; req: ReleaseRequest): bool =
   of vdAccepted: true
   of vdAcceptedNoRootOfTrust: req.allowNoRootOfTrust
   of vdAcceptedUnpinnedManifest: req.allowUnauthenticatedManifest
+  of vdAcceptedEvidenceBackedManifest: req.allowEvidenceBackedManifest
 
 proc withheldReason*(v: Verdict; req: ReleaseRequest): string =
   ## Why this verdict released nothing. Named per case, because "policy"
@@ -269,6 +283,11 @@ proc withheldReason*(v: Verdict; req: ReleaseRequest): string =
       "was taken from a document the policy pinned nothing about; " &
       "releasing against it is a deliberate opt-in this request did not " &
       "make"
+  of vdAcceptedEvidenceBackedManifest:
+    "the verdict is " & $v.decision & ", so the configuration it names " &
+      "was taken from a document the policy pinned nothing about and a " &
+      "quorum of admitted rebuilders signed; releasing against it is a " &
+      "deliberate opt-in this request did not make"
   of vdAccepted:
     "the verdict is " & $v.decision &
       ", and this build reached a withholding anyway; that is a defect"

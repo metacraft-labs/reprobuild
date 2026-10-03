@@ -23,8 +23,15 @@
 ##       the SAME on-disk store) resumes reaping — an expired record left by
 ##       the first instance is reaped by the second.
 ##   (d) scope routing selects the right store root for user vs system.
+##   (e) a record the tick CANNOT reap (no attrs marshaller registered in the
+##       daemon process) does not abort the tick: the reapable record beside it
+##       is still reaped, and the condition is logged ONCE for the daemon's
+##       life instead of on every tick.
+##   (f) that "once" holds even when the failure's MESSAGE changes on every
+##       tick — a provider refusing the destroy differently each time — so the
+##       de-duplication is keyed on the record, not on the sentence.
 
-import std/[os, options, times, tables, locks, random, unittest]
+import std/[os, options, times, tables, locks, random, strutils, unittest]
 
 import repro_core
 import repro_daemon_core
@@ -95,6 +102,50 @@ proc registerStub() =
 proc stubState(name, value: string): ResourceRef =
   resource("l4.stub", name, StubAttrs(value: value))
 
+# ---------------------------------------------------------------------------
+# A provider whose DESTROY refuses with a DIFFERENT sentence every attempt.
+#
+# `reapOnce` names four causes a per-record reap can raise on, and the one the
+# live daemon hit — a missing attrs marshaller — is the only one whose message
+# is ours and therefore fixed. The other three end in text written by
+# out-of-tree provider code: a session that would not launch, an `observe` that
+# failed, an `apply` that refused. Such a message is free to carry a pid, a
+# socket path, an errno or an attempt counter, and then no two ticks say the
+# same thing. This provider is that case, minimally: it reconstructs (its attrs
+# marshaller IS registered) and observes present, so the reap reaches the
+# destroy, and the destroy raises with the attempt number in it.
+# ---------------------------------------------------------------------------
+
+var flakyAttempts: int                   ## refused destroys, guarded by stubLock
+
+proc flakyApply(inst: ResourceInstance; action: ResourceActionKind;
+                observed: ObservedState): ResourceBinding {.gcsafe.} =
+  {.cast(gcsafe).}:
+    case action
+    of rakDestroy:
+      var attempt: int
+      withLock stubLock:
+        inc flakyAttempts
+        attempt = flakyAttempts
+      raise newException(CatchableError,
+        "provider refused destroy (attempt " & $attempt & ")")
+    else:
+      result = stubApply(inst, action, observed)
+
+proc registerFlaky() =
+  registerResourceProvider(ResourceProviderDef(
+    typeId: "l4.flaky",
+    determinism: rdVolatile,
+    driver: ResourceProviderDriver(
+      identity: stubIdentity,
+      digest: stubDigest,
+      observe: stubObserve,
+      apply: flakyApply)))
+  registerExtension[StubAttrs]("l4.flaky")
+
+proc flakyState(name, value: string): ResourceRef =
+  resource("l4.flaky", name, StubAttrs(value: value))
+
 proc stubConsumer(name, value: string; consumes: seq[LeasedDep]): ResourceRef =
   resource("l4.stub", name, StubAttrs(value: value), consumes = consumes)
 
@@ -111,6 +162,17 @@ proc materialize(store: StateStore; stateName, consumerId: string;
                  policy: LeasePolicy; now: Time) =
   resetDesiredResources()
   discard stubState(stateName, "up")
+  discard stubConsumer(consumerId & "-c", "probe",
+    consumes = @[leased(stateName, consumerId, policy)])
+  discard reconcileResources(collectedResources(), store = some(store), now = now)
+
+proc materializeFlaky(store: StateStore; stateName, consumerId: string;
+                      policy: LeasePolicy; now: Time) =
+  ## `materialize`, but the leased state is the flaky type. Its create path is
+  ## the stub's, so this really does write a reconstructable record and really
+  ## does put the state in the fake world; only the DESTROY refuses.
+  resetDesiredResources()
+  discard flakyState(stateName, "up")
   discard stubConsumer(consumerId & "-c", "probe",
     consumes = @[leased(stateName, consumerId, policy)])
   discard reconcileResources(collectedResources(), store = some(store), now = now)
@@ -134,6 +196,7 @@ proc runThrowawayDaemon(args: DaemonArgs) {.thread.} =
     # provider *driver* registry is a plain global — already visible — so the
     # stub world/log the destroy mutates is shared with the test thread.)
     registerStub()
+    registerFlaky()
     daemonThreadResult = runUserDaemonForeground(args.config)
 
 proc scratchRoot(sub: string): string =
@@ -162,6 +225,9 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
       destroyLog = @[]
     resetDesiredResources()
     registerStub()
+    registerFlaky()
+    withLock stubLock:
+      flakyAttempts = 0
     randomize()
     # Disable the wall-clock tick by default; cases that want it set the env
     # explicitly. (Prevents an unrelated case's daemon from reaping.)
@@ -296,3 +362,147 @@ suite "L4: daemon-hosted lease registry + wall-clock reaping":
     check policyFromTtlSeconds(LeaseRenewKeepSentinel).kind == lkKeep
     check policyFromTtlSeconds(0).kind == lkImmediate
     check policyFromTtlSeconds(42).kind == lkDelayed
+
+  test "(e) an unmarshallable record neither aborts the tick nor floods the log":
+    ## The measured defect (reprobuild-specs/issues/
+    ## 2026-09-29-lease-reap-tick-has-never-once-succeeded.md): the live
+    ## per-user daemon's tick raised on its FIRST record — a `vm_harness.nic`
+    ## whose attrs marshaller the daemon does not link — reaped nothing, and
+    ## logged the identical sentence 141,895 times over 60 days (62 MB of an
+    ## unrotated 385 MB log). Two failures in one: the tick never ran, and the
+    ## way it said so was indistinguishable from saying nothing.
+    ##
+    ## Both are asserted here, end-to-end, against a real daemon on a real
+    ## store with its real log file. `orphan` is a genuine record written to
+    ## disk under a typeId no `registerExtension` covers on the daemon thread,
+    ## so the daemon raises the same `KeyError` for the same reason; nothing is
+    ## stubbed to fail and nothing is mocked.
+    let root = scratchRoot("unreapable")
+    let stateRoot = root / "lease-state"
+    removeDir(root)
+    let store = openStateStore(stateRoot)
+
+    # One reapable stub state whose deadline is already past...
+    let past = getTime() - initDuration(hours = 1)
+    materialize(store, "cluster", "smoke", delayed(initDuration(minutes = 1)),
+                past)
+    check hasStateRecord(store, "cluster")
+    check worldHas("cluster")
+
+    # ...and one record the daemon cannot reconstruct. Hand written: the whole
+    # point is a typeId whose marshaller is absent, and `buildStateRecord`
+    # marshals THROUGH that registry. `reverseTopoOrder` sorts `orphan` after
+    # `cluster` and then reverses, so the tick meets `orphan` FIRST — which is
+    # why, before the fix, `cluster` was never reached.
+    writeStateRecord(store, ResourceStateRecord(
+      address: "orphan",
+      typeId: "l4.unregistered",
+      determinism: rdVolatile,
+      attrsTypeId: "l4.unregistered",
+      attrsJson: "\x01\x00\x00\x00\x00\x00",
+      dependsOn: @[],
+      identity: "stub:orphan",
+      present: true,
+      holders: initTable[string, Time](),
+      effectiveDeadline: some(past),
+      lastRenewed: past))
+
+    putEnv("REPRO_DAEMON_LEASE_REAP_INTERVAL_MS", "100")
+    var thread: Thread[DaemonArgs]
+    let config = startThrowawayDaemon(root, stateRoot, thread)
+    defer:
+      try: requestUserDaemonShutdown(config.endpoint) except CatchableError: discard
+      joinThread(thread)
+      removeDir(root)
+
+    # The reapable record must be reaped despite the broken one beside it.
+    let deadline = epochTime() + 8.0
+    while epochTime() < deadline and hasStateRecord(store, "cluster"):
+      sleep(50)
+    check not hasStateRecord(store, "cluster")     # record removed
+    check not worldHas("cluster")                  # world torn down
+    check "cluster" in destroyLogSnapshot()        # destroy actually ran
+
+    # The broken record stays on disk: a daemon that DOES link the marshaller
+    # (or a later `repro reap`) resumes it. It is not silently dropped.
+    check hasStateRecord(store, "orphan")
+
+    # Now let many more ticks run at 100 ms. The condition is unchanged and
+    # unfixable by retrying, so it must be reported ONCE, not once per tick.
+    # The log is read with the daemon still up (the `defer` above owns the
+    # single shutdown + join); `logLine` opens/appends/closes per line, so
+    # every tick that has fired is already on disk.
+    sleep(1200)
+    let logText = readFile(config.logPath)
+    # At least a dozen ticks ran in that window, so a per-tick report would
+    # show here. Exactly ONE LINE names the record — counted per line, not per
+    # substring occurrence: the typeId legitimately appears three times inside
+    # that single line (the `typeId=` field, the raised message, and the
+    # `registerExtension[Attrs]("...")` remedy the message suggests).
+    var linesNamingRecord = 0
+    for line in logText.splitLines:
+      if line.contains("l4.unregistered"):
+        inc linesNamingRecord
+    check linesNamingRecord == 1
+    check logText.count("cannot reap") == 1
+    # ...and it says which record and why, not just that something went wrong.
+    check logText.contains("address=orphan")
+    check logText.contains("marshaller")
+    # The old whole-sweep abort is gone: nothing raised out of the sweep.
+    check logText.count("lease reap tick error") == 0
+
+  test "(f) a failure whose message changes every tick is still reported once":
+    ## Case (e) proves the tick reports a stuck record once. It proves it for
+    ## the ONE failure whose message is ours and therefore identical on every
+    ## tick. This case is the same property for a failure whose message is a
+    ## PROVIDER's: `l4.flaky` refuses the destroy with the attempt number in
+    ## the sentence, so no two ticks produce the same text.
+    ##
+    ## De-duplicating on the rendered sentence passes case (e) and fails here:
+    ## every tick's sentence is new, so every tick logs — the same flood, at the
+    ## same 142,713-lines-in-61-days rate — and the daemon's set of seen
+    ## messages grows for as long as it runs. Nothing about that is visible in
+    ## a fixture whose error text never moves, which is why this case exists
+    ## beside (e) rather than instead of it.
+    let root = scratchRoot("flaky")
+    let stateRoot = root / "lease-state"
+    removeDir(root)
+    let store = openStateStore(stateRoot)
+
+    let past = getTime() - initDuration(hours = 1)
+    materializeFlaky(store, "flaky", "smoke", delayed(initDuration(minutes = 1)),
+                     past)
+    check hasStateRecord(store, "flaky")
+    check worldHas("flaky")            # really materialized; the destroy is what fails
+
+    putEnv("REPRO_DAEMON_LEASE_REAP_INTERVAL_MS", "100")
+    var thread: Thread[DaemonArgs]
+    let config = startThrowawayDaemon(root, stateRoot, thread)
+    defer:
+      try: requestUserDaemonShutdown(config.endpoint) except CatchableError: discard
+      joinThread(thread)
+      removeDir(root)
+
+    # Many ticks at 100 ms; each re-attempts the destroy and is refused anew.
+    sleep(1500)
+    var attempts = 0
+    withLock stubLock: attempts = flakyAttempts
+    # Non-vacuity: the record really was retried a lot, so a per-sentence key
+    # would have a lot of distinct sentences to log.
+    check attempts >= 5
+
+    let logText = readFile(config.logPath)
+    var linesNamingRecord = 0
+    for line in logText.splitLines:
+      if line.contains("address=flaky"):
+        inc linesNamingRecord
+    check linesNamingRecord == 1
+    # The one line still carries the provider's own words, so the operator is
+    # told WHY and not merely that something is stuck.
+    check logText.contains("provider refused destroy")
+    # The record and its world state are both kept: a refused destroy must not
+    # remove the record.
+    check hasStateRecord(store, "flaky")
+    check worldHas("flaky")
+    # And nothing raised out of the sweep.
+    check logText.count("lease reap tick error") == 0

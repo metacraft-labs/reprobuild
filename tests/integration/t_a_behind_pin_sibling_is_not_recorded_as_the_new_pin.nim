@@ -29,34 +29,33 @@
 ##
 ## ## The policy asserted here
 ##
-## The behind-pin case takes the SAME shape as the dirty-sibling case NF-2
-## already inherits: **skip that input's refresh, leave the lock, and let the
-## commit proceed**. Refusing the commit would be new behaviour §3.2 does not
-## ask for. The push gate is where a stale pin is refused.
+## The first fix gave the behind-pin case the dirty-sibling shape: skip that
+## input's refresh, leave the lock, let the commit proceed, and refuse at the
+## push. §3.2's "Rule, at commit" (owner-decided 2026-09-30) replaced that:
+## committing a downgrade is a different act from testing one, so the commit
+## is **refused** unless the committer names the input in
+## `REPRO_ALLOW_PIN_REGRESSION` for that commit. A stale checkout must not
+## become a stale published lock, and it must not become a commit that goes
+## out quietly and is caught only at the push either.
 ##
 ## ## What is asserted
 ##
-##   1. the commit SUCCEEDS — a pre-commit hook that rejected the developer's
-##      work here would be the wrong remedy for the wrong problem;
+##   1. the commit is REFUSED — nonzero, and no commit was made;
 ##   2. `flake.lock` in the working tree is **byte-identical** afterwards. Not
 ##      "the gamma node is unchanged" — the whole file, because a refresh that
 ##      moved the pin and then moved it back, or that reserialised the document,
 ##      is not the same thing as one that never touched it;
-##   3. `flake.lock` **as the commit carries it** is byte-identical too. That is
-##      the assertion the pre-commit placement exists to make available: the
-##      working-tree file answers "was anything written", only the committed
-##      blob answers "did this revision file a downgrade";
-##   4. the skip is SAID, in the pre-commit log, naming the sibling. A skip
-##      nobody can see is indistinguishable from a refresh that silently did
-##      nothing, which is the campaign's own motivating bug reproduced one level
-##      up.
+##   3. `flake.lock` **as HEAD carries it** is byte-identical too, and HEAD did
+##      not move: no revision filed a downgrade;
+##   4. the refusal is SAID, in the commit's output and in the pre-commit log,
+##      naming the input, the relation and the distance. A refusal nobody can
+##      read is indistinguishable from a broken hook.
 ##
 ## ## Mutation
 ##
-## Record the behind-pin sibling anyway (drop `fprBehind` from the
-## not-recordable set in `flakeRowIsRecordable`) ⇒ RED on (2) and (3): the
-## `gamma-src` node names the older checkout revision and the file is no longer
-## byte-identical.
+## Record the behind-pin sibling anyway (treat `sprBehind` as not a
+## regression in `isPinRegression`) ⇒ RED on (1), (2) and (3): the commit goes
+## through and the `gamma-src` node names the older checkout revision.
 ##
 ## Test-double policy: NO mocks, doubles or fakes — real bare git origins, real
 ## clones, a real `flake.lock` in nix's on-disk shape, the real
@@ -95,11 +94,13 @@ suite "NF-2: a behind-pin sibling is not recorded as the new pin":
       check before.contains(gammaPinned)
       check nodeText(before, "gamma-src").contains(gammaPinned)
 
-      # ---- (1) the commit SUCCEEDS -------------------------------------
+      # ---- (1) the commit is REFUSED ------------------------------------
+      let headBefore = headOf(fx, fx.app)
       let committed = tryCommitInApp(fx, "work made against a stale gamma")
       checkpoint("commit output:\n" & committed.output)
       checkpoint("pre-commit log:\n" & preCommitLog(fx))
-      check committed.code == 0
+      check committed.code != 0
+      check committed.head == headBefore
 
       # ---- (2) the working-tree lock is BYTE-identical ------------------
       let after = readFile(lockPath(fx))
@@ -113,7 +114,7 @@ suite "NF-2: a behind-pin sibling is not recorded as the new pin":
       check nodeText(after, "gamma-src").contains(gammaPinned)
       check not nodeText(after, "gamma-src").contains(gammaCheckout)
 
-      # ---- (3) the COMMIT carries the unchanged lock --------------------
+      # ---- (3) HEAD carries the unchanged lock --------------------------
       let carried = lockInCommit(fx)
       check carried.len > 0
       if carried != before:
@@ -121,9 +122,18 @@ suite "NF-2: a behind-pin sibling is not recorded as the new pin":
       check carried == before
       check not nodeText(carried, "gamma-src").contains(gammaCheckout)
 
-      # ---- (4) …and the skip was SAID ----------------------------------
+      # ---- (4) …and the refusal was SAID --------------------------------
+      var refusal = ""
+      for line in committed.output.splitLines():
+        if line.contains("flake.lock input 'gamma-src'") and
+            line.contains("behind by 2 commit(s)"):
+          refusal = line
+      checkpoint("refusal line: " & refusal)
+      check refusal.contains(gammaPinned)
+      check refusal.contains(gammaCheckout)
+      check committed.output.contains("REPRO_ALLOW_PIN_REGRESSION=gamma-src")
       let logLine = lastFlakeLogLine(fx)
       checkpoint("last flake-lock log line: " & logLine)
       check logLine.len > 0
-      check logLine.contains("gamma")
-      check logLine.contains("BEHIND")
+      check logLine.contains("refused-pin-regression")
+      check logLine.contains("gamma-src behind by 2 commit(s)")

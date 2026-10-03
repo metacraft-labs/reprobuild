@@ -4080,6 +4080,10 @@ macro packageImpl*(name: untyped;
   # selector naming an on-disk workspace sibling imports that producer's
   # exported CLI schema module and the consumer can bind it as a typed call.
   let consumerSourceFile = name.lineInfoObj().filename
+  let movedPackageError =
+    unresolvedMovedPackageDiagnostic(pkg, consumerSourceFile)
+  if movedPackageError.len > 0:
+    error(movedPackageError, name)
   let generated = parseStmt(
     usesImportCode(pkg, consumerSourceFile) &
     "registerPackageDef(" & packageLiteral(pkg) & ")\n" &

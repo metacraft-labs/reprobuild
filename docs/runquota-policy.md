@@ -29,10 +29,17 @@ runquota denied lease: lease request exceeds shared CPU budget: local
 runquota denied lease: lease request exceeds named-pool budget: cargo-network
 ```
 
-When reprobuild starts the daemon automatically, its default memory budget is
-16 GiB. Operators running memory-intensive builds on larger hosts can set
-`REPROBUILD_RUNQUOTA_MEMORY_BYTES` to a positive byte count. The setting is
-forwarded into daemon-hosted and nested builds so they use the same capacity.
+The daemon is host-wide, so its budget is the host's: `runquotad` reads
+`C:\ProgramData\runquota\runquotad.toml` / `/etc/runquota/runquotad.toml`,
+and with no `memory_bytes` there its budget is 75% of physical memory. When
+reprobuild starts the daemon automatically it passes no memory flag of its
+own (until 2026-09-30 it passed a flat 16 GiB, which became every
+workspace's budget). Change the budget with `runquota config set
+machine.memory_bytes 96GiB`, which also reloads a running daemon.
+`REPROBUILD_RUNQUOTA_MEMORY_BYTES` remains a per-invocation override for the
+daemon reprobuild spawns, and warns when it disagrees with the host file; the
+setting is forwarded into daemon-hosted and nested builds so they use the
+same capacity. See `reprobuild-specs/RunQuota-Host-Configuration.md`.
 
 Denials happen for one of two distinct reasons:
 

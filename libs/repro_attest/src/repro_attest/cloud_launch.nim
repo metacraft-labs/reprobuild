@@ -522,11 +522,40 @@ const
     ## what these providers' identifiers are actually made of, and a
     ## value outside it is far more likely to be a mistake than a need.
 
+  ProviderLabelValueChars* = {'0' .. '9', 'a' .. 'z', '_', '-'}
+    ## What a value may contain if it is going on as a provider **label
+    ## or tag value**, which is a narrower question than what may go on
+    ## a command line and was conflated with it once.
+    ##
+    ## Measured against one provider's own client rather than read off a
+    ## specification: of the twelve non-alphanumeric members of
+    ## `SafeLaunchValueChars`, SEVEN are refused as a label value —
+    ## `.`, `:`, `/`, `@`, `+`, `=` and the whole upper-case range. So a
+    ## check that asserted a tag value was spelled in the command-line
+    ## set asserted something seven characters wider than the provider
+    ## will take, and would have stayed green on a tag no cloud accepts.
+    ##
+    ## `providerLabelSetIsNarrower` below is the assertion that keeps
+    ## the two apart, so the narrowing cannot be undone by widening this
+    ## set back to its neighbour.
+
   MaxLaunchValueLen* = 256
 
   MaxHexWordDigits* = 16
     ## Both words this spells are sixty-four bits wide, so seventeen
     ## digits is not a wide value, it is a mistake.
+
+proc providerLabelSetIsNarrower*(): bool =
+  ## The label set is a PROPER subset of the command-line set. Checked
+  ## rather than asserted in a comment: the two sets differ by exactly
+  ## the seven spellings a provider refuses, and a build that widened
+  ## the label set back to its neighbour would restore the fault this
+  ## separation exists to remove.
+  for c in ProviderLabelValueChars:
+    if c notin SafeLaunchValueChars: return false
+  for c in SafeLaunchValueChars:
+    if c notin ProviderLabelValueChars: return true
+  false
 
 proc requireSafeLaunchValue(p: CloudLaunchParameter; value: string) =
   ## Two rules and two sites, because the remedies differ: one value is
@@ -906,14 +935,28 @@ type
 
 proc performCloudLaunch*(spec: CloudLaunchSpec; mode: CloudLaunchMode;
                          effector: CloudEffector = nil;
-                         env: CloudEnvLookup = nil): CloudLaunchOutcome =
+                         env: CloudEnvLookup = nil;
+                         plan: seq[string] = @[]): CloudLaunchOutcome =
   ## Compute everything, and hand the invocation on only when armed.
   ##
   ## Both modes do the SAME work up to the last statement. That is
   ## deliberate: a dry run that took a shorter path would prove nothing
   ## about the path an armed launch takes, and "the dry run creates
   ## nothing" would be a statement about different code.
-  let checked = checkedCloudLaunchPlanScanned(spec, env)
+  ##
+  ## `plan` is for the ONE caller that rewrites the invocation before it
+  ## is sent — the leased launch next door, which puts the lease's tags
+  ## on it. Empty means "render it here", which is what every other
+  ## caller means. It is NOT a second renderer: `leasedLaunchPlan` is
+  ## built by rewriting this procedure's own output, and the gate beside
+  ## it requires the two to differ in exactly one argument. What the
+  ## parameter buys is that the invocation which is CHECKED for
+  ## credential material and the invocation which is SENT are the same
+  ## sequence — the alternative, substituting inside the effector, would
+  ## check one and send another.
+  let checked = (if plan.len == 0: checkedCloudLaunchPlanScanned(spec, env)
+                 else: (plan: plan,
+                        scan: requirePlanCarriesNoCredential(plan, env)))
   result.plan = checked.plan
   result.secretScan = checked.scan
   result.manifestText = cloudExpectedManifestText(spec)

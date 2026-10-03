@@ -81,10 +81,30 @@ type
     wasPresent*: bool   ## true if `observe` saw it live (a real destroy);
                         ## false = already-absent clean no-op (record still removed)
 
+  ReapFailureKind* = enum
+    ## Why a SELECTED record was not reaped by this sweep.
+    rfkUnreapable   ## attempted; the per-record op RAISED (see `reason`)
+    rfkBlocked      ## NOT attempted: a record that DEPENDS on it is unreapable,
+                    ## so destroying it would break the reverse-topo invariant
+
+  ReapFailure* = object
+    ## One record the sweep SELECTED but could not reap. Deliberately NOT
+    ## folded into `skipped`: `skipped` means "inspected and correctly kept"
+    ## (never-reap / still leased), which is a healthy outcome, while this is
+    ## a record the reaper was asked to destroy and could not. Collapsing the
+    ## two would make a permanently stuck store read as a healthy one.
+    address*: string
+    typeId*: string
+    kind*: ReapFailureKind
+    reason*: string
+      ## `rfkUnreapable`: the raised message. `rfkBlocked`: which unreapable
+      ## dependent is holding this record back.
+
   ReapReport* = object
     ## The outcome of a sweep.
     reaped*: seq[ReapEvent]        ## destroyed (or already-absent) records removed, in order
     skipped*: seq[string]          ## addresses inspected but kept (still leased / never-reap)
+    failed*: seq[ReapFailure]      ## selected but NOT reaped — see `ReapFailure`
 
 proc inProcessTransport*(): ReapTransport =
   ReapTransport(kind: rtInProcess)
@@ -242,8 +262,39 @@ proc reapOnce*(store: StateStore; now: Time = getTime();
   ## Crash-safe: it relies ONLY on the store, so a partially-reaped group
   ## from a crashed prior run resumes (present records reaped, removed ones
   ## simply absent).
+  ##
+  ## ONE UNHANDLEABLE RECORD MUST NOT ABORT THE SWEEP. `reapRecord` can raise
+  ## for reasons that are properties of ONE record and of this process, not of
+  ## the store: no attrs marshaller registered for its `attrsTypeId`
+  ## (`reconstructInstance`), no in-process driver for its `typeId`
+  ## (`lookupResourceProvider`), a provider session that will not launch, or a
+  ## real provider whose `observe`/`apply` failed. Letting any of those unwind
+  ## the loop means the OTHER records — the ones this process can perfectly
+  ## well reap — are never reached, so the sweep reaps nothing at all and does
+  ## so again on every subsequent tick, forever. That is not hypothetical: the
+  ## daemon's wall-clock tick failed on its first record (a `vm_harness.nic`
+  ## with no linked marshaller) on every one of 141,895 consecutive attempts
+  ## over 60 days and reaped nothing, ever.
+  ##
+  ## So each record is attempted independently and a failure is RECORDED in
+  ## `failed` rather than raised. The record is left in the store (no
+  ## `removeStateRecord` ran), so a later sweep — in a process that does link
+  ## the marshaller, or once the provider is reachable — resumes it. This is
+  ## the same crash-safety contract `reapRecord` already relies on.
+  ##
+  ## …WITHOUT breaking reverse-topo. A record that cannot be reaped still
+  ## EXISTS, both in the store and (maybe) in the world, so destroying what it
+  ## `dependsOn` would tear a dependency out from under a live dependent —
+  ## exactly what the reverse-topo order exists to prevent — and
+  ## `removeStateRecord` would leave the surviving record's `dependsOn`
+  ## dangling at an address that no longer has a record. Every record the
+  ## failed one depends on (transitively, within this reap set) is therefore
+  ## HELD as `rfkBlocked` and left alone. Because the iteration order is
+  ## reverse-topo, a record's dependencies always come AFTER it, so marking
+  ## forward in one pass is sufficient.
   result.reaped = @[]
   result.skipped = @[]
+  result.failed = @[]
 
   var all = listStateRecords(store)
   if onlyAddresses.len > 0:
@@ -258,8 +309,33 @@ proc reapOnce*(store: StateStore; now: Time = getTime();
     if rec.address notin selectedAddrs:
       result.skipped.add(rec.address)
 
-  for rec in reverseTopoOrder(selected):
-    result.reaped.add(reapRecord(store, transport, rec))
+  let ordered = reverseTopoOrder(selected)
+  # Held-back records and, for each, the unreapable dependent responsible —
+  # so the report names the blast radius rather than just its size.
+  var blockedBy = initTable[string, string]()
+
+  proc holdDependencies(rec: ResourceStateRecord; culprit: string) =
+    for dep in rec.dependsOn:
+      if dep in selectedAddrs and dep notin blockedBy:
+        blockedBy[dep] = culprit
+
+  for rec in ordered:
+    if rec.address in blockedBy:
+      result.failed.add(ReapFailure(
+        address: rec.address, typeId: rec.typeId, kind: rfkBlocked,
+        reason: "held: '" & blockedBy[rec.address] &
+          "' depends on it and could not be reaped"))
+      # Propagate the hold down the dependency chain, crediting the record
+      # that actually failed rather than this intermediate one.
+      holdDependencies(rec, blockedBy[rec.address])
+      continue
+    try:
+      result.reaped.add(reapRecord(store, transport, rec))
+    except CatchableError as err:
+      result.failed.add(ReapFailure(
+        address: rec.address, typeId: rec.typeId, kind: rfkUnreapable,
+        reason: err.msg))
+      holdDependencies(rec, rec.address)
 
 # ---------------------------------------------------------------------------
 # Reconcile-start opportunistic hook (§4.3 fallback (a)).
@@ -374,4 +450,14 @@ proc runReapCli*(args: seq[string];
     emit("  - " & ev.address & " (" & ev.typeId & ")" &
          (if ev.wasPresent: "" else: " [already-absent]"))
   emit("kept: " & $report.skipped.len)
-  0
+  # A selected record the sweep could NOT reap is reported, never swallowed:
+  # dropping it here would reproduce, at the CLI, the same invisibility that
+  # let the daemon's tick fail for 60 days unnoticed. It is also why the exit
+  # code is non-zero — `repro reap` was asked to destroy this state and did
+  # not, and an operator (or CI) scripting the verb has to be able to tell.
+  if report.failed.len == 0:
+    return 0
+  emit("unreapable: " & $report.failed.len)
+  for f in report.failed:
+    emit("  - " & f.address & " (" & f.typeId & ") " & f.reason)
+  1

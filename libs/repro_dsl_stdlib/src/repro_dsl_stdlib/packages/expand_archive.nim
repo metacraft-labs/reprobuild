@@ -17,8 +17,8 @@
 ##   * **Linux / macOS** — ``tar`` for tar-family archives, ``unzip``
 ##     for zip archives. Both are declared as stdlib provisioning stubs
 ##     (see ``tar.nim`` / ``unzip.nim``).
-##   * **Windows** — ``Expand-Archive`` PowerShell cmdlet for zip
-##     archives (built into every Windows PowerShell since 5.0; no
+##   * **Windows** — Windows PowerShell and the .NET zip API it carries
+##     for zip archives (built into every Windows install; no
 ##     provisioning channel needed); ``tar.exe`` for tar-family archives
 ##     (ships in ``%SystemRoot%\System32\`` on Win11 — assumed
 ##     available, no provisioning channel needed).
@@ -150,36 +150,81 @@ proc powershellSingleQuotedLiteral*(value: string): string =
   "'" & value.replace("'", "''") & "'"
 
 proc buildZipArgvWindows*(archive, destination: string): seq[string] =
-  ## Deterministic PowerShell ``Expand-Archive`` invocation. Action argv is
-  ## part of the cache identity, so scratch uniqueness is deferred to the
-  ## executing PowerShell process through the literal runtime ``$PID`` rather
-  ## than selected while the profile is being compiled.
+  ## Deterministic Windows PowerShell zip extraction. Action argv is part of
+  ## the cache identity, so it depends on nothing but the two paths.
   ##
-  ## ``$ErrorActionPreference = 'Stop'`` makes copy/extraction failures
-  ## terminating. The ``finally`` block removes scratch on success and every
-  ## failure path; ``-ErrorAction Stop`` means cleanup failure also fails the
-  ## action. ``-Force`` preserves the Phase-F overwrite behavior and
-  ## ``-NoProfile`` keeps operator profiles out of the execution boundary.
+  ## The script does not use the ``Expand-Archive`` cmdlet. Windows
+  ## PowerShell 5.1's ``Expand-Archive`` writes a progress record for every
+  ## entry, and when the caller captures output those records are serialized
+  ## onto the pipe: about 90 ms per entry on a 4-vCPU CI machine, so a
+  ## 12,000-entry archive took about 40 minutes. The cmdlet also refused a
+  ## file not named ``.zip``, which is why this action used to copy every
+  ## archive to a scratch ``.zip`` under ``$env:TEMP`` first and clean it up
+  ## afterwards. Both costs, and the scratch copy's cleanup failure mode,
+  ## are gone.
+  ##
+  ## It reads the archive with the .NET zip reader that ``Expand-Archive``
+  ## itself uses, entry by entry, rather than calling
+  ## ``ZipFile.ExtractToDirectory`` as the tool store does. The difference is the overwrite contract: the tool store always
+  ## extracts into a fresh staging directory, but this action extracts into
+  ## a destination that may already hold an earlier extraction (a re-run
+  ## after its marker was removed, or after this argv changed and with it
+  ## the cache key), and its documented behavior is ``Expand-Archive
+  ## -Force``: overwrite the archive's files, leave everything else. Under
+  ## Windows PowerShell 5.1, which runs on .NET Framework,
+  ## ``ExtractToDirectory`` has no overwrite overload and fails on the first
+  ## existing file. ``ZipFileExtensions.ExtractToFile(entry, path, $true)``
+  ## is the per-entry call ``ExtractToDirectory`` makes, with overwrite on.
+  ##
+  ## Because the loop is ours, so is the check ``ExtractToDirectory`` would
+  ## make: every entry's resolved path must lie inside the destination, and
+  ## an entry that escapes it (``../x``, an absolute name) fails the action
+  ## before anything is written for that entry.
+  ##
+  ## ``$ErrorActionPreference = 'Stop'`` turns a .NET exception (missing or
+  ## corrupt archive, an escaping entry, a locked file) into a terminating
+  ## error, and ``-Command`` then exits non-zero. Progress is silenced in
+  ## case a module the host loads writes any. ``-NoProfile`` keeps operator
+  ## profiles out of the execution boundary, and ``-NonInteractive`` makes
+  ## anything that would prompt fail instead of waiting.
   let command =
+    "$ProgressPreference = 'SilentlyContinue'; " &
     "$ErrorActionPreference = 'Stop'; " &
-    "$scratch = Join-Path $env:TEMP " &
-      "('repro-expand-archive-' + $PID + '.zip'); " &
+    "Add-Type -AssemblyName System.IO.Compression.FileSystem; " &
+    "$root = [System.IO.Directory]::CreateDirectory(" &
+      powershellSingleQuotedLiteral(destination) & ").FullName; " &
+    "$root = $root.TrimEnd([char[]]'\\/') + " &
+      "[System.IO.Path]::DirectorySeparatorChar; " &
+    "$zip = [System.IO.Compression.ZipFile]::OpenRead(" &
+      powershellSingleQuotedLiteral(archive) & "); " &
     "try { " &
-      "Copy-Item -LiteralPath " & powershellSingleQuotedLiteral(archive) &
-        " -Destination $scratch -Force; " &
-      "Expand-Archive -LiteralPath $scratch -DestinationPath " &
-        powershellSingleQuotedLiteral(destination) & " -Force " &
-    "} finally { " &
-      "if (Test-Path -LiteralPath $scratch) { " &
-        "Remove-Item -LiteralPath $scratch -Force -ErrorAction Stop " &
+      "foreach ($entry in $zip.Entries) { " &
+        "$target = [System.IO.Path]::GetFullPath(" &
+          "[System.IO.Path]::Combine($root, $entry.FullName)); " &
+        "if (-not $target.StartsWith($root, " &
+          "[System.StringComparison]::OrdinalIgnoreCase)) { " &
+          "throw ('zip entry escapes the destination: ' + " &
+            "$entry.FullName) " &
+        "} " &
+        "if ($entry.Name.Length -eq 0) { " &
+          "[void][System.IO.Directory]::CreateDirectory($target) " &
+        "} else { " &
+          "[void][System.IO.Directory]::CreateDirectory(" &
+            "[System.IO.Path]::GetDirectoryName($target)); " &
+          "[System.IO.Compression.ZipFileExtensions]::ExtractToFile(" &
+            "$entry, $target, $true) " &
+        "} " &
       "} " &
+    "} finally { " &
+      "$zip.Dispose() " &
     "}"
-  @["powershell", "-NoProfile", "-Command", command]
+  @["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+    "Bypass", "-Command", command]
 
 proc buildZipArgvPosix*(archive, destination: string): seq[string] =
   ## InfoZIP invocation. ``-q`` quiets the per-file output;
-  ## ``-o`` overwrites existing files without prompting (matches
-  ## Windows ``Expand-Archive -Force``); ``-d`` selects the
+  ## ``-o`` overwrites existing files without prompting (matches the
+  ## Windows branch's overwrite); ``-d`` selects the
   ## destination directory.
   @["unzip", "-q", "-o", archive, "-d", destination]
 
@@ -415,9 +460,8 @@ proc build*(archive: string;
   ##   engine's cache invalidates when the archive bytes change).
   ##
   ## ``destination``
-  ##   Absolute path of the extraction root. The native tool creates
-  ##   this directory if missing (``Expand-Archive`` requires
-  ##   ``-Force``; ``unzip`` + ``tar`` create on extract).
+  ##   Absolute path of the extraction root. The zip extractors create
+  ##   this directory if missing.
   ##
   ## ``marker``
   ##   Idempotency marker — a file the archive itself contains. Wired

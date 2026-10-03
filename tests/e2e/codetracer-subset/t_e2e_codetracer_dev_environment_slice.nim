@@ -114,13 +114,31 @@ proc assertRealizedStorePaths(paths: openArray[string]) =
   check paths.anyIt(isNixStorePath(it))
   check paths.allIt(isNixStorePath(it) or isUnifiedStorePrefix(it))
 
-proc assertNixIdentity(identity: PathOnlyBuildIdentity) =
-  check identity.profiles.len == 5
+const AllDeclaredTools = ["nim", "node", "gcc", "sh", "stylus"]
+
+proc assertNixIdentity(identity: PathOnlyBuildIdentity;
+                       expectedTools: openArray[string]) =
+  ## ``expectedTools`` is the EXACT set the identity must realize, compared as
+  ## a set in both directions: a missing tool and an extra one both fail.
+  ##
+  ## The two callers differ on purpose. ``repro develop`` realizes every
+  ## package-level ``uses:`` entry, because a development shell is for the
+  ## whole package. ``repro build`` realizes only the tools the SELECTED
+  ## action closure references (``scopedToolArtifact``, 636d688f2 "cli: keep
+  ## focused workflows lightweight"): the fixture's one action runs ``sh``, so
+  ## its build identity is ``sh`` alone, and realizing node or stylus for it
+  ## would be work the build does not use. Asserting five profiles on the
+  ## build identity was the pre-636d688f2 behaviour, not M53's claim — M53
+  ## asks that the SELECTED executables come from package-declared Nix
+  ## realizations, which the per-profile checks below still prove.
+  check identity.profiles.len == expectedTools.len
   check identity.profiles.allIt(it.installMethod == "nix")
   check identity.profiles.allIt(it.adapterStrength == asStrong)
   check identity.profiles.allIt(it.cachePortability == cpPortable)
-  for executableName in ["nim", "node", "gcc", "sh", "stylus"]:
+  for executableName in expectedTools:
     check identity.profiles.anyIt(it.executableName == executableName)
+  for profile in identity.profiles:
+    check profile.executableName in expectedTools
   for profile in identity.profiles:
     check profile.nixSelector.len > 0
     assertRealizedStorePaths(profile.realizedStorePaths)
@@ -134,14 +152,16 @@ proc assertNixIdentity(identity: PathOnlyBuildIdentity) =
     check profile.probes.len == 1
     check profile.probes[0].exitCode == 0
     check profile.probes[0].output.strip().len > 0
-  check identity.profiles.anyIt(it.executableName == "sh" and
-    it.nixSelector.startsWith("github:NixOS/nixpkgs/") and
-    it.nixSelector.endsWith("#bash") and
-    it.declaredExecutablePath == "bin/sh")
-  check identity.profiles.anyIt(it.executableName == "stylus" and
-    it.nixSelector == "reprobuild-stdlib-stylus-0.64.0" and
-    it.declaredExecutablePath == "bin/stylus" and
-    it.nixExpressionFile.endsWith("nix/stylus-0.64.0/default.nix"))
+  if "sh" in expectedTools:
+    check identity.profiles.anyIt(it.executableName == "sh" and
+      it.nixSelector.startsWith("github:NixOS/nixpkgs/") and
+      it.nixSelector.endsWith("#bash") and
+      it.declaredExecutablePath == "bin/sh")
+  if "stylus" in expectedTools:
+    check identity.profiles.anyIt(it.executableName == "stylus" and
+      it.nixSelector == "reprobuild-stdlib-stylus-0.64.0" and
+      it.declaredExecutablePath == "bin/stylus" and
+      it.nixExpressionFile.endsWith("nix/stylus-0.64.0/default.nix"))
 
 proc assertPackageProvisioningMetadata(interfacePath: string) =
   let artifact = readInterfaceArtifact(interfacePath)
@@ -235,7 +255,7 @@ suite "e2e_codetracer_dev_environment_slice":
       check readFile(developIdentityPath)[0] != '{'
       assertPackageProvisioningMetadata(developInterfacePath)
       let developIdentity = readPathOnlyBuildIdentity(developIdentityPath)
-      assertNixIdentity(developIdentity)
+      assertNixIdentity(developIdentity, AllDeclaredTools)
 
       let inspection = parseFile(developInspectionPath)
       check inspection{"profiles"}.getElems().len == 5
@@ -275,6 +295,7 @@ suite "e2e_codetracer_dev_environment_slice":
       check build.contains("action: record-nix-sh status=asSucceeded launched=true")
       let buildIdentity = readPathOnlyBuildIdentity(valueAfter(build,
           "toolIdentity:"))
-      assertNixIdentity(buildIdentity)
+      # The selected action ``record-nix-sh`` names ``sh`` and nothing else.
+      assertNixIdentity(buildIdentity, ["sh"])
       check readFile(projectRoot / "build" / "nix-sh.txt").startsWith(
         "/nix/store/")

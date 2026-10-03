@@ -52,7 +52,10 @@ type
       ## from this process. Off (the zero value), ``env`` is layered over the
       ## inherited environment, which can replace a variable but never remove
       ## one. The build engine sets it for actions launched with an
-      ## allowlisted environment (``BuildEngineConfig.hermeticEnv``).
+      ## allowlisted environment (``BuildEngineConfig.hermeticEnv``) and for an
+      ## action that declares its whole environment
+      ## (``BuildAction.isolateHostEnvironment``). Carried through the helper's
+      ## argv as ``--isolated-env``.
 
   ReproRunQuotaExecution* = object
     leaseId*: uint64

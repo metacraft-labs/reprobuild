@@ -498,28 +498,61 @@ proc raiseExtractFailed(packageId, archivePath, archiveFormat,
   e.archiveFormat = archiveFormat
   raise e
 
+proc powershellZipLiteral(value: string): string =
+  ## A PowerShell single-quoted string literal: nothing inside it is
+  ## interpolated, and the only escape is a doubled quote.
+  "'" & value.replace("'", "''") & "'"
+
+proc powershellZipExtractCommand*(powershell, archivePath,
+                                  destDir: string): string =
+  ## The command line that extracts a zip archive with `powershell`.
+  ##
+  ## It calls `System.IO.Compression.ZipFile.ExtractToDirectory` rather than
+  ## the `Expand-Archive` cmdlet, as the tool store does. Both use the same
+  ## .NET zip reader, so backslash-separated entries (which InfoZIP `unzip`
+  ## rejects) still extract, and entries that would escape the destination
+  ## are still refused. What differs is the per-entry cost: Windows
+  ## PowerShell 5.1's `Expand-Archive` writes a progress record for every
+  ## entry, and with output captured, as `execCmdEx` captures it, those
+  ## records cost about 90 ms per entry on a 4-vCPU machine. A 12,000-entry
+  ## archive took about 40 minutes that way and about 3 minutes this way.
+  ##
+  ## The destination is always a freshly allocated staging directory, so
+  ## `Expand-Archive -Force`'s overwrite behavior is not needed; a file that
+  ## is already there is an error. `$ErrorActionPreference = 'Stop'` makes a
+  ## .NET exception exit non-zero, and progress is silenced in case a loaded
+  ## module writes any.
+  quoteShell(powershell) &
+    " -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command " &
+    quoteShell(
+      "$ProgressPreference = 'SilentlyContinue'; " &
+      "$ErrorActionPreference = 'Stop'; " &
+      "Add-Type -AssemblyName System.IO.Compression.FileSystem; " &
+      "[System.IO.Compression.ZipFile]::ExtractToDirectory(" &
+      powershellZipLiteral(archivePath) & ", " &
+      powershellZipLiteral(destDir) & ")")
+
+proc extractZipWithPowershell(packageId, powershell, archivePath,
+                              destDir: string) =
+  let res = execCmdEx(
+    powershellZipExtractCommand(powershell, archivePath, destDir))
+  if res.exitCode != 0:
+    raiseExtractFailed(packageId, archivePath, "zip",
+      "PowerShell zip extraction exited " & $res.exitCode & "\n" &
+      res.output)
+
 proc extractZip(packageId, archivePath, destDir: string) =
   createDir(extendedPath(destDir))
-  # On Windows we PREFER ``Expand-Archive`` because PowerShell-
-  # produced archives store paths with ``\\`` separators and the GNU
-  # ``unzip`` shipped by MSYS2 rejects those with "appears to use
-  # backslashes as path separators" (exit 1). ``Expand-Archive``
-  # round-trips its own archives correctly and also handles forward-
-  # slash archives produced by ``zip`` / ``7z``. On POSIX hosts we
-  # still prefer ``unzip`` because PowerShell is not universally
+  # On Windows we PREFER PowerShell because archives produced by Windows
+  # tools store paths with ``\\`` separators and the GNU ``unzip`` shipped by
+  # MSYS2 rejects those with "appears to use backslashes as path separators"
+  # (exit 1). The .NET zip reader handles both separators. On POSIX hosts
+  # we still prefer ``unzip`` because PowerShell is not universally
   # available there.
   when defined(windows):
     let powershell = findExe("powershell")
     if powershell.len > 0:
-      let psCommand = "Expand-Archive -Path " & quoteShell(archivePath) &
-        " -DestinationPath " & quoteShell(destDir) & " -Force"
-      let command = quoteShell(powershell) &
-        " -NoProfile -ExecutionPolicy Bypass -Command " &
-        quoteShell(psCommand)
-      let res = execCmdEx(command)
-      if res.exitCode != 0:
-        raiseExtractFailed(packageId, archivePath, "zip",
-          "Expand-Archive exited " & $res.exitCode & "\n" & res.output)
+      extractZipWithPowershell(packageId, powershell, archivePath, destDir)
       return
   let unzip = findExe("unzip")
   if unzip.len > 0:
@@ -532,24 +565,17 @@ proc extractZip(packageId, archivePath, destDir: string) =
     return
   when not defined(windows):
     # Final fallback on POSIX where PowerShell may exist via
-    # PowerShell Core; keep the original branch shape so a non-
-    # Windows host with PowerShell still has a path forward.
-    let powershell = findExe("powershell")
+    # PowerShell Core.
+    var powershell = findExe("powershell")
+    if powershell.len == 0:
+      powershell = findExe("pwsh")
     if powershell.len > 0:
-      let psCommand = "Expand-Archive -Path " & quoteShell(archivePath) &
-        " -DestinationPath " & quoteShell(destDir) & " -Force"
-      let command = quoteShell(powershell) &
-        " -NoProfile -ExecutionPolicy Bypass -Command " &
-        quoteShell(psCommand)
-      let res = execCmdEx(command)
-      if res.exitCode != 0:
-        raiseExtractFailed(packageId, archivePath, "zip",
-          "Expand-Archive exited " & $res.exitCode & "\n" & res.output)
+      extractZipWithPowershell(packageId, powershell, archivePath, destDir)
       return
   raiseExtractFailed(packageId, archivePath, "zip",
     "no zip extractor available (tried " &
     (when defined(windows): "powershell, " else: "") & "unzip" &
-    (when defined(windows): "" else: ", powershell") & ")")
+    (when defined(windows): "" else: ", powershell, pwsh") & ")")
 
 proc discoverSevenZipExe*(store: var Store; packageId: string):
     string =
@@ -1148,7 +1174,7 @@ proc extract7z(packageId, archivePath, destDir, sevenZipExe: string) =
   ## On POSIX hosts, `p7zip`'s `7z` binary speaks the same CLI.
   ##
   ## We deliberately do NOT fall back to PowerShell's
-  ## `Microsoft.PowerShell.Archive` (Expand-Archive only handles .zip)
+  ## .NET's zip reader (it only handles .zip)
   ## or to any other built-in extractor: 7z's compression family
   ## (LZMA/LZMA2/PPMd) has no in-box Windows alternative.
   ##
@@ -2737,8 +2763,8 @@ proc realizeBuiltinPackage*(store: var Store;
       let downloadDir = stagingDir / ".repro-download"
       createDir(extendedPath(downloadDir))
       # Suffix the download path with the archive's native extension so
-      # downstream extractors that dispatch on extension (PowerShell's
-      # Expand-Archive requires `.zip`; some `tar` wrappers parse the
+      # downstream extractors that dispatch on extension (`unzip` looks for
+      # `.zip` when a name has none; some `tar` wrappers parse the
       # second-from-last segment) can recognise the file. Without this
       # the `.<digits>` timestamp suffix is misread as the extension.
       var archiveExt = ""
