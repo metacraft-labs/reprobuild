@@ -23823,6 +23823,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "tests/e2e",
@@ -32746,6 +32747,7 @@
         "repro_dsl_stdlib",
         "repro_interface_artifacts",
         "repro_project_dsl",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "tests/integration",

@@ -34,6 +34,7 @@
 ## it downloads 7zr.exe and PortableGit once into a fresh temporary store.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_build_engine
 import repro_project_dsl
