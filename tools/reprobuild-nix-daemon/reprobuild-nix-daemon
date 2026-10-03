@@ -223,7 +223,13 @@ def response_for(line: bytes, cache: dict) -> dict:
         bool(req.get("evaluateOnly")),
         dependency_cache_key(dependencies),
     )
-    if key not in cache:
+    # Nix owns these outputs independently of this process's response cache.
+    # A surviving evaluation key does not keep its realized paths alive after
+    # store removal. Reacquire through Nix instead of returning stale success.
+    cached = cache.get(key)
+    if cached is None or not cached["paths"] or not all(
+        Path(path).exists() for path in cached["paths"]
+    ):
         cache[key] = resolve_selector(
             selector, workspace_root, dependencies, expression_file
         )

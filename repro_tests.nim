@@ -639,8 +639,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim",
-    binary: "build/test-bin/t_portable_fingerprint_engine",
+    source: "libs/repro_build_engine/tests/t_package_identity_is_the_producing_action.nim",
+    binary: "build/test-bin/t_package_identity_is_the_producing_action",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -648,10 +648,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
-    source: "libs/repro_build_engine/tests/t_package_identity_is_the_producing_action.nim",
-    binary: "build/test-bin/t_package_identity_is_the_producing_action",
+    source: "libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim",
+    binary: "build/test-bin/t_portable_fingerprint_engine",
     defines: @[],
-    requiresReproBinary: false,
+    requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny,
@@ -16039,6 +16039,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
 ## test execute edges, so the ``test`` collection covers
 ## both languages in one engine pass.
 const pythonTestPaths*: seq[string] = @[
+  "tests/integration/test_nix_daemon_cache.py",
   "tests/test_dev_env_m9_policy.py",
   "tests/unit/test_build_report_attribution.py",
   "tests/unit/test_cmake_generator_competitiveness_bench.py",
