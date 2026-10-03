@@ -624,13 +624,25 @@ suite "repro workspace sync — never advise pushing onto a rewritten remote":
         "force-pushes.json"
       check fileExists(forcePushesPath)
       let recorded = parseFile(forcePushesPath)
+      # THE FILE IS AN ARRAY OF RECORDS, not a flat ``{path: [sha…]}`` object.
+      # The flat shape was this writer's own, and it carried no branch, no new
+      # tip, no backup ref and no timestamp — so it was not a recovery record,
+      # which is the one thing the file is for. The richer shape is what the
+      # live workspace already carried and what a declared rename re-keys
+      # (Declared-Repository-Renames.md §3.5).
+      check recorded.kind == JArray
+      proc recordedFor(key: string): int =
+        for record in recorded:
+          if record.kind == JObject and "repo" in record and
+              record["repo"].getStr() == key:
+            inc result
       # ``observed``: the sync's own fetch watched the remote move, so the
       # superseded commits are on record and the replay has a base.
-      check recorded.hasKey("observed")
+      check recordedFor("observed") > 0
       # ``inferred``: the rewrite was already fetched, so this run saw no
       # transition and recorded nothing for it. Ancestry is the only signal
       # that produced its verdict, and there is nothing to replay from.
-      check not recorded.hasKey("inferred")
+      check recordedFor("inferred") == 0
 
       # The preserving remedy is offered where it can act, and nowhere else.
       check "--rebase-on-force-push" in observedReason

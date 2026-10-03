@@ -1429,6 +1429,17 @@ tests/integration/t_remote_unseal_boot.nim	nim	7
 tests/integration/t_remote_unseal_broker_refusal_fails_closed.nim	nim	6
 tests/integration/t_remote_unseal_client.nim	nim	11
 tests/integration/t_remove_gcs_only_unreferenced_checkouts_and_guards_dirty.nim	nim	3
+tests/integration/t_rename_alternates_keeps_old_bare_reachable.nim	nim	1
+tests/integration/t_rename_force_pushes_record_is_rekeyed.nim	nim	2
+tests/integration/t_rename_fork_at_previous_path_is_refused.nim	nim	1
+tests/integration/t_rename_old_reader_parses_fragment.nim	nim	9
+tests/integration/t_rename_orphan_is_reported.nim	nim	2
+tests/integration/t_rename_refusals.nim	nim	6
+tests/integration/t_rename_refuses_nested_declared_checkout.nim	nim	2
+tests/integration/t_rename_refuses_unrelated_directory_at_previous_path.nim	nim	2
+tests/integration/t_rename_relocates_instead_of_cloning.nim	nim	5
+tests/integration/t_rename_relocation_failure_is_clean.nim	nim	1
+tests/integration/t_rename_renamed_and_rewritten_repo_relocates.nim	nim	1
 tests/integration/t_report_classifies_at_ahead_and_behind.nim	nim	1
 tests/integration/t_repos_add_records_project_membership_by_key.nim	nim	1
 tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	nim	6
@@ -1817,6 +1828,7 @@ tests/unit/t_provider_startup_body_containment.nim	nim	14
 tests/unit/t_python3_provides_its_own_name.nim	nim	2
 tests/unit/t_reasoned_skip_compiles_on_any_unittest.nim	nim	3
 tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim	nim	4
+tests/unit/t_repo_relocation_move_ordering.nim	nim	7
 tests/unit/t_run_consumes.nim	nim	6
 tests/unit/t_runquota_endpoint_paths.nim	nim	6
 tests/unit/t_runquota_grant_wait_unresponsive.nim	nim	11

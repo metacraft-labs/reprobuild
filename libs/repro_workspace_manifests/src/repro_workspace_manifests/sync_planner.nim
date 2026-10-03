@@ -64,6 +64,20 @@ type
       ## of the world at some UNKNOWN earlier time. No verdict may be
       ## rendered from it -- least of all a reassuring one. See the guard
       ## at the top of ``classifyRepoState``.
+    scRelocationRefused
+      ## Declared-Repository-Renames.md §4 — the repo declares a prior
+      ## identity, something was found at a prior path, and the tool DECLINED
+      ## to move it (one of the eight pre-flight refusals). The repo must not
+      ## be cloned either: cloning fresh at the new path after concluding
+      ## something is wrong reproduces the orphan-beside-empty-clone outcome
+      ## the mechanism exists to prevent, and does it KNOWINGLY. Exit 2 — a
+      ## judgement call with manual work for the operator.
+    scRelocationFailed
+      ## Declared-Repository-Renames.md §4 — the move was attempted and
+      ## FAILED (`relocation_failed` / `relocation_verification_failed`).
+      ## Exit 1, because this is a broken action rather than a judgement
+      ## call; that split is the one `CLI/sync.md` already defines and
+      ## relocation does not need a third code.
 
   SyncActionKind* = enum
     ## Discriminator for what the dispatcher should do for a given repo
@@ -148,6 +162,22 @@ type
     fetchDiagnostic*: string
       ## Why the fetch failed, verbatim from the dispatcher, so the refusal
       ## names the real cause instead of the symptom.
+    relocationRefusal*: string
+      ## Declared-Repository-Renames.md §4 — the dispatcher declined to
+      ## relocate a checkout found at one of this repo's declared prior paths,
+      ## and this is the refusal, naming the case and what was found.
+      ##
+      ## Carried in the OBSERVATION rather than applied as a side table for
+      ## the reason the `fetchFailed` flag is: one code path downstream has to
+      ## report, count and exit-code every per-repo outcome, and a repo whose
+      ## relocation was refused has no checkout at its declared path — so
+      ## without this field the planner would read `exists = false` and
+      ## schedule the clone that manufactures the orphan.
+    relocationFailure*: string
+      ## Same, for a relocation that was ATTEMPTED and failed. Separate field
+      ## because the two map onto different exit codes (2 vs 1), and
+      ## collapsing them would make a broken move indistinguishable from a
+      ## declined one.
     remoteHistoryDisjoint*: bool
       ## HEAD shares NO history with the remote: the merge-base of HEAD and
       ## the remote's trunk tip is empty. On a branch with a remote
@@ -203,6 +233,8 @@ proc syncCaseTag*(syncCase: SyncCase): string =
   of scMissingCheckout: "missing_checkout"
   of scForcePushRebase: "force_push_rebase"
   of scFetchFailed: "fetch_failed"
+  of scRelocationRefused: "relocation_refused"
+  of scRelocationFailed: "relocation_failed"
 
 proc syncActionTag*(action: SyncActionKind): string =
   ## Stable identifier for the planner's action enum, used as the JSON
@@ -318,6 +350,11 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   ## cases. The decision logic deliberately runs in a fixed priority
   ## order:
   ##
+  ## -1. ``relocation_failed`` /
+  ##     ``relocation_refused``        (a declared rename's move failed, or
+  ##                                    the tool declined it — either way the
+  ##                                    declared path is empty BY DECISION and
+  ##                                    must not be cloned into)
   ## 0. ``fetch_failed``              (the pre-classification fetch for
   ##                                    this repo did not succeed, so no
   ##                                    remote-derived field can be trusted)
@@ -360,6 +397,28 @@ proc classifyRepoState*(resolved: ResolvedRepo;
   result.path = resolved.path
   result.expected = resolved.revision
   result.branch = observation.currentBranch
+
+  # Declared-Repository-Renames.md §3.3 — AHEAD of the missing-checkout arm,
+  # because that is the arm these two displace and the displacement is the
+  # whole point. A repo whose relocation was refused or failed has no checkout
+  # at its declared path, so `exists = false` is true and `missing_checkout`
+  # → `clone` is what the planner would otherwise answer: a second empty copy
+  # beside a directory the tool has just said it does not understand. "A
+  # failed check refuses the repo, and does not clone either."
+  if observation.relocationFailure.len > 0:
+    result.syncCase = scRelocationFailed
+    result.action = saNone
+    result.refusalReason = observation.relocationFailure
+    result.message = "relocation of '" & resolved.path & "' FAILED; nothing " &
+      "was half-moved and no clone was substituted for it"
+    return
+  if observation.relocationRefusal.len > 0:
+    result.syncCase = scRelocationRefused
+    result.action = saNone
+    result.refusalReason = observation.relocationRefusal
+    result.message = "declining to relocate a checkout into '" &
+      resolved.path & "'; it was NOT cloned over"
+    return
 
   if not observation.exists:
     result.syncCase = scMissingCheckout
