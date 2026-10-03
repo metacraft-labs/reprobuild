@@ -9513,6 +9513,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_build_declares_its_pools_to_runquota.nim",
+    binary: "build/test-bin/t_build_declares_its_pools_to_runquota",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_build_machine_and_host_target_are_distinct.nim",
     binary: "build/test-bin/t_build_machine_and_host_target_are_distinct",
     defines: @[],
@@ -13248,6 +13257,15 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false),
   TestSpec(
+    source: "tests/integration/t_runquota_auto_spawned_daemon_follows_host_config.nim",
+    binary: "build/test-bin/t_runquota_auto_spawned_daemon_follows_host_config",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false),
+  TestSpec(
     source: "tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim",
     binary: "build/test-bin/t_runquota_bypass_is_reported_in_build_header_and_report",
     defines: @[],
@@ -16418,15 +16436,6 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_runquota_queue_wait_is_loud_and_bounded.nim",
     binary: "build/test-bin/t_runquota_queue_wait_is_loud_and_bounded",
-    defines: @[],
-    requiresReproBinary: false,
-    extraPassC: @[],
-    extraPassL: @[],
-    targetOs: soAny,
-    selfInterposes: false),
-  TestSpec(
-    source: "tests/unit/t_rx_consumer_own_pool_forwarded_despite_unresolved_sibling.nim",
-    binary: "build/test-bin/t_rx_consumer_own_pool_forwarded_despite_unresolved_sibling",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

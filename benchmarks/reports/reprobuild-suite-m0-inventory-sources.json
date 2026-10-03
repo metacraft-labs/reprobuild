@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 24,
-    "nimTestBinaries": 1852,
+    "nimTestBinaries": 1853,
     "pureUnitConsolidationGroups": 47,
-    "pureUnitTests": 593,
+    "pureUnitTests": 592,
     "staticallyDetectedRuntimeCompilerFlowTests": 110,
-    "testEntries": 1868
+    "testEntries": 1869
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -958,6 +958,19 @@
       "count": 2,
       "defines": [],
       "dependencyShape": [
+        "repro_build_engine"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_m9r14e_3_action_env_threading.nim",
+        "tests/unit/t_rx_runquotad_forwards_custom_pools.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
         "repro_cli_support",
         "repro_interface_artifacts",
         "repro_tool_profiles"
@@ -999,20 +1012,6 @@
         "tests/unit/t_m9r21_2_probe_driver.nim",
         "tests/unit/t_m9r22_1_disko_btrfs_subvols.nim",
         "tests/unit/t_m9r22_2_disko_macro_emit.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 2,
-      "defines": [],
-      "dependencyShape": [
-        "repro_build_engine",
-        "repro_cli_support"
-      ],
-      "owner": "tests/unit",
-      "sources": [
-        "tests/unit/t_measurement_axes.nim",
-        "tests/unit/t_rx_runquotad_forwards_custom_pools.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1064,9 +1063,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 989,
+      "integration": 991,
       "platform/destructive": 118,
-      "pure unit": 593,
+      "pure unit": 592,
       "unclassified": 157
     },
     "graphOwnedTestArtifacts": [
@@ -1215,9 +1214,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 1852,
+    "nimTestBinaryCount": 1853,
     "pythonTestFileCount": 16,
-    "testEntryCount": 1868
+    "testEntryCount": 1869
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8954,14 +8953,13 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_build_engine",
         "repro_cli_support"
       ],
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_runquota_auto_spawn_defers_to_host_config.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25308,6 +25306,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_build_declares_its_pools_to_runquota",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_depfile",
+        "repro_runquota",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_build_declares_its_pools_to_runquota.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_build_machine_and_host_target_are_distinct",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -32650,6 +32669,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_runquota_auto_spawned_daemon_follows_host_config",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_runquota",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_runquota_auto_spawned_daemon_follows_host_config.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_runquota_bypass_is_reported_in_build_header_and_report",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -38940,40 +38979,19 @@
       "targetOs": "soAny"
     },
     {
-      "binary": "build/test-bin/t_rx_consumer_own_pool_forwarded_despite_unresolved_sibling",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
-      "defines": [],
-      "language": "nim",
-      "localDependencyShape": [
-        "repro_build_engine",
-        "repro_cli_support",
-        "repro_project_dsl",
-        "repro_provider_runtime"
-      ],
-      "owner": "tests/unit",
-      "requiresReproBinary": false,
-      "source": "tests/unit/t_rx_consumer_own_pool_forwarded_despite_unresolved_sibling.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
       "binary": "build/test-bin/t_rx_runquotad_forwards_custom_pools",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_build_engine",
-        "repro_cli_support"
+        "repro_build_engine"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_rx_runquotad_forwards_custom_pools.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

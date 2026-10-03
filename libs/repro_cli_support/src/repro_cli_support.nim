@@ -4339,31 +4339,6 @@ proc lowerMaterializedProviderSnapshot*(snapshot: ProviderGraphSnapshot;
   lowerProviderSnapshot(snapshot, PathOnlyBuildIdentity(), projectRoot,
     selectedActionIds, publishableOnly = true)
 
-proc poolsFromSnapshot*(snapshot: ProviderGraphSnapshot): seq[BuildPool] =
-  ## Gather the recipe's declared build pools DIRECTLY from the provider-graph
-  ## snapshot's ``reprobuild.build-pool.v1`` metadata nodes — the SAME pass
-  ## ``lowerProviderSnapshot`` runs (above), but WITHOUT the action-lowering /
-  ## tool-identity resolution that the full lower performs.
-  ##
-  ## RX pool-forwarding resilience: a recipe's ``buildPool(...)`` calls execute
-  ## at PROVIDER-EXECUTION time and land in the snapshot's fragments as
-  ## build-pool metadata nodes — they are INDEPENDENT of ``uses:`` sibling
-  ## resolution. Full graph LOWERING, by contrast, can throw for a CONSUMER
-  ## recipe whose ``uses:`` siblings are not yet resolvable at daemon-spawn
-  ## time. This proc lets the pool-forwarding path recover the consumer's OWN
-  ## declared pools from the snapshot even when lowering is incomplete, so a
-  ## consumer's ``buildPool("x.serial", 1)`` still reaches its runquotad.
-  var pools = initTable[string, BuildPoolDef]()
-  for fragment in snapshot.fragments:
-    for node in fragment.nodes:
-      if node.kind == gnkMetadata and
-          node.stableName == "reprobuild.build-pool.v1":
-        let pool = decodeBuildPoolPayload(toBytes(node.payload))
-        if not pools.hasKey(pool.name):
-          pools[pool.name] = pool
-  for pool in pools.values:
-    result.add(repro_build_engine.pool(pool.name, pool.capacity))
-
 const DefaultBuildCollectionName* = "default"
   ## Per Build-Graph-Collections.md §"`default`" — the conventional
   ## collection that `repro build` with no positional target resolves
@@ -12849,9 +12824,7 @@ proc publicDevEnvMonitor(publicCliPath: string):
   ## monitor binary.
   (selfSpawnIoMonitorPath(publicCliPath), internalIoMonitorArgs)
 
-proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
-                                extraPools: openArray[BuildPool] = []):
-    owned(Process)
+proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process)
   ## Exported on the FORWARD declaration, which is where Nim wants the marker
   ## when a proc is declared before it is defined. See the definition for why
   ## it is public at all.
@@ -19316,109 +19289,92 @@ proc restoreDaemonRequestEnvironment*(
     else:
       delEnv(item.key)
 
-const StandardRunquotadPoolCaps* = [
-  ("compile", 8'u32),
-  ("fetch", 2'u32)
-]
-  ## RX pool-forwarding — the two convention pools the standard provider's
-  ## convention bodies always register (``buildPool("compile", 8'u32)`` /
-  ## ``buildPool("fetch", 2'u32)`` in ``runtime_core``; also pinned in the
-  ## engine's in-process ``poolCapacity`` table at
-  ## ``repro_build_engine.nim`` ~L3592). Kept as a named constant so the
-  ## defaults live in one place and the argv assembler + its test share
-  ## the same source of truth.
-
-proc assembleRunquotadPoolArgs*(extraPools: openArray[BuildPool]): seq[string] =
-  ## Build the ``--pool NAME=CAP`` argv fragment forwarded to ``runquotad``.
-  ##
-  ## The daemon initialises ``namedPoolCaps`` empty (see
-  ## ``runquota_daemon.canAdmitImmediately`` — ``cap == 0 or units > cap``
-  ## denies), so every action whose ``pool`` field is non-empty must have a
-  ## matching ``--pool`` flag or its lease is denied and the engine's
-  ## ``automaticMonitor`` retry loop spins forever (``repro build`` hangs).
-  ##
-  ## Historically only the two convention pools (``compile`` / ``fetch``)
-  ## were forwarded. RX: a recipe can declare its own pool via
-  ## ``buildPool("<name>", <cap>)`` and route execute edges through it
-  ## (``edge.testBinary.run(pool="<name>", poolUnits=1)``) to serialize
-  ## resource-contending tests. Those custom pools reach the CLI as
-  ## ``buildGraph.pools`` entries in the extracted project graph. We forward
-  ## every such pool here IN ADDITION to the convention defaults so its
-  ## leases are granted. Custom pool names carry dots / dashes (e.g.
-  ## ``nim_pty.pty-serial``); ``runquotad`` parses ``--pool`` with
-  ## ``split("=", 1)`` (apps/runquotad/runquotad.nim ~L91) so only the first
-  ## ``=`` splits and dotted names survive intact.
-  var seen = initTable[string, uint32]()
-  for (name, cap) in StandardRunquotadPoolCaps:
-    seen[name] = cap
-  # A recipe may legitimately re-declare a convention pool with a different
-  # cap (e.g. widen ``compile``). The recipe-declared value wins since it is
-  # what the engine's in-process ``poolCapacity`` table gates on, so the
-  # daemon budget must match it; otherwise the two gates disagree.
-  for pool in extraPools:
-    if pool.name.len == 0:
-      continue
-    seen[pool.name] = pool.capacity
-  # Deterministic order: convention pools first (stable historical shape the
-  # M9.R.12.3 contract pins), then remaining custom pools sorted by name.
-  for (name, _) in StandardRunquotadPoolCaps:
-    result.add("--pool")
-    result.add(name & "=" & $seen[name])
-    seen.del(name)
-  var customNames: seq[string] = @[]
-  for name in seen.keys:
-    customNames.add(name)
-  customNames.sort()
-  for name in customNames:
-    result.add("--pool")
-    result.add(name & "=" & $seen[name])
-
-proc autoRunQuotaBudgetArgs*(host: HostConfig;
-                             extraPools: openArray[BuildPool];
-                             cpuMilli: uint32):
+proc autoRunQuotaBudgetArgs*(host: HostConfig):
     tuple[args: seq[string]; warnings: seq[string]] =
-  ## The budget flags an auto-spawned ``runquotad`` is started with.
+  ## The budget flags an auto-spawned ``runquotad`` is started with: NONE,
+  ## unless ``REPROBUILD_RUNQUOTA_MEMORY_BYTES`` asks for one.
   ##
-  ## The daemon is host-wide: whoever spawns it sets the budget for every
-  ## workspace on the host. Measured 2026-09-23 on a 125.6 GiB workstation:
-  ## the only daemon had been auto-spawned by another workspace with the
-  ## 16 GiB default and refused a provider compile. The budget is now the
-  ## host file's (``hostConfigPath``), which the daemon reads at start and
-  ## which a flag would override. So a flag is passed only for what the file
-  ## leaves unset:
+  ## A DAEMON REPROBUILD STARTS MUST BEHAVE AS THE HOST'S CONFIGURATION SAYS
+  ## (reprobuild-specs/RunQuota-Host-Configuration.md, "What the auto-spawn
+  ## passes"). Every flag pins its key for the daemon's whole life: it
+  ## overrides the host file and the daemon's own default, and survives
+  ## ``runquota config reload``, so a later ``runquota config set`` of that
+  ## key does nothing to the daemon. So the auto-spawn passes none of them:
   ##
-  ## - memory: ``REPROBUILD_RUNQUOTA_MEMORY_BYTES`` still wins as an explicit
-  ##   per-invocation override, with a warning when it disagrees with the
-  ##   file, because the daemon it spawns budgets every other workspace too.
-  ##   Otherwise NO FLAG: the daemon takes the file's value, or its own
-  ##   default of 75% of physical memory, and a later ``runquota config set
-  ##   machine.memory_bytes`` reaches it by reload (a flag would pin it).
-  ## - cpu: ``cpuMilli`` unless the file sets ``cpu_milli``.
-  ## - pools: a convention pool the file sizes is left to the file. A pool
-  ##   the recipe declares is always passed, because the engine's in-process
-  ##   gate uses the recipe's figure and the two gates must agree (see
-  ##   ``assembleRunquotadPoolArgs``).
+  ## - memory: the host file's ``memory_bytes``, else the daemon's default of
+  ##   75% of physical memory. Until 2026-09-30 a flat 16 GiB was passed.
+  ## - cpu: the host file's ``cpu_milli``, else the daemon's default of one
+  ##   core per logical processor. Until 2026-10-01 ``buildMaxParallelism()
+  ##   * 1000`` was passed whenever the file left ``cpu_milli`` unset: the
+  ##   build's own parallelism became the host's lease budget, for every
+  ##   workspace on the host and against every later ``config set``. The
+  ##   engine's parallelism still bounds the engine; it is a property of the
+  ##   build, not of the host.
+  ## - pools: not flags any more. Each build declares the pools its graph
+  ##   uses on its own session (``declareRunQuotaPools``), under the host
+  ##   file, so a daemon reprobuild did not start learns them too.
+  ##
+  ## ``REPROBUILD_RUNQUOTA_MEMORY_BYTES`` is the one explicit, per-invocation
+  ## override left, and it is a flag on purpose: it is somebody saying
+  ## "this number, for this daemon". What it does is said every time it is
+  ## used (``warnings``), because the daemon it starts outlives the command
+  ## that started it.
   let memoryOverride = autoRunQuotaMemoryBytes()
-  if memoryOverride.isSome:
-    let memory = memoryOverride.get
-    result.args.add(["--memory-bytes", $memory])
-    if host.memoryBytes.isSome and host.memoryBytes.get != memory:
-      result.warnings.add("REPROBUILD_RUNQUOTA_MEMORY_BYTES=" & $memory &
-        " overrides memory_bytes = " & $host.memoryBytes.get & " in " &
-        host.sourcePath & "; the RunQuota daemon being started serves the " &
-        "whole host, so this budget applies to every workspace on it")
-  if host.cpuMilli.isNone:
-    result.args.add(["--cpu-milli", $int(cpuMilli)])
-  var recipePools = initHashSet[string]()
-  for pool in extraPools:
-    recipePools.incl(pool.name)
-  let poolArgs = assembleRunquotadPoolArgs(extraPools)
-  var i = 0
-  while i + 1 < poolArgs.len:
-    let name = poolArgs[i + 1].split("=", 1)[0]
-    if name notin host.pools or name in recipePools:
-      result.args.add([poolArgs[i], poolArgs[i + 1]])
-    i += 2
+  if memoryOverride.isNone:
+    return
+  let memory = memoryOverride.get
+  if host.memoryBytes.isSome and host.memoryBytes.get == memory:
+    # The host file already says this. A flag would change nothing now and
+    # would pin the key, so a later `config set` would silently not apply.
+    return
+  result.args.add(["--memory-bytes", $memory])
+  let replaced =
+    if host.memoryBytes.isSome:
+      "memory_bytes = " & $host.memoryBytes.get & " in " & host.sourcePath
+    else:
+      "the daemon's default (75% of physical memory; no memory_bytes in " &
+        (if host.sourcePath.len > 0: host.sourcePath else: hostConfigPath) &
+        ")"
+  let reach =
+    when defined(windows):
+      "The daemon being started serves the whole host and outlives this " &
+        "build, so this budget applies to every workspace on it until " &
+        "runquotad stops"
+    else:
+      "The daemon being started serves this build and the builds it runs, " &
+        "and stops with it"
+  result.warnings.add("REPROBUILD_RUNQUOTA_MEMORY_BYTES=" & $memory &
+    " starts runquotad with --memory-bytes " & $memory & ", overriding " &
+    replaced & ". " & reach & ", and `runquota config set " &
+    "machine.memory_bytes` will not change it: the flag pins the key " &
+    "(`runquota config show` lists pinned keys).")
+
+proc autoRunQuotaMemoryOverrideNotApplied*(runningBudget: Option[uint64]):
+    seq[string] =
+  ## The warning for ``REPROBUILD_RUNQUOTA_MEMORY_BYTES`` when a daemon is
+  ## ALREADY running, so nothing is spawned and the variable cannot take
+  ## effect. Silent when the running daemon's budget is the requested one
+  ## (typically the daemon this same command spawned a moment earlier, seen
+  ## again by a daemon-hosted executor that inherited the variable).
+  let requested = autoRunQuotaMemoryBytes()
+  if requested.isNone:
+    return
+  if runningBudget.isSome and runningBudget.get == requested.get:
+    return
+  result.add("REPROBUILD_RUNQUOTA_MEMORY_BYTES=" & $requested.get &
+    " has no effect: a runquotad is already running at " &
+    runQuotaEndpointText() & ", and the variable only sizes a daemon " &
+    "reprobuild starts. Its memory budget is " &
+    (if runningBudget.isSome: $runningBudget.get & " bytes"
+     else: "unknown (it did not answer the topology inspection)") &
+    "; change it with `runquota config set machine.memory_bytes`.")
+
+proc warnRunQuotaMemoryOverrideNotApplied() =
+  if getEnv("REPROBUILD_RUNQUOTA_MEMORY_BYTES", "").len == 0:
+    return
+  for warning in autoRunQuotaMemoryOverrideNotApplied(
+      runQuotaDaemonMemoryBudget()):
+    stderr.writeLine("repro: warning: " & warning)
 
 var machineDaemonTrustApplied = false
 
@@ -19463,9 +19419,7 @@ proc forgetMachineDeclaredDaemonTrust*() =
   ## more than once in a process; production calls it nowhere.
   machineDaemonTrustApplied = false
 
-proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
-                                extraPools: openArray[BuildPool] = []):
-    owned(Process) =
+proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   ## Exported for `tests/integration/t_derived_daemon_ipc_trust.nim` and
   ## `tests/integration/t_declared_daemon_ipc_trust.nim`, which grade the
   ## PRODUCTION WIRING of DA-2 and DA-4 rather than their mechanisms: this is
@@ -19487,6 +19441,7 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
   # subsequent runquota client connect would fail. Probing here makes
   # both platforms self-healing.
   if getEnv("RUNQUOTA_SOCKET", "").len > 0 and isRunQuotaDaemonReachable():
+    warnRunQuotaMemoryOverrideNotApplied()
     return nil
   # M9.R.11 — also bypass a fresh spawn when the default per-user pipe
   # is already serviced by a healthy daemon (the common case: a previous
@@ -19496,6 +19451,7 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
   # ``connectDefault`` on Windows, so when it returns true the daemon
   # is genuinely accepting connections.
   if isRunQuotaDaemonReachable():
+    warnRunQuotaMemoryOverrideNotApplied()
     return nil
   # M9.R.13c.1 — **deterministic stale-pipe recovery**. The wedge that
   # blocked every M9.R.13b iter past iter 11 (and forced the operator
@@ -19615,28 +19571,14 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool;
   # before it listens and the build dies with the refusal in its log.
   # ``runquotaEndpointPath`` owns that rule; see its docs for why the
   # answer is a private directory and not a laxer check.
-  # M9.R.12.3 — declare the standard named pools the convention layer
-  # registers (``compile`` + ``fetch``). Without these flags the daemon
-  # initialises ``namedPoolCaps`` empty, so every action that requests
-  # a non-empty ``pool`` (which the M9.R.6.1 convention sentinel +
-  # M9.R.12.1 autotools_package configure action + every from-source-*
-  # convention does) hits the
-  # ``lease request exceeds named-pool budget: <name>`` denial and the
-  # ``automaticMonitor`` retry loop spins until exhaustion.
-  #
-  # Caps mirror what the standard provider's convention bodies declare
-  # at ``buildPool("compile", 8'u32)`` / ``buildPool("fetch", 2'u32)``
-  # — the engine-side ``poolCapacity`` table already pins these values
-  # for in-process gating; the daemon now sees the matching budget.
-  #
-  # RX: in ADDITION to the convention defaults, forward every
-  # recipe-declared custom pool (``extraPools`` — the pools present in the
-  # extracted project graph, i.e. ``buildGraph.pools``). Without this a
-  # recipe's ``buildPool("nim_pty.pty-serial", 1)`` never reaches the
-  # daemon, its execute-edge lease hits ``lease request exceeds named-pool
-  # budget: nim_pty.pty-serial``, and the build hangs.
-  let budget = autoRunQuotaBudgetArgs(readHostConfig(), extraPools,
-    buildMaxParallelism() * 1000'u32)
+  # THE BUDGET IS THE HOST'S, NOT THIS COMMAND'S. No CPU, memory or pool
+  # flag is passed (``autoRunQuotaBudgetArgs``): the daemon reads the host
+  # file and its own defaults exactly as the installed service does, and a
+  # later ``runquota config set`` + reload reaches it. Named pools -- the
+  # convention ``compile`` / ``fetch`` and every recipe ``buildPool`` -- are
+  # declared by each build on its own session (``declareRunQuotaPools``),
+  # which is also what lets a daemon this process did NOT start admit them.
+  let budget = autoRunQuotaBudgetArgs(readHostConfig())
   for warning in budget.warnings:
     stderr.writeLine("repro: warning: " & warning)
   when defined(windows):
@@ -19759,18 +19701,6 @@ proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
   except CatchableError:
     discard
   process = nil
-
-proc autoRunQuotaNeedsPoolPreflight(bypassRunQuota: bool): bool =
-  ## Pool discovery compiles/inspects the project provider. Do it only when
-  ## this process may actually spawn runquotad and can pass the discovered
-  ## pools at daemon startup; an already-reachable daemon cannot be amended.
-  if bypassRunQuota or not autoRunQuotaEnabled():
-    return false
-  if getEnv("RUNQUOTA_SOCKET", "").len > 0 and isRunQuotaDaemonReachable():
-    return false
-  if isRunQuotaDaemonReachable():
-    return false
-  findRunQuotaDaemonBin().len > 0
 
 proc runDepsRefreshCommand(args: openArray[string]): int =
   ## Implements ``repro deps refresh`` — the Mode 3 scanner CLI.
@@ -20575,14 +20505,6 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
                            asJson: bool; packageFilter: string;
                            bypassRunQuota: bool): int
 
-# RX pool-forwarding forward declaration: extracts a recipe's declared
-# ``buildPool(...)`` set (the ``buildGraph.pools`` present in the extracted
-# project graph) so ``startAutoRunQuotaIfNeeded`` can forward them to the
-# daemon as ``--pool NAME=CAP``. Best-effort — defined after
-# ``prepareBuildGraphInspection`` (which it reuses) further down in the file.
-proc extractRecipeBuildPools(target: string; mode: ToolProvisioningMode;
-                             publicCliPath, workRoot: string;
-                             bypassRunQuota: bool): seq[BuildPool]
 
 # ---------------------------------------------------------------------------
 # Workspace-Manifest-Optional MO-1 — committed solved-graph lock.
@@ -23271,17 +23193,12 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         "captureGroups": statsCapture.captureGroupsText,
         "daemonHosted": true
       })
-    # RX: forward recipe-declared custom pools to a freshly spawned daemon so
-    # their execute-edge leases are granted (not denied -> hung). If a daemon
-    # is already reachable, pool caps are fixed and the inspection would only
-    # warm provider caches before the visible build.
-    let recipePools =
-      if autoRunQuotaNeedsPoolPreflight(bypassRunQuota):
-        extractRecipeBuildPools(target, mode, publicCliPath, workRoot,
-          bypassRunQuota)
-      else:
-        @[]
-    var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota, recipePools)
+    # A recipe's own pools (``buildPool(...)``) are no longer extracted here
+    # to be passed as ``--pool`` flags to a daemon this command spawns: the
+    # engine declares the pools of the graph it runs on its own RunQuota
+    # session (``declareRunQuotaPools``), which also reaches a daemon it did
+    # not start, and does not pin them against the host file.
+    var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
     # Peer-Cache M1 wiring (LDRV M5): start the LAN peer-cache runtime
     # when the user passed ``--peer-cache=lan://…``. The actual setup
     # lives in ``buildPeerCacheWiringFor`` further down the file so
@@ -24210,42 +24127,6 @@ proc refreshRecipeProviderSnapshot(target: string;
     workRoot, lowerGraph = false)
   result.snapshot = some(refresh.snapshot)
   result.providerInvocations = refresh.invoked.len
-
-proc extractRecipeBuildPools(target: string; mode: ToolProvisioningMode;
-                             publicCliPath, workRoot: string;
-                             bypassRunQuota: bool): seq[BuildPool] =
-  ## RX pool-forwarding — return the recipe's declared build pools (the
-  ## ``buildGraph.pools`` present in the extracted project graph) so the
-  ## caller can forward them to ``runquotad`` alongside the convention
-  ## ``compile`` / ``fetch`` pools.
-  ##
-  ## Consumer-own-pool forwarding fix: this is called at daemon-spawn time,
-  ## BEFORE the producer sub-builds / develop-override resolution have run, so
-  ## a CONSUMER recipe with ``uses:`` selectors cannot yet resolve its sibling
-  ## tools. The OLD path routed through ``prepareBuildGraphInspection``, whose
-  ## tool-identity resolution / graph lowering THROWS on those unresolved
-  ## siblings; the best-effort ``except`` then swallowed the failure and
-  ## returned an EMPTY pool set — dropping the consumer's OWN
-  ## ``buildPool(...)`` and starving its pooled edges (cap-0 → lease denial →
-  ## livelock). The consumer's own pools execute at provider-execution time
-  ## and are INDEPENDENT of ``uses:`` resolution, so we now recover them from
-  ## the provider-graph SNAPSHOT (``refreshRecipeProviderSnapshot`` +
-  ## ``poolsFromSnapshot``) — which stops BEFORE the throwing sibling
-  ## resolution. Still best-effort: a genuine recipe error (no build block,
-  ## provider compile failure) yields an empty seq so the daemon spawns with
-  ## the convention defaults and the pre-RX behaviour is preserved.
-  var effectiveMode = mode
-  if effectiveMode == tpmUnspecified:
-    effectiveMode = tpmPathOnly
-  try:
-    let refresh = refreshRecipeProviderSnapshot(target, effectiveMode,
-      publicCliPath, workRoot, bypassRunQuota)
-    if refresh.snapshot.isSome:
-      result = poolsFromSnapshot(refresh.snapshot.get())
-    else:
-      result = @[]
-  except CatchableError:
-    result = @[]
 
 # ---------------------------------------------------------------------------
 # Workspace-Manifest-Optional MO-6 — projectExtension discovery + merge.

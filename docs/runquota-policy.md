@@ -31,23 +31,49 @@ runquota denied lease: lease request exceeds named-pool budget: cargo-network
 
 The daemon is host-wide, so its budget is the host's: `runquotad` reads
 `C:\ProgramData\runquota\runquotad.toml` / `/etc/runquota/runquotad.toml`,
-and with no `memory_bytes` there its budget is 75% of physical memory. When
-reprobuild starts the daemon automatically it passes no memory flag of its
-own (until 2026-09-30 it passed a flat 16 GiB, which became every
-workspace's budget). Change the budget with `runquota config set
-machine.memory_bytes 96GiB`, which also reloads a running daemon.
-`REPROBUILD_RUNQUOTA_MEMORY_BYTES` remains a per-invocation override for the
-daemon reprobuild spawns, and warns when it disagrees with the host file; the
-setting is forwarded into daemon-hosted and nested builds so they use the
-same capacity. See `reprobuild-specs/RunQuota-Host-Configuration.md`.
+and with no `memory_bytes` there its budget is 75% of physical memory; with no
+`cpu_milli`, one core (`1000` milli-CPU) per logical processor. Change it with
+`runquota config set machine.memory_bytes 96GiB` (or `machine.cpu_milli`,
+`pools.NAME`), which also reloads a running daemon.
+
+**A daemon reprobuild starts behaves exactly as that configuration says.**
+When reprobuild starts `runquotad` automatically it passes no CPU, memory or
+pool flag (`autoRunQuotaBudgetArgs`), so it arrives at the same budget as the
+installed service and nothing is pinned against `runquota config set`. Until
+2026-09-30 it passed a flat 16 GiB; until 2026-10-01 it also passed
+`--cpu-milli` = the build's own parallelism × 1000 and `--pool` flags. The
+engine's parallelism (`REPROBUILD_MAX_PARALLELISM`) still bounds how many
+actions the engine runs; it is no longer the host's lease budget.
+
+**Named pools are declared, not passed as flags.** Each build tells the
+daemon which named pools its graph uses (the convention `compile` / `fetch`
+and every recipe `buildPool`) on its own session, before its first lease
+(`runQuotaPoolDeclaration`, `declareRunQuotaPools`). That reaches a daemon
+reprobuild did not start too. The host file overrides a declared capacity,
+and a declaration leaves with its session. A `runquotad` too old to accept
+declarations is warned about once per process, naming the pools; its leases
+in pools it does not size are then refused as described below.
+
+`REPROBUILD_RUNQUOTA_MEMORY_BYTES` remains the one per-invocation override. It
+is passed as `--memory-bytes` to a daemon reprobuild spawns, and reprobuild
+warns every time that it overrides the host file (or the 75% default), how far
+that daemon reaches (Windows: every workspace on the host until `runquotad`
+stops), and that `runquota config set machine.memory_bytes` will not change it
+because the key is pinned. It passes nothing when the value equals the file's.
+When a daemon is already running the variable cannot apply, and reprobuild
+says so, naming the budget in force, unless the two agree. The setting is
+forwarded into daemon-hosted and nested builds so they use the same capacity.
+See `reprobuild-specs/RunQuota-Host-Configuration.md`, *What the auto-spawn
+passes* and *Pools a build declares*.
 
 Denials happen for one of two distinct reasons:
 
 1. **Hard denial** — the request exceeds the *machine's static capacity*
    (e.g. asks for 32 GiB on a 16 GiB host). No amount of waiting will let
    the request through with the current daemon configuration. The
-   operator must either grow the machine's budget, shrink the request,
-   or reconfigure the daemon's named-pool caps.
+   operator must either grow the machine's budget (`runquota config
+   set`), shrink the request, or size the named pool (`runquota config set
+   pools.NAME N`, or the build's own pool declaration).
 
 2. **Soft / transient denial** — the request would exceed a budget that
    is currently saturated by other live leases. Once a competing lease

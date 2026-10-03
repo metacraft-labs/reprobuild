@@ -2450,11 +2450,11 @@
         "release-packaging-src": []
       },
       "locked": {
-        "lastModified": 1790949658,
-        "narHash": "sha256-5FTgwikIfGRDXjMaMh7177AV1h92XdrM+1PecscNVLE=",
+        "lastModified": 1791039972,
+        "narHash": "sha256-whxsMfdBQU/jzM3fFCSGrZmJt7iL9OHMSR+J7HVWbqM=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "a9218b39133c85e025824b93a90529acaf77872b",
+        "rev": "4ec72e92aeaf9f6ed5caad9a8043ca703cc9df8c",
         "type": "github"
       },
       "original": {
