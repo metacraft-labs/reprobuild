@@ -221,7 +221,7 @@ proc expectedMainMessage(f: Fixture; w: LocalWork): string =
   let l = f.leaf
   "repro: " & l & ": your branch 'main' points at " & abbrev(w.oldMain) &
     ", which no longer\n" &
-  "exists here, in the shared cache (" & f.pool & "), or upstream.\n" &
+  "exists here, in the shared cache (" & displayPoolPath(f.pool) & "), or upstream.\n" &
   "  Why:  upstream rewrote its history and the old commits were removed everywhere this\n" &
   "        machine can reach. Commits that existed only on this ref and were never\n" &
   "        pushed are gone from this checkout too.\n" &
@@ -281,7 +281,7 @@ suite "SPI-3: detector, repair and messages":
         "repro: " & f.leaf & ": removed refs/remotes/origin/feat (" &
           abbrev(old) & ")\n" &
         "  Upstream rewrote or deleted that branch, and the old commit no longer exists\n" &
-        "  upstream or in the shared cache (" & f.pool & "). The ref was only a copy of upstream; none of\n" &
+        "  upstream or in the shared cache (" & displayPoolPath(f.pool) & "). The ref was only a copy of upstream; none of\n" &
         "  your branches depend on it. The next fetch recreates it if the branch still exists.\n" &
         "  Logged in " & logPath
       if stale.len == 1:
@@ -331,7 +331,7 @@ suite "SPI-3: detector, repair and messages":
       check refExists(f.leaf, "refs/remotes/origin/feat")
 
       let l = f.leaf
-      let cache = "the shared cache (" & f.pool & ")"
+      let cache = "the shared cache (" & displayPoolPath(f.pool) & ")"
       let expectedMywork =
         "repro: " & l & ": your branch 'mywork' is built on " & abbrev(w.featTip) &
           ", which no\n" &
@@ -400,7 +400,7 @@ suite "SPI-3: detector, repair and messages":
       let expected =
         "repro: " & l & ": your branch 'mywork' is built on " & abbrev(w.featTip) &
           ", which no\n" &
-        "longer exists here, in the shared cache (" & f.pool & "), or upstream.\n" &
+        "longer exists here, in the shared cache (" & displayPoolPath(f.pool) & "), or upstream.\n" &
         "  Why:  upstream rewrote its history and the old commits were removed everywhere this\n" &
         "        machine can reach. Your own commits on 'mywork' are still here, but some of\n" &
         "        the files in them existed only in that old history and are gone as well, so\n" &

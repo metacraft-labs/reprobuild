@@ -1678,8 +1678,9 @@ proc displayPath*(path: string): string =
     discard
   quoteShell(shown)
 
-proc displayPoolPath(pool: string): string =
+proc displayPoolPath*(pool: string): string =
   ## The pool path for prose (never pasted): ``~`` for the home directory.
+  ## Exported so tests that pin a message build it with the same rule.
   let home = getHomeDir()
   var h = home
   while h.len > 1 and h[^1] in {DirSep, AltSep}:
