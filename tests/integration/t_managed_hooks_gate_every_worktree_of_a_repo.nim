@@ -178,7 +178,7 @@ proc writeUserHook(fx: Fixture; hook: string) =
   setFilePermissions(path, perms)
 
 proc postCommitLog(fx: Fixture): string =
-  let path = fx.workspace / ".repro" / "build" / "reports" /
+  let path = fx.workspace / ".repro" / "workspace" /
     "post-commit-lock.log"
   if fileExists(path): readFile(path) else: ""
 

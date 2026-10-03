@@ -20931,11 +20931,29 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
 # milestone targets.
 # ---------------------------------------------------------------------------
 
+const PublishedRefPreference* = ["agents", "dev"]
+  ## The remote-tracking branch names a committed lock's ``ref`` prefers, in
+  ## order, when more than one published branch contains the pinned commit:
+  ## the shared agent integration branch, then the product mainline.
+
 proc committedLockRepoFacts(repoRoot: string):
-    tuple[headSha, branch, originUrl: string] =
+    tuple[headSha, branch, publishedRef, originUrl: string] =
   ## Read the repo-local facts the committed-lock-derived model needs: the
-  ## current ``HEAD`` SHA, the checked-out branch (empty when detached), and
-  ## the canonical fetch URL (empty when the repo has NO remote at all).
+  ## current ``HEAD`` SHA, the checked-out branch (empty when detached), the
+  ## PUBLISHED branch ``HEAD`` is reachable from (``publishedRef``, see
+  ## below), and the canonical fetch URL (empty when the repo has NO remote at
+  ## all).
+  ##
+  ## ``branch`` is the local name and is right for local decisions (a trunk
+  ## to sync). It is wrong for a committed lock's ``ref``: a lock is read on
+  ## other machines and in CI, where a local-only branch (`blocktracer`,
+  ## `n3g`, a worktree's topic branch) names nothing. ``publishedRef`` is a
+  ## branch of a remote whose remote-tracking ref contains ``HEAD``:
+  ## `PublishedRefPreference` first, then the checked-out branch's own name,
+  ## then the remote's default branch, then any other published branch
+  ## containing it (`main` / `master` first). Empty when no published branch
+  ## contains the commit, and a lock then records no ``ref`` rather than an
+  ## unpublished one.
   ## Best-effort: a missing ``git`` or a non-git directory yields empty fields
   ## (sync's plan and the gate's own per-repo probes still work without them).
   ##
@@ -20956,18 +20974,21 @@ proc committedLockRepoFacts(repoRoot: string):
   ## No remotes at all → empty (unchanged graceful degradation).
   if not (dirExists(extendedPath(repoRoot / ".git")) or
       fileExists(extendedPath(repoRoot / ".git"))):
-    return ("", "", "")
+    return ("", "", "", "")
   let gitBin = findExe("git")
   if gitBin.len == 0:
-    return ("", "", "")
-  proc run(extra: openArray[string]): string =
+    return ("", "", "", "")
+  proc runCode(extra: openArray[string]): tuple[code: int; output: string] =
     var cmd = quoteShell(gitBin)
     for a in extra:
       cmd.add(" ")
       cmd.add(quoteShell(a))
     let r = execCmdEx(cmd, options = {poUsePath},
       env = scrubbedGitRepositoryEnv())
-    if r.exitCode == 0: r.output.strip() else: ""
+    (code: r.exitCode, output: r.output)
+  proc run(extra: openArray[string]): string =
+    let r = runCode(extra)
+    if r.code == 0: r.output.strip() else: ""
   proc remoteUrl(name: string): string =
     if name.len == 0: "" else: run(["-C", repoRoot, "remote", "get-url", name])
   proc resolveFetchUrl(): string =
@@ -20990,9 +21011,90 @@ proc committedLockRepoFacts(repoRoot: string):
       if u.len > 0:
         return u
     remoteUrl(remotes[0])
+  proc resolvePublishedRef(headSha, branch: string): string =
+    if headSha.len == 0: return ""
+    var remotes: seq[string] = @[]
+    for line in run(["-C", repoRoot, "remote"]).splitLines():
+      let name = line.strip()
+      if name.len > 0: remotes.add(name)
+    # `origin`, then `upstream`, then the rest in git's order.
+    var ordered: seq[string] = @[]
+    for preferred in ["origin", "upstream"]:
+      if preferred in remotes: ordered.add(preferred)
+    for r in remotes:
+      if r notin ordered: ordered.add(r)
+    var candidates: seq[string] = @[]
+    for name in PublishedRefPreference: candidates.add(name)
+    if branch.len > 0 and branch notin candidates: candidates.add(branch)
+    for r in ordered:
+      let default = run(["-C", repoRoot, "symbolic-ref", "-q", "--short",
+        "refs/remotes/" & r & "/HEAD"])
+      if default.startsWith(r & "/"):
+        let name = default[r.len + 1 .. ^1]
+        if name.len > 0 and name notin candidates: candidates.add(name)
+    for name in candidates:
+      for r in ordered:
+        let tracking = "refs/remotes/" & r & "/" & name
+        if runCode(["-C", repoRoot, "rev-parse", "-q", "--verify",
+            tracking & "^{commit}"]).code != 0:
+          continue
+        if runCode(["-C", repoRoot, "merge-base", "--is-ancestor", headSha,
+            tracking]).code == 0:
+          return name
+    # No preferred name contains it (or the remote's default is unknown, as
+    # in a clone of a then-empty repository): any published branch that
+    # contains the commit, `main` / `master` first, else the first by name.
+    for r in ordered:
+      let listed = runCode(["-C", repoRoot, "for-each-ref", "--contains",
+        headSha, "--format=%(refname)", "refs/remotes/" & r & "/"])
+      if listed.code != 0: continue
+      var names: seq[string] = @[]
+      for line in listed.output.splitLines():
+        let full = line.strip()
+        let prefix = "refs/remotes/" & r & "/"
+        if not full.startsWith(prefix): continue
+        let name = full[prefix.len .. ^1]
+        if name.len == 0 or name == "HEAD": continue
+        names.add(name)
+      if names.len == 0: continue
+      for preferred in ["main", "master"]:
+        if preferred in names: return preferred
+      names.sort()
+      return names[0]
+    ""
   result.headSha = run(["-C", repoRoot, "rev-parse", "HEAD"])
   result.branch = run(["-C", repoRoot, "symbolic-ref", "--short", "-q", "HEAD"])
+  result.publishedRef = resolvePublishedRef(result.headSha, result.branch)
   result.originUrl = resolveFetchUrl()
+
+proc publishedRefContains(repoRoot, refName, revision: string): bool =
+  ## Whether ``refName`` is a branch of some remote of ``repoRoot`` whose
+  ## remote-tracking ref contains ``revision`` — the property a committed
+  ## lock's ``ref`` must have.
+  if refName.len == 0 or revision.len == 0: return false
+  let gitBin = findExe("git")
+  if gitBin.len == 0: return false
+  proc code(extra: openArray[string]): tuple[code: int; output: string] =
+    var cmd = quoteShell(gitBin)
+    for a in extra:
+      cmd.add(" ")
+      cmd.add(quoteShell(a))
+    let r = execCmdEx(cmd, options = {poUsePath},
+      env = scrubbedGitRepositoryEnv())
+    (code: r.exitCode, output: r.output)
+  let listed = code(["-C", repoRoot, "remote"])
+  if listed.code != 0: return false
+  for line in listed.output.splitLines():
+    let r = line.strip()
+    if r.len == 0: continue
+    let tracking = "refs/remotes/" & r & "/" & refName
+    if code(["-C", repoRoot, "rev-parse", "-q", "--verify",
+        tracking & "^{commit}"]).code != 0:
+      continue
+    if code(["-C", repoRoot, "merge-base", "--is-ancestor", revision,
+        tracking]).code == 0:
+      return true
+  false
 
 const nestedDevelopDirs* = ["deps", "vendor", "third-party", "develop"]
   ## Workspace-Manifest-Optional MO-7 — the conventional project-local
@@ -21217,7 +21319,7 @@ proc usesProducerLockedDep(selector, root: string;
     return some(LockedDep(
       name: selector, path: rel,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
-        gitRef: facts.branch, revision: facts.headSha),
+        gitRef: facts.publishedRef, revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
       depends: @[], tags: @[]))
@@ -21254,7 +21356,7 @@ proc lockedDepFromCheckout(name, depAbs, root: string): LockedDep =
   LockedDep(
     name: name, path: relativePath(depAbs, root).replace('\\', '/'),
     coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
-      gitRef: facts.branch, revision: facts.headSha),
+      gitRef: facts.publishedRef, revision: facts.headSha),
     integrity: computeDepIntegrity(depAbs, facts.headSha),
     version: "", visibility: "public", participation: "",
     depends: @[], tags: @[])
@@ -21317,7 +21419,7 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
     siblingDeps.add(LockedDep(
       name: d.name, path: d.path,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
-        gitRef: facts.branch, revision: facts.headSha),
+        gitRef: facts.publishedRef, revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
       depends: @[], tags: @[]))
@@ -21359,7 +21461,7 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
     siblingDeps.add(LockedDep(
       name: depName, path: rel,
       coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
-        gitRef: facts.branch, revision: facts.headSha),
+        gitRef: facts.publishedRef, revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
       depends: @[], tags: @[]))
@@ -21426,7 +21528,7 @@ proc lockedDepsForWorkspace(workspaceRoot: string;
   result.add(LockedDep(
     name: rootName, path: ".",
     coordinates: Coordinates(kind: ckVcs, url: rootFacts.originUrl,
-      gitRef: rootFacts.branch, revision: rootFacts.headSha),
+      gitRef: rootFacts.publishedRef, revision: rootFacts.headSha),
     integrity: computeDepIntegrity(root, rootFacts.headSha),
     version: "", visibility: "public", participation: "",
     depends: rootDepends, tags: @[]))
@@ -44426,14 +44528,24 @@ proc pinRegressionForwardCommands*(r: PinRegression; workspaceRoot: string;
     discard
 
 proc renderPinRegressionRefusal*(refused: openArray[PinRegression];
-    workspaceRoot: string; identity: GitToolIdentity): seq[string] =
+    workspaceRoot: string; identity: GitToolIdentity;
+    action = "commit"; rerun = ""): seq[string] =
   ## The refusal, one line per element (the caller prefixes each). It names
   ## every regressing sibling with its relation, distance and both revisions,
   ## then the usual course (bring the checkout forward) and the deliberate one
   ## (`REPRO_ALLOW_PIN_REGRESSION`), with when each is appropriate.
-  result.add("REFUSED: this commit would move " & $refused.len &
-    " pinned sibling revision(s) BACKWARD. The commit was not made, and " &
-    "nothing was written or staged.")
+  ##
+  ## ``action`` is what was refused: ``"commit"`` (the managed `pre-commit`
+  ## hook) or ``"refresh"`` (`repro lock refresh`). For a refresh, ``rerun``
+  ## is the command that repeats it with the regressing siblings allowed.
+  let isCommit = action == "commit"
+  if isCommit:
+    result.add("REFUSED: this commit would move " & $refused.len &
+      " pinned sibling revision(s) BACKWARD. The commit was not made, and " &
+      "nothing was written or staged.")
+  else:
+    result.add("REFUSED: this " & action & " would move " & $refused.len &
+      " pinned sibling revision(s) BACKWARD. The lock was not written.")
   var names: seq[string]
   for r in refused:
     if r.sibling notin names: names.add(r.sibling)
@@ -44457,16 +44569,23 @@ proc renderPinRegressionRefusal*(refused: openArray[PinRegression];
       r.observed & ".." & r.pinned
     if r.relation == sprUnprovable:
       result.add("      once fetched, `" & dropped & "` lists what this " &
-        "commit would drop from the published lock")
+        action & " would drop from the published lock")
     else:
-      result.add("      what this commit would drop from the published " &
-        "lock: `" & dropped & "`")
+      result.add("      what this " & action & " would drop from the " &
+        "published lock: `" & dropped & "`")
   result.add("The usual case is a stale checkout: bring it forward as above, " &
-    "then commit again.")
-  result.add("If the downgrade is deliberate, re-run the same commit with " &
-    "the sibling(s) named in " & PinRegressionAllowEnv & ", for example: `" &
-    PinRegressionAllowEnv & "=" & pinRegressionShellWord(names.join(",")) &
-    " git commit`")
+    "then " & action & " again.")
+  if isCommit or rerun.len == 0:
+    result.add("If the downgrade is deliberate, re-run the same " & action &
+      " with the sibling(s) named in " & PinRegressionAllowEnv &
+      ", for example: `" & PinRegressionAllowEnv & "=" &
+      pinRegressionShellWord(names.join(",")) &
+      (if isCommit: " git commit`" else: " repro lock " & action & "`"))
+  else:
+    result.add("If the downgrade is deliberate, re-run the " & action &
+      " naming the sibling(s): `" & rerun & "` (or set " &
+      PinRegressionAllowEnv & "=" & pinRegressionShellWord(names.join(",")) &
+      ")")
   result.add("  That is appropriate when you are intentionally reverting a " &
     "dependency upgrade, committing a known-good older pin while bisecting, " &
     "deliberately tracking another branch of the sibling, or when the " &
@@ -44476,7 +44595,7 @@ proc renderPinRegressionRefusal*(refused: openArray[PinRegression];
     "know why the sibling is behind: read what the commit would drop first.")
 
 proc pinRegressionAllowanceNotes*(allowance: PinRegressionAllowance;
-    used, examined: openArray[string]): seq[string] =
+    used, examined: openArray[string]; action = "commit"): seq[string] =
   ## A name in `REPRO_ALLOW_PIN_REGRESSION` that allowed nothing is ignored
   ## with a note, so a typo or a stale export is visible rather than inert.
   for v in allowance.rejected:
@@ -44487,11 +44606,11 @@ proc pinRegressionAllowanceNotes*(allowance: PinRegressionAllowance;
     if name in used: continue
     if name in examined:
       result.add(PinRegressionAllowEnv & " names '" & name & "', which this " &
-        "commit does not move backward. Ignored.")
+        action & " does not move backward. Ignored.")
     else:
       result.add(PinRegressionAllowEnv & " names '" & name & "', which is " &
-        "neither a repro.lock sibling nor a flake.lock input this commit " &
-        "examined. Ignored.")
+        "neither a repro.lock sibling nor a flake.lock input this " & action &
+        " examined. Ignored.")
 
 proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   toolProvisioning: ToolProvisioningMode;
@@ -44992,6 +45111,23 @@ proc committedLockDepsLine(ld: LockedDependencies): string =
     if line.startsWith("deps = ["): return line
   ""
 
+proc keptPublishedRef(depAbs: string; pinned, fresh: LockedDep): string =
+  ## The ``ref`` a re-observed entry records. A pin whose revision did not
+  ## move keeps the ``ref`` it already carries as long as that is still a
+  ## published branch containing the revision, so a later fetch that makes a
+  ## preferred branch contain it too does not churn the lock. Anything else —
+  ## a moved revision, or a recorded ``ref`` that names no published branch
+  ## containing it (a local-only name) — takes the freshly observed
+  ## published ``ref``, which is empty when no published branch contains the
+  ## commit.
+  if pinned.coordinates.revision == fresh.coordinates.revision and
+      pinned.coordinates.gitRef.len > 0 and
+      pinned.coordinates.gitRef != fresh.coordinates.gitRef and
+      publishedRefContains(depAbs, pinned.coordinates.gitRef,
+        pinned.coordinates.revision):
+    return pinned.coordinates.gitRef
+  fresh.coordinates.gitRef
+
 proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies):
     tuple[observations: seq[CommittedPinObservation]; manifestResolved: bool;
           workspaceRoot: string] =
@@ -45137,16 +45273,17 @@ proc planCommittedLockRepin(repoRoot: string;
               "could not be determined (" & o.detail & "), so the pin was " &
               "left alone")
             break
+        let freshRef = keptPublishedRef(depAbs, d, fresh)
         if d.coordinates.revision != fresh.coordinates.revision or
             d.integrity != fresh.integrity or
             (fresh.coordinates.url.len > 0 and
              d.coordinates.url != fresh.coordinates.url) or
-            d.coordinates.gitRef != fresh.coordinates.gitRef:
+            d.coordinates.gitRef != freshRef:
           if d.coordinates.revision != fresh.coordinates.revision:
             moved.add(o.name & " " & d.coordinates.revision.substr(0, 11) &
               " -> " & fresh.coordinates.revision.substr(0, 11))
           d.coordinates.revision = fresh.coordinates.revision
-          d.coordinates.gitRef = fresh.coordinates.gitRef
+          d.coordinates.gitRef = freshRef
           if fresh.coordinates.url.len > 0:
             d.coordinates.url = fresh.coordinates.url
           d.integrity = fresh.integrity
@@ -63221,6 +63358,8 @@ type
     strategy: LockStrategy
     registries: seq[string]
     write: bool
+    allowRegression: seq[string]
+      ## ``--allow-pin-regression=<sibling>[,<sibling>…]`` (refresh only)
 
 proc parseLockVerbArgs(rest: openArray[string]; verb: string;
                        projectDir, inputsOverride, lockOverride,
@@ -63229,8 +63368,10 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
   ## Shared arg parser for ``repro lock solve`` / ``refresh`` / ``validate``:
   ## ``[<projectDir>] [--inputs <file>] [--lock <file>] [--platform <p>]
   ## [--strategy <default|lowest|highest|lowest-direct>] [--lowest]
-  ## [--highest] [--registry <url>] [--write] [--json]``. Returns 0 on
-  ## success, 2 on a usage error (diagnostic already emitted).
+  ## [--highest] [--registry <url>] [--write] [--json]``, plus, for
+  ## ``refresh`` only, ``[--allow-pin-regression=<sibling>[,<sibling>…]]``
+  ## (see `gateRefreshedSiblingPins`). Returns 0 on success, 2 on a usage
+  ## error (diagnostic already emitted).
   ##
   ## ``--lowest`` / ``--highest`` are the spellings `Locking-And-Solver.md`
   ## §"CLI Surface" names for `repro lock solve`, and NLF-M6 ships them as
@@ -63269,6 +63410,17 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
       gen.write = true
     elif arg == "--json":
       asJson = true
+    elif verb == "refresh" and (arg == "--allow-pin-regression" or
+        arg.startsWith("--allow-pin-regression=")):
+      let parsedAllow = parsePinRegressionAllowance(
+        valueFromFlag(rest, i, "--allow-pin-regression"))
+      if parsedAllow.rejected.len > 0:
+        stderr.writeLine("repro lock " & verb & ": --allow-pin-regression " &
+          "names siblings, and there is no wildcard: '" &
+          parsedAllow.rejected.join("', '") & "' names none")
+        return 2
+      for n in parsedAllow.names:
+        if n notin gen.allowRegression: gen.allowRegression.add(n)
     elif arg.startsWith("--"):
       stderr.writeLine("repro lock " & verb & ": unknown flag " & arg)
       return 2
@@ -63921,6 +64073,85 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
     entryPoint: entryPoint)
   return 0
 
+type
+  RefreshPinGate = object
+    ## What `gateRefreshedSiblingPins` decided for one `repro lock refresh`.
+    refused: seq[PinRegression]   ## regressions that refuse the refresh
+    allowed: seq[PinRegression]   ## regressions written because they were named
+    warnings: seq[string]
+    examined: seq[string]         ## every sibling that already had a pin
+
+proc gateRefreshedSiblingPins(projectDir, lockPath: string;
+    deps: var seq[LockedDep]; allowRegression: openArray[string]):
+    RefreshPinGate =
+  ## Unified-Locking-And-Hooks.md §13.3 "A pin never moves backward
+  ## silently", applied to the explicit door. `repro lock refresh` observes
+  ## every sibling at whatever its shared checkout has checked out; a checkout
+  ## left on a stale branch would otherwise roll the committed pin back to an
+  ## ancestor (or sideways onto another line of history) with nothing said.
+  ##
+  ## Each freshly observed sibling ``deps`` entry is related to the pin the
+  ## lock at ``lockPath`` carries now, by the same `classifySiblingPin` the
+  ## commit hook uses: ahead advances; behind, diverged and unprovable are
+  ## regressions, refused unless ``allowRegression`` names the sibling; a
+  ## direction git cannot compute keeps the existing pin, said out loud. An
+  ## unmoved pin keeps a ``ref`` that is still published (`keptPublishedRef`).
+  ## Root entries, siblings with no current pin and siblings that are not
+  ## checked out (carried forward verbatim) are not examined.
+  if lockPath.len == 0 or not fileExists(extendedPath(lockPath)): return
+  var existing: seq[LockedDep]
+  try:
+    existing = parseLockedDependencies(readFile(extendedPath(lockPath))).deps
+  except CatchableError:
+    # An unreadable lock has no pins to protect; the refresh replaces it.
+    return
+  var identity: GitToolIdentity
+  try:
+    identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+  except CatchableError as err:
+    result.warnings.add("git is not resolvable (" & err.msg & "), so no " &
+      "sibling pin could be related to the one the lock carries")
+    return
+  let pathBase = absolutePath(projectDir)
+  for i in 0 ..< deps.len:
+    let d = deps[i]
+    if d.path == "." or d.coordinates.kind != ckVcs or
+        d.coordinates.revision.len == 0:
+      continue
+    var pinnedIdx = -1
+    for j, e in existing:
+      if e.path != "." and e.coordinates.kind == ckVcs and
+          e.coordinates.revision.len > 0 and
+          (e.name == d.name or e.path == d.path):
+        pinnedIdx = j
+        break
+    if pinnedIdx < 0: continue
+    let pinned = existing[pinnedIdx]
+    let depAbs = os.normalizedPath(absolutePath(pathBase / d.path))
+    if d.name notin result.examined: result.examined.add(d.name)
+    if pinned.coordinates.revision == d.coordinates.revision:
+      deps[i].coordinates.gitRef = keptPublishedRef(depAbs, pinned, d)
+      continue
+    if not isGitCheckoutDir(depAbs): continue
+    let verdict = classifySiblingPin(identity, depAbs,
+      pinned.coordinates.revision, d.coordinates.revision)
+    if verdict.relation in {sprAt, sprAhead}: continue
+    if verdict.relation.isPinRegression:
+      let reg = PinRegression(lock: CommittedLockFileName, sibling: d.name,
+        repo: d.name, path: depAbs, relation: verdict.relation,
+        aheadBy: verdict.aheadBy, behindBy: verdict.behindBy,
+        pinned: pinned.coordinates.revision,
+        observed: d.coordinates.revision)
+      if d.name in allowRegression: result.allowed.add(reg)
+      else: result.refused.add(reg)
+    else:
+      result.warnings.add("sibling '" & d.name & "' (" & d.path &
+        "): repro.lock pins " & pinned.coordinates.revision &
+        " and the checkout is at " & d.coordinates.revision & ", but which " &
+        "of the two is newer could not be determined (" & verdict.detail &
+        "), so the existing pin was kept")
+      deps[i] = pinned
+
 proc reportGeneratedLock(verb, lockP: string;
                          generated: LockGenerationResult): int =
   ## Sandbox-And-Monitoring.md §"The Network Dimension" rule 4: the network
@@ -63983,6 +64214,41 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
     platformOverride, gen, entryPoint, verb, request)
   if prc != 0: return prc
   let writeTo = if writeByDefault or gen.write: lockP else: ""
+  if entryPoint == lgeLockRefresh and writeTo.len > 0:
+    let envAllowance = parsePinRegressionAllowance(
+      getEnv(PinRegressionAllowEnv))
+    var allowance = PinRegressionAllowance(names: gen.allowRegression,
+      rejected: envAllowance.rejected)
+    for n in envAllowance.names:
+      if n notin allowance.names: allowance.names.add(n)
+    let gate = gateRefreshedSiblingPins(projectDir, writeTo,
+      request.extraDeps, allowance.names)
+    for w in gate.warnings:
+      stderr.writeLine("repro lock " & verb & ": " & w)
+    var used: seq[string]
+    for r in gate.allowed: used.add(r.sibling)
+    for note in pinRegressionAllowanceNotes(allowance, used, gate.examined,
+        action = verb):
+      stderr.writeLine("repro lock " & verb & ": note: " & note)
+    if gate.refused.len > 0:
+      var identity: GitToolIdentity
+      try: identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
+      except CatchableError: discard
+      var names: seq[string]
+      for r in gate.refused:
+        if r.sibling notin names: names.add(r.sibling)
+      for n in allowance.names:
+        if n notin names: names.add(n)
+      let rerun = "repro lock " & verb & " " & quoteShell(projectDir) &
+        " --allow-pin-regression=" & pinRegressionShellWord(names.join(","))
+      for line in renderPinRegressionRefusal(gate.refused,
+          resolvePostCommitWorkspaceRoot(projectDir, ""), identity,
+          action = verb, rerun = rerun):
+        stderr.writeLine("repro lock " & verb & ": " & line)
+      return 4
+    for r in gate.allowed:
+      stderr.writeLine("repro lock " & verb & ": " &
+        pinRegressionAllowedLine(r, via = "--allow-pin-regression"))
   try:
     defer:
       try: removeDir(extendedPath(request.workDir))
@@ -64003,7 +64269,10 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
 proc runReproLockRefresh(rest: openArray[string]): int =
   ## ``repro lock refresh`` — re-solve the project's solver inputs and
   ## (re)write the committed lock WITHOUT building. No build artifacts are
-  ## produced; only the lock file is written.
+  ## produced; only the lock file is written. Exits 4, writing nothing, when
+  ## a sibling pin would move backward or onto another line of history and
+  ## ``--allow-pin-regression`` / ``REPRO_ALLOW_PIN_REGRESSION`` does not
+  ## name it.
   runLockGenerationVerb(rest, "refresh", lgeLockRefresh,
     writeByDefault = true)
 
