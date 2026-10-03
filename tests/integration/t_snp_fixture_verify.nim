@@ -223,16 +223,16 @@ let milanArk = milanChain[1]
 let milanCrl = @[bytesOfHex(KdsMilanCrlDerHex)]
 
 const
-  # Inside the vendor revocation list's window (thisUpdate 2026-08-19,
-  # nextUpdate 2026-10-04) and inside every certificate's window. Fixed,
+  # Inside the vendor revocation list's window (thisUpdate 2026-09-22,
+  # nextUpdate 2026-11-09) and inside every certificate's window. Fixed,
   # not read from the host: a gate that used the real clock would start
   # failing on a date nobody chose.
-  Now = 1_788_220_800'i64
-    ## 2026-09-01T00:00:00Z. Chosen to sit inside the vendor revocation
-    ## list's own window — it states a this-update of 2026-08-19 and a
-    ## next-update of 2026-10-04 — and inside every certificate's window.
+  Now = 1_790_812_800'i64
+    ## 2026-10-01T00:00:00Z. Chosen to sit inside the vendor revocation
+    ## list's own window — it states a this-update of 2026-09-22 and a
+    ## next-update of 2026-11-09 — and inside every certificate's window.
     ## Fixed rather than read from the host: a gate that consulted the
-    ## real clock would pass today and start failing on 2026-10-04,
+    ## real clock would pass today and start failing on 2026-11-09,
     ## which is a date nobody chose and a failure nobody would connect
     ## to this file.
 
