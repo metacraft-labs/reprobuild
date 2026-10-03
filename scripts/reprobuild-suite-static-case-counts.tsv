@@ -1296,6 +1296,7 @@ tests/integration/t_lock_publish_hook_refusal_is_not_read_as_connectivity.nim	ni
 tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	nim	11
 tests/integration/t_lock_refresh_and_validate_without_building.nim	nim	5
 tests/integration/t_lock_refresh_folds_uses_sibling_producer_deps.nim	nim	2
+tests/integration/t_lock_refresh_never_moves_a_pin_backward.nim	nim	7
 tests/integration/t_lock_refresh_reads_solver_inputs_from_compiled_provider.nim	nim	2
 tests/integration/t_lock_refresh_records_the_catalog_a_package_resolved_from.nim	nim	2
 tests/integration/t_lock_refresh_reuses_monitored_provider_metadata.nim	nim	1
@@ -1867,7 +1868,7 @@ tests/unit/test_ct_test_surface_addressability.py	python	14
 tests/unit/test_dev_shell_hook_scope.py	python	6
 tests/unit/test_generated_artifact_merge_policy.py	python	19
 tests/unit/test_graph_owned_test_artifacts.py	python	23
-tests/unit/test_install_nix_paths.py	python	11
+tests/unit/test_install_nix_paths.py	python	14
 tests/unit/test_nix_daemon_descriptors.py	python	5
 tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_prune_undeclared_test_binaries.py	python	5
