@@ -635,6 +635,9 @@ jobs:
       # cache on the self-hosted runners) makes rebuilds fast once warm.
       - name: Build codetracer ct (via reprobuild)
         env:
+          # This prerequisite must exercise this job's freshly built engine;
+          # a pre-existing host daemon can carry another source/runtime closure.
+          REPRO_DAEMON: 'off'
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_TERMINAL_PROMPT: '0'

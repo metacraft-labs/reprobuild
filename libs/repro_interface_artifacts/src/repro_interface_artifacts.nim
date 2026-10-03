@@ -4805,6 +4805,21 @@ proc externalHashFlags(workDir = ""): seq[string] =
     result.add("--passL:-L" & (xxhashPrefix / "lib"))
     result.add("--passL:-lxxhash")
 
+  # Source-built repro has no installed wrapper to seed its complete runtime
+  # closure. Recipes can import OpenSSL even when the host recipe has no
+  # explicit ssl link flags. Match config.nims's source-library resolution
+  # and give internally compiled helpers their own loader search path.
+  let opensslNames = ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"]
+  let opensslLibDir = block:
+    let direct = firstExistingLibDir(
+      [getEnv("OPENSSL_LIBDIR"), getEnv("OPENSSL_PREFIX"),
+       "/opt/homebrew/opt/openssl@3", "/opt/homebrew/opt/openssl",
+       "/usr/local/opt/openssl@3", "/usr/local/opt/openssl"], opensslNames)
+    if direct.len > 0: direct
+    else: nixLibDir("*-openssl-*", opensslNames)
+  if opensslLibDir.len > 0:
+    result.add(runtimeRpathCompilerFlags(@[opensslLibDir], hostRuntimeLinkTarget()))
+
   # repro's own ASP solver (repro_solver) dlopens libclingo at module-init
   # time through a ``{.dynlib.}`` const. When repro runs as a CLI against an
   # arbitrary project, the extract_runner links repro's DSL (which pulls in
