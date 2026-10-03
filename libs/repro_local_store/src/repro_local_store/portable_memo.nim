@@ -199,9 +199,7 @@ proc currentIdentity*(roots: openArray[LogicalRoot]; entry: PathSetEntry;
   # otherwise reads as absent, so the same file was "present" under a short
   # checkout path and "absent" under a longer one.
   of pikRead:
-    if not fileExists(extendedPath(p)):
-      return none(string)
-    some(fileContentHex(p))
+    some(readIdentity(p))
   of pikProbe:
     some(if fileExists(extendedPath(p)) or dirExists(extendedPath(p)):
            "present"

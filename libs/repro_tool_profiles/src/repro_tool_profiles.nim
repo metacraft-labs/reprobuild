@@ -8049,6 +8049,54 @@ proc tryResolveStdlibProvisioning*(useDef: InterfaceToolUse;
     return true
   false
 
+proc tarballModeFallsThroughToFromSource*(useDef: InterfaceToolUse): bool =
+  ## Under ``--tool-provisioning=tarball``, whether this tool use is realized
+  ## by its package's from-source recipe instead of a tarball: exactly when
+  ## the package declares no tarball for the host
+  ## (Dependency-Provisioning-In-Build-Graph.md 4.3). It is decided by the
+  ## ABSENCE of a host tarball, never by the failure of one, so a download
+  ## that fails cannot silently become a source build. A use with no
+  ## executable name has no recipe to find and keeps the tarball diagnostic.
+  useDef.executableName.len > 0 and not hasHostTarballProvisioning(useDef)
+
+proc noHostTarballSentence(useDef: InterfaceToolUse): string =
+  "package \"" & useDef.packageSelector & "\" has no tarball realization " &
+    "for this host (cpu=" & hostCpuToken() & " os=" & hostOsToken() & "; " &
+    $useDef.tarballProvisioning.len & " tarball entries declared)"
+
+proc resolveTarballModeFromSource(useDef: InterfaceToolUse):
+    PathOnlyToolProfile =
+  ## The tarball-mode fall-through (Dependency-Provisioning-In-Build-Graph.md
+  ## 4.3): the package's from-source recipe, found where
+  ## ``--tool-provisioning=from-source`` looks for it. A built recipe is
+  ## used as from-source mode uses it. An unbuilt one is built by
+  ## ``repro build``'s auto-recurse pass before the consuming graph is
+  ## resolved, so reaching it unbuilt here means a caller that does not
+  ## build recipes (dev-env activation) or a build that failed; the error
+  ## names the command that builds it.
+  let outcome = tryResolveFromSourceTool(useDef)
+  case outcome.kind
+  of rrResolved:
+    result = outcome.profile
+  of rrNeedsBuild:
+    if absolutePath(outcome.recipeDir) in fromSourceDryRunPlannedRecipes:
+      return dryRunPlannedFromSourceProfile(useDef, outcome.recipeDir,
+        outcome.expectedArtifact)
+    raise newException(OSError,
+      "tool-resolution failed: " & noHostTarballSentence(useDef) &
+      ", so tarball provisioning falls through to its from-source recipe " &
+      "at " & outcome.recipeDir & ", which has not produced " &
+      outcome.expectedArtifact & " yet. `repro build` of a project that " &
+      "uses it builds the recipe first; to build it directly, run `repro " &
+      "build " & outcome.recipeDir & "`.")
+  of rrSiblingMissing:
+    raise newException(OSError,
+      "tool-resolution failed: " & noHostTarballSentence(useDef) &
+      ", and no from-source recipe to fall through to exists at " &
+      outcome.attemptedRecipeManifest & ". Declare a tarball for this " &
+      "host in the package's `provisioning:` block, or add a source recipe " &
+      "at that path (REPRO_FROM_SOURCE_ROOT selects another recipe root).")
+
 proc mkAuxChannelProducerProfile(useDef: InterfaceToolUse;
                                  dirs: ProducerAuxDirs):
     PathOnlyToolProfile =
@@ -8158,7 +8206,12 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
   of tpmNix:
     result = resolveNixTool(useDef, storeRoot)
   of tpmTarball:
-    result = resolveTarballTool(useDef, storeRoot)
+    if not tarballModeFallsThroughToFromSource(useDef):
+      # A host tarball is the realization and is never bypassed: its own
+      # failure is the result (Dependency-Provisioning-In-Build-Graph.md 4.3).
+      result = resolveTarballTool(useDef, storeRoot)
+    else:
+      result = resolveTarballModeFromSource(useDef)
   of tpmScoop:
     result = resolveScoopTool(useDef, storeRoot)
   of tpmFromSource:
