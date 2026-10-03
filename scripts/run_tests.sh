@@ -507,7 +507,26 @@ repro_build_collection ".#apps" || exit 1
 repro_build_collection ".#test-helpers" || exit 1
 # M2: build canonical test fixtures, including the io-monitor shim.
 repro_build_collection ".#test-fixtures" || exit 1
-repro_build_collection ".#test-builds" || exit 1
+# A failed test COMPILE is a failed test, not a reason to run nothing. This
+# used to `exit 1` here, so one broken compile cancelled every other case: one
+# 22-hour run and one 7-hour run each produced no test results at all for a
+# single failed action out of ~1 800. Now the failed actions' binaries are
+# deleted (a copy an earlier warm run left would otherwise run as if this
+# revision had built it), the rest of the suite runs, and the failure is
+# re-raised at the end like the other phases'. When the script cannot tell
+# which binaries are stale -- a timeout, no report attributed to this build,
+# blocked actions -- it stops, as before.
+test_builds_status=0
+repro_build_collection ".#test-builds" || test_builds_status=$?
+if (( test_builds_status != 0 )); then
+  if (( test_builds_status == 124 )) || ! python3 scripts/drop_failed_test_binaries.py \
+      "test-logs/build-failure-report-$(repro_build_report_slug ".#test-builds").json" \
+      build/test-bin; then
+    exit 1
+  fi
+  printf '::error:: .#test-builds failed (exit %d); running every test that built, failure re-raised at the end\n' \
+    "${test_builds_status}" >&2
+fi
 
 REPROBUILD_BIN_ABS="$(cd build/bin && pwd)"
 export PATH="${REPROBUILD_BIN_ABS}:${PATH}"
@@ -710,7 +729,12 @@ fi
 # guarantee comes from `.#test-builds` having succeeded, not from the Python
 # phase's position relative to the Nim one. Nothing between the two deletes a
 # test binary.
-export REPROBUILD_SUITE_INVENTORY_REQUIRE_BUILT_TREE=1
+# Only when the build really did succeed: after a failed compile the missing
+# binary is already reported (above, and re-raised below), and the inventory
+# must not turn that one failure into one refusal per inventory case.
+if (( test_builds_status == 0 )); then
+  export REPROBUILD_SUITE_INVENTORY_REQUIRE_BUILT_TREE=1
+fi
 # Hand the inventory the catalog the runner just published. Absent, stale or
 # unreadable, this is a no-op and the inventory probes as before.
 export REPROBUILD_SUITE_INVENTORY_RUN_CATALOG="${run_catalog}"
@@ -746,5 +770,10 @@ fi
 if (( nim_phase_status != 0 )); then
   printf '\nNim test phase exited %d\n' "${nim_phase_status}" >&2
   suite_status="${nim_phase_status}"
+fi
+if (( test_builds_status != 0 )); then
+  printf '\n.#test-builds failed (exit %d); see the NOT BUILT lines above\n' \
+    "${test_builds_status}" >&2
+  (( suite_status != 0 )) || suite_status="${test_builds_status}"
 fi
 exit "${suite_status}"

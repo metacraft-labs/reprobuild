@@ -16,6 +16,7 @@
 #
 #   <pkg>/share/repro/source/libs/...        reprobuild's libs/, tests excluded
 #   <pkg>/share/repro/src/<input>/...        one tree per source-only input
+#   <pkg>/share/repro/reprobuild-packages/   the pinned catalog's interfaces
 #
 # The running image finds these itself (repro_interface_artifacts.
 # ensureInstalledSourcePackageEnvironment): no wrapper, no environment.
@@ -131,6 +132,13 @@ stage RUNQUOTA_SRC runquota libs/runquota_core/src/runquota_core.nim ../runquota
 # as `scripts/source_paths.sh`, `config.nims` and the recipe's probe.
 stage BEARSSL_SRC bearssl bearssl/abi/consttypes.nim ../nim-bearssl \
   libs/nim-bearssl
+
+# ---- the reprobuild-packages catalog -----------------------------------------
+# An installed reprobuild carries the catalog it was released with, beside its
+# sources; see stage_release_catalog.sh.
+if ! bash scripts/release/stage_release_catalog.sh "$pkg"; then
+  missing+=("reprobuild-packages (stage_release_catalog.sh said why, above)")
+fi
 
 if (( ${#missing[@]} > 0 )); then
   echo "stage_release_sources: ERROR: source-only inputs not found:" >&2

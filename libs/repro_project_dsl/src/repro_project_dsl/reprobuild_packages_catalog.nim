@@ -22,7 +22,8 @@ const ReprobuildPackagesRootEnv* = "REPROBUILD_PACKAGES_ROOT"
 const ReprobuildPackagesRepositoryUrl* =
   "https://github.com/metacraft-labs/reprobuild-packages"
 
-const MovedToReprobuildPackages*: seq[string] = @["sqlite3"]
+const MovedToReprobuildPackages*: seq[string] =
+  @["sqlite3", "shellcheck", "shfmt", "prek"]
   ## Names the bundled stdlib USED to define and the catalog now defines.
   ##
   ## Before its move, a recipe's ``uses:`` of one of these always resolved:
@@ -35,6 +36,18 @@ const MovedToReprobuildPackages*: seq[string] = @["sqlite3"]
   ## says where the catalog was looked for.
   ##
   ## Add a name here in the same change that deletes it from the stdlib.
+
+const MovedPackageImportStubs*: seq[string] = @["shellcheck", "shfmt", "prek"]
+  ## Moved names whose stdlib module is still present for one release, as a
+  ## stub that fails to compile with "moved to reprobuild-packages; drop the
+  ## import and rely on uses:". A recipe that imported the module directly
+  ## (rather than naming the package in ``uses:``) would otherwise stop with
+  ## "cannot open file", which names neither the move nor the remedy.
+  ##
+  ## A stub is not a package definition: it declares no ``package`` and is
+  ## not on the bundled selector list, so a ``uses:`` line never imports it
+  ## and still reaches the catalog. Delete a name here together with its stub
+  ## module, in the release after the first release that ships the stub.
 
 type
   ReprobuildPackagesProbe* = object
@@ -127,6 +140,70 @@ proc reprobuildPackagesInterfaceModule*(selector, consumerSourceFile: string):
   ## `reprobuildPackagesSearch` for where it looks.
   reprobuildPackagesSearch(selector, consumerSourceFile).module
 
+const
+  ReprobuildPackagesRepositoryName* = "reprobuild-packages"
+    ## The catalog repository's name: the checkout directory the workspace
+    ## convention looks for, and the name a lock records it under.
+  CatalogRevisionMarkerFile* = "catalog-revision"
+    ## In a catalog COPY that is not a git checkout -- the one an installed
+    ## reprobuild ships at ``share/repro/reprobuild-packages`` -- the
+    ## repository and commit it was copied from, one ``key=value`` per line:
+    ## ``url=<fetch url>`` and ``revision=<commit id>``. It is what lets a lock
+    ## record the revision of a catalog that has no ``.git`` to ask.
+
+proc catalogSelectionIdentity*(): string =
+  ## What an interface extraction's cache identity must carry about the
+  ## catalog: the explicitly selected catalog, `$REPROBUILD_PACKAGES_ROOT`,
+  ## when it is set; "" otherwise.
+  ##
+  ## The variable decides which module a ``uses:`` of a catalog package
+  ## imports, and the recipe's text does not change when it does, so an
+  ## extraction keyed on the recipe and the files it read would serve the
+  ## interface of the previously selected catalog. Keyed by VALUE because it
+  ## is a choice of input, not host noise. An edit to the selected module in
+  ## place is a content change of a file the compile read, which the
+  ## extraction's recorded inputs already cover. "" when unset, so the
+  ## identity of every extraction that does not select a catalog is
+  ## unchanged.
+  let root = getEnv(ReprobuildPackagesRootEnv)
+  if root.len == 0:
+    return ""
+  "catalog-root:" & root.replace('\\', '/')
+
+proc catalogRootOfInterfaceModule*(file: string): string =
+  ## The catalog checkout that ``file`` belongs to when ``file`` is a catalog
+  ## interface module, ``<root>/packages/interfaces/<name>/repro.nim``; ""
+  ## otherwise. This is how a realization's source location (the file its
+  ## ``provisioning:`` block was written in) names the catalog it came from.
+  let normalized = file.replace('\\', '/')
+  if not normalized.endsWith("/repro.nim"):
+    return ""
+  let packageDir = normalized.parentDir
+  let interfacesDir = packageDir.parentDir
+  let packagesDir = interfacesDir.parentDir
+  if packageDir.extractFilename.len == 0 or
+      interfacesDir.extractFilename != "interfaces" or
+      packagesDir.extractFilename != "packages":
+    return ""
+  packagesDir.parentDir
+
+proc readCatalogRevisionMarker*(root: string): tuple[url, revision: string] =
+  ## The ``url`` / ``revision`` recorded by `CatalogRevisionMarkerFile` in
+  ## ``root``; empty fields when there is no marker or it lacks them.
+  let marker = root / CatalogRevisionMarkerFile
+  if not fileExists(marker):
+    return
+  for rawLine in readFile(marker).splitLines():
+    let line = rawLine.strip()
+    let eq = line.find('=')
+    if eq <= 0:
+      continue
+    let value = line[eq + 1 .. ^1].strip()
+    case line[0 ..< eq].strip()
+    of "url": result.url = value
+    of "revision": result.revision = value
+    else: discard
+
 proc reprobuildPackagesRemedy*(): string =
   ## How to make the catalog reachable. Shared by the compile-time diagnostic
   ## and the tool resolver's missing-provisioning errors.
@@ -164,9 +241,11 @@ proc describeReprobuildPackagesSearch*(search: ReprobuildPackagesSearch):
   lines.join("\n")
 
 proc movedPackageUnresolvedDiagnostic*(selector, rawConstraint,
-    consumerSourceFile: string; sourceLine = 0): string =
+    consumerSourceFile: string; sourceLine = 0; listName = "uses"): string =
   ## "" unless ``selector`` is a moved package (`MovedToReprobuildPackages`)
   ## that no catalog defines for this consumer; otherwise the full error text.
+  ## ``listName`` is the recipe block that names it: ``uses``,
+  ## ``nativeBuildDeps`` or ``runtimeDeps``.
   if selector notin MovedToReprobuildPackages:
     return ""
   let search = reprobuildPackagesSearch(selector, consumerSourceFile)
@@ -179,7 +258,7 @@ proc movedPackageUnresolvedDiagnostic*(selector, rawConstraint,
       consumerSourceFile & ": "
     else:
       ""
-  where & "uses: \"" & rawConstraint & "\" names `" & selector &
+  where & listName & ": \"" & rawConstraint & "\" names `" & selector &
     "`, which is no longer bundled with reprobuild's stdlib: it is defined" &
     " by the reprobuild-packages catalog (packages/interfaces/" & selector &
     "/repro.nim), and no reachable catalog defines it.\n" &
