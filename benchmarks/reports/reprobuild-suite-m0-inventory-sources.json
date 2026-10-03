@@ -5284,7 +5284,7 @@
             "summary",
             "unitConfig"
           ],
-          "line": 565,
+          "line": 568,
           "path": "tests/integration/t_repro_test_runner_process_group_cleanup.nim",
           "patterns": [
             "nim-c"
