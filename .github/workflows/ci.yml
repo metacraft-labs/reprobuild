@@ -671,6 +671,22 @@ jobs:
             echo "ct-build: no REPRO_PUBLISH_KEY; binary-cache publish disabled"
           fi
           repro_bin="$repro_root/build/bin/repro"
+          # Identify a loader failure in the actual engine/helper child. Keep
+          # glibc's per-process search/version trace in artifacts: the generic
+          # Nim "could not load libcrypto" message omits the underlying error.
+          mkdir -p "$repro_root/test-logs"
+          export REPRO_CI_REAL_CLI="$repro_bin"
+          export REPRO_CI_LOADER_LOG="$repro_root/test-logs/ct-loader"
+          diagnostic_cli="$repro_root/build/bin/repro-ct-loader-diagnostic"
+          cat > "$diagnostic_cli" <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec env LD_DEBUG=libs,versions LD_DEBUG_OUTPUT="$REPRO_CI_LOADER_LOG" \
+            "$REPRO_CI_REAL_CLI" "$@"
+          SCRIPT
+          chmod +x "$diagnostic_cli"
+          git -C "$repro_root" rev-parse HEAD
+          sha256sum "$repro_bin" "$repro_root/build/bin/reprobuild"
           # Build only the `ct` target via codetracer's reprobuild.nim recipe.
           #    build-once.sh's reprobuild path (CODETRACER_REPROBUILD_LINUX=1)
           #    runs `repro build "$CODETRACER_REPROBUILD_TARGET"`; codetracer's
@@ -681,7 +697,7 @@ jobs:
             CODETRACER_REPROBUILD_TARGET=ct \
             CODETRACER_REPROBUILD_REPO_PATH="$repro_root" \
             REPROBUILD_NIX_DAEMON_BIN="$repro_root/tools/reprobuild-nix-daemon/reprobuild-nix-daemon" \
-            REPROBUILD_BIN="$repro_bin" \
+            REPROBUILD_BIN="$diagnostic_cli" \
             REPRO_BINARY_CACHE_URL="${REPRO_BINARY_CACHE_URL:-}" \
             REPRO_BINARY_CACHE_KEY_PATH="${REPRO_BINARY_CACHE_KEY_PATH:-}" \
             REPRO_BINARY_CACHE_CERT_PATH="${REPRO_BINARY_CACHE_CERT_PATH:-}" \
