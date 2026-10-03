@@ -20,6 +20,7 @@
 ##   4. The inner repo itself still syncs — per-repo atomicity: one repo
 ##      awaiting a decision must not block the other hundred.
 
+import repro_test_support/reasoned_skip
 import std/[json, os, strutils, unittest]
 import declared_rename_fixture
 
@@ -28,7 +29,7 @@ suite "declared rename — a declared checkout nested inside the candidate":
   test "t_rename_refuses_nested_declared_checkout":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let fx = newRenameFixture(gitBin, "nested")
       defer: removeDir(fx.scratch)
@@ -96,7 +97,7 @@ suite "declared rename — a declared checkout nested inside the candidate":
     ## for every repo that happens to have a nested member declared.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let fx = newRenameFixture(gitBin, "nestedabsent")
       defer: removeDir(fx.scratch)

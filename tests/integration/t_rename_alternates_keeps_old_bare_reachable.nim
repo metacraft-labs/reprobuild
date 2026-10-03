@@ -21,6 +21,7 @@
 ## restrict the alternates to the new bare alone and the commit stops
 ## resolving.
 
+import repro_test_support/reasoned_skip
 import std/[json, os, strutils, unittest]
 import declared_rename_fixture
 
@@ -38,7 +39,7 @@ suite "declared rename — alternates keep the old bare reachable":
   test "t_rename_alternates_keeps_old_bare_reachable":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let fx = newRenameFixture(gitBin, "alternates")
       defer: removeDir(fx.scratch)

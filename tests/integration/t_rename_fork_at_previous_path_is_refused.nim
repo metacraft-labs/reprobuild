@@ -23,6 +23,7 @@
 ##   4. The premise: the fork and the declared repo share commits, so a
 ##      history-only check accepts it.
 
+import repro_test_support/reasoned_skip
 import std/[json, os, strutils, unittest]
 import declared_rename_fixture
 
@@ -31,7 +32,7 @@ suite "declared rename — a fork at the previous path":
   test "t_rename_fork_at_previous_path_is_refused":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let fx = newRenameFixture(gitBin, "fork")
       defer: removeDir(fx.scratch)

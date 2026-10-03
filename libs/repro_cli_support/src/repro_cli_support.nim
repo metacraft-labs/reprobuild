@@ -39984,7 +39984,7 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
   if not anyDeclared:
     return
 
-  let probe = RelocationGitProbe(gitBin: identity.binaryPath)
+  let probe = RelocationGitProbe(identity: identity)
   # Live claims, for the belt to the resolver's validator braces (§4
   # `previous_path_claimed_by_live_repo`) and for nested-checkout detection.
   var liveByPath = initTable[string, string]()

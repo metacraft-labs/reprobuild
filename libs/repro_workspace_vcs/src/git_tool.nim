@@ -17,7 +17,7 @@
 ## plan is declared. Until then those modes raise ``EGitToolUnresolved``
 ## with a clear message naming the active ``--tool-provisioning=`` mode.
 
-import std/[os, osproc, strtabs, strutils]
+import std/[os, osproc, streams, strtabs, strutils]
 
 import repro_core/codec
 import repro_hash
@@ -348,3 +348,21 @@ proc ensureGitToolResolvable*(mode: ToolProvisioningMode;
   ## invoke this helper — that wiring is M9's responsibility. M1's
   ## scope is the library and this helper.
   resolveGitTool(mode, pathEnv)
+
+proc queryGit*(identity: GitToolIdentity; args: openArray[string]):
+    tuple[code: int; output: string] =
+  ## Run a control-plane query through an already resolved Git profile.
+  ## Keep argv separate from the executable; neither PATH nor a shell may
+  ## select a different program. Build/cache actions still use git_actions,
+  ## which incorporates this identity's digest in their fingerprints.
+  ## Repository-local hook variables must not redirect a query to a different
+  ## checkout. Preserve the remaining environment for Git's runtime libraries.
+  if identity.binaryPath.len == 0 or not identity.binaryPath.isAbsolute:
+    raise newException(EGitToolUnresolved,
+      "a Git query requires an absolute resolved executable path")
+  let child = startProcess(identity.binaryPath, args = @args,
+    env = scrubbedGitRepositoryEnv(), options = {poStdErrToStdOut})
+  defer: child.close()
+  child.inputStream.close()
+  result.output = child.outputStream.readAll()
+  result.code = child.waitForExit()

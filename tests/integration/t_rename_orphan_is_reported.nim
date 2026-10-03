@@ -28,6 +28,7 @@
 ##   5. Nothing is moved, merged or deleted: `sync` must not merge two
 ##      checkouts.
 
+import repro_test_support/reasoned_skip
 import std/[json, os, strutils, unittest]
 import declared_rename_fixture
 
@@ -36,7 +37,7 @@ suite "declared rename — the orphan an old repro left is reported":
   test "t_rename_orphan_is_reported":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let fx = newRenameFixture(gitBin, "orphan")
       defer: removeDir(fx.scratch)
@@ -103,7 +104,7 @@ suite "declared rename — the orphan an old repro left is reported":
     ## forever is how an unconditional notice becomes noise people filter out.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let fx = newRenameFixture(gitBin, "orphandebris")
       defer: removeDir(fx.scratch)

@@ -22,9 +22,13 @@
 ##
 ## Nothing is mocked: real git repositories, and for the cross-filesystem case
 ## a real second filesystem (`/dev/shm`, skipped when absent).
+## Query controls retain a resolved Git profile while clearing PATH and
+## supplying a different real repository through Git's hook environment. They
+## require the requested checkout, literal argv and original exit statuses.
 
+import repro_test_support/reasoned_skip
 import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
-import repo_relocation
+import repo_relocation, git_tool
 
 proc q(value: string): string = quoteShell(value)
 
@@ -54,14 +58,79 @@ proc seedCheckout(gitBin, path: string) =
 
 suite "repo_relocation — the move, and the order of it":
 
+  test "resolved Git queries ignore ambient search and foreign hook bindings":
+    let identity = resolveGitTool(tpmPathOnly, getEnv("PATH"))
+    let scratch = createTempDir("repro-reloc-profile-", "")
+    defer: removeDir(scratch)
+    let target = scratch / "requested repo"
+    let foreign = scratch / "foreign repo"
+    seedCheckout(identity.binaryPath, target)
+    seedCheckout(identity.binaryPath, foreign)
+    let probe = RelocationGitProbe(identity: identity)
+    var saved: seq[tuple[key: string, present: bool, value: string]] = @[]
+    for key in ["PATH", "GIT_DIR", "GIT_WORK_TREE"]:
+      saved.add((key, existsEnv(key), getEnv(key)))
+    defer:
+      for entry in saved:
+        if entry.present: putEnv(entry.key, entry.value)
+        else: delEnv(entry.key)
+    putEnv("PATH", "")
+    putEnv("GIT_DIR", foreign / ".git")
+    putEnv("GIT_WORK_TREE", foreign)
+    let queried = queryGit(identity, ["-C", target, "rev-parse", "--show-toplevel"])
+    check queried.code == 0
+    check sameFile(queried.output.strip(), target)
+    check isGitCheckout(probe, target)
+    let captured = captureCheckoutState(probe, target)
+    check captured.ok
+    check captured.stashes.len == 1
+    check captured.porcelain.len == 2
+
+  test "typed Git queries preserve literal arguments and failure status":
+    let identity = resolveGitTool(tpmPathOnly, getEnv("PATH"))
+    let scratch = createTempDir("repro-reloc-argv-", "")
+    defer: removeDir(scratch)
+    seedCheckout(identity.binaryPath, scratch / "repo")
+    let target = scratch / "repo"
+    let literal = "literal $HOME; `whoami` and spaces"
+    let written = queryGit(identity, ["-C", target, "config", "probe.literal", literal])
+    check written.code == 0
+    let readBack = queryGit(identity, ["-C", target, "config", "--get", "probe.literal"])
+    check readBack.code == 0
+    check readBack.output.strip() == literal
+    let missing = queryGit(identity, ["-C", target, "config", "--get", "probe.missing"])
+    check missing.code == 1
+    check missing.output == ""
+    var unresolved = identity
+    unresolved.binaryPath = "git"
+    expect EGitToolUnresolved:
+      discard queryGit(unresolved, ["--version"])
+
+  when defined(posix):
+    test "a checkout directory alias is accepted but its nested directory is not":
+      let identity = resolveGitTool(tpmPathOnly, getEnv("PATH"))
+      let scratch = createTempDir("repro-reloc-alias-", "")
+      defer: removeDir(scratch)
+      let target = scratch / "physical checkout"
+      seedCheckout(identity.binaryPath, target)
+      let alias = scratch / "alias"
+      createSymlink(target, alias)
+      let nested = alias / "nested"
+      createDir(nested)
+      let probe = RelocationGitProbe(identity: identity)
+      check isGitCheckout(probe, target)
+      check isGitCheckout(probe, alias)
+      check checkoutSubstance(probe, alias) == csSubstantial
+      check not isGitCheckout(probe, nested)
+
   test "t_relocate_renames_within_a_filesystem_and_carries_everything":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let scratch = createTempDir("repro-reloc-rename-", "")
       defer: removeDir(scratch)
-      let probe = RelocationGitProbe(gitBin: gitBin)
+      let probe = RelocationGitProbe(identity: resolveGitTool(tpmPathOnly, getEnv("PATH")))
       let source = scratch / "old-name"
       let destination = scratch / "new-name"
       seedCheckout(gitBin, source)
@@ -90,7 +159,7 @@ suite "repo_relocation — the move, and the order of it":
   test "t_relocate_across_filesystems_copies_verifies_then_deletes":
     let gitBin = findExe("git")
     if gitBin.len == 0 or not dirExists("/dev/shm"):
-      skip()
+      skip("requires Git and a second filesystem at /dev/shm")
     else:
       # Two real filesystems: the temp dir and `/dev/shm` (tmpfs). A rename
       # between them fails with EXDEV, which is the only way to reach the
@@ -100,7 +169,7 @@ suite "repo_relocation — the move, and the order of it":
       defer:
         removeDir(scratch)
         removeDir(otherFs)
-      let probe = RelocationGitProbe(gitBin: gitBin)
+      let probe = RelocationGitProbe(identity: resolveGitTool(tpmPathOnly, getEnv("PATH")))
       let source = scratch / "old-name"
       let destination = otherFs / "new-name"
       seedCheckout(gitBin, source)
@@ -110,7 +179,7 @@ suite "repo_relocation — the move, and the order of it":
         let srcDev = execCmdEx("stat -c %d " & q(scratch)).output.strip()
         let dstDev = execCmdEx("stat -c %d " & q(otherFs)).output.strip()
         if srcDev == dstDev:
-          skip()
+          skip("temporary directory and /dev/shm are on the same filesystem")
           return
 
       let before = captureCheckoutState(probe, source)
@@ -134,7 +203,7 @@ suite "repo_relocation — the move, and the order of it":
     ## `relocateCheckout` a failed capture and a rename that cannot succeed.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let scratch = createTempDir("repro-reloc-nocapture-", "")
       defer:
@@ -143,7 +212,7 @@ suite "repo_relocation — the move, and the order of it":
           {fpUserRead, fpUserWrite, fpUserExec})
         except CatchableError: discard
         removeDir(scratch)
-      let probe = RelocationGitProbe(gitBin: gitBin)
+      let probe = RelocationGitProbe(identity: resolveGitTool(tpmPathOnly, getEnv("PATH")))
       let source = scratch / "old-name"
       seedCheckout(gitBin, source)
       createDir(scratch / "nest")
@@ -155,7 +224,7 @@ suite "repo_relocation — the move, and the order of it":
       when defined(posix):
         if execCmdEx("id -u").output.strip() == "0":
           # root ignores the permission bits, so the case cannot be staged.
-          skip()
+          skip("root bypasses the permission obstruction required by this case")
           return
 
       let failedCapture = CheckoutCapture(ok: false,
@@ -175,11 +244,11 @@ suite "repo_relocation — the move, and the order of it":
     ## and the report quotes this string verbatim.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let scratch = createTempDir("repro-reloc-samestate-", "")
       defer: removeDir(scratch)
-      let probe = RelocationGitProbe(gitBin: gitBin)
+      let probe = RelocationGitProbe(identity: resolveGitTool(tpmPathOnly, getEnv("PATH")))
       let a = scratch / "a"
       let b = scratch / "b"
       seedCheckout(gitBin, a)
@@ -209,11 +278,11 @@ suite "repo_relocation — the move, and the order of it":
     ## the other is something the operator put there.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let scratch = createTempDir("repro-reloc-substance-", "")
       defer: removeDir(scratch)
-      let probe = RelocationGitProbe(gitBin: gitBin)
+      let probe = RelocationGitProbe(identity: resolveGitTool(tpmPathOnly, getEnv("PATH")))
 
       check checkoutSubstance(probe, scratch / "absent") == csAbsent
 
@@ -240,11 +309,11 @@ suite "repo_relocation — the move, and the order of it":
     ## any", and the markers are stable documented git interface.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let scratch = createTempDir("repro-reloc-inprogress-", "")
       defer: removeDir(scratch)
-      let probe = RelocationGitProbe(gitBin: gitBin)
+      let probe = RelocationGitProbe(identity: resolveGitTool(tpmPathOnly, getEnv("PATH")))
       let repoPath = scratch / "repo"
       seedCheckout(gitBin, repoPath)
       check inProgressOperation(probe, repoPath) == ""
@@ -271,11 +340,11 @@ suite "repo_relocation — the move, and the order of it":
     ## cannot empty the whole sample.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let scratch = createTempDir("repro-reloc-sample-", "")
       defer: removeDir(scratch)
-      let probe = RelocationGitProbe(gitBin: gitBin)
+      let probe = RelocationGitProbe(identity: resolveGitTool(tpmPathOnly, getEnv("PATH")))
       let repoPath = scratch / "many"
       discard git(gitBin, "init --quiet -b main " & q(repoPath))
       discard git(gitBin, "-C " & q(repoPath) &

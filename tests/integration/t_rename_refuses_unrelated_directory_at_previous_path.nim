@@ -13,6 +13,7 @@
 ## declared repo. Both are asserted here because they are the two halves of
 ## §3.3 and only together do they prove neither half was dropped.
 
+import repro_test_support/reasoned_skip
 import std/[json, os, strutils, unittest]
 import declared_rename_fixture
 
@@ -21,7 +22,7 @@ suite "declared rename — an unrelated directory at the previous path":
   test "t_rename_refuses_unrelated_directory_at_previous_path":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let fx = newRenameFixture(gitBin, "unrelated")
       defer: removeDir(fx.scratch)
@@ -68,7 +69,7 @@ suite "declared rename — an unrelated directory at the previous path":
     ## asserted.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case uses real Git repositories")
     else:
       let fx = newRenameFixture(gitBin, "noshared")
       defer: removeDir(fx.scratch)
