@@ -64,6 +64,7 @@ import repro_dsl_stdlib/monitor_shim_artifacts
               # the linker flags — see the ``registerOpensslPrefixCandidate``
               # call in the ``build:`` block below.
 import repro_dsl_stdlib/openssl_layout
+import repro_dsl_stdlib/source_only_packages
 
 proc sanitizeStaticExec(val: string): string =
   var cleanLines: seq[string] = @[]
@@ -436,6 +437,35 @@ proc pinnedToolDir(root, tool, version, probe: string): string =
   if fileExists(dir / probe) or dirExists(dir / probe):
     return dir
 
+proc loadNixFlake(): bool =
+  ## ``REPRO_LOAD_NIX_FLAKE`` from the project's ``.env`` (the same file
+  ## ``.envrc`` loads with ``dotenv_if_exists``). Absent file or absent key
+  ## means the flake is loaded. Only an explicit ``0`` / ``false`` / ``no`` /
+  ## ``off`` selects the repro-native environment.
+  var root = activeProviderProjectRoot()
+  if root.len == 0:
+    root = getCurrentDir()
+  if not fileExists(root / ".env"):
+    return true
+  # `readDevEnvFile` records the read as an evaluation input of the dev-env
+  # introspection; it exists only in the provider build, which is the only
+  # one whose answer matters here.
+  let text =
+    when defined(reproProviderMode): readDevEnvFile(".env")
+    else: readFile(root / ".env")
+  for rawLine in text.splitLines():
+    var line = rawLine.strip()
+    if line.startsWith("export "):
+      line = line["export ".len .. ^1].strip()
+    let eq = line.find('=')
+    if line.startsWith("#") or eq <= 0:
+      continue
+    if line[0 ..< eq].strip() != "REPRO_LOAD_NIX_FLAKE":
+      continue
+    let value = line[eq + 1 .. ^1].strip().strip(chars = {'"', '\''})
+    return value.toLowerAscii() notin ["0", "false", "no", "off"]
+  true
+
 package reprobuild:
   # Declare ``path``-mode tool provisioning so the engine adopts it
   # automatically. Without this, ``repro build`` refuses to run with
@@ -474,6 +504,15 @@ package reprobuild:
     when defined(macosx):
       "clang"
     "just >=1"
+    # ``just lint`` ends in ``scripts/check_workflows.sh``, which runs
+    # actionlint over ``.github/workflows``. The flake shell carries it on
+    # Linux and macOS (so path mode finds it there); on Windows there is no
+    # flake shell, and the path-mode resolver realizes it from the release
+    # archives reprobuild-packages' ``packages/interfaces/actionlint``
+    # declares -- as it does ``just`` from the stdlib's. Without it the
+    # repository's local gate, the only gate ``agents`` has, could not pass
+    # in a Windows dev shell.
+    "actionlint"
     # The shipped CLI is compiled with ``-d:ssl``. Model the corresponding
     # link/runtime closure explicitly so graph-built binaries receive
     # OpenSSL's library channels instead of depending on ambient
@@ -545,25 +584,115 @@ package reprobuild:
     # every checkout without a runquota develop override breaks.
     "runquotad"
 
+    # THE SIBLING NIM LIBRARIES THIS REPOSITORY IMPORTS, DECLARED.
+    #
+    # Each of the three names a workspace PROJECT whose ``repro.nim``
+    # declares a ``library`` and NO ``executable``:
+    #
+    #   reprobuild-test-adapters -> ``library repro_test_adapters`` (src/)
+    #   nim-stackable-hooks      -> ``library stackable_hooks``     (src/)
+    #   nim-shm-queue            -> ``library shm_queue``           (src/)
+    #
+    # That is Cross-Repo-Source-Consumption §4.2a (SC-11), the Nim
+    # library-source channel: reprobuild resolves the producer through the
+    # develop-override map or this repo's committed ``repro.lock``, reads its
+    # shipped interface, takes the ``library``'s ``exportedPath`` (convention
+    # default ``src``) as an importable root, and threads it onto THIS repo's
+    # ``nim c --path:`` through ``ProducerAuxPaths.nimPathDirs``. The
+    # producer's revision + integrity then fold into every consuming action's
+    # fingerprint (SC-4), which is the whole point: before this, these three
+    # trees were inputs of every compile in this repository and appeared in no
+    # dependency graph, so no lock recorded them and nothing invalidated on
+    # their change. Same shape as ``io-mon/repro.nim``'s
+    # ``"nim-stackable-hooks"`` / ``"nim-shm-queue"``,
+    # ``nim-agents/repro.nim``'s ``"nim-acp"`` / ``"nim-agent-harbor"``, and
+    # ``isonim-tui/repro.nim``'s four.
+    #
+    # PURE-SOURCE LIBRARIES ONLY, AND THAT IS NOT A STYLE CHOICE. The
+    # admission gate in ``repro_cli_support.nim``
+    # (``buildAndSpliceProducers``, the ``selectorInSelectedClosure`` test)
+    # admits an out-of-closure package-level ``uses:`` producer ONLY when it
+    # exports no compiled artifact at all. A ``nim.c(...)`` edge's
+    # ``toolIdentityRefs`` are its OWN tools, so a sibling Nim library is
+    # never named by the selected closure and is always out of it. A producer
+    # that ALSO declares an ``executable`` therefore sets
+    # ``needsProducerBuild``, and the gate refuses it — MEASURED, by adding
+    # ``uses: "io-mon"`` + ``uses: "runquota"`` here, re-locking, and
+    # building:
+    #   cross-repo producer: "io-mon" is declared at package level but not
+    #   named by the selected action closure, and exports a compiled
+    #   artifact rather than a Nim source root — not building or splicing
+    #   it for this target.
+    # The build does NOT fail (the scoped artifact drops the selector before
+    # any path-mode resolution is attempted), but nothing is spliced either:
+    # no ``nimPathDirs``, so no ``--path:``. Declaring them would buy a lock
+    # entry and nothing else, which is a half-truth in a file whose subject
+    # is where the dependency actually comes from. This is why ``io-mon``
+    # and ``runquota`` are NOT in this list even though this repository
+    # consumes source from both — see the note over
+    # ``sourceOnlyPackagePath`` in the ``build:`` block for what each of
+    # them would need first.
+    #
+    # BOOTSTRAP ORDER. ``declaresProducerEdge`` materializes a producer only
+    # for a develop override or a committed ``LockedDep``. A bare ``uses:``
+    # string with neither falls through to PATH and fails outright, exactly
+    # as the ``runquotad`` note above describes. So these three lines and the
+    # ``repro.lock`` entries that pin them are ONE change: adding a name here
+    # without running ``repro lock refresh`` breaks every checkout that has
+    # no develop override for it.
+    "reprobuild-test-adapters"
+    "nim-stackable-hooks"
+    "nim-shm-queue"
+
     # Note: the remaining system libraries (libblake3, xxhash, sqlite3) and
-    # the source-only fixed inputs (nimcrypto, runquota,
-    # ssz-serialization, ct_test_nim_unittest) are NOT listed here.
+    # the source-only fixed inputs that are NOT workspace repos (nimcrypto,
+    # nim-bearssl) are still NOT listed here.
     # The path-mode resolver requires every ``uses:`` selector to be
-    # findable on ``$PATH`` as an executable file, and these are
-    # shared libraries, header bundles, or Nim source trees rather
-    # than CLI binaries. They are provisioned by ``flake.nix`` /
+    # findable on ``$PATH`` as an executable file OR to resolve as a
+    # cross-repo producer, and these are shared libraries, header bundles,
+    # or third-party Nim source trees with no workspace checkout of their
+    # own. They are provisioned by ``flake.nix`` /
     # ``nix/pkgs/by-name/re/reprobuild/package.nix`` via env vars
     # (BLAKE3_PREFIX / XXHASH_PREFIX / SQLITE_PREFIX / NIMCRYPTO_SRC /
-    # RUNQUOTA_SRC / SSZ_SERIALIZATION_SRC) and consumed by
-    # ``config.nims``. Once the DSL grows a typed "env-provided
-    # dependency" concept (a ``provides:`` clause, or a Mode 2 catalog
-    # shape for header-only / source-only deps) the list above will
-    # grow back to capture them; until then the constraints live in
-    # ``flake.nix`` and ``config.nims``.
+    # BEARSSL_SRC) and consumed by ``config.nims``. Once the DSL grows a
+    # typed "env-provided dependency" concept (a ``provides:`` clause, or a
+    # Mode 2 catalog shape for header-only / source-only deps) the list
+    # above will grow back to capture them; until then the constraints live
+    # in ``flake.nix`` and ``config.nims``.
 
   devEnv:
     when not defined(windows):
-      useFlakeDevShell()
+      # POSIX: two ways to assemble the SAME environment, chosen per checkout
+      # by `REPRO_LOAD_NIX_FLAKE` in the project's `.env` (read here, so the
+      # choice is an observed input of this evaluation):
+      #
+      #   * `REPRO_LOAD_NIX_FLAKE=1` (the default while the native path below
+      #     is incomplete) -- activate `devShells.default` from `flake.nix`.
+      #   * `REPRO_LOAD_NIX_FLAKE=0` -- the repro-native environment,
+      #     assembled from reprobuild package descriptions.
+      #
+      # The two are meant to be equivalent: whatever the flake shell puts on
+      # PATH for the build and the suite, the native one must provide too.
+      # That includes the language toolchains the Mode 2/3 convention tests
+      # drive (Go, Rust, GNAT, FPC, LDC, gfortran, Zig, Meson, Crystal, .NET,
+      # Elixir/Erlang, JDK/Maven/Gradle, GHC/Cabal, OCaml/dune, PHP/Composer,
+      # Ruby/Bundler, Swift -- `conventionTestToolchains` in flake.nix): the
+      # default dev shell is the one the tests run in, so there is no
+      # separate test shell to enter.
+      if loadNixFlake():
+        useFlakeDevShell()
+      else:
+        # Not assembled yet. Say so loudly rather than hand back a partial
+        # environment that looks complete: the native path needs every
+        # toolchain the flake shell provides described as a reprobuild
+        # package (source-level builds, served from the shared binary cache)
+        # plus a nix provisioning adapter alongside the scoop one.
+        diagnostic("REPRO_LOAD_NIX_FLAKE=0 selects the repro-native dev " &
+          "environment, which is not assembled yet on POSIX: nothing from " &
+          "flake.nix's devShells.default (Nim fork, C toolchain, *_SRC " &
+          "inputs, the convention-test toolchains) is on PATH. Remove the " &
+          "setting from .env (or set it to 1) to load the flake shell.",
+          dedsWarning)
 
     # Windows language-fixture toolchains for the 73
     # ``scripts/validate-standard-provider-*.ps1`` harnesses and their
@@ -589,8 +718,9 @@ package reprobuild:
     # ``repro home apply``; this only finds what they installed, probe-
     # gated exactly like ``env.ps1``'s ``Test-Path`` guards.
     #
-    # Linux / macOS need none of it: the validation harness is PowerShell-
-    # only and reprobuild's flake devShell carries no language fixtures.
+    # Linux / macOS get the same toolchains from the POSIX branch above
+    # (flake.nix's `conventionTestToolchains`, in the default dev shell);
+    # the PowerShell validation harnesses themselves are Windows-only.
     when defined(windows):
       let diyRoot = windowsDiyInstallRoot()
       let msys2Root = diyRoot / "msys2" / "msys64"
@@ -1120,58 +1250,91 @@ package reprobuild:
       "libclingo.so", "libclingo.dylib",
       "libzstd.so.1", "libzstd.dylib"])
 
-    proc findNixStoreSourceDir(namePart, marker: string): string =
-      when defined(posix):
-        let storeRoot = "/nix/store"
-        if dirExists(storeRoot):
-          for kind, path in walkDir(storeRoot):
-            if kind == pcDir and namePart in path.lastPathPart and
-                fileExists(path / marker):
-              return path
-      ""
-
-    proc nixDevShellSourcePath(envName, marker: string): string =
-      when defined(windows):
-        ""
-      else:
-        if not fileExists("flake.nix"):
-          return ""
-        let systemResult =
-          uncontrolledExecCmdEx("nix eval --raw --impure --expr 'builtins.currentSystem' 2>/dev/null")
-        if systemResult.exitCode != 0:
-          return ""
-        let system = systemResult.output.strip()
-        if system.len == 0:
-          return ""
-        let valueResult = uncontrolledExecCmdEx(
-          "nix eval --raw '.#devShells." & system & ".default." & envName &
-          "' 2>/dev/null")
-        if valueResult.exitCode != 0:
-          return ""
-        let candidate = valueResult.output.strip()
-        if candidate.len > 0 and fileExists(candidate / marker):
-          return candidate
-        ""
-
-    proc sourceOnlyPackagePath(envName: string; candidates: openArray[string];
-                               marker: string; nixStoreNamePart = ""):
-        tuple[path: string; env: seq[(string, string)]] =
-      let fromEnv = getEnv(envName)
-      if fromEnv.len > 0 and fileExists(fromEnv / marker):
-        return (fromEnv, @[(envName, fromEnv)])
-      for candidate in candidates:
-        if fileExists(candidate / marker):
-          return (candidate, @[(envName, candidate)])
-      let fromFlake = nixDevShellSourcePath(envName, marker)
-      if fromFlake.len > 0:
-        return (fromFlake, @[(envName, fromFlake)])
-      if nixStoreNamePart.len > 0:
-        let fromStore = findNixStoreSourceDir(nixStoreNamePart, marker)
-        if fromStore.len > 0:
-          return (fromStore, @[(envName, fromStore)])
-      ("", @[])
+    # THE ENV-VAR SOURCE CHANNEL, AND WHAT IS LEFT ON IT.
+    #
+    # This helper used to resolve SEVEN inputs, five of which were workspace
+    # sibling repositories reached by guessing at ``../<repo>``. That made
+    # them inputs of every compile in this repository that appeared in no
+    # dependency graph: nothing recorded them in a lock, nothing invalidated
+    # a compile when they changed, and ``repro develop`` / ``repro flake
+    # override-args`` could not see them. Three of the five are now declared
+    # as what they are — ``uses: "reprobuild-test-adapters"`` /
+    # ``"nim-stackable-hooks"`` / ``"nim-shm-queue"`` in the ``uses:`` block
+    # above (Cross-Repo-Source-Consumption §4.2a, SC-11) — and their entries
+    # here are gone. The engine threads each producer's ``exportedPath`` onto
+    # every ``nim c`` in this repository through
+    # ``ProducerAuxPaths.nimPathDirs``, which is strictly more than the
+    # ``--path:`` these entries used to supply, because it also folds the
+    # producer's revision + integrity into the consuming action's
+    # fingerprint.
+    #
+    # FOUR REMAIN, AND NOT FOR WANT OF TRYING:
+    #
+    #   * ``NIMCRYPTO_SRC`` / ``BEARSSL_SRC`` — third-party trees, not
+    #     workspace repos. There is no ``../nimcrypto`` and no
+    #     ``../nim-bearssl`` checkout to name: nimcrypto is vendored at
+    #     ``libs/nimcrypto`` and bearssl exists only as a flake input
+    #     materialized into the store. A ``uses:`` selector has no producer
+    #     to bind to, so these stay here until the "env-provided dependency"
+    #     concept the ``uses:`` note describes exists.
+    #
+    #   * ``RUNQUOTA_SRC`` — runquota IS a workspace repo with a ``repro.nim``
+    #     and a ``library runquota``, and it still cannot use the SC-11
+    #     channel, for two independent reasons. (1) Its importable roots are
+    #     SIXTEEN directories (``libs/<name>/src``, see ``config.nims``);
+    #     ``library``'s ``exportedPath`` is a single string and its
+    #     convention default ``src`` does not exist at the runquota root, so
+    #     the interface exports no Nim source root at all. (2) It declares
+    #     ``executable runquota`` / ``executable runquotad``, which makes
+    #     ``needsProducerBuild`` true, and an out-of-closure package-level
+    #     ``uses:`` producer that exports a compiled artifact is refused by
+    #     the admission gate in ``buildAndSpliceProducers`` rather than
+    #     spliced. Closing this needs a change in runquota (an umbrella
+    #     ``src/`` or a multi-root export), not here.
+    #
+    #   * ``REPRO_CT_TEST_RUNNER_SRC`` — reprobuild-ct-test-runner has NO
+    #     ``repro.nim`` at all, so there is no producer to name. Writing one
+    #     is a change to THAT repository (``library ct_test_runner_adapter``
+    #     with an explicit ``exportedPath: "libs/ct_test_runner_adapter/src"``
+    #     — its source is not at ``src/``); this entry migrates in the change
+    #     that lands it.
+    #
+    # ``io-mon`` is absent from this list on purpose and always was: the
+    # monitor-shim edges below compile io-mon SOURCE FILES by path
+    # (``ioMonSrc / "io_mon" / "shim" / ...`` as an edge's ``source =``),
+    # which is a file location rather than a module search path, so
+    # ``nimPathDirs`` could not serve it even if io-mon declared no
+    # executable (it declares ``executable ioMon``, so the same admission
+    # gate that refuses runquota refuses it).
+    #
+    # THE PROBE ITSELF LIVES IN ``repro_dsl_stdlib/source_only_packages``.
+    #
+    # It used to be a nested proc here, and the three properties that make it
+    # correct — the marker is the module the consumer imports, an explicitly
+    # named checkout is used or refused but never substituted, and there is no
+    # ``/nix/store`` scan — were each decided here and nowhere else, so
+    # nothing could test them and nothing could hold them equal to
+    # ``scripts/source_paths.sh``, which resolves the SAME inputs for the
+    # shell build path. The module header states each property with the
+    # evidence for it; ``tests/unit/``
+    # ``t_bearssl_probe_marker_is_the_imported_module.nim`` holds this
+    # recipe, ``config.nims``, the release stager and ``source_paths.sh`` to
+    # one spelling of the bearssl marker.
+    #
+    # AN UNRESOLVED INPUT IS FATAL, NOT DROPPED. The helper used to return
+    # ``("", @[])`` and the caller used to skip it with ``if pkg.path.len >
+    # 0``, so a dependency that resolved nowhere produced no message at all —
+    # the build simply went on without it and failed later somewhere that
+    # named a Nim module instead of the missing checkout. Four silent
+    # fallthroughs stacked on top of each other is exactly the shape that let
+    # ``reprobuild-test-adapters`` drift off its pin unnoticed.
 
     proc resolvedIoMonNimPaths(): seq[string] =
+      ## io-mon's importable root. NOT migrated to ``uses: "io-mon"`` — see
+      ## the note above ``sourceOnlyPackagePath``. Kept explicit, and kept
+      ## LOUD for the same reason the helper above is: this repository's
+      ## engine, its monitor shim and a large part of its test suite import
+      ## ``io_mon/*``, so an unresolved io-mon is never a reason to carry on.
       var candidates: seq[string] = @[]
       let fromEnv = getEnv("IO_MON_SRC")
       if fromEnv.len > 0:
@@ -1182,6 +1345,16 @@ package reprobuild:
       for candidate in candidates:
         if fileExists(candidate / "io_mon.nim"):
           return @[candidate]
+      raise newException(OSError,
+        "reprobuild's recipe could not resolve the io-mon source tree. " &
+        "Every candidate was probed for `io_mon.nim` and none carried it: " &
+        candidates.join("; ") & ". io-mon supplies this repository's " &
+        "filesystem-monitoring library and its monitor shim sources, so a " &
+        "build without it is not a narrower build, it is a broken one. " &
+        "Remedy: enter this repository's dev shell (`nix develop`, or " &
+        "`scripts/dev-shell.sh`), which exports $IO_MON_SRC from the " &
+        "flake's pinned input; or set $IO_MON_SRC to an io-mon checkout's " &
+        "`src` directory; or place a checkout at ../io-mon.")
 
     let ioMonNimPaths = resolvedIoMonNimPaths()
     let repoParent = ".."
@@ -1192,32 +1365,44 @@ package reprobuild:
         "libs" / "nimcrypto",
         repoParent / "codetracer" / "libs" / "nimcrypto",
         repoParent / "nimcrypto",
-      ], "nimcrypto" / "hash.nim"),
+      ], "nimcrypto" / "hash.nim",
+        remedy = "nimcrypto is vendored in this repository at " &
+          "`libs/nimcrypto`; a checkout missing it is incomplete (`git " &
+          "submodule update --init`, or re-clone). Alternatively set " &
+          "$NIMCRYPTO_SRC to a nimcrypto checkout."),
       sourceOnlyPackagePath("BEARSSL_SRC", [
         "libs" / "nim-bearssl",
         repoParent / "nim-bearssl",
-      ], "bearssl.nim", "nim-bearssl-"),
-      sourceOnlyPackagePath("REPRO_TEST_ADAPTERS_SRC", [
-        repoParent / "reprobuild-test-adapters" / "src",
-      ], "repro_test_adapters" / "test_runner.nim"),
+      ], BearsslModuleMarker,
+        remedy = "enter this repository's dev shell (`nix develop`, or " &
+          "`scripts/dev-shell.sh`), which exports $BEARSSL_SRC from the " &
+          "flake's pinned `nim-bearssl` input; or set $BEARSSL_SRC to a " &
+          "nim-bearssl checkout carrying that module. `bearssl.nim` at the " &
+          "package root is NOT enough: it is present in every revision, " &
+          "including ones predating the `bearssl/abi/` tree " &
+          "`repro_deploy_agent` imports."),
       sourceOnlyPackagePath("REPRO_CT_TEST_RUNNER_SRC", [
         repoParent / "reprobuild-ct-test-runner",
       ], "libs" / "ct_test_runner_adapter" / "src" /
-        "ct_test_runner_adapter.nim"),
+        "ct_test_runner_adapter.nim",
+        remedy = "enter this repository's dev shell (`nix develop`, or " &
+          "`scripts/dev-shell.sh`), which exports " &
+          "$REPRO_CT_TEST_RUNNER_SRC from the flake's pinned input; or " &
+          "place a checkout of `reprobuild-ct-test-runner` in the " &
+          "workspace (`repro workspace enable reprobuild`). This entry " &
+          "becomes a `uses:` producer edge once that repository grows a " &
+          "`repro.nim` declaring `library ct_test_runner_adapter`."),
       sourceOnlyPackagePath("RUNQUOTA_SRC", [
         repoParent / "runquota",
-      ], "repro.nim"),
-      sourceOnlyPackagePath("STACKABLE_HOOKS_SRC", [
-        repoParent / "nim-stackable-hooks" / "src",
-      ], "stackable_hooks.nim"),
-      sourceOnlyPackagePath("SHM_QUEUE_SRC", [
-        repoParent / "nim-shm-queue" / "src",
-      ], "shm_queue.nim"),
+      ], "repro.nim",
+        remedy = "enter this repository's dev shell (`nix develop`, or " &
+          "`scripts/dev-shell.sh`), which exports $RUNQUOTA_SRC from the " &
+          "flake's pinned input; or place a checkout of `runquota` in the " &
+          "workspace (`repro workspace enable reprobuild`)."),
     ]:
-      if pkg.path.len > 0:
-        sourceOnlyNimPaths.add(pkg.path)
-        for entry in pkg.env:
-          sourceOnlyEnv.add(entry)
+      sourceOnlyNimPaths.add(pkg.path)
+      for entry in pkg.env:
+        sourceOnlyEnv.add(entry)
     let testNimPaths = ioMonNimPaths & sourceOnlyNimPaths
 
     # Suite-Modernization M4: the shared pure-unit binaries, as (path, action
@@ -2402,6 +2587,14 @@ package reprobuild:
       # dry runs 36070347140 and 36080613401). Scoped to this edge's env, the
       # same way the i686 edges below carry their compiler's bin dir; the
       # fallback is where Xcode's Command Line Tools install it.
+      #
+      # Deliberately the ambient lookup, spelled as such: `lipo` belongs to
+      # the host's Xcode Command Line Tools, so there is nothing for this
+      # repository to provision or pin, and what the probe contributes is one
+      # entry on a PATH that already has a hard-coded fallback. Spelling it
+      # `uncontrolledFindExe` is what keeps that visible to a reader and to
+      # the ambient-execution ratchet, instead of adding this file to the
+      # ratchet's baseline and relaxing it for everything else in here.
       let macosLipo = uncontrolledFindExe("lipo")
       let macosShimEnv = @[("PATH",
         (if macosLipo.len > 0: macosLipo.parentDir else: "/usr/bin") &

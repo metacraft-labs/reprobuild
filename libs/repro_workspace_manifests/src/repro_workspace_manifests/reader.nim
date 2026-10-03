@@ -507,6 +507,72 @@ proc lockedCheckoutPathRejection*(value: string): string =
     "checkout path may name a sibling (`../name`) but never an ancestor — " &
     "regenerate the lock with `repro lock refresh`"
 
+const previouslyExtensionKey* = "previously"
+  ## The `[extensions]` key a fragment declares its prior identities under
+  ## (Declared-Repository-Renames.md §2). Named here so the reader, the
+  ## resolver and any future lint agree on one spelling.
+
+proc previousIdentities*(path: string; extensions: Extensions):
+    seq[PreviousRepoIdentity] =
+  ## Decode `[extensions] previously` out of a fragment's forward-compatible
+  ## extensions table (Declared-Repository-Renames.md §2).
+  ##
+  ## Hand-decoded rather than declared on `RepoFragment`, and that is the
+  ## point: `Extensions.raw` is the one place in this schema a key may live
+  ## without an older `repro` rejecting the whole file (see
+  ## `PreviousRepoIdentity`). The cost is that the strict decoder's
+  ## unknown-field rejection does not reach inside, so this proc re-imposes
+  ## it: a misspelled field name inside an entry is an ERROR rather than a
+  ## silently-ignored key, because a typo'd `path` would make the whole
+  ## relocation silently not happen — which reads exactly like a tool that
+  ## does not implement renames.
+  ##
+  ## An absent key yields an empty seq. Shape violations raise
+  ## `WorkspaceManifestParseError` naming the exact key path.
+  if extensions.raw.isNil:
+    return @[]
+  if previouslyExtensionKey notin extensions.raw:
+    return @[]
+  let node = extensions.raw[previouslyExtensionKey]
+  if node.isNil or node.kind != TomlKind.Array:
+    raiseManifestError(path, "extensions." & previouslyExtensionKey,
+      schemaRepoFragmentV1, schemaRepoFragmentV1,
+      "`previously` must be an ARRAY of inline tables, e.g. " &
+        "`previously = [{ name = \"old-name\", path = \"old-path\" }]`")
+  for index, element in node.arrayVal:
+    let keyBase = "extensions." & previouslyExtensionKey & "[" & $index & "]"
+    if element.isNil or
+        element.kind notin {TomlKind.InlineTable, TomlKind.Table}:
+      raiseManifestError(path, keyBase, schemaRepoFragmentV1,
+        schemaRepoFragmentV1,
+        "each `previously` entry must be an inline table with any of " &
+          "`name`, `path`, `url_prefix`, `url_suffix`")
+    var entry: PreviousRepoIdentity
+    for key, value in element.tableVal[]:
+      if value.isNil or value.kind != TomlKind.String:
+        raiseManifestError(path, keyBase & "." & key, schemaRepoFragmentV1,
+          schemaRepoFragmentV1,
+          "`" & key & "` must be a string")
+      case key
+      of "name": entry.name = value.stringVal
+      of "path": entry.path = value.stringVal
+      of "url_prefix": entry.url_prefix = value.stringVal
+      of "url_suffix": entry.url_suffix = value.stringVal
+      else:
+        raiseManifestError(path, keyBase & "." & key, schemaRepoFragmentV1,
+          schemaRepoFragmentV1,
+          "unknown `previously` field '" & key &
+            "' (accepted: name, path, url_prefix, url_suffix; `branch` is " &
+            "deliberately NOT accepted — a mainline rename strands no " &
+            "directory, so `repro switch --mainline` already covers it)")
+    if entry.name.len == 0 and entry.path.len == 0 and
+        entry.url_prefix.len == 0 and entry.url_suffix.len == 0:
+      raiseManifestError(path, keyBase, schemaRepoFragmentV1,
+        schemaRepoFragmentV1,
+        "`previously` entry declares no field at all; every field is " &
+          "optional but an entry must name at least one")
+    result.add(entry)
+
 proc readRepoFragment*(path: string): RepoFragment =
   let content = slurpManifest(path, schemaRepoFragmentV1)
   validateSchema(path, content, schemaRepoFragmentV1)
@@ -518,6 +584,42 @@ proc readRepoFragment*(path: string): RepoFragment =
     raiseManifestError(path, "repo.path", schemaRepoFragmentV1,
       schemaRepoFragmentV1,
       "checkout path '" & result.repo.path & "' " & rejection)
+  # Declared-Repository-Renames.md §2.3 — the two validator rules that are
+  # answerable from THIS fragment alone. The three cross-fragment rules (a
+  # prior path/name colliding with a LIVE declaration, and two fragments
+  # claiming one ancestor) need the whole resolved set and live in the
+  # resolver.
+  let declaredUrlPrefix =
+    if result.repo.url_prefix.isSome: result.repo.url_prefix.get() else: ""
+  let declaredUrlSuffix =
+    if result.repo.url_suffix.isSome: result.repo.url_suffix.get() else: ""
+  for index, prior in previousIdentities(path, result.extensions):
+    let keyBase = "extensions." & previouslyExtensionKey & "[" & $index & "]"
+    # Rule 5: a prior path places a directory MOVE on every machine that
+    # syncs, so it earns the same scrutiny the live path gets rather than a
+    # second, laxer check. Same proc, same wording.
+    if prior.path.len > 0:
+      let priorRejection = declaredCheckoutPathRejection(prior.path)
+      if priorRejection.len > 0:
+        raiseManifestError(path, keyBase & ".path", schemaRepoFragmentV1,
+          schemaRepoFragmentV1,
+          "previous checkout path '" & prior.path & "' " & priorRejection)
+    # Rule 1: an entry that merely restates `[repo]` makes the CURRENT path a
+    # "prior" path, which would make the relocation check consider the live
+    # checkout a candidate for moving onto itself.
+    let differs =
+      (prior.name.len > 0 and prior.name != result.repo.name) or
+      (prior.path.len > 0 and prior.path != result.repo.path) or
+      (prior.url_prefix.len > 0 and prior.url_prefix != declaredUrlPrefix) or
+      (prior.url_suffix.len > 0 and prior.url_suffix != declaredUrlSuffix)
+    if not differs:
+      raiseManifestError(path, keyBase, schemaRepoFragmentV1,
+        schemaRepoFragmentV1,
+        "`previously` entry restates the present identity (name '" &
+          result.repo.name & "', path '" & result.repo.path &
+          "'); an entry must differ from `[repo]` in at least one field, " &
+          "or the live checkout becomes a candidate for being moved onto " &
+          "itself")
 
 # ---- url-prefixes/<name>.toml ----------------------------------------------
 

@@ -64,6 +64,7 @@ on:
   push:
     branches: [main, dev]
   pull_request:
+    branches-ignore: [agents]
 
 # No `concurrency` block, deliberately: there is nothing to supersede. The job
 # is seconds long, so a backlog cannot form, and every commit gets its own

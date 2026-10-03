@@ -75,6 +75,27 @@
 ##     invocation such a launch would be made with, and the seam that
 ##     invocation would have to travel through. It performs no launch and
 ##     this build ships nothing that could.
+##   * ``repro_attest/merkle`` — RFC 6962 leaf and node hashing, and the
+##     recomputation of a tree root from one leaf and an audit path. It
+##     returns a root and never compares one, because the only safe
+##     right-hand side of that comparison comes from outside the document
+##     being checked.
+##   * ``repro_attest/edge_attestation`` — the
+##     ``reproos.edge-attestations.v1`` container: the claim a rebuilder
+##     signs about a measurement manifest, the opaque proofs that travel
+##     beside it, and the strict readers for both. Transport only — it
+##     holds no key and nothing in it makes an attestation count.
+##   * ``repro_attest/commitment`` — the salted, domain-separated,
+##     length-framed commitment an inference statement carries in place
+##     of a prompt or an output, so a verdict is reachable without
+##     either. Its header says what the construction is worth and what
+##     it is not.
+##   * ``repro_attest/inference_statement`` — the
+##     ``reproos.inference-statement.v1`` document: the eleven fields a
+##     signature covers, the framed bytes it covers them as, the strict
+##     reader, and the audit record that carries no plaintext because a
+##     statement has none. Transport only — nothing in it makes a
+##     statement true.
 ##   * ``repro_attest/tdx_backend`` — the trust-domain backend: the
 ##     driver that hands over the quote a quoting enclave produced, and
 ##     the checks that establish it answers THIS request. It bundles no
@@ -98,7 +119,12 @@ import ./repro_attest/snp_backend
 import ./repro_attest/tdx_backend
 import ./repro_attest/sealing
 import ./repro_attest/cloud_launch
+import ./repro_attest/merkle
+import ./repro_attest/edge_attestation
+import ./repro_attest/commitment
+import ./repro_attest/inference_statement
 
 export measurement, snp_launch, tdx_launch, tpm2, event_log, manifest,
        binding, report, driver, provision, mock_backend, tpm2_backend,
-       tsm_report, snp_backend, tdx_backend, sealing, cloud_launch
+       tsm_report, snp_backend, tdx_backend, sealing, cloud_launch,
+       merkle, edge_attestation, commitment, inference_statement

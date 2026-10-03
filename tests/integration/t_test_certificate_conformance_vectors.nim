@@ -26,6 +26,7 @@
 ## (the signature group needs the real ed25519 verifier).
 
 import std/[algorithm, json, os, sequtils, sets, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_cli_support
 

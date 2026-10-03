@@ -1983,7 +1983,11 @@ suite "declared IPC trust: the check is what makes it a claim":
         checkpoint("residual diagnostic=" & residualDiagnostics[0])
         check ("declared at " & daemon.address) in residualDiagnostics[0]
         check ("peer=" & $daemon.pid) in residualDiagnostics[0]
-        check daemon.secondAddress notin residualDiagnostics[0]
+        # io-mon now records the dialled endpoint (Dev-Env-Warm-Entry.md §3),
+        # so the forgiven loss NAMES the undeclared endpoint instead of hiding
+        # it. The exemption itself is unchanged: it is still keyed on the
+        # declared program's pid, which is the residual this arm pins.
+        check ("path=" & daemon.secondAddress) in residualDiagnostics[0]
       check f.publishedRecordExists(residualEdge)
       let residualWarm = runBuild(graph([residualEdge]), config)
       check residualWarm.byId(residualEdge.id).cacheDecision in ReuseDecisions

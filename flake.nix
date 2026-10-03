@@ -50,6 +50,11 @@
       # ``nixos-modules`` follows ours so runquota's package set is this
       # flake's package set — one nixpkgs evaluation, not two.
       inputs.nixos-modules.follows = "nixos-modules";
+      # runquota's release dev shell takes reprobuild's packaging sources as
+      # ``release-packaging-src``, pinned to SOME reprobuild revision. Inside
+      # this flake that is a second, competing reprobuild pin (and an identity
+      # with no recorded visibility); point it at this flake itself instead.
+      inputs.release-packaging-src.follows = "";
     };
     io-mon-src = {
       # io-mon ships the ``io_mon`` Nim package (the byte-identical wire-format
@@ -175,7 +180,18 @@
       # a merge path WITHOUT the fold while io-mon's capability declaration --
       # which this same revision moves into the supported set -- says the fold
       # is there, i.e. an over-claim in the depfile this engine reads.
-      url = "github:metacraft-labs/io-mon/07cc4afc823a7c631d9ef9fdf4522f4d219c46a8";
+      # Preserve child exec identities and the resumed parent guard across vfork.
+      # Bumped to 31b05a5 (io-mon#41): IPC connect records carry the socket
+      # path and the peer uid (endpoint-keyed daemon trust), and
+      # `FsSnoopRequest.isolateEnv` launches a child from its declared
+      # environment alone (Dev-Env-Warm-Entry.md).
+      # Keep this, the lock, sibling clone and package fallback on one revision.
+        # Bumped to e750199 (2026-09-30), io-mon's `agents` tip: it contains
+        # 53994c0 (dev's observation-identity fold + agents' vfork repairs) and
+        # 31b05a5 (io-mon#41: endpoint + peer-uid IPC records, isolated launch).
+        # Bumped to b464ce1 (2026-10-03), io-mon's `agents` tip; e750199 is an
+        # ancestor.
+      url = "github:metacraft-labs/io-mon/b464ce17cdf2196e61ccf4ab3e61ed0ee1a70ed2";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -315,8 +331,11 @@
       # lives, and past a hard deadline terminates it and fails the spawn
       # instead. 5125869 is an ancestor.
       #
+      # Bumped to 3b99d26 (2026-10-03), the published `agents`/`dev` tip; 72f5782
+      # is an ancestor.
+      #
       # Keep this pin aligned with the published workspace dependency.
-      url = "github:metacraft-labs/nim-stackable-hooks/72f578249e9d8bbca8e3705c8a41ed5085c05bf9";
+      url = "github:metacraft-labs/nim-stackable-hooks/3b99d26fd969a48698cf75fc90a8657010c81eec";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -1349,6 +1368,126 @@
           # closure. It ADDS to — and does not
           # disturb — `packages.default`/`packages.reprobuild` or `just build`.
           reproPortable = bundlers.bundlers.${system}.toArx reprobuild;
+
+          # The language toolchains the Mode 2/3 convention tests drive --
+          # `libs/repro_standard_provider/tests/test_<lang>_*_convention` and
+          # the `mixed/*` cross-language cases -- for `devShells.default`.
+          # Each case probes PATH and SKIPS without its toolchain; before
+          # these were in the dev shell, every one of those cases skipped on
+          # Linux, so the conventions were never exercised on the platform
+          # the suite runs on.
+          #
+          # They are part of the DEFAULT shell, not a separate test shell: the
+          # dev shell a project declares is the one its tests run in. The cost
+          # is closure size -- they add 12.4 GiB to the shell's 4.9 GiB
+          # (x86_64-linux, measured 2026-09-27) -- a one-time store cost per
+          # pin, not a per-entry one.
+          #
+          # Pins mirror `repro.nim`'s Windows fixture constants where nixpkgs
+          # carries the pinned line: Zig 0.13 (pre-1.0; the M44 fixtures were
+          # audited against it), the .NET 8.0 SDK band, JDK 21, Gradle 8,
+          # FPC 3.2.2 and Swift 5.10.1 (the nixpkgs defaults happen to be
+          # those exact versions). Go is the exception: nixpkgs has removed
+          # the end-of-life 1.23 line, so it is nixpkgs' current Go.
+          #
+          # ONE bin directory, and a curated one, rather than the packages
+          # themselves. GNAT and gfortran are cc-wrappers whose `bin/` also
+          # carries `gcc`, `g++`, `cc`, `ld`, `as`, ...; putting them in
+          # `packages` would put GCC 13 (GNAT's) ahead of the shell's own
+          # compiler for every `nim c`. Only names the C toolchain does not
+          # own are linked. gnatmake does not need the shadowed names: its
+          # wrapper passes `-B<its own bin>` to the compiler driver (verified:
+          # builds and runs an Ada hello with GCC 15 first on PATH).
+          # Packages unavailable on the current platform are dropped rather
+          # than failing the shell, so a missing one is a SKIP there too.
+          #
+          # `repro.nim`'s `devEnv:` names the same set for the repro-native
+          # (non-flake) activation; keep the two lists in step.
+          conventionTestToolchains =
+            let
+              available = pkgs.lib.filter (p: pkgs.lib.meta.availableOn pkgs.stdenv.hostPlatform p);
+              toolchains = available (
+                [
+                  pkgs.go
+                  pkgs.rustc
+                  pkgs.cargo
+                  pkgs.gfortran
+                  pkgs.fpc
+                  pkgs.ldc
+                  pkgs.zig_0_13
+                  pkgs.meson
+                  pkgs.crystal
+                  pkgs.shards
+                  pkgs.dotnet-sdk_8
+                  pkgs.elixir
+                  pkgs.erlang
+                  pkgs.rebar3
+                  pkgs.jdk21
+                  pkgs.maven
+                  pkgs.gradle_8
+                  pkgs.ghc
+                  pkgs.cabal-install
+                  pkgs.ocaml
+                  pkgs.dune_3
+                  pkgs.php
+                  pkgs.php.packages.composer
+                  pkgs.ruby
+                  pkgs.bundler
+                  pkgs.swift
+                  pkgs.swiftpm
+                ]
+                # GNAT's bootstrap binary exists only for x86_64 Linux at
+                # this pin. Its broad meta.platforms passes availableOn, but
+                # forcing the dependency on ARM64 throws during evaluation.
+                ++ pkgs.lib.optionals (pkgs.stdenv.isLinux && pkgs.stdenv.hostPlatform.isx86_64) [
+                  pkgs.gnat
+                ]
+              );
+              # Names the dev shell's C toolchain owns. A link under one of
+              # these would shadow it (see above).
+              shadowed = [
+                "addr2line"
+                "ar"
+                "as"
+                "c++"
+                "c++filt"
+                "cc"
+                "cpp"
+                "dwp"
+                "elfedit"
+                "g++"
+                "gcc"
+                "gprof"
+                "ld"
+                "ld.bfd"
+                "ld.gold"
+                "ld.lld"
+                "lld"
+                "nm"
+                "objcopy"
+                "objdump"
+                "ranlib"
+                "readelf"
+                "size"
+                "strings"
+                "strip"
+                "clang"
+                "clang++"
+                "clang-cpp"
+              ];
+            in
+            pkgs.runCommand "reprobuild-convention-test-toolchains" { } ''
+              mkdir -p $out/bin
+              for pkg in ${pkgs.lib.escapeShellArgs toolchains}; do
+                [ -d "$pkg/bin" ] || continue
+                for exe in "$pkg"/bin/*; do
+                  name=$(basename "$exe")
+                  case " ${toString shadowed} " in *" $name "*) continue ;; esac
+                  # First package wins, so the list order above is priority.
+                  [ -e "$out/bin/$name" ] || ln -s "$exe" "$out/bin/$name"
+                done
+              done
+            '';
         in
         {
           apps.default = reproApp;
@@ -1548,7 +1687,12 @@
             # not worth changing what the whole shell's `#include <unwind.h>`
             # resolves to. Same contract as SQLITE_PREFIX / CLINGO_PREFIX above.
             REPRO_HCR_LLVM_LIBUNWIND = pkgs.llvmPackages.libunwind;
+            # For the JVM convention fixtures (Maven / Gradle / bare javac), as
+            # the Windows `devEnv:` sets it for the same fixtures.
+            JAVA_HOME = pkgs.jdk21.home;
             packages = [
+              # See `conventionTestToolchains` above.
+              conventionTestToolchains
               runquotaTools
               # ``ct-test`` — CodeTracer's cross-language test driver. On PATH
               # so `ct-test test discover|run` is available in the dev shell

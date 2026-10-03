@@ -403,6 +403,22 @@ compiled repro.lock-adjacent recipe, a repro.solver sidecar, or pass
 --inputs <file>)` and exits 1 — so it is never the answer to a
 team/personal backend record.
 
+`repro lock refresh` re-observes each sibling from its checkout, but it
+**never moves a committed pin backward silently**. When a sibling's
+checkout is behind the revision the lock already pins, has diverged from
+it, or lacks the pinned commit, the refresh writes nothing and exits 4,
+naming the sibling, both commits, the checkout and the command that
+brings it forward (`git -C <sibling> merge --ff-only …`, `repro ws sync
+<project>`, or a fetch). A deliberate downgrade, or a move onto another
+line of the sibling's history, is spelled out:
+`repro lock refresh <path> --allow-pin-regression=<sibling>[,<sibling>…]`
+(or `REPRO_ALLOW_PIN_REGRESSION=<sibling>`, the same variable the
+`pre-commit` re-pin honors). Each pin's `ref` is a published branch that
+contains the pinned commit (`agents` first, then `dev`, then the
+checkout's branch, the remote's default, or any other published branch
+containing it) and is empty when no published branch contains it; a
+local-only branch name is never recorded.
+
 `repro workspace lock` resolves a bare invocation against the **current
 directory**, with no upward search. The gate speaks from inside the
 pushed repo, so its remedies spell out `--workspace-root=` and can be
@@ -512,8 +528,8 @@ make sense.
 
   Because post-commit cannot publish, it never reports a bare success for
   writing a record. Its outcome — in
-  `.repro/workspace/post-commit-lock.log` and
-  `.repro/workspace/post-commit-report.json` — says what became of the
+  `.repro/build/reports/post-commit-lock.log` and
+  `.repro/build/reports/post-commit-report.json` — says what became of the
   record:
 
   | Outcome | Meaning |
@@ -524,8 +540,9 @@ make sense.
   | `written-publication-unknown` | Written; the publication check itself failed. Treat as unpublished. |
   | `no-manifest-record` | The lock writer succeeded but wrote no manifest record — records are routed per-repo, or the workspace is public-only and carries its lock in the in-repo `repro.lock`. |
   | `no-lock-dirty-siblings` | **No lock exists.** An in-scope repo has uncommitted changes; a lock recorded over them would not reproduce the tree it claims. Commit or stash them and run `repro workspace lock`. |
-  | `no-lock-failed` | **No lock exists.** The lock writer failed; the diagnostic names the reason (commonly a declared repo with no checkout). |
-  | `skipped-no-workspace` | Not a workspace; the hook does not apply here. |
+  | `no-lock-failed` | **No lock exists.** The lock writer failed; the diagnostic names the reason (commonly a declared repo with no checkout). A triggering checkout that no project declares lands here too: there is no repo name to key a record on, so a record somebody would have looked for cannot be written. |
+  | `skipped-membership-repo` | **No lock is due.** The commit landed in the workspace's membership repo — the checkout carrying `projects/` and `repos/`, which no project declares as one of its repos. It is not a project repo, so it has no name to encode as the `<repo>` component of `locks/<project>/<repo>/<sha>.toml` and belongs to no tier's partition; a membership commit therefore anchors no trigger-keyed record at all. Nothing failed and nothing is pending. The repos whose pins the commit changes each record their own lock when they are pushed. Logged, with no stderr warning: this is a designed steady state, and a warning on every manifest commit teaches you to stop reading them. |
+  | `skipped-no-workspace` | Not a workspace; the hook does not apply here. **Reported on stderr only** — see below. |
   | `skipped-git-operation-in-progress` | Git was mid-rebase / mid-cherry-pick / mid-bisect in the repo that fired the hook. The commit the hook saw is one of that operation's intermediate commits, so nothing was written into the working tree and no ref was pushed. The diagnostic names the marker that proved it. The pre-push gate refreshes the lock before anything is published, so no lock is lost. |
   | `inert-git-state-unknown` | The hook could not determine whether a git operation was in progress (git unresolvable, or the repo path is not a checkout). It did nothing and said so on stderr — "I could not tell" is not the same answer as "nothing is happening". |
 
@@ -536,6 +553,22 @@ make sense.
   merely pending: it is not running. Any stranded record, any refusal,
   and any writer failure also prints a line to stderr, which git shows
   you at the terminal. The commit still succeeds in every case.
+
+  **`skipped-no-workspace` has no report file, by design.** When the hook
+  decides the root is not a workspace, it writes nothing at all and says so
+  on stderr instead. There is no workspace to own a `.repro/build/reports/`
+  tree, so the report used to be filed at the nearest `.repro/` shell at or
+  above the committing repo — inside a repo the engine had just disclaimed.
+  Two things were wrong with that and only one of them is about tidiness.
+  The files are untracked content in a git checkout: the dirt the lock
+  publisher refuses on, regenerated by the hook its own next commit fires.
+  And nothing reads them — no command may read a report back to decide
+  anything, and a report inside a repo nothing considers a workspace has no
+  reader by construction. Its sibling gate already rules this way: `repro
+  check --mode=pre-push` answers a non-workspace with one stderr line and
+  exit 0, writing no artifact. If you see this line, the managed hooks are
+  installed somewhere they have nothing to do: finish the bootstrap (`repro
+  workspace init`) or remove them.
 
 - **pre-push** (client gate; `--no-verify` bypasses it) — the currency +
   publication check for the whole publication boundary. It reads each

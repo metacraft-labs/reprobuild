@@ -38,9 +38,19 @@
 ##   * a ``[tcb]`` table with no confidential-computing backend to bound,
 ##     or a confidential-computing backend with no ``[tcb]`` table;
 ##   * an age bound on a challenge the policy does not require;
-##   * a ``[measurements.evidence]`` table, because this build does not
-##     implement the evidence-backed posture and a policy clause nothing
-##     enforces is weaker than the policy it appears to be.
+##   * a ``[measurements.evidence]`` quorum that cannot be reached — a
+##     threshold below two, a threshold above the number of signers
+##     admitted, an empty or repeating admitted set — and one stated
+##     beside ``allow_mock``, which makes it decide nothing.
+##
+## ## The evidence posture, which this build now implements
+##
+## ``[measurements.evidence]`` was refused outright until the quorum
+## verifier existed, on the grounds that a clause nothing enforces makes
+## a document read stricter than the verifier behind it. It is now
+## parsed and enforced. The refusal it replaced was right while it
+## lasted, and the rule it rested on still holds for whatever comes
+## next: do not parse a clause this build cannot act on.
 ##
 ## ## Why ``allow_mock`` and pinned manifests cannot coexist
 ##
@@ -75,7 +85,38 @@ type
     snp*: int
     microcode*: int
 
+  EvidencePolicy* = object
+    ## The ``[measurements.evidence]`` posture: accept a measurement
+    ## manifest this verifier did not build and did not pin, on the
+    ## strength of the build evidence that travels with it.
+    ##
+    ## Absent is the default and it is the strict one. A verifier with
+    ## no evidence clause accepts a manifest only by pinning its digest
+    ## or by having produced it, and no bundle of signatures can widen
+    ## that.
+    present*: bool
+    minSignatures*: int
+      ## K. At least ``MinQuorumThreshold``; see the refusal that
+      ## enforces it for why one is not a quorum.
+    knownKeys*: seq[string]
+      ## N, as the COSE key identifiers admitted — lower-case hex, the
+      ## one spelling a signer's identity has anywhere in this chain.
+      ##
+      ## The design sketches this list as PEM *filenames*. It is spelled
+      ## as key identifiers instead, and that is a deliberate departure
+      ## rather than an abbreviation: a filename is not a key, and a
+      ## policy that names paths makes the set of parties a verifier
+      ## trusts depend on a filesystem the policy does not describe —
+      ## which is the one thing a policy document exists to pin down.
+      ## The keys themselves still have to reach the verifier, and they
+      ## do, as a roster the operator supplies; this list decides which
+      ## of them may count.
+    requireTransparencyLog*: bool
+      ## Whether the claim must additionally be proved to sit in a
+      ## transparency log whose root this verifier has witnessed.
+
   MeasurementPolicy* = object
+    evidence*: EvidencePolicy
     manifests*: seq[string]
       ## ``sha256:<hex>`` digests of the measurement manifests this
       ## verifier will compare against. Empty is a legitimate and
@@ -137,6 +178,20 @@ const
 
   MaxPinnedManifests* = 64
   MaxPolicyBytes* = 65_536
+
+  MinQuorumThreshold* = 2
+    ## The smallest K a quorum clause may state. The design maps SLSA's
+    ## two-party review onto this threshold with K ≥ 2, and the reason
+    ## survives the mapping: a threshold of one is a single-signer
+    ## policy wearing a quorum's vocabulary, and single-party compromise
+    ## defeats it outright — which is the exact property the quorum
+    ## exists to deny.
+
+  MaxKnownKeys* = 64
+  MaxKeyIdentifierBytes* = 64
+    ## A COSE ``kid`` is opaque bytes. Sixty-four of them is room for any
+    ## digest a rebuilder might name its key by, and a bound is what
+    ## stops a policy from being a place to store something else.
 
 # ---------------------------------------------------------------------
 # A strict TOML subset
@@ -429,6 +484,18 @@ proc isSha256Digest(s: string): bool =
     if c notin {'0' .. '9', 'a' .. 'f'}: return false
   true
 
+proc isKeyIdentifier(s: string): bool =
+  ## A COSE key identifier as this schema spells it: an even, non-empty,
+  ## bounded run of lower-case hex. Case is fixed for the same reason it
+  ## is fixed everywhere else here — one value, one spelling, so a
+  ## roster and a policy cannot disagree about whether they name the
+  ## same signer.
+  if s.len == 0 or (s.len and 1) == 1: return false
+  if s.len > MaxKeyIdentifierBytes * 2: return false
+  for c in s:
+    if c notin {'0' .. '9', 'a' .. 'f'}: return false
+  true
+
 proc parseAttestationPolicy*(text, source: string): AttestationPolicy =
   ## Parse and fully validate a policy document. ``source`` names the
   ## file in every message, because the reader of these errors is
@@ -506,13 +573,50 @@ proc parseAttestationPolicy*(text, source: string): AttestationPolicy =
           "could never be reached")
 
     # -- [measurements] ----------------------------------------------
-    if r.hasPrefix("measurements.evidence"):
-      refuse("[measurements.evidence] asks this verifier to accept a " &
-        "measurement manifest on the strength of build evidence, which " &
-        "this build cannot evaluate. It is refused rather than ignored: " &
-        "a policy clause nothing enforces makes the document read " &
-        "stricter than the verifier behind it. Pin the manifests you " &
-        "accept, or reproduce the image and compare.")
+    result.measurements.evidence.present = r.hasPrefix("measurements.evidence")
+    if result.measurements.evidence.present:
+      result.measurements.evidence.minSignatures =
+        r.takeInt("measurements.evidence.min_signatures")
+      result.measurements.evidence.knownKeys =
+        r.takeStringArray("measurements.evidence.known_keys")
+      result.measurements.evidence.requireTransparencyLog =
+        r.takeBool("measurements.evidence.require_transparency_log")
+      let ev = result.measurements.evidence
+      if ev.knownKeys.len == 0:
+        refuse("measurements.evidence.known_keys is empty; a quorum over " &
+          "no admitted signers can never be reached, which is a mistake " &
+          "rather than a strict posture")
+      if ev.knownKeys.len > MaxKnownKeys:
+        refuse("measurements.evidence.known_keys admits " &
+          $ev.knownKeys.len & " signers; at most " & $MaxKnownKeys &
+          " are read")
+      var seenKeys: seq[string] = @[]
+      for k in ev.knownKeys:
+        if not isKeyIdentifier(k):
+          refuse("measurements.evidence.known_keys carries " & k.escape() &
+            "; each entry is a signer's COSE key identifier, written as " &
+            "an even number of at most " & $(MaxKeyIdentifierBytes * 2) &
+            " lower-case hex characters. It is the KEY that is admitted, " &
+            "not a file that might hold one: a policy naming a path " &
+            "would leave what this verifier trusts to a filesystem the " &
+            "policy does not describe")
+        if k in seenKeys:
+          refuse("measurements.evidence.known_keys repeats " & k.escape() &
+            "; N is the size of the admitted set, and a list that counts " &
+            "one signer twice states a larger N than it admits")
+        seenKeys.add k
+      if ev.minSignatures < MinQuorumThreshold:
+        refuse("measurements.evidence.min_signatures is " &
+          $ev.minSignatures & "; a quorum is at least " &
+          $MinQuorumThreshold & " signatures. One is a single signer " &
+          "with a quorum's name on it, and zero accepts a manifest no " &
+          "rebuilder ever signed")
+      if ev.minSignatures > ev.knownKeys.len:
+        refuse("measurements.evidence.min_signatures is " &
+          $ev.minSignatures & " and measurements.evidence.known_keys " &
+          "admits " & $ev.knownKeys.len & " signers; the threshold can " &
+          "never be reached, so the clause refuses every manifest while " &
+          "reading as though it admits some")
     result.measurements.manifests = r.takeStringArray("measurements.manifests")
     result.measurements.requireCertificates =
       r.takeBool("measurements.require_certificates")
@@ -529,6 +633,15 @@ proc parseAttestationPolicy*(text, source: string): AttestationPolicy =
       if d in seenDigests:
         refuse("measurements.manifests repeats " & d.escape())
       seenDigests.add d
+
+    if result.allowMock and result.measurements.evidence.present:
+      refuse("accept.allow_mock is true and [measurements.evidence] " &
+        "admits a manifest on the strength of rebuilder signatures. A " &
+        "mock report carries no launch measurement, so it is never " &
+        "compared against any manifest — attested or pinned — and the " &
+        "evidence clause decides nothing. It is the same quiet conflict " &
+        "as a pinned digest beside allow_mock, in the same direction: " &
+        "the document reads stricter than the verifier it configures")
 
     if result.allowMock and result.measurements.manifests.len > 0:
       refuse("accept.allow_mock is true and measurements.manifests pins " &
@@ -634,3 +747,13 @@ proc acceptsBackend*(p: AttestationPolicy; backend: AttestationBackend): bool =
 
 proc pinsManifests*(p: AttestationPolicy): bool =
   p.measurements.manifests.len > 0
+
+proc acceptsEvidence*(p: AttestationPolicy): bool =
+  ## Whether this policy will consider a manifest it neither pinned nor
+  ## produced. Spelled as a predicate, like ``pinsManifests``, so the
+  ## verifier and the verdict ask the same question the same way.
+  p.measurements.evidence.present
+
+proc requiresTransparencyLog*(p: AttestationPolicy): bool =
+  p.measurements.evidence.present and
+    p.measurements.evidence.requireTransparencyLog

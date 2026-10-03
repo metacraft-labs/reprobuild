@@ -1,0 +1,61 @@
+# The corpus census: every file in this directory that carries pinned
+# bytes, and whether those bytes have a lifecycle at all.
+#
+# THIS IS THE STABLE / REFRESHED SEPARATION, written down. The two are
+# operationally different in a way no reader can infer from the files:
+# a standards document's test vectors are frozen and a difference from
+# the publisher is a defect in the pin, while vendor collateral is
+# REISSUED on the vendor's own schedule and a difference is the pin
+# needing refreshing. Treating them alike produces either a monitor that
+# cries wolf every month or one that never notices a corrupted vector.
+#
+# COMPLETENESS IS MECHANICAL, and that is the point of the file.
+# `t_attestation_fixture_lifecycle` scans this directory and requires a
+# row for every file that matches any of:
+#
+#   * a run of twelve or more consecutive lines of sixty-plus
+#     hexadecimal characters — a corpus, as opposed to the single digest
+#     a dozen ordinary gates carry;
+#   * a name ending `_vectors.nim` or `_corpus.nim`;
+#   * anything under `fixtures/`.
+#
+# A new corpus that matches none of those is not covered, and one row
+# below is there because of exactly that: the malformed-CBOR corpus is
+# RFC text with no hex and a name the rule does not match. It is listed
+# by hand. Every row must name a file that exists, so a hand-added row
+# cannot drift into fiction even though the scan did not find it.
+#
+# kind      stable-protocol | refreshed-collateral | genuine-capture
+#           | local-capture | minted | mixed | not-attestation | no-corpus
+# refresh   never | on-vendor-reissue | on-upstream-move | re-capture
+#           | regenerate | see-ledger | -
+#
+# path	kind	refresh	note
+snp_vectors.nim	mixed	see-ledger	vendor chains and revocation lists, two genuine parts' reports and endorsements, and a minted impostor chain; every member has a ledger row
+tdx_vectors.nim	mixed	see-ledger	the vendor root, its signing certificate, three revocation lists, eight collateral documents — five current and three kept at an issue date years past, so the reader is shown to be reading the FORMAT and not one vintage — three genuine quotes and a minted impostor family; every member has a ledger row
+nitro_vectors.nim	mixed	see-ledger	the enclave vendor's root, five genuine documents from four republishers, and five readings derived here; every member has a ledger row
+snp_digest_vectors.nim	refreshed-collateral	on-upstream-move	an upstream project's test suite and two firmware tails, pinned by commit AND digest, with the vectors parsed rather than transcribed
+snp_digest_corpus.nim	no-corpus	-	the parser over the corpus beside it; it carries no bytes of its own
+tdx_launch_vectors.nim	mixed	see-ledger	binds the five files under fixtures/tdx and adds synthetic firmware that carries no provenance and is evidence about nothing
+attested_boot_vectors.nim	local-capture	re-capture	four boots of a transient guest under a software root of trust, taken by attested_boot/take-attested-boot-evidence.sh
+sealed_state_vectors.nim	local-capture	re-capture	five power cycles of one guest, taken by attested_boot/take-sealed-state-evidence.sh
+remote_unseal_vectors.nim	local-capture	re-capture	two runs, honest and refused, taken by attested_boot/take-remote-unseal-evidence.sh
+provisioned_secret_vectors.nim	local-capture	re-capture	taken by attested_boot/take-provisioned-secret-evidence.sh; digests only, no secret is pinned
+tcg_event_log_vectors.nim	local-capture	regenerate	real firmware and a software root of trust wrote these; the header carries the full regeneration recipe and the tool versions
+tpm2_quote_vectors.nim	local-capture	regenerate	six quotes plus an independent tool's readings of each; the header carries the command lines
+t_cose_rfc9052_vectors.nim	stable-protocol	never	verbatim standards-document text, pinned by the document's digest; the vectors are parsed out rather than transcribed
+t_cbor_rfc8949_vectors.nim	stable-protocol	never	verbatim standards-document text, pinned by the document's digest
+t_cbor_rfc8949_malformed.nim	stable-protocol	never	the not-well-formed corpus from the same standards document; the directory scan does not reach this file and the row is here by hand
+t_hpke_rfc9180_vectors.nim	stable-protocol	never	three standards documents' vectors, each pinned by its own digest
+t_test_certificate_conformance_vectors.nim	stable-protocol	-	a walker over an EXTERNAL sibling suite that is not pinned by commit or digest; it skips when the sibling is absent, so its coverage is a property of the checkout rather than of this repository
+t_snp_digest_vectors.nim	no-corpus	-	a gate over the corpus modules; it carries no bytes of its own
+t_tdx_launch_vectors.nim	no-corpus	-	a gate over the corpus modules; it carries no bytes of its own
+t_tpm2_structure_vectors.nim	no-corpus	-	a gate over the corpus modules; it carries no bytes of its own
+fixtures/tdx/ovmf-ubuntu-2025.02-3ubuntu2.fd	refreshed-collateral	see-ledger	a stock distribution firmware package
+fixtures/tdx/ovmf-dstack-0.5.9.fd	refreshed-collateral	see-ledger	an operator's published guest firmware
+fixtures/tdx/quote-operator-a.bin	genuine-capture	see-ledger	served live; asking again returns a different quote, not a correction of this one
+fixtures/tdx/quote-operator-b.bin	genuine-capture	see-ledger	served live; same caveat
+fixtures/tdx/dstack-0.5.9-register-log.json	genuine-capture	see-ledger	the measurement record served beside that quote in the same response
+fixtures/m9r21_4_eliwsl_hardware.json	not-attestation	-	a host-capability probe fixture; it shares this directory and nothing else
+fixtures/m9r21_4_eliwsl_hardware.nim	not-attestation	-	the reader for the file above
+fixtures/m9r21_4_eliwsl_summary.txt	not-attestation	-	the summary beside the two files above

@@ -388,6 +388,7 @@ when isNixSupported:
         tempRoot)
 
       let sessions = waitForSessionsContains(tempRoot, "\tbuild\tsucceeded")
+      checkpoint("daemon sessions:\n" & sessions)
       check sessions.contains("daemonM11Output") or sessions.contains(
         daemonProject)
 
@@ -404,6 +405,17 @@ when isNixSupported:
       let sessionId = valueAfter(detached, "repro watch: detached session=")
       check sessionId.len > 0
       discard waitForSessionsContains(tempRoot, sessionId & "\twatch\twatching")
+      # Wait on the session's OWN first-cycle verdict, not on wall time. The
+      # detached worker's first cycle compiles the project's interface in a
+      # store this case created empty (`REPROBUILD_STORE_ROOT` is per case),
+      # which took 319 s at host load ~155 — the old 120 s file wait failed
+      # while the worker was still compiling. The build case above has no such
+      # budget because it waits on the build synchronously; this gives the
+      # watch the same footing and still fails fast on a failed cycle.
+      let firstCycle = waitForSessionsContains(tempRoot,
+        "lastResult=cycle=1 ", timeoutSeconds = 1800.0)
+      checkpoint("sessions after the first cycle:\n" & firstCycle)
+      check firstCycle.contains("lastResult=cycle=1 exitCode=0")
       waitForFileContent(daemonProject / "dist" / "copied.txt",
         "daemon watch\n", tempRoot)
       let stopped = requireSuccess(shellCommand(@[

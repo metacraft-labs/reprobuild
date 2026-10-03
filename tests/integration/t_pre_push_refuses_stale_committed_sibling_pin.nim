@@ -27,6 +27,7 @@
 ## NO MOCKS: real repositories, real manifest, the built `repro`.
 
 import std/[json, os, strutils, unittest]
+import repro_test_support/reasoned_skip
 import ./committed_lock_siblings_fixture
 
 proc gate(fx: SiblingFixture): tuple[code: int; output: string; report: JsonNode] =

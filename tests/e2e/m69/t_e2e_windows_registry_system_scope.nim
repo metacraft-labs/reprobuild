@@ -21,6 +21,7 @@
 import std/[os, strutils, tempfiles]
 
 import std/unittest
+import repro_test_support/reasoned_skip
 
 import repro_elevation
 import repro_infra
