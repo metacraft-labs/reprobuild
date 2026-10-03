@@ -48,6 +48,10 @@ CLIATTEST = "libs/repro_cli_support/src/repro_cli_support/attest.nim"
 VERDICTGATE = "tests/integration/t_snp_evidence_reaches_the_verdict.nim"
 SNPTCB = "tests/integration/t_snp_tcb_policy.nim"
 FETCH = "tests/integration/attestation-fixture-fetch.tsv"
+TDXVEC = "tests/integration/tdx_vectors.nim"
+TDXCHAIN = "tests/integration/t_tdx_chain_requires_intel_root.nim"
+TDXCOLL = "tests/integration/t_tdx_collateral_and_verifier_arm.nim"
+SNPFIXTURE = "tests/integration/t_snp_fixture_verify.nim"
 WORKFLOW = ".github/workflows/attestation-collateral.yml"
 
 DEFINES: dict[str, list[str]] = {}
@@ -128,8 +132,11 @@ ROWS: list[Row] = [
     Row("L15", "a gate's list of what it judges is emptied",
         LIFECYCLE,
         [(LIFECYCLE,
-          'mustBeCurrent: @["KdsMilanCrlDerHex", "VirteeMilanVcekDerHex"]',
-          'mustBeCurrent: @[]')]),
+          """source: "t_snp_tcb_policy.nim", now: 1_790_121_600'i64,
+      mustBeCurrent: @["GsgMilanVcekDerHex", "KdsMilanCrlDerHex",
+                       "VirteeMilanVcekDerHex"],""",
+          """source: "t_snp_tcb_policy.nim", now: 1_790_121_600'i64,
+      mustBeCurrent: @[],""")]),
     # ---- the lifecycle decision --------------------------------------
     Row("L16", "classify treats the expiry instant as still current",
         LIFECYCLE,
@@ -362,7 +369,7 @@ ROWS: list[Row] = [
           "PcsTcbInfoEmrJson\ttdx_vectors.nim\thistorical-vintage")]),
     Row("N12", "the reference instant is left behind while the corpus moves",
         LIFECYCLE,
-        [(LEDGERMOD, "  LedgerReferenceInstant* = 1_790_899_200'i64",
+        [(LEDGERMOD, "  LedgerReferenceInstant* = 1_790_985_600'i64",
           "  LedgerReferenceInstant* = 1_790_640_000'i64")]),
     Row("N13", "an observation date falls outside the window the artifact states",
         LIFECYCLE,
@@ -381,6 +388,117 @@ ROWS: list[Row] = [
         LIFECYCLE,
         [(LIFEMOD, "  ## Half, specifically, because half is the largest fraction that",
           "  ## Half, precisely, because half is the largest fraction that")],
+        expect="GREEN"),
+    # ---- the refresh of the trust-domain vendor's seven documents, and
+    # ---- the mechanical tie that replaced the hand-kept clock lists --
+    #
+    # Same discipline as the N rows: every row below mutates something
+    # THIS change added, not only the thing it was meant to catch.
+    Row("P1", "one character of a re-pinned digest is changed",
+        LIFECYCLE,
+        [(LEDGER, "171fcc04b4a51c21b87c0ba348374bc64835314bf55a6f72ca5abf213f1c93fb",
+          "171fcc04b4a51c21b87c0ba348374bc64835314bf55a6f72ca5abf213f1c93fa")]),
+    Row("P2", "a re-pinned next-update is moved by one day",
+        LIFECYCLE,
+        [(LEDGER, "tcb-document\t2026-10-02T17:13:18Z\t2026-11-01T17:13:18Z",
+          "tcb-document\t2026-10-02T17:13:18Z\t2026-11-02T17:13:18Z")]),
+    Row("P3", "a re-pinned byte count is off by one",
+        LIFECYCLE,
+        [(LEDGER, "\t3355\td207cf20", "\t3354\td207cf20")]),
+    Row("P4", "the refreshed clock is moved a day forward, still inside the window",
+        LIFECYCLE,
+        [(TDXCOLL, "  Now = 1_790_985_600'i64                 ## 2026-10-03T00:00:00Z; see",
+          "  Now = 1_791_072_000'i64                 ## 2026-10-03T00:00:00Z; see"),
+         (LIFECYCLE, 'source: "t_tdx_collateral_and_verifier_arm.nim", now: 1_790_985_600\'i64',
+          'source: "t_tdx_collateral_and_verifier_arm.nim", now: 1_791_072_000\'i64')]),
+    Row("P5", "the refreshed clock is left at the instant the previous vintage implied",
+        LIFECYCLE,
+        [(TDXCHAIN, "  Now = 1_790_985_600'i64\n", "  Now = 1_790_035_200'i64\n"),
+         (LIFECYCLE, 'source: "t_tdx_chain_requires_intel_root.nim", now: 1_790_985_600\'i64',
+          'source: "t_tdx_chain_requires_intel_root.nim", now: 1_790_035_200\'i64')]),
+    Row("P6", "the boundary past the list's expiry is pulled back inside it",
+        TDXCHAIN,
+        [(TDXCHAIN, "  AfterTheListExpires = 1_794_000_000'i64",
+          "  AfterTheListExpires = 1_793_000_000'i64")]),
+    Row("P7", "a re-pinned issue date is reverted to the previous vintage",
+        TDXCOLL,
+        [(TDXCOLL, '(PcsTcbInfoEmrJson, "90c06f000000", 3, 4, 2, "2026-10-02T17:16:39Z")',
+          '(PcsTcbInfoEmrJson, "90c06f000000", 3, 4, 2, "2026-09-21T03:25:24Z")')]),
+    Row("P8", "one byte of a re-pinned document's signature is changed",
+        TDXCOLL,
+        [(TDXVEC, '"signature":"b8834e568f8e663c0172692974e66abeace2581c1dedf082c4d971e54650fb8e04362e482d7d209c0b092e10d734b84a645100f26602ba63084f03a9a22bfa1b"',
+          '"signature":"b8834e568f8e663c0172692974e66abeace2581c1dedf082c4d971e54650fb8e04362e482d7d209c0b092e10d734b84a645100f26602ba63084f03a9a22bfa1a"')]),
+    Row("P9", "the re-minted no-next-update negative is left at the previous vintage",
+        LIFECYCLE,
+        [(TDXVEC,
+          '      "0613025553170d3236313030323137323631325a30820be9303302146fc34e5023"',
+          '      "0613025553170d3236303932313034303230335a30820be9303302146fc34e5023"')]),
+    Row("P10", "the reference instant is left at the midnight that OPENS the observation day",
+        LIFECYCLE,
+        [(LEDGERMOD, "  LedgerReferenceInstant* = 1_790_985_600'i64",
+          "  LedgerReferenceInstant* = 1_790_899_200'i64")]),
+    Row("P11", "the thirty-day life of the vendor's documents is stated as thirty-one",
+        LIFECYCLE,
+        [(LIFECYCLE, "      check w.notAfter - w.notBefore == 30 * Day",
+          "      check w.notAfter - w.notBefore == 31 * Day")]),
+    Row("P12", "the evaluation-data number is allowed to go backwards",
+        LIFECYCLE,
+        [(LIFECYCLE, '      check b > a\n', '      check b >= a - 10\n'),
+         (LIFECYCLE,
+          'for (older, newer) in [("GtgTcbInfoSprJson", "PcsTcbInfoSprJson"),',
+          'for (older, newer) in [("PcsTcbInfoSprJson", "GtgTcbInfoSprJson"),')]),
+    Row("P13", "the new refresh route is dropped",
+        LIFECYCLE,
+        [(FETCH, "\nIntelRootCrlDerHex\thttps://certificates.trustedservices.intel.com/IntelSGXRootCA.der\tnone",
+          "")]),
+
+    # ---- Part 2: the mechanical tie, and each of its costs -----------
+    Row("Q1", "a gate references an artifact its row does not name",
+        LIFECYCLE,
+        [(SNPTCB, "let milanChain = pemCertificates(KdsMilanChainPem)",
+          "proc zzMutationTouch(): int =\n  bytesOfHex(KdsGenoaCrlDerHex).len\n\nlet milanChain = pemCertificates(KdsMilanChainPem)")]),
+    Row("Q2", "a gate's row names an artifact the gate does not reference",
+        LIFECYCLE,
+        [(LIFECYCLE,
+          '      mustBeCurrent: @["GsgMilanVcekDerHex", "KdsMilanCrlDerHex",\n'
+          '                       "VirteeMilanVcekDerHex"],\n'
+          '      notRequiredCurrent: @[]),\n'
+          '    PinnedClockGate(\n'
+          '      source: "t_snp_chain_requires_amd_root.nim"',
+          '      mustBeCurrent: @["GsgMilanVcekDerHex", "KdsGenoaCrlDerHex",\n'
+          '                       "KdsMilanCrlDerHex", "VirteeMilanVcekDerHex"],\n'
+          '      notRequiredCurrent: @[]),\n'
+          '    PinnedClockGate(\n'
+          '      source: "t_snp_chain_requires_amd_root.nim"')]),
+    Row("Q3", "a reissued document is excused instead of refreshed",
+        LIFECYCLE,
+        [(LIFECYCLE,
+          '                       "PcsTcbInfoSprJson", "PcsTdxQeIdentityJson"],\n'
+          '      notRequiredCurrent: @["GtgQeIdentityJson", "GtgTcbInfoEmrJson",',
+          '                       "PcsTdxQeIdentityJson"],\n'
+          '      notRequiredCurrent: @["PcsTcbInfoSprJson",\n'
+          '                            "GtgQeIdentityJson", "GtgTcbInfoEmrJson",')]),
+    Row("Q4", "an artifact is excused by one gate and required by another",
+        LIFECYCLE,
+        [(LIFECYCLE, '      notRequiredCurrent: @["ImpostorArkHex", "ImpostorAskHex",',
+          '      notRequiredCurrent: @["KdsMilanCrlDerHex", "ImpostorArkHex", "ImpostorAskHex",')]),
+    Row("Q5", "the scan stops stripping comments",
+        LIFECYCLE,
+        [(LIFECYCLE, "    elif text[i] == '#':", "    elif false:")]),
+    Row("Q6", "the scan stops stripping string literals",
+        LIFECYCLE,
+        [(LIFECYCLE,
+          "    elif text[i] == '\"':\n      if i + 2 < text.len and text[i + 1] == '\"' and text[i + 2] == '\"':",
+          "    elif false:\n      if i + 2 < text.len and text[i + 1] == '\"' and text[i + 2] == '\"':")]),
+    Row("Q7", "a numeric suffix is mistaken for a character literal",
+        LIFECYCLE,
+        [(LIFECYCLE,
+          "    if text[i] == '\\'' and\n       (i == 0 or text[i - 1] notin {'A' .. 'Z', 'a' .. 'z', '0' .. '9', '_'}):",
+          "    if text[i] == '\\'':")]),
+    Row("P14", "the comment is reworded on the new clock rule (GREEN control)",
+        LIFECYCLE,
+        [(LEDGERMOD, "    ## It moves the instant LATER, which is the strict direction:",
+          "    ## It moves the instant later, which is the strict direction:")],
         expect="GREEN"),
 ]
 
@@ -442,11 +560,71 @@ def run_gate(gate: str, tag: str) -> tuple[str, str]:
         " -- " + "; ".join(names[:3]) if names else "")
 
 
+def verify_rows() -> int:
+    """Every row must still be able to NAME ITS SITE in the tree as it
+    stands: its search string present, exactly once, in the file it
+    edits.
+
+    This is the check that notices this driver's own residue, and it was
+    added because that residue shipped. A row is applied by substring
+    replacement and reverted in a `finally`; when the revert does not
+    happen -- a kill, an interrupted run, a hand edit layered on top --
+    the tree keeps the REPLACEMENT and the row can no longer find its
+    search string. Measured on 2026-10-03: `P12` shipped with its own
+    replacement in the tree, so the comparison that proves a reissued
+    vendor document is not an older one replayed had been relaxed from
+    `b > a` to one that admits a rollback of ten.
+
+    Nothing else sees this. The gate still compiles, every case count is
+    unchanged, and the weakened check still passes -- the final
+    verification build of that tree reported 62 OK / 0 FAILED, which is
+    exactly what the correct tree reports. A mutation JOURNAL does not
+    see it either: a journal attests to the tree at the moment each row
+    ran, not to the tree that is shipped, and the gap between the last
+    row and the commit is unaudited. That gap is where residue lives.
+
+    So this asks the one question a case count cannot: not "does the
+    suite pass" but "can each row still find the thing it claims to
+    defeat". It is a source scan -- no compiler, no gate run, answers in
+    well under a second -- which is why it belongs in `just lint`
+    beside the other scan-shaped gates rather than in the suite.
+    """
+    bad: list[str] = []
+    for row in ROWS:
+        for path, find, repl in row.edits:
+            p = REPO / path
+            if not p.exists():
+                bad.append(f"{row.ident}: {path}: file does not exist")
+                continue
+            text = p.read_text()
+            n = text.count(find)
+            if n == 1:
+                continue
+            note = (f"{row.ident}: {path}: search string occurs {n} "
+                    "times, expected exactly 1")
+            # The diagnosis, not just the symptom. If the row's own
+            # REPLACEMENT is what the tree holds, this is not a stale
+            # row -- it is this driver's unreverted edit, and the fix is
+            # to restore the source rather than to re-word the row.
+            if repl and text.count(repl) >= 1:
+                note += ("; the row's REPLACEMENT is present instead -- "
+                         "this looks like an unreverted mutation, so "
+                         "restore the source rather than editing the row")
+            bad.append(note)
+    for line in bad:
+        print(line, file=sys.stderr)
+    print(f"attestation mutation rows: {len(ROWS)} checked, "
+          f"{len(bad)} unable to name their site")
+    return 1 if bad else 0
+
+
 def main(argv: list[str]) -> int:
     if "--list" in argv:
         for row in ROWS:
             print(f"{row.ident:5} {row.expect:16} {row.what}")
         return 0
+    if "--verify-rows" in argv:
+        return verify_rows()
     if IN_FLIGHT.exists():
         print(f"a previous run died inside {IN_FLIGHT.read_text().splitlines()[0]} "
               f"with these files edited:\n{IN_FLIGHT.read_text()}"
@@ -468,8 +646,28 @@ def main(argv: list[str]) -> int:
                            [p for p, _ in row.adds])
             for path, find, repl in row.edits:
                 p = REPO / path
-                originals[path] = p.read_bytes()
-                before[path] = digest(p)
+                # Snapshot a file ONCE, on first touch, and never again.
+                #
+                # This `if` is the whole of a defect that shipped. These
+                # two lines used to run per EDIT, so a row with two
+                # edits to the SAME file overwrote the pristine snapshot
+                # with the content edit 1 had already produced. The
+                # restore below then wrote that back, leaving edit 1
+                # applied for ever -- and `before[path]` was overwritten
+                # the same way, so the "did not restore" check compared
+                # against the post-edit-1 digest and reported success.
+                # Silent in every channel: no marker, no failure, and a
+                # journal line saying RED.
+                #
+                # Exactly one row has two edits to one file (`P12`), and
+                # exactly that row's first edit is what reached a
+                # delivered tree, relaxing `check b > a` to
+                # `check b >= a - 10`. Rows editing two DIFFERENT files
+                # were never affected, which is why this survived so
+                # long.
+                if path not in originals:
+                    originals[path] = p.read_bytes()
+                    before[path] = digest(p)
                 text = p.read_text()
                 if text.count(find) != 1:
                     raise RuntimeError(

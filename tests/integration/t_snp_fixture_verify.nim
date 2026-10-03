@@ -227,10 +227,20 @@ const
     ## 2026-09-23T00:00:00Z. NOT chosen — derived, by the clock rule
     ## `snp_vectors` states: the first UTC midnight at which every
     ## artifact this gate judges is in force. The latest of them is the
-    ## Turin revocation list, which came into force at
-    ## 2026-09-22T07:39:31Z. `t_attestation_fixture_lifecycle` recomputes
+    ## Milan revocation list above, which came into force at
+    ## 2026-09-22T07:35:42Z. `t_attestation_fixture_lifecycle` recomputes
     ## this from the ledger and requires equality, so it cannot be
     ## nudged by hand to make something here pass.
+    ##
+    ## This gate judges MILAN material only, and the reason to say so is
+    ## that the number is the same as the one `t_snp_chain_requires_amd_root`
+    ## states while the material is not. That gate also judges
+    ## `KdsTurinCrlDerHex`, four minutes later into the same morning, and
+    ## both round up to the same midnight. The earlier reading of this
+    ## comment named the Turin list as what fixes the clock HERE, which
+    ## was false and survived because it named the right midnight —
+    ## that is what a hand-kept list of what a gate judges costs, and the
+    ## ledger gate now derives that list from this file instead.
     ##
     ## Fixed rather than read from the host for the usual reason: a gate
     ## that consulted the real clock would pass today and start failing

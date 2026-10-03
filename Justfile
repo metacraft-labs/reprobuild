@@ -567,6 +567,18 @@ lint:
     # is a live walk of `tests/`, not a list, so a new file cannot be invisible
     # to it (Verification-Harness-Traps.md Sec. 35).
     python3 ./scripts/check_hcr_lane_manifest.py --check 2>&1 | tee -a test-logs/lint.log
+    # Every attestation mutation row must still be able to NAME ITS SITE in
+    # the tree. Same class as its neighbours -- a source scan, no compiler,
+    # under a second -- and here because of what it catches, which nothing
+    # else does. A row is applied by substring replacement and reverted in a
+    # `finally`; when that revert does not happen the tree keeps the
+    # REPLACEMENT, and a weakened check still passes. Case counts are
+    # identical before and after, the suite is green, and the mutation
+    # journal says RED because it attests to the tree at the moment the row
+    # ran rather than to the tree being shipped. One such residue did ship
+    # and was caught only by re-running the table against the delivered
+    # tree; this makes that question cost a second instead of an afternoon.
+    python3 ./tools/attestation-mutations/fixture_lifecycle_mutations.py --verify-rows 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_workflows.sh 2>&1 | tee -a test-logs/lint.log
 
 format:

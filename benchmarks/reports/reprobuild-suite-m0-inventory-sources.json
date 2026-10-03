@@ -24763,7 +24763,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_attestation_fixture_lifecycle.nim",
       "sourceSuiteCount": 7,
-      "staticCaseCount": 55,
+      "staticCaseCount": 62,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

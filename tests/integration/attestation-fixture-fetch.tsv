@@ -12,6 +12,45 @@
 # artifact with no row has no unattended refresh route, which is a fact
 # about this corpus worth knowing rather than a gap to hide.
 #
+# WHY THE TRUST-DOMAIN VENDOR'S SEVEN COLLATERAL DOCUMENTS HAVE NO ROW,
+# measured rather than assumed -- and it is not the reason previously
+# supposed. The supposed reason was that three of those endpoints select
+# the collateral with a platform-family query parameter, so there is no
+# one URL for "the trusted-computing-base document". That is true and it
+# is not an obstacle: a row pins ONE artifact, the family that artifact
+# describes is a property of the PIN, and the parameter belongs in the
+# URL. Two of the seven take no parameter at all.
+#
+# The real obstacle is that THE SERVICE RE-SIGNS ON A CADENCE FAR SHORTER
+# THAN THE VALIDITY IT STATES. Three back-to-back requests return
+# byte-identical answers, so it is not per-request; a request three hours
+# later returns a document whose issue/this-update and next-update have
+# both moved by that interval and whose substance has not -- same
+# evaluation-data number, same levels, same statuses, same advisories,
+# same revoked serials. Observed 2026-10-02: 17:13:18 then 20:14:40 on
+# one endpoint, 17:26:12 then 20:26:15 on another, both to the second.
+#
+# A row here promises that one HTTP GET returns the pinned bytes. For
+# these seven that promise is false within three hours of any pin, so the
+# drift half would report all seven as drifted on EVERY run, for ever,
+# and re-pinning would not quieten it. That is a worse version of the
+# condition the capped horizon was introduced to remove: an alarm that
+# has never once been silent cannot say that something changed.
+#
+# What a drift route for them would need, concretely, so this is a
+# deferral and not a dead end: a SUBSTANCE digest beside the byte digest
+# -- the document with its two timestamp members excluded -- pinned in
+# the ledger and compared against the same projection of the response. A
+# difference in THAT is the signal worth having, because it is how a
+# platform's trusted-computing-base policy moves, and a corpus pinned to
+# the previous one is testing a policy nobody runs. Their expiry is
+# watched meanwhile, which is what the capped horizon is for.
+#
+# The root revocation list below is a different case and does have a row:
+# it is served from the certificate host rather than the provisioning
+# API, states a one-year validity, and re-fetched byte-identical three
+# hours apart.
+#
 # normalize:
 #   none      the response body IS the artifact
 #   strip-cr  the response body with carriage returns removed. One
@@ -30,3 +69,4 @@ KdsGenoaCrlDerHex	https://kdsintf.amd.com/vcek/v1/Genoa/crl	none
 KdsTurinChainPem	https://kdsintf.amd.com/vcek/v1/Turin/cert_chain	strip-cr
 KdsTurinCrlDerHex	https://kdsintf.amd.com/vcek/v1/Turin/crl	none
 IntelSgxRootCaDerHex	https://certificates.trustedservices.intel.com/Intel_SGX_Provisioning_Certification_RootCA.cer	none
+IntelRootCrlDerHex	https://certificates.trustedservices.intel.com/IntelSGXRootCA.der	none

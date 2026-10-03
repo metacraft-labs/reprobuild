@@ -98,10 +98,13 @@ reissued revocation list comes into force *later* than the one it
 replaces, and a list that is not yet in force is set aside by every
 chain evaluator here, so the gates whose pinned clock sits before the
 new `thisUpdate` begin reporting "no revocation data". This happened to
-be four gates the last time; the ledger gate names them.
+be four gates on one vendor's lists and three on the other's — twelve
+cases each time — and the ledger gate names them.
 
 1. Re-fetch from the publisher named in the ledger's publisher table.
-   That table carries the exact command; it is not prose.
+   That table carries the exact command; it is not prose. For anything
+   with a row in the fetch table that command is one `curl` of the URL
+   recorded there.
 2. Replace the constant. Keep the surrounding provenance comment
    truthful — the observation date in particular.
 3. Regenerate the ledger row (digest, size, window). Do not type a
@@ -113,11 +116,35 @@ be four gates the last time; the ledger gate names them.
    that from the artifacts' own dates and requires equality, so there
    is nothing to choose and nothing to argue about. Pick a value
    because it passes and the gate says so.
-5. **Move `LedgerReferenceInstant`** to the UTC midnight of the new
-   observation date. It is likewise derived — the latest `observed` in
-   the ledger — and the gate checks it, because a reference instant
-   that stays put while the corpus moves is a set of cases describing a
-   corpus nobody has.
+5. **Move `LedgerReferenceInstant`** to the UTC midnight that *ends*
+   the new observation date. It is likewise derived — one day after the
+   latest `observed` in the ledger — and the gate checks it, because a
+   reference instant that stays put while the corpus moves is a set of
+   cases describing a corpus nobody has.
+
+   The *ending* midnight, and that is a repair rather than a style
+   choice. `observed` is a date, so it fixes the instant only to within
+   a day, and the *opening* midnight is the one instant in that day at
+   which a document fetched later the same day is **not yet in force**.
+   Measured, not imagined: a refresh fetched at 17:13–17:28 UTC put
+   seven observed artifacts into `not-yet-in-force` at the opening
+   midnight — a corpus freshly taken from its publisher reported as a
+   clock fault. The ending midnight cannot do that, because a document
+   the publisher *served* on a day was in force at some instant in that
+   day and therefore at its end. It also moves the instant later, which
+   is the strict direction: later can only turn `current` into
+   `due-for-refresh` or `expired`, never the reverse.
+
+6. **Check the two lists on the gate's row in the ledger gate.**
+   `mustBeCurrent` and `notRequiredCurrent` together must be exactly the
+   windowed ledger rows the gate's *source* references, and the gate
+   derives that set by reading the source. If the refresh added or
+   removed a reference, the row has to say what the clock does about it:
+   require the artifact in force, or record that this gate does not. The
+   second list is not a free pass — nothing in it may be required in
+   force by any other gate, and nothing in it may carry an `observed`
+   date, which every artifact somebody went to a publisher for does. A
+   reissue cannot be made quiet by moving a name.
 
 ### The review checklist for a new or refreshed fixture
 
@@ -218,6 +245,40 @@ than sixty days gets the full thirty.
 It narrows the warning and never the validity. `expired` is unchanged,
 `isUsable` is unchanged, and every evaluator's refusal is unchanged; the
 only thing that moves is the day the announcement starts.
+
+### One vendor re-signs every three hours, and that is why seven documents have no drift route
+
+Measured, because it decides whether those documents can be watched for
+drift at all. The trust-domain vendor's provisioning service does **not**
+serve a stable document for the thirty days it claims: it re-signs on a
+roughly three-hour cadence, moving the issue/this-update and next-update
+by that interval and leaving everything else alone — same evaluation-data
+number, same levels, same statuses, same advisory lists, same revoked
+serials. Three back-to-back requests return byte-identical answers, so it
+is not per request; a request three hours later does not. Observed
+2026-10-02: `17:13:18` then `20:14:40` on one endpoint, `17:26:12` then
+`20:26:15` on another, both to the second.
+
+A fetch-table row promises that one HTTP GET returns the pinned bytes.
+For these seven that promise expires three hours after any pin, so a row
+would make the drift half report all seven on **every** run, for ever,
+and re-pinning would not quieten it — the crying-wolf failure in a form
+worse than the one the capped horizon removed, because there is no action
+that ends it. They therefore have no row, and only their expiry is
+watched.
+
+**What a drift route for them needs, so this is a deferral and not a dead
+end:** a *substance* digest beside the byte digest — the document with its
+two timestamp members excluded — pinned in the ledger and compared against
+the same projection of the response. A difference in that is the signal
+worth having, because it is how a platform's trusted-computing-base policy
+moves, and a corpus pinned to the previous policy is testing a policy
+nobody runs. The byte digest cannot answer that question and the
+evaluation-data number is the field to watch.
+
+The other vendor is not like this: its three revocation lists and three
+certificate chains re-fetch byte-identical hours and days apart, which is
+why they do have rows.
 
 ### What "needs attention" does not include
 

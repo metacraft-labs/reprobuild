@@ -84,8 +84,8 @@ const
   CensusText* = staticRead("attestation-corpus-census.tsv")
   FetchText* = staticRead("attestation-fixture-fetch.tsv")
 
-  LedgerReferenceInstant* = 1_790_899_200'i64
-    ## 2026-10-02T00:00:00Z. The instant the corpus census cases judge
+  LedgerReferenceInstant* = 1_790_985_600'i64
+    ## 2026-10-03T00:00:00Z. The instant the corpus census cases judge
     ## the pinned material at.
     ##
     ## PINNED, and that is deliberate rather than lazy. A case that
@@ -97,12 +97,35 @@ const
     ##
     ## It is also DERIVED rather than chosen, which is what stops a
     ## pinned instant drifting quietly into the past until the cases
-    ## over it describe a corpus nobody has: it is the UTC midnight of
-    ## the latest `observed` date in the ledger — the last day anybody
-    ## went to a publisher. `t_attestation_fixture_lifecycle` recomputes
-    ## it from that column and requires equality, and the column in turn
-    ## is required to overlap the window each observed artifact states,
-    ## so neither side is free.
+    ## over it describe a corpus nobody has: it is the UTC midnight that
+    ## ENDS the latest `observed` date in the ledger — the close of the
+    ## last day anybody went to a publisher.
+    ## `t_attestation_fixture_lifecycle` recomputes it from that column
+    ## and requires equality, and the column in turn is required to
+    ## overlap the window each observed artifact states, so neither side
+    ## is free.
+    ##
+    ## The midnight that ENDS the day and not the one that opens it, and
+    ## this is a repair rather than a preference. `observed` is a DATE,
+    ## so it fixes the judging instant only to within a day, and the
+    ## opening midnight is the one instant in that day at which an
+    ## artifact fetched later the same day is *not yet in force*. That is
+    ## not hypothetical: seven of these artifacts were re-fetched at
+    ## 17:13–17:28 UTC — and an eighth re-minted from one of them — and
+    ## under the opening midnight all eight classify `lsNotYetInForce`:
+    ## a corpus freshly taken from the publisher reported as a clock
+    ## fault. The closing midnight has no
+    ## such instant, because a document the publisher SERVED on a given
+    ## day was in force at some point in that day and therefore at its
+    ## end.
+    ##
+    ## It moves the instant LATER, which is the strict direction: later
+    ## can only turn `lsCurrent` into `lsDueForRefresh` or `lsExpired`,
+    ## never the reverse, so nothing this instant judges can be made to
+    ## look healthier by the change. The one status it can suppress is
+    ## `lsNotYetInForce`, which is exactly the artifact of the old rule —
+    ## and the case that every observed row overlaps its own window keeps
+    ## that from becoming a way to hide a document from the future.
 
 proc tsvRows(text: string; columns: int; what: string): seq[seq[string]] =
   ## Every non-comment, non-blank line of a table, split on tabs.
