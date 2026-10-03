@@ -204,7 +204,7 @@ const
     vcKdsMilanChain: VerdictCorpusRow(name: "KdsMilanChainPem", bytes: 4602,
       sha256: "22e62f8d2c21a156470145fc75f7b5a377cb053ced3e97f0bd3f8d8ca5941ce6"),
     vcKdsMilanCrl: VerdictCorpusRow(name: "KdsMilanCrlDerHex", bytes: 866,
-      sha256: "873efcf8c8cedc28c603cf50acdff8556a704658357a0d9daab297f483deb0df")]
+      sha256: "dd68e9e3feb97dd0e95135feeae47d9cc193c73239a6281ec9884c00d5e6a525")]
 
 proc verdictCorpusBytes(c: VerdictCorpus): string =
   case c
@@ -262,8 +262,11 @@ require_challenge = true
    .replace("@BL@", $bootloader).replace("@TEE@", $tee)
    .replace("@SNP@", $snp).replace("@UC@", $microcode)
 
-const Now = 1_789_000_000'i64
+const Now = 1_790_812_800'i64
   ## A fixed instant, so nothing below can move because the clock did.
+  ## 2026-10-01T00:00:00Z: inside the pinned Milan revocation list's
+  ## window (2026-09-22 to 2026-11-09) and every certificate's; see
+  ## `snp_vectors`.
 
 proc verdictFor(p: Part; manifestText: string;
                 bootloader, tee, snp, microcode: int;

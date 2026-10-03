@@ -255,6 +255,21 @@ proc readRecord(path: string): MonitorRecord =
     threadId: 4242,
     path: path)
 
+proc entropyRecord(): MonitorRecord =
+  ## An UNATTRIBUTED entropy read — the Linux/macOS shape, whose detail
+  ## carries no `caller=` token. No `mrProcessExec` record in these captures
+  ## names pid 4242, so `applyEntropyBlessingPolicy` resolves no image for it,
+  ## finds no blessing, and refuses the publish with `cirUnblessedEntropy`.
+  ## Used by one case only: the one that grades what happens when that
+  ## refusal and the empty-keyed-set refusal land on the SAME action.
+  MonitorRecord(
+    kind: mrNonDeterministic,
+    observationKind: moNonDeterministic,
+    osPid: 4242,
+    threadId: 4242,
+    path: "getrandom",
+    detail: "non-deterministic entropy source")
+
 proc runEdge(f: Fixture; id: string; cacheable = true;
              rootImage = RootImage): BuildAction =
   ## `monitoredAction` preserves a monitor depfile the caller already set
@@ -374,6 +389,7 @@ proc reportValidatedByMonitorEdge(f: Fixture; id: string;
 
 proc twoReportsValidatedByMonitorEdge(f: Fixture; id: string;
                                       firstHeader, secondHeader: string;
+                                      firstNamesPrerequisite = true;
                                       rootImage = RootImage): BuildAction =
   ## THE STATE THAT SEPARATES THE TWO SPELLINGS OF `depfileObservedNothing`,
   ## and it needs no production seam to reach: one edge, one recognized report
@@ -404,11 +420,23 @@ proc twoReportsValidatedByMonitorEdge(f: Fixture; id: string;
   ## `tests/unit/t_unmonitorable_action_depfile_guards.nim`, so this needle
   ## cannot drift from what the DSL emits without something reddening.
   ##
+  ## `firstNamesPrerequisite = false` writes the FIRST depfile with a target
+  ## and NO prerequisites — a report that was produced, resolved and parsed,
+  ## and that named nothing. That is the second state this fixture reaches
+  ## and the one DA-1f Z2 is about: it is how a tool report comes to be
+  ## CONSULTED AND EMPTY on an edge whose channel some other contributor has
+  ## filled. `printf 'out:\n'` is exactly what `reportValidatedByMonitorEdge`
+  ## above writes for its own zero case, so the two agree on what an empty
+  ## recognized report looks like.
+  ##
   ## The capture stays empty, so the other four terms of the guard are true
   ## and the publish turns on this term alone.
+  let firstRule =
+    if firstNamesPrerequisite: "out: " & f.observedPath & "\\n"
+    else: "out:\\n"
   result = action(id,
     [rootImage, "-c", "echo ran >> " & f.runLogPath &
-      "; printf '" & firstHeader & "out: " & f.observedPath & "\\n' > " &
+      "; printf '" & firstHeader & firstRule & "' > " &
       f.makeDepfilePath &
       "; printf '" & secondHeader & "out: " & f.secondObservedPath &
       "\\n' > " & f.secondDepfilePath],
@@ -738,6 +766,12 @@ suite "the guard holds for every monitored policy kind, not just the first":
     check r0.evidence.monitorWrites.len == 0
     check r0.evidence.monitorProbes.len == 0
 
+    # The report WAS read — it is the empty-read mark that is present, not the
+    # absence of any depfile mark. "Declared a report and produced none of its
+    # declared paths" is a different outcome with its own reason code.
+    check evcEmptyToolDepfileReport in r0.evidence.evidenceProvenance
+    check evcToolReportedDepfile notin r0.evidence.evidenceProvenance
+
     let diagnosed = r0.evidence.diagnostics.join(" ")
     check diagnosed.contains("no observation of any kind")
     check diagnosed.contains(act.id)
@@ -751,6 +785,22 @@ suite "the guard holds for every monitored policy kind, not just the first":
     check f.runCount() == 2
 
   test "recognized-format-validated-by-monitor: one observation publishes":
+    ## DA-1f Z2 — ALSO THE OVER-REFUSAL CONTROL FOR `evcEmptyToolDepfileReport`,
+    ## which is why the extra assertions below are here rather than in a case
+    ## of their own.
+    ##
+    ## `reportValidatedByMonitorEdge` writes `printf 'out:\n'` — a declared,
+    ## produced, resolved, parsed recognized report that names NO
+    ## prerequisite. That is a LEGITIMATE zero-depfile capture (a compile with
+    ## no includes reports exactly this) and it must keep publishing on the
+    ## strength of the evidence the OTHER four terms carry. A fix for the
+    ## empty-report defect that refused every empty report would trade a false
+    ## accept for a false reject and reddens here.
+    ##
+    ## And the read is still DISTINGUISHABLE from no report at all: the
+    ## provenance says `evcEmptyToolDepfileReport`, not nothing. "The action
+    ## declared a report and produced none of its declared paths" is a
+    ## different outcome again, recorded by `cirMissingDependencyReport`.
     let f = makeFixture("validated-report-one")
     defer: removeDir(f.root)
     f.writeRmdf(@[processRecord(), readRecord(f.observedPath)])
@@ -760,8 +810,17 @@ suite "the guard holds for every monitored policy kind, not just the first":
 
     let first = runBuild(g, config)
     let r0 = first.byId(act.id)
-    checkpoint("first: reads=" & $r0.evidence.monitorReads)
+    checkpoint("first: reads=" & $r0.evidence.monitorReads &
+      " provenance=" & $r0.evidence.evidenceProvenance)
     check r0.status == asSucceeded
+
+    # THE DENOMINATOR for the control: the report really was read and really
+    # was empty, or the publish below would be about some other edge.
+    check r0.evidence.depfileInputs.len == 0
+    check evcEmptyToolDepfileReport in r0.evidence.evidenceProvenance
+    check evcToolReportedDepfile notin r0.evidence.evidenceProvenance
+    check not r0.evidence.diagnostics.join(" ").contains(
+      "no observation of any kind")
     # Launcher reconstruction first, observation after it — the same shape the
     # `dgAutomaticMonitor` case pins, asserted again on the policy kind where
     # BOTH `applyMonitorEvidenceStatus` producers can run. What makes this edge
@@ -1240,6 +1299,201 @@ suite "the guard is graded on the set the RECORD IS KEYED ON, not the set the mo
     check emptyKeyedInputSetDiagnostic("pkg.some_edge", 7, 7) !=
       zeroEvidenceDiagnostic("pkg.some_edge", MonitorHasLibraryLoadFloor)
 
+  test "the refusal NAMES its class, so no operator reads it as `unspecified`":
+    ## THE MACHINE-READABLE HALF, and it is a separate case from the one
+    ## above because the two can fail independently: the diagnostic STRING
+    ## shipped correct and informative from the day the guard landed, while
+    ## the refusal recorded no `CacheIneligibilityReason` at all for three
+    ## weeks. `traceCacheIneligibility` substitutes its defensive
+    ## `"unspecified"` placeholder for an empty reason set, so the refusal
+    ## reached an operator as
+    ##
+    ##     cache-skip-ineligible  action-cache publication skipped;
+    ##                            reasons=unspecified
+    ##
+    ## and — the consequence that matters beyond the wording — was invisible
+    ## to any per-class count over `cacheIneligibilityReasons`, which is how
+    ## DA-7's item 2 is measured. A class that never enters the set cannot
+    ## appear in such a table as a row, a zero, or a regression, whatever
+    ## its true count.
+    ##
+    ## WHY THE TRACE RATHER THAN THE SET: `cacheIneligibilityReasons` is a
+    ## module-private field of a module-private object, so the trace event
+    ## is the only place the class is observable from outside the engine —
+    ## and it is also the place an operator actually reads it, which makes
+    ## it the right assertion target rather than a concession.
+    ##
+    ## MUTATION-CHECKED (2026-10-03): deleting the
+    ## `cacheIneligibilityReasons.incl(cirEmptyKeyedInputSet)` line in
+    ## `gradeKeyedInputSet` reddens this case on the `reasons=` equality and
+    ## on the `unspecified` assertion, and reddens NOTHING else in the file.
+    let sh = contentAddressedShell()
+    if sh.len == 0:
+      skip("no executable /nix/store bash on this host; the tool-root " &
+        "elision only recognizes a REAL content-addressed root, so there " &
+        "is no way to empty the keyed input set here")
+    else:
+      let f = makeFixture("keyed-auto-reason")
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh))])
+      let act = f.runEdge("keyed-auto-reason/run", rootImage = sh)
+      let config = testConfig(f.cacheRoot)
+
+      let run = runBuild(graph([act]), config)
+      let r0 = run.byId(act.id)
+      # The precondition: this really is the empty-keyed-set refusal and not
+      # some other one that happens to skip the publish. Both halves are
+      # named, so a fixture that stopped reaching the guard fails here rather
+      # than passing the assertions below for the wrong reason.
+      check r0.status == asSucceeded
+      check r0.evidence.monitorReads == @[sh, storeRootRead(sh)]
+      check act.cacheInputPaths(r0.evidence).len == 0
+      check r0.evidence.diagnostics.join(" ").contains("came out EMPTY")
+      check not f.hasRecord(act)
+
+      var skips: seq[SchedulerTraceEvent] = @[]
+      for item in run.trace:
+        if item.event.startsWith("cache-skip-"):
+          skips.add(item)
+      checkpoint("skips=" & $skips)
+      require skips.len == 1
+      check skips[0].actionId == act.id
+      # Not `cache-skip-monitor-loss`: this edge's monitor is healthy, and
+      # misfiling it there would point an operator at the capture backend.
+      check skips[0].event == "cache-skip-ineligible"
+      check skips[0].detail ==
+        "action-cache publication skipped; reasons=empty-keyed-input-set"
+      # Stated separately from the equality so the failure output says WHICH
+      # defect came back if the message is ever reworded around it.
+      check not skips[0].detail.contains("unspecified")
+
+  test "entropy PLUS an empty key: the determinism probe does not rescue it":
+    ## THE ONE PLACE THE MISSING REASON WAS NOT MERELY COSMETIC, and the
+    ## reason this file now asserts a publish decision about a combination
+    ## rather than only a trace string.
+    ##
+    ## `cacheIneligibilityReasons` is documented as diagnostic-only, and it
+    ## is — with exactly one exception. `determinismProbeAdmits` gates on
+    ##
+    ##     if evidence.cacheIneligibilityReasons != {cirUnblessedEntropy}:
+    ##       return false
+    ##
+    ## because its own precondition is "only an action whose SOLE refusal is
+    ## unblessed entropy is probed": a probe compares output bytes, which can
+    ## answer a determinism question and cannot answer a question about what
+    ## was SEEN. That gate is an exact-set comparison, so it is only as
+    ## truthful as the set is complete — and while `gradeKeyedInputSet`
+    ## recorded nothing, an action refused for BOTH reasons presented to the
+    ## probe as one refused for entropy alone. The probe then admitted it on
+    ## the second run and published a record keyed on NOTHING: the exact
+    ## state this whole file exists to refuse, reached through the hole the
+    ## missing reason opened.
+    ##
+    ## So recording the reason is not purely additive here. It is the single
+    ## behavioural difference in this change, it moves in the REFUSING
+    ## direction only (a set can gain a member, never lose one, so the gate
+    ## can go true->false and never false->true), and it restores the
+    ## behaviour the probe's own docstring already claimed.
+    ##
+    ## THE FIXTURE DECLARES AN OUTPUT, unlike every other case in this
+    ## suite, and that is load-bearing rather than incidental: the probe
+    ## refuses an action with no declared outputs anyway ("two runs cannot be
+    ## compared"), so a fixture built like its siblings would grade the gate
+    ## above with the gate below and pass whatever the first one did.
+    ##
+    ## MEASURED BOTH WAYS (2026-10-03), by deleting the
+    ## `cacheIneligibilityReasons.incl(cirEmptyKeyedInputSet)` line and
+    ## rebuilding. The warm run's trace and the published evidence file:
+    ##
+    ## | | with the `incl` | without it |
+    ## |---|---|---|
+    ## | warm trace | `cache-skip-ineligible … reasons=unblessed-entropy,empty-keyed-input-set` | `determinism-probe-verified … caching despite unblessed entropy` |
+    ## | `dependencyEvidencePath` exists | no | **yes** |
+    ## | `hasRecord` | no | no |
+    ##
+    ## The third row is why the assertions below name the evidence file.
+    let sh = contentAddressedShell()
+    if sh.len == 0:
+      skip("no executable /nix/store bash on this host; the tool-root " &
+        "elision only recognizes a REAL content-addressed root, so there " &
+        "is no way to empty the keyed input set here")
+    else:
+      let f = makeFixture("keyed-auto-entropy")
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord(), readRecord(storeRootRead(sh)),
+        entropyRecord()])
+      # Byte-identical output on every run, so the probe has something to
+      # compare and WOULD admit the action if the gate let it get that far.
+      # An output that varied would refuse for a second reason and hide the
+      # one under test.
+      let act = block:
+        var a = action("keyed-auto-entropy/run",
+          [sh, "-c", "echo ran >> " & f.runLogPath &
+            "; printf stable > out.txt"],
+          cwd = f.workRoot,
+          inputs = [],
+          outputs = ["out.txt"],
+          cacheable = true,
+          weakFingerprint = weak("keyed-auto-entropy/run"),
+          actionCachePolicy = ffpHybrid,
+          dependencyPolicy = automaticMonitorGatheringPolicy(),
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
+        a.monitorDepfile = f.rmdfPath
+        a
+      let g = graph([act])
+      let config = testConfig(f.cacheRoot)
+
+      let first = runBuild(g, config)
+      let r0 = first.byId(act.id)
+      checkpoint("first: status=" & $r0.status &
+        " keyed=" & $act.cacheInputPaths(r0.evidence) &
+        " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+      check r0.status == asSucceeded
+      # Both refusals really are present on this one action — the premise of
+      # the case. Named through the trace, which is where the set is
+      # observable, and in ordinal order: entropy was declared first.
+      check act.cacheInputPaths(r0.evidence).len == 0
+      var skips: seq[string] = @[]
+      for item in first.trace:
+        if item.event.startsWith("cache-skip-"):
+          skips.add(item.detail)
+      checkpoint("skips=" & $skips)
+      require skips.len == 1
+      check skips[0] == "action-cache publication skipped; " &
+        "reasons=unblessed-entropy,empty-keyed-input-set"
+      check not f.hasRecord(act)
+      check f.runCount() == 1
+
+      # THE SECOND RUN IS THE PROBE. Pre-fix this is where the empty-keyed
+      # record appeared; the action must still re-run and still publish
+      # nothing.
+      let warm = runBuild(g, config)
+      let r1 = warm.byId(act.id)
+      var warmEvents: seq[string] = @[]
+      for item in warm.trace:
+        warmEvents.add(item.event & " :: " & item.detail)
+      checkpoint("warm: decision=" & $r1.cacheDecision &
+        " launched=" & $r1.launched & " trace=" & warmEvents.join(" | "))
+      check r1.launched
+      check r1.cacheDecision notin ReuseDecisions
+      check f.runCount() == 2
+      # THE WHOLE POINT. The probe must not be reached at all: the gate
+      # above it sees a second reason and returns before any comparison.
+      for event in warmEvents:
+        check not event.startsWith("determinism-probe-verified")
+      check warmEvents.contains("cache-skip-ineligible :: " &
+        "action-cache publication skipped; " &
+        "reasons=unblessed-entropy,empty-keyed-input-set")
+      # ... and the consequence of not being reached: nothing published.
+      #
+      # `dependencyEvidencePath` AND NOT `hasRecord`, and the difference was
+      # measured rather than assumed. With the `incl` removed, the warm run
+      # here publishes and `hasRecord` STILL answers false — the weak
+      # fingerprint's hot-record read does not see this zero-input record —
+      # while the evidence file flips to true. A case that asserted only
+      # `hasRecord` would have read green through the whole defect.
+      check not fileExists(dependencyEvidencePath(f.cacheRoot, act.id))
+
 suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
   ## The five channels the guard above reads cannot answer the question the
   ## guard is asking. `monitorReads` is a `seq[string]`, and a path the ENGINE
@@ -1563,6 +1817,114 @@ suite "DA-1f: a channel says WHAT is in it; provenance says WHO put it there":
         check evcToolReportedDepfile notin r0.evidence.evidenceProvenance
         check diagnosed.contains("no observation of any kind")
         check not f.hasRecord(act)
+
+  test "an EMPTY tool report beside a declaration-derived one is not an observation":
+    ## DA-1f Z2 — THE POLARITY QUESTION THE Z1 CASE ABOVE LEFT OPEN, and the
+    ## one the B1 construction does not answer.
+    ##
+    ## WHAT WAS WRONG. `depfileObservedNothing` is
+    ##
+    ##   depfileInputs.len == 0 or
+    ##     evidenceProvenance * DepfileObservingContributors == {}
+    ##
+    ## and `addPathSet` used to `incl evcToolReportedDepfile` for EVERY
+    ## recognized report before looking at whether the report named anything.
+    ## So an empty report made the second disjunct false on its own, the term
+    ## degenerated into the same plain emptiness test as the other four, and
+    ## ONE entry put into the channel by anything else suppressed the guard.
+    ##
+    ## THAT IS NOT A PROBE STATE. One edge, one
+    ## `RecognizedDependencyReportSpec`, two declared depfiles — which is what
+    ## an author writes when a compile edge has inputs no tool reports — and
+    ## the tool-written one comes out EMPTY while the
+    ## `fs.unmonitorableActionDepfile` beside it names a prerequisite.
+    ## Measured on `dev` `75f8e33c` BEFORE the fix, this case's refusal arm
+    ## got `hasRecord` true, a warm `cdHit`, `runCount()==1` and an empty
+    ## diagnostic list: a published record and a stale hit for an action
+    ## nothing looked at. Reverting `addPathSet` to the unconditional mark
+    ## and changing nothing else reproduces exactly that, 27 OK / 3 FAILED
+    ## at that tip, which is this case earning its keep: production
+    ## behaviour byte-identical to `dev`, and the stale hit comes back.
+    ##
+    ## The same shape is what the branch-legal
+    ## `observe(…, evcDeclarationDerivedDepfile, …)` probe reached
+    ## artificially; this reaches it through production types alone, which
+    ## is why it can be a test, and why no case count is quoted for the
+    ## probe — see `depfileObservedNothing` for why that count is a property
+    ## of the probe rather than of the engine.
+    ##
+    ## WHAT GRADES THE FIX IN THE OTHER DIRECTION. Two things, neither in
+    ## this case: "recognized-format-validated-by-monitor: one observation
+    ## publishes" is the LEGITIMATE consulted-and-empty report, which still
+    ## publishes on the monitor's evidence and must; and the `false` arm of
+    ## "a declaration-derived depfile cannot answer the observation question"
+    ## is the edge whose ONLY evidence is a tool depfile, which still
+    ## publishes on that depfile alone. A fix that simply distrusted empty
+    ## reports, or depfiles, reddens one of those.
+    ##
+    ## THE PAIR HERE varies ONE thing — whether the tool-written report names
+    ## a prerequisite. Same edge, same two declared depfiles, same stamps,
+    ## same empty capture.
+    const DeclarationDerivedHeader =
+      "# generated by unmonitorableActionDepfile - this action is not\\n"
+    const ToolWrittenHeader =
+      "# generated by a tool that opened these files\\n"
+    for toolReportNamedAnInput in [false, true]:
+      let name = "da1f-z2-" &
+        (if toolReportNamedAnInput: "tool-named-one" else: "tool-named-none")
+      let f = makeFixture(name)
+      defer: removeDir(f.root)
+      f.writeRmdf(@[processRecord()])
+      let act = f.twoReportsValidatedByMonitorEdge("da1f/z2/" & name,
+        firstHeader = ToolWrittenHeader,
+        secondHeader = DeclarationDerivedHeader,
+        firstNamesPrerequisite = toolReportNamedAnInput)
+      let g = graph([act])
+      let config = testConfig(f.cacheRoot)
+      let first = runBuild(g, config)
+      let r0 = first.byId(act.id)
+      checkpoint(name & ": depfileInputs=" & $r0.evidence.depfileInputs &
+        " provenance=" & $r0.evidence.evidenceProvenance &
+        " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+      check r0.status == asSucceeded
+      check f.runCount() == 1
+
+      # THE DENOMINATOR, and it is what makes the refusal arm mean anything:
+      # the channel is NOT empty in EITHER arm, so the first disjunct of
+      # `depfileObservedNothing` cannot be what decides this and the
+      # declaration-derived report really did fold.
+      check f.secondObservedPath in r0.evidence.depfileInputs
+      check evcDeclarationDerivedDepfile in r0.evidence.evidenceProvenance
+
+      let diagnosed = r0.evidence.diagnostics.join(" ")
+      if toolReportNamedAnInput:
+        check f.observedPath in r0.evidence.depfileInputs
+        check evcToolReportedDepfile in r0.evidence.evidenceProvenance
+        check evcEmptyToolDepfileReport notin r0.evidence.evidenceProvenance
+        check not diagnosed.contains("no observation of any kind")
+        check f.hasRecord(act)
+
+        let warm = runBuild(g, config)
+        check warm.byId(act.id).cacheDecision in ReuseDecisions
+        check f.runCount() == 1
+      else:
+        # ATTRIBUTION, NOT SUPPRESSION: the declaration-derived prerequisite
+        # is still in the channel and still keyed on. What changed is that an
+        # empty report no longer claims somebody observed it.
+        check r0.evidence.depfileInputs.len == 1
+        check evcEmptyToolDepfileReport in r0.evidence.evidenceProvenance
+        check evcToolReportedDepfile notin r0.evidence.evidenceProvenance
+        check diagnosed.contains("no observation of any kind")
+        check diagnosed.contains(act.id)
+        check not f.hasRecord(act)
+
+        let warm = runBuild(g, config)
+        let r1 = warm.byId(act.id)
+        checkpoint(name & " warm: decision=" & $r1.cacheDecision &
+          " launched=" & $r1.launched)
+        check r1.cacheDecision notin ReuseDecisions
+        check r1.launched
+        check f.runCount() == 2
 
 suite "DA-1f: a backend profile that claims nothing is not a claim of completeness":
   ## ITEM 5 — the asymmetry, settled. `monitorProfileEvidenceComplete` used to

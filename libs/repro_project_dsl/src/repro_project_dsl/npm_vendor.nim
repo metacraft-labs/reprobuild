@@ -188,7 +188,15 @@ proc emitNpmVendorAction*(projectRoot, packageName: string;
   # token below and the file is an input: an edit re-populates the cache.
   let overrideLock = npmBuildClosureLockPath(projectRoot)
   let hasOverrideLock = fileExists(overrideLock)
-  var prologue = "set -e; "
+  # npm writes a debug log into `<cache>/_logs` on every invocation and
+  # deletes older ones to keep `logs_max`. The build runs npm against this
+  # same cache with `logs_max=0`, so it DELETED the logs this step left there:
+  # a second writer of this step's output, whose record then named files the
+  # build had removed -- and the build's listing of `_logs` (empty) never
+  # matched the one another checkout derived from this record. This step
+  # writes no logs either, and always leaves `_logs` present and empty: the
+  # state the build finds it in and leaves it in.
+  var prologue = "set -e; export npm_config_logs_max=0; "
 
   # UP-TO-DATE SKIP. This action is non-cacheable (it reaches the network),
   # so the engine runs it on every build — and under automatic monitoring
@@ -234,7 +242,9 @@ proc emitNpmVendorAction*(projectRoot, packageName: string;
   full.add("if [ \"$repro_up\" = 1 ]; then printf '%s\\n' " &
     "'npm vendor: private cache up to date (" & $uniqueUrls.len &
     " archives)'; else " & script & "printf '%s\\n' '" & token &
-    "' > \"" & escapedStamp & "\"; fi")
+    "' > \"" & escapedStamp & "\"; fi; ")
+  full.add("mkdir -p \"" & q(npmCache) & "/_logs\" && " &
+    "rm -rf \"" & q(npmCache) & "/_logs\"/*")
   script = full
 
   var inputs: seq[string] = @[manifest]
