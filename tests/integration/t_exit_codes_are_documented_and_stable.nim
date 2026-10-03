@@ -338,7 +338,7 @@ suite "the attest exit codes are documented and stable":
       skip()
     else:
       let docPath = findUpFile(thisDir,
-        ".." / "reprobuild-specs" / "CLI" / "attest.md")
+        ".." / "reprobuild-specs" / "spec" / "CLI" / "attest.md")
       check docPath.len > 0
       if docPath.len > 0:
         let md = readFile(docPath)
