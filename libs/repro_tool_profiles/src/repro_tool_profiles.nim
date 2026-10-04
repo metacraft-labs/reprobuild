@@ -1581,71 +1581,32 @@ else:
       sock.connectUnix(socketPath)
       connected = true
     except CatchableError:
-      # Spawn daemon process detached
-      let envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN")
-      let localBin = getCurrentDir() / "build" / "reprobuild-nix-daemon"
-      let localTool = getCurrentDir() / "tools" / "reprobuild-nix-daemon" /
-        "reprobuild-nix-daemon"
-      let localBin2 = getCurrentDir().parentDir / "reprobuild-nix-daemon" /
-        "build" / "reprobuild-nix-daemon"
-      # When resolving toolchains for a FOREIGN build (the cwd is the foreign
-      # repo, not reprobuild), the candidates above miss the daemon that ships
-      # in reprobuild's own tree. Anchor on reprobuild's source root too —
-      # mirrors resolveMonitorShim. REPROBUILD_SOURCE_ROOT is exported by
-      # codetracer's build-once.sh; getAppFilename() covers direct builds.
-      let sourceRoot = block:
-        let env = getEnv("REPROBUILD_SOURCE_ROOT")
-        if env.len > 0: env
-        else: reprobuildSourceRootFromBinaryLocation()
-      let rootTool =
-        if sourceRoot.len > 0:
-          sourceRoot / "tools" / "reprobuild-nix-daemon" /
-            "reprobuild-nix-daemon"
-        else: ""
-      let rootBuild =
-        if sourceRoot.len > 0:
-          sourceRoot / "build" / "reprobuild-nix-daemon"
-        else: ""
-      proc executableFile(path: string): bool =
-        if path.len == 0 or not fileExists(path):
-          return false
-        when defined(posix):
-          let perms = getFilePermissions(path)
-          result = fpUserExec in perms or fpGroupExec in perms or
-            fpOthersExec in perms
-        else:
-          result = true
-      proc requireExecutableCandidate(path, label: string): bool =
-        if path.len == 0 or not fileExists(path):
-          return false
-        if not executableFile(path):
-          raise newException(OSError,
-            label & " exists but is not executable: " & path)
-        true
-      let daemonExe = if envBin.len > 0:
-                        if not requireExecutableCandidate(envBin,
-                            "REPROBUILD_NIX_DAEMON_BIN"):
-                          raise newException(OSError,
-                            "REPROBUILD_NIX_DAEMON_BIN does not exist: " &
-                            envBin)
-                        envBin
-                      elif requireExecutableCandidate(localBin,
-                          "local reprobuild-nix-daemon"):
-                        localBin
-                      elif requireExecutableCandidate(localTool,
-                          "local tools reprobuild-nix-daemon"):
-                        localTool
-                      elif requireExecutableCandidate(localBin2,
-                          "sibling reprobuild-nix-daemon"):
-                        localBin2
-                      elif requireExecutableCandidate(rootTool,
-                          "source-root tools reprobuild-nix-daemon"):
-                        rootTool
-                      elif requireExecutableCandidate(rootBuild,
-                          "source-root build reprobuild-nix-daemon"):
-                        rootBuild
-                      else:
-                        "reprobuild-nix-daemon"
+      # Spawn daemon process detached.
+      #
+      # ONE RESOLVER, THE ENGINE'S. This used to be a private candidate chain
+      # of its own -- ``getCurrentDir()``'s ``build/``, ``tools/`` and a
+      # sibling, then ``REPROBUILD_SOURCE_ROOT``'s ``tools/`` before its
+      # ``build/`` -- which had drifted from ``resolveNixDaemonExecutable``
+      # (the ``bakForeignProvision`` path) in two ways that mattered. It never
+      # considered the STAGED helper ``build/bin/reprobuild-nix-daemon``,
+      # whose ``#!`` names the interpreter pinned at build time; and it
+      # preferred the checked-in ``tools/`` script, whose ``#!/usr/bin/env
+      # python3`` resolves ``python3`` through the build's PATH. Under a PATH
+      # that carries a ``python3`` that is not Python (CodeTracer's in-place
+      # project tests put a version-answering stub there) the "daemon" exited
+      # 0 at once, never bound its socket, and the recipe's C compiler could
+      # not be provisioned: "Failed to connect or spawn reprobuild-nix-daemon".
+      # The engine's resolver tries the staged helper first and refuses a
+      # script whose interpreter is missing, with a message naming it.
+      let daemonExe =
+        try:
+          resolveNixDaemonExecutable(
+            cwd = getCurrentDir(),
+            exePath = getAppFilename(),
+            envSourceRoot = getEnv("REPROBUILD_SOURCE_ROOT"),
+            envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN"))
+        except BuildEngineError as err:
+          raise newException(OSError, err.msg)
       discard startProcess(daemonExe, args = ["--idle-exit-ms=300000"], options = {})
       for i in 0 .. 40:
         sleep(50)
