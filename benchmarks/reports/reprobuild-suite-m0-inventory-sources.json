@@ -1063,8 +1063,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 11,
-      "integration": 993,
-      "platform/destructive": 118,
+      "integration": 992,
+      "platform/destructive": 119,
       "pure unit": 592,
       "unclassified": 157
     },
@@ -37146,8 +37146,8 @@
     },
     {
       "binary": "build/test-bin/t_install_mirror_relocation",
-      "class": "integration",
-      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -37156,8 +37156,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_install_mirror_relocation.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 20,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 30,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

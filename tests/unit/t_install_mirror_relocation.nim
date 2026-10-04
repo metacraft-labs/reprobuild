@@ -61,12 +61,10 @@ suite "install mirror path relocatability":
   test "an $ORIGIN entry is portable and a non-mirror absolute path is foreign":
     check classifyInstallMirrorPath(OriginToken & "/../lib", ConsumerRoot,
       "") == rvPortable
-    # A producer's BUILD tree carries no package mirror segment, so there is
-    # nothing to rewrite it onto. This is the class the repair cannot fix,
-    # and it has to be reported rather than quietly passed.
-    check classifyInstallMirrorPath(
-      ProducerRoot & "/qt6-base/build/out/usr/lib", ConsumerRoot, "") ==
-      rvForeign
+    # A path into the TARGET ROOTFS carries no package mirror segment, so
+    # there is nothing to rewrite it onto. It is reported rather than
+    # quietly passed, and deliberately not refused — see the work-tree
+    # suite below for the line between the two.
     check classifyInstallMirrorPath("/usr/lib/systemd", ConsumerRoot, "") ==
       rvForeign
 
@@ -121,6 +119,141 @@ suite "install mirror path relocatability":
     runPathFinding.field = rpfRunPath
     check describeMirrorPathFinding("make", runPathFinding).startsWith(
       "install mirror: make: DT_RUNPATH of ")
+
+## The paths below are TRANSCRIBED from published install mirrors on a real
+## host — every one of them is a run path some build baked into an object it
+## then published. They are literals here rather than a walk over whatever
+## mirrors happen to be built on the machine running this suite, because a
+## rule whose only input is "the artifacts this host has" has no input at
+## all on a clean checkout.
+const
+  WorkTreePaths = [
+    # The out-of-tree build directory's DESTDIR staging child. By far the
+    # commonest shape.
+    "/home/builder/packages-checkout/packages/source/qt6-base/build/out/usr/lib",
+    # The same, with the library directory spelled the other way.
+    "/home/builder/packages-checkout/packages/source/pam/build/out/lib64",
+    # libtool's staging directory, nested well below the build root.
+    "/home/builder/packages-checkout/packages/source/sudo/build/lib/util/.libs",
+    # The same, directly under it.
+    "/home/builder/packages-checkout/packages/source/util-linux/build/.libs",
+    # The build root ITSELF, with nothing after it.
+    "/home/builder/packages-checkout/packages/source/glibc/build",
+    # The engine's own per-recipe scratch, which is not under ``build/``.
+    "/home/builder/packages-checkout/packages/source/gcc/.repro/build/" &
+      "from-source-custom/gccSource/lib",
+    # An outputs tree, which is neither of the two above.
+    "/home/builder/packages-checkout/packages/source/perl/outputs/out/lib",
+  ]
+
+  TargetRootfsPaths = [
+    # Every one of these was observed too, and NONE of them is a defect of
+    # this kind: each is correct once the mirror has been staged into the
+    # image it was built for. They are the negative control, and without
+    # them a rule that refused every unrewritable path would pass the
+    # cases above.
+    "/usr/lib",
+    "/usr/lib/systemd",
+    "/usr/libexec/sudo",
+    "/usr/lib/perl5/5.40.0/x86_64-linux/CORE",
+    "/lib64/ld-linux-x86-64.so.2",
+  ]
+
+suite "a recipe work tree is a place no consumer can look":
+  test "every observed work-tree shape is refused BY SHAPE":
+    for path in WorkTreePaths:
+      checkpoint path
+      check classifyInstallMirrorPath(path, ConsumerRoot, "") ==
+        rvRecipeWorkTree
+
+  test "and no target-rootfs path is, so the rule discriminates":
+    # The half that stops this being a blanket refusal. Each of these is
+    # unrewritable too — the verdict that separates them is the claim.
+    for path in TargetRootfsPaths:
+      checkpoint path
+      check classifyInstallMirrorPath(path, ConsumerRoot, "") == rvForeign
+
+  test "the recipe and the work tree are READ OFF the path, not constants":
+    # Two different inputs must give two different answers, or a splitter
+    # returning fixed strings would satisfy the cases above.
+    let qt = splitRecipeWorkTreePath(WorkTreePaths[0])
+    check qt.matched
+    check qt.recipeName == "qt6-base"
+    check qt.workTree == "build"
+    check qt.rest == "out/usr/lib"
+    let gcc = splitRecipeWorkTreePath(WorkTreePaths[5])
+    check gcc.matched
+    check gcc.recipeName == "gcc"
+    check gcc.workTree == ".repro/build"
+    check gcc.rest == "from-source-custom/gccSource/lib"
+    let perl = splitRecipeWorkTreePath(WorkTreePaths[6])
+    check perl.matched
+    check perl.recipeName == "perl"
+    check perl.workTree == "outputs/out"
+    check perl.rest == "lib"
+    # The build root with nothing after it: matched, with an empty rest
+    # rather than no match.
+    let glibc = splitRecipeWorkTreePath(WorkTreePaths[4])
+    check glibc.matched
+    check glibc.recipeName == "glibc"
+    check glibc.workTree == "build"
+    check glibc.rest.len == 0
+
+  test "THE PUBLISH SIDE: a work tree under the auditing checkout is refused too":
+    # This is the case the rule exists for, and the one that is easiest to
+    # lose. On the machine that BAKES the path in, the directory is sitting
+    # right there under that machine's own recipes root — so a classifier
+    # that asked "is this under the checkout I am auditing from?" first
+    # would call it portable, publish it, and leave the defect to be
+    # discovered by a consumer who has no way to repair it.
+    let own = ConsumerRoot & "/qt6-base/build/out/usr/lib"
+    check own.startsWith(ConsumerRoot)
+    check classifyInstallMirrorPath(own, ConsumerRoot,
+      ConsumerRoot & "/qt6-base/.repro/output/install") == rvRecipeWorkTree
+
+  test "a directory called build INSIDE a published mirror is not a work tree":
+    # A mirror may ship a ``build`` directory of its own, and it travels
+    # with the package. Refusing it would be refusing the artifact for
+    # carrying its own contents.
+    let insideSibling =
+      ProducerRoot & "/cmake/.repro/output/install/usr/share/foo/build/out/lib"
+    check not splitRecipeWorkTreePath(insideSibling).matched
+    check classifyInstallMirrorPath(insideSibling, ConsumerRoot, "") ==
+      rvRemappable
+    let ownMirror = ConsumerRoot & "/cmake/.repro/output/install"
+    check classifyInstallMirrorPath(ownMirror & "/usr/share/foo/build/out/lib",
+      ConsumerRoot, ownMirror) == rvOwnMirror
+
+  test "a work-tree directory with no recipe root in front of it is not one":
+    # ``/build/out/lib`` names no recipe. It is somebody's root filesystem,
+    # and the rule must not read the leading separator as a recipe name.
+    check not splitRecipeWorkTreePath("/build/out/lib").matched
+    check classifyInstallMirrorPath("/build/out/lib", ConsumerRoot, "") ==
+      rvForeign
+    # Nor a traversal component, for the same reason ``splitMirrorPath``
+    # refuses one: the "recipe" it named would be outside the tree.
+    check not splitRecipeWorkTreePath("/opt/a/../build/out/lib").matched
+    # And a relative entry is the loader's business, not this rule's.
+    check not splitRecipeWorkTreePath("../build/out/lib").matched
+
+  test "the diagnostic names the recipe and the work tree it came from":
+    let finding = MirrorPathFinding(
+      objectPath: "/tmp/mirror/usr/bin/sample",
+      field: rpfRunPath,
+      value: WorkTreePaths[0],
+      verdict: rvRecipeWorkTree)
+    let text = describeMirrorPathFinding("sudo", finding)
+    checkpoint text
+    check "qt6-base" in text
+    check "\"build\"" in text
+    check "exists on no other machine" in text
+    # Read off the finding, not printed as a constant.
+    var other = finding
+    other.value = WorkTreePaths[6]
+    let otherText = describeMirrorPathFinding("sudo", other)
+    check "perl" in otherText
+    check "\"outputs/out\"" in otherText
+    check "qt6-base" notin otherText
 
 when defined(linux) or defined(macosx):
   proc run(command: string; args: openArray[string]):
@@ -384,8 +517,9 @@ when defined(linux) or defined(macosx):
       # every comparison, and the case passes for ANY value of it — measured:
       # changing 5 to 4 left this green before the literals went in.
       check MaxReportedMirrorPaths == 5
-      # Producer BUILD trees: absolute, outside every store, and carrying no
-      # package-mirror segment, so they are rvForeign and unrepairable.
+      # Producer work trees: absolute, outside every store, and carrying no
+      # package-mirror segment, so they are unrepairable whatever else is
+      # decided about them.
       var foreign: seq[string]
       for i in 0 ..< 7:
         foreign.add("/elsewhere/packages/source/dep" & $i & "/build/out/lib")
@@ -399,6 +533,11 @@ when defined(linux) or defined(macosx):
         if entry in outcome.message: inc named
       check named == 5
       check "and 2 further distinct path(s) not shown" in outcome.message
+      # The refusal COUNTS the offending entries rather than announcing a
+      # fixed one. Seven here against the one in the case below: a message
+      # that printed a constant would satisfy exactly one of the two.
+      check not outcome.ok
+      check "7 run-path entries" in outcome.message
       # The FIRST path past the bound is withheld, not the whole tail: the
       # bound counts distinct values, so exactly two are missing.
       check foreign[5] notin outcome.message
@@ -426,3 +565,106 @@ when defined(linux) or defined(macosx):
       # And the object really is unchanged, so the refusal is about the
       # mirror rather than about the exit code it was handed.
       check readElfRuntimeFacts(staged.elfObject).runPaths == @[ElsewhereLib]
+
+    test "a mirror naming the producer's work tree is REFUSED, and nothing is rewritten first":
+      ## The repairable entry beside it is the point. A mirror that cannot
+      ## be made whole must not be left half-rewritten on the way to being
+      ## discarded: the caller withdraws it, and a rewrite performed first
+      ## is work done to an artifact nobody will read, on a tree that in
+      ## the restore path is the live one.
+      let scratch = createTempDir("repro-restore-worktree-", "")
+      defer: removeDir(scratch)
+      let staged = stageMirror(scratch, "sudo")
+      const workTree =
+        "/elsewhere/packages/source/sudo/build/out/usr/libexec/sudo"
+      let before = @[workTree, ElsewhereLib]
+      require run(findExe("patchelf"),
+        @["--set-rpath", before.join(":"), staged.elfObject]).exitCode == 0
+      let outcome = relocateRestoredInstallMirror(staged.mirror,
+        findExe("patchelf"), realPatchelfRunner)
+      checkpoint outcome.message
+      check not outcome.ok
+      check "sudo" in outcome.message
+      check workTree in outcome.message
+      # Pinned by the refusal's OWN wording, because three other refusals
+      # in this suite also set ``ok = false`` and also name the package.
+      check "cannot be made self-contained" in outcome.message
+      check "1 run-path entry" in outcome.message
+      # NOT half-repaired: the sibling-mirror entry was rewritable and was
+      # deliberately left alone.
+      check readElfRuntimeFacts(staged.elfObject).runPaths == before
+
+    test "a target-rootfs run path is reported and the mirror is ACCEPTED":
+      ## The discriminator. This path is just as unrewritable as the one
+      ## above and just as unresolvable where the mirror stands — the only
+      ## difference is that it comes right once the mirror has been staged
+      ## into the image it was built for. A refusal that could not tell the
+      ## two apart would withdraw a mirror for being correct.
+      let scratch = createTempDir("repro-restore-rootfs-", "")
+      defer: removeDir(scratch)
+      let staged = stageMirror(scratch, "sudo")
+      const rootfsPath = "/usr/libexec/sudo"
+      require run(findExe("patchelf"),
+        @["--set-rpath", rootfsPath, staged.elfObject]).exitCode == 0
+      let outcome = relocateRestoredInstallMirror(staged.mirror,
+        findExe("patchelf"), realPatchelfRunner)
+      checkpoint outcome.message
+      check outcome.ok
+      check rootfsPath in outcome.message
+      check "cannot be made self-contained" notin outcome.message
+      check readElfRuntimeFacts(staged.elfObject).runPaths == @[rootfsPath]
+
+    test "THE CASE: a mirror that SHIPS its library and still cannot reach it":
+      ## Reproduces, as a fixture, the shape a real published mirror was
+      ## found in. Eleven objects named a library that was not missing at
+      ## all — it sat in the very directory they sat in — and they could
+      ## not reach it, because the only two places their run paths named
+      ## were the target rootfs and the build tree of the machine that
+      ## produced them. Neither exists where the mirror was restored.
+      ##
+      ## So the mirror is complete and unusable at the same time, and the
+      ## audit that looks for a missing file finds nothing wrong with it.
+      ## What is wrong is decidable from the run paths alone.
+      let scratch = createTempDir("repro-restore-ships-", "")
+      defer: removeDir(scratch)
+      let staged = stageMirror(scratch, "sudo")
+      let libDir = staged.mirror / "usr" / "libexec" / "sudo"
+      createDir(libDir)
+      let consumer = libDir / "sudoers.so"
+      let provider = libDir / "libsudo_util.so.0"
+      copyFileWithPermissions(findExe("patchelf"), consumer)
+      copyFileWithPermissions(findExe("patchelf"), provider)
+      for path in [consumer, provider]:
+        setFilePermissions(path, getFilePermissions(path) + {fpUserWrite})
+      const observedRunPaths = [
+        "/usr/libexec/sudo",
+        "/elsewhere/packages/source/sudo/build/out/usr/libexec/sudo",
+      ]
+      require run(findExe("patchelf"), @["--set-rpath",
+        observedRunPaths.join(":"), consumer]).exitCode == 0
+      require run(findExe("patchelf"),
+        @["--add-needed", "libsudo_util.so.0", consumer]).exitCode == 0
+
+      # 1. The library really is shipped, in the consumer's own directory.
+      check fileExists(provider)
+      check parentDir(provider) == parentDir(consumer)
+      # 2. And the consumer really does need it.
+      check "libsudo_util.so.0" in readElfRuntimeFacts(consumer).needed
+      # 3. And still cannot reach it: resolved against the object's own run
+      #    paths — the only directories a loader will look in here — there
+      #    is no candidate. Decided against the fixture rather than quoted.
+      var reachable = 0
+      for entry in readElfRuntimeFacts(consumer).runPaths:
+        if fileExists(entry / "libsudo_util.so.0"): inc reachable
+      check reachable == 0
+      # 4. Which is what the refusal is for.
+      let outcome = relocateRestoredInstallMirror(staged.mirror,
+        findExe("patchelf"), realPatchelfRunner)
+      checkpoint outcome.message
+      check not outcome.ok
+      check observedRunPaths[1] in outcome.message
+      check "cannot be made self-contained" in outcome.message
+      # 5. The target-rootfs entry beside it is NOT what decided this: it
+      #    is reported, and on its own it would have been accepted — the
+      #    case above proves that half separately.
+      check observedRunPaths[0] in outcome.message
