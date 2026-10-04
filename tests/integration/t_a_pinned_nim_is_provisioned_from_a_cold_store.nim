@@ -25,8 +25,9 @@
 ##      compiled by the bootstrap's 2.2.10 -- or by a `nim` found on PATH of
 ##      another version -- fails the build.
 ##   3. Negative control: the same recipe, in a project whose lock pins no
-##      Nim, fails to build with the guard's message naming the bootstrap's
-##      version. Without it, a guard that never fired would pass step 2.
+##      Nim, fails to build with the guard's message naming the Nim that
+##      compiled it -- the bootstrap's, or the host's `nim` on PATH -- which
+##      is not the pin. Without it, a guard that never fired would pass step 2.
 ##
 ## The C compiler that the provider compile hands to Nim is the host's `gcc`
 ## when one is on PATH (named through `REPRO_BOOTSTRAP_CC`, as the hand-over
@@ -188,17 +189,23 @@ suite "a pinned Nim is provisioned from a cold store and compiles the provider":
   let cache = root / "action-cache"
   let token = $getCurrentProcessId() & "-" & $epochTime()
 
+  # Each case runs in its own process with its own `root`, so the build case
+  # cannot rely on the refresh case having written the lock: both write the
+  # pinned project through this.
+  template refreshPinnedProject(project: string): Run =
+    createDir(project)
+    writeFile(project / "repro.nim", recipe(token))
+    writeFile(project / "repro.solver", solverInputs("store"))
+    runEngine(project, store, cache, @["lock", "refresh", "--inputs",
+      project / "repro.solver"])
+
   test "lock refresh pins the official archive and its digest":
     when Expected.url.len == 0:
       skip("no expected nim " & PinnedNim & " archive is recorded here for " &
         HostPlatform)
     else:
       let project = root / "pinned"
-      createDir(project)
-      writeFile(project / "repro.nim", recipe(token))
-      writeFile(project / "repro.solver", solverInputs("store"))
-      let r = runEngine(project, store, cache, @["lock", "refresh", "--inputs",
-        project / "repro.solver"])
+      let r = refreshPinnedProject(project)
       checkpoint("rc=" & $r.code & "\n" & r.output)
       require r.code == 0
       let dep = nimDep(project / "repro.lock")
@@ -214,6 +221,10 @@ suite "a pinned Nim is provisioned from a cold store and compiles the provider":
         HostPlatform)
     else:
       let project = root / "pinned"
+      if not fileExists(project / "repro.lock"):
+        let refresh = refreshPinnedProject(project)
+        checkpoint("refresh rc=" & $refresh.code & "\n" & refresh.output)
+        check refresh.code == 0
       require fileExists(project / "repro.lock")
       let pin = projectPinsFor(project).providerNim
       require pin.state == spsPinned
@@ -264,8 +275,26 @@ suite "a pinned Nim is provisioned from a cold store and compiles the provider":
         "--daemon=off"])
       checkpoint("rc=" & $r.code & "\n" & r.output)
       check r.code != 0
-      check r.output.contains("provider compiled with Nim " & BootstrapNim &
-        ", not the pinned " & PinnedNim)
+      # WHICH Nim compiles an unpinned provider is the host's: the bootstrap's
+      # own (BootstrapNim) where nothing else provides one, as on the Windows
+      # host this was written on, but the dev shell's `nim` where one is on
+      # PATH (2.2.4 in this repository's Linux dev shell). The control's
+      # property is that the guard FIRES under a Nim that is not the pin, so
+      # it reads the version the guard names and requires only that.
+      const GuardPrefix = "provider compiled with Nim "
+      const GuardSuffix = ", not the pinned " & PinnedNim
+      var guardVersion = ""
+      for line in r.output.splitLines():
+        let at = line.find(GuardPrefix)
+        if at >= 0:
+          let tail = line[at + GuardPrefix.len .. ^1]
+          let stop = tail.find(GuardSuffix)
+          if stop > 0:
+            guardVersion = tail[0 ..< stop]
+            break
+      checkpoint("guard named Nim " & guardVersion)
+      check guardVersion.len > 0
+      check guardVersion != PinnedNim
 
   try: removeDir(root)
   except OSError: discard
