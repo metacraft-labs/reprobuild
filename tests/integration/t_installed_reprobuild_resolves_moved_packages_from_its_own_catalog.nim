@@ -105,13 +105,17 @@ suite "an installed reprobuild carries the catalog it was released with":
   createDir(installedModule.parentDir)
   copyFile(RepoRoot / CatalogModuleRel, installedModule)
 
-  test "the staging script ships the pinned catalog and names its revision":
-    let (output, exitCode) = run("bash " & quoteShell(StageScript) & " " &
-      quoteShell(prefix), cwd = checkout,
+  let staged = prefix / "share" / "repro" / "reprobuild-packages"
+
+  template stageCatalog(): untyped =
+    run("bash " & quoteShell(StageScript) & " " & quoteShell(prefix),
+      cwd = checkout,
       env = childEnv([("REPROBUILD_PACKAGES_ROOT", catalogRepo)]))
+
+  test "the staging script ships the pinned catalog and names its revision":
+    let (output, exitCode) = stageCatalog()
     checkpoint(output)
     check exitCode == 0
-    let staged = prefix / "share" / "repro" / "reprobuild-packages"
     check fileExists(staged / "packages" / "interfaces" / "rpinstalledfixture" /
       "repro.nim")
     check not dirExists(staged / "packages" / "interfaces" / "rpleaked")
@@ -121,6 +125,13 @@ suite "an installed reprobuild carries the catalog it was released with":
     check "ci-token" notin marker
 
   test "the installed lookup finds the shipped catalog with no workspace":
+    # Each case runs in its own process with its own scratch prefix, so this
+    # one cannot rely on the case above having staged the catalog: it stages
+    # it itself when it is not already there.
+    if not dirExists(staged):
+      let (stageOutput, stageExit) = stageCatalog()
+      checkpoint(stageOutput)
+      require stageExit == 0
     let probeDir = scratch / "elsewhere"
     createDir(probeDir / "consumer")
     writeFile(probeDir / "probe.nim",
