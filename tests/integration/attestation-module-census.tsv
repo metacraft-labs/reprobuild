@@ -67,6 +67,7 @@ libs/repro_attest/src/repro_attest/driver.nim	library	exported	The backend drive
 libs/repro_attest/src/repro_attest/edge_attestation.nim	library	exported	The ``reproos.edge-attestations.v1`` document: proofs that a build
 libs/repro_attest/src/repro_attest/event_log.nim	library	exported	The TCG event log: the record a platform keeps of what it measured
 libs/repro_attest/src/repro_attest/hpke.nim	library	standalone	Hybrid Public Key Encryption (RFC 9180) over the vendored BearSSL.
+libs/repro_attest/src/repro_attest/image_layout.nim	library	exported	The ``reproos.image-layout.v1`` record: the disk layout an image was
 libs/repro_attest/src/repro_attest/inference_statement.nim	library	exported	The ``reproos.inference-statement.v1`` document: what an agent claims
 libs/repro_attest/src/repro_attest/manifest.nim	library	exported	The ``reproos.attested-image.v1`` measurement manifest.
 libs/repro_attest/src/repro_attest/measurement.nim	library	exported	Launch-measurement precomputation for unified kernel images.
@@ -102,6 +103,7 @@ libs/repro_attest_verify/src/repro_attest_verify/trust.nim	library	exported	Cert
 libs/repro_attest_verify/src/repro_attest_verify/verdict.nim	library	exported	The verdict: every check a verifier performed, and what came of it.
 libs/repro_attest_verify/src/repro_attest_verify/verify.nim	library	exported	The verifier: thirteen checks, run in order, none of them skipped
 libs/repro_attest_verify/src/repro_attest_verify/x509.nim	library	exported	A strict DER reader for the two documents a certificate chain is made
+tools/attestation-mutations/cvm_emulator_mutations.py	tool	-	Apply each filed mutation to the confidential-computing emulator
 tools/attestation-mutations/fixture_lifecycle_mutations.py	tool	-	Apply each filed mutation, rebuild the gate it targets, RUN it, and
 tools/attestation-mutations/inference_binding_mutations.py	tool	-	Run the inference-binding mutation table: one edit at a time, rebuild AND run the gate
 tools/attestation-mutations/run_neighbour_gates.sh	tool	-	Rebuild and RUN every gate that imports the attestation libraries this
@@ -112,12 +114,15 @@ tests/integration/attested_boot/unseal_broker.nim	gate	-	``unseal-broker`` — t
 tests/integration/attested_boot/unseal_broker_core.nim	gate	-	The broker half of a remote unseal: the party that holds a machine's
 tests/integration/attested_boot_vectors.nim	gate	-	Four attested boots, pinned: one honest, one whose kernel command
 tests/integration/cloud_lease_fake_provider.nim	gate	-	A provider whose instances are files, for the two gates about what
+tests/integration/cvm_emulator_scenarios.nim	gate	-	One emulated confidential-computing attestation, assembled end to
+tests/integration/cvm_evidence_emulator.nim	gate	-	Confidential-computing evidence emulators: production-format
 tests/integration/edge_attestation_harness.nim	gate	-	Minting edge attestations: rebuilder signatures and log inclusion
 tests/integration/emulator_scenarios.nim	gate	-	One emulated attestation, assembled end to end, with one structured
 tests/integration/evidence_emulator.nim	gate	-	A local evidence emulator: production-format measured-boot evidence
 tests/integration/inference_statement_harness.nim	gate	-	Minting authenticated inference statements: an inference-signing
 tests/integration/provisioning_harness.nim	gate	-	Shared driving code for the secret-provisioning gates.
 tests/integration/remote_unseal_harness.nim	gate	-	Standing a real broker up beside the code under test, and measuring
+tests/integration/reproos_shaped_uki.nim	gate	-	A ReproOS-shaped unified kernel image, built here from the PE
 tests/integration/software_root_test_pki.nim	gate	-	A software-root test hierarchy, in production algorithms and
 tests/integration/t_agent_abuse_bounds.nim	gate	-	Oversized bodies and burst traffic are refused or limited, without the
 tests/integration/t_agent_mock_roundtrip.nim	gate	-	The agent answers a challenge, over a socket, with a document a
@@ -131,6 +136,7 @@ tests/integration/t_authenticated_inference_binding_mutations.nim	gate	-	Changin
 tests/integration/t_cloud_adapter_launches_nothing_in_ci.nim	gate	-	The cloud launch adapter's dry-run path creates no cloud resource —
 tests/integration/t_cloud_attestation_launch_manifest_identity.nim	gate	-	Changing a launch parameter that reaches the evidence changes the
 tests/integration/t_cose_rfc9052_vectors.nim	gate	-	RFC 9052 (COSE) — the published examples, rebuilt from the document
+tests/integration/t_cvm_evidence_emulator_all_protocol_paths.nim	gate	-	The confidential-computing evidence emulators, driven through every
 tests/integration/t_der_nesting_is_bounded_by_the_parent.nim	gate	-	A nested TLV is bounded by its PARENT, not by the buffer it sits in.
 tests/integration/t_e2e_authenticated_inference_local_and_cloud.nim	gate	-	One verifier, two trust classes: a locally-rooted statement and a
 tests/integration/t_e2e_local_attestation_emulator_all_protocol_paths.nim	gate	-	The local evidence emulator, driven through every protocol path, on
@@ -142,6 +148,7 @@ tests/integration/t_event_log_parser_rejects_malformed.nim	gate	-	Every byte str
 tests/integration/t_event_log_replay_mismatch_rejected.nim	gate	-	A log with one event altered no longer reproduces the composite, and
 tests/integration/t_event_log_replay_reproduces_pcrs.nim	gate	-	Replaying a real TCG event log reproduces the registers the TPM held
 tests/integration/t_exit_codes_are_documented_and_stable.nim	gate	-	Every value `repro attest` can exit with is written down, and the ones
+tests/integration/t_genuine_tier_policy_refuses_emulated_cvm_evidence.nim	gate	-	A software-root confidential-computing hierarchy cannot satisfy a
 tests/integration/t_hpke_rejects_wrong_recipient.nim	gate	-	HPKE fails closed: what happens when the ciphertext, the encapsulated
 tests/integration/t_hpke_rfc9180_vectors.nim	gate	-	RFC 9180 (HPKE) — the published test vectors for every mode and suite
 tests/integration/t_inference_commitment_is_hiding_and_binding.nim	gate	-	A commitment that a verifier can check without the prompt, that a
@@ -158,6 +165,7 @@ tests/integration/t_provision_policy_gate.nim	gate	-	The policy is what decides 
 tests/integration/t_remote_unseal_boot.nim	gate	-	A machine with no key to its own disk booted, because somebody else
 tests/integration/t_remote_unseal_broker_refusal_fails_closed.nim	gate	-	The broker said no, and the disk stayed shut.
 tests/integration/t_remote_unseal_client.nim	gate	-	Every way the early-boot client can come back without a key, and the
+tests/integration/t_reproos_uki_through_the_cvm_path.nim	gate	-	A ReproOS-shaped unified kernel image, measured by the real
 tests/integration/t_reseal_on_generation_switch.nim	gate	-	A machine seals its state key for a boot that has not happened.
 tests/integration/t_seal_survives_reboot.nim	gate	-	The machine is switched off, switched on, and its disk opens again.
 tests/integration/t_signer_roster_rotation_and_revocation.nim	gate	-	A rebuilder's key stops counting, and this is where that becomes

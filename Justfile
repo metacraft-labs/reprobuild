@@ -592,6 +592,7 @@ lint:
     # and was caught only by re-running the table against the delivered
     # tree; this makes that question cost a second instead of an afternoon.
     python3 ./tools/attestation-mutations/fixture_lifecycle_mutations.py --verify-rows 2>&1 | tee -a test-logs/lint.log
+    python3 ./tools/attestation-mutations/cvm_emulator_mutations.py --verify-rows 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_workflows.sh 2>&1 | tee -a test-logs/lint.log
 
 format:
