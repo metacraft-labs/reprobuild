@@ -2007,7 +2007,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 180,
+          "line": 179,
           "path": "tests/e2e/hcr-linux-hardening/t_e2e_hcr_linux_text_left_writable_reaches_the_wire.nim",
           "patterns": [
             "gcc"
@@ -2027,7 +2027,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 193,
+          "line": 192,
           "path": "tests/e2e/hcr-linux-hardening/t_e2e_hcr_linux_text_left_writable_reaches_the_wire.nim",
           "patterns": [
             "gcc"
@@ -2263,7 +2263,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 311,
+          "line": 326,
           "path": "tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim",
           "patterns": [
             "gcc"
